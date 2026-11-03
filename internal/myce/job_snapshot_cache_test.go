@@ -2,6 +2,7 @@ package myce
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -131,5 +132,79 @@ func TestJobSnapshotCacheCommitDuringRefresh(t *testing.T) {
 	close(resume)
 	if got := <-done; got == nil || got.State != "paused" {
 		t.Fatal("published invalidated refresh", got)
+	}
+}
+
+func TestJobSnapshotCacheCallDependsOnBatchCommit(t *testing.T) {
+	q, _, _ := modelFixture(t)
+	call := addModelCall(t, q, "experiment")
+	batch := submit(t, q, spec("experiment"))
+	if err := q.update(func() error {
+		q.s.Policies = map[string]ProjectPolicy{call.Project: {Weight: 1, MaxConcurrent: 1}}
+		j := q.touchJob(batch.ID)
+		j.Spec.Project = call.Project
+		j.State = "running"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := q.jobSnapshot(call.ID)
+	if err != nil || !strings.Contains(got.Reason, "concurrent work cap") {
+		t.Fatal("missing batch blocker", got, err)
+	}
+	if err := q.update(func() error { q.touchJob(batch.ID).State = "succeeded"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	got, err = q.jobSnapshot(call.ID)
+	if err != nil || strings.Contains(got.Reason, "concurrent work cap") {
+		t.Fatal("call retained committed batch blocker", got, err)
+	}
+}
+
+func TestJobSnapshotCacheBatchDependsOnCallCommit(t *testing.T) {
+	for _, change := range []string{"add", "change", "remove"} {
+		t.Run(change, func(t *testing.T) {
+			q, _, _ := modelFixture(t)
+			batch := submit(t, q, spec("experiment"))
+			call := &ModelCall{ID: "synthetic-call", Model: "test", Project: batch.Spec.Project, Priority: "experiment", Queued: q.clock.Now()}
+			if change == "remove" {
+				call.Machine = "one"
+			}
+			if err := q.update(func() error {
+				q.s.Policies = map[string]ProjectPolicy{batch.Spec.Project: {Weight: 1, MaxConcurrent: 1}}
+				if change != "add" {
+					q.calls[call.ID] = call
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			got, err := q.jobSnapshot(batch.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := strings.Contains(got.Reason, "concurrent work cap")
+			if before != (change == "remove") {
+				t.Fatal("unexpected initial cap", got.Reason)
+			}
+			if err := q.update(func() error {
+				switch change {
+				case "add":
+					call.Machine = "one"
+					q.calls[call.ID] = call
+				case "change":
+					q.calls[call.ID].Machine = "one"
+				case "remove":
+					delete(q.calls, call.ID)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			got, err = q.jobSnapshot(batch.ID)
+			if err != nil || strings.Contains(got.Reason, "concurrent work cap") == before {
+				t.Fatal("batch retained committed call blocker", got, err)
+			}
+		})
 	}
 }

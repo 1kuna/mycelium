@@ -305,11 +305,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if changedJobs {
 		// Preserve immediate cancellation-custody and blocker transitions even
 		// when the selected job's own durable envelope did not change.
-		for id, entry := range q.jobSnapshots {
-			if entry.dependsOnJobs {
-				delete(q.jobSnapshots, id)
-			}
-		}
+		q.invalidateDependentSnapshots()
 	}
 	return nil
 }

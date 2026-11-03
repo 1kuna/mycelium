@@ -31,8 +31,29 @@ type jobSnapshotCache struct {
 // Calls are ephemeral rather than persisted job records. Match their existing
 // transaction rollback boundary, and invalidate only committed changes.
 func (q *Queue) invalidateCallSnapshots(old map[string]*ModelCall) {
+	changed := false
 	for id, before := range old {
-		if q.jobSnapshots[id] != nil && !reflect.DeepEqual(before, q.calls[id]) {
+		if !reflect.DeepEqual(before, q.calls[id]) {
+			delete(q.jobSnapshots, id)
+			changed = true
+		}
+	}
+	for id := range q.calls {
+		if old[id] == nil {
+			delete(q.jobSnapshots, id)
+			changed = true
+		}
+	}
+	if changed {
+		q.invalidateDependentSnapshots()
+	}
+}
+
+// q.mu is held. Both calls and batch jobs contribute to project caps and
+// pending receipts; unchanged transactions leave their cached views intact.
+func (q *Queue) invalidateDependentSnapshots() {
+	for id, entry := range q.jobSnapshots {
+		if entry.dependsOnJobs {
 			delete(q.jobSnapshots, id)
 		}
 	}
@@ -355,7 +376,9 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 		}
 		entry := q.jobSnapshots[key]
 		if entry == nil {
-			entry = &jobSnapshotCache{dependsOnJobs: job.State == "queued" || job.FanOut != nil || job.CancelledAt != nil}
+			call := q.calls[key]
+			pendingCall := call != nil && call.Machine == "" && call.Error == ""
+			entry = &jobSnapshotCache{dependsOnJobs: pendingCall || job.State == "queued" || job.FanOut != nil || job.CancelledAt != nil}
 			q.jobSnapshots[key] = entry
 		}
 		unlock()
