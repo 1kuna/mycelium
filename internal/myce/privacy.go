@@ -135,7 +135,10 @@ func (q *Queue) statusEligibility(j *Job) {
 	if len(allowed) == 0 {
 		allowed = q.s.Policies[j.Spec.Project].AllowedMachines
 	}
-	j.EligibleUnrestricted = len(allowed) == 0 && len(j.Spec.ExcludedMachines) == 0
+	// This marker is open-ended eligibility for maintenance gates, not proof
+	// that each machine passes every authored constraint. Exclusions must not
+	// hide future non-excluded workers from older fail-closed gates.
+	j.EligibleUnrestricted = len(allowed) == 0
 	hosts := []string{}
 	seen := map[string]bool{}
 	addHost := func(host string) {
