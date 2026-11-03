@@ -135,6 +135,7 @@ type FileStore struct {
 	admissionMu                 sync.Mutex
 	uploadFilesMu               sync.RWMutex
 	creations                   map[string]*uploadCreation
+	capacityReservations        map[*capacityReservation]bool
 	handler                     http.Handler
 	uploadLocker                tus.Locker
 	syncDir                     func(string) error // Durability failure injection.
@@ -227,16 +228,17 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return tus.HTTPResponse{}, tus.FileInfoChanges{ID: ref.SHA256}, nil
 		},
 		PreFinishResponseCallback: func(e tus.HookEvent) (tus.HTTPResponse, error) {
+			ctx := creationContext(e.Context)
 			ref := FileRef{e.Upload.MetaData["sha256"], e.Upload.Size}
-			if err := s.publish(e.Context, ref); err != nil {
+			if err := s.publish(ctx, ref); err != nil {
 				return tus.HTTPResponse{}, err
 			}
 			// An internal writer may have created the same blob after this
 			// upload's POST. Publication must still honor the import's custody.
-			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], false, e.Context); err != nil {
+			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], false, ctx); err != nil {
 				return tus.HTTPResponse{}, err
 			}
-			return tus.HTTPResponse{}, s.publishUpload(ref.SHA256, e.Context)
+			return tus.HTTPResponse{}, s.publishUpload(ref.SHA256, ctx)
 		},
 	})
 	if err != nil {
@@ -328,7 +330,10 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Fence upload publication against unlink without serializing other uploads.
-	s.lifecycle.RLock()
+	if err := lockUploadContext(r.Context(), s.lifecycle.RLock, s.lifecycle.RUnlock); err != nil {
+		uploadCancelled(w, r.Context())
+		return
+	}
 	defer s.lifecycle.RUnlock()
 	id := strings.TrimPrefix(r.URL.Path, "/api/files/uploads/")
 	if id != "" {

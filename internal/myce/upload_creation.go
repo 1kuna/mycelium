@@ -103,3 +103,28 @@ func uploadCancelled(w http.ResponseWriter, ctx context.Context) bool {
 	http.Error(w, "upload request cancelled", http.StatusRequestTimeout)
 	return true
 }
+
+// Keep future queue output commitments visible to uploads while their queue
+// transaction waits. The transaction checks its original (pre-reservation)
+// snapshot against current queue commitments; concurrent provisional budgets
+// can conservatively reduce space until their transactions settle.
+type capacityReservation struct{ bytes uint64 }
+
+func (s *FileStore) reserveCapacity(ctx context.Context, bytes func(map[string]storedPayload) uint64) (FileStoreStatus, map[string]storedPayload, func(), error) {
+	if err := lockUploadContext(ctx, s.admissionMu.Lock, s.admissionMu.Unlock); err != nil {
+		return FileStoreStatus{}, nil, nil, err
+	}
+	defer s.admissionMu.Unlock()
+	status, payloads, err := s.capacity(ctx)
+	if err != nil {
+		status.Error = "file store capacity unavailable"
+	}
+	reservation := &capacityReservation{bytes: bytes(payloads)}
+	s.mu.Lock()
+	if s.capacityReservations == nil {
+		s.capacityReservations = map[*capacityReservation]bool{}
+	}
+	s.capacityReservations[reservation] = true
+	s.mu.Unlock()
+	return status, payloads, func() { s.mu.Lock(); delete(s.capacityReservations, reservation); s.mu.Unlock() }, nil
+}

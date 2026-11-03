@@ -137,6 +137,10 @@ func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]s
 	for hash, creation := range s.creations {
 		reservations[hash] = creation.length
 	}
+	var pendingBudget uint64
+	for reservation := range s.capacityReservations {
+		pendingBudget = addDiskBytes(pendingBudget, reservation.bytes)
+	}
 	s.mu.Unlock()
 	payloads, err := s.inventory(ctx)
 	if err != nil {
@@ -170,6 +174,7 @@ func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]s
 	storeFree := status.LimitBytes - min(status.LimitBytes, allocated)
 	unavailable := addDiskBytes(status.FloorBytes, remaining)
 	status.FreeBytes = min(storeFree, disk.FreeBytes-min(disk.FreeBytes, unavailable))
+	status.FreeBytes -= min(status.FreeBytes, pendingBudget)
 	return status, payloads, nil
 }
 
@@ -286,8 +291,6 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	}
 	store.lifecycle.RLock()
 	defer store.lifecycle.RUnlock()
-	store.admissionMu.Lock()
-	defer store.admissionMu.Unlock()
 	status, payloads, err := store.capacity(ctx)
 	if err != nil {
 		status.Error = "file store capacity unavailable"

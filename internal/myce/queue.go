@@ -492,7 +492,7 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 	if timing == nil && (q.observeUpdate != nil || spanFrom(ctx) != nil) {
 		timing = &queueUpdateTiming{}
 	}
-	if err := lockUploadContext(ctx, func() { timing.lock(&q.mu) }, q.mu.Unlock); err != nil {
+	if err := timing.lockContext(ctx, &q.mu); err != nil {
 		return err
 	}
 	hold := q.updateHolds.start()
@@ -661,13 +661,18 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	var resultCapacity FileStoreStatus
 	var resultPayloads map[string]storedPayload
 	if s.OutputDelivery == asyncNAS && !replay && store != nil {
-		// Serialize file-store admission, then snapshot disk outside q.mu.
-		store.admissionMu.Lock()
-		defer store.admissionMu.Unlock()
-		resultCapacity, resultPayloads, err = store.capacity(ctx)
+		// Reserve the prospective estimate before waiting for the queue.
+		var finish func()
+		resultCapacity, resultPayloads, finish, err = store.reserveCapacity(ctx, func(map[string]storedPayload) uint64 {
+			if s.Disk != nil {
+				return s.Disk.OutputBytes
+			}
+			return 0
+		})
 		if err != nil {
-			resultCapacity.Error = "file store capacity unavailable"
+			return nil, err
 		}
+		defer finish()
 	}
 	var out Job
 	err = q.updateRequest(ctx, func() error {

@@ -155,3 +155,93 @@ func TestUploadCreationExistingBlobDedupe(t *testing.T) {
 		t.Fatalf("dedupe created upload: %v", err)
 	}
 }
+
+func TestUploadCreationMixedAdmission(t *testing.T) {
+	for _, kind := range []string{"bundle", "async"} {
+		t.Run(kind, func(t *testing.T) {
+			q, s := creationStore(t, 1<<20)
+			entered, release := make(chan struct{}), make(chan struct{})
+			done := make(chan error, 1)
+			if kind == "bundle" {
+				record := s.recordBundle
+				s.recordBundle = func(hash string, created bool, contexts ...context.Context) error {
+					close(entered)
+					<-release
+					return record(hash, created, contexts...)
+				}
+				go func() {
+					files := map[string][]byte{"a": []byte("bundle")}
+					var ref *FileRef
+					done <- s.freezeFiles(&files, &ref, "", nil)
+				}()
+			} else {
+				q.deliveryRoot = q.root
+				q.checkpointProbe = func() bool { close(entered); <-release; return true }
+				go func() { _, err := q.SubmitContext(context.Background(), asyncDeliverySpec()); done <- err }()
+			}
+			<-entered
+			uploadDone := make(chan int, 1)
+			go func() {
+				w := httptest.NewRecorder()
+				s.serveUpload(w, creationRequest(context.Background(), creationRef("unrelated")))
+				uploadDone <- w.Code
+			}()
+			select {
+			case code := <-uploadDone:
+				if code != 201 {
+					t.Errorf("unrelated upload: %d", code)
+				}
+			case <-time.After(300 * time.Millisecond):
+				t.Error("unrelated upload blocked behind queue persistence")
+			}
+			close(release)
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestUploadCreationCancelledFinish(t *testing.T) {
+	q, s := creationStore(t, 8)
+	entered := make(chan struct{})
+	publish := s.publishUpload
+	s.publishUpload = func(hash string, contexts ...context.Context) error {
+		q.mu.Lock()
+		close(entered)
+		return publish(hash, contexts...)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.serveUpload(httptest.NewRecorder(), creationRequest(ctx, creationRef("")))
+	}()
+	<-entered
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(300 * time.Millisecond):
+		q.mu.Unlock()
+		<-done
+		t.Fatal("POST finish ignored cancellation")
+	}
+	q.mu.Unlock()
+}
+
+func TestUploadCancelledLaunchTiming(t *testing.T) {
+	q, _ := fixture(t)
+	for i := 0; i < 20; i++ {
+		q.mu.Lock()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- q.authorizeLaunchContext(ctx, HostLaunch{}) }()
+		time.Sleep(time.Millisecond)
+		cancel()
+		q.mu.Unlock()
+		if err := <-done; err != context.Canceled {
+			t.Fatalf("cancelled launch: %v", err)
+		}
+	}
+}
