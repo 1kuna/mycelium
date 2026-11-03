@@ -79,7 +79,7 @@ func (s *workerStore) pinSharedInput(root, key string) (func(), error) {
 		var f *os.File
 		f, err = os.OpenFile(pin, os.O_CREATE|os.O_WRONLY, 0600)
 		if err == nil {
-			err = errors.Join(f.Sync(), f.Close(), syncWorkerDir(filepath.Dir(pin)))
+			err = errors.Join(f.Sync(), f.Close(), syncWorkerDir(filepath.Dir(pin)), syncWorkerDir(filepath.Join(root, "pins")), syncWorkerDir(root))
 		}
 	}
 	return func() { _ = removeSharedInputPin(pin) }, err
@@ -112,6 +112,9 @@ func removeSharedInputPin(pin string) error {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+	}
+	if err := syncWorkerDir(filepath.Dir(pin)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	return nil
 }
