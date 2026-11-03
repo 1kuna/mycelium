@@ -99,3 +99,22 @@ func safeInputStagingPathDiagnostic(d *PathDiagnostic) *PathDiagnostic {
 	copy := *d
 	return &copy
 }
+
+// Only the job's authored NAS inputs may name a worker read failure. Shape
+// validation alone cannot establish that a worker-supplied name is public.
+func safeJobRuntimeCause(spec Spec, c *RuntimeCause) *RuntimeCause {
+	out := safeRuntimeCause(c)
+	if out == nil || out.PathDiagnostic == nil {
+		return out
+	}
+	d := out.PathDiagnostic
+	out.PathDiagnostic = nil
+	for name, input := range spec.SharedInputs {
+		field := "shared_inputs." + name + ".nas"
+		if input.NAS != "" && d.Field == field {
+			out.PathDiagnostic = &PathDiagnostic{Field: field, Side: "worker", Path: "input", ResolutionBase: "worker-checkpoint-root", Cause: d.Cause}
+			break
+		}
+	}
+	return out
+}

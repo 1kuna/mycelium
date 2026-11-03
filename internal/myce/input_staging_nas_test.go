@@ -160,3 +160,53 @@ func TestInputStagingPathDiagnosticRefusesPrivatePaths(t *testing.T) {
 		t.Fatal("worker-supplied private path escaped redaction")
 	}
 }
+
+func TestInputStagingPathDiagnosticRequiresDeclaredNASInput(t *testing.T) {
+	for _, name := range []string{"movie", "UNDECLARED_SECRET", "stored"} {
+		t.Run(name, func(t *testing.T) {
+			q, clock := fixture(t)
+			s := submitVerificationInput(t, q)
+			s.SharedInputs = map[string]SharedInput{
+				"movie":  {NAS: "movie", SHA256: s.Files["input"].SHA256, SizeBytes: s.Files["input"].SizeBytes},
+				"stored": {SHA256: s.Files["input"].SHA256, SizeBytes: s.Files["input"].SizeBytes},
+			}
+			submitted := submit(t, q, s)
+			m := machine("nas-reader", "fake")
+			m.Capabilities = append(m.Capabilities, "shared_inputs_v1")
+			assigned := check(t, q, m, nil).Job
+			if assigned == nil {
+				t.Fatal("not assigned")
+			}
+			field := "shared_inputs." + name + ".nas"
+			cause := &RuntimeCause{Operation: "input_staging", Class: "not_found", PathDiagnostic: &PathDiagnostic{Field: field, Side: "worker", Path: "input", ResolutionBase: "worker-checkpoint-root", Cause: "missing"}}
+			r := result(assigned, false)
+			r.ExecutionCause, r.Error = cause, cause.String()
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			database, root := strings.TrimSuffix(q.lock.Name(), ".lock"), q.root
+			if err := q.Close(); err != nil {
+				t.Fatal(err)
+			}
+			q, err := Open(database, root, clock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer q.Close()
+			// Check durable state too: public redaction alone must not hide a
+			// worker-supplied name already saved into reasons/history/ledger.
+			raw, err := json.Marshal(q.s.Jobs[submitted.ID])
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := job(t, q, submitted.ID)
+			wantDiagnostic := name == "movie"
+			if got.ExecutionCause == nil || (got.ExecutionCause.PathDiagnostic != nil) != wantDiagnostic || got.State != "failed" || len(got.AttemptHistory) != 1 {
+				t.Fatalf("unexpected completion: %+v", got)
+			}
+			if strings.Contains(string(raw), field) != wantDiagnostic || strings.Contains(got.Reason, field) != wantDiagnostic || strings.Contains(got.AttemptHistory[0].Reason, field) != wantDiagnostic {
+				t.Fatalf("diagnostic was not bound to declared NAS inputs: %s", raw)
+			}
+		})
+	}
+}
