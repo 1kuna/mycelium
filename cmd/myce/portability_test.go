@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -176,4 +177,19 @@ func TestPortabilityCLIRealAPILargeLock(t *testing.T) {
 	if len(report.Targets) != 1 || len(report.Targets[0].Environments) != 1 || report.Targets[0].Environments[0].Inputs != "present" {
 		t.Fatalf("large lock lost from advice: %+v", report)
 	}
+	out.Reset()
+	err = specCommand([]string{"check", "--resolve", "--json", "--queue", server.URL, "--token", "local-test-token", file}, &out, io.Discard)
+	// No worker is registered: the authored native recipe remains unknown,
+	// while the valid large lock must survive the same base64 transport.
+	if exitCode(err) != 1 {
+		t.Fatalf("unqualified native resolve: %v", err)
+	}
+	var resolved myce.ResolveReport
+	if err := json.Unmarshal(out.Bytes(), &resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Portability == nil || len(resolved.Portability.Targets) != 1 || len(resolved.Portability.Targets[0].Environments) != 1 || resolved.Portability.Targets[0].Environments[0].Inputs != "present" {
+		t.Fatalf("large lock lost from resolve: %+v", resolved)
+	}
+
 }

@@ -117,14 +117,16 @@ func TestResolveLockedCPUJobWithStagedInputOnTwoRoots(t *testing.T) {
 		if err := client.Call(context.Background(), "POST", "/api/resolve", ResolveRequest{Spec: s}, &r); err != nil {
 			t.Fatal(err)
 		}
-		return len(r.Targets) == 2
+		return len(r.Targets) == 2 && len(r.FileInputs) == 2 && r.FileInputs[0].State == "needs-staging" && r.FileInputs[1].State == "needs-staging"
 	})
 	for _, target := range r.Targets {
 		if !target.Eligible || !strings.Contains(target.Reason, "environment prepared") || target.Target.Platform != "cpu" {
 			t.Fatalf("target not eligible with prepared environment: %+v", r)
 		}
 	}
-	if len(r.Findings) != 0 || !strings.Contains(strings.Join(r.Resolved, " "), "environment tools: queue library recipes for cpu") {
+	// These declared identities intentionally have no uploaded bytes. #548
+	// requires needs-staging evidence rather than silently accepting the gap.
+	if len(r.FileInputs) != 2 || r.FileInputs[0].State != "needs-staging" || r.FileInputs[1].State != "needs-staging" || resolveFinding(r, "files.run.sh") == nil || resolveFinding(r, "files.data.txt") == nil || !strings.Contains(strings.Join(r.Resolved, " "), "environment tools: queue library recipes for cpu") {
 		t.Fatalf("staged locked job reported gaps: %+v", r)
 	}
 	d.Queue.mu.Lock()

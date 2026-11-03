@@ -624,6 +624,7 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
+	NASPathReports  []NASPathReport   `json:"nas_path_reports,omitempty"`
 	AttemptProtocol string            `json:"attempt_protocol,omitempty"`
 	Attempts        []AttemptReport   `json:"attempts,omitempty"`
 	Recovering      bool              `json:"recovering,omitempty"` // Reconcile custody without offering new work.
@@ -637,6 +638,7 @@ type Checkin struct {
 	Running         *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	NASPathChecks              []NASPathCheck               `json:"nas_path_checks,omitempty"`
 	SharedHost                 *SharedHostProfile           `json:"shared_host,omitempty"`
 	ExtensionQualificationPlan []ExtensionQualificationPlan `json:"extension_qualification_plan,omitempty"`
 

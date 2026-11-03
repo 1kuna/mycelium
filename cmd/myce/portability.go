@@ -61,63 +61,7 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 			if err != nil {
 				return err
 			}
-			if p.Source.Directory != "" {
-				if filepath.IsAbs(p.Source.Directory) {
-					root = p.Source.Directory
-				} else {
-					root = filepath.Join(root, p.Source.Directory)
-				}
-			}
-			// Bundle only known lock/manifest and explicit build input files.
-			// Payloads are never executed by an advice read. A 1 MiB metadata budget matches
-			// the existing extension-description contract and bounds API transfer.
-			budget := int64(1 << 20)
-			p.Native.Files = map[string][]byte{}
-			for _, v := range p.Native.Variants {
-				for _, r := range v.Environments {
-					inputs := []string{r.LockFile, path.Join(path.Dir(r.LockFile), "uv.lock"), path.Join(path.Dir(r.LockFile), "pyproject.toml"), path.Join(path.Dir(r.LockFile), "pixi.lock"), path.Join(path.Dir(r.LockFile), "pixi.toml")}
-					for _, arg := range r.Build {
-						if file, ok := strings.CutPrefix(arg, "{extension}/"); ok {
-							inputs = append(inputs, file)
-						}
-					}
-					for _, file := range inputs {
-						if !profileRelative(file) || strings.Contains(file, "\\") || p.Native.Files[file] != nil {
-							continue
-						}
-						// Lstat every component: advice must not follow project symlinks outside
-						// the selected directory to collect private local files.
-						current := root
-						safe := true
-						for _, part := range strings.Split(filepath.FromSlash(file), string(filepath.Separator)) {
-							current = filepath.Join(current, part)
-							info, e := os.Lstat(current)
-							if e != nil || info.Mode()&os.ModeSymlink != 0 {
-								safe = false
-								break
-							}
-						}
-						if !safe {
-							continue
-						}
-						info, err := os.Stat(current)
-						if err != nil || !info.Mode().IsRegular() || info.Size() > budget {
-							continue
-						}
-						input, err := os.Open(current)
-						if err != nil {
-							continue
-						}
-						b, err := io.ReadAll(io.LimitReader(input, budget+1))
-						input.Close()
-						if err != nil || int64(len(b)) > budget {
-							continue
-						}
-						budget -= int64(len(b))
-						p.Native.Files[file] = b
-					}
-				}
-			}
+			request.SourceUnverified = !bundleNativeMetadata(p.Native, p.Source, root)
 		} else {
 			request.Spec = &p.Spec
 		}
@@ -138,4 +82,72 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 		}
 	}
 	return myce.WritePortability(out, report, *asJSON)
+}
+
+func bundleNativeMetadata(recipe *myce.Extension, source profileSource, root string) bool {
+	// Working-tree files are evidence only for a declared directory source.
+	// Git path selection and snapshot contents need their own archive reader;
+	// until then, never substitute unrelated working-tree bytes.
+	if source.Directory == "" {
+		recipe.Files = nil
+		return false
+	}
+	if source.Directory != "" {
+		if filepath.IsAbs(source.Directory) {
+			root = source.Directory
+		} else {
+			root = filepath.Join(root, source.Directory)
+		}
+	}
+	// Bundle only known lock/manifest and explicit build input files.
+	// Payloads are never executed by an advice read. A 1 MiB metadata budget matches
+	// the existing extension-description contract and bounds API transfer.
+	budget := int64(1 << 20)
+	recipe.Files = map[string][]byte{}
+	for _, v := range recipe.Variants {
+		for _, r := range v.Environments {
+			inputs := []string{r.LockFile, path.Join(path.Dir(r.LockFile), "uv.lock"), path.Join(path.Dir(r.LockFile), "pyproject.toml"), path.Join(path.Dir(r.LockFile), "pixi.lock"), path.Join(path.Dir(r.LockFile), "pixi.toml")}
+			for _, arg := range r.Build {
+				if file, ok := strings.CutPrefix(arg, "{extension}/"); ok {
+					inputs = append(inputs, file)
+				}
+			}
+			for _, file := range inputs {
+				if !profileRelative(file) || strings.Contains(file, "\\") || recipe.Files[file] != nil {
+					continue
+				}
+				// Lstat every component: advice must not follow project symlinks outside
+				// the selected directory to collect private local files.
+				current := root
+				safe := true
+				for _, part := range strings.Split(filepath.FromSlash(file), string(filepath.Separator)) {
+					current = filepath.Join(current, part)
+					info, e := os.Lstat(current)
+					if e != nil || info.Mode()&os.ModeSymlink != 0 {
+						safe = false
+						break
+					}
+				}
+				if !safe {
+					continue
+				}
+				info, err := os.Stat(current)
+				if err != nil || !info.Mode().IsRegular() || info.Size() > budget {
+					continue
+				}
+				input, err := os.Open(current)
+				if err != nil {
+					continue
+				}
+				b, err := io.ReadAll(io.LimitReader(input, budget+1))
+				input.Close()
+				if err != nil || int64(len(b)) > budget {
+					continue
+				}
+				budget -= int64(len(b))
+				recipe.Files[file] = b
+			}
+		}
+	}
+	return true
 }
