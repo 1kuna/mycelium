@@ -625,6 +625,9 @@ func (s Spec) allowsMachine(machine string) bool {
 }
 
 func (q *Queue) validateJobExclusions(s Spec) error {
+	if len(s.ExcludedMachines) == 0 {
+		return nil
+	}
 	if err := q.validateMachineNames(s.ExcludedMachines); err != nil {
 		return fmt.Errorf("excluded_machines: %w", err)
 	}
