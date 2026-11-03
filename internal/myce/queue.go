@@ -187,6 +187,7 @@ type Queue struct {
 	usageMaintenance bool
 	s                state
 
+	memoryObservationIndex  map[memoryWorkKey][]*WorkObservation
 	checkinMemoryIdentities map[*Job]string // Fenced, transaction-local planner input.
 }
 
@@ -508,6 +509,8 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 		q.accountUsage(q.clock.Now())
 		return fn() // Simulation aborts on any error; it never resumes a failed mutation.
 	}
+	q.memoryObservationIndex = nil
+	defer func() { q.memoryObservationIndex = nil }()
 	old, err := q.beginRecords()
 	if err != nil {
 		return err
