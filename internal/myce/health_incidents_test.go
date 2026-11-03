@@ -262,8 +262,7 @@ func TestHealthIncidentLearnedEnvelopeReplay(t *testing.T) {
 	if len(alertsOf(q, kind)) != 0 {
 		t.Fatal("fitting history alerted")
 	}
-	m.HostMemoryBudgetGB = 24
-	check(t, q, m, nil)
+	incidentAllowance(t, q, &m, 24)
 	if _, err := q.Submit(s); err == nil {
 		t.Fatal("oversized learned submission was admitted")
 	}
@@ -284,8 +283,7 @@ func TestHealthIncidentLearnedEnvelopeReplay(t *testing.T) {
 	}
 	requireIncident(t, q, kind, key, 1, true)
 	// A larger allowance recovers automatically without a resubmission.
-	m.HostMemoryBudgetGB = 32
-	check(t, q, m, nil)
+	incidentAllowance(t, q, &m, 32)
 	requireIncident(t, q, kind, key, 1, false)
 	if q.s.Health.Conditions[key].Envelope != nil {
 		t.Fatal("recovered probe retained")

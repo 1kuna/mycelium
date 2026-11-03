@@ -7,6 +7,22 @@ import (
 	"time"
 )
 
+func incidentAllowance(t *testing.T, q *Queue, m *Machine, gb float64) {
+	t.Helper()
+	// Reports cannot change the queue-owned allowance after registration.
+	// Replay the operator update and worker acknowledgement before resuming.
+	for _, request := range []HostMaintenanceRequest{{Action: "drain"}, {Action: "budget", MemoryBudgetGB: &gb}} {
+		if _, err := q.ChangeHostMaintenance(hostID(m), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.HostMemoryBudgetGB = gb
+	check(t, q, *m, nil)
+	if _, err := q.ChangeHostMaintenance(hostID(m), HostMaintenanceRequest{Action: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func incidentVariantFixture(t *testing.T, capGB float64) (*Queue, *fakeClock, Machine, Spec) {
 	t.Helper()
 	q, clock := fixture(t)
@@ -44,8 +60,7 @@ func TestHealthIncidentInheritedAutoMemoryReplay(t *testing.T) {
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
-			m.HostMemoryBudgetGB = 24
-			check(t, q, m, nil)
+			incidentAllowance(t, q, &m, 24)
 			s.RequireTarget = refuse
 			queued, err := q.Submit(s)
 			if (err != nil) != refuse {
@@ -62,8 +77,7 @@ func TestHealthIncidentInheritedAutoMemoryReplay(t *testing.T) {
 				}
 			}
 			requireIncident(t, q, kind, key, 1, true)
-			m.HostMemoryBudgetGB = 64
-			check(t, q, m, nil)
+			incidentAllowance(t, q, &m, 64)
 			requireIncident(t, q, kind, key, 1, false)
 			clock.Advance(healthAlertCooldown)
 			check(t, q, m, nil)
@@ -84,8 +98,7 @@ func TestHealthIncidentDeclaredMemberCapExcluded(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	m.HostMemoryBudgetGB = 24
-	check(t, q, m, nil)
+	incidentAllowance(t, q, &m, 24)
 	s.RequireTarget = true
 	if _, err := q.Submit(s); err == nil {
 		t.Fatal("oversized declared member cap admitted")
@@ -123,8 +136,7 @@ func TestHealthIncidentOfflineUndersizedPeerDoesNotSuppress(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	m.HostMemoryBudgetGB = 24
-	check(t, q, m, nil)
+	incidentAllowance(t, q, &m, 24)
 	peer := cloneMachine(&m)
 	peer.ID, peer.HostID, peer.Session = "offline-peer", "offline-peer", "offline-session"
 	check(t, q, peer, nil)
@@ -156,8 +168,7 @@ func TestHealthIncidentLearnedEnvelopeHealthyExclusions(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			m.HostMemoryBudgetGB = 24
-			check(t, q, m, nil)
+			incidentAllowance(t, q, &m, 24)
 			s.Needs.Memory, s.RequireTarget = "auto", true
 			if history == "fitting peer" {
 				peer := cloneMachine(&m)
