@@ -191,6 +191,10 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 			}
 			ref := placeholderRef(name, size)
 			input.SHA256, input.SizeBytes = ref.SHA256, ref.SizeBytes
+		} else if info != nil && input.SizeBytes == 0 {
+			input.SizeBytes = info.Size()
+		} else if info != nil && input.SizeBytes != info.Size() {
+			found.missing("shared_inputs."+name+".size_bytes", "shared input "+name+": size differs", "Correct size_bytes to match the local file.", nil)
 		}
 		input.Local = ""
 		p.SharedInputs[name] = input
