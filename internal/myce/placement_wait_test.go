@@ -147,6 +147,13 @@ func TestQueuedReasonCardContentionWithOtherHostRAMShortage(t *testing.T) {
 					}
 				}
 			}
+			for _, reason := range []string{job(t, q, j.ID).Reason, receipt.Reason} {
+				for _, want := range []string{"cores reserved; utilization unknown", "RAM live 101.0 GiB available", "GiB admission headroom"} {
+					if !strings.Contains(reason, want) {
+						t.Errorf("card contention hid capacity context %q: %s", want, reason)
+					}
+				}
+			}
 			other.HostAvailableMemoryGB = 101
 			if got := assignedJob(machineCheck(t, q, other)); got == nil || got.ID != j.ID {
 				t.Fatal("busy card hid a now-runnable target", got)
