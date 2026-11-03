@@ -398,18 +398,29 @@ never proves cleanup. Status
 distinguishes `draining`, `ready`, `in_use`, `waiting_for_release` and `released`,
 and shows `reserved for OWNER: REASON` plus pending work/evidence.
 
-The maximum lifetime is a lost-binding backstop, not a deadline for live work.
-Its cost is retaining reserved capacity beyond the lifetime while a queued,
-preparing or running bound job exists, or any exact cleanup is unconfirmed.
-Status then reports `reserved past max lifetime` with the blocking reason;
-expiry never cancels work or confirms physical release. Only an absent job
-binding with no retained execution custody can expire with the visible release
-reason `maximum lifetime elapsed`. A terminal bound job releases after all
-attempts physically release, whether before or after the lifetime. Independent
-drains and exclusions still apply. Conditional operator
-release has the same admission-only meaning and requires an observed revision
-and reason. Use indefinite `exclude`/host maintenance for an operator-controlled
-hardware hold instead.
+Whole-host reservations for CPU validation wait for host work and physical
+cleanup, but do not wait for GPU admission to become enabled. A shared interactive
+host's profile deliberately excludes GPUs; that does not prevent its native CPU
+validation from becoming ready. Ordinary CPU, environment and owner-pressure
+admission checks still apply.
+
+The maximum lifetime bounds a never-ready admission fence as well as lost
+bindings. If a reservation has never been ready and its bound job is still
+queued with no retained execution or preparation custody, expiry marks it
+`expired`: other jobs regain admission, while the bound job remains queued.
+Explicitly release that record before reserving the validation again. Same-ID
+replay never renews it. `ready_at` records the first observed ready transition;
+`expired_at` records admission expiry, **not physical release**.
+
+Once ready, preparing or running bound work and unconfirmed cleanup retain the
+reservation beyond its lifetime. Status reports `reserved past max lifetime`
+with the blocking reason; expiry never cancels work or confirms physical release.
+An absent binding with no retained execution custody releases with the visible
+reason `maximum lifetime elapsed`. A terminal bound job releases after every
+attempt physically releases. Independent drains and exclusions still apply.
+Conditional operator release changes only the reservation's admission fence and
+requires its observed revision and a reason. Use indefinite `exclude`/host
+maintenance for an operator-controlled hardware hold instead.
 
 Laptop proof uses the real API and command runner with fake inventory. Start
 `myce dev --workers 1 --devices 2` and use its printed queue settings; add a local
@@ -3388,3 +3399,33 @@ The unchanged ten-second check-in deadline must hold under representative
 production bursts, without false quiet losses. Collect every workload failure,
 retain a compact receipt and remove disposable payloads after process release.
 Native Linux proof and #527's measured-protection acceptance remain open.
+
+## Durable model-engine interval history (#663)
+
+Authenticated `GET /api/models/intervals?limit=100` returns immutable transition
+`entries` with `sequence`, `at`, `kind`, model/attempt, machine/session, physical
+host, device ordinal/stable identity/platform, project/class/priority and the
+resolved `tier` (name, index, selector and policy revision). Events retain the
+interval's known `assigned_at`, `load_started_at`, `stopped_at`, `released_at`.
+Assignment records queue custody; load start records the first accepted engine
+launch authorization, not a process-start acknowledgement. Stop records queue
+stop intent, not signal delivery. Exact matching `failed` cleanup or accepted
+`unloaded` receipts record release; stale receipts and missing workers cannot.
+A direct cleanup receipt without prior stop intent sets stop at receipt time.
+Class/tier changes produce another event at their transition time, so a model
+promoted or demoted in place remains visible to overlap proofs.
+
+Begin with `after=0` and omit `high_water`. Follow `next` as `after`, retaining
+the first page's `high_water`, until `has_more=false`. `limit` is 1..256. Start
+a later snapshot at the previous high water to collect new arrivals. Even an
+empty snapshot's high water is a valid fixed bound. Events persist in SQLite
+with their queue transitions and survive slot removal and queue restarts; they
+are retained without automatic pruning. Reads fetch only a bounded indexed page
+outside the queue lock. Back up the entire queue database as usual.
+
+`coverage_since` is the first ledger-enabled queue transaction. Existing slots
+are recorded as `observed` with unknown earlier times; there is no historical
+backfill. Missing assignment, load-start or release evidence cannot pass a
+complete interval proof. Join events by attempt/machine/session/device and use
+class-change event times to split tier occupancy. For batch copies, continue to
+use job GET times and the paginated job ledger described in [status](status.md).

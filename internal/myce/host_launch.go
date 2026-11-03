@@ -117,6 +117,8 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			s := q.s.ModelSlots[slotKey(l.Machine, l.Key, l.Device)]
 			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" || !q.reservationAllows(nil, allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) || q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) {
 				reject("engine_custody")
+			} else {
+				q.recordModelInterval(s, "load_started")
 			}
 			return nil
 		}

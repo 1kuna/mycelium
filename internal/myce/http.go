@@ -205,6 +205,7 @@ func (a API) handler(joiningPin string) http.Handler {
 		}
 		respondOperation(w, reply, err, "status_unavailable")
 	})
+	a.registerModelIntervals(mux)
 	mux.HandleFunc("GET /api/jobs/{id}/ledger", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		values := []int{0, -1, 100}
