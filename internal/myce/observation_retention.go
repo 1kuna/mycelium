@@ -51,6 +51,7 @@ func (q *Queue) pruneObservations(requestContexts ...context.Context) error {
 		for _, id := range work {
 			if p, ok := q.s.WorkObservations[id]; ok && expiredWorkObservation(p, now) {
 				delete(q.s.WorkObservations, id)
+				q.memoryObservationIndex = nil
 			}
 		}
 		for _, id := range storage {

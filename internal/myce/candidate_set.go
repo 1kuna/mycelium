@@ -34,7 +34,13 @@ func (q *Queue) candidates(m *Machine, scans ...*placementScan) *candidateSet {
 
 func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateSet {
 	scan := q.placementScan(scans...)
-	s := &candidateSet{q: q, m: m, scores: map[string]float64{}, actives: map[string]float64{}}
+	if scan.memory == nil {
+		scan.memory = newMemoryPlanningCache()
+	}
+	previous := q.memoryPlanning
+	q.memoryPlanning = scan.memory
+	defer func() { q.memoryPlanning = previous }()
+	s := &candidateSet{q: q, m: m, jobs: make([]*Job, 0, len(q.liveJobs())), scores: map[string]float64{}, actives: map[string]float64{}}
 	s.resources = map[batchResourceKey]batchResourceRoom{}
 	fence := q.groupDemandFence(m)
 	for _, j := range q.liveJobs() {

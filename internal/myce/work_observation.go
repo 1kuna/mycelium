@@ -375,7 +375,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 	if memory {
 		q.recordWorkMemory(*sample, old, &point)
 	}
-	q.s.WorkObservations[key] = point
+	q.putWorkObservation(key, point)
 	q.recordCurveLearning(j, original, exists, point)
 }
 
