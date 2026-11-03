@@ -688,6 +688,7 @@ uses `reservations`. Each record includes `id`, `job`, the canonical stable
 | State | Meaning |
 | --- | --- |
 | `draining` | Existing work, independent maintenance, production takeover, missing inventory or fresh worker/cleanup evidence still prevents validation. The reservation never cancels Started work. `pending` names the blockers. |
+| `expired` | Never ready before max lifetime, still queued and without retained custody. Other jobs regain admission; the bound job remains queued until explicit release. `expired_at` is admission expiry, not physical cleanup. |
 | `ready` | The reserved components have no unrelated physical obligations or reservation readiness blockers. Ordinary qualification, priority and capacity checks still apply; this is not a launch grant. |
 | `in_use` | The bound job has Started and is running/stopping. |
 | `waiting_for_release` | The job is terminal with exact cleanup still pending, or its binding is unavailable. A terminal state alone does not release the reservation. |
@@ -700,10 +701,13 @@ including lost or superseded ones, and the bound job's Started preparations
 must settle before automatic completion release. Missing or stale reports
 survive queue restarts. The maximum lifetime
 defaults to two hours and is bounded at 24 hours; the original expiry survives
-caller replays and queue restarts. A non-terminal bound job or unconfirmed
-cleanup retains the fence past this lifetime; `text` reports `reserved past max
-lifetime` and the reason. Expiry releases only an absent binding without retained
-execution custody. The release reason remains in status.
+caller replays and queue restarts. `ready_at` records first readiness. A never-ready
+reservation with a queued bound job and no retained custody becomes `expired`,
+yielding admission to others while keeping its bound job queued. Release it
+explicitly before reserving again. Once ready, or while cleanup remains unknown,
+the fence stays past its lifetime; `text` reports `reserved past max lifetime`
+and the reason. An absent binding without retained custody can release. The
+release reason remains in status.
 Other reservations, device exclusions and newer operator drains remain intact.
 Device reservations leave CPU placement eligible within the host's CPU/RAM
 allowances. From the next release, a machine worker's CPU environment preparation
@@ -1175,3 +1179,16 @@ expiry. Three interrupted owner-scheduling-latency attempts within ten minutes
 exclude that job from that host for fifteen minutes, using the queue clock. Other
 eligible hosts can admit it immediately. Status names the latency backoff and its
 expiry; ordinary pressure recovery alone does not erase the cooldown.
+
+## Durable model interval API
+
+`GET /api/models/intervals` is the supported paginated history for resident model
+attempts, including engines assigned and removed between status reads. See the
+[interval contract](operations.md#durable-model-engine-interval-history-663).
+Events expose `assigned_at`, first-authorized `load_started_at`, stop-intent
+`stopped_at`, exact-cleanup `released_at`, card identity and class/resolved tier
+with policy revision. `class_changed` events timestamp in-place tier changes,
+including effective production pins. `coverage_since` bounds the current
+uninterrupted coverage period; a rollback through an older binary can create
+a gap even though older events remain readable. Unknown legacy times remain absent.
+A status snapshot's `loaded_models` alone cannot rule out transient arrivals.

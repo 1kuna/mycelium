@@ -194,6 +194,7 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
+	Interval             *ModelInterval      `json:"interval,omitempty"`
 	Device               string              `json:"device,omitempty"`
 	PreemptionCount      int                 `json:"preemption_count,omitempty"`
 	RunSince             *time.Time          `json:"run_since,omitempty"`
@@ -581,6 +582,7 @@ func (q *Queue) maintainModels() {
 			q.s.ModelSlots[targetSlotKey(m, c.Model)] = s
 		}
 		q.initEnginePreemption(s)
+		q.recordModelInterval(s, "assigned")
 		m.FreeMemoryGB -= model.MemoryGB
 		q.refreshHostMemory()
 	}

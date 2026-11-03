@@ -204,6 +204,7 @@ func (q *Queue) maintainPins() {
 		}
 		q.s.ModelSlots[key] = &ModelSlot{Project: p.Project, Model: p.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: "production", LastUsed: now}
 		q.initEnginePreemption(q.s.ModelSlots[key])
+		q.recordModelInterval(q.s.ModelSlots[key], "assigned")
 		m.FreeMemoryGB -= model.MemoryGB
 		q.refreshHostMemory()
 		p.Assigned, p.AssignedDevice = m.ID, targetDevice(m)
