@@ -1301,6 +1301,16 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		if old != nil && (old.Gone || old.Session != m.Session) {
 			q.clearPreemptionPlacements(old.ID, old.Session)
 		}
+		// Fresh workers attest cleanup only for their exact previous session.
+		// Record that accepted evidence before reconciliation discards old slots
+		// and before replacing the old inventory used to identify their cards.
+		if c.Fresh && c.PreviousSession != "" && c.PreviousSession != m.Session {
+			for _, slot := range q.s.ModelSlots {
+				if slot.Machine == m.ID && slot.Session == c.PreviousSession {
+					q.recordModelInterval(slot, "released")
+				}
+			}
+		}
 		q.s.Machines[m.ID] = &m
 		q.recordExternalMemory(&m)
 		for _, report := range reports {

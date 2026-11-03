@@ -288,3 +288,82 @@ func TestModelIntervalsTrackEffectivePinnedTier(t *testing.T) {
 		t.Fatal("missing unpin transition", unpinned)
 	}
 }
+
+func TestModelIntervalsPinAttributionIsCardSpecific(t *testing.T) {
+	q, _, m := modelFixture(t)
+	m.Devices = m3Machine().Devices
+	machineCheck(t, q, m)
+	addModelCall(t, q, "experiment")
+	sibling := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
+	if sibling == nil {
+		t.Fatal("missing experiment slot")
+	}
+	before := intervalPage(t, q, 0, -1, 256)
+	if err := q.Pin(ModelPin{Project: "pin-owner", Model: "test", Machine: m.ID, Device: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	pinned := q.s.ModelSlots[slotKey(m.ID, "test", "1")]
+	if pinned == nil || !q.slotPinned(pinned) {
+		t.Fatal("missing card 1 pin")
+	}
+	if got := q.slotSpec(sibling); jobClass(got) != "experiment" || got.Project != "test" {
+		t.Fatal("sibling inherited another card's pin", got)
+	}
+	after := intervalPage(t, q, before.HighWater, -1, 256)
+	for _, event := range after.Entries {
+		if event.Attempt == sibling.Attempt {
+			t.Fatal("pin changed sibling interval", event)
+		}
+		if event.Attempt == pinned.Attempt && (event.Device != "1" || event.Project != "pin-owner" || event.Tier.Tier != "production") {
+			t.Fatal("incorrect pinned card attribution", event)
+		}
+	}
+}
+
+func TestModelIntervalsCleanReplacementReleaseFence(t *testing.T) {
+	for _, verified := range []bool{true, false} {
+		name := "verified"
+		if !verified {
+			name = "unverified"
+		}
+		t.Run(name, func(t *testing.T) {
+			q, clock, m := modelFixture(t)
+			call := addModelCall(t, q, "experiment")
+			reportModel(t, q, m, "ready")
+			s := q.s.ModelSlots[slotKey(m.ID, "test")]
+			if err := q.finishCall(call.ID); err != nil {
+				t.Fatal(err)
+			}
+			before := intervalPage(t, q, 0, -1, 256)
+			clock.Advance(time.Second)
+			replacedAt := clock.Now()
+			oldSession := m.Session
+			m.Session = "replacement-session"
+			previous := oldSession
+			if !verified {
+				previous = "unverified-session"
+			}
+			_, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous})
+			after := intervalPage(t, q, before.HighWater, -1, 256)
+			if !verified {
+				if err == nil {
+					t.Fatal("replacement accepted without previous-session cleanup")
+				}
+				if after.HighWater != before.HighWater || s.Interval.ReleasedAt != nil {
+					t.Fatal("unverified cleanup released history", after)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(after.Entries) != 1 {
+				t.Fatal("clean replacement missing release event", after)
+			}
+			event := after.Entries[0]
+			if event.Kind != "released" || event.Attempt != s.Attempt || event.Session != oldSession || event.ReleasedAt == nil || !event.ReleasedAt.Equal(replacedAt) {
+				t.Fatal("incorrect replacement release", event)
+			}
+		})
+	}
+}

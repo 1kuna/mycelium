@@ -3410,7 +3410,9 @@ interval's known `assigned_at`, `load_started_at`, `stopped_at`, `released_at`.
 Assignment records queue custody; load start records the first accepted engine
 launch authorization, not a process-start acknowledgement. Stop records queue
 stop intent, not signal delivery. Exact matching `failed` cleanup or accepted
-`unloaded` receipts record release; stale receipts and missing workers cannot.
+`unloaded` receipts record release. A fresh replacement check-in also records
+release for slots in its exact attested `previous_session`, before old slots are
+discarded. Stale receipts and unverified worker loss cannot establish release.
 A direct cleanup receipt without prior stop intent sets stop at receipt time.
 Class/tier changes use the scheduler's effective identity, including active
 production pins, and produce another event at their transition time, so a model
