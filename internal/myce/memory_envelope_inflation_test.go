@@ -194,3 +194,51 @@ func TestMemoryEnvelopeIncidentSamplesIgnoreInfrastructure(t *testing.T) {
 		t.Fatalf("interruptions changed accepted incident peaks: want %.6f, got %+v", want, got)
 	}
 }
+
+func TestMemoryEnvelopeExhaustedLossLateReleaseSample(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	s.Needs.Memory, s.Priority = "auto", "production"
+	if err := q.SetProductionInfrastructureRetries(0); err != nil {
+		t.Fatal(err)
+	}
+	first := startObservation(t, q, m, s)
+	clock.Advance(time.Second)
+	peak := 2.0
+	r := result(&first, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	lost := startObservation(t, q, m, s)
+	clock.Advance(ProductionLossAfter + time.Second)
+	check(t, q, observer(), nil)
+	if got := job(t, q, lost.ID); got.State != "failed" || got.Reason != "infrastructure_retries_exhausted" || got.Machine != m.ID {
+		t.Fatalf("loss did not exhaust retry budget with retained identity: %+v", got)
+	}
+	// A late release can still add diagnostic counters to this exact exhausted
+	// attempt. It cannot turn queue-observed infrastructure loss into pressure.
+	pressure := 12.0
+	r = result(&lost, false)
+	r.ReleaseOnly = true
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &pressure, Constrained: true, Events: &MemoryEventCounts{Max: 1}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	q = memoryFactsRestart(t, q, clock)
+	check(t, q, m, nil)
+	retained := job(t, q, lost.ID)
+	key := *retained.Timing.Key
+	configuration := memoryConfiguration(retained.Spec.Needs, retained.Spec.Args, retained.Spec.Program)
+	if lower := q.sameOSMemoryLowerBound(key, configuration); lower != 0 {
+		t.Fatalf("late release after infrastructure loss raised future exploration: %v", lower)
+	}
+	facts := job(t, q, lost.ID).MemoryAttempts
+	if len(facts) != 1 || facts[0].LearningReason != "infrastructure_interrupted" || facts[0].MemoryPeak.Constrained || facts[0].MemoryPeak.Events.Max != 1 {
+		t.Fatalf("late release lost the sample's infrastructure classification: %+v", facts)
+	}
+	candidate := first
+	candidate.State = "queued"
+	if got := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; got.HostGB != 2.5 || got.Basis != "learned" {
+		t.Fatalf("loss changed accepted memory: %+v", got)
+	}
+}

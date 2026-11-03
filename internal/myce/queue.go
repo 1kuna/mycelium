@@ -899,7 +899,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	if chargeInfrastructure && strings.HasPrefix(why, "machine quiet for ") {
 		q.alertAttemptLoss(j, outcome, true)
 	}
-	q.recordAttemptMemory(j, Result{})
+	q.recordAttemptMemory(j, Result{Interrupted: true})
 	defer func() { q.recordAttemptOutcome(j, outcome) }()
 	if cancelled(j) {
 		if !terminal(j.State) {
