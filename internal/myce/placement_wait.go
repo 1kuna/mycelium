@@ -53,6 +53,11 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 					blocked = append(blocked, why)
 				}
 			}
+			if len(blocked) == 0 {
+				if why := q.cardWaitingReason(candidate, m); why != "" {
+					blocked = append(blocked, why)
+				}
+			}
 			specific = specific || len(blocked) > 0
 			if why := hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB); why != "" {
 				n := candidate.Spec.Needs
@@ -76,4 +81,39 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 	}
 	slices.Sort(reasons)
 	return strings.Join(slices.Compact(reasons), "; ")
+}
+
+// Occupancy is not RAM pressure. Explain the same sharing/release gate used by
+// dispatch, including the exact jobs retaining a card, without changing it.
+func (q *Queue) cardWaitingReason(j *Job, m *Machine) string {
+	if j.Spec.Needs.cpuOnly() || q.batchSlotFree(m, j) && j.Spec.Needs.MemoryGB <= m.FreeMemoryGB {
+		return ""
+	}
+	holders := map[string]string{}
+	for _, holder := range q.liveJobs() {
+		if holder.ID != j.ID && batchOnTarget(holder, m) && batchReservesCapacity(holder) {
+			holders[holder.ID] = holder.ID + " (" + q.priorityMatch(holder.Spec).Tier + ")"
+		}
+	}
+	for _, release := range q.s.HostReleases {
+		if !q.batchReleaseOnTarget(release, m) {
+			continue
+		}
+		if _, ok := holders[release.Job]; !ok {
+			holders[release.Job] = release.Job + " (awaiting exact release)"
+		}
+	}
+	if len(holders) == 0 {
+		return ""
+	}
+	owners := make([]string, 0, len(holders))
+	for _, owner := range holders {
+		owners = append(owners, owner)
+	}
+	slices.Sort(owners)
+	device := strings.Join(targetDevices(m), ",")
+	if n, shared := q.deviceCoTenants(m, j, true); shared && n > 0 && q.cardSettled(m) {
+		return fmt.Sprintf("device %s shared with %d attempts; %.1f GiB device memory free; held by %s", device, n, m.FreeMemoryGB, strings.Join(owners, ", "))
+	}
+	return fmt.Sprintf("card busy: waiting for GPU batch slot on device %s held by %s", device, strings.Join(owners, ", "))
 }
