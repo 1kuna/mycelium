@@ -21,7 +21,7 @@ import (
 // StartDev is the same real API/command-runner composition as `myce dev`.
 func TestM3DevTwoGPUScenario(t *testing.T) {
 	root := t.TempDir()
-	cfg := DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "two-gpu", MemoryGB: 8, Interval: 10 * time.Millisecond}
+	cfg := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "two-gpu", MemoryGB: 8, Interval: 10 * time.Millisecond}
 	d, err := StartDev(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +172,7 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 
 func TestM3DevModelEnginesPerDevice(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "model-machine", MemoryGB: 8, Interval: 10 * time.Millisecond})
+	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "model-machine", MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,7 +20,7 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 	src, c, binary, manager, run := m4InstallFixture(t)
 	root := t.TempDir()
 	clock := &workerFakeClock{now: time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)}
-	d, err := startDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: c.Checkpoints, Token: "synthetic-local-test", Workers: 1, HostID: "dev-controller", MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) {
+	d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: c.Checkpoints, Token: "synthetic-local-test", Workers: 1, HostID: "dev-controller", MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) {
 		q.clock = clock
 		fakeCheckpointAvailability(t, q, true)
 	})
@@ -159,7 +159,7 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 	checkAPI(spark) // Final source check-in records its settled leave.
 	sparkCtx, stopSpark := context.WithCancel(ctx)
 	sparkDone := make(chan error, 1)
-	sw := Worker{Clock: RealClock{}, StateDir: filepath.Join(root, "spark-machine"), Machine: machine("spark", "fake", "spark"), Client: client, ModelConfig: d.Queue.models, Interval: 10 * time.Millisecond, InventoryProbe: func(context.Context) ([]MachineDevice, error) {
+	sw := Worker{EnvironmentLimit: 1 << 30, Clock: RealClock{}, StateDir: filepath.Join(root, "spark-machine"), Machine: machine("spark", "fake", "spark"), Client: client, ModelConfig: d.Queue.models, Interval: 10 * time.Millisecond, InventoryProbe: func(context.Context) ([]MachineDevice, error) {
 		return []MachineDevice{{ID: "0", Platform: "fake", Identity: "GPU-spark", Selector: "GPU-spark", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}, nil
 	}}
 	sw.Machine.Device = "GPU-spark"
@@ -208,7 +208,7 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	devices := []MachineDevice{{ID: "0", Platform: "fake", Identity: "fake0", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}, {ID: "1", Platform: "fake", Identity: "fake1", Selector: "1", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}
-	machineWorker := Worker{Clock: RealClock{}, StateDir: saved.State, Machine: legacy("host"), Client: client, ModelConfig: d.Queue.models, Interval: 10 * time.Millisecond, CheckpointRoot: c.Checkpoints, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return append([]MachineDevice(nil), devices...), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 128, nil }}
+	machineWorker := Worker{EnvironmentLimit: 1 << 30, Clock: RealClock{}, StateDir: saved.State, Machine: legacy("host"), Client: client, ModelConfig: d.Queue.models, Interval: 10 * time.Millisecond, CheckpointRoot: c.Checkpoints, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return append([]MachineDevice(nil), devices...), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 128, nil }}
 	workerCtx, stopWorker := context.WithCancel(ctx)
 	workerDone := make(chan error, 1)
 	go func() { workerDone <- machineWorker.Run(workerCtx) }()

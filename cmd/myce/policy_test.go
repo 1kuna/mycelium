@@ -85,7 +85,7 @@ func TestPolicyCLIHostHoldScopeTransition(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		d, err := myce.StartDev(myce.DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(dir, "state", "queue.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "policy-test", Workers: 1, GPU: "cpu", HostPolicies: hosts})
+		d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "state", "queue.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "policy-test", Workers: 1, GPU: "cpu", HostPolicies: hosts})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -193,7 +193,7 @@ func TestPolicyCLIExplicitConfigChangeAfterRestart(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				d, err := myce.StartDev(myce.DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(dir, "state", "queue.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "policy-test", Workers: 1, GPU: "cpu", ProjectPolicies: policies})
+				d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "state", "queue.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "policy-test", Workers: 1, GPU: "cpu", ProjectPolicies: policies})
 				if err != nil {
 					t.Fatal(err)
 				}

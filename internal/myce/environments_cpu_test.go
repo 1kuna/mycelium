@@ -116,7 +116,7 @@ func TestEnvironmentCPUWorkerBuildAndExecute(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			m := m3Machine() // GPU host serving CPU work through its CPU target.
-			w := Worker{StateDir: newTestStateRoot(t), Client: Client{URL: testServerForEnvironments(t, q), Token: "test"}, Machine: m, Interval: time.Millisecond,
+			w := Worker{EnvironmentLimit: 1 << 30, StateDir: newTestStateRoot(t), Client: Client{URL: testServerForEnvironments(t, q), Token: "test"}, Machine: m, Interval: time.Millisecond,
 				CPUIsolationProbe: func(context.Context) error { return nil },
 				InventoryProbe:    func(context.Context) ([]MachineDevice, error) { return slices.Clone(m.Devices), nil },
 			}

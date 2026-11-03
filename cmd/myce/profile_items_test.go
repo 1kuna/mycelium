@@ -70,7 +70,7 @@ check: [test, -s, result]
 	binary := devTestBinary(t)
 	state := t.TempDir()
 	const token = "item-fixture-token"
-	d, err := myce.StartDev(myce.DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), FileStore: filepath.Join(state, "files"), Checkpoints: filepath.Join(state, "checkpoints"), Token: token, GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
+	d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), FileStore: filepath.Join(state, "files"), Checkpoints: filepath.Join(state, "checkpoints"), Token: token, GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

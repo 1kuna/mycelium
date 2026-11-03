@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,13 +27,18 @@ func TestExplicitFixtureCacheLimitUnderLowHeadroom(t *testing.T) {
 }
 
 // Exercise the installer sizing seam and pass its explicit fixture limit to a
-// real worker check-in. The worker's cache init uses the same explicit-limit
-// branch checked above; the test does not alter the host filesystem.
+// real worker check-in under the same simulated low cache headroom.
 func TestFixtureWorkerCheckinAfterLowHeadroomSizing(t *testing.T) {
 	lowHeadroom := func(string) (int64, error) { return environmentCacheSize(23 << 30) }
 	config := ServiceConfig{Role: "worker", EnvironmentCache: t.TempDir()}
 	if err := resolveEnvironmentCacheSizing(&config, false, lowHeadroom); err == nil {
 		t.Fatal("automatic installer sizing accepted low headroom")
+	}
+	autoWorker := recoveryWorker(t)
+	autoWorker.EnvironmentLimit = 0
+	autoWorker.environmentSizeLimit = lowHeadroom
+	if err := autoWorker.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "24 GiB") {
+		t.Fatalf("automatic worker sizing did not refuse low headroom: %v", err)
 	}
 	config.EnvironmentCacheBytes = 1 << 20
 	if err := resolveEnvironmentCacheSizing(&config, true, lowHeadroom); err != nil {
@@ -57,6 +63,7 @@ func TestFixtureWorkerCheckinAfterLowHeadroomSizing(t *testing.T) {
 	defer server.Close()
 	w := recoveryWorker(t)
 	w.EnvironmentRoot, w.EnvironmentLimit = config.EnvironmentCache, config.EnvironmentCacheBytes
+	w.environmentSizeLimit = lowHeadroom
 	w.Client = Client{URL: server.URL, Token: "test"}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
