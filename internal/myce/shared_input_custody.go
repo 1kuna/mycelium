@@ -11,12 +11,27 @@ import (
 // The attempt receipt is synced before the cache pin, and both precede launch.
 // A crashed worker loses its flock, but only exact process/container cleanup
 // removes these pins. Missing or unreadable custody never authorizes eviction.
-const sharedInputCustodyFile = "shared-input-custody.json"
-
 type sharedInputOwnerKey struct{}
 type sharedInputUse struct {
 	Root string `json:"root"`
 	Key  string `json:"key"`
+}
+
+type sharedInputReceipt struct {
+	Owner string           `json:"owner"`
+	Uses  []sharedInputUse `json:"uses"`
+}
+
+func (s *workerStore) sharedInputOwnerID() string {
+	name := s.stateName
+	if name == "" {
+		name = "state.json" // Legacy single-attempt spool.
+	}
+	return identityHash([2]string{s.dir, name})
+}
+
+func (s *workerStore) sharedInputCustodyFile() string {
+	return "shared-input-custody-" + s.sharedInputOwnerID() + ".json"
 }
 
 func sharedInputPin(root, key, owner string) string {
@@ -24,15 +39,18 @@ func sharedInputPin(root, key, owner string) string {
 }
 
 func (s *workerStore) readSharedInputUses() ([]sharedInputUse, error) {
-	b, err := os.ReadFile(filepath.Join(s.dir, sharedInputCustodyFile))
+	b, err := os.ReadFile(filepath.Join(s.dir, s.sharedInputCustodyFile()))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
-	var uses []sharedInputUse
+	var receipt sharedInputReceipt
 	if err == nil {
-		err = json.Unmarshal(b, &uses)
+		err = json.Unmarshal(b, &receipt)
 	}
-	return uses, err
+	if err == nil && receipt.Owner != s.sharedInputOwnerID() {
+		err = errors.New("mismatched shared input custody owner")
+	}
+	return receipt.Uses, err
 }
 
 func (s *workerStore) pinSharedInput(root, key string) (func(), error) {
@@ -50,11 +68,11 @@ func (s *workerStore) pinSharedInput(root, key string) (func(), error) {
 		found = found || previous == use
 	}
 	if !found {
-		if err = saveWorkerJSON(s.dir, sharedInputCustodyFile, append(uses, use)); err != nil {
+		if err = saveWorkerJSON(s.dir, s.sharedInputCustodyFile(), sharedInputReceipt{Owner: s.sharedInputOwnerID(), Uses: append(uses, use)}); err != nil {
 			return nil, err
 		}
 	}
-	pin := sharedInputPin(root, key, s.dir)
+	pin := sharedInputPin(root, key, s.sharedInputOwnerID())
 	if err = os.MkdirAll(filepath.Dir(pin), 0700); err == nil {
 		err = saveWorkerJSON(filepath.Dir(pin), filepath.Base(pin), struct{}{})
 	}
@@ -75,7 +93,7 @@ func (s *workerStore) releaseSharedInputPins() error {
 		return err
 	}
 	for _, use := range uses {
-		pin := sharedInputPin(use.Root, use.Key, s.dir)
+		pin := sharedInputPin(use.Root, use.Key, s.sharedInputOwnerID())
 		if err := os.Remove(pin); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}

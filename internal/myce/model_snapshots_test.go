@@ -406,8 +406,11 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 		clock := &fakeClock{now: time.Unix(1000, 0)}
 		cache := &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 1 << 20, Clock: clock}}
 		w := Worker{ModelRoot: filepath.Join(root, "models"), modelSnapshots: cache}
-		owner := &workerStore{dir: filepath.Join(root, "attempt")}
-		_, _, err := w.acquireModelSnapshots(context.WithValue(context.Background(), sharedInputOwnerKey{}, owner), snapshotJob("org/tiny"))
+		owner, err := newAttemptStore(&workerStore{dir: filepath.Join(root, "attempt")}, Job{ID: "active", Attempt: 1, Session: "session"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = w.acquireModelSnapshots(context.WithValue(context.Background(), sharedInputOwnerKey{}, owner), snapshotJob("org/tiny"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -450,12 +453,47 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 	if rehashes != 0 {
 		t.Fatal("active snapshot reverified after restart")
 	}
+	// Another attempt in the real shared spool cannot release the active owner.
+	sibling, err := newAttemptStore(&workerStore{dir: filepath.Join(root, "attempt")}, Job{ID: "sibling", Attempt: 1, Session: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sibling.pinSharedInput(cache.cache.Root, input.key()); err != nil {
+		t.Fatal(err)
+	}
+	if err := sibling.cleanupOrphan(clock); err != nil {
+		t.Fatal(err)
+	}
+	if pinned, err := sharedInputPinned(cache.cache.Root, input.key()); err != nil || !pinned {
+		t.Fatal("sibling cleanup lost active pin", err)
+	}
+	states, err := filepath.Glob(filepath.Join(root, "attempt", "state-attempt-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var activeName string
+	for _, state := range states {
+		b, err := os.ReadFile(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved workerState
+		if err := decodeWorkerState(b, &saved); err != nil {
+			t.Fatal(err)
+		}
+		if saved.Job.ID == "active" {
+			activeName = filepath.Base(state)
+		}
+	}
+	if activeName == "" {
+		t.Fatal("active attempt missing")
+	}
 	// Exact cleanup failure retains the pin; successful cleanup removes it.
 	cgroup := filepath.Join(root, "attempt-snapshot")
 	if err := os.Mkdir(cgroup, 0700); err != nil {
 		t.Fatal(err)
 	}
-	owner := &workerStore{dir: filepath.Join(root, "attempt"), state: workerState{Identity: "snapshot", Cgroup: cgroup, Job: &Job{}, PID: 1}}
+	owner := &workerStore{dir: filepath.Join(root, "attempt"), stateName: activeName, state: workerState{Identity: "snapshot", Cgroup: cgroup, Job: &Job{}, PID: 1}}
 	// Group custody avoids signalling any real process in this small fixture.
 	if err := saveWorkerJSON(owner.dir, "attempt-snapshot.json", workerState{Identity: "snapshot", PID: 1, Cgroup: cgroup}); err != nil {
 		t.Fatal(err)
@@ -472,5 +510,34 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 	_ = cache.admit(context.Background(), "other", 10)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("cleaned snapshot not evicted", err)
+	}
+}
+
+func TestModelSnapshotDockerPreparationRestartReleasesPins(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	root := &workerStore{dir: t.TempDir()}
+	j := Job{ID: "docker-preparation", Attempt: 1, Session: "session", Spec: Spec{Run: RunSpec{Docker: true}}}
+	owner, err := newAttemptStore(root, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheRoot, key := t.TempDir(), strings.Repeat("a", 64)
+	if _, err := owner.pinSharedInput(cacheRoot, key); err != nil {
+		t.Fatal(err)
+	}
+	// Reload the persisted pre-dispatch identity instead of retaining callbacks.
+	data, err := os.ReadFile(filepath.Join(root.dir, owner.stateName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := &workerStore{dir: root.dir, stateName: owner.stateName}
+	if err := decodeWorkerState(data, &restarted.state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Worker{Clock: clock}).recoverAttempt(restarted); err != nil {
+		t.Fatal(err)
+	}
+	if pinned, err := sharedInputPinned(cacheRoot, key); err != nil || pinned {
+		t.Fatal("pre-launch Docker pin leaked", err)
 	}
 }
