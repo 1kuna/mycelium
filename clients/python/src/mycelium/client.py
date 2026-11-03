@@ -233,7 +233,7 @@ class Client:
                 part not in {"", ".", ".."} for part in name.split("/"))
         if not all(local_name(name) for name in inputs):
             raise ValueError("input names must be clean relative paths")
-        files = {name: self.upload_file(source) for name, source in inputs.items()}
+        files = {name: self.upload_file(source, project=project, class_=class_) for name, source in inputs.items()}
         job = self.submit_and_wait({"name": extension, "project": project, "class": class_,
                                     "extension": extension, "submission_key": key,
                                     "files": files, **({"after": copy.deepcopy(dict(after))} if after is not None else {})}, timeout=timeout)
@@ -290,7 +290,7 @@ class Client:
             raise
         return response
 
-    def upload_file(self, source: str | Path) -> dict[str, Any]:
+    def upload_file(self, source: str | Path, *, project: str = "", class_: str = "") -> dict[str, Any]:
         """Upload a job input, eligible for retention if never submitted."""
         source = Path(source)
         digest = hashlib.sha256()
@@ -302,8 +302,11 @@ class Client:
         ref = {"sha256": digest.hexdigest(), "size_bytes": size}
         endpoint = "/api/files/uploads/" + ref["sha256"]
         headers = {"Tus-Resumable": "1.0.0"}
+        if project:
+            claim = self._call("POST", "/api/files/input-claims", {"project": project, "class": class_, "file": ref})
+            headers["X-Myce-Input-Claim"] = claim["id"]
         try:
-            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], size=size):
+            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
                 return ref
         except APIError as error:
             if error.status not in (404, 410):
@@ -315,7 +318,7 @@ class Client:
             pass
         # A repeated create may refer to an already published blob.
         try:
-            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], size=size):
+            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
                 return ref
         except APIError as error:
             if error.status not in (404, 410):
@@ -337,7 +340,7 @@ class Client:
                     if int(response.headers["Upload-Offset"]) != offset + len(chunk):
                         raise ValueError("invalid upload acknowledgement")
                 offset += len(chunk)
-        with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], size=size):
+        with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
             pass
         return ref
 

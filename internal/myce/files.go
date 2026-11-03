@@ -122,6 +122,7 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
+	inputClaim                  func(context.Context, FileRef, bool) (context.Context, error)
 	unidentifiedReserveAdmitted atomic.Uint64
 	checkAttempt                func(context.Context) error
 	productionReserve           uint64
@@ -192,7 +193,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	if q.lock != nil {
 		database := strings.TrimSuffix(q.lock.Name(), ".lock")
 		s.controlFiles = controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
@@ -324,6 +325,12 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	defer s.lifecycle.RUnlock()
 	id := strings.TrimPrefix(r.URL.Path, "/api/files/uploads/")
 	if id != "" {
+		claimCtx, err := s.inputClaim(r.Context(), FileRef{SHA256: id, SizeBytes: -1}, false)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		r = r.WithContext(claimCtx)
 		if err := (FileRef{SHA256: id}).validate(); err != nil {
 			http.Error(w, "invalid upload", 400)
 			return
@@ -365,7 +372,17 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid upload identity", 400)
 		return
 	}
+	claimCtx, claimErr := s.inputClaim(r.Context(), ref, false)
+	if claimErr != nil {
+		respond(w, nil, claimErr)
+		return
+	}
+	r = r.WithContext(claimCtx)
 	if s.verify(r.Context(), ref) == nil {
+		if _, err := s.inputClaim(r.Context(), ref, true); err != nil {
+			respond(w, nil, err)
+			return
+		}
 		if e := s.refreshBlob(s.blob(ref)); e != nil {
 			http.Error(w, "storage freshness unavailable", 503)
 			return
@@ -385,6 +402,10 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if st, e := os.Stat(filepath.Join(s.root, "uploads", hash+".info")); e == nil && st.Mode().IsRegular() {
 		// A repeated create (including a lost response) addresses the same tus upload.
+		if _, err := s.inputClaim(r.Context(), ref, true); err != nil {
+			respond(w, nil, err)
+			return
+		}
 		if e := s.refreshUpload(hash); e != nil {
 			http.Error(w, "storage freshness unavailable", 503)
 			return
@@ -419,6 +440,10 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unindexed upload requires operator recovery", 409)
 		return
 	}
+	if _, err := s.inputClaim(r.Context(), ref, true); err != nil {
+		respond(w, nil, err)
+		return
+	}
 	response := &uploadResponse{ResponseWriter: w}
 	s.handler.ServeHTTP(response, r)
 	if response.status == http.StatusCreated {
@@ -441,6 +466,20 @@ func (w *uploadResponse) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata bool) {
+	if r.Method == http.MethodHead && r.Header.Get("X-Myce-Input-Claim") != "" {
+		parsed, err := fileStoreSubmissionRequest(r)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		r = parsed
+		claimCtx, err := s.inputClaim(r.Context(), FileRef{SHA256: r.PathValue("hash"), SizeBytes: -1}, false)
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		r = r.WithContext(claimCtx)
+	}
 	if r.Method == http.MethodHead {
 		// HEAD is upload deduplication authority. Fence verification and refresh
 		// together; GET needs only its open descriptor to survive collection.
@@ -490,6 +529,12 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 		return
 	}
 	if r.Method == http.MethodHead {
+		if r.Header.Get("X-Myce-Input-Claim") != "" {
+			if _, err := s.inputClaim(r.Context(), FileRef{SHA256: hash, SizeBytes: st.Size()}, true); err != nil {
+				respond(w, nil, err)
+				return
+			}
+		}
 		if err = s.refreshBlob(path); err != nil {
 			http.Error(w, "file freshness unavailable", 503)
 			return
@@ -521,6 +566,18 @@ func (a API) registerFiles(mux *requestMux) {
 	if a.Queue.files == nil {
 		return
 	}
+	mux.HandleFunc("POST /api/files/input-claims", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Project string  `json:"project"`
+			Class   string  `json:"class,omitempty"`
+			File    FileRef `json:"file"`
+		}
+		if !decode(w, r, &request) {
+			return
+		}
+		claim, err := a.Queue.claimFileInput(r.Context(), Spec{Project: request.Project, Class: request.Class}, request.File)
+		respondOperation(w, claim, err, "job_spec_invalid")
+	})
 	mux.HandleFunc("POST /api/files/preflight", func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		r, err = fileStoreSubmissionRequest(r)
@@ -819,6 +876,14 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 }
 
 func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileRef, purpose string) error {
+	if s, ok := ctx.Value(fileStoreSubmissionKey{}).(Spec); ok && ctx.Value(fileStoreAttemptKey{}) == nil {
+		var claim FileInputClaim
+		err := c.Call(ctx, "POST", "/api/files/input-claims", map[string]any{"project": s.Project, "class": s.Class, "file": ref}, &claim)
+		if err != nil {
+			return err
+		}
+		ctx = context.WithValue(ctx, fileInputClaimKey{}, claim.ID)
+	}
 	headPurpose := purpose
 	if headPurpose == "" {
 		headPurpose = fileImportUploadPurpose

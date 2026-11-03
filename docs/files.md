@@ -174,6 +174,51 @@ GPU runtime and application parity require their own qualification.
 
 ## Transfer behavior
 
+### Project input attribution and capacity reservations (#464)
+
+Before uploading, current profile, files-from and Go `Run` clients obtain a
+queue-issued input claim bound to project, class, SHA-256 and size. Python
+`run` does the same; direct `upload_file(path, project="demo", class_="experiment")`
+and `myce file put --project demo FILE` provide explicit attribution. Go callers
+wrap upload context with `WithFileStoreSubmission(ctx, spec)`. Claims survive
+queue restart. Upload creation, resume and deduplicated HEAD reuse verify the
+claim; changing a project header cannot transfer its quota charge.
+
+API clients call `POST /api/files/input-claims` with `{project, class, file}`,
+then send its `id` as `X-Myce-Input-Claim` on upload POST/HEAD/PATCH and input
+blob HEAD. A claim commits the file's full declared length against the project's
+quota before any bytes arrive. Concurrent claims are checked in one SQLite
+transaction. Each digest counts once per project, including unfinished and
+abandoned inputs, and once in global physical usage. Submission transfers the
+claim into ordinary job attribution; owner release then works as before.
+Unused, unallocated claims expire after the existing six-hour publication grace;
+allocated inputs retain attribution until submission or ordinary file collection.
+Claims without bytes are reconciled after that grace. No claim deletes bytes.
+
+Local project policy may set `max_retained_file_bytes`,
+`max_added_file_bytes_24h`, and `reserved_file_bytes` (all default zero/off).
+The reservation protects that project's unused entitlement from other projects'
+new input allocations and declared async output commitments, in addition to the
+existing production reserve. Retained shared digests count toward each holder's
+entitlement. Preflight is advisory; serialized upload creation checks again.
+Status `file_store.projects` exposes attribution, limits, reservation and refusal
+reasons. Quota refusal is `project_file_store_quota`; a protected pool reports
+`file_store_capacity` naming `reserved_file_bytes`.
+
+When any such local policy is enabled, unidentified input uploads and resumes
+return `file_input_claim_required`; upgrade the client or obtain a claim. Exact
+worker attempts and legacy declared async output identities keep their existing
+output route. Production is exempt from project quotas and project reservations;
+completed output transfers receive no new refusal. Physical capacity still
+applies. Existing retained bytes, registry assets and checkpoints are preserved;
+this does not activate the parked storage backend or shorten retention.
+
+The fleet authenticates one operator credential. A claim is server-verifiable
+attribution to an operator-selected project, not a separately authenticated
+project account. It cannot prevent that operator from choosing another project
+or presenting an active worker attempt. Keep claims and operator authority out
+of payloads.
+
 `get` refuses an existing destination and retains a `.myce-partial` download
 beside it after interruption. Rerunning resumes it. A bad range response, byte
 count or hash is refused; a server ignoring Range causes a safe complete restart.

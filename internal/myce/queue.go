@@ -40,8 +40,9 @@ type batchRelease struct {
 }
 
 type state struct {
-	ModelIntervalSince     *time.Time `json:"model_interval_since,omitempty"`
-	ModelIntervalHighWater int        `json:"model_interval_high_water,omitempty"`
+	FileInputClaims        map[string]FileInputClaim `json:"file_input_claims,omitempty"`
+	ModelIntervalSince     *time.Time                `json:"model_interval_since,omitempty"`
+	ModelIntervalHighWater int                       `json:"model_interval_high_water,omitempty"`
 	// Read-only parked policy. Preserve retained DB records; these fields no
 	// longer activate admission or replace the configured file-store guards.
 	StorageMigration       json.RawMessage                `json:"storage_migration,omitempty"`
@@ -740,6 +741,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			if err := q.fileStoreReserveRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
 				return err
 			}
+			if err := q.projectFileReservationRefusal(WithFileStoreSubmission(ctx, s), resultCapacity, resultPayloads, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes); err != nil {
+				return err
+			}
 		}
 		if e := q.validateJobExclusions(s); e != nil {
 			return rejectFieldRule("job_placement_invalid", e)
@@ -836,6 +840,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			j.Dependency = &PieceBinding{Job: s.After.Job, Piece: s.After.Piece, State: "blocked"}
 		}
 		q.putJob(id, j)
+		q.settleFileInputClaims(s)
 		if s.SubmissionKey != "" {
 			if q.s.Submissions == nil {
 				q.s.Submissions = map[string]*submissionRecord{}

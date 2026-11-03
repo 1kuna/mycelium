@@ -26,6 +26,7 @@ type ProjectFileStoreUsage struct {
 	ReservedOutputBytes  uint64 `json:"reserved_output_bytes,omitempty"`
 	MaxRetainedFileBytes uint64 `json:"max_retained_file_bytes,omitempty"`
 	MaxAddedFileBytes24h uint64 `json:"max_added_file_bytes_24h,omitempty"`
+	ReservedFileBytes    uint64 `json:"reserved_file_bytes,omitempty"`
 	// Why new non-production submissions are refused now; empty when admitted.
 	Refusal string `json:"refusal,omitempty"`
 }
@@ -214,6 +215,7 @@ func (q *Queue) projectFileQuotaRefusal(project string, incoming FileManifest, d
 	var facts projectFileFacts
 	q.collectFileReferences(false, nil, facts.retain, jobs)
 	q.noteProjectFileAdditions(&facts, jobs)
+	q.noteInputClaimFacts(&facts, project)
 	l := facts.ledgers()[project]
 	if l == nil {
 		l = &projectFileLedger{}
@@ -240,8 +242,9 @@ func (f projectFileFacts) usage(now time.Time) []ProjectFileStoreUsage {
 	for _, name := range slices.Sorted(maps.Keys(ledgers)) {
 		l, p := ledgers[name], f.limits[name]
 		u := ProjectFileStoreUsage{Project: name, ReservedOutputBytes: l.reserved, MaxRetainedFileBytes: p.MaxRetainedFileBytes, MaxAddedFileBytes24h: p.MaxAddedFileBytes24h}
+		u.ReservedFileBytes = p.ReservedFileBytes
 		u.RetainedBytes, u.AddedBytes24h = l.usage(since, nil)
-		if u.RetainedBytes == 0 && u.AddedBytes24h == 0 && l.reserved == 0 && p.MaxRetainedFileBytes == 0 && p.MaxAddedFileBytes24h == 0 {
+		if u.RetainedBytes == 0 && u.AddedBytes24h == 0 && l.reserved == 0 && p.MaxRetainedFileBytes == 0 && p.MaxAddedFileBytes24h == 0 && p.ReservedFileBytes == 0 {
 			continue
 		}
 		u.Refusal = fileStoreQuotaReason(name, p, addDiskBytes(u.RetainedBytes, l.reserved), addDiskBytes(u.AddedBytes24h, l.reserved))

@@ -24,6 +24,9 @@ func withFileStoreAttempt(ctx context.Context, j Job) context.Context {
 	return context.WithValue(ctx, fileStoreAttemptKey{}, fileStoreAttempt{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session})
 }
 func fileStoreSubmissionHeaders(ctx context.Context, r *http.Request) {
+	if id, ok := ctx.Value(fileInputClaimKey{}).(string); ok {
+		r.Header.Set("X-Myce-Input-Claim", id)
+	}
 	if s, ok := ctx.Value(fileStoreSubmissionKey{}).(Spec); ok {
 		r.Header.Set("X-Myce-Project", s.Project)
 		r.Header.Set("X-Myce-Class", s.Class)
@@ -35,6 +38,9 @@ func fileStoreSubmissionHeaders(ctx context.Context, r *http.Request) {
 }
 func fileStoreSubmissionRequest(r *http.Request) (*http.Request, error) {
 	ctx := r.Context()
+	if id := r.Header.Get("X-Myce-Input-Claim"); id != "" {
+		ctx = context.WithValue(ctx, fileInputClaimKey{}, id)
+	}
 	if raw := r.Header.Get("X-Myce-File-Attempt"); raw != "" {
 		var attempt fileStoreAttempt
 		if err := json.Unmarshal([]byte(raw), &attempt); err != nil {
@@ -169,6 +175,13 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 	production, identified, classErr := q.fileStoreWriteClass(ctx, files, growth)
 	reserved := q.outputReservationsFor(projected, "", true)
 	refusal := q.fileStoreReserveRefusal(status, need, growth, reserved, production)
+	if refusal == nil {
+		projectStatus := status
+		if !production {
+			projectStatus.FreeBytes = q.nonProductionFileStoreFree(status, reserved)
+		}
+		refusal = q.projectFileReservationRefusal(ctx, projectStatus, projected, need, growth)
+	}
 	// Input uploads naming a project are checked against its file-store quota
 	// at preflight and tus creation; worker results and bundles never are.
 	// Use the class submit will see, unlike the reserve, so a production

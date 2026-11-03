@@ -118,7 +118,7 @@ class ExtensionClientTests(unittest.TestCase):
                  patch.object(client, "download_result") as download:
                 self.assertEqual(client.run("example@1", inputs={"input.json": "local.json"},
                     outputs=directory, project="demo", class_="batch", key="stable", timeout=5), job)
-                upload.assert_called_once_with("local.json")
+                upload.assert_called_once_with("local.json", project="demo", class_="batch")
                 submit.assert_called_once_with({"name": "example@1", "project": "demo", "class": "batch",
                     "extension": "example@1", "submission_key": "stable", "files": {"input.json": ref}}, timeout=5)
                 download.assert_called_once_with(job["id"], "result.json", Path(directory) / "result.json")
