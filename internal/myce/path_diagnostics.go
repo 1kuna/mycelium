@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 	"syscall"
 )
 
@@ -69,6 +70,25 @@ func pathDiagnostic(err error) *PathDiagnostic {
 // roots. Reconstruct every field before including authenticated readback.
 func safeWorkerPathDiagnostic(d *PathDiagnostic) *PathDiagnostic {
 	if d == nil || d.Field != "environment.binary" || d.Side != "worker" || d.Path != "binary" || d.ResolutionBase != "worker-environment-library" || d.Companion != "" {
+		return nil
+	}
+	switch d.Cause {
+	case "missing", "unreadable", "wrong_type", "read_failed":
+	default:
+		return nil
+	}
+	copy := *d
+	return &copy
+}
+
+// Staging reports identify the authored input and logical root role. Neither
+// the caller's NAS spelling nor expanded local paths cross this boundary.
+func safeInputStagingPathDiagnostic(d *PathDiagnostic) *PathDiagnostic {
+	if d == nil || d.Side != "worker" || d.Path != "input" || d.ResolutionBase != "worker-checkpoint-root" || d.Companion != "" || !strings.HasPrefix(d.Field, "shared_inputs.") || !strings.HasSuffix(d.Field, ".nas") {
+		return nil
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(d.Field, "shared_inputs."), ".nas")
+	if name == "" || strings.Trim(name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_") != "" {
 		return nil
 	}
 	switch d.Cause {

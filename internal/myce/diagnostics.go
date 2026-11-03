@@ -139,6 +139,7 @@ func specRejection(err error) error {
 // RuntimeCause retains safe operation/class information, never daemon stderr,
 // command arguments, environment values, endpoint URLs, or filesystem paths.
 type RuntimeCause struct {
+	PathDiagnostic   *PathDiagnostic  `json:"path_diagnostic,omitempty"`
 	Admission        *AdmissionDetail `json:"admission,omitempty"`
 	PrelaunchRefused bool             `json:"prelaunch_refused,omitempty"`
 	Operation        string           `json:"operation"`
@@ -150,6 +151,14 @@ type RuntimeCause struct {
 
 func (c RuntimeCause) String() string {
 	text := c.Operation + ": " + c.Class
+	if c.Operation == "input_staging" {
+		if d := safeInputStagingPathDiagnostic(c.PathDiagnostic); d != nil {
+			text += "; " + d.String()
+			if d.Cause == "missing" {
+				text += "; NAS paths are relative to worker --checkpoint-root; import existing bytes with profile local: or myce file put"
+			}
+		}
+	}
 	if c.ExitCode != nil {
 		text = fmt.Sprintf("%s (exit %d)", text, *c.ExitCode)
 	}
@@ -187,6 +196,9 @@ func runtimeErrorFor(operation string, err error) error {
 		return &runtimeError{diagnostic: typed.diagnostic, cause: err}
 	}
 	c := RuntimeCause{Operation: operation, Class: "io_error"}
+	if operation == "input_staging" {
+		c.PathDiagnostic = safeInputStagingPathDiagnostic(pathDiagnostic(err))
+	}
 	if errors.Is(err, errWorkerStartHandoff) {
 		c.Operation = "start_handoff"
 	} else if errors.Is(err, errWorkerStartAuthorization) {
@@ -263,6 +275,10 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		}
 	}
 	out := *c
+	out.PathDiagnostic = nil
+	if c.Operation == "input_staging" {
+		out.PathDiagnostic = safeInputStagingPathDiagnostic(c.PathDiagnostic)
+	}
 	out.Admission = nil
 	out.PrelaunchRefused = c.PrelaunchRefused && c.Operation == "launch" && (c.Class == launchRefused || c.Class == "resource_limit") && launchPredicateMessages[c.Predicate] != ""
 	if c.Operation == "launch" && c.Predicate == "memory_capacity" {

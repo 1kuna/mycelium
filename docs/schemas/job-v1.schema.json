@@ -2613,6 +2613,36 @@
       ],
       "type": "object"
     },
+    "PathDiagnostic": {
+      "properties": {
+        "cause": {
+          "type": "string"
+        },
+        "companion": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "resolution_base": {
+          "type": "string"
+        },
+        "side": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "side",
+        "path",
+        "resolution_base",
+        "cause"
+      ],
+      "type": "object"
+    },
     "PieceBinding": {
       "properties": {
         "execution": {
@@ -3301,6 +3331,9 @@
         },
         "operation": {
           "type": "string"
+        },
+        "path_diagnostic": {
+          "$ref": "#/$defs/PathDiagnostic"
         },
         "predicate": {
           "type": "string"
