@@ -13,24 +13,38 @@ import (
 // ResolveRequest asks which targets could run a job as authored. Resolve is
 // explanation only: no job, upload, build, reservation or execution permit.
 type ResolveRequest struct {
+	InspectNAS         bool              `json:"inspect_nas,omitempty"`
+	Recipe             *Extension        `json:"recipe,omitempty"`
 	Spec               Spec              `json:"spec"`
 	RequirementReasons map[string]string `json:"requirement_reasons,omitempty"`
 }
 
 type ResolveReport struct {
-	ObservedAt time.Time        `json:"observed_at"`
-	Resolved   []string         `json:"resolved"`
-	Targets    []ResolveTarget  `json:"targets"`
-	Findings   []ResolveFinding `json:"findings"`
-	Notes      []string         `json:"notes"`
+	ObservedAt  time.Time          `json:"observed_at"`
+	Resolved    []string           `json:"resolved"`
+	Targets     []ResolveTarget    `json:"targets"`
+	Findings    []ResolveFinding   `json:"findings"`
+	Portability *PortabilityReport `json:"portability,omitempty"`
+	Notes       []string           `json:"notes"`
+}
+
+type ResolveEnvironment struct {
+	Key     string `json:"key"`
+	Backend string `json:"backend"`
+	State   string `json:"state"`
 }
 
 type ResolveTarget struct {
-	Machine   string          `json:"machine"`
-	Target    ExecutionTarget `json:"target"`
-	Freshness string          `json:"freshness"`
-	Eligible  bool            `json:"eligible"`
-	Reason    string          `json:"reason"`
+	session       string
+	cachedInputs  map[string]bool
+	nasInspection bool
+	Environment   *ResolveEnvironment `json:"environment,omitempty"`
+	NASInputs     []ResolveNASInput   `json:"nas_inputs,omitempty"`
+	Machine       string              `json:"machine"`
+	Target        ExecutionTarget     `json:"target"`
+	Freshness     string              `json:"freshness"`
+	Eligible      bool                `json:"eligible"`
+	Reason        string              `json:"reason"`
 }
 
 // ResolveFinding names the field, the side that cannot see or run it
@@ -50,6 +64,9 @@ const StagingFix = "Stage it through managed transport: small private files as `
 // Resolve snapshots the queue, then reads environment recipes and evaluates
 // targets outside q.mu with the same fit checks submission uses.
 func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
+	if req.Recipe != nil {
+		return q.resolveNative(req)
+	}
 	view, _, err := q.captureObservation("")
 	if err != nil {
 		return ResolveReport{}, err
@@ -89,7 +106,7 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 	}
 	if len(nasInputs) > 0 {
 		slices.Sort(nasInputs)
-		r.Notes = append(r.Notes, strings.Join(nasInputs, ", ")+": worker NAS reads are unverified. Paths are relative to each worker's --checkpoint-root; resolve does not check their existence or bytes. For data elsewhere, use profile local: or myce file put PATH and a shared input with sha256 and size_bytes, without nas.")
+		r.Notes = append(r.Notes, strings.Join(nasInputs, ", ")+": worker NAS reads are unverified. Paths are relative to each worker's --checkpoint-root; without --inspect-nas, resolve does not check their existence or bytes. For data elsewhere, use profile local: or myce file put PATH and a shared input with sha256 and size_bytes, without nas.")
 	}
 	if _, err := view.modelLimits(s); err != nil {
 		r.Findings = append(r.Findings, ResolveFinding{Field: "model_snapshots", Side: "queue", Problem: err.Error(), Fix: "Ask the queue owner to permit the repository in the policy's models.sources, or declare a permitted repository."})
@@ -99,6 +116,9 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 	if !ok || err != nil {
 		r.Notes = append(r.Notes, "Targets are evaluated once the environment and extension resolve.")
 		return r, nil
+	}
+	if len(s.Files) > 0 {
+		r.Notes = append(r.Notes, "files: needs-staging unless the immutable blobs are already in the queue file store; resolve does not verify stored bytes. Submit verifies every declared hash and size before admission.")
 	}
 	job := func(s Spec) *Job {
 		j := &Job{ID: "resolve", State: "queued", Spec: s, Extensions: extensions, EnvironmentRecipes: recipes, SidecarEnvironmentRecipes: sidecars}
@@ -200,6 +220,24 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 			target.Platform = "cpu"
 		}
 		row := &ResolveTarget{Machine: m.ID, Target: portabilityTarget(target), Freshness: "fresh", Eligible: fit.failures == 0}
+		if key := environmentKey(candidate, m); key != "" {
+			state := "prepare-needed"
+			if environmentReady(candidate, m) {
+				state = "ready"
+			}
+			r := candidate.EnvironmentRecipes[m.GPU]
+			backend := r.Backend
+			if backend == "" {
+				if r.LockFile != "" {
+					backend = "uv"
+				} else if r.Key != "" {
+					backend = "binary"
+				} else {
+					backend = "worker-advertised"
+				}
+			}
+			row.Environment = &ResolveEnvironment{Key: key, Backend: backend, State: state}
+		}
 		if row.Eligible {
 			row.Reason = "eligible"
 			if j.Spec.Environment.Key() != "" {
@@ -212,7 +250,15 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 		} else {
 			row.Reason = targetFitReason(fit.first, candidate, m)
 		}
+		row.nasInspection = slices.Contains(m.Capabilities, "nas_inspection_v1")
+		row.cachedInputs = map[string]bool{}
+		for _, key := range m.CachedSharedInputs {
+			row.cachedInputs[key] = true
+		}
 		live := q.s.Machines[m.ID]
+		if live != nil {
+			row.session = live.Session
+		}
 		if live == nil || live.LastSeen.IsZero() {
 			row.Freshness = "unknown"
 		} else if live.Gone || q.clock.Now().Before(live.LastSeen) || q.clock.Now().Sub(live.LastSeen) > q.machineLossTimeout(m.ID) {
@@ -220,6 +266,13 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 		}
 		if row.Freshness != "fresh" && row.Eligible {
 			row.Eligible, row.Reason = false, "unknown: worker inventory "+row.Freshness
+		}
+		if row.Environment != nil {
+			if row.Freshness != "fresh" {
+				row.Environment.State = "unknown"
+			} else if !row.Eligible && row.Environment.State != "ready" {
+				row.Environment.State = "blocked"
+			}
 		}
 		rows[fit.key] = row
 		return true
@@ -282,8 +335,24 @@ func WriteResolve(dest io.Writer, r ResolveReport, asJSON bool) error {
 	if len(r.Targets) == 0 && len(r.Findings) == 0 {
 		fmt.Fprintln(&out, "  no known machine targets")
 	}
+	for _, target := range r.Targets {
+		for _, input := range target.NASInputs {
+			observed := "unknown"
+			if !input.ObservedAt.IsZero() {
+				observed = input.ObservedAt.Format(time.RFC3339)
+			}
+			fmt.Fprintf(&out, "  %s shared_inputs.%s.nas [worker]: %s (observed %s; existence only, bytes unverified)\n", target.Machine, input.Name, input.State, observed)
+		}
+	}
 	for _, f := range r.Findings {
 		fmt.Fprintf(&out, "\n%s [%s]: %s\n  fix: %s\n", f.Field, f.Side, f.Problem, f.Fix)
+	}
+	if r.Portability != nil {
+		var native strings.Builder
+		if err := WritePortability(&native, *r.Portability, false); err != nil {
+			return err
+		}
+		out.WriteString(native.String())
 	}
 	for _, note := range r.Notes {
 		fmt.Fprintln(&out, "\n"+note)

@@ -28,6 +28,7 @@ func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.hand
 
 func (a API) handler(joiningPin string) http.Handler {
 	mux := newRequestMux()
+	nas := newResolveNASCache(a.Queue.clock)
 	// Joining needs authenticated identity/version only, never the growing status
 	// snapshot. Transport pinning authenticates this identity to joining clients.
 	mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +72,9 @@ func (a API) handler(joiningPin string) http.Handler {
 			return
 		}
 		report, err := a.Queue.Resolve(request)
+		if err == nil {
+			nas.resolve(request, &report)
+		}
 		respondOperation(w, report, err, "resolve_invalid")
 	})
 	a.registerInvites(mux, joiningPin)
@@ -308,6 +312,9 @@ func (a API) handler(joiningPin string) http.Handler {
 			return
 		}
 		v, err := a.Queue.CheckinContext(r.Context(), c)
+		if err == nil {
+			v.NASPathChecks = nas.checkin(c)
+		}
 		respondOperation(w, v, err, "worker_checkin_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/launch", func(w http.ResponseWriter, r *http.Request) {
