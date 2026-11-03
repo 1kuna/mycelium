@@ -743,7 +743,7 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string {
 	var reasons []string
 	for _, m := range machines {
-		if m.Gone || m.Leaving || !machineAllowed(j.Spec.AllowedMachines, m.ID) {
+		if m.Gone || m.Leaving || !j.Spec.allowsMachine(m.ID) {
 			continue
 		}
 		for _, candidate := range extensionJobs(j, m, true) {

@@ -57,6 +57,7 @@ func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targ
 		report.check(!needsCheckpoint(j) || !m.CheckpointUnavailable, "checkpoint") &&
 		report.check(memory >= j.Spec.Needs.MemoryGB, "GPU memory") &&
 		report.check(machineAllowed(j.Spec.AllowedMachines, m.ID), "allow-list") &&
+		report.check(!contains(j.Spec.ExcludedMachines, m.ID), "excluded_machines") &&
 		report.check(j.Spec.Needs.cpuOnly() || len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU), "platform") &&
 		report.check(environmentCanRun(j, m), "environment")
 }
@@ -163,7 +164,7 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 	unknownCapacity := []string{}
 	knownCapacity := false
 	for _, m := range machines {
-		if m.Gone || m.Leaving || !machineAllowed(j.Spec.AllowedMachines, m.ID) || !environmentCanRun(j, m) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
+		if m.Gone || m.Leaving || !j.Spec.allowsMachine(m.ID) || !environmentCanRun(j, m) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
 		}
 		if reason := capabilityUnavailableReason(m); reason != "" {
@@ -182,6 +183,9 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 	}
 	if len(j.Spec.Needs.Platform.Required) > 0 {
 		needs = append(needs, "needs "+strings.Join(j.Spec.Needs.Platform.Required, " or "))
+	}
+	if len(j.Spec.ExcludedMachines) > 0 {
+		needs = append(needs, "excluded machines: "+strings.Join(j.Spec.ExcludedMachines, ", "))
 	}
 	if len(j.Spec.AllowedMachines) > 0 {
 		needs = append(needs, "allowed machines: "+strings.Join(j.Spec.AllowedMachines, ", "))

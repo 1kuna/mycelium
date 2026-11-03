@@ -148,6 +148,8 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 			device = "unknown"
 		}
 		return fmt.Sprintf("device %q does not match required devices %v or CPU select-none target", device, devices)
+	case "excluded_machines":
+		return "excluded by job excluded_machines"
 	case "allow-list":
 		return "machine excluded by job or project allow-list"
 	case "environment":

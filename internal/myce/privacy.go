@@ -135,7 +135,7 @@ func (q *Queue) statusEligibility(j *Job) {
 	if len(allowed) == 0 {
 		allowed = q.s.Policies[j.Spec.Project].AllowedMachines
 	}
-	j.EligibleUnrestricted = len(allowed) == 0
+	j.EligibleUnrestricted = len(allowed) == 0 && len(j.Spec.ExcludedMachines) == 0
 	hosts := []string{}
 	seen := map[string]bool{}
 	addHost := func(host string) {
@@ -265,7 +265,7 @@ func statusJobInputs(job *Job) Job {
 		j.Ledger = &JobLedgerInfo{}
 	}
 	j.Isolation = jobNativeIsolationStatus(job)
-	spec := Spec{Logs: j.Spec.Logs, AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy, StartWindow: j.Spec.StartWindow}
+	spec := Spec{Logs: j.Spec.Logs, AllowedMachines: j.Spec.AllowedMachines, ExcludedMachines: j.Spec.ExcludedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy, StartWindow: j.Spec.StartWindow}
 	if j.Spec.Program != nil {
 		spec.Program = &Program{Type: j.Spec.Program.Type}
 	}

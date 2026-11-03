@@ -741,6 +741,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 				return err
 			}
 		}
+		if e := q.validateJobExclusions(s); e != nil {
+			return rejectFieldRule("job_placement_invalid", e)
+		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return rejectFieldRule("job_placement_invalid", e)
 		}

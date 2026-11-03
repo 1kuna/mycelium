@@ -75,6 +75,10 @@ func submissionPlacementIntent(s Spec, j *Job) *PlacementIntent {
 	if len(p.Targets) > 0 || len(p.RequiredBackends) > 0 {
 		p.Scope = "platform_constraints"
 	}
+	if len(s.ExcludedMachines) > 0 {
+		p.HostConstraint = "exclusion"
+		p.Scope = "host_device_restriction"
+	}
 	if len(s.AllowedMachines) > 0 {
 		p.HostConstraint = "allowlist"
 		if len(placementStrings(s.AllowedMachines)) == 1 {

@@ -3490,6 +3490,16 @@
           "$ref": "#/$defs/Environment",
           "x-contract": "diagnostic"
         },
+        "excluded_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "execution": {
           "$ref": "#/$defs/ExecutionSpec",
           "x-contract": "diagnostic"

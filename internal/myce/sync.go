@@ -77,7 +77,7 @@ func (q *Queue) cachePins(m *Machine) []string {
 func (q *Queue) modelScores(m *Machine) map[string]int {
 	scores := map[string]int{}
 	for _, j := range q.liveJobs() {
-		if j.Spec.Needs.Model == "" || len(j.Spec.AllowedMachines) > 0 && !contains(j.Spec.AllowedMachines, m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !contains(j.Spec.Needs.Platform.Required, m.GPU) {
+		if j.Spec.Needs.Model == "" || !j.Spec.allowsMachine(m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
 		}
 		if j.State == "queued" || j.State == "running" || j.State == "stopping" {
