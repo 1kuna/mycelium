@@ -271,3 +271,58 @@ func TestMemoryEnvelopePrelaunchConstraintDoesNotEscalate(t *testing.T) {
 		})
 	}
 }
+
+func TestMemoryEnvelopeInterruptedRecoveryVetoesCrossHostConstraint(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	s.Needs.Memory = "auto"
+	first := startObservation(t, q, m, s)
+	clock.Advance(time.Second)
+	peak := 2.0
+	r := result(&first, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	interrupted := startObservation(t, q, m, s)
+	clock.Advance(time.Second)
+	r = result(&interrupted, false)
+	r.Interrupted = true
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: true}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	legacyInterruptedMemoryInvalidation(t, q, r)
+	if err := q.Cancel(interrupted.ID); err != nil {
+		t.Fatal(err)
+	}
+	other := m
+	other.ID, other.HostID, other.Session = "second", "second-host", "second-session"
+	report := newExtensionReport(q.s.Extensions[s.Extension], &other, "extension:sample")
+	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
+	other.ExtensionReports = []ExtensionReport{report}
+	check(t, q, other, nil)
+	s.AllowedMachines = []string{other.ID} // Exercise another exact physical key.
+	queued := submit(t, q, s)
+	assigned := check(t, q, other, nil).Job
+	if assigned == nil || assigned.ID != queued.ID {
+		t.Fatal("cross-host assignment:", job(t, q, queued.ID).Reason)
+	}
+	if err := q.Started(result(assigned, false)); err != nil {
+		t.Fatal(err)
+	}
+	failed := *assigned
+	clock.Advance(time.Second)
+	r = result(&failed, false)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: true}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	// The same diagnostic peak leaves the aggregate unchanged. A different
+	// physical key must not hide this newer real failure from host A's recovery.
+	candidate := first
+	candidate.State = "queued"
+	got := q.memoryCandidate(&candidate, q.s.Machines[m.ID])
+	if got.MemoryEnvelope.HostGB != 16 || got.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatalf("cross-host constrained failure allowed recovery: %+v", got.MemoryEnvelope)
+	}
+}

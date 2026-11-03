@@ -14,9 +14,11 @@ type memoryRecovery struct {
 // is a read projection, not a migration or a write to the learning ledger.
 func (q *Queue) recoveredMemoryObservations() map[ObservationKey]memoryRecovery {
 	wanted := map[ObservationKey]WorkObservation{}
+	wantedWork := map[memoryWorkKey]WorkObservation{}
 	for _, p := range q.s.WorkObservations {
 		if p.MemoryConfiguration != "" && p.MemoryRecordedAt.IsZero() {
 			wanted[p.Key] = p
+			wantedWork[memoryWorkIdentity(p.Key, p.MemoryConfiguration)] = p
 		}
 	}
 	recovered := map[ObservationKey]memoryRecovery{}
@@ -117,7 +119,7 @@ func (q *Queue) recoveredMemoryObservations() map[ObservationKey]memoryRecovery 
 		}
 		k := *j.Timing.Key
 		configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
-		if base, ok := wanted[k]; ok && base.MemoryConfiguration == configuration {
+		if base, ok := wantedWork[memoryWorkIdentity(k, configuration)]; ok {
 			vetoRealFailures(base)
 		}
 		for _, facts := range j.MemoryAttempts {
