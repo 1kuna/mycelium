@@ -283,7 +283,15 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if q.persisted == nil {
 		q.persisted = map[string][]byte{}
 	}
+	changedJobs := false
 	for key, value := range next {
+		// persistState reuses the immutable byte slice for unchanged records.
+		// Invalidate only after SQLite commit, including removal, and never on
+		// ordinary check-ins that merely journal an unchanged live job.
+		if id, ok := strings.CutPrefix(key, "jobs/"); ok && (len(value) == 0 || len(q.persisted[key]) == 0 || &value[0] != &q.persisted[key][0]) {
+			changedJobs = true
+			delete(q.jobSnapshots, id)
+		}
 		if value == nil {
 			delete(q.persisted, key)
 			delete(q.records.catalog, key)
@@ -291,6 +299,15 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 			q.persisted[key] = value
 			if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") || strings.HasPrefix(key, "storage_observations/") {
 				q.records.catalog[key] = true
+			}
+		}
+	}
+	if changedJobs {
+		// Preserve immediate cancellation-custody and blocker transitions even
+		// when the selected job's own durable envelope did not change.
+		for id, entry := range q.jobSnapshots {
+			if entry.dependsOnJobs {
+				delete(q.jobSnapshots, id)
 			}
 		}
 	}
