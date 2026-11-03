@@ -253,7 +253,11 @@ func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job
 	for _, m := range q.s.Machines {
 		if !q.jobAllowsMachine(j, m.ID) {
 			fit := targetFit{excluded: true, key: targetKey(m)}
-			fit.check(false, "allow-list")
+			if contains(j.Spec.ExcludedMachines, m.ID) {
+				fit.check(false, "excluded_machines")
+			} else {
+				fit.check(false, "allow-list")
+			}
 			if !visit(fit, j, m) {
 				return
 			}
