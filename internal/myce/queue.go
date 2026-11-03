@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -176,6 +177,7 @@ type Queue struct {
 	statusHolds      queueHoldSampler
 	logCleanupHolds  queueHoldSampler
 	statusCache      statusCache
+	committedRead    atomic.Pointer[Queue] // Immutable diagnostic inputs; never control authority.
 	observeRead      func(string, time.Duration, time.Duration)
 	usageReader      *sql.DB
 	db               *sql.DB
@@ -361,6 +363,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
+	q.publishCommittedRead()
 	success = true
 	return q, nil
 }
@@ -372,6 +375,7 @@ func (q *Queue) SetRestartGrace(d time.Duration) {
 	if len(q.unreported) > 0 {
 		q.restartUntil = q.clock.Now().Add(d)
 	}
+	q.publishCommittedRead()
 }
 
 const DefaultProductionInfrastructureRetries = 2
@@ -386,6 +390,7 @@ func (q *Queue) SetProductionInfrastructureRetries(n int) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.productionInfrastructureRetries = min(n, 2)
+	q.publishCommittedRead()
 	return nil
 }
 
@@ -397,6 +402,7 @@ func (q *Queue) SetLossTimeouts(production, deadline, experiment time.Duration) 
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.lossTimeouts = [3]time.Duration{production, deadline, experiment}
+	q.publishCommittedRead()
 	return nil
 }
 func (q *Queue) machineLossTimeout(id string) time.Duration {
@@ -521,7 +527,11 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 		q.usageWrites = nil
 		q.accountUsage(q.clock.Now())
 		hold.next(holdBody)
-		return fn() // Simulation aborts on any error; it never resumes a failed mutation.
+		err := fn() // Simulation aborts on any error; it never resumes a failed mutation.
+		if err == nil {
+			q.publishCommittedRead()
+		}
+		return err
 	}
 	q.memoryObservationIndex = nil
 	defer func() { q.memoryObservationIndex = nil }()
@@ -579,6 +589,7 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 	}
 
 	if err == nil {
+		q.publishCommittedRead()
 		q.invalidateTerminalStatus()
 		q.commitRecords()
 	}

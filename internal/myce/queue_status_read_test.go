@@ -29,6 +29,9 @@ func retainedStatusQueue(t testing.TB) *Queue {
 		q.s.Jobs[id] = j
 		q.s.Submissions[id] = &submissionRecord{Kind: submissionBinding, JobID: id, Job: j}
 	}
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
 	return q
 }
 
