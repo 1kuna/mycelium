@@ -73,7 +73,37 @@ func targetKey(m *Machine) string { return m.ID + "/" + m.Device }
 // status and qualification plans keep the per-card views.
 func (q *Queue) placementTargets(m *Machine) []*Machine {
 	targets := q.machineTargets(m)
-	return append(targets, groupTargets(targets)...)
+	groups := groupTargets(targets)
+	if len(m.Devices) <= 2 || len(groups) == 0 {
+		return append(targets, groups...)
+	}
+	// Free-memory ordering can change during teardown. Keep an already chosen
+	// group available as a candidate instead of silently substituting cards.
+	for _, j := range q.liveJobs() {
+		p := j.PreemptionPlacement
+		if j.State != "queued" || p == nil || p.Machine != m.ID || p.Session != m.Session || !strings.Contains(p.Device, ",") || slices.ContainsFunc(groups, func(g *Machine) bool { return g.Device == p.Device }) {
+			continue
+		}
+		members := []*Machine{}
+		for _, id := range strings.Split(p.Device, ",") {
+			for _, card := range targets {
+				if card.Device == id {
+					members = append(members, card)
+				}
+			}
+		}
+		if len(members) == len(strings.Split(p.Device, ",")) {
+			g := groupView(members)
+			for _, other := range groups {
+				if len(other.group) == len(g.group) && other.GPU == g.GPU {
+					g.groupFloorGB = other.groupFloorGB
+					groups = append(groups, g)
+					break
+				}
+			}
+		}
+	}
+	return append(targets, groups...)
 }
 
 // A job uses several cards only when no single card of its host can hold it.

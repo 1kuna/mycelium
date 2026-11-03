@@ -174,8 +174,11 @@ func (q *Queue) waveObservationKey(j *Job) (*ObservationKey, string) {
 func (q *Queue) fanOutComponents(j *Job) ([]batchComponent, map[string]*Job) {
 	var components []batchComponent
 	candidates := map[string]*Job{}
+	if q.preemptionReleasesPending(j) {
+		return nil, candidates
+	}
 	for _, m := range q.plannerMachines() {
-		if !q.workerIdle(m, j) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
+		if !q.preemptionPlacementAllows(j, m) || !q.workerIdle(m, j) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 			continue
 		}
 		for _, candidate := range extensionJobs(q.fanOutTemplate(j), m, true) {

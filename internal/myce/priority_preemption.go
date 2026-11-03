@@ -1,8 +1,84 @@
 package myce
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 const priorityPreemptionCause = "priority_preemption"
+
+// A batch that paid for release keeps that exact target until assignment.
+// A lost worker/session ends the commitment; cleanup custody remains separate.
+type PreemptionPlacement struct {
+	Machine  string   `json:"machine"`
+	Session  string   `json:"session"`
+	Device   string   `json:"device"`
+	Releases []string `json:"releases,omitempty"`
+}
+
+func (q *Queue) clearPreemptionPlacements(machine, session string) {
+	for _, j := range q.liveJobs() {
+		if p := j.PreemptionPlacement; p != nil && p.Machine == machine && p.Session == session {
+			q.touchJob(j.ID).PreemptionPlacement = nil
+		}
+	}
+}
+
+// Unrelated free capacity cannot repay the teardown this demand requested.
+// Reuse exact retained obligations; timers and projected headroom prove nothing.
+func (q *Queue) preemptionReleasesPending(j *Job) bool {
+	p := j.PreemptionPlacement
+	if p == nil || len(p.Releases) == 0 {
+		return false
+	}
+	for _, o := range q.hostObligations(q.executionHost(p.Machine)) {
+		if slices.Contains(p.Releases, obligationKey(o)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (q *Queue) retainPlacementReleases(p *placementPlan, demand *Job) {
+	if demand.PreemptionPlacement == nil {
+		return
+	}
+	add := func(o HostObligation) {
+		key := obligationKey(o)
+		if !slices.Contains(demand.PreemptionPlacement.Releases, key) {
+			demand.PreemptionPlacement.Releases = append(demand.PreemptionPlacement.Releases, key)
+		}
+	}
+	for _, j := range p.jobs {
+		add(HostObligation{Result: resultIdentity(j)})
+	}
+	for _, s := range p.slots {
+		add(HostObligation{Engine: &HostEngineExecution{Machine: s.Machine, Session: s.Session, Model: s.Model, Device: s.Device, Attempt: s.Attempt}})
+	}
+	for _, c := range p.calls {
+		add(c)
+	}
+	if p.preparations {
+		for _, l := range q.s.PreparationPlans {
+			if l.Machine == p.machine.ID && l.Session == p.machine.Session && l.Started && l.PriorityStop != nil && l.PriorityStop.Demand == demand.ID {
+				copy := l
+				add(HostObligation{Launch: &copy})
+			}
+		}
+	}
+}
+
+func (q *Queue) preemptionPlacementAllows(j *Job, m *Machine) bool {
+	p := j.PreemptionPlacement
+	if p == nil || j.State != "queued" {
+		return true
+	}
+	owner := q.s.Machines[p.Machine]
+	if owner == nil || owner.Gone || owner.Session != p.Session {
+		return true
+	}
+	return m.ID == p.Machine && m.Session == p.Session && m.Device == p.Device
+}
 
 // PriorityPreemption is planned intent, not proof of delivery or release. D5's
 // member facts still decide whether the command completed or was interrupted.

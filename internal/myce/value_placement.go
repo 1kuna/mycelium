@@ -286,7 +286,7 @@ func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, s
 		}
 		// Background copies yield to foreground commands in the existing worker.
 		// Builds and stopping preparations still fence admission.
-		if immediate && (!scan.live[set.m.ID] || !q.batchSlotFree(set.m, winner) || q.preparationActive(set.m) || q.preparationStopping(set.m) || q.calls[winner.ID] != nil || !fits(winner, set.m, set.m.FreeMemoryGB)) {
+		if immediate && (q.preemptionReleasesPending(winner) || !scan.live[set.m.ID] || !q.batchSlotFree(set.m, winner) || q.preparationActive(set.m) || q.preparationStopping(set.m) || q.calls[winner.ID] != nil || !fits(winner, set.m, set.m.FreeMemoryGB)) {
 			continue
 		}
 		if best == nil || winner.ID != best.ID && set.before(winner, best) || winner.ID == best.ID && q.projectionTargetBetter(winner, set.m, selected.m, scan, immediate) {

@@ -38,7 +38,7 @@ In short: run `myce spec check --resolve` first; the job's class is the only urg
    - `deadline` with `--deadline <RFC3339>`: work with a real date that Zach or a ruling set. It can stop lower-tier resumable work after a grace period; non-resumable commands keep running.
    - `experiment` (the default): everything else.
 
-   Equal-tier work is never stopped to make room, a running job isn't migrated, and eligibility, resources and locks still apply, so a higher class doesn't guarantee immediate capacity. A higher class than the work deserves takes capacity from someone else's real deadline.
+   Compatible idle capacity is preferred before stopping work elsewhere. When a batch demand causes preemption, it keeps the selected host and cards through exact release and starts there; losing the worker/session permits replanning. Equal-tier work is never stopped to make room, a running job isn't migrated, and eligibility, resources and locks still apply, so a higher class doesn't guarantee immediate capacity. A higher class than the work deserves takes capacity from someone else's real deadline.
 5. `git: HEAD` sends committed bytes only: commit first, and ignore `.mycelium/receipts/`. Save the receipt's `key` and `job_id`. The same key recovers the same job after a lost reply; changed intent needs a new key.
 6. Make long experiments resumable: implement [atomic checkpoints](https://github.com/1kuna/mycelium/blob/main/docs/files.md) through `MYCE_CHECKPOINT_DIR`, restore progress on restart, then declare `resumable: true`. The flag alone does not preserve progress.
 
