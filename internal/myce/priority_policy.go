@@ -312,6 +312,7 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 				old := q.s.Policies[name]
 				v.MaxRetainedFileBytes = cmp.Or(v.MaxRetainedFileBytes, old.MaxRetainedFileBytes)
 				v.MaxAddedFileBytes24h = cmp.Or(v.MaxAddedFileBytes24h, old.MaxAddedFileBytes24h)
+				v.ReservedFileBytes = cmp.Or(v.ReservedFileBytes, old.ReservedFileBytes)
 				projects[name] = v
 			}
 		}

@@ -522,6 +522,7 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 			return nil
 		}
 		for hash := range gone {
+			q.forgetFileInputClaims(hash, cutoff)
 			delete(q.s.RetiredJobFiles, hash)
 			// A re-publication between unlink and this transaction owns a newer
 			// marker. Never erase its eligibility/progress with an older result.

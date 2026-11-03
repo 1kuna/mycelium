@@ -184,8 +184,9 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 	expired, keep, referenced := q.collectFileReferences(true, nil, projects.retain)
 	q.noteProjectFileAdditions(&projects, q.s.Jobs)
 	q.noteProjectFileAdditions(&projects, q.retiredSubmissionJobs("", nil))
+	q.noteInputClaimFacts(&projects, "")
 	for name, p := range q.s.Policies {
-		if p.MaxRetainedFileBytes > 0 || p.MaxAddedFileBytes24h > 0 {
+		if p.MaxRetainedFileBytes > 0 || p.MaxAddedFileBytes24h > 0 || p.ReservedFileBytes > 0 {
 			if projects.limits == nil {
 				projects.limits = map[string]ProjectPolicy{}
 			}
@@ -400,6 +401,7 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			}
 			return q.updateRequest(requestCtx, func() error {
 				if published.IsZero() {
+					q.forgetFileInputClaims(hash, cutoff)
 					delete(q.s.JobInputUploads, hash)
 					delete(q.s.AttemptOutputUploads, hash)
 				} else {
@@ -427,5 +429,5 @@ func fileCapacityCode(code string) bool {
 
 // File-store refusals whose code and reason reach HTTP callers intact.
 func fileStoreRefusalCode(code string) bool {
-	return fileCapacityCode(code) || code == "project_file_store_quota"
+	return fileCapacityCode(code) || code == "project_file_store_quota" || code == "file_input_claim_required"
 }

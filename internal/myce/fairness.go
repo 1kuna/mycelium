@@ -27,6 +27,7 @@ type ProjectPolicy struct {
 	// means no limit. Production is admitted; the store's reserve still applies.
 	MaxRetainedFileBytes uint64 `json:"max_retained_file_bytes,omitempty" yaml:"max_retained_file_bytes,omitempty"`
 	MaxAddedFileBytes24h uint64 `json:"max_added_file_bytes_24h,omitempty" yaml:"max_added_file_bytes_24h,omitempty"`
+	ReservedFileBytes    uint64 `json:"reserved_file_bytes,omitempty" yaml:"reserved_file_bytes,omitempty"`
 }
 type FairUsage struct {
 	Seconds float64   `json:"seconds"`

@@ -40,8 +40,9 @@ type batchRelease struct {
 }
 
 type state struct {
-	ModelIntervalSince     *time.Time `json:"model_interval_since,omitempty"`
-	ModelIntervalHighWater int        `json:"model_interval_high_water,omitempty"`
+	FileInputClaims        map[string]FileInputClaim `json:"file_input_claims,omitempty"`
+	ModelIntervalSince     *time.Time                `json:"model_interval_since,omitempty"`
+	ModelIntervalHighWater int                       `json:"model_interval_high_water,omitempty"`
 	// Read-only parked policy. Preserve retained DB records; these fields no
 	// longer activate admission or replace the configured file-store guards.
 	StorageMigration       json.RawMessage                `json:"storage_migration,omitempty"`
@@ -747,7 +748,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			if store == nil {
 				return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
 			}
-			if err := q.fileStoreReserveRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
+			if err := q.fileStoreAdmissionRefusal(WithFileStoreSubmission(ctx, s), resultCapacity, resultPayloads, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
 				return err
 			}
 		}
@@ -846,6 +847,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			j.Dependency = &PieceBinding{Job: s.After.Job, Piece: s.After.Piece, State: "blocked"}
 		}
 		q.putJob(id, j)
+		q.settleFileInputClaims(s)
 		if s.SubmissionKey != "" {
 			if q.s.Submissions == nil {
 				q.s.Submissions = map[string]*submissionRecord{}

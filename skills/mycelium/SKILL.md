@@ -59,6 +59,19 @@ In short: run `myce spec check --resolve` first; the job's class is the only urg
 
 ## Results
 
+**Input upload attribution (next release):** profile submissions, files-from and
+Go/Python `Run` obtain queue-issued project/file claims before uploading. For a
+direct upload use `myce file put --project P FILE`, Python
+`upload_file(path, project="P", class_="experiment")`, or Go
+`WithFileStoreSubmission(ctx, spec)`. If local quotas/reservations are configured,
+an unidentified upload returns `file_input_claim_required`; upgrade the client or
+obtain `POST /api/files/input-claims` and carry `X-Myce-Input-Claim` through the
+transfer. Project `reserved_file_bytes` protects unused capacity from other
+projects' inputs; claims commit quota before bytes arrive. Production and
+completed worker results remain exempt from these project checks. The shared
+operator credential still chooses the project; claims do not create project
+accounts. See [input attribution](https://github.com/1kuna/mycelium/blob/main/docs/files.md#project-input-attribution-and-capacity-reservations-464).
+
 `myce result JOB_ID --out DIR` verifies each output's SHA-256 and size; then run your project's own acceptance check, since a wake or a zero exit proves no result. Download within the retention window (default seven days). The queue store is shared: write large outputs (hundreds of MB and up) to your project's own storage inside the job and return a small receipt (path, size, SHA-256) as the result. Once you have collected and verified results, release them with `myce file release plan --project P JOB... > PLAN.json`, review the plan, then `myce file release apply --accept-expiry PLAN.json`; on `file_release_stale`, plan and review again, then apply promptly. A project may have store quotas: an over-quota non-production submission is refused with `project_file_store_quota` and a reason giving usage and limit, and resubmitting the same key works after a release or once the 24-hour allowance frees. Production work is never refused by quota. Failed jobs have no accepted outputs; `myce result JOB_ID --attempt N --out DIR` fetches failed-attempt diagnostics. Report placement as "Mycelium placed it on X because Y", from the job's placement rationale.
 
 **Release results early** to free shared store space once your project is completely done with them, rather than waiting out retention. Select only your own project's terminal jobs, after every downstream use has finished and any copy you must keep is saved and verified; include fan-out parents, children and keyed answers you want expired. The project name is attribution, not a permission check, so never select another project's jobs. Plan, review, then apply:
