@@ -226,6 +226,11 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 				state = "ready"
 			}
 			r := candidate.EnvironmentRecipes[m.GPU]
+			if extension := qualifiedExtension(candidate, m); extension != nil {
+				if recipe, ok := extensionRecipe(*extension, m); ok {
+					r = recipe
+				}
+			}
 			backend := r.Backend
 			if backend == "" {
 				if r.LockFile != "" {

@@ -96,6 +96,11 @@ func TestResolveOldInterpreterBuilderJourney(t *testing.T) {
 						CPUIsolationProbe: func(context.Context) error { return nil },
 						InventoryProbe:    func(context.Context) ([]MachineDevice, error) { return slices.Clone(devices), nil },
 					}
+					// Reuse the synthetic live session advertised for resolution. A fresh
+					// state directory would otherwise impersonate a second live worker.
+					if err := saveWorkerJSON(w.StateDir, "state.json", workerState{Session: m.Session, Fresh: true}); err != nil {
+						t.Fatal(err)
+					}
 					w.environmentRun = func(_ context.Context, args []string, dir string, _ []string, out, _ io.Writer) error {
 						if args[0] != backend {
 							return fmt.Errorf("wrong builder %v", args)

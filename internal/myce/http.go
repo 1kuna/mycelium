@@ -403,7 +403,7 @@ func (a API) handler(joiningPin string) http.Handler {
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	limit := int64(1 << 20)
-	if r.URL.Path == "/api/extensions" || r.URL.Path == "/api/portability" {
+	if r.URL.Path == "/api/extensions" || r.URL.Path == "/api/portability" || r.URL.Path == "/api/resolve" {
 		limit = 2 << 20
 	} // base64 transport of a <=1 MiB folder
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
