@@ -418,6 +418,7 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 		os.Exit(0)
 	}
 	root := t.TempDir()
+	t.Cleanup(func() { _ = removeSharedEntry(root) })
 	modelRoot := filepath.Join(root, "models")
 	tinyModel(t, modelRoot)
 	if err := os.Mkdir(filepath.Join(root, "attempt"), 0700); err != nil {
@@ -498,7 +499,7 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 	}
 	// Exact cleanup failure retains the pin; successful cleanup removes it.
 	cgroup := filepath.Join(root, "attempt-snapshot")
-	if err := os.Mkdir(cgroup, 0700); err != nil {
+	if err := (fakeMemoryFS{}).Mkdir(cgroup); err != nil {
 		t.Fatal(err)
 	}
 	owner := &workerStore{dir: filepath.Join(root, "attempt"), stateName: activeName, state: workerState{Identity: "snapshot", Cgroup: cgroup, Job: &Job{}, PID: 1}}
