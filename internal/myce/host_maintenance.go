@@ -180,10 +180,10 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		if hostID(m) != host || m.Replacement != nil || q.migrationHistoricalMachine(m) {
 			continue
 		}
-		fresh := !m.Gone && !q.unreported[m.ID] && !m.LastSeen.After(now) && now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
+		fresh := !m.Gone && !q.unreported[m.ID] && !m.LastSeen.After(now) && now.Sub(q.lastContact(m, now)) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
 		out.Workers = append(out.Workers, MaintenanceWorker{Machine: cloneMachine(m), Fresh: fresh})
 		freshEvidence = freshEvidence && fresh
-		operational = operational && fresh && !m.HostMemoryPolicyMismatch && m.MemoryError == "" && m.HostMemoryError == "" && m.InventoryReason == ""
+		operational = operational && fresh && !m.HostMemoryPolicyMismatch && m.MemoryError == "" && m.HostMemoryError == "" && m.InventoryReason == "" && (out.Policy.SharedHost == nil || q.hostPressureReason(m) == "")
 		out.Healthy = out.Healthy && operational && len(m.UnavailableRoots) == 0
 		out.Healthy = out.Healthy && !slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
 		out.MemoryInUseGB = max(out.MemoryInUseGB, m.HostMemoryInUseGB)

@@ -3123,9 +3123,13 @@ foreground starvation, but cannot establish a universal latency guarantee.
 Native pressure-stress calibration and representative owner qualification remain
 outstanding; repeat the probe for the intended workload before enablement.
 
-Samples refresh at the existing 5-second owner-signal cadence and expire at its
-15-second freshness bound. Worker-local age is translated to queue receipt time;
-worker wall timestamps cannot renew evidence. Missing, malformed, failed or
+Samples refresh in an independent worker lane at the existing 5-second
+owner-signal cadence, including while a check-in is waiting for its response.
+The queue requires reported sample age below 15 seconds, discounts bounded
+matching-session check-in contact between reports, and caps total observation
+age at 45 seconds. See [pressure freshness](shared-hosts.md) for the rule and its
+safety bounds. Worker-local age is translated to queue receipt time; worker wall
+timestamps cannot renew evidence. Missing, malformed, failed or
 stale observations remain **unknown** and withhold new work. Unknown alone does
 not stop running work or clear a pressure latch. A fresh low sample for every
 signal clears the latch; middling samples retain it. There is no extra recovery

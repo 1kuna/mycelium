@@ -958,7 +958,21 @@ foreground wake lateness, local age and queue receipt time),
 attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
 observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
-See [shared-host thresholds and qualification](operations.md#pressure-response).
+Pressure sampling continues every five seconds independently of HTTP check-ins.
+The queue requires a worker-reported sample age below 15 seconds. Between
+reports, it discounts time covered by the existing matching-session check-in
+contact, including a request delayed in the queue for at most 30 seconds.
+One observation still expires at 45 seconds of total age, even if further
+requests arrive. A worker that stops reporting loses this credit; a stuck probe
+keeps aging and a completed probe failure reports no sample.
+
+Host maintenance `healthy`/`state` and fleet `host_states` use the same pressure
+and bounded contact facts. Detached fleet snapshots freeze contact at snapshot
+`now`; the ordinary one-second status cache can still show an older observation
+than a subsequent host-status request. Missing or stale pressure makes a shared
+host unhealthy and withholds new work; it does not itself stop running work.
+See [pressure freshness](shared-hosts.md) and
+[shared-host thresholds and qualification](operations.md#pressure-response).
 
 
 ## Execution elapsed time, remaining estimates, and application progress

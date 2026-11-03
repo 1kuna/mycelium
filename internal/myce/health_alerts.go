@@ -117,7 +117,7 @@ func (q *Queue) detectHealth() {
 		if q.unreported[m.ID] && now.Before(q.restartUntil) {
 			stale = false
 		}
-		unhealthy := len(m.UnavailableRoots) > 0 || m.HostMemoryPolicyMismatch || m.MemoryError != "" || m.HostMemoryError != "" || m.InventoryReason != "" || slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
+		unhealthy := (q.s.HostMaintenance[host].SharedHost != nil && q.hostPressureReason(m) != "") || len(m.UnavailableRoots) > 0 || m.HostMemoryPolicyMismatch || m.MemoryError != "" || m.HostMemoryError != "" || m.InventoryReason != "" || slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
 		q.observeHealth("host/"+m.ID, !intentional && (stale || unhealthy), 0, HealthAlert{Kind: "host_unhealthy_or_stale", Host: host})
 		q.observeHealth("storage/"+m.ID, !intentional && m.CheckpointUnavailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Host: host})
 		for _, v := range m.DiskVolumes {

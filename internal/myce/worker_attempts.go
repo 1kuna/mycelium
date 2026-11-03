@@ -674,10 +674,13 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var qualification checkpointIO[bool]
-	var pressureProbe checkpointIO[SharedHostPressure]
+	source := w.SharedPressureSource
+	if source == nil {
+		source = localSharedHostPressure
+	}
+	pressureProbe := &sharedPressureMonitor{clock: w.Clock, source: source, enabled: w.Machine.SharedHost != nil}
+	go pressureProbe.run(ctx)
 	var cpuProbe checkpointIO[*memoryCeilings]
-	var pressure *SharedHostPressure
-	var nextPressureProbe time.Time
 	sharedCPUAllowance := 0
 	events := make(chan WorkerEvent, 16)
 	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1), availability: w.availability, service: w.ServiceConfig != nil}
@@ -917,31 +920,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.MemoryObservation = creditDockerObservation(m.MemoryObservation, jobs, reports, w.Clock.Now())
 			m.SharedHostPressure = nil
 			if w.Machine.SharedHost != nil {
-				if !w.Clock.Now().Before(nextPressureProbe) {
-					source := w.SharedPressureSource
-					if source == nil {
-						source = localSharedHostPressure
-					}
-					clock := w.Clock
-					reading, probeErr := pressureProbe.run("shared-pressure", func() (SharedHostPressure, error) {
-						sampledAt := clock.Now()
-						reading, err := source(ctx)
-						reading.sampledAt = sampledAt
-						return reading, err
-					})
-					if probeErr == nil {
-						pressure = &reading
-						nextPressureProbe = w.Clock.Now().Add(signalRefresh)
-					} else if !errors.Is(probeErr, errCheckpointIOPending) {
-						pressure = nil
-						nextPressureProbe = w.Clock.Now().Add(signalRefresh)
-					}
-				}
-				if pressure != nil {
-					copy := *pressure
-					copy.AgeSeconds = w.Clock.Now().Sub(copy.sampledAt).Seconds()
-					m.SharedHostPressure = &copy
-				}
+				m.SharedHostPressure = pressureProbe.snapshot(true)
 				switch runtime.GOOS {
 				case "darwin":
 					m.SharedCPUEnforcement = "background task policy; declared-core cap; CPU time unenforced"
@@ -964,7 +943,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				w.Machine.SharedHostPressure = m.SharedHostPressure
 				w.Machine.SharedCPUEnforcement = m.SharedCPUEnforcement
 			} else {
-				pressure, nextPressureProbe = nil, time.Time{}
+				pressureProbe.snapshot(false)
 				w.sharedExecutionCeilings, sharedCPUAllowance = nil, 0
 				m.SharedCPUEnforcement = ""
 			}

@@ -3,8 +3,10 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -274,5 +276,119 @@ func TestSharedHostPressureQueuesRequireTarget(t *testing.T) {
 	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
 	if r := check(t, q, m, nil); r.Job == nil || r.Job.ID != j.ID {
 		t.Fatal("not assigned after pressure cleared", r.Job)
+	}
+}
+
+// #684: queue contention is contact, not a failed pressure probe. Both health
+// APIs must preserve the same contact evidence in their observation snapshot.
+func TestSharedHostPressureSlowCheckinHealthViews(t *testing.T) {
+	q, clock, m, _ := sharedRunning(t, false)
+	clock.Advance(time.Second)
+	settle := q.beginCheckin(m.ID, m.Session)
+	defer settle(false)
+	clock.Advance(20 * time.Second)
+	q.mu.Lock()
+	q.refreshHostMemory()
+	reason := q.s.Machines[m.ID].SharedHostReason
+	q.mu.Unlock()
+	if reason != "" {
+		t.Fatalf("slow check-in expired valid pressure: %s", reason)
+	}
+	assertSharedPressureHealth(t, q, m.ID, "healthy")
+	// The same pending request must not hide missing evidence indefinitely.
+	clock.Advance(pendingCheckinContactLimit)
+	q.mu.Lock()
+	reason = q.sharedPressureReason(q.s.Machines[m.ID])
+	q.mu.Unlock()
+	if reason == "" {
+		t.Fatal("abandoned check-in renewed pressure indefinitely")
+	}
+	assertSharedPressureHealth(t, q, m.ID, "unhealthy")
+}
+
+func assertSharedPressureHealth(t *testing.T, q *Queue, host, want string) {
+	t.Helper()
+	direct, err := q.HostMaintenanceStatus(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fleet, err := q.statusSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if direct.State != want || direct.Healthy != (want == "healthy") || fleet.HostStates[host] != want {
+		t.Fatalf("health disagreement: host=%s healthy=%t fleet=%s want=%s", direct.State, direct.Healthy, fleet.HostStates[host], want)
+	}
+}
+
+func TestSharedHostPressureMissingReportsHealthViews(t *testing.T) {
+	q, clock, m, _ := sharedRunning(t, false)
+	clock.Advance(signalMaxAge)
+	q.mu.Lock()
+	reason := q.sharedPressureReason(q.s.Machines[m.ID])
+	q.mu.Unlock()
+	if reason == "" {
+		t.Fatal("missing worker kept pressure fresh")
+	}
+	assertSharedPressureHealth(t, q, m.ID, "unhealthy")
+}
+
+func TestSharedHostPressureFailingProbeHealthViews(t *testing.T) {
+	q, clock, m, run := sharedRunning(t, false)
+	for _, pending := range []bool{true, false} {
+		t.Run(fmt.Sprint("pending=", pending), func(t *testing.T) {
+			m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
+			check(t, q, m, run)
+			for age := signalRefresh; age <= signalMaxAge; age += signalRefresh {
+				clock.Advance(signalRefresh)
+				if pending {
+					m.SharedHostPressure.AgeSeconds = age.Seconds()
+				} else {
+					m.SharedHostPressure = nil
+				}
+				check(t, q, m, run)
+			}
+			assertSharedPressureHealth(t, q, m.ID, "unhealthy")
+		})
+	}
+}
+
+func TestSharedHostPressureRefreshIndependentOfCheckins(t *testing.T) {
+	clock := &workerFakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
+	var failing, blocked atomic.Bool
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	monitor := &sharedPressureMonitor{clock: clock, enabled: true, source: func(context.Context) (SharedHostPressure, error) {
+		if blocked.Load() {
+			entered <- struct{}{}
+			<-release
+		}
+		if failing.Load() {
+			return SharedHostPressure{}, errors.New("probe failed")
+		}
+		return SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}, nil
+	}}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); monitor.run(ctx) }()
+	defer func() { cancel(); close(release); <-done }()
+	// No check-in consumes the probe during twenty seconds of queue delay.
+	for i := 0; i < 5; i++ {
+		await(t, func() bool { p := monitor.snapshot(true); return p != nil && p.AgeSeconds == 0 })
+		if i < 4 {
+			clock.Advance(signalRefresh)
+		}
+	}
+	failing.Store(true)
+	clock.Advance(signalRefresh)
+	await(t, func() bool { return monitor.snapshot(true) == nil })
+	failing.Store(false)
+	clock.Advance(signalRefresh)
+	await(t, func() bool { return validSharedPressure(monitor.snapshot(true)) })
+	blocked.Store(true)
+	clock.Advance(signalRefresh)
+	<-entered
+	clock.Advance(signalMaxAge)
+	if validSharedPressure(monitor.snapshot(true)) {
+		t.Fatal("pending probe renewed old evidence")
 	}
 }
