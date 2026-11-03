@@ -71,6 +71,8 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 		}
 	}
 	if err != nil {
+		s.uploadFilesMu.Lock()
+		defer s.uploadFilesMu.Unlock()
 		// A private temporary name cannot truncate or consume an interrupted tus
 		// upload of the same bytes. Preserve any existing verified blob.
 		f, e := os.CreateTemp(filepath.Join(s.root, "uploads"), ".bundle-")

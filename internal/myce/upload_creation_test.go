@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -317,5 +318,81 @@ func TestUploadCreationResultReservationHandoff(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestUploadCreationPhysicalSampleDuringBundle(t *testing.T) {
+	_, s := creationStore(t, 1000)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var first sync.Once
+	s.diskProbe = func(string) (DiskReading, error) {
+		first.Do(func() { close(entered); <-release })
+		var used uint64
+		for _, dir := range []string{"uploads", "blobs"} {
+			entries, err := os.ReadDir(filepath.Join(s.root, dir))
+			if err != nil {
+				return DiskReading{}, err
+			}
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), ".bundle-") || len(e.Name()) == 64 {
+					st, err := e.Info()
+					if err != nil {
+						return DiskReading{}, err
+					}
+					used += uint64(st.Size())
+				}
+			}
+		}
+		return DiskReading{TotalBytes: 1 << 30, FreeBytes: (256 << 20) + 100 - used}, nil
+	}
+	// Only the first snapshot pauses after inventory. Concurrent bundle capacity
+	// probes must remain independent of that pause.
+	var calls atomic.Uint64
+	probe := s.diskProbe
+	s.diskProbe = func(path string) (DiskReading, error) {
+		if calls.Add(1) == 1 {
+			return probe(path)
+		}
+		var used uint64
+		entries, err := os.ReadDir(filepath.Join(s.root, "blobs"))
+		if err != nil {
+			return DiskReading{}, err
+		}
+		for _, e := range entries {
+			st, err := e.Info()
+			if err != nil {
+				return DiskReading{}, err
+			}
+			used += uint64(st.Size())
+		}
+		return DiskReading{TotalBytes: 1 << 30, FreeBytes: (256 << 20) + 100 - used}, nil
+	}
+	postDone := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		s.serveUpload(w, creationRequest(context.Background(), creationRef(strings.Repeat("a", 20))))
+		postDone <- w.Code
+	}()
+	<-entered
+	bundleReady := make(chan struct{})
+	record := s.recordBundle
+	s.recordBundle = func(hash string, created bool, contexts ...context.Context) error {
+		close(bundleReady)
+		return record(hash, created, contexts...)
+	}
+	bundleDone := make(chan error, 1)
+	go func() {
+		files := map[string][]byte{"f": []byte(strings.Repeat("z", 33))}
+		var ref *FileRef
+		bundleDone <- s.freezeFiles(&files, &ref, "", nil)
+	}()
+	<-bundleReady
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	if code := <-postDone; code != 201 {
+		t.Errorf("physical bytes counted twice: %d", code)
+	}
+	if err := <-bundleDone; err != nil {
+		t.Fatal(err)
 	}
 }

@@ -44,6 +44,11 @@ type storedPayload struct {
 func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, error) {
 	s.uploadFilesMu.RLock()
 	defer s.uploadFilesMu.RUnlock()
+	return s.inventoryUnlocked(ctx)
+}
+
+// Caller fences file-pair creation and internal bundle writes.
+func (s *FileStore) inventoryUnlocked(ctx context.Context) (map[string]storedPayload, error) {
 	out := map[string]storedPayload{}
 	for _, dir := range []string{"blobs", "uploads"} {
 		entries, err := os.ReadDir(filepath.Join(s.root, dir))
@@ -128,8 +133,13 @@ func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, er
 }
 
 func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
+	// Keep physical free space and the inventory on the same side of a bundle
+	// write. Otherwise its bytes can be deducted by both disk-free and the
+	// completion ledger. No queue callbacks run under this filesystem fence.
+	s.uploadFilesMu.RLock()
+	defer s.uploadFilesMu.RUnlock()
 	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve, UnidentifiedWritesMayUseReserve: s.productionReserve > 0, UnidentifiedReserveAdmittedBytes: s.unidentifiedReserveAdmitted.Load()}
-	payloads, err := s.inventory(ctx)
+	payloads, err := s.inventoryUnlocked(ctx)
 	if err != nil {
 		return status, nil, err
 	}
