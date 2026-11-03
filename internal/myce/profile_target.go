@@ -248,7 +248,7 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job, m *Machine) bool) {
 	// Resolve envelopes with the planner's code, but without temporary
 	// occupancy or release holds. Retain observations for learned needs.
-	capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q}
+	capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: newMemoryPlanningCache()}
 	capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 	for _, m := range q.s.Machines {
 		if !q.jobAllowsMachine(j, m.ID) {
@@ -293,7 +293,19 @@ func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job
 
 // Shared permanent-capacity projection for qualification and bounded exploration.
 func (q *Queue) qualificationCapacity(target *Machine) Machine {
-	copy := cloneMachine(target)
+	// Only scalar capacity fields, disk volumes and availability are changed.
+	// All other referenced inventory remains read-only for this planning pass.
+	copy := *target
+	copy.hostBudgetGB, copy.modelReservationDebtGB, copy.hostReservationDebtGB = 0, 0, 0
+	copy.batchTenants = 0
+	if target.CapabilityProfile != nil {
+		profile := *target.CapabilityProfile
+		copy.CapabilityProfile = &profile
+		if profile.Availability != nil {
+			availability := *profile.Availability
+			profile.Availability = &availability
+		}
+	}
 	copy.group, copy.groupMembers, copy.groupFloorGB = target.group, target.groupMembers, target.groupFloorGB
 	copy.DiskVolumes = diskCapacityVolumes(copy.DiskVolumes)
 	copy.Gone, copy.Leaving, copy.Recovering, copy.CheckpointUnavailable = false, false, false, false

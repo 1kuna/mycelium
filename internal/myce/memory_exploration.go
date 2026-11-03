@@ -53,6 +53,18 @@ func (q *Queue) memoryHistory() *Queue {
 // Require the exact retained execution, fresh comparable configuration, and
 // unchanged target identity; a small unrelated/old sample cannot open a probe.
 func (q *Queue) sameOSMemoryLowerBound(key ObservationKey, configuration string) float64 {
+	if cache := q.memoryPlanning; cache != nil {
+		id := memoryLowerIdentity(key, configuration)
+		if lower, ok := cache.lower[id]; ok {
+			return lower
+		}
+		lower := q.sameOSMemoryLowerBoundUncached(key, configuration)
+		cache.lower[id] = lower
+		return lower
+	}
+	return q.sameOSMemoryLowerBoundUncached(key, configuration)
+}
+func (q *Queue) sameOSMemoryLowerBoundUncached(key ObservationKey, configuration string) float64 {
 	history := q.memoryHistory()
 	lower := 0.0
 	for _, j := range history.s.Jobs {

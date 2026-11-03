@@ -1,0 +1,190 @@
+package myce
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// Synthetic incident shape: 80 production jobs, 30 experiments, 1,400 curves
+// and five workers. The measured worker offers both CUDA and CPU targets.
+func candidateCostFixture(t testing.TB) (*Queue, []Machine) {
+	t.Helper()
+	clock := &fakeClock{now: time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)}
+	q, err := Open(filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	q.checkpointProbe = func() bool { return true }
+	workers := make([]Machine, 5)
+	for i := range workers {
+		id := fmt.Sprintf("worker-%d", i)
+		m := cpuMachine(id, id, "cpu", 16, 128)
+		m.ExtensionFingerprint, m.CPUExtensionFingerprint = "synthetic-cpu", "synthetic-cpu"
+		m.Devices = []MachineDevice{}
+		if i == 0 {
+			m.Devices = []MachineDevice{{ID: "0", Platform: "cuda", CapabilityProfile: &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", MemoryLayout: "separate", Accelerators: []AcceleratorProfile{{Type: "cuda", MemoryBytes: 48 << 30}}}, MemoryMode: "fixed", Selector: "0", TotalMemoryGB: 48, BudgetGB: 48, FreeMemoryGB: 48, Identity: "synthetic-card", ExtensionFingerprint: "synthetic-cuda"}}
+		}
+		workers[i] = m
+		if _, err := q.Checkin(Checkin{Machine: m}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 110 {
+		id := fmt.Sprintf("queued-%03d", i)
+		s := cpuSpec(2, 0)
+		s.Project, s.Name = fmt.Sprintf("project-%d", i%3), fmt.Sprintf("program-%d", i%12)
+		s.Run.Command = []string{"echo", s.Name}
+		s.Needs.Memory = "auto"
+		s.Needs.Platform = Platform{Required: []string{"cpu"}}
+		s.Priority = "production"
+		if i >= 80 {
+			s.Priority = "experiment"
+		}
+		if i%3 == 0 {
+			s.Needs.Platform = Platform{Required: []string{"cuda"}}
+			s.Needs.MemoryGB = 4
+		}
+		if err := s.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		j := &Job{ID: id, Spec: s, State: "queued", Queued: clock.Now().Add(time.Duration(i) * time.Millisecond)}
+		if !s.Needs.cpuOnly() {
+			j.MemoryFallback = &SizeHint{MemoryGB: 4, HostMemoryGB: 4}
+		}
+		q.s.Jobs[id] = j
+	}
+	q.s.WorkObservations = map[string]WorkObservation{}
+	peak := 2.0
+	for i := range 1400 {
+		source := q.s.Jobs[fmt.Sprintf("queued-%03d", i%110)]
+		provenance := *source
+		// Half of the recipes are cold, with similar-family history only.
+		if i%12 >= 6 {
+			provenance.Spec.Run.Command = []string{"echo", fmt.Sprintf("retained-%d", i)}
+		}
+		if i >= 60 {
+			provenance.Spec.Args = []string{fmt.Sprint(i / 5)}
+		}
+		m := q.machineTargets(q.s.Machines[workers[i%5].ID])[0]
+		if !source.Spec.Needs.cpuOnly() {
+			m = q.machineTargets(q.s.Machines[workers[0].ID])[1]
+		}
+		provenance.Machine, provenance.Session = m.ID, m.Session
+		if m.Device != "" {
+			provenance.AllocatedDevices = []string{m.Device}
+		}
+		key, why := q.workObservationKey(&provenance)
+		if key == nil {
+			t.Fatal(why)
+		}
+		q.s.WorkObservations[fmt.Sprint(i)] = WorkObservation{Key: *key, MemoryFamily: memoryFamily(source), MemoryConfiguration: memoryConfiguration(provenance.Spec.Needs, provenance.Spec.Args, provenance.Spec.Program), MemoryLayout: "separate", MemoryRecordedAt: clock.Now(), MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}, MemorySamples: 2, Samples: 2, RecordedAt: clock.Now(), Rate: 10, Units: 10, Seconds: 1}
+	}
+	// Retained constrained attempts exercise same-OS diagnostic lower bounds.
+	for i := range 160 {
+		source := q.s.Jobs[fmt.Sprintf("queued-%03d", i%110)]
+		j := *source
+		j.ID, j.State, j.Attempt = fmt.Sprintf("retained-%03d", i), "succeeded", 1
+		m := q.machineTargets(q.s.Machines[workers[i%5].ID])[0]
+		if !j.Spec.Needs.cpuOnly() {
+			m = q.machineTargets(q.s.Machines[workers[0].ID])[1]
+			j.AllocatedDevices = []string{m.Device}
+		}
+		j.Machine, j.Session = m.ID, m.Session
+		j.StartedAt, j.FinishedAt, j.ReleaseConfirmed = &clock.now, &clock.now, true
+		key, why := q.workObservationKey(&j)
+		if key == nil {
+			t.Fatal(why)
+		}
+		j.Timing = &WorkTiming{Key: key, Execution: Execution{ID: j.ID, Attempt: 1}, Machine: m.ID, Session: m.Session}
+		lower := 3.0
+		j.MemoryAttempts = []AttemptMemoryFacts{{Attempt: 1, Machine: m.ID, Session: m.Session, MemoryPeak: &AttemptMemoryPeak{HostGB: &lower, Constrained: true}}}
+		q.s.Jobs[j.ID] = &j
+	}
+	// Occupy the entire CPU allowance without preemptible work. All queued jobs
+	// still participate in candidate planning, and successive check-ins are stable.
+	for i, m := range workers {
+		id := fmt.Sprintf("running-%d", i)
+		s := cpuSpec(16, 8)
+		s.Needs.Platform = Platform{Required: []string{"cpu"}}
+		if err := s.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		s.Priority = "production"
+		q.s.Jobs[id] = &Job{ID: id, Spec: s, State: "running", Attempt: 1, Machine: m.ID, Session: m.Session, StartedAt: &clock.now, Queued: clock.Now()}
+	}
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	return q, workers
+}
+
+func BenchmarkCheckinCandidateCost(b *testing.B) {
+	q, workers := candidateCostFixture(b)
+	var total, maximum time.Duration
+	q.observeUpdate = func(_, hold time.Duration) { total += hold; maximum = max(maximum, hold) }
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		m := workers[0]
+		_, err := q.CheckinContext(context.Background(), Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: "running-0", Attempt: 1}, Session: m.Session, Started: true}}})
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(total.Nanoseconds())/float64(b.N), "hold-ns/op")
+	b.ReportMetric(float64(maximum.Nanoseconds()), "max-hold-ns")
+}
+
+// Freeze the original planner's full per-target candidate sequence, resolved
+// resource vectors and memory envelopes, not just its first winning job.
+func TestCandidateCostPlacementEquivalence(t *testing.T) {
+	for _, retained := range []bool{true, false} {
+		t.Run(fmt.Sprintf("retained=%v", retained), func(t *testing.T) {
+			q, _ := candidateCostFixture(t)
+			if !retained {
+				for id, j := range q.s.Jobs {
+					if j.State == "succeeded" {
+						delete(q.s.Jobs, id)
+					}
+				}
+			}
+			for i := range 5 {
+				delete(q.s.Jobs, fmt.Sprintf("running-%d", i))
+			}
+			q.refreshHostMemory()
+			q.refreshHostCPU()
+			type decision struct {
+				Target, Job string
+				Needs       ResourceNeeds
+				Envelope    *JobMemoryEnvelope
+			}
+			var decisions []decision
+			scan := q.placementScan()
+			for _, m := range scan.machines {
+				set := q.candidates(m, scan)
+
+				excluded := map[string]bool{}
+				for j := set.pick(excluded); j != nil; j = set.pick(excluded) {
+					decisions = append(decisions, decision{targetKey(m), j.ID, j.Spec.Needs, j.MemoryEnvelope})
+					excluded[j.ID] = true
+				}
+			}
+			data, err := json.Marshal(decisions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest := fmt.Sprintf("%x", sha256.Sum256(data))
+			want := map[bool]string{true: "18b20f0b5f071470f9b8d0c22f22c44255b385cbe83828ee1668b78858576b28", false: "a529ce44d72fbea3bd49e8dcdba79155beef7ec2a6d8a6b29573d8389d828f41"}[retained]
+			if digest != want {
+				t.Fatalf("placement digest %s (%d decisions), want %s", digest, len(decisions), want)
+			}
+		})
+	}
+}

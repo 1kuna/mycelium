@@ -193,7 +193,8 @@ type Queue struct {
 	usageMaintenance bool
 	s                state
 
-	memoryObservationIndex  map[memoryWorkKey][]*WorkObservation
+	memoryPlanning          *memoryPlanningCache // Only while a read-only placement scan is active.
+	memoryObservationIndex  *memoryObservationCatalog
 	checkinMemoryIdentities map[*Job]string // Fenced, transaction-local planner input.
 }
 

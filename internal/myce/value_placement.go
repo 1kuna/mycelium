@@ -179,6 +179,7 @@ type placementScan struct {
 	candidateBuilds int
 
 	memoryIdentities map[*Job]string
+	memory           *memoryPlanningCache
 }
 
 func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
