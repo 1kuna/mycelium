@@ -1276,7 +1276,10 @@ not send a second notification or change admission, retries, or release custody.
   oversized declarations are excluded. Refused submissions retain a private
   demand probe so new allowances or corrected/expired learning can clear the
   incident without resubmitting; it is discarded on recovery. Accepted queued
-  demand clears when it fits or leaves the queue. Events carry only project/job
+  demand clears when it fits or leaves the queue. Auto sizing inherited from
+  variants is included; explicit member caps are excluded from the learned
+  comparison. Healthy demand creates no condition history, and recovered
+  envelope conditions are discarded after their cooldown. Events carry only project/job
   identities, never commands, mount paths or worker error text.
 
 ## Durable model interval API

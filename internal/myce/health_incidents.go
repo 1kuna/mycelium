@@ -117,8 +117,11 @@ func (q *Queue) detectIncidentHealth() {
 			HealthAlert{Kind: "reservation_never_ready", Host: r.Target.Host, Reservation: id, JobID: r.Job})
 	}
 	for _, j := range q.liveJobs() {
-		if j.State == "queued" && !cancelled(j) && j.Spec.Needs.Memory == "auto" {
+		if j.State == "queued" && !cancelled(j) && (j.Spec.Needs.Memory == "auto" || j.Spec.extensionJob()) {
 			key := envelopeHealthKey(j)
+			if seen[key] {
+				continue
+			}
 			seen[key] = true
 			q.observeEnvelopeHealth(j, false)
 		}
@@ -130,6 +133,9 @@ func (q *Queue) detectIncidentHealth() {
 				q.observeEnvelopeHealth(c.Envelope, true)
 			} else if !seen[key] {
 				q.observeHealth(key, false, 0, HealthAlert{})
+				if c.LastAlert.IsZero() || now.Sub(c.LastAlert) >= healthAlertCooldown {
+					delete(q.s.Health.Conditions, key)
+				}
 			}
 		case strings.HasPrefix(key, "stale-flaps/"), strings.HasPrefix(key, "teardown-faults/"), strings.HasPrefix(key, "reservation-never-ready/"):
 			if !seen[key] {
@@ -149,9 +155,6 @@ func envelopeHealthKey(j *Job) string {
 // other predicate: wrong platforms, missing tools/recipes and cores are not
 // learned-envelope incidents. A fitting peer excludes temporary occupancy.
 func (q *Queue) learnedEnvelopeOversized(j *Job) bool {
-	if j.Spec.Needs.Memory != "auto" {
-		return false
-	}
 	eligible, allOversized := false, true
 	q.evaluateTargets(j, func(_ targetFit, candidate *Job, m *Machine) bool {
 		if !q.jobAllowsMachine(j, m.ID) {
@@ -168,8 +171,20 @@ func (q *Queue) learnedEnvelopeOversized(j *Job) bool {
 		}
 		eligible = true
 		envelope := candidate.MemoryEnvelope
-		oversized := envelope != nil && envelope.Basis == "learned" &&
-			(!hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) || candidate.Spec.Needs.MemoryGB > m.TotalMemoryGB || !capabilityFits(candidate, m))
+		oversized := false
+		if candidate.Spec.Needs.Memory == "auto" && envelope != nil && envelope.Basis == "learned" {
+			// Assignment's existing comparison excludes declared member caps,
+			// hints and retry floors. Only accepted learning is this incident.
+			learnedProbe := *candidate
+			q.recordLearnedMemory(&learnedProbe, m)
+			if learned := learnedProbe.MemoryEnvelope.Learned; learned != nil {
+				probe.Spec.Needs.HostMemoryGB, probe.Spec.Needs.MemoryGB = learned.HostGB, 0
+				if learned.DeviceGB != nil {
+					probe.Spec.Needs.MemoryGB = *learned.DeviceGB
+				}
+				oversized = !hostFits(m, probe.Spec.Needs.MemoryGB, probe.Spec.Needs.HostMemoryGB) || probe.Spec.Needs.MemoryGB > m.TotalMemoryGB || !capabilityFits(&probe, m)
+			}
+		}
 		allOversized = allOversized && oversized
 		return allOversized
 	})
@@ -179,6 +194,11 @@ func (q *Queue) learnedEnvelopeOversized(j *Job) bool {
 func (q *Queue) observeEnvelopeHealth(j *Job, refused bool) {
 	key := envelopeHealthKey(j)
 	bad := q.learnedEnvelopeOversized(j)
+	old, exists := q.s.Health.Conditions[key]
+	if !bad && (!exists || old.LastAlert.IsZero() || q.clock.Now().Sub(old.LastAlert) >= healthAlertCooldown) {
+		delete(q.s.Health.Conditions, key)
+		return
+	}
 	e := HealthAlert{Kind: "learned_envelope_exceeds_allowances", Project: j.Spec.Project}
 	if !refused {
 		e.JobID = j.ID
