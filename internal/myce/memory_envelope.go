@@ -576,31 +576,32 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	// Once corrected evidence exists, legacy XPU attribution on another
 	// comparable key (including a sibling card) must not restore the old peak.
 	correctedXPU := false
-	for _, point := range q.s.WorkObservations {
-		if sameMemoryWork(point, *key, configuration) && memoryIdentityUsable(point) && !point.MemoryRecordedAt.IsZero() && point.MemoryPeak != nil && !point.MemoryPeak.constrained() && !point.MemoryPeak.PressureUnavailable && point.MemoryPeak.GPUHost != nil && point.MemoryPeak.GPUHost.SiblingAdjusted {
+	points := q.memoryObservations(*key, configuration)
+	for _, point := range points {
+		if memoryIdentityUsable(*point) && !point.MemoryRecordedAt.IsZero() && point.MemoryPeak != nil && !point.MemoryPeak.constrained() && !point.MemoryPeak.PressureUnavailable && point.MemoryPeak.GPUHost != nil && point.MemoryPeak.GPUHost.SiblingAdjusted {
 			correctedXPU = true
 			break
 		}
 	}
-	for _, point := range q.s.WorkObservations {
+	for _, point := range points {
 		k, p := point.Key, point.MemoryPeak
 		if correctedXPU && k.Target.Platform == "xpu" && p != nil && p.GPUHost != nil && !p.GPUHost.SiblingAdjusted && !p.constrained() {
 			continue
 		}
 		age := q.clock.Now().Sub(point.MemoryRecordedAt)
-		if sameMemoryWork(point, *key, configuration) && memoryIdentityUsable(point) && p.constrained() {
+		if memoryIdentityUsable(*point) && p.constrained() {
 			invalidated = true
 			if p.HostGB != nil && validRate(*p.HostGB) {
 				constrainedGB = max(constrainedGB, hostMemoryPeakGB(p))
 			}
 		}
-		if !sameMemoryWork(point, *key, configuration) || !memoryIdentityUsable(point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) || p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) && !validMemoryValue(*p.CgroupGB*2.5) {
+		if !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) || p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) && !validMemoryValue(*p.CgroupGB*2.5) {
 			continue
 		}
 		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {
 			continue
 		}
-		sameFamily := sameMemoryFamily(point, *key, layout)
+		sameFamily := sameMemoryFamily(*point, *key, layout)
 		samples := max(1, point.MemorySamples)
 		if sameFamily && sameMemoryHost(k, *key, m) {
 			sameHost, sameHostN = mergeMemoryPeaks(sameHost, p), sameHostN+samples

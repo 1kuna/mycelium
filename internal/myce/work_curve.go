@@ -141,7 +141,7 @@ func (q *Queue) invalidateWorkCurves() {
 		}
 		if reason != p.StaleReason {
 			p.StaleReason = reason
-			q.s.WorkObservations[id] = p
+			q.putWorkObservation(id, p)
 		}
 	}
 }
@@ -237,7 +237,7 @@ func (q *Queue) acceptCurveReports(c Checkin, m *Machine) {
 				if q.s.WorkObservations == nil {
 					q.s.WorkObservations = map[string]WorkObservation{}
 				}
-				q.s.WorkObservations[id] = p
+				q.putWorkObservation(id, p)
 			}
 		}
 	}
@@ -314,7 +314,7 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 					// never as a learned estimate or a new class-level bound.
 					point.MemoryPeak = r.MemoryPeak
 				}
-				q.s.WorkObservations[id] = point
+				q.putWorkObservation(id, point)
 				q.recordMemoryInvalidation(j, old, point)
 			}
 		}
@@ -332,7 +332,7 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 	if q.s.WorkObservations == nil {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}
-	q.s.WorkObservations[id] = p
+	q.putWorkObservation(id, p)
 }
 
 // Identity fences only. Throughput age (RecordedAt) and memory age
