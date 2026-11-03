@@ -347,6 +347,8 @@ func TestProjectFileStoreRecoveryAndFailureDiagnosticsRemainPublishable(t *testi
 		check(t, q, m, nil)
 		s := spec("experiment")
 		s.Resumable = false
+		_, input := retentionJobInput(t, c, "diagnostic fixture")
+		s.Files = FileManifest{"input": input}
 		s.Diagnostics = &DiagnosticSpec{}
 		submit(t, q, s)
 		j := check(t, q, m, nil).Job
