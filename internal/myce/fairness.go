@@ -467,7 +467,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		if busy || !fits(best, live, live.FreeMemoryGB) {
 			base = reservationWaitReason(live, batchSlotAllocated && sharedWith == 0, sharedWith)
 			if why := q.cardWaitingReason(best, live); why != "" {
-				base = reservationWaitReason(live, batchSlotAllocated && sharedWith == 0, 0) + "; " + why
+				base = why
 			}
 		}
 		if !environmentReady(best, target) {

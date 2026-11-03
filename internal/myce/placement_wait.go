@@ -113,10 +113,10 @@ func (q *Queue) cardWaitingReason(j *Job, m *Machine) string {
 	slices.Sort(owners)
 	device := strings.Join(targetDevices(m), ",")
 	if device == "" {
-		return "waiting for GPU batch slot held by " + strings.Join(owners, ", ")
+		return reservationWaitReason(m, true, 0) + "; waiting for GPU batch slot held by " + strings.Join(owners, ", ")
 	}
 	if n, shared := q.deviceCoTenants(m, j, true); shared && n > 0 && q.cardSettled(m) {
-		return fmt.Sprintf("device %s shared with %d attempts; %.1f GiB device memory free; held by %s", device, n, m.FreeMemoryGB, strings.Join(owners, ", "))
+		return reservationWaitReason(m, false, n) + "; held by " + strings.Join(owners, ", ")
 	}
-	return fmt.Sprintf("card busy: waiting for GPU batch slot on device %s held by %s", device, strings.Join(owners, ", "))
+	return reservationWaitReason(m, true, 0) + fmt.Sprintf("; card busy: waiting for GPU batch slot on device %s held by %s", device, strings.Join(owners, ", "))
 }
