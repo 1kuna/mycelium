@@ -176,7 +176,10 @@ func (q *Queue) learnedEnvelopeOversized(j *Job) bool {
 			// Assignment's existing comparison excludes declared member caps,
 			// hints and retry floors. Only accepted learning is this incident.
 			learnedProbe := *candidate
-			q.recordLearnedMemory(&learnedProbe, m)
+			capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q}
+			capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
+			capacity.s.Machines = map[string]*Machine{m.ID: m}
+			capacity.recordLearnedMemory(&learnedProbe, m)
 			if learned := learnedProbe.MemoryEnvelope.Learned; learned != nil {
 				probe.Spec.Needs.HostMemoryGB, probe.Spec.Needs.MemoryGB = learned.HostGB, 0
 				if learned.DeviceGB != nil {

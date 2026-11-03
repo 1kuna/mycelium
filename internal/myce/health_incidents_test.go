@@ -204,6 +204,14 @@ func TestHealthIncidentReservationReplay(t *testing.T) {
 			q, clock := fixture(t)
 			m := m3Machine()
 			machineCheck(t, q, m)
+			submit(t, q, exclusionSpec(m.ID, "0"))
+			existing := assignedJob(machineCheck(t, q, m))
+			if existing == nil {
+				t.Fatal("missing conflicting attempt")
+			}
+			if err := q.Started(result(existing, false)); err != nil {
+				t.Fatal(err)
+			}
 			bound := submit(t, q, exclusionSpec(m.ID, "0"))
 			r, err := q.CreateReservation(reservationRequest("validation", "host=machine;devices=0", bound.ID))
 			if err != nil {
@@ -212,6 +220,7 @@ func TestHealthIncidentReservationReplay(t *testing.T) {
 			key, kind := "reservation-never-ready/validation", "reservation_never_ready"
 			requireIncident(t, q, kind, key, 0, false)
 			if ready {
+				finish(t, q, existing, true)
 				machineCheck(t, q, m)
 				if q.s.Reservations[r.ID].ReadyAt == nil {
 					t.Fatal("fixture never became ready")

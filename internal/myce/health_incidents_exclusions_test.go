@@ -113,6 +113,35 @@ func TestHealthIncidentHealthyDemandLeavesNoHistory(t *testing.T) {
 	}
 }
 
+func TestHealthIncidentOfflineUndersizedPeerDoesNotSuppress(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	first := startObservation(t, q, m, s)
+	clock.Advance(time.Second)
+	r := result(&first, true)
+	peak := 22.0
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	m.HostMemoryBudgetGB = 24
+	check(t, q, m, nil)
+	peer := cloneMachine(&m)
+	peer.ID, peer.HostID, peer.Session = "offline-peer", "offline-peer", "offline-session"
+	check(t, q, peer, nil)
+	// Reproduce the queue's loss observation without making the fitting
+	// worker stale too. Qualification ignores this temporary availability.
+	if err := q.update(func() error { q.s.Machines[peer.ID].Gone = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	s.Needs.Memory, s.RequireTarget = "auto", true
+	if _, err := q.Submit(s); err == nil {
+		t.Fatal("oversized work admitted")
+	}
+	if events := alertsOf(q, "learned_envelope_exceeds_allowances"); len(events) != 1 {
+		t.Fatal("offline undersized peer suppressed the incident", events)
+	}
+}
+
 func TestHealthIncidentLearnedEnvelopeHealthyExclusions(t *testing.T) {
 	for _, history := range []string{"cold", "fitting peer", "wrong platform"} {
 		t.Run(history, func(t *testing.T) {
