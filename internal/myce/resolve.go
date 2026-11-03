@@ -65,6 +65,9 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 		"Read-only: no job, upload, build, reservation or placement change. Eligibility uses permanent capacity; current load decides when work starts. Submission revalidates everything.",
 	}}
 	r.Notes = append(r.Notes, PlacementAdvisories(s, req.RequirementReasons)...)
+	if plainMemoryWork(s) && s.Needs.Memory == "auto" && s.ProfileMemory == "" {
+		r.Notes = append(r.Notes, "Auto memory learns from accepted samples of the same identity: project, name, exact command, environment and inputs. Changing a name, command argument or input can start a new identity; arbitrary arguments may change memory need. For comparable runs of one program with different items, use an adapter entry or execution profile with a stable name/base command and pass item arguments after -- or files with --input. Leave memory_class omitted to share the profile's base memory class; use memory_class: per_item when item arguments or bytes change memory need. This is guidance, not a submission error.")
+	}
 	if err := view.validateMachineNames(s.AllowedMachines); err != nil {
 		r.Findings = append(r.Findings, ResolveFinding{Field: "allowed_machines", Side: "submitter", Problem: err.Error(), Fix: "Use the current machine name, or omit allowed_machines and declare needs."})
 	}

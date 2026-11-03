@@ -55,6 +55,14 @@ Python `client.status(full=True)`) for both snapshots: curve provenance can
 depend on completed jobs outside the default history window. Curves remain in
 default status for existing callers, but that view is not a complete job ledger.
 
+Memory-only accepted samples increment `samples` and `memory_samples` and advance
+`memory_recorded_at`; they leave the throughput clock and rate unchanged. A
+failed ceiling-bound attempt can invalidate comparable memory on several hosts
+without adding a sample. Each rewritten key has its own `memory_invalidated`
+ledger link, including a replacement diagnostic peak with an already-zero memory
+clock. The preservation guard requires that exact key's complete digest chain;
+another host's accepted sample alone never explains its mutation (#620).
+
 Only the unfiltered default shares the one-second cache. Filtered/full reads are
 fresh. Snapshot capture keeps scheduling inputs and dependency state under the
 queue lock; projection, usage queries, file inventory, encoding the reply and
@@ -439,6 +447,18 @@ no peak do not create rows or increment the dropped count. The four-entry
 telemetry. Launched attempts ending without a worker reading retain the
 envelope and omit the peak. Release-only kill-time acknowledgements retain
 their measured facts too.
+
+One eligible accepted peak of the same plain-command identity is enough to seed
+the next run's learned envelope; the two-sample rule only enables the narrower
+complete-component range estimator. Identity includes project, name, exact run,
+environment and input references, so changing an argument or a job name can
+leave later runs exploratory even when earlier attempts report `eligible`.
+From the next release, resolve adds a non-blocking note pointing these auto
+commands to the existing profile memory class. Use a stable adapter entry or
+profile base command and append item arguments/pass `--input` files; the default
+class shares evidence across items. `memory_class: per_item` isolates arguments
+and item bytes when those change memory need. Arbitrary raw command arguments
+are never automatically treated as comparable (#631).
 
 New attempt rows include `learning_reason`: `eligible` means the queue's memory
 learning predicates passed; other values name the failed predicate (for example
