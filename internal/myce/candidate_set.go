@@ -26,19 +26,33 @@ func (q *Queue) candidates(m *Machine, scans ...*placementScan) *candidateSet {
 	if s := scan.sets[key]; s != nil {
 		return s
 	}
-	s := q.buildCandidates(m)
+	s := q.buildCandidates(m, scan)
 	scan.sets[key] = s
 	scan.candidateBuilds++
 	return s
 }
 
-func (q *Queue) buildCandidates(m *Machine) *candidateSet {
+func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateSet {
+	scan := q.placementScan(scans...)
 	s := &candidateSet{q: q, m: m, scores: map[string]float64{}, actives: map[string]float64{}}
 	s.resources = map[batchResourceKey]batchResourceRoom{}
 	fence := q.groupDemandFence(m)
 	for _, j := range q.liveJobs() {
 		if fence != nil && j.ID != fence.ID && q.comparePriority(j.Spec, fence.Spec) >= 0 {
 			continue
+		}
+		if j.State == "queued" && plainMemoryWork(j.Spec) && j.Spec.FanOut == nil {
+			if scan.memoryIdentities == nil {
+				scan.memoryIdentities = map[*Job]string{}
+			}
+			identity, ok := scan.memoryIdentities[j]
+			if !ok {
+				identity = profileMemoryIdentity(j)
+				scan.memoryIdentities[j] = identity
+			}
+			copy := *j
+			copy.planningMemoryIdentity = identity
+			j = &copy
 		}
 		if candidate := q.batchCandidateWithResources(j, m, s.resources); candidate != nil {
 			s.jobs = append(s.jobs, candidate)

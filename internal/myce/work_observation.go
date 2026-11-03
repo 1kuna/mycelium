@@ -188,6 +188,9 @@ func profileMemoryWork(s Spec) bool {
 }
 
 func profileMemoryIdentity(j *Job) string {
+	if j.planningMemoryIdentity != "" {
+		return j.planningMemoryIdentity
+	}
 	s := j.Spec
 	if s.ProfileMemory != "" {
 		return "profile:" + identityHash(struct {
