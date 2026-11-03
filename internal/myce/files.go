@@ -490,13 +490,17 @@ func (w *uploadResponse) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata bool) {
-	if r.Method == http.MethodHead && r.Header.Get("X-Myce-Input-Claim") != "" {
+	if r.Method == http.MethodHead && (r.Header.Get("X-Myce-Input-Claim") != "" || r.Header.Get("X-Myce-File-Attempt") != "") {
 		parsed, err := fileStoreSubmissionRequest(r)
 		if err != nil {
 			respond(w, nil, err)
 			return
 		}
 		r = parsed
+		if err := s.checkAttempt(r.Context()); err != nil {
+			respond(w, nil, err)
+			return
+		}
 		claimCtx, err := s.inputClaim(r.Context(), FileRef{SHA256: r.PathValue("hash"), SizeBytes: -1}, false)
 		if err != nil {
 			respond(w, nil, err)
@@ -553,6 +557,10 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 		return
 	}
 	if r.Method == http.MethodHead {
+		if err := s.checkAttempt(r.Context()); err != nil {
+			respond(w, nil, err)
+			return
+		}
 		if r.Header.Get("X-Myce-Input-Claim") != "" {
 			if _, err := s.inputClaim(r.Context(), FileRef{SHA256: hash, SizeBytes: st.Size()}, true); err != nil {
 				respond(w, nil, err)
