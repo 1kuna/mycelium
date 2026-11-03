@@ -134,7 +134,7 @@ func placeholderRef(name string, size int64) myce.FileRef {
 }
 
 // resolveInput reads a job spec, or for --resolve a profile or adapter entry,
-// and checks every submitter-side path with stat only.
+// and checks submitter-side paths; declared local shared input hashes are verified.
 func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest, submitterFindings, error) {
 	var found submitterFindings
 	s, err := readJobSpec(path)
@@ -184,6 +184,17 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 			found.missing("shared_inputs."+name+".local", "", "Create the file, or reference an already imported sha256/size or NAS location.", myce.PathReadError("shared_inputs."+name+".local", "submitter", input.Local, "project-root", "", err))
 			info = nil
 		}
+		if info != nil && input.SizeBytes != 0 && input.SizeBytes != info.Size() {
+			found.missing("shared_inputs."+name+".size_bytes", "shared input "+name+": size differs", "Correct size_bytes to match the local file.", nil)
+		}
+		if info != nil && input.SHA256 != "" {
+			ref, hashErr := myce.IdentifyFile(local)
+			if hashErr != nil {
+				found.missing("shared_inputs."+name+".local", "cannot identify shared input "+name, "Make the local file readable.", nil)
+			} else if input.SHA256 != ref.SHA256 {
+				found.missing("shared_inputs."+name+".sha256", "shared input "+name+": sha256 differs", "Correct sha256 to match the local file.", nil)
+			}
+		}
 		if input.SHA256 == "" {
 			size := int64(1)
 			if info != nil {
@@ -193,8 +204,6 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 			input.SHA256, input.SizeBytes = ref.SHA256, ref.SizeBytes
 		} else if info != nil && input.SizeBytes == 0 {
 			input.SizeBytes = info.Size()
-		} else if info != nil && input.SizeBytes != info.Size() {
-			found.missing("shared_inputs."+name+".size_bytes", "shared input "+name+": size differs", "Correct size_bytes to match the local file.", nil)
 		}
 		input.Local = ""
 		p.SharedInputs[name] = input

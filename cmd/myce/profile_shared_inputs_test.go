@@ -170,6 +170,7 @@ func TestProfileLocalSharedInputIdentity(t *testing.T) {
 		{"derive size", ref.SHA256, "", ""},
 		{"hash mismatch", strings.Repeat("0", 64), "", "shared input runtime: sha256 differs"},
 		{"size mismatch", ref.SHA256, ", size_bytes: 99", "shared input runtime: size differs"},
+		{"size mismatch without hash", "", ", size_bytes: 99", "shared input runtime: size differs"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			profile := `name: shared
@@ -192,7 +193,7 @@ shared_inputs: {runtime: {local: runtime, sha256: "` + tc.hash + `"` + tc.size +
 			if tc.name == "derive size" && (len(findings.findings) != 0 || req.Spec.SharedInputs["runtime"].SizeBytes != ref.SizeBytes) {
 				t.Fatalf("resolve: %+v %+v", req.Spec.SharedInputs, findings)
 			}
-			if tc.name == "size mismatch" && (len(findings.findings) != 1 || !strings.Contains(findings.findings[0].Problem, tc.want)) {
+			if tc.want != "" && (len(findings.findings) != 1 || !strings.Contains(findings.findings[0].Problem, tc.want)) {
 				t.Fatalf("resolve: %+v", findings)
 			}
 			var out bytes.Buffer
