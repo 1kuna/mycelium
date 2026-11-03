@@ -400,3 +400,77 @@ func TestModelSnapshotRestartSkipsUnchangedRehash(t *testing.T) {
 		t.Fatalf("re-verified snapshot re-hashed %d times after restart", n)
 	}
 }
+
+func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
+	if root := os.Getenv("MYCE_SNAPSHOT_CUSTODY_HELPER"); root != "" {
+		clock := &fakeClock{now: time.Unix(1000, 0)}
+		cache := &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 1 << 20, Clock: clock}}
+		w := Worker{ModelRoot: filepath.Join(root, "models"), modelSnapshots: cache}
+		owner := &workerStore{dir: filepath.Join(root, "attempt")}
+		_, _, err := w.acquireModelSnapshots(context.WithValue(context.Background(), sharedInputOwnerKey{}, owner), snapshotJob("org/tiny"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Exit without releasing: the OS drops every flock, as on worker death.
+		os.Exit(0)
+	}
+	root := t.TempDir()
+	modelRoot := filepath.Join(root, "models")
+	tinyModel(t, modelRoot)
+	if err := os.Mkdir(filepath.Join(root, "attempt"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	helper := exec.Command(os.Args[0], "-test.run=^TestModelSnapshotActiveCustodySurvivesRestart$")
+	helper.Env = append(os.Environ(), "MYCE_SNAPSHOT_CUSTODY_HELPER="+root)
+	if b, err := helper.CombinedOutput(); err != nil {
+		t.Fatalf("snapshot helper: %v: %s", err, b)
+	}
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	clock.Advance(time.Hour)
+	rehashes := 0
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 1, Clock: clock}, beforeVerify: func() { rehashes++ }}
+	if err := cache.cache.init(); err != nil {
+		t.Fatal(err)
+	}
+	input, repo, err := resolveModelSnapshot(context.Background(), modelRoot, snapshotJob("org/tiny").Spec.ModelSnapshots["base"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(cache.cache.Root, input.key(), "data", "config.json")
+	if err := cache.admit(context.Background(), "other", 10); err == nil {
+		t.Fatal("restart evicted an active snapshot")
+	}
+	if err := os.Chtimes(path, clock.Now(), clock.Now()); err != nil {
+		t.Fatal("active snapshot removed", err)
+	}
+	if _, release, err := cache.Acquire(context.Background(), input, repo); err == nil {
+		release()
+		t.Fatal("changed active snapshot accepted")
+	}
+	if rehashes != 0 {
+		t.Fatal("active snapshot reverified after restart")
+	}
+	// Exact cleanup failure retains the pin; successful cleanup removes it.
+	cgroup := filepath.Join(root, "attempt-snapshot")
+	if err := os.Mkdir(cgroup, 0700); err != nil {
+		t.Fatal(err)
+	}
+	owner := &workerStore{dir: filepath.Join(root, "attempt"), state: workerState{Identity: "snapshot", Cgroup: cgroup, Job: &Job{}, PID: 1}}
+	// Group custody avoids signalling any real process in this small fixture.
+	if err := saveWorkerJSON(owner.dir, "attempt-snapshot.json", workerState{Identity: "snapshot", PID: 1, Cgroup: cgroup}); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.cleanupOrphan(clock, sharedCleanupDeniedFS{}); err == nil {
+		t.Fatal("cleanup failure ignored")
+	}
+	if pinned, err := sharedInputPinned(cache.cache.Root, input.key()); err != nil || !pinned {
+		t.Fatal("cleanup failure lost pin", err)
+	}
+	if err := owner.cleanupOrphan(clock, fakeMemoryFS{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = cache.admit(context.Background(), "other", 10)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("cleaned snapshot not evicted", err)
+	}
+}

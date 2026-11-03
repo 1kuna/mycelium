@@ -134,14 +134,21 @@ func (c *SharedInputCache) Acquire(ctx context.Context, s SharedInput, nasRoot s
 		return "", nil, err
 	}
 	var once sync.Once
+	var unpin func()
 	release := func() {
 		once.Do(func() {
+			if unpin != nil {
+				unpin()
+			}
 			at := c.cache.Clock.Now()
 			_ = os.Chtimes(filepath.Join(c.cache.Root, key, "ready.json"), at, at)
 			unlockEnvironment(use)
 		})
 	}
 	path, err := c.ensure(ctx, s, nasRoot)
+	if err == nil && sharedInputOwner(ctx) != nil {
+		unpin, err = sharedInputOwner(ctx).pinSharedInput(c.cache.Root, key)
+	}
 	if err == nil {
 		err = ctx.Err()
 	}
@@ -194,6 +201,13 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 			}
 		}
 		if previous != signature {
+			pinned, err := sharedInputPinned(c.cache.Root, key)
+			if err != nil {
+				return "", err
+			}
+			if pinned {
+				return "", errors.New("shared input cache changed while an attempt retains custody")
+			}
 			if c.beforeVerify != nil {
 				c.beforeVerify()
 			}
@@ -709,6 +723,14 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 			return e
 		}
 		if use == nil {
+			continue
+		}
+		pinned, e := sharedInputPinned(c.cache.Root, v.name)
+		if e != nil || pinned {
+			unlockEnvironment(use)
+			if e != nil {
+				return e
+			}
 			continue
 		}
 		e = removeSharedEntry(filepath.Join(c.cache.Root, v.name))

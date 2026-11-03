@@ -422,8 +422,9 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 // helper group cannot be treated as proof of exit.
 func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, memoryFiles ...memoryFS) (cleanupErr error) {
 	defer func() {
-		if cleanupErr == nil {
+		if cleanupErr == nil && (s.state.Job == nil || !s.state.Job.Spec.Run.Docker) {
 			s.releaseSharedInputs()
+			cleanupErr = s.releaseSharedInputPins()
 		}
 	}()
 	if s.state.Preparation != "" {

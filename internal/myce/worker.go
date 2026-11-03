@@ -415,7 +415,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err := s.warnNativeIsolation(&j); err != nil {
 		return nil, err
 	}
-	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(ctx, j)
+	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(context.WithValue(ctx, sharedInputOwnerKey{}, s), j)
 	if sharedErr != nil {
 		if errors.Is(sharedErr, errCheckpointIOPending) {
 			return nil, fmt.Errorf("%w: shared input copy pending", errWorkerCheckpoint)
