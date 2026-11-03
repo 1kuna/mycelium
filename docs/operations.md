@@ -2451,6 +2451,37 @@ NFS/SMB, autofs (including autofs-managed NFS) and the known network FUSE types
 `fuse.sshfs`, `fuse.rclone`, `fuse.smbnetfs` are eligible; generic/local FUSE is
 not. Mycelium does not mount a share or fall back to local storage.
 
+### Linux CIFS boot recovery
+
+The host operator owns the system CIFS mount and its credentials; the worker
+installer creates a user service and does not configure system mounts. For an
+fstab-managed share use `_netdev,nofail,x-systemd.automount` and a bounded
+`x-systemd.mount-timeout=30s`, together with the site's existing CIFS and
+credential options. Enable the network manager's appropriate wait-online service
+and verify that it actually waits for the interface needed by the share;
+`network-online.target` ordering alone does not establish connectivity.
+
+The mount can still fail while the network is down. Add the provided
+`deploy/checkpoint-mount-start-limit.conf` as a systemd **mount unit** drop-in
+(`systemctl edit MOUNT.mount`), then reload systemd and qualify it at the next
+authorized boot. `StartLimitIntervalSec=0` disables the mount's start-rate
+limit: otherwise repeated failed accesses can put the automount in
+`mount-start-limit-hit` and remove it permanently. This permits another mount
+attempt on subsequent worker probes, at the cost of repeated connection attempts
+while the share is down. The bounded background probes and checkpoint admission
+fences remain in effect. Do not put this setting on the worker user service or
+the automount unit. Confirm the effective mount-unit setting and automount state
+with `systemctl show` before qualification.
+
+If an automount is already failed, after the network is restored an authorized
+operator can inspect the exact mount and automount units, reset their failed
+state and start that automount only. Do not restart the worker or queue; check
+that active work is unaffected. After deployment, qualify on a Linux test host:
+boot with its network unavailable, observe checkpoint-dependent work held and
+heartbeats continuing, restore the network, and verify the share mounts and the
+held work is admitted without restarting either service. This native boot check
+is separate from the laptop fixture and requires an authorized test window.
+
 On Linux, missing-runtime refusal applies to NVIDIA display controllers and
 Intel discrete PCIe display endpoints (Intel vendor ID and positive
 [`current_link_width`](https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-bus-pci)
