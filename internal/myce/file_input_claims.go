@@ -21,6 +21,7 @@ type FileInputClaim struct {
 }
 
 type fileInputClaimKey struct{}
+type fileDeclaredOutputKey struct{}
 
 func (q *Queue) inputClaimsRequired() bool {
 	for _, p := range q.s.Policies {
@@ -121,6 +122,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 		required = false
 	}
 	valid := found && (ref.SHA256 == "" || claim.File == ref || ref.SizeBytes == -1 && claim.File.SHA256 == ref.SHA256) && (claim.Allocated || claim.At.Add(filePublicationGrace).After(q.clock.Now()))
+	declaredOutput := false
 	if ctx.Value(fileStoreOrdinaryKey{}) != nil {
 		required = false
 	}
@@ -134,6 +136,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 			for _, pending := range j.PendingOutputRefs {
 				if pending.SHA256 == ref.SHA256 && (ref.SizeBytes == -1 || pending == ref) {
 					required = false
+					declaredOutput = true
 				}
 			}
 		}
@@ -142,6 +145,9 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 	if id == "" {
 		if required {
 			return ctx, inputClaimError()
+		}
+		if declaredOutput {
+			ctx = context.WithValue(ctx, fileDeclaredOutputKey{}, true)
 		}
 		return ctx, nil
 	}
@@ -199,7 +205,7 @@ func (q *Queue) settleFileInputClaims(s Spec) {
 // Admission pools reserve only each other project's unused entitlement. No
 // eviction or retention change; exact worker output transfers remain exempt.
 func (q *Queue) projectFileReservationRefusal(ctx context.Context, status FileStoreStatus, payloads map[string]storedPayload, need, growth uint64) error {
-	if growth == 0 || ctx.Value(fileStoreAttemptKey{}) != nil {
+	if growth == 0 || ctx.Value(fileStoreAttemptKey{}) != nil || ctx.Value(fileDeclaredOutputKey{}) != nil {
 		return nil
 	}
 	s, identified := ctx.Value(fileStoreSubmissionKey{}).(Spec)

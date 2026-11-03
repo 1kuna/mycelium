@@ -135,3 +135,31 @@ func TestProjectFileStoreConcurrentClaimsAndReservedCapacity(t *testing.T) {
 		t.Fatal("rolling allowance lost retained input bytes", u)
 	}
 }
+
+func TestProjectFileStoreDeclaredOutputKeepsPublicationExemption(t *testing.T) {
+	q, _ := fixture(t)
+	c := retentionClient(t, q)
+	q.files.limit = 12
+	setQuotaPolicy(t, q, "neighbor", ProjectPolicy{ReservedFileBytes: 12})
+	setQuotaPolicy(t, q, "producer", ProjectPolicy{MaxRetainedFileBytes: 1})
+	path, ref := policyInput(t, "completed")
+	s := spec("experiment")
+	s.Project = "producer"
+	j := submit(t, q, s)
+	if err := q.update(func() error {
+		j := q.touchJob(j.ID)
+		j.State = "running"
+		j.PendingOutputRefs = FileManifest{"result": ref}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy async workers identify the already-declared result, rather than
+	// presenting the newer exact-attempt header or an input claim.
+	if err := c.UploadFile(context.Background(), path, ref); err != nil {
+		t.Fatal("completed result newly refused", err)
+	}
+	if err := c.HasFile(context.Background(), ref); err != nil {
+		t.Fatal(err)
+	}
+}
