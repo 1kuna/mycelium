@@ -81,7 +81,9 @@ func (q *Queue) checkFileStoreAttempt(ctx context.Context) error {
 	if ctx.Value(fileStoreAttemptKey{}) == nil {
 		return nil
 	}
-	q.mu.RLock()
+	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return err
+	}
 	defer q.mu.RUnlock()
 	_, err := q.fileStoreAttemptJob(ctx, false)
 	return err
@@ -165,7 +167,9 @@ func (q *Queue) fileStoreWriteClass(ctx context.Context, files FileManifest, gro
 func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, projected map[string]storedPayload, files FileManifest, need, growth uint64) (uint64, error) {
 	// Most uploads need no queue mutation. Keep ordinary preflight/creation on
 	// the existing read path; journal only an actual commitment yield.
-	q.mu.RLock()
+	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return 0, err
+	}
 	production, identified, classErr := q.fileStoreWriteClass(ctx, files, growth)
 	reserved := q.outputReservationsFor(projected, "", true)
 	refusal := q.fileStoreReserveRefusal(status, need, growth, reserved, production)

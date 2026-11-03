@@ -43,8 +43,10 @@ func (q *Queue) outputReservationsFor(payloads map[string]storedPayload, exclude
 	return bytes
 }
 
-func (q *Queue) reservedOutputBytes(payloads map[string]storedPayload) uint64 {
-	q.mu.RLock()
+func (q *Queue) reservedOutputBytes(payloads map[string]storedPayload, contexts ...context.Context) uint64 {
+	if lockUploadContext(requestContext(contexts), q.mu.RLock, q.mu.RUnlock) != nil {
+		return 0
+	}
 	defer q.mu.RUnlock()
 	return q.outputReservations(payloads, "")
 }
@@ -81,8 +83,8 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 	if store == nil {
 		return errors.New("file store unavailable")
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	store.admissionMu.Lock()
+	defer store.admissionMu.Unlock()
 	status, payloads, err := store.capacity(ctx)
 	if err != nil {
 		status.Error = "file store capacity unavailable"
@@ -175,8 +177,8 @@ func (q *Queue) admitOutputRetries(ctx context.Context) error {
 	if !pending || store == nil {
 		return nil
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	store.admissionMu.Lock()
+	defer store.admissionMu.Unlock()
 	status, payloads, err := store.capacity(ctx)
 	if err != nil {
 		status.Error = "file store capacity unavailable"
@@ -214,7 +216,9 @@ func (q *Queue) admitOutputRetries(ctx context.Context) error {
 // Unlike input markers, this marker survives the provisional manifest reference:
 // it remains the cleanup owner if a failed/lost attempt discards that manifest.
 func (q *Queue) recordAttemptOutputUpload(hash string, created bool, ctx context.Context) error {
-	q.mu.RLock()
+	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return err
+	}
 	_, input := q.s.JobInputUploads[hash]
 	_, output := q.s.AttemptOutputUploads[hash]
 	q.mu.RUnlock()

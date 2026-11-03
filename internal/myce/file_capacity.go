@@ -42,6 +42,8 @@ type storedPayload struct {
 
 // Callers hold lifecycle.RLock (or its exclusive side for collection). No q.mu.
 func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, error) {
+	s.uploadFilesMu.RLock()
+	defer s.uploadFilesMu.RUnlock()
 	out := map[string]storedPayload{}
 	for _, dir := range []string{"blobs", "uploads"} {
 		entries, err := os.ReadDir(filepath.Join(s.root, dir))
@@ -127,9 +129,25 @@ func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, er
 
 func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
 	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve, UnidentifiedWritesMayUseReserve: s.productionReserve > 0, UnidentifiedReserveAdmittedBytes: s.unidentifiedReserveAdmitted.Load()}
+	// Snapshot reservations before disk: a creation may complete and release
+	// its reservation while inventory is in progress. Admission callers hold
+	// admissionMu, so new lengths cannot be reserved during this snapshot.
+	s.mu.Lock()
+	reservations := make(map[string]uint64, len(s.creations))
+	for hash, creation := range s.creations {
+		reservations[hash] = creation.length
+	}
+	s.mu.Unlock()
 	payloads, err := s.inventory(ctx)
 	if err != nil {
 		return status, nil, err
+	}
+	for hash, length := range reservations {
+		p := payloads[hash]
+		if length > p.length {
+			p.length = length
+			payloads[hash] = p
+		}
 	}
 	var allocated, remaining uint64
 	for _, p := range payloads {
@@ -268,8 +286,8 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	}
 	store.lifecycle.RLock()
 	defer store.lifecycle.RUnlock()
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	store.admissionMu.Lock()
+	defer store.admissionMu.Unlock()
 	status, payloads, err := store.capacity(ctx)
 	if err != nil {
 		status.Error = "file store capacity unavailable"

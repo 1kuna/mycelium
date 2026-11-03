@@ -63,7 +63,10 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestCont
 	if purpose == attemptOutputUploadPurpose {
 		return q.recordAttemptOutputUpload(hash, created, requestCtx)
 	}
-	unlockRequest := requestReadLock(requestCtx, &q.mu)
+	if err := lockUploadContext(requestCtx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return err
+	}
+	unlockRequest := q.mu.RUnlock
 	_, output := q.s.AttemptOutputUploads[hash]
 	_, marked := q.s.JobInputUploads[hash]
 	_, bundle := q.s.BundleUploads[hash]

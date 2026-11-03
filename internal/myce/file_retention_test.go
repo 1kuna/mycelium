@@ -421,10 +421,10 @@ func TestFileRetentionDuplicateUploadReadOnly(t *testing.T) {
 	}
 	revision := q.fileReferenceRevision
 	// A slow unrelated creation cannot hold duplicate checkpoint verification.
-	q.files.mu.Lock()
+	q.files.admissionMu.Lock()
 	err := c.UploadFile(context.Background(), importPath, imported)
 	inputErr := c.UploadJobInput(context.Background(), inputPath, input)
-	q.files.mu.Unlock()
+	q.files.admissionMu.Unlock()
 	if err != nil || inputErr != nil {
 		t.Errorf("duplicate upload failed: generic=%v input=%v", err, inputErr)
 	}

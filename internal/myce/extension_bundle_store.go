@@ -41,8 +41,13 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	// import promotion between our missing check and eligibility enrollment.
 	// Creation precedes the identity lock, matching tus POST-with-upload order.
 	// Neither lock holds q.mu; an active transfer can still finish publication.
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	finish, err := s.beginCreation(requestContext(contexts), next.SHA256)
+	if err != nil {
+		return err
+	}
+	defer finish()
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
 	lock, err := s.uploadLocker.NewLock(next.SHA256)
 	if err != nil {
 		return err

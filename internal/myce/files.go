@@ -126,12 +126,15 @@ type FileStore struct {
 	checkAttempt                func(context.Context) error
 	productionReserve           uint64
 	admit                       func(context.Context, FileStoreStatus, map[string]storedPayload, FileManifest, uint64, uint64) (uint64, error)
-	reservedOutputs             func(map[string]storedPayload) uint64
+	reservedOutputs             func(map[string]storedPayload, ...context.Context) uint64
 	diskProbe                   func(string) (DiskReading, error)
 	controlFiles                controlStorageFiles
 	root                        string
 	limit                       int64
-	mu                          sync.Mutex
+	mu                          sync.Mutex // In-memory creations only.
+	admissionMu                 sync.Mutex
+	uploadFilesMu               sync.RWMutex
+	creations                   map[string]*uploadCreation
 	handler                     http.Handler
 	uploadLocker                tus.Locker
 	syncDir                     func(string) error // Durability failure injection.
@@ -202,6 +205,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	fs.FileModePerm = 0600
 	composer := tus.NewStoreComposer()
 	fs.UseIn(composer)
+	composer.UseCore(creationDataStore{DataStore: fs, mu: &s.uploadFilesMu})
 	locker := filelocker.New(fs.Path)
 	s.uploadLocker = locker
 	locker.UseIn(composer)
@@ -209,11 +213,15 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 		BasePath: "/api/files/uploads/", StoreComposer: composer, DisableDownload: true, DisableTermination: true, DisableConcatenation: true,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		PreUploadCreateCallback: func(e tus.HookEvent) (tus.HTTPResponse, tus.FileInfoChanges, error) {
+			ctx := creationContext(e.Context)
 			ref := FileRef{e.Upload.MetaData["sha256"], e.Upload.Size}
 			if err := ref.validate(); err != nil || e.Upload.SizeIsDeferred {
 				return tus.HTTPResponse{}, tus.FileInfoChanges{}, errors.New("invalid file upload identity")
 			}
-			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], true, e.Context); err != nil {
+			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], true, ctx); err != nil {
+				return tus.HTTPResponse{}, tus.FileInfoChanges{}, err
+			}
+			if err := ctx.Err(); err != nil {
 				return tus.HTTPResponse{}, tus.FileInfoChanges{}, err
 			}
 			return tus.HTTPResponse{}, tus.FileInfoChanges{ID: ref.SHA256}, nil
@@ -342,9 +350,9 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		s.handler.ServeHTTP(w, r)
 		return
 	}
-	// tusd serializes each PATCH/HEAD; only creation/admission is global.
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Preserve immediate cancellation: tus otherwise delays it for PATCH flushes.
+	r = r.WithContext(context.WithValue(r.Context(), uploadCreationContextKey{}, r.Context()))
+	// Parse before claiming an identity or reserving capacity.
 	length, err := strconv.ParseInt(r.Header.Get("Upload-Length"), 10, 64)
 	var hash, purpose string
 	for _, field := range strings.Split(r.Header.Get("Upload-Metadata"), ",") {
@@ -365,6 +373,16 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid upload identity", 400)
 		return
 	}
+	finish, err := s.beginCreation(r.Context(), hash)
+	if err != nil {
+		uploadCancelled(w, r.Context())
+		return
+	}
+	defer finish()
+	// Recheck after waiting for a previous creation of this identity.
+	if uploadCancelled(w, r.Context()) {
+		return
+	}
 	if s.verify(r.Context(), ref) == nil {
 		if e := s.refreshBlob(s.blob(ref)); e != nil {
 			http.Error(w, "storage freshness unavailable", 503)
@@ -383,6 +401,9 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		return
 	}
+	if uploadCancelled(w, r.Context()) {
+		return
+	}
 	if st, e := os.Stat(filepath.Join(s.root, "uploads", hash+".info")); e == nil && st.Mode().IsRegular() {
 		// A repeated create (including a lost response) addresses the same tus upload.
 		if e := s.refreshUpload(hash); e != nil {
@@ -398,9 +419,28 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		return
 	}
+	// Serialize only the disk snapshot and reservation. All queue waits and
+	// persistence happen after this gate is released. Other admission paths
+	// include these reservations in capacity(), including before tus writes .info.
+	if err := lockUploadContext(r.Context(), s.admissionMu.Lock, s.admissionMu.Unlock); err != nil {
+		uploadCancelled(w, r.Context())
+		return
+	}
 	status, payloads, e := s.capacity(r.Context())
 	if e != nil {
 		status.Error = "file store capacity unavailable"
+	}
+	if e := fileStoreRefusal(status, uint64(length)); e != nil {
+		s.admissionMu.Unlock()
+		respond(w, nil, e)
+		return
+	}
+	s.mu.Lock()
+	s.creations[hash].length = uint64(length)
+	s.mu.Unlock()
+	s.admissionMu.Unlock()
+	if uploadCancelled(w, r.Context()) {
+		return
 	}
 	// A declared output becomes allocated in this creation. Preserve every
 	// other estimate/identity reservation before admitting these bytes.
@@ -408,7 +448,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		payloads = map[string]storedPayload{}
 	}
 	payloads[hash] = storedPayload{length: uint64(length)}
-	need := addDiskBytes(uint64(length), s.reservedOutputs(payloads))
+	need := addDiskBytes(uint64(length), s.reservedOutputs(payloads, r.Context()))
 	unidentified, err := s.admit(r.Context(), status, payloads, FileManifest{"upload": ref}, need, uint64(length))
 	if err != nil {
 		respond(w, nil, err)
@@ -417,6 +457,9 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	if _, e := os.Lstat(filepath.Join(s.root, "uploads", hash)); e == nil {
 		// No .info means no resumable upload authority; do not silently overwrite.
 		http.Error(w, "unindexed upload requires operator recovery", 409)
+		return
+	}
+	if uploadCancelled(w, r.Context()) {
 		return
 	}
 	response := &uploadResponse{ResponseWriter: w}
