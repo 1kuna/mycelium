@@ -174,6 +174,56 @@ GPU runtime and application parity require their own qualification.
 
 ## Transfer behavior
 
+### Project input attribution and capacity reservations (#464)
+
+Before uploading, current profile, files-from and Go `Run` clients obtain a
+queue-issued input claim bound to project, class, SHA-256 and size. Python
+`run` does the same; direct `upload_file(path, project="demo", class_="experiment")`
+and `myce file put --project demo FILE` provide explicit attribution. Go callers
+wrap upload context with `WithFileStoreSubmission(ctx, spec)`. Claims survive
+queue restart. Upload creation, resume and deduplicated HEAD reuse verify the
+claim; changing a project header cannot transfer its quota charge.
+
+API clients call `POST /api/files/input-claims` with `{project, class, file}`,
+then send its `id` as `X-Myce-Input-Claim` on upload POST/HEAD/PATCH and input
+blob HEAD. A claim commits the file's full declared length against the project's
+quota before any bytes arrive. Concurrent claims are checked in one SQLite
+transaction. Each digest counts once per project, including unfinished and
+abandoned inputs, and once in global physical usage. Submission transfers the
+claim into ordinary job attribution; a settled validation receipt remains valid
+for the six-hour publication grace so concurrent deduplicated transfers finish.
+The receipt adds no quota charge or retention; owner release works as before.
+Unused, unallocated claims expire after the existing six-hour publication grace;
+allocated inputs retain attribution until submission or ordinary file collection.
+Claims without bytes are reconciled after that grace. No claim deletes bytes.
+
+Local project policy may set `max_retained_file_bytes`,
+`max_added_file_bytes_24h`, and `reserved_file_bytes` (all default zero/off).
+The reservation protects that project's unused entitlement from other projects'
+new input allocations and declared async output commitments, in addition to the
+existing production reserve. Retained shared digests count toward each holder's
+entitlement. Preflight is advisory; serialized upload creation checks again.
+Status `file_store.projects` exposes attribution, limits, reservation and refusal
+reasons. Quota refusal is `project_file_store_quota`; a protected pool reports
+`file_store_capacity` naming `reserved_file_bytes`.
+
+When any such local policy is enabled, unidentified input uploads and resumes
+return `file_input_claim_required`; upgrade the client or obtain a claim. Exact
+worker attempts and legacy declared async output identities keep their existing
+output route. Failed-attempt diagnostics carry the exact execution identity.
+Go/CLI and Python result recovery upload with the captured failed-execution fence
+(`WithFileStoreRecovery` / `upload_file(..., recovery=plan)`); a changed attempt
+is refused. Production is exempt from project quotas and project reservations;
+completed output transfers receive no new refusal. Physical capacity still
+applies. Existing retained bytes, registry assets and checkpoints are preserved;
+this does not activate the parked storage backend or shorten retention.
+
+The fleet authenticates one operator credential. A claim is server-verifiable
+attribution to an operator-selected project, not a separately authenticated
+project account. It cannot prevent that operator from choosing another project
+or presenting an active worker attempt. Keep claims and operator authority out
+of payloads.
+
 `get` refuses an existing destination and retains a `.myce-partial` download
 beside it after interruption. Rerunning resumes it. A bad range response, byte
 count or hash is refused; a server ignoring Range causes a safe complete restart.
@@ -448,14 +498,17 @@ paths, for example `python "$MYCE_INPUT_RUNTIME/run.py" "$MYCE_INPUT_ORIGINAL"`.
 Extension commands receive the same environment variables; their NAS output and
 checkpoint contracts are unchanged. Extension execution must be native.
 
-`spec check --resolve` evaluates target eligibility but cannot check a worker's
-NAS file existence or bytes. A path relative to the NAS mount can therefore
+`spec check --resolve` evaluates target eligibility and labels worker NAS reads
+as unverified. From the next release, optional `--inspect-nas` requests cached,
+authenticated worker existence evidence; repeat after worker heartbeats.
+`pending` or `unverified` remains unknown. `present` does not verify bytes,
+and `missing` flags a wrong checkpoint-root-relative path before submission.
+Samples expire after one minute, and require upgraded workers. A path relative to the NAS mount can therefore
 resolve successfully and still be missing beneath `--checkpoint-root`. Import
 such a file with profile `local:` or `myce file put`, then omit `nas` and use its
 verified hash and size. This needs no worker root change or cache clearing.
 
-On the next release, resolve explicitly labels NAS reads as unverified. A
-missing NAS source still fails before launch with `input_staging: not_found`;
+A missing NAS source still fails before launch with `input_staging: not_found`;
 `execution_cause.path_diagnostic` identifies the shared-input field (for example
 `shared_inputs.movie.nas`), the worker side, and logical base
 `worker-checkpoint-root`. The expanded mount path and underlying syscall text
@@ -524,7 +577,8 @@ or a regular file. Blobs named by SHA-256 (large files) are verified while
 copying; blobs named by Git SHA-1 (small files) are hashed and checked against
 their name. The verified closure is copied into the worker's model snapshot
 cache (`model-snapshots` under the file cache folder), reused by identical
-snapshots, protected by use locks until attempt cleanup, and evicted only when
+snapshots, protected by use locks and durable attempt pins until exact process
+or container cleanup, and evicted only when
 inactive. That cache has its own budget, `--model-cache-bytes` (default
 100 GiB), plus the usual free-space floor; `--file-cache-bytes` does not apply.
 When the cache folder and the hub share a copy-on-write volume (APFS, or Linux
@@ -535,7 +589,10 @@ writing or changing permissions on the hub blob would change the "verified"
 copy. Other volumes, including a NAS, get a full copy. After verification the
 worker records each file's size, mode, modification time, inode and change time
 beside the entry; a restarted worker re-hashes the entry only when that record
-no longer matches. Copies are mode read-only, which is cooperative for
+no longer matches and no attempt still owns a durable pin. Pins survive worker
+death independently of process-held locks; restart cleanup reads the saved
+attempt receipt before releasing them. A changed pinned entry is refused without
+rehashing or replacing the active snapshot. Copies are mode read-only, which is cooperative for
 unsandboxed jobs, as for shared inputs.
 
 Only workers with a model root advertise `model_snapshots_v1`; other workers do

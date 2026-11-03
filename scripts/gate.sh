@@ -73,7 +73,10 @@ export GOCACHE="$shared_build" GOMODCACHE="$shared_modules" GOPATH="$scratch/gop
 export XDG_CONFIG_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.cache" XDG_DATA_HOME="$HOME/.local/share"
 export GOTOOLCHAIN=local GOTELEMETRY=off GOPROXY=off GOSUMDB=off GOENV=off GOWORK=off
 export UV_OFFLINE=1 UV_PYTHON_DOWNLOADS=never UV_CACHE_DIR="$scratch/uv" PIXI_HOME="$scratch/pixi"
-for gate_setting in ${!MYCE_@}; do unset "$gate_setting"; done
+for gate_setting in ${!MYCE_@}; do
+  # Process custody must survive nested test workers; it contains no authority.
+  [[ $gate_setting == MYCE_PROCESS_SESSION ]] || unset "$gate_setting"
+done
 # Go's race runtime otherwise sleeps one second on EVERY helper-process exit.
 # Tests join workers explicitly; keep instrumentation, omit that artificial wait.
 export GORACE=atexit_sleep_ms=0

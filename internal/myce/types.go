@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -164,35 +165,50 @@ type Spec struct {
 	Workload      *Workload         `json:"workload,omitempty" yaml:"workload,omitempty"`
 	SubmissionKey string            `json:"submission_key,omitempty" yaml:"submission_key,omitempty"`
 
-	Files           FileManifest           `json:"files,omitempty" yaml:"files,omitempty"`
-	Kind            string                 `json:"kind,omitempty" yaml:"kind,omitempty"`
-	Program         *Program               `json:"program,omitempty" yaml:"program,omitempty"`
-	Args            []string               `json:"args,omitempty" yaml:"args,omitempty"`
-	SizeHint        SizeHint               `json:"size_hint,omitempty" yaml:"size_hint,omitempty"`
-	Inputs          map[string]string      `json:"inputs,omitempty" yaml:"inputs,omitempty"`
-	Outputs         map[string]string      `json:"outputs,omitempty" yaml:"outputs,omitempty"`
-	Name            string                 `json:"name" yaml:"name"`
-	Project         string                 `json:"project" yaml:"project"`
-	Priority        string                 `json:"priority" yaml:"priority"`
-	Class           string                 `json:"class,omitempty" yaml:"class,omitempty"`
-	Logs            string                 `json:"logs,omitempty" yaml:"logs,omitempty"`
-	Deadline        *time.Time             `json:"deadline,omitempty" yaml:"deadline,omitempty"`
-	Run             RunSpec                `json:"run" yaml:"run"`
-	Needs           ResourceNeeds          `json:"needs" yaml:"needs"`
-	Execution       *ExecutionSpec         `json:"execution,omitempty" yaml:"execution,omitempty"`
-	Extension       string                 `json:"extension,omitempty" yaml:"extension,omitempty"`
-	ExtensionDigest string                 `json:"extension_digest,omitempty" yaml:"extension_digest,omitempty"`
-	ExtensionCheck  *ExtensionCheckRequest `json:"extension_check,omitempty" yaml:"extension_check,omitempty"`
-	Environment     Environment            `json:"environment,omitempty" yaml:"environment,omitempty"`
-	AllowedMachines []string               `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
-	StartBy         *time.Time             `json:"start_by,omitempty" yaml:"start_by,omitempty"`
-	StartWindow     string                 `json:"start_window,omitempty" yaml:"start_window,omitempty"`
-	GiveUpAt        *time.Time             `json:"give_up_at,omitempty" yaml:"give_up_at,omitempty"`
-	ExpectedMinutes float64                `json:"expected_minutes,omitempty" yaml:"expected_minutes,omitempty"`
-	Resumable       bool                   `json:"resumable" yaml:"resumable"`
+	Files            FileManifest           `json:"files,omitempty" yaml:"files,omitempty"`
+	Kind             string                 `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Program          *Program               `json:"program,omitempty" yaml:"program,omitempty"`
+	Args             []string               `json:"args,omitempty" yaml:"args,omitempty"`
+	SizeHint         SizeHint               `json:"size_hint,omitempty" yaml:"size_hint,omitempty"`
+	Inputs           map[string]string      `json:"inputs,omitempty" yaml:"inputs,omitempty"`
+	Outputs          map[string]string      `json:"outputs,omitempty" yaml:"outputs,omitempty"`
+	Name             string                 `json:"name" yaml:"name"`
+	Project          string                 `json:"project" yaml:"project"`
+	Priority         string                 `json:"priority" yaml:"priority"`
+	Class            string                 `json:"class,omitempty" yaml:"class,omitempty"`
+	Logs             string                 `json:"logs,omitempty" yaml:"logs,omitempty"`
+	Deadline         *time.Time             `json:"deadline,omitempty" yaml:"deadline,omitempty"`
+	Run              RunSpec                `json:"run" yaml:"run"`
+	Needs            ResourceNeeds          `json:"needs" yaml:"needs"`
+	Execution        *ExecutionSpec         `json:"execution,omitempty" yaml:"execution,omitempty"`
+	Extension        string                 `json:"extension,omitempty" yaml:"extension,omitempty"`
+	ExtensionDigest  string                 `json:"extension_digest,omitempty" yaml:"extension_digest,omitempty"`
+	ExtensionCheck   *ExtensionCheckRequest `json:"extension_check,omitempty" yaml:"extension_check,omitempty"`
+	Environment      Environment            `json:"environment,omitempty" yaml:"environment,omitempty"`
+	ExcludedMachines []string               `json:"excluded_machines,omitempty" yaml:"excluded_machines,omitempty"`
+	AllowedMachines  []string               `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
+	StartBy          *time.Time             `json:"start_by,omitempty" yaml:"start_by,omitempty"`
+	StartWindow      string                 `json:"start_window,omitempty" yaml:"start_window,omitempty"`
+	GiveUpAt         *time.Time             `json:"give_up_at,omitempty" yaml:"give_up_at,omitempty"`
+	ExpectedMinutes  float64                `json:"expected_minutes,omitempty" yaml:"expected_minutes,omitempty"`
+	Resumable        bool                   `json:"resumable" yaml:"resumable"`
 }
 
 func (s Spec) Validate() error {
+	for _, name := range s.ExcludedMachines {
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
+			return reject("job_placement_invalid", errors.New("excluded_machines requires nonempty machine names without surrounding whitespace"))
+		}
+	}
+	if len(s.AllowedMachines) > 0 {
+		remaining := false
+		for _, name := range s.AllowedMachines {
+			remaining = remaining || !contains(s.ExcludedMachines, name)
+		}
+		if !remaining {
+			return reject("job_placement_invalid", errors.New("excluded_machines excludes every job allowed_machines entry"))
+		}
+	}
 	if s.StorageProtocol != "" || s.OutputDestination != nil || s.OutputRetention != "" {
 		return errors.New(parkedStorageReason)
 	}
@@ -608,6 +624,7 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
+	NASPathReports  []NASPathReport   `json:"nas_path_reports,omitempty"`
 	AttemptProtocol string            `json:"attempt_protocol,omitempty"`
 	Attempts        []AttemptReport   `json:"attempts,omitempty"`
 	Recovering      bool              `json:"recovering,omitempty"` // Reconcile custody without offering new work.
@@ -621,6 +638,7 @@ type Checkin struct {
 	Running         *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	NASPathChecks              []NASPathCheck               `json:"nas_path_checks,omitempty"`
 	SharedHost                 *SharedHostProfile           `json:"shared_host,omitempty"`
 	ExtensionQualificationPlan []ExtensionQualificationPlan `json:"extension_qualification_plan,omitempty"`
 

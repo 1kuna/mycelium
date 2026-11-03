@@ -1236,7 +1236,14 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	stopEvents := d.observeDockerEvents()
 	defer stopEvents()
 	if release != nil {
-		defer release()
+		defer func() {
+			d.mu.Lock()
+			released := d.state.Released
+			d.mu.Unlock()
+			if released {
+				release()
+			}
+		}()
 	}
 	result := Result{Machine: p.machine, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	e := launch()
@@ -1488,6 +1495,9 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 		state.Pending = true
 	}
 	if state.Released {
+		if err := s.releaseSharedInputPins(); err != nil {
+			return nil, err
+		}
 		if s.state.Result == nil {
 			// Missing final output/result remains an interruption, but durable
 			// stage/OOM evidence cannot be erased by this recovery boundary.
@@ -1546,7 +1556,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 		return nil, err
 	}
 	p := &process{job: *s.state.Job, machine: w.Machine.ID, done: make(chan workerFinish, 1), docker: d, savePriorityStop: s.priorityStopRecorder()}
-	go d.run(p, *s.state.Job, s.state.Session, output, nil, func() error { return recoveryErr })
+	go d.run(p, *s.state.Job, s.state.Session, output, func() { _ = s.releaseSharedInputPins() }, func() error { return recoveryErr })
 	return p, nil
 }
 

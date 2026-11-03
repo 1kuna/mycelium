@@ -30,7 +30,11 @@ MY-19 output parity precedes production splits. Static job validation is
 `myce spec check FILE`; it grants no live admission or native qualification.
 `myce spec check --resolve --entry NAME .mycelium/adapter.yaml` asks the queue,
 read-only, which targets can run a command entry and how to stage what they
-cannot see ([resolve](jobs.md)).
+cannot see ([resolve](jobs.md)). Native variant entries also return metadata and
+lock-input gaps; their local recipes remain unqualified until frozen registration
+and qualification. Optional `--inspect-nas` gathers cached worker existence
+signals for declared NAS shared inputs; repeat after heartbeats and treat absent
+evidence and bytes as unverified. This requires upgraded queue and workers.
 
 ## Project instruction file
 

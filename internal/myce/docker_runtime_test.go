@@ -156,3 +156,17 @@ func TestDockerRuntimeDisabledWorkerMakesNoCalls(t *testing.T) {
 		t.Fatal("disabled worker advertised Docker", err)
 	}
 }
+
+func TestDockerRuntimeReasonIgnoresExcludedMachine(t *testing.T) {
+	q, _ := fixture(t)
+	enabled := dockerSharedMachine()
+	native := machine("native-only", "fake")
+	check(t, q, enabled, nil)
+	check(t, q, native, nil)
+	s := dockerJob().Spec
+	s.ExcludedMachines = []string{enabled.ID}
+	j := submit(t, q, s)
+	if got := job(t, q, j.ID).Reason; got != "needs docker runtime; no worker has it enabled" {
+		t.Fatal("excluded Docker worker masked actionable reason", got)
+	}
+}

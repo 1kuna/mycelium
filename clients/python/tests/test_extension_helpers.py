@@ -11,6 +11,26 @@ from mycelium import Client
 
 
 class ExtensionClientTests(unittest.TestCase):
+    def test_project_upload_carries_claim_through_resume(self):
+        client = Client(token="fixture")
+        calls = []
+        def request(method, endpoint, data=None, headers=None, size=0):
+            self.assertEqual(headers["X-Myce-Input-Claim"], "issued")
+            calls.append(method)
+            if method == "HEAD" and "/blobs/" in endpoint and calls.count("HEAD") <= 2:
+                raise APIError(404, "missing")
+            response = io.BytesIO()
+            response.headers = {"Upload-Offset": str(size if method == "PATCH" else 0), "Upload-Length": "4"}
+            return response
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder, "input")
+            source.write_bytes(b"data")
+            with patch.object(client, "_call", return_value={"id": "issued"}) as claim, \
+                 patch.object(client, "_file_request", side_effect=request):
+                ref = client.upload_file(source, project="demo", class_="experiment")
+            claim.assert_called_once_with("POST", "/api/files/input-claims", {"project": "demo", "class": "experiment", "file": ref})
+        self.assertIn("PATCH", calls)
+
     def test_upload_republishes_expired_content(self):
         client = Client(token="fixture")
         body = b"republished input"
@@ -118,7 +138,7 @@ class ExtensionClientTests(unittest.TestCase):
                  patch.object(client, "download_result") as download:
                 self.assertEqual(client.run("example@1", inputs={"input.json": "local.json"},
                     outputs=directory, project="demo", class_="batch", key="stable", timeout=5), job)
-                upload.assert_called_once_with("local.json")
+                upload.assert_called_once_with("local.json", project="demo", class_="batch")
                 submit.assert_called_once_with({"name": "example@1", "project": "demo", "class": "batch",
                     "extension": "example@1", "submission_key": "stable", "files": {"input.json": ref}}, timeout=5)
                 download.assert_called_once_with(job["id"], "result.json", Path(directory) / "result.json")

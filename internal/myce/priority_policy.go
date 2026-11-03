@@ -312,6 +312,7 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 				old := q.s.Policies[name]
 				v.MaxRetainedFileBytes = cmp.Or(v.MaxRetainedFileBytes, old.MaxRetainedFileBytes)
 				v.MaxAddedFileBytes24h = cmp.Or(v.MaxAddedFileBytes24h, old.MaxAddedFileBytes24h)
+				v.ReservedFileBytes = cmp.Or(v.ReservedFileBytes, old.ReservedFileBytes)
 				projects[name] = v
 			}
 		}
@@ -384,7 +385,7 @@ func (q *Queue) slotSpec(s *ModelSlot) Spec {
 		}
 	}
 	for _, p := range q.s.Pins {
-		if p.Model == s.Model && p.Assigned == s.Machine && p.active(q.clock.Now()) {
+		if p.Model == s.Model && p.Assigned == s.Machine && p.AssignedDevice == s.Device && p.active(q.clock.Now()) {
 			candidate := Spec{Project: p.Project, Priority: "production"}
 			if !found || q.comparePriority(candidate, best) < 0 {
 				best = candidate

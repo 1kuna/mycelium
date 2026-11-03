@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // workerRetry makes reconnect decisions independent of timer delivery. Timers
@@ -317,6 +319,9 @@ func saveWorkerJSON(dir, name string, v any) error {
 // Inspect both the leader and surviving descendants. The per-execution
 // marker prevents PID/PGID reuse from targeting an unrelated process group.
 func workerGroupMembers(group int) ([]int, error) {
+	if group <= 0 {
+		return nil, errors.New("invalid process group")
+	}
 	out, err := processPS("-ax", "-o", "pid=,pgid=,stat=")
 	if err != nil {
 		return nil, fmt.Errorf("inspect process groups: %w", err)
@@ -332,7 +337,11 @@ func workerGroupMembers(group int) ([]int, error) {
 		if e1 != nil || e2 != nil {
 			return nil, errors.New("invalid process inventory")
 		}
-		if pgid == group && !strings.HasPrefix(fields[2], "Z") {
+		session, sessionErr := unix.Getsid(pid)
+		if sessionErr != nil && !errors.Is(sessionErr, syscall.ESRCH) {
+			return nil, sessionErr
+		}
+		if (pgid == group || sessionErr == nil && session == group) && !strings.HasPrefix(fields[2], "Z") {
 			members = append(members, pid)
 		}
 	}
@@ -343,10 +352,13 @@ func workerGroupMembers(group int) ([]int, error) {
 // that as disappearance only after a successful inventory proves no live
 // members remain; permission errors for surviving processes stay fail-closed.
 func signalWorkerGroup(group int, signal syscall.Signal) error {
-	return signalWorkerGroupUsing(group, signal, syscall.Kill, workerGroupMembers)
+	return signalWorkerSession(group, signal)
 }
-func signalWorkerGroupUsing(group int, signal syscall.Signal, kill func(int, syscall.Signal) error, inventory func(int) ([]int, error)) error {
+func signalWorkerGroupUsing(group int, signal syscall.Signal, kill func(int, syscall.Signal) error, inventory func(int) ([]int, error), delivered ...func()) error {
 	err := kill(-group, signal)
+	if err == nil && len(delivered) > 0 {
+		delivered[0]()
+	}
 	if err == nil || errors.Is(err, syscall.ESRCH) {
 		return nil
 	}
@@ -410,8 +422,9 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 // helper group cannot be treated as proof of exit.
 func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, memoryFiles ...memoryFS) (cleanupErr error) {
 	defer func() {
-		if cleanupErr == nil {
+		if cleanupErr == nil && (s.state.Job == nil || !s.state.Job.Spec.Run.Docker || s.state.Identity == "") {
 			s.releaseSharedInputs()
+			cleanupErr = s.releaseSharedInputPins()
 		}
 	}()
 	if s.state.Preparation != "" {

@@ -11,6 +11,7 @@ type fileStoreSubmissionKey struct{}
 type fileStoreAttemptKey struct{}
 type fileStoreOrdinaryKey struct{}
 type fileStoreAttempt struct {
+	Recovery bool `json:"recovery,omitempty"`
 	Execution
 	Machine string `json:"machine"`
 	Session string `json:"session"`
@@ -23,7 +24,15 @@ func WithFileStoreSubmission(ctx context.Context, s Spec) context.Context {
 func withFileStoreAttempt(ctx context.Context, j Job) context.Context {
 	return context.WithValue(ctx, fileStoreAttemptKey{}, fileStoreAttempt{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session})
 }
+
+// WithFileStoreRecovery fences publication to the captured failed execution.
+func WithFileStoreRecovery(ctx context.Context, p RecoveryPlan) context.Context {
+	return context.WithValue(ctx, fileStoreAttemptKey{}, fileStoreAttempt{Execution: p.Execution, Machine: p.Machine, Session: p.Session, Recovery: true})
+}
 func fileStoreSubmissionHeaders(ctx context.Context, r *http.Request) {
+	if id, ok := ctx.Value(fileInputClaimKey{}).(string); ok {
+		r.Header.Set("X-Myce-Input-Claim", id)
+	}
 	if s, ok := ctx.Value(fileStoreSubmissionKey{}).(Spec); ok {
 		r.Header.Set("X-Myce-Project", s.Project)
 		r.Header.Set("X-Myce-Class", s.Class)
@@ -35,6 +44,9 @@ func fileStoreSubmissionHeaders(ctx context.Context, r *http.Request) {
 }
 func fileStoreSubmissionRequest(r *http.Request) (*http.Request, error) {
 	ctx := r.Context()
+	if id := r.Header.Get("X-Myce-Input-Claim"); id != "" {
+		ctx = context.WithValue(ctx, fileInputClaimKey{}, id)
+	}
 	if raw := r.Header.Get("X-Myce-File-Attempt"); raw != "" {
 		var attempt fileStoreAttempt
 		if err := json.Unmarshal([]byte(raw), &attempt); err != nil {
@@ -65,6 +77,10 @@ func (q *Queue) fileStoreAttemptJob(ctx context.Context, allocating bool) (*Job,
 		return nil, nil
 	}
 	j := q.s.Jobs[r.ID]
+	if r.Recovery {
+		err := recoveryFence(j, RecoveryRequest{Execution: r.Execution, Machine: r.Machine, Session: r.Session})
+		return j, err
+	}
 	if j == nil || j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || cancelled(j) {
 		return nil, ErrStale
 	}
@@ -115,7 +131,7 @@ func (q *Queue) fileStoreWriteClass(ctx context.Context, files FileManifest, gro
 	if j, err := q.fileStoreAttemptJob(ctx, growth > 0); err != nil {
 		return false, true, err
 	} else if j != nil {
-		return q.priorityMatch(j.Spec).Tier == "production", true, nil
+		return ctx.Value(fileStoreAttemptKey{}).(fileStoreAttempt).Recovery || q.priorityMatch(j.Spec).Tier == "production", true, nil
 	}
 	if ctx.Value(fileStoreOrdinaryKey{}) != nil {
 		return false, true, nil
@@ -168,7 +184,7 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 	q.mu.RLock()
 	production, identified, classErr := q.fileStoreWriteClass(ctx, files, growth)
 	reserved := q.outputReservationsFor(projected, "", true)
-	refusal := q.fileStoreReserveRefusal(status, need, growth, reserved, production)
+	refusal := q.fileStoreAdmissionRefusal(ctx, status, projected, need, growth, reserved, production)
 	// Input uploads naming a project are checked against its file-store quota
 	// at preflight and tus creation; worker results and bundles never are.
 	// Use the class submit will see, unlike the reserve, so a production
@@ -194,4 +210,16 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 		return ordinary, nil
 	}
 	return 0, refusal
+}
+
+// Use the same combined reserve pools for upload, submit and retry admission.
+// The inventory is detached; caller holds q.mu only for metadata checks.
+func (q *Queue) fileStoreAdmissionRefusal(ctx context.Context, status FileStoreStatus, payloads map[string]storedPayload, need, growth, productionReserved uint64, production bool) error {
+	if err := q.fileStoreReserveRefusal(status, need, growth, productionReserved, production); err != nil {
+		return err
+	}
+	if !production {
+		status.FreeBytes = q.nonProductionFileStoreFree(status, productionReserved)
+	}
+	return q.projectFileReservationRefusal(ctx, status, payloads, need, growth)
 }

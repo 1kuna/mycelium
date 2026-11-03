@@ -115,3 +115,31 @@ func TestHostLaunchSlowAuthorizationTelemetry(t *testing.T) {
 		t.Fatal("fast authorization logged as slow", logs.String())
 	}
 }
+
+func TestQueueSlowUpdatePhaseBreakdown(t *testing.T) {
+	q, clock := fixture(t)
+	// Both queue decisions and the observational clock are deterministic here.
+	q.holdClock = clock
+	q.updateHolds.count.Store(0)
+	logs := &launchLogWriter{q: q, t: t}
+	old := log.Writer()
+	log.SetOutput(logs)
+	defer log.SetOutput(old)
+	if err := q.update(func() error { clock.Advance(300 * time.Millisecond); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	line := logs.String()
+	for _, field := range []string{"event=slow_queue_mutex_hold", "duration_ms=300.000", "records_snapshot_ms=0.000", "fn_body_ms=300.000", "persist_commit_ms=0.000", "usage_accounting_ms=0.000", "notify_ms=0.000"} {
+		if !strings.Contains(line, field) {
+			t.Errorf("missing %s in %s", field, line)
+		}
+	}
+	logs.Reset()
+	q.updateHolds.count.Store(0)
+	if err := q.update(func() error { clock.Advance(249 * time.Millisecond); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if logs.Len() != 0 {
+		t.Fatal("subthreshold update logged", logs.String())
+	}
+}

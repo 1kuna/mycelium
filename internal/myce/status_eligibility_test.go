@@ -359,3 +359,28 @@ func TestStatusEligibleHostsRetainInflightModelCall(t *testing.T) {
 		})
 	}
 }
+
+func TestStatusExclusionsKeepFutureHostsRelevantToGates(t *testing.T) {
+	q, clock := fixture(t)
+	a := machine("worker-a", "fake", "host-a")
+	check(t, q, a, nil)
+	s := spec("experiment")
+	s.ExcludedMachines = []string{a.ID}
+	j := submit(t, q, s)
+	// Existing maintenance gates count the unrestricted marker on future hosts.
+	assertEligibleStatus(t, q, j.ID, "queued", nil, nil, true)
+	var observed Spec
+	if err := json.Unmarshal(statusJobs(t, q)[j.ID]["spec"], &observed); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(observed.ExcludedMachines, s.ExcludedMachines) {
+		t.Fatal("status lost exclusions", observed.ExcludedMachines)
+	}
+	b := machine("worker-b", "fake", "future-host")
+	running := check(t, q, b, nil).Job
+	if running == nil || running.ID != j.ID {
+		t.Fatal("future host not eligible", running)
+	}
+	clock.Advance(time.Second)
+	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"future-host"}, true)
+}

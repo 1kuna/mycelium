@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mycelium/internal/probeguard"
@@ -73,11 +74,26 @@ func (q *Queue) sharedPressureReason(m *Machine) string {
 	if m.SharedHostYieldReason != "" {
 		return m.SharedHostYieldReason
 	}
-	p := m.SharedHostPressure
-	if !validSharedPressure(p) || p.ReceivedAt.After(q.clock.Now()) || q.clock.Now().Sub(p.ReceivedAt) >= signalMaxAge {
+	if !q.sharedPressureFresh(m) {
 		return "shared host pressure observation unknown or stale"
 	}
 	return ""
+}
+
+// Expected owner yield is temporary occupancy, not an infrastructure failure.
+// Health and alerts distinguish it from missing/stale sensor evidence.
+func (q *Queue) sharedPressureFresh(m *Machine) bool {
+	p := m.SharedHostPressure
+	now := q.clock.Now()
+	if !validSharedPressure(p) || p.ReceivedAt.After(now) {
+		return false
+	}
+	// Reuse bounded matching-session contact during queue delay. Successive
+	// pending requests must never extend one observation beyond that budget.
+	reportAt := p.ReceivedAt.Add(time.Duration(p.AgeSeconds * float64(time.Second)))
+	contact := maxTime(reportAt, q.lastContact(m, now))
+	return now.Sub(contact)+time.Duration(p.AgeSeconds*float64(time.Second)) < signalMaxAge &&
+		now.Sub(p.ReceivedAt) < signalMaxAge+pendingCheckinContactLimit
 }
 
 // hostPressureReason is the first owner-pressure reason among m's host
@@ -179,4 +195,76 @@ func sharedMemoryPSI(b []byte) (float64, error) {
 		}
 	}
 	return 0, errors.New("memory PSI unavailable")
+}
+
+// Pressure sampling has its own lane: a slow HTTP check-in must not delay
+// consumption of a completed probe or the next refresh. A stuck source retains
+// its original sample age; a completed failure immediately removes the sample.
+type sharedPressureMonitor struct {
+	mu      sync.Mutex
+	clock   Clock
+	source  func(context.Context) (SharedHostPressure, error)
+	enabled bool
+	epoch   uint64
+	current *SharedHostPressure
+}
+
+func (m *sharedPressureMonitor) snapshot(enabled bool) *SharedHostPressure {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.enabled != enabled {
+		m.enabled = enabled
+		m.epoch++
+		m.current = nil
+	}
+	if m.current == nil {
+		return nil
+	}
+	p := *m.current
+	p.AgeSeconds = m.clock.Now().Sub(p.sampledAt).Seconds()
+	return &p
+}
+
+func (m *sharedPressureMonitor) sample(ctx context.Context) {
+	m.mu.Lock()
+	enabled, epoch := m.enabled, m.epoch
+	m.mu.Unlock()
+	if !enabled {
+		return
+	}
+	sampledAt := m.clock.Now()
+	// Sensor I/O uses a real deadline; freshness and cadence use Clock.
+	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	p, err := m.source(probe)
+	if probe.Err() != nil {
+		err = probe.Err()
+	}
+	p.sampledAt = sampledAt
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.enabled || m.epoch != epoch {
+		return
+	}
+	m.current = nil
+	if err == nil {
+		m.current = &p
+	}
+}
+
+func (m *sharedPressureMonitor) run(ctx context.Context) {
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	var next time.Time
+	for {
+		if now := m.clock.Now(); !now.Before(next) {
+			m.sample(ctx)
+			next = now.Add(signalRefresh)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }

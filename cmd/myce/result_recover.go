@@ -112,6 +112,7 @@ func recoverResultCommand(ctx context.Context, args []string, errOut io.Writer) 
 		}
 		p.Files[name] = ref
 	}
+	ctx = myce.WithFileStoreRecovery(ctx, plan)
 	if err = c.PreflightFileStore(ctx, p.Files); err != nil {
 		return fail(err)
 	}

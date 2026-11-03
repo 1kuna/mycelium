@@ -55,6 +55,14 @@ Python `client.status(full=True)`) for both snapshots: curve provenance can
 depend on completed jobs outside the default history window. Curves remain in
 default status for existing callers, but that view is not a complete job ledger.
 
+Memory-only accepted samples increment `samples` and `memory_samples` and advance
+`memory_recorded_at`; they leave the throughput clock and rate unchanged. A
+failed ceiling-bound attempt can invalidate comparable memory on several hosts
+without adding a sample. Each rewritten key has its own `memory_invalidated`
+ledger link, including a replacement diagnostic peak with an already-zero memory
+clock. The preservation guard requires that exact key's complete digest chain;
+another host's accepted sample alone never explains its mutation (#620).
+
 Only the unfiltered default shares the one-second cache. Filtered/full reads are
 fresh. Snapshot capture keeps scheduling inputs and dependency state under the
 queue lock; projection, usage queries, file inventory, encoding the reply and
@@ -283,11 +291,21 @@ do not require `native_network`: they have no kernel network confinement to
 qualify. `needs.network: true` still declares outbound intent. This does not
 grant protected egress or change a frozen extension's isolation policy.
 
-From the next release, queued reasons explain network, environment preparation
-and RAM envelope blockers per compatible target. A RAM wait gives the resolved
+From the next release, queued reasons explain network, environment preparation,
+GPU card contention and RAM envelope blockers per compatible target. Card waits
+say `device N shared with K attempts` or `card busy: waiting for GPU batch slot`,
+and name the holding jobs and tiers (or retained custody awaiting exact release).
+A RAM figure on another target cannot hide that card contention. A RAM wait gives the resolved
 envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
 environment is not prepared and that the host never builds environments.
+
+Owner pressure on a shared interactive host is temporary: an otherwise qualified
+`require_target` job is accepted and waits with `shared host temporarily
+unavailable: shared host memory pressure` (or the current pressure observation
+reason). Resolve retains eligibility and portability calls the admission block
+temporary. Dispatch and launch remain blocked until pressure hysteresis clears;
+structural shared-host restrictions and impossible capacity still refuse.
 
 `native_isolation_warning` is the worker's compact startup inventory warning,
 shown as `WARNING` in the CLI machine row. Fallback workers scan listening Unix
@@ -440,6 +458,18 @@ telemetry. Launched attempts ending without a worker reading retain the
 envelope and omit the peak. Release-only kill-time acknowledgements retain
 their measured facts too.
 
+One eligible accepted peak of the same plain-command identity is enough to seed
+the next run's learned envelope; the two-sample rule only enables the narrower
+complete-component range estimator. Identity includes project, name, exact run,
+environment and input references, so changing an argument or a job name can
+leave later runs exploratory even when earlier attempts report `eligible`.
+From the next release, resolve adds a non-blocking note pointing these auto
+commands to the existing profile memory class. Use a stable adapter entry or
+profile base command and append item arguments/pass `--input` files; the default
+class shares evidence across items. `memory_class: per_item` isolates arguments
+and item bytes when those change memory need. Arbitrary raw command arguments
+are never automatically treated as comparable (#631).
+
 New attempt rows include `learning_reason`: `eligible` means the queue's memory
 learning predicates passed; other values name the failed predicate (for example
 `constrained`, `pressure_unavailable`, `identity_changed`, or `attempt_failed`).
@@ -528,10 +558,10 @@ queue-configurable default limit of 2. Exhaustion reports
 `infrastructure_retries_exhausted`; stage failures do not consume this budget.
 
 For maintenance gates, every nonterminal job in redacted `GET /api/status`
-retains `spec.allowed_machines` (machine names) and reports:
+retains `spec.allowed_machines` and `spec.excluded_machines` (machine names) and reports:
 
 - `eligible_hosts`: sorted, unique host IDs of currently known machines allowed
-  by both the job and project allow-lists. For running and stopping jobs, including
+  by both the job and project allow-lists, excluding `spec.excluded_machines`. For running and stopping jobs, including
   in-flight model calls, this also includes the current machine's host and
   `production_host` when set, even if policy no longer allows them. A restricted
   job with no known eligible or occupied host reports an empty array.
@@ -539,10 +569,17 @@ retains `spec.allowed_machines` (machine names) and reports:
   allow-list that are not currently known machines. The effective list is the intersection
   when both job and project lists are nonempty, or whichever list is nonempty.
   This field is omitted when there are no unknown names. A joining machine
-  resolves its name into a host ID on subsequent status reads.
+  resolves its name into a host ID on subsequent status reads. Excluded names
+  are removed from this list.
 - `eligible_unrestricted: true`: neither allow-list restricts the job. Treat it
   as able to run anywhere, including future hosts. `eligible_hosts` is omitted
   unless the job currently occupies a host; listed hosts never limit this marker.
+  This is an open-ended, conservative maintenance marker: exclusion-only jobs
+  retain it because future non-excluded workers remain eligible. The exact
+  authored exclusions remain in `spec.excluded_machines`. Gates must continue
+  counting this marker for every host, even an excluded machine's host; an
+  exclusion is by machine ID and does not establish that every current or future
+  worker on a physical host is excluded.
 
 These fields cover queued, infra-requeued, running and stopping jobs. They
 express placement policy and current occupancy, not dispatch readiness: busy,
@@ -688,6 +725,7 @@ uses `reservations`. Each record includes `id`, `job`, the canonical stable
 | State | Meaning |
 | --- | --- |
 | `draining` | Existing work, independent maintenance, production takeover, missing inventory or fresh worker/cleanup evidence still prevents validation. The reservation never cancels Started work. `pending` names the blockers. |
+| `expired` | Never ready before max lifetime, still queued and without retained custody. Other jobs regain admission; the bound job remains queued until explicit release. `expired_at` is admission expiry, not physical cleanup. |
 | `ready` | The reserved components have no unrelated physical obligations or reservation readiness blockers. Ordinary qualification, priority and capacity checks still apply; this is not a launch grant. |
 | `in_use` | The bound job has Started and is running/stopping. |
 | `waiting_for_release` | The job is terminal with exact cleanup still pending, or its binding is unavailable. A terminal state alone does not release the reservation. |
@@ -700,10 +738,13 @@ including lost or superseded ones, and the bound job's Started preparations
 must settle before automatic completion release. Missing or stale reports
 survive queue restarts. The maximum lifetime
 defaults to two hours and is bounded at 24 hours; the original expiry survives
-caller replays and queue restarts. A non-terminal bound job or unconfirmed
-cleanup retains the fence past this lifetime; `text` reports `reserved past max
-lifetime` and the reason. Expiry releases only an absent binding without retained
-execution custody. The release reason remains in status.
+caller replays and queue restarts. `ready_at` records first readiness. A never-ready
+reservation with a queued bound job and no retained custody becomes `expired`,
+yielding admission to others while keeping its bound job queued. Release it
+explicitly before reserving again. Once ready, or while cleanup remains unknown,
+the fence stays past its lifetime; `text` reports `reserved past max lifetime`
+and the reason. An absent binding without retained custody can release. The
+release reason remains in status.
 Other reservations, device exclusions and newer operator drains remain intact.
 Device reservations leave CPU placement eligible within the host's CPU/RAM
 allowances. From the next release, a machine worker's CPU environment preparation
@@ -917,7 +958,23 @@ foreground wake lateness, local age and queue receipt time),
 attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
 observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
-See [shared-host thresholds and qualification](operations.md#pressure-response).
+Pressure sampling continues every five seconds independently of HTTP check-ins.
+The queue requires a worker-reported sample age below 15 seconds. Between
+reports, it discounts time covered by the existing matching-session check-in
+contact, including a request delayed in the queue for at most 30 seconds.
+One observation still expires at 45 seconds of total age, even if further
+requests arrive. A worker that stops reporting loses this credit; a stuck probe
+keeps aging and a completed probe failure reports no sample.
+
+Host maintenance `healthy`/`state` and fleet `host_states` use the same pressure
+and bounded contact facts. Normal owner-pressure yield remains temporary
+occupancy, without an infrastructure-failure alert; missing/stale evidence is
+unhealthy even with a yield latch set. Detached fleet snapshots freeze contact at snapshot
+`now`; the ordinary one-second status cache can still show an older observation
+than a subsequent host-status request. Missing or stale pressure makes a shared
+host unhealthy and withholds new work; it does not itself stop running work.
+See [pressure freshness](shared-hosts.md) and
+[shared-host thresholds and qualification](operations.md#pressure-response).
 
 
 ## Execution elapsed time, remaining estimates, and application progress
@@ -1175,3 +1232,65 @@ expiry. Three interrupted owner-scheduling-latency attempts within ten minutes
 exclude that job from that host for fifteen minutes, using the queue clock. Other
 eligible hosts can admit it immediately. Status names the latency backoff and its
 expiry; ordinary pressure recovery alone does not erase the cooldown.
+
+## Incident health alerts
+
+`health_alerts` retains diagnostic events delivered by the existing optional
+queue `--health-notify` executable. Detectors run on queue mutations and ticks,
+using the queue clock; no polling service or automatic issue filing is added.
+Each condition has a stable subject key, emits once per episode, and rearms
+after recovery with the existing 15-minute cooldown. Delivery retries keep the
+same `delivery_id`. Clearing a condition retains its diagnostic event; it does
+not send a second notification or change admission, retries, or release custody.
+
+- `checkpoint_store_unavailable`: a worker reports its `checkpoint` NAS root
+  unavailable (or `checkpoint_unavailable`) continuously for five minutes by
+  default. Other missing root roles and shorter outages do not trigger this
+  storage alert. A restored checkpoint root clears it. Planned leave and host
+  maintenance suppress it. The existing queue-store detector remains independent.
+- `repeated_launch_refusals`: three distinct unstarted attempts on one physical
+  host report `launch_authorization` refusals or start-fence admission refusals
+  within ten minutes. Duplicate reports, successful starts, planned stops and
+  transport errors without recorded fence evidence do not count. It clears
+  once fewer than three refusals remain in that window.
+- `worker_stale_flapping`: three fresh-to-stale transitions on one worker within
+  an hour, using the same shortest loss timeout as maintenance freshness. A
+  continuous outage counts once. Cold restart grace, leave and maintenance do
+  not seed flaps. It clears as the transitions age out, or on planned maintenance.
+- `xpu_repeated_teardown_faults`: the worker's existing quarantine classifier
+  reports three distinct same-card teardown faults in an hour. Isolated teardown
+  faults and unrelated quarantines do not trigger this alert. The optional
+  device `repeated_teardown_fault` fact survives worker restart and clears with
+  the exact quarantine clear or new boot. Alert `device` identifies the card;
+  a sibling's recovery cannot clear it. Upgrade the queue before workers that
+  can publish this new optional field.
+- `reservation_never_ready`: a reservation remains unreleased past its maximum
+  lifetime and has never recorded readiness. Normal draining before expiry,
+  ready/in-use reservations and released records are excluded. Readiness or
+  explicit release clears it; the alert itself does not release anything. The
+  event includes the `reservation` identifier and bound `job_id`.
+- `learned_envelope_exceeds_allowances`: current auto-memory demand has a learned
+  envelope exceeding every otherwise eligible target's permanent allowance.
+  Qualification, recipes, platform and other non-memory requirements still
+  apply. Busy but sufficiently large peers, cold/exploratory estimates and
+  oversized declarations are excluded. Refused submissions retain a private
+  demand probe so new allowances or corrected/expired learning can clear the
+  incident without resubmitting; it is discarded on recovery. Accepted queued
+  demand clears when it fits or leaves the queue. Auto sizing inherited from
+  variants is included; explicit member caps are excluded from the learned
+  comparison. Healthy demand creates no condition history, and recovered
+  envelope conditions are discarded after their cooldown. Events carry only project/job
+  identities, never commands, mount paths or worker error text.
+
+## Durable model interval API
+
+`GET /api/models/intervals` is the supported paginated history for resident model
+attempts, including engines assigned and removed between status reads. See the
+[interval contract](operations.md#durable-model-engine-interval-history-663).
+Events expose `assigned_at`, first-authorized `load_started_at`, stop-intent
+`stopped_at`, exact-cleanup `released_at`, card identity and class/resolved tier
+with policy revision. `class_changed` events timestamp in-place tier changes,
+including effective production pins. `coverage_since` bounds the current
+uninterrupted coverage period; a rollback through an older binary can create
+a gap even though older events remain readable. Unknown legacy times remain absent.
+A status snapshot's `loaded_models` alone cannot rule out transient arrivals.

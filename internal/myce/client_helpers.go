@@ -238,6 +238,7 @@ func (c Client) downloadResultFile(ctx context.Context, ref FileRef, dest string
 // its declared outputs into outputs. Repeat the same key and inputs to recover
 // a lost response. The extension declares output filenames; no app adapter is needed.
 func (c Client) Run(ctx context.Context, extension string, inputs map[string]string, outputs string, options RunOptions) (*Job, error) {
+	ctx = WithFileStoreSubmission(ctx, Spec{Project: options.Project, Class: options.Class})
 	if extension == "" || outputs == "" || options.Key == "" || options.Project == "" {
 		return nil, errors.New("run requires extension, outputs directory, key and project")
 	}

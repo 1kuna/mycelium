@@ -28,6 +28,7 @@ func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.hand
 
 func (a API) handler(joiningPin string) http.Handler {
 	mux := newRequestMux()
+	nas := newResolveNASCache(a.Queue.clock)
 	// Joining needs authenticated identity/version only, never the growing status
 	// snapshot. Transport pinning authenticates this identity to joining clients.
 	mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +71,10 @@ func (a API) handler(joiningPin string) http.Handler {
 		if !decode(w, r, &request) {
 			return
 		}
-		report, err := a.Queue.Resolve(request)
+		report, err := a.Queue.ResolveContext(r.Context(), request)
+		if err == nil {
+			nas.resolve(request, &report)
+		}
 		respondOperation(w, report, err, "resolve_invalid")
 	})
 	a.registerInvites(mux, joiningPin)
@@ -205,6 +209,7 @@ func (a API) handler(joiningPin string) http.Handler {
 		}
 		respondOperation(w, reply, err, "status_unavailable")
 	})
+	a.registerModelIntervals(mux)
 	mux.HandleFunc("GET /api/jobs/{id}/ledger", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		values := []int{0, -1, 100}
@@ -307,6 +312,9 @@ func (a API) handler(joiningPin string) http.Handler {
 			return
 		}
 		v, err := a.Queue.CheckinContext(r.Context(), c)
+		if err == nil {
+			v.NASPathChecks = nas.checkin(c)
+		}
 		respondOperation(w, v, err, "worker_checkin_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/launch", func(w http.ResponseWriter, r *http.Request) {
@@ -395,7 +403,7 @@ func (a API) handler(joiningPin string) http.Handler {
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	limit := int64(1 << 20)
-	if r.URL.Path == "/api/extensions" || r.URL.Path == "/api/portability" {
+	if r.URL.Path == "/api/extensions" || r.URL.Path == "/api/portability" || r.URL.Path == "/api/resolve" {
 		limit = 2 << 20
 	} // base64 transport of a <=1 MiB folder
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))

@@ -60,7 +60,11 @@ func TestSharedGPUPressureGrowth(t *testing.T) {
 
 func TestSharedGPUPressureVictimOrder(t *testing.T) {
 	q, _ := fixture(t)
+	// Mixed-tier CUDA/XPU packing is intentionally forbidden; Metal still
+	// permits it, so keep the pressure guard's tier/over-reservation ordering proof here.
 	m := sharedUnifiedMachine()
+	m.GPU, m.Devices[0].Platform = "metal", "metal"
+	m.CapabilityProfile.Accelerators[0].Type = "metal"
 	var runs []*Job
 	for _, priority := range []string{"experiment", "experiment", "production"} {
 		j := submit(t, q, sharedSpec(priority, 10))

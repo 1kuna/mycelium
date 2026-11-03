@@ -112,6 +112,7 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 			s.RetryReserved = q.slotPinned(s)
 		}
 		s.RuntimeFailed = r.RuntimeFailed
+		q.recordModelInterval(s, "released")
 		s.State = "failed"
 		s.Error = ceilingDiagnostic(r.Error, "model load or unload failed")
 		// Reports confirm process/group cleanup; old call completions must not
@@ -155,6 +156,7 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 		}
 	case "unloaded":
 		if (s.State == "draining" || s.State == "unloading") && (s.InFlight == 0 || r.CallsMeasured && r.InFlight == 0) {
+			q.recordModelInterval(s, "released")
 			delete(q.s.ModelSlots, key)
 		}
 	}
@@ -241,7 +243,7 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 		return
 	}
 	q.applyPlacement(plan, job)
-	if !q.xpuTiersSettled(m, job, true) || room.FreeMemoryGB < model.MemoryGB || !hostFits(&room, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
+	if !q.deviceTiersSettled(m, job, true) || room.FreeMemoryGB < model.MemoryGB || !hostFits(&room, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
 		return
 	}
 
@@ -253,6 +255,7 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 	if !q.clock.Now().Before(*s.RetryAt) {
 		q.beginEngineAttempt(s, priority)
 		s.Project = project
+		q.recordModelInterval(s, "assigned")
 	}
 }
 

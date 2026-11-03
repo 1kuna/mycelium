@@ -247,7 +247,7 @@ func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath s
 			return result, e
 		}
 		// Job-input upload eligibility also reclaims diagnostics orphaned before completion.
-		if err = w.Client.UploadJobInput(ctx, path, ref); err != nil {
+		if err = w.Client.UploadJobInput(withFileStoreAttempt(ctx, j), path, ref); err != nil {
 			return result, err
 		}
 		refs[name] = ref

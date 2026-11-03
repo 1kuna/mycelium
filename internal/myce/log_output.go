@@ -33,7 +33,7 @@ func (q *Queue) logsWaitingReason(j *Job) string {
 		return ""
 	}
 	for _, m := range q.s.Machines {
-		if m.Gone || m.Leaving || !q.projectAllows(j.Spec.Project, m.ID) || len(j.Spec.AllowedMachines) > 0 && !contains(j.Spec.AllowedMachines, m.ID) {
+		if m.Gone || m.Leaving || !q.projectAllows(j.Spec.Project, m.ID) || !j.Spec.allowsMachine(m.ID) {
 			continue
 		}
 		if hasModel && (!modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID)) {

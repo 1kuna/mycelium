@@ -909,6 +909,18 @@ queue revision and original job pointer; stale snapshots use ordinary planning.
 This is synthetic scale evidence, not attribution of live disk stalls (#527)
 or proof that worker freshness remains stable after deployment.
 
+`BenchmarkQueueCheckinLiveScale` compares 160 and 6,500 retained terminal jobs
+with keyed answers and ledgers, including one 17,400-entry ledger. Both cases
+have 60 distinct queued auto-memory recipes, 120 paused jobs, five occupied
+workers checking in every injected second, and 1,300 learned curve aggregates.
+Run with `-benchtime=50x -cpuprofile=checkin.cpu`. At 6,500 retained jobs, the
+curve-index comparison reduced mean update hold from 58.2 to 13.1 ms (maximum
+77.2 to 21.6 ms). Repeated full-curve scans and value copies dominated planning;
+the transaction now indexes exact comparable memory work and borrows the
+matching aggregates. Observation writes invalidate that index; rollback and
+commit discard it. Retained terminal count alone was flat in the comparison.
+These laptop timings do not establish the full cause of a live queue stall.
+
 ## Backed storage admission integration
 
 The unfinished native storage implementation and its original integration/native

@@ -68,6 +68,11 @@ func TestWorkerRootsProductionAdmissionAndExactCustody(t *testing.T) {
 	if got := job(t, q, j.ID); got.Machine != assigned.Machine || got.Attempt != assigned.Attempt {
 		t.Fatal("mount loss changed custody")
 	}
+	// Exercise the refusal rather than merely fabricating its failure report:
+	// the queue now records this decision before the worker reports the result.
+	if err := q.NativeCustody(NativeCustodyReport{Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}, Machine: assigned.Machine, Session: assigned.Session, ProcessID: "process", CustodyID: "group", Phase: "reserved"}); !errors.Is(err, ErrStale) {
+		t.Fatalf("mount loss did not refuse native custody: %v", err)
+	}
 	// A prelaunch refusal requeues with the same fence and does not spend a retry.
 	r := result(assigned, false)
 	r.Interrupted = true

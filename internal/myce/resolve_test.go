@@ -43,6 +43,30 @@ func cpuResolveSpec() Spec {
 	return Spec{Name: "resolve", Project: "test", Priority: "experiment", Run: RunSpec{Command: []string{"sh", "run.sh"}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}}
 }
 
+func TestResolveAutoMemoryIdentityHint(t *testing.T) {
+	q, _, _ := learnedMemoryFixture(t)
+	s := cpuResolveSpec()
+	s.Needs.MemoryGB = 0
+	r, err := q.Resolve(ResolveRequest{Spec: s})
+	if err != nil || len(r.Findings) != 0 || len(r.Targets) != 1 || !r.Targets[0].Eligible {
+		t.Fatalf("memory hint became a refusal: %+v %v", r, err)
+	}
+	notes := strings.Join(r.Notes, " ")
+	for _, want := range []string{"same identity", "exact command", "stable name/base command", "--input", "memory_class omitted", "memory_class: per_item"} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("missing %q in %s", want, notes)
+		}
+	}
+	if len(q.s.Jobs) != 0 {
+		t.Fatal("resolve submitted work")
+	}
+	s.Needs.MemoryGB = 1
+	r, err = q.Resolve(ResolveRequest{Spec: s})
+	if err != nil || strings.Contains(strings.Join(r.Notes, " "), "memory_class") {
+		t.Fatalf("declared memory got auto-memory guidance: %+v %v", r, err)
+	}
+}
+
 func TestResolveNASSharedInputReadsRemainUnverified(t *testing.T) {
 	q, _ := fixture(t)
 	s := cpuResolveSpec()
@@ -93,14 +117,16 @@ func TestResolveLockedCPUJobWithStagedInputOnTwoRoots(t *testing.T) {
 		if err := client.Call(context.Background(), "POST", "/api/resolve", ResolveRequest{Spec: s}, &r); err != nil {
 			t.Fatal(err)
 		}
-		return len(r.Targets) == 2
+		return len(r.Targets) == 2 && len(r.FileInputs) == 2 && r.FileInputs[0].State == "needs-staging" && r.FileInputs[1].State == "needs-staging"
 	})
 	for _, target := range r.Targets {
 		if !target.Eligible || !strings.Contains(target.Reason, "environment prepared") || target.Target.Platform != "cpu" {
 			t.Fatalf("target not eligible with prepared environment: %+v", r)
 		}
 	}
-	if len(r.Findings) != 0 || !strings.Contains(strings.Join(r.Resolved, " "), "environment tools: queue library recipes for cpu") {
+	// These declared identities intentionally have no uploaded bytes. #548
+	// requires needs-staging evidence rather than silently accepting the gap.
+	if len(r.FileInputs) != 2 || r.FileInputs[0].State != "needs-staging" || r.FileInputs[1].State != "needs-staging" || resolveFinding(r, "files.run.sh") == nil || resolveFinding(r, "files.data.txt") == nil || !strings.Contains(strings.Join(r.Resolved, " "), "environment tools: queue library recipes for cpu") {
 		t.Fatalf("staged locked job reported gaps: %+v", r)
 	}
 	d.Queue.mu.Lock()
