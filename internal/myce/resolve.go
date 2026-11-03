@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 // ResolveRequest asks which targets could run a job as authored. Resolve is
 // explanation only: no job, upload, build, reservation or execution permit.
 type ResolveRequest struct {
+	UnstagedInputs     []string          `json:"unstaged_inputs,omitempty"`
 	InspectNAS         bool              `json:"inspect_nas,omitempty"`
 	Recipe             *Extension        `json:"recipe,omitempty"`
 	Spec               Spec              `json:"spec"`
@@ -20,6 +22,7 @@ type ResolveRequest struct {
 }
 
 type ResolveReport struct {
+	FileInputs  []ResolveFileInput `json:"file_inputs,omitempty"`
 	ObservedAt  time.Time          `json:"observed_at"`
 	Resolved    []string           `json:"resolved"`
 	Targets     []ResolveTarget    `json:"targets"`
@@ -64,10 +67,14 @@ const StagingFix = "Stage it through managed transport: small private files as `
 // Resolve snapshots the queue, then reads environment recipes and evaluates
 // targets outside q.mu with the same fit checks submission uses.
 func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
+	return q.ResolveContext(context.Background(), req)
+}
+
+func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (ResolveReport, error) {
 	if req.Recipe != nil {
 		return q.resolveNative(req)
 	}
-	view, _, err := q.captureObservation("")
+	view, _, err := q.captureObservation("", ctx)
 	if err != nil {
 		return ResolveReport{}, err
 	}
@@ -81,6 +88,7 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 	r := ResolveReport{ObservedAt: view.clock.Now(), Resolved: []string{}, Targets: []ResolveTarget{}, Findings: []ResolveFinding{}, Notes: []string{
 		"Read-only: no job, upload, build, reservation or placement change. Eligibility uses permanent capacity; current load decides when work starts. Submission revalidates everything.",
 	}}
+	q.resolveFileInputs(ctx, req, &r)
 	r.Notes = append(r.Notes, PlacementAdvisories(s, req.RequirementReasons)...)
 	if plainMemoryWork(s) && s.Needs.Memory == "auto" && s.ProfileMemory == "" {
 		r.Notes = append(r.Notes, "Auto memory learns from accepted samples of the same identity: project, name, exact command, environment and inputs. Changing a name, command argument or input can start a new identity; arbitrary arguments may change memory need. For comparable runs of one program with different items, use an adapter entry or execution profile with a stable name/base command and pass item arguments after -- or files with --input. Leave memory_class omitted to share the profile's base memory class; use memory_class: per_item when item arguments or bytes change memory need. This is guidance, not a submission error.")
@@ -118,7 +126,7 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 		return r, nil
 	}
 	if len(s.Files) > 0 {
-		r.Notes = append(r.Notes, "files: needs-staging unless the immutable blobs are already in the queue file store; resolve does not verify stored bytes. Submit verifies every declared hash and size before admission.")
+		r.Notes = append(r.Notes, "file_inputs reports ready only after a bounded read-only SHA-256/size verification of file-store bytes; local placeholders need staging, and incomplete observations stay unknown. Submit verifies all bytes again before admission.")
 	}
 	job := func(s Spec) *Job {
 		j := &Job{ID: "resolve", State: "queued", Spec: s, Extensions: extensions, EnvironmentRecipes: recipes, SidecarEnvironmentRecipes: sidecars}
@@ -348,6 +356,9 @@ func WriteResolve(dest io.Writer, r ResolveReport, asJSON bool) error {
 			}
 			fmt.Fprintf(&out, "  %s shared_inputs.%s.nas [worker]: %s (observed %s; existence only, bytes unverified)\n", target.Machine, input.Name, input.State, observed)
 		}
+	}
+	for _, input := range r.FileInputs {
+		fmt.Fprintf(&out, "  %s [queue]: %s\n", input.Field, input.State)
 	}
 	for _, f := range r.Findings {
 		fmt.Fprintf(&out, "\n%s [%s]: %s\n  fix: %s\n", f.Field, f.Side, f.Problem, f.Fix)

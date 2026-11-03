@@ -118,6 +118,7 @@ func specCommand(args []string, out, errOut io.Writer) error {
 }
 
 type submitterFindings struct {
+	unstaged []string
 	resolved []string
 	findings []myce.ResolveFinding
 }
@@ -151,7 +152,7 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 		} else if len(s.Inputs) > 0 {
 			found.resolved = append(found.resolved, "inputs: NAS-relative; each worker reads them under its own --checkpoint-root (not checked by resolve)")
 		}
-		return myce.ResolveRequest{Spec: s}, found, nil
+		return myce.ResolveRequest{Spec: s, UnstagedInputs: found.unstaged}, found, nil
 	}
 	if !live {
 		return myce.ResolveRequest{}, found, err
@@ -184,6 +185,7 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 		if input.Local == "" {
 			continue
 		}
+		found.unstaged = append(found.unstaged, "shared/"+name)
 		local := input.Local
 		if !filepath.IsAbs(local) {
 			local = filepath.Join(root, local)
@@ -225,9 +227,10 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 	if p.Files == nil {
 		p.Files = myce.FileManifest{}
 	}
+	found.unstaged = append(found.unstaged, "files/.myce-source.tar")
 	p.Files[".myce-source.tar"] = placeholderRef(".myce-source.tar", max(1, size))
 	p.PrepareSource = p.Adapter
-	return myce.ResolveRequest{Spec: p.Spec, RequirementReasons: p.RequirementReasons}, found, nil
+	return myce.ResolveRequest{Spec: p.Spec, RequirementReasons: p.RequirementReasons, UnstagedInputs: found.unstaged}, found, nil
 }
 
 // lowerInputs mirrors submit's inputs-to-files lowering with stat instead of
@@ -239,6 +242,7 @@ func lowerInputs(s *myce.Spec, root, base string, found *submitterFindings) {
 	files := myce.FileManifest{}
 	staged := 0
 	for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
+		found.unstaged = append(found.unstaged, "files/"+name)
 		source := s.Inputs[name]
 		local := source
 		if base == "files-from" && !profileRelative(source) {

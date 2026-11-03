@@ -133,8 +133,12 @@ key, backend and `ready`, `prepare-needed` or `blocked` state. A cold uv/Pixi
 builder can prepare a locked Python 3.12 environment even when system Python is
 older; use `python3` from the managed PATH, rather than an absolute system
 interpreter. Pixi locks can include media tools such as ffmpeg. Resolve never
-runs the builder. File-store bytes remain `needs-staging` unless already stored;
-submit verifies hashes and sizes.
+runs the builder. File-store inputs report `ready` only after read-only hash/size verification;
+missing or corrupt bytes and submitter placeholders are `needs-staging`.
+The bounded local observation can return `unknown` if verification is busy or
+incomplete; repeat the check or let submission perform its full validation.
+The check shares submission's single I/O slot, runs outside the queue lock, and
+never performs a publication fsync. Submit verifies hashes and sizes again.
 
 For optional NAS existence evidence, add `--inspect-nas` and repeat after worker
 heartbeats. This authenticated request checks only declared `shared_inputs.nas`

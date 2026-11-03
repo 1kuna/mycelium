@@ -71,7 +71,7 @@ func (a API) handler(joiningPin string) http.Handler {
 		if !decode(w, r, &request) {
 			return
 		}
-		report, err := a.Queue.Resolve(request)
+		report, err := a.Queue.ResolveContext(r.Context(), request)
 		if err == nil {
 			nas.resolve(request, &report)
 		}
