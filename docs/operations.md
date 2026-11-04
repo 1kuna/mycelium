@@ -2334,6 +2334,13 @@ was processed, so also inspect per-host failures; it does not claim a failed
 disabled host was updated. No disabled host is enabled or resumed, even after a
 successful update. An explicit identical rerun retries failed disabled workers
 while preserving completed hosts' progress and the same operation ID.
+Disabled workers with unavailable/unhealthy runtime proofs, missing inventory,
+incompatible targets or refused downgrades also retain named per-host failures;
+they cannot refuse the initial rollout for enabled hosts. No failed check permits
+an update. Identical retries preserve the original maintenance receipt and
+interrupted runtime phase: an operator policy change remains a conflict, and a
+changed process with the wrong bytes remains a visible failure rather than a
+wait on its obsolete session.
 
 Enabled/drained-host failures, queue-service cutover failures (even on a disabled
 host), and replaced maintenance receipts still stop the operation and preserve

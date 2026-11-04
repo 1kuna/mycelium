@@ -916,3 +916,108 @@ func TestFleetUpgradeDisabledHostRetainsQueueAndPolicyFences(t *testing.T) {
 		})
 	}
 }
+
+func TestFleetUpgradeDisabledUnavailableWorkerDoesNotBlockEnumeration(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "a-disabled", "z-enabled")
+	if _, err := q.ChangeHostMaintenance("a-disabled", HostMaintenanceRequest{Action: "disable"}); err != nil {
+		t.Fatal(err)
+	}
+	q.s.Machines[workers[0].ID].Fleet = nil
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal("disabled worker prevented enabled-host rollout", err)
+	}
+	fleetTick(t, q)
+	for _, want := range []string{"queue/@queue", "z-enabled/worker-z-enabled"} {
+		if got := fleetActivate(t, q, c); got != want {
+			t.Fatalf("got %s, want %s", got, want)
+		}
+		fleetTick(t, q)
+	}
+	fleetTick(t, q)
+	status := q.fleetUpgradeStatus()
+	if status.State != "complete" || status.Hosts[2].Host != "a-disabled" || status.Hosts[2].Phase != "failed" || status.Hosts[2].Failure != "worker_unmanaged" || q.s.HostMaintenance["a-disabled"].Mode != "disabled" {
+		t.Fatalf("unavailable worker failure lost: %+v", status)
+	}
+	// Repair the proof without changing operator policy; explicit retry must
+	// establish a usable before identity rather than dereferencing the old nil.
+	workers[0].Fleet.ObservedAt = c.Now()
+	check(t, q, workers[0], nil)
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if got := fleetActivate(t, q, c); got != "a-disabled/worker-a-disabled" {
+		t.Fatal(got)
+	}
+	fleetTick(t, q)
+	if status := q.fleetUpgradeStatus(); status.State != "complete" || status.Hosts[2].Failure != "" || q.s.HostMaintenance["a-disabled"].Mode != "disabled" {
+		t.Fatalf("repaired worker did not recover safely: %+v", status)
+	}
+}
+
+func fleetDisabledWorkerInstruction(t *testing.T) (*Queue, *fakeClock, FleetUpdateInstruction) {
+	t.Helper()
+	q, c, _ := fleetFixture(t, "queue", "disabled")
+	if _, err := q.ChangeHostMaintenance("disabled", HostMaintenanceRequest{Action: "disable"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	fleetActivate(t, q, c)
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	if i.Host != "disabled" {
+		t.Fatal("expected disabled worker instruction", i.Host)
+	}
+	return q, c, i
+}
+
+func TestFleetUpgradeDisabledRetryPreservesMaintenanceReceipt(t *testing.T) {
+	q, c, i := fleetDisabledWorkerInstruction(t)
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "fleet_storage_preflight_failed"}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	c.Advance(time.Second)
+	if _, err := q.ChangeHostMaintenance(i.Host, HostMaintenanceRequest{Action: "disable"}); err != nil {
+		t.Fatal(err)
+	}
+	operator := q.s.HostMaintenance[i.Host]
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if status := q.fleetUpgradeStatus(); status.State != "stopped" || status.Hosts[1].Failure != "maintenance_changed" || !reflect.DeepEqual(operator, q.s.HostMaintenance[i.Host]) {
+		t.Fatalf("retry replaced the operator receipt: %+v", status)
+	}
+}
+
+func TestFleetUpgradeDisabledRetryPreservesRuntimeMismatchFailure(t *testing.T) {
+	q, c, i := fleetDisabledWorkerInstruction(t)
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
+		t.Fatal(err)
+	}
+	m := cloneMachine(q.s.Machines[i.Machine])
+	m.Session = "unexpected-process"
+	m.Fleet = fleetTestProof(c, m.Session, 999, false)
+	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: i.Session}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if status := q.fleetUpgradeStatus(); status.State != "complete" || status.Hosts[1].Failure != "worker_running_hash_mismatch" {
+		t.Fatalf("initial runtime mismatch not reported: %+v", status)
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	fleetTick(t, q)
+	if status := q.fleetUpgradeStatus(); status.State != "complete" || status.Hosts[1].Phase != "failed" || status.Hosts[1].Failure != "worker_running_hash_mismatch" || status.Hosts[1].Wait == "" {
+		t.Fatalf("retry became an indefinite wait: %+v", status)
+	}
+	if instruction, err := q.fleetInstruction(i.Host, i.Machine, i.Session); err != nil || instruction.Operation != "" {
+		t.Fatalf("obsolete process authorized after retry: %+v %v", instruction, err)
+	}
+}
