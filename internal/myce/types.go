@@ -478,28 +478,33 @@ type Job struct {
 
 	SidecarEnvironmentRecipes map[string]map[string]EnvironmentRecipe `json:"sidecar_environment_recipes,omitempty"`
 
-	FileTransport         bool                         `json:"file_transport,omitempty"`
-	FileCheckpoints       map[int]FileCheckpoint       `json:"file_checkpoints,omitempty"`
-	ResumeFiles           *FileCheckpoint              `json:"resume_files,omitempty"`
-	FilesExpired          bool                         `json:"files_expired,omitempty"`
-	FileReclamation       *FileReclamation             `json:"file_reclamation,omitempty"`
-	OutputRefs            FileManifest                 `json:"output_refs,omitempty"`
-	MemoryEnvelope        *JobMemoryEnvelope           `json:"memory_envelope,omitempty"`
-	MemoryAttempts        []AttemptMemoryFacts         `json:"memory_attempts,omitempty"`
-	MemoryAttemptsDropped int                          `json:"memory_attempts_dropped,omitempty"`
-	MemoryFallback        *SizeHint                    `json:"memory_fallback,omitempty"`
-	MemoryOOMFloor        *SizeHint                    `json:"memory_oom_floor,omitempty"`
-	DeviceMemoryFloorGB   float64                      `json:"device_memory_floor_gb,omitempty"`
-	MeasuredNeeds         *SizeHint                    `json:"measured_needs,omitempty"`
-	OOMCapacity           *SizeHint                    `json:"oom_capacity,omitempty"`
-	OOMRetries            int                          `json:"oom_retries,omitempty"`
-	Extensions            []Extension                  `json:"extensions,omitempty"`
-	Extension             *ExtensionSelection          `json:"extension,omitempty"`
-	OutputFiles           map[string]string            `json:"output_files,omitempty"`
-	ReleaseConfirmed      bool                         `json:"release_confirmed,omitempty"`
-	RequeuedByOperator    bool                         `json:"requeued_by_operator,omitempty"`
-	LastStopOutcome       string                       `json:"last_stop_outcome,omitempty"`
-	ProductionHost        string                       `json:"production_host,omitempty"`
+	FileTransport         bool                   `json:"file_transport,omitempty"`
+	FileCheckpoints       map[int]FileCheckpoint `json:"file_checkpoints,omitempty"`
+	ResumeFiles           *FileCheckpoint        `json:"resume_files,omitempty"`
+	FilesExpired          bool                   `json:"files_expired,omitempty"`
+	FileReclamation       *FileReclamation       `json:"file_reclamation,omitempty"`
+	OutputRefs            FileManifest           `json:"output_refs,omitempty"`
+	MemoryEnvelope        *JobMemoryEnvelope     `json:"memory_envelope,omitempty"`
+	MemoryAttempts        []AttemptMemoryFacts   `json:"memory_attempts,omitempty"`
+	MemoryAttemptsDropped int                    `json:"memory_attempts_dropped,omitempty"`
+	MemoryFallback        *SizeHint              `json:"memory_fallback,omitempty"`
+	MemoryOOMFloor        *SizeHint              `json:"memory_oom_floor,omitempty"`
+	DeviceMemoryFloorGB   float64                `json:"device_memory_floor_gb,omitempty"`
+	MeasuredNeeds         *SizeHint              `json:"measured_needs,omitempty"`
+	OOMCapacity           *SizeHint              `json:"oom_capacity,omitempty"`
+	OOMRetries            int                    `json:"oom_retries,omitempty"`
+	Extensions            []Extension            `json:"extensions,omitempty"`
+	Extension             *ExtensionSelection    `json:"extension,omitempty"`
+	OutputFiles           map[string]string      `json:"output_files,omitempty"`
+	ReleaseConfirmed      bool                   `json:"release_confirmed,omitempty"`
+	RequeuedByOperator    bool                   `json:"requeued_by_operator,omitempty"`
+	LastStopOutcome       string                 `json:"last_stop_outcome,omitempty"`
+	ProductionHost        string                 `json:"production_host,omitempty"`
+
+	// Retargeted production must keep positive parity across candidate changes
+	// and restart, including historical recipes otherwise allowed at first bind.
+	RequireProductionParity bool `json:"require_production_parity,omitempty"`
+
 	PreemptionPlacement   *PreemptionPlacement         `json:"preemption_placement,omitempty"`
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
 	AssignedAt            *time.Time                   `json:"assigned_at,omitempty"`

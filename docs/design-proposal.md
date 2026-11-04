@@ -2401,7 +2401,10 @@ exact agreement. All metrics reported for this work across variants and requeste
 by the job must pass. Complete measured parity satisfies MY-19; unknown evidence
 retains the approval fallback for production and is allowed for experiments.
 Known failures exclude a variant regardless of class or approval; native checks
-remain exempt. The same eligibility applies to production spillover. Evidence is
+remain exempt. The same eligibility applies to production spillover and storage recovery.
+Retargeting persists a positive-parity requirement across later candidate changes
+and restart, so one measured digest cannot authorize an unmeasured alternative.
+Evidence is
 immutable recipe metadata, not an evaluation runner or native qualification.
 The hold and owner action appear in eligibility/status. Approval is eligibility,
 not a job host pin.

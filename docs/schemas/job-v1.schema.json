@@ -1974,6 +1974,10 @@
           "type": "boolean",
           "x-contract": "diagnostic"
         },
+        "require_production_parity": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "requirement_reasons": {
           "items": {
             "$ref": "#/$defs/RequirementReasonStatus"

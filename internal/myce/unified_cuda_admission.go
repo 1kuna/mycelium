@@ -109,11 +109,11 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 			if !q.jobAllowsMachine(demand, target.ID) || !q.reservationAllows(demand, target) {
 				continue
 			}
-			// A production binding moves only with measured parity or approval.
-			if demand.ProductionHost != "" && hostID(target) != demand.ProductionHost && !q.productionParityKnown(demand, target) {
-				continue
-			}
 			for _, candidate := range q.memoryCandidates(demand, target) {
+				// Evidence belongs to this exact recipe, not a qualified sibling.
+				if q.variantParityReason(candidate, target) != "" || demand.ProductionHost != "" && hostID(target) != demand.ProductionHost && !q.productionParityKnown(candidate, target) {
+					continue
+				}
 				if !fitsResources(candidate, target, target.TotalMemoryGB) {
 					continue
 				}
@@ -124,8 +124,9 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 					}
 					// Reuse #401's immediate-admission proof, forecasting only the
 					// dependency's readiness. Approval alone is not spare capacity.
-					copy := *demand
+					copy := *candidate
 					copy.ProductionHost, copy.Spec.After = "", nil
+					copy.RequireProductionParity = demand.ProductionHost != "" && hostID(target) != demand.ProductionHost || demand.RequireProductionParity
 					alternative := q.batchCandidateWithResources(&copy, target, nil)
 					if alternative == nil || !q.workerIdle(target, alternative) || q.immediateCandidate(alternative, target) == nil {
 						continue

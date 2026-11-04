@@ -478,11 +478,12 @@ func (q *Queue) productionSpilloverTarget(j *Job) string {
 	}
 	copy := *j
 	copy.ProductionHost = ""
+	copy.RequireProductionParity = true
 	scan := q.placementScan()
 	var best *Machine
 	now := q.clock.Now()
 	for _, m := range scan.machines {
-		if hostID(m) == j.ProductionHost || !q.productionParityKnown(&copy, m) || q.unreported[m.ID] || m.LastSeen.After(now) || now.Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+		if hostID(m) == j.ProductionHost || q.unreported[m.ID] || m.LastSeen.After(now) || now.Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
 			continue
 		}
 		candidate := q.batchCandidateWithResources(&copy, m, nil)
@@ -522,6 +523,9 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 			continue
 		}
 		for _, candidate := range q.memoryCandidates(j, m) {
+			if q.variantParityReason(candidate, m) != "" || call == nil && j.ProductionHost != "" && j.ProductionHost != hostID(m) && j.Spec.extensionJob() && j.Spec.ExtensionCheck == nil && !q.productionParityKnown(candidate, m) {
+				continue
+			}
 			if !fitsResources(candidate, &capacity, m.TotalMemoryGB) {
 				continue
 			}
@@ -598,10 +602,12 @@ func (q *Queue) maintainHolds() {
 	for _, j := range jobs {
 		if target := q.productionSpilloverTarget(j); target != "" {
 			j.ProductionHost = target
+			j.RequireProductionParity = true
 		}
 		if j.State == "queued" && j.ProductionHost != "" && (q.dockerBlocker(j.ProductionHost) != "" || q.diskWaitingReason(j, j.ProductionHost) != "") {
 			if target := q.productionTarget(j, nil); target != "" {
 				j.ProductionHost = target
+				j.RequireProductionParity = j.Spec.extensionJob() && j.Spec.ExtensionCheck == nil
 			}
 		}
 		if j.ProductionHost == "" {
