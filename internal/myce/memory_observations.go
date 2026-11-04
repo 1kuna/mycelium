@@ -36,7 +36,11 @@ func (q *Queue) memoryObservationCatalog() *memoryObservationCatalog {
 				key := memoryWorkIdentity(point.Key, point.MemoryConfiguration)
 				index.work[key] = append(index.work[key], &point)
 			}
-			key := similarMemoryKey{point.MemoryFamily, point.Key.Target.OS, point.Key.Component != "cpu"}
+			layout := point.MemoryLayout
+			if point.Key.Component == "cpu" {
+				layout = ""
+			}
+			key := similarMemoryKey{point.MemoryFamily, point.Key.Target.OS, point.Key.Component != "cpu", layout}
 			index.family[key] = append(index.family[key], &point)
 		}
 		if q.records != nil && q.records.updating {

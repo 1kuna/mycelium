@@ -144,8 +144,8 @@ func TestFanOutAutoMemorySerialQualifiedDevice(t *testing.T) {
 			if learned && (want.MemoryEnvelope.Source != "accepted peak × 1.25" || want.Spec.Needs.HostMemoryGB != 5.007386207580566 || want.Spec.Needs.MemoryGB != 5.640864372253418) {
 				t.Fatalf("peak not reused: %+v", want.MemoryEnvelope)
 			}
-			if !learned && want.MemoryEnvelope.Source != "exploratory first run" {
-				t.Fatalf("missing exploration: %+v", want.MemoryEnvelope)
+			if !learned && (want.MemoryEnvelope.Source != "exploratory first run (bounded: 25% of host allowance)" || want.Spec.Needs.HostMemoryGB != 6 || want.Spec.Needs.MemoryGB != 30) {
+				t.Fatalf("missing bounded host exploration with whole card: %+v", want.MemoryEnvelope)
 			}
 			run := assignedJob(machineCheck(t, q, m))
 			if run == nil {
