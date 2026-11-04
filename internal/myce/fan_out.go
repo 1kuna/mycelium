@@ -183,7 +183,7 @@ func (q *Queue) fanOutComponents(j *Job) ([]batchComponent, map[string]*Job) {
 		}
 		for _, candidate := range extensionJobs(q.fanOutTemplate(j), m, true) {
 			q.applyLearnedNeeds(candidate)
-			if q.capReasonFor(candidate, m) != "" || !fitsResources(candidate, m, m.FreeMemoryGB) {
+			if q.variantParityReason(candidate, m) != "" || q.capReasonFor(candidate, m) != "" || !fitsResources(candidate, m, m.FreeMemoryGB) {
 				continue
 			}
 			e := qualifiedExtension(candidate, m)

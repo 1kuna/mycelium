@@ -413,6 +413,8 @@ type Job struct {
 
 	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`
 	PlacementIntent     *PlacementIntent     `json:"placement_intent,omitempty"`
+	VariantEligibility  []VariantEligibility `json:"variant_eligibility,omitempty"`
+	VariantAdvice       []string             `json:"variant_advice,omitempty"`
 	Placement           *PlacementDecision   `json:"placement,omitempty"`
 	ProductionBinding   *PlacementBinding    `json:"production_binding,omitempty"`
 	Runtime             *JobRuntime          `json:"runtime,omitempty"`

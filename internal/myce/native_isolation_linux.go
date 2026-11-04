@@ -185,6 +185,7 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 		return p, err
 	}
 	p.ReadOnly = append(p.ReadOnly, declaredRead...)
+	p.ReadOnly = append(p.ReadOnly, w.nativeModelInputs...)
 	p.Read = append(p.Read, declaredExecute...)
 	// Acquired archive members may execute, but receive no content-write grant.
 	p.Read = append(p.Read, w.nativeSharedInputs...)

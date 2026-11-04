@@ -238,6 +238,9 @@ func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
 }
 
 func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident bool) bool {
+	if q.variantParityReason(j, m) != "" {
+		return false
+	}
 	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
 		return false
 	}

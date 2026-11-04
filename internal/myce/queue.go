@@ -2251,6 +2251,7 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 	}
 	if forStatus {
 		q.statusEligibility(j)
+		q.projectVariantEligibility(j)
 		if j.State == "queued" {
 			j.Reason = q.statusWaitingReason(j)
 			if strings.Contains(j.Reason, cpuIsolationUnavailable) {

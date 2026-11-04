@@ -1421,6 +1421,58 @@ controls. Storage is bounded to 64 client/version identities plus per-kind
 IDs are never retained. Counting, summary encoding and logging run outside the
 queue mutex and do not write the database.
 
+### Variant eligibility (#499)
+
+From the next release, nonterminal native variant jobs expose
+`variant_eligibility` in status and job GET, and in the CLI and status page:
+
+- `extension`/`digest` identify the frozen implementation; `variant` is its exact
+  declared target, while `host`/`device` and `target` identify observed capacity.
+- `freshness` is fresh, stale or unknown, using queue time and the existing
+  worker loss timeout. Stale inventory cannot establish eligibility.
+- `qualified` requires the existing exact native report identity. `eligible`
+  additionally requires current resources, policy, readiness and admission.
+  `reasons` lists blockers; mismatched targets remain visible. It is not a
+  selection, reservation, forecast or proof of reference-output parity.
+- Assigned attempts say alternatives require requeue. Terminal jobs keep their
+  historical placement receipt rather than projecting new alternatives.
+- A newly registered multi-variant production implementation requires owner
+  approval of the candidate physical host in the existing
+  `policy.projects[PROJECT].production_parity_hosts[WORK]`. The reason explains
+  reference-output comparison and `myce policy get/set`. Checks/experiments can
+  obtain evidence; historical registrations/replays and accepted jobs are kept.
+
+`variant_advice` is conditional porting guidance when missing coverage could
+relieve current contention on a scarce host. It names the exact missing target,
+backend/device selection, resources, frozen environment/lock, native check and
+MY-19 approval steps. It does not infer support, change pins or relocate work.
+Registration warnings reuse the live portability report without executing work.
+
+### Read-only host-pin audit (#499)
+
+Run with an OpenSSL-backed Python supported by the installed-authority client:
+
+```sh
+python3 scripts/audit-host-pins.py --since 2026-11-01T00:00:00Z --until 2026-11-04T00:00:00Z
+```
+
+The script reads paginated status through `Client.from_installed()`; it never
+reads a database or changes jobs. The inclusive start/exclusive end window uses
+job submission (`queued`) time. Deduplicate by job ID and count explicit
+`spec.allowed_machines` or authored `placement_intent.host_constraint=pin`.
+Group by project and production/non-production (all other classes). Scheduler
+assignments, production bindings and backend/device selectors do not count as
+host pins. The denominator is all retained submitted jobs in the window, the
+same method as the 2026-10-30 audit (1,108/2,535 overall; 62.2% non-production).
+
+Public output uses generic project labels. Optional `--private-project-map FILE`
+creates a new mode-0600 label map for a private handoff; never publish it.
+Retention can remove older records, so report coverage and window with every
+number. Pages are read-only observations, not a transaction; a concurrent
+submission or history collection may affect coverage. The script refuses an API
+without pagination or a projection omitting host pins. A percentage change alone
+is not evidence that a particular release changed consumer behavior.
+
 ## Batched waits and consumer flood protection
 
 `POST /api/wait` accepts `{"ids":["JOB_A","JOB_B"],"after":{"JOB_A":1},"seconds":20}`.

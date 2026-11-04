@@ -2362,7 +2362,45 @@ steps, and preserves MY-19 output parity before splitting. Optional authored
 of existing registrations. No payload execution, registration or placement occurs
 on an advice read. All file hydration, hashing and lock analysis happens outside
 `q.mu`. See [portability](scheduling.md) for interfaces and evidence limits.
-Registration warnings and scarce-host yield remain separate implementation work.
+Registration warnings and variant eligibility are described below. Scarce-host
+yield remains a separate checkpoint/requeue mechanism (#328/#740).
+
+### Variant eligibility and production approval (#499; MY-27/MY-31)
+
+The existing exact extension variants, native qualification and least-valuable-fit
+placement remain the only implementation model. Status and job GET project each
+declared variant against observed host/device targets for nonterminal native jobs:
+target match, exact qualification identity, freshness, production parity and live
+admission/resource blockers. Eligible means admissible now, not reserved or chosen.
+Assigned attempts retain their execution and display alternatives as requiring
+requeue. Reads never execute, qualify or move work and run outside the queue lock.
+
+Successful registration returns non-blocking warnings from the existing live
+portability projection. Missing recipes, declared-but-unqualified coverage and
+unknown inventory remain distinct; genuine authored requirements are accepted.
+Queued unrestricted work may receive concrete missing-variant advice when its
+qualified implementation fits a scarce host but lacks current capacity, and a
+fresh, less-valued host has no recipe. Existing resource floors screen impossible
+destinations; an unimplemented backend's actual resources and parity remain
+unknown. Policy, preparation, caps and parity holds have their own remedies.
+Advice neither changes accepted jobs nor authorizes relocation.
+
+New multi-variant registrations carry server-owned registration metadata requiring
+explicit MY-19 approval before production placement. Native checks and experiments
+remain admissible to obtain evidence. After comparing outputs to the reference
+within the owner's accuracy criteria, the owner uses the existing project/work
+`production_parity_hosts` policy to approve candidate physical hosts. A native
+baseline proves execution, not cross-variant parity. Historical registrations,
+identical replays and their frozen accepted jobs retain their admission contract.
+No metric schema is added; that remains #145. The hold and owner action appear
+plainly in eligibility/status. Approval is eligibility, not a job host pin.
+
+Host-pin adoption is measured read-only over retained jobs submitted in an explicit
+time window, grouped by project and production/non-production: an explicit
+`allowed_machines` or authored host-constraint pin is pinned. Scheduler choices,
+production bindings and backend constraints are excluded. This reproduces the
+2026-10-30 audit's denominator; it does not edit consumers' jobs. See
+[the audit command](status.md#read-only-host-pin-audit-499) and its retention limits.
 
 ## Opt-in durable asynchronous NAS output delivery (#349; 2026-10-29)
 
