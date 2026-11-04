@@ -10,7 +10,9 @@ import (
 
 // These are runtime facts, not adapter conclusions. Intent is deliberately absent.
 // Times are wall-clock evidence (not scheduling deadlines). A signal is added
-// only after successful delivery and persistence; exit observation is immutable.
+// only after successful delivery and persistence; At is captured immediately
+// before sending, so a fast exit cannot overtake the delivery timestamp merely
+// by descheduling the sender. Exit observation is immutable.
 type deliveredSignal struct {
 	Signal   string    `json:"signal"`
 	At       time.Time `json:"at"`

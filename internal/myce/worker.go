@@ -336,16 +336,15 @@ func (p *process) signalLocked(signal syscall.Signal) bool {
 			return false
 		}
 	}
-	err := signalWorkerSession(p.cmd.Process.Pid, signal, func() {
+	err := signalWorkerSession(p.cmd.Process.Pid, signal, func(at time.Time) {
 		if !exited {
-			p.recordSignalLocked(signal)
+			p.recordSignalLocked(signal, at)
 		}
 	})
 	return err == nil
 }
 
-func (p *process) recordSignalLocked(signal syscall.Signal) {
-	at := time.Now().UTC()
+func (p *process) recordSignalLocked(signal syscall.Signal, at time.Time) {
 	name := "TERM"
 	if signal == syscall.SIGKILL {
 		name = "KILL"
