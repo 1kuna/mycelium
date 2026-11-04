@@ -105,3 +105,21 @@ func wallTimeText(j *Job) string {
 	}
 	return text
 }
+
+// File workers acknowledge physical release before publishing failure artifacts.
+// A wall-time release may already have made the job terminal. Permit only this
+// exact failed execution's opted-in diagnostic manifest, never success outputs.
+func wallTimeDiagnosticsAllowed(j *Job, r Result) bool {
+	return j != nil && j.State == "failed" && !cancelled(j) &&
+		j.ID == r.ID && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session &&
+		j.ExecutionCause != nil && j.ExecutionCause.Class == wallTimeLimit &&
+		!r.Success && !r.ReleaseOnly && r.ExecutionCause != nil && r.ExecutionCause.Class == wallTimeLimit &&
+		j.Spec.Diagnostics != nil && r.Diagnostics != nil
+}
+func (q *Queue) wallTimeVerificationJob(r Result) (*Job, error) {
+	j, err := q.current(r)
+	if err != nil && wallTimeDiagnosticsAllowed(q.s.Jobs[r.ID], r) {
+		return q.touchJob(r.ID), nil
+	}
+	return j, err
+}

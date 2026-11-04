@@ -153,3 +153,65 @@ func TestWallTimeValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWallTimeIndependentExperimentFailure(t *testing.T) {
+	q, c := fixture(t)
+	m := sharedDiscreteMachine("xpu")
+	s := sharedSpec("experiment", 1)
+	s.WallTime = "2s"
+	submit(t, q, s)
+	run := assignedJob(machineCheck(t, q, m))
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(2 * time.Second)
+	machineCheck(t, q, m, run)
+	r := result(run, false)
+	r.ExecutionCause = &RuntimeCause{Operation: "command", Class: "command_exit"}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, run.ID)
+	if got.State != "failed" || got.ExecutionCause == nil || got.ExecutionCause.Class != "command_exit" {
+		t.Fatal("wall stop replaced independently observed experiment failure", got.State, got.ExecutionCause)
+	}
+}
+
+func TestWallTimeFailureDiagnostics(t *testing.T) {
+	for _, releaseFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct", true: "after-release"}[releaseFirst], func(t *testing.T) {
+			q, c := fixture(t)
+			client := retentionClient(t, q)
+			_, ref := retentionUpload(t, client, "partial diagnostic")
+			s := spec("experiment")
+			s.WallTime = "2s"
+			s.Files = FileManifest{"input": ref}
+			s.Diagnostics = &DiagnosticSpec{}
+			submit(t, q, s)
+			m := machine("worker", "fake")
+			run := check(t, q, m, nil).Job
+			if err := q.Started(result(run, false)); err != nil {
+				t.Fatal(err)
+			}
+			c.Advance(2 * time.Second)
+			check(t, q, m, run)
+			if releaseFirst {
+				ack := result(run, false)
+				ack.ReleaseOnly = true
+				if err := q.Complete(ack); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r := result(run, false)
+			r.ExecutionCause = wallTimeCause()
+			r.Diagnostics = &AttemptDiagnostics{Files: FileManifest{"summary.json": ref, "log-tail.txt": ref}}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			files, err := DiagnosticFiles(job(t, q, run.ID), run.Attempt)
+			if err != nil || len(files) != 2 {
+				t.Fatal("wall stop lost verified failure diagnostics", files, err)
+			}
+		})
+	}
+}

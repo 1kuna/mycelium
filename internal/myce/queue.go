@@ -1630,14 +1630,14 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	defer q.fileLifecycle.RUnlock()
 	quotaFailure := attemptDiskLimitFailure(r)
 	unlockRequest := requestLock(ctx, &q.mu)
-	j, err := q.current(r)
+	j, err := q.wallTimeVerificationJob(r)
 	if err == nil && parkedStorage(j) && !r.ReleaseOnly {
 		unlockRequest()
 		return errors.New(parkedStorageReason)
 	}
 	// A quota failure remains terminal when a stop races it. Verify its opt-in
 	// diagnostics in either live state, with the same identity fences as outputs.
-	verify := err == nil && !(r.Success && wallTimeExpired(j, q.clock.Now())) && j.storedFileResults() && (j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j))) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.Diagnostics != nil) && !r.ReleaseOnly
+	verify := err == nil && !(r.Success && wallTimeExpired(j, q.clock.Now())) && j.storedFileResults() && (j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j) || wallTimeStopped(j)) || wallTimeDiagnosticsAllowed(j, r)) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.Diagnostics != nil) && !r.ReleaseOnly
 	var yieldPath string
 	if err == nil && yieldMatches(j) && !j.FileTransport && !r.ReleaseOnly && r.Interrupted && r.FinalCheckpointGeneration != nil {
 		yieldPath = attemptCheckpoint(*j)
@@ -1713,9 +1713,9 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		}
 		if verify {
 			q.maintainStartDeadlines()
-			j, err := q.current(r)
+			j, err := q.wallTimeVerificationJob(r)
 			m := q.s.Machines[r.Machine]
-			if err != nil || !(j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j))) || cancelled(j) || m == nil || m.Session != r.Session ||
+			if err != nil || !(j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j) || wallTimeStopped(j)) || wallTimeDiagnosticsAllowed(j, r)) || cancelled(j) || m == nil || m.Session != r.Session ||
 				q.executionHost(r.Machine) != host || !maps.Equal(j.Spec.Outputs, outputs) {
 				return ErrStale
 			}
@@ -1830,6 +1830,14 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	}
 	// A retransmitted acknowledgement must not turn a completed job into stale work.
 	if j := q.touchJob(r.ID); j != nil && terminal(j.State) && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+		if filesVerified && wallTimeDiagnosticsAllowed(j, r) {
+			for i := range j.AttemptHistory {
+				h := &j.AttemptHistory[i]
+				if h.Attempt == r.Attempt && h.Machine == r.Machine && h.Session == r.Session {
+					h.Diagnostics = r.Diagnostics
+				}
+			}
+		}
 		return nil
 	}
 	j, err := q.current(r)
@@ -1896,7 +1904,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 			}
 		}
 	}
-	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure {
+	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) {
 		if cancelled(j) {
 			q.finishCancellation(j)
 		} else {
