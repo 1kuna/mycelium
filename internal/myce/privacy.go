@@ -266,6 +266,9 @@ func extensionCheckAdmissionReason(reason string) string {
 // The returned value borrows fields until the caller deep-copies it.
 func statusJobInputs(job *Job) Job {
 	j := *job
+	if j.SpecProjection == nil {
+		j.RequirementReasons = requirementReasonStatus(job)
+	}
 	placementStatus(&j)
 	j.LedgerEntries = nil
 	if j.Ledger == nil {
@@ -290,7 +293,7 @@ func statusJobInputs(job *Job) Job {
 		"extension_check.directory", "extension_check.reserve", "extension_digest",
 		"fan_out", "files", "give_up_at", "inputs", "isolation",
 		"output_delivery", "output_destination", "output_retention", "outputs", "prepare_source", "profile_memory",
-		"program.args", "program.file", "reason", "require_target", "run",
+		"program.args", "program.file", "reason", "require_target", "requirement_reasons", "run",
 		"shared_inputs", "size_hint", "submission_key", "targets",
 	}}
 	j.Extensions = nil

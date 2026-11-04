@@ -101,7 +101,7 @@ The projection strips these entire fields: `after`, `args`, `diagnostics`,
 `disk`, `environment`, `execution`, `expected_minutes`, `extension`,
 `extension_digest`, `fan_out`, `files`, `give_up_at`, `inputs`, `isolation`,
 `output_delivery`, `outputs`, `prepare_source`, `profile_memory`,
-`reason`, `require_target`, `run`, `shared_inputs`, `size_hint`, and `targets`.
+`reason`, `require_target`, `requirement_reasons`, `run`, `shared_inputs`, `size_hint`, and `targets`.
 Status rows additionally strip `submission_key`; job GET retains it. Within `program`, it strips `args` and `file`, retaining only
 `type`. Within `extension_check`, it strips `automatic`, `directory` and
 `reserve`, retaining only `work` and `timeout`. Some stripped fields encode
@@ -1486,3 +1486,26 @@ number. Pages are read-only observations, not a transaction; a concurrent
 submission or history collection may affect coverage. The script refuses an API
 without pagination or a projection omitting host pins. A percentage change alone
 is not evidence that a particular release changed consumer behavior.
+
+### Authored requirement explanations (#748)
+
+From the next release, adapter entries, legacy profiles and job specs retain
+`requirement_reasons` in frozen submitted intent and private receipts. Existing
+native registrations already retain their map in each frozen extension snapshot.
+No scheduling authority, parity approval or pin policy comes from an explanation.
+
+Status and job GET expose job-level `requirement_reasons` rows with `constraint`,
+`reason_source` (`authored` or `missing`) and `source`. `source` locates the field
+in the frozen spec or the extension identified by its digest; it is not a host
+filesystem path. CLI/page status show the same metadata. Host/device constraints
+with no nonblank recorded explanation show `missing`; for historical submissions
+that means no explanation was retained, not that their requirement is invalid.
+Native recipe device selectors are included. Registration metadata and accepted
+jobs are never rewritten to fill in reasons.
+
+The raw `spec.requirement_reasons` map is stripped and listed in
+`spec_projection.omitted`. Native recipe maps remain stripped with extensions.
+Only fixed host/device/backend constraint names survive; arbitrary keys coalesce
+as `other` with a redacted-key locator. Free-form explanations stay in authored
+source, private receipts and frozen intent, under the existing privacy default.
+There is no raw-text exception or full-spec status mode.

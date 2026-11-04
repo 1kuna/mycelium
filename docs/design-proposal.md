@@ -2447,3 +2447,16 @@ samples withhold admission. Status names the pressure reason and enforcement mod
 macOS CPU time and RAM remain unenforced; QoS/concurrency hints are cooperative,
 and native Linux/representative owner-pressure qualification remains separate.
 See the shared-host guide for thresholds, evidence and costs.
+
+
+## Amendment: retain authored requirement explanations (#748)
+
+Adapter/profile submission carries the existing `requirement_reasons` map in
+frozen job intent and its private receipt. Native extension snapshots keep their
+existing copy. Status and job GET project sanitized constraint names, whether an
+explanation was authored or is missing, and the source field in the frozen spec
+or digest-identified extension. Raw maps and arbitrary keys/prose retain the
+existing observation redaction policy. This does not change scheduling, pins,
+qualification, parity approval or historical jobs. Missing metadata does not
+establish that a hard requirement is unjustified. See
+[status](status.md#authored-requirement-explanations-748).

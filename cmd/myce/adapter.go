@@ -42,18 +42,17 @@ type adapterVariant struct {
 	Sweeps       map[string]myce.ReferenceSweep    `yaml:"sweeps,omitempty"`
 }
 type adapterEntry struct {
-	RequirementReasons map[string]string `yaml:"requirement_reasons,omitempty"`
-	myce.Spec          `yaml:",inline"`
-	Source             profileSource     `yaml:"source,omitempty"`
-	Checks             adapterChecks     `yaml:"checks,omitempty"`
-	MemoryClass        string            `yaml:"memory_class,omitempty"`
-	Variants           []adapterVariant  `yaml:"variants,omitempty"`
-	Version            string            `yaml:"version,omitempty"`
-	Purpose            string            `yaml:"purpose,omitempty"`
-	Kinds              []string          `yaml:"kinds,omitempty"`
-	ProgramTypes       []string          `yaml:"program_types,omitempty"`
-	Assets             myce.FileManifest `yaml:"assets,omitempty"`
-	Notes              string            `yaml:"notes,omitempty"`
+	myce.Spec    `yaml:",inline"`
+	Source       profileSource     `yaml:"source,omitempty"`
+	Checks       adapterChecks     `yaml:"checks,omitempty"`
+	MemoryClass  string            `yaml:"memory_class,omitempty"`
+	Variants     []adapterVariant  `yaml:"variants,omitempty"`
+	Version      string            `yaml:"version,omitempty"`
+	Purpose      string            `yaml:"purpose,omitempty"`
+	Kinds        []string          `yaml:"kinds,omitempty"`
+	ProgramTypes []string          `yaml:"program_types,omitempty"`
+	Assets       myce.FileManifest `yaml:"assets,omitempty"`
+	Notes        string            `yaml:"notes,omitempty"`
 	// Legacy native recipes are converted to exact variants. These shared fields
 	// also make a flat native recipe possible, using the same recipe types.
 	Environments map[string]myce.EnvironmentRecipe `yaml:"environments,omitempty"`
@@ -205,7 +204,7 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 	if !ok {
 		return executionProfile{}, nil, errors.New("entry does not exist")
 	}
-	p := executionProfile{Spec: e.Spec, Source: e.Source, Check: e.Checks.Result, MemoryClass: e.MemoryClass, Adapter: true, RequirementReasons: e.RequirementReasons}
+	p := executionProfile{Spec: e.Spec, Source: e.Source, Check: e.Checks.Result, MemoryClass: e.MemoryClass, Adapter: true}
 	p.Project = a.Project
 	if p.Name == "" {
 		p.Name = name

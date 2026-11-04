@@ -98,6 +98,9 @@ type PortabilityHost struct {
 // Portability captures the ordinary detached read view. File hydration, hashing,
 // lock parsing, qualification and planner checks all happen after q.mu releases.
 func (q *Queue) Portability(req PortabilityRequest) (PortabilityReport, error) {
+	if req.RequirementReasons == nil && req.Spec != nil {
+		req.RequirementReasons = req.Spec.RequirementReasons
+	}
 	if req.Extension != "" && (req.Recipe != nil || req.Spec != nil) || req.Recipe != nil && req.Spec != nil {
 		return PortabilityReport{}, errors.New("choose extension, recipe or spec")
 	}

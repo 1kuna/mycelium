@@ -1959,6 +1959,16 @@
           "type": "boolean",
           "x-contract": "diagnostic"
         },
+        "requirement_reasons": {
+          "items": {
+            "$ref": "#/$defs/RequirementReasonStatus"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "resources": {
           "items": {
             "$ref": "#/$defs/ResourceBasis"
@@ -3304,6 +3314,25 @@
       ],
       "type": "object"
     },
+    "RequirementReasonStatus": {
+      "properties": {
+        "constraint": {
+          "type": "string"
+        },
+        "reason_source": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "constraint",
+        "reason_source",
+        "source"
+      ],
+      "type": "object"
+    },
     "ReservationOptions": {
       "properties": {
         "id": {
@@ -3762,6 +3791,16 @@
         },
         "require_target": {
           "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "requirement_reasons": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
           "x-contract": "diagnostic"
         },
         "resumable": {
