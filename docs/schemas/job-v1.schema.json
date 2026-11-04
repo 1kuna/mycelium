@@ -1505,6 +1505,9 @@
         "attempt": {
           "type": "string"
         },
+        "cpu_cores": {
+          "type": "integer"
+        },
         "demand": {
           "type": "string"
         },

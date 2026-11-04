@@ -140,9 +140,13 @@ func (q *Queue) hostCPUInUse(m *Machine, releasedJobs map[*Job]bool, releasedSlo
 	}
 	for _, p := range q.s.PreparationPlans {
 		owner := q.s.Machines[p.Machine]
-		if p.Started && !(releasePreparation && p.Machine == m.ID) && owner != nil && hostID(owner) == hostID(m) && (p.Kind == "environment" || !covered[p.Machine]) {
-			used++ // Other preparation may belong to an already reserved execution.
-			covered[p.Machine] = true
+		if p.Started && !(releasePreparation && p.Machine == m.ID) && owner != nil && hostID(owner) == hostID(m) {
+			if p.CPUCores > 0 {
+				used += p.CPUCores
+			} else if !covered[p.Machine] {
+				used++ // Legacy/shared preparation inherits one execution core.
+				covered[p.Machine] = true
+			}
 		}
 	}
 	return used
@@ -259,7 +263,7 @@ func (q *Queue) workerHasCPUReservation(m *Machine) bool {
 		return true
 	}
 	for _, p := range q.s.PreparationPlans {
-		if p.Machine == m.ID && p.Started {
+		if p.Machine == m.ID && p.Started && p.CPUCores == 0 {
 			return true
 		}
 	}

@@ -389,9 +389,10 @@ From s072, one environment builder can run beside CPU commands when a separate
 logical core fits the host allowance, including on accelerator workers. The
 builder's core stays charged until its exact completion or stop receipt; CPU
 commands retain their existing reservations. Preparation RAM uses the existing
-owner reserve. Device commands, active model work, recovery and shared-host
-policy still withhold new builds. Peer preference uses the same preparation
-eligibility, so a worker unable to start a builder cannot silently attract an
+owner reserve. CPU-scoped builds may also run beside device commands;
+device-scoped builds wait for those commands to release. Active model work,
+recovery and shared-host policy still withhold new builds. Peer preference uses
+the same preparation eligibility, so a worker unable to start a builder cannot silently attract an
 offer. Existing offered/building and CPU-capacity reasons describe these waits.
 
 From s071, a deterministic environment build failure fails matching queued jobs

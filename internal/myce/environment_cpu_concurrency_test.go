@@ -114,12 +114,12 @@ func TestEnvironmentPreparationCannotBorrowUnrelatedCPUCore(t *testing.T) {
 	if err := q.AuthorizeLaunch(l); err == nil {
 		t.Fatal("builder borrowed a fully occupied CPU reservation")
 	}
-	if localEnvironmentPreparationFits(Worker{Machine: m}, []Job{*active}, nil) {
+	if localEnvironmentPreparationFits(Worker{Machine: m}, []Job{*active}, nil, true) {
 		t.Fatal("worker admitted a builder without a free core")
 	}
 }
 
-func TestEnvironmentPreparationDoesNotDeferToDeviceBusyPeer(t *testing.T) {
+func TestEnvironmentPreparationDoesNotDeferToLoadingPeer(t *testing.T) {
 	q, _ := fixture(t)
 	busy := m3Machine()
 	busy.ID, busy.HostID, busy.Session = "a", "a", "session-a"
@@ -144,14 +144,54 @@ func TestEnvironmentPreparationDoesNotDeferToDeviceBusyPeer(t *testing.T) {
 	s := cpuSpec(1, .1)
 	s.Environment.Name = "new"
 	demand := submit(t, q, s)
-	if plan := machineCheck(t, q, busy, deviceWork).EnvironmentPlan; len(plan) != 0 {
-		t.Fatal("device-busy peer attracted an unstartable offer", plan)
+	q.models.Models = append(q.models.Models, Model{Name: "loading", MemoryGB: 1})
+	q.s.ModelSlots[slotKey(busy.ID, "loading", "1")] = &ModelSlot{Machine: busy.ID, Session: busy.Session, Device: "1", Model: "loading", State: "loading", Priority: "experiment"}
+	q.refreshHostCPU()
+	if plan := q.environmentPlan(cpuMachineView(q.s.Machines[busy.ID])); len(plan) != 0 {
+		t.Fatal("loading peer attracted an unstartable offer", plan)
 	}
-	plan := machineCheck(t, q, ready).EnvironmentPlan
+	plan := q.environmentPlan(cpuMachineView(q.s.Machines[ready.ID]))
 	if len(plan) != 1 || plan[0].Launch.Demand != demand.ID {
 		t.Fatal("eligible worker deferred to a peer unable to prepare", plan)
 	}
 	if err := q.AuthorizeLaunch(*plan[0].Launch); err != nil {
 		t.Fatal("eligible worker could not start preparation", err)
+	}
+}
+
+func TestEnvironmentOwnedCoreSurvivesExecutionReleaseProjection(t *testing.T) {
+	q, m := releaseTestHost(t, 3, 64, []releaseTestVictim{
+		{"a", "experiment", 1, 0, false}, {"b", "experiment", 1, 0, false},
+	})
+	owner := q.s.Machines["worker-a"]
+	q.s.PreparationPlans = map[string]HostLaunch{
+		"build": {Machine: owner.ID, Session: owner.Session, Kind: "environment", Attempt: "build", Started: true, CPUCores: 1},
+	}
+	q.refreshHostMemory()
+	demand := spec("production")
+	demand.Needs = ResourceNeeds{CPUCores: 2}
+	jobs, slots, ok := q.hostReleasesExcept(m, 0, 0, demand, nil, nil)
+	if !ok || !slices.Equal(releaseTestIDs(jobs, slots), []string{"job/a", "job/b"}) {
+		t.Fatalf("owned builder core distorted release projection: feasible=%t victims=%v", ok, releaseTestIDs(jobs, slots))
+	}
+	projected := q.cpuAfterReleases(m, jobs, slots, 0)
+	if projected.CPUInUseCores != 1 || !cpuAllocationFits(&projected, 2) {
+		t.Fatalf("projection lost the separately owned builder core: %+v", projected)
+	}
+}
+
+func TestEnvironmentAndCopyCoreAccountingIsOrderIndependent(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	q.s.Machines[m.ID] = &m
+	q.s.PreparationPlans = map[string]HostLaunch{
+		"build": {Machine: m.ID, Session: m.Session, Kind: "environment", Attempt: "build", Started: true, CPUCores: 1},
+		"copy":  {Machine: m.ID, Session: m.Session, Kind: "copy", Attempt: "copy", Started: true},
+	}
+	// Repeated map walks expose the observed environment/copy order bug.
+	for range 128 {
+		if used := q.hostCPUInUse(&m, nil, nil, false); used != 2 {
+			t.Fatalf("same custody changed core charge: got %d, want 2", used)
+		}
 	}
 }

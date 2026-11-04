@@ -585,14 +585,14 @@ func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 	return s, s.save()
 }
 
-func localEnvironmentPreparationFits(w Worker, jobs []Job, models []ModelSlot) bool {
+func localEnvironmentPreparationFits(w Worker, jobs []Job, models []ModelSlot, cpuOnly bool) bool {
 	if w.Machine.SharedHost != nil {
 		return false
 	}
 	cores, why := cpuCapacity(&w.Machine)
 	used := 1 // The single environment builder, independently of CPU actors.
 	for _, j := range jobs {
-		if !j.Spec.Needs.cpuOnly() {
+		if !j.Spec.Needs.cpuOnly() && !cpuOnly {
 			return false
 		}
 		used += j.Spec.Needs.cores()
@@ -1199,7 +1199,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				}
 				unavailable := leaving || recovering || reply.AdmissionBlocked || w.checkAvailability() != nil
 				busy := len(actors) > 0 || unavailable
-				environmentBusy := unavailable || !localEnvironmentPreparationFits(w, activeJobs(), reply.ModelPlan)
+				cpuPreparation := len(reply.EnvironmentPlan) > 0 && reply.EnvironmentPlan[0].Platform == "cpu"
+				environmentBusy := unavailable || !localEnvironmentPreparationFits(w, activeJobs(), reply.ModelPlan, cpuPreparation)
 				for _, slot := range reply.ModelPlan {
 					if slot.State == "loading" || slot.InFlight > 0 {
 						busy = true

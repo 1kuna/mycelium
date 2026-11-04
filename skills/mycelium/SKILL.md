@@ -101,8 +101,8 @@ From s072, missing environments can prepare beside unrelated CPU commands on
 the same worker, including an accelerator worker, when one additional core is
 available. Mycelium reserves that builder core separately and preserves running
 commands. Status distinguishes an offered preparation from a started build;
-an offer alone is not proof of progress. Device commands and active model work
-still exclude a new build, and preparation preference considers only peers
+an offer alone is not proof of progress. CPU-scoped builds may also run beside device commands; device-scoped builds
+wait for those commands, and active model work still withholds a new build, and preparation preference considers only peers
 that can start it.
 
 From s071, `myce status JOB_ID` and job GET show deterministic preparation errors

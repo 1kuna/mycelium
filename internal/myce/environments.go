@@ -348,19 +348,19 @@ type EnvironmentReport struct {
 }
 
 // Environment preparation is single-flight per worker, with its own core.
-// CPU attempts may continue beside it; device commands and active model work
-// retain the worker's existing preparation exclusion.
+// CPU-scoped builds may also run beside device commands. Device-scoped builds
+// and active model work retain their existing preparation exclusion.
 func (q *Queue) environmentPreparationAvailable(m *Machine) bool {
 	if !q.hostLaunchAllowed(m, m.Session) || !m.EnvironmentBuilder || q.preparationStopping(m) || q.s.HostMaintenance[hostID(m)].SharedHost != nil {
 		return false
 	}
 	for _, j := range q.liveJobs() {
-		if j.Machine == m.ID && batchReservesCapacity(j) && !j.Spec.Needs.cpuOnly() {
+		if j.Machine == m.ID && batchReservesCapacity(j) && !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" {
 			return false
 		}
 	}
 	for _, r := range q.s.HostReleases {
-		if r.Machine == m.ID && !r.CPUOnly {
+		if r.Machine == m.ID && !r.CPUOnly && m.GPU != "cpu" {
 			return false
 		}
 	}
