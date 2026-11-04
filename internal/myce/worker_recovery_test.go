@@ -591,7 +591,20 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	w := Worker{Client: Client{URL: server.URL, Token: "test"}, Machine: machine("crash-worker", "fake"), StateDir: stateDir, Interval: 5 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
-	await(t, func() bool { return job(t, q, j.ID).Attempt == 2 && job(t, q, j.ID).State == "running" })
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("restarted queue job: %+v", job(t, q, j.ID))
+		}
+	})
+	await(t, func() bool {
+		select {
+		case err := <-done:
+			t.Fatalf("restarted worker exited before reassignment: %v; job=%+v", err, job(t, q, j.ID))
+		default:
+		}
+		got := job(t, q, j.ID)
+		return got.Attempt == 2 && got.State == "running"
+	})
 	members, err = workerGroupMembers(before.PID)
 	if err != nil || len(members) != 0 {
 		t.Fatalf("new command assigned before old group stopped: %v %v", members, err)
