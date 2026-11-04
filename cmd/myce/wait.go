@@ -191,9 +191,11 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 					batchJobs = map[string]*myce.Job{}
 					var reply myce.WaitReply
 					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, min(20, int(max(0, budget-time.Second)/time.Second)))
-					for i, state := range reply.Jobs {
-						revisions[state.ID] = state.Revision
-						batchJobs[ids[i]] = &myce.Job{ID: state.ID, State: state.State, Reason: state.Reason}
+					if batchErr == nil {
+						for i, state := range reply.Jobs {
+							revisions[state.ID] = state.Revision
+							batchJobs[ids[i]] = &myce.Job{ID: state.ID, State: state.State, Reason: state.Reason}
+						}
 					}
 				}
 				j, err = batchJobs[id], batchErr

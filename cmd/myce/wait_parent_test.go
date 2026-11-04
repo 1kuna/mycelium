@@ -59,22 +59,38 @@ func TestWaitParentProcessHelper(t *testing.T) {
 		}
 		t.Fatal("child never read job")
 	}
-	err := waitCommand(context.Background(), []string{"job", "--queue", os.Getenv("MYCE_PARENT_TEST_QUEUE"), "--token", "fixture", "--timeout", "5s"}, io.Discard, io.Discard)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var err error
+	if os.Getenv("MYCE_PARENT_TEST_COMMAND") == "run" {
+		err = runCommand(ctx, []string{"--queue", os.Getenv("MYCE_PARENT_TEST_QUEUE"), "--token", "fixture", "--", "true"}, io.Discard, io.Discard)
+	} else {
+		err = waitCommand(ctx, []string{"job", "--queue", os.Getenv("MYCE_PARENT_TEST_QUEUE"), "--token", "fixture", "--timeout", "5s"}, io.Discard, io.Discard)
+	}
 	if e := os.WriteFile(filepath.Join(dir, "exit"), []byte(strconv.Itoa(exitCode(err))), 0600); e != nil {
 		t.Fatal(e)
 	}
 }
-func TestWaitExitsAfterRealParentExit(t *testing.T) {
+func TestWaitExitsAfterRealParentExit(t *testing.T) { testObserverParentExit(t, "wait") }
+func TestRunExitsAfterRealParentExit(t *testing.T)  { testObserverParentExit(t, "run") }
+func testObserverParentExit(t *testing.T, command string) {
 	dir := t.TempDir()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0600); err != nil {
 			t.Error(err)
 		}
+		if r.URL.Path == "/api/jobs/cancel" || r.URL.Path == "/api/jobs/job/cancel" {
+			t.Error("parent death cancelled job")
+		}
+		if r.URL.Path == "/api/jobs/job/logs" {
+			io.WriteString(w, `[]`)
+			return
+		}
 		io.WriteString(w, `{"id":"job","state":"running"}`)
 	}))
 	defer server.Close()
 	parent := exec.Command(os.Args[0], "-test.run=^TestWaitParentProcessHelper$")
-	parent.Env = append(os.Environ(), "MYCE_PARENT_TEST_MODE=parent", "MYCE_PARENT_TEST_DIR="+dir, "MYCE_PARENT_TEST_QUEUE="+server.URL)
+	parent.Env = append(os.Environ(), "MYCE_PARENT_TEST_COMMAND="+command, "MYCE_PARENT_TEST_MODE=parent", "MYCE_PARENT_TEST_DIR="+dir, "MYCE_PARENT_TEST_QUEUE="+server.URL)
 	if out, err := parent.CombinedOutput(); err != nil {
 		t.Fatalf("parent helper: %v %s", err, out)
 	}

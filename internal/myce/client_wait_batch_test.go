@@ -29,11 +29,14 @@ func TestWaitSubmittedDefaultDeadlineAndBackoff(t *testing.T) {
 	})
 }
 func TestWaitBatchInvalidReply(t *testing.T) {
-	for _, body := range []string{`{}`, `{"jobs":[{"id":"job"}]}`, `{"jobs":[{"id":"other","state":"queued","revision":1}]}`} {
+	for _, body := range []string{`{"jobs":[{"id":"job","state":"queued","revision":1},{"id":"job","state":"queued","revision":"bad"}]}`, `{}`, `{"jobs":[{"id":"job"}]}`, `{"jobs":[{"id":"other","state":"queued","revision":1}]}`} {
 		c := Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 		})}}
-		_, err := c.WaitBatch(context.Background(), []string{"job"}, nil, 0)
+		reply, err := c.WaitBatch(context.Background(), []string{"job"}, nil, 0)
+		if len(reply.Jobs) != 0 {
+			t.Fatal("unvalidated partial rows escaped", reply)
+		}
 		var api *HTTPError
 		if !errors.As(err, &api) || api.Code != "job_reply_invalid" {
 			t.Fatal(body, err)

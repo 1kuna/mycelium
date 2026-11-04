@@ -116,6 +116,14 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 		return err
 	}
 	if err := registerSharedObserver(ctx, dir, cfg, token); err != nil {
+		r.Observation, r.ObservationError = "not_armed", "observer_registration"
+		r.Delivery = "not_armed"
+		if cfg.Notify == "" {
+			r.Delivery = "not_configured"
+		}
+		if saveErr := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); saveErr != nil {
+			return errors.Join(err, saveErr)
+		}
 		return err
 	}
 	return readProfileJSON(filepath.Join(dir, "receipt.json"), r)
@@ -176,7 +184,7 @@ func observeProfile(ctx context.Context, c myce.Client, dir string, r profileRec
 	return finishProfileObservation(ctx, dir, r, cfg, j, waitErr)
 }
 
-func finishProfileObservation(ctx context.Context, dir string, r profileReceipt, cfg profileObserver, j *myce.Job, waitErr error) error {
+func finishProfileObservation(ctx context.Context, dir string, r profileReceipt, cfg profileObserver, j *myce.Job, waitErr error, notifyEnv ...[]string) error {
 	r.Observation = "not_armed"
 	r.Delivery = "not_configured"
 	if cfg.Notify != "" {
@@ -214,6 +222,9 @@ func finishProfileObservation(ctx context.Context, dir string, r profileReceipt,
 		cmd := exec.CommandContext(deliveryCtx, cfg.Notify)
 		cmd.Stdin = strings.NewReader(string(b))
 		cmd.Env = notifierEnvironment()
+		if len(notifyEnv) > 0 && notifyEnv[0] != nil {
+			cmd.Env = notifyEnv[0]
+		}
 		deliveryErr := cmd.Run()
 		r.DeliveryStatus = "delivered"
 		if deliveryErr != nil {

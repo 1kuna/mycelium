@@ -18,6 +18,7 @@ import (
 // is stored only in this user-only directory/file, never a receipt or process
 // argument; installed authority is re-resolved on each retry.
 type sharedProfileRegistration struct {
+	NotifyEnv []string        `json:"notify_env,omitempty"`
 	Directory string          `json:"directory"`
 	Observer  profileObserver `json:"observer"`
 	Token     string          `json:"token,omitempty"`
@@ -44,12 +45,14 @@ func registerSharedObserver(ctx context.Context, dir string, cfg profileObserver
 	if err != nil {
 		return err
 	}
-	start, err := profileLock(filepath.Join(root, "startup.lock"))
+	startupCtx, cancelStartup := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelStartup()
+	start, err := sharedProfileLock(startupCtx, filepath.Join(root, "startup.lock"))
 	if err != nil {
 		return err
 	}
 	defer start.Close()
-	registration := sharedProfileRegistration{Directory: dir, Observer: cfg, Token: token, Expires: time.Now().Add(myce.DefaultWaitTimeout)}
+	registration := sharedProfileRegistration{NotifyEnv: notifierEnvironment(), Directory: dir, Observer: cfg, Token: token, Expires: time.Now().Add(myce.DefaultWaitTimeout)}
 	if err = saveProfileJSON(filepath.Join(root, profileHash(dir)+".json"), registration); err != nil {
 		return err
 	}
@@ -132,6 +135,28 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			w.lock.Close()
 		}
 	}()
+	finish := func(entry string, j *myce.Job, cause error) bool {
+		watch := watches[entry]
+		if watch == nil {
+			return true
+		}
+		_ = finishProfileObservation(ctx, watch.registration.Directory, watch.receipt, watch.registration.Observer, j, cause, watch.registration.NotifyEnv)
+		var saved profileReceipt
+		if readProfileJSON(filepath.Join(watch.registration.Directory, "receipt.json"), &saved) != nil || saved.ArmNonce != watch.receipt.ArmNonce || saved.Observation != "not_armed" {
+			return false
+		}
+		if watch.registration.Observer.Notify != "" && saved.DeliveryStatus != "delivered" && saved.DeliveryStatus != "failed" {
+			return false
+		}
+		// Keep ownership until both receipt persistence and registration retirement
+		// succeed. A rearm cannot be deleted by a late old-owner cleanup.
+		if err := os.Remove(entry); err != nil && !os.IsNotExist(err) {
+			return false
+		}
+		delete(watches, entry)
+		watch.lock.Close()
+		return true
+	}
 	groups := map[string]*sharedProfileGroup{}
 	for {
 		entries, err := filepath.Glob(filepath.Join(root, "*.json"))
@@ -148,16 +173,29 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			}
 			receiptLock, e := profileLock(filepath.Join(reg.Directory, "watch.lock"))
 			if e != nil {
+				if os.IsNotExist(e) {
+					reclaimSharedRegistration(root, entry)
+				}
+				continue
+			}
+			// Registration is replaceable while waiting for the receipt lock.
+			// Reload both records only after ownership is established.
+			directory := reg.Directory
+			if readProfileJSON(entry, &reg) != nil || reg.Directory != directory {
+				receiptLock.Close()
 				continue
 			}
 			var receipt profileReceipt
 			if e = readProfileJSON(filepath.Join(reg.Directory, "receipt.json"), &receipt); e != nil {
+				if os.IsNotExist(e) {
+					_ = os.Remove(entry)
+				}
 				receiptLock.Close()
 				continue
 			}
 			if receipt.Observation != "armed" {
-				receiptLock.Close()
 				_ = os.Remove(entry)
+				receiptLock.Close()
 				continue
 			}
 			watches[entry] = &sharedProfileWatch{registration: reg, receipt: receipt, lock: receiptLock}
@@ -198,10 +236,7 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 					if w.receipt.JobID == "" {
 						cause = errors.New("receipt has no job")
 					}
-					_ = finishProfileObservation(ctx, w.registration.Directory, w.receipt, w.registration.Observer, nil, cause)
-					_ = os.Remove(entry)
-					delete(watches, entry)
-					w.lock.Close()
+					finish(entry, nil, cause)
 				} else {
 					active = append(active, entry)
 				}
@@ -243,10 +278,7 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 							cancel()
 							if jobErr == nil {
 								if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
-									_ = finishProfileObservation(ctx, w.registration.Directory, w.receipt, w.registration.Observer, j, nil)
-									_ = os.Remove(entry)
-									delete(watches, entry)
-									w.lock.Close()
+									finish(entry, j, nil)
 								}
 								continue
 							}
@@ -259,20 +291,13 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 								}
 							}
 							if !myce.RetryStatusRead(jobErr) {
-								_ = finishProfileObservation(ctx, w.registration.Directory, w.receipt, w.registration.Observer, nil, jobErr)
-								_ = os.Remove(entry)
-								delete(watches, entry)
-								w.lock.Close()
+								finish(entry, nil, jobErr)
 							}
 						}
 						group.unknownOffset = (group.unknownOffset + probeCount) % len(batch)
 					} else if !myce.RetryStatusRead(readErr) {
 						for _, entry := range batch {
-							w := watches[entry]
-							_ = finishProfileObservation(ctx, w.registration.Directory, w.receipt, w.registration.Observer, nil, readErr)
-							_ = os.Remove(entry)
-							delete(watches, entry)
-							w.lock.Close()
+							finish(entry, nil, readErr)
 						}
 					}
 					group.delay = min(max(3*time.Second, group.delay*2), 30*time.Second)
@@ -290,17 +315,21 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 						continue
 					}
 					entry := batch[i]
-					w := watches[entry]
 					finalCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 					j, finalErr := c.GetJobForWait(finalCtx, state.ID)
 					cancel()
 					if finalErr != nil {
+						if !myce.RetryStatusRead(finalErr) {
+							finish(entry, nil, finalErr)
+						} else {
+							group.delay = min(max(3*time.Second, group.delay*2), 30*time.Second)
+							group.next = clock.Now().Add(group.delay)
+						}
 						continue
 					}
-					_ = finishProfileObservation(ctx, w.registration.Directory, w.receipt, w.registration.Observer, j, nil)
-					_ = os.Remove(entry)
-					delete(watches, entry)
-					w.lock.Close()
+					if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
+						finish(entry, j, nil)
+					}
 				}
 			}
 			if c.HTTP != nil {
@@ -310,5 +339,41 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 		if err := pause(ctx, 3*time.Second); err != nil {
 			return err
 		}
+	}
+}
+
+// Context-bounded serialization for simultaneous submissions in different
+// worktrees. The lifetime lock remains nonblocking, to adopt a live observer.
+func sharedProfileLock(ctx context.Context, path string) (*os.File, error) {
+	for {
+		lock, err := profileLock(path)
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return nil, err
+		}
+		if err := waitPause(ctx, 10*time.Millisecond); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// An unloaded registration cannot hold the daemon open after its receipt has
+// disappeared. Registration writers serialize on startup.lock; recheck under
+// that lock before retiring the stale entry, so a rearm is never removed.
+func reclaimSharedRegistration(root, entry string) {
+	lock, err := profileLock(filepath.Join(root, "startup.lock"))
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	var latest sharedProfileRegistration
+	if readProfileJSON(entry, &latest) != nil {
+		return
+	}
+	_, statErr := os.Stat(filepath.Join(latest.Directory, "receipt.json"))
+	if os.IsNotExist(statErr) {
+		_ = os.Remove(entry)
 	}
 }

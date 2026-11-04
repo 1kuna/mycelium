@@ -2,7 +2,9 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"time"
 )
@@ -36,7 +38,12 @@ func (c Client) WaitBatch(ctx context.Context, ids []string, after map[string]ui
 		return reply, nil
 	}
 	if err != nil {
-		return reply, err
+		var syntax *json.SyntaxError
+		var fieldType *json.UnmarshalTypeError
+		if errors.As(err, &syntax) || errors.As(err, &fieldType) || err == io.EOF {
+			return WaitReply{}, invalidWaitReply()
+		}
+		return WaitReply{}, err
 	}
 	if len(reply.Jobs) != len(ids) {
 		return WaitReply{}, invalidWaitReply()

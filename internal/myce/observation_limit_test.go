@@ -9,6 +9,8 @@ import (
 
 func TestObservationLimitClockAndWorkerExemption(t *testing.T) {
 	q, clock := fixture(t)
+	job := submit(t, q, spec("experiment"))
+	observationPath := "/api/jobs/" + job.ID + "?view=wait"
 	handler := (API{Queue: q, Token: "fixture"}).Handler()
 	request := func(path, method, peer string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, nil)
@@ -20,11 +22,11 @@ func TestObservationLimitClockAndWorkerExemption(t *testing.T) {
 		return w
 	}
 	for range 10 {
-		if w := request("/api/ping", "GET", "192.0.2.1:1000"); w.Code != 200 {
+		if w := request(observationPath, "GET", "192.0.2.1:1000"); w.Code != 200 {
 			t.Fatal(w.Code)
 		}
 	}
-	w := request("/api/ping", "GET", "192.0.2.1:2000")
+	w := request(observationPath, "GET", "192.0.2.1:2000")
 	var api map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &api)
 	if w.Code != 429 || api["code"] != "client_rate_limited" || w.Header().Get("Retry-After") != "1" {
@@ -35,16 +37,21 @@ func TestObservationLimitClockAndWorkerExemption(t *testing.T) {
 			t.Fatal("worker throttled", path)
 		}
 	}
-	if w := request("/api/ping", "GET", "192.0.2.2:1000"); w.Code != 200 {
+	for _, path := range []string{"/api/instructions", "/api/files/fixture", "/api/environments/fixture/reference"} {
+		if observationRequest(httptest.NewRequest("GET", path, nil)) {
+			t.Fatal("worker dependency throttled", path)
+		}
+	}
+	if w := request(observationPath, "GET", "192.0.2.2:1000"); w.Code != 200 {
 		t.Fatal("peer isolation", w.Code)
 	}
 	clock.Advance(time.Second)
 	for range 5 {
-		if w := request("/api/ping", "GET", "192.0.2.1:1000"); w.Code != 200 {
+		if w := request(observationPath, "GET", "192.0.2.1:1000"); w.Code != 200 {
 			t.Fatal(w.Code)
 		}
 	}
-	if w := request("/api/ping", "GET", "192.0.2.1:1000"); w.Code != 429 {
+	if w := request(observationPath, "GET", "192.0.2.1:1000"); w.Code != 429 {
 		t.Fatal("refill exceeded rate", w.Code)
 	}
 }

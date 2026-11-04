@@ -19,6 +19,7 @@ import (
 )
 
 func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resultErr error) {
+	parentPID := os.Getppid()
 	f := flag.NewFlagSet("run", flag.ContinueOnError)
 	f.SetOutput(errOut)
 	address := f.String("queue", os.Getenv("MYCE_QUEUE"), "queue address (default: installed config)")
@@ -155,9 +156,11 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 		_, err = fmt.Fprintln(out, j.ID)
 		return err
 	}
+	observerCtx, stopObserver := waitParentContext(ctx, parentPID, time.Second, os.Getppid)
+	defer stopObserver()
 	var after int64
 	lastStatus := ""
-	j, err = client.WaitSubmitted(ctx, j, func(j *myce.Job) error {
+	j, err = client.WaitSubmitted(observerCtx, j, func(j *myce.Job) error {
 		line := j.ID + " " + j.State + " " + myce.JobReason(j)
 		if line != lastStatus {
 			if _, e := fmt.Fprintln(errOut, strings.ReplaceAll(line, client.Token, "[redacted]")); e != nil {
@@ -165,10 +168,13 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 			}
 			lastStatus = line
 		}
-		return drainJobLogs(ctx, client, j.ID, &after, out)
+		return drainJobLogs(observerCtx, client, j.ID, &after, out)
 	})
 	if ctx.Err() != nil {
 		return cancelJob()
+	}
+	if observerCtx.Err() != nil {
+		return waitError(4, "run observer parent exited; job continues")
 	}
 	if err != nil {
 		return err

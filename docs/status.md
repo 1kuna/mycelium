@@ -1437,10 +1437,12 @@ advertise `X-Myce-Wait: batch-v1`; clients without this capability retain legacy
 wait reads. Pending legacy wait reads also use the index; ordinary terminal
 GETs retain the full public Job contract.
 
-Consumer GET/HEAD requests and batch waits share a token bucket by transport
+Consumer job/status/inspection/usage/portability GET/HEAD requests and batch waits share a token bucket by transport
 source address, ignoring ports and untrusted forwarding/client headers: 5/s,
 burst 10. All worker protocol routes, including checkpoint publication, event
-streams, check-ins and launch authorization, are exempt. A refused observation
+streams, check-ins and launch authorization, are exempt. File transfers,
+instruction/catalog polls and environment references remain exempt worker
+dependencies as well. A refused observation
 returns HTTP 429 `client_rate_limited` and `Retry-After: 1` before queue work.
 The incident rate was 8,206 slow job reads in five minutes (27.4/s); the cap
 reduces one source's sustained rate by at least 82%. Batched idle waits need
