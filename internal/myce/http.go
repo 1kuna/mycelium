@@ -29,6 +29,7 @@ func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.hand
 func (a API) handler(joiningPin string) http.Handler {
 	mux := newRequestMux()
 	jobGets := newJobGetVolume(a.Queue.clock)
+	jobGets.observe = a.Queue.requestHealth.recordClient
 	nas := newResolveNASCache(a.Queue.clock)
 	// Joining needs authenticated identity/version only, never the growing status
 	// snapshot. Transport pinning authenticates this identity to joining clients.

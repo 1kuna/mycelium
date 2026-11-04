@@ -127,6 +127,8 @@ type Queue struct {
 	cancellationMembersByParent map[string][]*Job
 
 	requestLatencies                requestLatencies
+	requestHealth                   requestHealth
+	requestHealthAt                 time.Time
 	healthStoreProbe                checkpointAvailability
 	healthNotifier                  string
 	healthStorageDelay              time.Duration
@@ -1131,6 +1133,7 @@ func (q *Queue) Tick() error { return q.TickContext(context.Background()) }
 
 func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
+	traffic := q.requestHealth.snapshot(q.clock.Now())
 
 	// File-store health belongs to existing maintenance, not every control
 	// transaction. Snapshot under the lock, then perform bounded I/O outside it.
@@ -1146,6 +1149,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 		if delay <= 0 {
 			delay = DefaultHealthStorageDelay
 		}
+		q.applyRequestHealth(traffic)
 		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
 		q.maintain()
 		return nil

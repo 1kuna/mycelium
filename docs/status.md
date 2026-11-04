@@ -1364,6 +1364,33 @@ after recovery with the existing 15-minute cooldown. Delivery retries keep the
 same `delivery_id`. Clearing a condition retains its diagnostic event; it does
 not send a second notification or change admission, retries, or release custody.
 
+- `queue_overload`: two consecutive complete one-minute windows each contain
+  at least 100 slow responses (over one second), or at least 20 requests with
+  measured queue mutex wait of at least one second. Intentional worker event
+  long-poll duration is excluded from slow-response counts; its actual lock wait
+  still counts. One busy minute does not alert. This catches the recorded roughly
+  1,900 slow responses/minute and waits up to 15 seconds, while excluding the
+  quiet-history rate of about 0.4 slow responses/minute.
+- `client_request_flood`: the same client kind supplies at least 1,800 job GETs
+  and at least 80% of job GET volume in each of two consecutive complete minutes.
+  Both full and wait reads count, using the existing bounded attribution counters.
+  Versions aggregate by kind so a mixture of client releases cannot hide a flood.
+  The event's `client_kind` is only `cli`, `python`, or `unknown`; raw User-Agents,
+  addresses, versions and job identities are not copied into this alert. This is
+  attribution to a client family, not proof of an individual process's identity.
+  The 30 GETs/second floor is above the recorded 28.36/second baseline, below
+  roughly 63/second from 190 three-second waiters; the share requirement excludes
+  balanced traffic. Low-volume dominance alone does not alert.
+
+These two traffic detectors compute fixed-size, process-local windows outside
+`q.mu` and reconcile the result on the existing maintenance tick. They fire in
+2–3 minutes plus tick/queue delay; a wedged queue cannot commit or deliver an
+alert until it progresses. The first partial minute after observation begins is
+excluded. A completed minute below the relevant threshold clears an episode;
+quiet traffic clears without needing another HTTP request. Restart discards
+traffic evidence and rebuilds the windows, clearing old active conditions until
+fresh sustained evidence exists. Retained events and cooldowns still persist.
+
 - `checkpoint_store_unavailable`: a worker reports its `checkpoint` NAS root
   unavailable (or `checkpoint_unavailable`) continuously for five minutes by
   default. Other missing root roles and shorter outages do not trigger this

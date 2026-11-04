@@ -19,6 +19,7 @@ const healthAlertCooldown = 15 * time.Minute
 // HealthAlert contains identities and fixed diagnostic codes, never worker text.
 // Receivers deduplicate DeliveryID, including after an ambiguous hook exit.
 type HealthAlert struct {
+	ClientKind  string    `json:"client_kind,omitempty"`
 	Project     string    `json:"project,omitempty"`
 	Reason      string    `json:"reason,omitempty"`
 	Recipients  []string  `json:"recipients,omitempty"`

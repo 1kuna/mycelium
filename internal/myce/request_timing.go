@@ -160,6 +160,7 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 				}
 			}
 			q.requestLatencies.record(route, duration)
+			q.requestHealth.recordRequest(q.clock.Now(), route, duration, wait)
 			if duration <= requestSlowThreshold {
 				return
 			}
