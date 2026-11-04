@@ -194,13 +194,18 @@ func TestSharedInputCapacityReclaimsAbandonedReservation(t *testing.T) {
 	if err := cache.cache.init(); err != nil {
 		t.Fatal(err)
 	}
+	// Empty cache metadata can occupy blocks (for example .Trash on Linux).
+	emptyUsage, err := cache.cache.DiskUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
 	reservation := filepath.Join(cache.cache.Root, strings.Repeat("a", 64)+".reservation")
 	if err := os.WriteFile(reservation, []byte("1048576"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cache.refreshCapacity()
 	report := cache.capacityReport()
-	if report.FreeBytes != report.CapacityBytes {
+	if report.FreeBytes != report.CapacityBytes-uint64(emptyUsage) {
 		t.Fatalf("abandoned reservation wedged admission: %+v", report)
 	}
 }

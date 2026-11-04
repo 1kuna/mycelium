@@ -74,10 +74,11 @@ func targetKey(m *Machine) string { return m.ID + "/" + m.Device }
 func (q *Queue) placementTargets(m *Machine) []*Machine {
 	targets := q.machineTargets(m)
 	claims := q.sharedInputClaims(m)
-	for i, target := range targets {
-		copy := *target
-		copy.sharedInputClaims = claims
-		targets[i] = &copy
+	for _, target := range targets {
+		// Legacy single-device targets are the queue's live machine: model
+		// loading charges their memory in place. Preserve that identity while
+		// attaching these transient, queue-owned claims.
+		target.sharedInputClaims = claims
 	}
 	groups := groupTargets(targets)
 	if len(m.Devices) <= 2 || len(groups) == 0 {
