@@ -2743,47 +2743,80 @@ login/reboot and native backend checks remain separate. See
 The queue administrator provisions a trusted publisher HTTPS directory and an
 Ed25519 public key independently of the release manifest. The signing key stays
 with the publisher in a mode-0600 PKCS8 PEM file. Never distribute it with a release.
-No release tooling existed before this flow; the script uses Go and standard
-Ed25519/SHA-256 rather than adding a distribution service.
-
-On an Apple Silicon macOS build host with Go and Xcode command-line tools:
+The repo-owned fleet build path uses the committed `release-build` Mycelium
+profile for Linux and the local signing Mac for Darwin. Commit the release
+source first. On the native Apple Silicon Mac holding the provisioned Developer
+ID Application identity, with Go, Python 3 and Xcode command-line tools:
 
 ```sh
-scripts/release.sh v3.1.0 OUTPUT_DIR PRIVATE_SIGNING_KEY
+python3 scripts/release-build.py fleet v3.1.0 "$(git rev-parse HEAD)" .reports/release-v3.1.0
 ```
 
-Native Darwin release builds require `MYCE_DEVELOPER_ID` set to a provisioned
-Developer ID Application identity. This also applies when a fleet build profile
-invokes `scripts/build-release.sh`: configure the identity in the build job's
-environment, with the signing certificate and private key already provisioned
-on its native build host. Missing or empty `MYCE_DEVELOPER_ID` stops the release
-before building or publishing artifacts; signing or verification failure stops
-before manifest creation. Ad-hoc signatures cannot pass the Developer ID check.
-Never put real signing identities or keys in public profiles or release logs.
-The build embeds Mycelium's stable identifier,
-Local Network usage description and Bonjour service declaration in the single
-Darwin executable. The script applies and verifies a timestamped hardened-runtime
-signature before manifest generation, so Ed25519 authenticates the codesigned
-bytes. Linux artifacts use the same CGO-disabled builds and are not codesigned.
-Tests replace the signing tool and never access a real keychain.
+Set `MYCE_DEVELOPER_ID` through the Mac's private environment before running it.
+Never put the identity, a signing key or credentials in a profile or logs. The
+command refuses a missing identity, dirty checkout, or source commit mismatch;
+resolves the committed profile, submits the Linux job with literal version and
+commit arguments, waits and downloads hash-verified results; then builds and
+verifies Darwin locally and assembles `.reports/release-v3.1.0/release/`.
+The installed Mycelium CLI supplies authority internally. For agent use, bind
+`MYCE_NOTIFY` to the submitting thread as described in the consumer skill.
+No profile generation or textual replacement is involved, so `VERSION` cannot
+corrupt tool names such as `GOVERSION`. The command does not publish or deploy.
+Use a fresh output directory for each attempt; on a failure, retain its job
+receipt and artifacts and resume with the explicit steps below.
 
-When the Ed25519 key lives on a different publisher host, use
-`sh scripts/build-release.sh VERSION OUTPUT_DIR` on the Mac, then generate and
-sign the manifest on the key's host without modifying the artifacts. Never copy
-the private key to the build host just to run the combined script.
+The profile uses the existing `mycelium-gate` managed Go/Python environment,
+two CPU cores and automatic learned memory, with no host pin. Both Linux targets
+are CGO-disabled. Darwin is CGO-enabled and must report native owner sensing.
+The shared `myce release build-targets` matrix selects the artifacts.
+The Darwin executable embeds the stable identifier, Local Network usage
+description and Bonjour service declaration. A timestamped hardened-runtime
+Developer ID signature is applied and verified before hashes are recorded.
+Ad-hoc signatures fail the Developer ID requirement. Tests use fake tools and
+never touch a real keychain or signing key.
 
-Versions must be semver values, monotonically increasing for normal upgrades.
-Build metadata (`+build`) does not change version precedence.
-The shared `ReleaseTargets` data drives validation, manifest creation and
-`myce release build-targets`, which the build script consumes.
-This builds `myce-linux-amd64`, `myce-linux-arm64` (CGO disabled), and
-`myce-darwin-arm64` (CGO enabled with the Apple SDK). The native Mac binary must
-report real owner-sensing support. `myce release manifest` checks executable
-headers, the Mac release version/protocol/sensing, and writes a signed
-`release.json` plus `SHA256SUMS`. Publish the artifacts unchanged at an HTTPS
+The same committed steps can be run separately, including recovery after a
+completed Linux job (use its saved `job_id`, without resubmitting):
+
+```sh
+# From the clean checkout at COMMIT; arguments append literally to the profile.
+myce spec check --resolve .mycelium/profiles/release-build.yaml
+myce run --profile release-build -- VERSION COMMIT
+myce wait JOB_ID
+myce result JOB_ID --out .reports/linux-result
+
+# On the native signing Mac, at the same COMMIT and with MYCE_DEVELOPER_ID set:
+python3 scripts/release-build.py darwin VERSION COMMIT .reports/darwin-build
+python3 scripts/release-build.py assemble VERSION COMMIT .reports/linux-result/release-linux .reports/darwin-build .reports/assembled
+```
+
+Each build writes a JSON receipt with its version, commit, artifact sizes and
+SHA-256 hashes. Assembly checks both receipts, each artifact's embedded Go build ID
+(version and commit) and target/CGO metadata, the Darwin runtime version/protocol/sensing
+and its Developer ID signature, then rechecks copied hashes. A mismatch refuses
+assembly before manifest signing. Output includes `manifest.unsigned.json`,
+`build-provenance.json`, `SHA256SUMS` and the three executables; the unsigned
+manifest is not an approved release.
+
+If the Ed25519 publisher key is on this same Mac, append
+`--signing-key PRIVATE_SIGNING_KEY` to `fleet` or `assemble` to generate the
+signed `release.json` through the existing `myce release manifest` command.
+Otherwise transfer the verified assembled artifacts unchanged to the key's
+native Mac host and run:
+
+```sh
+ASSEMBLED_DIR/myce-darwin-arm64 release manifest --dir ASSEMBLED_DIR --version VERSION --signing-key PRIVATE_SIGNING_KEY
+```
+
+Never copy a key to a build worker for convenience. The existing
+`scripts/release.sh VERSION OUTPUT_DIR PRIVATE_SIGNING_KEY` remains a local
+all-target legacy path; fleet release workers use the committed profile path
+above. Versions must be full v-prefixed semver values and normally increase;
+`+build` metadata does not change upgrade precedence.
+Publish the assembled artifacts and signed `release.json` unchanged at an HTTPS
 directory that serves them directly without redirects. Mac distribution signing,
-Gatekeeper/notarization and actual launchd login/network behavior need their own
-native release acceptance; never disable those controls to make onboarding pass.
+Gatekeeper/notarization and actual launchd login/network behavior need separate
+native acceptance; laptop tests do not establish those properties.
 
 Add these options to the existing queue command with its usual private credential,
 database, checkpoint and joining-listener configuration:
