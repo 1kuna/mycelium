@@ -535,16 +535,10 @@ func (q *Queue) yieldProjection(j *Job) *ScarceYieldProjection {
 	}
 	out := &ScarceYieldProjection{Host: host, Reason: "scarce_host_yield: no safe relocation plan"}
 	for k := range j.Spec.RequirementReasons {
-		if k == "host" || k == "device" {
-			out.Requirements = append(out.Requirements, k)
-			continue
-		}
-		parts := strings.Split(k, ":")
-		if len(parts) == 2 && (parts[0] == "backend" || parts[0] == "os" || parts[0] == "arch") && extensionName.MatchString(parts[1]) {
-			out.Requirements = append(out.Requirements, k)
-		}
+		out.Requirements = append(out.Requirements, requirementConstraint(k))
 	}
 	slices.Sort(out.Requirements)
+	out.Requirements = slices.Compact(out.Requirements)
 	for _, m := range q.plannerMachines() {
 		if hostID(m) != host {
 			continue
