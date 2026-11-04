@@ -5,10 +5,21 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 func processBirth(pid int) (string, error) {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	return processBirthUsing(pid, os.ReadFile)
+}
+
+func processBirthUsing(pid int, readFile func(string) ([]byte, error)) (string, error) {
+	b, err := readFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	// Linux can return ESRCH when the process vanishes after opening stat.
+	// Callers use the same absence contract as a missing file or zombie;
+	// all other inspection errors must keep cleanup custody.
+	if errors.Is(err, syscall.ESRCH) {
+		return "", os.ErrNotExist
+	}
 	if err != nil {
 		return "", err
 	}
@@ -23,7 +34,7 @@ func processBirth(pid int) (string, error) {
 	if f[0] == "Z" {
 		return "", os.ErrNotExist
 	}
-	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	boot, err := readFile("/proc/sys/kernel/random/boot_id")
 	if err != nil {
 		return "", err
 	}
