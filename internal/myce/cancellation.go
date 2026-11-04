@@ -327,9 +327,24 @@ func (q *Queue) confirmCopyRelease(r Result, exact bool) {
 			c.Recoverable = false
 		}
 	}
-	if j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+	if j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session || len(j.Copies) > 0 && !attemptReleasePending(j) {
 		j.ReleaseConfirmed = true
 	}
+}
+
+// Copies retain exact execution custody after retry clears the current identity.
+// The job flag describes the current attempt and may be stale in either direction
+// relative to older copies. Legacy jobs without copies still need their flag.
+func attemptReleasePending(j *Job) bool {
+	if len(j.Copies) == 0 {
+		return j.Attempt > 0 && !j.ReleaseConfirmed
+	}
+	for _, copy := range j.Copies {
+		if !copy.ReleaseConfirmed {
+			return true
+		}
+	}
+	return false
 }
 
 // Only a modern worker's durable refusal receipt proves an unstarted copy.
@@ -380,6 +395,12 @@ func (q *Queue) importCancellationEvidence() bool {
 			} else if !current && !retained {
 				c.ReleaseConfirmed, c.ReleaseReason = true, "legacy_no_retained_custody"
 			}
+			changed = true
+		}
+		// Older queues only set the aggregate when a receipt matched the current
+		// machine/session, which retry can clear before the last release arrives.
+		if !j.ReleaseConfirmed && len(j.Copies) > 0 && !attemptReleasePending(j) {
+			j.ReleaseConfirmed = true
 			changed = true
 		}
 	}
