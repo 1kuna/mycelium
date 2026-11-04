@@ -126,6 +126,7 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 	pending := map[string]bool{}
 	completed := map[string]bool{}
 	lastGuidance := map[string]string{}
+	observed := map[string]bool{}
 	for _, id := range ids {
 		pending[id] = true
 	}
@@ -159,7 +160,13 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 				budget = min(budget, remaining)
 			}
 			requestCtx, cancel := context.WithTimeout(ctx, budget)
-			j, err := c.GetJob(requestCtx, id)
+			read := c.GetJobForWait
+			// Preserve the initial placement/deadline advisory; steady-state
+			// polls need only state, and terminal replies are full Jobs.
+			if !observed[id] {
+				read = c.GetJob
+			}
+			j, err := read(requestCtx, id)
 			deadlineExpired := requestCtx.Err() == context.DeadlineExceeded
 			cancel()
 			if ctx.Err() != nil {
@@ -196,6 +203,7 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 				break
 			}
 			lastProgress = clock.Now()
+			observed[j.ID] = true
 			if guidance := myce.DeadlineGuidanceText(j); guidance != "" && guidance != lastGuidance[j.ID] {
 				fmt.Fprintf(errOut, "wait: %s %s\n", j.ID, guidance)
 				lastGuidance[j.ID] = guidance
