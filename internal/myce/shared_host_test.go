@@ -385,6 +385,24 @@ func TestSharedHostBackgroundPriorityFailureWarns(t *testing.T) {
 	}
 }
 
+// Fleet commands can legitimately inherit a background policy from their
+// parent. Exercise the same dev journey inside that policy without changing
+// the test runner or the worker's scheduling policy.
+func TestSharedHostDevCommandPriorityBackgroundParent(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin background policy inheritance")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(t.Context(), "/usr/sbin/taskpolicy", "-b", executable,
+		"-test.run=^TestSharedHostDevCommandPriority$", "-test.count=1", "-test.v")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("background-parent priority journey: %v\n%s", err, output)
+	}
+}
+
 func TestSharedHostDevCommandPriority(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "synthetic-worker-only-token")
 	controlPriority, err := syscall.Getpriority(syscall.PRIO_PROCESS, os.Getpid())
@@ -440,7 +458,14 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	}
 	if runtime.GOOS == "darwin" {
 		ordinary := cpuSpec(1, .01)
-		ordinary.Run.Command = []string{"sh", "-c", `test "$(ps -o pri= -p $$)" -gt 4 && sh -c 'test "$(ps -o pri= -p $$)" -gt 4'`}
+		// No profile means no priority adjustment, so preserve an inherited
+		// background band too. Fleet gates may themselves run in that band.
+		comparison := "-gt"
+		if controlBackground != "0" {
+			comparison = "-le"
+		}
+		ordinary.Run.Command = []string{"sh", "-c", fmt.Sprintf(
+			`test "$(ps -o pri= -p $$)" %s 4 && sh -c 'test "$(ps -o pri= -p $$)" %s 4'`, comparison, comparison)}
 		var j Job
 		if err := c.Call(ctx, "POST", "/api/jobs", ordinary, &j); err != nil {
 			t.Fatal(err)
@@ -450,7 +475,7 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 				t.Fatal(err)
 			}
 			if j.State == "failed" {
-				t.Fatal("unprofiled payload entered background band", j)
+				t.Fatalf("unprofiled payload changed inherited priority band (control background=%s): state=%s reason=%s", controlBackground, j.State, j.Reason)
 			}
 			return j.State == "succeeded"
 		})
