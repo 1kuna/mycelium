@@ -1054,6 +1054,9 @@
             "null"
           ]
         },
+        "production_parity_required": {
+          "type": "boolean"
+        },
         "program_types": {
           "items": {
             "type": "string"
@@ -2085,6 +2088,26 @@
         },
         "timing": {
           "$ref": "#/$defs/WorkTiming",
+          "x-contract": "diagnostic"
+        },
+        "variant_advice": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "variant_eligibility": {
+          "items": {
+            "$ref": "#/$defs/VariantEligibility"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
           "x-contract": "diagnostic"
         },
         "waiting_since": {
@@ -4083,6 +4106,58 @@
         "allocation",
         "files",
         "stored_at"
+      ],
+      "type": "object"
+    },
+    "VariantEligibility": {
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "eligible": {
+          "type": "boolean"
+        },
+        "extension": {
+          "type": "string"
+        },
+        "freshness": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "qualified": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "variant": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "extension",
+        "digest",
+        "variant",
+        "host",
+        "target",
+        "freshness",
+        "qualified",
+        "eligible",
+        "reasons"
       ],
       "type": "object"
     },

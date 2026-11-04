@@ -543,8 +543,12 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			if err = readProfileJSON(filepath.Join(dir, "extension.json"), &e); err != nil {
 				return err
 			}
-			if err = c.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
+			var registration myce.ExtensionRegistration
+			if err = c.Call(ctx, "POST", "/api/extensions", e, &registration); err != nil {
 				return profileFailure(out, &r, 69, "queue_unavailable: frozen adapter registration unconfirmed; intent retained")
+			}
+			for _, warning := range registration.Warnings {
+				fmt.Fprintln(errOut, "portability advisory: "+warning)
 			}
 		}
 		j, e := c.Submit(ctx, r.Spec)

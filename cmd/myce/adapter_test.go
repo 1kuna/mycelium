@@ -442,9 +442,11 @@ func TestAdapterDevNativeColdAndWarmQualification(t *testing.T) {
 		command := exec.CommandContext(ctx, binary, "run", "--adapter", path, "--queue", d.URL, "--key", key, "--", "native literal; $()")
 		command.Dir = root
 		command.Env = append(os.Environ(), "MYCE_TOKEN=native-adapter-token", "MYCE_NOTIFY=")
-		b, err := command.CombinedOutput()
+		var diagnostics bytes.Buffer
+		command.Stderr = &diagnostics
+		b, err := command.Output()
 		if err != nil {
-			t.Fatalf("native submit: %v %s", err, b)
+			t.Fatalf("native submit: %v %s %s", err, b, &diagnostics)
 		}
 		var r profileReceipt
 		if err = json.Unmarshal(b, &r); err != nil {

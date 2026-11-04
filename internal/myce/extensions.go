@@ -57,6 +57,9 @@ type Extension struct {
 	Files             map[string][]byte                       `json:"files,omitempty" yaml:"-"`
 	FilesRef          *FileRef                                `json:"files_ref,omitempty" yaml:"-"`
 	Digest            string                                  `json:"digest" yaml:"-"`
+
+	// Registration policy is not part of the authored bundle digest.
+	ProductionParityRequired bool `json:"production_parity_required,omitempty" yaml:"-"`
 }
 
 // Baselines are per kind/program type, so a program check cannot qualify an
@@ -323,11 +326,13 @@ func (q *Queue) AddExtension(e Extension, requestContexts ...context.Context) er
 		}
 		k := extensionKey(checked)
 		checked.SandboxDefault = true
+		checked.ProductionParityRequired = len(checked.Variants) > 1
 		if old, ok := q.s.Extensions[k]; ok {
 			if old.Digest != checked.Digest {
 				return frozenExtensionConflict(k, old.Digest, checked.Digest)
 			}
 			checked.SandboxDefault = old.SandboxDefault
+			checked.ProductionParityRequired = old.ProductionParityRequired
 		}
 		q.s.Extensions[k] = checked
 		for _, j := range q.liveJobs() {

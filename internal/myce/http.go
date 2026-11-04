@@ -97,7 +97,11 @@ func (a API) handler(joiningPin string) http.Handler {
 		if !decode(w, r, &e) {
 			return
 		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.AddExtension(e, r.Context()), "extension_invalid")
+		if err := a.Queue.AddExtension(e, r.Context()); err != nil {
+			respondOperation(w, nil, err, "extension_invalid")
+			return
+		}
+		respond(w, ExtensionRegistration{OK: true, Warnings: a.Queue.extensionRegistrationWarnings(e)}, nil)
 	})
 	mux.HandleFunc("GET /api/extensions/{digest}", func(w http.ResponseWriter, r *http.Request) {
 		e, err := a.Queue.extensionByDigest(r.PathValue("digest"), r.Context())

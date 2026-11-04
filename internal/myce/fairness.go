@@ -316,6 +316,9 @@ func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 	return q.batchResourcesFitWithScan(j, m, nil)
 }
 func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {
+	if q.variantParityReason(j, m) != "" {
+		return false
+	}
 	key := resourceKey(j)
 	room, found := resources[key]
 	if !found {
@@ -530,6 +533,9 @@ func (q *Queue) waitReason(j *Job) string {
 			return "waiting for upstream fan-out parent success"
 		}
 		return "waiting for accepted producer piece"
+	}
+	if reason := q.variantParityWaitingReason(j); reason != "" {
+		return reason
 	}
 	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {
 		found := false
