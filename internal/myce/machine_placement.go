@@ -202,11 +202,6 @@ func dockerSharesDevice(j *Job) bool {
 	if !j.Spec.Run.Docker {
 		return true
 	}
-	// A host-only learned envelope can retain a recipe's device default.
-	// That is not a measured device figure (#625).
-	if e := j.MemoryEnvelope; e != nil && e.Basis == "learned" && strings.Contains(e.Source, "GPU recipe default") {
-		return false
-	}
 	return j.Spec.Needs.HostMemoryGB > 0
 }
 
@@ -217,6 +212,9 @@ func dockerSharesDevice(j *Job) bool {
 func sharesDevice(j *Job) bool {
 	n, e := j.Spec.Needs, j.MemoryEnvelope
 	unstated := e != nil && (e.Basis == "exploratory" || e.Basis == "hint" && (j.MemoryFallback == nil || j.MemoryFallback.MemoryGB <= 0))
+	// Host-only learning can retain a recipe default for device memory. Native
+	// and Docker attempts both keep the card until that vector is measured.
+	unstated = unstated || e != nil && e.Basis == "learned" && strings.Contains(e.Source, "GPU recipe default")
 	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && dockerSharesDevice(j) && j.Spec.ExtensionCheck == nil && j.Spec.FanOut == nil && len(j.AllocatedDevices) <= 1 && !unstated
 }
 
