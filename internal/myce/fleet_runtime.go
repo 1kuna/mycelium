@@ -379,8 +379,23 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 	result.attempted = fleetInstructionKey(instruction)
 	// Instructions can only agree with existing trust. They never provision or
 	// rotate it. The finite helper independently rechecks this same local key.
-	if !bytes.Equal(key, instruction.PublisherKey) || launch(request, config, instruction) != nil {
-		failure := &fleetLaunchFailure{instruction.Operation, instruction.Revision, host, machine, session, "failed", "helper_launch_failed"}
+	var launchErr error
+	if !bytes.Equal(key, instruction.PublisherKey) {
+		launchErr = errors.New("fleet_publisher_mismatch")
+	} else {
+		launchErr = launch(request, config, instruction)
+	}
+	if launchErr != nil {
+		var refetch *fleetInstructionRefetchError
+		if errors.As(launchErr, &refetch) {
+			result.attempted = ""
+			return result // The next ordinary poll refetches; never loop here.
+		}
+		code := fleetFailureCode(launchErr.Error())
+		if code == "fleet_failure_code_unrecognized" {
+			code = "fleet_helper_launch_unclassified"
+		}
+		failure := &fleetLaunchFailure{instruction.Operation, instruction.Revision, host, machine, session, "failed", code}
 		if !deliverFleetAck(ctx, client, clock, result.acks, "launch/"+fleetInstructionKey(instruction), failure, false) {
 			result.failed = failure
 		}
