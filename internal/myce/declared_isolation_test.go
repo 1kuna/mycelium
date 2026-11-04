@@ -27,6 +27,18 @@ test "$MYCE_SCRATCH_DIR" = "$PWD/.scratch"
 test "$(cat "$ISOLATION_HOST")" = synthetic-boundary
 `
 
+func isolationQueue(t *testing.T) *Queue {
+	t.Helper()
+	// HTTP request telemetry reads time after releasing the queue mutex.
+	clock := &workerFakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
+	q, err := Open(filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), clock, WithCheckpointAvailability(func() bool { return true }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	return q
+}
+
 func isolationClient(t *testing.T, q *Queue) Client {
 	t.Helper()
 	server := httptest.NewServer((API{Queue: q, Token: "isolation-test-token"}).Handler())
@@ -38,7 +50,7 @@ func isolationObserve(t *testing.T, q *Queue, client Client, id, state, reason s
 	t.Helper()
 	// Expire the normal public status cache through the injected queue clock.
 	q.mu.Lock()
-	q.clock.(*fakeClock).Advance(time.Second)
+	q.clock.(*workerFakeClock).Advance(time.Second)
 	q.mu.Unlock()
 	var j Job
 	if err := client.Call(context.Background(), "GET", "/api/jobs/"+id, nil, &j); err != nil {
@@ -204,7 +216,7 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "/synthetic-agent")
 	const reason = "native helper needs ordinary host IPC"
 	t.Run("author-validation", func(t *testing.T) {
-		q, _ := fixture(t)
+		q := isolationQueue(t)
 		client := isolationClient(t, q)
 		for _, mode := range []string{"unknown", "unsandboxed"} {
 			s := spec("experiment")
@@ -222,7 +234,7 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 		}
 	})
 	t.Run("single-command", func(t *testing.T) {
-		q, _ := fixture(t)
+		q := isolationQueue(t)
 		client := isolationClient(t, q)
 		w := isolationWorker(t, client, nil)
 		s := spec("experiment")
@@ -240,7 +252,7 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 		isolationRun(t, q, client, w, &j, false, reason)
 	})
 	t.Run("plain-native-default", func(t *testing.T) {
-		q, _ := fixture(t)
+		q := isolationQueue(t)
 		client := isolationClient(t, q)
 		w := isolationWorker(t, client, nil)
 		s := spec("experiment")
@@ -257,7 +269,7 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 	})
 
 	t.Run("extension-main-and-sidecar", func(t *testing.T) {
-		q, _ := fixture(t)
+		q := isolationQueue(t)
 		client := isolationClient(t, q)
 		w := isolationWorker(t, client, nil)
 		s := nativeSpec(t)
@@ -327,7 +339,7 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 
 func TestLegacyExtensionIsolationPersistence(t *testing.T) {
 	dir := t.TempDir()
-	clock := &fakeClock{now: time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)}
+	clock := &workerFakeClock{now: time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)}
 	open := func() *Queue {
 		q, err := Open(filepath.Join(dir, "queue.db"), filepath.Join(dir, "checkpoints"), clock, WithCheckpointAvailability(func() bool { return true }))
 		if err != nil {

@@ -88,6 +88,17 @@ Existing profiles using inline `environment: {lock_file: LOCK, python: '3.13', p
 
 ## Wait and check status
 
+**Staged fan-out (from the next release):** a native adapter entry can combine
+`fan_out` and `workload` with
+`after: {job: PARENT_ID, outputs: {first/input: first/result}}`.
+Omit `after.piece`: a fan-out consumer waits for the entire parent to succeed,
+then receives the explicitly mapped accepted `KEY/OUTPUT_NAME` artifacts.
+Keep a durable `--key` for each stage; upstream cancellation stops unfinished
+dependents and their children transitively. Sidecars, qualification and
+production `start_window` retain their queue contracts. Dependent result
+checks and piece-selected fan-out consumers remain unsupported; see the
+[adapter reference](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md).
+
 On releases with #775, job GET and status retain `spec.authoring_origin`: `profile`, `adapter`, `job_spec`, `command`, `extension` or `api`. Generated `extension_check` and `fan_out_child` records count separately from independent submissions. Historical `unknown` and unmarked older clients (`api` for new jobs) cannot establish zero legacy-reader use; verify caller upgrades and cutover too. Replay preserves the first accepted origin.
 
 - For an adapter or profile submission, bind completion to **your own** thread with [t3-binding.md](t3-binding.md) and pass its notifier as `--notify`. One binding per submitting thread, never an orchestrator's or a shared one. For a one-off, wait with `myce wait JOB_ID` (exits 0 only on success); it retries queue outages, and after two minutes without a successful read it logs where it is blocked and reconnects with the installed authority. Check the installed CLI's usage line before relying on a flag.
