@@ -1,0 +1,172 @@
+package myce
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+// WaitState is a scalar public observation, never an execution/diagnostic payload.
+type WaitState struct {
+	ID       string `json:"id"`
+	State    string `json:"state"`
+	Reason   string `json:"reason,omitempty"`
+	Revision uint64 `json:"revision"`
+}
+type WaitRequest struct {
+	IDs     []string          `json:"ids"`
+	After   map[string]uint64 `json:"after,omitempty"`
+	Seconds int               `json:"seconds,omitempty"`
+}
+type WaitReply struct {
+	Jobs []WaitState `json:"jobs"`
+}
+
+// The writer holds q.mu before mu; readers take only mu. No waiter takes q.mu.
+// Publication happens only after persistence succeeds. No timers, I/O, heavy
+// projections, or subscriber goroutines live in the commit path.
+type waitStateIndex struct {
+	mu       sync.Mutex
+	jobs     map[string]WaitState
+	revision uint64
+	changed  chan struct{}
+}
+
+func (q *Queue) waitIndex() *waitStateIndex {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.waitStates == nil {
+		q.waitStates = &waitStateIndex{jobs: map[string]WaitState{}, changed: make(chan struct{})}
+		for id, j := range q.s.Jobs {
+			q.waitStates.set(id, j)
+		}
+		for id, c := range q.calls {
+			q.waitStates.set(id, waitCallJob(c))
+		}
+	}
+	return q.waitStates
+}
+func waitCallJob(c *ModelCall) *Job {
+	j := &Job{ID: c.ID, State: "queued"}
+	if c.Machine != "" {
+		j.State = "running"
+	}
+	if c.Error != "" {
+		j.State, j.Reason = "failed", c.Error
+	}
+	return j
+}
+func (s *waitStateIndex) set(id string, j *Job) {
+	old, exists := s.jobs[id]
+	if j == nil {
+		if !exists {
+			return
+		}
+		delete(s.jobs, id)
+	} else {
+		next := WaitState{ID: id, State: j.State, Reason: j.Reason}
+		if exists && old.State == next.State && old.Reason == next.Reason {
+			return
+		}
+		s.revision++
+		next.Revision = s.revision
+		s.jobs[id] = next
+	}
+	close(s.changed)
+	s.changed = make(chan struct{})
+}
+
+// Called under q.mu, before transaction records are discarded. Cold retained
+// history is never rescanned for each waiter or each commit.
+func (q *Queue) publishWaitStates(oldCalls map[string]*ModelCall) {
+	s := q.waitStates
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range q.records.jobs {
+		s.set(id, q.s.Jobs[id])
+	}
+	for id, c := range q.calls {
+		s.set(id, waitCallJob(c))
+	}
+	for id := range oldCalls {
+		if q.calls[id] == nil {
+			s.set(id, q.s.Jobs[id])
+		}
+	}
+}
+func (s *waitStateIndex) read(request WaitRequest) ([]WaitState, <-chan struct{}, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	jobs := make([]WaitState, 0, len(request.IDs))
+	changed := false
+	for _, id := range request.IDs {
+		j, ok := s.jobs[id]
+		if !ok && len(id) >= 8 {
+			for key, candidate := range s.jobs {
+				if strings.HasPrefix(key, id) {
+					if ok {
+						return nil, nil, false, &HTTPError{Status: 409, Code: "job_ambiguous", Message: "job prefix is ambiguous"}
+					}
+					j, ok = candidate, true
+				}
+			}
+		}
+		if !ok {
+			return nil, nil, false, &HTTPError{Status: 404, Code: "job_unknown", Message: "unknown job"}
+		}
+		changed = changed || request.After[j.ID] != j.Revision || terminal(j.State)
+		jobs = append(jobs, j)
+	}
+	return jobs, s.changed, changed, nil
+}
+func (s *waitStateIndex) wait(ctx context.Context, request WaitRequest) (WaitReply, error) {
+	// This is an HTTP transport wait, not queue/scheduler time. One bounded timer
+	// per request; cancellation releases it. State/limits use the injected Clock.
+	timer := time.NewTimer(time.Duration(request.Seconds) * time.Second)
+	defer timer.Stop()
+	for {
+		jobs, wake, changed, err := s.read(request)
+		if err != nil {
+			return WaitReply{}, err
+		}
+		if changed || request.Seconds == 0 {
+			return publicWaitReply(jobs), nil
+		}
+		select {
+		case <-ctx.Done():
+			return WaitReply{}, ctx.Err()
+		case <-timer.C:
+			return publicWaitReply(jobs), nil
+		case <-wake:
+		}
+	}
+}
+func publicWaitReply(jobs []WaitState) WaitReply {
+	for i := range jobs {
+		jobs[i].Reason = statusJobValue(&Job{State: jobs[i].State, Reason: jobs[i].Reason}).Reason
+	}
+	return WaitReply{Jobs: jobs}
+}
+func (a API) registerWait(mux *requestMux) {
+	// Initialize once, before any request. All subsequent reads avoid q.mu.
+	index := a.Queue.waitIndex()
+	mux.HandleFunc("POST /api/wait", func(w http.ResponseWriter, r *http.Request) {
+		var request WaitRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		// 256 covers the incident's 200 jobs in one request and bounds lookup/JSON
+		// work and response size independently of retained history.
+		if len(request.IDs) == 0 || len(request.IDs) > 256 || request.Seconds < 0 || request.Seconds > 20 {
+			respond(w, nil, &HTTPError{Status: 400, Code: "wait_invalid", Message: "wait requires 1..256 IDs and seconds in 0..20"})
+			return
+		}
+		result, err := index.wait(r.Context(), request)
+		respondOperation(w, result, err, "status_unavailable")
+	})
+}

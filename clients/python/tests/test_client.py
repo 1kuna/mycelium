@@ -677,3 +677,12 @@ class LogFollowWaitViewTests(unittest.TestCase):
         self.assertEqual(requests, ["/api/jobs/job/logs?after=0",
                                    "/api/jobs/job?view=wait", "/api/jobs/job/logs?after=1",
                                    "/api/jobs/job?view=wait", "/api/jobs/job/logs?after=1"])
+
+class WaitFloodBackoffTests(unittest.TestCase):
+    def test_rate_limit_is_retried_with_backoff(self):
+        client = Client(token="fixture")
+        error = APIError(429, '{"code":"client_rate_limited"}')
+        terminal = {"id": "job", "state": "succeeded"}
+        with patch.object(client, "_read_job", side_effect=[error, error, terminal]), patch("mycelium.client.time.sleep") as pause:
+            self.assertEqual(client.wait("job"), terminal)
+        self.assertEqual([call.args[0] for call in pause.call_args_list], [2.0, 4.0])
