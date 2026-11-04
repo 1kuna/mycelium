@@ -593,13 +593,14 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	go func() { done <- w.Run(ctx) }()
 	t.Cleanup(func() {
 		if t.Failed() {
-			t.Logf("restarted queue job: %+v", job(t, q, j.ID))
+			got := job(t, q, j.ID)
+			t.Logf("restarted queue job: state=%s attempt=%d losses=%d machine=%q reason=%q release_confirmed=%t execution_cause=%+v", got.State, got.Attempt, got.Losses, got.Machine, got.Reason, got.ReleaseConfirmed, got.ExecutionCause)
 		}
 	})
 	await(t, func() bool {
 		select {
 		case err := <-done:
-			t.Fatalf("restarted worker exited before reassignment: %v; job=%+v", err, job(t, q, j.ID))
+			t.Fatalf("restarted worker exited before reassignment: %v", err)
 		default:
 		}
 		got := job(t, q, j.ID)
