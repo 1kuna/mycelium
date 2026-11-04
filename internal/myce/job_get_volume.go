@@ -25,6 +25,7 @@ type jobGetVolume struct {
 	clock   Clock
 	lastLog time.Time
 	totals  map[jobGetIdentity]jobGetTotal
+	observe func(time.Time, string)
 }
 
 func newJobGetVolume(clock Clock) *jobGetVolume {
@@ -66,6 +67,9 @@ func (v *jobGetVolume) record(agent string, wait bool) {
 		}
 	}
 	v.mu.Unlock()
+	if v.observe != nil {
+		v.observe(now, id.Kind)
+	}
 	if summary != nil {
 		sort.Slice(summary, func(i, j int) bool {
 			if summary[i].Kind != summary[j].Kind {

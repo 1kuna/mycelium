@@ -29,6 +29,7 @@ func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.hand
 func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler {
 	mux := newRequestMux()
 	jobGets := newJobGetVolume(a.Queue.clock)
+	jobGets.observe = a.Queue.requestHealth.recordClient
 	// Transport budgets must keep refilling when scheduling time is frozen or
 	// adjusted. Tests inject this clock independently of the queue clock.
 	var observationClock Clock = RealClock{}
