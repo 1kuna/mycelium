@@ -37,6 +37,8 @@ type fleetInstallFixture struct {
 	fetches        int
 	acks           []string
 	denyAt         int
+	denyCode       string
+	failureCodes   []string
 	badArtifact    bool
 	restarts       int
 	launches       int
@@ -92,6 +94,10 @@ func newFleetInstallFixture(t *testing.T, goos string) *fleetInstallFixture {
 				t.Error("authorization lost instruction fence")
 			}
 			if f.authorizations == f.denyAt {
+				if f.denyCode != "" {
+					respond(w, nil, fleetError(f.denyCode))
+					return
+				}
 				http.Error(w, "changed maintenance owner", http.StatusConflict)
 				return
 			}
@@ -118,6 +124,11 @@ func newFleetInstallFixture(t *testing.T, goos string) *fleetInstallFixture {
 				t.Error("failure disclosed credentials")
 			}
 			f.acks = append(f.acks, ack.Phase)
+			if ack.Phase == "failed" {
+				f.failureCodes = append(f.failureCodes, ack.Failure)
+			}
+		case "/api/fleet/instruction":
+			_ = json.NewEncoder(w).Encode(f.i)
 		default:
 			t.Errorf("unexpected request %s", r.URL)
 			http.NotFound(w, r)
@@ -702,7 +713,7 @@ func TestFleetInstallRetainsStorageFailureForQueueReconciliation(t *testing.T) {
 		t.Fatal(err)
 	}
 	failure, err = ReadFleetUpdateFailure(f.c)
-	if err != nil || failure == nil || failure.Failure != "fleet_update_failed" {
+	if err != nil || failure == nil || failure.Failure != "fleet_failure_code_unrecognized" {
 		t.Fatalf("untrusted failure exposed: %+v %v", failure, err)
 	}
 }

@@ -2327,7 +2327,58 @@ participate; install the capable release normally before the first fleet update.
 
 A storage preflight failure is reported as `storage_preflight_failed`, including
 when recovered from the durable helper receipt; arbitrary helper error text is
-never exposed. A failed worker step on an operator-disabled host is retained as
+never exposed. Failed acknowledgements also retain `failure_code` in each host
+entry: the worker's exact allow-listed code, including after receipt replay and
+queue restart. `failure` uses the same code except for the existing aliases
+`fleet_storage_preflight_failed` → `storage_preflight_failed` and
+`fleet_health_failed` → `service_health_failed`. Unknown strings are never
+published, even when shaped like a code. Older stopped operations cannot recover
+details already discarded by their old queue or worker.
+
+Fleet update failure codes and repair steps (apply repairs locally through the
+authorized owner, then explicitly rerun `myce fleet upgrade`):
+
+| Code | Next step |
+| --- | --- |
+| `fleet_instruction_stale` | Refresh queue status and current operation/session/revision and runtime proof; let exact custody settle. An initial launch authorization refusal is refetched at the next normal worker poll, before any intent is written. After durable intent, inspect the receipt and explicitly rerun; never automatically repeat a helper or restart. |
+| `fleet_ack_stale` | Reconcile the receipt with the current operation/session/revision; an obsolete ack cannot replace current progress. Inspect the earlier failure first: an ack after an operation stopped is expected to be stale. |
+| `fleet_maintenance_changed`, `fleet_authorization_refused` | Reconcile maintenance ownership, exact custody, current runtime and queue authorization; never override the operator's drain. |
+| `fleet_ack_failed` | Restore authenticated queue connectivity, then reconcile the durable receipt before rerunning. |
+| `fleet_artifact_download_failed` | Restore authenticated artifact connectivity and queue/publisher availability. |
+| `fleet_artifact_transfer_failed` | Check interrupted transfer and local disk write failures; repair connectivity or disk capacity/access. |
+| `fleet_artifact_refused` | Check artifact availability, approved size/hash and signed release; repair publication or approve a corrected newer release. |
+| `fleet_staging_exists` | Preserve the partial and receipt; prove the old helper absent. An explicit recovery revision removes only this operation's rebuildable partial. Never remove active staging. |
+| `fleet_staging_write_failed`, `fleet_staging_cleanup_failed` | Repair binary-directory access, disk capacity and staging file type; preserve evidence and prove the old helper absent before cleanup. |
+| `fleet_darwin_identity_refused` | Verify both installed and candidate signatures and exact designated requirements locally. The same candidate succeeding elsewhere does not prove compatibility with this installation. Use the matching Developer ID requirement; a legacy ad-hoc install needs a separately authorized identity migration. Never locally re-sign to bypass the refusal. |
+| `fleet_candidate_invalid`, `fleet_version_invalid` | Verify the staged executable can run and reports the approved version, target, protocols and native sensing. Publish a corrected release when needed. |
+| `fleet_version_refused` | Compare running, installed and approved versions/hashes; do not downgrade or replace a same-version binary with different bytes. |
+| `fleet_signature_refused`, `fleet_publisher_mismatch`, `fleet_publisher_unavailable` | Verify signed release and locally provisioned publisher trust. Trust rotation requires separate local provisioning. |
+| `fleet_instruction_invalid`, `fleet_target_invalid` | Check exact operation/host/service/session identity and approved OS/architecture target. |
+| `fleet_config_invalid`, `fleet_service_invalid`, `fleet_install_invalid`, `fleet_state_invalid`, `fleet_local_file_invalid` | Repair saved service settings, file types/permissions and private state root through the installer owner; preserve identity and state. |
+| `fleet_credentials_unavailable`, `fleet_queue_invalid` | Repair saved authentication and queue URL through the enrollment owner; never copy credentials into commands or diagnostics. |
+| `fleet_binary_unavailable`, `fleet_existing_service_unavailable` | Restore readable installed bytes and the exact existing service-manager runtime before rerunning. |
+| `fleet_helper_busy`, `fleet_helper_absence_unproven` | Inspect the existing helper/lock through its service manager; wait for owned work or prove absence. Never launch a duplicate or kill an unknown helper. |
+| `fleet_helper_launch_failed` | Inspect the finite helper's launchd/systemd registration and saved executable/settings; repair the manager refusal. Older `helper_launch_failed` acks map here. |
+| `fleet_helper_launch_unclassified` | Inspect the launch owner's local diagnostic and receipt; an unexpected launch error was sanitized. Upgrade the worker if its code is too old to classify it. |
+| `fleet_receipt_invalid`, `fleet_receipt_conflict`, `fleet_receipt_write_failed`, `fleet_previous_failure` | Preserve and reconcile local receipt, operation identity and settings; repair storage permissions/capacity or the recorded earlier failure before explicit recovery. |
+| `fleet_preflight_failed` | Repair saved install settings and policies using installer validation. |
+| `fleet_storage_preflight_failed` (`failure: storage_preflight_failed`) | Repair the named state/NAS root or mount through the storage owner. Do not bypass storage checks. |
+| `fleet_install_changed`, `fleet_recovery_runtime_changed` | Reconcile changed settings, installed bytes and manager PID/running image; never recover against a different runtime automatically. |
+| `fleet_publish_failed` | Repair atomic replacement access/capacity in the installed binary directory, then reconcile the installed hash and receipt. |
+| `fleet_restart_failed` | Inspect the existing service manager and restart intent; repair and explicitly recover without blindly repeating a restart. |
+| `fleet_health_failed` (`failure: service_health_failed`), `runner_smoke_failed` | Inspect new runtime startup, manager health and runner smoke. Repair or fix forward with a corrected release; never automatically restore old bytes. |
+| `fleet_failure_code_missing` | The worker sent no code. Ask the worker owner to inspect its receipt and update the reporter. |
+| `fleet_failure_code_unrecognized` | The worker/receipt supplied an unknown diagnostic. Inspect it locally and add a reviewed sanitized classification; arbitrary text is withheld. |
+| `fleet_failure_detail_unavailable` | An older reporter already collapsed the cause to `update_failed` or `fleet_update_failed`. Recover the original receipt locally if available; queue status cannot reconstruct it. |
+
+An initial authorization can become stale with an unchanged revision: a slow
+instruction request may outlive the queue's runtime-proof freshness window or
+custody may change before authorization. Cancellation/release alone does not
+advance the fleet revision. Refetching before durable intent changes no installed
+bytes and starts no helper; every later attempt still rechecks queue authority.
+Refusals after intent stay durable and require explicit operator recovery.
+
+A failed worker step on an operator-disabled host is retained as
 per-host `phase: failed` with its failure code and repair guidance; the operation
 continues to the remaining disabled hosts. `state: complete` means every host
 was processed, so also inspect per-host failures; it does not claim a failed
