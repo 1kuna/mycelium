@@ -469,7 +469,7 @@ func TestInstallWithoutPasswdEntry(t *testing.T) {
 			}
 			args := []string{"install", role, "--nas", home, "--dry-run"}
 			if role == "worker" {
-				args = append(args, "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "2")
+				args = append(args, "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "2", "--environment-cache-bytes", "1048576")
 			}
 			captureJoiningOutput(t, func() error {
 				return setupCommandWithAccountLookup(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home, lookup)
