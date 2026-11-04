@@ -275,11 +275,105 @@ func TestLearnedMemoryUnifiedGPUHostHintKeepsDeviceFigure(t *testing.T) {
 	}
 }
 
-func TestLearnedMemoryDiscreteGPUFirstRunUnchanged(t *testing.T) {
-	q, _, m := unifiedGPUFixture(t, false)
-	j := assignGPU(t, q, m, submit(t, q, plainGPUSpec()))
-	if e := j.MemoryEnvelope; e.Source != "exploratory first run" || e.DeviceGB != 96 || e.HostGB < 48 {
-		t.Fatalf("discrete GPU exploration changed: %+v", e)
+func TestLearnedMemoryDiscreteGPUFirstRunIsBounded(t *testing.T) {
+	q, clock, m := unifiedGPUFixture(t, false)
+	s := plainGPUSpec()
+	j := assignGPU(t, q, m, submit(t, q, s))
+	if e := j.MemoryEnvelope; e.Source != boundedQuarter || e.DeviceGB != 96 || e.HostGB != 24.125 {
+		t.Fatalf("discrete GPU first-run host vector not bounded: %+v", e)
+	}
+	if err := q.Started(result(j, false)); err != nil {
+		t.Fatal(err)
+	}
+	cpu := assignGPU(t, q, m, submit(t, q, cpuSpec(1, 50)), j)
+	if held := job(t, q, j.ID); held.State != "running" || held.StopAt != nil {
+		t.Fatalf("CPU peer stopped GPU run: %+v", held)
+	}
+	finish(t, q, cpu, true)
+	clock.Advance(time.Second)
+	peak := 14.0
+	r := result(j, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: true}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenQueue(t, q, clock)
+	machineCheck(t, q, m)
+	next := assignGPU(t, q, m, submit(t, q, s))
+	if e := next.MemoryEnvelope; e.DeviceGB != 96 || next.Spec.Needs.HostMemoryGB != 28 || !strings.Contains(e.Source, "constrained peak × 2") {
+		t.Fatalf("constrained host peak did not grow independently: %+v", e)
+	}
+}
+
+func TestLearnedMemoryDiscreteGPUHostHints(t *testing.T) {
+	for _, tc := range []struct {
+		name                               string
+		device, host, wantDevice, wantHost float64
+	}{
+		{"device only", 8, 0, 8, 24},
+		{"host only", 0, 4, 96, 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, _, m := unifiedGPUFixture(t, false)
+			s := plainGPUSpec()
+			s.Needs.Memory = "auto"
+			s.Needs.MemoryGB, s.Needs.HostMemoryGB = tc.device, tc.host
+			j := assignGPU(t, q, m, submit(t, q, s))
+			if j.Spec.Needs.MemoryGB != tc.wantDevice || j.Spec.Needs.HostMemoryGB != tc.wantHost {
+				t.Fatalf("partial hint lost its stated vector or host bound: %+v", j.MemoryEnvelope)
+			}
+		})
+	}
+}
+
+func TestLearnedMemoryDiscreteGPUSimilarHostAndOOM(t *testing.T) {
+	q, clock, m := unifiedGPUFixture(t, false)
+	s := plainGPUSpec()
+	first := assignGPU(t, q, m, submit(t, q, s))
+	if err := q.Started(result(first, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	host, total := 3.0, 4.0
+	r := result(first, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated shape uses only family evidence. A larger unified-layout
+	// family sample must not contaminate the discrete host vector.
+	for _, point := range q.s.WorkObservations {
+		point.MemoryLayout = "unified"
+		other := 20.0
+		point.MemoryPeak = &AttemptMemoryPeak{HostGB: &other}
+		q.putWorkObservation("unified-family", point)
+		break
+	}
+	s.Run.Command = append(s.Run.Command, "different-shape")
+	next := assignGPU(t, q, m, submit(t, q, s))
+	if e := next.MemoryEnvelope; next.Spec.Needs.HostMemoryGB != 10 || e.DeviceGB != 96 || e.Evidence != 1 || !strings.Contains(e.Source, "similar work peak × 2.5") {
+		t.Fatalf("same-layout conservative host peak not used: %+v", e)
+	}
+	if err := q.Started(result(next, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	r = result(next, false)
+	r.OutOfMemory = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	retry := assignGPU(t, q, m, next)
+	if retry.Spec.Needs.HostMemoryGB != 20 || retry.MemoryEnvelope.DeviceGB != 96 || retry.OOMRetries != 0 {
+		t.Fatalf("host OOM did not double only host vector: %+v", retry.MemoryEnvelope)
+	}
+}
+
+func TestLearnedMemoryDiscreteGPUExtensionHostBound(t *testing.T) {
+	q, _, m, s := gpuHostFixture(t)
+	run := assignGPU(t, q, m, submit(t, q, s))
+	if run.Spec.Needs.HostMemoryGB != 6 || run.MemoryEnvelope.DeviceGB != 30 || run.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatalf("extension did not retain exclusive card with bounded host vector: %+v", run.MemoryEnvelope)
 	}
 }
 
@@ -322,7 +416,7 @@ func TestLearnedMemoryDiscreteGPUAcceptedIdentity(t *testing.T) {
 	// accepted class just because the executable is the same (#631 decision).
 	s.Run.Command = append(s.Run.Command, "different-input")
 	next := assignGPU(t, q, m, submit(t, q, s))
-	if e := next.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != 0 {
-		t.Fatalf("different arguments reused exact memory evidence: %+v", e)
+	if e := next.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != 3 || next.Spec.Needs.HostMemoryGB != 8.6*2.5 || !strings.Contains(e.Source, "similar work peak × 2.5") {
+		t.Fatalf("different arguments did not use only similar-family evidence: %+v", e)
 	}
 }

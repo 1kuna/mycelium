@@ -58,22 +58,29 @@ func (q *Queue) memoryHistory() *Queue {
 // Require the exact retained execution, fresh comparable configuration, and
 // unchanged target identity; a small unrelated/old sample cannot open a probe.
 func (q *Queue) sameOSMemoryLowerBound(key ObservationKey, configuration string) float64 {
+	return q.memoryLowerBound(key, configuration, false)
+}
+
+// Discrete host bounds can use constrained GPU host peaks. Keep this opt-in
+// separate from the existing CPU/unified readers and their planning cache.
+func (q *Queue) memoryLowerBound(key ObservationKey, configuration string, discrete bool) float64 {
 	if cache := q.memoryPlanning; cache != nil {
 		id := memoryLowerIdentity(key, configuration)
+		id.discrete = discrete
 		if lower, ok := cache.history.lower[id]; ok {
 			return lower
 		}
-		lower := q.sameOSMemoryLowerBoundFrom(key, configuration, slices.Values(cache.retainedMemoryJobs(q, id)))
+		lower := q.sameOSMemoryLowerBoundFrom(key, configuration, slices.Values(cache.retainedMemoryJobs(q, id)), discrete)
 		cache.history.lower[id] = lower
 		return lower
 	}
-	return q.sameOSMemoryLowerBoundUncached(key, configuration)
+	return q.sameOSMemoryLowerBoundFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs), discrete)
 }
 func (q *Queue) sameOSMemoryLowerBoundUncached(key ObservationKey, configuration string) float64 {
-	return q.sameOSMemoryLowerBoundFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs))
+	return q.sameOSMemoryLowerBoundFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs), false)
 }
 
-func (q *Queue) sameOSMemoryLowerBoundFrom(key ObservationKey, configuration string, jobs iter.Seq[*Job]) float64 {
+func (q *Queue) sameOSMemoryLowerBoundFrom(key ObservationKey, configuration string, jobs iter.Seq[*Job], discrete bool) float64 {
 	history := q.memoryHistory()
 	lower := 0.0
 	for j := range jobs {
@@ -96,6 +103,13 @@ func (q *Queue) sameOSMemoryLowerBoundFrom(key ObservationKey, configuration str
 		m := owner
 		if owner.Devices != nil {
 			m = cpuMachineView(owner)
+			if discrete && !owner.UnifiedMemory && k.Target.Platform != "cpu" {
+				m = allocationMachine(owner, []string{k.Component})
+				// The recorded card must still be present.
+				if m == owner {
+					continue
+				}
+			}
 		}
 		if hostID(m) != k.Host || m.ExtensionFingerprint != k.Fingerprint || machineTarget(m) != k.Target {
 			continue

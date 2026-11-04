@@ -359,6 +359,17 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 					n.MemoryGB, n.HostMemoryGB, source = device, host, "submitter hint "+why
 				}
 			}
+			if !n.cpuOnly() && !m.UnifiedMemory {
+				if n.MemoryGB == 0 {
+					n.MemoryGB = q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
+					source += "; exploratory device"
+				}
+				if n.HostMemoryGB == 0 {
+					if host, why, similar, ok := q.coldMemoryBound(j, m, estimate, hostFloor); ok {
+						n.HostMemoryGB, source, evidence, bounded = host, source+"; "+why, similar, true
+					}
+				}
+			}
 			if !bounded && !n.cpuOnly() && n.HostMemoryGB == 0 {
 				host, why := q.exploratoryMemory(j, m)
 				if m.UnifiedMemory {

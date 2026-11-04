@@ -63,20 +63,21 @@ func memoryFamily(j *Job) string {
 // and is doubled, never shrunk. Cost: an under-estimate costs a ceiling hit or
 // OOM per doubling (retryOOM). At half the allowance or more, the host-wide
 // exploration and its custody fences apply as before. GPU work, whose card is
-// already exclusive, keeps its exploration except on unified hosts (below).
+// already exclusive, keeps whole-card device exploration; discrete hosts now
+// apply this bound to host RAM too (#596). Unified hosts use the policy below.
 const (
 	coldMemoryFraction  = .25
 	similarMemoryFactor = 1.25 * 2
 	boundedFirstRun     = "(bounded: "
 )
 
-// coldMemoryBound sizes a CPU first run. A qualification check's first run on
-// a card takes the same bound (#618): its reference fixture is small by design,
+// coldMemoryBound sizes a CPU or discrete-GPU host first run. A qualification
+// check's first run on a card takes the same bound (#618): its reference fixture is small by design,
 // and host-wide exploration, or the workload's peak, held most of a host's RAM
 // for a check that used under 1 GiB. The card itself still explores; on a
 // unified host the bound covers both.
 func (q *Queue) coldMemoryBound(j *Job, m *Machine, estimate memoryEstimate, floor float64) (float64, string, int, bool) {
-	if !j.Spec.Needs.cpuOnly() && j.Spec.ExtensionCheck == nil || !q.learnedMemory() {
+	if !j.Spec.Needs.cpuOnly() && m.UnifiedMemory && j.Spec.ExtensionCheck == nil || !q.learnedMemory() {
 		return 0, "", 0, false
 	}
 	allowance := m.EffectiveHostMemoryBudgetGB
@@ -87,7 +88,7 @@ func (q *Queue) coldMemoryBound(j *Job, m *Machine, estimate memoryEstimate, flo
 		return 0, "", 0, false
 	}
 	if cache := q.memoryPlanning; cache != nil {
-		id := coldMemoryKey{family: similarMemoryKey{memoryFamily(j), machineTarget(m).OS, !j.Spec.Needs.cpuOnly()}, constrained: constrainedMemoryIdentity(j, estimate), allowance: allowance, floor: floor, source: estimate.source}
+		id := coldMemoryKey{family: similarMemoryKey{memoryFamily(j), machineTarget(m).OS, !j.Spec.Needs.cpuOnly(), memoryLayout(j, m)}, constrained: constrainedMemoryIdentity(j, estimate), allowance: allowance, floor: floor, source: estimate.source}
 		if result, ok := cache.cold[id]; ok {
 			return result.host, result.source, result.evidence, result.ok
 		}
@@ -103,11 +104,11 @@ func (q *Queue) coldMemoryBoundUncached(j *Job, m *Machine, estimate memoryEstim
 		first = estimate.source + " "
 	}
 	host, source := allowance*coldMemoryFraction, first+boundedFirstRun+"25% of host allowance)"
-	peak, evidence := q.similarMemoryPeak(j, machineTarget(m).OS)
+	peak, evidence := q.similarMemoryPeak(j, m)
 	if evidence > 0 {
 		host, source = peak*similarMemoryFactor, first+boundedFirstRun+"similar work peak × 2.5)"
 	}
-	if lower := q.constrainedMemoryLower(j, estimate); lower*2 > host {
+	if lower := q.constrainedMemoryLowerFor(j, estimate, !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory); lower*2 > host {
 		host, source = lower*2, first+boundedFirstRun+"constrained peak × 2)"
 	}
 	if f := j.MemoryOOMFloor; f != nil {
@@ -123,21 +124,25 @@ func (q *Queue) coldMemoryBoundUncached(j *Job, m *Machine, estimate memoryEstim
 // The largest retained constrained host peak of this work or job. It is a lower
 // bound: it only ever raises a first-run bound.
 func (q *Queue) constrainedMemoryLower(j *Job, estimate memoryEstimate) float64 {
+	return q.constrainedMemoryLowerFor(j, estimate, false)
+}
+func (q *Queue) constrainedMemoryLowerFor(j *Job, estimate memoryEstimate, discrete bool) float64 {
 	if cache := q.memoryPlanning; cache != nil {
 		id := constrainedMemoryIdentity(j, estimate)
+		id.lower.discrete = discrete
 		if lower, ok := cache.constrained[id]; ok {
 			return lower
 		}
-		lower := q.constrainedMemoryLowerUncached(j, estimate)
+		lower := q.constrainedMemoryLowerUncached(j, estimate, discrete)
 		cache.constrained[id] = lower
 		return lower
 	}
-	return q.constrainedMemoryLowerUncached(j, estimate)
+	return q.constrainedMemoryLowerUncached(j, estimate, discrete)
 }
-func (q *Queue) constrainedMemoryLowerUncached(j *Job, estimate memoryEstimate) float64 {
+func (q *Queue) constrainedMemoryLowerUncached(j *Job, estimate memoryEstimate, discrete bool) float64 {
 	lower := estimate.constrainedGB
 	if estimate.key != nil {
-		lower = max(lower, q.sameOSMemoryLowerBound(*estimate.key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)))
+		lower = max(lower, q.memoryLowerBound(*estimate.key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program), discrete))
 	}
 	for _, facts := range j.MemoryAttempts {
 		if p := facts.MemoryPeak; p.constrained() && p.HostGB != nil && validRate(*p.HostGB) && memoryConstraintFacts(facts) {
@@ -157,7 +162,7 @@ func (q *Queue) constrainedMemoryLowerUncached(j *Job, estimate memoryEstimate) 
 // × 2.5, else 1 GiB. The cgroup-enforced host member still doubles on OOM.
 // Cost: device use above the figure is unreserved, as before #592; admission's
 // live host-memory checks still see it. Measured --mem avoids that. Extension
-// jobs and discrete cards keep their exploration. At half the allowance the
+// jobs keep their unified exploration. At half the allowance the
 // existing exploration applies.
 const unifiedGPUDefaultGB = 1.0
 
@@ -173,7 +178,7 @@ func (q *Queue) unifiedGPUFirstRun(j *Job, m *Machine, estimate memoryEstimate, 
 	if device <= 0 {
 		device, why = unifiedGPUDefaultGB, "1 GiB device default"
 	}
-	switch peak, similar := q.similarMemoryPeak(j, machineTarget(m).OS); {
+	switch peak, similar := q.similarMemoryPeak(j, m); {
 	case host > 0:
 		why += ", stated host"
 	case similar > 0:
@@ -195,26 +200,30 @@ func (q *Queue) unifiedGPUFirstRun(j *Job, m *Machine, estimate memoryEstimate, 
 }
 
 // Fresh accepted unconstrained peaks of the same family on the same OS: CPU
-// peaks for CPU work, unified-layout GPU host peaks for GPU work. Rows written
+// peaks for CPU work, matching-layout GPU host peaks for GPU work. Rows written
 // before memory sample counting count once.
-func (q *Queue) similarMemoryPeak(j *Job, os string) (float64, int) {
-	family, gpu := memoryFamily(j), !j.Spec.Needs.cpuOnly()
+func (q *Queue) similarMemoryPeak(j *Job, m *Machine) (float64, int) {
+	family, os, gpu, layout := memoryFamily(j), machineTarget(m).OS, !j.Spec.Needs.cpuOnly(), memoryLayout(j, m)
+	// CPU history never depended on a layout label.
+	if !gpu {
+		layout = ""
+	}
 	if cache := q.memoryPlanning; cache != nil {
-		id := similarMemoryKey{family, os, gpu}
+		id := similarMemoryKey{family, os, gpu, layout}
 		if result, ok := cache.similar[id]; ok {
 			return result.peak, result.evidence
 		}
-		peak, evidence := q.similarMemoryPeakUncached(family, os, gpu)
+		peak, evidence := q.similarMemoryPeakUncached(family, os, gpu, layout)
 		cache.similar[id] = similarMemoryResult{peak, evidence}
 		return peak, evidence
 	}
-	return q.similarMemoryPeakUncached(family, os, gpu)
+	return q.similarMemoryPeakUncached(family, os, gpu, layout)
 }
-func (q *Queue) similarMemoryPeakUncached(family, os string, gpu bool) (float64, int) {
+func (q *Queue) similarMemoryPeakUncached(family, os string, gpu bool, layout string) (float64, int) {
 	peak, evidence := 0.0, 0
-	for _, point := range q.memoryObservationCatalog().family[similarMemoryKey{family, os, gpu}] {
+	for _, point := range q.memoryObservationCatalog().family[similarMemoryKey{family, os, gpu, layout}] {
 		p, age := point.MemoryPeak, q.clock.Now().Sub(point.MemoryRecordedAt)
-		if point.MemoryFamily != family || (point.Key.Component != "cpu") != gpu || gpu && point.MemoryLayout != "unified" || point.Key.Target.OS != os || !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) {
+		if point.MemoryFamily != family || (point.Key.Component != "cpu") != gpu || gpu && point.MemoryLayout != layout || point.Key.Target.OS != os || !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) {
 			continue
 		}
 		peak, evidence = max(peak, hostMemoryPeakGB(p)), evidence+max(1, point.MemorySamples)

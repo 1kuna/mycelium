@@ -39,8 +39,9 @@ func (c *memoryPlanningCache) retainedMemoryJobs(q *Queue, key memoryLowerKey) [
 type memoryHistoryKey struct{ work, os string }
 
 type memoryLowerKey struct {
-	work memoryWorkKey
-	os   string
+	work     memoryWorkKey
+	os       string
+	discrete bool
 }
 type constrainedMemoryKey struct {
 	lower       memoryLowerKey
@@ -50,6 +51,7 @@ type constrainedMemoryKey struct {
 type similarMemoryKey struct {
 	family, os string
 	gpu        bool
+	layout     string
 }
 type similarMemoryResult struct {
 	peak     float64
@@ -74,7 +76,7 @@ func newMemoryPlanningCache() *memoryPlanningCache {
 	}
 }
 func memoryLowerIdentity(key ObservationKey, configuration string) memoryLowerKey {
-	return memoryLowerKey{memoryWorkIdentity(key, configuration), key.Target.OS}
+	return memoryLowerKey{work: memoryWorkIdentity(key, configuration), os: key.Target.OS}
 }
 func constrainedMemoryIdentity(j *Job, estimate memoryEstimate) constrainedMemoryKey {
 	key := constrainedMemoryKey{job: j.ID, constrained: estimate.constrainedGB}
