@@ -26,7 +26,7 @@ Before authoring, run `myce portability`, then
 `myce portability --adapter .mycelium/adapter.yaml --entry NAME`. Declare verified
 targets and software requirements; Mycelium chooses the host. Document a hard
 host/device exception in `requirement_reasons`. Missing variants are gaps, and
-MY-19 output parity precedes production splits. Static job validation is
+MY-19 output parity precedes production splits. From the next release, authored `requirement_reasons` are frozen in submitted specs and private receipts. Status/job GET expose sanitized constraint/presence/source metadata, while raw text remains redacted; see [status](status.md#authored-requirement-explanations-748). Static job validation is
 `myce spec check FILE`; it grants no live admission or native qualification.
 `myce spec check --resolve --entry NAME .mycelium/adapter.yaml` asks the queue,
 read-only, which targets can run a command entry and how to stage what they

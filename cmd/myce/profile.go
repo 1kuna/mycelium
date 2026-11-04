@@ -22,13 +22,12 @@ import (
 )
 
 type executionProfile struct {
-	myce.Spec          `yaml:",inline"`
-	Source             profileSource     `yaml:"source"`
-	Check              []string          `yaml:"check"`
-	MemoryClass        string            `yaml:"memory_class,omitempty"`
-	Adapter            bool              `yaml:"-"`
-	Native             *myce.Extension   `yaml:"-"`
-	RequirementReasons map[string]string `yaml:"requirement_reasons,omitempty" json:"-"`
+	myce.Spec   `yaml:",inline"`
+	Source      profileSource   `yaml:"source"`
+	Check       []string        `yaml:"check"`
+	MemoryClass string          `yaml:"memory_class,omitempty"`
+	Adapter     bool            `yaml:"-"`
+	Native      *myce.Extension `yaml:"-"`
 }
 
 type profileReceipt struct {

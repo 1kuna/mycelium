@@ -447,9 +447,10 @@ device. Keep the supporting evidence in the project's own records. Free-form
 reason text is omitted from advice output.
 
 `myce run` for adapters/profiles and `myce submit` print a non-blocking advisory
-for pins without a declared matching reason. Plain profiles and job YAML have no
-`requirement_reasons` field, so their pins receive the advisory; keep intentional
-exception evidence with the profile. `myce portability --adapter …` uses the same
+for pins without a declared matching reason. From the next release, plain profiles and job YAML also accept
+`requirement_reasons`; submission retains the map with the job and private receipt.
+Status/job GET show sanitized constraint, authored/missing state and source field,
+while omitting raw text. Keep intentional exception evidence in authored metadata. `myce portability --adapter …` uses the same
 advice in its notes. This identifies an unexplained restriction, not a proven
 unnecessary pin; it changes no intent, target, qualification or production rule.
 Full live-coverage warnings at registration remain

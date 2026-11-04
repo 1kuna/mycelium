@@ -140,6 +140,9 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	// Authored explanations are frozen intent, never placement authority.
+	RequirementReasons map[string]string `json:"requirement_reasons,omitempty" yaml:"requirement_reasons,omitempty"`
+
 	OutputDestination *OutputDestination     `json:"output_destination,omitempty" yaml:"output_destination,omitempty"`
 	OutputRetention   string                 `json:"output_retention,omitempty" yaml:"output_retention,omitempty"`
 	StorageProtocol   string                 `json:"storage_protocol,omitempty" yaml:"storage_protocol,omitempty"`
@@ -409,6 +412,7 @@ type Job struct {
 	StorageEnvelope        *JobStorageEnvelope          `json:"storage_envelope,omitempty"`
 	StorageAttempts        []AttemptStorageFacts        `json:"storage_attempts,omitempty"`
 	StorageAttemptsDropped int                          `json:"storage_attempts_dropped,omitempty"`
+	RequirementReasons     []RequirementReasonStatus    `json:"requirement_reasons,omitempty"`
 	SpecProjection         *SpecProjection              `json:"spec_projection,omitempty"`
 
 	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`

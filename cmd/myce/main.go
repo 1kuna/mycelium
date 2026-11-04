@@ -755,7 +755,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		for _, advice := range myce.PlacementAdvisories(s, nil) {
+		for _, advice := range myce.PlacementAdvisories(s, s.RequirementReasons) {
 			fmt.Fprintln(os.Stderr, "placement advisory: "+advice)
 		}
 		j, err := client.Submit(ctx, s)
@@ -1101,6 +1101,9 @@ func printStatus(s myce.Snapshot, full bool) {
 		}
 		for _, advice := range j.VariantAdvice {
 			fmt.Printf("  advice: %s\n", advice)
+		}
+		for _, reason := range j.RequirementReasons {
+			fmt.Printf("  requirement: %s\n", reason.Summary())
 		}
 	}
 	if len(s.Jobs) == 0 {

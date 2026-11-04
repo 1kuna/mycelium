@@ -72,6 +72,9 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 }
 
 func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (ResolveReport, error) {
+	if req.RequirementReasons == nil {
+		req.RequirementReasons = req.Spec.RequirementReasons
+	}
 	if req.Recipe != nil {
 		return q.resolveNative(req)
 	}

@@ -101,7 +101,7 @@ The projection strips these entire fields: `after`, `args`, `diagnostics`,
 `disk`, `environment`, `execution`, `expected_minutes`, `extension`,
 `extension_digest`, `fan_out`, `files`, `give_up_at`, `inputs`, `isolation`,
 `output_delivery`, `outputs`, `prepare_source`, `profile_memory`,
-`reason`, `require_target`, `run`, `shared_inputs`, `size_hint`, and `targets`.
+`reason`, `require_target`, `requirement_reasons`, `run`, `shared_inputs`, `size_hint`, and `targets`.
 Status rows additionally strip `submission_key`; job GET retains it. Within `program`, it strips `args` and `file`, retaining only
 `type`. Within `extension_check`, it strips `automatic`, `directory` and
 `reserve`, retaining only `work` and `timeout`. Some stripped fields encode
@@ -1416,6 +1416,35 @@ uninterrupted coverage period; a rollback through an older binary can create
 a gap even though older events remain readable. Unknown legacy times remain absent.
 A status snapshot's `loaded_models` alone cannot rule out transient arrivals.
 
+## Batched waits and consumer flood protection
+
+`POST /api/wait` accepts `{"ids":["JOB_A","JOB_B"],"after":{"JOB_A":1},"seconds":20}`.
+The first request may omit `after` and returns immediately. Replies contain
+`jobs`, an ordered array of scalar `id`, `state`, sanitized `reason` and
+`revision` records. Send the returned revisions on the next request; it waits
+until a selected record changes, becomes terminal, or the transport timeout
+expires. Use exact IDs after initial prefix resolution. The maximum is 256 IDs
+and 20 seconds; malformed/empty requests receive `wait_invalid`. Unknown and
+ambiguous IDs retain typed errors. Cancellation releases the transport wait.
+The committed scalar index uses its own mutex; waiting never takes the queue
+control mutex. Rollbacks cannot publish or wake consumers. HTTP job GET replies
+advertise `X-Myce-Wait: batch-v1`; clients without this capability retain legacy
+wait reads. Pending legacy wait reads also use the index; ordinary terminal
+GETs retain the full public Job contract.
+
+Consumer job/status/inspection/usage/portability GET/HEAD requests and batch waits share a token bucket by transport
+source address, ignoring ports and untrusted forwarding/client headers: 5/s,
+burst 10. All worker protocol routes, including checkpoint publication, event
+streams, check-ins and launch authorization, are exempt. File transfers,
+instruction/catalog polls and environment references remain exempt worker
+dependencies as well. A refused observation
+returns HTTP 429 `client_rate_limited` and `Retry-After: 1` before queue work.
+The incident rate was 8,206 slow job reads in five minutes (27.4/s); the cap
+reduces one source's sustained rate by at least 82%. Batched idle waits need
+one request per 20 seconds. Sources behind one proxy/NAT share the allowance;
+worker control still remains exempt. The bounded source table refuses new
+sources at capacity rather than resetting active allowances.
+
 ## Job GET request attribution
 
 The API emits `event=job_get_totals totals=[...]` at most once per minute,
@@ -1487,31 +1516,25 @@ submission or history collection may affect coverage. The script refuses an API
 without pagination or a projection omitting host pins. A percentage change alone
 is not evidence that a particular release changed consumer behavior.
 
-## Batched waits and consumer flood protection
+### Authored requirement explanations (#748)
 
-`POST /api/wait` accepts `{"ids":["JOB_A","JOB_B"],"after":{"JOB_A":1},"seconds":20}`.
-The first request may omit `after` and returns immediately. Replies contain
-`jobs`, an ordered array of scalar `id`, `state`, sanitized `reason` and
-`revision` records. Send the returned revisions on the next request; it waits
-until a selected record changes, becomes terminal, or the transport timeout
-expires. Use exact IDs after initial prefix resolution. The maximum is 256 IDs
-and 20 seconds; malformed/empty requests receive `wait_invalid`. Unknown and
-ambiguous IDs retain typed errors. Cancellation releases the transport wait.
-The committed scalar index uses its own mutex; waiting never takes the queue
-control mutex. Rollbacks cannot publish or wake consumers. HTTP job GET replies
-advertise `X-Myce-Wait: batch-v1`; clients without this capability retain legacy
-wait reads. Pending legacy wait reads also use the index; ordinary terminal
-GETs retain the full public Job contract.
+From the next release, adapter entries, legacy profiles and job specs retain
+`requirement_reasons` in frozen submitted intent and private receipts. Existing
+native registrations already retain their map in each frozen extension snapshot.
+No scheduling authority, parity approval or pin policy comes from an explanation.
 
-Consumer job/status/inspection/usage/portability GET/HEAD requests and batch waits share a token bucket by transport
-source address, ignoring ports and untrusted forwarding/client headers: 5/s,
-burst 10. All worker protocol routes, including checkpoint publication, event
-streams, check-ins and launch authorization, are exempt. File transfers,
-instruction/catalog polls and environment references remain exempt worker
-dependencies as well. A refused observation
-returns HTTP 429 `client_rate_limited` and `Retry-After: 1` before queue work.
-The incident rate was 8,206 slow job reads in five minutes (27.4/s); the cap
-reduces one source's sustained rate by at least 82%. Batched idle waits need
-one request per 20 seconds. Sources behind one proxy/NAT share the allowance;
-worker control still remains exempt. The bounded source table refuses new
-sources at capacity rather than resetting active allowances.
+Status and job GET expose job-level `requirement_reasons` rows with `constraint`,
+`reason_source` (`authored` or `missing`) and `source`. `source` locates the field
+in the frozen spec or the extension identified by its digest; it is not a host
+filesystem path. CLI/page status show the same metadata. Host/device constraints
+with no nonblank recorded explanation show `missing`; for historical submissions
+that means no explanation was retained, not that their requirement is invalid.
+Native recipe device selectors are included. Registration metadata and accepted
+jobs are never rewritten to fill in reasons.
+
+The raw `spec.requirement_reasons` map is stripped and listed in
+`spec_projection.omitted`. Native recipe maps remain stripped with extensions.
+Only fixed host/device/backend constraint names survive; arbitrary keys coalesce
+as `other` with a redacted-key locator. Free-form explanations stay in authored
+source, private receipts and frozen intent, under the existing privacy default.
+There is no raw-text exception or full-spec status mode.
