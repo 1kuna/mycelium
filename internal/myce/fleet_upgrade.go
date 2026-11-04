@@ -140,6 +140,17 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 						}
 					}
 				}
+				// Only explicit operator intent retries a failed disabled worker.
+				// Completed hosts retain their verified progress.
+				for _, h := range previous.Hosts {
+					if h.Phase == "failed" {
+						if previous.State == "complete" {
+							previous.Revision++
+							previous.State = "running"
+						}
+						h.Phase, h.Failure, h.Wait = "pending", "", ""
+					}
+				}
 				out = q.fleetUpgradeStatus()
 				return nil
 			}
@@ -201,7 +212,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 			// Carry unresolved drain custody into explicit fix-forward intent.
 			for _, h := range u.Hosts {
 				for _, p := range old.Hosts {
-					if h.Host == p.Host && p.Phase != "pending" && p.Phase != "complete" {
+					if h.Host == p.Host && p.Phase != "pending" && p.Phase != "complete" && p.Phase != "failed" {
 						h.Policy = p.Policy
 						h.Owned = p.Owned
 						if !q.fleetPolicyMatches(p) {
@@ -277,7 +288,7 @@ func (q *Queue) fleetProduction(host string) bool {
 func (q *Queue) fleetActiveHost() *fleetUpgradeHost {
 	if u := q.s.FleetUpgrade; u != nil {
 		for _, h := range u.Hosts {
-			if h.Phase != "pending" && h.Phase != "complete" {
+			if h.Phase != "pending" && h.Phase != "complete" && h.Phase != "failed" {
 				return h
 			}
 		}
@@ -291,6 +302,14 @@ func (q *Queue) fleetStop(h *fleetUpgradeHost, reason string) {
 	q.s.FleetUpgrade.State = "stopped"
 	h.Failure = reason
 	h.Wait = "fix forward, then rerun myce fleet upgrade"
+	// An operator-disabled worker contributes no admission capacity. Preserve
+	// its failure and policy, but let other hosts finish. Queue cutover and
+	// changed maintenance receipts still stop, retaining their existing fences.
+	if h.Policy.Mode == "disabled" && !h.Owned && q.fleetPolicyMatches(h) && (!h.Queue || h.QueueDone) {
+		q.s.FleetUpgrade.State = "running"
+		h.Phase = "failed"
+		h.Wait = "host remains disabled; repair the cause, then rerun myce fleet upgrade"
+	}
 	if reason == "maintenance_changed" {
 		h.Wait = "maintenance was replaced; preserve the current operator policy and select an approved newer release with myce fleet upgrade --release VERSION to fix forward"
 	}
@@ -370,6 +389,11 @@ func (q *Queue) maintainFleetUpgrade() {
 			return
 		}
 		sort.SliceStable(pending, func(i, j int) bool {
+			di := q.s.HostMaintenance[pending[i].Host].Mode == "disabled"
+			dj := q.s.HostMaintenance[pending[j].Host].Mode == "disabled"
+			if di != dj {
+				return !di
+			}
 			pi, pj := q.fleetProduction(pending[i].Host), q.fleetProduction(pending[j].Host)
 			if pi != pj {
 				return !pi
@@ -383,7 +407,7 @@ func (q *Queue) maintainFleetUpgrade() {
 		// Reflect execution order in status while retaining completed history.
 		var ordered []*fleetUpgradeHost
 		for _, v := range u.Hosts {
-			if v.Phase == "complete" {
+			if v.Phase == "complete" || v.Phase == "failed" {
 				ordered = append(ordered, v)
 			}
 		}

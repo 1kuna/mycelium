@@ -777,3 +777,142 @@ func TestFleetUpgradeReportsSanitizedStoragePreflightFailure(t *testing.T) {
 		t.Fatalf("specific safe failure lost: %+v %v", q.fleetUpgradeStatus(), err)
 	}
 }
+
+func TestFleetUpgradeDisabledPreflightFailureLastAndVisible(t *testing.T) {
+	q, c, _ := fleetFixture(t, "queue", "a-disabled", "b-disabled", "z-enabled")
+	for _, host := range []string{"a-disabled", "b-disabled"} {
+		if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "disable"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	operator := q.s.HostMaintenance["a-disabled"]
+	start, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	for _, want := range []string{"queue/@queue", "z-enabled/worker-z-enabled"} {
+		if got := fleetActivate(t, q, c); got != want {
+			t.Fatalf("enabled services must finish first: got %s, want %s", got, want)
+		}
+		fleetTick(t, q)
+	}
+	i := fleetInstructionFor(t, q)
+	if i.Host != "a-disabled" {
+		t.Fatal("disabled workers not attempted last", i.Host)
+	}
+	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "fleet_storage_preflight_failed"}
+	if err := q.AckFleetUpgrade(ack); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if got := fleetActivate(t, q, c); got != "b-disabled/worker-b-disabled" {
+		t.Fatal("disabled failure blocked later work", got)
+	}
+	fleetTick(t, q)
+	status := q.fleetUpgradeStatus()
+	if status.State != "complete" || len(status.Hosts) != 4 || status.Hosts[2].Phase != "failed" || status.Hosts[2].Failure != "storage_preflight_failed" || status.Hosts[2].Wait == "" || status.Hosts[3].Phase != "complete" {
+		t.Fatalf("failure or completed history lost: %+v", status)
+	}
+	if !reflect.DeepEqual(q.s.HostMaintenance["a-disabled"], operator) || q.s.HostMaintenance["b-disabled"].Mode != "disabled" || q.s.HostMaintenance["z-enabled"].Mode != "enabled" {
+		t.Fatal("operator policy changed")
+	}
+	if err := q.AckFleetUpgrade(ack); err == nil {
+		t.Fatal("finished helper acknowledgement accepted")
+	}
+	// The failure is durable, and only an explicit rerun retries it.
+	var path string
+	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	root, queueRuntime := q.root, q.fleetQueue
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	q, err = Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	fakeCheckpointAvailability(t, q, true)
+	q.fleetQueue = queueRuntime
+	for _, m := range q.s.Machines {
+		check(t, q, cloneMachine(m), nil) // Re-establish fresh custody after queue restart.
+	}
+	if status := q.fleetUpgradeStatus(); status.State != "complete" || status.Hosts[2].Failure != "storage_preflight_failed" {
+		t.Fatal("persisted failure lost", status)
+	}
+	retry, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
+	if err != nil || retry.Operation != start.Operation || retry.State != "running" {
+		t.Fatalf("explicit retry failed: %+v %v", retry, err)
+	}
+	fleetTick(t, q)
+	if got := fleetActivate(t, q, c); got != "a-disabled/worker-a-disabled" {
+		t.Fatal("retry repeated a completed service", got)
+	}
+	fleetTick(t, q)
+	if status := q.fleetUpgradeStatus(); status.State != "complete" || !reflect.DeepEqual(q.s.HostMaintenance["a-disabled"], operator) {
+		t.Fatalf("retry did not complete with disabled policy intact: %+v", status)
+	}
+}
+
+func TestFleetUpgradeEnabledPreflightFailureStopsLaterHosts(t *testing.T) {
+	q, c, _ := fleetFixture(t, "queue", "a-enabled", "b-enabled")
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	fleetActivate(t, q, c) // Queue cutover completes first.
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	if i.Host != "a-enabled" {
+		t.Fatal("wrong worker selected", i.Host)
+	}
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "fleet_storage_preflight_failed"}); err != nil {
+		t.Fatal(err)
+	}
+	fleetHeartbeatAdvance(t, q, c)
+	status := q.fleetUpgradeStatus()
+	if status.State != "stopped" || status.Hosts[1].Failure != "storage_preflight_failed" || status.Hosts[2].Phase != "pending" || q.s.HostMaintenance["a-enabled"].Mode != "drained" || q.s.HostMaintenance["b-enabled"].Mode != "enabled" {
+		t.Fatalf("enabled failure did not preserve stop and drain: %+v", status)
+	}
+}
+
+func TestFleetUpgradeDisabledHostRetainsQueueAndPolicyFences(t *testing.T) {
+	for _, queueFailure := range []bool{false, true} {
+		t.Run(fmt.Sprint("queue-failure=", queueFailure), func(t *testing.T) {
+			q, c, _ := fleetFixture(t, "host", "host")
+			if _, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "disable"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{WaitProductionIdle: true}); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			if !queueFailure {
+				fleetActivate(t, q, c)
+				fleetTick(t, q)
+			}
+			i := fleetInstructionFor(t, q)
+			if !queueFailure {
+				c.Advance(time.Second)
+				if _, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "disable"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "fleet_storage_preflight_failed"})
+			// A maintenance edit already reconciles the operation to stopped,
+			// so its formerly authorized helper must now be stale.
+			if queueFailure && err != nil || !queueFailure && err == nil {
+				t.Fatalf("unexpected acknowledgement result: %v", err)
+			}
+			want := "maintenance_changed"
+			if queueFailure {
+				want = "storage_preflight_failed"
+			}
+			if status := q.fleetUpgradeStatus(); status.State != "stopped" || status.Hosts[0].Failure != want || q.s.HostMaintenance["host"].Mode != "disabled" || queueFailure && !q.fleetPausesProduction() {
+				t.Fatalf("disabled host lost safety fence: %+v", status)
+			}
+		})
+	}
+}

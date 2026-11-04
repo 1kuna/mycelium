@@ -2309,7 +2309,8 @@ operation for the workers without restarting the already-current queue.
 These options require a queue version that implements them; they cannot change
 restart behavior inside an older installed queue or helper.
 
-Hosts update sequentially, with production hosts last. Started commands finish
+Hosts update sequentially: enabled/drained hosts first (production hosts last
+within that group), then operator-disabled hosts. Started commands finish
 naturally before their host restarts. At queue cutover new model calls pause and
 existing calls/streams finish; batch attempts on other hosts reconnect unchanged.
 The queue precedes its colocated worker. This implementation accepts the current
@@ -2326,8 +2327,19 @@ participate; install the capable release normally before the first fleet update.
 
 A storage preflight failure is reported as `storage_preflight_failed`, including
 when recovered from the durable helper receipt; arbitrary helper error text is
-never exposed. A failed step stops the operation and preserves maintenance; later hosts remain
-untouched. Repair the cause and explicitly rerun `myce fleet upgrade` to reconcile
+never exposed. A failed worker step on an operator-disabled host is retained as
+per-host `phase: failed` with its failure code and repair guidance; the operation
+continues to the remaining disabled hosts. `state: complete` means every host
+was processed, so also inspect per-host failures; it does not claim a failed
+disabled host was updated. No disabled host is enabled or resumed, even after a
+successful update. An explicit identical rerun retries failed disabled workers
+while preserving completed hosts' progress and the same operation ID.
+
+Enabled/drained-host failures, queue-service cutover failures (even on a disabled
+host), and replaced maintenance receipts still stop the operation and preserve
+maintenance; later hosts remain untouched. Queue cutover retains its production
+admission fence until healthy queue bytes are verified. Repair the cause and
+explicitly rerun `myce fleet upgrade` to reconcile
 that same operation. A rerun advances its recovery revision and rechecks the exact
 old runtime and maintenance receipt before recovering an interrupted helper.
 An active helper continues to report its result across reruns. Services already
@@ -2733,8 +2745,15 @@ On an Apple Silicon macOS build host with Go and Xcode command-line tools:
 scripts/release.sh v3.1.0 OUTPUT_DIR PRIVATE_SIGNING_KEY
 ```
 
-For native LaunchAgent distribution, set `MYCE_DEVELOPER_ID` to the provisioned
-Developer ID Application identity. The build embeds Mycelium's stable identifier,
+Native Darwin release builds require `MYCE_DEVELOPER_ID` set to a provisioned
+Developer ID Application identity. This also applies when a fleet build profile
+invokes `scripts/build-release.sh`: configure the identity in the build job's
+environment, with the signing certificate and private key already provisioned
+on its native build host. Missing or empty `MYCE_DEVELOPER_ID` stops the release
+before building or publishing artifacts; signing or verification failure stops
+before manifest creation. Ad-hoc signatures cannot pass the Developer ID check.
+Never put real signing identities or keys in public profiles or release logs.
+The build embeds Mycelium's stable identifier,
 Local Network usage description and Bonjour service declaration in the single
 Darwin executable. The script applies and verifies a timestamped hardened-runtime
 signature before manifest generation, so Ed25519 authenticates the codesigned
