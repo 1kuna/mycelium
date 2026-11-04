@@ -35,6 +35,7 @@ type GPUSelection struct {
 }
 
 type ResourceNeeds struct {
+	Tools        []string      `json:"tools,omitempty" yaml:"tools,omitempty"`
 	Network      bool          `json:"network,omitempty" yaml:"network,omitempty"`
 	Memory       string        `json:"memory,omitempty" yaml:"memory,omitempty"`
 	GPU          *GPUSelection `json:"gpu,omitempty" yaml:"gpu,omitempty"`

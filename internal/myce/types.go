@@ -195,6 +195,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if err := validateTools(s); err != nil {
+		return err
+	}
 	for _, name := range s.ExcludedMachines {
 		if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
 			return reject("job_placement_invalid", errors.New("excluded_machines requires nonempty machine names without surrounding whitespace"))
@@ -517,6 +520,8 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	// ToolInventory maps the native PATH (empty key) and prepared environment keys to executable names.
+	ToolInventory          map[string][]string    `json:"tool_inventory,omitempty"`
 	OutputDestinationIDs   []string               `json:"output_destination_ids,omitempty"`
 	SharedHost             *SharedHostProfile     `json:"shared_host,omitempty"`        // Worker acknowledgement.
 	SharedHostReason       string                 `json:"shared_host_reason,omitempty"` // Queue admission diagnostic.

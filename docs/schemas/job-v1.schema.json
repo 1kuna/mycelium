@@ -3363,6 +3363,15 @@
         },
         "platform": {
           "$ref": "#/$defs/Platform"
+        },
+        "tools": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3441,6 +3450,18 @@
         },
         "exit_code": {
           "type": "integer"
+        },
+        "host": {
+          "type": "string"
+        },
+        "missing_tools": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "operation": {
           "type": "string"

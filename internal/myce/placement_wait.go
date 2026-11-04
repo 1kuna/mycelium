@@ -23,7 +23,7 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 			unrelated := false
 			for _, dimension := range fit.failed {
 				switch dimension {
-				case "native network isolation", "environment", "shared host profile", "memory envelope":
+				case "tools", "native network isolation", "environment", "shared host profile", "memory envelope":
 					// These are actionable blockers to explain below. All other
 					// failures at permanent capacity exclude this target, including
 					// undersized CPUs/devices and unsupported execution runtimes.
@@ -35,6 +35,9 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 				continue
 			}
 			var blocked []string
+			if !toolsFit(candidate, m) {
+				blocked = append(blocked, targetFitReason("tools", candidate, m))
+			}
 			if !nativeNetworkFits(candidate, m) {
 				blocked = append(blocked, targetFitReason("native network isolation", candidate, m))
 			}

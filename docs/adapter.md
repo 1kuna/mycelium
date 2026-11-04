@@ -96,6 +96,16 @@ An explicit absolute `start_by` takes precedence. Keep the policy on the entry,
 alongside class and fan-out, rather than in hardware variants or extension recipes.
 Experiment entries omit it and retain no start deadline.
 
+Native profiles and adapter variants can declare executable prerequisites with
+`needs.tools: [python3.12, node, npm, npx, git]`. Names are PATH executables,
+not packages or version constraints; use a locked environment for exact versions.
+Resolve/placement report `tools_missing` with missing names and the worker.
+A cold environment may prepare first; its inventory is checked before dispatch.
+The launch check uses the effective PATH, including the prepared environment and
+`run.env` overrides. Worker inventories are captured at startup and when a new
+immutable environment becomes ready; launch rechecks catch subsequent removals.
+This declaration covers the main native command, not Docker/model runtimes.
+
 Installed tools (`environment: {}`) and named catalog environments keep their
 existing behavior. Project environment submission (#251) and worker build
 eligibility (#252) remain separate work. Existing native composed environment

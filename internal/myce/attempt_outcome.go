@@ -129,6 +129,9 @@ func startFailureOutcome(owner Result, err error) Result {
 		owner.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("start_authorization", err))
 	}
 	owner = classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
+	if errors.As(err, &staging) && staging.diagnostic.Class == "tools_missing" {
+		owner.ExecutionCause = runtimeDiagnostic(staging)
+	}
 	if execFormatFailure(err) && !owner.OutOfMemory {
 		// The payload cannot execute: this is an ordinary command failure, not
 		// infrastructure loss. Preserve existing cancellation and stop authority.
