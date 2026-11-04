@@ -26,6 +26,8 @@ func (t ExecutionTarget) matches(actual ExecutionTarget) bool {
 }
 
 type ExtensionVariant struct {
+	Quality map[string]map[string]QualityMeasurement `json:"quality,omitempty" yaml:"quality,omitempty"`
+
 	Sweeps       map[string]ReferenceSweep    `json:"sweeps,omitempty" yaml:"sweeps,omitempty"`
 	References   map[string]WorkReference     `json:"references,omitempty" yaml:"references,omitempty"`
 	Target       ExecutionTarget              `json:"target" yaml:"target"`
@@ -51,6 +53,9 @@ func (e Extension) validateVariants() error {
 	}
 	seen := map[ExecutionTarget]bool{}
 	for _, v := range e.Variants {
+		if err := e.validateQuality(v.Quality); err != nil {
+			return err
+		}
 		t := v.Target
 		if t.OS == "" || t.Arch == "" || !extensionName.MatchString(t.OS) || !extensionName.MatchString(t.Arch) || !validGPU(t.Platform) || seen[t] {
 			return errors.New("variants require unique complete OS/arch/platform targets")

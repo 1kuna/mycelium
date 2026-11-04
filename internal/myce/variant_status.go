@@ -48,34 +48,33 @@ func (q *Queue) extensionRegistrationWarnings(e Extension) []string {
 // Registration metadata is server-owned and frozen with accepted jobs. Older
 // registrations retain their admission contract, including on identical replay.
 func (q *Queue) variantParityReason(j *Job, m *Machine) string {
-	if j.Spec.ExtensionCheck != nil || j.Spec.Priority != "production" && jobClass(j.Spec) != "production" {
+	if j.Spec.ExtensionCheck != nil {
 		return ""
 	}
-	if slices.Contains(q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()], hostID(m)) {
-		return ""
-	}
-	blocked := false
+	production := j.Spec.Priority == "production" || jobClass(j.Spec) == "production"
+	approved := slices.Contains(q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()], hostID(m))
+	reason := ""
 	for _, e := range j.Extensions {
 		if !e.matchesTarget(m) || (j.State == "running" || j.State == "stopping") && j.Extension != nil && j.Extension.Digest != e.Digest {
 			continue
 		}
-		if e.ProductionParityRequired {
-			blocked = true
-		} else {
-			// A pre-selection policy check may see several registrations. Only
-			// a qualified alternative can discharge this hold. Candidate admission
-			// checks again after selecting one, and assigned work uses its digest.
-			copy := *j
-			copy.Extensions = []Extension{e}
-			if qualifiedExtension(&copy, m) != nil {
-				return ""
-			}
+		copy := *j
+		copy.Extensions = []Extension{e}
+		if qualifiedExtension(&copy, m) == nil {
+			continue
 		}
+		measured, failure := variantQuality(e, j.Spec, m)
+		if failure != "" {
+			reason = failure
+			continue
+		}
+		if production && !measured && !approved && (j.RequireProductionParity || e.ProductionParityRequired || len(j.Spec.QualityTolerance) > 0 || e.hasQuality(j.Spec.workType())) {
+			reason = "quality measurements unknown; " + variantParityAction
+			continue
+		}
+		return ""
 	}
-	if blocked {
-		return variantParityAction
-	}
-	return ""
+	return reason
 }
 
 func jobHasVariants(j *Job) bool {
@@ -91,20 +90,18 @@ func (q *Queue) variantParityWaitingReason(j *Job) string {
 	if !jobHasVariants(j) {
 		return ""
 	}
-	blocked := false
+	reason := ""
 	for _, m := range q.plannerMachines() {
 		if !q.jobAllowsMachine(j, m.ID) || qualifiedExtension(j, m) == nil {
 			continue
 		}
-		if q.variantParityReason(j, m) == "" {
+		if why := q.variantParityReason(j, m); why == "" {
 			return ""
+		} else if reason == "" {
+			reason = why
 		}
-		blocked = true
 	}
-	if blocked {
-		return variantParityAction
-	}
-	return ""
+	return reason
 }
 
 // Diagnostic rows describe frozen variants against live host/device targets.
@@ -211,9 +208,15 @@ func (q *Queue) variantAdmissionReasons(j *Job, m *Machine) []string {
 			reasons = append(reasons, "job or project host restriction")
 		}
 		withoutParity := *candidate
+		withoutParity.RequireProductionParity = false
+		withoutParity.Spec.QualityTolerance = nil
 		withoutParity.Extensions = slices.Clone(candidate.Extensions)
 		for i := range withoutParity.Extensions {
 			withoutParity.Extensions[i].ProductionParityRequired = false
+			withoutParity.Extensions[i].Variants = slices.Clone(withoutParity.Extensions[i].Variants)
+			for k := range withoutParity.Extensions[i].Variants {
+				withoutParity.Extensions[i].Variants[k].Quality = nil
+			}
 		}
 		if !q.placementAllowed(&withoutParity, m) {
 			reasons = append(reasons, "maintenance, policy, reservation or release hold")

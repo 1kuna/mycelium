@@ -282,6 +282,7 @@ func statusJobInputs(job *Job) Job {
 	if j.Spec.ExtensionCheck != nil {
 		spec.ExtensionCheck = &ExtensionCheckRequest{Work: j.Spec.ExtensionCheck.Work, Timeout: j.Spec.ExtensionCheck.Timeout}
 	}
+	spec.QualityTolerance = j.Spec.QualityTolerance
 	spec.Workload = j.Spec.Workload
 	spec.Needs = j.Spec.Needs
 	j.Spec = spec
