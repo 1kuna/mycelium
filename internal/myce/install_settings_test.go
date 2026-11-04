@@ -275,6 +275,9 @@ func TestInstallSettingsOverlayMatrix(t *testing.T) {
 						if kind != "omitted" {
 							field := installTestField(&values, setting.Field)
 							installTestField(&want, setting.Field).Set(field)
+							if setting.Flag == "file-cache-bytes" {
+								want.FileCacheBytesExplicit = want.FileCacheBytes > 0
+							}
 						}
 						if !reflect.DeepEqual(got, want) {
 							t.Fatalf("overlay changed omitted/unrelated fields or ignored explicit input (%s)", kind)
@@ -330,18 +333,38 @@ func TestInstallSettingsAliasesAndRelativePaths(t *testing.T) {
 	}
 }
 
-func TestInstallFileCacheLegacyDefault(t *testing.T) {
+func TestInstallFileCacheOmittedAutomatic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "worker.json")
 	if err := os.WriteFile(path, []byte(`{"role":"worker"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	c, err := ReadServiceConfig(path)
-	if err != nil || c.FileCacheBytes != 10<<30 {
-		t.Fatalf("legacy config lost 10 GiB file cache default: %d, %v", c.FileCacheBytes, err)
+	if err != nil || c.FileCacheBytes != 0 {
+		t.Fatalf("omitted cache limit did not select automatic mode: %d, %v", c.FileCacheBytes, err)
 	}
 	args := c.Args()
 	i := slices.Index(args, "--file-cache-bytes")
-	if i < 0 || args[i+1] != "10737418240" {
-		t.Fatal("legacy service arguments lost file cache default")
+	if i >= 0 {
+		t.Fatal("automatic cache limit must be resolved at worker startup")
+	}
+}
+
+func TestInstallFileCacheDefaultMigrationAndExplicitIntent(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want int64
+	}{
+		{`{"role":"worker","file_cache_bytes":10737418240}`, 0},
+		{`{"role":"worker","file_cache_bytes":10737418240,"file_cache_bytes_explicit":true}`, 10 << 30},
+		{`{"role":"worker","file_cache_bytes":34359738368}`, 32 << 30},
+	} {
+		path := filepath.Join(t.TempDir(), "worker.json")
+		if err := os.WriteFile(path, []byte(tc.body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := ReadServiceConfig(path)
+		if err != nil || c.FileCacheBytes != tc.want {
+			t.Fatalf("cache migration got %d want %d: %v", c.FileCacheBytes, tc.want, err)
+		}
 	}
 }

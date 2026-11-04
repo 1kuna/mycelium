@@ -581,7 +581,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			e.PathDiagnostic = body.PathDiagnostic
 			e.CurrentRevision = body.CurrentRevision
 			// The queue returns specific, safe submission validation reasons.
-			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" && !(method == http.MethodPost && path == "/api/jobs") {
+			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" && body.Code != "shared_input_cache_capacity" && body.Code != "shared_input_cache_unreported" && !(method == http.MethodPost && path == "/api/jobs") {
 				e.Message = message
 			}
 		}

@@ -6,13 +6,13 @@ func TestSharedInputsRequireWorkerCapability(t *testing.T) {
 	q, _ := fixture(t)
 	s := spec("experiment")
 	s.SharedInputs = map[string]SharedInput{"original": {NAS: "media/original", SHA256: "0000000000000000000000000000000000000000000000000000000000000000", SizeBytes: 10}}
+	upgraded := cacheCapacityMachine("worker", 1<<20)
+	check(t, q, upgraded, nil)
 	j := submit(t, q, s)
 	old := machine("worker", "fake")
 	if r := check(t, q, old, nil); r.Job != nil {
 		t.Fatal("old worker assigned shared inputs")
 	}
-	upgraded := old
-	upgraded.Capabilities = append([]string{"shared_inputs_v1"}, old.Capabilities...)
 	r := check(t, q, upgraded, nil)
 	if r.Job == nil {
 		t.Fatal("capable worker was not assigned input")

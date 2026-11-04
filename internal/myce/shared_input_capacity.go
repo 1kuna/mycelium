@@ -1,0 +1,248 @@
+package myce
+
+import (
+	"context"
+	"fmt"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"syscall"
+)
+
+// SharedInputCapacity is a worker-local cache snapshot. Heartbeats only copy
+// it: discovery/accounting runs at startup and cache mutation, never in q.mu.
+// FreeBytes excludes allocated bytes and outstanding staging reservations.
+// Protected identifies reusable entries that are not included in EvictableBytes.
+type SharedInputCapacity struct {
+	CapacityBytes  uint64            `json:"capacity_bytes"`
+	FreeBytes      uint64            `json:"free_bytes"`
+	EvictableBytes uint64            `json:"evictable_bytes"`
+	Protected      map[string]uint64 `json:"protected,omitempty"`
+}
+
+func (c *SharedInputCache) capacityReport() *SharedInputCapacity {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.capacity == nil {
+		return nil
+	}
+	report := *c.capacity
+	report.Protected = maps.Clone(report.Protected)
+	return &report
+}
+
+func (c *SharedInputCache) refreshCapacityIfTracked() {
+	c.mu.Lock()
+	tracked := c.capacity != nil
+	c.mu.Unlock()
+	if tracked {
+		c.refreshCapacity()
+	}
+}
+
+func (c *SharedInputCache) refreshCapacity() {
+	if err := c.cache.init(); err != nil {
+		return
+	}
+	gate, err := c.cache.lock(context.Background(), "admission", syscall.LOCK_EX)
+	if err != nil {
+		return
+	}
+	defer unlockEnvironment(gate)
+	c.mu.Lock()
+	initial := c.capacity == nil
+	c.mu.Unlock()
+	if initial {
+		// Existing admission already removes abandoned reservations/partials
+		// using their build locks. Otherwise a crash could advertise no free
+		// space forever, preventing the acquire that would reclaim them.
+		_ = c.admit(context.Background(), "", 0)
+	}
+	c.refreshCapacityLocked()
+}
+
+// The existing cache admission lock serializes accounting with reservations and
+// eviction. A failed inventory withholds space; it never invents free capacity.
+func (c *SharedInputCache) refreshCapacityLocked() {
+	report := &SharedInputCapacity{CapacityBytes: uint64(max(0, c.cache.Limit)), Protected: map[string]uint64{}}
+	defer func() { c.mu.Lock(); c.capacity = report; c.mu.Unlock() }()
+	used, err := c.cache.DiskUsage()
+	if err != nil {
+		return
+	}
+	entries, err := os.ReadDir(c.cache.Root)
+	if err != nil {
+		return
+	}
+	var reserved, evictable uint64
+	for _, entry := range entries {
+		key := entry.Name()
+		if strings.HasSuffix(key, ".reservation") {
+			b, err := os.ReadFile(filepath.Join(c.cache.Root, key))
+			if err != nil {
+				return
+			}
+			n, err := strconv.ParseUint(string(b), 10, 63)
+			if err != nil {
+				return
+			}
+			// Counting the full reservation is conservative while a writer grows.
+			reserved = addDiskBytes(reserved, n)
+			continue
+		}
+		if !entry.IsDir() || (FileRef{SHA256: key}).validate() != nil {
+			continue
+		}
+		n, err := environmentDiskUsage(filepath.Join(c.cache.Root, key))
+		if err != nil {
+			return
+		}
+		lock, err := c.cache.tryLock(key + ".use")
+		if err != nil {
+			return
+		}
+		pinned, err := sharedInputPinned(c.cache.Root, key)
+		if lock != nil {
+			unlockEnvironment(lock)
+		}
+		if err != nil {
+			return
+		}
+		if lock == nil || pinned {
+			report.Protected[key] = uint64(n)
+		} else {
+			evictable = addDiskBytes(evictable, uint64(n))
+		}
+	}
+	occupied := addDiskBytes(uint64(max(0, used)), reserved)
+	if report.CapacityBytes > occupied {
+		report.FreeBytes = report.CapacityBytes - occupied
+	}
+	report.EvictableBytes = min(evictable, report.CapacityBytes-report.FreeBytes)
+}
+
+// Include archive staging alongside the expanded payload. Saturation makes an
+// overflowing collection impossible rather than letting it wrap into a fit.
+func sharedInputRequired(s Spec, m *Machine) uint64 {
+	var required uint64
+	for _, input := range s.SharedInputs {
+		required = addDiskBytes(required, uint64(max(0, input.bytes())))
+		if input.Archive != "" && (m == nil || !slices.Contains(m.CachedSharedInputs, input.key())) {
+			required = addDiskBytes(required, uint64(max(0, input.SizeBytes)))
+		}
+	}
+	return required
+}
+
+func sharedInputCacheReason(s Spec, m *Machine, capacityOnly bool) string {
+	if len(s.SharedInputs) == 0 {
+		return ""
+	}
+	required := sharedInputRequired(s, m)
+	if m == nil || m.SharedInputCache == nil {
+		return fmt.Sprintf("shared_input_cache: required=%d bytes capacity=unknown; worker capacity report required", required)
+	}
+	report := m.SharedInputCache
+	if required > report.CapacityBytes {
+		return fmt.Sprintf("shared_input_cache: required=%d bytes capacity=%d bytes", required, report.CapacityBytes)
+	}
+	if capacityOnly {
+		return ""
+	}
+	inputs := maps.Clone(s.SharedInputs)
+	keys := map[string]bool{}
+	for _, input := range inputs {
+		keys[input.key()] = true
+	}
+	for key, input := range m.sharedInputClaims {
+		if !keys[key] {
+			required = addDiskBytes(required, sharedInputRequired(Spec{SharedInputs: map[string]SharedInput{key: input}}, m))
+			inputs[key] = input
+			keys[key] = true
+		}
+	}
+	available := addDiskBytes(min(report.FreeBytes, report.CapacityBytes), min(report.EvictableBytes, report.CapacityBytes))
+	seen := map[string]bool{}
+	for _, input := range inputs {
+		key := input.key()
+		if !seen[key] && slices.Contains(m.CachedSharedInputs, key) {
+			available = addDiskBytes(available, report.Protected[key])
+			seen[key] = true
+		}
+	}
+	available = min(available, report.CapacityBytes)
+	if required > available {
+		return fmt.Sprintf("shared_input_cache: required=%d bytes free=%d bytes evictable=%d bytes available=%d bytes capacity=%d bytes", required, report.FreeBytes, report.EvictableBytes, available, report.CapacityBytes)
+	}
+	return ""
+}
+
+func (q *Queue) sharedInputCapacityRefusal(j *Job) error {
+	if len(j.Spec.SharedInputs) == 0 {
+		return nil
+	}
+	var largest uint64
+	reported := false
+	for _, m := range q.plannerMachines() {
+		// Disabled/retired targets cannot make an impossible submission look viable.
+		if q.maintenanceBlocked(hostID(m)) || q.deviceAdmissionBlocked(m) || !q.jobAllowsMachine(j, m.ID) {
+			continue
+		}
+		if !executionTargetMatches(j.Spec, m) || !deviceAllowed(j, m) || !j.Spec.Needs.cpuOnly() && (m.GPU == "cpu" || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) {
+			continue
+		}
+		if m.SharedInputCache == nil {
+			continue
+		}
+		reported = true
+		largest = max(largest, m.SharedInputCache.CapacityBytes)
+		if sharedInputCacheReason(j.Spec, m, true) == "" {
+			return nil
+		}
+	}
+	code := "shared_input_cache_capacity"
+	if !reported {
+		code = "shared_input_cache_unreported"
+	}
+	return &HTTPError{Status: 409, Code: code, Message: fmt.Sprintf("%s: shared inputs require %d bytes; largest enabled matching worker cache capacity=%d bytes", code, sharedInputRequired(j.Spec, nil), largest)}
+}
+
+func sharedInputWaitingReason(j *Job, machines map[string]*Machine) string {
+	if len(j.Spec.SharedInputs) == 0 {
+		return ""
+	}
+	var reasons []string
+	for _, m := range machines {
+		if !j.Spec.allowsMachine(m.ID) || !executionTargetMatches(j.Spec, m) {
+			continue
+		}
+		reason := sharedInputCacheReason(j.Spec, m, false)
+		if reason == "" {
+			return ""
+		}
+		reasons = append(reasons, reason)
+	}
+	if len(reasons) == 0 {
+		return fmt.Sprintf("shared_input_cache: required=%d bytes; no reporting eligible worker", sharedInputRequired(j.Spec, nil))
+	}
+	slices.Sort(reasons)
+	return strings.Join(slices.Compact(reasons), "; ")
+}
+
+// Queue-owned claims cover the interval between assignment and the next worker
+// snapshot. Shared identities count once across concurrent attempts.
+func (q *Queue) sharedInputClaims(m *Machine) map[string]SharedInput {
+	claims := map[string]SharedInput{}
+	for _, j := range q.liveJobs() {
+		if j.Machine != m.ID || j.Session != m.Session || j.ReleaseConfirmed {
+			continue
+		}
+		for _, input := range j.Spec.SharedInputs {
+			claims[input.key()] = input
+		}
+	}
+	return claims
+}

@@ -53,6 +53,8 @@ func TestWorkerRootsProductionAdmissionAndExactCustody(t *testing.T) {
 	s.Priority = "production"
 	s.SharedInputs = map[string]SharedInput{"asset": {NAS: "assets/input.bin", SHA256: strings.Repeat("a", 64), SizeBytes: 1}}
 	m.Capabilities = append(m.Capabilities, "shared_inputs_v1")
+	m.SharedInputCache = &SharedInputCapacity{CapacityBytes: 1 << 20, FreeBytes: 1 << 20}
+	check(t, q, m, nil)
 	j := submit(t, q, s)
 	assigned := check(t, q, m, nil).Job
 	if assigned == nil {

@@ -73,6 +73,12 @@ func targetKey(m *Machine) string { return m.ID + "/" + m.Device }
 // status and qualification plans keep the per-card views.
 func (q *Queue) placementTargets(m *Machine) []*Machine {
 	targets := q.machineTargets(m)
+	claims := q.sharedInputClaims(m)
+	for i, target := range targets {
+		copy := *target
+		copy.sharedInputClaims = claims
+		targets[i] = &copy
+	}
 	groups := groupTargets(targets)
 	if len(m.Devices) <= 2 || len(groups) == 0 {
 		return append(targets, groups...)

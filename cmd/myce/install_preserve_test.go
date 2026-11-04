@@ -535,7 +535,7 @@ func TestInstallWorkerFileCacheCapacity(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, err := myce.ReadServiceConfig(c.Config)
-		if err != nil || got.FileCacheBytes != 32<<30 {
+		if err != nil || got.FileCacheBytes != 32<<30 || !got.FileCacheBytesExplicit {
 			t.Fatalf("install/reinstall lost file cache capacity: %d, %v", got.FileCacheBytes, err)
 		}
 		unit, err := os.ReadFile(got.Service)
@@ -543,7 +543,7 @@ func TestInstallWorkerFileCacheCapacity(t *testing.T) {
 			t.Fatal("generated service lost file cache capacity", err)
 		}
 	}
-	for _, value := range []string{"0", "-1"} {
+	for _, value := range []string{"-1"} {
 		err := setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, "--file-cache-bytes=" + value}, probe, c.NAS)
 		if err == nil || !strings.Contains(err.Error(), "file-cache-bytes") {
 			t.Fatal("nonpositive file cache capacity accepted", err)

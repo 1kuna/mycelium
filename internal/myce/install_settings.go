@@ -220,7 +220,12 @@ func InstallSettings() []InstallSetting {
 		installSetting("native-exec-root", "NativeExecuteRoots", "operator-granted native read/execute root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeExecuteRoots }, validateNativeRootPaths),
 		installSetting("gpu-telemetry-helper", "GPUTelemetryHelper", "optional read-only GPU telemetry executable (absolute path; empty disables helper)", func(c *ServiceConfig) *string { return &c.GPUTelemetryHelper }, validateGPUTelemetryHelper),
 		installPath("environment-root", "EnvironmentRoot", "NAS environment root", func(c *ServiceConfig) *string { return &c.EnvironmentRoot }, false),
-		installSetting("file-cache-bytes", "FileCacheBytes", "private file and shared-input cache bytes (each)", func(c *ServiceConfig) *int64 { return &c.FileCacheBytes }, installBytes),
+		installSetting("file-cache-bytes", "FileCacheBytes", "private file and shared-input cache bytes each (0: automatic)", func(c *ServiceConfig) *int64 { return &c.FileCacheBytes }, func(v int64) error {
+			if v < 0 {
+				return errors.New("byte limit must be nonnegative")
+			}
+			return nil
+		}),
 		installPath("model-cache", "ModelCache", "local model cache", func(c *ServiceConfig) *string { return &c.ModelCache }, false),
 		installSetting("model-cache-bytes", "ModelCacheBytes", "local model cache bytes", func(c *ServiceConfig) *int64 { return &c.ModelCacheBytes }, installBytes),
 		installPath("environment-cache", "EnvironmentCache", "local environment cache", func(c *ServiceConfig) *string { return &c.EnvironmentCache }, false),
@@ -295,6 +300,7 @@ func InstallSettings() []InstallSetting {
 		installPath("model-config", "ModelCatalog", "NAS model catalog", func(c *ServiceConfig) *string { return &c.ModelCatalog }, false),
 		installEnvironmentCatalogSetting(),
 		// No CLI overrides: preserved verbatim, with identity enforced separately.
+		{Field: "FileCacheBytesExplicit"},
 		{Field: "MachineDevices", validate: func(c ServiceConfig) error { return ValidateDeviceSettings(c.MachineDevices) }}, {Field: "FromWorkerConfigs"},
 		{Field: "Version", validate: func(c ServiceConfig) error {
 			if c.Version < 0 || c.Version > 1 {
@@ -357,6 +363,9 @@ func OverlayInstallFlags(f *flag.FlagSet, base, values ServiceConfig) (ServiceCo
 				return base, fmt.Errorf("usage: --%s: %w", s.Flag, err)
 			}
 		}
+	}
+	if explicit["file-cache-bytes"] {
+		base.FileCacheBytesExplicit = base.FileCacheBytes > 0
 	}
 	if err := base.ValidateInstall(); err != nil {
 		return base, fmt.Errorf("usage: %w", err)

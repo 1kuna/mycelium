@@ -82,6 +82,8 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 			return "native_isolation_unavailable: this host has not reported a supported native kernel boundary; upgrade or repair the worker"
 		}
 		return "needs.network: true requires native_network for protected native outbound execution; this host only supports offline native jobs or has not reported isolation capability"
+	case "shared input cache":
+		return sharedInputCacheReason(j.Spec, m, false)
 	case "disk headroom":
 		return diskHeadroomReason(j, m)
 	case "shared host profile":
@@ -301,6 +303,7 @@ func (q *Queue) qualificationCapacity(target *Machine) Machine {
 	// Only scalar capacity fields, disk volumes and availability are changed.
 	// All other referenced inventory remains read-only for this planning pass.
 	copy := *target
+	copy.sharedInputClaims = nil
 	copy.hostBudgetGB, copy.modelReservationDebtGB, copy.hostReservationDebtGB = 0, 0, 0
 	copy.batchTenants = 0
 	if target.CapabilityProfile != nil {
@@ -313,6 +316,12 @@ func (q *Queue) qualificationCapacity(target *Machine) Machine {
 	}
 	copy.group, copy.groupMembers, copy.groupFloorGB = target.group, target.groupMembers, target.groupFloorGB
 	copy.DiskVolumes = diskCapacityVolumes(copy.DiskVolumes)
+	if copy.SharedInputCache != nil {
+		capacity := *copy.SharedInputCache
+		capacity.FreeBytes, capacity.EvictableBytes = capacity.CapacityBytes, 0
+		capacity.Protected = nil
+		copy.SharedInputCache = &capacity
+	}
 	copy.Gone, copy.Leaving, copy.Recovering, copy.CheckpointUnavailable = false, false, false, false
 	copy.MemoryError, copy.HostMemoryError, copy.CPUCapacityReason = "", "", ""
 	copy.HostMemoryPolicyMismatch = false

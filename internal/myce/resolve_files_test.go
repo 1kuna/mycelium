@@ -24,6 +24,9 @@ func TestResolveStoredInputBytesAndStaging(t *testing.T) {
 	if err = client.UploadJobInput(context.Background(), source, ref); err != nil {
 		t.Fatal(err)
 	}
+	m := cacheCapacityMachine("reader", 1<<20)
+	m.GPU = "cpu"
+	check(t, q, m, nil)
 	req := ResolveRequest{Spec: cpuResolveSpec()}
 	req.Spec.Files = FileManifest{"input.txt": ref}
 	req.Spec.SharedInputs = map[string]SharedInput{"data": {SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}}

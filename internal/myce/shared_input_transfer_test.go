@@ -91,6 +91,7 @@ func TestSharedInputsStoredReferencesHaveRetentionAndAdmission(t *testing.T) {
 	}
 	input.SHA256, input.SizeBytes = ref.SHA256, ref.SizeBytes
 	s.SharedInputs["asset"] = input
+	check(t, q, cacheCapacityMachine("reader", 1<<20), nil)
 	j, err := q.Submit(s)
 	if err != nil {
 		t.Fatal(err)

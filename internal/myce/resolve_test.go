@@ -69,6 +69,9 @@ func TestResolveAutoMemoryIdentityHint(t *testing.T) {
 
 func TestResolveNASSharedInputReadsRemainUnverified(t *testing.T) {
 	q, _ := fixture(t)
+	m := cacheCapacityMachine("reader", 1<<20)
+	m.GPU = "cpu"
+	check(t, q, m, nil)
 	s := cpuResolveSpec()
 	s.SharedInputs = map[string]SharedInput{"movie": {NAS: "media/movie", SHA256: strings.Repeat("a", 64), SizeBytes: 10}}
 	r, err := q.Resolve(ResolveRequest{Spec: s})
