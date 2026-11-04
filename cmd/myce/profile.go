@@ -28,7 +28,7 @@ type executionProfile struct {
 	MemoryClass        string            `yaml:"memory_class,omitempty"`
 	Adapter            bool              `yaml:"-"`
 	Native             *myce.Extension   `yaml:"-"`
-	RequirementReasons map[string]string `yaml:"-" json:"-"`
+	RequirementReasons map[string]string `yaml:"requirement_reasons,omitempty" json:"-"`
 }
 
 type profileReceipt struct {
