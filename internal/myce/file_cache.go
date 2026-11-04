@@ -20,7 +20,9 @@ type FileCache struct {
 	mu     sync.Mutex
 }
 
-func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error {
+func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stageErr error) {
+	operation := "cache_init"
+	defer func() { stageErr = withStagingCause("", ref, operation, stageErr) }()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := ref.validate(); err != nil {
@@ -42,10 +44,12 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 		if err = os.Chtimes(p, now, now); err != nil {
 			return err
 		}
+		operation = "copy"
 		return copyJobFileContext(ctx, p, dest)
 	}
 	// Never replace corrupt cache bytes as if they were complete. They are disposable
 	// only after the durable authoritative copy has been checked.
+	operation = "cache_verify"
 	if err = c.Client.HasFile(ctx, ref); err != nil {
 		return err
 	}
@@ -61,6 +65,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 		used int64
 	}
 	var victims []victim
+	operation = "cache_scan"
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return err
@@ -107,25 +112,11 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 		if (FileRef{SHA256: hash}).validate() != nil {
 			return errors.New("unknown file in cache; refusing eviction")
 		}
-		if strings.HasSuffix(v.name, ".partial") {
-			// A partial length says nothing about the full blob's hash cost.
-			// Fetch only its size first, then verify the authoritative copy with HEAD.
-			var ref FileRef
-			if e := c.Client.Call(ctx, "GET", "/api/files/blobs/"+hash+"/metadata", nil, &ref); e != nil {
-				if !isResultExpired(e) {
-					return e
-				}
-			} else {
-				if ref.SHA256 != hash || ref.validate() != nil {
-					return errors.New("invalid stored file metadata")
-				}
-				if e := c.Client.HasFile(ctx, ref); e != nil && !isResultExpired(e) {
-					return e
-				}
-			}
-		} else if e := c.Client.HasFile(ctx, FileRef{hash, v.size}); e != nil && !isResultExpired(e) {
-			return e
-		}
+		// These are disposable cache copies, never checkpoint/result custody.
+		// Each attempt owns a private materialization. Queue expiry or a
+		// transient HEAD failure for an unrelated victim must not block new
+		// inputs. The requested blob was verified above before any eviction.
+		operation = "cache_evict"
 		if err = os.Remove(filepath.Join(root, v.name)); err != nil {
 			return err
 		}
@@ -135,12 +126,15 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 			return err
 		}
 	}
+	operation = "cache_admission"
 	if used+need > c.Limit || free < need {
 		return errors.New("insufficient local file cache space")
 	}
+	operation = "cache_download"
 	if err = c.Client.DownloadFile(ctx, ref, partial); err != nil {
 		return err
 	}
+	operation = "cache_publish"
 	if err = os.Rename(partial, p); err != nil {
 		return err
 	}
@@ -151,6 +145,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 	if err = os.Chtimes(p, now, now); err != nil {
 		return err
 	}
+	operation = "copy"
 	return copyJobFileContext(ctx, p, dest)
 }
 

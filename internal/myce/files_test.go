@@ -205,7 +205,7 @@ func TestFilesNASInputs(t *testing.T) {
 	}
 	err = c.Call(ctx, "POST", "/api/jobs", s, nil)
 	var rejection *HTTPError
-	if !errors.As(err, &rejection) || rejection.Status != 400 || rejection.Code != "job_files_invalid" {
+	if !errors.As(err, &rejection) || rejection.Status != 409 || rejection.Code != "input_blob_corrupt" {
 		t.Fatal("corrupt NAS-mode input accepted", err)
 	}
 }
@@ -235,7 +235,7 @@ func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 		refs = append(refs, ref)
 		if len(refs) == 3 {
 			// An interrupted download retains just one byte of the old full blob.
-			// Eviction must obtain the full size before asking the queue to hash it.
+			// The old partial is disposable without asking the queue to hash it.
 			old := filepath.Join(cache.Root, refs[0].SHA256)
 			if err := os.Rename(old, old+".partial"); err != nil {
 				t.Fatal(err)

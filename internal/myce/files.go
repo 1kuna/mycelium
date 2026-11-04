@@ -543,6 +543,13 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 		http.Error(w, "invalid file", 400)
 		return
 	}
+	failure := func(operation string, err error) {
+		log.Printf("file read failed blob=%s operation=%s cause=%v", hash, operation, err)
+		w.Header().Set("X-Myce-Error-Code", "file_blob_unavailable")
+		w.Header().Set("X-Myce-Storage-Operation", operation)
+		w.Header().Set("X-Myce-Storage-Error", stagingErrorName(err))
+		respond(w, nil, &HTTPError{Status: 503, Code: "file_blob_unavailable", Message: "queue blob read failed: " + stagingErrorName(err)})
+	}
 	missing := func() {
 		if s.expired != nil && s.expired(hash, r.Context()) {
 			w.Header().Set("X-Myce-Error-Code", "result_expired")
@@ -553,18 +560,30 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 	}
 	path := filepath.Join(s.root, "blobs", hash)
 	if err := noModelSymlinks(path, false); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			failure("store_resolve", err)
+			return
+		}
 		missing()
 		return
 	}
 	f, err := os.Open(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			failure("store_open", err)
+			return
+		}
 		missing()
 		return
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() {
-		http.NotFound(w, r)
+	if err != nil {
+		failure("store_stat", err)
+		return
+	}
+	if !st.Mode().IsRegular() {
+		failure("store_stat", errors.New("invalid cache entry"))
 		return
 	}
 	if metadata {
@@ -577,7 +596,10 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 	h := sha256.New()
 	n, verifyErr := io.Copy(h, contextReader{r.Context(), f})
 	if verifyErr != nil || n != st.Size() || hex.EncodeToString(h.Sum(nil)) != hash {
-		http.Error(w, "stored file corrupt", 500)
+		if verifyErr == nil {
+			verifyErr = errors.New("stored file identity mismatch")
+		}
+		failure("store_verify", verifyErr)
 		return
 	}
 	if r.Method == http.MethodHead {
@@ -592,12 +614,12 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 			}
 		}
 		if err = s.refreshBlob(path); err != nil {
-			http.Error(w, "file freshness unavailable", 503)
+			failure("store_refresh", err)
 			return
 		}
 	}
 	if err = s.syncDir(filepath.Join(s.root, "blobs")); err != nil {
-		http.Error(w, "file durability unavailable", 503)
+		failure("store_sync", err)
 		return
 	}
 	// An explicit import HEAD promotes an eligible input to an unmarked import.
@@ -610,7 +632,7 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 		}
 	}
 	if _, err = f.Seek(0, io.SeekStart); err != nil {
-		http.Error(w, "stored file seek failed", 500)
+		failure("store_seek", err)
 		return
 	}
 	w.Header().Set("ETag", `"`+hash+`"`)
@@ -854,7 +876,7 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 		if errors.Is(err, errFileTransferStalled) {
 			return nil, fmt.Errorf("%w: no network progress for %s", errFileTransferStalled, c.fileTimeout(size))
 		}
-		return nil, errors.New("file transfer connection failed")
+		return nil, fmt.Errorf("file transfer connection failed: %w", err)
 	}
 	return res, nil
 }
@@ -1086,6 +1108,12 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 }
 
 func fileTransferError(res *http.Response, message string) error {
+	if res.Header.Get("X-Myce-Error-Code") == "file_blob_unavailable" {
+		d := safeStagingCause(&StagingCause{Operation: res.Header.Get("X-Myce-Storage-Operation"), Error: res.Header.Get("X-Myce-Storage-Error"), Status: res.StatusCode})
+		if d != nil {
+			return &stagingError{*d, &HTTPError{Status: res.StatusCode, Code: "file_blob_unavailable", Message: "queue blob read failed"}}
+		}
+	}
 	var body struct {
 		Code  string `json:"code"`
 		Error string `json:"error"`

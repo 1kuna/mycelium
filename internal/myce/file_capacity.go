@@ -451,5 +451,5 @@ func fileCapacityCode(code string) bool {
 
 // File-store refusals whose code and reason reach HTTP callers intact.
 func fileStoreRefusalCode(code string) bool {
-	return fileCapacityCode(code) || code == "project_file_store_quota" || code == "file_input_claim_required"
+	return fileCapacityCode(code) || code == "project_file_store_quota" || code == "file_input_claim_required" || code == "input_blob_missing" || code == "input_blob_corrupt" || code == "input_blob_unavailable" || code == "file_blob_unavailable"
 }

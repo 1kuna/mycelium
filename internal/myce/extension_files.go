@@ -80,7 +80,9 @@ func copyJobFileContentsContext(ctx context.Context, src, dst string) error {
 func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 	return w.prepareExtensionFilesContext(context.Background(), j, stateDir)
 }
-func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateDir string) error {
+func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateDir string) (stageErr error) {
+	operation, input, ref := "prepare", "", (FileRef{})
+	defer func() { stageErr = withStagingCause(input, ref, operation, stageErr) }()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -125,6 +127,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 			}
 		}
 	}
+	operation = "extension_write"
 	if !j.Spec.Run.Docker && j.Extension != nil {
 		var files map[string][]byte
 		for _, extension := range j.Extensions {
@@ -157,15 +160,17 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 		if !ok {
 			return errors.New("missing frozen source archive")
 		}
+		input = ".myce-source.tar"
 		err = w.fileCache.copyTo(ctx, ref, filepath.Join(staged, ".myce-source.tar"))
 		if err != nil {
-			return err
+			return withStagingCause(input, ref, "copy", err)
 		}
 		if err = extractJobSourceContext(ctx, filepath.Join(staged, ".myce-source.tar"), staged); err != nil {
-			return err
+			return withStagingCause(input, ref, "source_extract", err)
 		}
 	}
-	for name, ref := range jobInputFiles(j) {
+	for name, file := range jobInputFiles(j) {
+		input, ref, operation = name, file, "source_replace"
 		if err := sharedInputProgress(ctx); err != nil {
 			return err
 		}
@@ -186,12 +191,13 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 	if err := stageJobFilesContext(ctx, jobInputPaths(j), func(name, source string) error {
 		p, err := sharedInputPath(ctx, w.JobFileRoot, source)
 		if err != nil {
-			return err
+			return withStagingCause(name, FileRef{}, "nas_read", err)
 		}
-		return copyJobFileContext(ctx, p, filepath.Join(staged, name))
+		return withStagingCause(name, FileRef{}, "copy", copyJobFileContext(ctx, p, filepath.Join(staged, name)))
 	}); err != nil {
 		return err
 	}
+	input, ref, operation = "", FileRef{}, "batch_write"
 	if j.Batch != nil && j.Batch.Run {
 		data, err := json.Marshal(batchManifest(j))
 		if err != nil {
@@ -206,12 +212,14 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 			}
 		}
 	}
+	operation = "sync"
 	if err := syncModelDirectoryContext(ctx, staged); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	operation = "publish"
 	if err := os.Rename(staged, dir); err != nil {
 		return err
 	}

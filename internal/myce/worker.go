@@ -421,7 +421,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		if errors.Is(sharedErr, errCheckpointIOPending) {
 			return nil, fmt.Errorf("%w: shared input copy pending", errWorkerCheckpoint)
 		}
-		return nil, runtimeErrorFor("input_staging", sharedErr)
+		return nil, w.stagingFailure(s, j, sharedErr)
 	}
 	if sharedReaders(j.Spec) && !j.Spec.Run.Docker {
 		s.sharedRelease = sharedRelease // Docker releases when its observer exits.
@@ -459,10 +459,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			return nil, ctx.Err()
 		}
 		if err != nil {
-			if strings.HasPrefix(err.Error(), "NAS unreachable:") {
+			if errors.Is(err, errCheckpointIOPending) || errors.Is(err, errCheckpointIOTimeout) {
 				return nil, fmt.Errorf("%w: input copy pending", errWorkerCheckpoint)
 			}
-			return nil, runtimeErrorFor("input_staging", err)
+			return nil, w.stagingFailure(s, j, err)
 		}
 		j.Spec.Run.Workdir = staged.directory
 		// Timestamp the actual asynchronous completion, not the retry that

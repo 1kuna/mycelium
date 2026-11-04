@@ -104,6 +104,9 @@ func safeInputStagingPathDiagnostic(d *PathDiagnostic) *PathDiagnostic {
 // validation alone cannot establish that a worker-supplied name is public.
 func safeJobRuntimeCause(spec Spec, c *RuntimeCause) *RuntimeCause {
 	out := safeRuntimeCause(c)
+	if out != nil {
+		out.Staging = bindStagingCause(spec, out.Staging)
+	}
 	if out == nil || out.PathDiagnostic == nil {
 		return out
 	}

@@ -433,6 +433,15 @@ queue reopen retain the diagnosis. Older attempts without recorded predicates
 cannot recover it. Workdir containment remains a worker-side launch check because
 it resolves the actual managed workspace and symlinks on that host.
 
+Input-staging failures carry `execution_cause.staging` on the job and exact
+attempt history: `input`, `blob` (SHA-256), `operation`, `error`, optional
+`syscall`, and optional HTTP `status`. Names are bound to declared inputs;
+expanded worker paths and raw upstream text are excluded. `myce logs JOB_ID`
+also includes the safe prelaunch cause unless `logs: none`. Infrastructure
+staging failures follow existing retry accounting; missing/expired referenced
+blobs use class `input_unavailable`, malformed inputs use `invalid_input`.
+See [input staging diagnosis](files.md#diagnosing-input-staging).
+
 Memory admission refusals additionally retain `execution_cause.admission` with
 the worker's failed `subcheck`, `required`, `available` and `unit`, plus the
 attempt's `envelope_source`, `envelope_host_gb` and `envelope_device_gb`.

@@ -734,6 +734,10 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		// A concurrent key binding/reservation wins even if verification failed.
 		if verificationErr != nil {
+			var typed *HTTPError
+			if errors.As(verificationErr, &typed) {
+				return typed
+			}
 			return reject("job_files_invalid", verificationErr)
 		}
 		if q.files != store || q.environmentRevision != environmentRevision {

@@ -358,6 +358,32 @@ unsafe paths, overlapping/case-colliding names and changed snapshots are refused
 The initial manifest limit is 1024 files; JSON checkpoint metadata is at most
 1 MiB. Larger binary payloads can be referenced by that metadata.
 
+## Diagnosing input staging
+
+Before the command starts, staging failures appear on the exact attempt in
+`myce status JOB_ID`, job GET `execution_cause.staging`, and `myce logs JOB_ID`
+(unless `logs: none`). The detail names the declared input and SHA-256 blob,
+operation (for example `cache_verify`, `cache_download`, `source_extract`,
+`copy`, or `publish`), OS/storage error, syscall when available, and HTTP status
+when applicable. Expanded worker paths and raw transport text stay in the local
+worker journal. Attempt history retains this cause when the job retries.
+
+Local I/O, permissions, capacity and transient storage/transport failures before
+launch use the existing infrastructure retry policy, including its production
+retry bound. `input_unavailable` with `blob_missing` or `blob_expired`, and
+`invalid_input`, require consumer action rather than infrastructure retries.
+
+Receipts identify bytes; they do not reserve those blobs forever. A new
+submission verifies every referenced input outside the queue lock, while the
+existing lifecycle fence protects verification through commit. A live accepted
+job then protects those bytes under ordinary retention, even when an older job
+referencing them expires. Missing bytes are refused with `input_blob_missing`,
+corrupt bytes with `input_blob_corrupt` (HTTP 409), and storage read/durability
+failures with `input_blob_unavailable` (HTTP 503). The refusal names the input,
+blob and failed verification. Restore storage for a 503; upload the original
+bytes again for missing/corrupt inputs, then retry the same unaccepted key.
+Prefer normal profile/adapter upload over copying references from old receipts.
+
 ## Model files and caches
 
 Import an approved model once with `myce file put`. In the existing model catalog,
@@ -387,7 +413,10 @@ Collection gives those bytes a six-hour publication grace, covering the gap from
 the first file's refresh through later multi-GB uploads, slow NAS, or a queue
 outage/deploy before submit/complete establishes a new reference.
 That grace survives queue restarts; it does not extend an expired job's result
-recovery contract. Expired reusable worker-cache copies remain evictable.
+recovery contract. Expired reusable worker-cache copies remain evictable. Private-file cache eviction removes only inactive reproducible
+copies and does not HEAD unrelated victims: missing/expired victims or a transient
+queue read failure cannot wedge admission of a healthy new input. Stored model
+cache eviction keeps its separate authoritative-copy verification contract.
 
 A blob remains while another job within its window or any non-terminal job needs
 it, or any checkpoint generation, catalog model, extension or environment refers

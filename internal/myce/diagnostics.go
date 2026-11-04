@@ -139,6 +139,7 @@ func specRejection(err error) error {
 // RuntimeCause retains safe operation/class information, never daemon stderr,
 // command arguments, environment values, endpoint URLs, or filesystem paths.
 type RuntimeCause struct {
+	Staging          *StagingCause    `json:"staging,omitempty"`
 	PathDiagnostic   *PathDiagnostic  `json:"path_diagnostic,omitempty"`
 	Admission        *AdmissionDetail `json:"admission,omitempty"`
 	PrelaunchRefused bool             `json:"prelaunch_refused,omitempty"`
@@ -152,6 +153,9 @@ type RuntimeCause struct {
 func (c RuntimeCause) String() string {
 	text := c.Operation + ": " + c.Class
 	if c.Operation == "input_staging" {
+		if d := safeStagingCause(c.Staging); d != nil {
+			text += "; " + d.String()
+		}
 		if d := safeInputStagingPathDiagnostic(c.PathDiagnostic); d != nil {
 			text += "; " + d.String()
 			if d.Cause == "missing" {
@@ -198,6 +202,10 @@ func runtimeErrorFor(operation string, err error) error {
 	c := RuntimeCause{Operation: operation, Class: "io_error"}
 	if operation == "input_staging" {
 		c.PathDiagnostic = safeInputStagingPathDiagnostic(pathDiagnostic(err))
+		var staging *stagingError
+		if errors.As(err, &staging) {
+			c.Staging = safeStagingCause(&staging.detail)
+		}
 	}
 	if errors.Is(err, errWorkerStartHandoff) {
 		c.Operation = "start_handoff"
@@ -224,6 +232,9 @@ func runtimeErrorFor(operation string, err error) error {
 		c.Class = "not_found"
 	case errors.Is(err, syscall.EDQUOT):
 		c.Class = diskLimitExceeded
+		if operation == "input_staging" {
+			c.Class = "storage_full"
+		}
 	case errors.Is(err, syscall.ENOSPC):
 		c.Class = "storage_full"
 	case errors.Is(err, syscall.ECONNREFUSED):
@@ -248,6 +259,14 @@ func runtimeErrorFor(operation string, err error) error {
 			c.Class = "disposition_unknown"
 		}
 	}
+	if c.Staging != nil {
+		switch c.Staging.Error {
+		case "blob_missing", "blob_expired":
+			c.Class = "input_unavailable"
+		case "invalid_source", "invalid_input":
+			c.Class = "invalid_input"
+		}
+	}
 	return &runtimeError{diagnostic: c, cause: err}
 }
 func runtimeDiagnostic(err error) *RuntimeCause {
@@ -269,6 +288,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	operations := map[string]bool{"main": true, "group": true, "command": true, "process_group": true, "outputs": true, "launch": true, "readiness": true, "reconcile": true, "persist": true, "ps": true, "inspect": true, "create": true, "start": true, "update": true, "unpause": true, "kill": true, "stop": true, "logs": true, "network.ls": true, "network.inspect": true, "network.rm": true, "network.create": true, "network.disconnect": true, "retain_evidence": true, "observe_group": true, "remove_networks": true}
 	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
 	classes[diskLimitExceeded] = true
+	classes["input_unavailable"], classes["invalid_input"] = true, true
 	operations["start_authorization"] = true
 	operations["start_handoff"] = true
 	operations["input_staging"] = true
@@ -278,6 +298,10 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		}
 	}
 	out := *c
+	out.Staging = nil
+	if c.Operation == "input_staging" {
+		out.Staging = safeStagingCause(c.Staging)
+	}
 	out.PathDiagnostic = nil
 	if c.Operation == "input_staging" {
 		out.PathDiagnostic = safeInputStagingPathDiagnostic(c.PathDiagnostic)
