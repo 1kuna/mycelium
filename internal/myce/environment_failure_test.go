@@ -246,3 +246,23 @@ func TestEnvironmentFailureClassificationAndPersistedExcerpt(t *testing.T) {
 		})
 	}
 }
+
+// A recipe hash is not evidence of an HTTP status. #718 independent review
+// reproduced an unchanged deterministic recipe retrying because its hash had 504.
+func TestEnvironmentFailureHashIsNotHTTPStatus(t *testing.T) {
+	const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789504503ab"
+	err := exec.Command("sh", "-c", "exit 1").Run()
+	wrapped := fmt.Errorf("environment %s build failed: %w (log %s.build.log)", key, err, key)
+	const output = "No solution found: example==1.0 unavailable on first index"
+	if got := classifyEnvironmentFailure(wrapped, output); got != "deterministic" {
+		t.Fatal("hash converted a recipe failure to a retry", got)
+	}
+	if got := environmentFailureKind(EnvironmentReport{Error: wrapped.Error(), Log: output}); got != "deterministic" {
+		t.Fatal("legacy hash converted a recipe failure to a retry", got)
+	}
+	for _, diagnostic := range []string{"HTTP 503", "HTTP/1.1 504 Gateway Timeout", "status code: 502", "HTTP error 504"} {
+		if got := classifyEnvironmentFailure(wrapped, diagnostic); got != "transient" {
+			t.Fatal("HTTP failure did not retry", diagnostic, got)
+		}
+	}
+}

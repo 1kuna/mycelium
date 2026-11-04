@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -53,9 +54,14 @@ func classifyEnvironmentFailure(err error, output string) string {
 	return "transient"
 }
 
+var environmentHTTPFailure = regexp.MustCompile(`\b(?:http(?:/[0-9.]+)?\s+|(?:status(?:\s+code)?|http\s+error)\s*[:=]?\s*)50[234]\b`)
+
 func environmentInfrastructureFailure(r EnvironmentReport) bool {
 	text := strings.ToLower(r.Error + "\n" + r.Log)
-	for _, clue := range []string{"no space left", "disk space", "disk quota", "environment cache needs", "connection refused", "connection reset", "connection closed", "network is unreachable", "network unreachable", "temporary failure", "timed out", "timeout", "failed to download", "error sending request", "dns error", "name resolution", "signal: killed", "signal: terminated", "build stalled", "service unavailable", "too many requests", "502 bad gateway", "503", "504"} {
+	if environmentHTTPFailure.MatchString(text) {
+		return true
+	}
+	for _, clue := range []string{"no space left", "disk space", "disk quota", "environment cache needs", "connection refused", "connection reset", "connection closed", "network is unreachable", "network unreachable", "temporary failure", "timed out", "timeout", "failed to download", "error sending request", "dns error", "name resolution", "signal: killed", "signal: terminated", "build stalled", "service unavailable", "too many requests", "502 bad gateway"} {
 		if strings.Contains(text, clue) {
 			return true
 		}
