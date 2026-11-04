@@ -73,6 +73,48 @@ place mutable indexes, lock files and generated caches in attempt scratch.
 The current job's checkpoint and usage paths receive specific write
 grants. Work, temp and scratch follow existing attempt retention and cleanup custody.
 
+### Declared model snapshots (#553)
+
+`model_snapshots` resolves an exact snapshot and its blobs into a verified
+worker cache entry. Concurrent attempts receive views of that same entry, with
+no per-job copy. The initial cache fill may copy or clone hub bytes; it never
+hard-links writable hub blobs. Restart pins, cleanup custody and eviction rules
+are unchanged. `MYCE_MODEL_<NAME>` names the acquired data directory, not the hub.
+
+- **Sandboxed Linux:** acquired model paths receive Landlock content-read grants
+  without write or direct-execute rights. The namespace mode also exposes them
+  through bubblewrap's read-only mount view (restoring exact paths hidden by
+  private `/tmp`). Conflicting writable/executable ancestor grants refuse launch.
+  In Landlock fallback `chmod` can still succeed, but cannot authorize a content
+  write; metadata is not immutable.
+- **macOS Seatbelt:** the acquired paths are readable and explicitly deny
+  `file-write*` and direct execution, including caches outside the default spool
+  or home. A conflicting write/execute grant refuses launch.
+- **Managed Docker:** the same cache directory is a worker-owned `readonly` bind
+  at `/myce/models/<name>`, with `MYCE_MODEL_<NAME>` set to that path.
+- **Plain native default (MY-25), or declared unsandboxed:** cache files and
+  directories have write bits removed. Ordinary writes/creates/unlinks fail for
+  the unprivileged worker user. **This is cooperative read-only access, not a
+  security boundary:** a same-user job can chmod files/directories back to
+  writable, replace entries through writable parents, or use another writable
+  alias; root can bypass file modes. It can mutate shared cache bytes. Choose
+  `isolation: sandboxed` or managed Docker when payload write denial is required.
+  Unsandboxed processes on the host remain outside the sandbox threat model.
+
+Interpreters can read model Python sources and loaders can map model libraries;
+read-only data grants do not imply a model engine or safe custom code. Put
+indexes, downloads and generated caches in `MYCE_SCRATCH_DIR`, and use offline
+loader flags. These guarantees do not introduce verify-in-place access to a
+mutable hub.
+
+`TestModelSnapshotPlainReadOnlyViews`, `TestModelSnapshotLinuxReadOnlyViews`,
+`TestModelSnapshotSeatbeltReadOnlyViews` and `TestModelSnapshotDockerReadOnlyViews`
+use two live payloads holding concurrent acquisitions of the same cache inode,
+and attempt writes against synthetic model bytes. Linux exercises Landlock and,
+when available, namespaces separately. Docker requires a local Linux daemon and
+an already-present POSIX image (no pulls); unavailable platform/runtime checks
+are skipped and must not be reported as native qualification.
+
 Operators can declare additional local roots with repeatable worker/install
 flags, for example:
 

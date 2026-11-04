@@ -113,7 +113,8 @@ type Worker struct {
 	NativeReadRoots             []string
 	NativeExecuteRoots          []string
 	nativeMetricCgroups         []string // Trusted attempt-member cgroups only.
-	nativeSharedInputs          []string // Verified acquired payloads, never authored environment paths.
+	nativeSharedInputs          []string // Verified executable shared inputs, never authored paths.
+	nativeModelInputs           []string // Verified model data: reads only, including custom-code sources.
 	modelMounts                 []dockerFileMount
 	CacheLimit                  int64
 	SecretRoot                  string
@@ -437,11 +438,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		s.sharedRelease = sharedRelease // Docker releases when its observer exits.
 	}
 	w.modelMounts = dockerModelMounts(j, sharedEnv)
-	w.nativeSharedInputs = nil
-	for _, path := range sharedEnv {
-		w.nativeSharedInputs = append(w.nativeSharedInputs, path)
-	}
-	slices.Sort(w.nativeSharedInputs)
+	w.nativeInputPaths(j, sharedEnv)
 	sharedStarted := false
 	defer func() {
 		if !sharedStarted && !errors.Is(startErr, errWorkerReleasePending) {

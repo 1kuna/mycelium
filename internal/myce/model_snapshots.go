@@ -276,6 +276,11 @@ func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]st
 	if j.ModelLimits == nil {
 		return fail(modelSnapshotError("model_snapshot_policy", "permission_denied", nil))
 	}
+	// Concurrent acquisitions inspect Root for capacity before Acquire. Finish
+	// its once-only canonicalization before any reader observes that field.
+	if err := w.modelSnapshots.cache.init(); err != nil {
+		return fail(modelSnapshotError("model_snapshot_mismatch", "io_error", err))
+	}
 	for name, m := range j.Spec.ModelSnapshots {
 		input, repo, err := resolveModelSnapshot(ctx, w.ModelRoot, m)
 		if err != nil {
@@ -305,6 +310,24 @@ func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]st
 		paths["MYCE_MODEL_"+strings.ToUpper(name)] = path
 	}
 	return paths, releases, nil
+}
+
+// nativeInputPaths keeps model data separate from executable shared runtimes.
+// Only acquired paths get grants; run.env cannot expand the boundary.
+func (w *Worker) nativeInputPaths(j Job, paths map[string]string) {
+	w.nativeSharedInputs, w.nativeModelInputs = nil, nil
+	for name := range j.Spec.SharedInputs {
+		if path := paths["MYCE_INPUT_"+strings.ToUpper(name)]; path != "" {
+			w.nativeSharedInputs = append(w.nativeSharedInputs, path)
+		}
+	}
+	for name := range j.Spec.ModelSnapshots {
+		if path := paths["MYCE_MODEL_"+strings.ToUpper(name)]; path != "" {
+			w.nativeModelInputs = append(w.nativeModelInputs, path)
+		}
+	}
+	slices.Sort(w.nativeSharedInputs)
+	slices.Sort(w.nativeModelInputs)
 }
 
 // Docker sees the same verified directory at a fixed container path.
