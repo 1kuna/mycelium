@@ -134,6 +134,15 @@ reasoning mode, and chat template; record those with any evaluation. The
 adapter does not guess generation settings or download a different model.
 No real GPU/model validation is implied by laptop tests.
 
+Qualify runtime memory with `myce measure` during coordinated maintenance, with
+the worker stopped and its exact spool selected; never bypass the spool lock.
+On Linux unified CUDA devices with unsupported used/free counters, the report's
+`basis: unified/host` means both memory figures track `MemTotal - MemAvailable`.
+Use its sampled load/warm-up peak and baseline delta as shared-RAM observations;
+do not add host and device figures or treat either as isolated model VRAM.
+Numeric device counters retain `basis: dedicated/host`. Failed or malformed
+probes still refuse measurement. See [joint measurement](operations.md#general-model-servers-and-joint-measurement).
+
 For a LAN worker, bind its authenticated model proxy to an address reachable
 by the queue and advertise that exact URL:
 

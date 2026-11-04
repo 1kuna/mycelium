@@ -160,6 +160,9 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	encoder := json.NewEncoder(&jsonData)
 	encoder.SetIndent("", "  ")
 	e = errors.Join(e, encoder.Encode(report))
+	if report.Baseline.Basis != "" {
+		fmt.Fprintf(&plain, "Memory basis: %s (unified device/host figures refer to the same RAM; do not add them).\n", report.Baseline.Basis)
+	}
 	fmt.Fprintf(&plain, "Worker %s device %s/%s; budget %.3f GiB; fits: %t\nBaseline used: device %.3f GiB, host %.3f GiB\nCombined absolute peak: device %.3f GiB, host %.3f GiB\nCombined peak delta from baseline: device %.3f GiB, host %.3f GiB\n", report.Worker, report.Platform, report.Device, report.BudgetGB, report.Fits, report.Baseline.DeviceGB, report.Baseline.HostGB, report.Peak.DeviceGB, report.Peak.HostGB, report.Delta.DeviceGB, report.Delta.HostGB)
 	for _, m := range report.Models {
 		fmt.Fprintf(&plain, "%s: load %.3fs; warm-up %.3fs; incremental peak delta device %.3f GiB, host %.3f GiB; absolute peak device %.3f GiB, host %.3f GiB\n", m.Model, m.LoadSeconds, m.WarmupSeconds, m.Delta.DeviceGB, m.Delta.HostGB, m.Peak.DeviceGB, m.Peak.HostGB)

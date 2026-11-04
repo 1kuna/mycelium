@@ -23,6 +23,7 @@ import (
 type MemoryReading struct {
 	DeviceGB float64 `json:"device_gb"`
 	HostGB   float64 `json:"host_gb"`
+	Basis    string  `json:"basis,omitempty"`
 }
 type MeasureWarmup struct {
 	Method  string          `json:"method"`
@@ -73,10 +74,10 @@ type MeasureOptions struct {
 }
 
 func measureDelta(a, b MemoryReading) MemoryReading {
-	return MemoryReading{max(0, a.DeviceGB-b.DeviceGB), max(0, a.HostGB-b.HostGB)}
+	return MemoryReading{DeviceGB: max(0, a.DeviceGB-b.DeviceGB), HostGB: max(0, a.HostGB-b.HostGB), Basis: a.Basis}
 }
 func measurePeak(a, b MemoryReading) MemoryReading {
-	return MemoryReading{max(a.DeviceGB, b.DeviceGB), max(a.HostGB, b.HostGB)}
+	return MemoryReading{DeviceGB: max(a.DeviceGB, b.DeviceGB), HostGB: max(a.HostGB, b.HostGB), Basis: a.Basis}
 }
 
 // Measure holds the exact join spool lock throughout preparation, loading,
@@ -176,6 +177,9 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 		r, e := o.ReadMemory(c)
 		if e == nil && (!validMemoryValue(r.DeviceGB) || !validMemoryValue(r.HostGB)) {
 			e = errors.New("invalid measured used memory")
+		}
+		if e == nil && report.Baseline.Basis != "" && r.Basis != report.Baseline.Basis {
+			e = errors.New("measurement memory basis changed during run")
 		}
 		return r, e
 	}
@@ -392,9 +396,18 @@ func measureWarmup(ctx context.Context, e Engine, w MeasureWarmup) error {
 }
 
 // NewMeasurementSource never converts configured allowances to observations.
-// Linux host memory and device counters are mandatory; unsupported probes fail.
+// Unified CUDA uses the same unsupported-free-counter detection as admission.
+// Its device and host figures alias system RAM usage, not separate allocations.
 func NewMeasurementSource(platform, device string) (func(context.Context) (MemoryReading, error), error) {
-	if runtime.GOOS != "linux" {
+	return newMeasurementSource(platform, device, runtime.GOOS, guardedHardwareReadFile,
+		func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			probeguard.Check()
+			return exec.CommandContext(ctx, name, args...).Output()
+		})
+}
+
+func newMeasurementSource(platform, device, goos string, readFile func(string) ([]byte, error), command func(context.Context, string, ...string) ([]byte, error)) (func(context.Context) (MemoryReading, error), error) {
+	if goos != "linux" {
 		return nil, errors.New("native measurement currently requires Linux /proc and CUDA or XPU counters")
 	}
 	if platform != "cuda" && platform != "xpu" {
@@ -403,11 +416,13 @@ func NewMeasurementSource(platform, device string) (func(context.Context) (Memor
 	if device == "" || strings.ContainsAny(device, "\n\r,") {
 		return nil, errors.New("one explicit device is required")
 	}
+	if readFile == nil || command == nil {
+		return nil, errors.New("measurement requires host and device probes")
+	}
 	return func(ctx context.Context) (MemoryReading, error) {
-		probeguard.Check()
 		c, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		host, e := os.ReadFile("/proc/meminfo")
+		host, e := readFile("/proc/meminfo")
 		if e != nil {
 			return MemoryReading{}, e
 		}
@@ -416,12 +431,23 @@ func NewMeasurementSource(platform, device string) (func(context.Context) (Memor
 			return MemoryReading{}, e
 		}
 		var d float64
+		basis := "dedicated/host"
 		if platform == "cuda" {
-			out, e := exec.CommandContext(c, "nvidia-smi", "--id="+device, "--query-gpu=memory.used", "--format=csv,noheader,nounits").Output()
+			out, e := command(c, "nvidia-smi", "--id="+device, "--query-gpu=memory.used", "--format=csv,noheader,nounits")
 			if e != nil {
 				return MemoryReading{}, fmt.Errorf("CUDA used memory: %w", e)
 			}
 			d, e = parseCUDAFreeMemory(out)
+			if errors.Is(e, errUnifiedMemory) {
+				unified, detectErr := (MachineProbe{Command: command}).DetectUnifiedMemory(c, platform, device, "auto")
+				if detectErr != nil {
+					return MemoryReading{}, detectErr
+				}
+				if !unified {
+					return MemoryReading{}, errors.New("CUDA used memory unavailable on a dedicated-memory device")
+				}
+				d, e, basis = h, nil, "unified/host"
+			}
 			if e != nil {
 				return MemoryReading{}, e
 			}
@@ -429,7 +455,7 @@ func NewMeasurementSource(platform, device string) (func(context.Context) (Memor
 			if _, e := strconv.ParseUint(device, 10, 32); e != nil {
 				return MemoryReading{}, errors.New("XPU device must be a numeric native device index")
 			}
-			out, e := exec.CommandContext(c, "xpu-smi", "stats", "-d", device, "--json").Output()
+			out, e := command(c, "xpu-smi", "stats", "-d", device, "--json")
 			if e != nil {
 				return MemoryReading{}, fmt.Errorf("native XPU used memory unavailable: %w", e)
 			}
@@ -439,7 +465,7 @@ func NewMeasurementSource(platform, device string) (func(context.Context) (Memor
 			}
 
 		}
-		return MemoryReading{DeviceGB: d, HostGB: h}, nil
+		return MemoryReading{DeviceGB: d, HostGB: h, Basis: basis}, nil
 	}, nil
 }
 func parseMeasureHost(data []byte) (float64, error) {

@@ -1507,6 +1507,17 @@ and an authorized maintenance window. Measured peaks and headroom, not model-fil
 sizes or a guessed budget, qualify native admission. The [native test plan](development.md)
 keeps this proof separate from laptop fixtures.
 
+On Linux unified CUDA hosts whose selected device reports unsupported used and
+free memory counters, measurement uses `MemTotal - MemAvailable`, matching
+admission's unified-memory detection. Reports label these readings
+`basis: unified/host`: device and host figures are the same shared RAM usage and
+must not be added. Baseline-to-peak deltas cover load and warm-up; absolute peaks
+still determine whether the supplied total usage budget fits. These are system
+observations, including other processes, rather than isolated GPU allocations.
+Malformed counters, a failed probe, unsupported used memory on a device with a
+numeric free-memory counter, or unavailable Linux host counters still refuse
+measurement. A change of memory basis during a run also fails the measurement.
+
 ## Host RAM admission and ceilings
 
 The separately installed [root broker templates and helper wrapper](../deploy/gpu-telemetry/README.md)

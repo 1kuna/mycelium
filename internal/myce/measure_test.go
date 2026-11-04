@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,11 +24,11 @@ func (e *measurementEngine) Call(c context.Context, p string, b []byte) (*http.R
 	return e.call(c, p, b)
 }
 func measureTestOptions(t *testing.T) MeasureOptions {
-	return MeasureOptions{Worker: Worker{StateDir: newTestStateRoot(t), Machine: Machine{ID: "local"}, Clock: RealClock{}}, Platform: "cuda", Device: "0", BudgetGB: 10, Models: []Model{{Name: "one", Platforms: []string{"cuda"}}, {Name: "two", Platforms: []string{"cuda"}}}, ReadMemory: func(context.Context) (MemoryReading, error) { return MemoryReading{1, 2}, nil }, Status: func(context.Context) (Snapshot, error) { return Snapshot{}, nil }}
+	return MeasureOptions{Worker: Worker{StateDir: newTestStateRoot(t), Machine: Machine{ID: "local"}, Clock: RealClock{}}, Platform: "cuda", Device: "0", BudgetGB: 10, Models: []Model{{Name: "one", Platforms: []string{"cuda"}}, {Name: "two", Platforms: []string{"cuda"}}}, ReadMemory: func(context.Context) (MemoryReading, error) { return MemoryReading{DeviceGB: 1, HostGB: 2}, nil }, Status: func(context.Context) (Snapshot, error) { return Snapshot{}, nil }}
 }
 func TestMeasureSimultaneousResidencyAndDeltas(t *testing.T) {
 	o := measureTestOptions(t)
-	usage := MemoryReading{1, 2}
+	usage := MemoryReading{DeviceGB: 1, HostGB: 2}
 	var engines []*measurementEngine
 	o.ReadMemory = func(context.Context) (MemoryReading, error) { return usage, nil }
 	o.NewEngine = func(m Model, _ string, _ Clock) Engine {
@@ -148,6 +149,102 @@ func TestMeasureRejectsInventedMemory(t *testing.T) {
 		t.Fatal("invalid counters accepted")
 	}
 }
+
+func TestMeasureUnifiedCUDASourceAndWarmupPeak(t *testing.T) {
+	var used atomic.Int64
+	used.Store(2)
+	source, err := newMeasurementSource("cuda", "GPU-selected", "linux", func(path string) ([]byte, error) {
+		if path != "/proc/meminfo" {
+			t.Fatalf("unexpected host probe %s", path)
+		}
+		return []byte(fmt.Sprintf("MemTotal: 16777216 kB\nMemAvailable: %d kB\n", (16-used.Load())*1024*1024)), nil
+	}, func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "nvidia-smi" || !contains(args, "--id=GPU-selected") || (!contains(args, "--query-gpu=memory.used") && !contains(args, "--query-gpu=memory.free")) {
+			t.Fatalf("unbound device probe %s %v", name, args)
+		}
+		return []byte("[N/A]\n"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := measureTestOptions(t)
+	o.Models = o.Models[:1]
+	o.ReadMemory = source
+	o.Warmup = map[string]MeasureWarmup{"one": {Path: "/v1/chat/completions", Body: []byte(`{}`)}}
+	o.NewEngine = func(Model, string, Clock) Engine {
+		return &measurementEngine{
+			load: func(context.Context, Model) error { used.Store(6); return nil },
+			call: func(context.Context, string, []byte) (*http.Response, error) {
+				used.Store(8)
+				return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
+			},
+		}
+	}
+	r, err := Measure(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Fits || r.Baseline.DeviceGB != 2 || r.Peak.DeviceGB != 8 || r.Delta.DeviceGB != 6 || r.Models[0].Delta.DeviceGB != 6 {
+		t.Fatalf("unified load/warm-up footprint: %+v", r)
+	}
+	for _, reading := range []MemoryReading{r.Baseline, r.Peak, r.Delta, r.Models[0].Before, r.Models[0].Peak, r.Models[0].Delta} {
+		if reading.Basis != "unified/host" || reading.DeviceGB != reading.HostGB {
+			t.Fatalf("shared RAM must be labelled, not added: %+v", reading)
+		}
+	}
+}
+
+func TestMeasureNativeSourceRefusesUnsupportedProbes(t *testing.T) {
+	for _, tc := range []struct {
+		name, used, free, host string
+		probeErr               error
+	}{
+		{name: "dedicated used unavailable", used: "N/A", free: "8192"},
+		{name: "malformed used", used: "wrong", free: "N/A"},
+		{name: "malformed detection", used: "N/A", free: "wrong"},
+		{name: "failed probe", probeErr: errors.New("probe unavailable")},
+		{name: "missing host counters", used: "N/A", free: "N/A", host: "MemTotal: 16777216 kB\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source, err := newMeasurementSource("cuda", "GPU-selected", "linux", func(string) ([]byte, error) {
+				if tc.host != "" {
+					return []byte(tc.host), nil
+				}
+				return []byte("MemTotal: 16777216 kB\nMemAvailable: 14680064 kB\n"), nil
+			}, func(_ context.Context, _ string, args ...string) ([]byte, error) {
+				if tc.probeErr != nil {
+					return nil, tc.probeErr
+				}
+				if contains(args, "--query-gpu=memory.used") {
+					return []byte(tc.used), nil
+				}
+				return []byte(tc.free), nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := source(context.Background()); err == nil {
+				t.Fatal("unsupported probe accepted as measured memory")
+			}
+		})
+	}
+}
+
+func TestMeasureRefusesChangedMemoryBasis(t *testing.T) {
+	o := measureTestOptions(t)
+	first := true
+	o.ReadMemory = func(context.Context) (MemoryReading, error) {
+		basis := "dedicated/host"
+		if first {
+			basis, first = "unified/host", false
+		}
+		return MemoryReading{DeviceGB: 2, HostGB: 2, Basis: basis}, nil
+	}
+	o.NewEngine = func(Model, string, Clock) Engine { t.Fatal("engine started with inconsistent probes"); return nil }
+	if _, err := Measure(context.Background(), o); err == nil || !strings.Contains(err.Error(), "basis changed") {
+		t.Fatalf("basis change not refused: %v", err)
+	}
+}
 func TestMeasureWarmupFailureUnloads(t *testing.T) {
 	o := measureTestOptions(t)
 	o.Models = o.Models[:1]
@@ -191,7 +288,7 @@ func TestMeasureBudgetUsesAbsolutePeak(t *testing.T) {
 	o := measureTestOptions(t)
 	o.Models = o.Models[:1]
 	o.BudgetGB = 2
-	o.ReadMemory = func(context.Context) (MemoryReading, error) { return MemoryReading{3, 4}, nil }
+	o.ReadMemory = func(context.Context) (MemoryReading, error) { return MemoryReading{DeviceGB: 3, HostGB: 4}, nil }
 	o.NewEngine = func(Model, string, Clock) Engine {
 		return &measurementEngine{load: func(context.Context, Model) error { return nil }}
 	}
@@ -241,9 +338,9 @@ func TestMeasureProbeIncludesTransientLoadPeak(t *testing.T) {
 				close(observed)
 				closed = true
 			}
-			return MemoryReading{8, 12}, nil
+			return MemoryReading{DeviceGB: 8, HostGB: 12}, nil
 		default:
-			return MemoryReading{1, 2}, nil
+			return MemoryReading{DeviceGB: 1, HostGB: 2}, nil
 		}
 	}
 	o.NewEngine = func(Model, string, Clock) Engine {
@@ -297,7 +394,7 @@ func TestMeasureOverlappingWarmups(t *testing.T) {
 		if n == 2 {
 			once.Do(func() { close(sampled) })
 		}
-		return MemoryReading{float64(n * 4), float64(n * 5)}, nil
+		return MemoryReading{DeviceGB: float64(n * 4), HostGB: float64(n * 5)}, nil
 	}
 	o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer"}, "two": {Path: "/infer"}, "three": {Path: "/infer"}}
 	var engines []*measurementEngine
