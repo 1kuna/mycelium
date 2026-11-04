@@ -392,6 +392,55 @@ func TestScarceHostYieldPendingNASVerificationRetries(t *testing.T) {
 	}
 }
 
+func TestScarceHostYieldCancelledFinalVerificationKeepsReceipt(t *testing.T) {
+	q, _, _, b, run := yieldFixture(t, false)
+	yieldDemand(t, q)
+	authorizeYield(t, q, run)
+	saveYieldGeneration(t, job(t, q, run.ID), 2)
+	path := attemptCheckpoint(*job(t, q, run.ID))
+	key := fmt.Sprintf("%s:yield-final:2", path)
+	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	q.nasProgress.timeout = 5 * time.Millisecond
+	_, err := q.nasProgress.run(key, func() (int64, error) {
+		close(entered)
+		<-release
+		close(finished)
+		return 2, nil
+	})
+	if !errors.Is(err, errCheckpointIOPending) {
+		t.Fatal(err)
+	}
+	<-entered
+	g := int64(2)
+	r := result(run, false)
+	r.Interrupted, r.FinalCheckpointGeneration = true, &g
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := q.CompleteContext(ctx, r); !errors.Is(err, context.Canceled) {
+		t.Fatal("cancelled receipt was acknowledged", err)
+	}
+	if got := job(t, q, run.ID); got.State != "stopping" || got.ScarceHostYield.FinalReceived {
+		t.Fatal("cancellation consumed receipt", got)
+	}
+	// Slow healthy verification retains late success for this exact generation;
+	// the retry uses the same short I/O budget, never a widened deadline.
+	if err := q.Complete(r); !errors.Is(err, errCheckpointIOPending) {
+		t.Fatal("slow scan did not remain pending", err)
+	}
+	unblock()
+	<-finished
+	if err := q.Complete(r); err != nil {
+		t.Fatal("late verification was not reusable", err)
+	}
+	next := assignedJob(machineCheck(t, q, b))
+	if next == nil || next.ID != run.ID || next.Attempt != 2 {
+		t.Fatal("valid retry could not resume", next, job(t, q, run.ID).Reason)
+	}
+}
+
 func TestScarceHostYieldConvenienceDevicePinIsNotUniqueness(t *testing.T) {
 	q, _, _, _, run := yieldFixture(t, false)
 	peer := m3Machine()

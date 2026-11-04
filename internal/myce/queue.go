@@ -1650,11 +1650,17 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	unlockRequest()
 	if yieldPath != "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// A heartbeat scan may predate the final save. Give final verification
 		// its own observation key, and retry unfinished I/O without accepting a
 		// failed-save verdict or discarding the worker's retained receipt.
 		key := fmt.Sprintf("%s:yield-final:%d", yieldPath, *r.FinalCheckpointGeneration)
-		generation, e := q.nasProgress.runContext(ctx, key, func() (int64, error) { return checkpointProgress(yieldPath) })
+		generation, e := q.nasProgress.run(key, func() (int64, error) { return checkpointProgress(yieldPath) })
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if errors.Is(e, errCheckpointIOPending) || errors.Is(e, errCheckpointIOTimeout) {
 			return e
 		}
@@ -1689,6 +1695,11 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	var rejected error
 	err = q.updateRequest(ctx, func() error {
+		if yieldPath != "" {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		if verify {
 			q.maintainStartDeadlines()
 			j, err := q.current(r)
