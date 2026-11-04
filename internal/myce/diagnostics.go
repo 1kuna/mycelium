@@ -23,7 +23,6 @@ var rejectionMessages = map[string]string{
 	"native_workdir_containment":            "native isolation requires workdir beneath {work}; stage source with inputs or a profile",
 	"queue_stopping":                        "queue is shutting down; retry the request",
 	"shared_input_cache_capacity":           "declared shared inputs exceed every enabled worker cache capacity",
-	"shared_input_cache_unreported":         "no enabled worker reports shared-input cache capacity",
 	"disk_headroom":                         "projected disk need plus free floor exceeds known disk capacity",
 	"result_expired":                        "stored job files expired after the retention window",
 	"no_qualified_target":                   "no known qualified target with the declared platform, environment and capacity; intent retained locally",

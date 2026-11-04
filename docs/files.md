@@ -376,9 +376,12 @@ Missing authored NAS inputs also require corrected inputs rather than retries.
 
 From s072, resolve and submit refuse impossible shared-input jobs with HTTP
 409 `shared_input_cache_capacity`: the reason gives required bytes and the
-largest enabled matching worker cache capacity. `shared_input_cache_unreported`
-means no matching enabled worker reports capacity; older workers cannot accept
-these inputs. Declaration sizes are a hard requirement: file bytes, manifest
+largest enabled matching worker cache capacity. Refusal requires known capacity
+from every enabled worker under consideration and no fitting matching target.
+Missing reports during startup or a rolling upgrade leave capacity unknown:
+resolve returns its target findings, and submit accepts the job with the typed
+waiting reason `shared_input_cache_unreported`. Older workers cannot receive
+shared-input work until they report a fitting capacity. Declaration sizes are a hard requirement: file bytes, manifest
 file totals, or `unpacked_bytes` for a tree/archive, plus compressed archive
 bytes for cold staging. Every distinct cache identity needed simultaneously must fit together; aliases
 with identical verified content share one entry.

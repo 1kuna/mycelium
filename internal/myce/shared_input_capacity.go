@@ -194,15 +194,17 @@ func (q *Queue) sharedInputCapacityRefusal(j *Job) error {
 	}
 	var largest uint64
 	reported := false
+	unreported := false
 	for _, m := range q.plannerMachines() {
 		// Disabled/retired targets cannot make an impossible submission look viable.
 		if q.maintenanceBlocked(hostID(m)) || q.deviceAdmissionBlocked(m) || !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
+		if m.SharedInputCache == nil {
+			unreported = true
+			continue
+		}
 		for _, candidate := range sharedInputCandidates(j, m) {
-			if m.SharedInputCache == nil {
-				continue
-			}
 			reported = true
 			largest = max(largest, m.SharedInputCache.CapacityBytes)
 			if sharedInputCacheReason(candidate.Spec, m, true) == "" {
@@ -210,10 +212,12 @@ func (q *Queue) sharedInputCapacityRefusal(j *Job) error {
 			}
 		}
 	}
-	code := "shared_input_cache_capacity"
-	if !reported {
-		code = "shared_input_cache_unreported"
+	// Missing reports during startup or a mixed-version rollout cannot prove
+	// impossibility. Accept and wait; placement still requires a fitting report.
+	if unreported || !reported {
+		return nil
 	}
+	code := "shared_input_cache_capacity"
 	return &HTTPError{Status: 409, Code: code, Message: fmt.Sprintf("%s: shared inputs require %d bytes; largest enabled matching worker cache capacity=%d bytes", code, sharedInputRequired(j.Spec, nil), largest)}
 }
 
@@ -222,20 +226,26 @@ func sharedInputWaitingReason(j *Job, machines map[string]*Machine) string {
 		return ""
 	}
 	var reasons []string
+	unreported, fittingCapacity := false, false
 	for _, m := range machines {
 		if !j.Spec.allowsMachine(m.ID) {
 			continue
 		}
 		for _, candidate := range sharedInputCandidates(j, m) {
+			if m.SharedInputCache == nil {
+				unreported = true
+				continue
+			}
 			reason := sharedInputCacheReason(candidate.Spec, m, false)
 			if reason == "" {
 				return ""
 			}
+			fittingCapacity = fittingCapacity || sharedInputCacheReason(candidate.Spec, m, true) == ""
 			reasons = append(reasons, reason)
 		}
 	}
-	if len(reasons) == 0 {
-		return fmt.Sprintf("shared_input_cache: required=%d bytes; no reporting eligible worker", sharedInputRequired(j.Spec, nil))
+	if len(reasons) == 0 || unreported && !fittingCapacity {
+		return fmt.Sprintf("shared_input_cache_unreported: required=%d bytes; waiting for worker capacity reports", sharedInputRequired(j.Spec, nil))
 	}
 	slices.Sort(reasons)
 	return strings.Join(slices.Compact(reasons), "; ")

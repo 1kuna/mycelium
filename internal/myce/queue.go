@@ -2244,6 +2244,9 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 	if j.State == "queued" && strings.HasPrefix(j.Reason, "shared_input_cache:") {
 		j.DiagnosticCode = "shared_input_cache"
 	}
+	if j.State == "queued" && strings.HasPrefix(j.Reason, "shared_input_cache_unreported:") {
+		j.DiagnosticCode = "shared_input_cache_unreported"
+	}
 	if j.State == "queued" && strings.HasPrefix(j.Reason, "disk_headroom:") {
 		j.DiagnosticCode = "disk_headroom"
 	}

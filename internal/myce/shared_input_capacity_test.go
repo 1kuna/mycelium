@@ -60,16 +60,17 @@ func TestSharedInputCapacityUnknownAndPressure(t *testing.T) {
 	old.SharedInputCache = nil
 	check(t, q, old, nil)
 	s := sharedCapacitySpec()
-	_, err := q.Submit(s)
-	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) || httpErr.Code != "shared_input_cache_unreported" {
-		t.Fatal(err)
+	if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
+		t.Fatal("unknown capacity refused at resolve", err)
+	}
+	j := submit(t, q, s)
+	if held := job(t, q, j.ID); held.State != "queued" || held.DiagnosticCode != "shared_input_cache_unreported" || !strings.Contains(held.Reason, fmt.Sprint(sharedInputRequired(s, nil))) {
+		t.Fatalf("unknown capacity did not wait with sizes: %+v", held)
 	}
 	big := cacheCapacityMachine("big", 80<<30)
 	big.SharedInputCache.FreeBytes = 1 << 30
 	big.SharedInputCache.EvictableBytes = 2 << 30
 	check(t, q, big, nil)
-	j := submit(t, q, s)
 	if r := check(t, q, old, nil); r.Job != nil {
 		t.Fatal("legacy worker accepted shared inputs")
 	}
@@ -84,6 +85,42 @@ func TestSharedInputCapacityUnknownAndPressure(t *testing.T) {
 	big.SharedInputCache.EvictableBytes = 40 << 30
 	if r := check(t, q, big, nil); r.Job == nil || r.Job.ID != j.ID {
 		t.Fatal("evictable capacity did not recover")
+	}
+}
+
+func TestSharedInputCapacityWaitsAcrossStartupAndRollout(t *testing.T) {
+	q, clock := fixture(t)
+	s := sharedCapacitySpec()
+	// A fresh queue has no worker reports yet; that is not proof of rejection.
+	if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
+		t.Fatal("startup resolve refused", err)
+	}
+	j := submit(t, q, s)
+	if got := job(t, q, j.ID); got.DiagnosticCode != "shared_input_cache_unreported" {
+		t.Fatal("startup wait was untyped", got.Reason)
+	}
+	old := cacheCapacityMachine("legacy", 40<<30)
+	old.SharedInputCache = nil
+	if reply := check(t, q, old, nil); reply.Job != nil {
+		t.Fatal("old worker without a report accepted shared inputs")
+	}
+	small := cacheCapacityMachine("small", 10<<30)
+	if reply := check(t, q, small, nil); reply.Job != nil {
+		t.Fatal("undersized reporting worker accepted shared inputs")
+	}
+	// A known small cache plus an unknown cache must still accept submissions.
+	if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
+		t.Fatal("mixed rollout resolve refused", err)
+	}
+	clock.Advance(time.Second)
+	second := submit(t, q, s)
+	if got := job(t, q, second.ID); got.DiagnosticCode != "shared_input_cache_unreported" {
+		t.Fatal("mixed rollout wait was untyped", got.Reason)
+	}
+	clock.Advance(time.Second)
+	old.SharedInputCache = &SharedInputCapacity{CapacityBytes: 40 << 30, FreeBytes: 40 << 30}
+	if reply := check(t, q, old, nil); reply.Job == nil || reply.Job.ID != j.ID {
+		t.Fatal("first fitting capacity report did not resume queued work")
 	}
 }
 func TestSharedInputCapacityAccounting(t *testing.T) {

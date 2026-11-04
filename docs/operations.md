@@ -2095,8 +2095,11 @@ the worker recomputes it from its actual filesystem at each startup.
 
 Workers report shared-input capacity, free and evictable bytes without cache
 scans in check-in. Discovery and accounting run at startup and cache changes,
-outside the queue mutex. Resolve and submit refuse impossible declared footprints;
-temporary occupancy waits, and mixed fleets route to a fitting worker. See
+outside the queue mutex. Resolve and submit refuse impossible declared footprints
+only once every enabled worker under consideration reports capacity. During
+startup or a rolling upgrade, missing reports accept and queue shared-input work
+with `shared_input_cache_unreported`; old workers remain excluded from placement.
+Temporary occupancy waits, and mixed fleets route to a fitting worker. See
 [large shared inputs](files.md#diagnosing-input-staging) for typed reasons.
 
 ## Environment cache capacity
