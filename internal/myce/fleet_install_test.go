@@ -9,12 +9,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -702,5 +704,61 @@ func TestFleetInstallRetainsStorageFailureForQueueReconciliation(t *testing.T) {
 	failure, err = ReadFleetUpdateFailure(f.c)
 	if err != nil || failure == nil || failure.Failure != "fleet_update_failed" {
 		t.Fatalf("untrusted failure exposed: %+v %v", failure, err)
+	}
+}
+
+func TestFleetInstallFileCacheCapacity(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			f := newFleetInstallFixture(t, goos)
+			// Save through the installer's flag overlay, then reinstall with no
+			// override before the signed fleet update reads the configuration.
+			for _, args := range [][]string{{"--file-cache-bytes=34359738368"}, nil} {
+				c, err := ReadServiceConfig(f.c.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				values := ServiceConfig{}
+				flags := flag.NewFlagSet("install", flag.ContinueOnError)
+				RegisterInstallFlags(flags, &values)
+				if err := flags.Parse(args); err != nil {
+					t.Fatal(err)
+				}
+				c, err = OverlayInstallFlags(flags, c, values)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := json.Marshal(c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(c.Config, data, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(c.Service, []byte(c.ServiceText()), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := f.launch(); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.apply(); err != nil {
+				t.Fatal(err)
+			}
+			c, err := ReadServiceConfig(f.c.Config)
+			if err != nil || c.FileCacheBytes != 32<<30 {
+				t.Fatalf("fleet upgrade lost file cache capacity: %d, %v", c.FileCacheBytes, err)
+			}
+			// launchd regenerates Args at startup; systemd retains the saved unit.
+			args := c.Args()
+			i := slices.Index(args, "--file-cache-bytes")
+			if i < 0 || args[i+1] != "34359738368" {
+				t.Fatal("fleet restart arguments lost file cache capacity")
+			}
+			unit, err := os.ReadFile(c.Service)
+			if err != nil || string(unit) != c.ServiceText() {
+				t.Fatal("fleet upgrade changed installed service configuration", err)
+			}
+		})
 	}
 }
