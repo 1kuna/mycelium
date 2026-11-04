@@ -12,6 +12,7 @@ import (
 // enter through touchJob/touchSubmission; insertions use putJob/putSubmission.
 // This is an in-memory index, rebuilt from the same SQLite records on startup.
 type queueRecords struct {
+	encodings                 map[string]catalogEncoding
 	catalog                   map[string]bool
 	removed                   map[string]*Job
 	references                map[string]bool
@@ -258,7 +259,7 @@ func (q *Queue) putSubmission(id string, r *submissionRecord) {
 	}
 }
 
-func (q *Queue) beginRecords() ([]byte, error) {
+func (q *Queue) beginRecords() (recordUndo, error) {
 	// Counts also let offline fixture/import code invalidate the derived index.
 	imported := q.records != nil && (q.records.jobCount != len(q.s.Jobs) || q.records.submissionCount != len(q.s.Submissions))
 	if q.records == nil || imported {
@@ -267,9 +268,14 @@ func (q *Queue) beginRecords() ([]byte, error) {
 	base := q.s
 	base.Jobs = nil
 	base.Submissions = nil
+	base.Extensions, base.WorkObservations, base.StorageObservations = nil, nil, nil
 	old, err := json.Marshal(base)
 	if err != nil {
-		return nil, err
+		return recordUndo{}, err
+	}
+	catalogs, err := q.snapshotCatalogs()
+	if err != nil {
+		return recordUndo{}, err
 	}
 	q.records.updating = true
 	q.records.jobs = map[string]*Job{}
@@ -288,12 +294,14 @@ func (q *Queue) beginRecords() ([]byte, error) {
 	for id := range q.records.removed {
 		q.touchSubmission(q.records.bindings[id])
 	}
-	return old, nil
+	return recordUndo{base: old, catalogs: catalogs}, nil
 }
-func (q *Queue) rollbackRecords(old []byte) {
+func (q *Queue) rollbackRecords(old recordUndo) {
 	jobs, submissions := q.s.Jobs, q.s.Submissions
 	var base state
-	_ = json.Unmarshal(old, &base)
+	_ = json.Unmarshal(old.base, &base)
+	base.Extensions, base.WorkObservations, base.StorageObservations = old.catalogs.Extensions, old.catalogs.WorkObservations, old.catalogs.StorageObservations
+	q.records.encodings = nil
 	base.Jobs, base.Submissions = jobs, submissions
 	q.s = base
 	for id, j := range q.records.jobs {
@@ -320,6 +328,11 @@ func (q *Queue) rollbackRecords(old []byte) {
 	q.commitRecords()
 }
 func (q *Queue) commitRecords() {
+	for key := range q.records.encodings {
+		if !q.records.catalog[key] {
+			delete(q.records.encodings, key)
+		}
+	}
 	for id := range q.records.jobs {
 		q.indexJob(id, q.s.Jobs[id])
 	}
