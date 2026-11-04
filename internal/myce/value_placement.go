@@ -261,10 +261,11 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 			break
 		}
 		excluded[j.ID] = true
-		// Preserve this job's chosen preparation/completion target, but do
-		// not consume a pull with work that cannot start. Keep the worker's
-		// target views available for the next ready fair/priority candidate.
-		if !environmentReady(j, selected.m) {
+		// Keep production's existing preparation turn, and honor a target
+		// whose release this demand already requested. Both have passed this
+		// scan's candidate eligibility checks; stale custody alone cannot
+		// withhold capacity. Other cold winners leave room for ready work.
+		if !environmentReady(j, selected.m) && !preparationOwnsTurn(j) {
 			continue
 		}
 		scan.assignments[targetKey(selected.m)] = j
@@ -278,6 +279,10 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 		sets = remaining
 	}
 	return scan.assignments
+}
+
+func preparationOwnsTurn(j *Job) bool {
+	return j.Spec.Priority == "production" || j.PreemptionPlacement != nil && len(j.PreemptionPlacement.Releases) > 0
 }
 
 // Shared with queueProjection: every target offers its next admissible fair

@@ -151,3 +151,61 @@ func TestPreparationBlockerInJobGET(t *testing.T) {
 		t.Fatalf("status hid the actual preparation blocker: %q", got.Reason)
 	}
 }
+
+func TestBlockedPreparationDemandDoesNotWithholdReadyCPU(t *testing.T) {
+	for _, blocker := range []string{"host-memory", "project-cap"} {
+		t.Run(blocker, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuMachine("worker", "host", "cpu", 4, 8)
+			m.EnvironmentBuilder = true
+			r := binaryRecipe(t, "cpu")
+			if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}); err != nil {
+				t.Fatal(err)
+			}
+			lowSpec := cpuSpec(2, 1)
+			lowSpec.Resumable = true
+			lowSpec.AllowedMachines = []string{m.ID}
+			low := submit(t, q, lowSpec)
+			run := check(t, q, m, nil).Job
+			if run == nil || run.ID != low.ID {
+				t.Fatal("missing initial experiment", run)
+			}
+			highSpec := cpuSpec(2, 6)
+			due := clock.Now().Add(time.Hour)
+			highSpec.Project, highSpec.Priority, highSpec.Deadline = "urgent", "deadline", &due
+			highSpec.Environment.Name, highSpec.AllowedMachines = "tools", []string{m.ID}
+			high := submit(t, q, highSpec)
+			if stop := job(t, q, low.ID); stop.State != "stopping" || priorityStop(stop) == nil {
+				t.Fatal("higher tier did not request release", stop.State)
+			}
+			finishInterrupted(t, q, run)
+			if p := q.s.Jobs[high.ID].PreemptionPlacement; p == nil || len(p.Releases) == 0 {
+				t.Fatal("missing paid target commitment")
+			}
+			if blocker == "host-memory" {
+				m.HostAvailableMemoryGB = 4
+			} else {
+				peer := cpuMachine("peer", "other-host", "cpu", 4, 8)
+				occupant := cpuSpec(1, 1)
+				occupant.Project, occupant.AllowedMachines = "urgent", []string{peer.ID}
+				other := submit(t, q, occupant)
+				if assigned := check(t, q, peer, nil).Job; assigned == nil || assigned.ID != other.ID {
+					t.Fatal("missing concurrent project work")
+				}
+				if err := q.ConfigureProjects(map[string]ProjectPolicy{"urgent": {Weight: 1, MaxConcurrent: 1}}); err != nil {
+					t.Fatal(err)
+				}
+				if reason := q.capReason(q.s.Jobs[high.ID]); reason == "" {
+					t.Fatal("fixture did not establish the project cap")
+				}
+			}
+			got := check(t, q, m, nil)
+			if got.Job == nil || got.Job.ID != low.ID || len(got.EnvironmentPlan) != 0 {
+				t.Fatalf("ineligible preparation demand withheld fitting ready work: job=%v offers=%d high-reason=%s", got.Job, len(got.EnvironmentPlan), q.capReason(q.s.Jobs[high.ID]))
+			}
+			if q.s.Jobs[high.ID].PreemptionPlacement == nil {
+				t.Fatal("eligibility change discarded exact target commitment")
+			}
+		})
+	}
+}

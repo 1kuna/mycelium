@@ -325,8 +325,9 @@ hyphae, software preparation, and work ahead in the queue.
 From s069, work held behind another job's environment preparation names the
 blocking job, environment identity and worker in status and job GET. The reason
 distinguishes an offered build awaiting a builder report, a started build and
-preparation awaiting exact stop/release acknowledgement. An unready winner does
-not consume an otherwise usable dispatch slot. Once priority preemption has
+preparation awaiting exact stop/release acknowledgement. An unready deadline
+winner permits ready backfill until existing priority rules take custody.
+Production retains its preparation turn. Once priority preemption has
 released its chosen target, that placement stays committed through preparation;
 the just-requeued victim cannot repeatedly backfill ahead of the build.
 

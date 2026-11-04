@@ -240,13 +240,23 @@ func environmentWaitingReason(j *Job, m *Machine) string {
 // A started build owns this worker until completion or its exact planned-stop
 // receipt. Name that custody rather than suggesting an idle worker can pull.
 func (q *Queue) preparationWaitingReason(j *Job, machines map[string]*Machine) string {
+	if len(q.s.PreparationPlans) == 0 {
+		return ""
+	}
 	blocked := []string{}
 	for _, m := range machines {
 		if !q.placementAllowed(j, m) {
 			continue
 		}
 		active := q.preparationActive(m)
-		fence := q.preparationDemandFence(m)
+		var fence *Job
+		// Reuse ordinary candidate eligibility, including resource and cap
+		// checks. A retained preemption target is not proof it can build now.
+		if !active {
+			if winner := q.candidate(m, nil); winner != nil && !environmentReady(winner, m) && preparationOwnsTurn(winner) {
+				fence = winner
+			}
+		}
 		copy := *m
 		if active {
 			copy = q.cpuAfterReleases(m, nil, nil, 1)
