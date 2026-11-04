@@ -102,7 +102,7 @@ func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
 			next := startObservation(t, q, m, s)
 			wantSource := boundedQuarter
 			if tc.mode == "auto" {
-				wantSource = "exploratory (previous peak constrained) (bounded: 25% of host allowance)"
+				wantSource = acceptedMemoryEscalation
 			}
 			if tc.success && tc.mode == "auto" {
 				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
@@ -183,7 +183,7 @@ func TestMemoryEnvelopeCPUOnGPUHostReusesAndRelearnsPeak(t *testing.T) {
 	if err := q.Cancel(next.ID); err != nil {
 		t.Fatal(err)
 	}
-	complete(start(boundedQuarter, 0), 8)
+	complete(start(acceptedMemoryEscalation, 4), 8)
 	start("accepted peak × 1.25", 10)
 }
 
@@ -273,7 +273,7 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 	if err := q.Cancel(oom.ID); err != nil {
 		t.Fatal(err)
 	}
-	complete(start(boundedQuarter, 0), 4)
+	complete(start(acceptedMemoryEscalation, 4), 4)
 	complete(start("accepted peak × 1.25", 5), 4)
 	s.Run.Command = []string{"sh", "-ec", "tar -xf .myce-source.tar\nbash scripts/other-suite.sh"}
 	// Similar work's 4 GiB peak × 2.5 exceeds half the allowance: host-wide.
@@ -1033,7 +1033,7 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 	s.Needs.Memory = "auto"
 	s.SizeHint = SizeHint{} // An old declaration must not act as a submitter hint.
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained) (bounded: 25% of host allowance)" {
+	if next.MemoryEnvelope.Source != acceptedMemoryEscalation || next.MemoryEnvelope.HostGB != 8 {
 		t.Errorf("constrained explicit attempt left its old seed usable: %+v", next.MemoryEnvelope)
 	}
 	// Subsequent failed auto pressure still invalidates comparable evidence.
@@ -1044,8 +1044,8 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	third := startObservation(t, q, m, s)
-	// The 16 GiB bound's constrained peak doubles to half the host: host-wide.
-	if third.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
+	// The accepted prior remains exploratory; the new 8 GiB lower bound doubles.
+	if third.MemoryEnvelope.Source != acceptedMemoryEscalation || third.MemoryEnvelope.HostGB != 16 {
 		t.Errorf("auto pressure failed to clear the explicit seed: %+v", third.MemoryEnvelope)
 	}
 }
@@ -1387,7 +1387,7 @@ func TestMemoryEnvelopeMeasuredRangeAdmissionAndPressure(t *testing.T) {
 	probe := *q.s.Jobs[running[0].ID]
 	probe.State = "queued"
 	estimate := q.memoryEstimate(&probe, q.s.Machines[m.ID])
-	if estimate.host != nil || estimate.measuredHostGB != 0 || !strings.Contains(estimate.source, "constrained") {
+	if estimate.host == nil || !estimate.escalation || estimate.samples != 0 || estimate.measuredHostGB != 0 || estimate.hostFactor != 2 {
 		t.Fatalf("pressure preserved a reduced estimate: %+v", estimate)
 	}
 	for _, point := range q.s.WorkObservations {

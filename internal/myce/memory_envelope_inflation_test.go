@@ -76,8 +76,8 @@ func TestMemoryEnvelopeInfrastructureSampleFilter(t *testing.T) {
 	}
 }
 
-func TestMemoryEnvelopeGenuineConstraintEscalationUnchanged(t *testing.T) {
-	for _, ending := range []string{"constrained completion", "OOM without peak", "OOM racing interruption", "payload exit with interrupted flag"} {
+func TestMemoryEnvelopeGenuineConstraintEscalationBounded(t *testing.T) {
+	for _, ending := range []string{"constrained completion", "constrained completion without host peak", "OOM with peak", "OOM without peak", "OOM racing interruption", "payload exit with interrupted flag"} {
 		t.Run(ending, func(t *testing.T) {
 			q, clock, m, s := observationFixture(t)
 			s.Needs.Memory = "auto"
@@ -94,6 +94,10 @@ func TestMemoryEnvelopeGenuineConstraintEscalationUnchanged(t *testing.T) {
 			r = result(&run, false)
 			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: true}
 			switch ending {
+			case "constrained completion without host peak":
+				r.MemoryPeak = &AttemptMemoryPeak{Constrained: true}
+			case "OOM with peak":
+				r.OutOfMemory = true
 			case "OOM without peak":
 				r.OutOfMemory, r.MemoryPeak = true, nil
 			case "OOM racing interruption":
@@ -110,13 +114,24 @@ func TestMemoryEnvelopeGenuineConstraintEscalationUnchanged(t *testing.T) {
 			candidate := first
 			candidate.State = "queued"
 			got := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope
-			want := "exploratory (previous peak constrained)"
-			if r.OutOfMemory {
-				want = "exploratory first run"
+			if got.HostGB != 4 || got.Basis != "exploratory" || !strings.Contains(got.Source, "accepted peak × 2") {
+				t.Fatalf("genuine failure lost measured exploration bound: %+v", got)
 			}
-			if got.HostGB != 16 || got.Basis != "exploratory" || !strings.HasPrefix(got.Source, want) {
-				t.Fatalf("genuine failure lost allowance-based exploration: %+v", got)
+			retryState := job(t, q, run.ID)
+			if retryState.MemoryOOMFloor != nil {
+				retryCandidate := *retryState
+				retryCandidate.State = "queued"
+				floor := retryState.MemoryOOMFloor.HostMemoryGB
+				if e := q.memoryCandidate(&retryCandidate, q.s.Machines[m.ID]).MemoryEnvelope; e.HostGB < floor {
+					t.Fatalf("accepted bound erased OOM floor %.3f: %+v", floor, e)
+				}
 			}
+			q = memoryFactsRestart(t, q, clock)
+			check(t, q, m, nil)
+			if e := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; e.HostGB != 4 || e.Basis != "exploratory" {
+				t.Fatalf("restart lost bounded prior: %+v", e)
+			}
+
 			// Existing writer re-teaches an invalidated aggregate only after
 			// a clean accepted completion; no historical reconstruction.
 			if terminal(job(t, q, run.ID).State) {

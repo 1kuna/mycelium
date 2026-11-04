@@ -34,7 +34,7 @@ func TestMemoryObservationIndexInvalidationRollbackAndRestart(t *testing.T) {
 	invalidate := func() error {
 		accepted() // Populate the transaction's index before the write.
 		q.recordWorkOOM(q.touchJob(first.ID), Result{OutOfMemory: true}, true)
-		if p := estimate(); p.host != nil || p.source != "" {
+		if p := estimate(); p.host == nil || p.samples != 0 || !p.escalation || p.hostFactor != 2 {
 			t.Fatalf("planner reused evidence invalidated in this transaction: %+v", p)
 		}
 		return nil
@@ -50,7 +50,8 @@ func TestMemoryObservationIndexInvalidationRollbackAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	q = reopenCancellationQueue(t, q, clock)
-	if p := estimate(); p.host != nil || p.source != "" {
+	check(t, q, m, nil)
+	if p := estimate(); p.host == nil || p.samples != 0 || !p.escalation || p.hostFactor != 2 {
 		t.Fatalf("restart restored invalidated evidence: %+v", p)
 	}
 }

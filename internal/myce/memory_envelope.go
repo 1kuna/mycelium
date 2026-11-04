@@ -318,6 +318,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			if estimate.measuredHostGB > 0 {
 				host = estimate.measuredHostGB
 			}
+			if estimate.escalation {
+				host = max(host, q.constrainedMemoryLower(j, estimate)*2)
+			}
 			if !n.cpuOnly() {
 				peak, factor := estimate.device, estimate.deviceFactor
 				if peak != nil && peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
@@ -460,6 +463,7 @@ func sameMemoryWork(point WorkObservation, key ObservationKey, configuration str
 type memoryEstimate struct {
 	key                      *ObservationKey
 	foreign                  bool
+	escalation               bool
 	measuredHostGB           float64
 	host, device             *AttemptMemoryPeak
 	hostFactor, deviceFactor float64
@@ -553,7 +557,30 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 	return seed
 }
 
+const acceptedMemoryEscalation = "exploratory (bounded: accepted peak × 2; transfer margin retained)"
+
 func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEstimate {
+	estimate := q.memoryEstimateForState(j, m, checkSeed, false)
+	if estimate.host != nil {
+		return estimate
+	}
+	prior := q.memoryEstimateForState(j, m, checkSeed, true)
+	if prior.host == nil || prior.source == spentMemoryExploration {
+		return estimate
+	}
+	// Twice the accepted conservative peak leaves 60% above the normal 1.25
+	// reservation. Larger transfer margins remain intact. Further OOMs retain
+	// their own growing floor; a prior is never permission to shrink that floor.
+	prior.hostFactor = max(2, prior.hostFactor)
+	prior.deviceFactor = max(2, prior.deviceFactor)
+	prior.measuredHostGB, prior.samples = 0, 0
+	prior.escalation = true
+	prior.constrainedGB = max(prior.constrainedGB, estimate.constrainedGB)
+	prior.source = acceptedMemoryEscalation
+	return prior
+}
+
+func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation bool) memoryEstimate {
 	provenance := *j
 	// Resumption excludes recording, not using a prior complete-input estimate.
 	provenance.Attempt = 0
@@ -583,6 +610,19 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	// comparable key (including a sibling card) must not restore the old peak.
 	correctedXPU := false
 	points := q.memoryObservations(*key, configuration)
+	if escalation {
+		priors := make([]*WorkObservation, 0, len(points))
+		for _, point := range points {
+			if point.MemoryEscalation == nil {
+				continue
+			}
+			prior := *point
+			prior.MemoryPeak, prior.MemoryRecordedAt = point.MemoryEscalation.Peak, point.MemoryEscalation.RecordedAt
+			prior.MemoryRange, prior.GPUHostRange = nil, nil
+			priors = append(priors, &prior)
+		}
+		points = priors
+	}
 	for _, point := range points {
 		if memoryIdentityUsable(*point) && !point.MemoryRecordedAt.IsZero() && point.MemoryPeak != nil && !point.MemoryPeak.constrained() && !point.MemoryPeak.PressureUnavailable && point.MemoryPeak.GPUHost != nil && point.MemoryPeak.GPUHost.SiblingAdjusted {
 			correctedXPU = true
