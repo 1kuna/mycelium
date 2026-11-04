@@ -50,6 +50,7 @@ func submissionDigest(project, key string) string {
 
 func submissionFingerprint(s Spec) (string, error) {
 	s.SubmissionKey = ""
+	s.AuthoringOrigin = "" // Observation never changes frozen execution/key identity.
 	// encoding/json sorts object keys; Spec contains only submitted fields. This
 	// runs before resolution, learned needs and the default production deadline.
 	data, err := json.Marshal(s)
@@ -120,7 +121,7 @@ func (q *Queue) existingSubmission(s Spec, fingerprint string) (*Job, error) {
 	}
 	if record.Kind == submissionReservation {
 		cancelled := *record.Created
-		j := &Job{ID: ID(), Spec: Spec{Project: record.Project, SubmissionKey: record.Key}, State: "cancelled", CancelledAt: &cancelled, Queued: cancelled, FinishedAt: &cancelled, Reason: "cancelled before submission"}
+		j := &Job{ID: ID(), Spec: Spec{AuthoringOrigin: submittedOrigin(s), Project: record.Project, SubmissionKey: record.Key}, State: "cancelled", CancelledAt: &cancelled, Queued: cancelled, FinishedAt: &cancelled, Reason: "cancelled before submission"}
 		q.putJob(j.ID, j)
 		record.Kind = submissionBinding
 		record.JobID = j.ID

@@ -104,7 +104,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	if *name == "" {
 		*name = filepath.Base(f.Arg(0))
 	}
-	s := myce.Spec{Name: *name, Project: *project, Class: *class, Priority: *priority,
+	s := myce.Spec{AuthoringOrigin: myce.OriginCommand, Name: *name, Project: *project, Class: *class, Priority: *priority,
 		SubmissionKey: "run-" + rand.Text(), Run: myce.RunSpec{Command: f.Args()},
 		Needs: myce.ResourceNeeds{CPUCores: *cpu, MemoryGB: memory, Platform: myce.Platform{Required: []string{platform}}}}
 	if *gpu != "" && (*mem != "" || explicitHostMem) {

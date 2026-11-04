@@ -250,7 +250,7 @@ class Client:
         job = yaml.safe_load(text)
         if not isinstance(job, Mapping):
             raise ValueError("job YAML must contain one mapping")
-        return self.submit(job)
+        return self.submit({**job, "authoring_origin": "job_spec"})
 
     def submit_and_wait(self, job: Mapping[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
         """Retry this call with the same spec/key after an uncertain response.
@@ -288,7 +288,7 @@ class Client:
             raise ValueError("input names must be clean relative paths")
         files = {name: self.upload_file(source, project=project, class_=class_) for name, source in inputs.items()}
         job = self.submit_and_wait({"name": extension, "project": project, "class": class_,
-                                    "extension": extension, "submission_key": key,
+                                    "extension": extension, "submission_key": key, "authoring_origin": "extension",
                                     "files": files, **({"after": copy.deepcopy(dict(after))} if after is not None else {})}, timeout=timeout)
         if job.get("files_expired"):
             raise APIError(410, json.dumps({"code": "result_expired", "error": "stored job files expired after the retention window"}))

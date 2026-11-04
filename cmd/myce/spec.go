@@ -38,6 +38,7 @@ func readJobSpec(path string) (myce.Spec, error) {
 	if d.Decode(&extra) != io.EOF {
 		return s, errors.New("expected one YAML job")
 	}
+	s.AuthoringOrigin = myce.OriginJobSpec
 	return s, nil
 }
 

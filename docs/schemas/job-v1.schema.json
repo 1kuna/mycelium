@@ -3861,6 +3861,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "authoring_origin": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "class": {
           "type": "string",
           "x-contract": "diagnostic"

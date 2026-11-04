@@ -140,7 +140,9 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
-	WallTime string `json:"wall_time,omitempty" yaml:"wall_time,omitempty"`
+	// Diagnostic only: assigned by readers, excluded from submission identity.
+	AuthoringOrigin string `json:"authoring_origin,omitempty" yaml:"-"`
+	WallTime        string `json:"wall_time,omitempty" yaml:"wall_time,omitempty"`
 	// Authored explanations are frozen intent, never placement authority.
 	RequirementReasons map[string]string `json:"requirement_reasons,omitempty" yaml:"requirement_reasons,omitempty"`
 
@@ -203,6 +205,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if s.AuthoringOrigin != "" && s.Origin() != s.AuthoringOrigin {
+		return reject("job_execution_invalid", errors.New("authoring_origin must be a supported reader label"))
+	}
 	if err := validateWallTime(s); err != nil {
 		return reject("job_execution_invalid", err)
 	}
