@@ -121,7 +121,7 @@ func TestWorkerServiceShutdownPreservesPayloadFailure(t *testing.T) {
 			if err := normalizeResources(&j.Spec); err != nil {
 				t.Fatal(err)
 			}
-			p, err := w.start(store, j)
+			p, err := startAfterFixtureInputs(t, w, store, j)
 			if err != nil {
 				t.Fatal(err)
 			}
