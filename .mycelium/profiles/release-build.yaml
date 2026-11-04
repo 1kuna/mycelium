@@ -1,0 +1,22 @@
+# Arguments after -- are literal VERSION COMMIT; never rewrite this profile.
+name: mycelium-release-build
+project: mycelium
+class: test
+source:
+  git: HEAD
+run:
+  command: [python3, scripts/release-build.py, linux]
+  env:
+    GOMAXPROCS: '2'
+needs:
+  cpu_cores: 2
+  platform: cpu
+targets:
+  - {os: linux, arch: amd64, platform: cpu}
+  - {os: linux, arch: arm64, platform: cpu}
+environment: mycelium-gate
+outputs:
+  release-linux/myce-linux-amd64: results
+  release-linux/myce-linux-arm64: results
+  release-linux/linux-build.json: results
+check: [python3, scripts/release-build.py, check-linux, release-linux]

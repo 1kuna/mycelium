@@ -113,6 +113,13 @@ see [agent offload](adapter.md). Linux runs the Linux builds, vet and full
 race/dev suite. The native Darwin CGO build explicitly skips there and remains
 a separate macOS check; the Linux gate is not proof of that release target.
 
+The committed `release-build` profile reuses this environment for Linux release
+artifacts, with literal version and commit arguments and build receipts. The
+single fleet build command and local signed Darwin step are documented in
+[release operations](operations.md#publish-and-approve-an-onboarding-release).
+Release script regressions run inside `TestReleaseBuildProfile`; their tools
+are fake and never access a signing key or keychain.
+
 The `gate-quick` profile runs the quick gate the same way. A submitted source
 archive has no Git history, so compute the related-test selection locally and
 send it as a job input; the job runs `gate.sh quick --selection FILE` in place
