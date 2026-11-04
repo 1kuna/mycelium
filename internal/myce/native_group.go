@@ -244,6 +244,7 @@ func (g *nativeGroup) recordSignalLocked(member *nativeMember, signal syscall.Si
 func (g *nativeGroup) outcomeLocked(runErr error, stage bool) (facts memberOutcome) {
 	defer func() {
 		facts.Infrastructure = append(append([]infrastructureFact(nil), facts.Infrastructure...), g.p.outcome.Infrastructure...)
+		facts.RSSLimit = g.p.outcome.RSSLimit
 	}()
 	for _, m := range g.members {
 		if m.Name != "main" && m.Exit != nil && (g.main == nil || g.main.Exit == nil || m.Exit.ObservedAt.Before(g.main.Exit.ObservedAt)) {
@@ -328,7 +329,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		return []int{g.supervisor.Process.Pid}
-	})
+	}, p)
 	go func() {
 		defer cancel()
 		for _, release := range releases {

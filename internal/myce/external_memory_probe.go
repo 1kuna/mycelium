@@ -15,6 +15,12 @@ import (
 // ps is available on both supported platforms. Read the whole tree once so
 // concurrent process groups and the worker itself are counted only once.
 func workerTreeRSS(data []byte, root int) (float64, error) {
+	bytes, _, err := ownedTreeRSS(data, map[int]bool{root: true})
+	return float64(bytes) / (1 << 30), err
+}
+
+// Reuse one process inventory for the worker or an exact attempt session.
+func ownedTreeRSS(data []byte, roots map[int]bool) (uint64, int, error) {
 	type row struct {
 		pid, ppid int
 		rss       uint64
@@ -26,17 +32,20 @@ func workerTreeRSS(data []byte, root int) (float64, error) {
 			continue
 		}
 		if len(f) != 3 {
-			return 0, errors.New("invalid process memory inventory")
+			return 0, 0, errors.New("invalid process memory inventory")
 		}
 		pid, e1 := strconv.Atoi(f[0])
 		parent, e2 := strconv.Atoi(f[1])
 		rss, e3 := strconv.ParseUint(f[2], 10, 64)
 		if e1 != nil || e2 != nil || e3 != nil {
-			return 0, errors.New("invalid process memory inventory")
+			return 0, 0, errors.New("invalid process memory inventory")
 		}
 		rows = append(rows, row{pid, parent, rss})
 	}
-	owned := map[int]bool{root: true}
+	owned := map[int]bool{}
+	for root := range roots {
+		owned[root] = true
+	}
 	for changed := true; changed; {
 		changed = false
 		for _, r := range rows {
@@ -47,17 +56,21 @@ func workerTreeRSS(data []byte, root int) (float64, error) {
 		}
 	}
 	var total uint64
-	found := false
+	members := 0
+	found := map[int]bool{}
 	for _, r := range rows {
 		if owned[r.pid] {
 			total += r.rss
-			found = found || r.pid == root
+			members++
+			found[r.pid] = true
 		}
 	}
-	if !found {
-		return 0, errors.New("worker missing from process inventory")
+	for root := range roots {
+		if !found[root] {
+			return 0, 0, errors.New("owned process missing from process inventory")
+		}
 	}
-	return float64(total) / (1 << 20), nil
+	return total << 10, members, nil
 }
 
 var workerMemoryRSS MemorySource = currentWorkerRSS

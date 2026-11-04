@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 func localProcessMemory() *processMemoryProbe {
 	return &processMemoryProbe{
+		OwnedResident: darwinOwnedResident,
 		Pressure: func(ctx context.Context) (*gpuHostState, error) {
 			probeguard.Check()
 			return readDarwinProcessPressure(ctx, func(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -61,4 +63,35 @@ func readDarwinProcessPressure(ctx context.Context, command func(context.Context
 		}
 	}
 	return nil, fmt.Errorf("swap-out counter unavailable")
+}
+
+// Keep the existing RSS inventory and cleanup session boundary. Birth checks
+// fence reuse both before and during the inventory; missing evidence is unknown.
+func darwinOwnedResident(roots map[int]string) (uint64, int, error) {
+	probeguard.Check()
+	owned := map[int]bool{}
+	for root, saved := range roots {
+		birth, err := processBirth(root)
+		if err != nil || saved == "" || birth != saved {
+			return 0, 0, errors.New("RSS ownership unavailable")
+		}
+		members, err := workerGroupMembers(root)
+		if err != nil {
+			return 0, 0, err
+		}
+		for _, pid := range members {
+			owned[pid] = true
+		}
+	}
+	out, err := processPS("-ax", "-o", "pid=,ppid=,rss=")
+	if err != nil {
+		return 0, 0, err
+	}
+	for root, saved := range roots {
+		birth, err := processBirth(root)
+		if err != nil || birth != saved {
+			return 0, 0, errors.New("RSS ownership changed")
+		}
+	}
+	return ownedTreeRSS(out, owned)
 }
