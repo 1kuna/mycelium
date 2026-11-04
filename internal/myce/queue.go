@@ -912,6 +912,11 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	return &out, err
 }
 func (q *Queue) retry(j *Job, why string) {
+	if yieldMatches(j) && !j.ScarceHostYield.FinalReceived && !cancelled(j) {
+		j.ScarceHostYield.Hold = "final checkpoint/transport pending; release alone cannot resume work"
+		j.Reason = "scarce_host_yield: " + j.ScarceHostYield.Hold
+		return
+	}
 	q.requeue(j, why, !plannedStop(j))
 }
 
@@ -1192,7 +1197,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			if save, ok := j.FileCheckpoints[j.Attempt]; ok {
 				progress.durable = save.Generation
 			}
-		} else if j != nil && j.Spec.Resumable && j.Attempt != report.Attempt {
+		} else if j != nil && j.Spec.Resumable && (j.Attempt != report.Attempt || j.Spec.ResumeCompatibility != nil) {
 			progress.path = attemptCheckpoint(*j)
 		}
 		unlockRequest()
@@ -1621,7 +1626,11 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	// A quota failure remains terminal when a stop races it. Verify its opt-in
 	// diagnostics in either live state, with the same identity fences as outputs.
-	verify := err == nil && j.storedFileResults() && (j.State == "running" || j.State == "stopping" && quotaFailure) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.Diagnostics != nil) && !r.ReleaseOnly
+	verify := err == nil && j.storedFileResults() && (j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j))) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.Diagnostics != nil) && !r.ReleaseOnly
+	var yieldPath string
+	if err == nil && yieldMatches(j) && !j.FileTransport && !r.ReleaseOnly && r.Interrupted && r.FinalCheckpointGeneration != nil {
+		yieldPath = attemptCheckpoint(*j)
+	}
 	var outputs map[string]string
 	var host string
 	if verify {
@@ -1640,6 +1649,12 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		}
 	}
 	unlockRequest()
+	if yieldPath != "" {
+		generation, e := q.nasProgress.run(yieldPath, func() (int64, error) { return checkpointProgress(yieldPath) })
+		if e != nil || generation != *r.FinalCheckpointGeneration {
+			r.FinalCheckpointGeneration = nil
+		}
+	}
 	if verify {
 		if r.Success && len(outputs) != len(r.OutputRefs) {
 			return errors.New("complete output manifest required")
@@ -1671,7 +1686,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 			q.maintainStartDeadlines()
 			j, err := q.current(r)
 			m := q.s.Machines[r.Machine]
-			if err != nil || !(j.State == "running" || j.State == "stopping" && quotaFailure) || cancelled(j) || m == nil || m.Session != r.Session ||
+			if err != nil || !(j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j))) || cancelled(j) || m == nil || m.Session != r.Session ||
 				q.executionHost(r.Machine) != host || !maps.Equal(j.Spec.Outputs, outputs) {
 				return ErrStale
 			}
@@ -1806,6 +1821,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		r.Interrupted, r.PriorityStop = false, nil
 	}
 	r = withStopProvenance(r, priorityStop(j))
+	q.retainYieldFinal(j, r)
 	outcome := attemptOutcome(j, r)
 	q.recordAttemptStorage(j, r)
 	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
@@ -2238,6 +2254,7 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 }
 
 func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
+	j.YieldPlan = q.yieldProjection(j)
 	if j.State == "queued" && strings.HasPrefix(j.Reason, "waiting for RAM envelope:") {
 		j.DiagnosticCode = "host_memory_headroom"
 	}
@@ -2538,6 +2555,9 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		reply.Kill = true
 		return reply
 	}
+	if !j.FileTransport && j.Spec.ResumeCompatibility != nil && progress.path == attemptCheckpoint(*j) && progress.err == nil && progress.durable > 0 {
+		j.YieldGeneration = max(j.YieldGeneration, progress.durable)
+	}
 	retainInputsStagedAt(j, report.InputsStagedAt)
 	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)
@@ -2630,6 +2650,10 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		}
 	}
 	j.Progress = 0
+	j.YieldGeneration = 0
+	if y := j.ScarceHostYield; y != nil {
+		y.Destination, y.DestinationDevice, y.DestinationTarget = m.ID, m.Device, machineTarget(m)
+	}
 	j.Machine = m.ID
 	j.AllocatedDevices = nil
 	if m.Devices != nil && !j.Spec.Needs.cpuOnly() {

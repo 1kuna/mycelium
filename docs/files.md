@@ -778,6 +778,15 @@ their verified results use the queue file store in both modes. Uploading inputs
 does not switch NAS checkpoints to file-store generations; workers fetch and
 verify those inputs through the queue API. See [file transport](files.md).
 
+For scarce-host yield (#328), `resumable: true` also needs frozen tested
+`resume_compatibility` for each exact target/environment and a verified positive
+portable generation before planning. A cooperative final save must publish a
+newer generation before resume; failed final save/transport or a forced stop
+holds the job, preserving prior generations. Exact process/sidecar release
+remains a separate requirement. `preemptible: true` instead opts only disposable,
+non-resumable experiments into restarting without a checkpoint; it never grants
+this to an existing class implicitly. See the [approved yield contract](design-proposal.md#amendment-scarce-host-yield-327-328-my-26).
+
 Set `resumable: true` only when the command can safely restart. Mycelium sends
 SIGTERM to the command's process group, allows 10 seconds for production preemption (configurable), or two minutes for
 deadline preemption and planned leave, to save and exit,

@@ -148,6 +148,10 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, ide
 	return q.hostReleasesExcept(m, gpu, host, priorityDemand(priority, identity), nil, nil)
 }
 func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparations ...bool) ([]*Job, []*ModelSlot, bool) {
+	releasePreparation := len(releasePreparations) > 0 && releasePreparations[0]
+	return q.hostReleasesWithVictims(m, gpu, host, demand, releasedJobs, releasedSlots, releasePreparation, func(j *Job) bool { return q.batchPreemptible(j, demand) })
+}
+func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparation bool, canStop func(*Job) bool) ([]*Job, []*ModelSlot, bool) {
 	if m.HostMemoryBudgetStatus() != "" {
 		return nil, nil, false
 	}
@@ -155,7 +159,6 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		return nil, nil, false
 	}
 	cores := demand.Needs.cores()
-	releasePreparation := len(releasePreparations) > 0 && releasePreparations[0]
 	// Only legacy preparations inherit a core when a worker loses its last
 	// execution. Independently charged builds retain their core throughout.
 	executions, builds := map[string]int{}, map[string]int{}
@@ -213,7 +216,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		if !releasedJobs[j] && !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
 			executions[j.Machine]++
 		}
-		if releasedJobs[j] || j.ReleaseConfirmed || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.batchPreemptible(j, demand) {
+		if releasedJobs[j] || j.ReleaseConfirmed || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !canStop(j) {
 			continue
 		}
 		if j.State == "running" || j.State == "stopping" {

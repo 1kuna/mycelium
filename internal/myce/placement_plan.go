@@ -11,6 +11,7 @@ import (
 // placement is applied, after all workers have been considered. Pending releases
 // are useful capacity for planning, never authority to admit a replacement.
 type placementPlan struct {
+	yields           map[string]*ScarceHostYield
 	machine          *Machine
 	jobs             []*Job
 	slots            []*ModelSlot
@@ -54,7 +55,11 @@ func (p *placementPlan) addSlot(s *ModelSlot) {
 }
 func (q *Queue) applyPlacement(p *placementPlan, demand *Job) {
 	for _, j := range p.jobs {
-		q.stopBatchFor(j, demand)
+		if y := p.yields[j.ID]; y != nil {
+			q.stopForScarceYield(j, demand, y)
+		} else {
+			q.stopBatchFor(j, demand)
+		}
 	}
 	for _, s := range p.slots {
 		q.preemptSlot(s, demand)
@@ -176,10 +181,16 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 	if best != nil && !q.addDeviceTierStops(best, j) {
 		return nil
 	}
+	if best == nil && batch {
+		best, _ = q.scarceYieldPlan(j, m)
+	}
 	return best
 }
-func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) *placementPlan {
+func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, yieldPlans ...map[string]*ScarceHostYield) *placementPlan {
 	p := &placementPlan{machine: m, preparations: true}
+	if len(yieldPlans) > 0 {
+		p.yields = yieldPlans[0]
+	}
 	need, host := j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB
 	if !batch {
 		model, ok := q.model(j.Spec.Needs.Model)
@@ -249,7 +260,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	}
 	// Measured over-use counts only up to the signed (debt-inclusive) shortfall.
 	projected.FreeHostMemoryGB += min(overuse, max(0, hostNeed(&projected, need, host)-projected.FreeHostMemoryGB))
-	hostJobs, hostSlots, ok := q.hostReleasesExcept(&projected, need, host, j.Spec, releasedJobs, releasedSlots, p.preparationCores > 0)
+	hostJobs, hostSlots, ok := q.hostReleasesWithVictims(&projected, need, host, j.Spec, releasedJobs, releasedSlots, p.preparationCores > 0, func(v *Job) bool { return q.batchPreemptible(v, j.Spec) || p.yields[v.ID] != nil })
 	if !ok {
 		return nil
 	}
@@ -364,7 +375,7 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 			continue
 		}
 		isolateTier := isolatesDeviceTiers(m) && !j.Spec.Needs.cpuOnly() && !r.Spec.Needs.cpuOnly() && q.comparePriority(r.Spec, j.Spec) != 0
-		if !q.batchPreemptible(r, j.Spec) {
+		if !q.batchPreemptible(r, j.Spec) && p.yields[r.ID] == nil {
 			if batch && !shared || isolateTier {
 				return false
 			}

@@ -277,6 +277,8 @@ func (q *Queue) startPlacementPolicyRejection(j *Job) string {
 		defer func() { m.DockerCleanup, owner.DockerCleanup = previous, previous }()
 	}
 	switch {
+	case j.StartedAt == nil && j.ScarceHostYield != nil && !q.yieldResumeStartAllowed(j, m):
+		return "scarce_host_yield"
 	case j.StartedAt == nil && !sharedHostJobFits(j, m):
 		return "shared_host_profile"
 	case !executionTargetMatches(j.Spec, m):

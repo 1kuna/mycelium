@@ -223,6 +223,15 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					return
 				}
 			}
+			if p != nil && d.Stop && !d.UserCancel && scarceYieldStop(d.PriorityStop) && s.state.PriorityStop == nil {
+				var authorization struct {
+					Allowed bool `json:"allowed"`
+				}
+				identity := Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}}
+				if e := w.Client.Call(ctx, "POST", "/api/workers/yield-stop", identity, &authorization); e != nil || !authorization.Allowed {
+					d.Stop = false
+				}
+			}
 			if p != nil && d.Stop {
 				if err := p.recordPriorityStop(s, d.PriorityStop); err != nil {
 					finish(err)
@@ -290,7 +299,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		a.mu.Unlock()
 		if connected && !d.Hold {
 			var err error
-			if d.Stop && d.Kill {
+			if d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop) {
 				if s.state.Result != nil && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 					released := *s.state.Result
 					released.ReleaseOnly = !released.ReleasePending
@@ -302,7 +311,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			} else {
 				err = w.replay(ctx, s)
 			}
-			if err == nil && a.job.storedFileResults() {
+			if err == nil && (a.job.storedFileResults() || s.state.Result != nil && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
 				if s.state.Result != nil {
 					if !s.state.Result.ReleasePending {
@@ -1048,7 +1057,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" || c == dockerFilesCapability }), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1")
+			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" || c == dockerFilesCapability }), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability)
 			if w.ModelRoot != "" && w.modelSnapshots != nil {
 				m.Capabilities = append(m.Capabilities, modelSnapshotsCapability)
 			}

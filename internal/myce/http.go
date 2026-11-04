@@ -358,6 +358,14 @@ func (a API) handler(joiningPin string) http.Handler {
 		}
 		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.Started(c, r.Context()), "worker_start_invalid")
 	})
+	mux.HandleFunc("POST /api/workers/yield-stop", func(w http.ResponseWriter, r *http.Request) {
+		var c Result
+		if !decode(w, r, &c) {
+			return
+		}
+		allowed, err := a.Queue.authorizeYieldStop(r.Context(), c)
+		respondOperation(w, map[string]bool{"allowed": allowed}, err, "worker_yield_invalid")
+	})
 	mux.HandleFunc("POST /api/workers/complete", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
 		if !decode(w, r, &c) {
