@@ -458,6 +458,12 @@ func extensionJobsWithRefusal(j *Job, m *Machine, qualified bool) ([]*Job, strin
 		}
 		if v := e.variant(machineTarget(m)); v != nil {
 			copy.Spec.Needs = v.Needs
+			copy.Spec.Needs.Tools = slices.Clone(v.Needs.Tools)
+			for _, tool := range j.Spec.Needs.Tools {
+				if !slices.Contains(copy.Spec.Needs.Tools, tool) {
+					copy.Spec.Needs.Tools = append(copy.Spec.Needs.Tools, tool)
+				}
+			}
 			copy.Spec.Needs.Network = v.Needs.Network || j.Spec.Needs.Network
 			if j.Spec.Needs.Memory != "" {
 				copy.Spec.Needs.Memory = j.Spec.Needs.Memory

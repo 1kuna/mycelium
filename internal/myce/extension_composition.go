@@ -57,6 +57,9 @@ func (e Extension) validateVariants() error {
 		}
 		seen[t] = true
 		resources := Spec{Needs: v.Needs}
+		if err := validateTools(resources); err != nil {
+			return err
+		}
 		resources.Needs.Platform = Platform{Required: []string{t.Platform}}
 		if err := normalizeResources(&resources); err != nil {
 			return err

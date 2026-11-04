@@ -172,3 +172,36 @@ func TestToolsPresentLaunchAndMissingCommandDiagnostic(t *testing.T) {
 		t.Fatalf("silent missing command: %+v", r)
 	}
 }
+
+func TestToolsVariantValidationAndCallerRequirements(t *testing.T) {
+	e := compositionExtension(t, false)
+	e.Variants[0].Needs.Tools = []string{"../private/tool"}
+	if err := e.validateVariants(); err == nil {
+		t.Fatal("variant accepted tool path")
+	}
+	e.Variants[0].Needs.Tools = []string{"git"}
+	if err := e.validateVariants(); err != nil {
+		t.Fatal(err)
+	}
+	m := machine("worker", "fake")
+	m.CapabilityProfile.OS = e.Variants[0].Target.OS
+	m.CapabilityProfile.Arch = e.Variants[0].Target.Arch
+	m.ToolInventory = map[string][]string{"": {"git"}}
+	s := spec("experiment")
+	s.Extension = extensionKey(e)
+	s.Needs.Tools = []string{"node", "git"}
+	candidates := extensionJobs(&Job{Spec: s, Extensions: []Extension{e}}, &m, false)
+	if len(candidates) != 1 || !slices.Equal(candidates[0].Spec.Needs.Tools, []string{"git", "node"}) {
+		t.Fatalf("caller tools lost: %+v", candidates)
+	}
+	if toolsFit(candidates[0], &m) || !strings.Contains(targetFitReason("tools", candidates[0], &m), "node") {
+		t.Fatal("missing caller prerequisite admitted")
+	}
+	m.ToolInventory[""] = []string{"git", "node"}
+	if !toolsFit(candidates[0], &m) {
+		t.Fatal("union of present tools refused")
+	}
+	if !slices.Equal(e.Variants[0].Needs.Tools, []string{"git"}) {
+		t.Fatal("mutated shared variant")
+	}
+}
