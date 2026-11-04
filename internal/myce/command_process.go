@@ -61,11 +61,12 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 		stateMu.Lock()
 		defer stateMu.Unlock()
 		if cmd.Process != nil {
-			var graceErr error
 			if state.Accelerator {
-				graceErr = gracefulRecoveredGroup(cmd.Process.Pid, scope.Clock, &state.StopAt, state.StopGrace, func() error {
+				if err := gracefulRecoveredGroup(cmd.Process.Pid, scope.Clock, &state.StopAt, state.StopGrace, func() error {
 					return saveWorkerJSON(scope.StateDir, record, state)
-				})
+				}); err != nil {
+					return err
+				}
 			}
 			custodyErr := recordWorkerGroup(&state, cmd.Process.Pid)
 			if custodyErr == nil {
@@ -73,7 +74,7 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 			}
 			// Inspection/persistence failures retain custody, but must not prevent
 			// stopping the process group this live command owns.
-			return errors.Join(graceErr, custodyErr, signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL))
+			return errors.Join(custodyErr, signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL))
 		}
 		return nil
 	}
@@ -106,17 +107,18 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 		_ = cmd.Cancel()
 	}
 	waitErr := cmd.Wait()
-	var graceErr error
 	if state.Accelerator {
-		graceErr = gracefulRecoveredGroup(state.PID, scope.Clock, &state.StopAt, state.StopGrace, func() error {
+		if err := gracefulRecoveredGroup(state.PID, scope.Clock, &state.StopAt, state.StopGrace, func() error {
 			return saveWorkerJSON(scope.StateDir, record, state)
-		})
+		}); err != nil {
+			return errors.Join(e, waitErr, err)
+		}
 	}
 	custodyErr := recordWorkerGroup(&state, state.PID)
 	if custodyErr == nil {
 		custodyErr = saveWorkerJSON(scope.StateDir, record, state)
 	}
-	groupErr := errors.Join(graceErr, custodyErr, signalWorkerGroup(state.PID, syscall.SIGKILL), waitWorkerGroup(state.PID, scope.Clock))
+	groupErr := errors.Join(custodyErr, signalWorkerGroup(state.PID, syscall.SIGKILL), waitWorkerGroup(state.PID, scope.Clock))
 	if groupErr == nil {
 		if err := os.Remove(filepath.Join(scope.StateDir, record)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			groupErr = err
