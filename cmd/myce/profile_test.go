@@ -169,10 +169,22 @@ printf '\n' >> "$NOTIFICATION_FILE"
 		}
 		return r, e
 	}
+	urgent, err := invoke("--key", "urgent", "--class", "deadline", "--deadline", "2031-02-03T04:05:06Z", "--", "literal")
+	if err != nil || urgent.Spec.Class != "deadline" || urgent.Spec.Deadline == nil {
+		t.Fatalf("urgent receipt: %+v %v", urgent.Spec, err)
+	}
+	queued, err := d.Client().GetJob(ctx, urgent.JobID)
+	if err != nil || queued.Spec.Class != urgent.Spec.Class || queued.Spec.Deadline == nil || !queued.Spec.Deadline.Equal(*urgent.Spec.Deadline) {
+		t.Fatalf("urgent queued spec: %+v %v", queued, err)
+	}
 	// A supplied notifier that is absent must never report armed.
 	missing, err := invoke("--key", "missing", "--notify", filepath.Join(root, "absent"), "--", "literal")
 	if exitCodeForTest(err) != 74 || missing.Delivery != "not_configured" || missing.Observation != "not_armed" {
 		t.Fatal("missing notifier armed", missing, err)
+	}
+	unchanged, err := d.Client().GetJob(ctx, missing.JobID)
+	if err != nil || unchanged.Spec.Class != "experiment" || unchanged.Spec.Deadline != nil || missing.Spec.Class != unchanged.Spec.Class || missing.Spec.Deadline != nil {
+		t.Fatalf("authored urgency: receipt=%+v job=%+v err=%v", missing.Spec, unchanged, err)
 	}
 	for _, upload := range missing.Uploads {
 		t.Fatal("accepted upload retained in receipt", upload)

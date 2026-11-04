@@ -64,11 +64,26 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 		return errors.New("choose profile or adapter")
 	}
 	useAdapter := *adapter != "" || *entry != "" || f.NArg() == 0
-	if *profile == "" && useAdapter {
-		return runAdapter(ctx, *adapter, *entry, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut)
-	}
-	if *profile != "" {
-		return runProfile(ctx, *profile, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut)
+	if *profile != "" || useAdapter {
+		var overrides profileOverrides
+		var unsupported string
+		f.Visit(func(v *flag.Flag) {
+			switch v.Name {
+			case "class":
+				overrides.Class = class
+			case "deadline":
+				overrides.Deadline = deadline
+			case "gpu", "cpu", "mem", "host-mem", "project", "priority", "name", "detach":
+				unsupported = v.Name
+			}
+		})
+		if unsupported != "" {
+			return fmt.Errorf("--%s is not supported with a profile or adapter", unsupported)
+		}
+		if *profile == "" {
+			return runAdapter(ctx, *adapter, *entry, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut, overrides)
+		}
+		return runProfile(ctx, *profile, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut, overrides)
 	}
 	explicitNotify, explicitHostMem := false, false
 	f.Visit(func(v *flag.Flag) {
