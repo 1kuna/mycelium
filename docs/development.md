@@ -217,6 +217,18 @@ losses. Queue decisions use a fixed injected clock; this is a laptop contention
 bound, while fake-clock contact/loss tests cover elapsed-time decisions under
 race. It does not establish fleet capacity or native release qualification.
 
+For retained-catalog transaction cost, run:
+
+```sh
+GOMAXPROCS=2 go test ./internal/myce -run '^$' -bench '^BenchmarkQueue(RecordsFleetCheckin|CatalogTransaction)$' -benchtime=30x -count=3
+```
+
+Both fixtures retain 6,500 constrained executions, 110 queued jobs and 1,400
+curves with five workers. They report mutex hold, process CPU and allocations
+for real SQLite check-ins and otherwise unchanged transactions. Queue time is
+injected and fixed. Compare the same fixture/toolchain on both revisions;
+these measurements do not establish natural fleet latency or worker freshness.
+
 On macOS, the bounded helper reads cwd, executable and standard-descriptor paths
 from `libproc` without enumerating or statting mounted filesystems. Apple's lsof
 has no network-mount exclusion and even scratch-scoped scans can block on an
