@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import os
 import ssl
+import socket
 from pathlib import Path
 import time
 from typing import Any, Iterator, Mapping
@@ -113,6 +114,41 @@ def _normalize(spec: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(result.get("environment"), str):
         result["environment"] = {"name": result["environment"]}
     return result
+
+
+def _openai_http_client(opener: Any) -> Any:
+    """Keep installed TLS pins and redirect policy on the SDK's HTTP path."""
+    import httpx
+
+    class Stream(httpx.SyncByteStream):
+        def __init__(self, response: Any):
+            self.response = response
+
+        def __iter__(self) -> Iterator[bytes]:
+            read = getattr(self.response, "read1", self.response.read)
+            while chunk := read(65536):
+                yield chunk
+
+        def close(self) -> None:
+            self.response.close()
+
+    class Transport(httpx.BaseTransport):
+        def handle_request(self, request: Any) -> Any:
+            outgoing = Request(str(request.url), data=request.read(),
+                               method=request.method, headers=dict(request.headers))
+            timeout = request.extensions.get("timeout", {}).get("read", 600)
+            try:
+                response = opener(outgoing, timeout=timeout)
+            except HTTPError as error:
+                response = error  # Preserve HTTP status and error/redirect bodies.
+            except (TimeoutError, socket.timeout) as error:
+                raise httpx.ReadTimeout("installed queue request timed out", request=request) from error
+            except (URLError, OSError) as error:
+                raise httpx.ConnectError("installed queue transport failed", request=request) from error
+            return httpx.Response(response.status, headers=list(response.headers.items()),
+                                  stream=Stream(response), request=request)
+
+    return httpx.Client(transport=Transport(), follow_redirects=False)
 
 
 class Client:
@@ -576,5 +612,7 @@ class Client:
             headers["X-Myce-Deadline"] = deadline
         kwargs.setdefault("timeout", 600)
         kwargs.setdefault("max_retries", 0)  # do not silently replay model calls
+        if self._urlopen is not urlopen and "http_client" not in kwargs:
+            kwargs["http_client"] = _openai_http_client(self._urlopen)
         return OpenAI(base_url=self.url + "/v1", api_key=self.token,
                       default_headers=headers, **kwargs)

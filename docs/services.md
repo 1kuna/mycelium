@@ -91,6 +91,52 @@ for chunk in client.chat.completions.create(
 Embeddings and text completions use `client.embeddings.create(model=..., input=...)`
 and `client.completions.create(model=..., prompt=...)` with the same headers.
 
+### Installed-client image chat
+
+Install this repository's Python client with its `openai` extra, using the
+reviewed commit containing the installed-transport fix. `Client.from_installed()`
+resolves credentials and the provisioned TLS pin internally; its `openai()`
+helper retains that opener, redirect policy and streaming behavior. It defaults
+to no SDK retries. Do not export the fleet token or disable TLS verification.
+
+```python
+import base64
+from pathlib import Path
+from mycelium import Client
+
+def image(path):
+    data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + data}}
+
+with Client.from_installed().openai(project="example", priority="experiment", timeout=1200) as sdk:
+    answer = sdk.chat.completions.create(
+        model="qwen3.8-27b-bf16",
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": "Compare the objects visible in these two images."},
+            image("first.jpg"), image("second.jpg"),
+        ]}],
+        max_tokens=128, temperature=0,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    print(answer.choices[0].message.content)
+```
+
+The [executable example](../examples/image-chat.py) validates action/reason JSON
+and reports request wall time; `--calls 6` collects one cold and five warm calls
+when the model starts unloaded. Use two 640×480 images and an explicit task
+prompt when qualifying this contract. A successful response proves the routing
+seam; it does not establish task accuracy.
+
+The [Qwen3.8-27B BF16 catalog template](../examples/qwen3.8-vl.example.yaml)
+pins the official Apache-2.0 model's complete file manifest to revision
+`1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`. It uses native vLLM 0.27.1,
+8192-token context, one concurrent request, two images, an explicit 8 GiB KV
+cache and eager execution. The KV byte setting overrides the preset's memory
+utilization fraction. Its memory placeholder must be replaced by measured
+load/warm-up peaks plus justified headroom before admission; it is not a
+hardware qualification or an installed catalog. Supply a reviewed environment
+named `open-vlm-vllm-0271`, keeping its native runtime available until unload.
+
 ## Model catalog and worker setup
 
 Queue and workers read the same short YAML file via `--model-config`:
