@@ -1228,3 +1228,15 @@ Consumer cutover and retirement of source readers require verified consumers
 under [#254](https://github.com/1kuna/mycelium/issues/254); the converter does not
 perform that cutover. Existing frozen identities and low-level registry callers
 remain supported.
+
+### Execution wall-time allowance
+
+Available from the next release: an entry or profile may declare top-level
+`wall_time: 30m`, a positive Go duration measured from accepted Started for each
+attempt. Omission is unlimited. Use measured runtime or a real consumer bound;
+`expected_minutes` and priority `deadline` do not enforce execution duration.
+Expiry fails with typed `execution/wall_time_limit`, stops the exact whole tree,
+and retains cleanup/partial-output custody. Ordinary command-failure policy
+applies (no automatic retry or infrastructure-loss charge). Reconnect and worker
+or queue restart cannot renew the allowance. Job status exposes the limit,
+expiry and remaining seconds. See [the full contract](jobs.md#per-attempt-wall-time).

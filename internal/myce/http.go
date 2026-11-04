@@ -375,7 +375,8 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		if !decode(w, r, &c) {
 			return
 		}
-		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.Started(c, r.Context()), "worker_start_invalid")
+		remaining, err := a.Queue.startedWithWallTime(c, r.Context())
+		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol, "wall_time_remaining_seconds": remaining}, err, "worker_start_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/yield-stop", func(w http.ResponseWriter, r *http.Request) {
 		var c Result

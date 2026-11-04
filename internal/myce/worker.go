@@ -875,7 +875,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		w.control.set(p)
 	}
 	if j.Spec.StartBy == nil {
-		if err = w.authorizeStart(j, s.state.Session); err != nil {
+		if err = w.authorizeStart(j, s.state.Session, s.dir); err != nil {
 			return nil, abort(s.startFailure(j, launchRefused, err))
 		}
 	}
@@ -890,7 +890,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		if _, e := io.ReadFull(readyReader, ready[:]); e != nil || ready[0] != 'R' {
 			return nil, abort(fmt.Errorf("command start gate unavailable: %v", e))
 		}
-		err = w.authorizeStart(j, s.state.Session)
+		err = w.authorizeStart(j, s.state.Session, s.dir)
 		if err == nil {
 			// Queue waiting must not consume the local exec-receipt I/O budget.
 			_ = readyReader.SetReadDeadline(time.Now().Add(2 * time.Second))

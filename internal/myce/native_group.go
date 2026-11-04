@@ -674,7 +674,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}
 	if m.Name == "main" {
-		if err := g.worker.authorizeStart(g.p.job, g.session); err != nil {
+		if err := g.worker.authorizeStart(g.p.job, g.session, g.dir); err != nil {
 			return g.recordInfrastructure(launchRefused, m.Name, "", err)
 		}
 	}
