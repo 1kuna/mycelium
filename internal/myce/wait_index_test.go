@@ -123,7 +123,7 @@ func benchmarkWaitIndex200(b *testing.B, idle bool) {
 		id := fmt.Sprintf("waiting-%08d", i)
 		q.s.Jobs[id] = &Job{ID: id, State: "queued"}
 	}
-	handler := (API{Queue: q, Token: "fixture"}).Handler()
+	handler := (API{Queue: q, Token: "fixture"}).handler("", clock)
 	var before, after syscall.Rusage
 	syscall.Getrusage(syscall.RUSAGE_SELF, &before)
 	b.ResetTimer()

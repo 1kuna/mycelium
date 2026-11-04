@@ -67,7 +67,7 @@ func TestWaitReadConcurrentPolling(t *testing.T) {
 			captures.Add(1)
 		}
 	}
-	handler := (API{Queue: q, Token: "fixture"}).Handler()
+	handler := (API{Queue: q, Token: "fixture"}).handler("", clock)
 	for _, query := range []string{"", "?view=wait"} {
 		captures.Store(0)
 		for range 20 {
@@ -142,7 +142,7 @@ func BenchmarkWaitRead(b *testing.B) {
 				ids[i] = fmt.Sprintf("pending-%04d", i)
 				q.s.Jobs[ids[i]] = &Job{ID: ids[i], Spec: spec("experiment"), State: "queued", Queued: clock.Now()}
 			}
-			handler := (API{Queue: q, Token: "fixture"}).Handler()
+			handler := (API{Queue: q, Token: "fixture"}).handler("", clock)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {

@@ -26,10 +26,16 @@ func (a API) Handler() http.Handler { return a.handler("") }
 
 func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.handler(pin) }
 
-func (a API) handler(joiningPin string) http.Handler {
+func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler {
 	mux := newRequestMux()
 	jobGets := newJobGetVolume(a.Queue.clock)
-	observationLimit := newObservationLimit(a.Queue.clock)
+	// Transport budgets must keep refilling when scheduling time is frozen or
+	// adjusted. Tests inject this clock independently of the queue clock.
+	var observationClock Clock = RealClock{}
+	if len(observationClocks) > 0 && observationClocks[0] != nil {
+		observationClock = observationClocks[0]
+	}
+	observationLimit := newObservationLimit(observationClock)
 	a.registerWait(mux)
 	waitStates := a.Queue.waitIndex()
 	nas := newResolveNASCache(a.Queue.clock)

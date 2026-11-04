@@ -11,7 +11,7 @@ func TestObservationLimitClockAndWorkerExemption(t *testing.T) {
 	q, clock := fixture(t)
 	job := submit(t, q, spec("experiment"))
 	observationPath := "/api/jobs/" + job.ID + "?view=wait"
-	handler := (API{Queue: q, Token: "fixture"}).Handler()
+	handler := (API{Queue: q, Token: "fixture"}).handler("", clock)
 	request := func(path, method, peer string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, nil)
 		r.RemoteAddr = peer
