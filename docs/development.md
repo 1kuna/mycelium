@@ -233,19 +233,34 @@ GitHub may replace a pending run in a group, losing proof for an intervening mer
 One repository-scoped runner accepts jobs sequentially without cancelling older
 merges. A backlog waits in Actions; no model callbacks, polls or wakes are needed.
 
-**Check main's latest run before merging**, including its head SHA:
+**Before merging, require the PR's exact-head fleet full gate and independent
+review**, then inspect main's workflow records and latest *completed* `main-full`
+run, including its head SHA. For a docs-only change, a passing exact-head fleet
+quick gate is sufficient in place of full.
 
 ```sh
 gh api repos/1kuna/mycelium/commits/main --jq .sha
-gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main --limit 1 \
+gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main --limit 20 \
   --json headSha,status,conclusion,url
+gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main \
+  --status completed --limit 1 --json headSha,status,conclusion,url
 ```
 
-A completed successful run must match current main. Missing, queued, running or
-failed is not passing evidence. Before merging, run targeted tests and obtain
-independent PR review. The next merge worker fixes a red main forward; agents do
-not wait on or poll CI. Automatic main proof supplements the release full gate.
-Use the run's job summary to inspect both platform outcomes and Mycelium job IDs.
+Queued or running main runs do not block a merge, and completed proof need not
+match current main: one sequential runner can lag behind frequent merges.
+The next merging worker inspects a red completed run's platform summaries,
+Mycelium job IDs and logs, then fixes its failures forward before unrelated
+merges. A reviewed fix with its own passing gate may merge while main is red;
+if the fix is already merged, record the failing test and the merged fix as
+resolution evidence instead of waiting for the backlog to reach it. A merge with
+no workflow run at all is a missing-run defect for that worker to repair, not
+passing evidence. Inspect cancelled runs for interrupted proof as well.
+
+Source: the maintainer's global CI rule, relayed in the 2026-11-04 merge-guidance
+assignment. CI remains once per merge on self-hosted fleet runners; agents do
+not wait on, poll or wake for main CI. Automatic main proof supplements each
+PR's gate and the release full gate. Use the run's job summary to inspect both
+platform outcomes and Mycelium job IDs.
 The workflow's own check reports success/failure; no commit-status credential or
 personal access token is needed.
 
