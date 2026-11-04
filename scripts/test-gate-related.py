@@ -12,6 +12,41 @@ spec.loader.exec_module(related)
 
 
 class RelatedTests(unittest.TestCase):
+    def test_moving_base_excludes_main_only_changes(self):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                def git(*args):
+                    subprocess.run(['git', *args], check=True, capture_output=True)
+                def commit():
+                    git('add', '.')
+                    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                        'commit', '-qm', 'fixture')
+                git('init', '-q')
+                for name in ('changed', 'unrelated', 'local'):
+                    pathlib.Path(name + '.go').write_text('package p\nvar value = 1\n')
+                    pathlib.Path(name + '_test.go').write_text(
+                        f'package p\nfunc Test{name.title()}(t *testing.T) {{}}\n')
+                commit()
+                git('branch', 'base')
+                git('checkout', '-qb', 'topic')
+                pathlib.Path('changed.go').write_text('package p\nvar value = 2\n')
+                commit()
+                git('checkout', 'base')
+                pathlib.Path('unrelated.go').write_text('package p\nvar value = 3\n')
+                # Main-only dependency changes must not force this PR to full.
+                pathlib.Path('go.mod').write_text('module unrelated\n')
+                commit()
+                git('checkout', 'topic')
+                pathlib.Path('local.go').write_text('package p\nvar value = 4\n')
+                self.assertEqual(related.select('base'), [
+                    ('.', '^(TestChanged|TestLocal)$')])
+                # An ancestor still selects the entire requested branch batch.
+                self.assertEqual(related.select('HEAD~1'), related.select('base'))
+            finally:
+                os.chdir(previous)
+
     def test_private_interface_methods_match_the_receiver(self):
         previous = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:

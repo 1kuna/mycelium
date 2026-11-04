@@ -46,6 +46,10 @@ def git(*args):
 
 
 def select(base):
+    # A moving main may contain changes this PR never made. Compare from the
+    # common ancestor even when the caller explicitly supplies origin/main;
+    # ancestor SHAs still select the requested wider batch.
+    base = git('merge-base', 'HEAD', base).strip()
     if git('diff', '--name-only', base, '--', 'go.mod', 'go.sum').strip():
         raise ValueError('module dependencies changed')
     changed = sorted(set((git('diff', '--name-only', base) +

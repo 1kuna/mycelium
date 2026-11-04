@@ -1,5 +1,4 @@
-# Darwin sampled RSS peak + 25%, rounded up; see docs/development.md.
-# Keep this explicit: constrained auto peaks otherwise explore all host headroom.
+# Accepted comparable peaks now supply the envelope; see docs/development.md.
 name: mycelium-gate-full-darwin
 project: mycelium
 class: test
@@ -11,7 +10,7 @@ run:
     GOMAXPROCS: '2'
 needs:
   cpu_cores: 2
-  memory_gb: 4
+  memory: auto
   platform: cpu
 targets:
   - {os: darwin, arch: arm64, platform: cpu}

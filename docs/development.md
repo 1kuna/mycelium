@@ -9,14 +9,17 @@ and [storage integration](#backed-storage-admission-integration) are developer
 contracts, with unsupported/native gaps explicit.
 
 Quick defaults to the merge base of the current branch and `origin/main`;
-pass `BASE` explicitly to check a wider batch. Known heavy
+pass an ancestor `BASE` explicitly to check a wider batch. Every supplied ref
+is reduced to its merge base with `HEAD`, so a moving `origin/main` never
+selects unrelated changes that landed after the branch diverged. Known heavy
 runs use the project's Mycelium submission path. Inspect host load/memory/disk
 before local heavy work; do not exceed two full race suites on one Mac.
 
 ## Laptop test gates
 
 Run `./scripts/gate.sh` (or `./scripts/gate.sh quick BASE`) for a change. The
-base defaults to the branch merge base with `origin/main`. Quick builds the CLI
+base defaults to the branch merge base with `origin/main`; an explicit ref
+uses its merge base too. Uncommitted and untracked changes remain included. Quick builds the CLI
 and every release target, vets all Go packages, and race-tests changed packages with test names from matching file
 prefixes, plus tests that directly reference changed exported symbols (using
 diff hunk function names and changed declarations). Exported methods on private
@@ -134,43 +137,83 @@ python3 scripts/gate-related.py "$(git merge-base HEAD origin/main)" > .reports/
 Commit first: the source is `HEAD`, while the selection also sees uncommitted
 files. A selection error (changed `go.mod`, unmapped code) means run `gate-full`;
 the `&&` keeps a failed selection's empty file from submitting a test-free run.
-Quick runs a subset of the full gate's commands at the same concurrency, so it
-declares the Linux full-gate 7 GiB; the same five-minute budget applies.
+Quick runs a subset of the full gate's commands at the same concurrency and
+retains the historical conservative 7 GiB bound; the same five-minute budget applies.
 
-Full-gate profiles and their converted adapter entries declare CPU host memory
-per platform: `gate-full` supports Linux at 7 GiB; `gate-full-darwin` supports
-Darwin arm64 at 4 GiB. CI selects the corresponding profile before freezing the
-source SHA. Commands, concurrency, environment and result acceptance are identical.
+Full-gate profiles and their converted adapter entries declare 6 GiB for Linux
+and use `memory: auto` for Darwin. Both platforms have comparable learning
+evidence, but the Linux auto validation below hit its ceiling; accepted older
+samples alone did not establish sufficient total-charge headroom. Source SHA
+changes and removing a declaration do not change the memory work identity.
+Commands, two-core concurrency, environment, targets and result acceptance stay
+the same. Quick retains the conservative 7 GiB declaration: the full suite bounds its
+work, while the shared quick memory identity excludes selection inputs by
+default. A small selection's accepted peak cannot establish the largest
+selection's demand.
 
-Successful unconstrained attempt telemetry inspected on 2026-11-01 included
-20 Linux total cgroup peaks of 2.699532–4.472893 GiB. The Linux budget remains
-max peak + max(observed range, 25% of max), rounded up:
-4.472893 + max(1.773361, 1.118223) = 6.246254 GiB becomes 7 GiB.
-Linux resident counters alone reached only 2.816639 GiB; total cgroup peaks also
-cover file-backed charges.
+Read-only job GET inspection on 2026-11-04 found these successful final attempts:
 
-A fresh read-API inspection found 34 successful final Darwin attempts, of which
-32 had unconstrained sampled process-group RSS: 2.362656–3.001328 GiB.
-The maximum is accepted attempt 1 of `424f3aa36122087656f8636038cff66d`.
-The same formula gives 3.001328 + max(0.638672, 0.750332) = 3.751659 GiB,
-rounded up to 4 GiB. This leaves 0.998672 GiB above the observed maximum.
-Older records lack explicit learning reasons; these are successful unconstrained
-observations, not a claim that every record passes every current learning fence.
+- Four recent Linux gates had total cgroup peaks 3.467369–3.548534 GiB,
+  resident peaks 2.379230–2.456242 GiB and non-reclaimable peaks
+  2.423759–2.508663 GiB. All four were learning-eligible, with zero cgroup
+  memory events and zero swap. Their `resources` reported a learned envelope
+  of 3.276315 GiB with 13–17 accepted observations, versus 7.125 GiB charged
+  from the old declaration. Auto adds ordinary launch slack to the learned
+  figure; it does not substitute a raw resident peak for a cgroup ceiling.
+- Four recent Darwin gates reported 3.827286 GiB learned with 23–25 accepted
+  observations, versus 4.125 GiB charged. Darwin RSS is sampled and admission
+  only; Linux uses enforced cgroups. These are different measurements.
+- Ten additional retained successful Linux attempts had total cgroup peaks
+  3.181683–4.244785 GiB and non-reclaimable peaks 2.274590–2.476593 GiB.
+  Their learned envelopes reached 3.767576 GiB with 48–55 accepted samples.
+  Auto keeps the queue's measured range/25% margin and tracks comparable
+  configuration changes; a fixed lower declaration would discard that adaptation.
 
-Darwin samples process-group RSS every 200 ms: short-lived processes and bursts
-between samples can be missed, and RSS does not measure total cgroup file-cache
-or kernel charges. The 25% margin and rounding provide headroom for observed
-variation and missed bursts; there is no measured Darwin total-charge delta to
-justify another fixed surcharge. This is an observed envelope, not a bound on
-all future growth or a Linux-equivalent total-memory measurement. Ordinary launch
-slack is additional on both platforms. Revisit sizing if the suite grows, pressure
-appears or peaks approach the declaration. Linux cgroups enforce the declaration
-plus configured slack; Darwin is admission-only. A confirmed final-attempt OOM
-appears as `failed (out of memory)` in CI. Unhinted `memory: auto` used to
-explore available host headroom after unusable constrained evidence, which made
-this repeatedly measured CPU gate reserve scarce accelerator capacity; CPU
-first runs are now bounded (see
-[#559](https://github.com/1kuna/mycelium/issues/559)).
+Linux auto validation job `2686318521495ce7787d3a2269635f8a` passed in 1495s,
+with 410.27s submission-to-command-start wait, but was constrained: its learned
+3.276315 GiB + 0.125 GiB slack ceiling recorded 160 `max` events. Total cgroup
+peak was 3.401348 GiB, non-reclaimable peak 2.427307 GiB, with zero swap/OOM.
+This is a lower bound, not a new accepted sizing sample. Keep an explicit Linux
+bound per #559: recent unconstrained total max 4.244785 GiB plus
+max(range 1.063103, 25% of max 1.061196) = 5.307888 GiB, rounded to 6 GiB.
+Its cost is 1.755215 GiB above that recent maximum; it saves 1 GiB per Linux
+full gate versus the previous declaration. #559's older 4.472893 GiB maximum
+also fits below 6 GiB with 34% headroom, though its wider historical range
+would still round to 7 GiB. The revised bound uses the newer retained samples;
+it is not proof against all future suite growth. Darwin has no corresponding
+cgroup ceiling event and keeps its accepted RSS-based auto envelope.
+Unknown configurations can still explore; inspect envelope basis, learning
+reason, memory events and swap after changes.
+
+A bounded recent-history snapshot contained 36 successful Linux full gates:
+submission-to-command-start wait was median 96.65s, maximum 2082.78s (34.71m).
+Fourteen successful Darwin gates waited median 36.65s, maximum 4052.41s (67.54m).
+These include staging and admission, not exclusively RAM wait. Failed and
+cancelled jobs are excluded; unfinished waits are not zero. The task's incident
+report separately observed RAM waits of at least 30m.
+
+A retained failed quick run built/vetted in 22s, finished 116 CLI tests in
+128.095s, and had completed 286 core tests before the 295s supervisor cutoff.
+A recent full run spent 482.033s in CLI and 1708.196s in core tests; the slowest
+journeys were fleet-upgrade (149.46s) and enrollment (135.78s). Removing a broad
+selection's unrelated main-only edits avoids executing these journeys for work
+that did not touch them; genuinely related journeys remain required.
+
+A paired fleet measurement on the same frozen diverged PR source reduced quick
+wall time from 161s to 119s (42s, 26.1%). The old moving-main comparison selected
+77 CLI + 125 core tests; merge-base selected 57 + 72, excluding only main-only
+changes. CLI package wall fell from 124.847s to 83.215s and core from 72.136s
+to 52.121s. Both accepted result markers were fetched and verified. Shared fleet
+occupancy was uncontrolled, so the timing difference is an observed pair, not
+an isolated scheduler or sustained-throughput benchmark. The reported incident's
+three 296s timeouts were a different selection. This patch's validation quick
+passed in 57s; that smaller selection is not the before/after comparator.
+
+CI and PR gates retain the same `test` class and normal queue fairness. Reducing
+the Linux declaration using unconstrained total peaks is the first intervention;
+raising PR class would misstate urgency, and serializing CI would move backlog
+into Actions. No runner services or global queue policy change here. Reconsider
+submission concurrency only if measured waits remain high after right-sizing.
 
 For ad-hoc suites, `myce run --profile go-test -- -race ./...` defaults to the
 same `-timeout 15m` as the full gate. Arguments after `--` go to `go test`; an
@@ -276,9 +319,9 @@ drain. The target is roughly an hour per new merge after that backlog drains.
 Adding runners is the smallest change because the existing submitter already
 waits cheaply through `myce wait`. Ending the workflow after submission would
 lose its verified per-merge result unless a separate completion publisher and
-credential were added. Reducing gate memory is not justified by current evidence:
-the platform declarations above already use measured successful peaks plus
-headroom. Cost: two persistent runner installations, workspaces and small
+credential were added. Subsequent measurements now justify the smaller Linux
+full-gate declaration documented above; the initial runner-capacity estimate
+used the previous declarations. Cost: two persistent runner installations, workspaces and small
 submitter/wait processes, plus overlapping gate demand within ordinary Mycelium
 admission; gate resources, test coverage and result acceptance stay the same.
 
