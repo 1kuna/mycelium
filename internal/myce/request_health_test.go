@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -79,6 +80,7 @@ func TestRequestHealthHealthyHistory(t *testing.T) {
 	for range 4 {
 		for range 1900 {
 			q.requestHealth.recordRequest(c.Now(), "GET /api/workers/{id}/events", 5*time.Second, 0)
+			q.requestHealth.recordRequest(c.Now(), "POST /api/wait", 25*time.Second, 0)
 		}
 		// Healthy history was ~0.4 slow/min; even 99/min is below this detector.
 		for range 99 {
@@ -198,12 +200,14 @@ func TestRequestHealthClientHealthyExclusions(t *testing.T) {
 
 func TestRequestHealthHTTPWiring(t *testing.T) {
 	q, c := fixture(t)
-	handler := (API{Queue: q, Token: "fixture"}).Handler()
+	handler := (API{Queue: q, Token: "fixture"}).handler("", c)
 	for range 2 {
-		for range requestHealthClientPerMinute {
+		for i := range requestHealthClientPerMinute {
 			r := httptest.NewRequest("GET", "/api/jobs/missing?view=wait", nil)
 			r.Header.Set("Authorization", "Bearer fixture")
 			r.Header.Set("User-Agent", "myce/s072")
+			// Independent peers preserve the merged per-source observation budget.
+			r.RemoteAddr = fmt.Sprintf("192.0.2.%d:1234", i/10+1)
 			handler.ServeHTTP(httptest.NewRecorder(), r)
 		}
 		c.Advance(time.Minute)

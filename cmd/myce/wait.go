@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -40,6 +41,8 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 	f := flag.NewFlagSet("wait", flag.ContinueOnError)
 	f.SetOutput(errOut)
 	authority := installedClientFlags(f)
+	observerDir := f.String("observer-dir", "", "private shared profile observer registry")
+	detached := f.Bool("detached", false, "continue after parent exit (explicit managed use only)")
 	receipt := f.String("receipt", "", "private profile receipt directory (managed detached observer)")
 	timeout := f.Duration("timeout", 0, "maximum wait duration; does not cancel jobs (default: unlimited)")
 	f.Usage = func() {
@@ -59,7 +62,7 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 		if strings.HasPrefix(a, "-") {
 			flags = append(flags, a)
 			key := strings.TrimLeft(a, "-")
-			if (key == "queue" || key == "token" || key == "config" || key == "joining-file" || key == "timeout" || key == "receipt") && i+1 < len(args) {
+			if (key == "queue" || key == "token" || key == "config" || key == "joining-file" || key == "timeout" || key == "receipt" || key == "observer-dir") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -72,6 +75,14 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 			return nil
 		}
 		return &exitError{2, err}
+	}
+	if !*detached {
+		var cancel context.CancelFunc
+		ctx, cancel = waitParentContext(ctx, os.Getppid(), time.Second, os.Getppid)
+		defer cancel()
+	}
+	if *observerDir != "" {
+		return waitSharedProfiles(ctx, *observerDir)
 	}
 	if *receipt != "" {
 		return waitProfileReceipt(ctx, *receipt, *timeout)
@@ -127,8 +138,13 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 	completed := map[string]bool{}
 	lastGuidance := map[string]string{}
 	observed := map[string]bool{}
+	revisions := map[string]uint64{}
+	batchSupported := false
 	for _, id := range ids {
 		pending[id] = true
+	}
+	if len(pending) > 256 {
+		return waitError(2, "wait accepts at most 256 job IDs; use one wait per batch")
 	}
 	deadline := clock.Now().Add(timeout)
 	delay := 3 * time.Second
@@ -147,6 +163,8 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 		}
 		unavailable := false
 		var readErr error
+		var batchJobs map[string]*myce.Job
+		var batchErr error
 		for _, id := range ids {
 			if !pending[id] {
 				continue
@@ -166,7 +184,26 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 			if !observed[id] {
 				read = c.GetJob
 			}
-			j, err := read(requestCtx, id)
+			var j *myce.Job
+			var err error
+			if batchSupported {
+				if batchJobs == nil {
+					batchJobs = map[string]*myce.Job{}
+					var reply myce.WaitReply
+					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, min(20, int(max(0, budget-time.Second)/time.Second)))
+					if batchErr == nil {
+						for i, state := range reply.Jobs {
+							revisions[state.ID] = state.Revision
+							batchJobs[ids[i]] = &myce.Job{ID: state.ID, State: state.State, Reason: state.Reason}
+						}
+					}
+				}
+				j, err = batchJobs[id], batchErr
+			} else if !observed[id] {
+				j, batchSupported, err = c.GetJobWaitCapability(requestCtx, id)
+			} else {
+				j, err = read(requestCtx, id)
+			}
 			deadlineExpired := requestCtx.Err() == context.DeadlineExceeded
 			cancel()
 			if ctx.Err() != nil {

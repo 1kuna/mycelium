@@ -65,9 +65,10 @@ func (h *requestHealth) recordRequest(now time.Time, route string, duration, wai
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	b := h.minute(now)
-	// Worker event requests intentionally wait up to five seconds. Their actual
+	// Worker events and batched consumer waits intentionally long-poll. Actual
 	// mutex wait still counts; only intentional response duration is excluded.
-	if route != "GET /api/workers/{id}/events" && duration > requestSlowThreshold {
+	intentionalWait := route == "GET /api/workers/{id}/events" || route == "POST /api/wait"
+	if !intentionalWait && duration > requestSlowThreshold {
 		b.slow++
 	}
 	if wait >= time.Second {

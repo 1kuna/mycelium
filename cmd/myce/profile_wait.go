@@ -115,53 +115,17 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 	if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 		return err
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	ready, writeReady, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-	defer ready.Close()
-	defer writeReady.Close()
-	cmd := exec.Command(executable, "wait", "--receipt", dir)
-	cmd.Env = append(notifierEnvironment(), "MYCE_PROFILE_OBSERVER=1")
-	if token != "" {
-		cmd.Env = append(cmd.Env, "MYCE_TOKEN="+token)
-	}
-	cmd.ExtraFiles = []*os.File{lock, writeReady}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	// No inherited stdio pipe or terminal may keep the submitting session alive.
-	if err = cmd.Start(); err != nil {
-		r.Observation = "not_armed"
-		if r.Delivery == "armed" {
-			r.Delivery = "not_armed"
+	if err := registerSharedObserver(ctx, dir, cfg, token); err != nil {
+		r.Observation, r.ObservationError = "not_armed", "observer_registration"
+		r.Delivery = "not_armed"
+		if cfg.Notify == "" {
+			r.Delivery = "not_configured"
 		}
-		_ = saveProfileJSON(filepath.Join(dir, "receipt.json"), r)
-		return err
-	}
-	writeReady.Close()
-	ack := make(chan error, 1)
-	go func() { var b [1]byte; _, e := io.ReadFull(ready, b[:]); ack <- e }()
-	startup, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	select {
-	case err = <-ack:
-	case <-startup.Done():
-		err = startup.Err()
-	}
-	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		r.Observation = "not_armed"
-		if r.Delivery == "armed" {
-			r.Delivery = "not_armed"
+		if saveErr := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); saveErr != nil {
+			return errors.Join(err, saveErr)
 		}
-		_ = saveProfileJSON(filepath.Join(dir, "receipt.json"), r)
 		return err
 	}
-	_ = cmd.Process.Release()
 	return readProfileJSON(filepath.Join(dir, "receipt.json"), r)
 }
 
@@ -217,6 +181,10 @@ func waitProfileReceipt(ctx context.Context, dir string, timeout time.Duration) 
 
 func observeProfile(ctx context.Context, c myce.Client, dir string, r profileReceipt, cfg profileObserver) error {
 	j, waitErr := c.WaitSubmitted(ctx, &myce.Job{ID: r.JobID, State: r.Status})
+	return finishProfileObservation(ctx, dir, r, cfg, j, waitErr)
+}
+
+func finishProfileObservation(ctx context.Context, dir string, r profileReceipt, cfg profileObserver, j *myce.Job, waitErr error, notifyEnv ...[]string) error {
 	r.Observation = "not_armed"
 	r.Delivery = "not_configured"
 	if cfg.Notify != "" {
@@ -225,9 +193,9 @@ func observeProfile(ctx context.Context, c myce.Client, dir string, r profileRec
 	notification := profileNotification{JobID: r.JobID, Key: r.Key}
 	if waitErr != nil {
 		r.ObservationError = "transport_error"
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(waitErr, context.DeadlineExceeded) {
 			r.ObservationError = "timeout"
-		} else if errors.Is(ctx.Err(), context.Canceled) {
+		} else if errors.Is(ctx.Err(), context.Canceled) || errors.Is(waitErr, context.Canceled) {
 			r.ObservationError = "interrupted"
 		} else if myce.IsTLSIdentityError(waitErr) {
 			r.ObservationError = "tls_identity"
@@ -249,9 +217,14 @@ func observeProfile(ctx context.Context, c myce.Client, dir string, r profileRec
 		b, _ := json.Marshal(notification)
 		// Observation cancellation must still report its failure. The notifier owns
 		// delivery deadlines/retries and gets no fleet token or diagnostic text.
-		cmd := exec.Command(cfg.Notify)
+		deliveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(deliveryCtx, cfg.Notify)
 		cmd.Stdin = strings.NewReader(string(b))
 		cmd.Env = notifierEnvironment()
+		if len(notifyEnv) > 0 && notifyEnv[0] != nil {
+			cmd.Env = notifyEnv[0]
+		}
 		deliveryErr := cmd.Run()
 		r.DeliveryStatus = "delivered"
 		if deliveryErr != nil {

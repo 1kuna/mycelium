@@ -97,6 +97,8 @@ func (c Client) WaitSubmitted(ctx context.Context, receipt *Job, updates ...func
 	if receipt == nil || receipt.ID == "" {
 		return nil, errors.New("wait-submitted requires an accepted job receipt")
 	}
+	ctx, cancel := context.WithTimeout(ctx, DefaultWaitTimeout)
+	defer cancel()
 	return c.wait(ctx, receipt.ID, receipt, updates)
 }
 
@@ -147,6 +149,8 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 	const poll = time.Second
 	delay := poll
 	last := receipt
+	batchSupported := false
+	revisions := map[string]uint64{}
 	var initial *Job
 	waitError := func(cause error) error {
 		err := jobWaitError(id, last, cause)
@@ -168,7 +172,24 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 		if initial == nil {
 			read = c.GetJob
 		}
-		j, err := read(ctx, id)
+		var j *Job
+		var err error
+		if batchSupported {
+			var reply WaitReply
+			reply, err = c.WaitBatch(ctx, []string{id}, revisions, 5)
+			if err == nil {
+				state := reply.Jobs[0]
+				revisions[state.ID] = state.Revision
+				j = &Job{ID: state.ID, State: state.State, Reason: state.Reason}
+				if terminal(j.State) {
+					j, err = c.GetJobForWait(ctx, state.ID)
+				}
+			}
+		} else if initial == nil {
+			j, batchSupported, err = c.GetJobWaitCapability(ctx, id)
+		} else {
+			j, err = read(ctx, id)
+		}
 		if ctx.Err() != nil {
 			return last, waitError(ctx.Err())
 		}

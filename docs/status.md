@@ -1366,7 +1366,7 @@ not send a second notification or change admission, retries, or release custody.
 
 - `queue_overload`: two consecutive complete one-minute windows each contain
   at least 100 slow responses (over one second), or at least 20 requests with
-  measured queue mutex wait of at least one second. Intentional worker event
+  measured queue mutex wait of at least one second. Intentional worker event and batched consumer wait
   long-poll duration is excluded from slow-response counts; its actual lock wait
   still counts. One busy minute does not alert. This catches the recorded roughly
   1,900 slow responses/minute and waits up to 15 seconds, while excluding the
@@ -1442,6 +1442,35 @@ including effective production pins. `coverage_since` bounds the current
 uninterrupted coverage period; a rollback through an older binary can create
 a gap even though older events remain readable. Unknown legacy times remain absent.
 A status snapshot's `loaded_models` alone cannot rule out transient arrivals.
+
+## Batched waits and consumer flood protection
+
+`POST /api/wait` accepts `{"ids":["JOB_A","JOB_B"],"after":{"JOB_A":1},"seconds":20}`.
+The first request may omit `after` and returns immediately. Replies contain
+`jobs`, an ordered array of scalar `id`, `state`, sanitized `reason` and
+`revision` records. Send the returned revisions on the next request; it waits
+until a selected record changes, becomes terminal, or the transport timeout
+expires. Use exact IDs after initial prefix resolution. The maximum is 256 IDs
+and 20 seconds; malformed/empty requests receive `wait_invalid`. Unknown and
+ambiguous IDs retain typed errors. Cancellation releases the transport wait.
+The committed scalar index uses its own mutex; waiting never takes the queue
+control mutex. Rollbacks cannot publish or wake consumers. HTTP job GET replies
+advertise `X-Myce-Wait: batch-v1`; clients without this capability retain legacy
+wait reads. Pending legacy wait reads also use the index; ordinary terminal
+GETs retain the full public Job contract.
+
+Consumer job/status/inspection/usage/portability GET/HEAD requests and batch waits share a token bucket by transport
+source address, ignoring ports and untrusted forwarding/client headers: 5/s,
+burst 10. All worker protocol routes, including checkpoint publication, event
+streams, check-ins and launch authorization, are exempt. File transfers,
+instruction/catalog polls and environment references remain exempt worker
+dependencies as well. A refused observation
+returns HTTP 429 `client_rate_limited` and `Retry-After: 1` before queue work.
+The incident rate was 8,206 slow job reads in five minutes (27.4/s); the cap
+reduces one source's sustained rate by at least 82%. Batched idle waits need
+one request per 20 seconds. Sources behind one proxy/NAT share the allowance;
+worker control still remains exempt. The bounded source table refuses new
+sources at capacity rather than resetting active allowances.
 
 ## Job GET request attribution
 

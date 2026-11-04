@@ -111,6 +111,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	waitStates          *waitStateIndex // scalar committed wait observations; separate reader mutex.
 	modelIntervalWrites []ModelIntervalEvent
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin *Queue
@@ -599,6 +600,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 	}
 
 	if err == nil {
+		q.publishWaitStates(oldCalls)
 		q.invalidateCallSnapshots(oldCalls)
 		q.invalidateTerminalStatus()
 		q.commitRecords()

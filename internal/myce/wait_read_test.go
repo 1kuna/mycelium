@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +17,9 @@ import (
 
 func waitReadRequest(handler http.Handler, id, query string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest("GET", "/api/jobs/"+id+query, nil)
+	// This projection/load fixture models independent transport peers. The
+	// separate limiter regression covers the now-invalid unlimited single-peer load.
+	r.RemoteAddr = net.JoinHostPort("fixture-"+id, "1234")
 	r.Header.Set("Authorization", "Bearer fixture")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
@@ -63,7 +67,7 @@ func TestWaitReadConcurrentPolling(t *testing.T) {
 			captures.Add(1)
 		}
 	}
-	handler := (API{Queue: q, Token: "fixture"}).Handler()
+	handler := (API{Queue: q, Token: "fixture"}).handler("", clock)
 	for _, query := range []string{"", "?view=wait"} {
 		captures.Store(0)
 		for range 20 {
@@ -138,7 +142,7 @@ func BenchmarkWaitRead(b *testing.B) {
 				ids[i] = fmt.Sprintf("pending-%04d", i)
 				q.s.Jobs[ids[i]] = &Job{ID: ids[i], Spec: spec("experiment"), State: "queued", Queued: clock.Now()}
 			}
-			handler := (API{Queue: q, Token: "fixture"}).Handler()
+			handler := (API{Queue: q, Token: "fixture"}).handler("", clock)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
