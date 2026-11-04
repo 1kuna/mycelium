@@ -42,7 +42,7 @@ func attemptOutcome(j *Job, r Result) AttemptOutcome {
 	return AttemptOutcome{
 		Placement: j.Placement,
 		Attempt:   j.Attempt, Machine: j.Machine, Session: j.Session,
-		ExecutionCause: safeJobRuntimeCause(j.Spec, r.ExecutionCause), CleanupCause: safeRuntimeCause(r.CleanupCause),
+		ExecutionCause: safeAttemptRuntimeCause(j, r.ExecutionCause), CleanupCause: safeRuntimeCause(r.CleanupCause),
 		Interrupted: r.Interrupted, OutOfMemory: r.OutOfMemory,
 		PoliteStop: r.PoliteStop, OperatorStop: r.OperatorStop || plannedMaintenanceStop(j),
 		PriorityStop: r.PriorityStop,

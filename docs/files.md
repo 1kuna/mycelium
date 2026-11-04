@@ -372,6 +372,19 @@ Local I/O, permissions, capacity and transient storage/transport failures before
 launch use the existing infrastructure retry policy, including its production
 retry bound. `input_unavailable` with `blob_missing` or `blob_expired`, and
 `invalid_input`, require consumer action rather than infrastructure retries.
+Missing authored NAS inputs also require corrected inputs rather than retries.
+
+Shared-input admission reports `resource_limit` with operation
+`shared_input_admission`, error `cache_space`, and `capacity` identifying
+`shared_input_cache` or `disk_free_floor`. `required_bytes`, `available_bytes`
+and `limit_bytes` give the comparison (zero values may be omitted). Shared
+inputs are admitted before source/plan blobs or command execution. Each worker's
+`--file-cache-bytes` also sets its separate shared-input cache budget (default
+10 GiB); all shared inputs held by an attempt must fit together, with active
+entries protected from eviction. Free physical disk alone does not increase
+that budget. Ask the fleet owner to coordinate a configuration increase, or
+split the workload into attempts whose simultaneous inputs fit. Re-uploading
+identical inputs or clearing caches cannot fix an input larger than the budget.
 
 Receipts identify bytes; they do not reserve those blobs forever. A new
 submission verifies every referenced input outside the queue lock, while the

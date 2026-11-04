@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -194,5 +196,136 @@ func TestStagingStorageErrorSurvivesHead(t *testing.T) {
 	var se *stagingError
 	if !errors.As(err, &se) || se.detail.Operation != "store_sync" || se.detail.Error != "EIO" || se.detail.Status != 503 || !stagingRetryable(err) {
 		t.Fatal("HEAD lost storage error", err)
+	}
+}
+
+// #720's incident shape: a shared input larger than the default cache fails
+// admission before any source archive, plan blob, NAS read or environment launch.
+func TestStagingSharedInputCapacityBeforeSourceReads(t *testing.T) {
+	_, clock := fixture(t)
+	w := Worker{StateDir: newTestStateRoot(t), Clock: clock}
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	if err := w.initFileTransfers(context.Background(), store); err != nil {
+		t.Fatal(err)
+	}
+	input := SharedInput{NAS: "media/large", SHA256: strings.Repeat("a", 64), SizeBytes: 11 << 30}
+	j := Job{Spec: Spec{Files: FileManifest{".myce-source.tar": {SHA256: strings.Repeat("b", 64), SizeBytes: 10}, "plan.json": {SHA256: strings.Repeat("c", 64), SizeBytes: 10}}, SharedInputs: map[string]SharedInput{"large": input}}}
+	w.sharedInputs.resolveNAS = func(string, string) (string, error) {
+		t.Error("NAS read reached before impossible admission")
+		return "", syscall.EIO
+	}
+	_, release, err := w.acquireSharedInputs(context.Background(), j)
+	if release != nil {
+		release()
+	}
+	if err == nil {
+		t.Fatal("oversized shared input admitted")
+	}
+	cause := runtimeDiagnostic(runtimeErrorFor("input_staging", err))
+	d := cause.Staging
+	if cause.Class != "resource_limit" || d == nil || d.Input != "shared_inputs/large" || d.Blob != input.SHA256 || d.Operation != "shared_input_admission" || d.Error != "cache_space" || d.RequiredBytes != 11<<30 || d.LimitBytes != 10<<30 || d.AvailableBytes > 10<<30 || !stagingRetryable(err) {
+		t.Fatalf("lost actual capacity failure: %+v %v", d, err)
+	}
+}
+
+func TestStagingLogFailureDoesNotBlockCompletion(t *testing.T) {
+	q, clock := fixture(t)
+	j := submit(t, q, spec("production"))
+	m := machine("staging", "fake")
+	assigned := check(t, q, m, nil).Job
+	w := Worker{StateDir: newTestStateRoot(t), Clock: clock, Machine: m}
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	store.state.Job, store.state.Session = assigned, assigned.Session
+	logName := fmt.Sprintf("staging-%s-%d.log", assigned.ID, assigned.Attempt)
+	if err := os.Mkdir(filepath.Join(store.dir, logName), 0700); err != nil {
+		t.Fatal(err)
+	}
+	failure := w.stagingFailure(store, *assigned, withStagingCause("", FileRef{}, "publish", syscall.EIO))
+	if store.state.Log != "" {
+		t.Fatal("uncreated log retained as replay obligation")
+	}
+	if err := w.replay(context.Background(), store); err != nil {
+		t.Fatal("log creation failure blocked completion", err)
+	}
+	if err := q.Complete(startFailureOutcome(result(assigned, false), failure)); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, j.ID); got.State != "queued" || got.InfrastructureRetries != 1 {
+		t.Fatal("bounded infrastructure retry stranded", got)
+	}
+}
+
+func TestStagingDependencyCauseSurvivesCompletion(t *testing.T) {
+	for _, stored := range []bool{false, true} {
+		t.Run(fmt.Sprint(stored), func(t *testing.T) {
+			q, _ := fixture(t)
+			submitted := submit(t, q, spec("experiment"))
+			assigned := check(t, q, machine("staging", "fake"), nil).Job
+			ref := FileRef{SHA256: strings.Repeat("a", 64), SizeBytes: 1}
+			dep := &PieceBinding{}
+			if stored {
+				dep.Files = FileManifest{"upstream/input": ref}
+			} else {
+				dep.Inputs = map[string]string{"upstream/input": "upstream/output"}
+				ref = FileRef{}
+			}
+			if err := q.update(func() error { q.touchJob(submitted.ID).Dependency = dep; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			r := result(assigned, false)
+			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("input_staging", withStagingCause("upstream/input", ref, "copy", syscall.EIO)))
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			got := job(t, q, submitted.ID)
+			if got.ExecutionCause == nil || got.ExecutionCause.Staging == nil || got.ExecutionCause.Staging.Input != "upstream/input" || len(got.AttemptHistory) != 1 || got.AttemptHistory[0].ExecutionCause.Staging == nil {
+				t.Fatal("resolved dependency source stripped", got)
+			}
+		})
+	}
+}
+
+func TestStagingOrdinaryNASMissingIsActionable(t *testing.T) {
+	q, clock := fixture(t)
+	e := fakeExtension(t)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	s := Spec{Name: "missing-input", Project: "test", Priority: "experiment", Kind: "sample", Inputs: map[string]string{"input": "missing"}}
+	submitted := submit(t, q, s)
+	m := machine("staging", "fake")
+	m.HostMemoryMeasured, m.FreeHostMemoryGB, m.HostAvailableMemoryGB = true, 8, 8
+	m.ExtensionReports = installQualified(t, t.TempDir(), e, "")
+	assigned := check(t, q, m, nil).Job
+	if assigned == nil {
+		t.Fatal("not assigned", job(t, q, submitted.ID))
+	}
+	w := Worker{StateDir: newTestStateRoot(t), JobFileRoot: t.TempDir(), Clock: clock, Machine: m}
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	err = w.prepareExtensionFilesContext(context.Background(), assigned, store.dir)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("missing NAS input did not fail", err)
+	}
+	r := startFailureOutcome(result(assigned, false), w.stagingFailure(store, *assigned, err))
+	if r.Interrupted || r.ExecutionCause == nil || r.ExecutionCause.Staging == nil || r.ExecutionCause.Staging.Input != "input" || r.ExecutionCause.Staging.Operation != "nas_read" {
+		t.Fatal("authored NAS absence became infrastructure", r)
+	}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, submitted.ID); got.State != "failed" || got.Losses != 0 {
+		t.Fatal("missing authored input retried", got)
 	}
 }

@@ -1783,7 +1783,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	if err != nil {
 		return err
 	}
-	r.ExecutionCause = safeJobRuntimeCause(j.Spec, r.ExecutionCause)
+	r.ExecutionCause = safeAttemptRuntimeCause(j, r.ExecutionCause)
 	if r.ExecutionCause != nil && r.ExecutionCause.Operation == "input_staging" {
 		// Keep the durable reason as safe as the structured cause; Error may
 		// contain the original worker-supplied diagnostic name or private text.

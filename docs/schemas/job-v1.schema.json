@@ -3809,7 +3809,13 @@
     },
     "StagingCause": {
       "properties": {
+        "available_bytes": {
+          "type": "integer"
+        },
         "blob": {
+          "type": "string"
+        },
+        "capacity": {
           "type": "string"
         },
         "error": {
@@ -3818,8 +3824,14 @@
         "input": {
           "type": "string"
         },
+        "limit_bytes": {
+          "type": "integer"
+        },
         "operation": {
           "type": "string"
+        },
+        "required_bytes": {
+          "type": "integer"
         },
         "status": {
           "type": "integer"

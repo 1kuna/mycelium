@@ -261,6 +261,8 @@ func runtimeErrorFor(operation string, err error) error {
 	}
 	if c.Staging != nil {
 		switch c.Staging.Error {
+		case "cache_space", "cache_limit":
+			c.Class = "resource_limit"
 		case "blob_missing", "blob_expired":
 			c.Class = "input_unavailable"
 		case "invalid_source", "invalid_input":

@@ -121,3 +121,11 @@ func safeJobRuntimeCause(spec Spec, c *RuntimeCause) *RuntimeCause {
 	}
 	return out
 }
+
+// Resolved dependency inputs are queue-owned attempt data, not authored Spec.
+// Use the same merged view as staging before retaining an input's name/hash.
+func safeAttemptRuntimeCause(j *Job, c *RuntimeCause) *RuntimeCause {
+	spec := j.Spec
+	spec.Files, spec.Inputs = jobInputFiles(j), jobInputPaths(j)
+	return safeJobRuntimeCause(spec, c)
+}

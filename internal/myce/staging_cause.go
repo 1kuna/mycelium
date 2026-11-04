@@ -16,12 +16,16 @@ import (
 // StagingCause names logical inputs and operations, never expanded worker paths
 // or untrusted transport text. The underlying error remains in the local chain.
 type StagingCause struct {
-	Input     string `json:"input,omitempty"`
-	Blob      string `json:"blob,omitempty"`
-	Operation string `json:"operation"`
-	Error     string `json:"error"`
-	Syscall   string `json:"syscall,omitempty"`
-	Status    int    `json:"status,omitempty"`
+	RequiredBytes  int64  `json:"required_bytes,omitempty"`
+	AvailableBytes int64  `json:"available_bytes,omitempty"`
+	LimitBytes     int64  `json:"limit_bytes,omitempty"`
+	Capacity       string `json:"capacity,omitempty"`
+	Input          string `json:"input,omitempty"`
+	Blob           string `json:"blob,omitempty"`
+	Operation      string `json:"operation"`
+	Error          string `json:"error"`
+	Syscall        string `json:"syscall,omitempty"`
+	Status         int    `json:"status,omitempty"`
 }
 
 func (d StagingCause) String() string {
@@ -31,6 +35,9 @@ func (d StagingCause) String() string {
 	}
 	if d.Status != 0 {
 		text += fmt.Sprintf(" status=%d", d.Status)
+	}
+	if d.Capacity != "" {
+		text += fmt.Sprintf(" capacity=%s required_bytes=%d available_bytes=%d limit_bytes=%d", d.Capacity, d.RequiredBytes, d.AvailableBytes, d.LimitBytes)
 	}
 	return text
 }
@@ -43,7 +50,16 @@ type stagingError struct {
 func (e *stagingError) Error() string { return e.detail.String() }
 func (e *stagingError) Unwrap() error { return e.cause }
 
-var stagingOperations = strings.Fields("store_resolve store_open store_stat store_verify store_refresh store_sync store_seek prepare cache_init cache_scan cache_admission cache_verify cache_evict cache_download cache_publish copy source_extract source_replace nas_read extension_write batch_write sync publish shared_input model_snapshot submit_verify")
+type stagingCapacityError struct {
+	required, available, limit int64
+	capacity                   string
+}
+
+func (e *stagingCapacityError) Error() string {
+	return fmt.Sprintf("disk_headroom: %s capacity: required=%d available=%d limit=%d", e.capacity, e.required, e.available, e.limit)
+}
+
+var stagingOperations = strings.Fields("store_resolve store_open store_stat store_verify store_refresh store_sync store_seek shared_input_admission prepare cache_init cache_scan cache_admission cache_verify cache_evict cache_download cache_publish copy source_extract source_replace nas_read extension_write batch_write sync publish shared_input model_snapshot submit_verify")
 var stagingErrors = strings.Fields("io_error permission_denied timeout cancelled EOF unexpected_EOF ENOENT EACCES EPERM ENOSPC EDQUOT EIO EROFS ENOTDIR EISDIR EEXIST EMFILE ENFILE ECONNREFUSED ECONNRESET EPIPE blob_missing blob_expired blob_unavailable identity_mismatch invalid_source invalid_cache_entry cache_limit cache_space invalid_input")
 
 func stagingErrorName(err error) string {
@@ -102,6 +118,12 @@ func withStagingCause(input string, ref FileRef, operation string, err error) er
 		return nil
 	}
 	d := StagingCause{Input: input, Blob: ref.SHA256, Operation: operation, Error: stagingErrorName(err)}
+	var capacity *stagingCapacityError
+	if errors.As(err, &capacity) {
+		d.RequiredBytes, d.AvailableBytes, d.LimitBytes, d.Capacity = capacity.required, capacity.available, capacity.limit, capacity.capacity
+		d.Operation = "shared_input_admission"
+		d.Error = "cache_space"
+	}
 	var se *stagingError
 	if errors.As(err, &se) {
 		d = se.detail
@@ -136,6 +158,10 @@ func safeStagingCause(d *StagingCause) *StagingCause {
 		return nil
 	}
 	out := *d
+	if !contains([]string{"shared_input_cache", "disk_free_floor"}, out.Capacity) || out.RequiredBytes < 0 || out.AvailableBytes < 0 || out.LimitBytes < 0 {
+		out.Capacity = ""
+		out.RequiredBytes, out.AvailableBytes, out.LimitBytes = 0, 0, 0
+	}
 	if !contains(strings.Fields("open read write close mkdir mkdirat lstat stat chmod chtimes rename unlink unlinkat remove sync fsync symlink readlink readdir seek truncate"), out.Syscall) {
 		out.Syscall = ""
 	}
@@ -170,6 +196,9 @@ func stagingRetryable(err error) bool {
 	} // Typed immutable model refusal.
 	var se *stagingError
 	if errors.As(err, &se) {
+		if se.detail.Operation == "nas_read" && se.detail.Error == "ENOENT" {
+			return false
+		}
 		if se.detail.Operation == "source_extract" && (se.detail.Error == "EOF" || se.detail.Error == "unexpected_EOF") {
 			return false
 		}
@@ -196,13 +225,17 @@ func (w Worker) stagingFailure(s *workerStore, j Job, err error) error {
 	// Create the normal replay spool before process launch so myce logs has the
 	// same safe cause even when no payload log could be opened.
 	if j.Spec.Logs != "none" {
-		if s.state.Log == "" {
-			s.state.Log = fmt.Sprintf("staging-%s-%d.log", j.ID, j.Attempt)
+		name := s.state.Log
+		if name == "" {
+			name = fmt.Sprintf("staging-%s-%d.log", j.ID, j.Attempt)
 		}
-		f, e := os.OpenFile(filepath.Join(s.dir, s.state.Log), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		f, e := os.OpenFile(filepath.Join(s.dir, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if e == nil {
 			_, e = fmt.Fprintln(f, wrapped.Error())
 			e = errors.Join(e, f.Sync(), f.Close())
+		}
+		if e == nil {
+			s.state.Log = name
 		}
 		if e != nil {
 			log.Printf("input staging log unavailable job=%s attempt=%d: %v", j.ID, j.Attempt, e)

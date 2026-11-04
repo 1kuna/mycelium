@@ -435,7 +435,9 @@ it resolves the actual managed workspace and symlinks on that host.
 
 Input-staging failures carry `execution_cause.staging` on the job and exact
 attempt history: `input`, `blob` (SHA-256), `operation`, `error`, optional
-`syscall`, and optional HTTP `status`. Names are bound to declared inputs;
+`syscall`, and optional HTTP `status`. Capacity failures also name `capacity`
+and byte comparisons (`required_bytes`, `available_bytes`, `limit_bytes`;
+zero values may be omitted). Names are bound to declared and resolved dependency inputs;
 expanded worker paths and raw upstream text are excluded. `myce logs JOB_ID`
 also includes the safe prelaunch cause unless `logs: none`. Infrastructure
 staging failures follow existing retry accounting; missing/expired referenced

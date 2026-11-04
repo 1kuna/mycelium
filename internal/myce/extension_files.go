@@ -188,6 +188,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 			return err
 		}
 	}
+	input, ref, operation = "", FileRef{}, "nas_read"
 	if err := stageJobFilesContext(ctx, jobInputPaths(j), func(name, source string) error {
 		p, err := sharedInputPath(ctx, w.JobFileRoot, source)
 		if err != nil {
