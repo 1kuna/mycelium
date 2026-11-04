@@ -1,5 +1,32 @@
 package myce
 
+// Memory pressure during a refused launch or infrastructure stop says nothing
+// about the payload's need. A positively classified OOM still wins a stop race.
+func memoryConstraintResult(started bool, r Result) bool {
+	if r.OutOfMemory {
+		return true
+	}
+	if r.ReleaseOnly || !started {
+		return false
+	}
+	if c := r.ExecutionCause; c != nil {
+		if c.PrelaunchRefused || c.Predicate == "launch_authorization" {
+			return false
+		}
+		switch c.Operation {
+		case "launch", "start_authorization", "start_handoff", "teardown", "start_deadline":
+			return false
+		}
+	}
+	return !r.Interrupted || r.ExecutionCause != nil && r.ExecutionCause.ExitCode != nil
+}
+
+func memoryConstraintFacts(facts AttemptMemoryFacts) bool {
+	// Classify once at completion, before retry clears attempt state. Raw event
+	// counters remain diagnostics, even when they imply pressure by themselves.
+	return facts.LearningReason != "infrastructure_interrupted" && facts.LearningReason != "release_only"
+}
+
 // eligibleMemorySample is the input to every successful-attempt memory writer.
 // Only memoryLearningSample constructs it, after checking outcome, custody and
 // pressure. gateBuilt rejects zero/field-built values at runtime; the source
@@ -24,6 +51,8 @@ func (q *Queue) memoryLearningSample(j *Job, r Result) (*eligibleMemorySample, s
 		return nil, "release_only"
 	case r.OutOfMemory:
 		return nil, "oom"
+	case !memoryConstraintResult(j.StartedAt != nil, r):
+		return nil, "infrastructure_interrupted"
 	case !r.Success:
 		return nil, "attempt_failed"
 	case j.StartedAt == nil:

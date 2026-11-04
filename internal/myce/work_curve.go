@@ -282,6 +282,9 @@ func (p WorkObservation) summary(state string) string {
 // Explicit OOMs forbid their performance point; auto OOMs and failed constrained
 // attempts invalidate comparable memory so exploration can re-teach it.
 func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
+	if !oomFailure && !memoryConstraintResult(j.StartedAt != nil, r) {
+		return
+	}
 	memoryOnly := j.Spec.Needs.Memory == "auto" || !oomFailure
 	var key *ObservationKey
 	if j.Timing != nil {

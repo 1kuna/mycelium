@@ -117,6 +117,9 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 	if facts.MemoryPeak != nil && facts.MemoryPeak.Source != processGroupMemorySource {
 		facts.MemoryPeak.Source = "" // Only publish the known measurement label.
 	}
+	if facts.MemoryPeak != nil && facts.LearningReason == "infrastructure_interrupted" {
+		facts.MemoryPeak.Constrained = false
+	}
 	if j.MemoryEnvelope != nil {
 		envelope := *j.MemoryEnvelope
 		facts.MemoryEnvelope = &envelope
@@ -128,6 +131,9 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 				// eligibility decision of the accepted completion.
 				if r.ReleaseOnly && old.LearningReason != "" {
 					facts.LearningReason = old.LearningReason
+					if facts.LearningReason == "infrastructure_interrupted" {
+						facts.MemoryPeak.Constrained = false
+					}
 					if old.MemoryPeak != nil && old.MemoryPeak.Pressure != nil {
 						facts.MemoryPeak.Pressure = old.MemoryPeak.Pressure
 					}
