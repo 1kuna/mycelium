@@ -29,7 +29,7 @@ func (f *targetFit) check(ok bool, dimension string) bool {
 		}
 		f.failures++
 		switch dimension {
-		case "target", "platform", "device", "environment", "extension", "allow-list", "native network isolation":
+		case "tools", "target", "platform", "device", "environment", "extension", "allow-list", "native network isolation":
 			f.ineligible++
 		}
 	}
@@ -77,6 +77,8 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		return strings.Join(parts, "/")
 	}
 	switch dimension {
+	case "tools":
+		return missingToolsReason(m.ID, missingTools(j, m))
 	case "native network isolation":
 		if !j.Spec.Needs.Network {
 			return "native_isolation_unavailable: this host has not reported a supported native kernel boundary; upgrade or repair the worker"
