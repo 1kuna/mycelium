@@ -26,7 +26,7 @@ type WorkerProbeDefaults struct {
 	// Nil disables per-attempt process sampling on hosts without cgroups.
 	ProcessMemory func() *processMemoryProbe
 	// Nil disables process-tree CPU observation; cgroup accounting remains available.
-	ProcessCPU func(context.Context, int) (float64, string, error)
+	ProcessCPU func(context.Context, int, string) (float64, string, error)
 }
 
 // SetWorkerProbeDefaults installs complete defaults during process setup.

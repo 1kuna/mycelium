@@ -180,7 +180,7 @@ func livenessTreeCPU(data []byte, root int) (float64, string, error) {
 
 var workerLivenessCPU = localLivenessCPU
 
-func livenessProcessCPU(ctx context.Context, p *process, source func(context.Context, int) (float64, string, error)) (float64, string, error) {
+func livenessProcessCPU(ctx context.Context, p *process, source func(context.Context, int, string) (float64, string, error)) (float64, string, error) {
 	p.mu.Lock()
 	cmd := p.cmd
 	memory := p.memory
@@ -189,8 +189,12 @@ func livenessProcessCPU(ctx context.Context, p *process, source func(context.Con
 		memory = p.native.memory
 	}
 	root := 0
+	birth := p.birth
 	if cmd != nil && cmd.Process != nil {
 		root = cmd.Process.Pid
+		if p.native != nil {
+			birth = p.native.custody.Groups[root][root]
+		}
 	}
 	docker := p.docker
 	p.mu.Unlock()
@@ -206,10 +210,10 @@ func livenessProcessCPU(ctx context.Context, p *process, source func(context.Con
 	}
 	// Never mistake a Docker client for container CPU; remote/Desktop containers
 	// without a verified local aggregate stay unknown.
-	if root == 0 || docker != nil || source == nil {
+	if root == 0 || birth == "" || docker != nil || source == nil {
 		return 0, "", errLivenessUnavailable
 	}
-	return source(ctx, root)
+	return source(ctx, root, birth)
 }
 
 func livenessCgroupCPU(memory *memoryAttempt) (float64, error) {
@@ -231,22 +235,30 @@ func livenessCgroupCPU(memory *memoryAttempt) (float64, error) {
 	return 0, errLivenessUnavailable
 }
 
-func localLivenessCPU(ctx context.Context, root int) (float64, string, error) {
+func localLivenessCPU(ctx context.Context, root int, ownedBirth string) (float64, string, error) {
 	probeguard.Check()
-	birth, err := processBirth(root)
-	if err != nil {
-		return 0, "", err
-	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	probe := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=,ppid=,pgid=,time=,lstart=")
-	probe.WaitDelay = time.Second
-	data, err := probe.Output()
+	return sampleLivenessCPU(ctx, root, ownedBirth, processBirth, func(ctx context.Context) ([]byte, error) {
+		probe := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=,ppid=,pgid=,time=,lstart=")
+		probe.WaitDelay = time.Second
+		return probe.Output()
+	})
+}
+
+// The launch custody identity, not the first observation, owns the anchor.
+// Checking only equality across one ps call can adopt a PID reused beforehand.
+func sampleLivenessCPU(ctx context.Context, root int, ownedBirth string, birth func(int) (string, error), inventory func(context.Context) ([]byte, error)) (float64, string, error) {
+	before, err := birth(root)
+	if err != nil || ownedBirth == "" || before != ownedBirth {
+		return 0, "", errLivenessUnavailable
+	}
+	data, err := inventory(ctx)
 	if err != nil || ctx.Err() != nil {
 		return 0, "", errLivenessUnavailable
 	}
-	after, err := processBirth(root)
-	if err != nil || after != birth {
+	after, err := birth(root)
+	if err != nil || after != ownedBirth {
 		return 0, "", errLivenessUnavailable
 	}
 	return livenessTreeCPU(data, root)

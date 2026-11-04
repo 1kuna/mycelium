@@ -146,7 +146,9 @@ The worker samples no more often than every five seconds, separately from its
 control loop, and sends results on its existing check-in. Linux uses a populated
 attempt cgroup's aggregate `cpu.stat` when available. Native macOS/Linux otherwise
 use `ps` CPU-time counters for the attempt anchor's group and descendant tree,
-with anchor identity checks. Membership changes or decreasing counters break
+with checks against the anchor birth identity recorded at launch, before and
+after each inventory. A reused PID cannot supply activity after its owned
+anchor exits. Membership changes or decreasing counters break
 idle comparisons; positive CPU advance remains useful. Short-lived processes
 between samples and detached descendants no longer connected to that tree can
 be missed. Docker without a verified local attempt cgroup, and recovered
