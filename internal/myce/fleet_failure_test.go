@@ -164,6 +164,82 @@ func TestFleetFailureRuntimePreservesCodesAndStaleBoundary(t *testing.T) {
 	}
 }
 
+func TestFleetFailureCredentialsOutageRetainsReceipt(t *testing.T) {
+	f := newFleetInstallFixture(t, "darwin")
+	if err := f.launch(); err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := os.ReadFile(f.c.Credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f.c.Credentials); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.apply(); err == nil || err.Error() != "fleet_credentials_unavailable" {
+		t.Fatal("credentials outage lost code", err)
+	}
+	ack, err := ReadFleetUpdateFailure(f.c)
+	if err != nil || ack == nil || ack.Failure != "fleet_credentials_unavailable" || f.fetches != 0 || f.restarts != 0 || len(f.failureCodes) != 0 {
+		t.Fatal("offline failure not durable", ack, err)
+	}
+	if err := os.WriteFile(f.c.Credentials, credentials, 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := f.deps.client(f.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect := func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error) { return nil, nil }
+	launch := func(context.Context, ServiceConfig, FleetUpdateInstruction) error {
+		t.Fatal("receipt recovery relaunched helper")
+		return nil
+	}
+	_ = pollFleetRuntime(context.Background(), f.c, client, collect, launch, f.i.Host, f.i.Machine, f.i.Session, true, "", nil)
+	if len(f.failureCodes) != 1 || f.failureCodes[0] != "fleet_credentials_unavailable" {
+		t.Fatal("worker did not replay repaired-credentials failure", f.failureCodes)
+	}
+	f.assertBinary(f.old)
+}
+
+func TestFleetFailureFinalPublisherRecheckPreservesCode(t *testing.T) {
+	for _, fault := range []string{"missing", "mismatch"} {
+		t.Run(fault, func(t *testing.T) {
+			f := newFleetInstallFixture(t, "darwin")
+			if err := f.launch(); err != nil {
+				t.Fatal(err)
+			}
+			command := f.deps.command
+			f.deps.command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				data, err := command(ctx, name, args...)
+				if name == fleetStagingPath(f.c, f.i) {
+					path := filepath.Join(f.c.State, "fleet-publisher.pub")
+					if fault == "missing" {
+						if err := os.Remove(path); err != nil {
+							t.Fatal(err)
+						}
+					} else if err := os.WriteFile(path, []byte(strings.Repeat("x", len(f.i.PublisherKey))), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return data, err
+			}
+			want := "fleet_publisher_unavailable"
+			if fault == "mismatch" {
+				want = "fleet_publisher_mismatch"
+			}
+			if err := f.apply(); err == nil || err.Error() != want {
+				t.Fatal("final trust recheck collapsed failure", err)
+			}
+			ack, err := ReadFleetUpdateFailure(f.c)
+			if err != nil || ack == nil || ack.Failure != want || len(f.failureCodes) != 1 || f.failureCodes[0] != want || f.restarts != 0 {
+				t.Fatal("final trust failure lost", ack, err, f.failureCodes)
+			}
+			f.assertBinary(f.old)
+		})
+	}
+}
+
 func TestFleetFailureAfterIntentRemainsDurable(t *testing.T) {
 	for _, denyAt := range []int{2, 3, 4} {
 		t.Run(map[int]string{2: "before-fetch", 3: "before-publication", 4: "before-restart"}[denyAt], func(t *testing.T) {

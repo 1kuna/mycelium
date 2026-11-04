@@ -437,18 +437,26 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	if err != nil || r.ConfigSHA256 != configHash {
 		return errors.New("fleet_receipt_invalid")
 	}
-	client, err := d.client(c)
-	if err != nil {
-		return errors.New("fleet_credentials_unavailable")
-	}
-	client = fleetNoRedirect(client)
-	defer client.HTTP.CloseIdleConnections()
 	if c.Detection.OS == "darwin" {
 		// launchctl submit creates no persistent definition or KeepAlive daemon.
 		defer func() {
 			_, _ = d.command(context.WithoutCancel(ctx), "launchctl", "remove", fleetHelperLabel(c, r.Instruction))
 		}()
 	}
+	client, err := d.client(c)
+	if err != nil {
+		// A validated receipt can retain the failure even when authentication
+		// is unavailable. The worker replays it after credentials are repaired.
+		if r.Phase != "failed" {
+			r.Phase, r.Failure = "failed", "fleet_credentials_unavailable"
+			if writeFleetReceipt(c, r) != nil {
+				return errors.New("fleet_receipt_write_failed")
+			}
+		}
+		return errors.New("fleet_credentials_unavailable")
+	}
+	client = fleetNoRedirect(client)
+	defer client.HTTP.CloseIdleConnections()
 	fail := func(code string) error {
 		code = fleetFailureCode(code)
 		r.Phase, r.Failure = "failed", code
@@ -562,7 +570,7 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 		return fail("fleet_install_changed")
 	}
 	if _, err = fleetArtifact(c, r.Instruction); err != nil {
-		return fail("fleet_signature_refused")
+		return fail(err.Error())
 	}
 	if err := fleetAuthorize(ctx, client, r.Instruction); err != nil {
 		return fail(err.Error())
