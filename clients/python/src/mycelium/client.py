@@ -5,6 +5,7 @@ import base64
 import hashlib
 import http.client
 import io
+from importlib.metadata import PackageNotFoundError, version
 import tempfile
 import re
 import copy
@@ -18,6 +19,12 @@ from typing import Any, Iterator, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
+
+try:
+    CLIENT_VERSION = version("mycelium-client")
+except PackageNotFoundError:
+    CLIENT_VERSION = "development"
+USER_AGENT = "mycelium-python/" + CLIENT_VERSION
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
 
@@ -160,7 +167,8 @@ class Client:
               *, timeout: float | None = None, raw: bool = False) -> Any:
         data = None if body is None else json.dumps(body, default=_json_default, allow_nan=False).encode()
         request = Request(self.url + path, data=data, method=method, headers={
-            "Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
+            "Authorization": "Bearer " + self.token, "Content-Type": "application/json",
+            "User-Agent": USER_AGENT})
         try:
             with self._urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
                 return _read_reply(response) if raw else json.load(response)
@@ -556,7 +564,7 @@ class Client:
                 continue
             if not follow:
                 return
-            if self.get(job_id)["state"] in TERMINAL:
+            if self._read_job(job_id, wait=True)["state"] in TERMINAL:
                 follow = False
                 continue
             time.sleep(self.poll_interval)
