@@ -2224,7 +2224,7 @@ are injectable for laptop verification.
 Tested fixes deploy without a separate task, bundled one release at a time; roll
 back if the queue is not healthy. Do not patch during a successful production
 run. Fixing a run failing because of Mycelium is allowed and expected. Keep the
-fleet on a healthy, tested release before Tuesday and Friday mornings. There is
+fleet on a healthy, tested release before each scheduled production window. There is
 no pre-production freeze, consumer canary deploy gate, or need to ask about
 deploy timing (MY-33).
 

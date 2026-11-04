@@ -56,7 +56,7 @@ Stage explicit paths and commit completed changes; push your own branches.
 Tested fixes deploy to the fleet without a separate task (MY-28, MY-32, MY-33):
 bundle them into one release at a time and roll back if the queue isn't healthy.
 Do not patch during a successful production run; fix a run failing because of
-Mycelium. Keep a healthy, tested release ready before Tuesday and Friday mornings.
+Mycelium. Keep a healthy, tested release ready before each scheduled production window.
 Fleet hardware changes still need a task that authorizes them.
 
 This repository is public: keep host names, addresses, fleet layout, private
