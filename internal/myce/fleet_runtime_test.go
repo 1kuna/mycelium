@@ -265,7 +265,7 @@ func TestFleetRuntimePollFencesLaunchAndSanitizesFailure(t *testing.T) {
 	current.Store(i)
 	result = pollFleetRuntime(context.Background(), c, client, collect, launch, "host", "worker", "session", true, "", nil)
 	ack := <-acks
-	if launches != 1 || result.attempted != fleetInstructionKey(i) || ack != (fleetLaunchFailure{i.Operation, i.Revision, i.Host, i.Machine, i.Session, "failed", "helper_launch_failed"}) {
+	if launches != 1 || result.attempted != fleetInstructionKey(i) || ack != (fleetLaunchFailure{i.Operation, i.Revision, i.Host, i.Machine, i.Session, "failed", "fleet_helper_launch_unclassified"}) {
 		t.Fatal("failed launch acknowledgement", launches, ack)
 	}
 	_ = pollFleetRuntime(context.Background(), c, client, collect, launch, "host", "worker", "session", true, result.attempted, nil)

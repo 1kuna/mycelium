@@ -569,6 +569,22 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		environmentStarted, sharedStarted = e == nil, e == nil
 		return p, e
 	}
+	env := jobBaseEnvironment()
+	for k, v := range j.Spec.Run.Env {
+		env[k] = v
+	}
+	for k, v := range sharedEnv {
+		env[k] = v
+	}
+	for k, v := range extensionEnv {
+		env[k] = v
+	}
+	if environmentPath != "" {
+		bindEnvironment(env, environmentPath)
+	}
+	if missing := missingExecutableTools(j.Spec.Needs.Tools, env["PATH"]); len(missing) > 0 {
+		return nil, toolMissingError(w.Machine.ID, missing)
+	}
 	// Resolve before the supervisor so a nonexistent command remains a clear
 	// start failure, rather than an unexplained shell exit status.
 	command := j.Spec.Run.Command[0]
@@ -650,19 +666,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		cmd.ExtraFiles = []*os.File{readyWriter, approvalReader}
 	}
 	cmd.Dir = j.Spec.Run.Workdir
-	env := jobBaseEnvironment()
-	for k, v := range j.Spec.Run.Env {
-		env[k] = v
-	}
-	for k, v := range sharedEnv {
-		env[k] = v
-	}
-	for k, v := range extensionEnv {
-		env[k] = v
-	}
-	if environmentPath != "" {
-		bindEnvironment(env, environmentPath)
-	}
 	placement := w.Machine
 	if j.Spec.Needs.cpuOnly() {
 		placement.GPU, placement.Device = "cpu", ""

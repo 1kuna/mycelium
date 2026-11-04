@@ -1119,7 +1119,7 @@ func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
 		if !follow {
 			return nil
 		}
-		j, err := c.GetJob(ctx, id)
+		j, err := c.GetJobForWait(ctx, id)
 		if err != nil {
 			return err
 		}

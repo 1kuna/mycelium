@@ -63,18 +63,28 @@ func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
 // Compare canonical JSON in memory; SQLite sees only changed logical records.
 func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 	next := map[string][]byte{}
-	put := func(key string, value any) error {
-		data, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
+	putData := func(key string, data []byte) error {
 		next[key] = data
 		if bytes.Equal(data, q.persisted[key]) {
 			next[key] = q.persisted[key]
 			return nil
 		}
-		_, err = tx.Exec("INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data", key, data)
+		_, err := tx.Exec("INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data", key, data)
 		return err
+	}
+	put := func(key string, value any) error {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		return putData(key, data)
+	}
+	putCatalog := func(key string, value any) error {
+		entry, err := q.encodeCatalog(key, value)
+		if err != nil {
+			return err
+		}
+		return putData(key, entry.data)
 	}
 	if q.persisted == nil {
 		if _, err := tx.Exec("CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL)"); err != nil {
@@ -125,17 +135,17 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 		}
 	}
 	for key, value := range q.s.Extensions {
-		if err := put("extensions/"+key, value); err != nil {
+		if err := putCatalog("extensions/"+key, value); err != nil {
 			return nil, err
 		}
 	}
 	for key, value := range q.s.WorkObservations {
-		if err := put("work_observations/"+key, value); err != nil {
+		if err := putCatalog("work_observations/"+key, value); err != nil {
 			return nil, err
 		}
 	}
 	for key, value := range q.s.StorageObservations {
-		if err := put("storage_observations/"+key, value); err != nil {
+		if err := putCatalog("storage_observations/"+key, value); err != nil {
 			return nil, err
 		}
 	}

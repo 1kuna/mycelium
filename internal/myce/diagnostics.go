@@ -13,6 +13,7 @@ import (
 // Stable rejection codes and default messages. Submission validation returns
 // the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
+	"job_tools_invalid":                     "needs.tools requires executable basenames for native command prerequisites",
 	"status_query_invalid":                  "status requires jobs=recent|active|all, limit=1..1000, an RFC3339 since, an existing before cursor and detail=full when requested",
 	"recovery_invalid":                      "recovery requires valid metadata, declared outputs and matching execution identity",
 	"recovery_stale":                        "recovery requires the exact retained failed execution",
@@ -141,6 +142,8 @@ func specRejection(err error) error {
 // RuntimeCause retains safe operation/class information, never daemon stderr,
 // command arguments, environment values, endpoint URLs, or filesystem paths.
 type RuntimeCause struct {
+	MissingTools     []string         `json:"missing_tools,omitempty"`
+	Host             string           `json:"host,omitempty"`
 	Staging          *StagingCause    `json:"staging,omitempty"`
 	PathDiagnostic   *PathDiagnostic  `json:"path_diagnostic,omitempty"`
 	Admission        *AdmissionDetail `json:"admission,omitempty"`
@@ -154,6 +157,9 @@ type RuntimeCause struct {
 
 func (c RuntimeCause) String() string {
 	text := c.Operation + ": " + c.Class
+	if c.Class == "tools_missing" {
+		text += "; " + missingToolsReason(c.Host, c.MissingTools)
+	}
 	if c.Operation == "input_staging" {
 		if d := safeStagingCause(c.Staging); d != nil {
 			text += "; " + d.String()
@@ -164,6 +170,9 @@ func (c RuntimeCause) String() string {
 				text += "; NAS paths are relative to worker --checkpoint-root; import existing bytes with profile local: or myce file put"
 			}
 		}
+	}
+	if c.ExitCode != nil && *c.ExitCode == 127 {
+		text += "; command unavailable: check the runtime PATH and declare prerequisites in needs.tools"
 	}
 	if c.ExitCode != nil {
 		text = fmt.Sprintf("%s (exit %d)", text, *c.ExitCode)
@@ -291,6 +300,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	}
 	operations := map[string]bool{"main": true, "group": true, "command": true, "process_group": true, "outputs": true, "launch": true, "readiness": true, "reconcile": true, "persist": true, "ps": true, "inspect": true, "create": true, "start": true, "update": true, "unpause": true, "kill": true, "stop": true, "logs": true, "network.ls": true, "network.inspect": true, "network.rm": true, "network.create": true, "network.disconnect": true, "retain_evidence": true, "observe_group": true, "remove_networks": true}
 	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
+	classes["tools_missing"] = true
 	classes[diskLimitExceeded] = true
 	classes["input_unavailable"], classes["invalid_input"] = true, true
 	operations["start_authorization"] = true
@@ -302,6 +312,15 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		}
 	}
 	out := *c
+	out.Host, out.MissingTools = "", nil
+	if c.Class == "tools_missing" && validToolName(c.Host) {
+		out.Host = c.Host
+		for _, tool := range c.MissingTools {
+			if validToolName(tool) {
+				out.MissingTools = append(out.MissingTools, tool)
+			}
+		}
+	}
 	out.Staging = nil
 	if c.Operation == "input_staging" {
 		out.Staging = safeStagingCause(c.Staging)

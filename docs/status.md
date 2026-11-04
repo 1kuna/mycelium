@@ -1412,3 +1412,22 @@ including effective production pins. `coverage_since` bounds the current
 uninterrupted coverage period; a rollback through an older binary can create
 a gap even though older events remain readable. Unknown legacy times remain absent.
 A status snapshot's `loaded_models` alone cannot rule out transient arrivals.
+
+## Job GET request attribution
+
+The API emits `event=job_get_totals totals=[...]` at most once per minute,
+triggered by job GET traffic. Each row has `kind` (`cli`, `python` or `unknown`),
+`version`, and cumulative `full` and `wait` counts since that API handler started.
+`wait` counts requests with `?view=wait`, including terminal replies that return
+full Jobs; other views count as `full`. Counts include failed job lookups, but
+exclude authentication failures and other endpoints. Restarting resets totals;
+compare consecutive summaries for rates. No traffic means no summary.
+
+Go/CLI requests identify as `myce/BUILD_VERSION`; Python uses
+`mycelium-python/PACKAGE_VERSION` (or `development` from an unpackaged source
+checkout). Older clients with no first-party identity, including stock Go/Python
+User-Agents, count as `unknown`. These are self-reported identities, not access
+controls. Storage is bounded to 64 client/version identities plus per-kind
+`other` overflow buckets; all requests remain counted. Raw User-Agents and job
+IDs are never retained. Counting, summary encoding and logging run outside the
+queue mutex and do not write the database.

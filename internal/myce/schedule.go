@@ -39,7 +39,8 @@ func fitsResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit)
 // Shared target eligibility without the disk check. Storage diagnostics must
 // evaluate a shortage instead of discarding its host because of that shortage.
 func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit) bool {
-	return report.check(groupFits(j, m), "card group") &&
+	return report.check(toolsFit(j, m), "tools") &&
+		report.check(groupFits(j, m), "card group") &&
 		report.check(executionTargetMatches(j.Spec, m), "target") &&
 		report.check(nativeNetworkFits(j, m), "native network isolation") &&
 		report.check(j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal == "", "memory envelope") &&

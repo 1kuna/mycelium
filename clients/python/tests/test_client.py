@@ -635,3 +635,45 @@ class StatusPagingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClientIdentityTests(unittest.TestCase):
+    def test_job_reads_send_package_identity(self):
+        from mycelium.client import USER_AGENT
+        from importlib.metadata import version, PackageNotFoundError
+        try:
+            expected = version("mycelium-client")
+        except PackageNotFoundError:
+            expected = "development"
+        self.assertEqual(USER_AGENT, "mycelium-python/" + expected)
+        client = Client("http://queue.invalid", "fixture")
+        requests = []
+        def respond(request, **kwargs):
+            requests.append(request)
+            return Reply(b'{"id":"job","state":"succeeded"}')
+        client._urlopen = respond
+        client.get("job")
+        client.wait("job")
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1].selector, "/api/jobs/job?view=wait")
+        for request in requests:
+            self.assertEqual(request.get_header("User-agent"), USER_AGENT)
+
+
+class LogFollowWaitViewTests(unittest.TestCase):
+    def test_pending_wait_reads_and_final_log_drain(self):
+        client = Client("http://queue.invalid", "fixture", poll_interval=0.001)
+        requests = []
+        replies = [b'[{"seq":1,"text":"first"}]',
+                   b'{"id":"job","state":"running"}', b'[]',
+                   b'{"id":"job","state":"succeeded"}',
+                   b'[{"seq":2,"text":"final"}]']
+        def respond(request, **kwargs):
+            requests.append(request.selector)
+            return Reply(replies.pop(0))
+        client._urlopen = respond
+        chunks = list(client.logs("job", follow=True))
+        self.assertEqual([chunk["text"] for chunk in chunks], ["first", "final"])
+        self.assertEqual(requests, ["/api/jobs/job/logs?after=0",
+                                   "/api/jobs/job?view=wait", "/api/jobs/job/logs?after=1",
+                                   "/api/jobs/job?view=wait", "/api/jobs/job/logs?after=1"])

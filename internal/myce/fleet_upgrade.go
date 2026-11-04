@@ -22,11 +22,12 @@ type FleetUpgradeStatus struct {
 	Hosts              []FleetHostStatus `json:"hosts"`
 }
 type FleetHostStatus struct {
-	Host       string    `json:"host"`
-	Phase      string    `json:"phase"`
-	Wait       string    `json:"wait,omitempty"`
-	Failure    string    `json:"failure,omitempty"`
-	ProgressAt time.Time `json:"progress_at"`
+	Host        string    `json:"host"`
+	Phase       string    `json:"phase"`
+	Wait        string    `json:"wait,omitempty"`
+	Failure     string    `json:"failure,omitempty"`
+	FailureCode string    `json:"failure_code,omitempty"`
+	ProgressAt  time.Time `json:"progress_at"`
 }
 type fleetUpgrade struct {
 	QueueOnly          bool                `json:"queue_only,omitempty"`
@@ -136,7 +137,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 					previous.State = "running"
 					for _, h := range previous.Hosts {
 						if h.Failure != "" {
-							h.Failure = ""
+							h.Failure, h.FailureCode = "", ""
 							h.Wait = "reconciling interrupted step"
 						}
 					}
@@ -150,6 +151,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 							previous.State = "running"
 						}
 						h.Phase, h.Failure, h.Wait = "pending", "", ""
+						h.FailureCode = ""
 					}
 				}
 				out = q.fleetUpgradeStatus()
@@ -708,7 +710,7 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.
 			}
 			h.HelperRevision = ack.Revision
 		case "failed":
-			reason := "update_failed"
+			reason := fleetFailureCode(ack.Failure)
 			if ack.Failure == "runner_smoke_failed" {
 				if !q.fleetRuntimeFailureCurrent(h, ack) {
 					return fleetError("fleet_ack_stale")
@@ -720,6 +722,10 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.
 			}
 			if ack.Failure == "fleet_health_failed" {
 				reason = "service_health_failed"
+			}
+			h.FailureCode = fleetFailureCode(ack.Failure)
+			if ack.Failure == "runner_smoke_failed" {
+				h.FailureCode = "runner_smoke_failed"
 			}
 			q.fleetStop(h, reason)
 		case "installed": // Not proof of activation, and no phase regression on delayed ACK.

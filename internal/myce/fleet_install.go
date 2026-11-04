@@ -167,7 +167,10 @@ func fleetAuthorize(ctx context.Context, client Client, i FleetUpdateInstruction
 func fleetAuthorizedRuntime(ctx context.Context, client Client, i FleetUpdateInstruction) (FleetRuntimeProof, error) {
 	var proof FleetRuntimeProof
 	v := url.Values{"operation": {i.Operation}, "revision": {strconv.Itoa(i.Revision)}, "host": {i.Host}, "machine": {i.Machine}, "session": {i.Session}}
-	if err := client.Call(ctx, http.MethodGet, "/api/fleet/authorize?"+v.Encode(), nil, &proof); err != nil || !fleetProofReady(&proof) || proof.Session != i.Session {
+	if err := client.Call(ctx, http.MethodGet, "/api/fleet/authorize?"+v.Encode(), nil, &proof); err != nil {
+		return proof, fleetControlFailure(err, "fleet_authorization_refused")
+	}
+	if !fleetProofReady(&proof) || proof.Session != i.Session {
 		return proof, errors.New("fleet_authorization_refused")
 	}
 	return proof, nil
@@ -175,6 +178,10 @@ func fleetAuthorizedRuntime(ctx context.Context, client Client, i FleetUpdateIns
 
 func fleetAck(ctx context.Context, client Client, r fleetInstallReceipt) error {
 	i := r.Instruction
+	failure := ""
+	if r.Phase == "failed" {
+		failure = fleetFailureCode(r.Failure)
+	}
 	ack := struct {
 		Operation string `json:"operation"`
 		Revision  int    `json:"revision"`
@@ -183,9 +190,9 @@ func fleetAck(ctx context.Context, client Client, r fleetInstallReceipt) error {
 		Session   string `json:"session"`
 		Phase     string `json:"phase"`
 		Failure   string `json:"failure,omitempty"`
-	}{i.Operation, i.Revision, i.Host, i.Machine, i.Session, r.Phase, r.Failure}
-	if client.Call(ctx, http.MethodPost, "/api/fleet/ack", ack, nil) != nil {
-		return errors.New("fleet_ack_failed")
+	}{i.Operation, i.Revision, i.Host, i.Machine, i.Session, r.Phase, failure}
+	if err := client.Call(ctx, http.MethodPost, "/api/fleet/ack", ack, nil); err != nil {
+		return fleetControlFailure(err, "fleet_ack_failed")
 	}
 	return nil
 }
@@ -258,6 +265,9 @@ func launchFleetUpdate(ctx context.Context, requested ServiceConfig, i FleetUpda
 	defer client.HTTP.CloseIdleConnections()
 	proof, err := fleetAuthorizedRuntime(ctx, client, i)
 	if err != nil {
+		if err.Error() == "fleet_instruction_stale" {
+			return &fleetInstructionRefetchError{}
+		}
 		return err
 	}
 	if CheckReleaseUpgrade(i.Release.Manifest.Version, proof.Version, false, proof.SHA256 == a.SHA256) != nil {
@@ -427,19 +437,28 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	if err != nil || r.ConfigSHA256 != configHash {
 		return errors.New("fleet_receipt_invalid")
 	}
-	client, err := d.client(c)
-	if err != nil {
-		return errors.New("fleet_credentials_unavailable")
-	}
-	client = fleetNoRedirect(client)
-	defer client.HTTP.CloseIdleConnections()
 	if c.Detection.OS == "darwin" {
 		// launchctl submit creates no persistent definition or KeepAlive daemon.
 		defer func() {
 			_, _ = d.command(context.WithoutCancel(ctx), "launchctl", "remove", fleetHelperLabel(c, r.Instruction))
 		}()
 	}
+	client, err := d.client(c)
+	if err != nil {
+		// A validated receipt can retain the failure even when authentication
+		// is unavailable. The worker replays it after credentials are repaired.
+		if r.Phase != "failed" {
+			r.Phase, r.Failure = "failed", "fleet_credentials_unavailable"
+			if writeFleetReceipt(c, r) != nil {
+				return errors.New("fleet_receipt_write_failed")
+			}
+		}
+		return errors.New("fleet_credentials_unavailable")
+	}
+	client = fleetNoRedirect(client)
+	defer client.HTTP.CloseIdleConnections()
 	fail := func(code string) error {
+		code = fleetFailureCode(code)
 		r.Phase, r.Failure = "failed", code
 		saveErr := writeFleetReceipt(c, r)
 		ackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -456,7 +475,7 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	}
 	a, err := fleetArtifact(c, r.Instruction)
 	if err != nil {
-		return fail("fleet_signature_refused")
+		return fail(fleetFailureCode(err.Error()))
 	}
 	if r.Phase == "restarting" {
 		return fleetAck(ctx, client, r)
@@ -473,11 +492,11 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	manager := installManager{c.Detection.OS, d.command}
 	unit := installUnit{path: c.Service, label: "local.mycelium." + c.Role}
 	activate := func() error {
-		if fleetAck(ctx, client, r) != nil {
-			return fail("fleet_ack_failed")
+		if err := fleetAck(ctx, client, r); err != nil {
+			return fail(err.Error())
 		}
-		if fleetAuthorize(ctx, client, r.Instruction) != nil {
-			return fail("fleet_authorization_refused")
+		if err := fleetAuthorize(ctx, client, r.Instruction); err != nil {
+			return fail(err.Error())
 		}
 		identity, err := EnrollmentServiceHealth(ctx, c, d.command)
 		pid, _, _ := strings.Cut(identity, "/")
@@ -490,8 +509,8 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 		if writeFleetReceipt(c, r) != nil {
 			return fail("fleet_receipt_write_failed")
 		}
-		if fleetAck(ctx, client, r) != nil {
-			return fail("fleet_ack_failed")
+		if err := fleetAck(ctx, client, r); err != nil {
+			return fail(err.Error())
 		}
 		if manager.activity(ctx, unit, true, true) != nil {
 			return fail("fleet_restart_failed")
@@ -509,7 +528,7 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 		return activate()
 	}
 	if err = fleetAuthorize(ctx, client, r.Instruction); err != nil {
-		return fail("fleet_authorization_refused")
+		return fail(err.Error())
 	}
 	before, err := FileSHA256(c.Binary)
 	if err != nil {
@@ -533,7 +552,7 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	}
 	staged, err := fetchFleetArtifact(ctx, c, client, r.Instruction, a)
 	if err != nil {
-		return fail("fleet_artifact_refused")
+		return fail(err.Error())
 	}
 	defer os.Remove(staged)
 	if c.Detection.OS == "darwin" && (!nativeMachO(c.Binary) || !nativeMachO(staged) || validateDarwinUpgradeIdentity(ctx, c.Binary, staged, d.command) != nil) {
@@ -551,10 +570,10 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 		return fail("fleet_install_changed")
 	}
 	if _, err = fleetArtifact(c, r.Instruction); err != nil {
-		return fail("fleet_signature_refused")
+		return fail(err.Error())
 	}
-	if fleetAuthorize(ctx, client, r.Instruction) != nil {
-		return fail("fleet_authorization_refused")
+	if err := fleetAuthorize(ctx, client, r.Instruction); err != nil {
+		return fail(err.Error())
 	}
 	// writeInstallFile is the installer's same-directory, fsynced atomic
 	// publication primitive. No transaction/snapshot/restore path is involved.
@@ -582,7 +601,7 @@ func fetchFleetArtifact(ctx context.Context, c ServiceConfig, client Client, i F
 	v := url.Values{"operation": {i.Operation}, "target": {a.File}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(client.URL, "/")+"/api/fleet/artifact?"+v.Encode(), nil)
 	if err != nil {
-		return "", err
+		return "", errors.New("fleet_artifact_download_failed")
 	}
 	req.Header.Set("Authorization", "Bearer "+client.Token)
 	// Large binaries need a transfer budget separate from small control calls.
@@ -591,7 +610,7 @@ func fetchFleetArtifact(ctx context.Context, c ServiceConfig, client Client, i F
 	hc.Timeout = 10 * time.Minute
 	res, err := hc.Do(req)
 	if err != nil {
-		return "", err
+		return "", errors.New("fleet_artifact_download_failed")
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
@@ -599,7 +618,10 @@ func fetchFleetArtifact(ctx context.Context, c ServiceConfig, client Client, i F
 	}
 	f, err := os.OpenFile(fleetStagingPath(c, i), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		return "", err
+		if errors.Is(err, os.ErrExist) {
+			return "", errors.New("fleet_staging_exists")
+		}
+		return "", errors.New("fleet_staging_write_failed")
 	}
 	path := f.Name()
 	keep := false
@@ -611,7 +633,10 @@ func fetchFleetArtifact(ctx context.Context, c ServiceConfig, client Client, i F
 	}()
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(res.Body, a.Size))
-	if err != nil || n != a.Size {
+	if err != nil {
+		return "", errors.New("fleet_artifact_transfer_failed")
+	}
+	if n != a.Size {
 		return "", errors.New("fleet_artifact_refused")
 	}
 	var extra [1]byte
@@ -619,7 +644,7 @@ func fetchFleetArtifact(ctx context.Context, c ServiceConfig, client Client, i F
 		return "", errors.New("fleet_artifact_refused")
 	}
 	if err := errors.Join(f.Chmod(0700), f.Sync(), f.Close()); err != nil {
-		return "", err
+		return "", errors.New("fleet_staging_write_failed")
 	}
 	keep = true
 	return path, nil
@@ -692,9 +717,6 @@ func ReadFleetUpdateFailure(c ServiceConfig) (*FleetUpgradeAck, error) {
 	if i.Operation == "" || i.Revision <= 0 || i.Host != c.HostID || i.Session == "" || c.Role == "worker" && i.Machine != c.Name || c.Role == "queue" && i.Machine != "@queue" {
 		return nil, errors.New("fleet_receipt_invalid")
 	}
-	code := "fleet_update_failed"
-	if r.Failure == "fleet_health_failed" || r.Failure == "fleet_storage_preflight_failed" {
-		code = r.Failure
-	}
+	code := fleetFailureCode(r.Failure)
 	return &FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: code}, nil
 }

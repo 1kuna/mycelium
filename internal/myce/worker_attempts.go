@@ -788,6 +788,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	defer tick.Stop()
 	var cpuQualification checkpointIO[string]
 	var dockerQualification checkpointIO[bool]
+	toolInventory := map[string][]string{"": executableTools(jobBaseEnvironment()["PATH"])}
 	w.Machine.CPUIsolation = cpuIsolationUnavailable
 	var retry workerRetry
 	var nextRetention, nextFaultProbe time.Time
@@ -1040,6 +1041,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			_, _ = root.environmentLogs.run("environment-logs", func() (bool, error) { return true, environments.upload(ctx, uploadClient, uploadMachine) })
 			ready, envReports, envTimes := environments.report()
 			m.Environments = append(slices.Clone(w.Machine.Environments), ready...)
+			m.ToolInventory = preparedToolInventory(toolInventory, m.Environments, w.EnvironmentRoot)
 			m.EnvironmentBuilder = true
 			m.EnvironmentReports, m.EnvironmentBuildSeconds = envReports, envTimes
 			if !recovering {
