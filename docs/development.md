@@ -249,8 +249,38 @@ to `main`, once for each merge result (or direct main fix). There are no PR,
 manual-dispatch or schedule triggers. It selects `[self-hosted, mycelium-ci]`;
 GitHub-hosted runners are never used. Do not add workflow concurrency grouping:
 GitHub may replace a pending run in a group, losing proof for an intervening merge.
-One repository-scoped runner accepts jobs sequentially without cancelling older
-merges. A backlog waits in Actions; no model callbacks, polls or wakes are needed.
+Three repository-scoped runners accept separate merges concurrently without
+cancelling older runs. Each runner still waits for its own two Mycelium jobs and
+verifies their accepted results. A backlog waits in Actions; no model callbacks,
+polls or wakes are needed.
+
+The throughput change in [#751](https://github.com/1kuna/mycelium/issues/751)
+adds two lightweight runner services on a Linux control-role fleet host, alongside
+the existing control-role runner. The T3 host and hosts in a production hold are
+excluded from new runner placement. Both added services use the same repository
+scope, `mycelium-ci` label, clean environment and low-priority settings described
+below, with separate installation and work directories. No full suite runs in a
+runner service; Mycelium continues to admit and place all gate work.
+
+Measured on 2026-11-04, six recent completed Actions jobs occupied the single
+runner for 25.67, 26.68, 27.63, 34.18, 37.08 and 44.92 minutes (median 30.91;
+mean 32.69), excluding their Actions queue wait. These are runs `41751005700`,
+`41753870854`, `41755027580`, `41755730952`, `41756251565` and `41757108412`;
+both successes and failures count toward occupied capacity. Sixteen more runs
+were queued at inspection. Three runner slots increase the median-based runner
+capacity from 1.94 to 5.82 results/hour (mean-based: 1.84 to 5.51). This is a
+capacity estimate at the observed service times, not a guarantee: shared fleet
+CPU/RAM contention can still extend a run, and an existing burst takes time to
+drain. The target is roughly an hour per new merge after that backlog drains.
+
+Adding runners is the smallest change because the existing submitter already
+waits cheaply through `myce wait`. Ending the workflow after submission would
+lose its verified per-merge result unless a separate completion publisher and
+credential were added. Reducing gate memory is not justified by current evidence:
+the platform declarations above already use measured successful peaks plus
+headroom. Cost: two persistent runner installations, workspaces and small
+submitter/wait processes, plus overlapping gate demand within ordinary Mycelium
+admission; gate resources, test coverage and result acceptance stay the same.
 
 **Before merging, require the PR's exact-head fleet full gate and independent
 review**, then inspect main's workflow records and latest *completed* `main-full`
@@ -266,7 +296,7 @@ gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main \
 ```
 
 Queued or running main runs do not block a merge, and completed proof need not
-match current main: one sequential runner can lag behind frequent merges.
+match current main: shared fleet gates can lag behind frequent merges.
 The next merging worker inspects a red completed run's platform summaries,
 Mycelium job IDs and logs, then fixes its failures forward before unrelated
 merges. A reviewed fix with its own passing gate may merge while main is red;
@@ -315,6 +345,13 @@ wall deadline kills healthy full suites. GitHub's own runner/job service limits
 still apply. Inspect failures privately with `myce logs JOB_ID`; public logs and
 the summary contain only job IDs, fixed states and exit codes, never raw CLI
 receipts, remote reasons or host paths.
+
+A submission refusal or outage is an **infrastructure failure**, distinct from a
+submitted suite reporting `failed`. Its platform row says `infrastructure failure`
+and the workflow emits a `CI infrastructure failure` error annotation: that
+platform has no suite result. Resolve the infrastructure problem privately, then
+rerun the same workflow/merge; the deterministic keys recover any jobs that were
+accepted before the outage. There is no automatic retry for a failed suite.
 
 ### Public repository and private authority
 
@@ -365,6 +402,18 @@ the personal home path, since checkout prints its workspace in public logs.
 Confirm its repository scope and `online`
 status using `gh api repos/1kuna/mycelium/actions/runners`, and inspect the local
 service/process without dumping its environment or credential files.
+
+The added Linux submitters use separate systemd user units running the standard
+`bin/runsvc.sh`, with `Nice=10`, reduced CPU/I/O weights and the same clean
+environment. They do not depend on, restart or reconfigure the queue or worker
+services. Before adding `mycelium-ci` to a new runner, verify installed-authority
+queue access **from its service context**, not just from an SSH shell. These
+units run a read-only installed-authority status check before starting. A failed
+check prevents runner startup. On macOS, SSH access can succeed while a launchd
+service gets `no route to host` under Local Network privacy; do not bypass that
+policy or enable CI admission on such a runner. Use an authorized Linux fleet
+host or leave approval to the host owner. Repository registration and an `online`
+runner alone do not prove queue reachability.
 
 Generated platform profiles and downloaded result markers live in job temp and
 are deleted on exit. Only small CLI recovery receipts remain in the checkout;

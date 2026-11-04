@@ -42,10 +42,10 @@ def submission_failure(reply):
         try:
             receipt = json.loads(reply.stdout)
             if receipt.get('refusal_code') == 'no_qualified_target':
-                return 'no qualified target; inspect private receipt for eligibility requirements'
+                return 'infrastructure failure: no qualified target; inspect private receipt for eligibility requirements'
         except (ValueError, TypeError, AttributeError):
             pass
-    return f'submission unavailable (exit {reply.returncode})'
+    return f'infrastructure failure: submission unavailable (exit {reply.returncode})'
 
 
 def failure_state(job):
@@ -119,6 +119,10 @@ def run(root, sha, scratch):
         with open(summary, 'a') as stream:
             stream.write('| Platform | Result | Mycelium job |\n| --- | --- | --- |\n')
             stream.write('\n'.join(rows) + '\n')
+    if refusals:
+        print('::error title=CI infrastructure failure::At least one platform was not submitted; '
+              'no suite result exists for that platform. Rerun this workflow to recover '
+              'the same merge jobs.', flush=True)
     return int(failed)
 
 
