@@ -356,7 +356,11 @@ func TestClientWaitIdentityAndView(t *testing.T) {
 			if r.UserAgent() != "myce/"+BuildVersion {
 				t.Errorf("identity = %q", r.UserAgent())
 			}
-			if r.URL.Query().Get("view") != "wait" {
+			wantView := "wait"
+			if reads == 0 {
+				wantView = ""
+			}
+			if r.URL.Query().Get("view") != wantView {
 				t.Errorf("full wait poll: %s", r.URL)
 			}
 			reads++
@@ -369,6 +373,26 @@ func TestClientWaitIdentityAndView(t *testing.T) {
 		j, err := c.Wait(context.Background(), "job")
 		if err != nil || j.State != "succeeded" || reads != 2 {
 			t.Fatal(j, err, reads)
+		}
+	})
+}
+
+func TestClientWaitRetainsInitialAdviceAfterLightweightPoll(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reads := 0
+		c := Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+			reads++
+			reason := ""
+			if reads == 1 {
+				reason = "no hypha has a qualified extension"
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"job","state":"queued","reason":"` + reason + `"}`)), Header: make(http.Header)}, nil
+		})}}
+		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+		defer cancel()
+		_, err := c.Wait(ctx, "job")
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "initial status advice: no hypha has a qualified extension") || reads != 3 {
+			t.Fatal(err, reads)
 		}
 	})
 }

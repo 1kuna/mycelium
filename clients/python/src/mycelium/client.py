@@ -564,7 +564,7 @@ class Client:
                 continue
             if not follow:
                 return
-            if self.get(job_id)["state"] in TERMINAL:
+            if self._read_job(job_id, wait=True)["state"] in TERMINAL:
                 follow = False
                 continue
             time.sleep(self.poll_interval)

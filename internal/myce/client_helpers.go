@@ -80,7 +80,8 @@ func (c Client) getJob(ctx context.Context, id, query string) (*Job, error) {
 }
 
 // Wait observes a job through terminal state. Optional updates run on each
-// successful job read, including completion, and may drain logs. Transient
+// successful job read, including completion, and may drain logs. The first
+// read includes diagnostics; later pending updates carry only state and reason. Transient
 // read errors from an update use the same retry policy as status reads.
 func (c Client) Wait(ctx context.Context, id string, updates ...func(*Job) error) (*Job, error) {
 	return c.wait(ctx, id, nil, updates)
@@ -146,6 +147,14 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 	const poll = time.Second
 	delay := poll
 	last := receipt
+	var initial *Job
+	waitError := func(cause error) error {
+		err := jobWaitError(id, last, cause)
+		if initial != nil && last != nil && initial.State == last.State && initial.Reason != last.Reason {
+			return fmt.Errorf("%w; initial status advice: %s; refresh with myce status %s", err, JobReason(initial), id)
+		}
+		return err
+	}
 	clock := RealClock{}
 	var unknownUntil time.Time
 	if receipt != nil {
@@ -153,11 +162,15 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 	}
 	for {
 		if ctx.Err() != nil {
-			return last, jobWaitError(id, last, ctx.Err())
+			return last, waitError(ctx.Err())
 		}
-		j, err := c.GetJobForWait(ctx, id)
+		read := c.GetJobForWait
+		if initial == nil {
+			read = c.GetJob
+		}
+		j, err := read(ctx, id)
 		if ctx.Err() != nil {
-			return last, jobWaitError(id, last, ctx.Err())
+			return last, waitError(ctx.Err())
 		}
 		if err != nil {
 			var api *HTTPError
@@ -171,6 +184,9 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 		} else {
 			unknownUntil = time.Time{}
 			last = j
+			if initial == nil {
+				initial = j
+			}
 			for _, update := range updates {
 				if err = update(j); err != nil {
 					break
@@ -192,7 +208,7 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 			}
 		}
 		if err := waitStatusPause(ctx, delay); err != nil {
-			return last, jobWaitError(id, last, err)
+			return last, waitError(err)
 		}
 	}
 }

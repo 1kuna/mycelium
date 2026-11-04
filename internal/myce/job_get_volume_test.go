@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -67,5 +68,29 @@ func TestJobGetVolumeBoundedConcurrent(t *testing.T) {
 	}
 	if v.totals[jobGetIdentity{"unknown", "unknown"}].Full != 1 {
 		t.Fatal("missing unknown bucket")
+	}
+}
+
+func TestJobGetVolumeHTTPRouting(t *testing.T) {
+	q, clock := fixture(t)
+	handler := (API{Queue: q, Token: "fixture"}).Handler()
+	var output bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(old)
+	request := func(path, token, agent string) {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("User-Agent", agent)
+		handler.ServeHTTP(httptest.NewRecorder(), r)
+	}
+	request("/api/jobs/missing?view=wait", "fixture", "myce/s072")
+	request("/api/jobs/missing?view=wait", "wrong", "myce/s072")
+	request("/api/ping", "fixture", "myce/s072")
+	clock.Advance(time.Minute)
+	request("/api/jobs/missing", "fixture", "")
+	line := output.String()
+	if strings.Count(line, "event=job_get_totals") != 1 || !strings.Contains(line, `"kind":"cli","version":"s072","full":0,"wait":1`) || !strings.Contains(line, `"kind":"unknown","version":"unknown","full":1,"wait":0`) {
+		t.Fatal(line)
 	}
 }
