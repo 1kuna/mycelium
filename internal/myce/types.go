@@ -196,6 +196,9 @@ type Spec struct {
 	GiveUpAt         *time.Time             `json:"give_up_at,omitempty" yaml:"give_up_at,omitempty"`
 	ExpectedMinutes  float64                `json:"expected_minutes,omitempty" yaml:"expected_minutes,omitempty"`
 	Resumable        bool                   `json:"resumable" yaml:"resumable"`
+
+	ResumeCompatibility *ResumeCompatibility `json:"resume_compatibility,omitempty" yaml:"resume_compatibility,omitempty"`
+	Preemptible         bool                 `json:"preemptible,omitempty" yaml:"preemptible,omitempty"`
 }
 
 func (s Spec) Validate() error {
@@ -204,6 +207,9 @@ func (s Spec) Validate() error {
 	}
 	if err := validateTools(s); err != nil {
 		return err
+	}
+	if err := validateYieldContract(s); err != nil {
+		return reject("job_execution_invalid", err)
 	}
 	for _, name := range s.ExcludedMachines {
 		if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
@@ -404,6 +410,9 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	YieldPlan       *ScarceYieldProjection `json:"yield_plan,omitempty"`
+	ScarceHostYield *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
+	YieldGeneration int64                  `json:"yield_generation,omitempty"`
 	// Set only on read-only planner copies, never the durable job. Plain work's
 	// recipe and input identity is independent of the target or learned memory.
 	planningMemoryIdentity string
@@ -722,24 +731,25 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
-	StoragePeak          *AttemptStoragePeak `json:"storage_peak,omitempty"`
-	InputsStagedAt       *time.Time          `json:"inputs_staged_at,omitempty"`
-	Diagnostics          *AttemptDiagnostics `json:"diagnostics,omitempty"`
-	PriorityStop         *PriorityPreemption `json:"priority_stop,omitempty"`
-	ExecutionCause       *RuntimeCause       `json:"execution_cause,omitempty"`
-	CleanupCause         *RuntimeCause       `json:"cleanup_cause,omitempty"`
-	PoliteStop           bool                `json:"polite_stop,omitempty"`
-	OutputRefs           FileManifest        `json:"output_refs,omitempty"`
-	MemoryPeak           *AttemptMemoryPeak  `json:"memory_peak,omitempty"`
-	Usage                *SizeHint           `json:"usage,omitempty"`
-	OutOfMemory          bool                `json:"out_of_memory,omitempty"`
-	ExtensionUnavailable bool                `json:"extension_unavailable,omitempty"`
-	OperatorStop         bool                `json:"operator_stop,omitempty"`
-	ReleaseOnly          bool                `json:"release_only,omitempty"`
-	Forced               bool                `json:"forced,omitempty"`
-	ReleasePending       bool                `json:"release_pending,omitempty"`
-	Machine              string              `json:"machine"`
-	Session              string              `json:"session"`
+	FinalCheckpointGeneration *int64              `json:"final_checkpoint_generation,omitempty"`
+	StoragePeak               *AttemptStoragePeak `json:"storage_peak,omitempty"`
+	InputsStagedAt            *time.Time          `json:"inputs_staged_at,omitempty"`
+	Diagnostics               *AttemptDiagnostics `json:"diagnostics,omitempty"`
+	PriorityStop              *PriorityPreemption `json:"priority_stop,omitempty"`
+	ExecutionCause            *RuntimeCause       `json:"execution_cause,omitempty"`
+	CleanupCause              *RuntimeCause       `json:"cleanup_cause,omitempty"`
+	PoliteStop                bool                `json:"polite_stop,omitempty"`
+	OutputRefs                FileManifest        `json:"output_refs,omitempty"`
+	MemoryPeak                *AttemptMemoryPeak  `json:"memory_peak,omitempty"`
+	Usage                     *SizeHint           `json:"usage,omitempty"`
+	OutOfMemory               bool                `json:"out_of_memory,omitempty"`
+	ExtensionUnavailable      bool                `json:"extension_unavailable,omitempty"`
+	OperatorStop              bool                `json:"operator_stop,omitempty"`
+	ReleaseOnly               bool                `json:"release_only,omitempty"`
+	Forced                    bool                `json:"forced,omitempty"`
+	ReleasePending            bool                `json:"release_pending,omitempty"`
+	Machine                   string              `json:"machine"`
+	Session                   string              `json:"session"`
 	Execution
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Success     bool   `json:"success"`

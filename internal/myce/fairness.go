@@ -217,7 +217,7 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 		}
 	}
 	for _, r := range q.liveJobs() {
-		if r.Spec.Project == j.Spec.Project && r.Spec.Priority == "experiment" && (r.State == "running" || r.State == "stopping") {
+		if r.ID != j.ID && r.Spec.Project == j.Spec.Project && r.Spec.Priority == "experiment" && (r.State == "running" || r.State == "stopping") {
 			count++
 			used += r.Spec.Needs.MemoryGB
 		}
@@ -251,7 +251,7 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 	if q.environmentFailureBlocked(j, m) {
 		return nil
 	}
-	if !q.preemptionPlacementAllows(j, m) {
+	if !q.preemptionPlacementAllows(j, m) || !q.yieldPlacementAllows(j, m) {
 		return nil
 	}
 	if j.Spec.FanOut != nil {
@@ -297,6 +297,7 @@ func (q *Queue) mayNeedCards(j *Job, m *Machine) bool {
 // without preparations, whose sharing decision also depends on the recipe.
 type batchResourceKey struct {
 	project, class, priority string
+	yieldDemand              string
 	gpu, host                float64
 	cores                    int
 	shares                   bool
@@ -309,7 +310,11 @@ type batchResourceRoom struct {
 }
 
 func resourceKey(j *Job) batchResourceKey {
-	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j)}
+	id := ""
+	if len(j.Spec.RequirementReasons) > 0 || len(j.Extensions) > 0 {
+		id = j.ID
+	}
+	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j)}
 }
 
 func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
@@ -343,7 +348,24 @@ func (q *Queue) batchResourceProjection(j *Job, m *Machine) batchResourceRoom {
 		}
 		projected = q.cpuAfterReleases(m, jobs, slots, 0)
 	}
-	return batchResourceRoom{machine: projected, memory: q.batchReclaimableGB(j, m), ok: true, plan: plan}
+	memory := q.batchReclaimableGB(j, m)
+	if plan != nil && len(plan.yields) > 0 {
+		memory = m.FreeMemoryGB
+		for _, v := range plan.jobs {
+			if batchOnTarget(v, m) {
+				memory += deviceShareGB(v)
+			}
+		}
+		for _, slot := range plan.slots {
+			if slotOnTarget(slot, m) {
+				memory += q.slotMemory(slot)
+			}
+		}
+		for _, v := range plan.jobs {
+			projected.FreeHostMemoryGB += hostNeed(allocationMachine(q.s.Machines[v.Machine], v.AllocatedDevices), v.Spec.Needs.MemoryGB, v.Spec.Needs.HostMemoryGB)
+		}
+	}
+	return batchResourceRoom{machine: projected, memory: memory, ok: true, plan: plan}
 }
 
 // A card group offers its smallest card's room once per card.
@@ -525,6 +547,12 @@ func reservationWaitReason(m *Machine, batchSlot bool, sharedWith int) string {
 	return strings.Join(parts, "; ")
 }
 func (q *Queue) waitReason(j *Job) string {
+	if why := q.yieldWaitReason(j); why != "" {
+		return why
+	}
+	if plan := q.yieldProjection(j); plan != nil && plan.Reason != "" {
+		return plan.Reason
+	}
 	if reason := q.hostRetryStorageWaitingReason(j); reason != "" {
 		return reason
 	}

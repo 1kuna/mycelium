@@ -47,6 +47,12 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			if scarceYieldStop(e.PriorityStop) && !e.UserCancel {
+				j := a.Queue.s.Jobs[id]
+				if j != nil && yieldMatches(j) && !j.ScarceHostYield.Authorized {
+					return
+				}
+			}
 			if e.PriorityStop != nil {
 				e.Cursor += ":" + e.PriorityStop.Demand
 			}

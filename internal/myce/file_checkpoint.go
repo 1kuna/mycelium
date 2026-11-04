@@ -309,8 +309,18 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 			finished.StoragePeak = w.storageObserver.snapshot()
 		}()
 	}
-	if _, err := w.publishFileCheckpoint(j, parent); err != nil && !stale(err) {
+	generation, err := w.publishFileCheckpoint(j, parent)
+	if err != nil && !stale(err) {
 		return result, err
+	}
+	if scarceYieldStop(result.PriorityStop) && j.Spec.Resumable && !result.ReleasePending {
+		if !j.FileTransport {
+			generation, err = checkpointProgress(attemptCheckpoint(j))
+			if err != nil {
+				generation = -1
+			}
+		}
+		result.FinalCheckpointGeneration = &generation
 	}
 	if !result.Success || result.Interrupted || len(j.Spec.Outputs) == 0 || !j.storedFileResults() {
 		return result, nil

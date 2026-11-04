@@ -76,8 +76,8 @@ A demand with a selected release precedes uncommitted same-tier demand, so each
 waiting batch plans its own target instead of borrowing another demand's release.
 This includes non-resumable commands, native
 sidecar groups, model calls/loads, pinned engines and environment builds. Idle
-unpinned same-tier model cache may be evicted; active same-tier work is never
-preempted. Production preempts lower-tier work. Accelerator work, including
+unpinned same-tier model cache may be evicted; active same-tier work is preserved except for the qualified scarce-host yield
+case below. Production preempts lower-tier work. Accelerator work, including
 non-resumable work, receives SIGTERM with ten seconds of grace by default,
 capped at fifteen seconds, before SIGKILL if still running. Resumable CPU commands
 receive ten seconds by default to save; non-resumable CPU work stops immediately. Deadline
@@ -1804,7 +1804,8 @@ adapter contracts or introducing an explicit speed/deadline goal. Eligibility,
 accuracy/qualification and owner policy precede tiers and per-family project
 deficit. Free capacity and existing victim stop-count/lost-work comparisons
 precede host value. Value never selects another project, changes fair-share
-charges or preempts equal-tier work.
+charges equal-tier work. The scarce-host yield amendment below is the narrow
+exception for moving already-running portable work.
 
 Known measured inventory and owner allowances define distinct accelerator backend/
 usable-memory bands and host-memory bands above the fleet minimum. Count the
@@ -2362,8 +2363,9 @@ steps, and preserves MY-19 output parity before splitting. Optional authored
 of existing registrations. No payload execution, registration or placement occurs
 on an advice read. All file hydration, hashing and lock analysis happens outside
 `q.mu`. See [portability](scheduling.md) for interfaces and evidence limits.
-Registration warnings and variant eligibility are described below. Scarce-host
-yield remains a separate checkpoint/requeue mechanism (#328/#740).
+Registration warnings and variant eligibility are described below. The scarce-host
+yield amendment implements relocation through the existing checkpoint/requeue
+lifecycle (#327/#328).
 
 ### Variant eligibility and production approval (#499; MY-27/MY-31)
 
@@ -2474,3 +2476,74 @@ existing observation redaction policy. This does not change scheduling, pins,
 qualification, parity approval or historical jobs. Missing metadata does not
 establish that a hard requirement is unjustified. See
 [status](status.md#authored-requirement-explanations-748).
+
+## Amendment: scarce-host yield (#327, #328; MY-26)
+
+The shared batch planner may reclaim CPU, host RAM or accelerator capacity from
+portable finite work when ready demand has a documented hard requirement and
+exactly one structurally capable physical host. `requirement_reasons` records
+hard `host`, `device`, `backend:NAME`, `os:NAME` or `arch:NAME` constraints in the
+frozen submission. Occupancy, stale/maintained peers, missing recipes or unknown
+qualification cannot manufacture uniqueness. Convenience pins and target labels
+without a corresponding hard requirement do not prove it. Existing ordinary
+higher-tier preemption runs first; this exception does not alter model calls,
+services, engine state, streaming output, preparation or fan-out handling.
+
+Victims must be at or below the demand's owner tier. This path never selects
+production for non-production demand, including under custom tier ordering.
+Only resumable work with a verified positive portable checkpoint generation, or
+an explicitly disposable non-resumable experiment with `preemptible: true`, can
+yield. No class silently opts in. Both need another qualified, currently
+admissible physical host and frozen `resume_compatibility` evidence:
+
+```yaml
+resumable: true
+resume_compatibility:
+  checkpoint_format: counter-v1
+  result_contract: counter-result-v1
+  targets:
+    - target: {os: linux, arch: amd64, platform: cpu}
+      environment: none
+      result_check: counter-resume-test
+```
+
+Exact target entries assert author-tested checkpoint, environment and equivalent
+result support; the named result check identifies that evidence. Metadata is
+not a substitute for tests or MY-19 parity. `environment` matches the frozen
+resolved environment key, `none` for no environment, or `qualified` for native
+extensions (which still require the exact frozen variant's ordinary checks).
+Unknown, unqualified or incompatible alternatives hold. The schema rejects
+incomplete/duplicate targets and invalid opt-ins. The queue never infers support
+from CPU availability or labels. Source and destination workers must advertise
+`scarce_host_yield_v1` so older runners cannot bypass authorization/final-save
+handling.
+
+The existing room planner chooses the minimum useful victims with its stop-count
+and lost-work comparisons. Destination projections honor resources, readiness,
+owner availability, freshness, maintenance and fair turns, and reserve nothing.
+Persist `scarce_host_yield` with demand, victim, exact source attempt/session,
+checkpoint generation and proposed destination. Revalidate immediately before
+stop authorization, before dispatch and at the launch/Started fences. An
+undelivered stop is withdrawn if demand or alternative admission disappears;
+authorized stops retain cleanup custody. Completion observed before delivery
+wins; stale reports cannot publish, qualify or release a newer attempt.
+
+Reuse existing checkpoint verification/transport outside `q.mu`, stop grace,
+process-group/sidecar cleanup and same-job requeue. Exact release is independent
+of the final save. Resumable yield requires a verified final generation newer
+than the authorization generation and a cooperative, unforced result. Failed
+save/transport, forced exit or release alone produces an explicit hold, retaining
+every committed generation. Transport retries retain local results; a failed
+final save requires repair or cancellation by its owner. Only opted-in disposable
+experiments may restart without saved progress. If destination capacity vanishes
+after stop, retain verified progress queued with a reason. Exclude the scarce
+host only while the recorded demand needs it; cancellation clears this routing
+exclusion without cancelling already-authorized cleanup.
+
+Queue and worker restart recover the same intent and exact custody. Keep logical
+job ID, submission key, frozen choices and accepted outputs; use existing planned
+displacement accounting and the runtime grace after two displacements, spending
+no infrastructure or loss retries. There is no migration daemon, new cooldown,
+capacity reservation or live process transfer. CPU dev proof uses simulated
+inventory and real commands, file-store generations, native sidecars and one
+verified accepted artifact; native hardware qualification remains separate.

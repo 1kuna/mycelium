@@ -2006,6 +2006,10 @@
           "$ref": "#/$defs/JobRuntime",
           "x-contract": "diagnostic"
         },
+        "scarce_host_yield": {
+          "$ref": "#/$defs/ScarceHostYield",
+          "x-contract": "diagnostic"
+        },
         "session": {
           "description": "Worker session of the assigned execution; combine with job ID and attempt.",
           "minLength": 1,
@@ -2142,6 +2146,14 @@
         "waiting_since": {
           "format": "date-time",
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "yield_generation": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "yield_plan": {
+          "$ref": "#/$defs/ScarceYieldProjection",
           "x-contract": "diagnostic"
         }
       },
@@ -3495,6 +3507,50 @@
       ],
       "type": "object"
     },
+    "ResumeCompatibility": {
+      "properties": {
+        "checkpoint_format": {
+          "type": "string"
+        },
+        "result_contract": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ResumeTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "checkpoint_format",
+        "result_contract",
+        "targets"
+      ],
+      "type": "object"
+    },
+    "ResumeTarget": {
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "result_check": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "target",
+        "environment",
+        "result_check"
+      ],
+      "type": "object"
+    },
     "RunSpec": {
       "properties": {
         "command": {
@@ -3600,6 +3656,96 @@
       "required": [
         "operation",
         "class"
+      ],
+      "type": "object"
+    },
+    "ScarceHostYield": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "authorized": {
+          "type": "boolean"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "demand": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "destination_device": {
+          "type": "string"
+        },
+        "destination_target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "final_received": {
+          "type": "boolean"
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "hold": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "victim": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cause",
+        "demand",
+        "victim",
+        "attempt",
+        "machine",
+        "session",
+        "destination",
+        "destination_device",
+        "destination_target",
+        "generation",
+        "authorized",
+        "final_received"
+      ],
+      "type": "object"
+    },
+    "ScarceYieldProjection": {
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "requirements": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "victims": {
+          "items": {
+            "$ref": "#/$defs/ScarceHostYield"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "reason"
       ],
       "type": "object"
     },
@@ -3821,6 +3967,10 @@
           "type": "boolean",
           "x-contract": "diagnostic"
         },
+        "preemptible": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "prepare_source": {
           "type": "boolean",
           "x-contract": "diagnostic"
@@ -3878,6 +4028,10 @@
         },
         "resumable": {
           "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "resume_compatibility": {
+          "$ref": "#/$defs/ResumeCompatibility",
           "x-contract": "diagnostic"
         },
         "run": {
