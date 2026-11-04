@@ -322,7 +322,7 @@ Running jobs show their hypha and attempt. Every waiting job has an explanation,
 including missing qualification, memory or resource requirements, unavailable
 hyphae, software preparation, and work ahead in the queue.
 
-From s069, work held behind another job's environment preparation names the
+From s070, work held behind another job's environment preparation names the
 blocking job, environment identity and worker in status and job GET. The reason
 distinguishes an offered build awaiting a builder report, a started build and
 preparation awaiting exact stop/release acknowledgement. An unready deadline
