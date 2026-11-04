@@ -94,12 +94,17 @@ func saveProfileJSON(path string, value any) error {
 	defer dir.Close()
 	return dir.Sync()
 }
-func readProfileJSON(path string, value any) error {
+func readProfileJSON[T any](path string, value *T) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(b, value)
+	var next T
+	if err := json.Unmarshal(b, &next); err != nil {
+		return err
+	}
+	*value = next
+	return nil
 }
 
 func profileLock(path string) (*os.File, error) {

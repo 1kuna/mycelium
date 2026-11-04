@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +17,9 @@ import (
 
 func waitReadRequest(handler http.Handler, id, query string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest("GET", "/api/jobs/"+id+query, nil)
+	// This projection/load fixture models independent transport peers. The
+	// separate limiter regression covers the now-invalid unlimited single-peer load.
+	r.RemoteAddr = net.JoinHostPort("fixture-"+id, "1234")
 	r.Header.Set("Authorization", "Bearer fixture")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)

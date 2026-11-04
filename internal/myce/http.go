@@ -29,6 +29,9 @@ func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.hand
 func (a API) handler(joiningPin string) http.Handler {
 	mux := newRequestMux()
 	jobGets := newJobGetVolume(a.Queue.clock)
+	observationLimit := newObservationLimit(a.Queue.clock)
+	a.registerWait(mux)
+	waitStates := a.Queue.waitIndex()
 	nas := newResolveNASCache(a.Queue.clock)
 	// Joining needs authenticated identity/version only, never the growing status
 	// snapshot. Transport pinning authenticates this identity to joining clients.
@@ -194,11 +197,20 @@ func (a API) handler(joiningPin string) http.Handler {
 		respondOperation(w, s, err, "status_unavailable")
 	})
 	mux.HandleFunc("GET /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Myce-Wait", "batch-v1")
 		jobGets.record(r.UserAgent(), r.URL.Query().Get("view") == "wait")
 		var j *Job
 		var err error
 		if r.URL.Query().Get("view") == "wait" {
-			j, err = a.Queue.waitJobSnapshot(r.PathValue("id"), r.Context())
+			states, _, _, readErr := waitStates.read(WaitRequest{IDs: []string{r.PathValue("id")}})
+			err = readErr
+			if err == nil {
+				state := publicWaitReply(states).Jobs[0]
+				j = &Job{ID: state.ID, State: state.State, Reason: state.Reason}
+				if terminal(j.State) {
+					j, err = a.Queue.jobSnapshot(j.ID, r.Context())
+				}
+			}
 			if err == nil && !terminal(j.State) {
 				respondOperation(w, struct {
 					ID     string `json:"id"`
@@ -414,6 +426,9 @@ func (a API) handler(joiningPin string) http.Handler {
 			respond(w, nil, &HTTPError{Status: 405, Code: "request_method_invalid", Message: rejectionMessages["request_method_invalid"]})
 			return
 		}
+		if !observationLimit.admit(w, r) {
+			return
+		}
 		mux.ServeHTTP(w, r)
 	}), mux.patterns)
 }
@@ -543,6 +558,19 @@ type Client struct {
 }
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
+	err := c.callOnce(ctx, method, path, in, out)
+	var api *HTTPError
+	// Ordinary idempotent reads get one refill retry. Wait loops own repeated
+	// backoff; worker control and mutations never silently replay.
+	if (method == "GET" || method == "HEAD") && errors.As(err, &api) && api.Status == 429 && api.Code == "client_rate_limited" {
+		if pauseErr := waitStatusPause(ctx, time.Second); pauseErr != nil {
+			return pauseErr
+		}
+		return c.callOnce(ctx, method, path, in, out)
+	}
+	return err
+}
+func (c Client) callOnce(ctx context.Context, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
 		data, err := json.Marshal(in)
@@ -571,6 +599,9 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		return err
 	}
 	defer res.Body.Close()
+	if support, ok := ctx.Value(waitCapabilityKey{}).(*bool); ok {
+		*support = res.Header.Get("X-Myce-Wait") == "batch-v1"
+	}
 	if res.StatusCode >= 300 {
 		e := &HTTPError{Status: res.StatusCode, Message: "request failed"}
 		var body struct {

@@ -200,11 +200,12 @@ class Client:
         return client
 
     def _call(self, method: str, path: str, body: Any = None,
-              *, timeout: float | None = None, raw: bool = False) -> Any:
+              *, timeout: float | None = None, raw: bool = False, _rate_retry: bool = False) -> Any:
         data = None if body is None else json.dumps(body, default=_json_default, allow_nan=False).encode()
         request = Request(self.url + path, data=data, method=method, headers={
             "Authorization": "Bearer " + self.token, "Content-Type": "application/json",
             "User-Agent": USER_AGENT})
+        started = time.monotonic()
         try:
             with self._urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
                 return _read_reply(response) if raw else json.load(response)
@@ -212,6 +213,14 @@ class Client:
             with error:
                 body = error.read(4096).decode("utf-8", errors="replace")
             failure = APIError(error.code, body)
+            if failure.code == "client_rate_limited" and error.code == 429 and method in {"GET", "HEAD"} and not _rate_retry:
+                remaining = (self.timeout if timeout is None else timeout) - (time.monotonic() - started)
+                # One refill retry for ordinary reads. Wait loops apply their
+                # own exponential backoff if contention persists; the original
+                # request budget bounds this retry too.
+                if remaining > 1:
+                    time.sleep(1)
+                    return self._call(method, path, body=None, timeout=remaining - 1, raw=raw, _rate_retry=True)
             if (error.code == 404 and not failure.code and method == "GET"
                     and path.startswith("/api/jobs/") and "/" not in path[len("/api/jobs/"):]):
                 failure = APIError(404, json.dumps({
@@ -558,6 +567,7 @@ class Client:
         """Wait for a terminal state; timeout leaves the job queued/running."""
         end = None if timeout is None else time.monotonic() + timeout
         job = None
+        delay = max(1.0, self.poll_interval)
         def timed_out() -> TimeoutError:
             if job is None:
                 return TimeoutError(f"timed out waiting for job {job_id}; status unavailable; job was not cancelled")
@@ -570,6 +580,12 @@ class Client:
                 raise timed_out()
             try:
                 observed = self._read_job(job_id, timeout=self.timeout if remaining is None else min(self.timeout, remaining), wait=True)
+            except APIError as error:
+                if error.status != 429 and error.status != 408 and error.status < 500:
+                    raise
+                if error.code == "job_reply_invalid":
+                    raise
+                delay = min(max(1.0, delay * 2), 30.0)
             except (TimeoutError, URLError, IncompleteReplyError) as error:
                 if end is not None and time.monotonic() >= end:
                     raise timed_out() from None
@@ -577,9 +593,10 @@ class Client:
                     raise
             else:
                 job = observed
+                delay = self.poll_interval
                 if job["state"] in TERMINAL:
                     return job
-            time.sleep(self.poll_interval if remaining is None else min(self.poll_interval, max(0, end - time.monotonic())))
+            time.sleep(delay if remaining is None else min(delay, max(0, end - time.monotonic())))
 
     def logs(self, job_id: str, *, follow: bool = False,
              after: int = 0) -> Iterator[dict[str, Any]]:
