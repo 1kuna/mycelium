@@ -385,6 +385,29 @@ Production retains its preparation turn. Once priority preemption has
 released its chosen target, that placement stays committed through preparation;
 the just-requeued victim cannot repeatedly backfill ahead of the build.
 
+From s071, a deterministic environment build failure fails matching queued jobs
+with `environment failed: ...; fix the recipe and resubmit with changed inputs`.
+Job GET, `myce status ID`, and aggregate status include the build-log tail (up to
+4 KiB); `myce logs ID` retains the uploaded full build log. `logs: none` omits the
+excerpt and saved job log. CPU recipes are matched to the worker's CPU execution
+target, including on accelerator hosts. A retained failed key is never offered
+again just because a new launch attempt or submission key exists: fix the locked
+recipe so its immutable environment identity changes.
+While the full log is still uploading, the job stays queued with the same typed
+failure reason and excerpt, excluded from preparation; terminal failure follows
+the upload receipt so no trailing log chunks are lost.
+
+Worker environment reports add `failure_kind` (`deterministic` or `transient`).
+Network, disk/capacity, killed builders and unknown preparation infrastructure
+errors remain queued. Their reason is `environment retry pending` with an excerpt
+and the queue-clock `retry_at`; repeated failures back off for 30, 60, 120, 240,
+then at most 300 seconds. Reports also expose the capped consecutive `failures`
+counter. Repeated heartbeats do not move that retry time. Exact completion
+receipts, including a finished build still uploading its log, release only their
+own preparation attempt. Unstarted replacement offers are withdrawn; started
+custody still requires its own receipt. Other environments can prepare during
+backoff. Lost workers retain the existing session/loss and cleanup fences.
+
 The page and CLI use the queue's decisions. Reading status does not choose where
 to run work. The status API returns job summaries without submitted commands,
 environment values, program arguments, extension files, or local checkpoint
