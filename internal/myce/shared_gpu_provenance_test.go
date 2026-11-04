@@ -17,6 +17,11 @@ func TestSharedDeviceHostOnlyLearningKeepsCard(t *testing.T) {
 			m.Devices[0].ExtensionFingerprint = "synthetic-cuda-v1"
 			s := plainGPUSpec()
 			s.Needs.Memory = "auto"
+			if layout == "separate" {
+				// A recipe/bootstrap hint survives host-only learning as a
+				// positive device default, which used to authorize sharing.
+				s.Needs.MemoryGB, s.Needs.HostMemoryGB = 8, 1
+			}
 			seed := assignGPU(t, q, m, submit(t, q, s))
 			if err := q.Started(result(seed, false)); err != nil {
 				t.Fatal(err)
