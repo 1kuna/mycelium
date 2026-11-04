@@ -1,8 +1,10 @@
 # Measurement template, not an admission qualification.
 # Source: Qwen/Qwen3.8-27B, Apache-2.0.
 # Revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
-# Supply a reviewed native vLLM 0.27.1 environment; replace the memory placeholder
-# with measured load/warm-up peak plus justified headroom before deployment.
+# Supply a reviewed native vLLM 0.27.1 environment; replace both memory
+# placeholders with positive measured reservations before deployment.
+# Unified admission charges memory_gb + host_memory_gb. Size their sum from
+# one shared-RAM load/warm-up peak plus headroom; do not count that peak twice.
 idle_timeout: 10m
 max_wait: 15m
 models:
@@ -10,8 +12,8 @@ models:
     engine: vllm
     environment: open-vlm-vllm-0271
     path: Qwen3.8-27B/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
-    memory_gb: REPLACE_WITH_MEASURED_SHARED_RAM_GIB
-    host_memory_gb: 0 # On unified CUDA this is the same RAM, not an extra copy.
+    memory_gb: REPLACE_WITH_MEASURED_DEVICE_SHARE_GIB
+    host_memory_gb: REPLACE_WITH_MEASURED_ADDITIONAL_HOST_SHARE_GIB
     platforms: [cuda]
     max_in_flight: 1
     logs: none

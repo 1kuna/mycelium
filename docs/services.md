@@ -132,8 +132,11 @@ pins the official Apache-2.0 model's complete file manifest to revision
 `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`. It uses native vLLM 0.27.1,
 8192-token context, one concurrent request, two images, an explicit 8 GiB KV
 cache and eager execution. The KV byte setting overrides the preset's memory
-utilization fraction. Its memory placeholder must be replaced by measured
-load/warm-up peaks plus justified headroom before admission; it is not a
+utilization fraction. Replace both memory placeholders with positive measured
+reservations before admission. On unified-memory hosts, admission charges
+`memory_gb + host_memory_gb`: size that sum from one shared-RAM load/warm-up
+peak plus justified headroom, without duplicating the peak in both fields.
+Keep `host_memory_gb` positive for host admission and enforced ceilings. It is not a
 hardware qualification or an installed catalog. Supply a reviewed environment
 named `open-vlm-vllm-0271`, keeping its native runtime available until unload.
 
