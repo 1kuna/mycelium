@@ -177,7 +177,7 @@ func TestMemorySamplingOOMInvalidatesAndRelearns(t *testing.T) {
 		t.Fatal(err)
 	}
 	explore := startObservation(t, q, m, s)
-	if explore.MemoryEnvelope.Source != boundedQuarter {
+	if explore.MemoryEnvelope.Source != acceptedMemoryEscalation || explore.MemoryEnvelope.Basis != "exploratory" || explore.MemoryEnvelope.HostGB != 4 {
 		t.Fatalf("invalidated class did not explore: %+v", explore.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)
