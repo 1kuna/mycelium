@@ -480,6 +480,71 @@ func TestScarceHostYieldToolsDoNotManufactureUniqueness(t *testing.T) {
 	}
 }
 
+func TestScarceHostYieldWorkerProtocolsAreNotHardwareUniqueness(t *testing.T) {
+	for _, protocol := range []string{"shared-input", "model-snapshot"} {
+		t.Run(protocol, func(t *testing.T) {
+			q, _, a, _, _ := yieldFixture(t, false)
+			peer := m3Machine()
+			peer.ID, peer.HostID = "peer", "peer"
+			machineCheck(t, q, peer)
+			if err := q.update(func() error {
+				q.s.Machines[a.ID].Capabilities = append(q.s.Machines[a.ID].Capabilities, "shared_inputs_v1", modelSnapshotsCapability)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			s := spec("experiment")
+			s.Needs.Platform = Platform{Required: []string{"fake"}}
+			s.RequirementReasons = map[string]string{"backend:fake": "requires simulated accelerator"}
+			if protocol == "shared-input" {
+				s.SharedInputs = map[string]SharedInput{"data": {SHA256: strings.Repeat("a", 64), SizeBytes: 1, Manifest: FileManifest{"data": {SHA256: strings.Repeat("a", 64), SizeBytes: 1}}}}
+			} else {
+				s.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "example/model", Revision: strings.Repeat("a", 40)}}
+			}
+			// Read-only hardware projection: input acquisition/admission still
+			// rejects this peer's older worker protocol in the ordinary planner.
+			host, _ := q.scarceDemandHost(&Job{State: "queued", Spec: s})
+			if host != "" {
+				t.Fatal("worker software manufactured unique hardware", protocol, host)
+			}
+		})
+	}
+}
+
+func TestScarceHostYieldDestinationProtocolRechecked(t *testing.T) {
+	for _, fence := range []string{"dispatch", "launch"} {
+		t.Run(fence, func(t *testing.T) {
+			q, _, _, b, run := yieldFixture(t, false)
+			yieldDemand(t, q)
+			authorizeYield(t, q, run)
+			saveYieldGeneration(t, job(t, q, run.ID), 2)
+			g := int64(2)
+			r := result(run, false)
+			r.Interrupted, r.FinalCheckpointGeneration = true, &g
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if fence == "dispatch" {
+				b.Capabilities = []string{"native_isolation_landlock"}
+				if next := assignedJob(machineCheck(t, q, b)); next != nil {
+					t.Fatal("older worker accepted yielded work", next)
+				}
+			} else {
+				next := assignedJob(machineCheck(t, q, b))
+				if next == nil || next.ID != run.ID {
+					t.Fatal("missing resume offer", next)
+				}
+				if err := q.update(func() error { q.s.Machines[b.ID].Capabilities = []string{"native_isolation_landlock"}; return nil }); err != nil {
+					t.Fatal(err)
+				}
+				if err := q.Started(result(next, false)); !errors.Is(err, ErrStale) {
+					t.Fatal("old worker passed yielded launch fence", err)
+				}
+			}
+		})
+	}
+}
+
 func TestScarceHostYieldRechecksDemandToolsBeforeStop(t *testing.T) {
 	q, _, a, _, run := yieldFixture(t, false)
 	if err := q.update(func() error { q.s.Machines[a.ID].ToolInventory = map[string][]string{"": {"node"}}; return nil }); err != nil {

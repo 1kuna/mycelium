@@ -138,22 +138,12 @@ func (q *Queue) scarceDemandHost(j *Job) (string, string) {
 			continue
 		}
 		capacity := q.qualificationCapacity(m)
-		// Check physical capability with the requested vector before software.
-		physical := copy
-		physical.Spec.Targets = nil
-		physical.Spec.Environment = Environment{}
-		physical.EnvironmentRecipes = nil
-		physical.Extensions = nil
-		physical.Spec.Kind = ""
-		physical.Spec.Program = nil
-		physical.Spec.Extension = ""
-		physical.Spec.ExtensionDigest = ""
-		physical.Spec.Execution = nil
-		physical.Spec.Run.Docker = false
+		// Start from only hardware/resource constraints. Copying the full job
+		// and removing known software fields lets future protocol/recipe fields
+		// accidentally turn a mixed-version rollout into hardware uniqueness.
+		physical := Job{Spec: Spec{Needs: copy.Spec.Needs, AllowedMachines: copy.Spec.AllowedMachines, ExcludedMachines: copy.Spec.ExcludedMachines}}
 		physical.Spec.Needs.Tools = nil // Missing software is not a hardware exclusion.
 		physical.Spec.Needs.Network = false
-		physical.Spec.Logs = ""
-		physical.MemoryEnvelope = nil
 		if gpu := physical.Spec.Needs.GPU; gpu != nil && strings.TrimSpace(reasons["device"]) == "" {
 			selection := *gpu
 			selection.Devices = nil
@@ -214,6 +204,9 @@ func (q *Queue) yieldPlacementAllows(j *Job, m *Machine) bool {
 	y := j.ScarceHostYield
 	if y == nil {
 		return true
+	}
+	if !slices.Contains(m.Capabilities, scarceHostYieldCapability) {
+		return false
 	}
 	if y.Hold != "" || !y.FinalReceived || q.yieldReleasePending(y) {
 		return false
@@ -498,7 +491,7 @@ func (q *Queue) yieldReleasePending(y *ScarceHostYield) bool {
 }
 func (q *Queue) yieldResumeStartAllowed(j *Job, m *Machine) bool {
 	y := j.ScarceHostYield
-	return y == nil || y.FinalReceived && y.Hold == "" && !q.yieldReleasePending(y) && q.yieldContractMatches(j, m) && (!q.yieldDemandNeedsHost(y) || hostID(m) != q.executionHost(y.Machine))
+	return y == nil || slices.Contains(m.Capabilities, scarceHostYieldCapability) && y.FinalReceived && y.Hold == "" && !q.yieldReleasePending(y) && q.yieldContractMatches(j, m) && (!q.yieldDemandNeedsHost(y) || hostID(m) != q.executionHost(y.Machine))
 }
 func (q *Queue) retainYieldFinal(j *Job, r Result) {
 	if !yieldMatches(j) {
