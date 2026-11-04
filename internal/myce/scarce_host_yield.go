@@ -79,6 +79,9 @@ func finiteYieldJob(j *Job) bool {
 	return j.Spec.Needs.Model == "" && j.Spec.FanOut == nil && j.Batch == nil && j.Spec.ExtensionCheck == nil
 }
 func (q *Queue) yieldContractMatches(j *Job, m *Machine) bool {
+	if j.Spec.Needs.cpuOnly() {
+		m = cpuMachineView(m)
+	}
 	r := j.Spec.ResumeCompatibility
 	if r == nil {
 		return false
@@ -147,6 +150,11 @@ func (q *Queue) scarceDemandHost(j *Job) (string, string) {
 		physical.Spec.ExtensionDigest = ""
 		physical.Spec.Execution = nil
 		physical.Spec.Run.Docker = false
+		if gpu := physical.Spec.Needs.GPU; gpu != nil && strings.TrimSpace(reasons["device"]) == "" {
+			selection := *gpu
+			selection.Devices = nil
+			physical.Spec.Needs.GPU = &selection
+		}
 		if !fitsTargetResourcesChecked(&physical, &capacity, capacity.TotalMemoryGB, nil) || !hostFits(&capacity, physical.Spec.Needs.MemoryGB, physical.Spec.Needs.HostMemoryGB) {
 			continue
 		}
@@ -206,7 +214,7 @@ func (q *Queue) yieldPlacementAllows(j *Job, m *Machine) bool {
 	if y.Hold != "" || !y.FinalReceived || q.yieldReleasePending(y) {
 		return false
 	}
-	if j.Spec.Resumable && !q.yieldContractMatches(j, m) {
+	if !q.yieldContractMatches(j, m) {
 		return false
 	}
 	return !q.yieldDemandNeedsHost(y) || hostID(m) != q.executionHost(y.Machine)
@@ -475,11 +483,14 @@ func (q *Queue) yieldReleasePending(y *ScarceHostYield) bool {
 }
 func (q *Queue) yieldResumeStartAllowed(j *Job, m *Machine) bool {
 	y := j.ScarceHostYield
-	return y == nil || y.FinalReceived && y.Hold == "" && !q.yieldReleasePending(y) && (!j.Spec.Resumable || q.yieldContractMatches(j, m)) && (!q.yieldDemandNeedsHost(y) || hostID(m) != q.executionHost(y.Machine))
+	return y == nil || y.FinalReceived && y.Hold == "" && !q.yieldReleasePending(y) && q.yieldContractMatches(j, m) && (!q.yieldDemandNeedsHost(y) || hostID(m) != q.executionHost(y.Machine))
 }
 func (q *Queue) retainYieldFinal(j *Job, r Result) {
 	if !yieldMatches(j) {
 		return
+	}
+	if r.ReleasePending && r.Interrupted {
+		return // Cleanup custody must retain the identity for its final receipt.
 	}
 	y := j.ScarceHostYield
 	y.FinalReceived = true

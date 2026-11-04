@@ -294,6 +294,123 @@ func TestScarceHostYieldDestinationLostAfterStopAndDemandCancel(t *testing.T) {
 	if next == nil || next.ID != run.ID {
 		t.Fatal("cancellation did not clear scarce exclusion", next, job(t, q, run.ID).Reason)
 	}
+	if err := q.Started(result(next, false)); err != nil {
+		t.Fatal("CPU resume on accelerator-equipped host failed launch fence", err)
+	}
+}
+
+func TestScarceHostYieldCleanupPendingRetainsFinalReceipt(t *testing.T) {
+	q, _, _, b, run := yieldFixture(t, false)
+	yieldDemand(t, q)
+	authorizeYield(t, q, run)
+	saveYieldGeneration(t, job(t, q, run.ID), 2)
+	r := result(run, false)
+	r.Interrupted, r.ReleasePending = true, true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, run.ID)
+	if got.State != "stopping" || got.ScarceHostYield.FinalReceived || got.Machine != run.Machine {
+		t.Fatal("cleanup-pending result lost final-receipt custody", got)
+	}
+	r.ReleasePending, r.ReleaseOnly = false, true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	g := int64(2)
+	r.ReleaseOnly = false
+	r.FinalCheckpointGeneration = &g
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	next := assignedJob(machineCheck(t, q, b))
+	if next == nil || next.ID != run.ID || next.Attempt != 2 || next.ScarceHostYield.Hold != "" {
+		t.Fatal("cleanup retry did not accept final save", next, job(t, q, run.ID).Reason)
+	}
+}
+
+func TestScarceHostYieldDisposableKeepsFrozenCompatibility(t *testing.T) {
+	q, _, _, b, run := yieldFixture(t, true)
+	yieldDemand(t, q)
+	authorizeYield(t, q, run)
+	if err := q.Leave(b.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	finishInterrupted(t, q, run)
+	other := cpuMachine("other", "other", "cpu", 8, 32)
+	other.Devices = []MachineDevice{}
+	other.CapabilityProfile.Arch = "arm64"
+	other.Capabilities = append(other.Capabilities, scarceHostYieldCapability)
+	if next := assignedJob(machineCheck(t, q, other)); next != nil {
+		t.Fatal("disposable work used unproven result target", next)
+	}
+	got := job(t, q, run.ID)
+	if got.State != "queued" || !strings.Contains(got.Reason, scarceHostYieldCause) {
+		t.Fatal("missing compatibility hold", got)
+	}
+}
+
+func TestScarceHostYieldPendingNASVerificationRetries(t *testing.T) {
+	q, _, _, b, run := yieldFixture(t, false)
+	yieldDemand(t, q)
+	authorizeYield(t, q, run)
+	path := attemptCheckpoint(*job(t, q, run.ID))
+	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	q.nasProgress.timeout = time.Millisecond
+	_, err := q.nasProgress.run(path, func() (int64, error) {
+		close(entered)
+		<-release
+		close(finished)
+		return 1, nil // Heartbeat began before the cooperative final save.
+	})
+	if !errors.Is(err, errCheckpointIOPending) {
+		t.Fatal("missing pending scan", err)
+	}
+	<-entered
+	saveYieldGeneration(t, job(t, q, run.ID), 2)
+	g := int64(2)
+	r := result(run, false)
+	r.Interrupted, r.FinalCheckpointGeneration = true, &g
+	if err := q.Complete(r); !errors.Is(err, errCheckpointIOPending) {
+		t.Fatal("unfinished verification acknowledged as final", err)
+	}
+	if got := job(t, q, run.ID); got.ScarceHostYield.FinalReceived || got.State != "stopping" {
+		t.Fatal("pending verification consumed final receipt", got)
+	}
+	unblock()
+	<-finished
+	q.nasProgress.timeout = testWaitTimeout
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	next := assignedJob(machineCheck(t, q, b))
+	if next == nil || next.ID != run.ID || next.Attempt != 2 {
+		t.Fatal("fresh verification did not resume", next, job(t, q, run.ID).Reason)
+	}
+}
+
+func TestScarceHostYieldConvenienceDevicePinIsNotUniqueness(t *testing.T) {
+	q, _, _, _, run := yieldFixture(t, false)
+	peer := m3Machine()
+	peer.ID, peer.HostID = "peer", "peer"
+	peer.Devices[0].ID, peer.Devices[1].ID = "2", "3"
+	machineCheck(t, q, peer)
+	s := spec("experiment")
+	s.Resumable = false
+	s.Needs.CPUCores, s.Needs.HostMemoryGB = 1, 1
+	s.Needs.Platform = Platform{Required: []string{"fake"}}
+	s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+	s.RequirementReasons = map[string]string{"backend:fake": "needs simulated accelerator"}
+	d := submit(t, q, s)
+	if got := job(t, q, run.ID); got.State != "running" {
+		t.Fatal("convenience pin manufactured uniqueness", got)
+	}
+	if got := job(t, q, d.ID); got.Spec.Needs.GPU.Devices[0] != "0" {
+		t.Fatal("projection changed authored pin", got.Spec.Needs.GPU)
+	}
 }
 func TestScarceHostYieldRequiresRealUniquenessAndCompatibility(t *testing.T) {
 	for _, gap := range []string{"busy-peer", "stale-peer", "maintained-peer", "unavailable", "unqualified", "incompatible", "no-checkpoint", "production", "not-opted-in", "protected"} {
