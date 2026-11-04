@@ -307,6 +307,24 @@ func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]st
 	return paths, releases, nil
 }
 
+// nativeInputPaths keeps model data separate from executable shared runtimes.
+// Only acquired paths get grants; run.env cannot expand the boundary.
+func (w *Worker) nativeInputPaths(j Job, paths map[string]string) {
+	w.nativeSharedInputs, w.nativeModelInputs = nil, nil
+	for name := range j.Spec.SharedInputs {
+		if path := paths["MYCE_INPUT_"+strings.ToUpper(name)]; path != "" {
+			w.nativeSharedInputs = append(w.nativeSharedInputs, path)
+		}
+	}
+	for name := range j.Spec.ModelSnapshots {
+		if path := paths["MYCE_MODEL_"+strings.ToUpper(name)]; path != "" {
+			w.nativeModelInputs = append(w.nativeModelInputs, path)
+		}
+	}
+	slices.Sort(w.nativeSharedInputs)
+	slices.Sort(w.nativeModelInputs)
+}
+
 // Docker sees the same verified directory at a fixed container path.
 func dockerModelMounts(j Job, paths map[string]string) []dockerFileMount {
 	var mounts []dockerFileMount
