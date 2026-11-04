@@ -385,6 +385,16 @@ Production retains its preparation turn. Once priority preemption has
 released its chosen target, that placement stays committed through preparation;
 the just-requeued victim cannot repeatedly backfill ahead of the build.
 
+From s072, one environment builder can run beside CPU commands when a separate
+logical core fits the host allowance, including on accelerator workers. The
+builder's core stays charged until its exact completion or stop receipt; CPU
+commands retain their existing reservations. Preparation RAM uses the existing
+owner reserve. CPU-scoped builds may also run beside device commands;
+device-scoped builds wait for those commands to release. Active model work,
+recovery and shared-host policy still withhold new builds. Peer preference uses
+the same preparation eligibility, so a worker unable to start a builder cannot silently attract an
+offer. Existing offered/building and CPU-capacity reasons describe these waits.
+
 From s071, a deterministic environment build failure fails matching queued jobs
 with `environment failed: ...; fix the recipe and resubmit with changed inputs`.
 Job GET, `myce status ID`, and aggregate status include the build-log tail (up to

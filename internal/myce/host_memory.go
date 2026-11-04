@@ -156,11 +156,11 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	}
 	cores := demand.Needs.cores()
 	releasePreparation := len(releasePreparations) > 0 && releasePreparations[0]
-	// Count the ledger's remaining executions and started builds once. Candidate
-	// sets only hand one core back when they remove a worker's last execution.
+	// Only legacy preparations inherit a core when a worker loses its last
+	// execution. Independently charged builds retain their core throughout.
 	executions, builds := map[string]int{}, map[string]int{}
 	for _, p := range q.s.PreparationPlans {
-		if owner := q.s.Machines[p.Machine]; p.Started && !(releasePreparation && p.Machine == m.ID) && owner != nil && hostID(owner) == hostID(m) {
+		if owner := q.s.Machines[p.Machine]; p.Started && p.CPUCores == 0 && !(releasePreparation && p.Machine == m.ID) && owner != nil && hostID(owner) == hostID(m) {
 			builds[p.Machine]++
 		}
 	}

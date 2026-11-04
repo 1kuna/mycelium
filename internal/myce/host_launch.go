@@ -14,6 +14,8 @@ const defaultWorkerInterval = time.Second
 // HostLaunch is exact queue custody for a preparation, or an engine attempt.
 // A cached reply is an offer, never permission to launch.
 type HostLaunch struct {
+	// Zero preserves legacy preparation sharing with an execution reservation.
+	CPUCores     int                 `json:"cpu_cores,omitempty"`
 	Device       string              `json:"device,omitempty"`
 	StartedAt    *time.Time          `json:"started_at,omitempty"`
 	Spec         *Spec               `json:"spec,omitempty"`
@@ -44,6 +46,9 @@ func (q *Queue) issuePreparation(m *Machine, kind, key string) HostLaunch {
 		}
 	}
 	l := HostLaunch{Device: targetDevice(m), Machine: m.ID, Session: m.Session, Kind: kind, Key: key, Attempt: ID()}
+	if kind == "environment" {
+		l.CPUCores = 1 // Background builds do not borrow unrelated command cores.
+	}
 	if j := q.candidate(m, nil); j != nil {
 		spec := Spec{Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class}
 		l.Spec = &spec
@@ -164,7 +169,7 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			reject("benchmark_busy")
 			return nil
 		}
-		if !q.workerHasCPUReservation(m) && !cpuAllocationFits(m, 1) {
+		if !p.Started && (p.CPUCores > 0 || !q.workerHasCPUReservation(m)) && !cpuAllocationFits(m, max(1, p.CPUCores)) {
 			reject("preparation_cpu")
 			return nil
 		}

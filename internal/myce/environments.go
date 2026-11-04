@@ -347,11 +347,41 @@ type EnvironmentReport struct {
 	BuildSeconds   float64         `json:"build_seconds,omitempty"`
 }
 
+// Environment preparation is single-flight per worker, with its own core.
+// CPU-scoped builds may also run beside device commands. Device-scoped builds
+// and active model work retain their existing preparation exclusion.
+func (q *Queue) environmentPreparationAvailable(m *Machine) bool {
+	if !q.hostLaunchAllowed(m, m.Session) || !m.EnvironmentBuilder || q.preparationStopping(m) || q.s.HostMaintenance[hostID(m)].SharedHost != nil {
+		return false
+	}
+	for _, j := range q.liveJobs() {
+		if j.Machine == m.ID && batchReservesCapacity(j) && !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" {
+			return false
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if r.Machine == m.ID && !r.CPUOnly && m.GPU != "cpu" {
+			return false
+		}
+	}
+	for _, s := range q.s.ModelSlots {
+		if s.Machine == m.ID && (s.State == "loading" || s.InFlight > 0) {
+			return false
+		}
+	}
+	for _, p := range q.s.PreparationPlans {
+		if p.Machine == m.ID && p.Session == m.Session && p.Kind == "environment" && p.Started {
+			return m.CPUCapacityReason == "" && m.CPUInUseCores <= m.EffectiveCPUCores
+		}
+	}
+	return cpuAllocationFits(m, 1)
+}
+
 func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	if q.s.HostMaintenance[hostID(m)].SharedHost != nil {
 		return nil
 	}
-	if !q.hostLaunchAllowed(m, m.Session) || !q.workerBatchIdle(m) || !m.EnvironmentBuilder || q.preparationStopping(m) {
+	if !q.environmentPreparationAvailable(m) {
 		return nil
 	}
 	// Preserve a started same-tier/protected build even if another queued job
@@ -383,7 +413,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		return q.extensionPreparationPlan(m)
 	}
 	for _, other := range q.plannerMachines() {
-		if sameTarget(other, m) || q.preparationStopping(other) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
+		if sameTarget(other, m) || !q.environmentPreparationAvailable(other) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
 		// workerIdle permits a shared started build. Preserve a strict
@@ -1139,6 +1169,15 @@ type environmentRuntime struct {
 	cancel    context.CancelFunc
 	done      chan struct{}
 	key       string
+}
+
+func (rt *environmentRuntime) cores() int {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.cancel != nil {
+		return 1
+	}
+	return 0
 }
 
 func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActive ...bool) {
