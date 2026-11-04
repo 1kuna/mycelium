@@ -34,10 +34,12 @@ func processSessionEnvironment(env []string) []string {
 // Snapshot the whole session before group delivery can orphan its descendants.
 // Individual birth checks fence PID reuse, and the ordinary release inspector
 // verifies all remaining session members, including separate process groups.
+// Failed inspection still signals the owned group, while retaining the error
+// so missing descendant custody can never be mistaken for confirmed release.
 func signalWorkerSession(group int, signal syscall.Signal, delivered ...func()) error {
 	members, err := workerGroupMembers(group)
 	if err != nil {
-		return err
+		return errors.Join(err, signalWorkerGroupUsing(group, signal, syscall.Kill, workerGroupMembers, delivered...))
 	}
 	births := map[int]string{}
 	for _, pid := range members {
@@ -46,7 +48,7 @@ func signalWorkerSession(group int, signal syscall.Signal, delivered ...func()) 
 			continue
 		}
 		if err != nil {
-			return err
+			return errors.Join(err, signalWorkerGroupUsing(group, signal, syscall.Kill, workerGroupMembers, delivered...))
 		}
 		births[pid] = birth
 	}

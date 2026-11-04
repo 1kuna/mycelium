@@ -68,13 +68,13 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 					return err
 				}
 			}
-			if err := recordWorkerGroup(&state, cmd.Process.Pid); err != nil {
-				return err
+			custodyErr := recordWorkerGroup(&state, cmd.Process.Pid)
+			if custodyErr == nil {
+				custodyErr = saveWorkerJSON(scope.StateDir, record, state)
 			}
-			if err := saveWorkerJSON(scope.StateDir, record, state); err != nil {
-				return err
-			}
-			return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
+			// Inspection/persistence failures retain custody, but must not prevent
+			// stopping the process group this live command owns.
+			return errors.Join(custodyErr, signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL))
 		}
 		return nil
 	}
