@@ -40,6 +40,7 @@ type fleetUpgrade struct {
 	CreatedAt          time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
+	RetryPhase     string    `json:"retry_phase,omitempty"`
 	HealthSince    time.Time `json:"health_since,omitempty"`
 	HealthIdentity string    `json:"health_identity,omitempty"`
 	HelperRevision int       `json:"helper_revision,omitempty"`
@@ -140,6 +141,17 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 						}
 					}
 				}
+				// Only explicit operator intent retries a failed disabled worker.
+				// Completed hosts retain their verified progress.
+				for _, h := range previous.Hosts {
+					if h.Phase == "failed" {
+						if previous.State == "complete" {
+							previous.Revision++
+							previous.State = "running"
+						}
+						h.Phase, h.Failure, h.Wait = "pending", "", ""
+					}
+				}
 				out = q.fleetUpgradeStatus()
 				return nil
 			}
@@ -168,16 +180,6 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 			if request.QueueOnly || m.Replacement != nil || q.migrationHistoricalMachine(m) {
 				continue
 			}
-			if !q.fleetProofFresh(m.Fleet) || m.CapabilityProfile == nil {
-				return q.fleetProofRefusal("fleet_worker_unmanaged", request)
-			}
-			artifact, e := approved.Manifest.Select(m.CapabilityProfile.OS, m.CapabilityProfile.Arch)
-			if e != nil {
-				return fleetError("fleet_worker_target_incompatible")
-			}
-			if e = CheckReleaseUpgrade(approved.Manifest.Version, m.Fleet.Version, false, m.Fleet.SHA256 == artifact.SHA256); e != nil {
-				return fleetError("fleet_worker_downgrade_refused")
-			}
 			h := byHost[hostID(m)]
 			if h == nil {
 				h = &fleetUpgradeHost{FleetHostStatus: FleetHostStatus{Host: hostID(m), Phase: "pending"}}
@@ -189,6 +191,17 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 			before := cloneMachine(m)
 			h.Machine = m.ID
 			h.Before = &before
+			if policy := q.s.HostMaintenance[h.Host]; policy.Mode == "disabled" {
+				// Freeze the operator receipt even when this out-of-service
+				// worker cannot yet supply a usable runtime/inventory proof.
+				h.Policy = policy
+				h.Failure = q.fleetWorkerFailure(m, approved)
+			} else if reason := q.fleetWorkerFailure(m, approved); reason != "" {
+				if reason == "worker_unmanaged" {
+					return q.fleetProofRefusal("fleet_worker_unmanaged", request)
+				}
+				return fleetError("fleet_" + reason)
+			}
 		}
 		for _, h := range byHost {
 			u.Hosts = append(u.Hosts, h)
@@ -201,7 +214,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 			// Carry unresolved drain custody into explicit fix-forward intent.
 			for _, h := range u.Hosts {
 				for _, p := range old.Hosts {
-					if h.Host == p.Host && p.Phase != "pending" && p.Phase != "complete" {
+					if h.Host == p.Host && p.Phase != "pending" && p.Phase != "complete" && p.Phase != "failed" {
 						h.Policy = p.Policy
 						h.Owned = p.Owned
 						if !q.fleetPolicyMatches(p) {
@@ -232,6 +245,23 @@ func cloneFleetProof(p *FleetRuntimeProof) *FleetRuntimeProof {
 	}
 	out := *p
 	return &out
+}
+
+// A disabled worker is validated when its turn comes, so missing or unhealthy
+// proofs cannot prevent enabled hosts from being processed. No failed check
+// authorizes an update; its named failure remains visible on that host.
+func (q *Queue) fleetWorkerFailure(m *Machine, release *EnrollmentRelease) string {
+	if m == nil || !q.fleetProofFresh(m.Fleet) || m.CapabilityProfile == nil {
+		return "worker_unmanaged"
+	}
+	artifact, err := release.Manifest.Select(m.CapabilityProfile.OS, m.CapabilityProfile.Arch)
+	if err != nil {
+		return "worker_target_incompatible"
+	}
+	if err := CheckReleaseUpgrade(release.Manifest.Version, m.Fleet.Version, false, m.Fleet.SHA256 == artifact.SHA256); err != nil {
+		return "worker_downgrade_refused"
+	}
+	return ""
 }
 func fleetProofReady(p *FleetRuntimeProof) bool {
 	return p != nil && p.PID > 0 && p.Session != "" && validPin(p.SHA256) && p.ServiceHealthy && p.RunnerSmoke && p.StartGate == startGateProtocol && p.AttemptProtocol == keyedAttemptProtocol
@@ -277,7 +307,7 @@ func (q *Queue) fleetProduction(host string) bool {
 func (q *Queue) fleetActiveHost() *fleetUpgradeHost {
 	if u := q.s.FleetUpgrade; u != nil {
 		for _, h := range u.Hosts {
-			if h.Phase != "pending" && h.Phase != "complete" {
+			if h.Phase != "pending" && h.Phase != "complete" && h.Phase != "failed" {
 				return h
 			}
 		}
@@ -291,6 +321,15 @@ func (q *Queue) fleetStop(h *fleetUpgradeHost, reason string) {
 	q.s.FleetUpgrade.State = "stopped"
 	h.Failure = reason
 	h.Wait = "fix forward, then rerun myce fleet upgrade"
+	// An operator-disabled worker contributes no admission capacity. Preserve
+	// its failure and policy, but let other hosts finish. Queue cutover and
+	// changed maintenance receipts still stop, retaining their existing fences.
+	if h.Policy.Mode == "disabled" && !h.Owned && q.fleetPolicyMatches(h) && (!h.Queue || h.QueueDone) {
+		q.s.FleetUpgrade.State = "running"
+		h.RetryPhase = h.Phase
+		h.Phase = "failed"
+		h.Wait = "host remains disabled; repair the cause, then rerun myce fleet upgrade"
+	}
 	if reason == "maintenance_changed" {
 		h.Wait = "maintenance was replaced; preserve the current operator policy and select an approved newer release with myce fleet upgrade --release VERSION to fix forward"
 	}
@@ -370,6 +409,11 @@ func (q *Queue) maintainFleetUpgrade() {
 			return
 		}
 		sort.SliceStable(pending, func(i, j int) bool {
+			di := q.s.HostMaintenance[pending[i].Host].Mode == "disabled"
+			dj := q.s.HostMaintenance[pending[j].Host].Mode == "disabled"
+			if di != dj {
+				return !di
+			}
 			pi, pj := q.fleetProduction(pending[i].Host), q.fleetProduction(pending[j].Host)
 			if pi != pj {
 				return !pi
@@ -383,32 +427,42 @@ func (q *Queue) maintainFleetUpgrade() {
 		// Reflect execution order in status while retaining completed history.
 		var ordered []*fleetUpgradeHost
 		for _, v := range u.Hosts {
-			if v.Phase == "complete" {
+			if v.Phase == "complete" || v.Phase == "failed" {
 				ordered = append(ordered, v)
 			}
 		}
 		u.Hosts = append(ordered, pending...)
-		policy := q.s.HostMaintenance[h.Host]
-		if policy.Mode == "" && h.Machine == "" {
-			if q.s.HostMaintenance == nil {
-				q.s.HostMaintenance = map[string]HostMaintenance{}
+		if h.RetryPhase != "" || h.Policy.Mode == "disabled" {
+			// Keep the original maintenance and runtime phase fences when
+			// retrying; pending is only a place in the sequential order.
+			h.Phase = "draining"
+			if h.RetryPhase != "" {
+				h.Phase, h.RetryPhase = h.RetryPhase, ""
 			}
-			policy.Mode = "enabled"
-			q.s.HostMaintenance[h.Host] = policy
-		}
-		h.Policy = policy
-		h.Phase = "draining"
-		h.ProgressAt = q.clock.Now()
-		if policy.Mode == "enabled" {
-			if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "drain", IfMode: policy.Mode, IfUpdatedAt: &policy.UpdatedAt, DrainOwner: u.Operation}); err != nil {
-				q.fleetStop(h, "drain_conflict")
+			h.HelperRevision = u.Revision
+		} else {
+			policy := q.s.HostMaintenance[h.Host]
+			if policy.Mode == "" && h.Machine == "" {
+				if q.s.HostMaintenance == nil {
+					q.s.HostMaintenance = map[string]HostMaintenance{}
+				}
+				policy.Mode = "enabled"
+				q.s.HostMaintenance[h.Host] = policy
+			}
+			h.Policy = policy
+			h.Phase = "draining"
+			h.ProgressAt = q.clock.Now()
+			if policy.Mode == "enabled" {
+				if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "drain", IfMode: policy.Mode, IfUpdatedAt: &policy.UpdatedAt, DrainOwner: u.Operation}); err != nil {
+					q.fleetStop(h, "drain_conflict")
+					return
+				}
+				h.Owned = true
+				h.Policy = q.s.HostMaintenance[h.Host]
+			} else if policy.Mode != "drained" && policy.Mode != "disabled" {
+				q.fleetStop(h, "maintenance_unavailable")
 				return
 			}
-			h.Owned = true
-			h.Policy = q.s.HostMaintenance[h.Host]
-		} else if policy.Mode != "drained" && policy.Mode != "disabled" {
-			q.fleetStop(h, "maintenance_unavailable")
-			return
 		}
 	}
 	if !q.fleetPolicyMatches(h) {
@@ -416,6 +470,18 @@ func (q *Queue) maintainFleetUpgrade() {
 		return
 	}
 	if h.Phase == "draining" {
+		if h.Policy.Mode == "disabled" && h.Machine != "" && (!h.Queue || h.QueueDone) {
+			m := q.s.Machines[h.Machine]
+			if reason := q.fleetWorkerFailure(m, &u.Release); reason != "" {
+				q.fleetStop(h, reason)
+				return
+			}
+			// No worker helper has been issued in this phase. A previously
+			// unavailable worker now has a validated starting identity.
+			before := cloneMachine(m)
+			h.Before = &before
+			h.Failure = ""
+		}
 		if !q.fleetHostQuiet(h) {
 			h.Wait = "waiting for fresh exact execution and release custody"
 			return
