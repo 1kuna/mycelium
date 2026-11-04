@@ -143,6 +143,7 @@ type process struct {
 	savePriorityStop func(*PriorityPreemption) error
 	priorityStop     *PriorityPreemption
 	outcome          memberOutcome
+	exitObservation  nativeExitObservation
 	saveOutcome      func(memberOutcome) error
 	saveCustody      func() error
 
@@ -324,9 +325,18 @@ func (p *process) waitStopGrace(clock Clock, group, anchor int) {
 	}
 }
 
-// p.mu serializes delivery/persistence with exit observation. Capture the
-// observation timestamp immediately after Wait, before acquiring this lock.
 func (p *process) signalLocked(signal syscall.Signal) bool {
+	return p.signalLockedUsing(signal, func(delivered func()) error {
+		return signalWorkerSession(p.cmd.Process.Pid, signal, delivered)
+	})
+}
+
+func (p *process) signalLockedUsing(signal syscall.Signal, deliver func(func()) error) bool {
+	p.exitObservation.mu.Lock()
+	defer p.exitObservation.mu.Unlock()
+	if p.exitObservation.exit != nil {
+		p.outcome.Exit = p.exitObservation.exit
+	}
 	exited := p.outcome.Exit != nil
 	if exited && !p.stopGroup {
 		return true
@@ -336,21 +346,22 @@ func (p *process) signalLocked(signal syscall.Signal) bool {
 			return false
 		}
 	}
-	err := signalWorkerSession(p.cmd.Process.Pid, signal, func(at time.Time) {
+	err := deliver(func() {
 		if !exited {
-			p.recordSignalLocked(signal, at)
+			p.recordSignalLocked(signal)
 		}
 	})
 	return err == nil
 }
 
-func (p *process) recordSignalLocked(signal syscall.Signal, at time.Time) {
+func (p *process) recordSignalLocked(signal syscall.Signal) {
+	at := time.Now().UTC()
 	name := "TERM"
 	if signal == syscall.SIGKILL {
 		name = "KILL"
 	}
 	next := p.outcome
-	next.Signals = append(append([]deliveredSignal(nil), next.Signals...), deliveredSignal{Signal: name, At: at, Shutdown: p.shutdown})
+	next.Signals = append(append([]deliveredSignal(nil), next.Signals...), deliveredSignal{Signal: name, At: at, Shutdown: p.shutdown, BeforeExit: true})
 	if p.saveOutcome != nil && p.saveOutcome(next) == nil {
 		p.outcome = next
 	}
@@ -922,7 +933,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			defer release()
 		}
 		waitErr := cmd.Wait()
-		observed := observedNativeExit(cmd, time.Now().UTC())
+		observed := p.exitObservation.observe(cmd)
 		p.mu.Lock()
 		p.outcome.Exit = observed
 		observationErr := p.saveOutcome(p.outcome)

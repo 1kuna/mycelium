@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -37,7 +36,7 @@ func processSessionEnvironment(env []string) []string {
 // verifies all remaining session members, including separate process groups.
 // Failed inspection still signals the owned group, while retaining the error
 // so missing descendant custody can never be mistaken for confirmed release.
-func signalWorkerSession(group int, signal syscall.Signal, delivered ...func(time.Time)) error {
+func signalWorkerSession(group int, signal syscall.Signal, delivered ...func()) error {
 	members, err := workerGroupMembers(group)
 	if err != nil {
 		return errors.Join(err, signalWorkerGroupUsing(group, signal, syscall.Kill, workerGroupMembers, delivered...))

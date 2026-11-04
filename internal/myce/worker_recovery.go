@@ -354,14 +354,10 @@ func workerGroupMembers(group int) ([]int, error) {
 func signalWorkerGroup(group int, signal syscall.Signal) error {
 	return signalWorkerSession(group, signal)
 }
-func signalWorkerGroupUsing(group int, signal syscall.Signal, kill func(int, syscall.Signal) error, inventory func(int) ([]int, error), delivered ...func(time.Time)) error {
-	// Capture the ordering boundary before kill: a cooperative payload can
-	// exit and Wait can observe it before this goroutine resumes. Publish the
-	// timestamp only on successful delivery, never for intent or disappearance.
-	at := time.Now().UTC()
+func signalWorkerGroupUsing(group int, signal syscall.Signal, kill func(int, syscall.Signal) error, inventory func(int) ([]int, error), delivered ...func()) error {
 	err := kill(-group, signal)
 	if err == nil && len(delivered) > 0 {
-		delivered[0](at)
+		delivered[0]()
 	}
 	if err == nil || errors.Is(err, syscall.ESRCH) {
 		return nil

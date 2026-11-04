@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -29,7 +30,7 @@ func TestSignalWorkerGroupDeliveryEvidence(t *testing.T) {
 				return tc.err
 			}, func(int) ([]int, error) {
 				return []int{42}, nil
-			}, func(time.Time) { delivered = true })
+			}, func() { delivered = true })
 			if delivered != tc.want || tc.err == syscall.EPERM && !errors.Is(err, syscall.EPERM) {
 				t.Fatalf("delivery=%v error=%v", delivered, err)
 			}
@@ -37,8 +38,9 @@ func TestSignalWorkerGroupDeliveryEvidence(t *testing.T) {
 	}
 }
 
-// Force Wait's observation to happen inside kill, before the sender resumes
-// and persists delivery. No scheduler timing or sleeps are needed for #743.
+// Force Wait to return inside kill, before the sender resumes and persists
+// delivery. Its exit observation is ordered by the separate observation lock;
+// no scheduler timing or sleeps are needed for #743.
 func TestNativeStopExitBeforeDeliveryReceipt(t *testing.T) {
 	for _, grouped := range []bool{false, true} {
 		for _, shutdown := range []bool{false, true} {
@@ -53,20 +55,18 @@ func TestNativeStopExitBeforeDeliveryReceipt(t *testing.T) {
 					m := &nativeMember{Name: "main", PID: 42}
 					g := &nativeGroup{p: p, dir: t.TempDir(), identity: "attempt", members: []*nativeMember{m}}
 					var observed *memberExit
-					err := signalWorkerGroupUsing(42, signal, func(int, syscall.Signal) error {
-						// The waiter observes a cooperative zero exit while the
-						// sender is descheduled, before it can acquire p.mu.
-						observed = &memberExit{Status: 0, ObservedAt: time.Now().UTC()}
-						return nil
-					}, func(int) ([]int, error) { return nil, nil }, func(at time.Time) {
-						if grouped {
-							g.recordSignalLocked(nil, signal, at)
-						} else {
-							p.recordSignalLocked(signal, at)
-						}
-					})
-					if err != nil {
-						t.Fatal(err)
+					deliver := func(delivered func()) error {
+						return signalWorkerGroupUsing(42, signal, func(int, syscall.Signal) error {
+							// The OS wait returns while the sender is descheduled.
+							// The observation lock is held until receipt persistence.
+							observed = &memberExit{Status: 0, ObservedAt: time.Now().UTC()}
+							return nil
+						}, func(int) ([]int, error) { return nil, nil }, delivered)
+					}
+					if grouped {
+						g.signalLockedUsing(nil, signal, deliver)
+					} else if !p.signalLockedUsing(signal, deliver) {
+						t.Fatal("delivery failed")
 					}
 					if grouped {
 						var receipt struct {
@@ -90,6 +90,52 @@ func TestNativeStopExitBeforeDeliveryReceipt(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// An independently observed exit must win even while its waiter is unable to
+// publish under p.mu and a surviving group can still accept a signal (#743).
+func TestNativeStopPreservesPendingExitObservation(t *testing.T) {
+	for _, grouped := range []bool{false, true} {
+		for _, code := range []int{0, 7} {
+			t.Run(fmt.Sprintf("group=%v/exit=%d", grouped, code), func(t *testing.T) {
+				cmd := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code))
+				if err := cmd.Run(); err != nil && code == 0 {
+					t.Fatal(err)
+				}
+				p := &process{stopGroup: true, priorityStop: &PriorityPreemption{Cause: priorityPreemptionCause}}
+				p.saveOutcome = func(memberOutcome) error { return nil }
+				m := &nativeMember{Name: "main", PID: 42, exitObservation: new(nativeExitObservation)}
+				g := &nativeGroup{p: p, dir: t.TempDir(), identity: "attempt", members: []*nativeMember{m}}
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				observation := &p.exitObservation
+				if grouped {
+					observation = m.exitObservation
+				}
+				observation.observe(cmd) // Waiter has not yet obtained p.mu.
+				killCalled := false
+				deliver := func(delivered func()) error {
+					return signalWorkerGroupUsing(42, syscall.SIGTERM, func(int, syscall.Signal) error {
+						killCalled = true // Group anchor survives main's exit.
+						return nil
+					}, func(int) ([]int, error) { return nil, nil }, delivered)
+				}
+				if grouped {
+					g.signalLockedUsing(nil, syscall.SIGTERM, deliver)
+				} else if !p.signalLockedUsing(syscall.SIGTERM, deliver) {
+					t.Fatal("group cleanup failed")
+				}
+				facts := p.outcome
+				if grouped {
+					facts = m.memberOutcome
+				}
+				r := classifyAttemptOutcome(Result{Success: code == 0}, attemptCause{PriorityStop: p.priorityStop, memberOutcome: facts})
+				if !killCalled || len(facts.Signals) != 0 || r.Success != (code == 0) || r.Interrupted || r.PriorityStop != nil {
+					t.Fatalf("group cleanup rewrote independent exit: %+v; facts=%+v", r, facts)
+				}
+			})
 		}
 	}
 }

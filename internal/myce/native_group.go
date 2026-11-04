@@ -27,17 +27,18 @@ const nativeBindAttempts = 3 // Whole-group preparation attempts, including the 
 // Members attach to child cgroups before their exec gates open.
 type nativeMember struct {
 	memberOutcome
-	Name     string `json:"name"`
-	PID      int    `json:"pid,omitempty"`
-	Birth    string `json:"birth,omitempty"`
-	ExitCode *int   `json:"exit_code,omitempty"`
-	Phase    string `json:"phase"`
-	Cgroup   string `json:"cgroup,omitempty"`
-	memory   *memoryAttempt
-	MemoryGB float64 `json:"memory_gb,omitempty"`
-	cmd      *exec.Cmd
-	done     chan struct{}
-	err      error
+	exitObservation *nativeExitObservation
+	Name            string `json:"name"`
+	PID             int    `json:"pid,omitempty"`
+	Birth           string `json:"birth,omitempty"`
+	ExitCode        *int   `json:"exit_code,omitempty"`
+	Phase           string `json:"phase"`
+	Cgroup          string `json:"cgroup,omitempty"`
+	memory          *memoryAttempt
+	MemoryGB        float64 `json:"memory_gb,omitempty"`
+	cmd             *exec.Cmd
+	done            chan struct{}
+	err             error
 
 	signalTarget *os.File // Transient pidfd for a namespace member's joined child.
 }
@@ -180,29 +181,48 @@ func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) 
 }
 
 func (g *nativeGroup) signalLocked(member *nativeMember, signal syscall.Signal) {
-	if member != nil && member.Exit != nil {
-		return
-	}
-	if member != nil {
-		at := time.Now().UTC()
-		if member.signal(signal) == nil {
-			g.recordSignalLocked(member, signal, at)
+	g.signalLockedUsing(member, signal, func(delivered func()) error {
+		if member != nil {
+			if err := member.signal(signal); err != nil {
+				return err
+			}
+			delivered()
+			return nil
 		}
+		return signalWorkerSession(g.supervisor.Process.Pid, signal, delivered)
+	})
+}
+
+func (g *nativeGroup) signalLockedUsing(member *nativeMember, signal syscall.Signal, deliver func(func()) error) {
+	for _, m := range g.members {
+		if member == nil || member == m {
+			if m.exitObservation == nil {
+				m.exitObservation = new(nativeExitObservation)
+			}
+			m.exitObservation.mu.Lock()
+			defer m.exitObservation.mu.Unlock()
+			if m.exitObservation.exit != nil {
+				m.Exit = m.exitObservation.exit
+			}
+		}
+	}
+	if member != nil && member.Exit != nil {
 		return
 	}
 	// Persist delivery before the session sweep can observe/reap a stopped
 	// member. A later descendant error must not erase successful group delivery.
-	_ = signalWorkerSession(g.supervisor.Process.Pid, signal, func(at time.Time) {
-		g.recordSignalLocked(nil, signal, at)
+	_ = deliver(func() {
+		g.recordSignalLocked(member, signal)
 	})
 }
 
-func (g *nativeGroup) recordSignalLocked(member *nativeMember, signal syscall.Signal, at time.Time) {
+func (g *nativeGroup) recordSignalLocked(member *nativeMember, signal syscall.Signal) {
+	at := time.Now().UTC()
 	name := "TERM"
 	if signal == syscall.SIGKILL {
 		name = "KILL"
 	}
-	record := deliveredSignal{Signal: name, At: at, Shutdown: g.p.shutdown}
+	record := deliveredSignal{Signal: name, At: at, Shutdown: g.p.shutdown, BeforeExit: true}
 	prior := g.p.outcome.Signals
 	g.p.outcome.Signals = append(append([]deliveredSignal(nil), prior...), record)
 	changed := map[*nativeMember][]deliveredSignal{}
@@ -725,9 +745,10 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	m.PID = cmd.Process.Pid
 	m.Phase = "gated"
 	m.done = make(chan struct{})
+	m.exitObservation = new(nativeExitObservation)
 	go func() {
 		waitErr := cmd.Wait()
-		observed := observedNativeExit(cmd, time.Now().UTC())
+		observed := m.exitObservation.observe(cmd)
 		g.p.mu.Lock()
 		m.err = waitErr
 		m.Exit = observed

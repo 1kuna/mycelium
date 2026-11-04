@@ -4,20 +4,45 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 )
 
 // These are runtime facts, not adapter conclusions. Intent is deliberately absent.
 // Times are wall-clock evidence (not scheduling deadlines). A signal is added
-// only after successful delivery and persistence; At is captured immediately
-// before sending, so a fast exit cannot overtake the delivery timestamp merely
-// by descheduling the sender. Exit observation is immutable.
+// only after successful delivery and persistence; exit observation is immutable.
 type deliveredSignal struct {
 	Signal   string    `json:"signal"`
 	At       time.Time `json:"at"`
 	Shutdown bool      `json:"shutdown,omitempty"`
+	// Native observation and delivery share a lock, proving this ordering even
+	// when wall-clock timestamps tie. Older and daemon receipts use timestamps.
+	BeforeExit bool `json:"before_exit,omitempty"`
 }
+
+// Separate from process.mu: an exit can be observed while control/persistence
+// holds process.mu. Delivery and observation arbitrate here; neither waits for
+// a running payload while holding this lock. Always release it before taking
+// process.mu in the waiter. Senders take process.mu first.
+type nativeExitObservation struct {
+	mu   sync.Mutex
+	exit *memberExit
+}
+
+func (o *nativeExitObservation) observe(cmd *exec.Cmd) *memberExit {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.exit == nil {
+		o.exit = observedNativeExit(cmd, time.Now().UTC())
+	}
+	return o.exit
+}
+
+func (signal deliveredSignal) before(exit *memberExit) bool {
+	return exit != nil && !signal.At.IsZero() && (signal.Signal == "TERM" || signal.Signal == "KILL") && (signal.BeforeExit || signal.At.Before(exit.ObservedAt))
+}
+
 type memberExit struct {
 	Status     int       `json:"status"`
 	ObservedAt time.Time `json:"observed_at"`
@@ -60,7 +85,7 @@ func (facts memberOutcome) deliveredBeforeExit() bool {
 		return false
 	}
 	for _, signal := range facts.Signals {
-		if !signal.At.IsZero() && (signal.Signal == "TERM" || signal.Signal == "KILL") && signal.At.Before(facts.Exit.ObservedAt) {
+		if signal.before(facts.Exit) {
 			return true
 		}
 	}
@@ -164,7 +189,7 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	shutdownDelivered := false
 	if facts.Exit != nil {
 		for _, signal := range facts.Signals {
-			if signal.Shutdown && !signal.At.IsZero() && (signal.Signal == "TERM" || signal.Signal == "KILL") && signal.At.Before(facts.Exit.ObservedAt) {
+			if signal.Shutdown && signal.before(facts.Exit) {
 				shutdownDelivered = true
 			}
 		}
