@@ -478,6 +478,9 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 				base = environmentWaitingReason(best, target)
 			}
 		}
+		if strings.HasPrefix(reasons[best.ID], "waiting for software preparation for job ") {
+			base = reasons[best.ID]
+		}
 		if winner.ID == best.ID {
 			reasons[best.ID] = base + "; next in line"
 			continue

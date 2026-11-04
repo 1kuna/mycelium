@@ -147,4 +147,7 @@ func TestPreparationBlockerInJobGET(t *testing.T) {
 	if !strings.Contains(got.Reason, "preparation") || !strings.Contains(got.Reason, high.ID) || !strings.Contains(got.Reason, r.Key) {
 		t.Fatalf("job GET hid the actual preparation blocker: %q", got.Reason)
 	}
+	if got := job(t, q, low.ID); !strings.Contains(got.Reason, high.ID) || !strings.Contains(got.Reason, r.Key) {
+		t.Fatalf("status hid the actual preparation blocker: %q", got.Reason)
+	}
 }
