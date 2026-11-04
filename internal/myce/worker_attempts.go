@@ -440,6 +440,9 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 		if err := s.recoverResult(w.Machine.ID); err != nil {
 			return nil, err
 		}
+		if err := s.recoverRSSCause(w.Machine.ID); err != nil {
+			return nil, err
+		}
 		if err := s.recoverNativeCause(w.Machine.ID, fs); err != nil {
 			return nil, err
 		}

@@ -67,6 +67,7 @@ const (
 )
 
 type memberOutcome struct {
+	RSSLimit        *RSSLimitEvidence    `json:"rss_limit,omitempty"`
 	Infrastructure  []infrastructureFact `json:"infrastructure_facts,omitempty"`
 	Signals         []deliveredSignal    `json:"delivered_signals,omitempty"`
 	Exit            *memberExit          `json:"exit,omitempty"`
@@ -172,6 +173,11 @@ func startFailureOutcome(owner Result, err error) Result {
 }
 
 func classifyAttemptOutcome(result Result, facts attemptCause) Result {
+	if e := safeRSSLimit(facts.RSSLimit); e != nil {
+		result.Success, result.OutOfMemory = false, true
+		result.ExecutionCause = &RuntimeCause{Operation: "command", Class: rssLimitExceeded, RSSLimit: e}
+		result.Error = e.String()
+	}
 	result.OutOfMemory = result.OutOfMemory || facts.OutOfMemory
 	diskFailure := attemptDiskLimitFailure(result)
 	result.Interrupted = false

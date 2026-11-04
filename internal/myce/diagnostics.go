@@ -141,21 +141,27 @@ func specRejection(err error) error {
 // RuntimeCause retains safe operation/class information, never daemon stderr,
 // command arguments, environment values, endpoint URLs, or filesystem paths.
 type RuntimeCause struct {
-	MissingTools     []string         `json:"missing_tools,omitempty"`
-	Host             string           `json:"host,omitempty"`
-	Staging          *StagingCause    `json:"staging,omitempty"`
-	PathDiagnostic   *PathDiagnostic  `json:"path_diagnostic,omitempty"`
-	Admission        *AdmissionDetail `json:"admission,omitempty"`
-	PrelaunchRefused bool             `json:"prelaunch_refused,omitempty"`
-	Operation        string           `json:"operation"`
-	Class            string           `json:"class"`
-	ExitCode         *int             `json:"exit_code,omitempty"`
-	Predicate        string           `json:"predicate,omitempty"`
-	Reason           string           `json:"reason,omitempty"`
+	RSSLimit         *RSSLimitEvidence `json:"rss_limit,omitempty"`
+	MissingTools     []string          `json:"missing_tools,omitempty"`
+	Host             string            `json:"host,omitempty"`
+	Staging          *StagingCause     `json:"staging,omitempty"`
+	PathDiagnostic   *PathDiagnostic   `json:"path_diagnostic,omitempty"`
+	Admission        *AdmissionDetail  `json:"admission,omitempty"`
+	PrelaunchRefused bool              `json:"prelaunch_refused,omitempty"`
+	Operation        string            `json:"operation"`
+	Class            string            `json:"class"`
+	ExitCode         *int              `json:"exit_code,omitempty"`
+	Predicate        string            `json:"predicate,omitempty"`
+	Reason           string            `json:"reason,omitempty"`
 }
 
 func (c RuntimeCause) String() string {
 	text := c.Operation + ": " + c.Class
+	if c.Class == rssLimitExceeded {
+		if e := safeRSSLimit(c.RSSLimit); e != nil {
+			text += "; " + e.String()
+		}
+	}
 	if c.Class == "tools_missing" {
 		text += "; " + missingToolsReason(c.Host, c.MissingTools)
 	}
@@ -301,6 +307,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
 	classes["tools_missing"] = true
 	classes[diskLimitExceeded] = true
+	classes[rssLimitExceeded] = true
 	classes["input_unavailable"], classes["invalid_input"] = true, true
 	operations["start_authorization"] = true
 	operations["start_handoff"] = true
@@ -311,6 +318,10 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		}
 	}
 	out := *c
+	out.RSSLimit = nil
+	if c.Class == rssLimitExceeded {
+		out.RSSLimit = safeRSSLimit(c.RSSLimit)
+	}
 	out.Host, out.MissingTools = "", nil
 	if c.Class == "tools_missing" && validToolName(c.Host) {
 		out.Host = c.Host

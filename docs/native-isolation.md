@@ -8,6 +8,52 @@ supersede its former blanket requirement. Wider executor hardening is separate.
 These are implementation contracts and limits, **not fleet qualification or
 deployment evidence**.
 
+## macOS sampled memory guard (#770)
+
+On a guard-capable worker, native CPU attempts automatically use their positive
+resolved host-memory reservation (including configured ceiling slack) as an RSS
+threshold, for both plain and sandboxed commands and native sidecar groups.
+Zero/unresolved reservations have no guard. GPU jobs, managed Docker, preparation
+and model servers retain their existing behavior; Linux retains cgroup ceilings.
+The worker reports `sampled RSS guard (native CPU); no kernel memory ceiling`.
+
+The existing process-memory observer samples once per second. It reuses the
+cleanup session inventory, launch birth identities and tree-RSS parser to include
+main, helpers and attributable descendants, excluding sibling attempts and the
+worker. A valid RSS above the threshold on three consecutive observations spanning
+two seconds stops that exact attempt through normal cleanup. Under normal probe
+latency this detects sustained growth within about three seconds. A lower sample,
+missing/denied/incomplete inventory, changed anchor identity or observation gap
+over two periods resets the window. Unknown observations never establish overage
+or release. Pressure/owner-latency yield and admission remain independent.
+
+The cadence preserves the observer's measured cost budget: 30 original RSS plus
+pressure cycles took 27.0 ms median, 32.1 ms maximum; 20 complete birth-fenced
+session/RSS plus pressure cycles, including member birth checks, took 65.4 ms
+median, 74.0 ms p95, 77.9 ms maximum
+on one development Mac. One new cycle per second uses about 65 ms of serialized probe wall time versus
+54 ms for two old cycles, while retaining a roughly three-second reaction window.
+A two-second cadence would halve probe work but double that reaction window.
+Two further observations filter brief
+spikes without a second sampler or an arbitrary memory multiplier. These are
+bounded local overhead measurements, not fleet load qualification.
+
+Job GET/status retains `execution_cause.class: rss_limit_exceeded` with
+`rss_limit` evidence (`observed_bytes`, `limit_bytes`, `quality:
+owned_session_rss`). The fact is persisted before stopping and survives worker
+recovery. It is a memory failure, not infrastructure loss: `memory: auto` uses the
+existing bounded OOM escalation; plain declared-limit failures are terminal, and
+extension retry remains bounded by the existing OOM policy. Failed/constrained
+readings cannot become accepted clean memory peaks. Partial diagnostics and
+cleanup charges retain ordinary custody until all owned processes are gone.
+
+This is a reactive RSS guard, **not a kernel ceiling or aggregate RAM containment**.
+It can miss fast spikes, compression and deliberately escaped sessions; shared
+pages can count more than once. A sufficiently fast allocation can still exhaust
+RAM before detection. A bounded native runner check with a memory-using child
+verified stop, whole-session release, retained logging and a successful below-limit
+command; it does not qualify representative owner interference (#389).
+
 ## Boundary and guarantees
 
 Sandboxed native batch commands and their sidecars, including queued extension run/check

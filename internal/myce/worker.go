@@ -921,7 +921,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	extensionStarted = true
 	sharedStarted = true
 	started = true
-	finishMemory := w.observeAttemptMemory(memoryAttempt, j, func() []int { return []int{cmd.Process.Pid} })
+	finishMemory := w.observeAttemptMemory(memoryAttempt, j, func() []int { return []int{cmd.Process.Pid} }, p)
 	go func() {
 		if extensionRelease != nil {
 			defer extensionRelease()

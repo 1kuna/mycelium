@@ -205,6 +205,8 @@ func (a *memoryAttempt) processIDs(ids map[int]bool) error {
 
 // processMemoryProbe samples attempts on hosts without cgroup accounting.
 type processMemoryProbe struct {
+	// OwnedResident uses launch birth identities and the cleanup session boundary.
+	OwnedResident func(map[int]string) (uint64, int, error)
 	// Resident bytes summed over live members of the process groups, and how
 	// many members were found.
 	Resident func(groups map[int]bool) (uint64, int, error)
@@ -232,14 +234,24 @@ func processGroupResident(out []byte, groups map[int]bool) (uint64, int, error) 
 	return total, members, nil
 }
 
-// Without cgroups (macOS), the attempt boundary is its process groups, the
-// same boundary the worker signals. Periodic RSS sums cover concurrent
-// members; rusage max RSS reports only the largest waited process. Shared
-// pages count once per process, but compressed pages, members that left the
-// group and spikes shorter than the interval are missed, so it is no bound in
-// either direction. Host pressure rejects this sample's learning, but cannot
+// Without cgroups (macOS), reuse the birth-fenced cleanup session boundary.
+// Periodic RSS sums cover concurrent members; rusage reports only the largest
+// waited process. Shared pages count once per process; compression, deliberate
+// session escape and spikes between observations prevent a hard bound. Host pressure rejects this sample's learning, but cannot
 // attribute the cause to this attempt or invalidate other hosts' learned peaks.
-func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryPeak {
+func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) func() *AttemptMemoryPeak {
+	var attempt *process
+	if len(attempts) > 0 {
+		attempt = attempts[0]
+	}
+	clock := w.Clock
+	if clock == nil {
+		clock = RealClock{}
+	}
+	guard := rssGuard{}
+	if attempt != nil && attempt.job.Spec.Needs.cpuOnly() {
+		guard.limit, _ = memoryBytes(hostNeed(&w.Machine, attempt.job.Spec.Needs.MemoryGB, attempt.job.Spec.Needs.HostMemoryGB))
+	}
 	probe := w.processMemory
 	var mu sync.Mutex
 	var peak *AttemptMemoryPeak
@@ -257,7 +269,7 @@ func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryP
 	if complete {
 		worst = *baseline
 	}
-	sample := func() {
+	sample := func(enforce bool) {
 		host, err := readPressure()
 		if err != nil || host == nil || baseline == nil || host.swapOut < baseline.swapOut {
 			complete = false
@@ -270,7 +282,19 @@ func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryP
 				ids[g] = true
 			}
 		}
-		bytes, members, err := probe.Resident(ids)
+		var bytes uint64
+		var members int
+		if probe.OwnedResident != nil && attempt != nil {
+			roots := attempt.rssRoots()
+			bytes, members, err = probe.OwnedResident(roots)
+			if enforce {
+				if evidence := guard.observe(clock.Now(), roots, bytes, members, err); evidence != nil {
+					guard.exceeded = attempt.stopRSS(clock.Now(), roots, evidence)
+				}
+			}
+		} else if probe.Resident != nil {
+			bytes, members, err = probe.Resident(ids)
+		}
 		if err != nil || members == 0 {
 			return
 		}
@@ -285,10 +309,10 @@ func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryP
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tick := time.NewTicker(500 * time.Millisecond)
+		tick := time.NewTicker(processMemorySamplePeriod)
 		defer tick.Stop()
 		for {
-			sample()
+			sample(true)
 			select {
 			case <-ctx.Done():
 				return
@@ -301,7 +325,7 @@ func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryP
 		once.Do(func() {
 			cancel()
 			<-done
-			sample() // Include teardown pressure even after the process groups exit.
+			sample(false) // Include teardown pressure even after the process groups exit.
 		})
 		mu.Lock()
 		defer mu.Unlock()
@@ -310,7 +334,7 @@ func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryP
 			if !complete {
 				peak.Pressure.Reason = "host_pressure_unavailable"
 			}
-			peak.Constrained = peak.Pressure.Reason != "eligible"
+			peak.Constrained = peak.Pressure.Reason != "eligible" || guard.exceeded
 		}
 		return peak
 	}
@@ -335,14 +359,14 @@ func withExitMaxRSS(peak *AttemptMemoryPeak, state *os.ProcessState) *AttemptMem
 // Sample only processes inside this exact attempt. Driver/device totals include
 // other workloads and cannot serve as job peaks. Sampling is a lower bound.
 // groups names the attempt's process groups for hosts without cgroups.
-func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []int) func() *AttemptMemoryPeak {
-	return w.observeAttemptMemoryEvery(a, j, groups, deviceMemorySamplePeriod)
+func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []int, attempts ...*process) func() *AttemptMemoryPeak {
+	return w.observeAttemptMemoryEvery(a, j, groups, deviceMemorySamplePeriod, attempts...)
 }
 
-func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func() []int, devicePeriod time.Duration) func() *AttemptMemoryPeak {
+func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func() []int, devicePeriod time.Duration, attempts ...*process) func() *AttemptMemoryPeak {
 	deviceTelemetry := !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu")
 	if a == nil && w.processMemory != nil && groups != nil {
-		return w.observeProcessMemory(groups)
+		return w.observeProcessMemory(groups, attempts...)
 	}
 	if a == nil {
 		if deviceTelemetry {
