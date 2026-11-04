@@ -155,7 +155,7 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 		if ctx.Err() != nil {
 			return last, jobWaitError(id, last, ctx.Err())
 		}
-		j, err := c.GetJob(ctx, id)
+		j, err := c.GetJobForWait(ctx, id)
 		if ctx.Err() != nil {
 			return last, jobWaitError(id, last, ctx.Err())
 		}

@@ -28,6 +28,7 @@ func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.hand
 
 func (a API) handler(joiningPin string) http.Handler {
 	mux := newRequestMux()
+	jobGets := newJobGetVolume(a.Queue.clock)
 	nas := newResolveNASCache(a.Queue.clock)
 	// Joining needs authenticated identity/version only, never the growing status
 	// snapshot. Transport pinning authenticates this identity to joining clients.
@@ -193,6 +194,7 @@ func (a API) handler(joiningPin string) http.Handler {
 		respondOperation(w, s, err, "status_unavailable")
 	})
 	mux.HandleFunc("GET /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		jobGets.record(r.UserAgent(), r.URL.Query().Get("view") == "wait")
 		var j *Job
 		var err error
 		if r.URL.Query().Get("view") == "wait" {
@@ -556,6 +558,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	fileStoreSubmissionHeaders(ctx, req)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "myce/"+BuildVersion)
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 	}

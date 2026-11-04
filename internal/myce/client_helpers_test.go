@@ -348,3 +348,27 @@ func TestClientJobReplyOldQueue(t *testing.T) {
 		})
 	}
 }
+
+func TestClientWaitIdentityAndView(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reads := 0
+		c := Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+			if r.UserAgent() != "myce/"+BuildVersion {
+				t.Errorf("identity = %q", r.UserAgent())
+			}
+			if r.URL.Query().Get("view") != "wait" {
+				t.Errorf("full wait poll: %s", r.URL)
+			}
+			reads++
+			state := "running"
+			if reads == 2 {
+				state = "succeeded"
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"job","state":"` + state + `"}`)), Header: make(http.Header)}, nil
+		})}}
+		j, err := c.Wait(context.Background(), "job")
+		if err != nil || j.State != "succeeded" || reads != 2 {
+			t.Fatal(j, err, reads)
+		}
+	})
+}

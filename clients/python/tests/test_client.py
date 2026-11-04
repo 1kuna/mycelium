@@ -635,3 +635,26 @@ class StatusPagingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClientIdentityTests(unittest.TestCase):
+    def test_job_reads_send_package_identity(self):
+        from mycelium.client import USER_AGENT
+        from importlib.metadata import version, PackageNotFoundError
+        try:
+            expected = version("mycelium-client")
+        except PackageNotFoundError:
+            expected = "development"
+        self.assertEqual(USER_AGENT, "mycelium-python/" + expected)
+        client = Client("http://queue.invalid", "fixture")
+        requests = []
+        def respond(request, **kwargs):
+            requests.append(request)
+            return Reply(b'{"id":"job","state":"succeeded"}')
+        client._urlopen = respond
+        client.get("job")
+        client.wait("job")
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1].selector, "/api/jobs/job?view=wait")
+        for request in requests:
+            self.assertEqual(request.get_header("User-agent"), USER_AGENT)
