@@ -2,6 +2,10 @@ package myce
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -24,8 +28,7 @@ func verifySubmissionInputs(ctx context.Context, store *FileStore, manifest File
 	done := make(chan error, 1)
 	go func() {
 		// The existing verifier only needs the immutable file-store snapshot.
-		verifier := Queue{files: store}
-		err := verifier.verifyManifest(ctx, manifest)
+		err := verifySubmissionManifest(ctx, store, manifest)
 		<-slot
 		done <- err
 	}()
@@ -35,4 +38,40 @@ func verifySubmissionInputs(ctx context.Context, store *FileStore, manifest File
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// The lifecycle fence held by SubmitContext protects verified bytes through
+// commit; live-job references then protect them under ordinary retention.
+func verifySubmissionManifest(ctx context.Context, store *FileStore, manifest FileManifest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := manifest.validate(); err != nil {
+		return err
+	}
+	if store == nil {
+		return &HTTPError{Status: 503, Code: "input_blob_unavailable", Message: "queue file store unavailable; retry after storage recovery"}
+	}
+	for name, ref := range manifest {
+		if err := store.verify(ctx, ref); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			reason := stagingErrorName(err)
+			code, status := "input_blob_unavailable", 503
+			if errors.Is(err, os.ErrNotExist) {
+				code, status = "input_blob_missing", 409
+			} else if reason == "identity_mismatch" {
+				code, status = "input_blob_corrupt", 409
+			}
+			return &HTTPError{Status: status, Code: code, Message: fmt.Sprintf("input=%q blob=%s operation=submit_verify error=%s; upload the original input again before submitting", name, ref.SHA256, reason)}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := store.syncDir(filepath.Join(store.root, "blobs")); err != nil {
+		return &HTTPError{Status: 503, Code: "input_blob_unavailable", Message: "input verification durability barrier failed: " + stagingErrorName(err)}
+	}
+	return ctx.Err()
 }

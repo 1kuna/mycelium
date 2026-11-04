@@ -96,7 +96,9 @@ func TestInputStagingTimeoutSurvivesAcknowledgementAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Attempt != j.Attempt || got.State != "failed" || got.Reason != "execution failed: input_staging: timeout" || got.StartedAt != nil || got.ExecutionCause == nil || got.ExecutionCause.Operation != "input_staging" || got.ExecutionCause.Class != "timeout" || got.ExecutionCause.ExitCode != nil {
+	// #720: a prelaunch transport timeout is infrastructure, so the same
+	// retained diagnosis now belongs to a queued retry rather than a bare failure.
+	if got.Attempt != j.Attempt || got.State != "queued" || len(got.AttemptHistory) != 1 || !strings.Contains(got.AttemptHistory[0].Reason, "operation=cache_download error=timeout") || got.StartedAt != nil || got.ExecutionCause == nil || got.ExecutionCause.Operation != "input_staging" || got.ExecutionCause.Class != "timeout" || got.ExecutionCause.ExitCode != nil || got.ExecutionCause.Staging == nil {
 		t.Fatalf("GET lost exact prelaunch diagnosis: %+v", got)
 	}
 	data, _ := json.Marshal(got)

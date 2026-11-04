@@ -136,7 +136,7 @@ func TestResolveLockedCPUJobWithStagedInputOnTwoRoots(t *testing.T) {
 		t.Fatalf("resolve created queue state: jobs=%d reservations=%d", jobs, reservations)
 	}
 	var h *HTTPError
-	if _, err := client.Submit(context.Background(), s); !errors.As(err, &h) || h.Code != "job_files_invalid" {
+	if _, err := client.Submit(context.Background(), s); !errors.As(err, &h) || h.Status != 409 || h.Code != "input_blob_missing" || !strings.Contains(h.Message, "operation=submit_verify error=ENOENT") {
 		t.Fatalf("submission accepted unstaged bytes after resolve: %v", err)
 	}
 }

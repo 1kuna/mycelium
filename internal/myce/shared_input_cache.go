@@ -691,6 +691,7 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		victims = append(victims, victim{d.Name(), info.ModTime().UnixNano()})
 	}
 	sort.Slice(victims, func(i, j int) bool { return victims[i].used < victims[j].used })
+	var cacheAvailable, diskAvailable int64
 	enough := func() (bool, error) {
 		used, e := c.cache.DiskUsage()
 		if e != nil {
@@ -705,6 +706,11 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 			return false, nil
 		}
 		projected := need + reserved
+		cacheAvailable = max(0, c.cache.Limit-used-reserved)
+		diskAvailable = 0
+		if disk.FreeBytes >= floor {
+			diskAvailable = int64(min(uint64(^uint64(0)>>1), disk.FreeBytes-floor))
+		}
 		return projected <= c.cache.Limit-used && disk.FreeBytes >= floor && uint64(projected) <= disk.FreeBytes-floor, nil
 	}
 	for _, v := range victims {
@@ -747,7 +753,10 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		return err
 	}
 	if !ok {
-		return errors.New("disk_headroom: shared input cache full; active entries protected")
+		if need > cacheAvailable {
+			return &stagingCapacityError{required: need, available: cacheAvailable, limit: c.cache.Limit, capacity: "shared_input_cache"}
+		}
+		return &stagingCapacityError{required: need, available: max(0, diskAvailable-reserved), capacity: "disk_free_floor"}
 	}
 	return nil
 }

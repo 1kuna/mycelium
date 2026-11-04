@@ -32,10 +32,11 @@ type infrastructureFact struct {
 }
 
 const (
-	launchRefused     = "launch_refused"
-	launchFailed      = "launch_failed"
-	environmentFailed = "environment_failed"
-	foreignPort       = "foreign_port"
+	inputStagingFailed = "input_staging_failed"
+	launchRefused      = "launch_refused"
+	launchFailed       = "launch_failed"
+	environmentFailed  = "environment_failed"
+	foreignPort        = "foreign_port"
 )
 
 type memberOutcome struct {
@@ -70,7 +71,7 @@ func (facts memberOutcome) recordedInfrastructure() bool {
 			continue
 		}
 		switch fact.Kind {
-		case launchRefused, launchFailed, environmentFailed:
+		case launchRefused, launchFailed, environmentFailed, inputStagingFailed:
 			return true
 		case foreignPort:
 			if fact.Port != "" && fact.Group > 0 {
@@ -92,12 +93,15 @@ func (e *recordedStartError) Error() string { return e.cause.Error() }
 func (e *recordedStartError) Unwrap() error { return e.cause }
 
 func (s *workerStore) startFailure(j Job, kind string, cause error) error {
+	return s.startFailureAt(j, kind, cause, time.Now().UTC())
+}
+func (s *workerStore) startFailureAt(j Job, kind string, cause error, at time.Time) error {
 	// Identity alone is assigned before admission. Custody/launch intent, in
 	// contrast, is written before any process can start and is never inferred
 	// from an absent Started report. Persist this positive refusal proof with
 	// the facts so release-only replay carries it too.
 	prelaunch := kind == launchRefused && !j.Spec.Run.Docker && s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending && len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == ""
-	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: kind, At: time.Now().UTC(), Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, j), PrelaunchRefused: prelaunch}}}
+	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: kind, At: at, Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, j), PrelaunchRefused: prelaunch}}}
 	s.state.LaunchOutcome = fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt)
 	if err := saveWorkerJSON(s.dir, s.state.LaunchOutcome, facts); err != nil {
 		return errors.Join(cause, err)

@@ -3453,6 +3453,9 @@
         },
         "reason": {
           "type": "string"
+        },
+        "staging": {
+          "$ref": "#/$defs/StagingCause"
         }
       },
       "required": [
@@ -3801,6 +3804,45 @@
       "required": [
         "projected",
         "omitted"
+      ],
+      "type": "object"
+    },
+    "StagingCause": {
+      "properties": {
+        "available_bytes": {
+          "type": "integer"
+        },
+        "blob": {
+          "type": "string"
+        },
+        "capacity": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        },
+        "limit_bytes": {
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "required_bytes": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "integer"
+        },
+        "syscall": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "error"
       ],
       "type": "object"
     },

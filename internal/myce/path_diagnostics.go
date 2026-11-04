@@ -104,6 +104,9 @@ func safeInputStagingPathDiagnostic(d *PathDiagnostic) *PathDiagnostic {
 // validation alone cannot establish that a worker-supplied name is public.
 func safeJobRuntimeCause(spec Spec, c *RuntimeCause) *RuntimeCause {
 	out := safeRuntimeCause(c)
+	if out != nil {
+		out.Staging = bindStagingCause(spec, out.Staging)
+	}
 	if out == nil || out.PathDiagnostic == nil {
 		return out
 	}
@@ -117,4 +120,12 @@ func safeJobRuntimeCause(spec Spec, c *RuntimeCause) *RuntimeCause {
 		}
 	}
 	return out
+}
+
+// Resolved dependency inputs are queue-owned attempt data, not authored Spec.
+// Use the same merged view as staging before retaining an input's name/hash.
+func safeAttemptRuntimeCause(j *Job, c *RuntimeCause) *RuntimeCause {
+	spec := j.Spec
+	spec.Files, spec.Inputs = jobInputFiles(j), jobInputPaths(j)
+	return safeJobRuntimeCause(spec, c)
 }

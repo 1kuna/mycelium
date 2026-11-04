@@ -29,7 +29,8 @@ func TestSubmissionFilesystemCausesStayLocal(t *testing.T) {
 			privateRoot := t.TempDir()
 			if name == "files sync" {
 				s = submitVerificationInput(t, q)
-				code = "job_files_invalid"
+				// #720: storage failures are now typed retryable refusals.
+				code = "input_blob_unavailable"
 				privateRoot = q.files.root
 				q.files.syncDir = func(path string) error {
 					return fmt.Errorf("sync input custody: %w", &os.PathError{Op: "fsync", Path: path, Err: os.ErrPermission})
@@ -60,6 +61,11 @@ func TestSubmissionFilesystemCausesStayLocal(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := rejectionMessages[code]
+			status := http.StatusBadRequest
+			if name == "files sync" {
+				status = http.StatusServiceUnavailable
+				want = "input verification durability barrier failed: permission_denied"
+			}
 			if name != "files sync" {
 				if body.PathDiagnostic == nil {
 					t.Fatal("missing path diagnostic", response.Body.String())
@@ -69,7 +75,7 @@ func TestSubmissionFilesystemCausesStayLocal(t *testing.T) {
 					t.Fatal(body.PathDiagnostic)
 				}
 			}
-			if response.Code != http.StatusBadRequest || body.Code != code || body.Error != want {
+			if response.Code != status || body.Code != code || body.Error != want {
 				t.Errorf("expected fixed %s rejection, got HTTP %d: %s", code, response.Code, response.Body.String())
 			}
 			if name == "files sync" && strings.Contains(response.Body.String(), privateRoot) {

@@ -146,7 +146,7 @@ func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]stri
 				d.Field = "shared_inputs." + n + ".nas"
 				err = &pathReadError{diagnostic: *d, cause: err}
 			}
-			return nil, nil, err
+			return nil, nil, withStagingCause("shared_inputs/"+n, FileRef{SHA256: input.SHA256, SizeBytes: input.SizeBytes}, "shared_input", err)
 		}
 		releases = append(releases, done)
 		env["MYCE_INPUT_"+strings.ToUpper(n)] = path
