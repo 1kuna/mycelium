@@ -2221,6 +2221,13 @@ are injectable for laptop verification.
 
 ## Rolling fleet upgrades
 
+Tested fixes deploy without a separate task, bundled one release at a time; roll
+back if the queue is not healthy. Do not patch during a successful production
+run. Fixing a run failing because of Mycelium is allowed and expected. Keep the
+fleet on a healthy, tested release before each scheduled production window. There is
+no pre-production freeze, consumer canary deploy gate, or need to ask about
+deploy timing (MY-33).
+
 > **Before deploying bounded status (#439), migrate preservation checks.**
 > Default `GET /api/status` includes active/cleanup-pending jobs and only the
 > newest 100 other terminal jobs. Before/after preservation, protected-job,

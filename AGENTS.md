@@ -53,10 +53,11 @@ duplicate journeys or process self-audits (maintainer, 2026-10-22). Native GPU/d
 from laptop proof; see `docs/development.md`.
 
 Stage explicit paths and commit completed changes; push your own branches.
-Tested fixes deploy to the fleet without a separate task (MY-28, MY-32): bundle
-them into one release at a time, deploy only while no customer or production job
-is running, and roll back if the queue doesn't come back healthy. Fleet hardware changes still need a
-task that authorizes them.
+Tested fixes deploy to the fleet without a separate task (MY-28, MY-32, MY-33):
+bundle them into one release at a time and roll back if the queue isn't healthy.
+Do not patch during a successful production run; fix a run failing because of
+Mycelium. Keep a healthy, tested release ready before each scheduled production window.
+Fleet hardware changes still need a task that authorizes them.
 
 This repository is public: keep host names, addresses, fleet layout, private
 paths and other projects' details out of commits, issues and docs.
