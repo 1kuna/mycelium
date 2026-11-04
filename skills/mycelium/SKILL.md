@@ -63,6 +63,18 @@ In short: run `myce spec check --resolve` first; the job's class is the only urg
 - **From the next fleet release:** running job/status reads include `liveness` on the job and its exact `copies` attempt: `advancing`, `idle` with `idle_seconds`, or `unknown`, plus CPU-time and work-directory byte values and each signal's age. This works without application progress or logs. Unknown includes older workers, missing/incomplete measurements and samples older than 30 seconds; never read it as idle. “Alive and advancing” is activity, not useful-progress or output proof; “alive but idle” alone does not justify killing/retrying a job.
 - Give a long job one stall check at about twice its expected duration, bound to your thread, verifying one thing (the job's state or log growth), and delete it when done.
 
+## Mycelium repository merge gates
+
+When working on Mycelium itself, require independent review and a passing fleet
+full gate for the PR's exact head (fleet quick is sufficient for docs-only).
+Before merging, inspect the latest completed `main-full` run and fix any red
+failure forward first; a reviewed fix with its own passing gate can merge while
+main is red. If already fixed, cite the failing test and merged fix. Repair a
+merge with no workflow run. Queued or running main runs do not block, and
+completed proof need not match current main. Keep one self-hosted run per merge,
+without workflow concurrency grouping; do not wait on, poll or wake for main CI.
+See [the repository merge procedure](https://github.com/1kuna/mycelium/blob/main/docs/development.md#automatic-main-full-gates).
+
 ## Results
 
 **Input upload attribution (next release):** profile submissions, files-from and

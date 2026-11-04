@@ -55,6 +55,11 @@ per observed bug. No speculative edge-case matrices, implementation-detail pins,
 duplicate journeys or process self-audits (maintainer, 2026-10-22). Native GPU/daemon/identity/boot checks are separate
 from laptop proof; see `docs/development.md`.
 
+Before merging, follow `docs/development.md#automatic-main-full-gates`: require
+independent review and the PR's exact-head fleet full gate (quick for docs-only),
+inspect main's latest completed run, and fix red or missing runs forward. Queued
+or running main CI does not block; the sequential runner can lag behind merges.
+
 Stage explicit paths and commit completed changes; push your own branches.
 Tested fixes deploy to the fleet without a separate task (MY-28, MY-32, MY-33):
 bundle them into one release at a time and roll back if the queue isn't healthy.
