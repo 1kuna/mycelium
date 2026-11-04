@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,33 @@ func waitReadRequest(handler http.Handler, id, query string) *httptest.ResponseR
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 	return w
+}
+
+func TestWaitReadPendingReasonPrivacy(t *testing.T) {
+	q, _ := fixture(t)
+	j := submit(t, q, spec("experiment"))
+	if err := q.update(func() error {
+		stored := q.touchJob(j.ID)
+		stored.State = "stopping"
+		stored.Reason = "hypha waiting: synthetic-private-secret /private/fixture"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := (API{Queue: q, Token: "fixture"}).Handler()
+	var ordinary Job
+	full := waitReadRequest(handler, j.ID, "")
+	if err := json.Unmarshal(full.Body.Bytes(), &ordinary); err != nil || full.Code != 200 {
+		t.Fatal(full.Code, err)
+	}
+	var pending Job
+	w := waitReadRequest(handler, j.ID, "?view=wait")
+	if err := json.Unmarshal(w.Body.Bytes(), &pending); err != nil || w.Code != 200 {
+		t.Fatal(w.Code, err)
+	}
+	if pending.Reason != ordinary.Reason || strings.Contains(w.Body.String(), "synthetic-private-secret") || strings.Contains(w.Body.String(), "/private/fixture") {
+		t.Fatalf("pending reason bypassed public sanitization: pending=%q ordinary=%q", pending.Reason, ordinary.Reason)
+	}
 }
 
 // Replay 35 independent waiters across twenty expired diagnostic-cache windows.

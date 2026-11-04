@@ -23,5 +23,8 @@ func (q *Queue) waitJobSnapshot(id string, ctx context.Context) (*Job, error) {
 	if full {
 		return q.jobSnapshot(out.ID, ctx)
 	}
+	// Reuse the public Job sanitizer on our detached scalar copy. Worker
+	// availability errors can otherwise expose private details in Reason.
+	out.Reason = statusJobValue(out).Reason
 	return out, nil
 }
