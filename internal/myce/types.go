@@ -143,6 +143,7 @@ type Spec struct {
 	// Authored explanations are frozen intent, never placement authority.
 	RequirementReasons map[string]string `json:"requirement_reasons,omitempty" yaml:"requirement_reasons,omitempty"`
 
+	QualityTolerance  map[string]float64     `json:"quality_tolerance,omitempty" yaml:"quality_tolerance,omitempty"`
 	OutputDestination *OutputDestination     `json:"output_destination,omitempty" yaml:"output_destination,omitempty"`
 	OutputRetention   string                 `json:"output_retention,omitempty" yaml:"output_retention,omitempty"`
 	StorageProtocol   string                 `json:"storage_protocol,omitempty" yaml:"storage_protocol,omitempty"`
@@ -198,6 +199,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if err := validateQualityTolerance(s); err != nil {
+		return err
+	}
 	if err := validateTools(s); err != nil {
 		return err
 	}

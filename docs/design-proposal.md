@@ -2386,14 +2386,25 @@ unknown. Policy, preparation, caps and parity holds have their own remedies.
 Advice neither changes accepted jobs nor authorizes relocation.
 
 New multi-variant registrations carry server-owned registration metadata requiring
-explicit MY-19 approval before production placement. Native checks and experiments
-remain admissible to obtain evidence. After comparing outputs to the reference
+measured MY-19 parity or explicit approval before production placement. Native
+checks and experiments remain admissible to obtain evidence. After comparing outputs to the reference
 within the owner's accuracy criteria, the owner uses the existing project/work
 `production_parity_hosts` policy to approve candidate physical hosts. A native
 baseline proves execution, not cross-variant parity. Historical registrations,
 identical replays and their frozen accepted jobs retain their admission contract.
-No metric schema is added; that remains #145. The hold and owner action appear
-plainly in eligibility/status. Approval is eligibility, not a job host pin.
+Each variant may publish `quality[WORK][METRIC]` with a frozen `reference`
+identity, `value`, `reference_value` and `margin_of_error` (uncertainty of their
+difference). Missing/null numbers are unknown. A job declares `quality_tolerance`
+as metric to maximum absolute difference; projects can reuse an adapter entry.
+An omitted metric tolerance defaults to the measured margin; explicit zero means
+exact agreement. All metrics reported for this work across variants and requested
+by the job must pass. Complete measured parity satisfies MY-19; unknown evidence
+retains the approval fallback for production and is allowed for experiments.
+Known failures exclude a variant regardless of class or approval; native checks
+remain exempt. The same eligibility applies to production spillover. Evidence is
+immutable recipe metadata, not an evaluation runner or native qualification.
+The hold and owner action appear in eligibility/status. Approval is eligibility,
+not a job host pin.
 
 Host-pin adoption is measured read-only over retained jobs submitted in an explicit
 time window, grouped by project and production/non-production: an explicit

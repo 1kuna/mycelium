@@ -1303,6 +1303,21 @@
         "needs": {
           "$ref": "#/$defs/ResourceNeeds"
         },
+        "quality": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/QualityMeasurement"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "references": {
           "additionalProperties": {
             "$ref": "#/$defs/WorkReference"
@@ -3180,6 +3195,50 @@
       ],
       "type": "object"
     },
+    "QualityMeasurement": {
+      "properties": {
+        "margin_of_error": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reference": {
+          "type": "string"
+        },
+        "reference_value": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "reference",
+        "value",
+        "reference_value",
+        "margin_of_error"
+      ],
+      "type": "object"
+    },
     "RecoveredResult": {
       "properties": {
         "attempt": {
@@ -3784,6 +3843,16 @@
           "minLength": 1,
           "type": "string",
           "x-contract": "stable"
+        },
+        "quality_tolerance": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
         },
         "reason": {
           "type": "string",

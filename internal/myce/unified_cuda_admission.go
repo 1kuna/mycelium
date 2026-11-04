@@ -109,8 +109,8 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 			if !q.jobAllowsMachine(demand, target.ID) || !q.reservationAllows(demand, target) {
 				continue
 			}
-			// A production binding can move only to a work-scoped parity approval.
-			if demand.ProductionHost != "" && hostID(target) != demand.ProductionHost && (!demand.Spec.extensionJob() || demand.Spec.ExtensionCheck != nil || !contains(q.s.Policies[demand.Spec.Project].ProductionParityHosts[demand.Spec.workType()], hostID(target))) {
+			// A production binding moves only with measured parity or approval.
+			if demand.ProductionHost != "" && hostID(target) != demand.ProductionHost && !q.productionParityKnown(demand, target) {
 				continue
 			}
 			for _, candidate := range q.memoryCandidates(demand, target) {

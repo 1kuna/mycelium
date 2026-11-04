@@ -31,6 +31,8 @@ type adapterChecks struct {
 	Qualification []string `yaml:"qualification,omitempty"`
 }
 type adapterVariant struct {
+	Quality map[string]map[string]myce.QualityMeasurement `yaml:"quality,omitempty"`
+
 	Target       myce.ExecutionTarget              `yaml:"target"`
 	Environments map[string]myce.EnvironmentRecipe `yaml:"environments,omitempty"`
 	Needs        myce.ResourceNeeds                `yaml:"needs"`
@@ -265,7 +267,7 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 				}
 				sweeps[work] = sweep
 			}
-			x.Variants = append(x.Variants, myce.ExtensionVariant{Target: v.Target, Needs: v.Needs, Environments: v.Environments, Execution: execution, Setup: v.Setup, Check: v.Checks.Qualification, Baselines: v.Baselines, References: v.References, Sweeps: sweeps})
+			x.Variants = append(x.Variants, myce.ExtensionVariant{Quality: v.Quality, Target: v.Target, Needs: v.Needs, Environments: v.Environments, Execution: execution, Setup: v.Setup, Check: v.Checks.Qualification, Baselines: v.Baselines, References: v.References, Sweeps: sweeps})
 			p.Targets = append(p.Targets, v.Target)
 		}
 		p.Targets = slices.Compact(p.Targets)

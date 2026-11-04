@@ -393,7 +393,7 @@ func (q *Queue) holdWaitReason(j *Job) string {
 	}
 	if j.ProductionHost != "" && q.held(j.ProductionHost) {
 		if reason := q.productionOccupancyReason(j); reason != "" {
-			return reason + "; production hold bound to " + j.ProductionHost + "; spillover requires production_parity_hosts approval and an immediately admissible qualified host"
+			return reason + "; production hold bound to " + j.ProductionHost + "; spillover requires measured quality parity or production_parity_hosts approval and an immediately admissible qualified host"
 		}
 		return q.holdReason(j.ProductionHost)
 	}
@@ -473,8 +473,7 @@ func (q *Queue) productionOccupancyReason(j *Job) string {
 // Reuse dispatch's qualified, frozen extension and admission checks on a copy.
 // This changes only queued host affinity; it creates no release or attempt.
 func (q *Queue) productionSpilloverTarget(j *Job) string {
-	approved := q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()]
-	if len(approved) == 0 || !j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil || q.productionOccupancyReason(j) == "" {
+	if !j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil || q.productionOccupancyReason(j) == "" {
 		return ""
 	}
 	copy := *j
@@ -483,7 +482,7 @@ func (q *Queue) productionSpilloverTarget(j *Job) string {
 	var best *Machine
 	now := q.clock.Now()
 	for _, m := range scan.machines {
-		if hostID(m) == j.ProductionHost || !contains(approved, hostID(m)) || q.unreported[m.ID] || m.LastSeen.After(now) || now.Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+		if hostID(m) == j.ProductionHost || !q.productionParityKnown(&copy, m) || q.unreported[m.ID] || m.LastSeen.After(now) || now.Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
 			continue
 		}
 		candidate := q.batchCandidateWithResources(&copy, m, nil)
