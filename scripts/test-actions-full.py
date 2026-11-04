@@ -68,6 +68,13 @@ class ActionsFullTest(unittest.TestCase):
             self.assertIn('profiles lack a negative host selector', public.getvalue())
             self.assertIn('https://github.com/1kuna/mycelium/issues/527', public.getvalue())
             self.assertNotIn('PRIVATE', summary + public.getvalue())
+            if submission_failure:
+                self.assertIn('infrastructure failure:', summary)
+                self.assertIn('::error title=CI infrastructure failure::', public.getvalue())
+                self.assertIn('submission is unconfirmed', public.getvalue())
+                self.assertIn('no suite result was verified for that platform', public.getvalue())
+            else:
+                self.assertNotIn('CI infrastructure failure', public.getvalue())
             if status_record and status_record.get('attempt_history', [{}])[-1].get('out_of_memory'):
                 self.assertIn('failed (out of memory)', summary + public.getvalue())
             if refusal is not None:
@@ -93,6 +100,12 @@ class ActionsFullTest(unittest.TestCase):
             ]}), (1, ['darwin', 'linux'], ['darwin']))
         self.assertEqual(self.exercise(submission_failure=True), (1, ['linux'], ['linux']))
 
+    def test_submission_outage_is_infrastructure_not_a_suite_failure(self):
+        self.assertEqual(self.exercise(submission_failure=True), (1, ['linux'], ['linux']))
+        reply = subprocess.CompletedProcess([], 69, 'PRIVATE ERROR', 'PRIVATE ERROR')
+        self.assertEqual(ci.submission_failure(reply),
+                         'infrastructure failure: submission unavailable (exit 69)')
+
     def test_oom_requires_current_attempt_and_readable_status(self):
         for output, code in [
             (json.dumps({'state': 'failed', 'attempt': 2, 'attempt_history': [
@@ -113,15 +126,15 @@ class ActionsFullTest(unittest.TestCase):
         }
         reply = subprocess.CompletedProcess([], 78, json.dumps(refusal), 'PRIVATE ERROR')
         self.assertEqual(ci.submission_failure(reply),
-                         'no qualified target; inspect private receipt for eligibility requirements')
+                         'infrastructure failure: no qualified target; inspect private receipt for eligibility requirements')
         self.assertEqual(self.exercise(submission_failure=True, refusal=refusal),
                          (1, ['linux'], ['linux']))
         refusal['refusal_reason'] = 'PRIVATE unsupported environment or host path'
         self.assertEqual(ci.submission_failure(subprocess.CompletedProcess([], 78, json.dumps(refusal))),
-                         'no qualified target; inspect private receipt for eligibility requirements')
+                         'infrastructure failure: no qualified target; inspect private receipt for eligibility requirements')
         for output in ('PRIVATE malformed', '[]', '{"refusal_reason": "PRIVATE"}'):
             self.assertEqual(ci.submission_failure(subprocess.CompletedProcess([], 78, output)),
-                             'submission unavailable (exit 78)')
+                             'infrastructure failure: submission unavailable (exit 78)')
 
     def test_no_credentials_or_notifier_in_cli_environment(self):
         with patch.dict(os.environ, {'MYCE_TOKEN': 'synthetic-fleet', 'MYCE_NOTIFY': 'unused',
