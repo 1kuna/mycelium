@@ -67,7 +67,12 @@ func TestWaitParentProcessHelper(t *testing.T) {
 	} else {
 		err = waitCommand(ctx, []string{"job", "--queue", os.Getenv("MYCE_PARENT_TEST_QUEUE"), "--token", "fixture", "--timeout", "5s"}, io.Discard, io.Discard)
 	}
-	if e := os.WriteFile(filepath.Join(dir, "exit"), []byte(strconv.Itoa(exitCode(err))), 0600); e != nil {
+	// Publish only complete contents; the parent reads as soon as exit exists.
+	exit := filepath.Join(dir, "exit")
+	if e := os.WriteFile(exit+".tmp", []byte(strconv.Itoa(exitCode(err))), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Rename(exit+".tmp", exit); e != nil {
 		t.Fatal(e)
 	}
 }
