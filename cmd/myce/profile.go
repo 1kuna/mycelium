@@ -208,6 +208,16 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			return waitError(64, "class must not be empty")
 		}
 		p.Class = *override.Class
+		if p.Priority != "" {
+			// Match submit's legacy normalization: built-in classes use their
+			// matching priority; custom classes have no legacy priority.
+			switch p.Class {
+			case "production", "deadline", "experiment":
+				p.Priority = p.Class
+			default:
+				p.Priority = ""
+			}
+		}
 	}
 	if override.Deadline != nil {
 		d, err := time.Parse(time.RFC3339, *override.Deadline)
