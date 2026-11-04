@@ -164,7 +164,7 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			reject("benchmark_busy")
 			return nil
 		}
-		if !q.workerHasCPUReservation(m) && !cpuAllocationFits(m, 1) {
+		if !p.Started && (p.Kind == "environment" || !q.workerHasCPUReservation(m)) && !cpuAllocationFits(m, 1) {
 			reject("preparation_cpu")
 			return nil
 		}

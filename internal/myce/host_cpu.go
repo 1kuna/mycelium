@@ -106,8 +106,8 @@ func (q *Queue) refreshHostCPU() {
 	}
 }
 
-// Live admission and release projections share this ledger. A preparation
-// inherits one core when its worker loses its final execution reservation.
+// Live admission and release projections share this ledger. Environment builds
+// run beside unrelated CPU commands and retain their own single core.
 func (q *Queue) hostCPUInUse(m *Machine, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparation bool) int {
 	used := 0
 	covered := map[string]bool{}
@@ -140,8 +140,8 @@ func (q *Queue) hostCPUInUse(m *Machine, releasedJobs map[*Job]bool, releasedSlo
 	}
 	for _, p := range q.s.PreparationPlans {
 		owner := q.s.Machines[p.Machine]
-		if p.Started && !(releasePreparation && p.Machine == m.ID) && owner != nil && hostID(owner) == hostID(m) && !covered[p.Machine] {
-			used++ // Preparation on a reserved execution is already charged once.
+		if p.Started && !(releasePreparation && p.Machine == m.ID) && owner != nil && hostID(owner) == hostID(m) && (p.Kind == "environment" || !covered[p.Machine]) {
+			used++ // Other preparation may belong to an already reserved execution.
 			covered[p.Machine] = true
 		}
 	}

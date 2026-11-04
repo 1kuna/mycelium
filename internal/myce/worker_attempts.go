@@ -585,7 +585,30 @@ func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 	return s, s.save()
 }
 
-func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport) error {
+func localEnvironmentPreparationFits(w Worker, jobs []Job, models []ModelSlot) bool {
+	if w.Machine.SharedHost != nil {
+		return false
+	}
+	cores, why := cpuCapacity(&w.Machine)
+	used := 1 // The single environment builder, independently of CPU actors.
+	for _, j := range jobs {
+		if !j.Spec.Needs.cpuOnly() {
+			return false
+		}
+		used += j.Spec.Needs.cores()
+	}
+	for _, s := range models {
+		if s.State == "loading" || s.InFlight > 0 {
+			return false
+		}
+		if slotReservesMemory(&s) {
+			used++
+		}
+	}
+	return why == "" && used <= cores
+}
+
+func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport, preparationCores ...int) error {
 	if reason := w.storageRootReason(&next); reason != "" {
 		return errors.New(reason)
 	}
@@ -597,6 +620,9 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 	}
 	cores, why := cpuCapacity(&w.Machine)
 	usedCores, usedRAM := next.Spec.Needs.cores(), localJobHostNeed(w, next)
+	for _, n := range preparationCores {
+		usedCores += n
+	}
 	growth := usedRAM
 	for _, j := range jobs {
 		usedCores += j.Spec.Needs.cores()
@@ -1141,7 +1167,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 							r := Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Interrupted: true, Error: "worker leaving before command started"}
 							s.state.Result = &r
 						}
-						if e = localAttemptAdmission(admissionWorker, activeJobs(), j, modelReports); e != nil {
+						if e = localAttemptAdmission(admissionWorker, activeJobs(), j, modelReports, environments.cores()); e != nil {
 							e = s.startFailure(j, launchRefused, e)
 							r := startFailureOutcome(Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: e.Error()}, e)
 							s.state.Result = &r
@@ -1171,7 +1197,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						a.update(w, AttemptDirective{}, true, reply.AdmissionBlocked)
 					}
 				}
-				busy := len(actors) > 0 || leaving || recovering || w.checkAvailability() != nil
+				unavailable := leaving || recovering || reply.AdmissionBlocked || w.checkAvailability() != nil
+				busy := len(actors) > 0 || unavailable
+				environmentBusy := unavailable || !localEnvironmentPreparationFits(w, activeJobs(), reply.ModelPlan)
 				for _, slot := range reply.ModelPlan {
 					if slot.State == "loading" || slot.InFlight > 0 {
 						busy = true
@@ -1188,7 +1216,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				environments.mu.Lock()
 				environments.prepare = prepareWorker.prepareRegisteredExtension
 				environments.mu.Unlock()
-				environments.sync(reply.EnvironmentPlan, busy, keep)
+				environments.sync(reply.EnvironmentPlan, environmentBusy, keep)
 				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy, keep)
 				// A result can finish while check-in is in flight. Refresh the
 				// same exact local reservations before applying a new engine load.
