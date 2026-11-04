@@ -35,7 +35,7 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	parallel := f.Int("warmup-parallel", 1, "maximum concurrent warm-ups (greater than one warms after all models load)")
 	loadTimeout := f.Duration("load-timeout", 5*time.Minute, "per-model measurement load timeout")
 	force := f.Bool("force", false, "bypass production refusal during approved maintenance; never bypass spool lock")
-	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue URL (must match join)")
+	authority := installedClientFlags(f)
 	if e := f.Parse(args); e != nil {
 		return e
 	}
@@ -101,12 +101,16 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 			}
 		}
 	}
-	w := myce.Worker{StateDir: *state, CacheRoot: *cache, EnvironmentRoot: *envCache, Client: myce.Client{URL: *queue, Token: env("MYCE_TOKEN", "")}, Machine: myce.Machine{ID: *worker, GPU: *platform}, Clock: myce.RealClock{}}
+	w := myce.Worker{StateDir: *state, CacheRoot: *cache, EnvironmentRoot: *envCache, Machine: myce.Machine{ID: *worker, GPU: *platform}, Clock: myce.RealClock{}}
 	roots, err := w.StateRoots()
 	if err != nil {
 		return err
 	}
 	if err := myce.PrepareStateRoots(roots...); err != nil {
+		return err
+	}
+	w.Client, err = authority.client()
+	if err != nil {
 		return err
 	}
 	// Cache defaults are resolved from join's store by Prepare below; opening it
@@ -160,6 +164,9 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	encoder := json.NewEncoder(&jsonData)
 	encoder.SetIndent("", "  ")
 	e = errors.Join(e, encoder.Encode(report))
+	if report.Baseline.Basis != "" {
+		fmt.Fprintf(&plain, "Memory basis: %s (unified device/host figures refer to the same RAM; do not add them).\n", report.Baseline.Basis)
+	}
 	fmt.Fprintf(&plain, "Worker %s device %s/%s; budget %.3f GiB; fits: %t\nBaseline used: device %.3f GiB, host %.3f GiB\nCombined absolute peak: device %.3f GiB, host %.3f GiB\nCombined peak delta from baseline: device %.3f GiB, host %.3f GiB\n", report.Worker, report.Platform, report.Device, report.BudgetGB, report.Fits, report.Baseline.DeviceGB, report.Baseline.HostGB, report.Peak.DeviceGB, report.Peak.HostGB, report.Delta.DeviceGB, report.Delta.HostGB)
 	for _, m := range report.Models {
 		fmt.Fprintf(&plain, "%s: load %.3fs; warm-up %.3fs; incremental peak delta device %.3f GiB, host %.3f GiB; absolute peak device %.3f GiB, host %.3f GiB\n", m.Model, m.LoadSeconds, m.WarmupSeconds, m.Delta.DeviceGB, m.Delta.HostGB, m.Peak.DeviceGB, m.Peak.HostGB)
