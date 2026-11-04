@@ -144,8 +144,10 @@ Full-gate profiles and their converted adapter entries use `memory: auto`.
 Both platforms have accepted comparable learning evidence; source SHA changes
 and removing a memory declaration do not change the memory work identity.
 Commands, two-core concurrency, environment, targets and result acceptance stay
-the same. Quick retains the conservative 7 GiB declaration because selections
-have distinct input identities and may not yet have comparable evidence.
+the same. Quick retains the conservative 7 GiB declaration: the full suite bounds its
+work, while the shared quick memory identity excludes selection inputs by
+default. A small selection's accepted peak cannot establish the largest
+selection's demand.
 
 Read-only job GET inspection on 2026-11-04 found these successful final attempts:
 
