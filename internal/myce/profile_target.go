@@ -219,7 +219,10 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 	var best *targetFit
 	reason := "no known machine targets"
 	q.evaluateTargets(j, func(fit targetFit, candidate *Job, m *Machine) bool {
-		if fit.failures == 0 {
+		// A missing cache report is a temporary admission hold, not evidence
+		// against require_target. Keep every other qualification check intact.
+		unknownCacheOnly := m.SharedInputCache == nil && fit.failures == 1 && fit.first == "shared input cache"
+		if fit.failures == 0 || unknownCacheOnly {
 			best, reason = nil, ""
 			return false
 		}

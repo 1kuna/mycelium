@@ -109,6 +109,12 @@ func TestSharedInputCapacityWaitsAcrossStartupAndRollout(t *testing.T) {
 		t.Fatal("undersized reporting worker accepted shared inputs")
 	}
 	// A known small cache plus an unknown cache must still accept submissions.
+	// require_target must keep other qualification checks without treating a
+	// temporarily missing capacity report as permanent incompatibility.
+	if err := q.SeedProjects(map[string]ProjectPolicy{s.Project: {Weight: 1, AllowedMachines: []string{old.ID, small.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	s.RequireTarget = true
 	if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
 		t.Fatal("mixed rollout resolve refused", err)
 	}
@@ -117,6 +123,13 @@ func TestSharedInputCapacityWaitsAcrossStartupAndRollout(t *testing.T) {
 	if got := job(t, q, second.ID); got.DiagnosticCode != "shared_input_cache_unreported" {
 		t.Fatal("mixed rollout wait was untyped", got.Reason)
 	}
+	tooLarge := s
+	tooLarge.Needs.MemoryGB = 1e6
+	if _, err := q.Submit(tooLarge); err == nil {
+		t.Fatal("unknown cache bypassed other permanent qualification")
+	}
+	s.RequireTarget = false
+	submit(t, q, s) // Project capacity validation must also retain unknown intent.
 	clock.Advance(time.Second)
 	old.SharedInputCache = &SharedInputCapacity{CapacityBytes: 40 << 30, FreeBytes: 40 << 30}
 	if reply := check(t, q, old, nil); reply.Job == nil || reply.Job.ID != j.ID {
