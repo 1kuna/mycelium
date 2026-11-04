@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -194,6 +195,178 @@ func TestCatalogRefusesRemoteLoadArgs(t *testing.T) {
 type fetchTransport func(*http.Request) (*http.Response, error)
 
 func (f fetchTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type interruptedFetchReader struct{}
+
+func (interruptedFetchReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+func TestFetchRejectsConcurrentResume(t *testing.T) {
+	old := http.DefaultClient
+	defer func() { http.DefaultClient = old }()
+	started, release := make(chan struct{}), make(chan struct{})
+	http.DefaultClient = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+		close(started)
+		<-release
+		return &http.Response{StatusCode: http.StatusPartialContent, Header: http.Header{"Content-Range": []string{"bytes 2-3/4"}}, Body: io.NopCloser(strings.NewReader("ta"))}, nil
+	})}
+	dest := filepath.Join(t.TempDir(), "model")
+	if err := os.WriteFile(dest+".partial", []byte("da"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sum := fmt.Sprintf("%x", sha256.Sum256([]byte("data")))
+	url := "https://huggingface.co/repo/resolve/hash/file"
+	done := make(chan error, 1)
+	go func() { done <- FetchModel(context.Background(), url, dest, 4, sum) }()
+	<-started
+	err := FetchModel(context.Background(), url, dest, 4, sum)
+	close(release)
+	if err == nil {
+		t.Fatal("concurrent resume accepted")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyModel(dest, Model{Name: "model", SizeBytes: 4, SHA256: sum}); err != nil {
+		t.Fatal(err)
+	}
+	if err := FetchModel(context.Background(), url, dest, 4, sum); err == nil {
+		t.Fatal("published destination overwritten")
+	}
+	if _, err := os.Lstat(dest + ".partial"); !os.IsNotExist(err) {
+		t.Fatal("concurrent or late fetch left an extra partial", err)
+	}
+}
+
+func TestFetchRecoversInvalidPartial(t *testing.T) {
+	for _, prefix := range []string{"bad!", "bad", "oversized"} {
+		t.Run(prefix, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			dest := filepath.Join(home, "bundle", "model")
+			if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dest+".partial", []byte(prefix), 0600); err != nil {
+				t.Fatal(err)
+			}
+			old := http.DefaultClient
+			defer func() { http.DefaultClient = old }()
+			http.DefaultClient = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+				res := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("data"))}
+				if r.Header.Get("Range") != "" {
+					res.StatusCode = http.StatusPartialContent
+					res.Header.Set("Content-Range", "bytes 3-3/4")
+					res.Body = io.NopCloser(strings.NewReader("a"))
+				}
+				return res, nil
+			})}
+			sum := fmt.Sprintf("%x", sha256.Sum256([]byte("data")))
+			if err := FetchModel(context.Background(), "https://huggingface.co/a", dest, 4, sum); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyModel(dest, Model{Name: "model", SizeBytes: 4, SHA256: sum}); err != nil {
+				t.Fatal(err)
+			}
+			trash, err := os.ReadDir(filepath.Join(home, ".Trash", "myce-model-cache"))
+			if err != nil || len(trash) != 1 {
+				t.Fatalf("invalid partial not preserved: %v %v", trash, err)
+			}
+			if _, err := os.Lstat(dest + ".partial"); !os.IsNotExist(err) {
+				t.Fatal("partial remains", err)
+			}
+		})
+	}
+}
+
+func TestFetchSyncsPublicationAndRecovers(t *testing.T) {
+	home := t.TempDir()
+	dest := filepath.Join(home, "model")
+	sum := fmt.Sprintf("%x", sha256.Sum256([]byte("data")))
+	if err := os.WriteFile(dest+".partial", []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	syncDir := func(dir string) error {
+		calls++
+		if _, err := os.Stat(dest); err != nil {
+			t.Fatal(err)
+		}
+		_, err := os.Stat(dest + ".partial")
+		if calls == 1 {
+			if err != nil {
+				t.Fatal("partial missing before link sync", err)
+			}
+			return errors.New("injected sync failure")
+		}
+		if calls == 2 && err != nil {
+			t.Fatal("partial missing before retry sync", err)
+		}
+		if calls == 3 && !os.IsNotExist(err) {
+			t.Fatal("partial remains at cleanup sync", err)
+		}
+		return syncWorkerDir(dir)
+	}
+	url := "https://huggingface.co/a"
+	if err := fetchModel(context.Background(), url, dest, 4, sum, syncDir); err == nil {
+		t.Fatal("sync failure ignored")
+	}
+	if err := fetchModel(context.Background(), url, dest, 4, sum, syncDir); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 {
+		t.Fatalf("directory sync calls = %d", calls)
+	}
+}
+
+func TestFetchBundleResumesAndVerifies(t *testing.T) {
+	old := http.DefaultClient
+	defer func() { http.DefaultClient = old }()
+	attempt := 0
+	http.DefaultClient = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+		attempt++
+		response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+		switch attempt {
+		case 1:
+			response.Body = io.NopCloser(io.MultiReader(strings.NewReader("wei"), interruptedFetchReader{}))
+		case 2:
+			if got := r.Header.Get("Range"); got != "bytes=3-" {
+				t.Fatalf("resume range = %q", got)
+			}
+			response.StatusCode = http.StatusPartialContent
+			response.Header.Set("Content-Range", "bytes 3-6/7")
+			response.Body = io.NopCloser(strings.NewReader("ghts"))
+		default:
+			response.Body = io.NopCloser(strings.NewReader("{}"))
+		}
+		return response, nil
+	})}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []ModelFile{
+		{Path: "weights/model.bin", SizeBytes: 7, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("weights")))},
+		{Path: "config.json", SizeBytes: 2, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("{}")))},
+	}
+	url := "https://huggingface.co/repo/resolve/hash/file"
+	dest := filepath.Join(root, files[0].Path)
+	if err := FetchModel(context.Background(), url, dest, files[0].SizeBytes, files[0].SHA256); err == nil {
+		t.Fatal("interruption accepted")
+	}
+	for _, f := range files {
+		if err := FetchModel(context.Background(), url, filepath.Join(root, f.Path), f.SizeBytes, f.SHA256); err != nil {
+			t.Fatal(err)
+		}
+	}
+	size, sum, err := ModelFilesIdentity(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyModelFiles(context.Background(), root, Model{Name: "bundle", Files: files, SizeBytes: size, SHA256: sum}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExplicitFetchVerifiesMaster(t *testing.T) {
 	old := http.DefaultClient
 	defer func() { http.DefaultClient = old }()

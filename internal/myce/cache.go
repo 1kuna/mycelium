@@ -686,53 +686,140 @@ func (c *ModelCache) CopyReports() ([]CopyReport, float64) {
 
 // FetchModel is the only network download path. Loading never invokes it.
 func FetchModel(ctx context.Context, raw, dest string, size int64, sum string) error {
-	u, e := url.Parse(raw)
-	if e != nil || u.Scheme != "https" || u.Host != "huggingface.co" {
+	return fetchModel(ctx, raw, dest, size, sum, syncWorkerDir)
+}
+
+func fetchModel(ctx context.Context, raw, dest string, size int64, sum string, syncDir func(string) error) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host != "huggingface.co" {
 		return errors.New("fetch requires an HTTPS huggingface.co file URL")
 	}
 	if size <= 0 || len(sum) != 64 {
 		return errors.New("fetch requires size and SHA-256")
 	}
-	if _, e = os.Stat(dest); !os.IsNotExist(e) {
+	dir, temp := filepath.Dir(dest), dest+".partial"
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	lock, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fmt.Errorf("fetch directory is in use: %w", err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	if st, err := os.Lstat(dest); err == nil {
+		partial, perr := os.Lstat(temp)
+		if perr == nil && st.Mode().IsRegular() && partial.Mode().IsRegular() && os.SameFile(st, partial) {
+			if err = verifyModel(dest, Model{Name: dest, SizeBytes: size, SHA256: sum}); err != nil {
+				return err
+			}
+			if err = syncDir(dir); err != nil {
+				return err
+			}
+			if err = os.Remove(temp); err != nil {
+				return err
+			}
+			return syncDir(dir)
+		}
 		return errors.New("destination already exists or cannot be inspected")
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-	if e = os.MkdirAll(filepath.Dir(dest), 0700); e != nil {
-		return e
+
+	// Preserve invalid bytes in the user's Trash before retrying once from zero.
+	// A failed fresh download remains available for diagnosis, without a retry loop.
+	for retried := false; ; retried = true {
+		st, err := os.Lstat(temp)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err == nil && !st.Mode().IsRegular() {
+			return errors.New("fetch partial is not a regular file")
+		}
+		if err == nil && st.Size() > size {
+			if retried {
+				return errors.New("fetch partial exceeds declared size")
+			}
+			if err = (&ModelCache{}).discard(temp); err != nil {
+				return err
+			}
+			continue
+		}
+		offset := int64(0)
+		if st != nil {
+			offset = st.Size()
+		}
+		if offset < size {
+			req, err := http.NewRequestWithContext(ctx, "GET", raw, nil)
+			if err != nil {
+				return err
+			}
+			if offset > 0 {
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+			}
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return err
+			}
+			if offset > 0 && (res.StatusCode != http.StatusPartialContent || res.Header.Get("Content-Range") != fmt.Sprintf("bytes %d-%d/%d", offset, size-1, size)) {
+				res.Body.Close()
+				return errors.New("fetch: invalid range response; partial retained")
+			}
+			if offset == 0 && res.StatusCode != http.StatusOK {
+				res.Body.Close()
+				return fmt.Errorf("fetch: HTTP %d", res.StatusCode)
+			}
+			flags := os.O_WRONLY
+			if st == nil {
+				flags |= os.O_CREATE | os.O_EXCL
+			}
+			f, err := os.OpenFile(temp, flags, 0600)
+			if err != nil {
+				res.Body.Close()
+				return err
+			}
+			if _, err = f.Seek(offset, io.SeekStart); err == nil {
+				_, err = io.Copy(f, io.LimitReader(res.Body, size-offset+1))
+			}
+			if err == nil {
+				err = f.Sync()
+			}
+			err = errors.Join(err, f.Close(), res.Body.Close())
+			if err != nil {
+				return err
+			}
+		}
+		if err = verifyModel(temp, Model{Name: dest, SizeBytes: size, SHA256: sum}); err != nil {
+			if retried {
+				return fmt.Errorf("fetch partial failed verification: %w", err)
+			}
+			if err = (&ModelCache{}).discard(temp); err != nil {
+				return err
+			}
+			continue
+		}
+		f, err := os.OpenFile(temp, os.O_WRONLY, 0)
+		if err != nil {
+			return err
+		}
+		err = errors.Join(f.Sync(), f.Close())
+		if err != nil {
+			return err
+		}
+		if err = os.Link(temp, dest); err != nil {
+			return err
+		}
+		if err = syncDir(dir); err != nil {
+			return err
+		}
+		if err = os.Remove(temp); err != nil {
+			return err
+		}
+		return syncDir(dir)
 	}
-	req, e := http.NewRequestWithContext(ctx, "GET", raw, nil)
-	if e != nil {
-		return e
-	}
-	res, e := http.DefaultClient.Do(req)
-	if e != nil {
-		return e
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return fmt.Errorf("fetch: HTTP %d", res.StatusCode)
-	}
-	temp := dest + ".partial"
-	f, e := os.OpenFile(temp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if e != nil {
-		return e
-	}
-	_, e = io.Copy(f, io.LimitReader(res.Body, size+1))
-	if e == nil {
-		e = f.Sync()
-	}
-	e = errors.Join(e, f.Close())
-	if e != nil {
-		return e
-	}
-	if e = verifyModel(temp, Model{Name: dest, SizeBytes: size, SHA256: sum}); e != nil {
-		return e
-	}
-	// Link rather than overwrite a master published by another fetch.
-	if e = os.Link(temp, dest); e != nil {
-		return e
-	}
-	c := ModelCache{NASRoot: filepath.Dir(dest)}
-	return c.discard(temp)
 }
 
 func (c *ModelCache) noteCopyError(m Model, err error) {
