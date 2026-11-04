@@ -1,6 +1,11 @@
 package myce
 
-import "strings"
+import (
+	"iter"
+	"maps"
+	"slices"
+	"strings"
+)
 
 const boundedMemoryExploration = "bounded cross-OS exploration"
 const boundedGPUExploration = "bounded cross-family GPU exploration"
@@ -55,19 +60,23 @@ func (q *Queue) memoryHistory() *Queue {
 func (q *Queue) sameOSMemoryLowerBound(key ObservationKey, configuration string) float64 {
 	if cache := q.memoryPlanning; cache != nil {
 		id := memoryLowerIdentity(key, configuration)
-		if lower, ok := cache.lower[id]; ok {
+		if lower, ok := cache.history.lower[id]; ok {
 			return lower
 		}
-		lower := q.sameOSMemoryLowerBoundUncached(key, configuration)
-		cache.lower[id] = lower
+		lower := q.sameOSMemoryLowerBoundFrom(key, configuration, slices.Values(cache.retainedMemoryJobs(q, id)))
+		cache.history.lower[id] = lower
 		return lower
 	}
 	return q.sameOSMemoryLowerBoundUncached(key, configuration)
 }
 func (q *Queue) sameOSMemoryLowerBoundUncached(key ObservationKey, configuration string) float64 {
+	return q.sameOSMemoryLowerBoundFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs))
+}
+
+func (q *Queue) sameOSMemoryLowerBoundFrom(key ObservationKey, configuration string, jobs iter.Seq[*Job]) float64 {
 	history := q.memoryHistory()
 	lower := 0.0
-	for _, j := range history.s.Jobs {
+	for j := range jobs {
 		if j.Timing == nil || j.Timing.Key == nil || j.StartedAt == nil || j.FinishedAt == nil {
 			continue
 		}

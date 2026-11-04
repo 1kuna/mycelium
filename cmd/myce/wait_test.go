@@ -427,6 +427,30 @@ func TestWaitDeadlineCancelsInFlightRequest(t *testing.T) {
 	}
 }
 
+func TestWaitUsesLightweightReadsAfterInitial(t *testing.T) {
+	clock := &waitClock{now: time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)}
+	var queries []string
+	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
+		queries = append(queries, r.URL.RawQuery)
+		state := "running"
+		if len(queries) == 4 {
+			state = "succeeded"
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(fmt.Sprintf(`{"id":"exact-job-id","state":%q}`, state)))}, nil
+	})}}
+	var out bytes.Buffer
+	err := waitJobs(context.Background(), client, []string{"exact-job"}, 0, &out, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error {
+		if d != 3*time.Second {
+			t.Fatal("completion cadence changed", d)
+		}
+		clock.advance(d)
+		return nil
+	})
+	if err != nil || out.String() != "exact-job-id succeeded\n" || fmt.Sprint(queries) != "[ view=wait view=wait view=wait]" {
+		t.Fatalf("err=%v output=%q queries=%q", err, out.String(), queries)
+	}
+}
+
 func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)

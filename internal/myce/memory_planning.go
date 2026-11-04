@@ -1,14 +1,43 @@
 package myce
 
-// Owned by one immutable placementScan, shared across its target machines.
+// Owned by one immutable planning pass, shared across its target machines.
 // Never retained across placements, inventory changes, or transaction boundaries.
 type memoryPlanningCache struct {
 	observations *memoryObservationCatalog
-	lower        map[memoryLowerKey]float64
+	history      *memoryHistoryCache
 	constrained  map[constrainedMemoryKey]float64
 	similar      map[similarMemoryKey]similarMemoryResult
 	cold         map[coldMemoryKey]coldMemoryResult
 }
+
+// Only retained execution evidence is shared with permanent-capacity views.
+// Admission-dependent estimates stay in each view's own planning cache.
+type memoryHistoryCache struct {
+	jobs  map[memoryHistoryKey][]*Job
+	lower map[memoryLowerKey]float64
+}
+
+// Retained constrained executions used to be scanned once per distinct work
+// key, even with memoized answers. Index work/OS once in the same
+// immutable pass. Borrow jobs only for that pass; reader-side freshness,
+// ownership, qualification and exact-attempt fences remain authoritative.
+func (c *memoryPlanningCache) retainedMemoryJobs(q *Queue, key memoryLowerKey) []*Job {
+	if c.history.jobs == nil {
+		c.history.jobs = map[memoryHistoryKey][]*Job{}
+		for _, j := range q.memoryHistory().s.Jobs {
+			if j.Timing == nil || j.Timing.Key == nil || j.StartedAt == nil || j.FinishedAt == nil || len(j.MemoryAttempts) == 0 {
+				continue
+			}
+			k := j.Timing.Key
+			id := memoryHistoryKey{k.Work, k.Target.OS}
+			c.history.jobs[id] = append(c.history.jobs[id], j)
+		}
+	}
+	return c.history.jobs[memoryHistoryKey{key.work.work, key.os}]
+}
+
+type memoryHistoryKey struct{ work, os string }
+
 type memoryLowerKey struct {
 	work memoryWorkKey
 	os   string
@@ -41,7 +70,7 @@ type coldMemoryResult struct {
 
 func newMemoryPlanningCache() *memoryPlanningCache {
 	return &memoryPlanningCache{
-		lower: map[memoryLowerKey]float64{}, constrained: map[constrainedMemoryKey]float64{}, similar: map[similarMemoryKey]similarMemoryResult{}, cold: map[coldMemoryKey]coldMemoryResult{},
+		history: &memoryHistoryCache{lower: map[memoryLowerKey]float64{}}, constrained: map[constrainedMemoryKey]float64{}, similar: map[similarMemoryKey]similarMemoryResult{}, cold: map[coldMemoryKey]coldMemoryResult{},
 	}
 }
 func memoryLowerIdentity(key ObservationKey, configuration string) memoryLowerKey {

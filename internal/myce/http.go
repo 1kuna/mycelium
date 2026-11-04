@@ -193,7 +193,21 @@ func (a API) handler(joiningPin string) http.Handler {
 		respondOperation(w, s, err, "status_unavailable")
 	})
 	mux.HandleFunc("GET /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
-		j, err := a.Queue.jobSnapshot(r.PathValue("id"), r.Context())
+		var j *Job
+		var err error
+		if r.URL.Query().Get("view") == "wait" {
+			j, err = a.Queue.waitJobSnapshot(r.PathValue("id"), r.Context())
+			if err == nil && !terminal(j.State) {
+				respondOperation(w, struct {
+					ID     string `json:"id"`
+					State  string `json:"state"`
+					Reason string `json:"reason,omitempty"`
+				}{j.ID, j.State, j.Reason}, nil, "status_unavailable")
+				return
+			}
+		} else {
+			j, err = a.Queue.jobSnapshot(r.PathValue("id"), r.Context())
+		}
 		// Keep the GET execution payload empty without changing Spec's JSON
 		// encoding, which also defines durable submission fingerprints.
 		type replySpec struct {

@@ -439,6 +439,10 @@ func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*
 	}
 	var reasons map[string]string
 	if j.State == "queued" {
+		// The detached generation's observations are immutable. Reuse one
+		// index across waiting, eligibility and deadline diagnostics rather
+		// than copying every curve again for each target comparison.
+		v.memoryObservationIndex = v.memoryObservationCatalog()
 		// A receipt explains this job; full fleet ordering belongs to status.
 		reasons = map[string]string{j.ID: v.waitReason(j)}
 	}

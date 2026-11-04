@@ -921,6 +921,17 @@ matching aggregates. Observation writes invalidate that index; rollback and
 commit discard it. Retained terminal count alone was flat in the comparison.
 These laptop timings do not establish the full cause of a live queue stall.
 
+`GOMAXPROCS=4 go test ./internal/myce -run '^TestCheckinRetainedHistoryContention$' -count=1 -v`
+replays six concurrent worker check-ins and 60 concurrent job GETs per round,
+with 6,500 retained constrained executions, 110 queued jobs and 1,400 curves.
+It reports nearest-rank hold p50/p99 (including the check-in's snapshot locks),
+job GET mutex waits and total process CPU per check-in across 20 rounds. The
+hold p99 must be below 100ms. Unlike empty terminal receipts, these retained
+jobs carry timing and memory-attempt evidence used by cold-memory planning.
+This `!race` laptop regression includes real SQLite commits and uses an injected
+clock for every decision; CPU accounting includes the concurrent readers. It
+does not establish live fleet latency or native hardware qualification.
+
 ## Backed storage admission integration
 
 The unfinished native storage implementation and its original integration/native

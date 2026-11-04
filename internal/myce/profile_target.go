@@ -249,6 +249,11 @@ func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job
 	// Resolve envelopes with the planner's code, but without temporary
 	// occupancy or release holds. Retain observations for learned needs.
 	capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: newMemoryPlanningCache()}
+	if q.memoryPlanning != nil {
+		// Retained lower bounds depend on origin history and identity, not
+		// the temporary capacity fields removed by this view.
+		capacity.memoryPlanning.history = q.memoryPlanning.history
+	}
 	capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 	for _, m := range q.s.Machines {
 		if !q.jobAllowsMachine(j, m.ID) {

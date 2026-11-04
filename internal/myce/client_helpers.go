@@ -52,9 +52,20 @@ func (c Client) Submit(ctx context.Context, spec Spec) (*Job, error) {
 // io.ErrUnexpectedEOF, which RetryStatusRead retries. The Python client
 // detects truncation only from transport framing (Content-Length or chunking).
 func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
+	return c.getJob(ctx, id, "")
+}
+
+// GetJobForWait returns only identity, state and stored reason while pending,
+// and the ordinary full Job at completion. Older queues ignore the query and
+// return full replies. Use GetJob for live placement and deadline diagnostics.
+func (c Client) GetJobForWait(ctx context.Context, id string) (*Job, error) {
+	return c.getJob(ctx, id, "?view=wait")
+}
+
+func (c Client) getJob(ctx context.Context, id, query string) (*Job, error) {
 	var j Job
 	invalid := &HTTPError{Status: 502, Code: "job_reply_invalid", Message: "queue returned an invalid Job reply: nonempty id and state are required"}
-	if err := c.Call(ctx, "GET", "/api/jobs/"+url.PathEscape(id), nil, &j); err != nil {
+	if err := c.Call(ctx, "GET", "/api/jobs/"+url.PathEscape(id)+query, nil, &j); err != nil {
 		var syntax *json.SyntaxError
 		var fieldType *json.UnmarshalTypeError
 		if errors.As(err, &syntax) || errors.As(err, &fieldType) || err == io.EOF {
