@@ -147,6 +147,16 @@ queue-delayed check-ins alone do not renew a failed probe.
 
 ## Credentials
 
+For catalog image chat, install the repository's current Python client with
+its `openai` extra and use `Client.from_installed().openai(project=PROJECT,
+priority="experiment")`. The installed opener preserves queue TLS authority;
+send images as OpenAI `image_url` parts with base64 data URLs. The model must
+already be in the matching queue/worker catalog. See the
+[image-chat example](https://github.com/1kuna/mycelium/blob/main/examples/image-chat.py)
+for two-image requests and timings; its example model name is not a claim that
+your installation has that model. Use the reviewed client commit containing
+the installed-transport fix before calling a queue with a private TLS pin.
+
 `myce submit FILE` also uses installed credentials when `MYCE_TOKEN` is unset, including the installed queue address and TLS pin.
 
 Never open, print, copy or pass fleet credentials, and never set the fleet token yourself. Use the installed-authority CLI or `Client.from_installed()`, which resolve credentials internally; prefer the CLI for read-only status and result calls. A missing CLI or failed authority is a setup hold, not a reason to look for the token.
