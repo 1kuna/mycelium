@@ -2268,12 +2268,22 @@ custody across the fleet" solely because failed jobs have every copy
 with the copy-release reconciliation fix through the supported
 [queue service installation/restart procedure](#install-and-upgrade), using the
 existing saved queue config. On startup it derives the missing job flag from
-the confirmed copies and resumes the same durable running operation on normal
-queue ticks, once fresh runtime proofs and the remaining cutover checks pass.
-No supersession, database or helper-receipt edits are needed. A running wait has
-no cancel/supersede command; `fleet supersede` remains limited to stopped
-operations. Any unconfirmed copy, retained host custody, or production call still
-blocks; failed/completed state, loss and elapsed time never establish release.
+the confirmed copies. If the restarted queue runs the waiting operation's exact
+frozen release version and artifact hash, the same operation finishes after
+fresh runtime proofs and the remaining cutover checks pass, without another
+queue restart. If the fixed queue is a newer release than that frozen target,
+the old operation stops with `queue_running_hash_mismatch` after custody settles;
+its drain and production admission fence remain. Approve that newer signed
+release, then explicitly run `myce fleet upgrade --release NEWER_RELEASE` with
+the original `--queue-only` (if used) and `--wait-production-idle` flags. This
+supported fix-forward path carries the drain into a new operation and verifies
+already-current queue bytes without restarting them. A restart never silently
+retargets the frozen operation or authorizes a downgrade.
+
+No database or helper-receipt edits are needed. A running wait has no
+cancel/supersede command; `fleet supersede` remains limited to stopped operations.
+Any unconfirmed copy, retained host custody, or production call still blocks;
+failed/completed state, loss and elapsed time never establish release.
 
 Repeat the same flags when resuming: scope and idle policy cannot change during
 an unfinished operation, including when selecting a newer fix-forward release.
