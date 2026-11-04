@@ -116,6 +116,12 @@ func (q *Queue) detectIncidentHealth() {
 		q.observeHealth(key, r.active() && r.ReadyAt == nil && !now.Before(r.ExpiresAt), 0,
 			HealthAlert{Kind: "reservation_never_ready", Host: r.Target.Host, Reservation: id, JobID: r.Job})
 	}
+	// The envelope pass changes health conditions only. Share retained
+	// evidence across its permanent-capacity views, then discard it before
+	// another queue mutation can change history or inventory.
+	previous := q.memoryPlanning
+	q.memoryPlanning = newMemoryPlanningCache()
+	defer func() { q.memoryPlanning = previous }()
 	for _, j := range q.liveJobs() {
 		if j.State == "queued" && !cancelled(j) && (j.Spec.Needs.Memory == "auto" || j.Spec.extensionJob()) {
 			key := envelopeHealthKey(j)

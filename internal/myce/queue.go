@@ -1090,6 +1090,12 @@ func (q *Queue) maintain() {
 	q.escalateDockerCleanup()
 	q.refreshHostMemory()
 	q.maintainHolds()
+	// Only display reasons change in this final read-only planning pass.
+	// Share memory evidence across the backlog, then discard it before the
+	// next mutation (a check-in can call maintain again in the same update).
+	previous := q.memoryPlanning
+	q.memoryPlanning = newMemoryPlanningCache()
+	defer func() { q.memoryPlanning = previous }()
 	for _, j := range q.liveJobs() {
 		if q.startupPending(j) {
 			j.Reason = q.startStatusReason(j)

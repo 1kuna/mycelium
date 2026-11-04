@@ -50,3 +50,48 @@ func TestQualificationCapacityDoesNotChangeInventory(t *testing.T) {
 		t.Fatal("qualification changed live inventory")
 	}
 }
+
+// The incident's retained constrained attempts must give the same lower bounds
+// in ordinary admission and permanent-capacity views. A later pass must see
+// collection and changed worker identity rather than lending old evidence.
+func TestRetainedMemoryPlanningEquivalence(t *testing.T) {
+	q, _ := candidateCostFixture(t)
+	compare := func(wantEvidence bool) {
+		t.Helper()
+		planning := newMemoryPlanningCache()
+		positive := false
+		for _, j := range q.s.Jobs {
+			if j.State != "queued" || !j.Spec.Needs.cpuOnly() {
+				continue
+			}
+			probe := *j
+			probe.Machine, probe.Session = "worker-1", q.s.Machines["worker-1"].Session
+			key, why := q.workObservationKey(&probe)
+			if key == nil {
+				t.Fatal(why)
+			}
+			configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+			want := q.sameOSMemoryLowerBoundUncached(*key, configuration)
+			positive = positive || want > 0
+			view := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: planning}
+			view.s.Jobs = nil
+			if got := view.sameOSMemoryLowerBound(*key, configuration); got != want {
+				t.Fatalf("%s lower bound %v, want %v", j.ID, got, want)
+			}
+		}
+		if positive != wantEvidence {
+			t.Fatalf("retained lower-bound evidence=%v, want %v", positive, wantEvidence)
+		}
+	}
+	compare(true)
+	// Exercise the real scopes that consume the index before collecting evidence.
+	q.maintain()
+	q.detectIncidentHealth()
+	for id, j := range q.s.Jobs {
+		if j.State == "succeeded" {
+			delete(q.s.Jobs, id)
+		}
+	}
+	q.s.Machines["worker-1"].ExtensionFingerprint = "changed-identity"
+	compare(false)
+}
