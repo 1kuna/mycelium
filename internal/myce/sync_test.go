@@ -407,6 +407,12 @@ func TestSyncUsesRealAPIAndWorker(t *testing.T) {
 				t.Fatal(e)
 			}
 			if len(snap.Machines) == 1 && contains(snap.Machines[0].CachedModels, "m") {
+				// Verified inventory is published before Precopy returns and the
+				// attempt reports ready. Wait for that terminal acknowledgement;
+				// the same deadline and final progress/speed assertions still apply.
+				if len(snap.Machines[0].CopyReports) == 1 && snap.Machines[0].CopyReports[0].State == "copying" {
+					continue
+				}
 				if len(snap.Machines[0].CopyReports) != 1 || snap.Machines[0].CopyReports[0].State != "ready" || snap.Machines[0].CopyBytesPerSecond <= 0 {
 					t.Fatal("no progress/speed", snap.Machines[0])
 				}
