@@ -2066,6 +2066,23 @@ remains the R1 execution limit. Core counts reserve capacity, with no CPU-time
 kernel enforcement in R1. Existing Linux memory ceilings and macOS admission-only
 semantics apply unchanged. Native Windows/WSL CPU qualification is later work.
 
+## File and shared-input cache capacity
+
+`myce install worker --config CONFIG --file-cache-bytes 34359738368` sets a
+32 GiB ceiling for **each** of the worker's private file cache and shared-input
+cache under its state directory. Fresh installs accept the same option. The
+saved setting survives `install worker` re-runs with the flag omitted and
+`myce fleet upgrade`. Configurations saved before this option retain the
+10 GiB default for each cache. Values must be positive integer bytes.
+
+As with explicit model and environment cache limits, this is a ceiling, not a
+preallocation or disk reservation. Check free space on the worker state
+filesystem before raising it: both caches can grow independently, alongside
+models, environments and active jobs. Existing disk-headroom checks still apply;
+a larger ceiling cannot make an input fit on a disk without room. Choose a
+ceiling larger than the shared input plus other active cached inputs, then
+reconfigure the idle worker through the installer.
+
 ## Environment cache capacity
 
 Omitting `--environment-cache-bytes` auto-sizes from available bytes on the local

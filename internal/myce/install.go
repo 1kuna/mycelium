@@ -163,6 +163,7 @@ type ServiceConfig struct {
 	State                 string    `json:"state_dir"`
 	ModelCache            string    `json:"model_cache"`
 	EnvironmentCache      string    `json:"environment_cache"`
+	FileCacheBytes        int64     `json:"file_cache_bytes"`
 	ModelCacheBytes       int64     `json:"model_cache_bytes"`
 	EnvironmentCacheBytes int64     `json:"environment_cache_bytes"`
 	Binary                string    `json:"binary"`
@@ -210,6 +211,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.State = filepath.Join(root, role, "state")
 	c.ModelCache = filepath.Join(c.State, "model-cache")
 	c.EnvironmentCache = filepath.Join(c.State, "environment-cache")
+	c.FileCacheBytes = 10 << 30
 	c.ModelCacheBytes = 100 * 1024 * 1024 * 1024
 	c.EnvironmentCacheBytes = 20 * 1024 * 1024 * 1024
 	c.Checkpoints = filepath.Join(nas, "mycelium", "checkpoints")
@@ -536,7 +538,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 }
 
 func ReadServiceConfig(path string) (ServiceConfig, error) {
-	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention, FileStoreBytes: 100 << 30}
+	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention, FileStoreBytes: 100 << 30, FileCacheBytes: 10 << 30}
 	b, e := os.ReadFile(path)
 	if e != nil {
 		return c, e
@@ -791,6 +793,7 @@ func (c ServiceConfig) Args() []string {
 		args = []string{"join", "--reserve-cpu-cores", strconv.Itoa(c.CPUReserveCores), "--cpu-budget-cores", strconv.Itoa(c.CPUBudgetCores), "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--job-file-root", c.NAS, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}
 	if c.Role == "worker" {
+		args = append(args, "--file-cache-bytes", strconv.FormatInt(c.FileCacheBytes, 10))
 		if c.GPUTelemetryHelper != "" {
 			args = append(args, "--gpu-telemetry-helper", c.GPUTelemetryHelper)
 		}

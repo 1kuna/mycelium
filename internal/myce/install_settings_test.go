@@ -329,3 +329,19 @@ func TestInstallSettingsAliasesAndRelativePaths(t *testing.T) {
 		})
 	}
 }
+
+func TestInstallFileCacheLegacyDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.json")
+	if err := os.WriteFile(path, []byte(`{"role":"worker"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := ReadServiceConfig(path)
+	if err != nil || c.FileCacheBytes != 10<<30 {
+		t.Fatalf("legacy config lost 10 GiB file cache default: %d, %v", c.FileCacheBytes, err)
+	}
+	args := c.Args()
+	i := slices.Index(args, "--file-cache-bytes")
+	if i < 0 || args[i+1] != "10737418240" {
+		t.Fatal("legacy service arguments lost file cache default")
+	}
+}

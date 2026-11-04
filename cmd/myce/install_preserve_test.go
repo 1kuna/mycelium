@@ -526,3 +526,27 @@ func TestInstallFreshEmptyRequiredValuesAreUsageErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestInstallWorkerFileCacheCapacity(t *testing.T) {
+	c, probe := savedInstallFixture(t, "worker")
+	for _, flags := range [][]string{{"--file-cache-bytes=34359738368"}, nil} {
+		args := append([]string{"install", "worker", "--config", c.Config}, flags...)
+		if err := setupCommandWithProbe(args, probe, c.NAS); err != nil {
+			t.Fatal(err)
+		}
+		got, err := myce.ReadServiceConfig(c.Config)
+		if err != nil || got.FileCacheBytes != 32<<30 {
+			t.Fatalf("install/reinstall lost file cache capacity: %d, %v", got.FileCacheBytes, err)
+		}
+		unit, err := os.ReadFile(got.Service)
+		if err != nil || !strings.Contains(string(unit), `"--file-cache-bytes" "34359738368"`) {
+			t.Fatal("generated service lost file cache capacity", err)
+		}
+	}
+	for _, value := range []string{"0", "-1"} {
+		err := setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, "--file-cache-bytes=" + value}, probe, c.NAS)
+		if err == nil || !strings.Contains(err.Error(), "file-cache-bytes") {
+			t.Fatal("nonpositive file cache capacity accepted", err)
+		}
+	}
+}
