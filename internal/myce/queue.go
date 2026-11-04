@@ -820,6 +820,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if !environmentPlatformsMatch(s.Needs, recipes) {
 			return reject("job_environment_platform_mismatch", nil)
 		}
+		s.AuthoringOrigin = submittedOrigin(s)
 		var id string
 		if q.simulation {
 			q.simID++

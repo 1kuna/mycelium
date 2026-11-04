@@ -116,8 +116,11 @@ The launch check uses the effective PATH, including the prepared environment and
 immutable environment becomes ready; launch rechecks catch subsequent removals.
 This declaration covers the main native command, not Docker/model runtimes.
 
-Installed tools (`environment: {}`) and named catalog environments keep their
-existing behavior. Project environment submission (#251) and worker build
+Installed tools (`environment: {}`), named catalog environments, and existing
+inline `environment: {lock_file: LOCK, python: '3.13', platforms: [cpu]}`
+keep their existing behavior. Inline locks are read and snapshotted by the queue;
+the path must be queue-readable, not merely present on the submitter.
+Project environment submission (#251) and worker build
 eligibility (#252) remain separate work. Existing native composed environment
 maps are supported; single `environment` and `environments` cannot coexist.
 

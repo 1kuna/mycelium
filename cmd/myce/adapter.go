@@ -170,8 +170,8 @@ func validateAdapterEntry(e adapterEntry) error {
 	if !reflect.ValueOf(s.Environment).IsZero() && len(e.Environments) > 0 {
 		return errors.New("choose environment or environments")
 	}
-	if s.Environment.LockFile != "" {
-		return errors.New("project-supplied environments await #251; use installed tools or a catalog name")
+	if s.Environment.Name != "" && s.Environment.LockFile != "" {
+		return errors.New("environment requires name or lock_file, not both")
 	}
 	if s.After != nil && s.FanOut != nil && s.After.Piece != "" {
 		return errors.New("fan_out consumers require the whole parent (omit after.piece)")

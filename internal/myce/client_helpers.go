@@ -304,7 +304,7 @@ func (c Client) Run(ctx context.Context, extension string, inputs map[string]str
 		}
 		files[name] = ref
 	}
-	j, err := c.SubmitAndWait(ctx, Spec{Name: extension, Project: options.Project, Class: options.Class, Extension: extension, SubmissionKey: options.Key, Files: files, After: options.After})
+	j, err := c.SubmitAndWait(ctx, Spec{AuthoringOrigin: OriginExtension, Name: extension, Project: options.Project, Class: options.Class, Extension: extension, SubmissionKey: options.Key, Files: files, After: options.After})
 	if err != nil {
 		return j, err
 	}

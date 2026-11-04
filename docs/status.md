@@ -97,6 +97,23 @@ of whether those fields were submitted. In particular, absent `spec.files`
 **does not mean no files were submitted**. The same metadata is available through
 Python `Client.get()` and `Client.list()`.
 
+On releases with #775, `spec.authoring_origin` records the reader used at first
+acceptance: `profile`, `adapter`, `job_spec` (explicit YAML/JSON or Python YAML),
+`command` (one-off CLI), `extension` (Go/Python extension run helper), or `api`
+(otherwise unmarked new API/SDK submissions). Generated qualification jobs are
+`extension_check`; generated fan-out execution records are `fan_out_child`,
+while their parent retains its reader label. Count those separately from
+independent submissions. CLI status and the status page show the same label.
+
+These fixed labels carry no YAML, argv, paths, inputs or keys. They are diagnostic
+reader markers, not authenticated proof of a client's implementation. Origin is
+immutable after acceptance, excluded from keyed submission fingerprints, and
+survives restart. A replay through another reader preserves the original label.
+Historical records without the field read as `unknown`; no backfill is inferred
+from names or payloads. Older clients that do not send a reader marker appear as
+`api` for new submissions, so retirement audits must also verify caller upgrades
+and cutover. This field does not measure extension registration events.
+
 The projection strips these entire fields: `after`, `args`, `diagnostics`,
 `disk`, `environment`, `execution`, `expected_minutes`, `extension`,
 `extension_digest`, `fan_out`, `files`, `give_up_at`, `inputs`, `isolation`,

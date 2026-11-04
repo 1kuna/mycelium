@@ -109,7 +109,8 @@ func TestAdapterWholeParentFanOutGraph(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := myce.Spec{Name: "stage", Project: "pipeline-fixture", Class: "production", StartWindow: "600s", SubmissionKey: key,
-			Extension: frozen.Name + "@" + frozen.Version, ExtensionDigest: frozen.Digest, PrepareSource: true,
+			AuthoringOrigin: myce.OriginAdapter,
+			Extension:       frozen.Name + "@" + frozen.Version, ExtensionDigest: frozen.Digest, PrepareSource: true,
 			Files: myce.FileManifest{".myce-source.tar": ref}, Targets: []myce.ExecutionTarget{target},
 			Outputs: map[string]string{"result": "results"}, Workload: &myce.Workload{InputShape: "fixture", Units: 1},
 			FanOut: &myce.FanOut{MaxConcurrency: 1, Pieces: []myce.FanOutPiece{{Key: "first", Args: []string{"first"}}, {Key: "tail", Args: []string{"tail"}}}}}
