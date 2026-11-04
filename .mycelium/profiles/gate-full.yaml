@@ -1,4 +1,4 @@
-# Accepted comparable peaks now supply the envelope; see docs/development.md.
+# Total cgroup peak plus measured range/25% margin, rounded up; see docs/development.md.
 name: mycelium-gate-full
 project: mycelium
 class: test
@@ -10,7 +10,7 @@ run:
     GOMAXPROCS: '2'
 needs:
   cpu_cores: 2
-  memory: auto
+  memory_gb: 6
   platform: cpu
 targets:
   - {os: linux, arch: amd64, platform: cpu}

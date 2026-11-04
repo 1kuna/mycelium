@@ -137,12 +137,14 @@ python3 scripts/gate-related.py "$(git merge-base HEAD origin/main)" > .reports/
 Commit first: the source is `HEAD`, while the selection also sees uncommitted
 files. A selection error (changed `go.mod`, unmapped code) means run `gate-full`;
 the `&&` keeps a failed selection's empty file from submitting a test-free run.
-Quick runs a subset of the full gate's commands at the same concurrency, so it
-declares the Linux full-gate 7 GiB; the same five-minute budget applies.
+Quick runs a subset of the full gate's commands at the same concurrency and
+retains the historical conservative 7 GiB bound; the same five-minute budget applies.
 
-Full-gate profiles and their converted adapter entries use `memory: auto`.
-Both platforms have accepted comparable learning evidence; source SHA changes
-and removing a memory declaration do not change the memory work identity.
+Full-gate profiles and their converted adapter entries declare 6 GiB for Linux
+and use `memory: auto` for Darwin. Both platforms have comparable learning
+evidence, but the Linux auto validation below hit its ceiling; accepted older
+samples alone did not establish sufficient total-charge headroom. Source SHA
+changes and removing a declaration do not change the memory work identity.
 Commands, two-core concurrency, environment, targets and result acceptance stay
 the same. Quick retains the conservative 7 GiB declaration: the full suite bounds its
 work, while the shared quick memory identity excludes selection inputs by
@@ -167,11 +169,21 @@ Read-only job GET inspection on 2026-11-04 found these successful final attempts
   Auto keeps the queue's measured range/25% margin and tracks comparable
   configuration changes; a fixed lower declaration would discard that adaptation.
 
-This supersedes #559's explicit 7 GiB workaround: in that incident constrained
-samples left no accepted estimate, so auto explored available headroom. Now job
-GET `resources` and `memory_envelope` establish accepted learned evidence, not
-just a cold successful run. Unknown configurations can still explore; inspect
-the envelope basis, learning reason, memory events and swap after changes.
+Linux auto validation job `2686318521495ce7787d3a2269635f8a` passed in 1495s,
+with 410.27s submission-to-command-start wait, but was constrained: its learned
+3.276315 GiB + 0.125 GiB slack ceiling recorded 160 `max` events. Total cgroup
+peak was 3.401348 GiB, non-reclaimable peak 2.427307 GiB, with zero swap/OOM.
+This is a lower bound, not a new accepted sizing sample. Keep an explicit Linux
+bound per #559: recent unconstrained total max 4.244785 GiB plus
+max(range 1.063103, 25% of max 1.061196) = 5.307888 GiB, rounded to 6 GiB.
+Its cost is 1.755215 GiB above that recent maximum; it saves 1 GiB per Linux
+full gate versus the previous declaration. #559's older 4.472893 GiB maximum
+also fits below 6 GiB with 34% headroom, though its wider historical range
+would still round to 7 GiB. The revised bound uses the newer retained samples;
+it is not proof against all future suite growth. Darwin has no corresponding
+cgroup ceiling event and keeps its accepted RSS-based auto envelope.
+Unknown configurations can still explore; inspect envelope basis, learning
+reason, memory events and swap after changes.
 
 A bounded recent-history snapshot contained 36 successful Linux full gates:
 submission-to-command-start wait was median 96.65s, maximum 2082.78s (34.71m).
@@ -198,7 +210,7 @@ three 296s timeouts were a different selection. This patch's validation quick
 passed in 57s; that smaller selection is not the before/after comparator.
 
 CI and PR gates retain the same `test` class and normal queue fairness. Reducing
-the Linux charge using accepted memory evidence is the first intervention;
+the Linux declaration using unconstrained total peaks is the first intervention;
 raising PR class would misstate urgency, and serializing CI would move backlog
 into Actions. No runner services or global queue policy change here. Reconsider
 submission concurrency only if measured waits remain high after right-sizing.

@@ -207,9 +207,10 @@ an isolated working folder; extension/Docker/sidecar profiles are outside this
 MVP. `environment` selects an existing immutable catalog recipe; `{}` explicitly
 uses installed tools. The gate profile selects the locked `mycelium-gate` catalog
 environment and checks the toolchain before running. It declares two CPU cores,
-matches Go parallelism to that declaration, and uses `memory: auto` with
-accepted comparable full-gate evidence; see [test-gate sizing](development.md).
-The learned envelope includes measured variation and ordinary launch slack.
+matches Go parallelism to that declaration, and declares 6 GiB for Linux based
+on total cgroup peaks plus measured variation. Darwin uses `memory: auto` with
+accepted comparable evidence; see [test-gate sizing](development.md).
+Ordinary launch slack is additional.
 Unknown configurations can still explore; check job GET `resources` and
 `memory_envelope` before dropping a measured declaration. Profiles opt into
 automatic memory with:
