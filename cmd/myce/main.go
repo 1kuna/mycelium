@@ -261,7 +261,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	fileStoreProductionReserve := f.Int64("file-store-production-reserve", 0, "file-store bytes reserved for production-tier submissions")
 	fileStoreLimit := f.Int64("file-store-bytes", 100<<30, "authoritative files plus upload reservations limit")
 	fileCache := f.String("file-cache", "", "local reproducible file cache folder")
-	fileCacheLimit := f.Int64("file-cache-bytes", 10<<30, "maximum local file cache bytes")
+	fileCacheLimit := f.Int64("file-cache-bytes", 0, "local file/shared-input cache bytes each (0: automatic from disk headroom)")
 	filesFrom := f.String("files-from", "", "upload explicitly mapped inputs from this local folder")
 	checkpoint := f.String("checkpoints", "./checkpoints", "queue NAS checkpoint root")
 	workerCheckpoint := f.String("checkpoint-root", env("MYCE_CHECKPOINT_ROOT", ""), "worker-local NAS root (may differ from queue mount path)")

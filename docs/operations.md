@@ -2081,20 +2081,39 @@ semantics apply unchanged. Native Windows/WSL CPU qualification is later work.
 
 ## File and shared-input cache capacity
 
-`myce install worker --config CONFIG --file-cache-bytes 34359738368` sets a
-32 GiB ceiling for **each** of the worker's private file cache and shared-input
-cache under its state directory. Fresh installs accept the same option. The
-saved setting survives `install worker` re-runs with the flag omitted and
-`myce fleet upgrade`. Configurations saved before this option retain the
-10 GiB default for each cache. Values must be positive integer bytes.
+From s072, omitted `--file-cache-bytes` (or `0`) selects automatic sizing at
+worker startup, using the local cache filesystem's nearest existing ancestor.
+It reuses the environment policy: `min(max(free/4, 4 GiB), 80 GiB, free-20 GiB)`;
+less than 24 GiB free refuses automatic startup. These are ceilings for **each**
+of the private file and shared-input caches, not allocations or reservations.
+The quarter fraction leaves room for both caches, environments and active work;
+the existing physical free-space floor also applies at admission. This sampled
+policy is not the native disk-isolation guarantee parked under #504/#506.
 
-As with explicit model and environment cache limits, this is a ceiling, not a
-preallocation or disk reservation. Check free space on the worker state
-filesystem before raising it: both caches can grow independently, alongside
-models, environments and active jobs. Existing disk-headroom checks still apply;
-a larger ceiling cannot make an input fit on a disk without room. Choose a
-ceiling larger than the shared input plus other active cached inputs, then
-reconfigure the idle worker through the installer.
+Read-only measurements for this change found approximately 152 GiB and
+1,085 GiB free on two worker filesystems. The reused formula yields about
+38 GiB and 80 GiB, respectively, enough for the incident's 16.5 + 3.4 GiB
+file inputs. The old 10 GiB default could never hold that pair. The 80 GiB
+ceiling preserves the existing bounded environment-cache policy; this change
+does not invent a fleet-wide storage allocator or reserve disk from other writers.
+
+`myce install worker --config CONFIG --file-cache-bytes 34359738368` retains an
+explicit 32 GiB ceiling across reinstall and signed upgrade. Saved distinct positive
+values remain authoritative. Like environment sizing, the exact retired 10 GiB
+default in an older configuration migrates to automatic mode: older settings did
+not record whether that value was explicit. New explicit settings persist that
+intent, including an explicit 10 GiB. An omitted field selects automatic mode; reinstall with `--file-cache-bytes 0`
+clears a saved override. No installer writes a machine-specific automatic size:
+the worker recomputes it from its actual filesystem at each startup.
+
+Workers report shared-input capacity, free and evictable bytes without cache
+scans in check-in. Discovery and accounting run at startup and cache changes,
+outside the queue mutex. Resolve and submit refuse impossible declared footprints
+only once every enabled worker under consideration reports capacity. During
+startup or a rolling upgrade, missing reports accept and queue shared-input work
+with `shared_input_cache_unreported`; old workers remain excluded from placement.
+Temporary occupancy waits, and mixed fleets route to a fitting worker. See
+[large shared inputs](files.md#diagnosing-input-staging) for typed reasons.
 
 ## Environment cache capacity
 

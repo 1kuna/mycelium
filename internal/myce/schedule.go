@@ -31,6 +31,7 @@ func fitsResources(j *Job, m *Machine, memory float64) bool {
 // collects failures from these very same checks, without a second fit path.
 func fitsResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit) bool {
 	return report.check(sharedHostJobFits(j, m), "shared host profile") &&
+		report.check(sharedInputCacheReason(j.Spec, m, j.State != "queued") == "", "shared input cache") &&
 		report.check(diskHeadroomReason(j, m) == "", "disk headroom") &&
 		fitsTargetResourcesChecked(j, m, memory, report)
 }
@@ -116,6 +117,9 @@ func beforeWithinTier(a, b *Job, m *Machine) bool {
 	return a.ID < b.ID
 }
 func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) string {
+	if reason := sharedInputWaitingReason(j, machines); reason != "" {
+		return reason
+	}
 	if reason := cpuWaitingReason(j, machines); reason != "" {
 		return reason
 	}

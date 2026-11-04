@@ -864,6 +864,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		w.batchMemory.Store(math.Float64bits(batch))
 		if recovering && len(actors) == 0 {
 			recovering = false
+			if w.sharedInputs != nil {
+				w.sharedInputs.refreshCapacity()
+			}
 			root.state.PreviousSession, root.state.Session, root.state.Fresh = root.state.Session, ID(), true
 			w.Machine.Session = root.state.Session
 			if err := root.save(); err != nil {
@@ -877,6 +880,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m := cloneMachine(&w.Machine)
 			if w.sharedInputs != nil {
 				m.CachedSharedInputs = w.sharedInputs.readyKeys()
+				m.SharedInputCache = w.sharedInputs.capacityReport()
 				evidence := w.sharedInputs.evidence()
 				m.SharedInputEvidence = &evidence
 			}

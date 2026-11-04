@@ -374,17 +374,31 @@ retry bound. `input_unavailable` with `blob_missing` or `blob_expired`, and
 `invalid_input`, require consumer action rather than infrastructure retries.
 Missing authored NAS inputs also require corrected inputs rather than retries.
 
-Shared-input admission reports `resource_limit` with operation
-`shared_input_admission`, error `cache_space`, and `capacity` identifying
-`shared_input_cache` or `disk_free_floor`. `required_bytes`, `available_bytes`
-and `limit_bytes` give the comparison (zero values may be omitted). Shared
-inputs are admitted before source/plan blobs or command execution. Each worker's
-`--file-cache-bytes` also sets its separate shared-input cache budget (default
-10 GiB); all shared inputs held by an attempt must fit together, with active
-entries protected from eviction. Free physical disk alone does not increase
-that budget. Ask the fleet owner to coordinate a configuration increase, or
-split the workload into attempts whose simultaneous inputs fit. Re-uploading
-identical inputs or clearing caches cannot fix an input larger than the budget.
+From s072, resolve and submit refuse impossible shared-input jobs with HTTP
+409 `shared_input_cache_capacity`: the reason gives required bytes and the
+largest enabled matching worker cache capacity. Refusal requires known capacity
+from every enabled worker under consideration and no fitting matching target.
+Missing reports during startup or a rolling upgrade leave capacity unknown:
+resolve returns its target findings, and submit accepts the job with the typed
+waiting reason `shared_input_cache_unreported`. Older workers cannot receive
+shared-input work until they report a fitting capacity. Declaration sizes are a hard requirement: file bytes, manifest
+file totals, or `unpacked_bytes` for a tree/archive, plus compressed archive
+bytes for cold staging. Every distinct cache identity needed simultaneously must fit together; aliases
+with identical verified content share one entry.
+Mycelium chooses a fitting worker; do not pin a host to work around data size.
+If a fitting worker exists but its space is occupied, the job waits with
+`diagnostic_code: shared_input_cache` and required/free/evictable/capacity bytes.
+Inactive reproducible entries are evictable; active/custody-pinned entries stay
+protected. Queue claims also cover assigned inputs before the next check-in.
+
+Worker-side admission remains authoritative against disk changes between samples.
+A staging failure reports `resource_limit`, operation `shared_input_admission`,
+error `cache_space`, and `capacity` (`shared_input_cache` or `disk_free_floor`),
+with required/available/limit bytes. Inputs stage before source/plan blobs.
+Omitting `--file-cache-bytes` now sizes both separate cache ceilings automatically
+from disk headroom; see [cache policy](operations.md#file-and-shared-input-cache-capacity).
+An explicit saved positive limit still wins. Split work whose simultaneous inputs
+exceed all eligible cache capacities; re-uploading identical bytes cannot help.
 
 Receipts identify bytes; they do not reserve those blobs forever. A new
 submission verifies every referenced input outside the queue lock, while the
@@ -408,7 +422,7 @@ catalog entries, `direct_nas`, pins, pre-copy, protected loaded models and model
 cache limits retain their behavior. Extensions can receive models as job inputs.
 
 `--file-cache` and `--file-cache-bytes` configure each hypha's reproducible cache
-(default 10 GiB, under its state folder). It counts complete and partial bytes,
+(automatic from disk headroom by default, under its state folder). It counts complete and partial bytes,
 evicts least-recently-used entries, and refuses a file larger than its allowance.
 A private materialization keeps active jobs independent of eviction. Model
 loading/pre-copy uses the existing `--model-cache-bytes` admission and pin/loaded
@@ -578,7 +592,7 @@ are refused. `unpacked_bytes` bounds expanded file bytes to stop an archive from
 exhausting disk. Use a fresh hash/manifest when changing content.
 
 Workers keep entries under `file-cache/shared-inputs`, separately bounded by
-`--file-cache-bytes` (default 10 GiB), in addition to the private-file cache's
+`--file-cache-bytes` (automatic by default from s072), in addition to the private-file cache's
 allowance. Physical disk headroom applies across both. LRU eviction removes
 reproducible inactive copies; active attempts hold use locks through process
 cleanup. Mode bits provide cooperative read-only access, not a sandbox against

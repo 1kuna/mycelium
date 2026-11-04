@@ -37,6 +37,10 @@ func TestExtensionSharedInputReuse(t *testing.T) {
 	if err := c.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
 		t.Fatal(err)
 	}
+	await(t, func() bool {
+		snap, err := d.Queue.Snapshot()
+		return err == nil && len(snap.Machines) > 0 && snap.Machines[0].SharedInputCache != nil
+	})
 	s := Spec{Name: "extension-cache", Project: "test", Priority: "experiment", Kind: "sample", SharedInputs: map[string]SharedInput{"data": {NAS: "data", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}}, Outputs: map[string]string{"output": "results"}}
 	for i := 0; i < 2; i++ {
 		var j Job
@@ -225,8 +229,10 @@ func TestExtensionSharedInputsRequireNewWorkerCapability(t *testing.T) {
 	}
 	s.Kind, s.Name, s.Project, s.Priority = "sample", "extension", "test", "experiment"
 	s.Outputs = map[string]string{"output": "results"}
+	m := cacheCapacityMachine("worker", 1<<20)
+	check(t, q, m, nil)
 	j := submit(t, q, s)
-	m := machine("worker", "fake")
+	m.Capabilities = []string{"native_isolation_landlock", "shared_inputs_v1"}
 	m.HostMemoryMeasured, m.FreeHostMemoryGB, m.HostAvailableMemoryGB = true, 8, 8
 	m.ExtensionReports = installQualified(t, t.TempDir(), e, "")
 	m.Capabilities = append(m.Capabilities, "shared_inputs_v1")

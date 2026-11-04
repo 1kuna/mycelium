@@ -121,6 +121,8 @@ func TestWorkerStagingCancellationAndPreemption(t *testing.T) {
 			s.Resumable = false
 			s.SharedInputs = map[string]SharedInput{"data": input}
 			s.Run.Command = []string{"sh", "-ec", `test "$(cat "$MYCE_INPUT_DATA")" = "shared fixture"; touch "$1"`, "fixture", marker}
+			w.Machine.SharedInputCache = &SharedInputCapacity{CapacityBytes: 1 << 20, FreeBytes: 1 << 20}
+			check(t, q, w.Machine, nil)
 			victim := submit(t, q, s)
 			assigned := check(t, q, w.Machine, nil).Job
 			if assigned == nil || assigned.ID != victim.ID {

@@ -625,7 +625,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 			e.PathDiagnostic = body.PathDiagnostic
 			e.CurrentRevision = body.CurrentRevision
 			// The queue returns specific, safe submission validation reasons.
-			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" && !(method == http.MethodPost && path == "/api/jobs") {
+			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" && body.Code != "shared_input_cache_capacity" && !(method == http.MethodPost && path == "/api/jobs") {
 				e.Message = message
 			}
 		}

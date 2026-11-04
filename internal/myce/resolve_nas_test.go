@@ -17,6 +17,10 @@ func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
 	}
 	defer d.Close()
 	client := Client{URL: d.URL, Token: "resolve-nas-fixture"}
+	await(t, func() bool {
+		snap, err := d.Queue.Snapshot()
+		return err == nil && len(snap.Machines) > 0 && snap.Machines[0].SharedInputCache != nil
+	})
 	s := cpuResolveSpec()
 	s.SharedInputs = map[string]SharedInput{"movie": {NAS: "media/missing", SHA256: strings.Repeat("a", 64), SizeBytes: 10}}
 	var report ResolveReport
@@ -45,7 +49,8 @@ func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
 
 func TestResolveNASCacheFreshnessAndSession(t *testing.T) {
 	q, clock := fixture(t)
-	m := machine("worker", "cpu")
+	m := cacheCapacityMachine("worker", 1<<20)
+	m.GPU = "cpu"
 	m.Session = "one"
 	m.LastSeen = clock.Now()
 	m.Capabilities = append(m.Capabilities, "nas_inspection_v1")

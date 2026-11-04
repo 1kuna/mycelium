@@ -29,9 +29,9 @@ func TestInputStagingMissingNASNamesSourceAndSurvivesReopen(t *testing.T) {
 	}
 	s.SharedInputs = map[string]SharedInput{"movie": {NAS: "movie", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}}
 	s.Resumable = false
+	m := cacheCapacityMachine("nas-reader", 1<<20)
+	check(t, q, m, nil)
 	submitted := submit(t, q, s)
-	m := machine("nas-reader", "fake")
-	m.Capabilities = append(m.Capabilities, "shared_inputs_v1")
 	assigned := check(t, q, m, nil).Job
 	if assigned == nil {
 		t.Fatal("not assigned", job(t, q, submitted.ID))
@@ -100,6 +100,7 @@ func TestInputStagingStoredSharedInputAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.SharedInputs = map[string]SharedInput{"movie": {SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}}
+	check(t, q, cacheCapacityMachine("stored-reader", 1<<20), nil)
 	submitted := submit(t, q, s)
 	api.Close()
 	database, root, storeRoot := strings.TrimSuffix(q.lock.Name(), ".lock"), q.root, q.files.root
@@ -112,8 +113,7 @@ func TestInputStagingStoredSharedInputAfterRestart(t *testing.T) {
 	}
 	defer q.Close()
 	fakeCheckpointAvailability(t, q, true)
-	m := machine("stored-reader", "fake")
-	m.Capabilities = append(m.Capabilities, "shared_inputs_v1")
+	m := cacheCapacityMachine("stored-reader", 1<<20)
 	assigned := check(t, q, m, nil).Job
 	if assigned == nil {
 		t.Fatal("not assigned after restart", job(t, q, submitted.ID))
@@ -170,9 +170,9 @@ func TestInputStagingPathDiagnosticRequiresDeclaredNASInput(t *testing.T) {
 				"movie":  {NAS: "movie", SHA256: s.Files["input"].SHA256, SizeBytes: s.Files["input"].SizeBytes},
 				"stored": {SHA256: s.Files["input"].SHA256, SizeBytes: s.Files["input"].SizeBytes},
 			}
+			m := cacheCapacityMachine("nas-reader", 1<<20)
+			check(t, q, m, nil)
 			submitted := submit(t, q, s)
-			m := machine("nas-reader", "fake")
-			m.Capabilities = append(m.Capabilities, "shared_inputs_v1")
 			assigned := check(t, q, m, nil).Job
 			if assigned == nil {
 				t.Fatal("not assigned")

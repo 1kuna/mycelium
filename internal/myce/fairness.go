@@ -739,7 +739,10 @@ func (q *Queue) validateProjectCapacity(j *Job) error {
 				}
 				value.Spec.Kind, value.Spec.Program = "", nil
 				value.Spec.Extension, value.Spec.ExtensionDigest, value.Spec.ExtensionCheck = "", "", nil
-				if fitsResources(&value, &copy, copy.TotalMemoryGB) {
+				var fit targetFit
+				fitsResourcesChecked(&value, &copy, copy.TotalMemoryGB, &fit)
+				unknownCacheOnly := copy.SharedInputCache == nil && fit.failures == 1 && fit.first == "shared input cache"
+				if fit.failures == 0 || unknownCacheOnly {
 					possible = true
 					break
 				}

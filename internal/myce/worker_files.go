@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -15,13 +16,18 @@ func (w *Worker) initFileTransfers(ctx context.Context, s *workerStore) error {
 	}
 	limit := w.FileCacheLimit
 	if limit == 0 {
-		limit = 10 << 30
+		var err error
+		limit, err = AutoEnvironmentCacheLimit(root)
+		if err != nil {
+			return fmt.Errorf("file cache auto-size: %w", err)
+		}
 	}
 	if limit <= 0 {
 		return errors.New("file cache limit must be positive")
 	}
 	w.fileCache = &FileCache{Root: root, Limit: limit, Clock: w.Clock, Client: w.Client}
 	w.sharedInputs = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "shared-inputs"), Limit: limit, Clock: w.Clock}, Client: w.Client}
+	w.sharedInputs.refreshCapacity()
 	// Model snapshots are tens of gigabytes, so they share the model cache's
 	// size setting rather than the small file cache's.
 	models := w.CacheLimit

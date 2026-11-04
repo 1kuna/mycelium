@@ -75,6 +75,7 @@ func TestResolveOldInterpreterBuilderJourney(t *testing.T) {
 					s.Environment = Environment{Name: "tools"}
 					s.SharedInputs = map[string]SharedInput{"data": {SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}}
 					m.Capabilities = append(m.Capabilities, "shared_inputs_v1")
+					m.SharedInputCache = &SharedInputCapacity{CapacityBytes: 1 << 20, FreeBytes: 1 << 20}
 					before := string(wireJSON(t, q.s))
 					var report ResolveReport
 					if err = client.Call(context.Background(), "POST", "/api/resolve", ResolveRequest{Spec: s}, &report); err != nil {

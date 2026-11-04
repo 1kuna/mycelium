@@ -73,6 +73,13 @@ func targetKey(m *Machine) string { return m.ID + "/" + m.Device }
 // status and qualification plans keep the per-card views.
 func (q *Queue) placementTargets(m *Machine) []*Machine {
 	targets := q.machineTargets(m)
+	claims := q.sharedInputClaims(m)
+	for _, target := range targets {
+		// Legacy single-device targets are the queue's live machine: model
+		// loading charges their memory in place. Preserve that identity while
+		// attaching these transient, queue-owned claims.
+		target.sharedInputClaims = claims
+	}
 	groups := groupTargets(targets)
 	if len(m.Devices) <= 2 || len(groups) == 0 {
 		return append(targets, groups...)
