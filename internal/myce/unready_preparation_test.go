@@ -209,3 +209,33 @@ func TestBlockedPreparationDemandDoesNotWithholdReadyCPU(t *testing.T) {
 		})
 	}
 }
+
+func TestPreparationStatusKeepsReadyAlternativeWorker(t *testing.T) {
+	q, _ := fixture(t)
+	a := cpuMachine("worker-a", "host-a", "cpu", 4, 8)
+	b := cpuMachine("worker-b", "host-b", "cpu", 4, 8)
+	a.EnvironmentBuilder, b.EnvironmentBuilder = true, true
+	r := binaryRecipe(t, "cpu")
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, a, nil)
+	check(t, q, b, nil)
+	s := cpuSpec(2, 1)
+	s.Priority, s.Environment.Name = "production", "tools"
+	submit(t, q, s)
+	if reply := check(t, q, a, nil); reply.Job != nil || len(reply.EnvironmentPlan) != 1 {
+		t.Fatal("missing production preparation offer", reply)
+	}
+	low := submit(t, q, cpuSpec(2, 1))
+	before, err := q.jobSnapshot(low.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(before.Reason, "waiting for software preparation for job ") {
+		t.Fatal("status hid the ready alternative worker", before.Reason)
+	}
+	if got := check(t, q, b, nil).Job; got == nil || got.ID != low.ID {
+		t.Fatal("ready alternative worker did not dispatch", got)
+	}
+}

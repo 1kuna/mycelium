@@ -244,18 +244,27 @@ func (q *Queue) preparationWaitingReason(j *Job, machines map[string]*Machine) s
 		return ""
 	}
 	blocked := []string{}
+	var preparationTurns map[string]*Job
 	for _, m := range machines {
 		if !q.placementAllowed(j, m) {
 			continue
 		}
 		active := q.preparationActive(m)
 		var fence *Job
-		// Reuse ordinary candidate eligibility, including resource and cap
-		// checks. A retained preemption target is not proof it can build now.
+		// Use dispatch's global plan: the same cold winner cannot reserve
+		// preparation independently on every compatible worker or target view.
 		if !active {
-			if winner := q.candidate(m, nil); winner != nil && !environmentReady(winner, m) && preparationOwnsTurn(winner) {
-				fence = winner
+			if preparationTurns == nil {
+				preparationTurns = map[string]*Job{}
+				scan := q.placementScan()
+				plan := q.assignmentPlan(scan)
+				for _, target := range scan.machines {
+					if winner := plan[targetKey(target)]; winner != nil && !environmentReady(winner, target) && preparationOwnsTurn(winner) {
+						preparationTurns[target.ID] = winner
+					}
+				}
 			}
+			fence = preparationTurns[m.ID]
 		}
 		copy := *m
 		if active {
