@@ -461,6 +461,48 @@ func TestScarceHostYieldConvenienceDevicePinIsNotUniqueness(t *testing.T) {
 		t.Fatal("projection changed authored pin", got.Spec.Needs.GPU)
 	}
 }
+
+func TestScarceHostYieldToolsDoNotManufactureUniqueness(t *testing.T) {
+	q, _, a, _, run := yieldFixture(t, false)
+	peer := m3Machine()
+	peer.ID, peer.HostID = "peer", "peer"
+	machineCheck(t, q, peer)
+	if err := q.update(func() error { q.s.Machines[a.ID].ToolInventory = map[string][]string{"": {"node"}}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.Needs.Tools = []string{"node"}
+	s.Needs.Platform = Platform{Required: []string{"fake"}}
+	s.RequirementReasons = map[string]string{"backend:fake": "requires simulated accelerator"}
+	submit(t, q, s)
+	if got := job(t, q, run.ID); got.State != "running" {
+		t.Fatal("missing peer software manufactured uniqueness", got)
+	}
+}
+
+func TestScarceHostYieldRechecksDemandToolsBeforeStop(t *testing.T) {
+	q, _, a, _, run := yieldFixture(t, false)
+	if err := q.update(func() error { q.s.Machines[a.ID].ToolInventory = map[string][]string{"": {"node"}}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.Needs.Tools = []string{"node"}
+	s.Needs.Platform = Platform{Required: []string{"fake"}}
+	s.RequirementReasons = map[string]string{"backend:fake": "requires simulated accelerator"}
+	submit(t, q, s)
+	if got := job(t, q, run.ID); got.State != "stopping" {
+		t.Fatal("missing initial yield", got.State, got.Reason)
+	}
+	if err := q.update(func() error { q.s.Machines[a.ID].ToolInventory = nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := q.authorizeYieldStop(context.Background(), result(run, false)); ok || err != nil {
+		t.Fatal("missing demand tools still authorized stop", ok, err)
+	}
+	if got := job(t, q, run.ID); got.State != "running" {
+		t.Fatal("undelivered stop not withdrawn", got)
+	}
+}
 func TestScarceHostYieldRequiresRealUniquenessAndCompatibility(t *testing.T) {
 	for _, gap := range []string{"busy-peer", "stale-peer", "maintained-peer", "unavailable", "unqualified", "incompatible", "no-checkpoint", "production", "not-opted-in", "protected"} {
 		t.Run(gap, func(t *testing.T) {

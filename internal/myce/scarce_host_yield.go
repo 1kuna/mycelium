@@ -150,6 +150,10 @@ func (q *Queue) scarceDemandHost(j *Job) (string, string) {
 		physical.Spec.ExtensionDigest = ""
 		physical.Spec.Execution = nil
 		physical.Spec.Run.Docker = false
+		physical.Spec.Needs.Tools = nil // Missing software is not a hardware exclusion.
+		physical.Spec.Needs.Network = false
+		physical.Spec.Logs = ""
+		physical.MemoryEnvelope = nil
 		if gpu := physical.Spec.Needs.GPU; gpu != nil && strings.TrimSpace(reasons["device"]) == "" {
 			selection := *gpu
 			selection.Devices = nil
@@ -293,7 +297,7 @@ func (q *Queue) scarceYieldPlan(d *Job, m *Machine) (*placementPlan, string) {
 	if host == "" || host != hostID(m) {
 		return nil, why
 	}
-	if !q.placementAllowed(d, m) || !q.checkpointReady(d, m) || !environmentReady(d, m) {
+	if !q.yieldDemandTargetReady(d, m) {
 		return nil, "scarce_host_yield: demand target is not ready"
 	}
 	yields := map[string]*ScarceHostYield{}
@@ -452,12 +456,23 @@ func (q *Queue) yieldDemandReady(d *Job, y *ScarceHostYield) bool {
 			continue
 		}
 		for _, candidate := range q.memoryCandidates(d, m) {
-			if q.placementAllowed(candidate, m) && q.checkpointReady(candidate, m) && environmentReady(candidate, m) && q.capReasonFor(candidate, m) == "" {
+			if q.yieldDemandTargetReady(candidate, m) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func (q *Queue) yieldDemandTargetReady(d *Job, m *Machine) bool {
+	if m.HostMemoryError != "" || !d.Spec.Needs.cpuOnly() && m.MemoryError != "" {
+		return false
+	}
+	capacity := q.qualificationCapacity(m)
+	return q.placementAllowed(d, m) && q.checkpointReady(d, m) && environmentReady(d, m) &&
+		q.capReasonFor(d, m) == "" && sharedInputCacheReason(d.Spec, m, false) == "" &&
+		fitsTargetResourcesChecked(d, &capacity, capacity.TotalMemoryGB, nil) &&
+		hostFits(&capacity, d.Spec.Needs.MemoryGB, d.Spec.Needs.HostMemoryGB)
 }
 
 func (q *Queue) yieldWaitReason(j *Job) string {
