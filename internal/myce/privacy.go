@@ -88,6 +88,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 		}
 		for i := range m.EnvironmentReports {
 			m.EnvironmentReports[i].Error = diagnostic(m.EnvironmentReports[i].Error, "environment build failed")
+			m.EnvironmentReports[i].Log = ""
 			m.EnvironmentReports[i].PathDiagnostic = safeWorkerPathDiagnostic(m.EnvironmentReports[i].PathDiagnostic)
 		}
 	}
@@ -222,6 +223,9 @@ func statusJobValue(job *Job) Job {
 			// Fixed scheduler diagnostics contain no payload or machine paths.
 		case strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
 			j.Reason = "production start deadline exceeded"
+		case strings.HasPrefix(j.Reason, "environment failed:"):
+			// Authenticated job status deliberately includes the preparation
+			// diagnostic, like the corresponding job log. Logs:none omits output.
 		case strings.HasPrefix(j.Reason, "production cannot start: no eligible host is enabled;"):
 			j.Reason = "production cannot start: no eligible host is enabled"
 		default:

@@ -338,12 +338,7 @@ func (q *Queue) fleetProductionIdle() bool {
 			return false
 		}
 		// Completion/loss is not proof that the remote attempt has released custody.
-		for _, copy := range j.Copies {
-			if !copy.ReleaseConfirmed {
-				return false
-			}
-		}
-		if j.Attempt > 0 && !j.ReleaseConfirmed {
+		if attemptReleasePending(j) {
 			return false
 		}
 	}
@@ -476,7 +471,10 @@ func (q *Queue) maintainFleetUpgrade() {
 			h.ProgressAt = q.clock.Now()
 			return
 		}
-		if h.Phase == "queue_health" && p.Proof.Session != h.QueueBefore.Session {
+		// An out-of-band queue restart invalidates the old helper/session fence
+		// even before a helper acknowledged restarting. If it did not install
+		// the frozen target, stop so explicit newer-release recovery can proceed.
+		if p.Proof.Session != h.QueueBefore.Session {
 			q.fleetStop(h, "queue_running_hash_mismatch")
 			return
 		}

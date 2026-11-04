@@ -2262,6 +2262,29 @@ operation keeps the admission fence until explicit recovery. Queued production
 keeps its ordinary start/give-up deadlines; choose the maintenance window with
 that in mind. Status includes both policy flags and the current wait reason.
 
+For an existing operation stuck at "waiting for production attempts and release
+custody across the fleet" solely because failed jobs have every copy
+`release_confirmed: true` but an unset job-level flag, install a queue version
+with the copy-release reconciliation fix through the supported
+[queue service installation/restart procedure](#install-and-upgrade), using the
+existing saved queue config. On startup it derives the missing job flag from
+the confirmed copies. If the restarted queue runs the waiting operation's exact
+frozen release version and artifact hash, the same operation finishes after
+fresh runtime proofs and the remaining cutover checks pass, without another
+queue restart. If the fixed queue is a newer release than that frozen target,
+the old operation stops with `queue_running_hash_mismatch` after custody settles;
+its drain and production admission fence remain. Approve that newer signed
+release, then explicitly run `myce fleet upgrade --release NEWER_RELEASE` with
+the original `--queue-only` (if used) and `--wait-production-idle` flags. This
+supported fix-forward path carries the drain into a new operation and verifies
+already-current queue bytes without restarting them. A restart never silently
+retargets the frozen operation or authorizes a downgrade.
+
+No database or helper-receipt edits are needed. A running wait has no
+cancel/supersede command; `fleet supersede` remains limited to stopped operations.
+Any unconfirmed copy, retained host custody, or production call still blocks;
+failed/completed state, loss and elapsed time never establish release.
+
 Repeat the same flags when resuming: scope and idle policy cannot change during
 an unfinished operation, including when selecting a newer fix-forward release.
 After queue-only completion, a full same-release invocation creates a separate

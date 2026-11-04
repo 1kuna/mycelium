@@ -97,6 +97,17 @@ The plan lists each job's files, what still protects them and `reclaimable_bytes
 
 ## When a job waits
 
+From s071, `myce status JOB_ID` and job GET show deterministic preparation errors
+as a failed job with `environment failed`, a build-log excerpt and instructions
+to fix the recipe and resubmit. Read `myce logs JOB_ID` for the full build output.
+Correct the dependency/lock/index/build inputs and submit changed intent with a
+new submission key; changing only the submission key does not retry the same
+failed environment. `logs: none` omits the excerpt and saved log. A transient
+network, disk or builder infrastructure failure stays queued with `environment
+retry pending` and a retry time (30-second exponential backoff, capped at five
+minutes). Let it retry, address a continuing infrastructure hold with its owner,
+and keep independent work moving; other environments remain eligible to build.
+
 From the next release, shared-host `myce host status` health and fleet
 `host_states` use the same pressure and bounded check-in contact evidence.
 Compare fleet snapshot `now` with a separate host-status read: public status
