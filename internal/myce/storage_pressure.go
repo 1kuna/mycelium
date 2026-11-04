@@ -54,7 +54,9 @@ func (q *Queue) storageWriteDemand(ctx context.Context) *Job {
 }
 
 func (q *Queue) recordStorageWritePressure(ctx context.Context, status FileStoreStatus, projected map[string]storedPayload, files FileManifest, growth uint64, bad bool, exclude string) {
-	q.mu.RLock()
+	if lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock) != nil {
+		return
+	}
 	demand := q.storageWriteDemand(ctx)
 	production, identified, err := q.fileStoreWriteClass(ctx, files, growth)
 	key := ""
@@ -69,7 +71,7 @@ func (q *Queue) recordStorageWritePressure(ctx context.Context, status FileStore
 	if demand == nil || err != nil || !production || !identified || !bad && !active {
 		return
 	}
-	_ = q.updateRequest(ctx, func() error {
+	_ = q.updateUploadRequest(ctx, func() error {
 		demand := q.storageWriteDemand(ctx)
 		production, identified, err := q.fileStoreWriteClass(ctx, files, growth)
 		if demand == nil || err != nil || !production || !identified {

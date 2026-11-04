@@ -478,6 +478,9 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 				base = environmentWaitingReason(best, target)
 			}
 		}
+		if strings.HasPrefix(reasons[best.ID], "waiting for software preparation for job ") {
+			base = reasons[best.ID]
+		}
 		if winner.ID == best.ID {
 			reasons[best.ID] = base + "; next in line"
 			continue
@@ -560,6 +563,9 @@ func (q *Queue) waitReason(j *Job) string {
 		if q.projectAllows(j.Spec.Project, m.ID) {
 			machines[targetKey(m)] = m
 		}
+	}
+	if reason := q.preparationWaitingReason(j, machines); reason != "" {
+		return reason
 	}
 	if reason := q.memoryWaitingReason(j, machines); reason != "" {
 		return reason

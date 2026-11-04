@@ -39,13 +39,16 @@ func (q *Queue) recordBundleUpload(hash string, created bool, requestContexts ..
 	if !created {
 		return nil
 	}
-	unlockRequest := requestReadLock(requestCtx, &q.mu)
+	if err := lockUploadContext(requestCtx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return err
+	}
+	unlockRequest := q.mu.RUnlock
 	_, marked := q.s.BundleUploads[hash]
 	unlockRequest()
 	if marked {
 		return nil
 	}
-	return q.updateRequest(requestCtx, func() error { q.markBundleUpload(hash); return nil }, nil)
+	return q.updateUploadRequest(requestCtx, func() error { q.markBundleUpload(hash); return nil }, nil)
 }
 
 func (q *Queue) markBundleUpload(hash string) {
@@ -63,7 +66,10 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestCont
 	if purpose == attemptOutputUploadPurpose {
 		return q.recordAttemptOutputUpload(hash, created, requestCtx)
 	}
-	unlockRequest := requestReadLock(requestCtx, &q.mu)
+	if err := lockUploadContext(requestCtx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return err
+	}
+	unlockRequest := q.mu.RUnlock
 	_, output := q.s.AttemptOutputUploads[hash]
 	_, marked := q.s.JobInputUploads[hash]
 	_, bundle := q.s.BundleUploads[hash]
@@ -73,7 +79,7 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestCont
 	if !change {
 		return nil
 	}
-	return q.updateRequest(requestCtx, func() error {
+	return q.updateUploadRequest(requestCtx, func() error {
 		if purpose != jobInputUploadPurpose {
 			delete(q.s.JobInputUploads, hash)
 			delete(q.s.AttemptOutputUploads, hash)
@@ -90,14 +96,17 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestCont
 
 func (q *Queue) publishFileUpload(hash string, requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
-	unlockRequest := requestReadLock(requestCtx, &q.mu)
+	if err := lockUploadContext(requestCtx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return err
+	}
+	unlockRequest := q.mu.RUnlock
 	published, marked := q.jobUploadMarker(hash)
 	unchanged := !marked || published.Equal(q.clock.Now())
 	unlockRequest()
 	if unchanged {
 		return nil
 	}
-	return q.updateRequest(requestCtx, func() error {
+	return q.updateUploadRequest(requestCtx, func() error {
 		if _, marked := q.s.JobInputUploads[hash]; marked {
 			q.s.JobInputUploads[hash] = q.clock.Now()
 		}

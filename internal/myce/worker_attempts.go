@@ -30,6 +30,7 @@ type attemptSupervisor struct {
 	released    bool
 	finished    bool
 	err         error
+	liveness    *attemptLivenessSampler
 	wake        chan struct{}
 	done        chan struct{}
 	recovering  *process
@@ -58,7 +59,11 @@ func jobKey(j Job) attemptKey { return attemptKey{j.ID, j.Attempt, j.Session} }
 func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.report, a.diagnostics, a.finished, a.err
+	r := a.report
+	if a.liveness != nil {
+		r.Liveness = a.liveness.snapshot(a.worker.Clock.Now())
+	}
+	return r, a.diagnostics, a.finished, a.err
 }
 func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
 	a.mu.Lock()
@@ -91,6 +96,13 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	}
 	a.mu.Unlock()
 	p := a.recovering
+	defer func() {
+		a.mu.Lock()
+		if a.liveness != nil {
+			a.liveness.cancel()
+		}
+		a.mu.Unlock()
+	}()
 	defer func() {
 		if p != nil {
 			p.stop(initial.Clock.Now(), 0, true)
@@ -222,6 +234,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started())}
 
 		if report.Started {
+			a.mu.Lock()
+			if a.liveness == nil {
+				a.liveness = startAttemptLiveness(ctx, w.Clock, w.Interval, p, s.dir)
+			}
+			a.mu.Unlock()
 			var memory *memoryAttempt
 			switch {
 			case p.native != nil:
@@ -1040,6 +1057,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 
 			// Age the actor snapshot at send time, including any intervening probes.
 			for i := range reports {
+				reports[i].Liveness = reports[i].Liveness.aged(w.Clock.Now())
 				reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
 				reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 			}

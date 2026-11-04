@@ -17,6 +17,7 @@ type JobRuntime struct {
 }
 
 func (q *Queue) projectRuntime(j *Job) {
+	q.projectLiveness(j)
 	if j.ApplicationProgress != nil {
 		p := *j.ApplicationProgress
 		if p.Attempt != j.Attempt || p.Session != j.Session || p.Machine != j.Machine || j.State == "queued" {
@@ -81,6 +82,9 @@ func (q *Queue) projectRuntime(j *Job) {
 
 func runtimeText(j *Job) string {
 	text := ""
+	if j.Liveness != nil {
+		text += "; " + livenessText(j.Liveness)
+	}
 	if r := j.Runtime; r != nil {
 		if r.ElapsedSeconds != nil {
 			text += fmt.Sprintf("; elapsed %.2fs", *r.ElapsedSeconds)

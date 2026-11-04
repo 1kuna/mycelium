@@ -493,6 +493,16 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 }
 
 func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queueUpdateTiming) error {
+	return q.updateTransaction(ctx, fn, timing, false)
+}
+
+// Upload persistence may abandon a pending transaction before it owns q.mu.
+// Ordinary transactions must still run cleanup when their request is cancelled.
+func (q *Queue) updateUploadRequest(ctx context.Context, fn func() error, timing *queueUpdateTiming) error {
+	return q.updateTransaction(ctx, fn, timing, true)
+}
+
+func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool) error {
 	available := true
 	if !q.simulation {
 		if q.checkpointProbe != nil {
@@ -506,7 +516,13 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 	if timing == nil && (q.observeUpdate != nil || spanFrom(ctx) != nil) {
 		timing = &queueUpdateTiming{}
 	}
-	timing.lock(&q.mu)
+	if cancelWait {
+		if err := timing.lockContext(ctx, &q.mu); err != nil {
+			return err
+		}
+	} else {
+		timing.lock(&q.mu)
+	}
 	hold := newQueueHoldPhases(q.updateHolds.startClock(q.holdClock), q.holdClock)
 	q.nasAvailable = available
 	defer func() {
@@ -683,18 +699,20 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	}
 	var resultCapacity FileStoreStatus
 	var resultPayloads map[string]storedPayload
+	var resultView *fileCapacitySnapshot
 	if s.OutputDelivery == asyncNAS && !replay && store != nil {
-		// Serialize file-store admission, then snapshot disk outside q.mu.
-		store.mu.Lock()
-		defer store.mu.Unlock()
-		resultCapacity, resultPayloads, err = store.capacity(ctx)
-		if err != nil {
-			resultCapacity.Error = "file store capacity unavailable"
-		}
+		resultView = store.snapshotCapacity(ctx)
+		defer resultView.release()
 	}
+
 	var out Job
 	var refusedHealthDemand *Job
 	err = q.updateRequest(ctx, func() error {
+		if resultView != nil {
+			store.mu.Lock()
+			resultCapacity, resultPayloads = resultView.current()
+			store.mu.Unlock()
+		}
 		q.maintainSubmissions()
 		existing, err := q.existingSubmission(s, fingerprint)
 		if err != nil {
@@ -2511,6 +2529,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	}
 	j.Progress = report.Progress
 	q.retainApplicationProgress(j, report, m)
+	q.retainLiveness(j, report)
 	if j.State == "stopping" {
 		reply.PriorityStop = priorityStop(j)
 		reply.UserCancel = cancelled(j)
@@ -2573,6 +2592,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.InputsStagedAt = nil
 	j.Timing = nil
 	j.ApplicationProgress = nil
+	j.Liveness = nil
 	now := q.clock.Now()
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	j.AssignedAt = &now

@@ -42,6 +42,13 @@ type storedPayload struct {
 
 // Callers hold lifecycle.RLock (or its exclusive side for collection). No q.mu.
 func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, error) {
+	s.uploadFilesMu.RLock()
+	defer s.uploadFilesMu.RUnlock()
+	return s.inventoryUnlocked(ctx)
+}
+
+// Caller fences file-pair creation and internal bundle writes.
+func (s *FileStore) inventoryUnlocked(ctx context.Context) (map[string]storedPayload, error) {
 	out := map[string]storedPayload{}
 	for _, dir := range []string{"blobs", "uploads"} {
 		entries, err := os.ReadDir(filepath.Join(s.root, dir))
@@ -125,9 +132,14 @@ func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, er
 	return out, nil
 }
 
-func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
+func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
+	// Keep physical free space and the inventory on the same side of a bundle
+	// write. Otherwise its bytes can be deducted by both disk-free and the
+	// completion ledger. No queue callbacks run under this filesystem fence.
+	s.uploadFilesMu.RLock()
+	defer s.uploadFilesMu.RUnlock()
 	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve, UnidentifiedWritesMayUseReserve: s.productionReserve > 0, UnidentifiedReserveAdmittedBytes: s.unidentifiedReserveAdmitted.Load()}
-	payloads, err := s.inventory(ctx)
+	payloads, err := s.inventoryUnlocked(ctx)
 	if err != nil {
 		return status, nil, err
 	}
@@ -152,6 +164,18 @@ func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]s
 	storeFree := status.LimitBytes - min(status.LimitBytes, allocated)
 	unavailable := addDiskBytes(status.FloorBytes, remaining)
 	status.FreeBytes = min(storeFree, disk.FreeBytes-min(disk.FreeBytes, unavailable))
+	return status, payloads, nil
+}
+
+func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
+	view := s.snapshotCapacity(ctx)
+	defer view.release()
+	s.mu.Lock()
+	status, payloads := view.current()
+	s.mu.Unlock()
+	if status.Error != "" {
+		return status, payloads, errors.New(status.Error)
+	}
 	return status, payloads, nil
 }
 
@@ -269,8 +293,6 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	}
 	store.lifecycle.RLock()
 	defer store.lifecycle.RUnlock()
-	store.mu.Lock()
-	defer store.mu.Unlock()
 	status, payloads, err := store.capacity(ctx)
 	if err != nil {
 		status.Error = "file store capacity unavailable"
