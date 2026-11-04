@@ -140,6 +140,7 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	WallTime string `json:"wall_time,omitempty" yaml:"wall_time,omitempty"`
 	// Authored explanations are frozen intent, never placement authority.
 	RequirementReasons map[string]string `json:"requirement_reasons,omitempty" yaml:"requirement_reasons,omitempty"`
 
@@ -202,6 +203,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if err := validateWallTime(s); err != nil {
+		return reject("job_execution_invalid", err)
+	}
 	if err := validateQualityTolerance(s); err != nil {
 		return err
 	}
@@ -410,6 +414,7 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	WallTime        *WallTimeStatus        `json:"wall_time,omitempty"`
 	YieldPlan       *ScarceYieldProjection `json:"yield_plan,omitempty"`
 	ScarceHostYield *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
 	YieldGeneration int64                  `json:"yield_generation,omitempty"`

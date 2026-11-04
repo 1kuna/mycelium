@@ -151,6 +151,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				if s.state.OperatorStopped {
 					f.result = operatorOutcome(f.result, true)
 				}
+				f.result, f.err = applyWorkerWallTime(s.dir, a.job, f.result)
+				if f.err != nil {
+					finish(f.err)
+					return
+				}
 				s.state.Result = &f.result
 				if !f.result.ReleasePending {
 					s.state.PID = 0
@@ -239,6 +244,18 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 				p.stopDirective(now, time.Duration(max(0, d.GraceSeconds)*float64(time.Second)), d.Kill, d.UserCancel)
 			}
+		}
+		if err := enforceWorkerWallTime(s.dir, a.job, p, now); err != nil {
+			finish(err)
+			return
+		}
+		if s.state.Result != nil {
+			r, err := applyWorkerWallTime(s.dir, a.job, *s.state.Result)
+			if err != nil {
+				finish(err)
+				return
+			}
+			s.state.Result = &r
 		}
 		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started())}
 

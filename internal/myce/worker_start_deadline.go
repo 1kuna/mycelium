@@ -19,21 +19,37 @@ var errWorkerStartHandoff = fmt.Errorf("queue start hand-off unavailable: %w", e
 const workerStartRequestTimeout = 10 * time.Second
 
 // A positive reply means this exact attempt is durably started, before execution.
-func (w Worker) authorizeStart(j Job, session string) error {
+func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) error {
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), workerStartRequestTimeout)
 	defer cancel()
+	requested := time.Time{}
+	if j.Spec.WallTime != "" {
+		if w.Clock == nil || len(receiptDirs) != 1 {
+			return errors.New("wall-time enforcement requires owned receipt storage and Clock")
+		}
+		requested = w.Clock.Now()
+	}
 	var reply struct {
-		OK        bool   `json:"ok"`
-		StartGate string `json:"start_gate"`
+		WallTimeRemainingSeconds *float64 `json:"wall_time_remaining_seconds"`
+		OK                       bool     `json:"ok"`
+		StartGate                string   `json:"start_gate"`
 	}
 	if err := w.Client.Call(ctx, "POST", "/api/workers/started", Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply); err != nil {
 		return fmt.Errorf("%w: %w", errWorkerStartHandoff, err)
 	}
 	if !reply.OK || reply.StartGate != startGateProtocol {
 		return fmt.Errorf("queue start-gate protocol mismatch: upgrade queue and workers together")
+	}
+	if j.Spec.WallTime != "" {
+		if reply.WallTimeRemainingSeconds == nil || *reply.WallTimeRemainingSeconds <= 0 {
+			return errors.New("queue did not authorize a positive wall-time allowance")
+		}
+		if err := saveWorkerWallTime(receiptDirs[0], j, requested, *reply.WallTimeRemainingSeconds); err != nil {
+			return err
+		}
 	}
 	return w.checkAvailability()
 }

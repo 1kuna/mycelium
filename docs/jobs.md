@@ -278,6 +278,38 @@ deadline work keep the three-loss limit; their planned pauses do not consume it.
 complete checkpoint. An attempt is an execution identity, not a retry budget.
 Logs and results are accepted only for the current execution identity.
 
+### Per-attempt wall time
+
+Available from the next release: optional top-level `wall_time: 30m` (a positive
+Go duration string) stops an attempt once its execution allowance is exhausted.
+Omit it for unlimited execution; there is no fleet-wide default because no
+measured duration fits all workloads. Choose a limit from measured runs or a
+real consumer deadline. It is separate from `expected_minutes` (an estimate),
+`deadline` (priority) and client wait timeouts.
+
+Accounting starts at accepted Started, excluding queue wait and preparation.
+The queue persists that boundary. Before opening the main execution gate, the
+worker durably records the remaining allowance in its own clock domain;
+request/response transit can shorten it, never extend it. Reconnect and restart
+do not renew that receipt. During a queue outage the existing attempt supervisor
+still stops the owned main, sidecars and descendants, using ordinary TERM/grace/
+KILL cleanup. This is a supervisor wall-time guard, not kernel time containment:
+control/observation I/O and cleanup can extend time until confirmed release.
+
+Expiry records `execution_cause: {operation: execution, class: wall_time_limit}`
+and the exact copy's `stop_cause: wall_time_limit`. It follows ordinary
+job-caused failure policy: no automatic retry, no infrastructure loss or retry
+charge, including for resumable jobs. Cancellation and independently observed
+failures retain precedence. A completion arriving after queue expiry cannot
+publish success; its exact release evidence can still discharge custody.
+Partial files/checkpoints and opt-in failure diagnostics use existing retention
+and collection; terminal state or elapsed grace never proves cleanup.
+
+Job GET/status expose `wall_time.limit`, `expires_at` and `remaining_seconds`
+(the latter two appear after Started). The CLI labels the wall allowance
+separately from estimated completion time. Profiles and adapter entries accept
+the same `wall_time` field, frozen into submitted intent.
+
 Use top-level `logs: none` for private batch output, matching the model/server
 catalog field. Both streams go directly to the OS null device, so large output
 cannot fill an undrained pipe or reach the worker's journal. The queue also

@@ -17,6 +17,7 @@ type JobRuntime struct {
 }
 
 func (q *Queue) projectRuntime(j *Job) {
+	q.projectWallTime(j)
 	q.projectLiveness(j)
 	if j.ApplicationProgress != nil {
 		p := *j.ApplicationProgress
@@ -81,7 +82,7 @@ func (q *Queue) projectRuntime(j *Job) {
 }
 
 func runtimeText(j *Job) string {
-	text := ""
+	text := wallTimeText(j)
 	if j.Liveness != nil {
 		text += "; " + livenessText(j.Liveness)
 	}

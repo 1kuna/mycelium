@@ -2148,6 +2148,11 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "wall_time": {
+          "$ref": "#/$defs/WallTimeStatus",
+          "description": "Execution allowance, distinct from runtime estimates. Expiry/remaining appear after Started; elapsed grace or terminal state does not prove release.",
+          "x-contract": "diagnostic"
+        },
         "yield_generation": {
           "type": "integer",
           "x-contract": "diagnostic"
@@ -4084,6 +4089,11 @@
           ],
           "x-contract": "diagnostic"
         },
+        "wall_time": {
+          "description": "Optional positive per-attempt Go duration from accepted Started; omission is unlimited. Expiry follows ordinary command-failure policy, never infrastructure loss.",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "workload": {
           "$ref": "#/$defs/Workload",
           "x-contract": "diagnostic"
@@ -4424,6 +4434,24 @@
         "qualified",
         "eligible",
         "reasons"
+      ],
+      "type": "object"
+    },
+    "WallTimeStatus": {
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "limit": {
+          "type": "string"
+        },
+        "remaining_seconds": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "limit"
       ],
       "type": "object"
     },

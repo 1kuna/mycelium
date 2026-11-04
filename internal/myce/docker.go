@@ -1179,7 +1179,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	create = append(create, args...)
 	launched = true
 	go d.run(p, j, s.state.Session, output, release, func() error {
-		if e := w.authorizeStart(j, j.Session); e != nil {
+		if e := w.authorizeStart(j, j.Session, s.dir); e != nil {
 			return d.recordInfrastructure(infrastructureFact{Kind: launchRefused, At: time.Now().UTC()}, e)
 		}
 		if dockerFileJob(j.Spec) {

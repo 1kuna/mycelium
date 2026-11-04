@@ -916,6 +916,10 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	return &out, err
 }
 func (q *Queue) retry(j *Job, why string) {
+	if wallTimeStopped(j) && !cancelled(j) {
+		q.finishWallTime(j)
+		return
+	}
 	if yieldMatches(j) && !j.ScarceHostYield.FinalReceived && !cancelled(j) {
 		j.ScarceHostYield.Hold = "final checkpoint/transport pending; release alone cannot resume work"
 		j.Reason = "scarce_host_yield: " + j.ScarceHostYield.Hold
@@ -1018,6 +1022,7 @@ func (q *Queue) maintain() {
 	if q.stopping {
 		return
 	}
+	q.maintainWallTimeLimits()
 	q.maintainJobPauses()
 	q.maintainFleetUpgrade()
 	q.maintainFanOut()
@@ -1632,7 +1637,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	// A quota failure remains terminal when a stop races it. Verify its opt-in
 	// diagnostics in either live state, with the same identity fences as outputs.
-	verify := err == nil && j.storedFileResults() && (j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j))) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.Diagnostics != nil) && !r.ReleaseOnly
+	verify := err == nil && !(r.Success && wallTimeExpired(j, q.clock.Now())) && j.storedFileResults() && (j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j))) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.Diagnostics != nil) && !r.ReleaseOnly
 	var yieldPath string
 	if err == nil && yieldMatches(j) && !j.FileTransport && !r.ReleaseOnly && r.Interrupted && r.FinalCheckpointGeneration != nil {
 		yieldPath = attemptCheckpoint(*j)
@@ -1724,6 +1729,10 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 			(j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || !terminal(j.State) && j.State != "running" && j.State != "stopping") {
 			rejected = ErrStale
 		}
+		q.maintainWallTimeLimits()
+		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session && wallTimeStopped(j) && r.Success && !r.ReleaseOnly {
+			rejected = ErrStale
+		}
 		return q.complete(r, verify)
 	}, nil)
 	if err != nil {
@@ -1732,6 +1741,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	return rejected
 }
 func (q *Queue) complete(r Result, filesVerified bool) error {
+	q.maintainWallTimeLimits()
 	if r.MemoryPeak.constrained() && !r.MemoryPeak.Constrained {
 		peak := *r.MemoryPeak
 		peak.Constrained = true
@@ -1826,6 +1836,12 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	if err != nil {
 		return err
 	}
+	wallFailure := r.ExecutionCause != nil && r.ExecutionCause.Class == wallTimeLimit
+	wallFailure = (wallFailure || wallTimeStopped(j) && (r.Success || r.Interrupted)) && !r.OutOfMemory && !attemptDiskLimitFailure(r)
+	if wallFailure {
+		r.Success, r.Interrupted, r.PriorityStop = false, false, nil
+		r.ExecutionCause, r.Error = wallTimeCause(), wallTimeLimit
+	}
 	r.ExecutionCause = safeAttemptRuntimeCause(j, r.ExecutionCause)
 	if r.ExecutionCause != nil && r.ExecutionCause.Operation == "input_staging" {
 		// Keep the durable reason as safe as the structured cause; Error may
@@ -1880,13 +1896,15 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 			}
 		}
 	}
-	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure {
+	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure {
 		if cancelled(j) {
 			q.finishCancellation(j)
 		} else {
 			q.recordSharedHostLatencyStop(j, r)
 			q.retry(j, j.Reason)
 		}
+	} else if wallFailure {
+		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
 	} else if diskFailure {
 		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
@@ -2485,8 +2503,13 @@ func (q *Queue) markStarted(j *Job) {
 	}
 }
 func (q *Queue) Started(r Result, requestContexts ...context.Context) error {
+	_, err := q.startedWithWallTime(r, requestContexts...)
+	return err
+}
+func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context) (*float64, error) {
 	requestCtx := requestContext(requestContexts)
 
+	var remaining *float64
 	var rejected error
 	err := q.updateRequest(requestCtx, func() error {
 		q.maintain()
@@ -2507,12 +2530,16 @@ func (q *Queue) Started(r Result, requestContexts ...context.Context) error {
 		}
 		retainInputsStagedAt(j, r.InputsStagedAt)
 		q.markStarted(j)
+		if at := wallTimeDeadline(j); at != nil {
+			left := max(0, at.Sub(q.clock.Now()).Seconds())
+			remaining = &left
+		}
 		return nil
 	}, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return rejected
+	return remaining, rejected
 }
 
 func (q *Queue) renewRecoveryStartWindow(j *Job) {

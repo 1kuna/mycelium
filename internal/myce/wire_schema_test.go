@@ -94,6 +94,8 @@ func generatedJobSchema(t *testing.T) []byte {
 	dockerProperties := defs["RunSpec"].(map[string]any)["properties"].(map[string]any)
 	dockerProperties["docker"].(map[string]any)["description"] = "Opt-in managed direct docker run argv with a local digest-pinned image. With files or outputs: worker-owned mounts, UID/GID, /myce/work working directory and environment only; caller mounts/env/workdir/user and shared_inputs are rejected. Requires Linux docker_files_v1 worker capability."
 	specProperties["start_window"].(map[string]any)["description"] = "Optional production relative start duration (Go duration string), greater than zero and at most 1h. Defaults to 150s; explicit start_by takes precedence."
+	specProperties["wall_time"].(map[string]any)["description"] = "Optional positive per-attempt Go duration from accepted Started; omission is unlimited. Expiry follows ordinary command-failure policy, never infrastructure loss."
+	job["wall_time"].(map[string]any)["description"] = "Execution allowance, distinct from runtime estimates. Expiry/remaining appear after Started; elapsed grace or terminal state does not prove release."
 	delete(job, "ledger_entries") // Persistence only; the supported read surface is paginated.
 	delete(defs, "JobLedgerEntry")
 	job["ledger"].(map[string]any)["description"] = "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies."
