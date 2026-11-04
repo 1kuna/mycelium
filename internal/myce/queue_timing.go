@@ -102,6 +102,23 @@ func (t *queueUpdateTiming) lock(mu sync.Locker) {
 	t.lockedAt = time.Now()
 }
 
+// The detached cancellation waiter may touch only the mutex, never caller
+// timing state: callers can log that state as soon as cancellation returns.
+func (t *queueUpdateTiming) lockContext(ctx context.Context, mu sync.Locker) error {
+	var started time.Time
+	if t != nil {
+		started = time.Now()
+	}
+	if err := lockUploadContext(ctx, mu.Lock, mu.Unlock); err != nil {
+		return err
+	}
+	if t != nil {
+		t.mutexWait = time.Since(started)
+		t.lockedAt = time.Now()
+	}
+	return nil
+}
+
 func (t *queueUpdateTiming) commit(tx *sql.Tx) error {
 	if t == nil {
 		return tx.Commit()

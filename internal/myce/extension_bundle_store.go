@@ -41,8 +41,11 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	// import promotion between our missing check and eligibility enrollment.
 	// Creation precedes the identity lock, matching tus POST-with-upload order.
 	// Neither lock holds q.mu; an active transfer can still finish publication.
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	finish, err := s.beginCreation(requestContext(contexts), next.SHA256)
+	if err != nil {
+		return err
+	}
+	defer finish()
 	lock, err := s.uploadLocker.NewLock(next.SHA256)
 	if err != nil {
 		return err
@@ -54,18 +57,11 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	err = s.verify(context.Background(), next)
 	missing := os.IsNotExist(err)
 	if err != nil {
-		status, payloads, e := s.capacity(requestContext(contexts))
+		ctx := context.WithValue(requestContext(contexts), fileStoreOrdinaryKey{}, true)
+		view := s.snapshotCapacity(ctx)
+		_, e := s.admitCreation(ctx, view, next)
+		view.release()
 		if e != nil {
-			status.Error = "file store capacity unavailable"
-		}
-		if payloads == nil {
-			payloads = map[string]storedPayload{}
-		}
-		// Replacement of corrupt bytes can grow an existing allocation too.
-		growth := uint64(next.SizeBytes) - min(uint64(next.SizeBytes), payloads[next.SHA256].length)
-		payloads[next.SHA256] = storedPayload{length: uint64(next.SizeBytes)}
-		need := addDiskBytes(growth, s.reservedOutputs(payloads))
-		if _, e = s.admit(context.WithValue(requestContext(contexts), fileStoreOrdinaryKey{}, true), status, payloads, FileManifest{"bundle": next}, need, growth); e != nil {
 			return e
 		}
 	}
@@ -75,6 +71,8 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 		}
 	}
 	if err != nil {
+		s.uploadFilesMu.Lock()
+		defer s.uploadFilesMu.Unlock()
 		// A private temporary name cannot truncate or consume an interrupted tus
 		// upload of the same bytes. Preserve any existing verified blob.
 		f, e := os.CreateTemp(filepath.Join(s.root, "uploads"), ".bundle-")
@@ -98,6 +96,7 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 				return e
 			}
 		}
+		s.noteAllocation(next.SHA256, uint64(next.SizeBytes))
 	}
 	if err = s.verify(context.Background(), next); err != nil {
 		return err
