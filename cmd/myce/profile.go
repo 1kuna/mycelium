@@ -361,6 +361,10 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			return waitError(65, "profile_source_changed: source changed while freezing")
 		}
 		s := p.Spec
+		s.AuthoringOrigin = myce.OriginProfile
+		if p.Adapter {
+			s.AuthoringOrigin = myce.OriginAdapter
+		}
 		s.SubmissionKey = ""
 		s.RequireTarget = p.Native == nil
 		s.Files = myce.FileManifest{".myce-source.tar": ref}

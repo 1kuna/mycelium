@@ -291,6 +291,7 @@ func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 	copy := cloneJob(selected)
 	copy.Spec.FanOut = nil
 	copy.Spec.SubmissionKey = ""
+	copy.Spec.AuthoringOrigin = OriginFanOutChild
 	copy.FanOut = nil
 	copy.Spec.Outputs = map[string]string{}
 	for _, piece := range copy.Batch.Pieces {

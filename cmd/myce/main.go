@@ -1096,6 +1096,7 @@ func printStatus(s myce.Snapshot, full bool) {
 		}
 		fmt.Printf("tier=%s selector=%s policy_revision=%d ", j.PriorityPolicy.Tier, j.PriorityPolicy.Selector, j.PriorityPolicy.Revision)
 		fmt.Printf("%s %s [%s/%s] %s hypha=%s logs=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Project, j.Spec.Class, myce.JobState(j), j.Machine, policy, myce.JobReason(j), myce.JobAge(j, s.Now), myce.JobWork(j)+"; "+myce.JobTiming(j))
+		fmt.Printf("  authoring origin: %s\n", j.Spec.Origin())
 		for _, variant := range j.VariantEligibility {
 			fmt.Printf("  variant: %s\n", variant.Summary())
 		}
