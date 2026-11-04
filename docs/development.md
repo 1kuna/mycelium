@@ -187,6 +187,16 @@ journeys were fleet-upgrade (149.46s) and enrollment (135.78s). Removing a broad
 selection's unrelated main-only edits avoids executing these journeys for work
 that did not touch them; genuinely related journeys remain required.
 
+A paired fleet measurement on the same frozen diverged PR source reduced quick
+wall time from 161s to 119s (42s, 26.1%). The old moving-main comparison selected
+77 CLI + 125 core tests; merge-base selected 57 + 72, excluding only main-only
+changes. CLI package wall fell from 124.847s to 83.215s and core from 72.136s
+to 52.121s. Both accepted result markers were fetched and verified. Shared fleet
+occupancy was uncontrolled, so the timing difference is an observed pair, not
+an isolated scheduler or sustained-throughput benchmark. The reported incident's
+three 296s timeouts were a different selection. This patch's validation quick
+passed in 57s; that smaller selection is not the before/after comparator.
+
 CI and PR gates retain the same `test` class and normal queue fairness. Reducing
 the Linux charge using accepted memory evidence is the first intervention;
 raising PR class would misstate urgency, and serializing CI would move backlog
