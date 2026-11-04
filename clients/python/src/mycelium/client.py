@@ -454,10 +454,11 @@ class Client:
             if not before:
                 return result
 
-    def _read_job(self, job_id: str, *, timeout: float | None = None) -> dict[str, Any]:
+    def _read_job(self, job_id: str, *, timeout: float | None = None, wait: bool = False) -> dict[str, Any]:
         # A 2xx body cut short in transport is retryable; a complete body that
         # is not a UTF-8 JSON Job is the typed job_reply_invalid.
-        body = self._call("GET", f"/api/jobs/{quote(job_id, safe='')}", timeout=timeout, raw=True)
+        query = "?view=wait" if wait else ""
+        body = self._call("GET", f"/api/jobs/{quote(job_id, safe='')}{query}", timeout=timeout, raw=True)
         try:
             reply = json.loads(body.decode("utf-8"))
         except ValueError:
@@ -524,7 +525,7 @@ class Client:
             if remaining is not None and remaining <= 0:
                 raise timed_out()
             try:
-                observed = self._read_job(job_id, timeout=self.timeout if remaining is None else min(self.timeout, remaining))
+                observed = self._read_job(job_id, timeout=self.timeout if remaining is None else min(self.timeout, remaining), wait=True)
             except (TimeoutError, URLError, IncompleteReplyError) as error:
                 if end is not None and time.monotonic() >= end:
                     raise timed_out() from None

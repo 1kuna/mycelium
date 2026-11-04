@@ -142,6 +142,19 @@ class FileTransferTimeoutTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def test_wait_uses_lightweight_view_and_keeps_terminal_payload(self):
+        client = Client(token="fixture")
+        terminal = {"id": "job/one", "state": "succeeded", "output_refs": {"result": {"size_bytes": 10}}}
+        replies = [{"id": "job/one", "state": "running"}, terminal]
+        with patch.object(client, "_call", side_effect=lambda *_args, **_kwargs: json.dumps(replies.pop(0)).encode()) as call, patch(
+                "mycelium.client.time.sleep") as pause:
+            self.assertEqual(client.wait("job/one"), terminal)
+            self.assertEqual([item.args for item in call.call_args_list], [
+                ("GET", "/api/jobs/job%2Fone?view=wait"),
+                ("GET", "/api/jobs/job%2Fone?view=wait"),
+            ])
+            pause.assert_called_once_with(client.poll_interval)
+
     def test_job_reply_invalid(self):
         client = Client(token="test-only")
         for body in (b'{"jobs":[{"id":"fixture","state":"succeeded"}]}',
