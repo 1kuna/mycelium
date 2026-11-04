@@ -1367,6 +1367,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 				}
 			}
 		}
+		q.acceptEnvironmentFailures(&m, old)
 		q.s.Machines[m.ID] = &m
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
