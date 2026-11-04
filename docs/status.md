@@ -376,6 +376,15 @@ Running jobs show their hypha and attempt. Every waiting job has an explanation,
 including missing qualification, memory or resource requirements, unavailable
 hyphae, software preparation, and work ahead in the queue.
 
+From s070, work held behind another job's environment preparation names the
+blocking job, environment identity and worker in status and job GET. The reason
+distinguishes an offered build awaiting a builder report, a started build and
+preparation awaiting exact stop/release acknowledgement. An unready deadline
+winner permits ready backfill until existing priority rules take custody.
+Production retains its preparation turn. Once priority preemption has
+released its chosen target, that placement stays committed through preparation;
+the just-requeued victim cannot repeatedly backfill ahead of the build.
+
 The page and CLI use the queue's decisions. Reading status does not choose where
 to run work. The status API returns job summaries without submitted commands,
 environment values, program arguments, extension files, or local checkpoint

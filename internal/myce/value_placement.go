@@ -260,8 +260,15 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 		if j == nil {
 			break
 		}
-		scan.assignments[targetKey(selected.m)] = j
 		excluded[j.ID] = true
+		// Keep production's existing preparation turn, and honor a target
+		// whose release this demand already requested. Both have passed this
+		// scan's candidate eligibility checks; stale custody alone cannot
+		// withhold capacity. Other cold winners leave room for ready work.
+		if !environmentReady(j, selected.m) && !preparationOwnsTurn(j) {
+			continue
+		}
+		scan.assignments[targetKey(selected.m)] = j
 		remaining := sets[:0]
 		for _, s := range sets {
 			// A check-in offers one next attempt, even on a multi-device worker.
@@ -272,6 +279,10 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 		sets = remaining
 	}
 	return scan.assignments
+}
+
+func preparationOwnsTurn(j *Job) bool {
+	return j.Spec.Priority == "production" || j.PreemptionPlacement != nil && len(j.PreemptionPlacement.Releases) > 0
 }
 
 // Shared with queueProjection: every target offers its next admissible fair

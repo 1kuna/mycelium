@@ -236,3 +236,69 @@ func environmentWaitingReason(j *Job, m *Machine) string {
 	}
 	return "building environment: " + label
 }
+
+// A started build owns this worker until completion or its exact planned-stop
+// receipt. Name that custody rather than suggesting an idle worker can pull.
+func (q *Queue) preparationWaitingReason(j *Job, machines map[string]*Machine) string {
+	if len(q.s.PreparationPlans) == 0 {
+		return ""
+	}
+	blocked := []string{}
+	var preparationTurns map[string]*Job
+	for _, m := range machines {
+		if !q.placementAllowed(j, m) {
+			continue
+		}
+		active := q.preparationActive(m)
+		var fence *Job
+		// Use dispatch's global plan: the same cold winner cannot reserve
+		// preparation independently on every compatible worker or target view.
+		if !active {
+			if preparationTurns == nil {
+				preparationTurns = map[string]*Job{}
+				scan := q.placementScan()
+				plan := q.assignmentPlan(scan)
+				for _, target := range scan.machines {
+					if winner := plan[targetKey(target)]; winner != nil && !environmentReady(winner, target) && preparationOwnsTurn(winner) {
+						preparationTurns[target.ID] = winner
+					}
+				}
+			}
+			fence = preparationTurns[m.ID]
+		}
+		copy := *m
+		if active {
+			copy = q.cpuAfterReleases(m, nil, nil, 1)
+		}
+		fit := false
+		for _, candidate := range q.memoryCandidates(j, &copy) {
+			fit = fit || fits(candidate, &copy, copy.FreeMemoryGB)
+		}
+		if !fit {
+			continue
+		}
+		if !active && fence == nil {
+			return "" // Another compatible target is not held by preparation.
+		}
+		found := false
+		for _, l := range q.s.PreparationPlans {
+			if l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started && (fence == nil || l.Demand != fence.ID) {
+				continue
+			}
+			state := "offered; waiting for builder report"
+			if l.Started {
+				state = "building"
+			}
+			if l.PriorityStop != nil {
+				state = "stopping; waiting for exact release"
+			}
+			blocked = append(blocked, fmt.Sprintf("waiting for software preparation for job %s on %s (environment %s; %s)", l.Demand, m.ID, l.Key, state))
+			found = true
+		}
+		if !found && fence != nil {
+			blocked = append(blocked, fmt.Sprintf("waiting for software preparation for job %s on %s (environment %s; reserved after priority preemption)", fence.ID, m.ID, environmentKey(fence, m)))
+		}
+	}
+	slices.Sort(blocked)
+	return strings.Join(slices.Compact(blocked), "; ")
+}
