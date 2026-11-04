@@ -35,7 +35,7 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	parallel := f.Int("warmup-parallel", 1, "maximum concurrent warm-ups (greater than one warms after all models load)")
 	loadTimeout := f.Duration("load-timeout", 5*time.Minute, "per-model measurement load timeout")
 	force := f.Bool("force", false, "bypass production refusal during approved maintenance; never bypass spool lock")
-	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue URL (must match join)")
+	authority := installedClientFlags(f)
 	if e := f.Parse(args); e != nil {
 		return e
 	}
@@ -101,12 +101,16 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 			}
 		}
 	}
-	w := myce.Worker{StateDir: *state, CacheRoot: *cache, EnvironmentRoot: *envCache, Client: myce.Client{URL: *queue, Token: env("MYCE_TOKEN", "")}, Machine: myce.Machine{ID: *worker, GPU: *platform}, Clock: myce.RealClock{}}
+	w := myce.Worker{StateDir: *state, CacheRoot: *cache, EnvironmentRoot: *envCache, Machine: myce.Machine{ID: *worker, GPU: *platform}, Clock: myce.RealClock{}}
 	roots, err := w.StateRoots()
 	if err != nil {
 		return err
 	}
 	if err := myce.PrepareStateRoots(roots...); err != nil {
+		return err
+	}
+	w.Client, err = authority.client()
+	if err != nil {
 		return err
 	}
 	// Cache defaults are resolved from join's store by Prepare below; opening it

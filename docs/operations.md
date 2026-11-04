@@ -1506,6 +1506,8 @@ records observations, and unloads. Use explicit runtime/device/worker identity
 and an authorized maintenance window. Measured peaks and headroom, not model-file
 sizes or a guessed budget, qualify native admission. The [native test plan](development.md)
 keeps this proof separate from laptop fixtures.
+The command uses installed queue credentials and TLS authority by default;
+`--config` selects the installation without exporting or copying its token.
 
 On Linux unified CUDA hosts whose selected device reports unsupported used and
 free memory counters, measurement uses `MemTotal - MemAvailable`, matching
