@@ -248,6 +248,9 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 }
 
 func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
+	if q.environmentFailureBlocked(j, m) {
+		return nil
+	}
 	if !q.preemptionPlacementAllows(j, m) {
 		return nil
 	}
@@ -563,6 +566,9 @@ func (q *Queue) waitReason(j *Job) string {
 		if q.projectAllows(j.Spec.Project, m.ID) {
 			machines[targetKey(m)] = m
 		}
+	}
+	if reason := q.environmentFailureWaitingReason(j, machines); reason != "" {
+		return reason
 	}
 	if reason := q.preparationWaitingReason(j, machines); reason != "" {
 		return reason

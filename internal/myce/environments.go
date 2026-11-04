@@ -334,6 +334,9 @@ func environmentCanRun(j *Job, m *Machine) bool {
 }
 
 type EnvironmentReport struct {
+	FailureKind    string          `json:"failure_kind,omitempty"`
+	RetryAt        *time.Time      `json:"retry_at,omitempty"`
+	Failures       int             `json:"failures,omitempty"`
 	PathDiagnostic *PathDiagnostic `json:"path_diagnostic,omitempty"`
 	Kind           string          `json:"kind,omitempty"`
 	Attempt        string          `json:"attempt,omitempty"`
@@ -1157,7 +1160,7 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 	if wanted == "" {
 		return
 	}
-	if r := rt.reports[wanted]; r.State == "failed" || (r.State == "ready" && r.Attempt == launchAttempt(plan[0].Launch)) {
+	if r := rt.reports[wanted]; (r.State == "failed" && (environmentFailureKind(r) != "transient" || r.Attempt == launchAttempt(plan[0].Launch))) || (r.State == "ready" && r.Attempt == launchAttempt(plan[0].Launch)) {
 		// Keep an exact completion visible until the queue withdraws its offer.
 		// A stale heartbeat response must not restart completed preparation.
 		return
@@ -1185,6 +1188,11 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 		log.Printf("persist environment build intent: %v", e)
 	}
 	go func() {
+		logPath := filepath.Join(rt.cache.Root, r.Key+".build.log")
+		var logStart int64
+		if st, err := os.Stat(logPath); err == nil {
+			logStart = st.Size()
+		}
 		var release func()
 		e := checkLaunchGate(ctx)
 		if e == nil {
@@ -1207,11 +1215,11 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 			report.Error = e.Error()
 			report.PathDiagnostic = pathDiagnostic(e)
 		}
-		b, _ := os.ReadFile(filepath.Join(rt.cache.Root, r.Key+".build.log"))
-		if len(b) > 32768 {
-			b = b[len(b)-32768:]
-		}
+		b := readEnvironmentLogTail(logPath, logStart)
 		report.Log = string(b)
+		if report.State == "failed" {
+			report.FailureKind = classifyEnvironmentFailure(e, report.Log)
+		}
 		if ctx.Err() != nil {
 			report.State = "paused"
 			report.Error = ""
@@ -1267,7 +1275,11 @@ func (rt *environmentRuntime) report() ([]string, []EnvironmentReport, map[strin
 				r.State = "uploading"
 			}
 		}
-		r.Log = ""
+		if r.State != "failed" && r.State != "uploading" {
+			r.Log = ""
+		} else {
+			r.Log = environmentLogExcerpt(r.Log)
+		}
 		reports = append(reports, r)
 	}
 	return ready, reports, times
@@ -1275,19 +1287,33 @@ func (rt *environmentRuntime) report() ([]string, []EnvironmentReport, map[strin
 
 func (q *Queue) reconcileEnvironments(m *Machine) error {
 	for _, r := range m.EnvironmentReports {
-		if r.State != "failed" {
+		// Uploading is already a failed build for admission/status, but keep
+		// its dependents queued until the complete log has been attached.
+		if r.State != "failed" || environmentFailureKind(r) == "transient" {
 			continue
 		}
 		for _, j := range q.liveJobs() {
-			if j.State != "queued" || !q.placementAllowed(j, m) || environmentKey(j, m) != r.Key {
+			if j.State != "queued" {
 				continue
 			}
-			for _, candidate := range q.memoryCandidates(j, m) {
-				if !hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) || !fitsResources(candidate, m, m.FreeMemoryGB) {
+			for _, target := range q.machineTargets(m) {
+				if !q.placementAllowed(j, target) || environmentKey(j, target) != r.Key {
+					continue
+				}
+				matched := false
+				for _, candidate := range q.memoryCandidates(j, target) {
+					if hostFits(target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, target, target.FreeMemoryGB) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
 					continue
 				}
 				j.State = "failed"
-				j.Reason = "environment build failed on " + m.ID + ": " + r.Error
+				now := q.clock.Now()
+				j.FinishedAt = &now
+				j.Reason = environmentFailureReason(r, j.Spec.Logs != "none")
 				if e := q.copyEnvironmentLogs(j, m, r.Key); e != nil {
 					return e
 				}
@@ -1380,9 +1406,14 @@ func (q *Queue) AppendEnvironmentLog(l EnvironmentLog, requestContexts ...contex
 		return e
 	}
 	for _, j := range q.liveJobs() {
-		if j.State == "queued" && environmentKey(j, m) == l.Key {
-			if e = insertEnvironmentJobLog(tx, j, l); e != nil {
-				return e
+		if j.State == "queued" {
+			for _, target := range q.machineTargets(m) {
+				if environmentKey(j, target) == l.Key {
+					if e = insertEnvironmentJobLog(tx, j, l); e != nil {
+						return e
+					}
+					break
+				}
 			}
 		}
 	}

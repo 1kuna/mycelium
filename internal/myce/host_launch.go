@@ -198,7 +198,7 @@ func (q *Queue) reconcilePreparationPlans(c Checkin) {
 		done := false
 		if l.Kind == "environment" {
 			for _, r := range c.Machine.EnvironmentReports {
-				if r.Key == l.Key && r.Attempt == l.Attempt && (r.State == "ready" || r.State == "failed" || r.State == "paused") {
+				if r.Key == l.Key && r.Attempt == l.Attempt && (r.State == "ready" || r.State == "failed" || r.State == "uploading" || r.State == "paused") {
 					done = true
 				}
 			}
