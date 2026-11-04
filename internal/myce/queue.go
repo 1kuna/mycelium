@@ -848,6 +848,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			j.MemoryFallback = &SizeHint{MemoryGB: max(hintSpec.Needs.MemoryGB, submitted.SizeHint.MemoryGB), HostMemoryGB: max(hintSpec.Needs.HostMemoryGB, submitted.SizeHint.HostMemoryGB)}
 		}
 		q.applyLearnedNeeds(j)
+		if err := q.sharedInputCapacityRefusal(j); err != nil {
+			return err
+		}
 		if reason := q.diskCapacityRefusal(j); reason != "" {
 			return &HTTPError{Status: 409, Code: "disk_headroom", Message: reason}
 		}
@@ -2237,6 +2240,12 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 	if j.State == "queued" && strings.HasPrefix(j.Reason, "waiting for RAM envelope:") {
 		j.DiagnosticCode = "host_memory_headroom"
+	}
+	if j.State == "queued" && strings.HasPrefix(j.Reason, "shared_input_cache:") {
+		j.DiagnosticCode = "shared_input_cache"
+	}
+	if j.State == "queued" && strings.HasPrefix(j.Reason, "shared_input_cache_unreported:") {
+		j.DiagnosticCode = "shared_input_cache_unreported"
 	}
 	if j.State == "queued" && strings.HasPrefix(j.Reason, "disk_headroom:") {
 		j.DiagnosticCode = "disk_headroom"

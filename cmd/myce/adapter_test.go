@@ -219,7 +219,7 @@ func TestAdapterSharedInputUploadNamespaces(t *testing.T) {
 			if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
 				t.Fatal(err)
 			}
-			m := myce.Machine{Capabilities: []string{"native_isolation_landlock", "shared_inputs_v1"}, ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
+			m := myce.Machine{Capabilities: []string{"native_isolation_landlock", "shared_inputs_v1"}, SharedInputCache: &myce.SharedInputCapacity{CapacityBytes: 1 << 20, FreeBytes: 1 << 20}, ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
 				HostMemoryMeasured: true, HostAvailableMemoryGB: 32, HostMemoryBudgetGB: 8, MemoryCeilingSlackGB: .125,
 				CapabilityProfile: &myce.CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
 			if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {

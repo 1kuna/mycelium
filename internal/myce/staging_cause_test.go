@@ -199,11 +199,11 @@ func TestStagingStorageErrorSurvivesHead(t *testing.T) {
 	}
 }
 
-// #720's incident shape: a shared input larger than the default cache fails
+// #720's incident shape: a shared input larger than an explicit cache limit fails
 // admission before any source archive, plan blob, NAS read or environment launch.
 func TestStagingSharedInputCapacityBeforeSourceReads(t *testing.T) {
 	_, clock := fixture(t)
-	w := Worker{StateDir: newTestStateRoot(t), Clock: clock}
+	w := Worker{StateDir: newTestStateRoot(t), Clock: clock, FileCacheLimit: 10 << 30}
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)

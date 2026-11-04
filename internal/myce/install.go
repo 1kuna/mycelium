@@ -147,29 +147,30 @@ type ServiceConfig struct {
 	NativeReadRoots    []string `json:"native_read_roots"`
 	NativeExecuteRoots []string `json:"native_execute_roots"`
 
-	Path                  string    `json:"path"`
-	EnvironmentRoot       string    `json:"environment_root"`
-	Role                  string    `json:"role"`
-	Detection             Detection `json:"detection"`
-	Name                  string    `json:"name"`
-	Queue                 string    `json:"queue"`
-	Listen                string    `json:"listen"`
-	DiscoveryListen       string    `json:"discovery_listen,omitempty"`
-	NAS                   string    `json:"nas"`
-	Checkpoints           string    `json:"checkpoint_root"`
-	ModelRoot             string    `json:"model_root"`
-	ModelCatalog          string    `json:"model_catalog"`
-	EnvironmentCatalog    string    `json:"environment_catalog"`
-	State                 string    `json:"state_dir"`
-	ModelCache            string    `json:"model_cache"`
-	EnvironmentCache      string    `json:"environment_cache"`
-	FileCacheBytes        int64     `json:"file_cache_bytes"`
-	ModelCacheBytes       int64     `json:"model_cache_bytes"`
-	EnvironmentCacheBytes int64     `json:"environment_cache_bytes"`
-	Binary                string    `json:"binary"`
-	Credentials           string    `json:"credentials"`
-	Service               string    `json:"service"`
-	Config                string    `json:"config"`
+	Path                   string    `json:"path"`
+	EnvironmentRoot        string    `json:"environment_root"`
+	Role                   string    `json:"role"`
+	Detection              Detection `json:"detection"`
+	Name                   string    `json:"name"`
+	Queue                  string    `json:"queue"`
+	Listen                 string    `json:"listen"`
+	DiscoveryListen        string    `json:"discovery_listen,omitempty"`
+	NAS                    string    `json:"nas"`
+	Checkpoints            string    `json:"checkpoint_root"`
+	ModelRoot              string    `json:"model_root"`
+	ModelCatalog           string    `json:"model_catalog"`
+	EnvironmentCatalog     string    `json:"environment_catalog"`
+	State                  string    `json:"state_dir"`
+	ModelCache             string    `json:"model_cache"`
+	EnvironmentCache       string    `json:"environment_cache"`
+	FileCacheBytes         int64     `json:"file_cache_bytes"`
+	FileCacheBytesExplicit bool      `json:"file_cache_bytes_explicit,omitempty"`
+	ModelCacheBytes        int64     `json:"model_cache_bytes"`
+	EnvironmentCacheBytes  int64     `json:"environment_cache_bytes"`
+	Binary                 string    `json:"binary"`
+	Credentials            string    `json:"credentials"`
+	Service                string    `json:"service"`
+	Config                 string    `json:"config"`
 }
 
 // PlanInstall is pure. The command boundary supplies the OS account; omitted
@@ -211,7 +212,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.State = filepath.Join(root, role, "state")
 	c.ModelCache = filepath.Join(c.State, "model-cache")
 	c.EnvironmentCache = filepath.Join(c.State, "environment-cache")
-	c.FileCacheBytes = 10 << 30
+	c.FileCacheBytes = 0
 	c.ModelCacheBytes = 100 * 1024 * 1024 * 1024
 	c.EnvironmentCacheBytes = 20 * 1024 * 1024 * 1024
 	c.Checkpoints = filepath.Join(nas, "mycelium", "checkpoints")
@@ -538,7 +539,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 }
 
 func ReadServiceConfig(path string) (ServiceConfig, error) {
-	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention, FileStoreBytes: 100 << 30, FileCacheBytes: 10 << 30}
+	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention, FileStoreBytes: 100 << 30, FileCacheBytes: 0}
 	b, e := os.ReadFile(path)
 	if e != nil {
 		return c, e
@@ -557,6 +558,12 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 		RequiredWorkers json.RawMessage `json:"required_workers"`
 	}{ServiceConfig: &c}
 	e = decoder.Decode(&legacy)
+	// Like environment sizing, retire only the exact old default. Earlier
+	// configurations did not distinguish an explicit 10 GiB from the default.
+	// New explicit values record intent, including an explicit 10 GiB.
+	if e == nil && c.Role == "worker" && c.FileCacheBytes == 10<<30 && !c.FileCacheBytesExplicit {
+		c.FileCacheBytes = 0
+	}
 	// Retire the exact installer default that throttled serialized control work
 	// past worker authorization/loss deadlines (#108). Saved upgrades otherwise
 	// preserve old defaults forever. Distinct operator overrides stay explicit.
@@ -793,7 +800,9 @@ func (c ServiceConfig) Args() []string {
 		args = []string{"join", "--reserve-cpu-cores", strconv.Itoa(c.CPUReserveCores), "--cpu-budget-cores", strconv.Itoa(c.CPUBudgetCores), "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--job-file-root", c.NAS, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}
 	if c.Role == "worker" {
-		args = append(args, "--file-cache-bytes", strconv.FormatInt(c.FileCacheBytes, 10))
+		if c.FileCacheBytes > 0 {
+			args = append(args, "--file-cache-bytes", strconv.FormatInt(c.FileCacheBytes, 10))
+		}
 		if c.GPUTelemetryHelper != "" {
 			args = append(args, "--gpu-telemetry-helper", c.GPUTelemetryHelper)
 		}

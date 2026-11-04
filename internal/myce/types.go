@@ -544,6 +544,7 @@ type Machine struct {
 	Devices                []MachineDevice        `json:"devices"`
 	InventoryReason        string                 `json:"inventory_reason,omitempty"`
 	CPUIsolation           string                 `json:"cpu_isolation,omitempty"`
+	sharedInputClaims      map[string]SharedInput
 	cpuLedger              bool
 	CPUReserveCores        int           `json:"cpu_reserve_cores,omitempty"`
 	CPUBudgetCores         int           `json:"cpu_budget_cores,omitempty"`
@@ -556,6 +557,7 @@ type Machine struct {
 
 	CachedSharedInputs  []string             `json:"cached_shared_inputs,omitempty"`
 	SharedInputEvidence *SharedInputEvidence `json:"shared_input_evidence,omitempty"`
+	SharedInputCache    *SharedInputCapacity `json:"shared_input_cache,omitempty"`
 
 	Capabilities                []string            `json:"capabilities,omitempty"`
 	NativeIsolationWarning      string              `json:"native_isolation_warning,omitempty"`

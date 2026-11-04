@@ -108,6 +108,19 @@ func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
+	// StartDev returns before its worker joins. Shared-input admission needs
+	// that worker's capacity report, not incidental time spent uploading files.
+	await(t, func() bool {
+		snapshot, err := d.Queue.Snapshot()
+		if err == nil {
+			for _, m := range snapshot.Machines {
+				if m.ID == "fake-1" && m.SharedInputCache != nil {
+					return true
+				}
+			}
+		}
+		return false
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	ref := sharedFixtureFile(t, t.TempDir(), "source", "source")

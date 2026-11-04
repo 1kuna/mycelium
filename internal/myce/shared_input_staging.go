@@ -90,6 +90,10 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 	}()
 	go func() {
 		defer close(b.done)
+		// Run after reservation/partial cleanup and build-lock release, including
+		// detached cancellation tails. A copied heartbeat must not retain a
+		// reservation whose writer has already exited.
+		defer c.refreshCapacityIfTracked()
 		defer os.Remove(filepath.Join(c.cache.Root, "locks", stageKey+".build"))
 		lock, err := c.cache.lock(ctx, stageKey+".build", syscall.LOCK_EX)
 		if err == nil {

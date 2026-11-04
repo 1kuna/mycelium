@@ -140,6 +140,9 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		return j
 	}
 	j := job(s)
+	if err := view.sharedInputCapacityRefusal(j); err != nil {
+		return ResolveReport{}, err
+	}
 	if !environmentPlatformsMatch(j.Spec.Needs, recipes) {
 		r.Findings = append(r.Findings, ResolveFinding{Field: "environment.platforms", Side: "queue", Problem: "the environment has no recipe for the platform this job's needs select", Fix: "Add a recipe for that platform (for CPU work, a cpu recipe), or change needs to match an existing recipe."})
 	}

@@ -35,6 +35,7 @@ type SharedInputCache struct {
 	hits          uint64
 	misses        uint64
 	nasBytes      uint64
+	capacity      *SharedInputCapacity
 }
 
 // sharedVerifiedRecord holds the metadata signature (size, mode, mtime, inode
@@ -119,6 +120,7 @@ func removeSharedEntry(path string) error {
 	return os.RemoveAll(path)
 }
 func (c *SharedInputCache) Acquire(ctx context.Context, s SharedInput, nasRoot string) (string, func(), error) {
+	defer c.refreshCapacityIfTracked()
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
@@ -143,6 +145,7 @@ func (c *SharedInputCache) Acquire(ctx context.Context, s SharedInput, nasRoot s
 			at := c.cache.Clock.Now()
 			_ = os.Chtimes(filepath.Join(c.cache.Root, key, "ready.json"), at, at)
 			unlockEnvironment(use)
+			c.refreshCapacityIfTracked()
 		})
 	}
 	path, err := c.ensure(ctx, s, nasRoot)
@@ -252,6 +255,12 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		reservation := strings.TrimSuffix(stage, ".partial") + ".reservation"
 		if e == nil {
 			e = os.WriteFile(reservation, []byte(strconv.FormatInt(need, 10)), 0600)
+		}
+		c.mu.Lock()
+		tracked := c.capacity != nil
+		c.mu.Unlock()
+		if tracked {
+			c.refreshCapacityLocked()
 		}
 		unlockEnvironment(gate)
 		if e != nil {

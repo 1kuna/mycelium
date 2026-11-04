@@ -15,6 +15,20 @@ filtered and full views and per-job GET. This can repeat observation work during
 completions; ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
 injected queue time at capture, rather than the response completion time.
 
+From s072, machine `shared_input_cache` reports `capacity_bytes`, `free_bytes`
+and `evictable_bytes`. Free space excludes cache allocation and outstanding
+staging reservations; evictable space contains only inactive reproducible entries.
+`protected` maps cache identities to allocated bytes held by readers/custody, so
+placement can reuse an already held input without charging it twice. Check-ins
+copy an in-memory snapshot; cache discovery does not run under the queue mutex.
+Absent reports withhold shared-input placement. Temporary cache pressure appears
+as job `diagnostic_code: shared_input_cache`, with byte comparisons in `reason`.
+Resolve/submit return `shared_input_cache_capacity` only when all enabled workers
+under consideration report capacity and none of the matching targets can hold
+the job. Missing reports accept and queue the job with
+`diagnostic_code: shared_input_cache_unreported`, including during startup and
+rolling upgrades; those workers remain excluded from shared-input placement.
+
 Machine `cpu_extension_fingerprint` identifies the CPU qualification identity;
 device entries carry their own extension fingerprints and reports. The scalar
 `extension_fingerprint` and reports retain a first-device compatibility view.
