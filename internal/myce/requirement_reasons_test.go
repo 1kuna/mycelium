@@ -100,3 +100,30 @@ func TestRequirementReasonsNativeAndMissingPin(t *testing.T) {
 		t.Fatal("missing pin reason invisible", got.RequirementReasons, err)
 	}
 }
+
+func TestRequirementReasonsResolveAndPortability(t *testing.T) {
+	q, _ := fixture(t)
+	s := cpuResolveSpec()
+	s.AllowedMachines = []string{"worker-a"}
+	s.RequirementReasons = map[string]string{"host": "private authored explanation"}
+	for _, item := range []struct {
+		name    string
+		legacy  map[string]string
+		missing bool
+	}{{"shared spec", nil, false}, {"legacy request", map[string]string{"host": "private legacy explanation"}, false}, {"explicit legacy override", map[string]string{}, true}} {
+		t.Run(item.name, func(t *testing.T) {
+			r, err := q.Resolve(ResolveRequest{Spec: s, RequirementReasons: item.legacy})
+			if err != nil || strings.Contains(strings.Join(r.Notes, " "), "Host pin has no declared") != item.missing {
+				t.Fatal("resolve ignored authored explanation/legacy override", r.Notes, err)
+			}
+			p, err := q.Portability(PortabilityRequest{Spec: &s, RequirementReasons: item.legacy})
+			data, _ := json.Marshal(p)
+			if err != nil || strings.Contains(strings.Join(p.Notes, " "), "Host pin has no declared") != item.missing || strings.Contains(string(data), "private") {
+				t.Fatal("portability ignored explanation or leaked prose", err)
+			}
+		})
+	}
+	if len(q.s.Jobs) != 0 {
+		t.Fatal("advice submitted work")
+	}
+}
