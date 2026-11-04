@@ -25,6 +25,8 @@ type WorkerProbeDefaults struct {
 	DeviceFaults func() DeviceFaultSource
 	// Nil disables per-attempt process sampling on hosts without cgroups.
 	ProcessMemory func() *processMemoryProbe
+	// Nil disables process-tree CPU observation; cgroup accounting remains available.
+	ProcessCPU func(context.Context, int) (float64, string, error)
 }
 
 // SetWorkerProbeDefaults installs complete defaults during process setup.
@@ -41,6 +43,7 @@ func SetWorkerProbeDefaults(p WorkerProbeDefaults) {
 	workerOwnerSignals = p.OwnerSignals
 	workerProcessMemory = p.ProcessMemory
 	workerMemoryRSS = p.MemoryRSS
+	workerLivenessCPU = p.ProcessCPU
 	extensionIdentityProbe = p.Identity
 	if p.DeviceFaults != nil {
 		workerDeviceFaultSource = p.DeviceFaults

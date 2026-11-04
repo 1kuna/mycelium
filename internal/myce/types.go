@@ -365,6 +365,7 @@ func legacyRank(p string) int {
 }
 
 type Copy struct {
+	Liveness         *AttemptLiveness    `json:"liveness,omitempty"`
 	StartedAt        *time.Time          `json:"started_at,omitempty"`
 	StoppedAt        *time.Time          `json:"stopped_at,omitempty"`
 	ReleasedAt       *time.Time          `json:"released_at,omitempty"`
@@ -413,6 +414,7 @@ type Job struct {
 	ProductionBinding   *PlacementBinding    `json:"production_binding,omitempty"`
 	Runtime             *JobRuntime          `json:"runtime,omitempty"`
 	ApplicationProgress *ApplicationProgress `json:"application_progress,omitempty"`
+	Liveness            *AttemptLiveness     `json:"liveness,omitempty"`
 
 	OutputReservationBytes *uint64          `json:"output_reservation_bytes,omitempty"`
 	OutputAdmissionPending bool             `json:"output_admission_pending,omitempty"`
@@ -672,6 +674,7 @@ type Reply struct {
 // AttemptReport binds heartbeat, progress and Started to an exact execution.
 // Collections have no wire cardinality limit; admission remains in the planner.
 type AttemptReport struct {
+	Liveness               *LivenessReport `json:"liveness,omitempty"`
 	OutputDeliveryProgress uint64          `json:"output_delivery_progress,omitempty"`
 	ApplicationProgress    *ProgressReport `json:"application_progress,omitempty"`
 

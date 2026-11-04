@@ -91,6 +91,48 @@
       ],
       "type": "object"
     },
+    "AttemptLiveness": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "cpu": {
+          "$ref": "#/$defs/LivenessSignal"
+        },
+        "idle_seconds": {
+          "type": "number"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "received_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "work_dir": {
+          "$ref": "#/$defs/LivenessSignal"
+        }
+      },
+      "required": [
+        "cpu",
+        "work_dir",
+        "attempt",
+        "machine",
+        "session",
+        "received_at",
+        "state"
+      ],
+      "type": "object"
+    },
     "AttemptMemoryFacts": {
       "properties": {
         "attempt": {
@@ -515,6 +557,9 @@
         },
         "extension": {
           "$ref": "#/$defs/ExtensionSelection"
+        },
+        "liveness": {
+          "$ref": "#/$defs/AttemptLiveness"
         },
         "loss_charged": {
           "type": "boolean"
@@ -1726,6 +1771,10 @@
           "description": "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies.",
           "x-contract": "stable"
         },
+        "liveness": {
+          "$ref": "#/$defs/AttemptLiveness",
+          "x-contract": "diagnostic"
+        },
         "local_outputs": {
           "$ref": "#/$defs/TaskOutputCustody",
           "x-contract": "diagnostic"
@@ -2255,6 +2304,35 @@
         "host_gb",
         "evidence",
         "source"
+      ],
+      "type": "object"
+    },
+    "LivenessSignal": {
+      "properties": {
+        "advancing": {
+          "type": "boolean"
+        },
+        "age_seconds": {
+          "type": "number"
+        },
+        "compared": {
+          "type": "boolean"
+        },
+        "idle_seconds": {
+          "type": "number"
+        },
+        "unavailable": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "age_seconds",
+        "compared",
+        "advancing",
+        "idle_seconds"
       ],
       "type": "object"
     },

@@ -2511,6 +2511,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	}
 	j.Progress = report.Progress
 	q.retainApplicationProgress(j, report, m)
+	q.retainLiveness(j, report)
 	if j.State == "stopping" {
 		reply.PriorityStop = priorityStop(j)
 		reply.UserCancel = cancelled(j)
@@ -2573,6 +2574,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.InputsStagedAt = nil
 	j.Timing = nil
 	j.ApplicationProgress = nil
+	j.Liveness = nil
 	now := q.clock.Now()
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	j.AssignedAt = &now
