@@ -379,7 +379,7 @@ func freezeAdapterExtension(e myce.Extension, archive string) (myce.Extension, e
 	return myce.ReadExtension(folder)
 }
 
-func runAdapter(ctx context.Context, file, entry string, args []string, inputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer) error {
+func runAdapter(ctx context.Context, file, entry string, args []string, inputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer, overrides ...profileOverrides) error {
 	root, err := os.Getwd()
 	if err != nil {
 		return err
@@ -406,5 +406,5 @@ func runAdapter(ctx context.Context, file, entry string, args []string, inputs m
 	if rel, e := filepath.Rel(root, abs); e == nil && profileRelative(rel) {
 		p.Source.AdapterFile = rel
 	}
-	return runPreparedProfile(ctx, root, p, selected, args, inputs, key, notify, config, joining, address, token, out, errOut)
+	return runPreparedProfile(ctx, root, p, selected, args, inputs, key, notify, config, joining, address, token, out, errOut, overrides...)
 }

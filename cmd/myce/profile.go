@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"gopkg.in/yaml.v3"
 	"mycelium/internal/myce"
@@ -129,12 +130,14 @@ func profileFailure(out io.Writer, r *profileReceipt, code int, reason string) e
 	return waitError(code, reason)
 }
 
-func runProfile(ctx context.Context, name string, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer) error {
+type profileOverrides struct{ Class, Deadline *string }
+
+func runProfile(ctx context.Context, name string, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer, overrides ...profileOverrides) error {
 	p, root, data, err := readProfile(name)
 	if err != nil {
 		return err
 	}
-	return runPreparedProfile(ctx, root, p, data, args, itemInputs, key, notify, config, joining, address, token, out, errOut)
+	return runPreparedProfile(ctx, root, p, data, args, itemInputs, key, notify, config, joining, address, token, out, errOut, overrides...)
 }
 
 // readProfile locates, strictly decodes and validates a profile; run and
@@ -195,7 +198,24 @@ func (p executionProfile) placementAdvisories() []string {
 	return myce.PlacementAdvisories(p.Spec, p.RequirementReasons, variants...)
 }
 
-func runPreparedProfile(ctx context.Context, root string, p executionProfile, data []byte, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer) error {
+func runPreparedProfile(ctx context.Context, root string, p executionProfile, data []byte, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer, overrides ...profileOverrides) error {
+	var override profileOverrides
+	if len(overrides) > 0 {
+		override = overrides[0]
+	}
+	if override.Class != nil {
+		if *override.Class == "" {
+			return waitError(64, "class must not be empty")
+		}
+		p.Class = *override.Class
+	}
+	if override.Deadline != nil {
+		d, err := time.Parse(time.RFC3339, *override.Deadline)
+		if err != nil {
+			return waitError(64, "deadline must be RFC3339")
+		}
+		p.Deadline = &d
+	}
 	for _, advice := range p.placementAdvisories() {
 		fmt.Fprintln(errOut, "placement advisory: "+advice)
 	}
@@ -223,6 +243,12 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		Profile string
 		Args    []string
 	}{string(data), args})
+	if override.Class != nil || override.Deadline != nil {
+		intent = profileHash(struct {
+			Intent, Class string
+			Deadline      *time.Time
+		}{intent, p.Class, p.Deadline})
+	}
 	if len(itemRefs) > 0 {
 		// Local filenames are not identity: identical bytes at another path adopt.
 		intent = profileHash(struct {
@@ -488,7 +514,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			return waitError(64, "profile_invalid: "+err.Error())
 		}
 		if err = s.Validate(); err != nil {
-			return waitError(64, "profile_invalid: job fields failed validation")
+			return waitError(64, "profile_invalid: "+err.Error())
 		}
 		dir = filepath.Join(receipts, profileHash([]string{p.Project, key}))
 		err = readProfileJSON(filepath.Join(dir, "receipt.json"), &r)
