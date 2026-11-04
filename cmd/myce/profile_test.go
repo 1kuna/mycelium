@@ -22,6 +22,66 @@ import (
 	"mycelium/internal/myce"
 )
 
+func TestProfileRequirementReasonsResolveAndAdapterSchema(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".mycelium", "profiles")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "work.yaml")
+	profile := `name: work
+project: example
+class: experiment
+source: {directory: source}
+run: {command: [echo, ok]}
+needs: {cpu_cores: 1, memory_gb: 1}
+targets: [{os: linux, arch: amd64, platform: cpu}]
+check: [true]
+`
+	for _, tc := range []struct {
+		name, value string
+		valid       bool
+	}{
+		{"valid", "{host: approved parity check}", true},
+		{"sequence", "[host]", false},
+		{"nested value", "{host: [invalid]}", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(profile+"requirement_reasons: "+tc.value+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			p, _, _, err := readProfile(path)
+			adapter := strings.Replace(cpuAdapterYAML("source"), "    source:", "    requirement_reasons: "+tc.value+"\n    source:", 1)
+			_, adapterErr := decodeAdapter([]byte(adapter))
+			if (err == nil) != tc.valid || (adapterErr == nil) != tc.valid {
+				t.Fatalf("profile: %v; adapter: %v", err, adapterErr)
+			}
+			if !tc.valid {
+				return
+			}
+			if p.RequirementReasons["host"] != "approved parity check" {
+				t.Fatal(p.RequirementReasons)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req myce.ResolveRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Error(err)
+					return
+				}
+				if req.RequirementReasons["host"] != "approved parity check" {
+					t.Errorf("resolve reasons: %v", req.RequirementReasons)
+				}
+				_ = json.NewEncoder(w).Encode(myce.ResolveReport{Targets: []myce.ResolveTarget{{Eligible: true}}})
+			}))
+			defer server.Close()
+			var out bytes.Buffer
+			if err := specCommand([]string{"check", "--resolve", "--queue", server.URL, "--token", "fixture", path}, &out, io.Discard); err != nil {
+				t.Fatalf("resolve: %v: %s", err, &out)
+			}
+		})
+	}
+}
+
 func TestProfileDevReceiptRecoveryAndNotification(t *testing.T) {
 	root := t.TempDir()
 	profileDir := filepath.Join(root, ".mycelium", "profiles")
