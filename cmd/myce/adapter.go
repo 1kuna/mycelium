@@ -173,8 +173,11 @@ func validateAdapterEntry(e adapterEntry) error {
 	if s.Environment.LockFile != "" {
 		return errors.New("project-supplied environments await #251; use installed tools or a catalog name")
 	}
-	if s.After != nil && (s.FanOut != nil || len(e.Checks.Result) > 0 || s.Program != nil) {
-		return errors.New("unsupported after/check/fan_out combination (#180)")
+	if s.After != nil && s.FanOut != nil && s.After.Piece != "" {
+		return errors.New("fan_out consumers require the whole parent (omit after.piece)")
+	}
+	if s.After != nil && (len(e.Checks.Result) > 0 || s.Program != nil) {
+		return errors.New("unsupported after/check/program combination (#180)")
 	}
 	if s.After != nil {
 		for _, v := range e.Variants {

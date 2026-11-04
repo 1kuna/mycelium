@@ -84,6 +84,17 @@ In short: run `myce spec check --resolve` first; the job's class is the only urg
 
 ## Wait and check status
 
+**Staged fan-out (from the next release):** a native adapter entry can combine
+`fan_out` and `workload` with
+`after: {job: PARENT_ID, outputs: {first/input: first/result}}`.
+Omit `after.piece`: a fan-out consumer waits for the entire parent to succeed,
+then receives the explicitly mapped accepted `KEY/OUTPUT_NAME` artifacts.
+Keep a durable `--key` for each stage; upstream cancellation stops unfinished
+dependents and their children transitively. Sidecars, qualification and
+production `start_window` retain their queue contracts. Dependent result
+checks and piece-selected fan-out consumers remain unsupported; see the
+[adapter reference](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md).
+
 - For an adapter or profile submission, bind completion to **your own** thread with [t3-binding.md](t3-binding.md) and pass its notifier as `--notify`. One binding per submitting thread, never an orchestrator's or a shared one. For a one-off, wait with `myce wait JOB_ID` (exits 0 only on success); it retries queue outages, and after two minutes without a successful read it logs where it is blocked and reconnects with the installed authority. Check the installed CLI's usage line before relying on a flag.
 - **Available from the next release:** host headroom credits fresh exact-attempt nonreclaimable cgroup memory from managed Docker containers, including jobs without a shared cgroup parent. Missing or five-second-old samples keep the full reservation, and unified CUDA keeps its device-growth floor. External-memory history excludes this sampled container memory; a running container without a fresh sample sets `memory_observation.attribution_unknown: true` and skips external-history recording while retaining physical-memory admission evidence.
 - **Model occupancy proofs:** authenticated `GET /api/models/intervals?limit=100` retains assignment, first-authorized load start, stop intent, exact release and class/tier-change events after slots disappear. Follow `next` as `after` with the first page's `high_water` (limit 1..256); keep `coverage_since` (the current uninterrupted coverage period, restarted after an older-binary rollback) and treat missing legacy times or release evidence as incomplete. Tier changes include effective production pins. See the [interval contract](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#durable-model-engine-interval-history-663).

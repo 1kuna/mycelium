@@ -96,6 +96,16 @@ An explicit absolute `start_by` takes precedence. Keep the policy on the entry,
 alongside class and fan-out, rather than in hardware variants or extension recipes.
 Experiment entries omit it and retain no start deadline.
 
+A native fan-out entry may depend on an existing fan-out parent in the same
+project: set `after: {job: PARENT_ID, outputs: {first/input: first/result}}`
+alongside `fan_out` and `workload`, omitting `after.piece`. Each mapping names a
+local input and a gathered `KEY/OUTPUT_NAME`. The queue waits for the whole
+parent to succeed, binds its accepted outputs and producing attempts, and
+cancels unfinished downstream work transitively when the upstream is cancelled.
+The existing durable `--key`, sidecar, qualification and start-window contracts
+apply. Piece-selected fan-out consumers and dependent result checks remain
+unsupported. See the [job dependency contract](jobs.md).
+
 Native profiles and adapter variants can declare executable prerequisites with
 `needs.tools: [python3.12, node, npm, npx, git]`. Names are PATH executables,
 not packages or version constraints; use a locked environment for exact versions.
