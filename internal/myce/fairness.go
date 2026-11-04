@@ -316,6 +316,9 @@ func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 	return q.batchResourcesFitWithScan(j, m, nil)
 }
 func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {
+	if q.variantParityReason(j, m) != "" {
+		return false
+	}
 	key := resourceKey(j)
 	room, found := resources[key]
 	if !found {

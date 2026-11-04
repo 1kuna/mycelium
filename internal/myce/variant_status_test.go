@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -214,6 +215,89 @@ func TestVariantStatusHistoricalRegistration(t *testing.T) {
 	}
 	if got := check(t, q, b, nil).Job; got == nil || got.ID != j.ID {
 		t.Fatal("historical job stranded")
+	}
+}
+
+func TestVariantStatusMixedRegistrationParity(t *testing.T) {
+	for _, state := range []struct{ legacy, added bool }{{true, false}, {true, true}, {false, true}} {
+		t.Run(fmt.Sprintf("legacy=%t,new=%t", state.legacy, state.added), func(t *testing.T) {
+			q, clock := fixture(t)
+			added, _, b := variantsFixture(t, true)
+			if err := q.AddExtension(added); err != nil {
+				t.Fatal(err)
+			}
+			legacy, _, _ := variantsFixture(t, true)
+			legacy.Name = "z-legacy"
+			legacy.Variants = legacy.Variants[1:] // one historical-contract alternative
+			delete(legacy.Variants[0].Baselines, "extension:"+added.Name)
+			legacy = freezeComposition(t, legacy)
+			if err := q.AddExtension(legacy); err != nil {
+				t.Fatal(err)
+			}
+			b.ExtensionReports = nil
+			for _, item := range []struct {
+				e         Extension
+				qualified bool
+			}{{added, state.added}, {legacy, state.legacy}} {
+				r := newExtensionReport(item.e, &b, "kind:sample")
+				r.Setup, r.Qualified, r.CheckID = true, item.qualified, "native-check"
+				b.ExtensionReports = append(b.ExtensionReports, r)
+			}
+			check(t, q, b, nil)
+			j := submit(t, q, Spec{Name: "mixed", Project: "test", Kind: "sample", Class: "production"})
+			run := check(t, q, b, nil).Job
+			if !state.legacy {
+				if run != nil {
+					t.Fatal("unapproved new alternative admitted", run)
+				}
+				return
+			}
+			if run == nil || run.ID != j.ID || run.Extension == nil || run.Extension.Digest != legacy.Digest {
+				t.Fatal("qualified legacy alternative blocked or wrong digest selected", run)
+			}
+			if err := q.Started(result(run, true)); err != nil {
+				t.Fatal("selected legacy digest blocked at start", err)
+			}
+			q = reopenVariants(t, q, clock)
+			if reason := q.variantParityReason(q.s.Jobs[j.ID], &b); reason != "" {
+				t.Fatal("selected legacy digest blocked after restart", reason)
+			}
+		})
+	}
+}
+
+func TestVariantStatusCommittedPreemptionTarget(t *testing.T) {
+	q, clock := fixture(t)
+	e, a, b := variantsFixture(t, true)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, a, nil)
+	check(t, q, b, nil)
+	j := submit(t, q, variantSpec(e, "experiment"))
+	// Exact releases have completed, but assignment to the paid-for target has
+	// not happened yet. That commitment still excludes other idle targets.
+	if err := q.update(func() error {
+		q.touchJob(j.ID).PreemptionPlacement = &PreemptionPlacement{Machine: a.ID, Session: a.Session, Device: a.Device}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := q.jobSnapshot(j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range got.VariantEligibility {
+		if r.Host == hostID(&b) && r.Variant == r.Target && (r.Eligible || !strings.Contains(strings.Join(r.Reasons, " "), "committed preemption target")) {
+			t.Fatal("uncommitted alternative advertised eligible", r)
+		}
+	}
+	if run := check(t, q, b, nil).Job; run != nil {
+		t.Fatal("uncommitted alternative assigned", run)
+	}
+	clock.Advance(time.Second)
+	if run := check(t, q, a, nil).Job; run == nil || run.ID != j.ID {
+		t.Fatal("committed target did not assign", run)
 	}
 }
 

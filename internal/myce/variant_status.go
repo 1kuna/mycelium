@@ -51,13 +51,29 @@ func (q *Queue) variantParityReason(j *Job, m *Machine) string {
 	if j.Spec.ExtensionCheck != nil || j.Spec.Priority != "production" && jobClass(j.Spec) != "production" {
 		return ""
 	}
+	if slices.Contains(q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()], hostID(m)) {
+		return ""
+	}
+	blocked := false
 	for _, e := range j.Extensions {
-		if !e.matchesTarget(m) {
+		if !e.matchesTarget(m) || (j.State == "running" || j.State == "stopping") && j.Extension != nil && j.Extension.Digest != e.Digest {
 			continue
 		}
-		if e.ProductionParityRequired && !slices.Contains(q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()], hostID(m)) {
-			return variantParityAction
+		if e.ProductionParityRequired {
+			blocked = true
+		} else {
+			// A pre-selection policy check may see several registrations. Only
+			// a qualified alternative can discharge this hold. Candidate admission
+			// checks again after selecting one, and assigned work uses its digest.
+			copy := *j
+			copy.Extensions = []Extension{e}
+			if qualifiedExtension(&copy, m) != nil {
+				return ""
+			}
 		}
+	}
+	if blocked {
+		return variantParityAction
 	}
 	return ""
 }
@@ -217,6 +233,9 @@ func (q *Queue) variantAdmissionReasons(j *Job, m *Machine) []string {
 		if q.preemptionReleasesPending(candidate) {
 			reasons = append(reasons, "selected preemption release pending")
 		}
+		if !q.preemptionPlacementAllows(candidate, m) {
+			reasons = append(reasons, "committed preemption target must assign or lose its session first")
+		}
 		if q.capReasonFor(candidate, m) != "" {
 			reasons = append(reasons, "project concurrency or resource cap")
 		}
@@ -279,7 +298,7 @@ func (q *Queue) missingVariantAdvice(j *Job) []string {
 				continue
 			}
 			for _, other := range targets {
-				if hostID(other) == hostID(scarce) || e.variant(machineTarget(other)) != nil || q.variantFreshness(other) != "fresh" || !q.jobAllowsMachine(j, other.ID) {
+				if hostID(other) == hostID(scarce) || e.variant(machineTarget(other)) != nil || q.variantFreshness(other) != "fresh" || !q.jobAllowsMachine(j, other.ID) || !q.preemptionPlacementAllows(j, other) {
 					continue
 				}
 				ov := values[hostID(other)]
