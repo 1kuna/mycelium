@@ -43,6 +43,9 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 	s := &candidateSet{q: q, m: m, jobs: make([]*Job, 0, len(q.liveJobs())), scores: map[string]float64{}, actives: map[string]float64{}}
 	s.resources = map[batchResourceKey]batchResourceRoom{}
 	fence := q.groupDemandFence(m)
+	if preparing := q.preparationDemandFence(m); preparing != nil && (fence == nil || q.comparePriority(preparing.Spec, fence.Spec) < 0) {
+		fence = preparing
+	}
 	for _, j := range q.liveJobs() {
 		if fence != nil && j.ID != fence.ID && q.comparePriority(j.Spec, fence.Spec) >= 0 {
 			continue
@@ -74,6 +77,24 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 		s.jobs = append(s.jobs, j)
 	}
 	return s
+}
+
+// Once higher-tier demand has paid for this target's release, do not backfill
+// the just-requeued victim ahead of its preparation. Reuse the existing exact
+// preemption placement; otherwise every pull stops and restarts the victim and
+// the worker never becomes idle long enough to build the winner's environment.
+func (q *Queue) preparationDemandFence(m *Machine) *Job {
+	var fence *Job
+	for _, j := range q.liveJobs() {
+		p := j.PreemptionPlacement
+		if j.State != "queued" || cancelled(j) || p == nil || len(p.Releases) == 0 || p.Machine != m.ID || p.Session != m.Session || p.Device != m.Device || environmentReady(j, m) {
+			continue
+		}
+		if fence == nil || q.comparePriority(j.Spec, fence.Spec) < 0 {
+			fence = j
+		}
+	}
+	return fence
 }
 
 // A card stopped for a waiting multi-card demand stays withheld from equal and

@@ -561,6 +561,9 @@ func (q *Queue) waitReason(j *Job) string {
 			machines[targetKey(m)] = m
 		}
 	}
+	if reason := q.preparationWaitingReason(j, machines); reason != "" {
+		return reason
+	}
 	if reason := q.memoryWaitingReason(j, machines); reason != "" {
 		return reason
 	}

@@ -236,3 +236,50 @@ func environmentWaitingReason(j *Job, m *Machine) string {
 	}
 	return "building environment: " + label
 }
+
+// A started build owns this worker until completion or its exact planned-stop
+// receipt. Name that custody rather than suggesting an idle worker can pull.
+func (q *Queue) preparationWaitingReason(j *Job, machines map[string]*Machine) string {
+	blocked := []string{}
+	for _, m := range machines {
+		if !q.placementAllowed(j, m) {
+			continue
+		}
+		active := q.preparationActive(m)
+		fence := q.preparationDemandFence(m)
+		copy := *m
+		if active {
+			copy = q.cpuAfterReleases(m, nil, nil, 1)
+		}
+		fit := false
+		for _, candidate := range q.memoryCandidates(j, &copy) {
+			fit = fit || fits(candidate, &copy, copy.FreeMemoryGB)
+		}
+		if !fit {
+			continue
+		}
+		if !active && fence == nil {
+			return "" // Another compatible target is not held by preparation.
+		}
+		found := false
+		for _, l := range q.s.PreparationPlans {
+			if l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started && (fence == nil || l.Demand != fence.ID) {
+				continue
+			}
+			state := "offered; waiting for builder report"
+			if l.Started {
+				state = "building"
+			}
+			if l.PriorityStop != nil {
+				state = "stopping; waiting for exact release"
+			}
+			blocked = append(blocked, fmt.Sprintf("waiting for software preparation for job %s on %s (environment %s; %s)", l.Demand, m.ID, l.Key, state))
+			found = true
+		}
+		if !found && fence != nil {
+			blocked = append(blocked, fmt.Sprintf("waiting for software preparation for job %s on %s (environment %s; reserved after priority preemption)", fence.ID, m.ID, environmentKey(fence, m)))
+		}
+	}
+	slices.Sort(blocked)
+	return strings.Join(slices.Compact(blocked), "; ")
+}

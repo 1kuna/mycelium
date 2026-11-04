@@ -260,8 +260,14 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 		if j == nil {
 			break
 		}
-		scan.assignments[targetKey(selected.m)] = j
 		excluded[j.ID] = true
+		// Preserve this job's chosen preparation/completion target, but do
+		// not consume a pull with work that cannot start. Keep the worker's
+		// target views available for the next ready fair/priority candidate.
+		if !environmentReady(j, selected.m) {
+			continue
+		}
+		scan.assignments[targetKey(selected.m)] = j
 		remaining := sets[:0]
 		for _, s := range sets {
 			// A check-in offers one next attempt, even on a multi-device worker.
