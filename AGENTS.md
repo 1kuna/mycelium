@@ -44,8 +44,11 @@ myce run --profile gate-quick --input gate-selection.tsv=FILE  # quick on a flee
 ./myce dev # long-running local API and fake workers; Ctrl-C to stop
 ```
 
-Hotfix: quick, deploy, then full, fixing forward. At most two full race suites
-at once on one Mac (more causes false failures). Details: `docs/development.md`.
+Hotfix: quick, deploy, then full, fixing forward. Run full gates on the fleet
+(`myce run --profile gate-full`, or `gate-full-darwin`), not on the T3 Mac: local
+full gates there refilled its Go build cache to 70 GiB in four days and pushed its
+disk under the workers' 50 GiB floor (2026-11-03). At most two full race suites at
+once on one Mac (more causes false failures). Details: `docs/development.md`.
 
 Test behavior, security invariants and real incidents; add a focused regression
 per observed bug. No speculative edge-case matrices, implementation-detail pins,
