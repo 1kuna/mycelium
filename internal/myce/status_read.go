@@ -194,7 +194,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	// Once a batch execution has started, only policy and host identities are
 	// needed for its eligibility summary. Queued/startup work and calls still
 	// need the active diagnostic context, but never the fleet projection.
-	minimal := selected != nil && q.calls[id] == nil && (terminal(selected.State) || selected.State != "queued" && selected.StartedAt != nil)
+	minimal := selected != nil && q.calls[id] == nil && (terminal(selected.State) || selected.State != "queued" && selected.StartedAt != nil && !jobHasVariants(selected))
 	if err == nil {
 		if minimal {
 			copy := statusJobInputs(selected)

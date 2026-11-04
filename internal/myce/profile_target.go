@@ -79,6 +79,8 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 	switch dimension {
 	case "tools":
 		return missingToolsReason(m.ID, missingTools(j, m))
+	case "production parity":
+		return variantParityAction
 	case "native network isolation":
 		if !j.Spec.Needs.Network {
 			return "native_isolation_unavailable: this host has not reported a supported native kernel boundary; upgrade or repair the worker"
@@ -286,6 +288,7 @@ func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job
 			for _, candidate := range candidates {
 				candidate = capacity.memoryCandidate(candidate, &copy)
 				fit := targetFit{key: targetKey(&copy)}
+				fit.check(q.variantParityReason(candidate, &copy) == "", "production parity")
 				fitsResourcesChecked(candidate, &copy, copy.TotalMemoryGB, &fit)
 				hostFailure := hostFitFailure(&copy, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB)
 				fit.check(hostFailure == "", hostFailure)

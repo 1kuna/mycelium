@@ -93,8 +93,12 @@ func extensionCommand(args []string) error {
 		}
 		// Queue first: a frozen-version refusal must not leave a misleading local add.
 		if !*local {
-			if err := client.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
+			var registration myce.ExtensionRegistration
+			if err := client.Call(ctx, "POST", "/api/extensions", e, &registration); err != nil {
 				return err
+			}
+			for _, warning := range registration.Warnings {
+				fmt.Fprintln(os.Stderr, "portability advisory: "+warning)
 			}
 		}
 		if err := myce.InstallExtension(*root, e); err != nil {

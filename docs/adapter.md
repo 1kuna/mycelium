@@ -121,6 +121,22 @@ comparison; a warm repeat reuses matching evidence. Failure remains visible and
 unqualified until an explicit qualification retry or a changed identity. Result
 checks never replace native qualification.
 
+Registration returns non-blocking live portability warnings: missing recipes,
+declared-but-unqualified targets and unknown inventory are separate. Re-run the
+live report after requirements or inventory change. Status and job GET expose
+`variant_eligibility` per host/device and conditional `variant_advice` for scarce
+capacity; [status](status.md#variant-eligibility-499) explains the fields.
+New multi-variant registrations require owner approval through existing
+project/work `production_parity_hosts` before production placement. First compare
+outputs with the reference within the owner's accuracy criteria (MY-19); native
+baselines alone are insufficient. Checks/experiments and historical registrations
+retain their contracts. Per-metric parity design remains #145.
+
+After staging local data and qualifying approved alternatives, remove convenience
+host/device pins from future authored submissions and resolve again. Genuine
+hardware/validation restrictions keep their `requirement_reasons`. Existing
+accepted work is not cancelled or rewritten to move it.
+
 Adapter submission retains the existing profile receipt/observer recovery contract:
 
 ```sh

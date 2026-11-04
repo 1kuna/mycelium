@@ -531,6 +531,9 @@ func (q *Queue) waitReason(j *Job) string {
 		}
 		return "waiting for accepted producer piece"
 	}
+	if reason := q.variantParityWaitingReason(j); reason != "" {
+		return reason
+	}
 	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {
 		found := false
 		for _, target := range q.plannerMachines() {
