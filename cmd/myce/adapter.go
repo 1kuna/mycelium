@@ -170,9 +170,6 @@ func validateAdapterEntry(e adapterEntry) error {
 	if !reflect.ValueOf(s.Environment).IsZero() && len(e.Environments) > 0 {
 		return errors.New("choose environment or environments")
 	}
-	if s.Environment.LockFile != "" {
-		return errors.New("project-supplied environments await #251; use installed tools or a catalog name")
-	}
 	if s.After != nil && (s.FanOut != nil || len(e.Checks.Result) > 0 || s.Program != nil) {
 		return errors.New("unsupported after/check/fan_out combination (#180)")
 	}
