@@ -55,6 +55,11 @@ def select(base):
         if not name.endswith('.go'):
             continue
         path = pathlib.Path(name)
+        # Tagged worker defaults run in the standalone CLI smoke fixture, not
+        # the core package's in-process synthetic host.
+        if name == 'internal/myce/worker_probes_fake.go':
+            packages.setdefault(pathlib.Path('cmd/myce'), set()).add('TestDevStandaloneSmoke')
+            continue
         # The shared fixture lifecycle is exercised through both real TestMains.
         if name == 'internal/testenv/lifecycle.go':
             for directory in ('internal/myce', 'cmd/myce'):

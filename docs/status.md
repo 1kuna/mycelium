@@ -116,6 +116,60 @@ and `started_at`, allowing for clock differences between worker and queue.
 Upgrade the queue before workers that report this field; older queues reject
 unknown request fields.
 
+Running job reads and status rows include `liveness`, also retained on the exact
+entry in `copies` (attempt, machine and session). **Available in the next fleet
+release:** this worker observation requires no application reporter, log output
+or checkpoint. `state` answers one of:
+
+- `advancing`: a fresh live process tree has increased CPU time, or its managed
+  work directory has grown while the process tree is still observed alive.
+- `idle`: both signals have fresh, comparable, unchanged samples;
+  `idle_seconds` is the shorter continuously observed inactive interval, through
+  the latest samples. CLI/page wording is “alive but idle for N min”.
+- `unknown`: old worker, no baseline pair, unavailable process tree, failed or
+  incomplete directory measurement, counter reset or stale observation. Unknown
+  never means idle. A fresh advancing CPU signal suffices when directory size is
+  unknown; directory growth alone cannot establish a live process.
+
+`cpu.value` is cumulative CPU seconds; `work_dir.value` is logical regular-file
+bytes below the managed attempt directory. Each signal has `age_seconds`,
+`compared`, `advancing`, `idle_seconds`, and optional `unavailable`. Absent `value`
+means no successful measurement, so its zero age is not a fresh reading. Ages use
+worker-measured elapsed time plus queue-clock time since `received_at`, without
+synchronizing the two clocks. Cached check-ins do not renew samples. Evidence
+expires after 30 seconds (six normal sample cycles); a failed measurement breaks
+idle continuity immediately. Past/released attempts retain their last values
+and ages with an unknown current state. New attempts reset job-level evidence;
+stale reports/results cannot overwrite it.
+
+The worker samples no more often than every five seconds, separately from its
+control loop, and sends results on its existing check-in. Linux uses a populated
+attempt cgroup's aggregate `cpu.stat` when available. Native macOS/Linux otherwise
+use `ps` CPU-time counters for the attempt anchor's group and descendant tree,
+with checks against the anchor birth identity recorded at launch, before and
+after each inventory. A reused PID cannot supply activity after its owned
+anchor exits. Membership changes or decreasing counters break
+idle comparisons; positive CPU advance remains useful. Short-lived processes
+between samples and detached descendants no longer connected to that tree can
+be missed. Docker without a verified local attempt cgroup, and recovered
+processes without a live anchor, report CPU unknown. No Docker client or worker
+process is substituted for payload CPU.
+
+Directory measurement uses metadata only, never payload reads or symlink
+traversal, and excludes writes outside the managed attempt directory (including
+NAS checkpoints and shared caches). Each scan is limited to 4,096 entries,
+64-entry directory-read batches, and a cooperative 25 ms deadline: at most 0.5%
+of the five-second cycle spent walking locally. The entry bound also caps work
+on fast, very large trees; partial totals are unknown, never unchanged zeros.
+A blocked OS call can exceed the deadline, but the single background collector
+retains its slot until it returns, cannot block check-in or launch overlapping
+scans, and its last observation ages to unknown. CPU probing has a two-second
+command deadline plus a one-second pipe-drain allowance. All collection runs on
+the worker, outside `q.mu`; the queue only retains small fenced values and
+projects status. These are activity signals, not proof of useful progress,
+completion, a hang, or permission to kill/retry a job; no scheduling or retry
+policy consumes them.
+
 `myce status` and `GET /api/status` report `queue_release` (`version`, `commit`)
 from the queue process. Each machine's `release` reports the worker process's
 version and commit from its check-in. Missing worker releases mean unknown
