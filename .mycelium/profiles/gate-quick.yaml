@@ -1,5 +1,5 @@
-# Quick runs a subset of the full gate's commands at the same concurrency, so
-# gate-full's measured 7 GiB Linux envelope bounds it; see docs/development.md.
+# Quick retains the historical conservative 7 GiB Linux bound across selections.
+# Its shared memory identity excludes selection inputs; see docs/development.md.
 # Submit with --input gate-selection.tsv=FILE from scripts/gate-related.py BASE.
 name: mycelium-gate-quick
 project: mycelium

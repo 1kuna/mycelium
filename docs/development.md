@@ -319,9 +319,9 @@ drain. The target is roughly an hour per new merge after that backlog drains.
 Adding runners is the smallest change because the existing submitter already
 waits cheaply through `myce wait`. Ending the workflow after submission would
 lose its verified per-merge result unless a separate completion publisher and
-credential were added. Reducing gate memory is not justified by current evidence:
-the platform declarations above already use measured successful peaks plus
-headroom. Cost: two persistent runner installations, workspaces and small
+credential were added. Subsequent measurements now justify the smaller Linux
+full-gate declaration documented above; the initial runner-capacity estimate
+used the previous declarations. Cost: two persistent runner installations, workspaces and small
 submitter/wait processes, plus overlapping gate demand within ordinary Mycelium
 admission; gate resources, test coverage and result acceptance stay the same.
 
