@@ -129,6 +129,24 @@ func TestRSSGuardRejectsLateAndReusedIdentity(t *testing.T) {
 	}
 }
 
+func TestRSSGuardRejectsPendingNativeExit(t *testing.T) {
+	birth, err := processBirth(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &process{}
+	pid := os.Getpid()
+	g := &nativeGroup{p: p, supervisor: &exec.Cmd{Process: &os.Process{Pid: pid}}, custody: workerState{Groups: map[int]map[int]string{pid: {pid: birth}}}}
+	g.main = &nativeMember{exitObservation: &nativeExitObservation{exit: &memberExit{Status: 0, ObservedAt: time.Unix(100, 0)}}}
+	p.native = g
+	if g.main.Exit != nil {
+		t.Fatal("fixture must leave cached exit pending")
+	}
+	if p.stopRSS(time.Unix(101, 0), p.rssRoots(), &RSSLimitEvidence{ObservedBytes: 2 << 30, LimitBytes: 1 << 30, Quality: "owned_session_rss"}) || p.outcome.RSSLimit != nil {
+		t.Fatal("pending successful native exit became OOM")
+	}
+}
+
 func TestRSSGuardLinuxKeepsCgroupAccounting(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux cgroup contract")

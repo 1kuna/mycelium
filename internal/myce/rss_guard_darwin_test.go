@@ -85,3 +85,37 @@ func TestDarwinRSSGuardChild(t *testing.T) {
 	<-timer.C
 	runtime.KeepAlive(data)
 }
+
+func TestDarwinRSSGuardMemberBirthAndControlExclusion(t *testing.T) {
+	// The control anchor alone is far above the payload threshold; payload and
+	// a separate-PGID helper remain below it. Unrelated process 99 is excluded.
+	const data = "7 1 1048576\n8 7 1024\n9 1 2048\n99 1 1048576\n"
+	for _, mode := range []string{"complete", "reused member", "changed session"} {
+		t.Run(mode, func(t *testing.T) {
+			collected := false
+			birth := func(pid int) (string, error) {
+				if collected && pid == 9 && mode == "reused member" {
+					return "replacement", nil
+				}
+				return fmt.Sprint(pid), nil
+			}
+			belongs := func(pid, root int) bool { return !(collected && pid == 9 && mode == "changed session") }
+			bytes, members, err := sampleOwnedResident(map[int]string{7: "7"}, birth, func(int) ([]int, error) { return []int{7, 8, 9}, nil }, belongs, func() ([]byte, error) { collected = true; return []byte(data), nil })
+			if mode != "complete" {
+				if err == nil {
+					t.Fatal("changed member became valid RSS")
+				}
+				return
+			}
+			if err != nil || bytes != 3<<20 || members != 2 {
+				t.Fatalf("control/sibling charged or helper missing: %d %d %v", bytes, members, err)
+			}
+			g := rssGuard{limit: 4 << 20}
+			for i := 0; i < 3; i++ {
+				if g.observe(time.Unix(100+int64(i), 0), map[int]string{7: "7"}, bytes, members, err) != nil {
+					t.Fatal("supervisor overhead stopped below-limit payload")
+				}
+			}
+		})
+	}
+}

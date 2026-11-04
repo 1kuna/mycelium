@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/sys/unix"
 	"mycelium/internal/probeguard"
 )
 
@@ -69,29 +70,52 @@ func readDarwinProcessPressure(ctx context.Context, command func(context.Context
 // fence reuse both before and during the inventory; missing evidence is unknown.
 func darwinOwnedResident(roots map[int]string) (uint64, int, error) {
 	probeguard.Check()
+	return sampleOwnedResident(roots, processBirth, workerGroupMembers, func(pid, root int) bool {
+		session, sessionErr := unix.Getsid(pid)
+		group, groupErr := syscall.Getpgid(pid)
+		return sessionErr == nil && groupErr == nil && (session == root || group == root)
+	}, func() ([]byte, error) { return processPS("-ax", "-o", "pid=,ppid=,rss=") })
+}
+
+func sampleOwnedResident(roots map[int]string, birthOf func(int) (string, error), membersOf func(int) ([]int, error), belongs func(int, int) bool, inventory func() ([]byte, error)) (uint64, int, error) {
 	owned := map[int]bool{}
+	births := map[int]string{}
+	owners := map[int]int{}
+	excluded := map[int]bool{}
 	for root, saved := range roots {
-		birth, err := processBirth(root)
+		birth, err := birthOf(root)
 		if err != nil || saved == "" || birth != saved {
 			return 0, 0, errors.New("RSS ownership unavailable")
 		}
-		members, err := workerGroupMembers(root)
+		excluded[root] = true
+		members, err := membersOf(root)
 		if err != nil {
 			return 0, 0, err
 		}
 		for _, pid := range members {
+			birth, err := birthOf(pid)
+			if err != nil || birth == "" || !belongs(pid, root) {
+				return 0, 0, errors.New("RSS member ownership unavailable")
+			}
 			owned[pid] = true
+			births[pid], owners[pid] = birth, root
 		}
 	}
-	out, err := processPS("-ax", "-o", "pid=,ppid=,rss=")
+	out, err := inventory()
 	if err != nil {
 		return 0, 0, err
 	}
 	for root, saved := range roots {
-		birth, err := processBirth(root)
+		birth, err := birthOf(root)
 		if err != nil || birth != saved {
 			return 0, 0, errors.New("RSS ownership changed")
 		}
 	}
-	return ownedTreeRSS(out, owned)
+	for pid, saved := range births {
+		birth, err := birthOf(pid)
+		if err != nil || birth != saved || !belongs(pid, owners[pid]) {
+			return 0, 0, errors.New("RSS member ownership changed")
+		}
+	}
+	return ownedTreeRSS(out, owned, excluded)
 }

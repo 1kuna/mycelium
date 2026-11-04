@@ -29,9 +29,12 @@ or release. Pressure/owner-latency yield and admission remain independent.
 
 The cadence preserves the observer's measured cost budget: 30 original RSS plus
 pressure cycles took 27.0 ms median, 32.1 ms maximum; 20 complete birth-fenced
-session/RSS plus pressure cycles took 53.1 ms median, 59.0 ms p95, 62.8 ms maximum
-on one development Mac. One new cycle per second costs approximately the same
-probe wall time as the old 500 ms observer. Two further observations filter brief
+session/RSS plus pressure cycles, including member birth checks, took 65.4 ms
+median, 74.0 ms p95, 77.9 ms maximum
+on one development Mac. One new cycle per second uses about 65 ms of serialized probe wall time versus
+54 ms for two old cycles, while retaining a roughly three-second reaction window.
+A two-second cadence would halve probe work but double that reaction window.
+Two further observations filter brief
 spikes without a second sampler or an arbitrary memory multiplier. These are
 bounded local overhead measurements, not fleet load qualification.
 

@@ -94,15 +94,31 @@ func (p *process) stopRSS(now time.Time, roots map[int]string, evidence *RSSLimi
 	if !maps.Equal(roots, p.rssRootsLocked()) || p.outcome.RSSLimit != nil {
 		return false
 	}
-	p.exitObservation.mu.Lock()
-	exited := p.exitObservation.exit != nil || p.outcome.Exit != nil
-	p.exitObservation.mu.Unlock()
+	observation := &p.exitObservation
 	if p.native != nil && p.native.main != nil {
-		exited = exited || p.native.main.Exit != nil
+		if p.native.main.exitObservation == nil {
+			p.native.main.exitObservation = new(nativeExitObservation)
+		}
+		observation = p.native.main.exitObservation
 	}
-	if exited {
+	// Receipt commit and native exit observation arbitrate under the same lock.
+	// Release it before stopLocked, whose signal path takes this lock itself.
+	observation.mu.Lock()
+	accepted := func() bool {
+		if observation.exit != nil || p.outcome.Exit != nil || p.native != nil && p.native.main != nil && p.native.main.Exit != nil {
+			return false
+		}
+		return p.recordRSSLocked(roots, evidence)
+	}()
+	observation.mu.Unlock()
+	if !accepted {
 		return false
 	}
+	p.stopLocked(now, 0, true)
+	return true
+}
+
+func (p *process) recordRSSLocked(roots map[int]string, evidence *RSSLimitEvidence) bool {
 	for root, saved := range roots {
 		birth, err := processBirth(root)
 		if err != nil || birth != saved {
@@ -126,7 +142,6 @@ func (p *process) stopRSS(now time.Time, roots map[int]string, evidence *RSSLimi
 		}
 		p.outcome = next
 	}
-	p.stopLocked(now, 0, true)
 	return true
 }
 

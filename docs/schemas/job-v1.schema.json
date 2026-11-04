@@ -3255,6 +3255,25 @@
       ],
       "type": "object"
     },
+    "RSSLimitEvidence": {
+      "properties": {
+        "limit_bytes": {
+          "type": "integer"
+        },
+        "observed_bytes": {
+          "type": "integer"
+        },
+        "quality": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "observed_bytes",
+        "limit_bytes",
+        "quality"
+      ],
+      "type": "object"
+    },
     "RecoveredResult": {
       "properties": {
         "attempt": {
@@ -3648,6 +3667,9 @@
         },
         "reason": {
           "type": "string"
+        },
+        "rss_limit": {
+          "$ref": "#/$defs/RSSLimitEvidence"
         },
         "staging": {
           "$ref": "#/$defs/StagingCause"

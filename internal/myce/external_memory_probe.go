@@ -20,7 +20,7 @@ func workerTreeRSS(data []byte, root int) (float64, error) {
 }
 
 // Reuse one process inventory for the worker or an exact attempt session.
-func ownedTreeRSS(data []byte, roots map[int]bool) (uint64, int, error) {
+func ownedTreeRSS(data []byte, roots map[int]bool, excluded ...map[int]bool) (uint64, int, error) {
 	type row struct {
 		pid, ppid int
 		rss       uint64
@@ -60,9 +60,13 @@ func ownedTreeRSS(data []byte, roots map[int]bool) (uint64, int, error) {
 	found := map[int]bool{}
 	for _, r := range rows {
 		if owned[r.pid] {
-			total += r.rss
-			members++
 			found[r.pid] = true
+			// The anchor establishes custody but is Mycelium control overhead.
+			// Keep following its children without charging its own resident pages.
+			if len(excluded) == 0 || !excluded[0][r.pid] {
+				total += r.rss
+				members++
+			}
 		}
 	}
 	for root := range roots {
