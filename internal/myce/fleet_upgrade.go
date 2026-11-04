@@ -338,12 +338,7 @@ func (q *Queue) fleetProductionIdle() bool {
 			return false
 		}
 		// Completion/loss is not proof that the remote attempt has released custody.
-		for _, copy := range j.Copies {
-			if !copy.ReleaseConfirmed {
-				return false
-			}
-		}
-		if j.Attempt > 0 && !j.ReleaseConfirmed {
+		if attemptReleasePending(j) {
 			return false
 		}
 	}

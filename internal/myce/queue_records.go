@@ -79,15 +79,7 @@ func mutableJob(j *Job) bool {
 	if parkedStorageCustody(j) {
 		return true
 	}
-	if deliveryPending(j) || !terminal(j.State) || j.Attempt > 0 && !j.ReleaseConfirmed {
-		return true
-	}
-	for _, c := range j.Copies {
-		if !c.ReleaseConfirmed {
-			return true
-		}
-	}
-	return false
+	return deliveryPending(j) || !terminal(j.State) || attemptReleasePending(j)
 }
 func (q *Queue) indexJob(id string, j *Job) {
 	if j == nil {
