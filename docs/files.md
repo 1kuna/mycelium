@@ -380,7 +380,8 @@ largest enabled matching worker cache capacity. `shared_input_cache_unreported`
 means no matching enabled worker reports capacity; older workers cannot accept
 these inputs. Declaration sizes are a hard requirement: file bytes, manifest
 file totals, or `unpacked_bytes` for a tree/archive, plus compressed archive
-bytes for cold staging. Every simultaneous declared input must fit together.
+bytes for cold staging. Every distinct cache identity needed simultaneously must fit together; aliases
+with identical verified content share one entry.
 Mycelium chooses a fitting worker; do not pin a host to work around data size.
 If a fitting worker exists but its space is occupied, the job waits with
 `diagnostic_code: shared_input_cache` and required/free/evictable/capacity bytes.

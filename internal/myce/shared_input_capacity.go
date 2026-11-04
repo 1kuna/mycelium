@@ -127,12 +127,20 @@ func (c *SharedInputCache) refreshCapacityLocked() {
 // Include archive staging alongside the expanded payload. Saturation makes an
 // overflowing collection impossible rather than letting it wrap into a fit.
 func sharedInputRequired(s Spec, m *Machine) uint64 {
-	var required uint64
+	sizes := map[string]uint64{}
 	for _, input := range s.SharedInputs {
-		required = addDiskBytes(required, uint64(max(0, input.bytes())))
-		if input.Archive != "" && (m == nil || !slices.Contains(m.CachedSharedInputs, input.key())) {
-			required = addDiskBytes(required, uint64(max(0, input.SizeBytes)))
+		key := input.key()
+		size := uint64(max(0, input.bytes()))
+		if input.Archive != "" && (m == nil || !slices.Contains(m.CachedSharedInputs, key)) {
+			size = addDiskBytes(size, uint64(max(0, input.SizeBytes)))
 		}
+		// Aliases share storage; differing upper bounds must not make the
+		// answer depend on map iteration order.
+		sizes[key] = max(sizes[key], size)
+	}
+	var required uint64
+	for _, size := range sizes {
+		required = addDiskBytes(required, size)
 	}
 	return required
 }
@@ -191,16 +199,15 @@ func (q *Queue) sharedInputCapacityRefusal(j *Job) error {
 		if q.maintenanceBlocked(hostID(m)) || q.deviceAdmissionBlocked(m) || !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
-		if !executionTargetMatches(j.Spec, m) || !deviceAllowed(j, m) || !j.Spec.Needs.cpuOnly() && (m.GPU == "cpu" || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) {
-			continue
-		}
-		if m.SharedInputCache == nil {
-			continue
-		}
-		reported = true
-		largest = max(largest, m.SharedInputCache.CapacityBytes)
-		if sharedInputCacheReason(j.Spec, m, true) == "" {
-			return nil
+		for _, candidate := range sharedInputCandidates(j, m) {
+			if m.SharedInputCache == nil {
+				continue
+			}
+			reported = true
+			largest = max(largest, m.SharedInputCache.CapacityBytes)
+			if sharedInputCacheReason(candidate.Spec, m, true) == "" {
+				return nil
+			}
 		}
 	}
 	code := "shared_input_cache_capacity"
@@ -216,14 +223,16 @@ func sharedInputWaitingReason(j *Job, machines map[string]*Machine) string {
 	}
 	var reasons []string
 	for _, m := range machines {
-		if !j.Spec.allowsMachine(m.ID) || !executionTargetMatches(j.Spec, m) {
+		if !j.Spec.allowsMachine(m.ID) {
 			continue
 		}
-		reason := sharedInputCacheReason(j.Spec, m, false)
-		if reason == "" {
-			return ""
+		for _, candidate := range sharedInputCandidates(j, m) {
+			reason := sharedInputCacheReason(candidate.Spec, m, false)
+			if reason == "" {
+				return ""
+			}
+			reasons = append(reasons, reason)
 		}
-		reasons = append(reasons, reason)
 	}
 	if len(reasons) == 0 {
 		return fmt.Sprintf("shared_input_cache: required=%d bytes; no reporting eligible worker", sharedInputRequired(j.Spec, nil))
@@ -245,4 +254,21 @@ func (q *Queue) sharedInputClaims(m *Machine) map[string]SharedInput {
 		}
 	}
 	return claims
+}
+
+// Match target-specific extension needs before deciding whether a CPU/GPU
+// target is relevant. The unresolved platform union is not a CPU-only test.
+func sharedInputCandidates(j *Job, m *Machine) []*Job {
+	var out []*Job
+	for _, candidate := range extensionJobs(j, m, false) {
+		s := candidate.Spec
+		if !executionTargetMatches(s, m) || !deviceAllowed(candidate, m) {
+			continue
+		}
+		if !s.Needs.cpuOnly() && (m.GPU == "cpu" || len(s.Needs.Platform.Required) > 0 && !slices.Contains(s.Needs.Platform.Required, m.GPU)) {
+			continue
+		}
+		out = append(out, candidate)
+	}
+	return out
 }

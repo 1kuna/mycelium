@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -201,5 +202,122 @@ func TestSharedInputCapacityReclaimsAbandonedReservation(t *testing.T) {
 	report := cache.capacityReport()
 	if report.FreeBytes != report.CapacityBytes {
 		t.Fatalf("abandoned reservation wedged admission: %+v", report)
+	}
+}
+
+func TestSharedInputCapacityDetachedCancellationRecovers(t *testing.T) {
+	q, clock := fixture(t)
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 10 << 20, Clock: clock}}
+	cache.refreshCapacity()
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	unblockWriter := sync.OnceFunc(func() { close(unblock) })
+	t.Cleanup(unblockWriter)
+	cache.beforeStage = func(context.Context) { close(entered); <-unblock }
+	input := SharedInput{NAS: "input", SHA256: strings.Repeat("a", 64), SizeBytes: 6 << 20}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	nas := t.TempDir()
+	result := make(chan error, 1)
+	go func() {
+		_, release, err := cache.Acquire(ctx, input, nas)
+		if release != nil {
+			release()
+		}
+		result <- err
+	}()
+	<-entered
+	writer := onlySharedStaging(t, cache)
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	m := cacheCapacityMachine("worker", 10<<20)
+	m.SharedInputCache = cache.capacityReport()
+	check(t, q, m, nil)
+	s := spec("experiment")
+	s.SharedInputs = map[string]SharedInput{"data": input}
+	j := submit(t, q, s)
+	if reply := check(t, q, m, nil); reply.Job != nil {
+		t.Fatal("outstanding writer reservation was ignored")
+	}
+	unblockWriter()
+	<-writer.done
+	// No new Acquire/restart: the detached writer's cleanup must publish space.
+	m.SharedInputCache = cache.capacityReport()
+	clock.Advance(time.Second)
+	if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.ID != j.ID {
+		t.Fatalf("cleanup left queue blocked: %+v", m.SharedInputCache)
+	}
+}
+
+func TestSharedInputCapacityAliasesReuseOneEntry(t *testing.T) {
+	q, _ := fixture(t)
+	m := cacheCapacityMachine("worker", 10<<30)
+	check(t, q, m, nil)
+	input := SharedInput{NAS: "first", SHA256: strings.Repeat("a", 64), SizeBytes: 6 << 30}
+	alias := input
+	alias.NAS = "other/path"
+	s := spec("experiment")
+	s.SharedInputs = map[string]SharedInput{"first": input, "alias": alias}
+	if got := sharedInputRequired(s, nil); got != 6<<30 {
+		t.Fatalf("aliases charged %d bytes", got)
+	}
+	if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
+		t.Fatal(err)
+	}
+	j := submit(t, q, s)
+	if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.ID != j.ID {
+		t.Fatal("aliases were not placed")
+	}
+	target := q.placementTargets(q.s.Machines[m.ID])[0]
+	if reason := sharedInputCacheReason(s, target, false); reason != "" {
+		t.Fatal("pending claims double charged alias", reason)
+	}
+}
+
+func TestSharedInputCapacityUsesCPUExtensionVariant(t *testing.T) {
+	q, _ := fixture(t)
+	e := compositionExtension(t, false)
+	cpu := e.Variants[0]
+	cpu.Target = ExecutionTarget{OS: "linux", Arch: "amd64", Platform: "cpu"}
+	cpu.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 1}
+	gpu := cpu
+	gpu.Target.Platform = "cuda"
+	e.Variants = []ExtensionVariant{cpu, gpu}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	big, small := cacheCapacityMachine("cpu", 40<<30), cacheCapacityMachine("gpu", 10<<30)
+	big.GPU = "cpu"
+	small.GPU = "cuda"
+	big.HostMemoryMeasured, big.FreeHostMemoryGB, big.HostAvailableMemoryGB = true, 16, 16
+	big.ExtensionFingerprint = "fixture"
+	report := newExtensionReport(e, &big, "kind:sample")
+	report.Setup, report.Qualified, report.CheckID = true, true, "fixture-check"
+	big.ExtensionReports = []ExtensionReport{report}
+	check(t, q, big, nil)
+	check(t, q, small, nil)
+	s := sharedCapacitySpec()
+	s.Kind = "sample"
+	s.Run = RunSpec{}
+	s.Needs = ResourceNeeds{}
+	resolved, err := q.Resolve(ResolveRequest{Spec: s})
+	if err != nil {
+		t.Fatal("fitting CPU variant refused at resolve", err)
+	}
+	var cpuEligible bool
+	for _, target := range resolved.Targets {
+		cpuEligible = cpuEligible || target.Machine == big.ID && target.Eligible
+	}
+	if !cpuEligible {
+		t.Fatalf("CPU variant was not eligible: %+v", resolved.Targets)
+	}
+	j := submit(t, q, s)
+	if reply := check(t, q, small, nil); reply.Job != nil {
+		t.Fatal("placed extension on undersized GPU cache")
+	}
+	if reply := check(t, q, big, nil); reply.Job == nil || reply.Job.ID != j.ID {
+		t.Fatal("did not place CPU variant", job(t, q, j.ID).Reason)
 	}
 }
