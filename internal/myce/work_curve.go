@@ -224,9 +224,11 @@ func (q *Queue) acceptCurveReports(c Checkin, m *Machine) {
 				p.IncrementalDeviceMemoryGB = max(old.IncrementalDeviceMemoryGB, p.IncrementalDeviceMemoryGB)
 				// Memory evidence comes only from accepted attempts, never a report.
 				p.MemoryPeak, p.MemoryRecordedAt, p.MemoryConfiguration, p.MemoryLayout = old.MemoryPeak, old.MemoryRecordedAt, old.MemoryConfiguration, old.MemoryLayout
+				p.MemoryEscalation = old.MemoryEscalation
 				p.MemoryRange = old.MemoryRange
 				p.GPUHostRange = old.GPUHostRange
 				if old.StaleReason != "" {
+					p.MemoryEscalation = nil
 					p.MemoryPeak = nil
 					p.MemoryRange = nil
 					p.GPUHostRange = nil
@@ -309,6 +311,9 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 			}
 			if sameMemoryWork(point, k, configuration) {
 				old := point
+				if point.MemoryPeak != nil && !point.MemoryPeak.constrained() && !point.MemoryRecordedAt.IsZero() {
+					point.MemoryEscalation = &MemoryEscalationPrior{Peak: point.MemoryPeak, RecordedAt: point.MemoryRecordedAt}
+				}
 				point.MemoryPeak, point.MemoryRecordedAt = nil, time.Time{}
 				point.MemoryRange, point.MemorySamples = nil, 0
 				point.GPUHostRange = nil

@@ -159,7 +159,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	// cannot share this single-attempt claim. An OOM floor is already negative
 	// evidence, never permission to try a smaller exploratory envelope.
 	crossGPU := !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory && len(m.groupMembers) == 0 && estimate.hostFactor == 2.5 && estimate.samples == 1
-	if (!estimate.foreign && !crossGPU) || estimate.key == nil || j.Batch != nil || j.Spec.FanOut != nil || j.MemoryOOMFloor != nil {
+	if estimate.escalation || (!estimate.foreign && !crossGPU) || estimate.key == nil || j.Batch != nil || j.Spec.FanOut != nil || j.MemoryOOMFloor != nil {
 		return 0, "", false
 	}
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)

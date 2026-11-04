@@ -49,13 +49,20 @@ type ObservationKey struct {
 	Check bool `json:"check,omitempty"`
 }
 
+// Invalidated accepted evidence remains a prior for exploration, never a learner.
+type MemoryEscalationPrior struct {
+	Peak       *AttemptMemoryPeak `json:"peak"`
+	RecordedAt time.Time          `json:"recorded_at"`
+}
+
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
-	GPUHostRange        *MemoryPeakRange `json:"gpu_host_range,omitempty"`
-	MemoryRange         *MemoryPeakRange `json:"memory_range,omitempty"`
-	MemoryLayout        string           `json:"memory_layout,omitempty"`
-	MemoryConfiguration string           `json:"memory_configuration,omitempty"`
+	MemoryEscalation    *MemoryEscalationPrior `json:"memory_escalation,omitempty"`
+	GPUHostRange        *MemoryPeakRange       `json:"gpu_host_range,omitempty"`
+	MemoryRange         *MemoryPeakRange       `json:"memory_range,omitempty"`
+	MemoryLayout        string                 `json:"memory_layout,omitempty"`
+	MemoryConfiguration string                 `json:"memory_configuration,omitempty"`
 	// Family and accepted memory sample count since the last invalidation
 	// (#585); zero on rows written before them.
 	MemoryFamily              string             `json:"memory_family,omitempty"`
@@ -366,6 +373,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB
 	point.Forbidden = old.Forbidden
 	point.SampleID = old.SampleID
+	point.MemoryEscalation = old.MemoryEscalation
 	point.MemoryPeak = old.MemoryPeak
 	point.MemoryRange = old.MemoryRange
 	point.GPUHostRange = old.GPUHostRange
