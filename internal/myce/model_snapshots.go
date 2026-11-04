@@ -276,6 +276,11 @@ func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]st
 	if j.ModelLimits == nil {
 		return fail(modelSnapshotError("model_snapshot_policy", "permission_denied", nil))
 	}
+	// Concurrent acquisitions inspect Root for capacity before Acquire. Finish
+	// its once-only canonicalization before any reader observes that field.
+	if err := w.modelSnapshots.cache.init(); err != nil {
+		return fail(modelSnapshotError("model_snapshot_mismatch", "io_error", err))
+	}
 	for name, m := range j.Spec.ModelSnapshots {
 		input, repo, err := resolveModelSnapshot(ctx, w.ModelRoot, m)
 		if err != nil {
