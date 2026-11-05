@@ -40,9 +40,10 @@ type batchRelease struct {
 }
 
 type state struct {
-	FileInputClaims        map[string]FileInputClaim `json:"file_input_claims,omitempty"`
-	ModelIntervalSince     *time.Time                `json:"model_interval_since,omitempty"`
-	ModelIntervalHighWater int                       `json:"model_interval_high_water,omitempty"`
+	ToolInventories        map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
+	FileInputClaims        map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
+	ModelIntervalSince     *time.Time                    `json:"model_interval_since,omitempty"`
+	ModelIntervalHighWater int                           `json:"model_interval_high_water,omitempty"`
 	// Read-only parked policy. Preserve retained DB records; these fields no
 	// longer activate admission or replace the configured file-store guards.
 	StorageMigration       json.RawMessage                `json:"storage_migration,omitempty"`
@@ -287,6 +288,10 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	if err != nil && err != sql.ErrNoRows {
 		db.Close()
 		return nil, err
+	}
+	// Inventories are refreshed by workers after restart, including legacy state.
+	for _, m := range q.s.Machines {
+		m.ToolInventory = nil
 	}
 	// A previous binary can rewrite away new state fields while retaining this
 	// additive table. Recover allocation before any startup transaction emits an
@@ -1192,7 +1197,13 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	defer settle(false) // No-op once settled; a panicking check-in stops counting as contact.
 	stopCancellation := context.AfterFunc(ctx, func() { settle(false) })
 	defer stopCancellation()
-	reply := Reply{FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	preparedInventory, err := prepareCheckinToolInventory(c)
+	if err != nil {
+		return Reply{}, err
+	}
+	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
+	preparedMachine := cloneMachine(&c.Machine)
+	reply := Reply{ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
 		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
@@ -1230,7 +1241,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.checkinMemoryIdentities = identities.current(q)
 		defer func() { q.checkinMemoryIdentities = nil }()
-		m := cloneMachine(&c.Machine)
+		m := preparedMachine
 		m.ExternalMemory = nil // Summary is queue-owned, never worker-supplied.
 		// Worker clocks are unrelated to queue time. Translate local proof age
 		// into a queue-owned receipt timestamp; cached observations keep aging.
@@ -1375,6 +1386,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 				since = *old.RecoveringSince
 			}
 			m.RecoveringSince = &since
+		}
+		if err := q.acceptToolInventory(c, &m, old, preparedInventory, &reply); err != nil {
+			return err
 		}
 		q.acceptExtensionQualifications(&m)
 		q.acceptSharedPressure(&m, old)
@@ -2478,6 +2492,7 @@ func cloneMachine(m *Machine) Machine {
 	data, _ := json.Marshal(m)
 	var out Machine
 	_ = json.Unmarshal(data, &out)
+	out.toolInventory = m.toolInventory
 	return out
 }
 
