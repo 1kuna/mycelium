@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"mycelium/internal/myce"
 )
@@ -106,6 +110,69 @@ func TestReleaseVerifiedAssemblySigning(t *testing.T) {
 	publicPath := filepath.Join(dir, "fake-public.pem")
 	write(publicPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
 	args := []string{"manifest", "--dir", dir, "--version", version, "--commit", commit, "--assembly-receipt", receiptPath, "--assembly-sha256", receiptHash, "--signing-key", keyPath}
+	t.Run("receipt-replacement", func(t *testing.T) {
+		// A FIFO can serve pinned bytes to the first read and unrelated proof
+		// to a second read. The signer must parse only the first snapshot.
+		fifo := filepath.Join(dir, "receipt.fifo")
+		if err := syscall.Mkfifo(fifo, 0600); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(fifo)
+		pinned := []byte(`{"unrelated":"not assembly proof"}`)
+		stop := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			f, err := os.OpenFile(fifo, os.O_WRONLY, 0600)
+			if err != nil {
+				done <- err
+				return
+			}
+			_, err = f.Write(pinned)
+			f.Close()
+			if err != nil {
+				done <- err
+				return
+			}
+			// The original implementation reopens the FIFO here. Nonblocking
+			// writes let the corrected single-read implementation exit cleanly.
+			select {
+			case <-stop:
+				done <- nil
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+			for {
+				select {
+				case <-stop:
+					done <- nil
+					return
+				default:
+				}
+				fd, err := syscall.Open(fifo, syscall.O_WRONLY|syscall.O_NONBLOCK, 0600)
+				if err == syscall.ENXIO {
+					time.Sleep(time.Millisecond)
+					continue
+				}
+				if err != nil {
+					done <- err
+					return
+				}
+				file := os.NewFile(uintptr(fd), fifo)
+				_, err = file.Write(receiptBytes)
+				file.Close()
+				done <- err
+				return
+			}
+		}()
+		_, err := verifiedAssembly(dir, version, commit, fifo, fmt.Sprintf("%x", sha256.Sum256(pinned)))
+		close(stop)
+		if writerErr := <-done; writerErr != nil {
+			t.Fatal(writerErr)
+		}
+		if err == nil {
+			t.Fatal("signed proof from unauthenticated second receipt read")
+		}
+	})
 	if err := releaseCommand(args); err != nil {
 		t.Fatal(err)
 	}

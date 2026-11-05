@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"debug/buildinfo"
 	"encoding/json"
 	"errors"
@@ -24,16 +25,14 @@ func verifiedAssembly(dir, version, commit, receiptPath, receiptHash string) (my
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(commit) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(receiptHash) {
 		return refuse()
 	}
-	digest, err := myce.FileSHA256(receiptPath)
-	if err != nil {
-		return m, err
-	}
-	if digest != receiptHash {
-		return refuse()
-	}
+	// Authenticate and parse one snapshot; reopening after hashing permits a
+	// replaced file (or FIFO) to supply unauthenticated native proof.
 	data, err := os.ReadFile(receiptPath)
 	if err != nil {
 		return m, err
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(data)) != receiptHash {
+		return refuse()
 	}
 	type record struct {
 		File   string `json:"file"`
@@ -59,16 +58,12 @@ func verifiedAssembly(dir, version, commit, receiptPath, receiptHash string) (my
 		return refuse()
 	}
 	manifestPath := filepath.Join(dir, "manifest.unsigned.json")
-	digest, err = myce.FileSHA256(manifestPath)
-	if err != nil {
-		return m, err
-	}
-	if digest != receipt.ManifestSHA256 {
-		return refuse()
-	}
 	data, err = os.ReadFile(manifestPath)
 	if err != nil {
 		return m, err
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(data)) != receipt.ManifestSHA256 {
+		return refuse()
 	}
 	if json.Unmarshal(data, &m) != nil {
 		return refuse()
