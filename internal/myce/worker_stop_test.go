@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Unlike the queue-only fake clock, this clock is safe for concurrent worker I/O.
+// Safe for concurrent queue observation and worker I/O, including time advances.
 type workerFakeClock struct {
 	mu  sync.Mutex
 	now time.Time

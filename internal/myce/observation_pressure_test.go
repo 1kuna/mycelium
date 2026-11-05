@@ -3,9 +3,57 @@ package myce
 import (
 	"context"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
+
+// Observation must keep sampling while the queue owner advances injected time
+// under its writer lock. Neither pressure sampling nor admission can take that
+// lock: they must remain available when control work is blocked behind it.
+func TestQueueMutexPressureConcurrentClockAdvance(t *testing.T) {
+	q, clock := fixture(t)
+	l := newObservationLimit(clock, q)
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for _, observe := range []func(){
+		func() { q.mu.Lock(); q.mu.Unlock() },
+		func() { q.mu.RLock(); q.mu.RUnlock() },
+		func() { l.pressure.measurement() },
+		func() {
+			done, _ := observationAdmit(l, "/api/status")
+			if done != nil {
+				done()
+			}
+		},
+	} {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for range 1000 {
+				observe()
+			}
+		}()
+	}
+	before := clock.Now()
+	close(start)
+	for range 1000 {
+		q.mu.Lock()
+		clock.Advance(time.Nanosecond)
+		q.mu.Unlock()
+	}
+	workers.Wait()
+	if got := clock.Now().Sub(before); got != 1000*time.Nanosecond {
+		t.Fatal("injected time changed", got)
+	}
+	p := l.pressure
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.holders != 0 || len(p.waiting) != 0 {
+		t.Fatal("completed observations left pressure state", p.holders, len(p.waiting))
+	}
+}
 
 func TestQueueMutexPressureClockCoverage(t *testing.T) {
 	clock := &workerFakeClock{now: time.Unix(1, 0)}
