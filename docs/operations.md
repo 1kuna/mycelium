@@ -2110,8 +2110,10 @@ Workers report shared-input capacity, free and evictable bytes without cache
 scans in check-in. Discovery and accounting run at startup and cache changes,
 outside the queue mutex. Resolve and submit refuse impossible declared footprints
 only once every enabled worker under consideration reports capacity. During
-startup or a rolling upgrade, missing reports accept and queue shared-input work
-with `shared_input_cache_unreported`; old workers remain excluded from placement.
+startup with no matching worker, shared-input work waits
+with `shared_input_cache_unreported`. Workers
+without the optional report retain staging-time admission; their local cache still
+enforces actual capacity and reports required/available/limit bytes on failure.
 Temporary occupancy waits, and mixed fleets route to a fitting worker. See
 [large shared inputs](files.md#diagnosing-input-staging) for typed reasons.
 
