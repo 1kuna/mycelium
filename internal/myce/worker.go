@@ -26,6 +26,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	hygieneCollector     *workerHygieneCollector
 	hygieneWire          *workerHygieneWire
 	HostHealthSource     func(context.Context) (HostHealthReading, error)
 	toolReport           *workerToolReport // Serial check-in negotiation, shared by value copies.
@@ -1219,6 +1220,7 @@ func (w Worker) Run(stop context.Context) error {
 	}
 	retentionRequests := make(chan retentionRequest, 1)
 	retentionDone := make(chan struct{})
+	w.hygieneCollector = &workerHygieneCollector{w: w}
 	go func() {
 		defer close(retentionDone)
 		var lastRetentionErr string
@@ -1227,6 +1229,7 @@ func (w Worker) Run(stop context.Context) error {
 			case <-retentionCtx.Done():
 				return
 			case request := <-retentionRequests:
+				w.hygieneCollector.collect(retentionCtx)
 				// Repeat a persistent error only when it changes, not every minute.
 				if e := workerRetention(s.dir, request.now, w.LogRetention); e == nil {
 					lastRetentionErr = ""

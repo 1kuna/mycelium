@@ -912,6 +912,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		}
 		if retry.ready(now) {
 			m := cloneMachine(&w.Machine)
+			m.HygieneCollection = w.hygieneCollector.snapshot()
 			if w.sharedInputs != nil {
 				m.CachedSharedInputs = w.sharedInputs.readyKeys()
 				m.SharedInputCache = w.sharedInputs.capacityReport()

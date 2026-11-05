@@ -155,3 +155,17 @@ the existing leaving signal for a confirmed local drain until support is negotia
 - **Mycelium repository changes:** [merge gates](advanced.md#mycelium-repository-merge-gates). Feature availability is version-dependent; see [release qualifiers](advanced.md).
 
 For a blocking dependency, next owner and action, see the [diagnostic reference](advanced.md#diagnostic-reference-one-blocker). For one read-only consumer check on supporting releases, use [project doctor](advanced.md#diagnostic-reference-project-doctor).
+
+## Automatic worker collection (next release)
+
+Mycelium maintains its own file/environment budgets during idle retention as
+well as new staging. Machine `hygiene_collection` shows effective limits,
+collection errors and protected/busy entries. A cache can remain over budget
+while references, recent use or locks protect data; do not remove it manually to
+force admission. Attempt custody and result/diagnostic retention still bind.
+`pending` can mean conservative shared-inode accounting left work for another
+sweep. Collector status requires matching queue support; older queues keep
+their supported request shape while local collection continues.
+Installed/rollback images, active state, receipts and unknown data are retained;
+foreign services/processes and other projects' shared caches are owner context
+only. See [worker cleanup](https://github.com/1kuna/mycelium/blob/main/docs/status.md#worker-cleanup-834-next-release).

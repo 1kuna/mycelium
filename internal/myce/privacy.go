@@ -39,6 +39,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 	}
 	unsafeDockerHolds := map[string]string{}
 	for _, m := range s.Machines {
+		publicWorkerCollection(m)
 		if m.DockerCleanup != "" && !safeDockerHoldStatus(m.DockerCleanup) {
 			unsafeDockerHolds[hostID(m)+": Docker cleanup unconfirmed; "+m.DockerCleanup] = hostID(m) + ": Docker cleanup unconfirmed"
 		}
