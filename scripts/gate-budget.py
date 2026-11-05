@@ -147,20 +147,30 @@ def acquire_full_slot():
     cache.mkdir(parents=True, exist_ok=True)
     announced = False
     while True:
-        # Honor older standalone full race commands too. Their package-wide
-        # invocation lacks -run; new full gates are accounted by held locks.
-        processes = subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True)
-        legacy = sum(bool(re.search(r'\s(?:\S*/)?go test .*?-race', line)) and '-run' not in line
-                     for line in processes.splitlines())
-        # Two simultaneous full suites is the repository's measured Mac safety
-        # boundary: more caused false failures. It is not a package/CPU default.
-        for index in range(max(0, 2 - legacy)):
-            handle = (cache / f'mycelium-full-gate-{index}.lock').open('a')
+        # Serialize the availability snapshot. Slot numbers do not encode how
+        # many suites are active: slot 1 can remain held after slot 0 exits.
+        with (cache / 'mycelium-full-gate-admission.lock').open('a') as admission:
+            fcntl.flock(admission, fcntl.LOCK_EX)
+            processes = subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True)
+            legacy = sum(bool(re.search(r'\s(?:\S*/)?go test .*?-race', line)) and '-run' not in line
+                         for line in processes.splitlines())
+            available = []
             try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return handle
-            except BlockingIOError:
-                handle.close()
+                # Two full suites is the repository's observed Mac safety
+                # boundary, independent of package count and CPU defaults.
+                for index in range(2):
+                    handle = (cache / f'mycelium-full-gate-{index}.lock').open('a')
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        available.append(handle)
+                    except BlockingIOError:
+                        handle.close()
+                occupied = 2 - len(available)
+                if available and occupied + legacy < 2:
+                    return available.pop(0)
+            finally:
+                for handle in available:
+                    handle.close()
         if not announced:
             print('waiting for a full-race slot (two-suite custody boundary)', flush=True)
             announced = True

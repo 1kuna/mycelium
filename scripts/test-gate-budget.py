@@ -41,6 +41,22 @@ class GateBudgetTests(unittest.TestCase):
                     first.close()
                     second.close()
 
+    def test_legacy_and_higher_occupied_slot_block_third_suite(self):
+        with tempfile.TemporaryDirectory() as folder:
+            higher = (Path(folder) / 'mycelium-full-gate-1.lock').open('a')
+            budget.fcntl.flock(higher, budget.fcntl.LOCK_EX | budget.fcntl.LOCK_NB)
+            legacy = '123 go test -race ./...\n'
+            try:
+                with (patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else legacy),
+                      patch.object(budget.time, 'sleep', side_effect=RuntimeError('blocked'))):
+                    with self.assertRaisesRegex(RuntimeError, 'blocked'):
+                        budget.acquire_full_slot()
+            finally:
+                higher.close()
+            with patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else legacy):
+                admitted = budget.acquire_full_slot()
+                admitted.close()
+
     def test_quick_overlaps_packages_and_collects_failure(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
