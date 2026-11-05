@@ -6,14 +6,15 @@ import (
 
 // Runtime is a read-only execution projection, never a scheduling input.
 type JobRuntime struct {
-	ElapsedSeconds    *float64 `json:"elapsed_seconds,omitempty"`
-	RemainingSeconds  *float64 `json:"remaining_seconds,omitempty"`
-	Source            string   `json:"source,omitempty"`
-	Unit              string   `json:"unit,omitempty"`
-	Samples           int      `json:"samples"`
-	HistoryAgeSeconds *float64 `json:"history_age_seconds,omitempty"`
-	Reason            string   `json:"reason,omitempty"`
-	Limitation        string   `json:"limitation"`
+	ElapsedSeconds       *float64 `json:"elapsed_seconds,omitempty"`
+	RemainingSeconds     *float64 `json:"remaining_seconds,omitempty"`
+	RemainingWorkUnknown bool     `json:"remaining_work_unknown"`
+	Source               string   `json:"source,omitempty"`
+	Unit                 string   `json:"unit,omitempty"`
+	Samples              int      `json:"samples"`
+	HistoryAgeSeconds    *float64 `json:"history_age_seconds,omitempty"`
+	Reason               string   `json:"reason,omitempty"`
+	Limitation           string   `json:"limitation"`
 }
 
 func (q *Queue) projectRuntime(j *Job) {
@@ -32,7 +33,7 @@ func (q *Queue) projectRuntime(j *Job) {
 	if j.State != "running" && j.State != "stopping" {
 		return
 	}
-	r := &JobRuntime{Limitation: "estimate from comparable history, not a completion deadline; includes result handoff, excludes queue wait and preparation"}
+	r := &JobRuntime{RemainingWorkUnknown: true, Limitation: "whole-job estimate from comparable history, not a completion deadline; includes result handoff, excludes queue wait and preparation; stage reports do not predict later stages"}
 	j.Runtime = r
 	if j.StartedAt == nil {
 		r.Reason = "execution has not acknowledged Started"
@@ -79,6 +80,7 @@ func (q *Queue) projectRuntime(j *Job) {
 	}
 	remaining := *t.PredictedSeconds - elapsed
 	r.RemainingSeconds, r.Reason = &remaining, ""
+	r.RemainingWorkUnknown = false
 }
 
 func runtimeText(j *Job) string {
@@ -97,11 +99,37 @@ func runtimeText(j *Job) string {
 		}
 	}
 	if p := j.ApplicationProgress; p != nil {
-		text += fmt.Sprintf("; reported progress %g/%g %s (attempt %d; age %.1fs", p.Completed, p.Total, p.Unit, p.Attempt, p.AgeSeconds)
+		text += "; stage "
+		if p.StageIndex == nil {
+			text += "unknown"
+		} else {
+			text += fmt.Sprint(*p.StageIndex)
+		}
+		if p.StageCount == nil {
+			text += "/unknown"
+		} else {
+			text += fmt.Sprintf("/%d", *p.StageCount)
+		}
+		text += fmt.Sprintf("; reported stage progress %g/%g %s (attempt %d; age %.1fs", p.Completed, p.Total, p.Unit, p.Attempt, p.AgeSeconds)
 		if p.Stale {
 			text += "; stale"
 		}
 		text += "; advisory)"
+		text += fmt.Sprintf("; total work known: %t", p.TotalWorkKnown)
+		if p.TotalWorkKnown && p.StageCount != nil && *p.StageCount == 1 && !p.Stale {
+			text += fmt.Sprintf("; whole-job reported progress %g/%g %s (advisory; job state decides completion)", p.Completed, p.Total, p.Unit)
+		} else {
+			text += "; whole-job progress unknown (stage-local counts)"
+		}
+	} else if j.Runtime != nil {
+		text += "; stage unknown/unknown; total work known: unknown; whole-job progress unknown (no application report)"
+	}
+	if j.Runtime != nil || j.ApplicationProgress != nil {
+		if j.Progress > 0 {
+			text += fmt.Sprintf("; checkpoint generation %d (recovery evidence, not work progress)", j.Progress)
+		} else {
+			text += "; checkpoint evidence: none reported"
+		}
 	}
 	return text
 }

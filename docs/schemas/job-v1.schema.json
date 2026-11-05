@@ -57,13 +57,26 @@
         "session": {
           "type": "string"
         },
+        "stage_count": {
+          "type": "integer"
+        },
+        "stage_index": {
+          "type": "integer"
+        },
         "stale": {
           "type": "boolean"
         },
         "total": {
           "type": "number"
         },
+        "total_work_known": {
+          "type": "boolean"
+        },
         "unit": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
           "type": "string"
         }
       },
@@ -76,7 +89,8 @@
         "session",
         "received_at",
         "age_seconds",
-        "stale"
+        "stale",
+        "total_work_known"
       ],
       "type": "object"
     },
@@ -2300,6 +2314,9 @@
         "remaining_seconds": {
           "type": "number"
         },
+        "remaining_work_unknown": {
+          "type": "boolean"
+        },
         "samples": {
           "type": "integer"
         },
@@ -2311,6 +2328,7 @@
         }
       },
       "required": [
+        "remaining_work_unknown",
         "samples",
         "limitation"
       ],
