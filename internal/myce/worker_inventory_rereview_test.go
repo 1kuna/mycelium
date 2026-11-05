@@ -245,7 +245,8 @@ func TestInventoryRereviewUnifiedCapBelowReserve(t *testing.T) {
 		return []byte("NVIDIA GB10, N/A"), nil
 	}}
 	p = withCUDAFacts(p, true, 1)
-	w := Worker{Machine: Machine{GPU: "cuda", FreeMemoryGB: 10}}
+	// This is an authored reserve, not the retired platform-wide default.
+	w := Worker{Machine: Machine{GPU: "cuda"}, DeviceSettings: []DeviceInstall{{Selector: "GPU-unified", Detection: Detection{Platform: "cuda", MemoryMode: "unified", MemoryGB: 10, ReserveGB: 16}}}}
 	devices, err := w.localInventoryWithProbe(context.Background(), p)
 	if err != nil || len(devices) != 1 || devices[0].Reason != "device_budget_unavailable" || devices[0].FreeMemoryGB != 0 {
 		t.Fatalf("budget error became probe failure: %+v %v", devices, err)

@@ -4,10 +4,9 @@ package myce
 // Never retained across placements, inventory changes, or transaction boundaries.
 type memoryPlanningCache struct {
 	observations *memoryObservationCatalog
+	transfers    map[memoryTransferKey]memoryTransferResult
 	history      *memoryHistoryCache
 	constrained  map[constrainedMemoryKey]float64
-	similar      map[similarMemoryKey]similarMemoryResult
-	cold         map[coldMemoryKey]coldMemoryResult
 }
 
 // Only retained execution evidence is shared with permanent-capacity views.
@@ -53,26 +52,10 @@ type similarMemoryKey struct {
 	gpu        bool
 	layout     string
 }
-type similarMemoryResult struct {
-	peak     float64
-	evidence int
-}
-type coldMemoryKey struct {
-	family           similarMemoryKey
-	constrained      constrainedMemoryKey
-	allowance, floor float64
-	source           string
-}
-type coldMemoryResult struct {
-	host     float64
-	source   string
-	evidence int
-	ok       bool
-}
 
 func newMemoryPlanningCache() *memoryPlanningCache {
 	return &memoryPlanningCache{
-		history: &memoryHistoryCache{lower: map[memoryLowerKey]float64{}}, constrained: map[constrainedMemoryKey]float64{}, similar: map[similarMemoryKey]similarMemoryResult{}, cold: map[coldMemoryKey]coldMemoryResult{},
+		history: &memoryHistoryCache{lower: map[memoryLowerKey]float64{}}, constrained: map[constrainedMemoryKey]float64{},
 	}
 }
 func memoryLowerIdentity(key ObservationKey, configuration string) memoryLowerKey {

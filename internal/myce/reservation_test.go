@@ -52,6 +52,9 @@ func TestReservationGPURequalificationDefaultsToDevice(t *testing.T) {
 			s.ExtensionDigest, s.RequireTarget = e.Digest, true
 			s.AllowedMachines = []string{m.ID}
 			s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
+			// Exercise device reservation scope with a bounded check. A wholly
+			// unmeasured cold probe owns host headroom independently of scope.
+			s.SizeHint = SizeHint{MemoryGB: 1, HostMemoryGB: 1}
 			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
 			bound := submit(t, q, s)
 			selector, err := ValidationReservationSelector("host="+m.HostID, bound.Spec, wholeHost)

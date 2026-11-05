@@ -144,8 +144,8 @@ func TestExtensionVariantLearnedNeeds(t *testing.T) {
 	}
 	next := submit(t, q, s)
 	for _, j := range []*Job{job(t, q, queued.ID), next} {
-		if j.Spec.Needs.MemoryGB != 50 || j.Spec.Needs.HostMemoryGB != 5 {
-			t.Fatalf("variant discarded learned 50/5 GiB floors: %+v", j.Spec.Needs)
+		if j.Spec.Needs.MemoryGB != 40 || j.Spec.Needs.HostMemoryGB != 4 {
+			t.Fatalf("variant discarded learned 40/4 GiB floors: %+v", j.Spec.Needs)
 		}
 	}
 	// Qualification still selects the variant, but learned reservations exclude

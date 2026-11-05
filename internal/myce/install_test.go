@@ -51,10 +51,10 @@ func TestInstallDetectionDryPlans(t *testing.T) {
 		platform, mode string
 		reserve        float64
 	}{
-		{"4090", fakeProbe("linux", "amd64", "NVIDIA GeForce RTX 4090, 24564", ""), "cuda", "dedicated", 2},
-		{"Spark", fakeProbe("linux", "arm64", "NVIDIA GB10, [N/A]", ""), "cuda", "unified", 16},
-		{"Intel", withIntegratedPCI(fakeProbe("linux", "amd64", "", "[level_zero:gpu] Intel(R) UHD Integrated Graphics")), "xpu", "unified", 8},
-		{"Mac", fakeProbe("darwin", "arm64", "", ""), "metal", "unified", 4},
+		{"4090", fakeProbe("linux", "amd64", "NVIDIA GeForce RTX 4090, 24564", ""), "cuda", "dedicated", 0},
+		{"Spark", fakeProbe("linux", "arm64", "NVIDIA GB10, [N/A]", ""), "cuda", "unified", 0},
+		{"Intel", withIntegratedPCI(fakeProbe("linux", "amd64", "", "[level_zero:gpu] Intel(R) UHD Integrated Graphics")), "xpu", "unified", 0},
+		{"Mac", fakeProbe("darwin", "arm64", "", ""), "metal", "unified", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -220,8 +220,11 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.DB = filepath.Join(c.State, "myce.db")
 
 	c.HostID, _ = os.Hostname()
-	c.ReserveHostMemoryGB = 4
-	c.MemoryCeilingSlackGB = .125
+	// Live free memory already excludes the OS/driver working set. New
+	// installations do not subtract a second, guessed reserve; explicit
+	// operator reserves and ceiling slack remain supported and preserved.
+	c.ReserveHostMemoryGB = 0
+	c.MemoryCeilingSlackGB = 0
 	c.Heartbeat = time.Second
 	c.LogRetention = DefaultLogRetention
 	c.FileRetention = DefaultFileRetention
@@ -232,7 +235,8 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.UploadSpoolDir = filepath.Join(c.State, "uploads")
 	c.UploadSpoolBytes = DefaultUploadSpoolBytes
 	c.PrivateDevices, c.NoNewPrivileges = false, true
-	c.CPUReserveCores = 1
+	// The OS preempts CPU work; an idle logical CPU is not a memory reserve.
+	c.CPUReserveCores = 0
 	c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = 10, "25%", "512M", "64"
 	if role == "queue" {
 		// Control transactions and heartbeats must not share job politeness limits.

@@ -178,7 +178,7 @@ func (q *Queue) learnedEnvelopeOversized(j *Job) bool {
 		eligible = true
 		envelope := candidate.MemoryEnvelope
 		oversized := false
-		if candidate.Spec.Needs.Memory == "auto" && envelope != nil && envelope.Basis == "learned" {
+		if candidate.Spec.Needs.Memory == "auto" && envelope != nil && (envelope.Basis == "learned" || envelope.Basis == "exploratory") {
 			// Assignment's existing comparison excludes declared member caps,
 			// hints and retry floors. Only accepted learning is this incident.
 			learnedProbe := *candidate
@@ -186,7 +186,18 @@ func (q *Queue) learnedEnvelopeOversized(j *Job) bool {
 			capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 			capacity.s.Machines = map[string]*Machine{m.ID: m}
 			capacity.recordLearnedMemory(&learnedProbe, m)
-			if learned := learnedProbe.MemoryEnvelope.Learned; learned != nil {
+			learned := learnedProbe.MemoryEnvelope.Learned
+			if learned == nil && candidate.Spec.Needs.cpuOnly() {
+				estimate := capacity.memoryEstimate(&learnedProbe, m)
+				if estimate.uncalibrated && estimate.samples > 0 && estimate.host != nil {
+					// Unknown transfer error does not prove a smaller CPU need.
+					// Admission retains the accepted source prior; diagnose that
+					// same conservative requirement even for an offline peer.
+					// Physical probe room itself is not learned demand.
+					learned = &LearnedMemory{HostGB: hostMemoryPeakGB(estimate.host)}
+				}
+			}
+			if learned != nil {
 				probe.Spec.Needs.HostMemoryGB, probe.Spec.Needs.MemoryGB = learned.HostGB, 0
 				if learned.DeviceGB != nil {
 					probe.Spec.Needs.MemoryGB = *learned.DeviceGB

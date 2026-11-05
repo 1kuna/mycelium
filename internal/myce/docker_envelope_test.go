@@ -114,7 +114,7 @@ func TestDockerEnvelopeRecoveryEventsOnlyKeepsLearning(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := startObservation(t, q, m, s)
-	if r.MemoryPeak.Constrained || next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 1.25 {
+	if r.MemoryPeak.Constrained || next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.Spec.Needs.HostMemoryGB != 1+minimumHostMemoryGB {
 		t.Fatalf("events-only recovery invalidated learning: peak=%+v next=%+v", r.MemoryPeak, next.MemoryEnvelope)
 	}
 }

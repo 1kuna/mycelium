@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const boundedQuarter = "exploratory first run (bounded: 25% of host allowance)"
+const physicalMemoryProbe = "exploratory first run"
 
 func setLearnedMemory(t *testing.T, q *Queue, on bool) {
 	t.Helper()
@@ -20,7 +20,7 @@ func setLearnedMemory(t *testing.T, q *Queue, on bool) {
 	}
 }
 
-// One 32 GiB CPU host; the cold bound is a quarter of its allowance.
+// One 32 GiB CPU host; the cold probe owns measured physical headroom.
 func learnedMemoryFixture(t *testing.T) (*Queue, *fakeClock, Machine) {
 	t.Helper()
 	q, clock := fixture(t)
@@ -77,11 +77,11 @@ func TestLearnedMemoryOmittedFigureLearnsAcrossReopen(t *testing.T) {
 		t.Fatal("omitted memory must pass static validation:", err)
 	}
 	first := runMemory(t, q, clock, m, s, 2, nil)
-	if e := first.MemoryEnvelope; e.Source != boundedQuarter || e.Basis != "exploratory" || first.Spec.Needs.HostMemoryGB != 8 || first.Spec.Needs.Memory != "auto" {
+	if e := first.MemoryEnvelope; e.Source != physicalMemoryProbe || e.Basis != "exploratory" || first.Spec.Needs.HostMemoryGB != 32-minimumHostMemoryGB || first.Spec.Needs.Memory != "auto" {
 		t.Fatalf("cold run not bounded: %+v needs=%+v", e, first.Spec.Needs)
 	}
 	second := runMemory(t, q, clock, m, s, 2, nil)
-	if e := second.MemoryEnvelope; e.Source != "accepted peak × 1.25" || e.Basis != "learned" || e.Evidence != 1 || second.Spec.Needs.HostMemoryGB != 2.5 {
+	if e := second.MemoryEnvelope; e.Source != "accepted peak + measured uncertainty" || e.Basis != "learned" || e.Evidence != 1 || second.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
 		t.Fatalf("second run did not learn: %+v", e)
 	}
 
@@ -100,7 +100,7 @@ func TestLearnedMemoryOmittedFigureLearnsAcrossReopen(t *testing.T) {
 	waiting := submit(t, q, s)
 	check(t, q, m, nil)
 	reason := job(t, q, waiting.ID).Reason
-	if !strings.Contains(reason, "learned from 2 comparable accepted attempts: accepted peak × 1.25") {
+	if !strings.Contains(reason, "learned from 2 comparable accepted attempts: accepted peak + measured uncertainty") {
 		t.Fatalf("queued reason lacks source and evidence: %s", reason)
 	}
 }
@@ -114,47 +114,38 @@ func TestLearnedMemoryBoundsGrowAndNeverShrink(t *testing.T) {
 		r.MemoryPeak.Constrained = true
 		r.MemoryPeak.Events = &MemoryEventCounts{Max: 1627}
 	}
-	// #559 replay: a failed ceiling-bound attempt is a lower bound only.
 	runMemory(t, q, clock, m, s, 6, constrained)
 	next := runMemory(t, q, clock, m, s, 3, nil)
-	if e := next.MemoryEnvelope; next.Spec.Needs.HostMemoryGB != 12 || !strings.HasSuffix(e.Source, "(bounded: constrained peak × 2)") {
-		t.Fatalf("constrained peak did not raise the bound: %+v", e)
+	if next.Spec.Needs.HostMemoryGB != 32-minimumHostMemoryGB || next.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatal("constrained evidence was treated as an upper bound", next.MemoryEnvelope)
 	}
-	// A small constrained peak never lowers the quarter-allowance bound.
 	other := s
 	other.Run.Command = []string{"echo", "other"}
 	runMemory(t, q, clock, m, other, 1, constrained)
-	if j := runMemory(t, q, clock, m, other, 1, nil); j.Spec.Needs.HostMemoryGB != 3*similarMemoryFactor {
-		t.Fatalf("similar accepted peak did not bound the cold run: %+v", j.MemoryEnvelope)
-	} else if e := j.MemoryEnvelope; e.Evidence != 1 || !strings.Contains(e.Origin(), "bounded by 1 similar accepted attempts") {
-		t.Fatalf("similar evidence not reported: %s", e.Origin())
+	j := runMemory(t, q, clock, m, other, 1, nil)
+	if j.Spec.Needs.HostMemoryGB != 3+minimumHostMemoryGB || j.MemoryEnvelope.Evidence != 1 || !strings.Contains(j.MemoryEnvelope.Origin(), "bounded by 1 similar accepted attempts") {
+		t.Fatal("family evidence lost", j.MemoryEnvelope)
 	}
-
-	// OOM on a bounded first run doubles without spending the one retry; at
-	// half the allowance, host-wide exploration and its retry take over.
-	fresh := cpuSpec(1, 0)
-	fresh.Name = "fresh"
-	queued := submit(t, q, fresh)
-	for _, want := range []string{boundedQuarter, "exploratory first run; OOM retry floor"} {
-		j := check(t, q, m, nil).Job
-		if j == nil || j.ID != queued.ID || j.MemoryEnvelope.Source != want || j.OOMRetries != 0 {
-			t.Fatalf("want %q: %+v %s", want, j.MemoryEnvelope, job(t, q, queued.ID).Reason)
-		}
-		if want != boundedQuarter && j.Spec.Needs.HostMemoryGB < 16 {
-			t.Fatalf("retry shrank below the doubled floor: %+v", j.Spec.Needs)
-		}
-		if err := q.Started(result(j, false)); err != nil {
-			t.Fatal(err)
-		}
-		clock.Advance(time.Second)
-		r := result(j, false)
-		r.OutOfMemory = true
-		if err := q.Complete(r); err != nil {
-			t.Fatal(err)
-		}
+	// Preserve the existing doubling protocol when a measured family envelope
+	// underestimates a new shape. The floor is never replaced by a smaller peak.
+	other.Run.Command = []string{"echo", "larger"}
+	queued := submit(t, q, other)
+	run := check(t, q, m, nil).Job
+	if run == nil || run.ID != queued.ID {
+		t.Fatal("not assigned")
 	}
-	if got := job(t, q, queued.ID); got.State != "failed" || got.OOMRetries != 1 {
-		t.Fatalf("host-wide OOM lost its one-retry limit: %s %s retries=%d", got.State, got.Reason, got.OOMRetries)
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	r := result(run, false)
+	r.OutOfMemory = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, run.ID)
+	if got.MemoryOOMFloor == nil || got.MemoryOOMFloor.HostMemoryGB != run.Spec.Needs.HostMemoryGB*2 || got.OOMRetries != 0 {
+		t.Fatal("existing bounded OOM floor changed", got.MemoryOOMFloor)
 	}
 }
 
@@ -220,48 +211,29 @@ func assignGPU(t *testing.T, q *Queue, m Machine, want *Job, running ...*Job) *J
 func TestLearnedMemoryUnifiedGPUFirstRunIsBounded(t *testing.T) {
 	q, clock, m := unifiedGPUFixture(t, true)
 	j := assignGPU(t, q, m, submit(t, q, plainGPUSpec()))
-	if e := j.MemoryEnvelope; e.DeviceGB != 1 || e.HostGB != 2.125 || e.Basis != "exploratory" || !strings.HasSuffix(e.Source, "(bounded: unified GPU: 1 GiB device default, 1 GiB host default)") {
-		t.Fatalf("unified GPU first run not bounded: %+v", e)
+	if e := j.MemoryEnvelope; e.DeviceGB != minimumHostMemoryGB || e.HostGB != 80.875 || e.Basis != "exploratory" || !strings.Contains(e.Source, "shared physical headroom") {
+		t.Fatal("unknown shared pool was guessed", e)
 	}
 	if err := q.Started(result(j, false)); err != nil {
 		t.Fatal(err)
 	}
-	// Production fits beside it without stopping it; host-wide exploration
-	// would have reserved almost all of the 81 GiB physical room.
-	production := cpuSpec(1, 70)
-	production.Name, production.Priority = "production", "production"
-	p := assignGPU(t, q, m, submit(t, q, production), j)
-	if held := job(t, q, j.ID); held.State != "running" || held.StopAt != nil {
-		t.Fatalf("GPU job was stopped for room it never needed: %s %s", held.State, held.Reason)
+	peer := submit(t, q, cpuSpec(1, 70))
+	if next := assignedJob(machineCheck(t, q, m, j)); next != nil {
+		t.Fatal("cold probe spent shared pool twice", next)
 	}
-	finish(t, q, p, true)
 	clock.Advance(time.Second)
-	peak := 3.0 // Host side only: unified CUDA reports no device sample.
+	peak := 3.0
 	r := result(j, true)
 	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, CgroupGB: &peak}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-
-	// The accepted host peak sizes the next run's host side; the device keeps
-	// its default, since no device sample exists.
+	p := assignGPU(t, q, m, peer)
+	finish(t, q, p, true)
+	// A host-only sample cannot turn unknown GPU use into accepted sharing.
 	next := assignGPU(t, q, m, submit(t, q, plainGPUSpec()))
-	if next.Spec.Needs.HostMemoryGB != 7.5 || next.Spec.Needs.MemoryGB != 1 || next.MemoryEnvelope.Evidence != 1 || !strings.Contains(next.MemoryEnvelope.Source, "similar work host peak × 2.5") {
-		t.Fatalf("similar host peak not used: %+v %+v", next.MemoryEnvelope, next.Spec.Needs)
-	}
-	// A classified host OOM doubles the bound without spending the one retry.
-	if err := q.Started(result(next, false)); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Second)
-	oom := result(next, false)
-	oom.OutOfMemory = true
-	if err := q.Complete(oom); err != nil {
-		t.Fatal(err)
-	}
-	retry := assignGPU(t, q, m, next)
-	if retry.OOMRetries != 0 || retry.Spec.Needs.HostMemoryGB != 15 || retry.Spec.Needs.MemoryGB != 1 {
-		t.Fatalf("host OOM did not double the bound: %+v %+v", retry.MemoryEnvelope, retry.Spec.Needs)
+	if next.MemoryEnvelope.Basis != "exploratory" || next.MemoryEnvelope.Evidence != 0 || next.MemoryEnvelope.HostGB != 80.875 {
+		t.Fatal("missing device sample became accepted", next.MemoryEnvelope)
 	}
 }
 
@@ -270,7 +242,7 @@ func TestLearnedMemoryUnifiedGPUHostHintKeepsDeviceFigure(t *testing.T) {
 	s := plainGPUSpec()
 	s.Needs.HostMemoryGB = 4 // `--host-mem 4G` without --mem.
 	j := assignGPU(t, q, m, submit(t, q, s))
-	if e := j.MemoryEnvelope; e.DeviceGB != 1 || e.HostGB != 5.125 || e.Basis != "hint" || !strings.Contains(e.Source, "1 GiB device default, stated host") {
+	if e := j.MemoryEnvelope; e.DeviceGB != 76.75 || e.HostGB != 80.875 || e.Basis != "hint" || !strings.Contains(e.Source, "shared physical headroom") {
 		t.Fatalf("host-hint-only GPU job charged a 0 GiB device: %+v", e)
 	}
 }
@@ -279,17 +251,16 @@ func TestLearnedMemoryDiscreteGPUFirstRunIsBounded(t *testing.T) {
 	q, clock, m := unifiedGPUFixture(t, false)
 	s := plainGPUSpec()
 	j := assignGPU(t, q, m, submit(t, q, s))
-	if e := j.MemoryEnvelope; e.Source != boundedQuarter || e.DeviceGB != 96 || e.HostGB != 24.125 {
-		t.Fatalf("discrete GPU first-run host vector not bounded: %+v", e)
+	if e := j.MemoryEnvelope; e.Source != physicalMemoryProbe || e.DeviceGB != 96 || e.HostGB != 89.875 {
+		t.Fatal("cold discrete physical probe", e)
 	}
 	if err := q.Started(result(j, false)); err != nil {
 		t.Fatal(err)
 	}
-	cpu := assignGPU(t, q, m, submit(t, q, cpuSpec(1, 50)), j)
-	if held := job(t, q, j.ID); held.State != "running" || held.StopAt != nil {
-		t.Fatalf("CPU peer stopped GPU run: %+v", held)
+	peer := submit(t, q, cpuSpec(1, 50))
+	if next := assignedJob(machineCheck(t, q, m, j)); next != nil {
+		t.Fatal("unknown host demand shared", next)
 	}
-	finish(t, q, cpu, true)
 	clock.Advance(time.Second)
 	peak := 14.0
 	r := result(j, true)
@@ -297,11 +268,13 @@ func TestLearnedMemoryDiscreteGPUFirstRunIsBounded(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
+	cpu := assignGPU(t, q, m, peer)
+	finish(t, q, cpu, true)
 	q = reopenQueue(t, q, clock)
 	machineCheck(t, q, m)
 	next := assignGPU(t, q, m, submit(t, q, s))
-	if e := next.MemoryEnvelope; e.DeviceGB != 96 || next.Spec.Needs.HostMemoryGB != 28 || !strings.Contains(e.Source, "constrained peak × 2") {
-		t.Fatalf("constrained host peak did not grow independently: %+v", e)
+	if next.MemoryEnvelope.DeviceGB != 96 || next.Spec.Needs.HostMemoryGB != 89.75 || next.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatal("constrained peak became a guessed upper bound", next.MemoryEnvelope)
 	}
 }
 
@@ -310,7 +283,7 @@ func TestLearnedMemoryDiscreteGPUHostHints(t *testing.T) {
 		name                               string
 		device, host, wantDevice, wantHost float64
 	}{
-		{"device only", 8, 0, 8, 24},
+		{"device only", 8, 0, 8, 89.75},
 		{"host only", 0, 4, 96, 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -351,7 +324,7 @@ func TestLearnedMemoryDiscreteGPUSimilarHostAndOOM(t *testing.T) {
 	}
 	s.Run.Command = append(s.Run.Command, "different-shape")
 	next := assignGPU(t, q, m, submit(t, q, s))
-	if e := next.MemoryEnvelope; next.Spec.Needs.HostMemoryGB != 10 || e.DeviceGB != 96 || e.Evidence != 1 || !strings.Contains(e.Source, "similar work peak × 2.5") {
+	if e := next.MemoryEnvelope; next.Spec.Needs.HostMemoryGB != 4+minimumHostMemoryGB || e.DeviceGB != 96 || e.Evidence != 1 || !strings.Contains(e.Source, "accepted family peaks + measured uncertainty") {
 		t.Fatalf("same-layout conservative host peak not used: %+v", e)
 	}
 	if err := q.Started(result(next, false)); err != nil {
@@ -364,7 +337,7 @@ func TestLearnedMemoryDiscreteGPUSimilarHostAndOOM(t *testing.T) {
 		t.Fatal(err)
 	}
 	retry := assignGPU(t, q, m, next)
-	if retry.Spec.Needs.HostMemoryGB != 20 || retry.MemoryEnvelope.DeviceGB != 96 || retry.OOMRetries != 0 {
+	if retry.Spec.Needs.HostMemoryGB != (4+minimumHostMemoryGB)*2 || retry.MemoryEnvelope.DeviceGB != 96 || retry.OOMRetries != 0 {
 		t.Fatalf("host OOM did not double only host vector: %+v", retry.MemoryEnvelope)
 	}
 }
@@ -372,7 +345,7 @@ func TestLearnedMemoryDiscreteGPUSimilarHostAndOOM(t *testing.T) {
 func TestLearnedMemoryDiscreteGPUExtensionHostBound(t *testing.T) {
 	q, _, m, s := gpuHostFixture(t)
 	run := assignGPU(t, q, m, submit(t, q, s))
-	if run.Spec.Needs.HostMemoryGB != 6 || run.MemoryEnvelope.DeviceGB != 30 || run.MemoryEnvelope.Basis != "exploratory" {
+	if run.Spec.Needs.HostMemoryGB != 24-minimumHostMemoryGB || run.MemoryEnvelope.DeviceGB != 30 || run.MemoryEnvelope.Basis != "exploratory" {
 		t.Fatalf("extension did not retain exclusive card with bounded host vector: %+v", run.MemoryEnvelope)
 	}
 }
@@ -384,7 +357,7 @@ func TestLearnedMemoryDiscreteGPUAcceptedIdentity(t *testing.T) {
 	s := plainGPUSpec()
 	for i := 0; i < 3; i++ {
 		j := assignGPU(t, q, m, submit(t, q, s))
-		if i > 0 && (j.MemoryEnvelope.Basis != "learned" || j.MemoryEnvelope.Evidence != i || j.Spec.Needs.HostMemoryGB != 8.6*1.25) {
+		if i > 0 && (j.MemoryEnvelope.Basis != "learned" || j.MemoryEnvelope.Evidence != i || j.Spec.Needs.HostMemoryGB != 8.6+minimumHostMemoryGB) {
 			t.Fatalf("accepted identity stayed exploratory: %+v needs=%+v", j.MemoryEnvelope, j.Spec.Needs)
 		}
 		if err := q.Started(result(j, false)); err != nil {
@@ -402,7 +375,7 @@ func TestLearnedMemoryDiscreteGPUAcceptedIdentity(t *testing.T) {
 	q = reopenQueue(t, q, clock)
 	machineCheck(t, q, m)
 	j := assignGPU(t, q, m, submit(t, q, s))
-	if e := j.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 3 || j.Spec.Needs.HostMemoryGB != 8.6*1.25 || e.DeviceGB != 3*1.25 {
+	if e := j.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 3 || j.Spec.Needs.HostMemoryGB != 8.6+minimumHostMemoryGB || e.DeviceGB != 3+minimumHostMemoryGB {
 		t.Fatalf("restart lost learned envelope: %+v", e)
 	}
 	if err := q.Started(result(j, false)); err != nil {
@@ -416,7 +389,7 @@ func TestLearnedMemoryDiscreteGPUAcceptedIdentity(t *testing.T) {
 	// accepted class just because the executable is the same (#631 decision).
 	s.Run.Command = append(s.Run.Command, "different-input")
 	next := assignGPU(t, q, m, submit(t, q, s))
-	if e := next.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != 3 || next.Spec.Needs.HostMemoryGB != 8.6*2.5 || !strings.Contains(e.Source, "similar work peak × 2.5") {
+	if e := next.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != 3 || next.Spec.Needs.HostMemoryGB != 8.6+minimumHostMemoryGB || !strings.Contains(e.Source, "accepted family peaks + measured uncertainty") {
 		t.Fatalf("different arguments did not use only similar-family evidence: %+v", e)
 	}
 }

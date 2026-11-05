@@ -172,8 +172,8 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	// Fan-out changes the selected piece/configuration during assignment; it
 	// cannot share this single-attempt claim. An OOM floor is already negative
 	// evidence, never permission to try a smaller exploratory envelope.
-	crossGPU := !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory && len(m.groupMembers) == 0 && estimate.hostFactor == 2.5 && estimate.samples == 1
-	if estimate.escalation || (!estimate.foreign && !crossGPU) || estimate.key == nil || j.Batch != nil || j.Spec.FanOut != nil || j.MemoryOOMFloor != nil {
+	crossGPU := !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory && len(m.groupMembers) == 0 && estimate.uncalibrated
+	if !estimate.uncalibrated || estimate.escalation || (!estimate.foreign && !crossGPU) || estimate.key == nil || j.Batch != nil || j.Spec.FanOut != nil || j.MemoryOOMFloor != nil {
 		return 0, "", false
 	}
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
@@ -182,15 +182,18 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	}
 	prior := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
 	cap, priorFits := q.largestMemoryExplorationHost(j, m, prior)
-	if priorFits || cap <= 0 || q.qualificationCapacity(m).FreeHostMemoryGB != cap {
+	if (!estimate.uncalibrated && priorFits) || cap <= 0 || q.qualificationCapacity(m).FreeHostMemoryGB != cap {
 		return 0, "", false
 	}
-	lower := q.sameOSMemoryLowerBound(*estimate.key, configuration)
+	lower := max(q.sameOSMemoryLowerBound(*estimate.key, configuration), q.constrainedMemoryLowerFor(j, estimate, crossGPU))
+	if lower <= 0 {
+		lower = prior
+	}
 	if crossGPU {
 		// One foreign-family sample is a prior, not a target measurement.
-		// Retain its conservative total-cgroup peak and 25% headroom; only
-		// the extra transfer margin may yield to one bounded measurement.
-		lower = max(hostMemoryPeakGB(estimate.host), estimate.constrainedGB)
+		// Retain the observed total-cgroup lower bound. Unknown transfer
+		// error requires a physical probe, never another guessed factor.
+		lower = max(lower, hostMemoryPeakGB(estimate.host), estimate.constrainedGB)
 	}
 	budget := cap - m.MemoryCeilingSlackGB - exploratoryDriftMarginGB(m)
 	hint := 0.0
@@ -200,7 +203,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 			hint = max(hint, j.MemoryFallback.MemoryGB)
 		}
 	}
-	if lower <= 0 || !validRate(lower*1.25) || lower*1.25 > budget || hint > budget {
+	if lower <= 0 || !validRate(lower) || lower > budget || hint > budget {
 		return 0, "", false
 	}
 	room, why := q.exploratoryMemory(j, m)

@@ -156,7 +156,7 @@ func TestAttemptMemoryFactsAcceptedGET(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
+	if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
 		t.Fatal("accepted total peak lost headroom", next.MemoryEnvelope)
 	}
 	// A second job with an unread platform reading remains distinct from zero.
@@ -210,11 +210,11 @@ func TestAttemptMemoryFactsGB10Accounting(t *testing.T) {
 				t.Fatal("next CUDA attempt not assigned")
 			}
 			if available {
-				want := (total+device)*1.25 + m.MemoryCeilingSlackGB
-				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.MemoryEnvelope.HostGB != want || next.Spec.Needs.HostMemoryGB != total*1.25 || next.Spec.Needs.MemoryGB != device*1.25 {
+				want := total + device + 2*minimumHostMemoryGB + m.MemoryCeilingSlackGB
+				if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.MemoryEnvelope.HostGB != want || next.Spec.Needs.HostMemoryGB != total+minimumHostMemoryGB || next.Spec.Needs.MemoryGB != device+minimumHostMemoryGB {
 					t.Fatalf("GB10 memory lost a host/device floor: %+v; %+v", next.MemoryEnvelope, next.Spec.Needs)
 				}
-			} else if next.MemoryEnvelope.Source != "exploratory first run" {
+			} else if !strings.HasPrefix(next.MemoryEnvelope.Source, "exploratory first run") {
 				t.Fatalf("unknown device use enabled a smaller unified charge: %+v", next.MemoryEnvelope)
 			}
 		})

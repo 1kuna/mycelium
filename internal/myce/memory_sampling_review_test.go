@@ -177,7 +177,7 @@ func TestMemorySamplingOOMInvalidatesAndRelearns(t *testing.T) {
 		t.Fatal(err)
 	}
 	explore := startObservation(t, q, m, s)
-	if explore.MemoryEnvelope.Source != acceptedMemoryEscalation || explore.MemoryEnvelope.Basis != "exploratory" || explore.MemoryEnvelope.HostGB != 4 {
+	if explore.MemoryEnvelope.Source != acceptedMemoryEscalation || explore.MemoryEnvelope.Basis != "exploratory" || explore.MemoryEnvelope.HostGB != 32-minimumHostMemoryGB {
 		t.Fatalf("invalidated class did not explore: %+v", explore.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)
@@ -188,7 +188,7 @@ func TestMemorySamplingOOMInvalidatesAndRelearns(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := startObservation(t, q, m, s)
-	if next.Spec.Needs.HostMemoryGB != 10 || !strings.Contains(next.MemoryEnvelope.Source, "accepted peak") {
+	if next.Spec.Needs.HostMemoryGB != 8+minimumHostMemoryGB || !strings.Contains(next.MemoryEnvelope.Source, "accepted peak") {
 		t.Fatalf("successful exploration did not re-teach memory: %+v", next.MemoryEnvelope)
 	}
 }

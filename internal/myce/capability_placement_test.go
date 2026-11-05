@@ -73,7 +73,7 @@ func TestCapabilityLearnedNeedsPersistAndScope(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	if job(t, q, queued.ID).Spec.Needs.MemoryGB != 50 {
+	if job(t, q, queued.ID).Spec.Needs.MemoryGB != 40 {
 		t.Fatal("already queued program did not learn")
 	}
 	if err := q.Close(); err != nil {
@@ -84,7 +84,7 @@ func TestCapabilityLearnedNeedsPersistAndScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	learned := submit(t, q, s)
-	if learned.Spec.Needs.MemoryGB != 50 || learned.Spec.Needs.HostMemoryGB != 5 {
+	if learned.Spec.Needs.MemoryGB != 40 || learned.Spec.Needs.HostMemoryGB != 4 {
 		t.Fatal("measurements did not survive restart", learned.Spec.Needs)
 	}
 	small := placementMachine("small", "separate", 64, 24, e)
@@ -301,7 +301,7 @@ func TestCapabilityLearnedProgramUsesSmallerFreeHypha(t *testing.T) {
 	}
 	clock.Advance(time.Second)
 	next := submit(t, q, s)
-	if next.Spec.Needs.MemoryGB != 2.5 || next.Spec.Needs.HostMemoryGB != 50 {
+	if next.Spec.Needs.MemoryGB != 2 || next.Spec.Needs.HostMemoryGB != 40 {
 		t.Fatal("RAM-heavy needs not learned")
 	}
 	if got := check(t, q, small, nil).Job; got == nil || got.ID != next.ID {

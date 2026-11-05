@@ -51,7 +51,7 @@ func TestSharedGPUPressureGrowth(t *testing.T) {
 			fakeCheckpointAvailability(t, q, true)
 			finish(t, q, b, true)
 			next := assignedJob(machineCheck(t, q, m))
-			if next == nil || next.ID != a.ID || next.Attempt <= a.Attempt || next.Spec.Needs.MemoryGB != 37.5 || next.MemoryEnvelope == nil || !strings.Contains(next.MemoryEnvelope.Source, "shared GPU peak") {
+			if next == nil || next.ID != a.ID || next.Attempt <= a.Attempt || next.Spec.Needs.MemoryGB != 30 || next.MemoryEnvelope == nil || !strings.Contains(next.MemoryEnvelope.Source, "shared GPU measured") {
 				t.Fatal("retry did not reserve measured peak times the learning factor", next)
 			}
 		})

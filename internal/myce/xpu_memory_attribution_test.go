@@ -164,7 +164,7 @@ func TestXPUHostMemoryCorrectedSampleReplacesLegacyAfterReopen(t *testing.T) {
 	if next == nil || next.ID != queued.ID {
 		t.Fatalf("corrected job not assigned: %+v", job(t, q, queued.ID))
 	}
-	if got := next.Spec.Needs.HostMemoryGB; math.Abs(got-9.375) > 1e-8 {
-		t.Fatalf("legacy history still dominates after reopen: %.3f, want 9.375", got)
+	if got := next.Spec.Needs.HostMemoryGB; math.Abs(got-(7.5+minimumHostMemoryGB)) > 1e-8 {
+		t.Fatalf("legacy history still dominates after reopen: %.3f, want accepted 7.5 GiB plus page rounding", got)
 	}
 }

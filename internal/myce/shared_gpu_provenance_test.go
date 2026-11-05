@@ -45,8 +45,8 @@ func TestSharedDeviceHostOnlyLearningKeepsCard(t *testing.T) {
 			if unknown == nil || unknown.ID != queued.ID {
 				t.Fatal("unmeasured work could not run alone", job(t, q, queued.ID).Reason)
 			}
-			if layout == "separate" && (unknown.MemoryEnvelope.Basis != "learned" || !strings.Contains(unknown.MemoryEnvelope.Source, "GPU recipe default")) {
-				t.Fatal("regression did not exercise a learned recipe-default vector", unknown.MemoryEnvelope)
+			if layout == "separate" && (unknown.MemoryEnvelope.Basis != "exploratory" || !strings.Contains(unknown.MemoryEnvelope.Source, "unknown device peak; exclusive card")) {
+				t.Fatal("host-only evidence lost exploratory card exclusivity", unknown.MemoryEnvelope)
 			}
 			if err := q.Started(result(unknown, false)); err != nil {
 				t.Fatal(err)
@@ -71,7 +71,7 @@ func TestSharedDeviceHostOnlyLearningKeepsCard(t *testing.T) {
 			}
 			next := submit(t, q, s)
 			measured := assignedJob(machineCheck(t, q, m, runningPeer))
-			if measured == nil || measured.ID != next.ID || measured.MemoryEnvelope.Basis != "learned" || measured.Spec.Needs.MemoryGB != 10 || strings.Contains(measured.MemoryEnvelope.Source, "GPU recipe default") {
+			if measured == nil || measured.ID != next.ID || measured.MemoryEnvelope.Basis != "learned" || measured.Spec.Needs.MemoryGB != 8+minimumHostMemoryGB || strings.Contains(measured.MemoryEnvelope.Source, "GPU recipe default") {
 				t.Fatal("accepted device evidence did not enable sharing", measured, job(t, q, next.ID).Reason)
 			}
 		})

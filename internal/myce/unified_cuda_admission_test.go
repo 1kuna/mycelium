@@ -249,9 +249,14 @@ func TestUnifiedCUDAAdmissionMeasuredProductionEnvelope(t *testing.T) {
 	experiment.Spec.Needs.MemoryGB, experiment.Spec.Needs.HostMemoryGB = 16, 10
 	target := allocationMachine(q.s.Machines[m.ID], []string{"0"})
 	reason := q.productionAdmissionReason(experiment, target)
-	// The tiny recipe defaults would fit. The retained peaks require
-	// (8 + 24) * 1.25 + .125 = 40.125 GiB, with no overlap deduction.
-	if !strings.Contains(reason, "40.125 GiB production envelope") {
+	// The measured bound no longer withholds a universal 25% margin.
+	if reason != "" {
+		t.Fatal("fitting measured demand withheld headroom", reason)
+	}
+	experiment.Spec.Needs.HostMemoryGB = 18
+	reason = q.productionAdmissionReason(experiment, target)
+	// Retain both measured vectors, page rounding and explicit launch slack.
+	if !strings.Contains(reason, "32.125 GiB production envelope") {
 		t.Fatal("measured production envelope or margin lost", reason)
 	}
 	if err := q.Cancel(demand.ID); err != nil {
