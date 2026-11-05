@@ -68,6 +68,7 @@ func TestApplicationProgressTwoStagesUnknownRemaining(t *testing.T) {
 	stage, stages := 1, 2
 	p := progressReport(10, 10, "records")
 	p.StageIndex, p.StageCount, p.TotalWorkKnown = &stage, &stages, true
+	p.UpdatedAt = clock.Now()
 	report := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, ApplicationProgress: p}
 	send := func() {
 		t.Helper()
@@ -85,6 +86,7 @@ func TestApplicationProgressTwoStagesUnknownRemaining(t *testing.T) {
 	stage = 2
 	p = progressReport(0, 100, "iterations")
 	p.StageIndex, p.StageCount = &stage, &stages
+	p.UpdatedAt = clock.Now()
 	report.ApplicationProgress = p
 	send()
 	got = runtimeJob(t, q, j.ID)
@@ -95,6 +97,7 @@ func TestApplicationProgressTwoStagesUnknownRemaining(t *testing.T) {
 	oldStage := 1
 	old := progressReport(10, 10, "records")
 	old.StageIndex, old.StageCount, old.AgeSeconds = &oldStage, &stages, 5
+	old.UpdatedAt = clock.Now().Add(-5 * time.Second)
 	report.ApplicationProgress = old
 	send()
 	if *runtimeJob(t, q, j.ID).ApplicationProgress.StageIndex != 2 {
@@ -102,6 +105,8 @@ func TestApplicationProgressTwoStagesUnknownRemaining(t *testing.T) {
 	}
 	// A delayed report within the stage also cannot overwrite fresher counts.
 	old.StageIndex, old.Unit = &stage, "iterations"
+	// Both were fresh at send time, but the older file's heartbeat arrives last.
+	old.AgeSeconds = 0
 	send()
 	if runtimeJob(t, q, j.ID).ApplicationProgress.Completed != 0 {
 		t.Fatal("older file evidence overwrote progress")

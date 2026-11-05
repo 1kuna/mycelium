@@ -223,7 +223,7 @@ cat expected > effect`}
 			for _, current := range snapshot.Jobs {
 				if current.ID == job.ID && current.ApplicationProgress != nil {
 					text := myce.JobTiming(current)
-					return current.State == "running" && current.ApplicationProgress.Attempt == 1 && strings.Contains(text, "stage 1/2") && strings.Contains(text, "reported stage progress 10/10 frames") && strings.Contains(text, "whole-job progress unknown") && current.Runtime.RemainingWorkUnknown && current.Progress == 0
+					return current.State == "running" && current.ApplicationProgress.Attempt == 1 && strings.Contains(text, "stage 1/2") && strings.Contains(text, "reported stage progress 10/10 frames") && strings.Contains(text, "whole-job progress unknown") && strings.Contains(text, "checkpoint evidence: none reported") && current.Runtime.RemainingWorkUnknown && current.Progress <= 0
 				}
 			}
 			return false

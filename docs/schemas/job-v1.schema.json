@@ -74,6 +74,10 @@
         },
         "unit": {
           "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
         }
       },
       "required": [

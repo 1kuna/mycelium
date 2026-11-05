@@ -19,6 +19,8 @@ const applicationProgressMaxBytes = 4096
 // Counts need pointers on input so missing fields cannot masquerade as zero.
 type ProgressReport struct {
 	updatedAt time.Time
+	// Worker file identity/order, never an application-authored timestamp.
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 
 	Completed      *float64 `json:"completed"`
 	Total          *float64 `json:"total"`
@@ -37,6 +39,7 @@ type ApplicationProgress struct {
 	Machine        string    `json:"machine"`
 	Session        string    `json:"session"`
 	ReceivedAt     time.Time `json:"received_at"`
+	UpdatedAt      time.Time `json:"updated_at,omitempty"`
 	AgeSeconds     float64   `json:"age_seconds"`
 	Stale          bool      `json:"stale"`
 	StageIndex     *int      `json:"stage_index,omitempty"`
@@ -91,6 +94,7 @@ func readApplicationProgress(spool string, j Job, now time.Time) *ProgressReport
 	// Application timestamps/ages are not trusted. Use local file modification
 	// age and queue receipt time, avoiding worker/queue clock synchronization.
 	p.updatedAt = opened.ModTime()
+	p.UpdatedAt = p.updatedAt
 	p.AgeSeconds = max(0, now.Sub(p.updatedAt).Seconds())
 	if !p.valid() {
 		return nil
@@ -116,6 +120,11 @@ func (q *Queue) retainApplicationProgress(j *Job, report *AttemptReport, m *Mach
 	}
 	now := q.clock.Now()
 	if old := j.ApplicationProgress; old != nil && old.Attempt == j.Attempt && old.Session == j.Session {
+		// File times order evidence within this worker/session, independently of
+		// transport delay. Equal times are repeats and must not renew freshness.
+		if !old.UpdatedAt.IsZero() && (p.UpdatedAt.IsZero() || !p.UpdatedAt.After(old.UpdatedAt)) {
+			return
+		}
 		// Reordered/cached heartbeats must not replace newer file evidence.
 		oldAge := old.AgeSeconds + max(0, now.Sub(old.ReceivedAt).Seconds())
 		if p.AgeSeconds > oldAge || (old.StageIndex != nil && p.StageIndex != nil && *p.StageIndex < *old.StageIndex) {
@@ -130,5 +139,5 @@ func (q *Queue) retainApplicationProgress(j *Job, report *AttemptReport, m *Mach
 		n := *v
 		return &n
 	}
-	j.ApplicationProgress = &ApplicationProgress{Completed: *p.Completed, Total: *p.Total, Unit: p.Unit, Attempt: j.Attempt, Machine: m.ID, Session: m.Session, ReceivedAt: now, AgeSeconds: p.AgeSeconds, StageIndex: cloneInt(p.StageIndex), StageCount: cloneInt(p.StageCount), TotalWorkKnown: p.TotalWorkKnown}
+	j.ApplicationProgress = &ApplicationProgress{Completed: *p.Completed, Total: *p.Total, Unit: p.Unit, Attempt: j.Attempt, Machine: m.ID, Session: m.Session, ReceivedAt: now, UpdatedAt: p.UpdatedAt, AgeSeconds: p.AgeSeconds, StageIndex: cloneInt(p.StageIndex), StageCount: cloneInt(p.StageCount), TotalWorkKnown: p.TotalWorkKnown}
 }

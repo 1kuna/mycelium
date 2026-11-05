@@ -1185,6 +1185,11 @@ live reporter. Worker restart preserves file age. Queue restart preserves receip
 age. New attempts clear reports; old attempts/sessions cannot replace them.
 Delayed older file evidence and a backwards stage index cannot replace newer
 evidence within the same attempt either.
+Worker-observed `updated_at` is the local file modification time, used only to
+order reports within the same attempt/session; it is not a queue-clock time or
+an application-authored timestamp. Repeated equal timestamps do not renew age.
+Older workers without it retain the legacy age-based interpretation. Upgrade
+the queue before workers that send the extended heartbeat fields.
 
 Application progress is advisory. It is separate from durable checkpoint
 `job.progress` generations and accepted `fan_out.results`. A report of 100% may

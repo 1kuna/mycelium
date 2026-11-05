@@ -117,7 +117,7 @@ func runtimeText(j *Job) string {
 		text += "; advisory)"
 		text += fmt.Sprintf("; total work known: %t", p.TotalWorkKnown)
 		if p.TotalWorkKnown && p.StageCount != nil && *p.StageCount == 1 && !p.Stale {
-			text += fmt.Sprintf("; whole-job reported progress %g/%g %s (advisory; awaiting job success)", p.Completed, p.Total, p.Unit)
+			text += fmt.Sprintf("; whole-job reported progress %g/%g %s (advisory; job state decides completion)", p.Completed, p.Total, p.Unit)
 		} else {
 			text += "; whole-job progress unknown (stage-local counts)"
 		}
