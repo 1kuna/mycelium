@@ -151,7 +151,9 @@ func TestProfileStorageNamesAuthoredInput(t *testing.T) {
 				t.Fatal(err)
 			}
 			p.Adapter = adapter
-			p.Inputs = map[string]string{"dataset.json": input}
+			// Supply per-command input separately: an explicit-key replay skips
+			// preparation and must still recover the authored name from these flags.
+			itemInputs := map[string]string{"dataset.json": input}
 			var files map[string]struct {
 				SHA256    string `json:"sha256"`
 				SizeBytes int64  `json:"size_bytes"`
@@ -183,10 +185,12 @@ func TestProfileStorageNamesAuthoredInput(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			var out bytes.Buffer
-			err = runPreparedProfile(context.Background(), root, p, []byte("fixture"), nil, nil, "named-input", "", "", "", server.URL, "fixture-token", &out, io.Discard)
-			if exitCode(err) != 69 || !strings.Contains(err.Error(), `operation=upload input="dataset.json" HTTP 403`) || strings.Contains(err.Error(), input) {
-				t.Fatalf("wrong diagnostic: %v", err)
+			for attempt := 0; attempt < 2; attempt++ {
+				var out bytes.Buffer
+				err = runPreparedProfile(context.Background(), root, p, []byte("fixture"), nil, itemInputs, "named-input", "", "", "", server.URL, "fixture-token", &out, io.Discard)
+				if exitCode(err) != 69 || !strings.Contains(err.Error(), `operation=upload input="dataset.json" HTTP 403`) || strings.Contains(err.Error(), input) {
+					t.Fatalf("invocation %d: wrong diagnostic: %v", attempt+1, err)
+				}
 			}
 		})
 	}

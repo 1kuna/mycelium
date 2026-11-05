@@ -582,11 +582,11 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		}
 		ctx = myce.WithFileStoreSubmission(ctx, r.Spec)
 		if err = c.PreflightFileStore(ctx, r.Spec.StoredInputFiles()); err != nil {
-			return capacityFailure("preflight", profileInputNames(r, p), err)
+			return capacityFailure("preflight", profileInputNames(r, p, itemInputs), err)
 		}
 		for name, file := range r.Uploads {
 			if err = c.UploadJobInput(ctx, filepath.Join(dir, file), profileUploadRef(r.Spec, name)); err != nil {
-				return capacityFailure("upload", profileStorageInputName(name, p), err)
+				return capacityFailure("upload", profileStorageInputName(name, p, itemInputs), err)
 			}
 		}
 		if r.Spec.Extension != "" {
@@ -606,7 +606,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		if e != nil {
 			var h *myce.HTTPError
 			if errors.As(e, &h) && h.Code == "project_file_store_quota" {
-				return capacityFailure("submit", profileInputNames(r, p), e)
+				return capacityFailure("submit", profileInputNames(r, p, itemInputs), e)
 			}
 			if errors.As(e, &h) {
 				if h.Code == "no_qualified_target" || h.Code == "job_environment_invalid" && h.PathDiagnostic != nil {
@@ -699,22 +699,24 @@ func profileUploadRef(s myce.Spec, name string) myce.FileRef {
 
 // Receipt keys use hashed destinations for legacy profiles; report the authored
 // input name rather than its frozen local filename or opaque storage key.
-func profileStorageInputName(name string, p executionProfile) string {
+func profileStorageInputName(name string, p executionProfile, itemInputs map[string]string) string {
 	name = strings.TrimPrefix(name, "files/")
 	if name == ".myce-source.tar" {
 		return "source"
 	}
-	for dest := range p.Inputs {
-		if name == ".myce-inputs/"+profileHash(dest) {
-			return dest
+	for _, inputs := range []map[string]string{p.Inputs, itemInputs} {
+		for dest := range inputs {
+			if name == ".myce-inputs/"+profileHash(dest) {
+				return dest
+			}
 		}
 	}
 	return name
 }
-func profileInputNames(r profileReceipt, p executionProfile) string {
-	names := make([]string, 0, len(r.Uploads))
-	for name := range r.Uploads {
-		names = append(names, profileStorageInputName(name, p))
+func profileInputNames(r profileReceipt, p executionProfile, itemInputs map[string]string) string {
+	names := make([]string, 0, len(r.Spec.StoredInputFiles()))
+	for name := range r.Spec.StoredInputFiles() {
+		names = append(names, profileStorageInputName(name, p, itemInputs))
 	}
 	slices.Sort(names)
 	return strings.Join(names, ", ")
