@@ -13,22 +13,52 @@ import (
 
 func TestCandidateCostRequirementPlans(t *testing.T) {
 	q, _ := candidateCostFixture(t)
+	for i := range 5 {
+		delete(q.s.Jobs, fmt.Sprintf("running-%d", i))
+	}
+	q.refreshHostMemory()
+	q.refreshHostCPU()
 	for _, j := range q.s.Jobs {
 		if j.State == "queued" {
 			j.Spec.RequirementReasons = map[string]string{"os:linux": "requires Linux"}
 		}
 	}
+	admitted, rejected, plans := 0, 0, 0
 	for _, m := range q.plannerMachines() {
 		set := q.candidates(m)
+		candidates := map[string]*Job{}
 		for _, j := range set.jobs {
-			ordinary := q.batchCandidateWithResources(q.s.Jobs[j.ID], m, nil)
-			if !reflect.DeepEqual(j, ordinary) {
-				t.Fatalf("shared projection changed candidate %s on %s", j.ID, targetKey(m))
+			candidates[j.ID] = j
+		}
+		for _, queued := range q.s.Jobs {
+			if queued.State != "queued" {
+				continue
 			}
-			if !reflect.DeepEqual(set.batchPlan(j), q.roomPlan(j, m, true)) {
+			j := candidates[queued.ID]
+			ordinary := q.batchCandidateWithResources(queued, m, nil)
+			if (j == nil) != (ordinary == nil) {
+				t.Fatalf("shared projection changed eligibility %s on %s", queued.ID, targetKey(m))
+			}
+			if j == nil {
+				rejected++
+				continue
+			}
+			admitted++
+			if !reflect.DeepEqual(j.Spec, ordinary.Spec) || !reflect.DeepEqual(j.MemoryEnvelope, ordinary.MemoryEnvelope) {
+				t.Fatalf("shared projection changed resources %s on %s", j.ID, targetKey(m))
+			}
+			plan := set.batchPlan(j)
+			if !reflect.DeepEqual(plan, q.roomPlan(ordinary, m, true)) {
 				t.Fatalf("shared projection changed release plan %s on %s", j.ID, targetKey(m))
 			}
+			if plan != nil {
+				plans++
+			}
 		}
+	}
+	t.Logf("compared admitted=%d rejected=%d release plans=%d", admitted, rejected, plans)
+	if admitted == 0 || rejected == 0 || plans == 0 {
+		t.Fatalf("missing comparison coverage: admitted=%d rejected=%d plans=%d", admitted, rejected, plans)
 	}
 }
 
