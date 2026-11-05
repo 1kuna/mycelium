@@ -232,7 +232,8 @@ findings; record installation, queue or storage-owner holds on your issue.
 
 No notifier is required for foreground `myce wait`. If using detached completion,
 pass this thread's executable with `--notify PATH` (or `MYCE_NOTIFY`); a missing or
-non-executable supplied notifier blocks. Doctor never runs it, tests delivery or
+non-executable supplied notifier blocks; executable lookup follows run, including
+PATH lookup. Doctor never runs it, tests delivery or
 verifies thread ownership. Follow [T3 binding](t3-binding.md) for that proof.
 It also leaves application result checks unexecuted; verify downloaded results.
 

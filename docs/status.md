@@ -1632,6 +1632,8 @@ explicit storage-owner verification hold: doctor does not request NAS inspection
 Managed source/input placeholders are staged by the subsequent run.
 
 Only authenticated ping and read-only resolve requests are made. No upload,
-preparation, reservation, adapter/receipt write or service edit occurs. Authority
-and raw transport errors are not printed. This is diagnosis, not execution or
+preparation, reservation, adapter/receipt write or service edit occurs. Known authority is redacted in every output field; raw YAML values
+and transport errors are withheld. Notifier lookup uses the same PATH/absolute
+executable resolution as run. Recognized cache-capacity refusals preserve the
+required/capacity byte evidence and a dependency remedy. This is diagnosis, not execution or
 release verification; submit revalidates and results still need acceptance checks.

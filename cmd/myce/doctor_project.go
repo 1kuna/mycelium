@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"mycelium/internal/myce"
 )
@@ -32,7 +34,8 @@ func projectDoctor(ctx context.Context, args []string, out, errOut io.Writer) er
 
 func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut io.Writer, authority func(clientFlags) (myce.Client, error)) error {
 	f := flag.NewFlagSet("doctor --project", flag.ContinueOnError)
-	f.SetOutput(errOut)
+	var optionOutput bytes.Buffer
+	f.SetOutput(&optionOutput)
 	project := f.Bool("project", false, "diagnose a consumer project, read-only; no installation checks or changes")
 	adapter := f.String("adapter", ".mycelium/adapter.yaml", "project adapter (paths resolve from the current project directory, as with run)")
 	entry := f.String("entry", "", "adapter entry (default: adapter default)")
@@ -41,9 +44,10 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	credentials := installedClientFlags(f)
 	if err := f.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return nil
+			_, writeErr := io.WriteString(errOut, projectDoctorRedact(optionOutput.String(), os.Getenv("MYCE_TOKEN"), *credentials.token, *credentials.queue, *credentials.config, *credentials.joining))
+			return writeErr
 		}
-		return waitError(2, "invalid project doctor options")
+		return waitError(2, "invalid project doctor options; use myce doctor --project --help")
 	}
 	if !*project || f.NArg() != 0 {
 		return waitError(2, "usage: myce doctor --project [--adapter FILE] [--entry NAME] [--notify EXECUTABLE] [--json]")
@@ -60,7 +64,16 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 		add(prefix+finding.Field, state, owner, finding.Fix)
 		checks[len(checks)-1].Evidence = finding.Problem
 	}
+	var client myce.Client
 	finish := func() error {
+		// Apply to every string before either renderer, including fields and fixes
+		// echoed by a remote report. Never serialize installed authority.
+		for i := range checks {
+			c := &checks[i]
+			for _, value := range []*string{&c.Name, &c.State, &c.Owner, &c.Action, &c.Evidence} {
+				*value = projectDoctorRedact(*value, client.Token, client.URL, os.Getenv("MYCE_TOKEN"), *credentials.token, *credentials.queue, *credentials.config, *credentials.joining)
+			}
+		}
 		blocked := slices.ContainsFunc(checks, func(c projectDoctorCheck) bool { return c.State == "blocked" })
 		next := "run the selected entry, wait for completion, then fetch and verify its result"
 		owner := "consumer"
@@ -103,7 +116,8 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	}
 	// Authority failures deliberately discard error strings: they may contain a
 	// queue URL, config path, TLS details or credentials from a remote response.
-	client, authErr := authority(credentials)
+	var authErr error
+	client, authErr = authority(credentials)
 	if authErr != nil {
 		add("installed authority", "blocked", "installation owner", "restore installed queue authority; do not look up or copy the fleet token")
 	} else {
@@ -135,7 +149,7 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	}
 	a, err := decodeAdapter(data)
 	if err != nil {
-		add("adapter", "blocked", "consumer", "fix adapter YAML/schema: "+err.Error())
+		add("adapter", "blocked", "consumer", "fix adapter YAML/schema and field types; run.command requires a list of strings; raw YAML values are withheld")
 		return finish()
 	}
 	p, _, err := adapterProfile(a, *entry)
@@ -156,7 +170,7 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	}
 	if *notify == "" {
 		add("completion", "ready", "", "foreground myce wait is available; notifier is not configured (no delivery will be sent)")
-	} else if info, err := os.Stat(*notify); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+	} else if _, err := resolveProfileNotifier(*notify); err != nil {
 		add("completion", "blocked", "consumer", "provide an executable notifier owned by this thread, or omit --notify and use foreground myce wait")
 	} else {
 		add("completion", "ready", "", "notifier executable exists; delivery and application result checks are not executed by doctor")
@@ -203,8 +217,28 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	var report myce.ResolveReport
 	if err := client.Call(ctx, "POST", "/api/resolve", request, &report); err != nil {
 		var h *myce.HTTPError
-		if errors.As(err, &h) && (h.Status == 404 || h.Status == 400) {
-			add("server support", "blocked", "queue owner", "upgrade the queue for this client's read-only resolve request, then repeat doctor")
+		if errors.As(err, &h) {
+			switch {
+			case h.Code == "shared_input_cache_capacity":
+				add("dependencies: shared input cache", "blocked", "consumer", "reduce simultaneous shared-input bytes, or ask the queue owner for matching worker cache capacity; do not retry unchanged inputs")
+				checks[len(checks)-1].Evidence = h.Message
+			case h.PathDiagnostic != nil:
+				owner := "consumer"
+				if h.PathDiagnostic.Side != "submitter" {
+					owner = h.PathDiagnostic.Side + " owner"
+				}
+				add("dependencies", "blocked", owner, "make the declared dependency readable on its reading side, or stage it through managed transport")
+				checks[len(checks)-1].Evidence = h.PathDiagnostic.String()
+			case h.Code == "no_qualified_target":
+				add("target coverage", "blocked", "consumer", "correct the declared target requirements, or ask the queue owner to qualify a compatible target")
+				checks[len(checks)-1].Evidence = h.Message
+			case h.Status == 404 || h.Code == "queue_upgrade_required":
+				add("server support", "blocked", "queue owner", "upgrade the queue for this client's read-only resolve request, then repeat doctor")
+			case h.Status == 400:
+				add("resolve request", "blocked", "consumer", "correct the adapter's job fields; if valid fields are unsupported, ask the queue owner to check client/server compatibility")
+			default:
+				add("resolve", "blocked", "queue owner", "restore queue resolve service; inspect the authenticated queue's diagnostics")
+			}
 		} else {
 			add("resolve", "blocked", "queue owner", "restore queue resolve service; inspect the authenticated queue's diagnostics")
 		}
@@ -270,4 +304,15 @@ func projectFileReadable(root, path string) bool {
 	var b [1]byte
 	_, err = f.Read(b[:])
 	return err == nil || errors.Is(err, io.EOF)
+}
+
+// Redact known authority before rendering typed diagnostics. Parse/transport
+// errors that can embed arbitrary values are withheld at their source.
+func projectDoctorRedact(value string, authority ...string) string {
+	for _, secret := range authority {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[redacted]")
+		}
+	}
+	return value
 }

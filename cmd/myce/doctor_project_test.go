@@ -186,3 +186,95 @@ func TestProjectDoctorHelpDoesNotProbe(t *testing.T) {
 		t.Fatalf("%v %s", err, &out)
 	}
 }
+
+func doctorReviewFixture(t *testing.T, args []string, resolve func(http.ResponseWriter, *http.Request)) (string, error) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/ping" {
+			io.WriteString(w, `{"version":1}`)
+			return
+		}
+		if r.Method != "POST" || r.URL.Path != "/api/resolve" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			http.Error(w, "bad", 500)
+			return
+		}
+		resolve(w, r)
+	}))
+	defer server.Close()
+	var out bytes.Buffer
+	err := projectDoctorWithAuthority(context.Background(), append([]string{"--project"}, args...), &out, io.Discard, func(clientFlags) (myce.Client, error) { return myce.Client{URL: server.URL, Token: "CANARY"}, nil })
+	return out.String(), err
+}
+func doctorReadyReport(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(myce.ResolveReport{Targets: []myce.ResolveTarget{{Eligible: true}}})
+}
+func TestProjectDoctorReviewPathNotifier(t *testing.T) {
+	doctorCPUProject(t)
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "review-hook"), []byte("#!/bin/sh\necho invoked > unexpected-notifier-execution\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := doctorReviewFixture(t, []string{"--notify", "review-hook"}, doctorReadyReport)
+	if err != nil {
+		t.Fatalf("PATH executable accepted by run is rejected: %v\n%s", err, out)
+	}
+	if _, err := os.Stat("unexpected-notifier-execution"); !os.IsNotExist(err) {
+		t.Fatal("doctor executed notifier")
+	}
+}
+func TestProjectDoctorReviewCapacityRemedy(t *testing.T) {
+	doctorCPUProject(t)
+	out, err := doctorReviewFixture(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(409)
+		io.WriteString(w, `{"code":"shared_input_cache_capacity","error":"shared inputs require 200 bytes; largest enabled matching worker cache capacity=100 bytes"}`)
+	})
+	if exitCode(err) != 1 {
+		t.Fatal(err, out)
+	}
+	if strings.Contains(out, "restore queue resolve service") || !strings.Contains(out, "200") {
+		t.Fatalf("healthy queue capacity rejection lost its cause and remedy:\n%s", out)
+	}
+}
+func TestProjectDoctorReviewDiagnosticSecret(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			doctorCPUProject(t)
+			var args []string
+			if format == "json" {
+				args = []string{"--json"}
+			}
+			out, _ := doctorReviewFixture(t, args, func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(myce.ResolveReport{Targets: []myce.ResolveTarget{{Eligible: true}}, Findings: []myce.ResolveFinding{{Field: "environment", Side: "queue", Problem: "environment build failed: Authorization: Bearer CANARY", Fix: "correct immutable inputs"}}})
+			})
+			if strings.Contains(out, "CANARY") || !strings.Contains(out, "[redacted]") {
+				t.Fatal("authority was not safely redacted")
+			}
+		})
+	}
+}
+func TestProjectDoctorReviewInvalidAdapterSecret(t *testing.T) {
+	doctorCPUProject(t)
+	b, err := os.ReadFile(".mycelium/adapter.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = []byte(strings.Replace(string(b), "command: [sh, run.sh]", "command: CANARY", 1))
+	if err = os.WriteFile(".mycelium/adapter.yaml", b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := doctorReviewFixture(t, nil, doctorReadyReport)
+	if strings.Contains(out, "CANARY") || exitCode(err) != 1 {
+		t.Fatal("malformed adapter disclosed its scalar or did not block")
+	}
+}
+func TestProjectDoctorReviewBadRequestIsConsumerFix(t *testing.T) {
+	doctorCPUProject(t)
+	out, err := doctorReviewFixture(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unrecognized synthetic private error", 400)
+	})
+	if exitCode(err) != 1 || strings.Contains(out, "upgrade the queue") || strings.Contains(out, "synthetic private error") || !strings.Contains(out, "correct the adapter") {
+		t.Fatalf("%v %s", err, out)
+	}
+}
