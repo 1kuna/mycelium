@@ -600,6 +600,8 @@ type Client struct {
 }
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
+	ctx, cancel := c.apiContext(ctx)
+	defer cancel()
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
 	in, resourceFields := resourceWireInput(in, supported)
 	clock := c.clock()

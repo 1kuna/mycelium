@@ -10,8 +10,35 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+func TestClientAdaptiveExplicitHTTPTimeoutBoundsRetries(t *testing.T) {
+	for _, submit := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			calls := 0
+			clock := RealClock{} // synctest advances the injected clock and timers.
+			c := Client{URL: "http://fixture.invalid", Clock: clock, Jitter: func() float64 { return 0 }, HTTP: &http.Client{
+				Timeout: time.Second,
+				Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
+					calls++
+					return &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"7"}}, Body: io.NopCloser(strings.NewReader(`{"code":"queue_stopping"}`))}, nil
+				}),
+			}}
+			started := clock.Now()
+			var err error
+			if submit {
+				_, err = c.Submit(context.Background(), Spec{SubmissionKey: "same-intent"})
+			} else {
+				err = c.Call(context.Background(), "GET", "/api/status", nil, nil)
+			}
+			if !errors.Is(err, context.DeadlineExceeded) || clock.Now().Sub(started) != time.Second || calls != 1 {
+				t.Fatalf("owner timeout lost across overload retries: submit=%v elapsed=%s calls=%d err=%v", submit, clock.Now().Sub(started), calls, err)
+			}
+		})
+	}
+}
 
 func TestClientAdaptiveReadRetryAfter(t *testing.T) {
 	for _, status := range []int{429, 503} {

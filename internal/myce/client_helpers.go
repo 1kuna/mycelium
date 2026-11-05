@@ -30,6 +30,8 @@ func (c Client) SubmitAndWait(ctx context.Context, spec Spec) (*Job, error) {
 // Submit retries only identical keyed intent after an ambiguous transport
 // failure or explicit overload, paced by observations until owner cancellation.
 func (c Client) Submit(ctx context.Context, spec Spec) (*Job, error) {
+	ctx, cancel := c.apiContext(ctx)
+	defer cancel()
 	var j Job
 	pace := ClientPace{}
 	for {

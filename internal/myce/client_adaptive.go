@@ -88,6 +88,15 @@ func (c Client) pause(ctx context.Context, d time.Duration) error {
 	return waitStatusPause(ctx, d)
 }
 
+// An explicit HTTP timeout belongs to the API operation, including overload
+// pauses and retries. Restarting it on every attempt would make it unbounded.
+func (c Client) apiContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.HTTP != nil && c.HTTP.Timeout > 0 {
+		return context.WithTimeout(ctx, c.HTTP.Timeout)
+	}
+	return context.WithCancel(ctx)
+}
+
 // WithoutRetries lets an observation loop own pacing and overall timeouts,
 // avoiding nested retries that conceal overload or consume its whole deadline.
 func (c Client) WithoutRetries() Client { c.singleAttempt = true; return c }
