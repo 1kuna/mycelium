@@ -2,6 +2,7 @@ package myce
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http/httptest"
@@ -92,5 +93,111 @@ func TestJobGetVolumeHTTPRouting(t *testing.T) {
 	line := output.String()
 	if strings.Count(line, "event=job_get_totals") != 1 || !strings.Contains(line, `"kind":"cli","version":"s072","full":0,"wait":1`) || !strings.Contains(line, `"kind":"unknown","version":"unknown","full":1,"wait":0`) {
 		t.Fatal(line)
+	}
+}
+
+func TestJobGetVolumeRejectedObservations(t *testing.T) {
+	q, clock := fixture(t)
+	// Rejection summaries use the existing counter clock. Holding transport
+	// time fixed lets a rejection alone trigger the minute summary.
+	rateClock := &fakeClock{now: clock.Now()}
+	handler := (API{Queue: q, Token: "fixture"}).handler("", rateClock)
+	var output bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(old)
+	request := func(method, path, agent, token string) int {
+		r := httptest.NewRequest(method, path, nil)
+		r.RemoteAddr = "192.0.2.123:4567"
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("User-Agent", agent)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w.Code
+	}
+	for range 100 {
+		if code := request("GET", "/api/jobs/missing", "myce/s073", "fixture"); code != 404 {
+			t.Fatal(code)
+		}
+	}
+	for _, tc := range []struct{ method, path, agent string }{
+		{"GET", "/api/jobs/private-job?secret=private-query", "myce/s073"},
+		{"HEAD", "/api/jobs/private-job?view=wait", "myce/s073"},
+		{"POST", "/api/wait", "mycelium-python/development"},
+		{"GET", "/api/status", "mycelium-python/development"},
+		{"GET", "/api/inspection", "myce/private/path"},
+		{"GET", "/api/usage", "Go-http-client/1.1"},
+		{"GET", "/api/portability", "myce/s073"},
+		{"GET", "/", "myce/s073"},
+	} {
+		if code := request(tc.method, tc.path, tc.agent, "fixture"); code != 429 {
+			t.Fatal(tc.path, code)
+		}
+	}
+	if code := request("GET", "/api/status", "myce/s073", "wrong"); code != 401 {
+		t.Fatal(code)
+	}
+	if strings.Contains(output.String(), "event=job_get_totals") {
+		t.Fatal("summary emitted before one minute")
+	}
+	clock.Advance(time.Minute)
+	if code := request("GET", "/api/status", "myce/s073", "fixture"); code != 429 {
+		t.Fatal(code)
+	}
+	_, data, ok := strings.Cut(output.String(), "event=job_get_totals totals=")
+	if !ok {
+		t.Fatal("rejection did not trigger summary", output.String())
+	}
+	var totals []jobGetTotal
+	if err := json.Unmarshal([]byte(strings.TrimSpace(data)), &totals); err != nil {
+		t.Fatal(err)
+	}
+	want := []jobGetTotal{
+		{Kind: "cli", Version: "s073", Full: 100, RateLimited: map[string]uint64{"job_full": 1, "job_wait": 1, "portability": 1, "page": 1, "status": 1}},
+		{Kind: "python", Version: "development", RateLimited: map[string]uint64{"batch_wait": 1, "status": 1}},
+		{Kind: "unknown", Version: "unknown", RateLimited: map[string]uint64{"inspection": 1, "usage": 1}},
+	}
+	gotJSON, _ := json.Marshal(totals)
+	wantJSON, _ := json.Marshal(want)
+	if !bytes.Equal(gotJSON, wantJSON) {
+		t.Fatalf("rejection attribution %s, want %s", gotJSON, wantJSON)
+	}
+	for _, private := range []string{"192.0.2.123", "private-job", "private-query", "private/path", "Bearer", "fixture"} {
+		if strings.Contains(output.String(), private) {
+			t.Fatal("private observation data logged", private)
+		}
+	}
+}
+
+func TestJobGetVolumeRejectedConcurrent(t *testing.T) {
+	clock := &workerFakeClock{now: time.Unix(1, 0)}
+	v := newJobGetVolume(clock)
+	var output bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(old)
+	var wg sync.WaitGroup
+	for i := range 500 {
+		wg.Go(func() {
+			r := httptest.NewRequest("GET", "/api/jobs/unretained?view=wait", nil)
+			r.Header.Set("User-Agent", fmt.Sprintf("myce/v%d", i))
+			v.recordRejection(r)
+			clock.Advance(time.Second)
+			v.recordRejection(r)
+		})
+	}
+	wg.Wait()
+	var rejected uint64
+	for _, total := range v.totals {
+		rejected += total.RateLimited["job_wait"]
+		if total.Full != 0 || total.Wait != 0 {
+			t.Fatal("rejection counted as admitted observation")
+		}
+	}
+	if rejected != 1000 || len(v.totals) > jobGetIdentityLimit+3 {
+		t.Fatal("lost or unbounded rejection attribution", rejected, len(v.totals))
+	}
+	if !strings.Contains(output.String(), `"rate_limited":{"job_wait":`) {
+		t.Fatal("missing concurrent rejection summary")
 	}
 }
