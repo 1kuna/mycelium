@@ -301,7 +301,7 @@ func TestCapabilityLearnedProgramUsesSmallerFreeHypha(t *testing.T) {
 	}
 	clock.Advance(time.Second)
 	next := submit(t, q, s)
-	if next.Spec.Needs.MemoryGB != 2.5 || next.Spec.Needs.HostMemoryGB != 50 {
+	if next.Spec.Needs.MemoryGB != 2 || next.Spec.Needs.HostMemoryGB != 40 {
 		t.Fatal("RAM-heavy needs not learned")
 	}
 	if got := check(t, q, small, nil).Job; got == nil || got.ID != next.ID {

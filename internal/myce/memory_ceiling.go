@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -38,6 +39,8 @@ type memoryCeilings struct {
 	clock    Clock
 }
 type memoryAttempt struct {
+	currentMu        sync.Mutex
+	currentGrowth    memoryGrowth
 	fs               memoryFS
 	path             string
 	bytes            int64

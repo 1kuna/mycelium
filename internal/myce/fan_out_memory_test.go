@@ -54,7 +54,7 @@ func TestFanOutMemoryLearningAndPressure(t *testing.T) {
 	if timing := job(t, q, next.ID).Timing; timing.PredictedSeconds != nil || timing.ActualSeconds != nil || timing.Reason != "declared wave; serial occupancy is not comparable" {
 		t.Fatalf("serial child invented comparable throughput: %+v", timing)
 	}
-	if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.MemoryEnvelope.HostGB != (total+device)*1.25+.125 {
+	if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.MemoryEnvelope.HostGB != total+device+2*minimumHostMemoryGB+.125 {
 		t.Fatalf("next piece lost peak/arguments: %+v", next.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)
@@ -71,7 +71,7 @@ func TestFanOutMemoryLearningAndPressure(t *testing.T) {
 	if facts := job(t, q, next.ID).MemoryAttempts; len(facts) != 1 || !facts[0].MemoryPeak.constrained() {
 		t.Fatalf("lost attempt pressure facts: %+v", facts)
 	}
-	if got := start().MemoryEnvelope.Source; got != "accepted peak × 1.25" {
+	if got := start().MemoryEnvelope.Source; got != "accepted peak + measured uncertainty" {
 		t.Fatalf("rejected child erased earlier accepted memory: %s", got)
 	}
 }
@@ -141,10 +141,10 @@ func TestFanOutAutoMemorySerialQualifiedDevice(t *testing.T) {
 			if want.MemoryEnvelope.Refusal != "" || want.Spec.Needs.HostMemoryGB <= 0 || want.Spec.Needs.MemoryGB <= 0 {
 				t.Fatalf("ordinary sizing must be admissible: %+v", want.MemoryEnvelope)
 			}
-			if learned && (want.MemoryEnvelope.Source != "accepted peak × 1.25" || want.Spec.Needs.HostMemoryGB != 5.007386207580566 || want.Spec.Needs.MemoryGB != 5.640864372253418) {
+			if learned && (want.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || want.Spec.Needs.HostMemoryGB != 4.005908966064453+minimumHostMemoryGB || want.Spec.Needs.MemoryGB != 4.512691497802734+minimumHostMemoryGB) {
 				t.Fatalf("peak not reused: %+v", want.MemoryEnvelope)
 			}
-			if !learned && (want.MemoryEnvelope.Source != "exploratory first run (bounded: 25% of host allowance)" || want.Spec.Needs.HostMemoryGB != 6 || want.Spec.Needs.MemoryGB != 30) {
+			if !learned && (want.MemoryEnvelope.Source != physicalMemoryProbe || want.Spec.Needs.HostMemoryGB != 24-minimumHostMemoryGB || want.Spec.Needs.MemoryGB != 30) {
 				t.Fatalf("missing bounded host exploration with whole card: %+v", want.MemoryEnvelope)
 			}
 			run := assignedJob(machineCheck(t, q, m))

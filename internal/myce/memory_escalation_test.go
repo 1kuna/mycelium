@@ -37,7 +37,7 @@ func TestMemoryEscalationMeasuredIncidentRange(t *testing.T) {
 		target := *q.s.Machines[m.ID]
 		target.EffectiveHostMemoryBudgetGB = allowance
 		e := q.memoryCandidate(&candidate, &target).MemoryEnvelope
-		if math.Abs(e.HostGB-37.4) > 1e-9 || e.Basis != "exploratory" || e.Evidence != 0 {
+		if math.Abs(e.HostGB-(32-minimumHostMemoryGB)) > 1e-9 || e.Basis != "exploratory" || e.Evidence != 0 {
 			t.Fatalf("allowance %.0f changed measured bound: %+v", allowance, e)
 		}
 	}
@@ -74,13 +74,13 @@ func TestMemoryEscalationTransferMargin(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	// A different CPU family on the same OS retains the existing 2.5x margin.
+	// A different CPU family on the same OS still needs calibrated transfer error.
 	for id, point := range q.s.WorkObservations {
 		point.Key.Target.Arch = "other-arch"
 		q.putWorkObservation(id, point)
 	}
 	estimate := q.memoryEstimate(&first, q.s.Machines[m.ID])
-	if estimate.host == nil || !estimate.escalation || estimate.hostFactor != 2.5 {
+	if estimate.host == nil || !estimate.escalation || !estimate.uncalibrated || estimate.measuredHostGB < 32-minimumHostMemoryGB {
 		t.Fatalf("transfer margin lost: %+v", estimate)
 	}
 }

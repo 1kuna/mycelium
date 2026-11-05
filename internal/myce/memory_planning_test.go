@@ -20,7 +20,7 @@ func TestColdMemoryPlanningSeparatesTargetOS(t *testing.T) {
 	q.s.WorkObservations = map[string]WorkObservation{}
 	for i, os := range []string{"linux", "darwin"} {
 		peak := float64(2 + i*2)
-		q.s.WorkObservations[os] = WorkObservation{Key: ObservationKey{Component: "cpu", Target: ExecutionTarget{OS: os}}, MemoryFamily: family, MemoryRecordedAt: clock.Now(), MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}}
+		q.s.WorkObservations[os] = WorkObservation{Key: ObservationKey{Host: "host", Component: "cpu", Target: ExecutionTarget{OS: os}}, MemoryFamily: family, MemoryRecordedAt: clock.Now(), MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}}
 	}
 	q.memoryPlanning = newMemoryPlanningCache()
 	for i, os := range []string{"linux", "darwin"} {
@@ -28,7 +28,7 @@ func TestColdMemoryPlanningSeparatesTargetOS(t *testing.T) {
 		m.CapabilityProfile.OS = os
 		m.EffectiveHostMemoryBudgetGB = 64
 		host, _, _, ok := q.coldMemoryBound(j, &m, memoryEstimate{}, 0)
-		want := float64(2+i*2) * similarMemoryFactor
+		want := float64(2+i*2) + minimumHostMemoryGB
 		if !ok || host != want {
 			t.Fatalf("%s first-run bound = %v, %v; want %v", os, host, ok, want)
 		}

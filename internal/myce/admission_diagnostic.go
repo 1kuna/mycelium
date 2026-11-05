@@ -86,11 +86,15 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 	allowed := map[string]bool{
 		"declared": true, "submitter hint": true, "exploratory host": true,
 		"exploratory first run": true, "exploratory (previous peak constrained)": true,
-		"accepted peak × 1.25": true, "cross-machine estimate": true,
-		"same-host RAM peak × 1.25": true, "cross-machine device estimate": true,
-		"non-reclaimable peak + measured range (25% minimum)": true, "CPU only": true,
-		"non-reclaimable + xe host memory + measured range (25% minimum)": true,
-		"GPU recipe default with host estimate floor":                     true, "GPU recipe default": true, "OOM retry floor": true,
+		"accepted peak × 1.25": true, "accepted peak + measured uncertainty": true, "cross-machine estimate": true,
+		"same-host RAM peak × 1.25": true, "same-host RAM peak + measured uncertainty": true, "cross-machine device estimate": true,
+		"non-reclaimable peak + measured range (measured growth)": true, "CPU only": true,
+		"non-reclaimable + xe host memory + measured range (measured growth)": true,
+		"accepted transfer + measured error":                                  true, "exploratory (transfer error unavailable)": true,
+		"exploratory device transfer": true, "unknown device peak": true, "exclusive card": true,
+		"shared GPU measured growth floor": true, "from qualification checks": true,
+		"exploratory shared physical headroom": true, "exclusive device": true,
+		"GPU recipe default with host estimate floor": true, "GPU recipe default": true, "OOM retry floor": true,
 	}
 	out.EnvelopeSource = ""
 	if len(parts) <= 5 {

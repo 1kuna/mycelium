@@ -199,7 +199,7 @@ func TestMemoryReviewResumedEstimateAndOOMFloor(t *testing.T) {
 		q.s.WorkObservations[id] = point
 	}
 	estimate := q.memoryCandidate(&probe, q.s.Machines[m.ID])
-	if estimate.Spec.Needs.HostMemoryGB != 2.5 {
+	if estimate.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
 		t.Fatal("resumed or Forbidden performance point lost its accepted memory peak")
 	}
 	s.Needs.Memory, s.Resumable = "auto", true

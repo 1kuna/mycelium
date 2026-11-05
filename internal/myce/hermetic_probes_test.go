@@ -103,7 +103,7 @@ func TestMaintenanceBenchmarkIgnoresSparkInventory(t *testing.T) {
 	t.Cleanup(func() { workerMachineProbe = previous })
 	// Confirm the simulated hardware has the reserve that broke the 8 GiB fixture.
 	detected, err := workerMachineProbe().Detect(context.Background())
-	if err != nil || detected.Platform != "cuda" || detected.ReserveGB != 16 {
+	if err != nil || detected.Platform != "cuda" || detected.ReserveGB != 0 {
 		t.Fatal(detected, err)
 	}
 	calls.Store(0)

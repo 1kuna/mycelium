@@ -191,6 +191,9 @@
           "description": "Sampled per-attempt process GPU memory in GiB, not GPU-wide memory.used or an allocator high-water mark. CUDA uses nvidia-smi compute-apps even on unified-memory devices. Sampling is a lower bound; missing means unknown, not zero.",
           "type": "number"
         },
+        "device_growth_gb": {
+          "type": "number"
+        },
         "device_source": {
           "type": "string"
         },
@@ -204,6 +207,9 @@
         },
         "gpu_host": {
           "$ref": "#/$defs/GPUHostMemory"
+        },
+        "growth_gb": {
+          "type": "number"
         },
         "host_gb": {
           "type": "number"

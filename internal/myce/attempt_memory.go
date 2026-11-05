@@ -255,6 +255,7 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 	probe := w.processMemory
 	var mu sync.Mutex
 	var peak *AttemptMemoryPeak
+	var growth memoryGrowth
 	readPressure := func() (*gpuHostState, error) {
 		if probe.Pressure == nil {
 			return nil, errAttemptMemoryUnsupported
@@ -299,7 +300,8 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 			return
 		}
 		gb := float64(bytes) / (1 << 30)
-		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource}
+		margin := growth.observe(clock.Now(), gb)
+		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource, GrowthGB: &margin}
 		mu.Lock()
 		peak = sampledMemoryPeak(peak, next)
 		peak.Source = processGroupMemorySource
@@ -460,6 +462,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 		driver = a.collectGPUHost(ctx, clock, w.GPUTelemetryHelper, w.selectedDevice.pciAddress)
 	}
 	var samplers sync.WaitGroup
+	var growth memoryGrowth
 	hostSampled := false // Read only after joining the host sampler.
 	samplers.Add(1)
 	go func() {
@@ -474,6 +477,10 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 				return
 			case <-hostTick.C:
 				sample := a.peak()
+				if sample != nil && sample.HostGB != nil {
+					margin := growth.observe(clock.Now(), hostMemoryPeakGB(sample))
+					sample.GrowthGB = &margin
+				}
 				completeNonreclaimable = completeNonreclaimable && sample != nil && sample.nonreclaimableSampleGB != nil && !sample.PressureUnavailable
 				hostSampled = hostSampled || sample != nil && sample.HostGB != nil
 				record(sample)
@@ -808,10 +815,13 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 	if err != nil {
 		return nil
 	}
-	sample := &CurrentHostMemory{NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at, deviceSample: &a.device}
+	a.currentMu.Lock()
+	margin := a.currentGrowth.observe(at, float64(min(anon, current))/(1<<30))
+	a.currentMu.Unlock()
+	sample := &CurrentHostMemory{GrowthGB: margin, NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at, deviceSample: &a.device}
 	if device := a.device.Load(); device != nil {
 		gb := device.gb
-		sample.DeviceGB, sample.deviceSampledAt = &gb, device.at
+		sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB
 	}
 	return sample
 }
@@ -828,6 +838,7 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 	go func() {
 		peak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
 		unreported, shared := false, false
+		var growth memoryGrowth
 		defer func() { result <- deviceMemoryResult{peak, unreported, shared} }()
 		tick := time.NewTicker(period)
 		defer tick.Stop()
@@ -858,9 +869,10 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 					}
 					continue
 				}
-				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb})
+				margin := growth.observe(clock.Now(), gb)
+				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb, DeviceGrowthGB: &margin})
 				if a != nil {
-					a.device.Store(&hostMemorySample{gb: gb, at: clock.Now()})
+					a.device.Store(&hostMemorySample{gb: gb, at: clock.Now(), growthGB: margin})
 				}
 			}
 		}

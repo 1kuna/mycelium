@@ -83,7 +83,7 @@ func (q *Queue) memoryLearningSample(j *Job, r Result) (*eligibleMemorySample, s
 	programKey := ""
 	var floor SizeHint
 	if j.Spec.Program != nil && j.Extension != nil && r.Usage != nil && r.Usage.valid() &&
-		validMemoryValue(r.Usage.MemoryGB*1.25) && validMemoryValue(r.Usage.HostMemoryGB*1.25) {
+		validMemoryValue(r.Usage.MemoryGB+deviceMemoryGrowthGB(r.MemoryPeak)) && validMemoryValue(r.Usage.HostMemoryGB+memoryGrowthGB(r.MemoryPeak)) {
 		if m := allocationMachine(q.s.Machines[r.Machine], j.AllocatedDevices); m != nil {
 			for _, e := range j.Extensions {
 				if e.Digest == j.Extension.Digest {
@@ -181,8 +181,9 @@ func (q *Queue) recordProgramNeeds(sample eligibleMemorySample) {
 		q.s.ProgramNeeds = map[string]SizeHint{}
 	}
 	old, floor, usage := q.s.ProgramNeeds[sample.programKey], sample.programFloor, sample.result.Usage
-	// Floors and 25% headroom remain conservative; observations never shrink.
-	q.s.ProgramNeeds[sample.programKey] = SizeHint{MemoryGB: max(old.MemoryGB, floor.MemoryGB, usage.MemoryGB*1.25), HostMemoryGB: max(old.HostMemoryGB, floor.HostMemoryGB, usage.HostMemoryGB*1.25)}
+	// Explicit floors and prior requirements never shrink. New headroom comes
+	// from the attempt sensors, rather than a universal percentage.
+	q.s.ProgramNeeds[sample.programKey] = SizeHint{MemoryGB: max(old.MemoryGB, floor.MemoryGB, usage.MemoryGB+deviceMemoryGrowthGB(sample.result.MemoryPeak)), HostMemoryGB: max(old.HostMemoryGB, floor.HostMemoryGB, usage.HostMemoryGB+memoryGrowthGB(sample.result.MemoryPeak))}
 	observation := *usage
 	sample.job.MeasuredNeeds = &observation
 }

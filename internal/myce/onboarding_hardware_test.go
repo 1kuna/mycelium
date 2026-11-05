@@ -79,11 +79,11 @@ func TestOnboardingWholeMachineHardware(t *testing.T) {
 					t.Fatal(got)
 				}
 			case "cuda":
-				if len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 16 || got.MemoryGB != 0 {
+				if len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 0 || got.MemoryGB != 0 {
 					t.Fatal(got)
 				}
 			case "metal":
-				if len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 4 {
+				if len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 0 {
 					t.Fatal(got)
 				}
 			default:
@@ -166,10 +166,7 @@ func TestOnboardingExplicitPlatformKeepsDetectedUnifiedDefaults(t *testing.T) {
 		p := onboardingProbe(platform)
 		c := ServiceConfig{Detection: Detection{Platform: platform, MemoryMode: "auto"}}
 		got, err := PreflightHardware(context.Background(), c, p)
-		reserve := 4.0
-		if platform == "cuda" {
-			reserve = 16
-		}
+		reserve := 0.0
 		if err != nil || got.MemoryMode != "unified" || got.ReserveGB != reserve {
 			t.Fatal(got, err)
 		}

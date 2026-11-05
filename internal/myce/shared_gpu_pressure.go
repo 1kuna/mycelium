@@ -56,11 +56,11 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 			continue
 		}
 		// Retain each grower's lower bound even if a lower tier yields for it.
-		// The existing learning margin (25%) costs packing room but covers
-		// variation beyond this sampled peak. Never resize active custody.
+		// Measured growth covers the sensor horizon. Never resize active custody.
 		for _, j := range tenants {
 			if over[j.ID] > 0 || j.ID == victim.ID {
-				j.DeviceMemoryFloorGB = max(j.DeviceMemoryFloorGB, (over[j.ID]+deviceShareGB(j))*1.25)
+				sample := q.hostMemorySamples[m.ID][jobKey(*j)]
+				j.DeviceMemoryFloorGB = max(j.DeviceMemoryFloorGB, sample.deviceGB+sample.deviceGrowthGB)
 			}
 		}
 		for i := range victim.Copies {

@@ -263,7 +263,7 @@ func TestStatusViewFloorFreeAutoMemory(t *testing.T) {
 	probe := *q.s.Jobs[j.ID]
 	probe.Reason = "no machine in the fleet can run this right now"
 	body = q.statusWaitingReason(&probe)
-	if !strings.Contains(body, "needs 3.8 GiB free accelerator memory and 2.5 GiB host RAM") || strings.Contains(body, "needs 0.0 GiB") {
+	if !strings.Contains(body, "needs 3.0 GiB free accelerator memory and 2.0 GiB host RAM") || strings.Contains(body, "needs 0.0 GiB") {
 		t.Errorf("sized need missing: %s", body)
 	}
 	stored := q.s.Jobs[j.ID]

@@ -54,71 +54,38 @@ func memoryFamily(j *Job) string {
 	return identityHash(struct{ Project, Name string }{j.Spec.Project, j.Spec.Name})
 }
 
-// Bounded first runs (#559). Host-wide exploration once reserved about 89 of a
-// unified host's 96 GiB for a test suite that peaks near 4.5 GiB, blocking
-// unrelated deadline work. A CPU job with no comparable accepted peak now
-// starts from similar work's accepted peak × 2.5 (the 1.25 headroom × 2 used
-// for same-OS cross-machine estimates), else a quarter of the host allowance,
-// leaving room for three more such jobs. A constrained peak is a lower bound
-// and is doubled, never shrunk. Cost: an under-estimate costs a ceiling hit or
-// OOM per doubling (retryOOM). At half the allowance or more, the host-wide
-// exploration and its custody fences apply as before. GPU work, whose card is
-// already exclusive, keeps whole-card device exploration; discrete hosts now
-// apply this bound to host RAM too (#596). Unified hosts use the policy below.
-const (
-	coldMemoryFraction  = .25
-	similarMemoryFactor = 1.25 * 2
-	boundedFirstRun     = "(bounded: "
-)
+// The marker preserves the existing OOM retry protocol for an exploratory
+// envelope smaller than physical capacity. It is a protocol label, not a size.
+const boundedFirstRun = "(bounded: "
 
-// coldMemoryBound sizes a CPU or discrete-GPU host first run. A qualification
-// check's first run on a card takes the same bound (#618): its reference fixture is small by design,
-// and host-wide exploration, or the workload's peak, held most of a host's RAM
-// for a check that used under 1 GiB. The card itself still explores; on a
-// unified host the bound covers both.
+// With no usable measurements an arbitrary command has no finite demand bound.
+// Reserve measured physical headroom for one probe instead of guessing a
+// fraction. The cost is local concurrency until a clean completion teaches us;
+// other hosts remain independent. Explicit containment and OOM floors win.
 func (q *Queue) coldMemoryBound(j *Job, m *Machine, estimate memoryEstimate, floor float64) (float64, string, int, bool) {
-	if !j.Spec.Needs.cpuOnly() && m.UnifiedMemory && j.Spec.ExtensionCheck == nil || !q.learnedMemory() {
+	if !q.learnedMemory() {
 		return 0, "", 0, false
 	}
-	allowance := m.EffectiveHostMemoryBudgetGB
-	if allowance <= 0 && m.CapabilityProfile != nil {
-		allowance = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
-	}
-	if allowance <= 0 {
-		return 0, "", 0, false
-	}
-	if cache := q.memoryPlanning; cache != nil {
-		id := coldMemoryKey{family: similarMemoryKey{memoryFamily(j), machineTarget(m).OS, !j.Spec.Needs.cpuOnly(), memoryLayout(j, m)}, constrained: constrainedMemoryIdentity(j, estimate), allowance: allowance, floor: floor, source: estimate.source}
-		if result, ok := cache.cold[id]; ok {
-			return result.host, result.source, result.evidence, result.ok
-		}
-		host, source, evidence, ok := q.coldMemoryBoundUncached(j, m, estimate, floor, allowance)
-		cache.cold[id] = coldMemoryResult{host, source, evidence, ok}
-		return host, source, evidence, ok
-	}
-	return q.coldMemoryBoundUncached(j, m, estimate, floor, allowance)
-}
-func (q *Queue) coldMemoryBoundUncached(j *Job, m *Machine, estimate memoryEstimate, floor, allowance float64) (float64, string, int, bool) {
-	first := "exploratory first run "
+	host, evidence := q.similarMemoryPeak(j, m)
+	source := "exploratory first run"
 	if estimate.source != "" {
-		first = estimate.source + " "
+		source = estimate.source
 	}
-	host, source := allowance*coldMemoryFraction, first+boundedFirstRun+"25% of host allowance)"
-	peak, evidence := q.similarMemoryPeak(j, m)
-	if evidence > 0 {
-		host, source = peak*similarMemoryFactor, first+boundedFirstRun+"similar work peak × 2.5)"
-	}
-	if lower := q.constrainedMemoryLowerFor(j, estimate, !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory); lower*2 > host {
-		host, source = lower*2, first+boundedFirstRun+"constrained peak × 2)"
+	lower := q.constrainedMemoryLowerFor(j, estimate, !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory)
+	// A constrained completion is not an upper bound, even with a prior. Do
+	// not invent headroom by multiplying it. Physical probing remains subject
+	// to normal admission, release custody and the retained OOM requirement.
+	if host <= lower || evidence == 0 {
+		return 0, "", 0, false
 	}
 	if f := j.MemoryOOMFloor; f != nil {
 		floor = max(floor, f.HostMemoryGB)
 	}
 	host = max(host, floor, minimumHostMemoryGB)
-	if !validRate(host) || host >= allowance/2 {
+	if !validRate(host) {
 		return 0, "", 0, false
 	}
-	return host, source, evidence, true
+	return host, source + " " + boundedFirstRun + "accepted family peaks + measured uncertainty)", evidence, true
 }
 
 // The largest retained constrained host peak of this work or job. It is a lower
@@ -152,83 +119,54 @@ func (q *Queue) constrainedMemoryLowerUncached(j *Job, estimate memoryEstimate, 
 	return lower
 }
 
-// Plain GPU runs on unified-memory hosts without an accepted estimate (#596).
-// There the card's memory is host RAM, CUDA allocations escape the job's
-// cgroup, and neither a device sample nor a classified GPU allocation failure
-// exists, so no device bound can be checked or grown. Host-wide exploration
-// instead reserved most of the machine until an accepted run. These runs take
-// what `myce run --gpu` declared before #592: the stated device figure or
-// 1 GiB, and the stated host figure, else similar GPU work's accepted host peak
-// × 2.5, else 1 GiB. The cgroup-enforced host member still doubles on OOM.
-// Cost: device use above the figure is unreserved, as before #592; admission's
-// live host-memory checks still see it. Measured --mem avoids that. Extension
-// jobs keep their unified exploration. At half the allowance the
-// existing exploration applies.
-const unifiedGPUDefaultGB = 1.0
-
+// Unknown host/device overlap cannot justify two independent size guesses.
+// A cold unified probe owns the card exclusively and reserves the whole shared
+// physical headroom. With neither vector known, one supported kernel page is
+// a nonzero device/exclusivity marker, with the remaining pool available to the
+// enforced host member. It is not a device-use estimate or sharing evidence.
+// Explicit vectors and member floors retain their original meaning.
 func (q *Queue) unifiedGPUFirstRun(j *Job, m *Machine, estimate memoryEstimate, device, host, floor float64) (float64, float64, string, int, bool) {
-	if !m.UnifiedMemory || j.Spec.Needs.cpuOnly() || j.Spec.extensionJob() || !q.learnedMemory() {
+	if !m.UnifiedMemory || j.Spec.Needs.cpuOnly() || !q.learnedMemory() {
 		return 0, 0, "", 0, false
 	}
-	allowance := m.EffectiveHostMemoryBudgetGB
-	if allowance <= 0 && m.CapabilityProfile != nil {
-		allowance = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
+	room, why := q.exploratoryMemory(j, m)
+	if why != "" {
+		return 0, 0, "", 0, false
 	}
-	why, evidence := "stated device", 0
-	if device <= 0 {
-		device, why = unifiedGPUDefaultGB, "1 GiB device default"
-	}
-	switch peak, similar := q.similarMemoryPeak(j, m); {
-	case host > 0:
-		why += ", stated host"
-	case similar > 0:
-		host, evidence, why = peak*similarMemoryFactor, similar, why+", similar work host peak × 2.5"
-	default:
-		host, why = unifiedGPUDefaultGB, why+", 1 GiB host default"
-	}
-	if lower := q.constrainedMemoryLower(j, estimate); lower*2 > host {
-		host, why = lower*2, why+", constrained peak × 2"
-	}
+	floor = max(floor, q.constrainedMemoryLower(j, estimate), minimumHostMemoryGB)
 	if f := j.MemoryOOMFloor; f != nil {
 		floor = max(floor, f.HostMemoryGB)
 	}
-	host = max(host, floor, minimumHostMemoryGB)
-	if allowance <= 0 || !validRate(host+device) || host+device >= allowance/2 {
+	switch {
+	case host > 0 && device <= 0:
+		device = max(minimumHostMemoryGB, room-host)
+	case device > 0 && host <= 0:
+		host = max(floor, room-device)
+	default:
+		device = max(device, minimumHostMemoryGB)
+		host = max(host, floor, room-device)
+	}
+	if !validRate(host+device) || host+device > room {
 		return 0, 0, "", 0, false
 	}
-	return device, host, boundedFirstRun + "unified GPU: " + why + ")", evidence, true
+	return device, host, "exploratory shared physical headroom; exclusive device", 0, true
 }
 
 // Fresh accepted unconstrained peaks of the same family on the same OS: CPU
 // peaks for CPU work, matching-layout GPU host peaks for GPU work. Rows written
 // before memory sample counting count once.
 func (q *Queue) similarMemoryPeak(j *Job, m *Machine) (float64, int) {
-	family, os, gpu, layout := memoryFamily(j), machineTarget(m).OS, !j.Spec.Needs.cpuOnly(), memoryLayout(j, m)
-	// CPU history never depended on a layout label.
+	family, gpu, layout := memoryFamily(j), !j.Spec.Needs.cpuOnly(), memoryLayout(j, m)
 	if !gpu {
 		layout = ""
 	}
-	if cache := q.memoryPlanning; cache != nil {
-		id := similarMemoryKey{family, os, gpu, layout}
-		if result, ok := cache.similar[id]; ok {
-			return result.peak, result.evidence
+	var points []*WorkObservation
+	for _, point := range q.memoryObservationCatalog().family[similarMemoryKey{family, machineTarget(m).OS, gpu, layout}] {
+		if q.acceptedMemoryPoint(point) && point.Key.Host == hostID(m) && point.Key.Fingerprint == m.ExtensionFingerprint {
+			points = append(points, point)
 		}
-		peak, evidence := q.similarMemoryPeakUncached(family, os, gpu, layout)
-		cache.similar[id] = similarMemoryResult{peak, evidence}
-		return peak, evidence
 	}
-	return q.similarMemoryPeakUncached(family, os, gpu, layout)
-}
-func (q *Queue) similarMemoryPeakUncached(family, os string, gpu bool, layout string) (float64, int) {
-	peak, evidence := 0.0, 0
-	for _, point := range q.memoryObservationCatalog().family[similarMemoryKey{family, os, gpu, layout}] {
-		p, age := point.MemoryPeak, q.clock.Now().Sub(point.MemoryRecordedAt)
-		if point.MemoryFamily != family || (point.Key.Component != "cpu") != gpu || gpu && point.MemoryLayout != layout || point.Key.Target.OS != os || !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) {
-			continue
-		}
-		peak, evidence = max(peak, hostMemoryPeakGB(p)), evidence+max(1, point.MemorySamples)
-	}
-	return peak, evidence
+	return observedMemoryBound(points, false)
 }
 
 // Origin names the figure's basis for status, job timing and waiting reasons.

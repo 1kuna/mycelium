@@ -48,7 +48,12 @@ YAML
 ```
 
 The tiny declared memory bounds this fixture; real work can omit memory to learn
-it. Plain native commands default to **unsandboxed** under MY-25; explicitly set
+it. From the next release, cold auto-memory work reserves measured physical
+headroom on one host until a clean accepted completion teaches a smaller bound.
+Comparable peaks use observed variability and sampling growth; cross-target
+estimates need paired accepted runs and measured transfer error. Unknown pressure
+and incomplete counters remain conservative. See [memory sizing](advanced.md#submit).
+Plain native commands default to **unsandboxed** under MY-25; explicitly set
 `isolation: sandboxed` to opt in. New native extension registrations default to
 sandboxing; retained registrations keep their frozen policy.
 

@@ -66,7 +66,7 @@ func TestResourceBasisDeclaredBesideLearned(t *testing.T) {
 		t.Fatalf("want host memory, CPU and storage for a CPU job: %+v", got.Resources)
 	}
 	mem, cpu := got.Resources[0], got.Resources[1]
-	if mem.Dimension != "host_memory_gb" || mem.Basis != "declared" || mem.Declared == nil || *mem.Declared != 6 || mem.Learned == nil || *mem.Learned != peak*1.25 || mem.Evidence != 1 || mem.Used == nil {
+	if mem.Dimension != "host_memory_gb" || mem.Basis != "declared" || mem.Declared == nil || *mem.Declared != 6 || mem.Learned == nil || *mem.Learned != peak+minimumHostMemoryGB || mem.Evidence != 1 || mem.Used == nil {
 		t.Fatalf("explicit figure without its learned comparison: %+v", mem)
 	}
 	if cpu.Dimension != "cpu_cores" || cpu.Used == nil || *cpu.Used != 1 || cpu.Basis != "declared" || cpu.Declared == nil || cpu.Learned != nil {

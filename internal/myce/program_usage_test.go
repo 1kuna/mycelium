@@ -97,7 +97,7 @@ printf useful-result > output
 		t.Fatal("runner did not supply eligible memory telemetry", completed.MemoryAttempts)
 	}
 	learned := submit(t, q, s)
-	if learned.Spec.Needs.MemoryGB != 2.5 || learned.Spec.Needs.HostMemoryGB < .625 {
+	if learned.Spec.Needs.MemoryGB != 2 || learned.Spec.Needs.HostMemoryGB < .5 {
 		t.Fatal("next submission did not reuse measurements", learned.Spec.Needs)
 	}
 	data, err := os.ReadFile(filepath.Join(shared, completed.OutputFiles["output"]))

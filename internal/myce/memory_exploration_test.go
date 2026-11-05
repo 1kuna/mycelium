@@ -164,9 +164,18 @@ func TestMemoryExplorationLargestEligibleHost(t *testing.T) {
 		t.Fatal("bounded attempt bypassed stale-result fence", err)
 	}
 	memoryExplorationComplete(t, q, clock, run, 4, false, false)
-	next := check(t, q, darwin, nil).Job
-	if next == nil || next.ID != second.ID || next.Spec.Needs.HostMemoryGB != 5 || next.MemoryEnvelope.Source != "accepted peak × 1.25" {
-		t.Fatal("clean local learning did not supersede the foreign prior", next)
+	// A different host has no calibrated transfer error, so its next run
+	// remains a physical probe even after this clean local completion.
+	next := check(t, q, small, nil).Job
+	if next == nil || next.ID != second.ID || next.Spec.Needs.HostMemoryGB != 5 || next.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatal("uncalibrated same-OS transfer lost its physical bound", next, job(t, q, second.ID).Reason)
+	}
+	localSpec := s
+	localSpec.AllowedMachines = []string{darwin.ID}
+	local := submit(t, q, localSpec)
+	learned := check(t, q, darwin, nil).Job
+	if learned == nil || learned.ID != local.ID || learned.Spec.Needs.HostMemoryGB != 4+minimumHostMemoryGB || learned.MemoryEnvelope.Source != "accepted peak + measured uncertainty" {
+		t.Fatal("clean local learning did not supersede the foreign prior", learned, job(t, q, local.ID).Reason)
 	}
 	if len(q.s.MemoryExplorations) != 1 {
 		t.Fatal("accepted learning consumed another probe")

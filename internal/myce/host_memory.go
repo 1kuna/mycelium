@@ -384,6 +384,10 @@ func hostMemoryAvailableFits(m *Machine, gpu, host, available float64) bool {
 // CurrentHostMemory credits only nonreclaimable, uniquely charged cgroup RAM.
 // Peaks and RSS (shared pages on macOS) cannot safely reduce growth room.
 type CurrentHostMemory struct {
+	// Projection over this sensor's observed sampling horizon. Older workers
+	// still protect their full unconsumed reservation, without this forecast.
+	GrowthGB         float64 `json:"growth_gb,omitempty"`
+	DeviceGrowthGB   float64 `json:"device_growth_gb,omitempty"`
 	NonreclaimableGB float64 `json:"nonreclaimable_gb"`
 	AgeSeconds       float64 `json:"age_seconds"`
 	sampledAt        time.Time
@@ -407,7 +411,7 @@ func (s *CurrentHostMemory) aged(now time.Time) *CurrentHostMemory {
 	if s.deviceSample != nil {
 		if device := s.deviceSample.Load(); device != nil {
 			gb := device.gb
-			sample.DeviceGB, sample.deviceSampledAt = &gb, device.at
+			sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB
 		}
 	}
 	sample.AgeSeconds = now.Sub(sample.sampledAt).Seconds()
@@ -426,29 +430,32 @@ const deviceMemorySamplePeriod = 5 * time.Second
 const deviceMemorySampleFreshFor = 2 * deviceMemorySamplePeriod
 
 type hostMemorySample struct {
-	gb, deviceGB float64
-	at, deviceAt time.Time
+	gb, deviceGB             float64
+	growthGB, deviceGrowthGB float64
+	at, deviceAt             time.Time
 }
 
 func remainingHostGrowth(reservation float64, sample hostMemorySample, now time.Time) float64 {
 	if sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= hostMemorySampleFreshFor || !validMemoryValue(sample.gb) {
 		return reservation
 	}
-	return max(0, reservation-sample.gb)
+	return max(0, reservation-sample.gb+sample.growthGB)
 }
 
 func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemptKey]hostMemorySample {
 	samples := map[attemptKey]hostMemorySample{}
 	for _, r := range reports {
 		sample, s := r.CurrentHostMemory, hostMemorySample{}
-		if !r.Started || sample == nil {
+		if !r.Started || sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.DeviceGrowthGB) {
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) && sample.AgeSeconds < hostMemorySampleFreshFor.Seconds() {
 			s.gb, s.at = sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds*float64(time.Second)))
+			s.growthGB = sample.GrowthGB
 		}
 		if d := sample.DeviceGB; d != nil && validMemoryValue(*d) && validMemoryValue(sample.DeviceAgeSeconds) && sample.DeviceAgeSeconds < deviceMemorySampleFreshFor.Seconds() {
 			s.deviceGB, s.deviceAt = *d, now.Add(-time.Duration(sample.DeviceAgeSeconds*float64(time.Second)))
+			s.deviceGrowthGB = sample.DeviceGrowthGB
 		}
 		if !s.at.IsZero() || !s.deviceAt.IsZero() {
 			samples[attemptKey{r.ID, r.Attempt, r.Session}] = s

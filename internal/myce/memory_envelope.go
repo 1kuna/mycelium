@@ -22,6 +22,11 @@ type AttemptMemoryPeak struct {
 
 	// CombinedHostGB is the maximum per-attempt resident-plus-outside figure.
 	// Component maxima below remain diagnostics and must not be added across runs.
+	// GrowthGB is the largest observed positive memory growth over a sampling
+	// horizon. It is measured by the attempt's injected clock, never inferred
+	// from a universal percentage. Nil means the worker predates this sensor.
+	DeviceGrowthGB      *float64                `json:"device_growth_gb,omitempty"`
+	GrowthGB            *float64                `json:"growth_gb,omitempty"`
 	CombinedHostGB      *float64                `json:"combined_host_gb,omitempty"`
 	GPUHost             *GPUHostMemory          `json:"gpu_host,omitempty"`
 	NonreclaimableGB    *float64                `json:"nonreclaimable_gb,omitempty"`
@@ -196,7 +201,9 @@ type LearnedMemory struct {
 
 // Snapshot-to-launch telemetry drift needs headroom even with ceiling slack off.
 func exploratoryDriftMarginGB(m *Machine) float64 {
-	return max(m.MemoryCeilingSlackGB, .125) // 128 MiB minimum.
+	// The operator's explicit launch slack is preserved. One maximum supported
+	// kernel page is the physical rounding floor, not a workload-size reserve.
+	return max(m.MemoryCeilingSlackGB, minimumHostMemoryGB)
 }
 
 func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
@@ -218,7 +225,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 			out.DeviceSource = next.DeviceSource
 		}
 	}
-	for _, pair := range [][2]**float64{{&out.HostGB, &next.HostGB}, {&out.CgroupGB, &next.CgroupGB}, {&out.DeviceGB, &next.DeviceGB}, {&out.NonreclaimableGB, &next.NonreclaimableGB}, {&out.nonreclaimableSampleGB, &next.nonreclaimableSampleGB}} {
+	for _, pair := range [][2]**float64{{&out.DeviceGrowthGB, &next.DeviceGrowthGB}, {&out.GrowthGB, &next.GrowthGB}, {&out.HostGB, &next.HostGB}, {&out.CgroupGB, &next.CgroupGB}, {&out.DeviceGB, &next.DeviceGB}, {&out.NonreclaimableGB, &next.NonreclaimableGB}, {&out.nonreclaimableSampleGB, &next.nonreclaimableSampleGB}} {
 		if *pair[1] != nil && validMemoryValue(**pair[1]) && (*pair[0] == nil || **pair[1] > **pair[0]) {
 			n := **pair[1]
 			*pair[0] = &n
@@ -301,17 +308,25 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			}
 		}
 		estimate := q.memoryEstimate(j, m)
+		refusal = estimate.refusal
+		if estimate.source == spentMemoryExploration {
+			refusal = spentMemoryExploration + "; " + memoryCapacityRemedies
+		}
 		if host, why, ok := q.boundedMemoryCandidate(j, m, estimate); ok {
 			estimate.measuredHostGB, estimate.source = host, boundedMemoryExploration
 			if !n.cpuOnly() {
 				estimate.source = boundedGPUExploration
 			}
-			refusal = why
+			if why != "" {
+				refusal = why
+			}
+		} else if estimate.uncalibrated && (estimate.foreign || !n.cpuOnly() && !m.UnifiedMemory) {
+			refusal = memoryCapacityRemedies
 		}
 		switch {
 		case estimate.host != nil:
 			source, basis, evidence = estimate.source, "learned", estimate.samples
-			if evidence == 0 || estimate.measuredHostGB > 0 && boundedMemorySource(estimate.source) {
+			if evidence == 0 || estimate.uncalibrated || estimate.deviceUncalibrated || estimate.measuredHostGB > 0 && boundedMemorySource(estimate.source) {
 				basis = "exploratory"
 			}
 			host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
@@ -319,16 +334,20 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 				host = estimate.measuredHostGB
 			}
 			if estimate.escalation {
-				host = max(host, q.constrainedMemoryLower(j, estimate)*2)
+				if lower := q.constrainedMemoryLower(j, estimate); lower >= host {
+					room, why := q.exploratoryMemory(j, m)
+					host, refusal = max(host, lower, room), why
+				}
 			}
 			if !n.cpuOnly() {
 				peak, factor := estimate.device, estimate.deviceFactor
 				if peak != nil && peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
 					n.MemoryGB = *peak.DeviceGB * factor
-				} else if peak != nil && factor > 1.25 {
-					// Unknown device counters cannot become zero reservations.
-					n.MemoryGB = max(n.MemoryGB, hostMemoryPeakGB(peak)*factor)
-					source += "; GPU recipe default with host estimate floor"
+				} else if peak != nil && (estimate.uncalibrated || estimate.deviceUncalibrated) {
+					// A missing device measurement cannot authorize sharing or
+					// book less than the exclusive card's available capacity.
+					n.MemoryGB = q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
+					source += "; unknown device peak; exclusive card"
 				} else {
 					source += "; GPU recipe default"
 				}
@@ -427,7 +446,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	}
 	if !n.cpuOnly() && j.DeviceMemoryFloorGB > 0 {
 		n.MemoryGB = max(n.MemoryGB, j.DeviceMemoryFloorGB)
-		source += "; shared GPU peak × 1.25 floor"
+		source += "; shared GPU measured growth floor"
 	}
 	enforcement := m.MemoryEnforcement
 	if enforcement == "" {
@@ -474,6 +493,9 @@ func sameMemoryWork(point WorkObservation, key ObservationKey, configuration str
 type memoryEstimate struct {
 	key                      *ObservationKey
 	foreign                  bool
+	uncalibrated             bool
+	deviceUncalibrated       bool
+	refusal                  string
 	escalation               bool
 	measuredHostGB           float64
 	host, device             *AttemptMemoryPeak
@@ -487,9 +509,8 @@ type memoryEstimate struct {
 
 // Range of complete non-reclaimable attempt peaks, not instantaneous samples
 // or throughput sample counts. Two independent attempts are the minimum needed
-// to observe a range, not statistical confidence. The existing 25% headroom
-// stays as a floor for unobserved growth between the 200ms samples; a larger
-// observed range increases it. Until then total-peak sizing stays in use.
+// to observe a range, not statistical confidence. Until then conservative
+// total-peak sizing stays in use; sampler growth supplies measured headroom.
 type MemoryPeakRange struct {
 	Samples uint64  `json:"samples"`
 	MinGB   float64 `json:"min_gb"`
@@ -568,7 +589,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 	return seed
 }
 
-const acceptedMemoryEscalation = "exploratory (bounded: accepted peak × 2; transfer margin retained)"
+const acceptedMemoryEscalation = "exploratory (accepted prior invalidated; physical headroom)"
 
 func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEstimate {
 	estimate := q.memoryEstimateForState(j, m, checkSeed, false)
@@ -579,12 +600,12 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	if prior.host == nil || prior.source == spentMemoryExploration {
 		return estimate
 	}
-	// Twice the accepted conservative peak leaves 60% above the normal 1.25
-	// reservation. Larger transfer margins remain intact. Further OOMs retain
-	// their own growing floor; a prior is never permission to shrink that floor.
-	prior.hostFactor = max(2, prior.hostFactor)
-	prior.deviceFactor = max(2, prior.deviceFactor)
-	prior.measuredHostGB, prior.samples = 0, 0
+	// Invalidated evidence is a lower bound, not a distribution. A fresh
+	// physical probe cannot shrink a retained requirement or an OOM floor.
+	room, why := q.exploratoryMemory(j, m)
+	prior.refusal = why
+	prior.measuredHostGB = max(room, prior.measuredHostGB, hostMemoryPeakGB(prior.host)*prior.hostFactor, estimate.constrainedGB)
+	prior.samples = 0
 	prior.escalation = true
 	prior.constrainedGB = max(prior.constrainedGB, estimate.constrainedGB)
 	prior.source = acceptedMemoryEscalation
@@ -652,7 +673,7 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 				constrainedGB = max(constrainedGB, hostMemoryPeakGB(p))
 			}
 		}
-		if !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) || p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) && !validMemoryValue(*p.CgroupGB*2.5) {
+		if !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(hostMemoryPeakGB(p)) {
 			continue
 		}
 		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {
@@ -684,13 +705,13 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 	estimate := memoryEstimate{key: key, constrainedGB: constrainedGB}
 	switch {
 	case exact != nil:
-		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = exact, 1.25, "accepted peak × 1.25", exactN
+		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = exact, 1, "accepted peak + measured uncertainty", exactN
 	case family != nil:
-		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = family, 1.25*1.5, "cross-machine estimate", familyN
+		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = family, 1, "cross-machine estimate", familyN
 	case sameOS != nil:
-		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = sameOS, 1.25*2, "cross-machine estimate", sameOSN
+		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = sameOS, 1, "cross-machine estimate", sameOSN
 	case other != nil:
-		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = other, 1.25*2, "cross-machine estimate", otherN
+		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = other, 1, "cross-machine estimate", otherN
 		estimate.foreign = j.Spec.Needs.cpuOnly()
 	case invalidated:
 		estimate.source = "exploratory (previous peak constrained)"
@@ -710,17 +731,16 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 		}
 	}
 	if sameHost != nil {
-		estimate.host, estimate.hostFactor, estimate.samples = sameHost, 1.25, sameHostN
+		estimate.host, estimate.hostFactor, estimate.samples = sameHost, 1, sameHostN
 		if exact == nil {
-			estimate.source = "same-host RAM peak × 1.25; cross-machine device estimate"
+			estimate.source = "same-host RAM peak + measured uncertainty; cross-machine device estimate"
 		} else if hostMemoryPeakGB(sameHost) > hostMemoryPeakGB(exact) {
-			estimate.source += "; same-host RAM peak × 1.25"
+			estimate.source += "; same-host RAM peak + measured uncertainty"
 		}
 		if (j.Spec.Needs.cpuOnly() || gpuHost) && key.Target.OS == "linux" && completeHostRange && hostRange.valid() {
 			// Keep all observed resident peaks as a floor, including older
-			// attempts. A range of two peaks cannot justify eliminating the
-			// existing growth allowance; the launch-drift floor alone is tiny
-			// for multi-GiB work. Cost: at least 25% over retained components.
+			// attempts. Reserve the observed spread and sensor growth horizon;
+			// explicit launch slack remains a separately configured floor.
 			peak := max(hostRange.MaxGB, *sameHost.HostGB)
 			if sameHost.NonreclaimableGB != nil && validMemoryValue(*sameHost.NonreclaimableGB) {
 				peak = max(peak, *sameHost.NonreclaimableGB)
@@ -731,12 +751,39 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 				combined, _ := sameHost.gpuHostPeakGB()
 				peak = max(peak, combined)
 			}
-			estimate.measuredHostGB = peak + max(hostRange.MaxGB-hostRange.MinGB, peak*.25, exploratoryDriftMarginGB(m))
-			estimate.source = "non-reclaimable peak + measured range (25% minimum); CPU only"
+			estimate.measuredHostGB = peak + max(hostRange.MaxGB-hostRange.MinGB, memoryGrowthGB(sameHost), exploratoryDriftMarginGB(m))
+			estimate.source = "non-reclaimable peak + measured range (measured growth); CPU only"
 			if gpuHost {
-				estimate.source = "non-reclaimable + xe host memory + measured range (25% minimum)"
+				estimate.source = "non-reclaimable + xe host memory + measured range (measured growth)"
 			}
 		}
+	}
+	if estimate.host != nil && estimate.source != spentMemoryExploration {
+		if sameHost != nil {
+			bound, _ := observedMemoryBoundForHost(acceptedMemoryPoints(q, points), *key, m)
+			estimate.measuredHostGB = max(estimate.measuredHostGB, bound)
+		} else {
+			q.adaptMemoryTransfer(&estimate, j, m, acceptedMemoryPoints(q, points))
+		}
+		if !j.Spec.Needs.cpuOnly() && exact == nil && !estimate.uncalibrated {
+			q.adaptDeviceTransfer(&estimate, m, acceptedMemoryPoints(q, points))
+		}
+		if estimate.device != nil && estimate.device.DeviceGB != nil {
+			device := *estimate.device.DeviceGB
+			if exact != nil {
+				bound, _ := observedMemoryBound(pointsForExact(acceptedMemoryPoints(q, points), *key), true)
+				if device > 0 {
+					estimate.deviceFactor = max(1, bound/device)
+				}
+			} else if estimate.uncalibrated || estimate.deviceUncalibrated {
+				if device > 0 {
+					estimate.deviceFactor = max(1, m.TotalMemoryGB/device)
+				}
+			}
+		} else if !j.Spec.Needs.cpuOnly() {
+			estimate.deviceUncalibrated = true
+		}
+
 	}
 	return estimate
 }
@@ -753,7 +800,7 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 	}
 	room := m.FreeHostMemoryGB - m.hostReservationDebtGB
 	for _, release := range q.s.HostReleases {
-		if release.Host != hostID(m) || release.HostChargeGB < allowance/4 {
+		if release.Host != hostID(m) || release.HostChargeGB <= 0 {
 			continue
 		}
 		live := q.s.Jobs[release.Job]
@@ -769,7 +816,7 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 		charge := hostNeed(owner, running.Spec.Needs.MemoryGB, running.Spec.Needs.HostMemoryGB)
 		if q.batchPreemptible(running, j.Spec) {
 			room += charge
-		} else if charge >= allowance/4 {
+		} else if charge > 0 {
 			return 0, "exploratory first run blocked by a protected memory-heavy attempt"
 		}
 	}
@@ -782,7 +829,7 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 		charge := hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
 		if q.slotReclaimableFor(slot, j.Spec) {
 			room += charge
-		} else if charge >= allowance/4 {
+		} else if charge > 0 {
 			return 0, "exploratory first run blocked by protected memory-heavy model residency"
 		}
 	}
@@ -790,8 +837,8 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 	// hostNeed adds ceiling slack back. Leave the named drift margin unused
 	// between the inventory snapshot and the strict launch check.
 	slack := m.MemoryCeilingSlackGB + exploratoryDriftMarginGB(m)
-	if room < allowance/2 || room <= slack {
-		return 0, fmt.Sprintf("exploratory first run needs half the host allowance free (%.1f GiB available; %.1f GiB allowance)", room, allowance)
+	if room <= slack {
+		return 0, fmt.Sprintf("exploratory first run needs physical headroom above launch slack (%.1f GiB available; %.1f GiB allowance)", room, allowance)
 	}
 	return room - slack, ""
 }
