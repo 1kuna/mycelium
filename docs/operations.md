@@ -1567,6 +1567,13 @@ records observations, and unloads. Use explicit runtime/device/worker identity
 and an authorized maintenance window. Measured peaks and headroom, not model-file
 sizes or a guessed budget, qualify native admission. The [native test plan](development.md)
 keeps this proof separate from laptop fixtures.
+The installed queue must support the fresh `/api/measure/safety` read used by
+the measurement binary. This small production-work/call/pin check avoids the
+full inspection snapshot. Transient read timeouts back off within the existing
+load-timeout budget and any earlier maintenance-context deadline. Keep the
+external maintenance deadline in force: the safety wait consumes window time,
+and no timeout, missing route or failed check certifies production safety.
+See the [measurement contract](services.md#model-catalog-and-worker-setup).
 The command uses installed queue credentials and TLS authority by default;
 `--config` selects the installation without exporting or copying its token.
 

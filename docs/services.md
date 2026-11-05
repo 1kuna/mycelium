@@ -185,6 +185,19 @@ No real GPU/model validation is implied by laptop tests.
 
 Qualify runtime memory with `myce measure` during coordinated maintenance, with
 the worker stopped and its exact spool selected; never bypass the spool lock.
+Measurement first requests a fresh, compact `GET /api/measure/safety` read from
+the queue. It checks outstanding production jobs (including unreleased attempts),
+production model calls, matching pins, and active models/calls on the selected
+worker without projecting `/api/inspection` or host inventories. Queue and
+measurement binary must both support this route; an older queue's refusal is
+not a reason to fall back or bypass the check.
+Transient read timeouts retry with backoff derived from the failed request's
+duration, at least the configured sample interval, doubling between failures.
+The safety phase is bounded by `--load-timeout` and any earlier caller deadline;
+backoff consumes that budget and never extends an enclosing maintenance window.
+Production blockers, HTTP refusals, malformed replies, cancellation, and an
+exhausted safety budget stop before model preparation/loading. A timeout never
+counts as evidence that production is idle.
 On Linux unified CUDA devices with unsupported used/free counters, the report's
 `basis: unified/host` means both memory figures track `MemTotal - MemAvailable`.
 Use its sampled load/warm-up peak and baseline delta as shared-RAM observations;
