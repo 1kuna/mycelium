@@ -161,3 +161,44 @@ func TestSharedProfileAdaptiveRetiresAuthorityPacing(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSharedProfileAdaptiveCompletionRecomputesNextRead(t *testing.T) {
+	clock := &waitClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
+	var reads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			adaptiveReply(w, r, "succeeded")
+			return
+		}
+		var request myce.WaitRequest
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		// Every response carries new progress after one observed service period.
+		// Repeated coordinator scans must not add a growing delay to those events.
+		clock.advance(time.Second)
+		n := reads.Add(1)
+		state := "running"
+		if n == 50 {
+			state = "succeeded"
+		}
+		_ = json.NewEncoder(w).Encode(myce.WaitReply{Jobs: []myce.WaitState{{ID: "job", State: state, Revision: uint64(n)}}})
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	dir, _, lock := sharedWatchFixture(t, root, server.URL, clock)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runSharedProfileLoop(ctx, root, lock, clock, func(_ context.Context, d time.Duration) error {
+		if d > time.Second {
+			return fmt.Errorf("progress delayed beyond observed service period: %s", d)
+		}
+		clock.advance(d)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt profileReceipt
+	if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &receipt); err != nil || receipt.Observation != "not_armed" || receipt.Status != "succeeded" {
+		t.Fatal("progressing observer did not retire", receipt, err)
+	}
+}
