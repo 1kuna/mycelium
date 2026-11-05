@@ -183,3 +183,43 @@ func TestAdaptiveMemoryGrowthUsesClockAndLiveCredit(t *testing.T) {
 		t.Fatal("unknown sample earned credit")
 	}
 }
+
+// A learned CPU family must not inflate an experiment's RAM by an arbitrary
+// transfer multiplier and thereby strand a large declared GPU workload. This
+// isolates memory admission; input/cache readiness remains a separate predicate.
+func TestAdaptiveMemoryCPUFamilyLeavesMeasuredTrainingHeadroom(t *testing.T) {
+	q, clock := fixture(t)
+	cpu := cpuMachine("cpu-worker", "mixed-host", "cpu", 8, 64)
+	gpu := cpuMachine("gpu-worker", "mixed-host", "cuda", 8, 64)
+	cpu.HostMemoryBudgetGB, gpu.HostMemoryBudgetGB = 64, 64
+	cpu.ExtensionFingerprint, gpu.ExtensionFingerprint = "cpu-v1", "gpu-v1"
+	check(t, q, gpu, nil)
+	check(t, q, cpu, nil)
+	s := cpuSpec(1, 0)
+	s.Targets = []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cpu"}}
+	s.AllowedMachines = []string{cpu.ID}
+	const acceptedPeak = 5.3572
+	for i := 0; i < 37; i++ {
+		runMemory(t, q, clock, cpu, s, acceptedPeak, nil)
+	}
+	s.Run.Command = []string{"echo", "next-family-work"}
+	pending := submit(t, q, s)
+	experiment := check(t, q, cpu, nil).Job
+	if experiment == nil || experiment.ID != pending.ID || experiment.Spec.Needs.HostMemoryGB != acceptedPeak+minimumHostMemoryGB || experiment.MemoryEnvelope.Evidence != 37 {
+		t.Fatal("family evidence acquired an invented multiplier", experiment)
+	}
+	if err := q.Started(result(experiment, false)); err != nil {
+		t.Fatal(err)
+	}
+	training := cpuSpec(1, 0)
+	training.Name = "declared-training"
+	training.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 1, HostMemoryGB: 52.1, Platform: Platform{Required: []string{"cuda"}}}
+	queued := submit(t, q, training)
+	run := check(t, q, gpu, nil).Job
+	if run == nil || run.ID != queued.ID || run.Spec.Needs.HostMemoryGB != 52.1 || run.MemoryEnvelope.Basis != "declared" {
+		t.Fatal("measured CPU experiment stranded fitting declared training", job(t, q, queued.ID).Reason)
+	}
+	if got := q.s.Machines[gpu.ID].HostMemoryInUseGB; math.Abs(got-(acceptedPeak+minimumHostMemoryGB+52.1)) > 1e-8 || got > 64 {
+		t.Fatal("shared host ledger lost a reservation", got)
+	}
+}
