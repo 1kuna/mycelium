@@ -95,6 +95,7 @@ func (q *Queue) pruneHealthEvents() {
 }
 
 func (q *Queue) detectHealth() {
+	q.detectHostHygiene()
 	// Job-specific pressure conditions follow live demand, rather than growing
 	// with retained job history. Project input conditions are bounded by policy.
 	for key := range q.s.Health.Conditions {
@@ -127,7 +128,11 @@ func (q *Queue) detectHealth() {
 			stale = false
 		}
 		unhealthy := (q.s.HostMaintenance[host].SharedHost != nil && !q.sharedPressureFresh(m)) || len(m.UnavailableRoots) > 0 || m.HostMemoryPolicyMismatch || m.MemoryError != "" || m.HostMemoryError != "" || m.InventoryReason != "" || slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
-		q.observeHealth("host/"+m.ID, !intentional && (stale || unhealthy), 0, HealthAlert{Kind: "host_unhealthy_or_stale", Host: host})
+		cause := "host_health_unavailable"
+		if stale {
+			cause = "host_silent"
+		}
+		q.observeHealth("host/"+m.ID, !intentional && (stale || unhealthy), 0, HealthAlert{Kind: "host_unhealthy_or_stale", Host: host, Reason: cause})
 		checkpointRootMissing := slices.ContainsFunc(m.UnavailableRoots, func(r UnavailableRoot) bool { return r.Root == "checkpoint" })
 		q.observeHealth("storage/"+m.ID, !intentional && (m.CheckpointUnavailable || checkpointRootMissing), delay, HealthAlert{Kind: "checkpoint_store_unavailable", Host: host})
 		for _, v := range m.DiskVolumes {

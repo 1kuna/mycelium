@@ -555,6 +555,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	HostHealth    *HostHealth    `json:"host_health,omitempty"`
 	toolInventory *toolInventory // Immutable queue-owned inventory; never serialized.
 	// ToolInventory maps the native PATH (empty key) and prepared environment keys to executable names.
 	ToolInventory          map[string][]string    `json:"tool_inventory,omitempty"`

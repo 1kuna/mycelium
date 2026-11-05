@@ -58,7 +58,7 @@ func (q *Queue) issuePreparation(m *Machine, kind, key string) HostLaunch {
 	return l
 }
 func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
-	return m != nil && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m) && !m.HostMemoryPolicyMismatch
+	return m != nil && q.hostHygieneReason(m) == "" && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m) && !m.HostMemoryPolicyMismatch
 }
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 	return q.authorizeLaunchContext(context.Background(), l)

@@ -26,6 +26,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	HostHealthSource     func(context.Context) (HostHealthReading, error)
 	toolReport           *workerToolReport // Serial check-in negotiation, shared by value copies.
 	nasInspection        *workerNASInspection
 	storageObserver      *storageObserver

@@ -1392,6 +1392,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptExtensionQualifications(&m)
 		q.acceptSharedPressure(&m, old)
+		acceptHostHygiene(&m)
 		if old != nil && (old.Gone || old.Session != m.Session) {
 			q.clearPreemptionPlacements(old.ID, old.Session)
 		}
