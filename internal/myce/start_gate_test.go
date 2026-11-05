@@ -75,8 +75,7 @@ func TestProductionStartGateRecoveryWindow(t *testing.T) {
 		t.Run(outage.String(), func(t *testing.T) {
 			q, c := fixture(t)
 			s := spec("production")
-			deadline := c.Now().Add(30 * time.Second)
-			s.StartBy = &deadline
+			s.StartWindow = "30s" // Relative recovery renews; an absolute start_by never does.
 			submit(t, q, s)
 			a := check(t, q, machine("b70", "xpu"), nil).Job
 			if e := q.Started(result(a, true)); e != nil {
