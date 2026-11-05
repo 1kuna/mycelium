@@ -163,7 +163,7 @@ type ServiceConfig struct {
 	State                  string    `json:"state_dir"`
 	ModelCache             string    `json:"model_cache"`
 	EnvironmentCache       string    `json:"environment_cache"`
-	FileCacheBytes         int64     `json:"file_cache_bytes"`
+	FileCacheBytes         int64     `json:"file_cache_bytes,omitempty"`
 	FileCacheBytesExplicit bool      `json:"file_cache_bytes_explicit,omitempty"`
 	ModelCacheBytes        int64     `json:"model_cache_bytes"`
 	EnvironmentCacheBytes  int64     `json:"environment_cache_bytes"`

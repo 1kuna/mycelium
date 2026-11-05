@@ -38,11 +38,13 @@ evidence and bytes as unverified. This requires upgraded queue and workers.
 
 ## Project instruction file
 
-Entries default to native sandboxing. An entry can declare top-level
-`isolation: unsandboxed` and a required nonempty `reason`; this covers its main,
-result checks, queued qualification payloads and sidecars. Use
-`isolation: sandboxed` for explicit opt-in when publishing a new version of a
-legacy registered extension. The reason is public in status/job GET. See
+Plain native command entries default to **unsandboxed** under MY-25;
+`isolation: sandboxed` explicitly opts in. New native variant/extension
+registrations default to sandboxing. An explicit top-level
+`isolation: unsandboxed` requires a nonempty `reason` and covers main,
+result checks, queued qualification payloads and sidecars. Pre-policy registered
+extensions retain their frozen policy; publish a new version with
+`isolation: sandboxed` to opt in. The reason is public in status/job GET. See
 [native isolation](native-isolation.md) for the ordinary host permissions of
 unsandboxed stages, retained launch/device/cleanup checks and durable legacy
 registration policy. This is an entry choice, not a global or per-sidecar flag.
@@ -158,9 +160,12 @@ myce wait JOB_ID
 myce result JOB_ID --out accepted-results
 ```
 
-Submission returns a receipt; `myce result` verifies accepted artifact SHA-256 and
-size. Foreground completion/retrieval and new operation UX remain #156's separate
-slice. Queue outages never execute locally. Keep private receipts while recovery
+Submission returns a receipt; foreground `myce wait JOB_ID` is sufficient for
+adapter and profile completion, with no notifier or harness binding required.
+Use [completion notification](#completion-notification) only when detached delivery
+is needed. `myce result` verifies accepted artifact SHA-256 and size; then apply
+the project's own acceptance check. Integrated foreground completion/retrieval UX
+remains #156's separate slice. Queue outages never execute locally. Keep private receipts while recovery
 matters, and use a new explicit `--key` for an intentional repeat.
 
 ## Initialize a profile

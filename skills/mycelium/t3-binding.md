@@ -1,7 +1,10 @@
 # Bind Mycelium completion to a T3 thread
 
-A wake goes to the thread that created its webhook schedule. Each thread that
-submits jobs therefore has its own binding, created from that thread. Never share
+Optional for detached completion. Foreground `myce wait JOB_ID` works for adapter
+and profile jobs without a notifier or schedule; see [the first-run guide](SKILL.md).
+
+A wake goes to the thread that created its webhook schedule. When using this
+binding, each submitting thread creates its own. Never share
 one binding across threads or a project, because another thread's wake would land
 in yours. If your thread already recorded a binding, reuse it.
 

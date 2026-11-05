@@ -1,7 +1,7 @@
 # Set up project offload
 
 For new reusable work, follow [the adapter reference](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md):
-one `.mycelium/adapter.yaml`, explicit targets, committed source, result checks,
+one `.mycelium/adapter.yaml`, explicit targets, deliberately selected source, result checks,
 and submit/wait/verified retrieval. Keep this package's [SKILL.md](SKILL.md) and
 supporting files together when installing it.
 
