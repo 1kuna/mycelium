@@ -152,11 +152,11 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		r.Findings = append(r.Findings, ResolveFinding{Field: "environment.platforms", Side: "queue", Problem: "the environment has no recipe for the platform this job's needs select", Fix: "Add a recipe for that platform (for CPU work, a cpu recipe), or change needs to match an existing recipe."})
 	}
 	r.Targets = view.resolveTargets(j)
-	if !slices.ContainsFunc(r.Targets, func(t ResolveTarget) bool {
-		return t.Eligible && (t.Environment == nil || t.Environment.State == "ready")
-	}) {
-		r.Blocker = view.actionableBlocker(j)
+	r.Blocker = view.actionableBlocker(j)
+	if r.Blocker != nil && r.Blocker.Code == "waiting_for_worker" {
+		r.Blocker = nil
 	}
+
 	eligible := 0
 	for _, t := range r.Targets {
 		if t.Eligible {
@@ -178,6 +178,9 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 	}
 	if eligible == 0 && len(r.Targets) > 0 {
 		r.Notes = append(r.Notes, "No eligible target: fix the first blocker on the closest target; submission with require_target would refuse.")
+	}
+	if finding := ResolveFindingBlocker(r.Findings); finding != nil {
+		r.Blocker = finding
 	}
 	return r, nil
 }

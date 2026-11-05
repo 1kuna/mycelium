@@ -30,10 +30,19 @@ func (b *Blocker) Text() string {
 // Resolve findings already carry the field, reading side and remedy. Keep that
 // evidence intact instead of replacing validation errors with a generic hold.
 func ResolveFindingBlocker(findings []ResolveFinding) *Blocker {
-	if len(findings) == 0 {
+	var primary *ResolveFinding
+	for i := range findings {
+		f := &findings[i]
+		if f.Field == "source" || strings.HasPrefix(f.Field, "run.command[") || strings.HasPrefix(f.Field, "args[") || f.Field == "allowed_machines" && strings.Contains(f.Problem, "host pin limits") {
+			continue
+		}
+		primary = f
+		break
+	}
+	if primary == nil {
 		return nil
 	}
-	f := findings[0]
+	f := *primary
 	owner := "consumer"
 	if f.PathDiagnostic != nil && f.Side != "submitter" {
 		owner = f.Side + " owner"
@@ -50,6 +59,11 @@ func (q *Queue) inventoryFresh(m *Machine) bool {
 func (q *Queue) actionableBlocker(j *Job) *Blocker {
 	if j.State != "queued" {
 		return nil
+	}
+	if !dependencyReady(j) {
+		copy := *j
+		copy.Reason = q.waitReason(j)
+		return &Blocker{"unprepared", "accepted upstream result", "producer", "complete and publish the required upstream result", q.statusWaitingReasonDetail(&copy)}
 	}
 	type observation struct {
 		fit targetFit
@@ -116,7 +130,7 @@ func (q *Queue) actionableBlocker(j *Job) *Blocker {
 		b.Code, b.Dependency, b.Owner, b.Action = "unprepared", "accepted upstream result", "producer", "complete and publish the required upstream result"
 	} else if strings.Contains(reason, "waiting for software preparation for job ") {
 		b.Code, b.Dependency, b.Owner, b.Action = "waiting_for_builder", "software preparation for the named queued job", "queue", "wait for the named preparation; ask the queue owner if its offer or exact release makes no progress"
-	} else if len(targets) == 0 || strings.Contains(reason, "unavailable") || strings.Contains(reason, "readings") || strings.Contains(reason, "unknown") && !strings.Contains(reason, "utilization unknown") {
+	} else if len(targets) == 0 || strings.Contains(reason, "readings") || strings.Contains(reason, "telemetry unavailable") || strings.Contains(reason, "unknown") && !strings.Contains(reason, "utilization unknown") {
 		b.Code, b.Owner, b.Action = "unknown_observation", "queue owner", "restore the missing observation named in the reason"
 	} else if strings.Contains(reason, "hypha to take") {
 		b.Code, b.Dependency, b.Action = "waiting_for_worker", "worker assignment", "wait for an eligible worker to take this job"
@@ -148,6 +162,9 @@ func (q *Queue) environmentBlocker(j *Job, m *Machine) *Blocker {
 		return nil
 	}
 	key := environmentKey(j, m)
+	if e := qualifiedExtension(j, m); e != nil {
+		key = extensionPreparationKey(*e, m)
+	}
 	if key == "" {
 		return nil
 	}
@@ -179,9 +196,9 @@ func (q *Queue) environmentBlocker(j *Job, m *Machine) *Blocker {
 			continue
 		}
 		switch r.State {
-		case "building", "uploading":
+		case "building":
 			b.Code, b.Owner, b.Action, b.Evidence = "building", "builder", "wait for preparation to finish; inspect environment logs if progress stalls", "builder reports "+r.State
-		case "failed":
+		case "failed", "uploading":
 			b.Code, b.Owner, b.Action, b.Evidence = "deterministically_failed", "consumer", "fix the recipe and resubmit with changed immutable inputs", environmentFailureReason(r, j.Spec.Logs != "none")
 			if environmentFailureKind(r) == "transient" {
 				b.Code, b.Owner, b.Action = "waiting_for_builder", "queue", "wait for the recorded retry; ask the queue owner if infrastructure remains unavailable"
