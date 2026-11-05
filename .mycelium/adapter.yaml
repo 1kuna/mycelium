@@ -13,6 +13,7 @@ entries:
         needs:
             cpu_cores: 2
             memory_gb: 6
+            network: true
             platform: cpu
         outputs:
             gate-result.txt: results
@@ -44,6 +45,7 @@ entries:
         needs:
             cpu_cores: 2
             memory: auto
+            network: true
             platform: cpu
         outputs:
             gate-result.txt: results
