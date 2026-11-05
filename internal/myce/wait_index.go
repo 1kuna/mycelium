@@ -27,9 +27,19 @@ type WaitReply struct {
 // The writer holds q.mu before mu; readers take only mu. No waiter takes q.mu.
 // Publication happens only after persistence succeeds. No timers, I/O, heavy
 // projections, or subscriber goroutines live in the commit path.
+type observationIntent struct{ project, class, priority string }
+
+func (i observationIntent) spec() Spec {
+	return Spec{Project: i.project, Class: i.class, Priority: i.priority}
+}
+
 type waitStateIndex struct {
-	mu       sync.Mutex
-	jobs     map[string]WaitState
+	mu   sync.Mutex
+	jobs map[string]WaitState
+	// Only scalar intent and immutable policy tiers, never Job payloads. This
+	// lets observation protect production without waiting for the control lock.
+	intents  map[string]observationIntent
+	policy   PriorityPolicy
 	revision uint64
 	changed  chan struct{}
 }
@@ -39,6 +49,7 @@ func (q *Queue) waitIndex() *waitStateIndex {
 	defer q.mu.Unlock()
 	if q.waitStates == nil {
 		q.waitStates = &waitStateIndex{jobs: map[string]WaitState{}, changed: make(chan struct{})}
+		q.waitStates.policy = q.effectivePriorityPolicy()
 		for id, j := range q.s.Jobs {
 			q.waitStates.set(id, j)
 		}
@@ -49,7 +60,7 @@ func (q *Queue) waitIndex() *waitStateIndex {
 	return q.waitStates
 }
 func waitCallJob(c *ModelCall) *Job {
-	j := &Job{ID: c.ID, State: "queued"}
+	j := &Job{ID: c.ID, State: "queued", Spec: Spec{Project: c.Project, Class: c.Class, Priority: c.Priority}}
 	if c.Machine != "" {
 		j.State = "running"
 	}
@@ -65,7 +76,12 @@ func (s *waitStateIndex) set(id string, j *Job) {
 			return
 		}
 		delete(s.jobs, id)
+		delete(s.intents, id)
 	} else {
+		if s.intents == nil {
+			s.intents = make(map[string]observationIntent)
+		}
+		s.intents[id] = observationIntent{j.Spec.Project, j.Spec.Class, j.Spec.Priority}
 		next := WaitState{ID: id, State: j.State, Reason: j.Reason}
 		if exists && old.State == next.State && old.Reason == next.Reason {
 			return
@@ -87,6 +103,7 @@ func (q *Queue) publishWaitStates(oldCalls map[string]*ModelCall) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.policy = q.effectivePriorityPolicy() // committed tiers are immutable
 	for id := range q.records.jobs {
 		s.set(id, q.s.Jobs[id])
 	}
@@ -98,6 +115,37 @@ func (q *Queue) publishWaitStates(oldCalls map[string]*ModelCall) {
 			s.set(id, q.s.Jobs[id])
 		}
 	}
+}
+
+func (s *waitStateIndex) observationPriority(id string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	view := Queue{s: state{PriorityPolicy: &PriorityPolicyRecord{Policy: s.policy}}}
+	priority := func(intent observationIntent) (int, bool) {
+		match := view.priorityMatch(intent.spec())
+		return match.Index, jobClass(intent.spec()) == "production" || match.Tier == "production"
+	}
+	intent, found := s.intents[id]
+	if !found && len(id) >= 8 {
+		best := len(s.policy.Tiers)
+		for key, candidate := range s.intents {
+			if strings.HasPrefix(key, id) {
+				// Protect any production match even for an ambiguous prefix. The
+				// handler still returns the ordinary ambiguity error.
+				rank, production := priority(candidate)
+				if production {
+					return rank, true
+				}
+				best = min(best, rank)
+			}
+		}
+		return best, false
+	}
+	if !found {
+		return len(s.policy.Tiers), false
+	}
+	// Reuse the scheduler's pure matcher on this detached policy/intent view.
+	return priority(intent)
 }
 func (s *waitStateIndex) read(request WaitRequest) ([]WaitState, <-chan struct{}, bool, error) {
 	s.mu.Lock()

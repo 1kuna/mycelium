@@ -1476,19 +1476,42 @@ advertise `X-Myce-Wait: batch-v1`; clients without this capability retain legacy
 wait reads. Pending legacy wait reads also use the index; ordinary terminal
 GETs retain the full public Job contract.
 
-Consumer job/status/inspection/usage/portability GET/HEAD requests and batch waits share a token bucket by transport
-source address, ignoring ports and untrusted forwarding/client headers: 20/s,
-burst 100. All worker protocol routes, including checkpoint publication, event
-streams, check-ins and launch authorization, are exempt. File transfers,
-instruction/catalog polls and environment references remain exempt worker
-dependencies as well. A refused observation
-returns HTTP 429 `client_rate_limited` and `Retry-After: 1` before queue work.
-The allowance covers a measured workload of 31 concurrent jobs polling every
-two seconds plus result reads (about 16/s). Managed batched waits and parent-exit
-cleanup prevent the orphaned-waiter flood that motivated the former 5/s cap.
-Batched idle waits need one request per 20 seconds. Sources behind one proxy/NAT share the allowance;
-worker control still remains exempt. The bounded source table refuses new
-sources at capacity rather than resetting active allowances.
+Consumer observation admission is adaptive. A healthy queue never refuses a
+read because of its rate, address or number of clients. The queue measures every
+control-mutex acquisition with its injected clock. Its mean uncontended occupied
+interval supplies the local service baseline; a live lock waiter older than that
+baseline establishes pressure. Overlapping readers form one occupied interval.
+There is no fleet-derived rate, latency threshold, peer table or cooldown. A cold
+queue without a positive baseline admits observations while it learns.
+
+During pressure, admission compares incoming observations with the highest-value
+observation already in flight. Higher scheduler tiers precede lower tiers;
+selected-job scalar waits precede detailed job reads, then broad fleet projections.
+Within the same tier/scope, the running installation's mean completed healthy
+request cost determines the order. Unknown cost cannot claim to be cheaper.
+Only a higher-value read crosses that frontier; equal/lower-value reads receive
+HTTP 429 `client_rate_limited` before projection work. If no observation remains
+in flight, one request can measure recovery. As soon as live lock wait clears,
+all reads are admitted again, even if previous observations are still active.
+This is progress-based admission, not a fixed concurrency allowance.
+
+Production-class job observation (including production policy tiers, prefixes,
+HEAD and job subresources) is never shed. Class comes from committed scalar
+intent and current immutable policy, never User-Agent or request headers; the
+classification read does not take the control mutex. Batched scalar waits are
+also exempt because they use their independent committed index and do not delay
+control. All worker protocol, launch/report, file transfer, instruction/catalog
+and environment-reference dependencies remain exempt. Existing clients and the
+429 code remain compatible. `Retry-After` rounds the measured live wait up to a
+positive integer number of seconds, the HTTP header's granularity. It does not
+promise the queue will have recovered by then.
+
+Measurements and active-request bookkeeping are process-local. A first concurrent
+wave can arrive before pressure is measurable, and production observations remain
+exempt even during overload. This protects control from continued nonproduction
+read floods; it is not an absolute bound on all admitted work. No network or bulk
+I/O is added under the queue mutex. Adaptive admission ships in the release that
+includes #800; earlier deployed releases may still use the fixed-rate stopgap.
 
 ## Job GET request attribution
 

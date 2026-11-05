@@ -98,8 +98,8 @@ func TestJobGetVolumeHTTPRouting(t *testing.T) {
 
 func TestJobGetVolumeRejectedObservations(t *testing.T) {
 	q, clock := fixture(t)
-	// Rejection summaries use the existing counter clock. Holding transport
-	// time fixed lets a rejection alone trigger the minute summary.
+	// Rejection summaries retain their original counter clock. The old fixed-
+	// rate exhaustion is replaced by measured pressure and a real in-flight read.
 	rateClock := &fakeClock{now: clock.Now()}
 	handler := (API{Queue: q, Token: "fixture"}).handler("", rateClock)
 	var output bytes.Buffer
@@ -120,10 +120,19 @@ func TestJobGetVolumeRejectedObservations(t *testing.T) {
 			t.Fatal(code)
 		}
 	}
+	busy := holdObservationHTTP(t, handler, "/api/jobs/missing?view=wait")
+	defer busy()
+	pressure := q.mu.pressure.Load()
+	pressure.acquired(nil)
+	rateClock.Advance(time.Millisecond)
+	pressure.release()
+	waiting := pressure.wait()
+	rateClock.Advance(2 * time.Millisecond)
+	defer func() { pressure.acquired(waiting); pressure.release() }()
+
 	for _, tc := range []struct{ method, path, agent string }{
 		{"GET", "/api/jobs/private-job?secret=private-query", "myce/s073"},
 		{"HEAD", "/api/jobs/private-job?view=wait", "myce/s073"},
-		{"POST", "/api/wait", "mycelium-python/development"},
 		{"GET", "/api/status", "mycelium-python/development"},
 		{"GET", "/api/inspection", "myce/private/path"},
 		{"GET", "/api/usage", "Go-http-client/1.1"},
@@ -153,8 +162,8 @@ func TestJobGetVolumeRejectedObservations(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []jobGetTotal{
-		{Kind: "cli", Version: "s073", Full: 100, RateLimited: map[string]uint64{"job_full": 1, "job_wait": 1, "portability": 1, "page": 1, "status": 1}},
-		{Kind: "python", Version: "development", RateLimited: map[string]uint64{"batch_wait": 1, "status": 1}},
+		{Kind: "cli", Version: "s073", Full: 100, Wait: 1, RateLimited: map[string]uint64{"job_full": 1, "job_wait": 1, "portability": 1, "page": 1, "status": 1}},
+		{Kind: "python", Version: "development", RateLimited: map[string]uint64{"status": 1}},
 		{Kind: "unknown", Version: "unknown", RateLimited: map[string]uint64{"inspection": 1, "usage": 1}},
 	}
 	gotJSON, _ := json.Marshal(totals)
