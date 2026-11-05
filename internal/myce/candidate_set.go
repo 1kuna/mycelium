@@ -43,6 +43,7 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 	s := &candidateSet{q: q, m: m, jobs: make([]*Job, 0, len(q.liveJobs())), scores: map[string]float64{}, actives: map[string]float64{}}
 	s.resources = map[batchResourceKey]batchResourceRoom{}
 	fence := q.groupDemandFence(m)
+	hostFence := q.hostBackfillFences(scan)[hostID(m)]
 	for _, j := range q.liveJobs() {
 		if fence != nil && j.ID != fence.ID && q.comparePriority(j.Spec, fence.Spec) >= 0 {
 			continue
@@ -60,7 +61,7 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 			copy.planningMemoryIdentity = identity
 			j = &copy
 		}
-		if candidate := q.batchCandidateWithResources(j, m, s.resources); candidate != nil {
+		if candidate := q.batchCandidateWithResources(j, m, s.resources); candidate != nil && q.hostBackfillAllows(candidate, m, hostFence) {
 			s.jobs = append(s.jobs, candidate)
 		}
 	}
