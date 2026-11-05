@@ -59,7 +59,7 @@ func TestFileTransferSingleWriteProgress(t *testing.T) {
 			}()
 			idle := 800 * time.Millisecond // Four measured 0.2 s scheduling periods.
 			start := time.Now()
-			n, err := (fileTransferConn{sender, idle}).Write(body)
+			n, err := (&fileTransferConn{Conn: sender, idle: idle}).Write(body)
 			sender.Close()
 			got := <-done
 			if err != nil || n != len(body) || sha256.Sum256(got) != sha256.Sum256(body) {
@@ -74,7 +74,7 @@ func TestFileTransferSingleWriteProgress(t *testing.T) {
 	sender, receiver := net.Pipe()
 	defer sender.Close()
 	defer receiver.Close()
-	_, err := (fileTransferConn{sender, 100 * time.Millisecond}).Write([]byte("stalled"))
+	_, err := (&fileTransferConn{Conn: sender, idle: 100 * time.Millisecond}).Write([]byte("stalled"))
 	if !errors.Is(err, errFileTransferStalled) {
 		t.Fatal("true write stall did not fail typed", err)
 	}

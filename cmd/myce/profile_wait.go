@@ -187,7 +187,7 @@ func waitProfileReceipt(ctx context.Context, dir string, timeout time.Duration) 
 }
 
 func observeProfile(ctx context.Context, c myce.Client, dir string, r profileReceipt, cfg profileObserver) error {
-	j, waitErr := c.WaitSubmitted(ctx, &myce.Job{ID: r.JobID, State: r.Status})
+	j, waitErr := c.WaitSubmitted(ctx, &myce.Job{ID: r.JobID, State: r.Status, Spec: r.Spec})
 	return finishProfileObservation(ctx, dir, r, cfg, j, waitErr)
 }
 

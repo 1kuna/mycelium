@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -675,58 +676,84 @@ func (a API) registerFiles(mux *requestMux) {
 	mux.HandleFunc("POST /api/files/checkpoint", a.checkpointHandler)
 }
 
-// File transfers have no whole-request timeout (#218). Each network operation
-// renews one idle budget: at least 60 s (past TCP retransmission backoffs), or
-// 30 s plus two full-blob hash passes at a conservative disk rate of 100 MiB/s.
-// The queue hashes before sending headers and twice when publishing an upload.
-const (
-	fileResponseBudget       = 30 * time.Second
-	fileVerifyBytesPerSecond = 100 << 20
-	fileTransferIdle         = 60 * time.Second
-)
-
+// File transfers have no whole-request deadline. Each direction learns its
+// own byte service time; queue verification before headers is bounded only by
+// the owner, since socket throughput cannot estimate server disk/hash work.
 var errFileTransferStalled = errors.New("file transfer stalled")
 
-func (c Client) fileTimeout(size int64) time.Duration {
-	if c.transferIdle != 0 {
-		return c.transferIdle
-	}
-	return max(fileTransferIdle, fileResponseBudget+time.Duration(2*float64(max(size, 0))/fileVerifyBytesPerSecond*float64(time.Second)))
-}
+func (c Client) fileTimeout(_ int64) time.Duration { return c.transferIdle }
 
-// Network deadlines use real time, outside queue/scheduling Clock decisions.
-// Refresh both directions: net/http can already be waiting for the response
-// while an upload is still progressing on the same connection.
 type fileTransferConn struct {
 	net.Conn
-	idle time.Duration
+	idle                        time.Duration // Explicit test/owner override; zero learns from progress.
+	clock                       Clock
+	readProgress, writeProgress transferProgress
+	reading, writing            *atomic.Bool
 }
 
-func (c fileTransferConn) Read(p []byte) (int, error) {
-	if err := c.SetDeadline(time.Now().Add(c.idle)); err != nil {
+func (c *fileTransferConn) deadline(read bool, bytes int) error {
+	idle := c.idle
+	if idle == 0 {
+		if read && (c.reading == nil || c.reading.Load()) {
+			idle = c.readProgress.window(bytes)
+		} else if !read && (c.writing == nil || c.writing.Load()) {
+			idle = c.writeProgress.window(bytes)
+		}
+	}
+	end := time.Time{}
+	if idle > 0 {
+		clock := c.clock
+		if clock == nil {
+			clock = RealClock{}
+		}
+		end = clock.Now().Add(idle)
+	}
+	if c.idle > 0 {
+		return c.SetDeadline(end)
+	}
+	if read {
+		return c.SetReadDeadline(end)
+	}
+	return c.SetWriteDeadline(end)
+}
+func (c *fileTransferConn) Read(p []byte) (int, error) {
+	if err := c.deadline(true, len(p)); err != nil {
 		return 0, err
 	}
+	clock := c.clock
+	if clock == nil {
+		clock = RealClock{}
+	}
+	started := clock.Now()
 	n, err := c.Conn.Read(p)
-	return n, fileTransferTimeout(err, c.idle)
+	if c.reading == nil || c.reading.Load() {
+		c.readProgress.observe(clock.Now().Sub(started), n)
+	}
+	return n, fileTransferTimeout(err, max(c.idle, c.readProgress.window(len(p))))
 }
-func (c fileTransferConn) Write(p []byte) (int, error) {
-	// Observe partial socket writes, including progress within one TLS record.
+func (c *fileTransferConn) Write(p []byte) (int, error) {
 	total := 0
 	for len(p) > 0 {
-		if err := c.SetDeadline(time.Now().Add(c.idle)); err != nil {
+		if err := c.deadline(false, len(p)); err != nil {
 			return total, err
 		}
+		clock := c.clock
+		if clock == nil {
+			clock = RealClock{}
+		}
+		started := clock.Now()
 		n, err := fileWriteSome(c.Conn, p)
+		if c.writing == nil || c.writing.Load() {
+			c.writeProgress.observe(clock.Now().Sub(started), n)
+		}
 		total += n
 		p = p[n:]
 		if err != nil {
-			// Some injected in-memory connections expose partial progress only
-			// with a timeout, as handled by x/net/http2's WriteByteTimeout.
 			var timeout net.Error
 			if n > 0 && errors.As(err, &timeout) && timeout.Timeout() {
 				continue
 			}
-			return total, fileTransferTimeout(err, c.idle)
+			return total, fileTransferTimeout(err, max(c.idle, c.writeProgress.window(len(p))))
 		}
 		if n == 0 {
 			return total, io.ErrNoProgress
@@ -747,8 +774,11 @@ func fileTransferTimeout(err error, idle time.Duration) error {
 // Bound setup separately from transfer progress. A legacy hook cannot be
 // cancelled, so close its late result; its goroutine lasts until it returns.
 func fileTransferDial(ctx context.Context, idle time.Duration, dial func(context.Context) (net.Conn, error)) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(ctx, idle)
-	defer cancel()
+	if idle > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, idle)
+		defer cancel()
+	}
 	type result struct {
 		conn net.Conn
 		err  error
@@ -773,7 +803,26 @@ func fileTransferDial(ctx context.Context, idle time.Duration, dial func(context
 }
 
 // size is the full blob the queue may verify before replying; 0 when none.
+// Retry reads only: PATCH offsets and arbitrary mutations require their
+// caller's reconciliation protocol, never an implicit replay.
 func (c Client) fileRequest(ctx context.Context, method, path string, body io.Reader, headers map[string]string, sizes ...int64) (*http.Response, error) {
+	pace := ClientPace{}
+	for {
+		started := c.clock().Now()
+		response, err := c.fileRequestOnce(ctx, method, path, body, headers, sizes...)
+		if err != nil || method != "GET" && method != "HEAD" || response.StatusCode != 429 && response.StatusCode != 503 {
+			return response, err
+		}
+		failure := &HTTPError{Status: response.StatusCode, RetryAfter: retryAfter(response.Header.Get("Retry-After"), c.clock().Now())}
+		response.Body.Close()
+		pace.Observe(c.clock().Now().Sub(started), false)
+		if err := c.pause(ctx, pace.Delay(c.clock().Now(), time.Time{}, failure, c.Jitter)); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (c Client) fileRequestOnce(ctx context.Context, method, path string, body io.Reader, headers map[string]string, sizes ...int64) (*http.Response, error) {
 	var size int64
 	if len(sizes) != 0 {
 		size = sizes[0]
@@ -782,6 +831,8 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 	if err != nil {
 		return nil, err
 	}
+	var reading, writing atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{WroteHeaders: func() { writing.Store(true) }}))
 	fileStoreSubmissionHeaders(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	for k, v := range headers {
@@ -819,7 +870,7 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 			if err != nil {
 				return nil, fileTransferTimeout(err, idle)
 			}
-			return fileTransferConn{conn, idle}, nil
+			return &fileTransferConn{Conn: conn, idle: idle, clock: c.clock(), reading: &reading, writing: &writing}, nil
 		}
 		// TLS normally runs over the wrapped TCP connection. An injected TLS
 		// dialer owns its handshake and authority checks; retain that path too.
@@ -878,6 +929,7 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 		}
 		return nil, fmt.Errorf("file transfer connection failed: %w", err)
 	}
+	reading.Store(true)
 	return res, nil
 }
 

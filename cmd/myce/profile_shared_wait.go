@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -49,16 +51,23 @@ func registerSharedObserver(ctx context.Context, dir string, cfg profileObserver
 	if err != nil {
 		return err
 	}
-	startupCtx, cancelStartup := context.WithTimeout(ctx, 10*time.Second)
+	startupCtx, cancelStartup := context.WithCancel(ctx)
 	defer cancelStartup()
 	start, err := sharedProfileLock(startupCtx, filepath.Join(root, "startup.lock"))
 	if err != nil {
 		return err
 	}
 	defer start.Close()
-	registration := sharedProfileRegistration{NotifyEnv: notifierEnvironment(), Directory: dir, Observer: cfg, Token: token, Expires: time.Now().Add(myce.DefaultWaitTimeout)}
+	registration := sharedProfileRegistration{NotifyEnv: notifierEnvironment(), Directory: dir, Observer: cfg, Token: token, Expires: time.Time{}}
 	if err = saveProfileJSON(filepath.Join(root, profileHash(dir)+".json"), registration); err != nil {
 		return err
+	}
+	// Wake an existing observer immediately; registrations remain durable if
+	// startup/recovery has not created its private socket yet.
+	socketPath, socketErr := sharedProfileSocket(root)
+	if wake, e := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: socketPath, Net: "unixgram"}); socketErr == nil && e == nil {
+		_, _ = wake.Write([]byte{1})
+		wake.Close()
 	}
 	lock, err := profileLock(filepath.Join(root, "observer.lock"))
 	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
@@ -93,7 +102,7 @@ func registerSharedObserver(ctx context.Context, dir string, cfg profileObserver
 	writeReady.Close()
 	ack := make(chan error, 1)
 	go func() { var b [1]byte; _, e := io.ReadFull(ready, b[:]); ack <- e }()
-	startup, cancel := context.WithTimeout(ctx, 10*time.Second)
+	startup, cancel := context.WithCancel(ctx)
 	defer cancel()
 	select {
 	case err = <-ack:
@@ -112,12 +121,11 @@ type sharedProfileWatch struct {
 	registration sharedProfileRegistration
 	receipt      profileReceipt
 	lock         *os.File
-	unknownSince time.Time
 }
 type sharedProfileGroup struct {
 	unknownOffset int
 	next          time.Time
-	delay         time.Duration
+	pace          myce.ClientPace
 	after         map[string]uint64
 }
 
@@ -128,13 +136,56 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 	syscall.CloseOnExec(3)
 	lock := os.NewFile(3, "observer.lock")
 	defer lock.Close()
+	// The lifetime lock proves any old socket belongs to an inactive observer.
+	socketPath, socketErr := sharedProfileSocket(root)
+	if socketErr != nil {
+		return socketErr
+	}
+	if info, e := os.Lstat(socketPath); e == nil && info.Mode()&os.ModeSocket != 0 {
+		_ = os.Remove(socketPath)
+	}
+	socket, e := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: socketPath, Net: "unixgram"})
+	if e != nil {
+		return e
+	}
+	defer os.Remove(filepath.Dir(socketPath))
+	defer os.Remove(socketPath)
+	defer socket.Close()
+	wakes := make(chan struct{}, 1)
+	done := make(chan struct{})
+	defer func() { socket.Close(); <-done }()
+	go func() {
+		defer close(done)
+		buffer := make([]byte, 1)
+		for {
+			if _, _, err := socket.ReadFromUnix(buffer); err != nil {
+				return
+			}
+			select {
+			case wakes <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	adaptivePause := func(ctx context.Context, d time.Duration) error {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-wakes:
+			return nil
+		case <-timer.C:
+			return nil
+		}
+	}
 	ready := os.NewFile(4, "ready")
 	_, err := ready.Write([]byte{1})
 	ready.Close()
 	if err != nil {
 		return err
 	}
-	return runSharedProfileLoop(ctx, root, lock, myce.RealClock{}, waitPause)
+	return runSharedProfileLoop(ctx, root, lock, myce.RealClock{}, adaptivePause)
 }
 
 func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock myce.Clock, pause func(context.Context, time.Duration) error) error {
@@ -167,7 +218,10 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 		return true
 	}
 	groups := map[string]*sharedProfileGroup{}
+	discovery := myce.ClientPace{}
+	previousCount := -1
 	for {
+		passStarted := clock.Now()
 		entries, err := filepath.Glob(filepath.Join(root, "*.json"))
 		if err != nil {
 			return err
@@ -207,7 +261,13 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 				receiptLock.Close()
 				continue
 			}
+			if receipt.Spec.Deadline != nil && (reg.Expires.IsZero() || receipt.Spec.Deadline.Before(reg.Expires)) {
+				reg.Expires = *receipt.Spec.Deadline
+			}
 			watches[entry] = &sharedProfileWatch{registration: reg, receipt: receipt, lock: receiptLock}
+			for _, group := range groups {
+				group.next = time.Time{}
+			}
 		}
 		if len(watches) == 0 {
 			// Serialize idle exit with registration/startup. Release the lifetime lock
@@ -230,6 +290,7 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			byAuthority[key] = append(byAuthority[key], entry)
 		}
 		for key, entries := range byAuthority {
+			started := clock.Now()
 			group := groups[key]
 			if group == nil {
 				group = &sharedProfileGroup{after: map[string]uint64{}}
@@ -240,7 +301,7 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			active := entries[:0]
 			for _, entry := range entries {
 				w := watches[entry]
-				if !clock.Now().Before(w.registration.Expires) || w.receipt.JobID == "" {
+				if !w.registration.Expires.IsZero() && !clock.Now().Before(w.registration.Expires) || w.receipt.JobID == "" {
 					cause := context.DeadlineExceeded
 					if w.receipt.JobID == "" {
 						cause = errors.New("receipt has no job")
@@ -257,18 +318,26 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			sample := watches[entries[0]].registration
 			c, e := runClient(sample.Observer.Config, sample.Observer.Joining, sample.Observer.Queue, sample.Token)
 			if e != nil {
-				group.delay = min(max(3*time.Second, group.delay*2), 30*time.Second)
-				group.next = clock.Now().Add(group.delay)
+				group.pace.Observe(clock.Now().Sub(started), false)
+				group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, e, nil))
 				continue
 			}
+			c = c.WithoutRetries()
+			c.Clock = clock
 			for start := 0; start < len(entries); start += 256 {
 				batch := entries[start:min(start+256, len(entries))]
 				ids := make([]string, 0, len(batch))
 				for _, entry := range batch {
 					ids = append(ids, watches[entry].receipt.JobID)
 				}
-				readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				reply, readErr := c.WaitBatch(readCtx, ids, group.after, 0)
+				readCtx, cancel := sharedProfileReadContext(ctx, batch, watches, clock)
+				seconds := group.pace.Seconds(clock.Now(), time.Time{})
+				// More than one group/batch shares this coordinator. Those reads stay
+				// nonblocking so one authority cannot hold another's completion.
+				if len(byAuthority) > 1 || len(entries) > 256 {
+					seconds = 0
+				}
+				reply, readErr := c.WaitBatch(readCtx, ids, group.after, seconds)
 				cancel()
 				if readErr != nil {
 					// Unknown IDs must not poison their healthy batch peers. Resolve this
@@ -282,7 +351,7 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 						for n := 0; n < probeCount; n++ {
 							entry := batch[(group.unknownOffset+n)%len(batch)]
 							w := watches[entry]
-							one, cancel := context.WithTimeout(ctx, 10*time.Second)
+							one, cancel := sharedProfileReadContext(ctx, []string{entry}, watches, clock)
 							j, jobErr := c.GetJobForWait(one, w.receipt.JobID)
 							cancel()
 							if jobErr == nil {
@@ -292,12 +361,9 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 								continue
 							}
 							if errors.As(jobErr, &api) && api.Code == "job_unknown" {
-								if w.unknownSince.IsZero() {
-									w.unknownSince = clock.Now()
-								}
-								if clock.Now().Sub(w.unknownSince) < 5*time.Second {
-									continue
-								}
+								// This receipt records accepted intent. Visibility retry ends only
+								// at its owner's deadline, not after a fixed grace period.
+								continue
 							}
 							if !myce.RetryStatusRead(jobErr) {
 								finish(entry, nil, jobErr)
@@ -309,30 +375,36 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 							finish(entry, nil, readErr)
 						}
 					}
-					group.delay = min(max(3*time.Second, group.delay*2), 30*time.Second)
-					if errors.As(readErr, &api) && api.Code == "job_unknown" {
-						group.delay = 3 * time.Second
-					}
-					group.next = clock.Now().Add(group.delay)
+					group.pace.Observe(clock.Now().Sub(started), false)
+					group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, readErr, nil))
 					continue
 				}
-				group.delay = 0
-				group.next = time.Time{}
+				changed := false
+				for _, state := range reply.Jobs {
+					changed = changed || group.after[state.ID] != state.Revision
+				}
+				group.pace.Observe(clock.Now().Sub(started), changed)
+				group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, nil, nil))
+				// A negotiated long-poll already paces unchanged jobs and wakes on a
+				// revision. Re-enter it without an additional growing sleep.
+				if seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0 {
+					group.next = clock.Now()
+				}
 				for i, state := range reply.Jobs {
 					group.after[state.ID] = state.Revision
 					if state.State != "succeeded" && state.State != "failed" && state.State != "cancelled" {
 						continue
 					}
 					entry := batch[i]
-					finalCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					finalCtx, cancel := sharedProfileReadContext(ctx, []string{entry}, watches, clock)
 					j, finalErr := c.GetJobForWait(finalCtx, state.ID)
 					cancel()
 					if finalErr != nil {
 						if !myce.RetryStatusRead(finalErr) {
 							finish(entry, nil, finalErr)
 						} else {
-							group.delay = min(max(3*time.Second, group.delay*2), 30*time.Second)
-							group.next = clock.Now().Add(group.delay)
+							group.pace.Observe(clock.Now().Sub(started), false)
+							group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, finalErr, nil))
 						}
 						continue
 					}
@@ -345,7 +417,20 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 				c.HTTP.CloseIdleConnections()
 			}
 		}
-		if err := pause(ctx, 3*time.Second); err != nil {
+		discovery.Observe(clock.Now().Sub(passStarted), previousCount != len(watches))
+		previousCount = len(watches)
+		delay := discovery.Delay(clock.Now(), time.Time{}, nil, nil)
+		for _, group := range groups {
+			if !group.next.IsZero() {
+				delay = min(delay, max(0, group.next.Sub(clock.Now())))
+			}
+		}
+		for _, watch := range watches {
+			if !watch.registration.Expires.IsZero() {
+				delay = min(delay, max(0, watch.registration.Expires.Sub(clock.Now())))
+			}
+		}
+		if err := pause(ctx, delay); err != nil {
 			return err
 		}
 	}
@@ -385,4 +470,37 @@ func reclaimSharedRegistration(root, entry string) {
 	if os.IsNotExist(statErr) {
 		_ = os.Remove(entry)
 	}
+}
+
+// Only explicit receipt/owner deadlines bound an observation, including a
+// half-open read. Pending observers have no arbitrary maximum lifetime.
+func sharedProfileReadContext(ctx context.Context, entries []string, watches map[string]*sharedProfileWatch, clock myce.Clock) (context.Context, context.CancelFunc) {
+	var end time.Time
+	for _, entry := range entries {
+		if w := watches[entry]; w != nil && !w.registration.Expires.IsZero() && (end.IsZero() || w.registration.Expires.Before(end)) {
+			end = w.registration.Expires
+		}
+	}
+	if !end.IsZero() {
+		return context.WithTimeout(ctx, max(0, end.Sub(clock.Now())))
+	}
+	return context.WithCancel(ctx)
+}
+
+// Unix-domain addresses have a physical path-length bound. Keep the private
+// rendezvous short even when the installed cache/worktree path is long.
+func sharedProfileSocket(root string) (string, error) {
+	directory := filepath.Join("/tmp", "myce-"+strconv.Itoa(os.Getuid()))
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return "", err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 || !ok || stat.Uid != uint32(os.Getuid()) {
+		return "", errors.New("observer socket directory is not private")
+	}
+	return filepath.Join(directory, profileHash(root)+".sock"), nil
 }
