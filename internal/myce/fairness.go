@@ -571,6 +571,9 @@ func reservationWaitReason(m *Machine, batchSlot bool, sharedWith int) string {
 	return strings.Join(parts, "; ")
 }
 func (q *Queue) waitReason(j *Job, scans ...*placementScan) string {
+	if why := q.batchRetryWaitingReason(j); why != "" {
+		return why
+	}
 	if why := q.yieldWaitReason(j); why != "" {
 		return why
 	}

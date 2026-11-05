@@ -46,7 +46,23 @@ func TestAttemptHistoryLaunchRefusal(t *testing.T) {
 	defer log.SetOutput(old)
 	var first Result
 	for attempt := 1; attempt <= 3; attempt++ {
-		j := check(t, q, w.Machine, nil).Job
+		// History spans distinct recovery probes. Unchanged failed preparation
+		// now waits; a worker replacement supplies relevant retry evidence.
+		var replacement *Job
+		if attempt > 1 {
+			previous := w.Machine.Session
+			w.Machine.Session = fmt.Sprintf("recovery-%d", attempt)
+			store.state.Session = w.Machine.Session
+			reply, err := q.Checkin(Checkin{Machine: w.Machine, Fresh: true, PreviousSession: previous})
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacement = reply.Job
+		}
+		j := replacement
+		if j == nil {
+			j = check(t, q, w.Machine, nil).Job
+		}
 		if j == nil || j.Attempt != attempt {
 			t.Fatalf("missing attempt %d: %+v", attempt, j)
 		}

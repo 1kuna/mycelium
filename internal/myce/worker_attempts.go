@@ -175,6 +175,28 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			if w.memoryCeilings != nil {
 				fs = w.memoryCeilings.fs
 			}
+			// Apply exact-attempt control before another nonblocking recovery
+			// step. Persist force/cancel so a second restart cannot renew grace.
+			if connected && d.Stop {
+				deadline := now.Add(time.Duration(max(0, d.GraceSeconds) * float64(time.Second)))
+				if d.Kill {
+					deadline = now
+				}
+				if s.state.StopAt == nil || deadline.Before(*s.state.StopAt) {
+					s.state.StopAt = &deadline
+				}
+				s.state.UserCancel = s.state.UserCancel || d.UserCancel
+				intent := workerState{Identity: s.state.Identity, StopAt: s.state.StopAt, UserCancel: s.state.UserCancel}
+				if err := saveWorkerJSON(s.dir, s.state.Identity+".stop.json", intent); err != nil {
+					finish(err)
+					return
+				}
+				if err := s.save(); err != nil {
+					finish(err)
+					return
+				}
+			}
+			s.cleanupNonblocking = true
 			if err := s.cleanupOrphan(w.Clock, fs); err == nil {
 				released := *s.state.Result
 				released.ReleasePending = false
@@ -464,8 +486,17 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 			return nil, err
 		}
 	}
+	s.cleanupNonblocking = true
 	if err := s.cleanupOrphan(w.Clock, fs); err != nil {
-		return nil, err
+		if !errors.Is(err, errRecoveryStopPending) {
+			return nil, err
+		}
+		if s.state.Result == nil {
+			r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; cleanup pending"}, attemptCause{memberOutcome: memberOutcome{ObservationLost: true}, PriorityStop: s.state.PriorityStop})
+			s.state.Result = &r
+		}
+		s.state.Result.ReleasePending = true
+		return nil, s.save()
 	}
 	var p *process
 	var err error

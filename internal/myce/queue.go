@@ -40,6 +40,8 @@ type batchRelease struct {
 }
 
 type state struct {
+	BatchPlacements        map[string]time.Duration      `json:"batch_placements,omitempty"`
+	BatchRetries           map[string]batchRetryEvidence `json:"batch_retries,omitempty"`
 	BatchLifecycle         map[string]batchLifecycle     `json:"batch_lifecycle,omitempty"`
 	ToolInventories        map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
 	FileInputClaims        map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
@@ -976,6 +978,9 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		if chargeInfrastructure {
 			j.InfrastructureRetries++
 		}
+	}
+	if chargeInfrastructure && q.productionInfrastructureRetries < 0 {
+		q.holdUnproductiveInfrastructure(j)
 	}
 	j.Machine = ""
 	j.StorageEnvelope = nil
@@ -2524,6 +2529,7 @@ func (q *Queue) markStarted(j *Job) {
 		j.StartLatencySeconds = now.Sub(since).Seconds()
 		if j.Spec.Priority == "production" {
 			q.s.ProductionStarts = append(q.s.ProductionStarts, ProductionStart{At: now, Job: j.ID, Seconds: j.StartLatencySeconds})
+			q.recordBatchPlacement(j)
 		}
 	}
 }
@@ -2729,6 +2735,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 			j.OutputFiles[name] = outputRelative(*j, name, prefix)
 		}
 	}
+	q.beginBatchRetryEvidence(j)
 	j.Progress = 0
 	j.YieldGeneration = 0
 	if y := j.ScarceHostYield; y != nil {

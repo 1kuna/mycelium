@@ -81,7 +81,7 @@ func TestDiskHeadroomProductionPreemptsWithObservedSpace(t *testing.T) {
 	machineCheck(t, q, m, busy)
 	m = reportDisk(t, m, c, "volume", []string{"data"}, 100<<30, 41<<30)
 	machineCheck(t, q, m, busy)
-	s = spec("production")
+	s = authoredStartSpec() // This regression asserts admission before an authored fence.
 	s.Disk = &DiskNeeds{OutputBytes: 30 << 30}
 	prod := submit(t, q, s)
 	machineCheck(t, q, m, busy)

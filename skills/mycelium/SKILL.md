@@ -113,7 +113,11 @@ On releases with adaptive observation admission (#800), healthy queues accept re
 ## Lifecycle recovery (next release, #807)
 
 Infrastructure interruptions no longer fail a job on its third loss. Mycelium
-retains the job/key and retry counters and retries infrastructure failures;
+retains the job/key and retry counters and retries infrastructure failures with
+useful progress. Diagnosed preparation/launch failures without progress wait on
+the failed target until its worker session, preparation or qualification changes;
+another eligible target can run immediately. Routine heartbeat/pressure changes
+do not release this hold. Unclassified observation loss remains recoverable;
 command exits, readiness failures without infrastructure evidence, and ordinary
 fixed-memory OOM remain failures. Resumable work still needs complete durable
 checkpoints. An operator may explicitly bound production retries (`-1` selects

@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"slices"
 	"time"
 )
 
@@ -109,16 +108,25 @@ func (q *Queue) batchStopGrace(j *Job) time.Duration {
 // Comparable accepted starts describe the installation's actual queue and
 // preparation latency. This is advisory: overload cannot create a new caller
 // deadline, and unrelated recipes/targets cannot shorten an authored cutoff.
+func batchPlacementKey(j *Job) string {
+	return identityHash(struct {
+		Command     []string
+		Environment string
+		Docker      bool
+	}{j.Spec.Run.Command, j.Spec.Environment.Name, j.Spec.Run.Docker})
+}
 func (q *Queue) observedPlacementLatency(j *Job) time.Duration {
-	var observed time.Duration
-	for _, sample := range q.s.ProductionStarts {
-		old := q.s.Jobs[sample.Job]
-		if old == nil || !slices.Equal(old.Spec.Run.Command, j.Spec.Run.Command) || old.Spec.Environment.Name != j.Spec.Environment.Name || old.Spec.Run.Docker != j.Spec.Run.Docker {
-			continue
-		}
-		observed = max(observed, time.Duration(sample.Seconds*float64(time.Second)))
+	return q.s.BatchPlacements[batchPlacementKey(j)]
+}
+func (q *Queue) recordBatchPlacement(j *Job) {
+	if j.AssignedAt == nil || j.StartedAt == nil {
+		return
 	}
-	return observed
+	if q.s.BatchPlacements == nil {
+		q.s.BatchPlacements = map[string]time.Duration{}
+	}
+	key := batchPlacementKey(j)
+	q.s.BatchPlacements[key] = max(q.s.BatchPlacements[key], j.StartedAt.Sub(j.Queued))
 }
 
 // Unknown cleanup has no predicted release credit. It must not attract more
@@ -142,4 +150,91 @@ func (q *Queue) boundLearnedBatchStop(j *Job, now time.Time) {
 			j.StopAt = &deadline
 		}
 	}
+}
+
+// Failed preparation/launch with no useful progress is held on the unchanged
+// target. A new worker session or changed preparation/qualification evidence
+// permits a probe; elapsed time and routine memory/heartbeat noise do not.
+type batchRetryEvidence struct {
+	Targets  map[string]string `json:"targets,omitempty"`
+	Progress int64             `json:"progress,omitempty"`
+}
+
+func batchInfrastructureState(m *Machine) string {
+	if m == nil {
+		return ""
+	}
+	type preparationState struct{ Key, State, Failure string }
+	reports := make([]preparationState, 0, len(m.EnvironmentReports))
+	for _, r := range m.EnvironmentReports {
+		reports = append(reports, preparationState{r.Key, r.State, r.FailureKind})
+	}
+	return identityHash(struct {
+		Session        string
+		Environments   []string
+		Reports        []preparationState
+		Extension, CPU string
+		Roots          []UnavailableRoot
+		Checkpoint     bool
+		CacheError     string
+	}{m.Session, m.Environments, reports, m.ExtensionFingerprint, m.CPUIsolation, m.UnavailableRoots, m.CheckpointUnavailable, m.CacheError})
+}
+
+func (q *Queue) holdUnproductiveInfrastructure(j *Job) {
+	// An unobserved exit/lost heartbeat has no repeatable failure signature.
+	// Keep recovering those interruptions; never mistake them for command exits.
+	// A fresh capacity admission sample is itself relevant pressure evidence;
+	// existing admission checks govern those probes independently of job faults.
+	if j.ExecutionCause != nil && j.ExecutionCause.Predicate == "memory_capacity" {
+		return
+	}
+	if j.ExecutionCause == nil || j.Progress > q.s.BatchRetries[j.ID].Progress || j.ApplicationProgress != nil && j.ApplicationProgress.Attempt == j.Attempt && j.ApplicationProgress.Completed > 0 {
+		return
+	}
+	if q.s.BatchRetries == nil {
+		q.s.BatchRetries = map[string]batchRetryEvidence{}
+	}
+	evidence := q.s.BatchRetries[j.ID]
+	if evidence.Targets == nil {
+		evidence.Targets = map[string]string{}
+	}
+	evidence.Targets[j.Machine] = batchInfrastructureState(q.s.Machines[j.Machine])
+	q.s.BatchRetries[j.ID] = evidence
+}
+
+func (q *Queue) batchRetryBlocked(j *Job, m *Machine) bool {
+	if m == nil {
+		return false
+	}
+	evidence := q.s.BatchRetries[j.ID]
+	fingerprint, ok := evidence.Targets[m.ID]
+	return ok && fingerprint == batchInfrastructureState(m)
+}
+
+func (q *Queue) batchRetryWaitingReason(j *Job) string {
+	evidence := q.s.BatchRetries[j.ID]
+	if len(evidence.Targets) == 0 {
+		return ""
+	}
+	for _, m := range q.plannerMachines() {
+		if q.jobAllowsMachine(j, m.ID) && executionTargetMatches(j.Spec, m) && !q.batchRetryBlocked(j, m) {
+			return ""
+		}
+	}
+	return "infrastructure recovery waiting for changed worker session, preparation or qualification evidence; no attempt progress"
+}
+
+func (q *Queue) beginBatchRetryEvidence(j *Job) {
+	if q.s.BatchRetries == nil {
+		q.s.BatchRetries = map[string]batchRetryEvidence{}
+	}
+	evidence := q.s.BatchRetries[j.ID]
+	evidence.Progress = 0
+	for _, c := range j.Copies {
+		evidence.Progress = max(evidence.Progress, c.Progress)
+	}
+	if save := bestFileCheckpoint(j); save != nil {
+		evidence.Progress = max(evidence.Progress, save.Generation)
+	}
+	q.s.BatchRetries[j.ID] = evidence
 }

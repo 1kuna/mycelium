@@ -124,6 +124,8 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 	for _, blocker := range []string{"experiments", "Docker"} {
 		t.Run(blocker, func(t *testing.T) {
 			q, c := fixture(t)
+			// This fixture asserts a known cleanup countdown inside an authored start fence.
+			q.SetPreemptionGrace(10 * time.Second)
 			m := machine("b70", "xpu")
 			if blocker == "Docker" {
 				m.Capabilities = append(m.Capabilities, "docker")
