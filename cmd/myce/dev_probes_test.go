@@ -196,7 +196,10 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 		spec.Files = myce.FileManifest{"expected": ref}
 
 		spec.Run.Command = []string{"sh", "-c", `test -z "$MYCE_TOKEN" || exit 99
-printf '{"completed":5,"total":10,"unit":"frames"}' > "$MYCE_PROGRESS_FILE.tmp"
+printf '{"completed":10,"total":10,"unit":"frames","stage_index":1,"stage_count":2,"total_work_known":false}' > "$MYCE_PROGRESS_FILE.tmp"
+mv "$MYCE_PROGRESS_FILE.tmp" "$MYCE_PROGRESS_FILE"
+while [ ! -f stage-two ]; do sleep 0.01; done
+printf '{"completed":0,"total":20,"unit":"iterations","stage_index":2,"stage_count":2,"total_work_known":true}' > "$MYCE_PROGRESS_FILE.tmp"
 mv "$MYCE_PROGRESS_FILE.tmp" "$MYCE_PROGRESS_FILE"
 while [ ! -f release ]; do sleep 0.01; done
 cat expected > effect`}
@@ -209,7 +212,7 @@ cat expected > effect`}
 				t.Fatal(err)
 			}
 			p := current.ApplicationProgress
-			return current.State == "running" && p != nil && p.Completed == 5 && p.Total == 10 && p.Unit == "frames" && !p.Stale && current.Runtime != nil && current.Runtime.ElapsedSeconds != nil
+			return current.State == "running" && p != nil && p.Completed == 10 && p.Total == 10 && p.StageIndex != nil && *p.StageIndex == 1 && p.StageCount != nil && *p.StageCount == 2 && !p.Stale && current.Runtime != nil && current.Runtime.ElapsedSeconds != nil && current.Runtime.RemainingSeconds == nil && current.Runtime.RemainingWorkUnknown
 		})
 		// Status JSON and the job reply expose the same attempt's evidence.
 		waitFor(func() bool {
@@ -219,12 +222,20 @@ cat expected > effect`}
 			}
 			for _, current := range snapshot.Jobs {
 				if current.ID == job.ID && current.ApplicationProgress != nil {
-					return current.ApplicationProgress.Attempt == 1 && strings.Contains(myce.JobTiming(current), "reported progress 5/10 frames")
+					text := myce.JobTiming(current)
+					return current.State == "running" && current.ApplicationProgress.Attempt == 1 && strings.Contains(text, "stage 1/2") && strings.Contains(text, "reported stage progress 10/10 frames") && strings.Contains(text, "whole-job progress unknown") && current.Runtime.RemainingWorkUnknown && current.Progress == 0
 				}
 			}
 			return false
 		})
 		work := filepath.Join(root, "state", "workers", "fake-1", "job-files", job.ID, "1")
+		if err := os.WriteFile(filepath.Join(work, "stage-two"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(func() bool {
+			current, err := client.GetJob(ctx, job.ID)
+			return err == nil && current.State == "running" && current.ApplicationProgress != nil && current.ApplicationProgress.StageIndex != nil && *current.ApplicationProgress.StageIndex == 2 && current.Runtime.RemainingSeconds == nil && current.Runtime.RemainingWorkUnknown
+		})
 		if err := os.WriteFile(filepath.Join(work, "release"), nil, 0600); err != nil {
 			t.Fatal(err)
 		}

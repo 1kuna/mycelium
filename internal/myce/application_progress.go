@@ -20,26 +20,34 @@ const applicationProgressMaxBytes = 4096
 type ProgressReport struct {
 	updatedAt time.Time
 
-	Completed  *float64 `json:"completed"`
-	Total      *float64 `json:"total"`
-	Unit       string   `json:"unit"`
-	AgeSeconds float64  `json:"age_seconds"`
+	Completed      *float64 `json:"completed"`
+	Total          *float64 `json:"total"`
+	Unit           string   `json:"unit"`
+	AgeSeconds     float64  `json:"age_seconds"`
+	StageIndex     *int     `json:"stage_index,omitempty"`
+	StageCount     *int     `json:"stage_count,omitempty"`
+	TotalWorkKnown bool     `json:"total_work_known"`
 }
 
 type ApplicationProgress struct {
-	Completed  float64   `json:"completed"`
-	Total      float64   `json:"total"`
-	Unit       string    `json:"unit"`
-	Attempt    int       `json:"attempt"`
-	Machine    string    `json:"machine"`
-	Session    string    `json:"session"`
-	ReceivedAt time.Time `json:"received_at"`
-	AgeSeconds float64   `json:"age_seconds"`
-	Stale      bool      `json:"stale"`
+	Completed      float64   `json:"completed"`
+	Total          float64   `json:"total"`
+	Unit           string    `json:"unit"`
+	Attempt        int       `json:"attempt"`
+	Machine        string    `json:"machine"`
+	Session        string    `json:"session"`
+	ReceivedAt     time.Time `json:"received_at"`
+	AgeSeconds     float64   `json:"age_seconds"`
+	Stale          bool      `json:"stale"`
+	StageIndex     *int      `json:"stage_index,omitempty"`
+	StageCount     *int      `json:"stage_count,omitempty"`
+	TotalWorkKnown bool      `json:"total_work_known"`
 }
 
 func (p *ProgressReport) valid() bool {
-	return p != nil && p.Completed != nil && p.Total != nil && validMemoryValue(*p.Completed) && validMemoryValue(*p.Total) && *p.Completed <= *p.Total && len(p.Unit) <= 64 && extensionName.MatchString(p.Unit) && !math.IsNaN(p.AgeSeconds) && !math.IsInf(p.AgeSeconds, 0) && p.AgeSeconds >= 0
+	return p != nil && p.Completed != nil && p.Total != nil && validMemoryValue(*p.Completed) && validMemoryValue(*p.Total) && *p.Completed <= *p.Total && len(p.Unit) <= 64 && extensionName.MatchString(p.Unit) && !math.IsNaN(p.AgeSeconds) && !math.IsInf(p.AgeSeconds, 0) && p.AgeSeconds >= 0 &&
+		(p.StageIndex == nil || *p.StageIndex > 0) &&
+		(p.StageCount == nil || (*p.StageCount > 0 && p.StageIndex != nil && *p.StageIndex <= *p.StageCount))
 }
 
 // Reuse the attempt's existing local input-directory retention and custody.
@@ -106,5 +114,21 @@ func (q *Queue) retainApplicationProgress(j *Job, report *AttemptReport, m *Mach
 	if report.Session != m.Session || j.Session != report.Session || !p.valid() {
 		return
 	}
-	j.ApplicationProgress = &ApplicationProgress{Completed: *p.Completed, Total: *p.Total, Unit: p.Unit, Attempt: j.Attempt, Machine: m.ID, Session: m.Session, ReceivedAt: q.clock.Now(), AgeSeconds: p.AgeSeconds}
+	now := q.clock.Now()
+	if old := j.ApplicationProgress; old != nil && old.Attempt == j.Attempt && old.Session == j.Session {
+		// Reordered/cached heartbeats must not replace newer file evidence.
+		oldAge := old.AgeSeconds + max(0, now.Sub(old.ReceivedAt).Seconds())
+		if p.AgeSeconds > oldAge || (old.StageIndex != nil && p.StageIndex != nil && *p.StageIndex < *old.StageIndex) {
+			return
+		}
+	}
+	// Own the optional integers just as we already own the count values.
+	cloneInt := func(v *int) *int {
+		if v == nil {
+			return nil
+		}
+		n := *v
+		return &n
+	}
+	j.ApplicationProgress = &ApplicationProgress{Completed: *p.Completed, Total: *p.Total, Unit: p.Unit, Attempt: j.Attempt, Machine: m.ID, Session: m.Session, ReceivedAt: now, AgeSeconds: p.AgeSeconds, StageIndex: cloneInt(p.StageIndex), StageCount: cloneInt(p.StageCount), TotalWorkKnown: p.TotalWorkKnown}
 }

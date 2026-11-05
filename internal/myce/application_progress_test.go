@@ -62,6 +62,57 @@ func TestApplicationProgressAttemptScopeStalenessAndAdvisory(t *testing.T) {
 	}
 }
 
+func TestApplicationProgressTwoStagesUnknownRemaining(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	j := startObservation(t, q, m, s)
+	stage, stages := 1, 2
+	p := progressReport(10, 10, "records")
+	p.StageIndex, p.StageCount, p.TotalWorkKnown = &stage, &stages, true
+	report := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, ApplicationProgress: p}
+	send := func() {
+		t.Helper()
+		if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send()
+	got := runtimeJob(t, q, j.ID)
+	text := JobTiming(got)
+	if got.State != "running" || got.Runtime.RemainingSeconds != nil || !got.Runtime.RemainingWorkUnknown || got.Progress != 0 || !strings.Contains(text, "stage 1/2") || !strings.Contains(text, "whole-job progress unknown") || strings.Contains(text, "remaining ~0") {
+		t.Fatalf("stage completion claimed job completion: %s / %+v", text, got.Runtime)
+	}
+	clock.Advance(5 * time.Second)
+	stage = 2
+	p = progressReport(0, 100, "iterations")
+	p.StageIndex, p.StageCount = &stage, &stages
+	report.ApplicationProgress = p
+	send()
+	got = runtimeJob(t, q, j.ID)
+	if *got.ApplicationProgress.StageIndex != 2 || got.Runtime.RemainingSeconds != nil || !got.Runtime.RemainingWorkUnknown || !strings.Contains(JobTiming(got), "stage 2/2") {
+		t.Fatalf("invented stage-two timing: %+v", got)
+	}
+	// A delayed older heartbeat in this same execution cannot rewind stage two.
+	oldStage := 1
+	old := progressReport(10, 10, "records")
+	old.StageIndex, old.StageCount, old.AgeSeconds = &oldStage, &stages, 5
+	report.ApplicationProgress = old
+	send()
+	if *runtimeJob(t, q, j.ID).ApplicationProgress.StageIndex != 2 {
+		t.Fatal("late stage-one report overwrote stage two")
+	}
+	// A delayed report within the stage also cannot overwrite fresher counts.
+	old.StageIndex, old.Unit = &stage, "iterations"
+	send()
+	if runtimeJob(t, q, j.ID).ApplicationProgress.Completed != 0 {
+		t.Fatal("older file evidence overwrote progress")
+	}
+	clock.Advance(31 * time.Second)
+	got = runtimeJob(t, q, j.ID)
+	if !got.ApplicationProgress.Stale || got.ApplicationProgress.AgeSeconds != 31 || !strings.Contains(JobTiming(got), "stale") {
+		t.Fatal("stage evidence did not age", got.ApplicationProgress)
+	}
+}
+
 func TestApplicationProgressBoundedFileValidationAndRestartAge(t *testing.T) {
 	dir := t.TempDir()
 	j := Job{ID: "job", Attempt: 2, Session: "session"}
