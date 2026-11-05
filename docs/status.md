@@ -1588,3 +1588,27 @@ Only fixed host/device/backend constraint names survive; arbitrary keys coalesce
 as `other` with a redacted-key locator. Free-form explanations stay in authored
 source, private receipts and frozen intent, under the existing privacy default.
 There is no raw-text exception or full-spec status mode.
+
+## Primary consumer blocker
+
+Resolve and queued job observations expose an additive `blocker` with `code`,
+`dependency`, `owner`, `action` and `evidence`. CLI resolve, status, the web page
+and the initial wait observation lead with this same projection. Aggregate order
+is additional context; it does not choose a different primary dependency than
+job GET. The projection reads the existing qualification, waiting-reason and
+preparation facts on a detached snapshot; it changes no admission decision.
+
+`unprepared` means no builder has started; `waiting_for_builder` distinguishes
+an unstarted offer or unavailable preparation core; `building` requires a fresh
+builder report. `deterministically_failed` retains the failed immutable recipe's
+cause and log excerpt: the consumer must fix its inputs. Transient failures retain
+the existing retry evidence. `unknown_observation` asks the queue owner to restore
+missing/stale observations; it never claims preparation is progressing.
+`resource_pressure` retains the existing RAM, card, reservation or policy reason.
+A ready alternative takes precedence over preparation on another target.
+
+CPU resolve omits accelerator and multi-card target views. Eligible means permanent
+placement compatibility, not immediate capacity. `needs-staging` for a local source
+placeholder is normal: the following run stages it automatically. A successful
+wait/status omits deadline-policy tutorials and empty blockers. These changes
+require the matching client and queue release; they are not rollout evidence.

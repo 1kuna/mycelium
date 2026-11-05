@@ -419,6 +419,7 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	Blocker         *Blocker               `json:"blocker,omitempty"`
 	WallTime        *WallTimeStatus        `json:"wall_time,omitempty"`
 	YieldPlan       *ScarceYieldProjection `json:"yield_plan,omitempty"`
 	ScarceHostYield *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
