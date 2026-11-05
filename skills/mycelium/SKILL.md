@@ -85,8 +85,8 @@ or an intentional repeat needs a new key.
 
 If a profile or entry exits 69 with `input storage unconfirmed`, its intent and
 frozen inputs remain in the receipt. The diagnostic names preflight or upload,
-the input, and a sanitized HTTP status/code or transport class; overload includes
-`Retry-After`. Rerunning the same command resumes from that receipt without
+the input, and a sanitized HTTP status/code or transport class. Rerunning the
+same command resumes from that receipt without
 duplicating anything. Keep its key and receipt rather than making a new submission.
 
 Replace `JOB_ID` below with the receipt's ID. No notifier or harness setup is
