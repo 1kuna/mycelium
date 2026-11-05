@@ -3635,10 +3635,38 @@ Use the native verification above before claiming a WSL daily-use host ready.
 
 ## Queue disk contention (#527)
 
-Keep bulk copies, heavy tests and maintenance off the queue's backing device
-while qualifying I/O protection. Another directory or partition on the same
-device provides no physical isolation. Native protection remains unqualified;
-[#527](https://github.com/1kuna/mycelium/issues/527) owns measured acceptance.
+The 2026-11-05 native test on queue release s074-r2 (`b71c29ca`) did not reproduce
+the check-in deadline failure under bounded gate-like I/O. Test-class job
+`1179401000178688d5384d7083878797` ran four writers on the queue's backing device,
+inside the ordinary worker attempt cgroup: 2 GiB written over 90.001 seconds
+(22.755 MiB/s), fsync every 4 MiB, at most 256 MiB of disposable payload, with
+90-second before/after phases. Payload occupied less than 0.15% of measured free
+space. The experiment finished at 20:59:38Z, with zero attempt losses; its
+accepted result was retrieved and verified, payloads removed and processes exited.
+No service configuration or production database was changed or accessed.
+
+Before / during / after check-in p50 was 316.812 / 322.027 / 319.888 ms;
+p95 was 909.931 / 744.890 / 958.325 ms; p99 was
+1035.339 / 969.471 / 1124.875 ms. These are the API's rolling 256-sample windows
+read near each phase end, not independent phase histograms; windows can retain
+nearby phase samples. Journal counts use the exact phase timestamps. Slow
+control requests (>1 second) numbered 4 / 1 / 15, or 2.67 / 0.67 / 10.00 per
+minute, excluding intentional event/wait long polls and the three status reads
+used to observe latency. Slow check-ins numbered 4 / 1 / 10, with maxima
+1080.377 / 1136.772 / 1399.770 ms. No check-in over the unchanged ten-second
+deadline or local worker check-in timeout was observed. Background work was
+uncontrolled, and recovery had more slow requests; this is bounded native
+deadline evidence, not proof of causal isolation or unlimited I/O headroom.
+
+This supports removing CI's architecture-wide full-gate exclusion: the existing
+Linux profile's amd64 and arm64 targets are both eligible again in CI, without
+host pins or resource-policy changes. It does not qualify live backups, larger
+bursts, or sustained bulk maintenance. Keep those off the queue's backing device
+until separately measured. Another directory or partition on the same device
+provides no physical isolation. No effective I/O weighting was present in this
+test (no delegated io controller, scheduler `none`, no configured io.cost).
+Native protection remains unqualified; [#527](https://github.com/1kuna/mycelium/issues/527)
+retains that broader acceptance and the control options below.
 
 ## SQLite backup and commit limits
 
