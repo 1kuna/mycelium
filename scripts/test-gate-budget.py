@@ -28,6 +28,7 @@ class GateBudgetTests(unittest.TestCase):
             scripts = root / 'scripts'
             scripts.mkdir()
             shutil.copyfile(Path(__file__).with_name('gate.sh'), scripts / 'gate.sh')
+            shutil.copyfile(Path(__file__).with_name('gate-progress.py'), scripts / 'gate-progress.py')
             (scripts / 'gate-related.py').write_text('print("a\\t^TestA$")\nprint("b\\t^TestB$")\n')
             bin_dir = root / 'bin'
             bin_dir.mkdir()
@@ -67,7 +68,7 @@ elif args[0] == 'test':
             scratch.mkdir()
             env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
                        MYCE_GATE_BUDGET='1', GATE_SCRATCH=str(scratch),
-                       GATE_TEST_DEADLINE=str(time.monotonic() + 30), TEST_MARKERS=str(root))
+                       GOMAXPROCS='2', TEST_MARKERS=str(root))
             run = subprocess.run(['bash', str(scripts / 'gate.sh'), 'quick', 'base'],
                                  env=env, capture_output=True, text=True, timeout=15)
             self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -173,23 +174,6 @@ elif args[0] == 'test':
         command = launch.call_args.args[0]
         self.assertEqual(command[:2], budget.MACOS_HANDLE_PROBE)
 
-    def test_quick_timeout_uses_remaining_budget(self):
-        script = Path(__file__).with_name('gate.sh').read_text()
-        start = script.index('  quick_timeout() {')
-        helper = script[start:script.index('  while IFS=', start)]
-        # Use the supervisor interpreter, including when PATH resolves another Python.
-        helper = helper.replace('python3 -', shlex.quote(sys.executable) + ' -')
-        helper = helper.replace('import time', 'import time; time.monotonic = lambda: 100')
-        env = dict(os.environ, GATE_TEST_DEADLINE='130')
-        run = subprocess.run(['bash', '-c', helper + '\nquick_timeout'],
-                             env=env, capture_output=True, text=True, check=True)
-        self.assertEqual(run.stdout.strip(), '30.000s')
-        env['GATE_TEST_DEADLINE'] = '99'
-        run = subprocess.run(['bash', '-c', helper + '\nquick_timeout'],
-                             env=env, capture_output=True, text=True)
-        self.assertNotEqual(run.returncode, 0)
-        self.assertIn('exhausted', run.stderr)
-
     def test_success_cleans_fixture(self):
         scripts = Path(__file__).resolve().parent
         with tempfile.TemporaryDirectory() as folder:
@@ -213,7 +197,7 @@ elif args[0] == 'test':
         with tempfile.TemporaryDirectory() as folder:
             gate = Path(folder) / 'scripts' / 'gate.sh'
             child = unittest.mock.Mock()
-            child.wait.side_effect = subprocess.TimeoutExpired('fixture', 175)
+            child.wait.return_value = 124
             output = io.StringIO()
             with (patch.object(sys, 'argv', ['gate-budget.py', str(gate)]),
                   patch.object(subprocess, 'Popen', return_value=child),
@@ -251,12 +235,12 @@ while True: signal.pause()
 from unittest.mock import patch
 original = subprocess.Popen.wait
 def wait(child, timeout=None):
-    if timeout is not None and child.args[0] == 'bash':
+    if child.args[0] == 'bash':
         deadline = time.monotonic() + 10
         while not pathlib.Path(ready).exists():
             if time.monotonic() >= deadline: raise RuntimeError('fixture not ready')
             time.sleep(.01)
-        raise subprocess.TimeoutExpired(child.args, timeout)
+        return 124
     return original(child, timeout)
 script, gate, fixture, ready = sys.argv[1:]
 sys.argv = [script, gate, sys.executable, fixture]
@@ -292,6 +276,7 @@ with patch.object(subprocess.Popen, 'wait', wait):
             (root / "scripts").mkdir()
             (root / "bin").mkdir()
             (root / "scripts/gate.sh").write_bytes((scripts / "gate.sh").read_bytes())
+            shutil.copyfile(scripts / "gate-progress.py", root / "scripts/gate-progress.py")
             (root / "scripts/gate-related.py").write_text("")
             go = root / "bin/go"
             go.write_text(f'''#!{sys.executable}
@@ -306,6 +291,8 @@ else:
             go.chmod(0o755)
             env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"])
             env.pop("MYCE_GATE_BUDGET", None)
+            env["GATE_SCRATCH"] = str(root / "scratch")
+            (root / "scratch").mkdir()
             # Setup does not need real Go, uv, Git state, or a full gate run.
             for name, body in {"git": "exit 0", "uv": f"echo {sys.executable}"}.items():
                 stub = root / "bin" / name
@@ -322,13 +309,13 @@ else:
 from unittest.mock import patch
 original = subprocess.Popen.wait
 def wait(child, timeout=None):
-    if timeout is not None and child.args[0] == 'bash':
+    if child.args[0] == 'bash':
         deadline = time.monotonic() + 10
         while not pathlib.Path(ready).exists():
             if time.monotonic() >= deadline:
                 raise RuntimeError("fake build did not start")
             time.sleep(.01)
-        raise subprocess.TimeoutExpired(child.args, timeout)
+        return 124
     return original(child, timeout)
 script, ready, gate = sys.argv[1:]
 sys.argv = [script, gate, "quick", "HEAD"]
@@ -338,7 +325,7 @@ with patch.object(subprocess.Popen, "wait", wait):
                         command = [sys.executable, "-c", launcher, str(scripts / "gate-budget.py"), str(ready), str(root / "scripts/gate.sh")]
                         expected = 124
                     else:
-                        command = ["bash", str(root / "scripts/gate.sh"), "full"]
+                        command = [sys.executable, str(scripts / "gate-budget.py"), str(root / "scripts/gate.sh"), "full"]
                         expected = 143
                     child = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
                     try:
@@ -348,14 +335,14 @@ with patch.object(subprocess.Popen, "wait", wait):
                                 if time.monotonic() >= deadline:
                                     self.fail("fake build did not start")
                                 time.sleep(.01)
-                            os.killpg(child.pid, signal.SIGTERM)
+                            child.terminate()
                         output, _ = child.communicate(timeout=15)
                         self.assertEqual(child.returncode, expected, output)
                         self.assertNotIn("exit=0", output)
                         mode = "quick" if budgeted else "full"
                         self.assertIn(f"gate {mode}: exit={expected}", output)
                         if budgeted:
-                            self.assertIn("timed out; run full", output)
+                            self.assertIn("exit=124", output)
                     finally:
                         if child.poll() is None:
                             os.killpg(child.pid, signal.SIGKILL)

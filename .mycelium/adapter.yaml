@@ -12,11 +12,12 @@ entries:
         name: mycelium-gate-full
         needs:
             cpu_cores: 2
-            memory_gb: 6
+            memory: auto
             network: true
             platform: cpu
         outputs:
             gate-result.txt: results
+            gate-timings.jsonl: results
         run:
             command:
                 - bash
@@ -49,6 +50,7 @@ entries:
             platform: cpu
         outputs:
             gate-result.txt: results
+            gate-timings.jsonl: results
         run:
             command:
                 - bash
@@ -70,13 +72,15 @@ entries:
                 - gate-result.txt
         class: test
         environment: mycelium-gate
+        memory_class: per_item
         name: mycelium-gate-quick
         needs:
             cpu_cores: 2
-            memory_gb: 7
+            memory: auto
             platform: cpu
         outputs:
             gate-result.txt: results
+            gate-timings.jsonl: results
         run:
             command:
                 - bash

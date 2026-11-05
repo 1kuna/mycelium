@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Fake-time regressions for host/selection progress supervision."""
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+spec = importlib.util.spec_from_file_location('progress', Path(__file__).with_name('gate-progress.py'))
+progress = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(progress)
+
+
+class ProgressTests(unittest.TestCase):
+    def execute(self, root, times, expected=None, command=None, status=0):
+        cache, report = root / 'cache', root / 'report'
+        now = [0.0]
+        child = Mock()
+        child.wait.return_value = status
+        child.stdout.fileno.return_value = 123
+        if expected is not None:
+            cache.mkdir(exist_ok=True)
+            identity = ['package:selection', progress.platform.system(),
+                        progress.platform.machine(), progress.cpu_count(),
+                        os.environ.get('GOVERSION', '')]
+            key = progress.hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+            (cache / (key + '.json')).write_text(json.dumps(dict(count=1, expected_seconds=expected)))
+        selector = Mock()
+        selector.__enter__ = Mock(return_value=selector)
+        selector.__exit__ = Mock(return_value=False)
+        events = iter([(0, b'{"Action":"start"}\n'), *times])
+        chunks = []
+
+        def select(timeout):
+            at, data = next(events)
+            now[0] = at
+            chunks.append(data)
+            return [True] if data is not None else []
+
+        selector.select.side_effect = select
+        output = Mock(buffer=io.BytesIO())
+        with (patch.object(progress.subprocess, 'Popen', return_value=child) as launch,
+              patch.object(progress.selectors, 'DefaultSelector', return_value=selector),
+              patch.object(progress.os, 'read', side_effect=lambda *_: chunks.pop(0)),
+              patch.object(sys, 'stdout', output)):
+            code = progress.run('package:selection', command or ['go', 'test', './pkg'],
+                                cache, report, clock=lambda: now[0])
+        return code, launch.call_args.args[0], json.loads(report.read_text().splitlines()[-1])
+
+    def test_slow_progressing_run_outlives_old_wall_budget(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code, command, record = self.execute(Path(folder),
+                [(100, b'output'), (200, b'output'), (300, b'output'), (400, b'')], expected=100)
+        self.assertEqual(code, 0)
+        self.assertEqual(record['elapsed_seconds'], 400)
+        self.assertIn('-timeout=0', command)
+
+    def test_hung_test_stops_after_measured_silence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code, _, record = self.execute(Path(folder), [(30, None)], expected=10)
+        self.assertEqual(code, 124)
+        self.assertEqual(record['elapsed_seconds'], 30)
+
+    def test_fast_host_gets_its_own_short_deadline(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code, _, record = self.execute(Path(folder), [(1.5, None)], expected=.5)
+        self.assertEqual(code, 124)
+        self.assertEqual(record['elapsed_seconds'], 1.5)
+
+    def test_cold_run_keeps_go_backstop_and_learns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            code, command, _ = self.execute(root, [(20, b'')])
+            self.assertEqual(code, 0)
+            self.assertIn('-timeout=1h', command)
+            code, command, _ = self.execute(root, [(60, None)])
+            self.assertEqual(code, 124)
+            self.assertIn('-timeout=0', command)
+            learned = json.loads(next((root / 'cache').glob('*.json')).read_text())
+            self.assertEqual(learned['count'], 1)  # A hang never lengthens the baseline.
+
+    def test_cpu_contract_limits_parallelism(self):
+        with patch.dict(os.environ, GOMAXPROCS='1'):
+            self.assertEqual(progress.cpu_count(), 1)
+
+    def test_nested_execution_quota_limits_parallelism(self):
+        files = {'/proc/self/cgroup': '0::/worker/job',
+                 '/sys/fs/cgroup/worker/cpu.max': '150000 100000'}
+
+        def read(path):
+            if str(path) not in files:
+                raise FileNotFoundError(path)
+            return files[str(path)]
+
+        with (patch.object(Path, 'read_text', read),
+              patch.object(progress.os, 'sched_getaffinity', return_value=set(range(8)), create=True),
+              patch.dict(os.environ, GOMAXPROCS='4')):
+            self.assertEqual(progress.cpu_count(), 1)
+
+    def test_real_command_records_output_and_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            env = dict(os.environ, GATE_TIMING_CACHE=str(root / 'cache'),
+                       GATE_TIMING_REPORT=str(root / 'report'))
+            run = subprocess.run([sys.executable, str(Path(progress.__file__)), 'fixture',
+                                  sys.executable, '-c', 'print("progress"); raise SystemExit(7)'],
+                                 env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(run.returncode, 7, run.stderr)
+            self.assertIn('progress', run.stdout)
+            self.assertEqual(json.loads((root / 'report').read_text())['exit'], 7)
+            self.assertEqual(list((root / 'cache').iterdir()), [])
+
+
+if __name__ == '__main__':
+    unittest.main()

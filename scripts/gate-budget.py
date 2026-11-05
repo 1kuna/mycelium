@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bound quick and stop its fixtures before removing their working files."""
+"""Supervise gate custody and stop fixtures before removing working files."""
 import os
 from pathlib import Path
 import shutil
@@ -143,25 +143,20 @@ def remove_scratch(path):
 def main():
     signal.signal(signal.SIGTERM, interrupted)
     started = time.monotonic()
-    status, timed_out = 1, False
+    status = 1
+    mode = 'full' if 'full' in sys.argv[2:] else 'quick'
     root = Path(sys.argv[1]).resolve().parent.parent / '.gate'
     root.mkdir(exist_ok=True)
     scratch = tempfile.mkdtemp(prefix='run.', dir=root)
     marker = 'GATE_RUN_ID=' + uuid.uuid4().hex
     child_env = dict(os.environ, MYCE_GATE_BUDGET='1', GATE_SCRATCH=scratch)
     child_env['GATE_RUN_ID'] = marker.split('=', 1)[1]
-    child_env['GATE_TEST_DEADLINE'] = str(started + 285)
     child = subprocess.Popen(['bash', *sys.argv[1:]], env=child_env, start_new_session=not bool(os.environ.get('MYCE_PROCESS_SESSION')))
     try:
-        # Reported related tests alone take 156s, before builds/vet. Allow five
-        # minutes for quick feedback; reserve the last five seconds for TERM.
-        status = child.wait(timeout=295)
+        # Per-command progress watchdogs decide stalls; no gate wall deadline.
+        status = child.wait()
         if status < 0:
             status = 128 - status
-    except subprocess.TimeoutExpired:
-        status, timed_out = 124, True
-        print('quick: five-minute budget exhausted; run ./scripts/gate.sh full',
-              file=sys.stderr, flush=True)
     except (KeyboardInterrupt, SystemExit) as error:
         status = error.code if isinstance(error, SystemExit) else 130
     finally:
@@ -178,8 +173,7 @@ def main():
             print(f'gate scratch retained: {scratch}', file=sys.stderr)
             if status == 0:
                 status = 1
-        detail = ' (timed out; run full)' if timed_out else ''
-        print(f'gate quick: exit={status}{detail} wall={int(time.monotonic() - started)}s', flush=True)
+        print(f'gate {mode}: exit={status} wall={int(time.monotonic() - started)}s', flush=True)
     return status
 
 
