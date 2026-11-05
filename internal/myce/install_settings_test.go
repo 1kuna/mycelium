@@ -368,3 +368,36 @@ func TestInstallFileCacheDefaultMigrationAndExplicitIntent(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallFileCacheAutomaticSavedConfigAllowsDowngrade(t *testing.T) {
+	for _, limit := range []int64{0, 32 << 30} {
+		c := ServiceConfig{Role: "worker", FileCacheBytes: limit, FileCacheBytesExplicit: limit > 0}
+		data, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved map[string]json.RawMessage
+		if err = json.Unmarshal(data, &saved); err != nil {
+			t.Fatal(err)
+		}
+		// s071 defaults a missing field to its positive cache budget, but
+		// rejects an explicitly saved zero before a downgrade can proceed.
+		var legacyLimit int64 = 10 << 30
+		if value, present := saved["file_cache_bytes"]; present {
+			if err = json.Unmarshal(value, &legacyLimit); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if legacyLimit <= 0 || limit > 0 && legacyLimit != limit {
+			t.Fatalf("saved cache limit cannot be read by the older installer: %d", legacyLimit)
+		}
+		path := filepath.Join(t.TempDir(), "worker.json")
+		if err = os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		restored, err := ReadServiceConfig(path)
+		if err != nil || restored.FileCacheBytes != limit {
+			t.Fatalf("current installer lost cache mode: got %d want %d: %v", restored.FileCacheBytes, limit, err)
+		}
+	}
+}
