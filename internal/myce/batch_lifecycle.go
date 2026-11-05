@@ -170,14 +170,14 @@ func batchInfrastructureState(m *Machine) string {
 		reports = append(reports, preparationState{r.Key, r.State, r.FailureKind})
 	}
 	return identityHash(struct {
-		Session        string
-		Environments   []string
-		Reports        []preparationState
-		Extension, CPU string
-		Roots          []UnavailableRoot
-		Checkpoint     bool
-		CacheError     string
-	}{m.Session, m.Environments, reports, m.ExtensionFingerprint, m.CPUIsolation, m.UnavailableRoots, m.CheckpointUnavailable, m.CacheError})
+		Session                   string
+		Environments              []string
+		Reports                   []preparationState
+		Extension, CPU, Inventory string
+		Roots                     []UnavailableRoot
+		Checkpoint                bool
+		CacheError                string
+	}{m.Session, m.Environments, reports, m.ExtensionFingerprint, m.CPUIsolation, m.InventoryReason, m.UnavailableRoots, m.CheckpointUnavailable, m.CacheError})
 }
 
 func (q *Queue) holdUnproductiveInfrastructure(j *Job) {
@@ -197,6 +197,14 @@ func (q *Queue) holdUnproductiveInfrastructure(j *Job) {
 	evidence := q.s.BatchRetries[j.ID]
 	if evidence.Targets == nil {
 		evidence.Targets = map[string]string{}
+	}
+	// A failed device admission probe withdraws the last healthy inventory.
+	// Only a subsequent healthy inventory report can permit another launch probe;
+	// repeated unhealthy reports retain the hold. Never alter execution custody.
+	if j.ExecutionCause.Predicate == "device_probe_unavailable" || j.ExecutionCause.Predicate == "device_identity_mismatch" {
+		if m := q.s.Machines[j.Machine]; m != nil {
+			m.InventoryReason = j.ExecutionCause.Predicate
+		}
 	}
 	evidence.Targets[j.Machine] = batchInfrastructureState(q.s.Machines[j.Machine])
 	q.s.BatchRetries[j.ID] = evidence
