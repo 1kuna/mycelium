@@ -23,6 +23,7 @@ type ResolveRequest struct {
 }
 
 type ResolveReport struct {
+	Blocker     *Blocker           `json:"blocker,omitempty"`
 	FileInputs  []ResolveFileInput `json:"file_inputs,omitempty"`
 	ObservedAt  time.Time          `json:"observed_at"`
 	Resolved    []string           `json:"resolved"`
@@ -126,6 +127,7 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		r.Notes = append(r.Notes, "Model snapshots are verified by the worker before launch; a missing or changed snapshot fails the attempt with a named model_snapshot reason.")
 	}
 	if !ok || err != nil {
+		r.Blocker = ResolveFindingBlocker(r.Findings)
 		r.Notes = append(r.Notes, "Targets are evaluated once the environment and extension resolve.")
 		return r, nil
 	}
@@ -150,6 +152,11 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		r.Findings = append(r.Findings, ResolveFinding{Field: "environment.platforms", Side: "queue", Problem: "the environment has no recipe for the platform this job's needs select", Fix: "Add a recipe for that platform (for CPU work, a cpu recipe), or change needs to match an existing recipe."})
 	}
 	r.Targets = view.resolveTargets(j)
+	if !slices.ContainsFunc(r.Targets, func(t ResolveTarget) bool {
+		return t.Eligible && (t.Environment == nil || t.Environment.State == "ready")
+	}) {
+		r.Blocker = view.actionableBlocker(j)
+	}
 	eligible := 0
 	for _, t := range r.Targets {
 		if t.Eligible {
@@ -226,6 +233,9 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 	best := map[string]targetFit{}
 	rows := map[string]*ResolveTarget{}
 	q.evaluateTargets(j, func(fit targetFit, candidate *Job, m *Machine) bool {
+		if j.Spec.Needs.cpuOnly() && m.Device != "" {
+			return true
+		}
 		if old, ok := best[fit.key]; ok && !fit.better(old) {
 			return true
 		}
@@ -294,6 +304,11 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 				row.Environment.State = "blocked"
 			}
 		}
+		if row.Environment != nil && row.Environment.State != "ready" {
+			if b := q.environmentBlocker(candidate, m); b != nil {
+				row.Environment.State = b.Code
+			}
+		}
 		rows[fit.key] = row
 		return true
 	})
@@ -345,6 +360,9 @@ func WriteResolve(dest io.Writer, r ResolveReport, asJSON bool) error {
 		return e.Encode(r)
 	}
 	var out strings.Builder
+	if r.Blocker != nil {
+		fmt.Fprintln(&out, r.Blocker.Text())
+	}
 	fmt.Fprintf(&out, "Resolution observed %s\n", r.ObservedAt.Format(time.RFC3339))
 	for _, line := range r.Resolved {
 		fmt.Fprintln(&out, "  resolved "+line)
