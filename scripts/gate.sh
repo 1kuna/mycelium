@@ -94,14 +94,6 @@ step() {
   python3 scripts/gate-progress.py "$name" "$@"
   echo "$name: $((SECONDS-begin))s"
 }
-wait_for_race_slot() {
-  # Existing workers also run the older pair/full commands. Count go processes,
-  # not their Python/shell supervisors; targeted -run commands aren't full runs.
-  while [[ $({ pgrep -fl 'go test' || true; } | awk '/^[0-9]+ (.*\/)?go test / && /-race/ && !/-run/ { n++ } END { print n+0 }') -ge 2 ]]; do
-    echo 'waiting for a full-race slot (two other runs active)' >&2
-    sleep 15
-  done
-}
 step gate-progress-regressions python3 scripts/test-gate-progress.py
 step build go build -o "$scratch/bin/myce" ./cmd/myce
 step vet go vet ./...
@@ -120,7 +112,6 @@ if [[ $mode == full ]]; then
   step upgrade-compat python3 scripts/upgrade-compat.py run
   # Includes the real CLI dev/checkpoint/model/onboarding e2e. A separate dev
   # pair would repeat the same tests and builds.
-  wait_for_race_slot
   go list ./... | while read -r package; do
     printf '%s\t.*\n' "$package"
   done > "$scratch/selection"
@@ -135,6 +126,7 @@ fi
   wait_related() {
     local result=0
     wait "$1" || result=$?
+    if (( result == 125 )); then exit 125; fi
     if (( result == 124 )); then related_status=124
     elif (( result != 0 && related_status != 124 )); then related_status=1; fi
   }

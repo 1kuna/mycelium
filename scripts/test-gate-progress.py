@@ -47,6 +47,7 @@ class ProgressTests(unittest.TestCase):
         with (patch.object(progress.subprocess, 'Popen', return_value=child) as launch,
               patch.object(progress.selectors, 'DefaultSelector', return_value=selector),
               patch.object(progress.os, 'read', side_effect=lambda *_: chunks.pop(0)),
+              patch.object(progress.custody, 'stop_fixtures', return_value=True),
               patch.object(sys, 'stdout', output)):
             code = progress.run('package:selection', command or ['go', 'test', './pkg'],
                                 cache, report, clock=lambda: now[0])
@@ -101,6 +102,38 @@ class ProgressTests(unittest.TestCase):
               patch.object(progress.os, 'sched_getaffinity', return_value=set(range(8)), create=True),
               patch.dict(os.environ, GOMAXPROCS='4')):
             self.assertEqual(progress.cpu_count(), 1)
+
+    def test_stalled_child_exits_before_slot_is_released(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            tool = root / 'go'
+            tool.write_text('#!' + sys.executable + '\n'
+                            'import json, os, pathlib, signal\n'
+                            'pathlib.Path(os.environ["FIXTURE_PID"]).write_text(str(os.getpid()))\n'
+                            'print(json.dumps({"Action": "start"}), flush=True)\n'
+                            'signal.pause()\n')
+            tool.chmod(0o755)
+            cache = root / 'cache'
+            cache.mkdir()
+            identity = ['hung', progress.platform.system(), progress.platform.machine(),
+                        progress.cpu_count(), os.environ.get('GOVERSION', '')]
+            key = progress.hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+            (cache / (key + '.json')).write_text(json.dumps(dict(count=1, expected_seconds=.05)))
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
+                       FIXTURE_PID=str(root / 'pid'), GATE_TIMING_CACHE=str(cache),
+                       GATE_TIMING_REPORT=str(root / 'report'))
+            peer = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+            try:
+                run = subprocess.run([sys.executable, str(Path(progress.__file__)), 'hung', 'go', 'test'],
+                                     env=env, capture_output=True, text=True, timeout=15)
+                self.assertEqual(run.returncode, 124, run.stdout + run.stderr)
+                pid = int((root / 'pid').read_text())
+                state = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)
+                self.assertTrue(not state.stdout.strip() or state.stdout.strip().startswith('Z'), state.stdout)
+                self.assertIsNone(peer.poll())
+            finally:
+                peer.kill()
+                peer.wait()
 
     def test_real_command_records_output_and_failure(self):
         with tempfile.TemporaryDirectory() as folder:

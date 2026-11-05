@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Supervise gate custody and stop fixtures before removing working files."""
 import os
+import fcntl
 from pathlib import Path
 import shutil
 import re
@@ -140,11 +141,38 @@ def remove_scratch(path):
     shutil.rmtree(path, onerror=writable)
 
 
+def acquire_full_slot():
+    """Hold a cross-checkout slot for the whole full gate, not each package."""
+    cache = Path(subprocess.check_output(['go', 'env', 'GOCACHE'], text=True).strip())
+    cache.mkdir(parents=True, exist_ok=True)
+    announced = False
+    while True:
+        # Honor older standalone full race commands too. Their package-wide
+        # invocation lacks -run; new full gates are accounted by held locks.
+        processes = subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True)
+        legacy = sum(bool(re.search(r'\s(?:\S*/)?go test .*?-race', line)) and '-run' not in line
+                     for line in processes.splitlines())
+        # Two simultaneous full suites is the repository's measured Mac safety
+        # boundary: more caused false failures. It is not a package/CPU default.
+        for index in range(max(0, 2 - legacy)):
+            handle = (cache / f'mycelium-full-gate-{index}.lock').open('a')
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except BlockingIOError:
+                handle.close()
+        if not announced:
+            print('waiting for a full-race slot (two-suite custody boundary)', flush=True)
+            announced = True
+        time.sleep(.25)  # Local semaphore readiness check, not a work deadline.
+
+
 def main():
     signal.signal(signal.SIGTERM, interrupted)
     started = time.monotonic()
     status = 1
     mode = 'full' if 'full' in sys.argv[2:] else 'quick'
+    slot = acquire_full_slot() if mode == 'full' else None
     root = Path(sys.argv[1]).resolve().parent.parent / '.gate'
     root.mkdir(exist_ok=True)
     scratch = tempfile.mkdtemp(prefix='run.', dir=root)
@@ -173,6 +201,8 @@ def main():
             print(f'gate scratch retained: {scratch}', file=sys.stderr)
             if status == 0:
                 status = 1
+        if slot is not None:
+            slot.close()
         print(f'gate {mode}: exit={status} wall={int(time.monotonic() - started)}s', flush=True)
     return status
 

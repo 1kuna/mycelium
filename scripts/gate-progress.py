@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Learn host/selection timings and stop silent commands, not progressing work."""
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -11,7 +12,13 @@ import signal
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
+
+
+_custody_spec = importlib.util.spec_from_file_location('gate_custody', Path(__file__).with_name('gate-budget.py'))
+custody = importlib.util.module_from_spec(_custody_spec)
+_custody_spec.loader.exec_module(custody)
 
 
 # Two missed expected completions after the normal completion interval. This is
@@ -109,7 +116,18 @@ def run(label, command, cache, report, clock=time.monotonic):
     # measurement must not become a deadline for a cold compiler/linker.
     progress = Progress(None, clock())
     pending = b''
-    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    package_scratch = None
+    child_env = None
+    if is_test:
+        package_scratch = tempfile.mkdtemp(prefix='gate-package.', dir=os.environ.get('TMPDIR'))
+        home = Path(package_scratch) / 'home'
+        temporary = Path(package_scratch) / 'tmp'
+        home.mkdir()
+        temporary.mkdir()
+        child_env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), TMPDIR=str(temporary),
+                         XDG_CONFIG_HOME=str(home / '.config'), XDG_CACHE_HOME=str(home / '.cache'),
+                         XDG_DATA_HOME=str(home / '.local/share'), GATE_PACKAGE_ID=uuid.uuid4().hex)
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=child_env)
     status = 1
     try:
         with selectors.DefaultSelector() as selector:
@@ -120,9 +138,8 @@ def run(label, command, cache, report, clock=time.monotonic):
                     status = 124
                     print(f'gate stall {label}: no output for {STALL_INTERVALS * expected:.3f}s',
                           file=sys.stderr, flush=True)
-                    # The outer custody supervisor stops this command and all
-                    # fixtures, verifies exit, then removes scratch. Never wait
-                    # here for inherited output handles held by a hung fixture.
+                    # Stop this package below before releasing its execution
+                    # slot; sibling progress must not postpone custody cleanup.
                     break
                 events = selector.select(remaining)
                 if not events:
@@ -152,6 +169,17 @@ def run(label, command, cache, report, clock=time.monotonic):
         status = error.code if isinstance(error, SystemExit) else 130
     finally:
         child.stdout.close()
+        if package_scratch is not None:
+            try:
+                stopped = custody.stop_fixtures('GATE_PACKAGE_ID=' + child_env['GATE_PACKAGE_ID'],
+                                               package_scratch, child)
+            except (OSError, subprocess.SubprocessError):
+                stopped = False
+            if stopped:
+                custody.remove_scratch(package_scratch)
+            else:
+                print('gate: package custody unconfirmed; scratch retained', file=sys.stderr, flush=True)
+                status = 125
         elapsed = clock() - progress.started
         record = dict(label=label, cpu=cpu_count(), elapsed_seconds=elapsed,
                       longest_gap_seconds=max(progress.longest_gap, clock() - progress.last),

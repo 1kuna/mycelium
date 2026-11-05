@@ -22,6 +22,25 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def test_full_slots_count_gate_owners_not_package_commands(self):
+        with tempfile.TemporaryDirectory() as folder:
+            # New full packages carry -run expressions; owner locks, not the
+            # number or arguments of their package processes, bound full suites.
+            processes = '123 go test -race -run .* mycelium/pkg\n'
+            with patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else processes):
+                first = budget.acquire_full_slot()
+                second = budget.acquire_full_slot()
+                try:
+                    with patch.object(budget.time, 'sleep', side_effect=RuntimeError('blocked')):
+                        with self.assertRaisesRegex(RuntimeError, 'blocked'):
+                            budget.acquire_full_slot()
+                    first.close()
+                    replacement = budget.acquire_full_slot()
+                    replacement.close()
+                finally:
+                    first.close()
+                    second.close()
+
     def test_quick_overlaps_packages_and_collects_failure(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -29,6 +48,9 @@ class GateBudgetTests(unittest.TestCase):
             scripts.mkdir()
             shutil.copyfile(Path(__file__).with_name('gate.sh'), scripts / 'gate.sh')
             shutil.copyfile(Path(__file__).with_name('gate-progress.py'), scripts / 'gate-progress.py')
+            shutil.copyfile(Path(__file__).with_name('gate-budget.py'), scripts / 'gate-budget.py')
+            shutil.copyfile(Path(__file__).with_name('gate-handles.py'), scripts / 'gate-handles.py')
+            shutil.copyfile(Path(__file__).with_name('test-gate-progress.py'), scripts / 'test-gate-progress.py')
             (scripts / 'gate-related.py').write_text('print("a\\t^TestA$")\nprint("b\\t^TestB$")\n')
             bin_dir = root / 'bin'
             bin_dir.mkdir()
@@ -277,6 +299,9 @@ with patch.object(subprocess.Popen, 'wait', wait):
             (root / "bin").mkdir()
             (root / "scripts/gate.sh").write_bytes((scripts / "gate.sh").read_bytes())
             shutil.copyfile(scripts / "gate-progress.py", root / "scripts/gate-progress.py")
+            shutil.copyfile(scripts / "gate-budget.py", root / "scripts/gate-budget.py")
+            shutil.copyfile(scripts / "gate-handles.py", root / "scripts/gate-handles.py")
+            shutil.copyfile(scripts / "test-gate-progress.py", root / "scripts/test-gate-progress.py")
             (root / "scripts/gate-related.py").write_text("")
             go = root / "bin/go"
             go.write_text(f'''#!{sys.executable}
