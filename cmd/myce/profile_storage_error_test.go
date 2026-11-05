@@ -95,7 +95,11 @@ func TestProfileStorageFailureCause(t *testing.T) {
 							server.Close()
 						}
 					}
-					ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+					ctx, cancel := context.WithCancel(t.Context())
+					if failure == "timeout" {
+						cancel()
+						ctx, cancel = context.WithTimeout(t.Context(), 150*time.Millisecond)
+					}
 					defer cancel()
 					var out bytes.Buffer
 					err = runPreparedProfile(ctx, root, p, []byte("fixture"), nil, nil, "storage-cause", "", "", "", server.URL, secret, &out, io.Discard)
