@@ -131,8 +131,8 @@ func TestAdaptiveMemoryTransferUsesPairedError(t *testing.T) {
 			s.AllowedMachines = nil
 			queued := submit(t, q, s)
 			candidate := q.memoryCandidate(queued, q.s.Machines[destination.ID])
-			low := (2*unit + minimumHostMemoryGB) / (unit + minimumHostMemoryGB)
-			high := (5*unit + minimumHostMemoryGB) / (2*unit + minimumHostMemoryGB)
+			low := (2*unit + minimumHostMemoryGB) / unit
+			high := (5*unit + minimumHostMemoryGB) / (2 * unit)
 			want := (3*unit + minimumHostMemoryGB) * (high + (high - low))
 			if e := candidate.MemoryEnvelope; e.Source != "accepted transfer + measured error" || e.Basis != "learned" || math.Abs(e.HostGB-want) > 1e-8 {
 				t.Fatalf("did not use measured transfer errors: %+v want %v", e, want)
@@ -221,5 +221,67 @@ func TestAdaptiveMemoryCPUFamilyLeavesMeasuredTrainingHeadroom(t *testing.T) {
 	}
 	if got := q.s.Machines[gpu.ID].HostMemoryInUseGB; math.Abs(got-(acceptedPeak+minimumHostMemoryGB+52.1)) > 1e-8 || got > 64 {
 		t.Fatal("shared host ledger lost a reservation", got)
+	}
+}
+
+func TestAdaptiveMemoryTransferDoesNotDivideBySourceUncertainty(t *testing.T) {
+	q, clock, source := learnedMemoryFixture(t)
+	destination := cpuMachine("destination", "destination-host", "cpu", 8, 32)
+	destination.HostMemoryBudgetGB, destination.ExtensionFingerprint = 32, "destination-v1"
+	check(t, q, destination, nil)
+	s := cpuSpec(1, 0)
+	for i := 0; i < 2; i++ {
+		s.Run.Command = []string{"echo", fmt.Sprint(i)}
+		for _, target := range []Machine{source, destination} {
+			s.AllowedMachines = []string{target.ID}
+			for _, gb := range []float64{1, 8} {
+				if target.ID == destination.ID {
+					gb = 8
+				}
+				runMemory(t, q, clock, target, s, gb, func(r *Result) {
+					r.MemoryPeak.NonreclaimableGB = &gb
+					r.MemoryPeak.Events = &MemoryEventCounts{}
+				})
+			}
+		}
+	}
+	s.Run.Command = []string{"echo", "steady-new-work"}
+	s.AllowedMachines = []string{source.ID}
+	runMemory(t, q, clock, source, s, 8, nil)
+	s.AllowedMachines = []string{destination.ID}
+	queued := submit(t, q, s)
+	candidate := q.memoryCandidate(queued, q.s.Machines[destination.ID])
+	if e := candidate.MemoryEnvelope; e.Basis != "learned" || e.HostGB < 8 {
+		t.Fatal("source variation reduced target demand below measured peak", e)
+	}
+}
+
+func TestAdaptiveMemoryFirstConstrainedCompletionRetainsFloor(t *testing.T) {
+	for _, ram := range []float64{.5, 512} {
+		t.Run(fmt.Sprint(ram), func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuMachine("worker", "host", "cpu", 8, ram)
+			m.HostMemoryBudgetGB, m.ExtensionFingerprint = ram, "cpu-v1"
+			m.CapabilityProfile.SystemMemoryBytes = uint64(ram * (1 << 30))
+			check(t, q, m, nil)
+			s := cpuSpec(1, 0)
+			lower := ram / 2
+			runMemory(t, q, clock, m, s, lower, func(r *Result) { r.MemoryPeak.Constrained = true })
+			q = memoryFactsRestart(t, q, clock)
+			m.HostAvailableMemoryGB = ram / 4
+			check(t, q, m, nil)
+			queued := submit(t, q, s)
+			if run := check(t, q, m, nil).Job; run != nil {
+				t.Fatal("first constrained result shrank to currently free memory", run.MemoryEnvelope)
+			}
+			candidate := q.memoryCandidate(queued, q.s.Machines[m.ID])
+			if candidate.Spec.Needs.HostMemoryGB < lower || candidate.MemoryEnvelope.Basis != "exploratory" {
+				t.Fatal("physical fallback dropped retained requirement", candidate.MemoryEnvelope)
+			}
+			m.HostAvailableMemoryGB = ram
+			if run := check(t, q, m, nil).Job; run == nil || run.ID != queued.ID || run.Spec.Needs.HostMemoryGB < lower {
+				t.Fatal("physical recovery lost the requirement", run)
+			}
+		})
 	}
 }

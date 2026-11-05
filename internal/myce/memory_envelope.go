@@ -394,7 +394,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 				if m.UnifiedMemory {
 					host -= n.MemoryGB
 				}
-				n.HostMemoryGB, refusal = max(minimumHostMemoryGB, host), why
+				n.HostMemoryGB, refusal = max(minimumHostMemoryGB, host, q.constrainedMemoryLowerFor(j, estimate, !m.UnifiedMemory)), why
 				source = "submitter hint; exploratory host"
 			}
 		default:
@@ -430,7 +430,10 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 					host -= n.MemoryGB
 				}
 			}
-			n.HostMemoryGB = max(minimumHostMemoryGB, host)
+			// Physical headroom is a capacity, never permission to lower a
+			// retained constrained requirement. Admission refuses when less
+			// room is currently free, including the first constrained attempt.
+			n.HostMemoryGB = max(minimumHostMemoryGB, host, q.constrainedMemoryLowerFor(j, estimate, !n.cpuOnly() && !m.UnifiedMemory))
 		}
 		n.HostMemoryGB = max(n.HostMemoryGB, hostFloor)
 		if floor := j.MemoryOOMFloor; floor != nil {

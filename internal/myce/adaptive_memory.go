@@ -46,6 +46,11 @@ func (q *Queue) acceptedMemoryPoint(p *WorkObservation) bool {
 // The observed range covers between-attempt variability; sampled growth covers
 // the next observation horizon. Neither is substituted for the other's cost.
 func observedMemoryBound(points []*WorkObservation, device bool) (float64, int) {
+	peak, margin, samples := observedMemoryPeakAndMargin(points, device)
+	return peak + margin, samples
+}
+
+func observedMemoryPeakAndMargin(points []*WorkObservation, device bool) (float64, float64, int) {
 	peak, low, growth, samples := 0.0, math.Inf(1), 0.0, 0
 	complete := !device
 	for _, point := range points {
@@ -96,9 +101,9 @@ func observedMemoryBound(points []*WorkObservation, device bool) (float64, int) 
 		samples += max(1, point.MemorySamples)
 	}
 	if samples == 0 {
-		return 0, 0
+		return 0, 0, 0
 	}
-	return peak + max(peak-low, growth, minimumHostMemoryGB), samples
+	return peak, max(peak-low, growth, minimumHostMemoryGB), samples
 }
 
 func pointsForExact(points []*WorkObservation, key ObservationKey) []*WorkObservation {
@@ -164,7 +169,11 @@ func (q *Queue) transferMemoryFactorUncached(from, to memoryTransferTarget, devi
 	for work, sourcePoints := range catalog.targets[from] {
 		sources := acceptedMemoryPoints(q, sourcePoints)
 		targets := acceptedMemoryPoints(q, catalog.targets[to][work])
-		source, _ := observedMemoryBound(sources, device)
+		// Only measured demand belongs in the denominator. Dividing by a
+		// source uncertainty allowance would make greater uncertainty shrink
+		// the target reservation. Target uncertainty stays in the numerator;
+		// the new source workload carries its own uncertainty when transferred.
+		source := memoryTransferMeasurement(sources, device)
 		target, _ := observedMemoryBound(targets, device)
 		if source <= 0 || target <= 0 {
 			continue
@@ -179,6 +188,31 @@ func (q *Queue) transferMemoryFactorUncached(from, to memoryTransferTarget, devi
 		return 0, false
 	}
 	return high + (high - low), true
+}
+
+// Calibration denominators use measured resident/device demand, never sizing
+// allowances or a total-charge fallback that includes reclaimable cache. Every
+// new-work bound is at least these measured components; learning a complete
+// range later cannot shrink the source basis underneath its calibration.
+func memoryTransferMeasurement(points []*WorkObservation, device bool) float64 {
+	peak := 0.0
+	for _, point := range points {
+		p := point.MemoryPeak
+		if device {
+			if p.DeviceGB != nil && validRate(*p.DeviceGB) {
+				peak = max(peak, *p.DeviceGB)
+			}
+			continue
+		}
+		peak = max(peak, *p.HostGB)
+		if p.NonreclaimableGB != nil && validMemoryValue(*p.NonreclaimableGB) {
+			peak = max(peak, *p.NonreclaimableGB)
+		}
+		if combined, ok := p.gpuHostPeakGB(); ok {
+			peak = max(peak, combined)
+		}
+	}
+	return peak
 }
 
 func (q *Queue) adaptMemoryTransfer(e *memoryEstimate, j *Job, m *Machine, points []*WorkObservation) {
