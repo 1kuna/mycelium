@@ -128,6 +128,21 @@ verifies the master without replacing it. Keep staging while a fetch is active.
 Verify the whole manifest before use; loading never downloads weights. See
 [explicit master downloads](https://github.com/1kuna/mycelium/blob/main/docs/services.md#explicit-master-download-and-pins).
 
+## Automatic host hygiene (next release)
+
+Machine status `host_health` explains automatic admission drains with typed
+causes, persisted recent samples and the host's own healthy baseline. Mycelium
+resumes after measured recovery; an operator drain remains independent. Running
+attempts retain custody. NAS/checkpoint degradation withholds dependent work;
+independent local work can remain eligible. `host_degraded` and
+`host_mount_degraded` use existing health notifications; silent-worker alerts
+carry `host_silent`. Read the job's waiting reason or one needed status snapshot;
+no agent polling or drain/resume loop is needed. Foreign CPU/RSS leaders are
+context for the host owner: never stop their processes or services. See
+[host-health fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#automatic-host-health-834-next-release).
+Older queues omit the new status fields; workers retain local history and use
+the existing leaving signal for a confirmed local drain until support is negotiated.
+
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.

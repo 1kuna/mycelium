@@ -1,5 +1,60 @@
 # Seeing your mycelium
 
+## Automatic host health (#834, next release)
+
+Machine `host_health` contains a typed `drain_reason`, recent `history`, the
+healthy `baseline`, and CPU/RSS-leading `foreign` processes and service identities.
+Samples include OS memory pressure, swap/growth, load, timer wake latency,
+heartbeat duration, local free disk, and configured NAS/checkpoint metadata-probe
+latency or pending age. `age_seconds` is age at the worker's last report; worker
+freshness remains independent. `host-health.json` in worker state survives a
+restart. `persistence_error`, sample `error` and `foreign_error` are fixed codes,
+never raw errors or local paths.
+
+The sampler reuses the five-second observation cadence and keeps 64 recent and
+64 healthy samples to bound diagnostic memory and local writes. Eight healthy
+samples bootstrap each host's prediction bands: quartiles plus three
+interquartile ranges (Tukey's far-outlier fence), with observed adjacent changes
+supplying a noise floor. These are statistical/history bounds, not fleet capacity
+limits. Three consecutive adverse samples confirm degradation; three healthy
+samples resume admission. Missing evidence breaks confirmation and cannot prove
+recovery. Adverse samples never teach a new healthy baseline. Load requires
+increased wake latency; heartbeat delay also requires local wake latency, so
+ordinary useful CPU work or a slow queue alone does not drain a host. Memory
+pressure, swap growth with wake latency, and low free disk use the host's bands.
+Disk pressure also requires exhaustion against measured consumption over the
+confirmation horizon. `disk_recovery` retains that measured reserve until space
+actually recovers; aging history alone cannot clear it. Pending adverse mount
+samples (`adverse`) are excluded from healthy baselines before confirmation.
+History serialization/fsync runs outside the mutex used by heartbeat snapshots.
+
+Workers send the additive health fields only after the queue advertises
+`host_hygiene_protocol: host-hygiene-v1`. A strict older queue receives the
+legacy shape; local evidence still persists and a confirmed local drain uses
+the existing leaving signal. A queue downgrade retries the legacy shape once
+after a strict-decoder rejection, preserving session and attempt custody.
+
+Drains withhold new command, model and preparation launches without changing
+operator maintenance, killing running work or discarding exact-attempt custody.
+`host_degraded` alerts carry the typed cause; existing stale-worker alerts carry
+`reason: host_silent`. Existing notifier episode/cooldown and delivery custody
+apply. Operator drains still require their owner's resume.
+
+Mount probes inspect configured root metadata without traversing or remounting
+it. A blocked syscall remains the single owned outstanding operation for that
+root, off the heartbeat path. Pending age and completion latency are compared
+with successful history, with repeated degradation using existing root-specific
+admission. Independent local work stays eligible. Cold roots retain existing
+checkpoint and mount-inventory availability rules. No filesystem I/O runs in a
+queue transaction. Missing pre-hang evidence cannot establish an earlier hang's
+cause; native OS/mount qualification is separate from fake-clock proof.
+
+Foreign CPU/RSS leaders (up to five of each) refresh once per minute to keep
+enumeration out of the heartbeat path. Only executable basenames and available
+service identities are reported, without argv or environment values. The worker
+tree and birth-verified recorded surviving attempt members are excluded. This
+is owner context only; it causes no signals, service changes or cleanup.
+
 Run `myce status` using your usual queue address and private token. `--full`
 shows full job IDs. Open the queue address in a browser for the same information;
 sign in as `myce`, using the token as the password. The page is read-only and

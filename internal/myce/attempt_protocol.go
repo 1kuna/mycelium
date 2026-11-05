@@ -53,6 +53,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		c.Attempts = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
 	}
 	c.Running, c.Started = nil, false
+	c = w.hygieneCheckin(c)
 	full := c
 	if w.toolReport != nil {
 		c = w.toolReport.checkin(c)
@@ -60,12 +61,15 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	var refusal *HTTPError
-	if w.toolReport != nil && c.ToolInventoryHash != "" && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
-		// Strict decoding rejected the additive inventory fields before mutation
+	if (w.toolReport != nil && c.ToolInventoryHash != "" || c.Machine.HostHealth != nil) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+		// Strict decoding rejected additive inventory/hygiene fields before mutation
 		// (for example, a queue replaced with an older inventory-capable binary).
 		// Retry once with the full legacy inventory; attempt protocol is unchanged.
-		w.toolReport.supported = false
-		c = w.toolReport.checkin(full)
+		c = w.legacyHygieneCheckin(full)
+		if w.toolReport != nil {
+			w.toolReport.supported = false
+			c = w.toolReport.checkin(c)
+		}
 		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	}
 	if err != nil {
@@ -82,6 +86,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	if w.toolReport != nil {
 		w.toolReport.accept(c, reply)
 	}
+	w.acceptHygieneReply(reply)
 	// A lost/discarded assignment leaves no local custody to stop. Validate
 	// the whole reply first, then explicitly release only unheld own-session
 	// keys; omission alone is never the queue's release evidence.

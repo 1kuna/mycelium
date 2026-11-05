@@ -756,6 +756,11 @@ func firstDevice(j Job, m Machine) string {
 func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*workerStore, rt *modelRuntime, environments *environmentRuntime, rawMemory MemorySource, requestRetention func(string, time.Time)) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	health, err := startWorkerHealth(ctx, w, root)
+	if err != nil {
+		return err
+	}
+	defer func() { cancel(); health.wait() }()
 	var qualification checkpointIO[bool]
 	source := w.SharedPressureSource
 	if source == nil {
@@ -1123,7 +1128,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 			}
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
+			m.HostHealth = health.snapshot(m.DiskVolumes)
+			applyHostMountHealth(w, &m)
+			heartbeatStarted := w.Clock.Now()
 			reply, err := w.checkin(ctx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
+			health.noteHeartbeat(w.Clock.Now().Sub(heartbeatStarted))
 			if err == nil {
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {
 					// Enrollment is an observer, never authority to terminate live work.
