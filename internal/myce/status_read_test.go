@@ -254,7 +254,7 @@ func TestJobReadEligibilityLifecycle(t *testing.T) {
 
 func TestStatusReadPreservesDeadlineReason(t *testing.T) {
 	q, c := fixture(t)
-	s := spec("production")
+	s := authoredStartSpec()
 	j := submit(t, q, s)
 	c.Advance(ProductionStartTimeout + time.Second)
 	if err := q.Tick(); err != nil {

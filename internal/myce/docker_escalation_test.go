@@ -11,6 +11,10 @@ import (
 func dockerEscalationFixture(t *testing.T) (*Queue, *fakeClock, *Job, *Machine) {
 	t.Helper()
 	q, c := fixture(t)
+	// The timing fixture authors a cleanup budget; cold uncertainty is tested separately.
+	if err := q.SetPreemptionGrace(2 * time.Minute); err != nil {
+		t.Fatal(err)
+	}
 	m := machine("worker", "fake")
 	m.HostID = "host"
 	q.s.Machines[m.ID] = &m

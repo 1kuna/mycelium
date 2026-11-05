@@ -316,9 +316,13 @@ func (q *Queue) hostBlockerState(host string) (string, hostBlockerClass) {
 		}
 		count++
 		remaining = max(remaining, r.Until.Sub(q.clock.Now()).Seconds())
-		if m := q.s.Machines[r.Machine]; m == nil || m.Gone || q.unreported[r.Machine] || r.CleanupFailed || r.Until.IsZero() || !q.clock.Now().Before(r.Until) {
+		unknownBudget := false
+		if j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+			unknownBudget = unmeasuredBatchStop(j)
+		}
+		if m := q.s.Machines[r.Machine]; m == nil || m.Gone || q.unreported[r.Machine] || r.CleanupFailed || unknownBudget || r.Until.IsZero() || !q.clock.Now().Before(r.Until) {
 			unknown = append(unknown, r.Machine)
-			needsOperator = needsOperator || q.releaseNeedsOperator(m, &r.Until, r.CleanupFailed)
+			needsOperator = needsOperator || unknownBudget || q.releaseNeedsOperator(m, &r.Until, r.CleanupFailed)
 		}
 	}
 	for _, c := range q.calls {
@@ -835,7 +839,14 @@ func (q *Queue) escalateDockerCleanup() {
 			}
 			r.CleanupSince = &since
 		}
-		if r.EscalatedAt == nil && !now.Before(r.CleanupSince.Add(2*time.Minute)) {
+		grace := unmeasuredBatchGrace
+		if j := q.s.Jobs[r.Job]; j != nil {
+			grace = q.batchStopGrace(j)
+		}
+		// A failed observation or missing cleanup evidence requires attention now;
+		// elapsed time still never proves release. Otherwise use measured cleanup.
+		needsAttention := r.CleanupFailed || grace == unmeasuredBatchGrace
+		if r.EscalatedAt == nil && (needsAttention || !now.Before(r.CleanupSince.Add(grace))) {
 			r.EscalatedAt = &now
 			log.Printf("event=docker_cleanup_escalated host=%q job=%q attempt=%d machine=%q session=%q operator_action_required=true", r.Host, r.Job, r.Attempt, r.Machine, r.Session)
 		}

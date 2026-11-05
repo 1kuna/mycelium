@@ -1126,6 +1126,9 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 
 func TestDockerCleanupEscalatesDurably(t *testing.T) {
 	q, c := fixture(t)
+	if err := q.SetPreemptionGrace(2 * time.Minute); err != nil {
+		t.Fatal(err)
+	}
 	m := dockerMachine("b70", "xpu")
 	check(t, q, m, nil)
 	j := submit(t, q, dockerJob().Spec)

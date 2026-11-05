@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	BatchLifecycle         map[string]batchLifecycle     `json:"batch_lifecycle,omitempty"`
 	ToolInventories        map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
 	FileInputClaims        map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
 	ModelIntervalSince     *time.Time                    `json:"model_interval_since,omitempty"`
@@ -259,7 +260,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	q.healthStoreProbe.timeout = heartbeatFilesystemBudget
 	q.nasProbe.timeout = heartbeatFilesystemBudget
 	q.nasProgress.timeout = heartbeatFilesystemBudget
@@ -384,18 +385,20 @@ func (q *Queue) SetRestartGrace(d time.Duration) {
 	}
 }
 
-const DefaultProductionInfrastructureRetries = 2
+// A negative default selects evidence-based retries; nonnegative values are
+// explicit operator intent, never clamped to a deployment-specific maximum.
+const DefaultProductionInfrastructureRetries = -1
 
-// SetProductionInfrastructureRetries bounds infrastructure requeues per production job.
-// Zero disables retries; values above two are clamped to the agreed maximum.
-// Stage failures never use this budget.
+// SetProductionInfrastructureRetries accepts -1 for adaptive infrastructure
+// recovery, or an explicit nonnegative requeue limit. Command failures never
+// use this budget.
 func (q *Queue) SetProductionInfrastructureRetries(n int) error {
-	if n < 0 {
-		return errors.New("production infrastructure retries must be nonnegative")
+	if n < -1 {
+		return errors.New("production infrastructure retries must be -1 (adaptive) or nonnegative")
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.productionInfrastructureRetries = min(n, 2)
+	q.productionInfrastructureRetries = n
 	return nil
 }
 
@@ -962,7 +965,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
 		}
-		if chargeInfrastructure && j.InfrastructureRetries >= q.productionInfrastructureRetries {
+		if chargeInfrastructure && q.productionInfrastructureRetries >= 0 && j.InfrastructureRetries >= q.productionInfrastructureRetries {
 			j.State, j.Reason = "failed", "infrastructure_retries_exhausted"
 			j.StopAt = nil
 			now := q.clock.Now()
@@ -983,11 +986,6 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	j.InputsStagedAt = nil
 	j.FinishedAt = nil
 	j.Reason = why
-	if chargeInfrastructure && j.Spec.Priority != "production" && j.Losses >= 3 {
-		j.State = "failed"
-		j.Reason = "failed after 3 infrastructure losses: " + why
-		return
-	}
 	j.WaitingSince = q.clock.Now()
 	q.s.Front++
 	j.Front = q.s.Front
@@ -1004,7 +1002,7 @@ func (q *Queue) stop(j *Job, why string) {
 			c.StoppedAt = &now
 		}
 	}
-	t := now.Add(StopGrace)
+	t := now.Add(q.batchStopGrace(j))
 	j.StopAt = &t
 	j.State = "stopping"
 	j.Reason = why
@@ -2573,12 +2571,15 @@ func (q *Queue) renewRecoveryStartWindow(j *Job) {
 	// Planned leave keeps its original deadline; queue maintenance stops retain
 	// the recovery window for already-started attempts.
 	recovering := j.State == "running" || j.State == "stopping" && plannedStop(j)
-	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
+	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil && !absoluteStartBy(j) {
 		// Recovery is bounded from loss detection, using the original first-start window.
 		if j.StartWindow == 0 {
 			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
 		}
 		deadline := q.clock.Now().Add(j.StartWindow)
+		if j.Spec.Deadline != nil && j.Spec.Deadline.Before(deadline) {
+			deadline = *j.Spec.Deadline
+		}
 		j.Spec.StartBy = &deadline
 	}
 }
@@ -2637,9 +2638,10 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		j.YieldGeneration = max(j.YieldGeneration, progress.durable)
 	}
 	retainInputsStagedAt(j, report.InputsStagedAt)
-	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
+	if report.Started && j.Spec.Priority != "production" && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)
 	}
+	q.observeBatchProgress(j, report.Progress)
 	j.Progress = report.Progress
 	q.retainApplicationProgress(j, report, m)
 	q.retainLiveness(j, report)

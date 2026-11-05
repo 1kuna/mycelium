@@ -340,7 +340,7 @@ func (q *Queue) maintainHostObligation(p HostObligation, deadline *time.Time) {
 			}
 			q.stop(j, maintenanceStopCause)
 			if gracefulGPUStop(j) {
-				boundStop(&j.StopAt, q.clock.Now().Add(q.gpuStopGrace()))
+				boundStop(&j.StopAt, q.clock.Now().Add(q.batchStopGrace(j)))
 			}
 			if deadline != nil {
 				boundStop(&j.StopAt, *deadline)

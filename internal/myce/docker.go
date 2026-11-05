@@ -231,7 +231,12 @@ func (d *dockerAttempt) stopLocked(now time.Time, grace time.Duration, kill bool
 		if kill {
 			grace = d.state.StopGrace
 		}
-		grace = min(acceleratorStopGrace(grace), acceleratorStopGrace(d.state.StopGrace))
+		if grace <= 0 {
+			grace = acceleratorStopGrace(d.state.StopGrace)
+		}
+		if d.state.StopGrace > 0 {
+			grace = min(grace, d.state.StopGrace)
+		}
 		deadline := now.Add(grace)
 		if d.state.Stopped && d.state.StopAt != nil && d.state.StopAt.Before(deadline) {
 			deadline = *d.state.StopAt
@@ -1064,7 +1069,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	}
 	d.memoryWorker = &w
 	d.state.Accelerator = !j.Spec.Needs.cpuOnly()
-	d.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
+	d.state.StopGrace = w.AcceleratorStopGrace
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	d.command = w.dockerCommand
 	d.state.LogsNone = j.Spec.Logs == "none"

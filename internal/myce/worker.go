@@ -255,7 +255,12 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 		if kill {
 			grace = p.stopGrace
 		}
-		grace = min(acceleratorStopGrace(grace), acceleratorStopGrace(p.stopGrace))
+		if grace <= 0 {
+			grace = acceleratorStopGrace(p.stopGrace)
+		}
+		if p.stopGrace > 0 {
+			grace = min(grace, p.stopGrace)
+		}
 		deadline := now.Add(grace)
 		if p.stopped && p.stopAt != nil && p.stopAt.Before(deadline) {
 			deadline = *p.stopAt
@@ -387,9 +392,6 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
-		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
 	if parkedStorage(&j) {
 		return nil, s.startFailure(j, launchRefused, errors.New(parkedStorageReason))
@@ -650,7 +652,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; exec 3>&-; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
 	args = append(args, j.Spec.Run.Command[1:]...)
 	var readyReader, readyWriter, approvalReader, approvalWriter *os.File
-	if j.Spec.StartBy != nil {
+	if j.Spec.Priority == "production" || j.Spec.StartBy != nil {
 		executable, e := os.Executable()
 		if e != nil {
 			return nil, e
@@ -875,7 +877,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if w.control != nil {
 		w.control.set(p)
 	}
-	if j.Spec.StartBy == nil {
+	if readyReader == nil {
 		if err = w.authorizeStart(j, s.state.Session, s.dir); err != nil {
 			return nil, abort(s.startFailure(j, launchRefused, err))
 		}

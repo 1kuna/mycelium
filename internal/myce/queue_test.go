@@ -693,7 +693,7 @@ func TestResumableThreeInfrastructureLosses(t *testing.T) {
 		}
 	}
 	got := job(t, q, j.ID)
-	if got.Losses != 3 || got.State != "failed" {
+	if got.Losses != 3 || got.State != "queued" {
 		t.Fatalf("after %d counted losses: state=%s, want failed", got.Losses, got.State)
 	}
 	if check(t, q, m, nil).Job != nil {

@@ -18,7 +18,7 @@ func TestStartWindowDependentFanOut(t *testing.T) {
 		absolute                    bool
 	}{
 		{"relative", "production", "600s", 600 * time.Second, false},
-		{"default", "production", "", ProductionStartTimeout, false},
+		{"default", "production", "", 0, false},
 		{"absolute-wins", "production", "600s", 1000 * time.Second, true},
 		{"experiment", "experiment", "", 0, false},
 	} {
@@ -82,7 +82,11 @@ func TestStartWindowDependentFanOut(t *testing.T) {
 					t.Fatal(err)
 				}
 				recovery := job(t, q, child.ID)
-				if recovery.State != "queued" || recovery.StartWindow != tc.window || !recovery.Spec.StartBy.Equal(clock.Now().Add(tc.window)) {
+				wantRecovery := clock.Now().Add(tc.window)
+				if tc.absolute {
+					wantRecovery = cutoff
+				}
+				if recovery.State != "queued" || recovery.StartWindow != tc.window || !recovery.Spec.StartBy.Equal(wantRecovery) {
 					t.Fatalf("loss changed original window: %+v", recovery)
 				}
 				q = reopenCancellationQueue(t, q, clock)
@@ -91,7 +95,11 @@ func TestStartWindowDependentFanOut(t *testing.T) {
 					t.Fatal("recovery was not reassigned")
 				}
 			}
-			clock.Advance(tc.window)
+			if tc.absolute {
+				clock.Advance(cutoff.Sub(clock.Now()))
+			} else {
+				clock.Advance(tc.window)
+			}
 			if got := job(t, q, child.ID); got.State != "failed" {
 				t.Fatalf("unstarted retry renewed deadline: %+v", got)
 			}
@@ -129,6 +137,7 @@ func TestStartWindowFanOutWaitsForFirstAssignment(t *testing.T) {
 			s.Outputs = map[string]string{"out": "results"}
 			producer := submit(t, q, s)
 			s.Priority = "production"
+			s.StartWindow = ProductionStartTimeout.String()
 			if mode == "dependency-ready" {
 				s.After = &PieceDependency{Job: producer.ID, Outputs: map[string]string{"input": "item-0/out"}}
 			}
@@ -247,7 +256,7 @@ func TestStartWindowRetainedAbsoluteCutoff(t *testing.T) {
 }
 
 func TestStartWindowValidation(t *testing.T) {
-	for _, value := range []string{"-1s", "0s", "1h1ns", "600", "forever", "999999999999999999999h"} {
+	for _, value := range []string{"-1s", "0s", "600", "forever", "999999999999999999999h"} {
 		t.Run(value, func(t *testing.T) {
 			s := spec("production")
 			s.StartWindow = value
@@ -262,7 +271,7 @@ func TestStartWindowValidation(t *testing.T) {
 		t.Fatal("experiment window accepted")
 	}
 	s.Priority = "production"
-	for _, value := range []string{"1ns", "600s", "1h"} {
+	for _, value := range []string{"1ns", "600s", "1h", "1h1ns", "24h"} {
 		if err := yaml.Unmarshal([]byte("start_window: "+value), &s); err != nil {
 			t.Fatal(err)
 		}

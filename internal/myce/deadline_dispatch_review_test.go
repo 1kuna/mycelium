@@ -14,7 +14,7 @@ func TestReviewDeadlineDelayedGateMustNotExecute(t *testing.T) {
 	q, initial := fixture(t)
 	c := &dockerTestClock{now: initial.Now()}
 	q.clock = c
-	s := spec("production")
+	s := authoredStartSpec()
 	s.Run.Command = []string{"/bin/sh", "-c", `echo ran > "$MYCE_CHECKPOINT_DIR/command-ran"`}
 	submit(t, q, s)
 	assigned := check(t, q, machine("worker", "fake"), nil).Job

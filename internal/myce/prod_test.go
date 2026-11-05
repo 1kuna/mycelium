@@ -155,6 +155,10 @@ func TestDevProductionStartsUnder15SecondsRealTime(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer d.Close()
+	// This latency canary explicitly requests its measured 10s checkpoint policy.
+	if err := d.Queue.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	// Immediate delivery independently has a long-poll notification test.
 	s := spec("experiment")
 	s.Run.Command = []string{"sh", "-c", `if [ "$MYCE_ATTEMPT" != 1 ]; then exit 0; fi; trap '' TERM; echo ready; while :; do sleep 1; done`}

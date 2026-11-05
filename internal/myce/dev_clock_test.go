@@ -156,7 +156,7 @@ func TestDevClockQueueDecisions(t *testing.T) {
 	t.Run("start deadline", func(t *testing.T) {
 		q, _ := fixture(t)
 		q.clock = &devClock{}
-		s := spec("production")
+		s := authoredStartSpec()
 		s.Needs.Platform = Platform{Required: []string{"xpu"}}
 		j := submit(t, q, s)
 		response := clockRequest(API{Queue: q, Token: "test"}.Handler(), fmt.Sprintf(`{"seconds":%g}`, ProductionStartTimeout.Seconds()+1), "test")

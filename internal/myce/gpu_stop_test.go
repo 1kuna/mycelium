@@ -29,8 +29,8 @@ func TestGPUStopPreemptionWithinStartBudget(t *testing.T) {
 		victim := check(t, q, m, nil).Job
 		maintenanceChange(t, q, "disable", true)
 		d := check(t, q, m, victim)
-		if !d.Stop || d.Kill || d.UserCancel || d.GraceSeconds != 15 {
-			t.Fatal("maintenance did not cap GPU group grace", d)
+		if !d.Stop || d.Kill || d.UserCancel || d.GraceSeconds != 60 {
+			t.Fatal("maintenance ignored authored GPU grace", d)
 		}
 		testGPUStopNative(t, false, "", d)
 	})
@@ -42,6 +42,9 @@ func TestGPUStopTermExitNeverKilled(t *testing.T) {
 	t.Run("native", func(t *testing.T) { testGPUStopNative(t, true, "") })
 	t.Run("native-shutdown", func(t *testing.T) { testGPUStopNative(t, true, "shutdown") })
 	q, clock := fixture(t)
+	if err := q.SetPreemptionGrace(defaultGPUStopGrace); err != nil {
+		t.Fatal(err)
+	}
 	s := spec("experiment")
 	s.Resumable = false
 	submit(t, q, s)
@@ -203,12 +206,15 @@ func testGPUStopNative(t *testing.T, cooperative bool, stopPath string, directiv
 func testGPUStopDocker(t *testing.T, infrastructure bool) {
 	t.Helper()
 	q, clock := fixture(t)
+	if err := q.SetPreemptionGrace(defaultGPUStopGrace); err != nil {
+		t.Fatal(err)
+	}
 	s := spec("experiment")
 	s.Resumable = false
 	submit(t, q, s)
 	m := machine("gpu", "fake")
 	victim := check(t, q, m, nil).Job
-	prod := submit(t, q, spec("production"))
+	prod := submit(t, q, authoredStartSpec())
 	directive := check(t, q, m, victim)
 	if !directive.Stop || directive.Kill || directive.UserCancel || directive.GraceSeconds != 10 {
 		t.Fatalf("GPU preemption bypassed grace: %+v", directive)

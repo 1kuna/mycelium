@@ -116,7 +116,7 @@ func TestHealthAlertProductionAttemptLoss(t *testing.T) {
 	for _, operation := range []string{"quiet", "deadline", "start_authorization", "inspect", "kill"} {
 		t.Run(operation, func(t *testing.T) {
 			q, c := fixture(t)
-			j := submit(t, q, spec("production"))
+			j := submit(t, q, authoredStartSpec())
 			m := machine("worker", "cuda")
 			assigned := check(t, q, m, nil).Job
 			if assigned == nil {

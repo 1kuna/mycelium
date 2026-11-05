@@ -101,7 +101,7 @@ func TestAttemptHistoryLaunchRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "failed" || got.Losses != 3 || got.Starts != 3 || got.StartedAt != nil || len(got.AttemptHistory) != 3 {
+	if got.State != "queued" || got.Losses != 3 || got.Starts != 3 || got.StartedAt != nil || len(got.AttemptHistory) != 3 {
 		t.Fatalf("changed accounting/history: %+v", got)
 	}
 	for i, a := range got.AttemptHistory {

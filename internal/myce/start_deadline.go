@@ -7,29 +7,21 @@ import (
 	"time"
 )
 
-// Budget includes up to 15s accelerator TERM grace, 120s cleanup escalation,
-// and 15s for reporting and replacement launch; grace never extends StartBy.
+// Retained names describe historical records, not new lifecycle defaults.
 const ProductionStartTimeout = maxGPUStopGrace + StopGrace + 15*time.Second
-
-// A startup availability budget may cover contended preparation, but must not
-// silently turn production admission into an unbounded capacity wait.
 const MaxProductionStartWindow = time.Hour
 
 func productionStartWindow(s Spec) time.Duration {
-	if s.StartWindow != "" {
-		window, _ := time.ParseDuration(s.StartWindow) // validated at submission
-		return window
-	}
-	return ProductionStartTimeout
+	window, _ := time.ParseDuration(s.StartWindow) // validated at submission
+	return window
 }
 
-// Keep the durable original length separate from the advancing recovery cutoff.
-// An absolute caller deadline always wins over a relative declaration.
+// A caller's absolute cutoff wins; a relative window starts at dependency
+// readiness/assignment as before. Without either, only the submitted deadline
+// bounds admission. An installation's observed latency is an estimate, never
+// evidence that a healthy command must fail during a larger overload.
 func initializeStartDeadline(j *Job, since time.Time) {
 	if j.Spec.ExtensionCheck != nil && j.Spec.ExtensionCheck.Timeout != "" {
-		// Reuse the startup fence without promoting qualification to production.
-		// One hour bounds unavailable-capacity/preparation waits at the existing
-		// maximum start window, independently of the execution budget.
 		if j.Spec.StartBy == nil {
 			deadline := since.Add(MaxProductionStartWindow)
 			j.Spec.StartBy = &deadline
@@ -41,10 +33,19 @@ func initializeStartDeadline(j *Job, since time.Time) {
 	}
 	if j.Spec.StartBy == nil {
 		j.StartWindow = productionStartWindow(j.Spec)
-		deadline := since.Add(j.StartWindow)
-		j.Spec.StartBy = &deadline
-	} else if j.StartWindow == 0 {
+		if j.StartWindow > 0 {
+			deadline := since.Add(j.StartWindow)
+			j.Spec.StartBy = &deadline
+		} else if j.Spec.Deadline != nil {
+			deadline := *j.Spec.Deadline
+			j.Spec.StartBy = &deadline
+		}
+	} else if j.StartWindow == 0 && (absoluteStartBy(j) || j.Spec.StartWindow != "") {
 		j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
+	}
+	if j.Spec.Deadline != nil && (j.Spec.StartBy == nil || j.Spec.Deadline.Before(*j.Spec.StartBy)) {
+		deadline := *j.Spec.Deadline
+		j.Spec.StartBy = &deadline
 	}
 }
 
@@ -71,7 +72,7 @@ func (q *Queue) startupPending(j *Job) bool {
 			}
 		}
 	}
-	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
+	return (j.Spec.StartBy != nil || j.Spec.Priority == "production") && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
 }
 
 func (q *Queue) startWaitingReason(j *Job) string {
@@ -126,7 +127,7 @@ func (q *Queue) maintainStartDeadlines() {
 		// relative timeout exemption for logical fan-out capacity waits.
 		pending := q.startupPending(j)
 		firstWave := j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next == 0
-		disabled := (pending || firstWave) && j.Spec.Priority == "production" && j.Spec.StartBy != nil && !cancelled(j) && dependencyReady(j) && j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)
+		disabled := (pending || firstWave) && j.Spec.Priority == "production" && !cancelled(j) && dependencyReady(j) && j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)
 		executionExpired := false
 		if check := j.Spec.ExtensionCheck; check != nil && check.Timeout != "" && j.StartedAt != nil && !terminal(j.State) && !cancelled(j) {
 			timeout, _ := time.ParseDuration(check.Timeout) // validated at submission
@@ -140,7 +141,7 @@ func (q *Queue) maintainStartDeadlines() {
 		}
 		reason := q.startWaitingReason(j)
 		outcome := attemptOutcome(j, Result{Interrupted: true})
-		if j.State == "queued" && expired(j.Spec.GiveUpAt, now) && j.Spec.GiveUpAt.Before(*j.Spec.StartBy) {
+		if j.State == "queued" && expired(j.Spec.GiveUpAt, now) && (j.Spec.StartBy == nil || j.Spec.GiveUpAt.Before(*j.Spec.StartBy)) {
 			j.State = "failed"
 			j.Reason = "give-up time reached"
 			j.FinishedAt = &now
@@ -203,7 +204,14 @@ func (q *Queue) startupReleaseDetail(host string) HoldDetail {
 }
 
 func (q *Queue) startStatusReason(j *Job) string {
-	return q.startWaitingReason(j) + fmt.Sprintf("; %.0fs left to start", max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds()))
+	reason := q.startWaitingReason(j)
+	if j.Spec.StartBy != nil {
+		return reason + fmt.Sprintf("; %.0fs left to start", max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds()))
+	}
+	if observed := q.observedPlacementLatency(j); observed > 0 {
+		return reason + fmt.Sprintf("; observed placement latency %.3fs (estimate, no submitted start cutoff)", observed.Seconds())
+	}
+	return reason + "; no submitted start cutoff; placement latency not yet observed"
 }
 
 // An unknown fleet may still join; an explicit operator disable is not incoming room.

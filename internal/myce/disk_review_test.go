@@ -37,7 +37,7 @@ func TestDiskHeadroomProductionRepins(t *testing.T) {
 	if busy == nil {
 		t.Fatal("no initial occupancy")
 	}
-	s := spec("production")
+	s := authoredStartSpec()
 	s.Needs.MemoryGB = 1
 	s.Disk = &DiskNeeds{OutputBytes: 30 << 30}
 	prod := submit(t, q, s)

@@ -11,6 +11,9 @@ func TestProductionInfrastructureRetryLimit(t *testing.T) {
 	for _, mode := range []string{"interrupted", "lost", "worker-restart", "queue-restart", "leave", "operator", "polite"} {
 		t.Run(mode, func(t *testing.T) {
 			q, clock := fixture(t)
+			if err := q.SetProductionInfrastructureRetries(2); err != nil {
+				t.Fatal(err)
+			}
 			m := machine("one", "fake")
 			m.HostID = "host"
 			s := spec("production")
@@ -46,6 +49,7 @@ func TestProductionInfrastructureRetryLimit(t *testing.T) {
 					}
 					t.Cleanup(func() { q.Close() })
 					fakeCheckpointAvailability(t, q, true)
+					q.SetProductionInfrastructureRetries(2)
 					q.SetRestartGrace(time.Second)
 					clock.Advance(time.Second)
 					if err := q.Tick(); err != nil {
@@ -173,13 +177,12 @@ func TestProductionInfrastructureRetryConfiguration(t *testing.T) {
 	for _, limit := range []int{0, 1, 4} {
 		t.Run(fmt.Sprint(limit), func(t *testing.T) {
 			q, clock := fixture(t)
-			if err := q.SetProductionInfrastructureRetries(-1); err == nil {
+			if err := q.SetProductionInfrastructureRetries(-2); err == nil {
 				t.Fatal("negative limit accepted")
 			}
 			if err := q.SetProductionInfrastructureRetries(limit); err != nil {
 				t.Fatal(err)
 			}
-			limit = min(limit, 2)
 			submit(t, q, spec("production"))
 			m := machine("one", "fake")
 			for i := 0; i <= limit; i++ {
