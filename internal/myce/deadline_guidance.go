@@ -104,9 +104,13 @@ func (q *Queue) deadlineGuidance(j *Job) *DeadlineGuidance {
 // output while sharing the API's current-policy advice with CLI observers.
 func DeadlineGuidanceText(j *Job) string {
 	d := j.DeadlineGuidance
-	if d == nil {
+	if d == nil || terminal(j.State) {
 		return ""
 	}
 	p := j.PriorityPolicy
-	return fmt.Sprintf("priority advisory: tier %s selector %s revision %d; deadline class matches tier %s selector %s revision %d (%s tier precedence). Blockers: %s. ETA %s. %s %s Example: %s", p.Tier, p.Selector, p.Revision, d.DeadlinePolicy.Tier, d.DeadlinePolicy.Selector, d.DeadlinePolicy.Revision, d.PrecedenceChange, strings.Join(d.Blockers, "; "), d.ETA, d.Message, d.NextAction, strings.ReplaceAll(d.Example, "\n", "; "))
+	blockers := ""
+	if len(d.Blockers) > 0 {
+		blockers = "Blockers: " + strings.Join(d.Blockers, "; ") + ". "
+	}
+	return fmt.Sprintf("priority advisory: tier %s selector %s revision %d; deadline class matches tier %s selector %s revision %d (%s tier precedence). %sETA %s. %s %s Example: %s", p.Tier, p.Selector, p.Revision, d.DeadlinePolicy.Tier, d.DeadlinePolicy.Selector, d.DeadlinePolicy.Revision, d.PrecedenceChange, blockers, d.ETA, d.Message, d.NextAction, strings.ReplaceAll(d.Example, "\n", "; "))
 }

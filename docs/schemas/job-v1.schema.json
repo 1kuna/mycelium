@@ -57,13 +57,26 @@
         "session": {
           "type": "string"
         },
+        "stage_count": {
+          "type": "integer"
+        },
+        "stage_index": {
+          "type": "integer"
+        },
         "stale": {
           "type": "boolean"
         },
         "total": {
           "type": "number"
         },
+        "total_work_known": {
+          "type": "boolean"
+        },
         "unit": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
           "type": "string"
         }
       },
@@ -76,7 +89,8 @@
         "session",
         "received_at",
         "age_seconds",
-        "stale"
+        "stale",
+        "total_work_known"
       ],
       "type": "object"
     },
@@ -390,6 +404,32 @@
         "parent",
         "pieces",
         "concurrency"
+      ],
+      "type": "object"
+    },
+    "Blocker": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "dependency": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "dependency",
+        "owner",
+        "action"
       ],
       "type": "object"
     },
@@ -1613,6 +1653,10 @@
           "$ref": "#/$defs/BatchWork",
           "x-contract": "diagnostic"
         },
+        "blocker": {
+          "$ref": "#/$defs/Blocker",
+          "x-contract": "diagnostic"
+        },
         "cancellation": {
           "$ref": "#/$defs/Cancellation",
           "description": "Read-only cancellation acknowledgement after durable cancellation. Same aggregate release as cancel, including descendants; not_applicable explicitly settles never-attempted work without physical-release evidence.",
@@ -2270,6 +2314,9 @@
         "remaining_seconds": {
           "type": "number"
         },
+        "remaining_work_unknown": {
+          "type": "boolean"
+        },
         "samples": {
           "type": "integer"
         },
@@ -2281,6 +2328,7 @@
         }
       },
       "required": [
+        "remaining_work_unknown",
         "samples",
         "limitation"
       ],

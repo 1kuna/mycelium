@@ -294,7 +294,11 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 	for id := range q.records.removed {
 		q.touchSubmission(q.records.bindings[id])
 	}
-	return recordUndo{base: old, catalogs: catalogs}, nil
+	inventories := make(map[string]*toolInventory, len(q.s.Machines))
+	for id, m := range q.s.Machines {
+		inventories[id] = m.toolInventory
+	}
+	return recordUndo{base: old, catalogs: catalogs, inventories: inventories}, nil
 }
 func (q *Queue) rollbackRecords(old recordUndo) {
 	jobs, submissions := q.s.Jobs, q.s.Submissions
@@ -304,6 +308,9 @@ func (q *Queue) rollbackRecords(old recordUndo) {
 	q.records.encodings = nil
 	base.Jobs, base.Submissions = jobs, submissions
 	q.s = base
+	for id, m := range q.s.Machines {
+		m.toolInventory = old.inventories[id]
+	}
 	for id, j := range q.records.jobs {
 		if j == nil {
 			delete(jobs, id)

@@ -38,15 +38,19 @@ func missingTools(j *Job, m *Machine) []string {
 	if len(j.Spec.Needs.Tools) == 0 {
 		return nil
 	}
+	inventory := m.ToolInventory
+	if m.toolInventory != nil {
+		inventory = m.toolInventory.tools
+	}
 	key := environmentKey(j, m)
 	// A cold managed recipe must be prepared before its executable inventory can
 	// be known. Preparation is allowed, but dispatch rechecks the prepared key.
-	if m.ToolInventory != nil && key != "" && !slices.Contains(m.Environments, key) && m.EnvironmentBuilder {
+	if inventory != nil && key != "" && !slices.Contains(m.Environments, key) && m.EnvironmentBuilder {
 		return nil
 	}
 	var missing []string
 	for _, tool := range j.Spec.Needs.Tools {
-		if !slices.Contains(m.ToolInventory[key], tool) {
+		if !slices.Contains(inventory[key], tool) {
 			missing = append(missing, tool)
 		}
 	}

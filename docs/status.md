@@ -1131,6 +1131,8 @@ with the variant's check and baseline. Submit
 The existing qualified exact-key work curve supplies the frozen total prediction.
 `runtime.remaining_seconds` subtracts elapsed from that prediction, with
 `source`, `unit`, `samples`, `history_age_seconds`, and a `limitation`.
+`remaining_work_unknown` is true whenever remaining execution time cannot be
+estimated; it is never cleared by a stage reaching its reported total.
 It is an approximate runtime estimate, without a statistical confidence bound.
 After the prediction is reached, remaining becomes unknown with reason
 `historical estimate exceeded; remaining time unknown`; zero is never a promise
@@ -1154,6 +1156,21 @@ with `json.dump` to a sibling temporary file and `os.replace` to publish it;
 Python `Client.get()` and `Client.list()` return the same JSON evidence.
 
 Both counts are required, finite and nonnegative, with `completed <= total`.
+**From the next release**, optional `stage_index` and `stage_count` are positive,
+one-based integers. A count requires an index, with index no greater than count;
+an index without a count means the number of stages is unknown. Counts and units
+describe the current stage, so they may reset/change when the stage advances.
+`total_work_known` defaults to false: set it true only when the complete amount
+of work across every stage is known to the application. Knowing a stage's total
+does not establish that fact. Status shows these declarations separately.
+Only a fresh, explicitly single-stage report with `total_work_known: true` can
+also describe whole-job reported counts. Multi-stage counts never imply an
+overall percentage, and no report implies successful job completion.
+Missing later-stage timings stay unknown; stage counters are never extrapolated
+into an ETA. A comparable whole-job history estimate remains independent and
+includes all stages, with its own source/sample count/age. Declare reference
+and workload identities for the complete pipeline, changing them when the
+pipeline changes; first-stage-only measurements are not comparable history.
 Zero/zero is allowed. Unit is a single generic name of at most 64 characters
 using the extension-name syntax (lowercase letters, digits, `_`, `-`, `.`,
 starting with a letter or digit).
@@ -1166,6 +1183,13 @@ More than 30 seconds without a file update marks it stale; this is a display
 threshold and never stops work. Rewrite even unchanged counts to indicate a
 live reporter. Worker restart preserves file age. Queue restart preserves receipt
 age. New attempts clear reports; old attempts/sessions cannot replace them.
+Delayed older file evidence and a backwards stage index cannot replace newer
+evidence within the same attempt either.
+Worker-observed `updated_at` is the local file modification time, used only to
+order reports within the same attempt/session; it is not a queue-clock time or
+an application-authored timestamp. Repeated equal timestamps do not renew age.
+Older workers without it retain the legacy age-based interpretation. Upgrade
+the queue before workers that send the extended heartbeat fields.
 
 Application progress is advisory. It is separate from durable checkpoint
 `job.progress` generations and accepted `fan_out.results`. A report of 100% may
@@ -1617,3 +1641,27 @@ Only fixed host/device/backend constraint names survive; arbitrary keys coalesce
 as `other` with a redacted-key locator. Free-form explanations stay in authored
 source, private receipts and frozen intent, under the existing privacy default.
 There is no raw-text exception or full-spec status mode.
+
+## Primary consumer blocker
+
+Resolve and queued job observations expose an additive `blocker` with `code`,
+`dependency`, `owner`, `action` and `evidence`. CLI resolve, status, the web page
+and the initial wait observation lead with this same projection. Aggregate order
+is additional context; it does not choose a different primary dependency than
+job GET. The projection reads the existing qualification, waiting-reason and
+preparation facts on a detached snapshot; it changes no admission decision.
+
+`unprepared` means no builder has started; `waiting_for_builder` distinguishes
+an unstarted offer or unavailable preparation core; `building` requires a fresh
+builder report. `deterministically_failed` retains the failed immutable recipe's
+cause and log excerpt: the consumer must fix its inputs. Transient failures retain
+the existing retry evidence. `unknown_observation` asks the queue owner to restore
+missing/stale observations; it never claims preparation is progressing.
+`resource_pressure` retains the existing RAM, card, reservation or policy reason.
+A ready alternative takes precedence over preparation on another target.
+
+CPU resolve omits accelerator and multi-card target views. Eligible means permanent
+placement compatibility, not immediate capacity. `needs-staging` for a local source
+placeholder is normal: the following run stages it automatically. A successful
+wait/status omits deadline-policy tutorials and empty blockers. These changes
+require the matching client and queue release; they are not rollout evidence.

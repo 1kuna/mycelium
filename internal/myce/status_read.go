@@ -144,6 +144,7 @@ type observationState struct {
 // Capture it by value alongside the public inputs, then restore only into the
 // detached machines. Probe facts and runtime preparation/secrets are worker-only.
 type observationMachineLedger struct {
+	toolInventory          *toolInventory
 	cpuLedger              bool
 	hostBudgetGB           float64
 	modelReservationDebtGB float64
@@ -287,7 +288,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	machineLedgers := make(map[string]observationMachineLedger, len(s.Machines))
 	for key, m := range s.Machines {
 		machineLedgers[key] = observationMachineLedger{
-			cpuLedger: m.cpuLedger, hostBudgetGB: m.hostBudgetGB,
+			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger, hostBudgetGB: m.hostBudgetGB,
 			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB,
 		}
 	}
@@ -330,6 +331,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	}
 	for key, m := range detached.State.Machines {
 		ledger := machineLedgers[key]
+		m.toolInventory = ledger.toolInventory
 		m.cpuLedger, m.hostBudgetGB = ledger.cpuLedger, ledger.hostBudgetGB
 		m.modelReservationDebtGB, m.hostReservationDebtGB = ledger.modelReservationDebtGB, ledger.hostReservationDebtGB
 	}

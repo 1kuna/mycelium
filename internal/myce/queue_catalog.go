@@ -93,6 +93,7 @@ func (q *Queue) snapshotCatalogs() (state, error) {
 }
 
 type recordUndo struct {
-	base     []byte
-	catalogs state
+	inventories map[string]*toolInventory
+	base        []byte
+	catalogs    state
 }

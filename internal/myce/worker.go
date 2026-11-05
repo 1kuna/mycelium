@@ -26,6 +26,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	toolReport           *workerToolReport // Serial check-in negotiation, shared by value copies.
 	nasInspection        *workerNASInspection
 	storageObserver      *storageObserver
 	hostMemorySamples    map[attemptKey]hostMemorySample
@@ -1061,6 +1062,7 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	w.toolReport = &workerToolReport{}
 	if w.rootMonitor == nil {
 		w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
 	}

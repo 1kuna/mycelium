@@ -112,6 +112,54 @@ On releases with #775, job GET and status retain `spec.authoring_origin`: `profi
 - **From the next fleet release:** running job/status reads include `liveness` on the job and its exact `copies` attempt: `advancing`, `idle` with `idle_seconds`, or `unknown`, plus CPU-time and work-directory byte values and each signal's age. This works without application progress or logs. Unknown includes older workers, missing/incomplete measurements and samples older than 30 seconds; never read it as idle. “Alive and advancing” is activity, not useful-progress or output proof; “alive but idle” alone does not justify killing/retrying a job.
 - For a long detached job, give it one stall check at about twice its expected duration, bound to your thread, verifying one thing (state or log growth), and delete it when done. If duration is unknown, record that uncertainty and a next owner for follow-up rather than inventing an ETA; use the foreground wait while this session owns completion.
 
+## Stage progress and honest ETA
+
+**Available from the next release:** report current-stage work through the existing
+`MYCE_PROGRESS_FILE` contract, without credentials or log parsing. For example,
+a two-stage CPU command can publish at each batch and stage transition:
+
+```python
+import json
+import os
+from pathlib import Path
+
+progress = Path(os.environ["MYCE_PROGRESS_FILE"])
+
+def report(stage, completed, total, unit, *, total_work_known=False):
+    temporary = progress.with_name(progress.name + ".tmp")
+    temporary.write_text(json.dumps({
+        "stage_index": stage, "stage_count": 2,
+        "completed": completed, "total": total, "unit": unit,
+        "total_work_known": total_work_known,
+    }))
+    os.replace(temporary, progress)
+
+report(1, 10, 10, "records")       # Stage one finished; job is still running.
+report(2, 0, 100, "iterations")    # Stage-two duration has no timing evidence.
+# Run refinement, reporting batches; write outputs and exit normally afterward.
+```
+
+Indices are one-based. Omit `stage_count` if later stages are not yet known;
+omit both stage fields if stage identity is unknown. `total_work_known` defaults
+false; a known stage total alone never makes the entire workload known. Set it
+true only when the complete workload across all stages is known. Counts remain
+stage-local, even then: unequal stages cannot be averaged into a job percentage.
+Rewrite at least every 30 seconds to keep reporting evidence fresh.
+
+Read `myce status JOB_ID` or Python `Client.get(JOB_ID)`: `application_progress`
+has stage index/count, work-known declaration, exact attempt, age and `stale`.
+`runtime` separately has elapsed and remaining time, source, sample count,
+history age and limitations. Missing timing stays unknown; completing stage one
+never yields zero whole-job remaining. Historical ETA must describe the complete
+pipeline under comparable workload/reference identities, not just its first
+stage. An exceeded estimate becomes unknown. See the
+[report contract](https://github.com/1kuna/mycelium/blob/main/docs/status.md#execution-elapsed-time-remaining-estimates-and-application-progress).
+
+Checkpoint `progress` is a durable generation number, not a percentage or ETA.
+Its existence does not prove that all stages or outputs are recoverable. Neither
+stage completion nor a checkpoint means job success or resource release: keep
+the same job ID, wait for success, and verify the usual results.
+
 ## Mycelium repository merge gates
 
 When working on Mycelium itself, require independent review and a passing fleet
@@ -188,7 +236,7 @@ queue-delayed check-ins alone do not renew a failed probe.
 1. Read its waiting reason: `myce status JOB_ID`. From the next release, reasons name reservations only on compatible targets, give the resolved RAM envelope against each eligible host's free memory, and explain missing protected network support or disallowed environment preparation. Device reservations permit CPU work when the host's RAM and cores fit. Repeated owner-latency preemptions on a shared host trigger a job-specific cooldown there; other eligible hosts remain available. A missing configured NAS mount names the affected root role and holds only work depending on it; healthy local/cached work can continue, and admission recovers automatically when the mount returns. Every waiting job has one: missing qualification, memory or resource needs, no available host, software preparation, or work ahead in the queue. **From the next release**, GPU contention says `device N shared with K attempts` or `card busy: waiting for GPU batch slot`, with holding job IDs and tiers or pending exact release; RAM figures on another eligible target no longer hide the card blocker. Owner pressure alone lets an otherwise qualified `require_target` submission queue with `shared host temporarily unavailable` until pressure clears; structural restrictions and impossible capacity still refuse.
    From the next release, an attempt refused by the queue's start fence records the predicate in its ledger and requeue history. That refusal spends no loss or infrastructure retry budget even if the fence clears before its failure report; a real transport or execution failure still uses the normal budget.
    From s070, a preparation blocker names the other job and environment, and distinguishes an offer awaiting a builder report from a started build or pending exact release. Ready work can fill an unready winner's slot until the existing priority/preparation rules take custody; after a priority stop, the selected target stays committed so preparation can progress. Report a persistent offer with no builder report on the Mycelium issue, with job and attempt identities; do not clear custody or retry a failed build blindly.
-2. Fix what's yours, in order: right-size needs using comparable accepted evidence, add portable targets, make the job resumable, and choose `deadline` plus a real date only when warranted. Submission, status and the initial CLI wait read include deadline guidance explaining policy precedence, blockers and ETA uncertainty. This is advice, not a deadline guarantee or an edit to accepted job intent; for an existing job's urgency, ask the queue owner rather than cancelling and resubmitting it.
+2. Fix what's yours, in order: right-size needs using comparable accepted evidence, add portable targets, make the job resumable, and choose `deadline` plus a real date only when warranted. Nonterminal submission/status and the initial CLI wait read may include deadline guidance explaining policy precedence, blockers and ETA uncertainty. This is advice, not a deadline guarantee or an edit to accepted job intent; for an existing job's urgency, ask the queue owner rather than cancelling and resubmitting it.
 3. Otherwise it's a hold with a next owner: record it on your ticket and keep other work moving. Running heavy work locally on a shared host instead isn't a fallback.
 4. If the reason looks wrong, or Mycelium itself failed, search the Mycelium issues for a duplicate, then update or file a sanitized one (expected versus observed, version, job and attempt id, minimal command). The repo is public: no secrets, private paths, host details or webhook URLs.
 
@@ -207,3 +255,15 @@ the installed-transport fix before calling a queue with a private TLS pin.
 `myce submit FILE` also uses installed credentials when `MYCE_TOKEN` is unset, including the installed queue address and TLS pin.
 
 Never open, print, copy or pass fleet credentials, and never set the fleet token yourself. Use the installed-authority CLI or `Client.from_installed()`, which resolve credentials internally; prefer the CLI for read-only status and result calls. A missing CLI or failed authority is a setup hold, not a reason to look for the token.
+
+## Diagnostic reference: one blocker
+
+With a client and queue containing #793's diagnostic changes, resolve, status and
+wait lead with one dependency, next owner and action. `unprepared` means no builder
+has started; `waiting_for_builder` means an offer or preparation capacity is still
+pending; only a fresh builder report says `building`. A deterministic failure keeps
+its recipe error: fix immutable inputs rather than retrying unchanged bytes.
+`resource_pressure` retains measured resource/reservation evidence;
+`unknown_observation` is a queue-owner hold to restore observations. Keep other
+work moving on a hold. CPU resolve shows CPU views, and successful waits omit
+urgency tutorials. Source placeholders marked `needs-staging` are uploaded by run.

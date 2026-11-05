@@ -13,6 +13,9 @@ Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
+On releases with inventory deltas, status omits full executable inventories. Use
+resolve/placement diagnostics for `needs.tools`; workers automatically refresh
+inventory after queue restart before qualifying tool-dependent work.
 
 This dependency-free CPU fixture uses only worker PATH tools (`sh`, `printf`,
 `cat`, `test`), not Python, Docker or a managed environment. From an empty project
@@ -96,6 +99,7 @@ On releases with adaptive observation admission (#800), healthy queues accept re
 
 ## Read before extending this fixture
 
+- **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
 - **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits.
 - **Large outputs, diagnostics, quotas or early release:** [results and custody](advanced.md#results). Release only your own terminal results after all downstream uses and verified copies are complete.
@@ -103,3 +107,5 @@ On releases with adaptive observation admission (#800), healthy queues accept re
 - **Blocked preparation or placement:** [diagnosis](advanced.md#when-a-job-waits).
 - **Real adapters, native variants or legacy formats:** [adapter contract](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md), [project setup and profile compatibility](setup-project.md), [harness routing](harness-binding.md).
 - **Mycelium repository changes:** [merge gates](advanced.md#mycelium-repository-merge-gates). Feature availability is version-dependent; see [release qualifiers](advanced.md).
+
+For a blocking dependency, next owner and action, see the [diagnostic reference](advanced.md#diagnostic-reference-one-blocker).
