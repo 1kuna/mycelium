@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -322,6 +323,27 @@ func TestModelFetchConcurrentBundleCreation(t *testing.T) {
 		done <- FetchModel(context.Background(), modelFetchURL, root, "bundle/nested/model.bin", 7, modelFetchHash("weights"))
 	}()
 	<-started // The first process holds the bundle lock before partial creation.
+	// A regular-file contender (the locking interface used by NAS clients)
+	// must contend on the same live lock, not an unrelated directory inode.
+	stages, err := filepath.Glob(filepath.Join(root, ".myce-fetch-*"))
+	if err != nil || len(stages) != 1 {
+		close(release)
+		<-done
+		t.Fatalf("staging = %v, %v", stages, err)
+	}
+	contender, err := os.OpenFile(filepath.Join(stages[0], "fetch.lock"), os.O_RDWR, 0)
+	if err != nil {
+		close(release)
+		<-done
+		t.Fatal(err)
+	}
+	err = syscall.Flock(int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	contender.Close()
+	if !errors.Is(err, syscall.EWOULDBLOCK) {
+		close(release)
+		<-done
+		t.Fatalf("regular-file lock contender = %v", err)
+	}
 	// Another fetch of the same file or another file in the bundle must refuse.
 	for _, relative := range []string{"bundle/nested/model.bin", "bundle/config.json"} {
 		err := FetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights"))

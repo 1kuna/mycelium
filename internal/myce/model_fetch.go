@@ -52,9 +52,10 @@ func fetchModel(ctx context.Context, raw, root, relative string, size int64, sum
 	if err = fetchMkdir(stage, syncDir); err != nil {
 		return err
 	}
-	// Lock the stable staging directory before inspecting or creating partials.
-	// Keep the directory after success so competing processes share one inode.
-	lock, err := os.Open(stage)
+	// A permanent regular file coordinates NAS clients too: directory flock
+	// can fall back to host-local locking on network filesystems. Never unlink
+	// this file, so every fetch contends on the same inode across publication.
+	lock, err := os.OpenFile(filepath.Join(stage, "fetch.lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return err
 	}
@@ -63,6 +64,9 @@ func fetchModel(ctx context.Context, raw, root, relative string, size int64, sum
 		return fmt.Errorf("model bundle fetch is in use; retry: %w", err)
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	if err = errors.Join(lock.Sync(), syncDir(stage)); err != nil {
+		return err
+	}
 	if err = ctx.Err(); err != nil {
 		return err
 	}
