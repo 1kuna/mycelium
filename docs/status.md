@@ -28,6 +28,12 @@ actually recovers; aging history alone cannot clear it. Pending adverse mount
 samples (`adverse`) are excluded from healthy baselines before confirmation.
 History serialization/fsync runs outside the mutex used by heartbeat snapshots.
 
+Workers send the additive health fields only after the queue advertises
+`host_hygiene_protocol: host-hygiene-v1`. A strict older queue receives the
+legacy shape; local evidence still persists and a confirmed local drain uses
+the existing leaving signal. A queue downgrade retries the legacy shape once
+after a strict-decoder rejection, preserving session and attempt custody.
+
 Drains withhold new command, model and preparation launches without changing
 operator maintenance, killing running work or discarding exact-attempt custody.
 `host_degraded` alerts carry the typed cause; existing stale-worker alerts carry
