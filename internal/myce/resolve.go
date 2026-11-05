@@ -304,11 +304,6 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 				row.Environment.State = "blocked"
 			}
 		}
-		if row.Environment != nil && row.Environment.State != "ready" {
-			if b := q.environmentBlocker(candidate, m); b != nil {
-				row.Environment.State = b.Code
-			}
-		}
 		rows[fit.key] = row
 		return true
 	})

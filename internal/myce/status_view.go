@@ -235,11 +235,15 @@ func JobWork(j *Job) string {
 // remains authoritative; only its generic no-fit explanation needs more detail.
 func (q *Queue) statusWaitingReason(j *Job) string {
 	j.Blocker = q.actionableBlocker(j)
+	return q.statusWaitingReasonDetail(j)
+}
+
+func (q *Queue) statusWaitingReasonDetail(j *Job) string {
 	reason := j.Reason
 	if rest, ok := strings.CutPrefix(reason, "requeued: disabled by operator; "); ok {
 		copy := *j
 		copy.Reason = rest
-		return "requeued after being disabled; " + q.statusWaitingReason(&copy)
+		return "requeued after being disabled; " + q.statusWaitingReasonDetail(&copy)
 	}
 	if strings.HasPrefix(reason, "waiting for an extension for ") {
 		return "no extension is installed for this " + statusWorkType(j)

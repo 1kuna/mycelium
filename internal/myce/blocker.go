@@ -105,16 +105,20 @@ func (q *Queue) actionableBlocker(j *Job) *Blocker {
 	if environment != nil {
 		return environment
 	}
-	reason := q.waitReason(j)
+	copy := *j
+	copy.Reason = q.waitReason(j)
+	reason := q.statusWaitingReasonDetail(&copy)
 	if key := j.Spec.Environment.Key(); key != "" {
 		reason = strings.ReplaceAll(reason, key, "required software")
 	}
 	b := &Blocker{"resource_pressure", "eligible execution capacity", "queue", "wait for the named capacity or reservation to be released; keep other work moving", reason}
 	if !dependencyReady(j) {
 		b.Code, b.Dependency, b.Owner, b.Action = "unprepared", "accepted upstream result", "producer", "complete and publish the required upstream result"
+	} else if strings.Contains(reason, "waiting for software preparation for job ") {
+		b.Code, b.Dependency, b.Owner, b.Action = "waiting_for_builder", "software preparation for the named queued job", "queue", "wait for the named preparation; ask the queue owner if its offer or exact release makes no progress"
 	} else if len(targets) == 0 || strings.Contains(reason, "unavailable") || strings.Contains(reason, "readings") || strings.Contains(reason, "unknown") && !strings.Contains(reason, "utilization unknown") {
 		b.Code, b.Owner, b.Action = "unknown_observation", "queue owner", "restore the missing observation named in the reason"
-	} else if strings.Contains(reason, "worker to pull") {
+	} else if strings.Contains(reason, "hypha to take") {
 		b.Code, b.Dependency, b.Action = "waiting_for_worker", "worker assignment", "wait for an eligible worker to take this job"
 	}
 	return b
