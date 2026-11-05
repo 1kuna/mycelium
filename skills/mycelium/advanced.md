@@ -208,6 +208,12 @@ The plan lists each job's files, what still protects them and `reclaimable_bytes
 
 ## When a job waits
 
+From the next release, `host_capacity_accumulation` names the ready accelerator
+job whose RAM/cores are being protected from new CPU backfill on one selected
+host. Running attempts finish normally; higher tiers, nonconflicting capacity
+and other hosts remain eligible. Unready environments, occupied GPU cards or
+impossible needs do not create this wait. Do not cancel/resubmit to bypass it.
+
 From s072, missing environments can prepare beside unrelated CPU commands on
 the same worker, including an accelerator worker, when one additional core is
 available. Mycelium reserves that builder core separately and preserves running

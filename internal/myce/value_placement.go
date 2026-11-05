@@ -180,6 +180,7 @@ type placementScan struct {
 
 	memoryIdentities map[*Job]string
 	memory           *memoryPlanningCache
+	hostBackfill     map[string]*hostBackfillDemand
 }
 
 func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
