@@ -1118,8 +1118,13 @@ func fileTransferError(res *http.Response, message string) error {
 		Code  string `json:"code"`
 		Error string `json:"error"`
 	}
-	if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && fileStoreRefusalCode(body.Code) {
-		return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error}
+	if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil {
+		if fileStoreRefusalCode(body.Code) {
+			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error}
+		}
+		if publicErrorCode(body.Code) || body.Code == "request_failed" {
+			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: message}
+		}
 	}
 
 	if res.StatusCode == 410 && res.Header.Get("X-Myce-Error-Code") == "result_expired" {

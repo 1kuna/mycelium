@@ -562,7 +562,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		defer c.HTTP.CloseIdleConnections()
 	}
 	if r.JobID == "" {
-		capacityFailure := func(cause error) error {
+		capacityFailure := func(operation, input string, cause error) error {
 			var h *myce.HTTPError
 			if errors.As(cause, &h) && (h.Code == "file_store_capacity" || h.Code == "project_file_store_quota") {
 				r.RefusalCode, r.RefusalReason = h.Code, h.Message
@@ -571,15 +571,22 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 				}
 				return profileFailure(out, &r, 75, h.Code+": "+h.Message)
 			}
-			return profileFailure(out, &r, 69, "queue_unavailable: input storage unconfirmed; intent retained")
+			if c.Token != "" {
+				input = strings.ReplaceAll(input, c.Token, "[redacted]")
+			}
+			detail := fmt.Sprintf("operation=%s input=%q %s", operation, input, myce.ClientErrorCause(cause))
+			if c.Token != "" {
+				detail = strings.ReplaceAll(detail, c.Token, "[redacted]")
+			}
+			return profileFailure(out, &r, 69, "queue_unavailable: input storage unconfirmed; "+detail+"; intent retained; rerunning the same command resumes from the receipt without duplicating anything")
 		}
 		ctx = myce.WithFileStoreSubmission(ctx, r.Spec)
 		if err = c.PreflightFileStore(ctx, r.Spec.StoredInputFiles()); err != nil {
-			return capacityFailure(err)
+			return capacityFailure("preflight", profileInputNames(r, p), err)
 		}
 		for name, file := range r.Uploads {
 			if err = c.UploadJobInput(ctx, filepath.Join(dir, file), profileUploadRef(r.Spec, name)); err != nil {
-				return capacityFailure(err)
+				return capacityFailure("upload", profileStorageInputName(name, p), err)
 			}
 		}
 		if r.Spec.Extension != "" {
@@ -599,7 +606,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		if e != nil {
 			var h *myce.HTTPError
 			if errors.As(e, &h) && h.Code == "project_file_store_quota" {
-				return capacityFailure(e)
+				return capacityFailure("submit", profileInputNames(r, p), e)
 			}
 			if errors.As(e, &h) {
 				if h.Code == "no_qualified_target" || h.Code == "job_environment_invalid" && h.PathDiagnostic != nil {
@@ -688,4 +695,27 @@ func profileUploadRef(s myce.Spec, name string) myce.FileRef {
 		return myce.FileRef{SHA256: input.SHA256, SizeBytes: input.SizeBytes}
 	}
 	return s.Files[name]
+}
+
+// Receipt keys use hashed destinations for legacy profiles; report the authored
+// input name rather than its frozen local filename or opaque storage key.
+func profileStorageInputName(name string, p executionProfile) string {
+	name = strings.TrimPrefix(name, "files/")
+	if name == ".myce-source.tar" {
+		return "source"
+	}
+	for dest := range p.Inputs {
+		if name == ".myce-inputs/"+profileHash(dest) {
+			return dest
+		}
+	}
+	return name
+}
+func profileInputNames(r profileReceipt, p executionProfile) string {
+	names := make([]string, 0, len(r.Uploads))
+	for name := range r.Uploads {
+		names = append(names, profileStorageInputName(name, p))
+	}
+	slices.Sort(names)
+	return strings.Join(names, ", ")
 }
