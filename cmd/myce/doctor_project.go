@@ -7,19 +7,20 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"mycelium/internal/myce"
 )
 
 type projectDoctorCheck struct {
-	Name   string `json:"name"`
-	State  string `json:"state"`
-	Owner  string `json:"owner,omitempty"`
-	Action string `json:"action"`
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	Owner    string `json:"owner,omitempty"`
+	Action   string `json:"action"`
+	Evidence string `json:"evidence,omitempty"`
 }
 
 // Project diagnosis shares run's decoder/source contract and resolve's read-only
@@ -49,7 +50,15 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	}
 	checks := []projectDoctorCheck{{Name: "client support", State: "ready", Action: "project doctor, adapter schema 1 and read-only resolve are supported"}}
 	add := func(name, state, owner, action string) {
-		checks = append(checks, projectDoctorCheck{name, state, owner, action})
+		checks = append(checks, projectDoctorCheck{Name: name, State: state, Owner: owner, Action: action})
+	}
+	addFinding := func(prefix string, finding myce.ResolveFinding) {
+		state, owner := "advice", "consumer"
+		if b := myce.ResolveFindingBlocker([]myce.ResolveFinding{finding}); b != nil {
+			state, owner = "blocked", b.Owner
+		}
+		add(prefix+finding.Field, state, owner, finding.Fix)
+		checks[len(checks)-1].Evidence = finding.Problem
 	}
 	finish := func() error {
 		blocked := slices.ContainsFunc(checks, func(c projectDoctorCheck) bool { return c.State == "blocked" })
@@ -80,6 +89,9 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 				fmt.Fprintf(out, "  %s: %s — %s", c.Name, c.State, c.Action)
 				if c.Owner != "" {
 					fmt.Fprintf(out, " (owner: %s)", c.Owner)
+				}
+				if c.Evidence != "" {
+					fmt.Fprintf(out, "; %s", c.Evidence)
 				}
 				fmt.Fprintln(out)
 			}
@@ -123,12 +135,12 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	}
 	a, err := decodeAdapter(data)
 	if err != nil {
-		add("adapter", "blocked", "consumer", "fix adapter YAML/schema with myce spec check --resolve --entry NAME FILE")
+		add("adapter", "blocked", "consumer", "fix adapter YAML/schema: "+err.Error())
 		return finish()
 	}
 	p, _, err := adapterProfile(a, *entry)
 	if err != nil {
-		add("adapter", "blocked", "consumer", "select an existing entry and fix its run, targets and result-check declaration")
+		add("adapter", "blocked", "consumer", "select an existing entry and fix its declaration: "+err.Error())
 		return finish()
 	}
 	adapterPath, _ := filepath.Abs(*adapter)
@@ -138,6 +150,7 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	add("adapter", "ready", "", "selected entry is valid")
 	if _, _, err := identifyProfileSource(ctx, root, p.Source); err != nil {
 		add("source cleanliness", "blocked", "consumer", "commit selected Git HEAD source changes, or fix the declared readable source; live adapter edits and receipts are excluded as in run")
+		checks[len(checks)-1].Evidence = err.Error()
 	} else {
 		add("source cleanliness", "ready", "", "source satisfies run's source contract")
 	}
@@ -148,12 +161,19 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	} else {
 		add("completion", "ready", "", "notifier executable exists; delivery and application result checks are not executed by doctor")
 	}
-	for name, path := range p.Inputs {
+	if len(p.Check) == 0 && p.Native == nil {
+		add("result acceptance", "advice", "consumer", "declare checks.result to verify application output after download; doctor does not execute it")
+	} else {
+		add("result acceptance", "ready", "", "result checks are declared; doctor does not execute them")
+	}
+	for _, name := range slices.Sorted(maps.Keys(p.Inputs)) {
+		path := p.Inputs[name]
 		if !projectFileReadable(root, path) {
 			add("dependencies: inputs."+name, "blocked", "consumer", "make this input a readable regular file before run")
 		}
 	}
-	for name, input := range p.SharedInputs {
+	for _, name := range slices.Sorted(maps.Keys(p.SharedInputs)) {
+		input := p.SharedInputs[name]
 		if input.Local != "" && !projectFileReadable(root, input.Local) {
 			add("dependencies: shared_inputs."+name, "blocked", "consumer", "make the declared local shared input readable before run")
 		}
@@ -161,16 +181,17 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	request, local, err := resolveInput(*adapter, "", *entry, true)
 	if err != nil {
 		add("dependencies", "blocked", "consumer", "correct the selected entry and make its source and local dependencies readable")
+		checks[len(checks)-1].Evidence = err.Error()
 		return finish()
 	}
 	if request.Recipe == nil {
 		if err := request.Spec.Validate(); err != nil {
-			add("adapter", "blocked", "consumer", "correct the entry job fields using myce spec check --resolve")
+			add("adapter", "blocked", "consumer", "correct the entry job fields: "+err.Error())
 			return finish()
 		}
 	}
 	for _, finding := range local.findings {
-		add("dependencies: "+finding.Field, projectFindingState(finding), "consumer", finding.Fix)
+		addFinding("dependencies: ", finding)
 	}
 	if len(local.findings) == 0 {
 		add("dependencies", "ready", "", "local resolve checks passed; run stages local inputs and source automatically")
@@ -191,11 +212,21 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	}
 	add("server support", "ready", "", "queue accepts this client's read-only resolve request")
 	for _, finding := range report.Findings {
-		owner := "consumer"
-		if finding.Side == "queue" && finding.PathDiagnostic != nil {
-			owner = "queue owner"
+		addFinding("resolve: ", finding)
+	}
+	if b := report.Blocker; b != nil {
+		state := "blocked"
+		if b.Code == "unprepared" && b.Owner == "queue" || b.Code == "building" || b.Code == "waiting_for_worker" {
+			state = "advice"
 		}
-		add("resolve: "+finding.Field, projectFindingState(finding), owner, finding.Fix)
+		add("resolve: "+b.Dependency, state, b.Owner, b.Action)
+		checks[len(checks)-1].Evidence = b.Evidence
+	}
+	for _, name := range slices.Sorted(maps.Keys(request.Spec.SharedInputs)) {
+		input := request.Spec.SharedInputs[name]
+		if input.NAS != "" {
+			add("dependencies: shared_inputs."+name+".nas", "blocked", "storage owner", "verify worker readability and immutable bytes at the declared NAS path, or stage through managed file transport; doctor does not inspect worker NAS")
+		}
 	}
 	for _, input := range report.FileInputs {
 		if input.State == "unknown" {
@@ -203,20 +234,24 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 		}
 	}
 	if !slices.ContainsFunc(report.Targets, func(t myce.ResolveTarget) bool { return t.Eligible }) {
-		add("target coverage", "blocked", "queue owner", "restore a compatible qualified target; inspect myce spec check --resolve for the exact failing constraint")
+		if b := report.Blocker; b != nil {
+			add("target coverage", "blocked", b.Owner, b.Action)
+			checks[len(checks)-1].Evidence = b.Evidence
+		} else {
+			add("target coverage", "blocked", "queue owner", "restore a compatible qualified target or correct the declared needs")
+			for _, target := range report.Targets {
+				if target.Reason != "" {
+					checks[len(checks)-1].Evidence = target.Reason
+					break
+				}
+			}
+		}
 	} else {
 		add("target coverage", "ready", "", "at least one eligible target; current load may delay launch and submit revalidates")
 	}
 	// Resolve findings are the source of remedies; never render arbitrary remote
 	// errors, installed addresses, command/environment bytes or notifier paths.
 	return finish()
-}
-
-func projectFindingState(f myce.ResolveFinding) string {
-	if f.Field == "source" || strings.HasPrefix(f.Field, "run.command[") || strings.HasPrefix(f.Field, "args[") || f.Field == "allowed_machines" && strings.Contains(f.Problem, "host pin limits") {
-		return "advice"
-	}
-	return "blocked"
 }
 
 func projectFileReadable(root, path string) bool {

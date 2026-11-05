@@ -1606,3 +1606,32 @@ placement compatibility, not immediate capacity. `needs-staging` for a local sou
 placeholder is normal: the following run stages it automatically. A successful
 wait/status omits deadline-policy tutorials and empty blockers. These changes
 require the matching client and queue release; they are not rollout evidence.
+
+## Read-only consumer project doctor
+
+On a matching client/queue release, `myce doctor --project` diagnoses the selected
+`.mycelium/adapter.yaml` entry without installation probes or changes. Use
+`--adapter FILE`, `--entry NAME`, `--notify EXECUTABLE` and `--json` as needed.
+Ordinary `myce doctor` retains its installation diagnosis.
+
+Project mode checks installed authority internally, authenticated API/resolve
+support, strict adapter validity, run's selected-source cleanliness contract,
+local dependency readability, resolve findings, target coverage and completion
+configuration. It leads with ready/blocked, the next owner and one action;
+blocking checks exit 1, invalid options exit 2. Findings retain their evidence
+and fixes. Queue-side unreadable locks remain queue-owner holds. Current resource
+pressure, failed preparation, missing builders and unknown observations reuse
+resolve's blocker. Cold environments with an available builder can be submitted
+normally; target eligibility still does not promise immediate capacity.
+
+No notifier is a valid foreground `myce wait` workflow, explicitly distinguished
+from a supplied missing/non-executable notifier. Doctor checks an executable's
+presence only; it does not run notifier checks or prove delivery/thread ownership.
+Result checks are reported without execution. Worker NAS readability is an
+explicit storage-owner verification hold: doctor does not request NAS inspection.
+Managed source/input placeholders are staged by the subsequent run.
+
+Only authenticated ping and read-only resolve requests are made. No upload,
+preparation, reservation, adapter/receipt write or service edit occurs. Authority
+and raw transport errors are not printed. This is diagnosis, not execution or
+release verification; submit revalidates and results still need acceptance checks.

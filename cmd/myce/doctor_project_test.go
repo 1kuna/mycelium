@@ -41,7 +41,7 @@ func doctorCPUProject(t *testing.T) string {
 func TestProjectDoctorReadyCPUReadOnly(t *testing.T) {
 	root := doctorCPUProject(t)
 	q, _, _, _ := waitQueue(t)
-	_, err := q.Checkin(myce.Checkin{Machine: myce.Machine{ID: "cpu-worker", Session: "session", GPU: "cpu", CapabilityProfile: &myce.CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 16 << 30}, Capabilities: []string{"native_isolation_landlock", "native_isolation_seatbelt"}, HostMemoryMeasured: true, HostAvailableMemoryGB: 12}})
+	_, err := q.Checkin(myce.Checkin{Machine: myce.Machine{ID: "cpu-worker", Session: "session", GPU: "cpu", CPUIsolation: "select-none", CapabilityProfile: &myce.CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 16 << 30}, Capabilities: []string{"native_isolation_landlock", "native_isolation_seatbelt"}, HostMemoryMeasured: true, HostAvailableMemoryGB: 12}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestProjectDoctorReadyCPUReadOnly(t *testing.T) {
 }
 
 func TestProjectDoctorHoldsAndCompletion(t *testing.T) {
-	for _, scenario := range []string{"missing authority", "queue lock", "missing notifier", "old server", "missing input", "dirty source"} {
+	for _, scenario := range []string{"missing authority", "queue lock", "missing notifier", "old server", "missing input", "dirty source", "failed preparation", "resource pressure", "cold environment", "unknown observation", "NAS unverified", "target constraint"} {
 		t.Run(scenario, func(t *testing.T) {
 			doctorCPUProject(t)
 			body, _ := os.ReadFile(".mycelium/adapter.yaml")
@@ -87,6 +87,13 @@ func TestProjectDoctorHoldsAndCompletion(t *testing.T) {
 			want := "queue owner"
 			if scenario == "missing notifier" {
 				args = append(args, "--notify", "missing-hook")
+				want = "consumer"
+			}
+			if scenario == "NAS unverified" {
+				body = []byte(strings.Replace(string(body), "    run:", "    shared_inputs: {data: {nas: data.bin, sha256: '"+strings.Repeat("a", 64)+"', size_bytes: 3}}\n    run:", 1))
+				want = "storage owner"
+			}
+			if scenario == "failed preparation" {
 				want = "consumer"
 			}
 			if scenario == "missing input" {
@@ -125,6 +132,18 @@ func TestProjectDoctorHoldsAndCompletion(t *testing.T) {
 				if scenario == "queue lock" {
 					report.Findings = []myce.ResolveFinding{{Field: "environment.lock_file", Side: "queue", Problem: "queue cannot read lock", Fix: "ask the queue owner to make the lock readable, or use a library recipe", PathDiagnostic: &myce.PathDiagnostic{Side: "queue"}}}
 				}
+				switch scenario {
+				case "failed preparation":
+					report.Blocker = &myce.Blocker{Code: "deterministically_failed", Dependency: "environment", Owner: "consumer", Action: "fix immutable recipe", Evidence: "package version is unavailable"}
+				case "resource pressure":
+					report.Blocker = &myce.Blocker{Code: "resource_pressure", Dependency: "host memory", Owner: "queue owner", Action: "wait for memory", Evidence: "requires 4 GiB; available 0.5 GiB"}
+				case "cold environment":
+					report.Blocker = &myce.Blocker{Code: "unprepared", Dependency: "environment", Owner: "queue", Action: "submit normally"}
+				case "unknown observation":
+					report.Blocker = &myce.Blocker{Code: "unknown_observation", Dependency: "inventory", Owner: "queue owner", Action: "restore observations"}
+				case "target constraint":
+					report.Targets = []myce.ResolveTarget{{Reason: "requires linux/arm64; no matching target"}}
+				}
 				json.NewEncoder(w).Encode(report)
 			}))
 			defer server.Close()
@@ -136,6 +155,18 @@ func TestProjectDoctorHoldsAndCompletion(t *testing.T) {
 				}
 				return myce.Client{URL: server.URL, Token: "fixture-secret"}, nil
 			})
+			if scenario == "cold environment" {
+				if err != nil || !strings.Contains(out.String(), `"state":"ready"`) {
+					t.Fatalf("%v %s", err, &out)
+				}
+				return
+			}
+			if scenario == "failed preparation" && !strings.Contains(out.String(), "package version is unavailable") {
+				t.Fatal(out.String())
+			}
+			if scenario == "target constraint" && !strings.Contains(out.String(), "requires linux/arm64") {
+				t.Fatal(out.String())
+			}
 			if exitCode(err) != 1 || !strings.Contains(out.String(), `"state":"blocked"`) || !strings.Contains(out.String(), `"owner":"`+want+`"`) {
 				t.Fatalf("%v want=%s output=%s", err, want, &out)
 			}
@@ -145,5 +176,13 @@ func TestProjectDoctorHoldsAndCompletion(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProjectDoctorHelpDoesNotProbe(t *testing.T) {
+	var out bytes.Buffer
+	err := projectDoctorWithAuthority(context.Background(), []string{"--project", "--help"}, io.Discard, &out, func(clientFlags) (myce.Client, error) { t.Fatal("help loaded authority"); return myce.Client{}, nil })
+	if err != nil || !strings.Contains(out.String(), "-adapter") {
+		t.Fatalf("%v %s", err, &out)
 	}
 }
