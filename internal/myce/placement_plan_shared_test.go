@@ -573,16 +573,16 @@ func TestSharedDeviceMultiCardDemandStopsEveryCoTenant(t *testing.T) {
 	}
 }
 
-// A host-only hint leaves a unified GPU job's device figure at the 1 GiB
-// default, which no one stated or measured; that job keeps its card.
+// A host-only hint cannot bound device demand. The unified physical probe
+// reserves the available card and shared host headroom; it keeps its card.
 func TestSharedDeviceUnifiedDeviceDefaultKeepsCard(t *testing.T) {
 	q, _ := fixture(t)
 	m := sharedUnifiedMachine()
 	s := plainGPUSpec()
 	s.Needs.HostMemoryGB = 4 // `--host-mem 4G` without --mem.
 	first := assignGPU(t, q, m, submit(t, q, s))
-	if e := first.MemoryEnvelope; e == nil || e.Basis != "hint" || e.DeviceGB != 1 {
-		t.Fatalf("fixture no longer charges the unified device default: %+v", e)
+	if e := first.MemoryEnvelope; e == nil || e.Basis != "hint" || e.DeviceGB != m.Devices[0].BudgetGB {
+		t.Fatalf("fixture no longer reserves the unmeasured card: %+v", e)
 	}
 	if err := q.Started(result(first, false)); err != nil {
 		t.Fatal(err)

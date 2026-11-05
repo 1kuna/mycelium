@@ -289,9 +289,9 @@ func TestInventoryReviewUnifiedLocalProbe(t *testing.T) {
 					}
 					return nil, exec.ErrNotFound
 				}}
-				reserve := 4.0
+				reserve := 0.0
 				if platform == "cuda" {
-					p.OS, p.Arch, reserve = "linux", "arm64", 16
+					p.OS, p.Arch = "linux", "arm64"
 					p = withCUDAFacts(p, true, 1)
 					read := p.ReadFile
 					p.ReadFile = func(path string) ([]byte, error) {
@@ -302,10 +302,6 @@ func TestInventoryReviewUnifiedLocalProbe(t *testing.T) {
 					}
 				}
 				w := Worker{Machine: Machine{GPU: platform, FreeMemoryGB: cap}}
-				// GB10 reserves 16 GiB; use an allowance above that reserve.
-				if platform == "cuda" && cap > 0 {
-					w.Machine.FreeMemoryGB = 18
-				}
 				devices, err := w.localInventoryWithProbe(context.Background(), p)
 				if err != nil || len(devices) != 1 {
 					t.Fatalf("inventory: %v %v", devices, err)
@@ -317,10 +313,7 @@ func TestInventoryReviewUnifiedLocalProbe(t *testing.T) {
 				if d := devices[0]; d.Platform != platform || d.BudgetGB != want || d.FreeMemoryGB != want || d.Reason != "" {
 					t.Fatalf("unified capacity: %+v, want %g", d, want)
 				}
-				available = 17
-				if platform == "metal" {
-					available = 10
-				}
+				available = 10 // Measured free RAM below the explicit 12 GiB cap.
 				devices, err = w.localInventoryWithProbe(context.Background(), p)
 				if err != nil || devices[0].FreeMemoryGB != float64(available)-reserve {
 					t.Fatalf("live memory did not apply below cap: %+v %v", devices, err)

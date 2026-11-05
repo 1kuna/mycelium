@@ -85,13 +85,16 @@ func TestQueuedReasonNetworkPreparationAndMemory(t *testing.T) {
 	s := cpuSpec(1, 0)
 	s.Needs.Memory, s.Needs.Network, s.Isolation = "auto", true, "sandboxed"
 	s.Environment.Name = "download-tools"
+	// A cold probe now fits a small host's measured headroom. State an actual
+	// lower requirement so this fixture still has a RAM shortage to explain.
+	s.Needs.HostMemoryGB = 1
 	j := submit(t, q, s)
 	clock.Advance(time.Second)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
 	for _, reason := range []string{job(t, q, j.ID).Reason, q.statusWaitingReason(job(t, q, j.ID))} {
-		for _, want := range []string{"partial: needs.network: true requires native_network", "interactive: environment not prepared on this shared host", "full: RAM envelope:", "GiB needed, 0.5 GiB available", "exploratory"} {
+		for _, want := range []string{"partial: needs.network: true requires native_network", "interactive: environment not prepared on this shared host", "full: RAM envelope:", "GiB needed, 0.5 GiB available", "hint"} {
 			if !strings.Contains(reason, want) {
 				t.Errorf("missing %q: %s", want, reason)
 			}
