@@ -19,6 +19,7 @@ type queuePressure struct {
 	since    time.Time
 	quiet    bool
 	samples  uint64
+	epoch    uint64  // invalidates read-cost samples across contention, including recovered waits
 	baseline float64 // nanoseconds, incremental mean; fixed space
 }
 
@@ -29,6 +30,7 @@ func (p *queuePressure) wait() *queuePressureWait {
 	defer p.mu.Unlock()
 	w := &queuePressureWait{contended: p.holders != 0 || len(p.waiting) != 0}
 	if w.contended {
+		p.epoch++
 		p.quiet = false
 	}
 	p.waiting[w] = p.clock.Now()
@@ -38,6 +40,9 @@ func (p *queuePressure) wait() *queuePressureWait {
 func (p *queuePressure) acquired(w *queuePressureWait) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if started, ok := p.waiting[w]; ok && p.samples != 0 && float64(p.clock.Now().Sub(started)) > p.baseline {
+		p.epoch++
+	}
 	delete(p.waiting, w)
 	if p.holders == 0 {
 		p.since = p.clock.Now()
@@ -61,6 +66,10 @@ func (p *queuePressure) release() {
 }
 
 func (p *queuePressure) pressure() (bool, time.Duration) {
+	pressure, delay, _ := p.measurement()
+	return pressure, delay
+}
+func (p *queuePressure) measurement() (bool, time.Duration, uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var wait time.Duration
@@ -68,5 +77,5 @@ func (p *queuePressure) pressure() (bool, time.Duration) {
 	for _, started := range p.waiting {
 		wait = max(wait, now.Sub(started))
 	}
-	return p.samples != 0 && float64(wait) > p.baseline, wait
+	return p.samples != 0 && float64(wait) > p.baseline, wait, p.epoch
 }

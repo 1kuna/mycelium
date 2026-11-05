@@ -29,6 +29,7 @@ type observationRead struct {
 	tier, scope int
 	started     time.Time
 	healthy     bool
+	epoch       uint64
 }
 
 func newObservationLimit(clock Clock, q *Queue) *observationLimit {
@@ -70,7 +71,7 @@ func observationRouteClass(r *http.Request) string {
 		return "portability"
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/jobs/") {
-		if r.URL.Query().Get("view") == "wait" {
+		if id, _ := strings.CutPrefix(r.URL.Path, "/api/jobs/"); id != "" && !strings.Contains(id, "/") && r.URL.Query().Get("view") == "wait" {
 			return "job_wait"
 		}
 		return "job_full"
@@ -124,7 +125,7 @@ func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func()
 	}
 	read := &observationRead{route: route, tier: tier, scope: observationScope(route), started: l.clock.Now()}
 	l.mu.Lock()
-	pressure, delay := l.pressure.pressure()
+	pressure, delay, epoch := l.pressure.measurement()
 	var best *observationRead
 	for active := range l.active {
 		if best == nil || l.better(active, best) {
@@ -144,14 +145,15 @@ func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func()
 		return nil, false
 	}
 	read.healthy = !pressure
+	read.epoch = epoch
 	l.active[read] = struct{}{}
 	l.mu.Unlock()
 	return func() {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 		delete(l.active, read)
-		pressure, _ := l.pressure.pressure()
-		if d := l.clock.Now().Sub(read.started); read.healthy && !pressure && d > 0 {
+		pressure, _, epoch := l.pressure.measurement()
+		if d := l.clock.Now().Sub(read.started); read.healthy && !pressure && read.epoch == epoch && d > 0 {
 			cost := l.costs[route]
 			cost.samples++
 			cost.mean += (float64(d) - cost.mean) / float64(cost.samples)

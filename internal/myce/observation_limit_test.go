@@ -220,76 +220,78 @@ func TestObservationLimitProductionHTTPAndPolicy(t *testing.T) {
 // separately by BenchmarkWaitIndex200; here the expensive reads must all be shed
 // before reaching the handler or queue lock once measured pressure is present.
 func BenchmarkObservationLimitFlood200(b *testing.B) {
-	for _, size := range []struct {
-		hosts, jobs int
-		latency     time.Duration
-	}{{2, 4, time.Microsecond}, {200, 6500, 50 * time.Millisecond}} {
-		b.Run(fmt.Sprint(size.hosts), func(b *testing.B) {
-			clock := &workerFakeClock{now: time.Unix(1, 0)}
-			q, err := Open(filepath.Join(b.TempDir(), "queue.db"), b.TempDir(), clock, WithCheckpointAvailability(func() bool { return true }))
-			if err != nil {
-				b.Fatal(err)
-			}
-			defer q.Close()
-			for i := range size.hosts {
-				id := fmt.Sprintf("host-%d", i)
-				q.s.Machines[id] = &Machine{ID: id}
-			}
-			for i := range size.jobs {
-				id := fmt.Sprintf("job-%08d", i)
-				q.s.Jobs[id] = &Job{ID: id, State: "queued", Spec: spec("experiment")}
-			}
-			handler := (API{Queue: q, Token: "fixture"}).handler("", clock)
-			active := holdObservationHTTP(b, handler, "/api/jobs/job-00000000?view=wait")
-			defer active()
-			q.mu.Lock()
-			clock.Advance(size.latency)
-			q.mu.Unlock()
-			// A real control acquisition queued behind the occupied queue mutex. The
-			// in-flight HTTP read and all 200 incoming requests use the actual API.
-			q.mu.Lock()
-			acquired := make(chan struct{})
-			go func() { unlock := requestLock(context.Background(), &q.mu); unlock(); close(acquired) }()
-			p := q.mu.pressure.Load()
-			for {
+	for _, floodPath := range []string{"/api/inspection", "/api/jobs/job-0000"} {
+		for _, size := range []struct {
+			hosts, jobs int
+			latency     time.Duration
+		}{{2, 4, time.Microsecond}, {200, 6500, 50 * time.Millisecond}} {
+			b.Run(fmt.Sprintf("%d%s", size.hosts, floodPath), func(b *testing.B) {
+				clock := &workerFakeClock{now: time.Unix(1, 0)}
+				q, err := Open(filepath.Join(b.TempDir(), "queue.db"), b.TempDir(), clock, WithCheckpointAvailability(func() bool { return true }))
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer q.Close()
+				for i := range size.hosts {
+					id := fmt.Sprintf("host-%d", i)
+					q.s.Machines[id] = &Machine{ID: id}
+				}
+				for i := range size.jobs {
+					id := fmt.Sprintf("job-%08d", i)
+					q.s.Jobs[id] = &Job{ID: id, State: "queued", Spec: spec("experiment")}
+				}
+				handler := (API{Queue: q, Token: "fixture"}).handler("", clock)
+				active := holdObservationHTTP(b, handler, "/api/jobs/job-00000000?view=wait")
+				defer active()
+				q.mu.Lock()
+				clock.Advance(size.latency)
+				q.mu.Unlock()
+				// A real control acquisition queued behind the occupied queue mutex. The
+				// in-flight HTTP read and all 200 incoming requests use the actual API.
+				q.mu.Lock()
+				acquired := make(chan struct{})
+				go func() { unlock := requestLock(context.Background(), &q.mu); unlock(); close(acquired) }()
+				p := q.mu.pressure.Load()
+				for {
+					p.mu.Lock()
+					pending := len(p.waiting)
+					p.mu.Unlock()
+					if pending > 0 {
+						break
+					}
+					runtime.Gosched()
+				}
+				clock.Advance(size.latency + time.Nanosecond)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					var wg sync.WaitGroup
+					for range 200 {
+						wg.Go(func() {
+							r := httptest.NewRequest("GET", floodPath, nil)
+							r.Header.Set("Authorization", "Bearer fixture")
+							w := httptest.NewRecorder()
+							handler.ServeHTTP(w, r)
+							if w.Code != http.StatusTooManyRequests {
+								b.Error("flood reached expensive handler", w.Code)
+							}
+						})
+					}
+					wg.Wait()
+				}
+				b.StopTimer()
 				p.mu.Lock()
 				pending := len(p.waiting)
 				p.mu.Unlock()
-				if pending > 0 {
-					break
+				q.mu.Unlock()
+				<-acquired
+				if pending != 1 {
+					b.Fatal("flood added queue work", pending)
 				}
-				runtime.Gosched()
-			}
-			clock.Advance(size.latency + time.Nanosecond)
-			b.ReportAllocs()
-			b.ResetTimer()
-			for range b.N {
-				var wg sync.WaitGroup
-				for range 200 {
-					wg.Go(func() {
-						r := httptest.NewRequest("GET", "/api/inspection", nil)
-						r.Header.Set("Authorization", "Bearer fixture")
-						w := httptest.NewRecorder()
-						handler.ServeHTTP(w, r)
-						if w.Code != http.StatusTooManyRequests {
-							b.Error("flood reached expensive handler", w.Code)
-						}
-					})
-				}
-				wg.Wait()
-			}
-			b.StopTimer()
-			p.mu.Lock()
-			pending := len(p.waiting)
-			p.mu.Unlock()
-			q.mu.Unlock()
-			<-acquired
-			if pending != 1 {
-				b.Fatal("flood added queue work", pending)
-			}
-			b.ReportMetric(0, "added-lock-waits/200")
-			b.ReportMetric(200, "shed/200")
-		})
+				b.ReportMetric(0, "added-lock-waits/200")
+				b.ReportMetric(200, "shed/200")
+			})
+		}
 	}
 }
 
@@ -324,4 +326,129 @@ func holdObservationHTTP(t testing.TB, handler http.Handler, path string) func()
 		t.Fatal("observation did not enter response")
 	}
 	return func() { close(w.release); <-done }
+}
+
+// A keyed production answer remains readable after history pruning and restart.
+func TestObservationLimitRetainedProductionLedger(t *testing.T) {
+	q, clock := fixture(t)
+	s := spec("production")
+	s.SubmissionKey = "retained-production"
+	j := submit(t, q, s)
+	assigned := check(t, q, machine("one", "fake"), nil).Job
+	finish(t, q, assigned, true)
+	observer := submit(t, q, spec("experiment"))
+	l := newObservationLimit(clock, q)
+	clock.Advance(jobHistoryRetention)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.Jobs[j.ID] != nil {
+		t.Fatal("fixture was not pruned")
+	}
+	for _, restart := range []bool{false, true} {
+		if restart {
+			q = reopenCancellationQueue(t, q, clock)
+			l = newObservationLimit(clock, q)
+		}
+		if _, err := q.JobLedger(j.ID, 0, 0, 10); err != nil {
+			t.Fatal("retained ledger missing", err)
+		}
+		busy, _ := observationAdmit(l, "/api/jobs/"+observer.ID+"?view=wait")
+		recover := observationPressure(l, clock, time.Millisecond)
+		done, w := observationAdmit(l, "/api/jobs/"+j.ID+"/ledger")
+		if done != nil {
+			done()
+		}
+		recover()
+		busy()
+		if w.Code != 200 {
+			t.Errorf("retained production shed (restart=%v): %d", restart, w.Code)
+		}
+	}
+	clock.Advance(submissionRetention)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if _, protected := l.index.observationPriority(j.ID); protected {
+		t.Fatal("expired intent retained")
+	}
+}
+
+func TestObservationLimitIgnoredViewDoesNotPromoteDiagnostics(t *testing.T) {
+	_, clock, l := adaptiveObservationFixture(t, 1, 4)
+	busy, _ := observationAdmit(l, "/api/jobs/selected-experiment")
+	defer busy()
+	recover := observationPressure(l, clock, time.Millisecond)
+	defer recover()
+	for _, resource := range []string{"logs", "ledger"} {
+		done, w := observationAdmit(l, "/api/jobs/selected-experiment/"+resource+"?view=wait")
+		if done != nil {
+			done()
+		}
+		if w.Code != 429 {
+			t.Errorf("ignored view promoted %s: %d", resource, w.Code)
+		}
+	}
+	done, w := observationAdmit(l, "/api/jobs/selected-experiment?view=wait")
+	if done != nil {
+		done()
+	}
+	if w.Code != 200 {
+		t.Fatal("scalar wait lost priority", w.Code)
+	}
+}
+
+func TestObservationLimitDoesNotLearnTransientPressureAsCost(t *testing.T) {
+	_, clock, l := adaptiveObservationFixture(t, 2, 4)
+	for _, sample := range []struct {
+		path string
+		cost time.Duration
+	}{
+		{"/api/status", time.Millisecond}, {"/api/inspection", 3 * time.Millisecond},
+	} {
+		done, _ := observationAdmit(l, sample.path)
+		clock.Advance(sample.cost)
+		done()
+	}
+	delayed, _ := observationAdmit(l, "/api/status")
+	recover := observationPressure(l, clock, time.Millisecond)
+	clock.Advance(time.Second)
+	// No admission/completion samples the pressure during this request.
+	recover()
+	delayed()
+	expensive, _ := observationAdmit(l, "/api/inspection")
+	defer expensive()
+	recover = observationPressure(l, clock, time.Millisecond)
+	defer recover()
+	cheap, w := observationAdmit(l, "/api/status")
+	if cheap != nil {
+		cheap()
+	}
+	if w.Code != 200 {
+		t.Fatal("queue wait poisoned healthy cost ordering", w.Code)
+	}
+}
+
+func TestObservationLimitPrefixPriorityUpdates(t *testing.T) {
+	q, _, l := adaptiveObservationFixture(t, 2, 6500)
+	prefix := "job-0000"
+	if _, protected := l.index.observationPriority(prefix); protected {
+		t.Fatal("nonproduction prefix protected")
+	}
+	id := "job-00000000"
+	if err := q.update(func() error { q.touchJob(id).Spec = spec("production"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, protected := l.index.observationPriority(prefix); !protected {
+		t.Fatal("production prefix not protected")
+	}
+	if err := q.update(func() error { q.deleteJob(id); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, protected := l.index.observationPriority(prefix); protected {
+		t.Fatal("removed production still protects prefix")
+	}
+	if tier, protected := l.index.observationPriority("job-00000001"); protected || tier != 2 {
+		t.Fatal("remaining exact priority", tier, protected)
+	}
 }

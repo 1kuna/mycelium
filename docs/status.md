@@ -1487,8 +1487,11 @@ queue without a positive baseline admits observations while it learns.
 During pressure, admission compares incoming observations with the highest-value
 observation already in flight. Higher scheduler tiers precede lower tiers;
 selected-job scalar waits precede detailed job reads, then broad fleet projections.
+An ignored `view=wait` query on a diagnostic subresource grants no scalar priority.
 Within the same tier/scope, the running installation's mean completed healthy
-request cost determines the order. Unknown cost cannot claim to be cheaper.
+request cost determines the order. Requests spanning contention cannot teach a
+healthy cost, even if pressure clears before they complete. Unknown cost cannot
+claim to be cheaper.
 Only a higher-value read crosses that frontier; equal/lower-value reads receive
 HTTP 429 `client_rate_limited` before projection work. If no observation remains
 in flight, one request can measure recovery. As soon as live lock wait clears,
@@ -1498,7 +1501,10 @@ This is progress-based admission, not a fixed concurrency allowance.
 Production-class job observation (including production policy tiers, prefixes,
 HEAD and job subresources) is never shed. Class comes from committed scalar
 intent and current immutable policy, never User-Agent or request headers; the
-classification read does not take the control mutex. Batched scalar waits are
+classification read does not take the control mutex. Keyed production ledgers
+retain protection through history pruning and restart until their durable answer
+expires. Prefix classification follows an index of precomputed priorities rather
+than scanning retained jobs. Batched scalar waits are
 also exempt because they use their independent committed index and do not delay
 control. All worker protocol, launch/report, file transfer, instruction/catalog
 and environment-reference dependencies remain exempt. Existing clients and the
