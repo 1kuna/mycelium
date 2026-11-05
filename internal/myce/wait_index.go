@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -27,11 +28,22 @@ type WaitReply struct {
 // The writer holds q.mu before mu; readers take only mu. No waiter takes q.mu.
 // Publication happens only after persistence succeeds. No timers, I/O, heavy
 // projections, or subscriber goroutines live in the commit path.
+type observationIntent struct{ project, class, priority string }
+
+func (i observationIntent) spec() Spec {
+	return Spec{Project: i.project, Class: i.class, Priority: i.priority}
+}
+
 type waitStateIndex struct {
-	mu       sync.Mutex
-	jobs     map[string]WaitState
-	revision uint64
-	changed  chan struct{}
+	mu   sync.Mutex
+	jobs map[string]WaitState
+	// Only scalar intent and immutable policy tiers, never Job payloads. This
+	// lets observation protect production without waiting for the control lock.
+	intents    map[string]observationIntent
+	policy     PriorityPolicy
+	priorities *observationPrefix
+	revision   uint64
+	changed    chan struct{}
 }
 
 func (q *Queue) waitIndex() *waitStateIndex {
@@ -39,6 +51,12 @@ func (q *Queue) waitIndex() *waitStateIndex {
 	defer q.mu.Unlock()
 	if q.waitStates == nil {
 		q.waitStates = &waitStateIndex{jobs: map[string]WaitState{}, changed: make(chan struct{})}
+		q.waitStates.policy = q.effectivePriorityPolicy()
+		for _, r := range q.s.Submissions {
+			if r.Kind == submissionBinding && r.Job != nil {
+				q.waitStates.setIntent(r.JobID, r.Job)
+			}
+		}
 		for id, j := range q.s.Jobs {
 			q.waitStates.set(id, j)
 		}
@@ -49,7 +67,7 @@ func (q *Queue) waitIndex() *waitStateIndex {
 	return q.waitStates
 }
 func waitCallJob(c *ModelCall) *Job {
-	j := &Job{ID: c.ID, State: "queued"}
+	j := &Job{ID: c.ID, State: "queued", Spec: Spec{Project: c.Project, Class: c.Class, Priority: c.Priority}}
 	if c.Machine != "" {
 		j.State = "running"
 	}
@@ -66,6 +84,7 @@ func (s *waitStateIndex) set(id string, j *Job) {
 		}
 		delete(s.jobs, id)
 	} else {
+		s.setIntent(id, j)
 		next := WaitState{ID: id, State: j.State, Reason: j.Reason}
 		if exists && old.State == next.State && old.Reason == next.Reason {
 			return
@@ -87,17 +106,54 @@ func (q *Queue) publishWaitStates(oldCalls map[string]*ModelCall) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	policy := q.effectivePriorityPolicy() // committed tiers are immutable
+	if !reflect.DeepEqual(s.policy.Tiers, policy.Tiers) {
+		s.policy = policy
+		s.priorities = nil
+		for id, intent := range s.intents {
+			s.indexIntent(id, intent)
+		}
+	}
 	for id := range q.records.jobs {
 		s.set(id, q.s.Jobs[id])
+		s.setIntent(id, q.observationJob(id))
 	}
+	for digest, old := range q.records.submissions {
+		if old != nil && old.JobID != "" {
+			s.setIntent(old.JobID, q.observationJob(old.JobID))
+		}
+		if r := q.s.Submissions[digest]; r != nil && r.JobID != "" {
+			s.setIntent(r.JobID, q.observationJob(r.JobID))
+		}
+	}
+
 	for id, c := range q.calls {
 		s.set(id, waitCallJob(c))
 	}
 	for id := range oldCalls {
 		if q.calls[id] == nil {
 			s.set(id, q.s.Jobs[id])
+			s.setIntent(id, q.observationJob(id))
 		}
 	}
+}
+
+func (s *waitStateIndex) observationPriority(id string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node := s.priorities
+	for i := 0; node != nil && i < len(id); i++ {
+		node = node.children[id[i]]
+	}
+	if node != nil {
+		if node.exact != nil {
+			return node.exact.tier, node.exact.production
+		}
+		if len(id) >= 8 && node.best != nil {
+			return node.best.tier, node.best.production
+		}
+	}
+	return len(s.policy.Tiers), false
 }
 func (s *waitStateIndex) read(request WaitRequest) ([]WaitState, <-chan struct{}, bool, error) {
 	s.mu.Lock()

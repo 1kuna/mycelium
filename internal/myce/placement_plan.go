@@ -157,8 +157,19 @@ func (q *Queue) callSlotPlan(m *Machine, c *ModelCall, s *ModelSlot, limit int) 
 // demands), model loads and pins. A batch needs the worker's command slot;
 // engines can coexist with a batch when the resource vector has room.
 func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
+	best, yield := q.ordinaryRoomPlan(j, m, batch)
+	if yield {
+		best, _ = q.scarceYieldPlan(j, m)
+	}
+	return best
+}
+
+// Ordinary release decisions depend on the resource vector and tier. Scarce
+// yield decisions also belong to the exact demand, so keep that fallback out
+// of the shared projection used by an immutable candidate pass.
+func (q *Queue) ordinaryRoomPlan(j *Job, m *Machine, batch bool) (*placementPlan, bool) {
 	if m.Recovering {
-		return nil
+		return nil, false
 	}
 	if batch {
 		for _, r := range q.s.HostReleases {
@@ -168,7 +179,7 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 			current := q.s.Jobs[r.Job]
 			if current == nil || current.Machine != r.Machine || current.Session != r.Session || current.Attempt != r.Attempt || (current.State != "running" && current.State != "stopping") {
 				// No live attempt can be preempted to release this slot.
-				return nil
+				return nil, false
 			}
 		}
 	}
@@ -179,12 +190,9 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 		}
 	}
 	if best != nil && !q.addDeviceTierStops(best, j) {
-		return nil
+		return nil, false
 	}
-	if best == nil && batch {
-		best, _ = q.scarceYieldPlan(j, m)
-	}
-	return best
+	return best, best == nil && batch
 }
 func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, yieldPlans ...map[string]*ScarceHostYield) *placementPlan {
 	p := &placementPlan{machine: m, preparations: true}

@@ -30,13 +30,13 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	mux := newRequestMux()
 	jobGets := newJobGetVolume(a.Queue.clock)
 	jobGets.observe = a.Queue.requestHealth.recordClient
-	// Transport budgets must keep refilling when scheduling time is frozen or
-	// adjusted. Tests inject this clock independently of the queue clock.
-	var observationClock Clock = RealClock{}
+	// All adaptive admission decisions use an injected clock. The optional
+	// override is retained for transport/fake-clock fixtures.
+	var observationClock Clock = a.Queue.clock
 	if len(observationClocks) > 0 && observationClocks[0] != nil {
 		observationClock = observationClocks[0]
 	}
-	observationLimit := newObservationLimit(observationClock)
+	observationLimit := newObservationLimit(observationClock, a.Queue)
 	a.registerWait(mux)
 	waitStates := a.Queue.waitIndex()
 	nas := newResolveNASCache(a.Queue.clock)
@@ -446,10 +446,12 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			respond(w, nil, &HTTPError{Status: 405, Code: "request_method_invalid", Message: rejectionMessages["request_method_invalid"]})
 			return
 		}
-		if !observationLimit.admit(w, r) {
+		finishObservation, admitted := observationLimit.admit(w, r)
+		if !admitted {
 			jobGets.recordRejection(r)
 			return
 		}
+		defer finishObservation()
 		mux.ServeHTTP(w, r)
 	}), mux.patterns)
 }

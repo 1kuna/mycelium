@@ -292,8 +292,8 @@ func (q *Queue) mayNeedCards(j *Job, m *Machine) bool {
 	return false
 }
 
-// Resource projections depend on the concrete vector and demand identity, not
-// queue age or job ID. Reuse them only within one read-only device scan and only
+// Ordinary projections depend on the concrete vector and tier; scarce yields
+// also depend on the exact demand. Reuse within one read-only device scan and only
 // without preparations, whose sharing decision also depends on the recipe.
 type batchResourceKey struct {
 	project, class, priority string
@@ -303,10 +303,11 @@ type batchResourceKey struct {
 	shares                   bool
 }
 type batchResourceRoom struct {
-	machine Machine
-	memory  float64
-	ok      bool
-	plan    *placementPlan
+	machine  Machine
+	memory   float64
+	ok       bool
+	plan     *placementPlan
+	tryYield bool
 }
 
 func resourceKey(j *Job) batchResourceKey {
@@ -327,7 +328,24 @@ func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batc
 	key := resourceKey(j)
 	room, found := resources[key]
 	if !found {
-		room = q.batchResourceProjection(j, m)
+		// #740 made every annotated/extension job miss the whole resource
+		// projection cache, even when no scarce-host yield was possible.
+		// Share ordinary release work; retain the exact-demand fallback.
+		ordinaryKey := key
+		ordinaryKey.yieldDemand = ""
+		var ok bool
+		room, ok = resources[ordinaryKey]
+		if !ok {
+			room = q.batchResourceProjection(j, m)
+			if resources != nil && len(q.s.PreparationPlans) == 0 {
+				resources[ordinaryKey] = room
+			}
+		}
+		if room.tryYield && key.yieldDemand != "" {
+			if plan, _ := q.scarceYieldPlan(j, m); plan != nil {
+				room = q.batchResourceProjectionWithPlan(j, m, plan)
+			}
+		}
 		if resources != nil && len(q.s.PreparationPlans) == 0 {
 			resources[key] = room
 		}
@@ -335,7 +353,13 @@ func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batc
 	return room.ok && fitsResources(j, &room.machine, room.memory)
 }
 func (q *Queue) batchResourceProjection(j *Job, m *Machine) batchResourceRoom {
-	plan := q.roomPlan(j, m, true)
+	plan, yield := q.ordinaryRoomPlan(j, m, true)
+	room := q.batchResourceProjectionWithPlan(j, m, plan)
+	room.tryYield = yield
+	return room
+}
+
+func (q *Queue) batchResourceProjectionWithPlan(j *Job, m *Machine, plan *placementPlan) batchResourceRoom {
 	var projected Machine
 	if plan != nil {
 		projected = q.cpuAfterReleases(m, plan.jobs, plan.slots, plan.preparationCores)
