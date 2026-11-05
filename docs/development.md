@@ -105,12 +105,14 @@ workspace, which is deleted on exit because it holds only rebuildable test state
 Failure logs belong in an
 ignored `.reports/` folder (for example redirect stdout/stderr there).
 
-The full supervisor holds one of two cross-checkout filesystem locks for its
-entire lifetime, independent of package commands or test expressions. It also
+On macOS, the full supervisor holds one of two cross-checkout filesystem locks
+for its entire lifetime, independent of package commands or test expressions. It also
 accounts for older standalone full race commands before entering a slot. The
 two-suite boundary preserves the repository's observed Mac safety rule: more
-concurrent full suites caused false failures. Do not terminate another worker's
-tests. Build and test concurrency follows the execution host's affinity, Linux CPU
+concurrent full suites caused false failures. Linux fleet gates rely on the
+queue's CPU and learned-memory admission instead of this Mac-only count; waiting
+inside an already-admitted Linux job would strand its allocated resources. Do not
+terminate another worker's tests. Build and test concurrency follows the execution host's affinity, Linux CPU
 quota and optional `GOMAXPROCS` contract, rounded down to whole runnable cores
 (with a one-core minimum). Profiles retain their explicit two-core reservation
 and matching `GOMAXPROCS=2` contract. Each test command takes one build slot;

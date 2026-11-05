@@ -182,7 +182,10 @@ def main():
     started = time.monotonic()
     status = 1
     mode = 'full' if 'full' in sys.argv[2:] else 'quick'
-    slot = acquire_full_slot() if mode == 'full' else None
+    # The repository's two-suite safety rule is specific to Macs. Linux fleet
+    # jobs are already admitted against declared CPU and learned host memory;
+    # an additional fixed suite count would strand those allocated resources.
+    slot = acquire_full_slot() if mode == 'full' and sys.platform == 'darwin' else None
     root = Path(sys.argv[1]).resolve().parent.parent / '.gate'
     root.mkdir(exist_ok=True)
     scratch = tempfile.mkdtemp(prefix='run.', dir=root)

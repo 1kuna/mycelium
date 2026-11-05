@@ -22,6 +22,20 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def test_linux_full_does_not_wait_on_mac_suite_limit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            gate = Path(folder) / 'scripts/gate.sh'
+            child = unittest.mock.Mock()
+            child.wait.return_value = 0
+            with (patch.object(sys, 'platform', 'linux'),
+                  patch.object(sys, 'argv', ['gate-budget.py', str(gate), 'full']),
+                  patch.object(budget, 'acquire_full_slot') as slot,
+                  patch.object(budget.subprocess, 'Popen', return_value=child),
+                  patch.object(budget, 'stop_fixtures', return_value=True),
+                  contextlib.redirect_stdout(io.StringIO())):
+                self.assertEqual(budget.main(), 0)
+            slot.assert_not_called()
+
     def test_full_slots_count_gate_owners_not_package_commands(self):
         with tempfile.TemporaryDirectory() as folder:
             # New full packages carry -run expressions; owner locks, not the
