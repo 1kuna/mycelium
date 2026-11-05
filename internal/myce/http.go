@@ -96,6 +96,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	mux.HandleFunc("POST /api/files/result", a.deliveryResultHandler)
 	a.registerRecoveredResults(mux)
 	a.registerHostMaintenance(mux)
+	a.registerMeasurementSafety(mux)
 	a.registerDeviceMaintenance(mux)
 	a.registerComponentExclusions(mux)
 	a.registerReservations(mux)

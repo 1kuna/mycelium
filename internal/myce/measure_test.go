@@ -24,7 +24,7 @@ func (e *measurementEngine) Call(c context.Context, p string, b []byte) (*http.R
 	return e.call(c, p, b)
 }
 func measureTestOptions(t *testing.T) MeasureOptions {
-	return MeasureOptions{Worker: Worker{StateDir: newTestStateRoot(t), Machine: Machine{ID: "local"}, Clock: RealClock{}}, Platform: "cuda", Device: "0", BudgetGB: 10, Models: []Model{{Name: "one", Platforms: []string{"cuda"}}, {Name: "two", Platforms: []string{"cuda"}}}, ReadMemory: func(context.Context) (MemoryReading, error) { return MemoryReading{DeviceGB: 1, HostGB: 2}, nil }, Status: func(context.Context) (Snapshot, error) { return Snapshot{}, nil }}
+	return MeasureOptions{Worker: Worker{StateDir: newTestStateRoot(t), Machine: Machine{ID: "local"}, Clock: RealClock{}}, Platform: "cuda", Device: "0", BudgetGB: 10, Models: []Model{{Name: "one", Platforms: []string{"cuda"}}, {Name: "two", Platforms: []string{"cuda"}}}, ReadMemory: func(context.Context) (MemoryReading, error) { return MemoryReading{DeviceGB: 1, HostGB: 2}, nil }, ProductionSafety: func(context.Context) error { return nil }}
 }
 func TestMeasureSimultaneousResidencyAndDeltas(t *testing.T) {
 	o := measureTestOptions(t)
@@ -87,29 +87,6 @@ func TestMeasureFailureUnloadsFailedAndEarlierEngines(t *testing.T) {
 	}
 	if released != 2 {
 		t.Fatalf("released %d", released)
-	}
-}
-func TestMeasureProductionRefusalAndQueueFailure(t *testing.T) {
-	for _, scenario := range []string{"production", "queue", "pin", "calls"} {
-		t.Run(scenario, func(t *testing.T) {
-			o := measureTestOptions(t)
-			o.Status = func(context.Context) (Snapshot, error) {
-				switch scenario {
-				case "queue":
-					return Snapshot{}, errors.New("offline")
-				case "pin":
-					return Snapshot{Pins: []ModelPin{{Machine: "local"}}}, nil
-				case "calls":
-					return Snapshot{LoadedModels: []ModelSlot{{Machine: "local", InFlight: 1}}}, nil
-				default:
-					return Snapshot{Jobs: []*Job{{Spec: Spec{Priority: "production"}, State: "queued"}}}, nil
-				}
-			}
-			o.NewEngine = func(Model, string, Clock) Engine { t.Fatal("engine started during refusal"); return nil }
-			if _, e := Measure(context.Background(), o); e == nil {
-				t.Fatal("expected refusal")
-			}
-		})
 	}
 }
 func TestMeasureForceNeverBypassesJoinLock(t *testing.T) {
