@@ -8,13 +8,14 @@ import (
 	"time"
 )
 
-// Five reads/second/source, burst ten: the incident produced 27.4 slow
-// job reads/second. A batch long-poll needs 0.05/s while unchanged. The burst
-// permits status/log/result inspection without letting one source queue work
-// indefinitely ahead of worker control. Identity is the transport peer, never
-// a self-selected header, User-Agent, port, or shared fleet token.
-const observationRate = 5.0
-const observationBurst = 10.0
+// One source can legitimately observe 31 concurrent jobs every two seconds
+// plus fetch results (about 16 reads/s). Twenty reads/s and a burst of 100
+// accommodate that measured workload; managed batched waits and parent-exit
+// cleanup now prevent the orphaned-waiter flood that motivated the old cap.
+// Identity is the transport peer, never a self-selected header, User-Agent,
+// port, or shared fleet token.
+const observationRate = 20.0
+const observationBurst = 100.0
 
 type observationBucket struct {
 	tokens float64
@@ -30,24 +31,46 @@ func newObservationLimit(clock Clock) *observationLimit {
 	return &observationLimit{clock: clock, clients: map[string]observationBucket{}}
 }
 func observationRequest(r *http.Request) bool {
+	return observationRouteClass(r) != ""
+}
+
+// Finite classes only: never retain a URL, job identity, query or peer address.
+func observationRouteClass(r *http.Request) string {
 	// All worker and launch/report routes are exempt, including GET event streams.
 	if workerProtocolEndpoint(r.URL.Path) {
-		return false
+		return ""
 	}
 	if r.Method == "POST" {
-		return r.URL.Path == "/api/wait"
+		if r.URL.Path == "/api/wait" {
+			return "batch_wait"
+		}
+		return ""
 	}
 	if r.Method != "GET" && r.Method != "HEAD" {
-		return false
+		return ""
 	}
 	// File transfer, instruction/catalog polls and environment references are
 	// also worker dependencies. Limit consumer observation projections, never
 	// the data/control routes required to launch or finish work.
 	switch r.URL.Path {
-	case "/", "/api/status", "/api/inspection", "/api/usage", "/api/portability":
-		return true
+	case "/":
+		return "page"
+	case "/api/status":
+		return "status"
+	case "/api/inspection":
+		return "inspection"
+	case "/api/usage":
+		return "usage"
+	case "/api/portability":
+		return "portability"
 	}
-	return strings.HasPrefix(r.URL.Path, "/api/jobs/")
+	if strings.HasPrefix(r.URL.Path, "/api/jobs/") {
+		if r.URL.Query().Get("view") == "wait" {
+			return "job_wait"
+		}
+		return "job_full"
+	}
+	return ""
 }
 func (l *observationLimit) allow(peer string) bool {
 	if host, _, err := net.SplitHostPort(peer); err == nil {

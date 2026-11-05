@@ -21,7 +21,7 @@ func TestObservationLimitClockAndWorkerExemption(t *testing.T) {
 		handler.ServeHTTP(w, r)
 		return w
 	}
-	for range 10 {
+	for range 100 {
 		if w := request(observationPath, "GET", "192.0.2.1:1000"); w.Code != 200 {
 			t.Fatal(w.Code)
 		}
@@ -46,12 +46,27 @@ func TestObservationLimitClockAndWorkerExemption(t *testing.T) {
 		t.Fatal("peer isolation", w.Code)
 	}
 	clock.Advance(time.Second)
-	for range 5 {
+	for range 20 {
 		if w := request(observationPath, "GET", "192.0.2.1:1000"); w.Code != 200 {
 			t.Fatal(w.Code)
 		}
 	}
 	if w := request(observationPath, "GET", "192.0.2.1:1000"); w.Code != 429 {
 		t.Fatal("refill exceeded rate", w.Code)
+	}
+}
+
+// One source observing 31 in-flight jobs every two seconds, with a result read
+// alongside each wave, must not fail a customer batch.
+func TestObservationLimitConcurrentBatch(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	limit := newObservationLimit(clock)
+	for range 300 {
+		for range 32 {
+			if !limit.allow("192.0.2.1:1000") {
+				t.Fatal("legitimate batch observation throttled")
+			}
+		}
+		clock.Advance(2 * time.Second)
 	}
 }

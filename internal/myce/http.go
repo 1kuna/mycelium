@@ -447,6 +447,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			return
 		}
 		if !observationLimit.admit(w, r) {
+			jobGets.recordRejection(r)
 			return
 		}
 		mux.ServeHTTP(w, r)

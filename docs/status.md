@@ -1477,26 +1477,31 @@ wait reads. Pending legacy wait reads also use the index; ordinary terminal
 GETs retain the full public Job contract.
 
 Consumer job/status/inspection/usage/portability GET/HEAD requests and batch waits share a token bucket by transport
-source address, ignoring ports and untrusted forwarding/client headers: 5/s,
-burst 10. All worker protocol routes, including checkpoint publication, event
+source address, ignoring ports and untrusted forwarding/client headers: 20/s,
+burst 100. All worker protocol routes, including checkpoint publication, event
 streams, check-ins and launch authorization, are exempt. File transfers,
 instruction/catalog polls and environment references remain exempt worker
 dependencies as well. A refused observation
 returns HTTP 429 `client_rate_limited` and `Retry-After: 1` before queue work.
-The incident rate was 8,206 slow job reads in five minutes (27.4/s); the cap
-reduces one source's sustained rate by at least 82%. Batched idle waits need
-one request per 20 seconds. Sources behind one proxy/NAT share the allowance;
+The allowance covers a measured workload of 31 concurrent jobs polling every
+two seconds plus result reads (about 16/s). Managed batched waits and parent-exit
+cleanup prevent the orphaned-waiter flood that motivated the former 5/s cap.
+Batched idle waits need one request per 20 seconds. Sources behind one proxy/NAT share the allowance;
 worker control still remains exempt. The bounded source table refuses new
 sources at capacity rather than resetting active allowances.
 
 ## Job GET request attribution
 
 The API emits `event=job_get_totals totals=[...]` at most once per minute,
-triggered by job GET traffic. Each row has `kind` (`cli`, `python` or `unknown`),
+triggered by job GET traffic or refused observations. Each row has `kind` (`cli`, `python` or `unknown`),
 `version`, and cumulative `full` and `wait` counts since that API handler started.
 `wait` counts requests with `?view=wait`, including terminal replies that return
-full Jobs; other views count as `full`. Counts include failed job lookups, but
-exclude authentication failures and other endpoints. Restarting resets totals;
+full Jobs; other views count as `full`. Counts include failed job lookups.
+Each row's optional `rate_limited` map also counts refused observations by
+finite route class: `job_full`, `job_wait`, `batch_wait`, `status`, `inspection`,
+`usage`, `portability` or `page`. Rejected reads do not increment admitted
+`full`/`wait` counts. Rejections trigger the periodic summary even when no job
+GET is admitted. Authentication failures remain excluded. Restarting resets totals;
 compare consecutive summaries for rates. No traffic means no summary.
 
 Go/CLI requests identify as `myce/BUILD_VERSION`; Python uses
@@ -1505,7 +1510,8 @@ checkout). Older clients with no first-party identity, including stock Go/Python
 User-Agents, count as `unknown`. These are self-reported identities, not access
 controls. Storage is bounded to 64 client/version identities plus per-kind
 `other` overflow buckets; all requests remain counted. Raw User-Agents and job
-IDs are never retained. Counting, summary encoding and logging run outside the
+IDs and peer addresses are never retained in these counters or summaries.
+Counting, summary encoding and logging run outside the
 queue mutex and do not write the database.
 
 ### Variant eligibility (#499)
