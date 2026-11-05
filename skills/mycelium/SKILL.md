@@ -95,6 +95,8 @@ independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
 
+On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. During measured control pressure, expensive/lower-value nonproduction reads can return 429; honor `Retry-After` and prefer batched waits. Production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
+
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
