@@ -170,6 +170,21 @@ class ReleaseBuildTest(unittest.TestCase):
             r.assemble(VERSION, COMMIT, linux, darwin, self.root / 'out')
         self.assertFalse((self.root / 'out').exists())
 
+    def test_assembly_signer_receives_pinned_native_receipt(self):
+        linux, darwin = self.fixtures()
+        output = self.root / 'out'
+        r.assemble(VERSION, COMMIT, linux, darwin, output, 'fake-key')
+        receipt = json.loads((output / 'build-provenance.json').read_text())
+        self.assertEqual(receipt['manifest_sha256'], r.artifact(output / 'manifest.unsigned.json')['sha256'])
+        self.assertTrue(receipt['darwin']['developer_id_verified'])
+        self.assertTrue(receipt['darwin']['info']['native_sensing'])
+        digest = r.artifact(output / 'build-provenance.json')['sha256']
+        self.assertEqual((output / 'build-provenance.sha256').read_text(), digest + '\n')
+        signing = [args for args, _ in self.calls if 'manifest' in args]
+        self.assertEqual(len(signing), 1)
+        self.assertEqual(signing[0][signing[0].index('--assembly-sha256') + 1], digest)
+        self.assertEqual(signing[0][signing[0].index('--commit') + 1], COMMIT)
+
     def test_assembly_preserves_bytes_and_separates_signing(self):
         linux, darwin = self.fixtures()
         output = self.root / 'out'

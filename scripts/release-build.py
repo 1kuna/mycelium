@@ -168,11 +168,18 @@ def assemble(version, commit, linux, darwin, output, signing_key=None):
     manifest = {'version': version, 'start_gate': info['start_gate'],
                 'attempt_protocol': info['attempt_protocol'], 'artifacts': records}
     write_json(output / 'manifest.unsigned.json', manifest)
-    write_json(output / 'build-provenance.json', {'version': version, 'commit': commit, 'builds': receipts})
+    write_json(output / 'build-provenance.json', {
+        'version': version, 'commit': commit, 'builds': receipts,
+        'manifest_sha256': artifact(output / 'manifest.unsigned.json')['sha256'],
+        'darwin': {'info': info, 'developer_id_verified': True}})
+    receipt_hash = artifact(output / 'build-provenance.json')['sha256']
+    (output / 'build-provenance.sha256').write_text(receipt_hash + '\n')
     (output / 'SHA256SUMS').write_text(''.join(f"{r['sha256']}  {r['file']}\n" for r in records))
     if signing_key:
         run(str((output / binary.name).resolve()), 'release', 'manifest', '--dir', str(output),
-            '--version', version, '--signing-key', signing_key)
+            '--version', version, '--commit', commit,
+            '--assembly-receipt', str(output / 'build-provenance.json'),
+            '--assembly-sha256', receipt_hash, '--signing-key', signing_key)
 
 
 def fleet(version, commit, output, signing_key=None):
