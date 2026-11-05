@@ -69,7 +69,8 @@ func TestReleaseQueueApprovalAndAuthentication(t *testing.T) {
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test-authority"}
 	var release EnrollmentRelease
-	if err := client.Call(context.Background(), "GET", "/api/invites/release", nil, &release); err == nil {
+	// Inspect the refusal itself; recovery cannot configure this fixture.
+	if err := client.WithoutRetries().Call(context.Background(), "GET", "/api/invites/release", nil, &release); err == nil {
 		t.Fatal("unconfigured queue approved release")
 	}
 	data, pub, m := signedTestRelease(t)

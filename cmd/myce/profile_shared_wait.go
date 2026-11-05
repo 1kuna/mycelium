@@ -270,6 +270,23 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			}
 		}
 	}
+	nextWake := func() (pending bool, due time.Time) {
+		for _, group := range groups {
+			if group.pending {
+				pending = true
+				continue
+			}
+			if !group.next.IsZero() && (due.IsZero() || group.next.Before(due)) {
+				due = group.next
+			}
+		}
+		for _, watch := range watches {
+			if end := watch.registration.Expires; !end.IsZero() && (due.IsZero() || end.Before(due)) {
+				due = end
+			}
+		}
+		return
+	}
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -416,22 +433,7 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 		discovery.Observe(clock.Now().Sub(passStarted), previousCount != len(watches))
 		previousCount = len(watches)
 		delay := discovery.Delay(clock.Now(), time.Time{}, nil, nil)
-		pending := false
-		var due time.Time
-		for _, group := range groups {
-			if group.pending {
-				pending = true
-				continue
-			}
-			if !group.next.IsZero() && (due.IsZero() || group.next.Before(due)) {
-				due = group.next
-			}
-		}
-		for _, watch := range watches {
-			if end := watch.registration.Expires; !end.IsZero() && (due.IsZero() || end.Before(due)) {
-				due = end
-			}
-		}
+		pending, due := nextWake()
 		if pending {
 			var timer *time.Timer
 			var timerC <-chan time.Time
@@ -458,20 +460,17 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			if timer != nil {
 				timer.Stop()
 			}
-			// Preserve injected pacing between completed observation rounds. If other
-			// authorities are still in flight, return immediately to their event select.
-			anyPending := false
-			for _, group := range groups {
-				anyPending = anyPending || group.pending
-			}
-			if anyPending {
+			// The response can advance the next read or retire the final watch.
+			// Never sleep using the discovery delay computed before that response.
+			pending, due = nextWake()
+			if pending || len(watches) == 0 {
 				continue
 			}
 		}
 		if !due.IsZero() {
 			delay = min(delay, max(0, due.Sub(clock.Now())))
 		}
-		if err := pause(ctx, delay); err != nil {
+		if err := pause(ctx, max(time.Nanosecond, delay)); err != nil {
 			return err
 		}
 	}
