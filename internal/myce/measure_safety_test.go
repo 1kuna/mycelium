@@ -84,7 +84,13 @@ func TestMeasureSafetyRemovedProductionCustodySurvivesReopen(t *testing.T) {
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.update(func() error { q.deleteJob(j.ID); return nil }); err != nil {
+	// Reproduce a terminal tombstone that still owes an exact copy release.
+	// A removed nonterminal attempt must remain a blocker even after release.
+	if err := q.update(func() error {
+		q.finishCancellation(q.touchJob(j.ID))
+		q.deleteJob(j.ID)
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	q = reopenCancellationQueue(t, q, clock)
