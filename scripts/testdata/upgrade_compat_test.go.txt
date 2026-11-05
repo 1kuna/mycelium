@@ -1,0 +1,225 @@
+package myce
+
+// Compiled, unmodified, against both production source trees by upgrade-compat.py.
+// Only hardware and the service manager are synthetic; queue persistence, HTTP,
+// worker startup, inventory discovery and installer serialization are real.
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"testing/fstest"
+	"time"
+)
+
+func TestUpgradeCompatProcess(t *testing.T) {
+	mode := os.Getenv("UPGRADE_MODE")
+	if mode == "" {
+		t.Skip("process fixture")
+	}
+	root := os.Getenv("UPGRADE_ROOT")
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	switch mode {
+	case "queue":
+		upgradeQueue(t, ctx, root)
+	case "worker":
+		upgradeWorker(t, ctx, root)
+	case "install":
+		upgradeInstall(t, ctx, root)
+	default:
+		t.Fatal("unknown fixture mode")
+	}
+}
+
+type upgradeClock struct{}
+
+func (upgradeClock) Now() time.Time { return time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC) }
+
+func upgradeQueue(t *testing.T, ctx context.Context, root string) {
+	q, err := Open(filepath.Join(root, "state", "queue.db"), filepath.Join(root, "checkpoints"), upgradeClock{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	now := q.clock.Now()
+	q.s.WorkObservations = map[string]WorkObservation{}
+	q.s.StorageObservations = map[string]StorageObservation{}
+	// Seed disposable in-process state, never a live database. One ordinary queue
+	// transaction writes the fixture, avoiding thousands of quadratic submissions.
+	for i := 0; i < 6286; i++ {
+		id := fmt.Sprintf("retained-%05d", i)
+		s := Spec{Name: id, Project: "upgrade-compat", Priority: "experiment"}
+		s.Run.Command = []string{"echo", "retained"}
+		q.s.Jobs[id] = &Job{ID: id, Spec: s, State: "succeeded", Attempt: 1, Queued: now, FinishedAt: &now, ReleaseConfirmed: true}
+	}
+	for i := 0; i < 1655; i++ {
+		id := fmt.Sprintf("curve-%04d", i)
+		q.s.WorkObservations[id] = WorkObservation{Key: ObservationKey{Work: id, Hardware: strings.Repeat("hardware", 16), Configuration: strings.Repeat("config", 16)}, Samples: 10, Units: 100, Seconds: 20, RecordedAt: now}
+	}
+	for i := 0; i < 1384; i++ {
+		q.s.StorageObservations[fmt.Sprint(i)] = StorageObservation{}
+	}
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	handler := API{Queue: q, Token: "upgrade-fixture"}.Handler()
+	var mu sync.Mutex
+	receipts := []map[string]any{}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workers/checkin" {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		r.Body.Close()
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		capture := &upgradeResponse{ResponseWriter: w, status: 200}
+		handler.ServeHTTP(capture, r)
+		var request map[string]any
+		_ = json.Unmarshal(body, &request)
+		machine, _ := request["machine"].(map[string]any)
+		inventory, _ := machine["tool_inventory"].(map[string]any)
+		mu.Lock()
+		defer mu.Unlock()
+		receipts = append(receipts, map[string]any{"status": capture.status, "bytes": len(body), "inventory_keys": len(inventory)})
+		data, _ := json.Marshal(receipts)
+		tmp := filepath.Join(root, "receipts.tmp")
+		if err := os.WriteFile(tmp, data, 0600); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.Rename(tmp, filepath.Join(root, "receipts.json")); err != nil {
+			t.Error(err)
+		}
+	}), ReadHeaderTimeout: 5 * time.Second}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	if err := os.WriteFile(filepath.Join(root, "url"), []byte("http://"+listener.Addr().String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	<-ctx.Done()
+	stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(stop); err != nil {
+		server.Close()
+		t.Error(err)
+	}
+	if err := <-done; err != http.ErrServerClosed {
+		t.Error(err)
+	}
+}
+
+type upgradeResponse struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *upgradeResponse) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func upgradeWorker(t *testing.T, ctx context.Context, root string) {
+	// No native GPU, mounted-share discovery, daemon, or fleet authority is used.
+	workerMountRoots = func(context.Context) ([]string, error) { return []string{"/"}, nil }
+	workerDiskProbe = func(string) (DiskReading, error) {
+		return DiskReading{Volume: "fixture", TotalBytes: 1 << 40, FreeBytes: 1 << 39}, nil
+	}
+	workerOwnerSignals = func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} }
+	workerDeviceFaultSource = func() DeviceFaultSource { return nil }
+	workerMemoryRSS = nil
+	workerProcessMemory = nil
+	workerLivenessCPU = nil
+	extensionIdentityProbe = func() MachineProbe {
+		return MachineProbe{Files: fstest.MapFS{}, Command: func(context.Context, string, ...string) ([]byte, error) { return []byte("fixture"), nil }}
+	}
+	m := Machine{ID: "compat-worker", HostID: "compat-host", GPU: "fake", FreeMemoryGB: 8, HostMemoryMeasured: true, CapabilityProfile: &CapabilityProfile{Version: 0, OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 16, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30}}
+	for i := 0; i < 40; i++ {
+		m.Environments = append(m.Environments, fmt.Sprintf("prepared-%064d", i))
+	}
+	devices := []MachineDevice{}
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprint(i)
+		devices = append(devices, MachineDevice{ID: id, Platform: "fake", Identity: "fixture-" + id, Selector: id, Fingerprint: "fixture", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8, MemoryMeasured: true})
+	}
+	m.Devices = devices
+	w := Worker{Machine: m, StateDir: filepath.Join(root, "worker"), Client: Client{URL: os.Getenv("UPGRADE_QUEUE"), Token: "upgrade-fixture", HTTP: &http.Client{Timeout: 10 * time.Second}}, Interval: 200 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 60, nil }, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return devices, nil }, CPUIsolationProbe: func(context.Context) error { return nil }}
+	if path := os.Getenv("UPGRADE_CONFIG"); path != "" {
+		c, err := ReadServiceConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.ValidateInstall(); err != nil {
+			t.Fatal(err)
+		}
+		w.StateDir = c.State
+		w.FileCacheLimit = c.FileCacheBytes
+		w.EnvironmentRoot = c.EnvironmentCache
+		w.EnvironmentLimit = c.EnvironmentCacheBytes
+		w.Machine.ID = c.Name
+		w.Machine.HostID = c.HostID
+	}
+	if err := w.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type upgradeInactive int
+
+func (upgradeInactive) Error() string   { return "fixture inactive" }
+func (e upgradeInactive) ExitCode() int { return int(e) }
+func upgradeInstall(t *testing.T, ctx context.Context, root string) {
+	c, err := PlanInstall("worker", root, "", filepath.Join(root, "nas"), os.Getenv("UPGRADE_QUEUE"), "compat-worker", Detection{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "fake", MemoryMode: "fixed", MemoryGB: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.EnvironmentRoot = ""
+	c.ModelRoot = ""
+	c.Checkpoints = ""
+	c.HostID = "compat-host"
+	c.AllowDeviceless = true
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name == "launchctl" {
+			if len(args) > 0 && args[0] == "print" {
+				return nil, upgradeInactive(113)
+			}
+			return nil, nil
+		}
+		if name != "systemctl" {
+			return nil, fmt.Errorf("unexpected manager command %s", name)
+		}
+		if strings.Contains(strings.Join(args, " "), "is-active") {
+			return nil, upgradeInactive(3)
+		}
+		return nil, nil
+	}
+	if err := Install(ctx, c, executable, "upgrade-fixture", manager); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config-path"), []byte(c.Config), 0600); err != nil {
+		t.Fatal(err)
+	}
+}

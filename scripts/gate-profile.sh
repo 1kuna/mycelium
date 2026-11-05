@@ -18,5 +18,10 @@ if version is None or tuple(int(part or 0) for part in version.groups()) < (1, 2
 PYTHON
 # Prepare module dependencies before gate.sh deliberately switches offline.
 go mod download
+if [[ $mode == full ]]; then
+  # Source transport has no Git history. Fetch the pinned public predecessor
+  # and seed its modules before gate.sh disables network dependency resolution.
+  python3 scripts/upgrade-compat.py prepare
+fi
 ./scripts/gate.sh "${gate[@]}"
 printf 'gate %s: exit=0\n' "$mode" > gate-result.txt

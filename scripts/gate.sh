@@ -109,6 +109,9 @@ while read -r os arch cgo; do
   step "build-$os-$arch" env GOOS="$os" GOARCH="$arch" CGO_ENABLED="$cgo" go build -o "$scratch/bin/myce-$os-$arch" ./cmd/myce
 done < <("$scratch/bin/myce" release build-targets)
 if [[ $mode == full ]]; then
+  # Real cross-release queue/worker and installer proof. Previous source must
+  # already be local/cached; this gate remains offline.
+  step upgrade-compat python3 scripts/upgrade-compat.py run
   # Includes the real CLI dev/checkpoint/model/onboarding e2e. A separate dev
   # pair would repeat the same tests and builds.
   wait_for_race_slot
