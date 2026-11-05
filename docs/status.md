@@ -21,13 +21,14 @@ staging reservations; evictable space contains only inactive reproducible entrie
 `protected` maps cache identities to allocated bytes held by readers/custody, so
 placement can reuse an already held input without charging it twice. Check-ins
 copy an in-memory snapshot; cache discovery does not run under the queue mutex.
-Absent reports withhold shared-input placement. Temporary cache pressure appears
+Workers without the optional report retain staging-time admission. Temporary cache pressure appears
 as job `diagnostic_code: shared_input_cache`, with byte comparisons in `reason`.
 Resolve/submit return `shared_input_cache_capacity` only when all enabled workers
 under consideration report capacity and none of the matching targets can hold
-the job. Missing reports accept and queue the job with
-`diagnostic_code: shared_input_cache_unreported`, including during startup and
-rolling upgrades; those workers remain excluded from shared-input placement.
+the job. With no matching worker yet, the job waits with
+`diagnostic_code: shared_input_cache_unreported`. Reporting workers retain
+queue-side checks during a rolling upgrade; older workers enforce actual cache
+capacity when staging.
 
 Machine `cpu_extension_fingerprint` identifies the CPU qualification identity;
 device entries carry their own extension fingerprints and reports. The scalar
