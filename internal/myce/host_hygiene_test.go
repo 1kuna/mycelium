@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -132,6 +134,56 @@ func TestHostHygieneDiskUsesMeasuredConsumption(t *testing.T) {
 			if m.health.DrainReason != "host_disk_pressure" {
 				t.Fatal("measured burst exhaustion did not drain")
 			}
+			for i := 0; i < hostHealthHistorySize+hostHealthConfirmation; i++ {
+				c.Advance(signalRefresh)
+				if err := m.sample(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if m.health.DrainReason != "host_disk_pressure" {
+				t.Fatal("history expiry falsely recovered unchanged low free disk")
+			}
+			reopened, err := openHostHealth(m.dir, c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened.source = m.source
+			reopened.disks = map[string]float64{"disk": scale * 1e9}
+			for i := 0; i < hostHealthConfirmation; i++ {
+				c.Advance(signalRefresh)
+				if err := reopened.sample(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if reopened.health.DrainReason != "" {
+				t.Fatal("affirmative disk recovery did not resume after restart")
+			}
 		})
+	}
+}
+
+func TestHostHygieneBlockedPersistenceDoesNotBlockHeartbeat(t *testing.T) {
+	m, c := healthFixture(t, 1)
+	blocked, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	m.persist = func(HostHealth) error { close(blocked); <-release; return nil }
+	c.Advance(signalRefresh)
+	go func() { done <- m.sample(context.Background()) }()
+	<-blocked
+	snapshot := make(chan *HostHealth, 1)
+	go func() { snapshot <- m.snapshot(nil) }()
+	select {
+	case h := <-snapshot:
+		if len(h.History) != hostHealthWarmup+1 {
+			t.Error("missing fresh in-memory evidence")
+		}
+	case <-time.After(time.Second):
+		t.Error("blocked persistence stalled heartbeat snapshot")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(m.dir, "host-health.json")); err != nil {
+		t.Fatal("lost previously persisted history", err)
 	}
 }

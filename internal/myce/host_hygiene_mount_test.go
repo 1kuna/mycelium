@@ -1,11 +1,38 @@
 package myce
 
 import (
+	"context"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestHostHygieneMountSlowHistoryDoesNotWidenBaseline(t *testing.T) {
+	m, c := healthFixture(t, 1)
+	for i := range m.health.Baseline {
+		m.health.Baseline[i].Mounts = []HostMountHealth{{Root: "checkpoint", LatencySeconds: .001}}
+	}
+	p := &hostMountProbe{root: "checkpoint", path: "sentinel", measure: func(string) hostMountResult { return hostMountResult{latency: 100 * time.Millisecond} }}
+	m.mounts["checkpoint"] = p
+	for i := 0; i < hostHealthConfirmation+1; i++ {
+		c.Advance(signalRefresh)
+		if err := m.sample(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		await(t, func() bool { return len(p.pending) == 1 })
+	}
+	if got := m.health.History[len(m.health.History)-1].Mounts[0].Reason; got != "mount_probe_slow" {
+		t.Fatal("slow probes contaminated healthy baseline", got)
+	}
+	for _, s := range m.health.Baseline {
+		for _, mount := range s.Mounts {
+			if mount.LatencySeconds > .001 {
+				t.Fatal("adverse probe entered baseline")
+			}
+		}
+	}
+}
 
 func TestHostHygieneMountSingleOutstandingAndScopedRecovery(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)

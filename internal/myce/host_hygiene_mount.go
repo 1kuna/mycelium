@@ -17,6 +17,7 @@ type hostMountResult struct {
 type hostMountProbe struct {
 	root, path  string
 	probe       func(string) error
+	measure     func(string) hostMountResult
 	pending     chan hostMountResult
 	started     time.Time
 	last        HostMountHealth
@@ -52,7 +53,7 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 	}
 	base := slices.DeleteFunc(slices.Clone(baseline), func(s HostHealthSample) bool {
 		return !slices.ContainsFunc(s.Mounts, func(m HostMountHealth) bool {
-			return m.Root == p.root && m.LatencySeconds > 0 && m.PendingSeconds == 0 && m.Reason == ""
+			return m.Root == p.root && m.LatencySeconds > 0 && m.PendingSeconds == 0 && m.Reason == "" && !m.Adverse
 		})
 	})
 	limit := 0.0
@@ -80,11 +81,21 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 	}
 	p.pending, p.started = make(chan hostMountResult, 1), now
 	done, path, probe := p.pending, p.path, p.probe
-	go func() { started := time.Now(); err := probe(path); done <- hostMountResult{time.Since(started), err} }()
+	measure := p.measure
+	go func() {
+		if measure != nil {
+			done <- measure(path)
+			return
+		}
+		started := time.Now()
+		err := probe(path)
+		done <- hostMountResult{time.Since(started), err}
+	}()
 	return p.confirm(result)
 }
 
 func (p *hostMountProbe) confirm(result HostMountHealth) HostMountHealth {
+	result.Adverse = result.Reason != ""
 	if result.Reason != p.candidate {
 		p.candidate, p.consecutive = result.Reason, 0
 	}

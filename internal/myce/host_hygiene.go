@@ -35,6 +35,7 @@ type HostHealthSample struct {
 }
 
 type HostMountHealth struct {
+	Adverse        bool    `json:"adverse,omitempty"`
 	Root           string  `json:"root"`
 	LatencySeconds float64 `json:"latency_seconds"`
 	PendingSeconds float64 `json:"pending_seconds"`
@@ -51,6 +52,7 @@ type ForeignConsumer struct {
 }
 
 type HostHealth struct {
+	DiskRecovery     map[string]float64 `json:"disk_recovery,omitempty"`
 	PersistenceError string             `json:"persistence_error,omitempty"`
 	History          []HostHealthSample `json:"history"`
 	Baseline         []HostHealthSample `json:"baseline"`
@@ -128,7 +130,20 @@ func (h *HostHealth) observe(s HostHealthSample) {
 				}
 				if free == 0 || free < lo && free <= burst*hostHealthConfirmation {
 					reason = "host_disk_pressure"
+					if h.DiskRecovery == nil {
+						h.DiskRecovery = map[string]float64{}
+					}
+					h.DiskRecovery[key] = max(h.DiskRecovery[key], min(max(0, lo), burst*hostHealthConfirmation))
 				}
+			}
+		}
+		// History eviction is not evidence of newly available space. Retain
+		// the measured burst reserve until this volume positively recovers.
+		for key, reserve := range h.DiskRecovery {
+			if free, ok := s.DiskFree[key]; !ok || free == 0 || free < reserve {
+				reason = "host_disk_pressure"
+			} else {
+				delete(h.DiskRecovery, key)
 			}
 		}
 	}
@@ -149,7 +164,7 @@ func (h *HostHealth) observe(s HostHealthSample) {
 		}
 		// Freeze on the first adverse sample, so sustained trouble does not
 		// teach the worker that degradation is its new healthy baseline.
-		if reason == "" && h.DrainReason == "" {
+		if reason == "" && h.DrainReason == "" && !slices.ContainsFunc(s.Mounts, func(m HostMountHealth) bool { return m.Adverse || m.Reason != "" }) {
 			h.Baseline = append(h.Baseline, s)
 			if len(h.Baseline) > hostHealthHistorySize {
 				h.Baseline = h.Baseline[1:]
@@ -175,10 +190,12 @@ type hostHealthMonitor struct {
 	mounts    map[string]*hostMountProbe
 	disks     map[string]float64
 	done      chan struct{}
+	persist   func(HostHealth) error
 }
 
 func openHostHealth(dir string, clock Clock) (*hostHealthMonitor, error) {
 	m := &hostHealthMonitor{dir: dir, clock: clock, mounts: map[string]*hostMountProbe{}}
+	m.persist = func(h HostHealth) error { return saveWorkerJSON(dir, "host-health.json", h) }
 	b, err := os.ReadFile(filepath.Join(dir, "host-health.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return m, nil
@@ -216,7 +233,6 @@ func (m *hostHealthMonitor) sample(ctx context.Context) error {
 		foreign, foreignErr = m.foreign(ctx)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	s.HeartbeatSeconds, s.DiskFree = m.heartbeat, m.disks
 	for _, probe := range m.mounts {
 		s.Mounts = append(s.Mounts, probe.sample(at, m.health.Baseline))
@@ -238,10 +254,15 @@ func (m *hostHealthMonitor) sample(ctx context.Context) error {
 		}
 	}
 	m.health.PersistenceError = ""
-	err = saveWorkerJSON(m.dir, "host-health.json", m.health)
+	durable := cloneHostHealth(m.health)
+	m.mu.Unlock()
+	// A stuck local fsync must not own the heartbeat/status snapshot mutex.
+	err = m.persist(durable)
+	m.mu.Lock()
 	if err != nil {
 		m.health.PersistenceError = "host_history_write_failed"
 	}
+	m.mu.Unlock()
 	return err
 }
 
@@ -262,8 +283,20 @@ func (m *hostHealthMonitor) snapshot(disks []DiskVolume) *HostHealth {
 		h.AgeSeconds = max(0, m.clock.Now().Sub(h.History[len(h.History)-1].At).Seconds())
 	}
 	// observe may append into these backing arrays on its next tick.
-	h.History, h.Baseline, h.Foreign = slices.Clone(h.History), slices.Clone(h.Baseline), slices.Clone(h.Foreign)
+	h = cloneHostHealth(h)
 	return &h
+}
+
+func cloneHostHealth(h HostHealth) HostHealth {
+	h.History, h.Baseline, h.Foreign = slices.Clone(h.History), slices.Clone(h.Baseline), slices.Clone(h.Foreign)
+	if h.DiskRecovery != nil {
+		copy := map[string]float64{}
+		for key, value := range h.DiskRecovery {
+			copy[key] = value
+		}
+		h.DiskRecovery = copy
+	}
+	return h
 }
 
 func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostHealthMonitor, error) {

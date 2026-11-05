@@ -22,6 +22,11 @@ recovery. Adverse samples never teach a new healthy baseline. Load requires
 increased wake latency; heartbeat delay also requires local wake latency, so
 ordinary useful CPU work or a slow queue alone does not drain a host. Memory
 pressure, swap growth with wake latency, and low free disk use the host's bands.
+Disk pressure also requires exhaustion against measured consumption over the
+confirmation horizon. `disk_recovery` retains that measured reserve until space
+actually recovers; aging history alone cannot clear it. Pending adverse mount
+samples (`adverse`) are excluded from healthy baselines before confirmation.
+History serialization/fsync runs outside the mutex used by heartbeat snapshots.
 
 Drains withhold new command, model and preparation launches without changing
 operator maintenance, killing running work or discarding exact-attempt custody.
