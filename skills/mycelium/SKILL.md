@@ -163,6 +163,9 @@ well as new staging. Machine `hygiene_collection` shows effective limits,
 collection errors and protected/busy entries. A cache can remain over budget
 while references, recent use or locks protect data; do not remove it manually to
 force admission. Attempt custody and result/diagnostic retention still bind.
+`pending` can mean conservative shared-inode accounting left work for another
+sweep. Collector status requires matching queue support; older queues keep
+their supported request shape while local collection continues.
 Installed/rollback images, active state, receipts and unknown data are retained;
 foreign services/processes and other projects' shared caches are owner context
 only. See [worker cleanup](https://github.com/1kuna/mycelium/blob/main/docs/status.md#worker-cleanup-834-next-release).

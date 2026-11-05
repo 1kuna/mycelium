@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -17,6 +18,7 @@ type CacheCollection struct {
 	Reclaimed int64  `json:"reclaimed"`
 	Busy      bool   `json:"busy,omitempty"`
 	Protected bool   `json:"protected,omitempty"`
+	Pending   bool   `json:"pending,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 
@@ -198,25 +200,16 @@ func (c *FileCache) collect(ctx context.Context) (r CacheCollection) {
 	return r
 }
 
-// Reuse the existing eviction primitive and local use/build locks, but obtain
-// authoritative queue references immediately before each budget eviction.
+// Inventory and reference requests never hold admission. Each candidate keeps
+// its existing use/build fences; only the final atomic retirement tries admission.
 func (c *EnvironmentCache) collectBudget(ctx context.Context, references func(context.Context, string) (bool, error)) (r CacheCollection) {
 	if err := c.init(); err != nil {
 		r.Error = "environment_collect_failed"
 		return r
 	}
 	r.Limit = c.Limit
-	gate, err := c.tryLock("admission")
-	if err != nil {
-		r.Error = "environment_collect_failed"
-		return r
-	}
-	if gate == nil {
-		r.Busy = true
-		return r
-	}
-	defer unlockEnvironment(gate)
-	r.Bytes, err = c.DiskUsage()
+	var err error
+	r.Bytes, err = c.collectionUsage(ctx)
 	if err != nil {
 		r.Error = "environment_collect_failed"
 		return r
@@ -233,8 +226,28 @@ func (c *EnvironmentCache) collectBudget(ctx context.Context, references func(co
 		r.Error = "environment_collect_failed"
 		return r
 	}
+	before := r.Bytes
+	changed, estimatedEnough := false, false
+	defer func() {
+		if changed {
+			after, err := c.collectionUsage(ctx)
+			if err != nil {
+				r.Error = "environment_collect_interrupted"
+				return
+			}
+			r.Bytes, r.Reclaimed = after, max(0, before-after)
+		}
+		if r.Bytes > r.Limit {
+			if estimatedEnough {
+				r.Pending = true
+			} else {
+				r.Protected = true
+			}
+		}
+	}()
 	for _, v := range candidates {
 		if r.Bytes <= r.Limit {
+			estimatedEnough = true
 			break
 		}
 		if ctx.Err() != nil {
@@ -245,13 +258,34 @@ func (c *EnvironmentCache) collectBudget(ctx context.Context, references func(co
 			r.Protected = true
 			continue
 		}
+		// Per-prefix allocated bytes can overestimate the saving when prefixes share
+		// inodes. Stop conservatively, then recount the union once after the batch;
+		// any residual budget work waits for the next measured sweep. This avoids
+		// traversing every remaining environment after each individual eviction.
+		size, err := collectionAllocatedBytes(ctx, filepath.Join(c.Root, v.Key))
+		if err != nil {
+			r.Error = "environment_collect_failed"
+			return r
+		}
+		var admission *os.File
 		removed, err := c.evict(v.Key, "automatic_budget", func() (bool, error) {
 			if !c.ready(v.Key) {
 				return false, nil
 			}
 			referenced, err := references(ctx, v.Key)
-			return !referenced, err
+			if err != nil || referenced {
+				return false, err
+			}
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			admission, err = c.tryLock("admission")
+			if err == nil && admission == nil {
+				r.Busy = true
+			}
+			return admission != nil, err
 		})
+		unlockEnvironment(admission)
 		if err != nil {
 			r.Error = "environment_references_unavailable"
 			return r
@@ -260,22 +294,75 @@ func (c *EnvironmentCache) collectBudget(ctx context.Context, references func(co
 			r.Protected = true
 			continue
 		}
+		changed = true
 		if _, err = c.purgeRetiredKey(v.Key); err != nil {
 			r.Error = "environment_collect_failed"
 			return r
 		}
-		after, err := c.DiskUsage()
-		if err != nil {
-			r.Error = "environment_collect_failed"
-			return r
-		}
-		r.Reclaimed += max(0, r.Bytes-after)
-		r.Bytes = after
+		r.Bytes = max(0, r.Bytes-size)
 	}
-	if r.Bytes > r.Limit {
-		r.Protected = true
+	if r.Bytes <= r.Limit {
+		estimatedEnough = true
 	}
 	return r
+}
+
+// Preserve the existing budget's allocated-block/inode union, with cancellation
+// between metadata operations. Downloads retain their separate cache policy.
+func (c *EnvironmentCache) collectionUsage(ctx context.Context) (int64, error) {
+	entries, err := os.ReadDir(c.Root)
+	if err != nil {
+		return 0, err
+	}
+	paths := []string{filepath.Join(c.Root, ".Trash")}
+	for _, d := range entries {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if d.IsDir() && (len(d.Name()) == 64 || strings.HasSuffix(d.Name(), ".partial")) {
+			paths = append(paths, filepath.Join(c.Root, d.Name()))
+		}
+	}
+	return collectionAllocatedBytes(ctx, paths...)
+}
+
+func collectionAllocatedBytes(ctx context.Context, paths ...string) (int64, error) {
+	seen := map[[2]uint64]bool{}
+	var size int64
+	for _, root := range paths {
+		err := filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+			if e := ctx.Err(); e != nil {
+				return e
+			}
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			info, err := d.Info()
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok {
+				return errors.New("environment disk accounting unavailable")
+			}
+			id := [2]uint64{uint64(stat.Dev), uint64(stat.Ino)}
+			if !seen[id] {
+				size += stat.Blocks * 512
+				seen[id] = true
+			}
+			return nil
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+	return size, nil
 }
 
 // The durable fleet receipt proves ownership of exactly one staging path.

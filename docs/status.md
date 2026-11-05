@@ -1772,6 +1772,10 @@ bytes, busy locks, protected entries and fixed diagnostic codes. File-cache
 accounting uses logical copy sizes; environments use existing allocated/inode
 accounting. Reclaimed counters are cache-accounting changes, not a promise of
 equivalent physical free space on clone/compressed filesystems.
+Unknown worker diagnostic strings are replaced by fixed codes at the public
+status boundary. Collection fields require separately advertised
+`hygiene_collection_protocol: worker-collection-v1`; health-only/older queues
+receive their supported request shape.
 
 The existing serialized retention lane applies the configured/automatically
 sized budgets even when no new download or environment build arrives. Complete
@@ -1780,6 +1784,11 @@ as staging; each attempt has a private materialization. Partials, unknown data
 and links remain protected. Environment collection reuses use/build/admission
 locks, recent-use retention, ready receipts and authoritative queue reference
 checks immediately before retirement. Unavailable reference state fails closed.
+Inventory and reference requests do not hold admission; only final atomic
+retirement tries that gate without waiting behind foreground work. Inventory
+checks cancellation between metadata operations. Per-prefix saving estimates
+can include shared inodes, so collection stops conservatively and recounts the
+union once after a batch. `pending` means a residual budget needs another sweep.
 In-use or referenced environments can leave a cache over budget; status explains
 that protection instead of deleting custody to satisfy a target. Existing
 shared-input/model caches keep their own separate policies and locks.
