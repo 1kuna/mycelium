@@ -97,6 +97,18 @@ observed behavior; omit credentials, webhook URLs, private paths and host detail
 
 On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. During measured control pressure, expensive/lower-value nonproduction reads can return 429; honor `Retry-After` and prefer batched waits. Production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
 
+## Explicit model master downloads (next release)
+
+For every declared bundle file, including nested paths, run
+`myce model fetch BUNDLE/FILE --model-root PARENT --url URL --size-bytes BYTES --sha256 HASH`.
+The root must contain the bundle. Fetch stages beside it, resumes interruptions,
+restarts when `Range` is ignored, and publishes only verified files. Invalid
+bytes stay in the reported staging quarantine. Retry a directory-sync or
+concurrent-fetch error after its cause clears; repeating a completed fetch
+verifies the master without replacing it. Keep staging while a fetch is active.
+Verify the whole manifest before use; loading never downloads weights. See
+[explicit master downloads](https://github.com/1kuna/mycelium/blob/main/docs/services.md#explicit-master-download-and-pins).
+
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
