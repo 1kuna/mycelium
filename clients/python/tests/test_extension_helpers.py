@@ -66,8 +66,14 @@ class ExtensionClientTests(unittest.TestCase):
         with patch.object(client, "submit", return_value={"id": "original"}) as submit:
             with patch.object(client, "wait", return_value={"id": "original", "state": "failed"}) as wait:
                 self.assertEqual(client.submit_and_wait(spec, timeout=5)["state"], "failed")
-                submit.assert_called_once_with(spec)
-                wait.assert_called_once_with("original", timeout=5)
+                self.assertEqual(submit.call_count, 1)
+                self.assertEqual(submit.call_args.args, (spec,))
+                self.assertGreater(submit.call_args.kwargs["timeout"], 0)
+                self.assertLessEqual(submit.call_args.kwargs["timeout"], 5)
+                self.assertEqual(wait.call_count, 1)
+                self.assertEqual(wait.call_args.args, ("original",))
+                self.assertGreater(wait.call_args.kwargs["timeout"], 0)
+                self.assertLessEqual(wait.call_args.kwargs["timeout"], submit.call_args.kwargs["timeout"])
 
     def test_lost_response_retries_same_key_but_conflict_does_not(self):
         client = Client(token="fixture")
@@ -140,7 +146,7 @@ class ExtensionClientTests(unittest.TestCase):
                     outputs=directory, project="demo", class_="batch", key="stable", timeout=5), job)
                 upload.assert_called_once_with("local.json", project="demo", class_="batch")
                 submit.assert_called_once_with({"name": "example@1", "project": "demo", "class": "batch",
-                    "extension": "example@1", "submission_key": "stable", "files": {"input.json": ref}}, timeout=5)
+                    "extension": "example@1", "submission_key": "stable", "authoring_origin": "extension", "files": {"input.json": ref}}, timeout=5)
                 download.assert_called_once_with(job["id"], "result.json", Path(directory) / "result.json")
 
     def test_run_consumes_whole_parent_binding(self):
@@ -192,11 +198,12 @@ class ExtensionClientTests(unittest.TestCase):
         job = {"id": "12345678abcdef", "state": "queued",
                "reason": "no hypha has a qualified extension for this kind of work"}
         for run in (False, True):
+            elapsed = [0.0]
             with patch.object(client, "_read_job", return_value=job), \
                  patch.object(client, "submit", return_value=job), \
                  patch.object(client, "cancel_submission") as cancel, \
-                 patch("mycelium.client.time.monotonic", side_effect=[0, 0, .06, .06]), \
-                 patch("mycelium.client.time.sleep"):
+                 patch("mycelium.client.time.monotonic", side_effect=lambda: elapsed[0]), \
+                 patch("mycelium.client.time.sleep", side_effect=lambda d: elapsed.__setitem__(0, elapsed[0]+d)):
                 with self.assertRaises(TimeoutError) as caught:
                     if run:
                         client.run("sample@1", inputs={}, outputs="unused", project="demo", key="key", timeout=.05)
@@ -210,9 +217,10 @@ class ExtensionClientTests(unittest.TestCase):
     def test_wait_timeout_for_running_job_does_not_claim_waiting_for_hypha(self):
         client = Client(token="fixture")
         job = {"id": "12345678abcdef", "state": "running"}
+        elapsed = [0.0]
         with patch.object(client, "_read_job", return_value=job), \
-             patch("mycelium.client.time.monotonic", side_effect=[0, 0, .06, .06]), \
-             patch("mycelium.client.time.sleep"):
+             patch("mycelium.client.time.monotonic", side_effect=lambda: elapsed[0]), \
+             patch("mycelium.client.time.sleep", side_effect=lambda d: elapsed.__setitem__(0, elapsed[0]+d)):
             with self.assertRaises(TimeoutError) as caught:
                 client.wait(job["id"], timeout=.05)
         message = str(caught.exception)

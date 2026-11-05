@@ -182,7 +182,7 @@ hash before replacing an explicit destination. File transfers have no
 default whole-request deadline. They learn socket no-progress windows from observed
 byte service time and gaps, and fail with `TransferStalledError` (code
 `result_download_failed` for results) if progress then stops. Slow transfers can
-continue indefinitely while progressing. Before the first observation, and while
+continue indefinitely while progressing. Before two wire observations establish a service period, and while
 waiting for queue verification before headers, there is no throughput estimate:
 set `Client(transfer_timeout=SECONDS)` to bound each transfer operation explicitly.
 API calls also have no default deadline; `Client(timeout=SECONDS)` preserves an

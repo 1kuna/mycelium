@@ -2,6 +2,8 @@ import datetime as dt
 import io
 import json
 import socket
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -106,7 +108,7 @@ class AdaptiveTests(unittest.TestCase):
                         return len(buffer)
                 source = Socket()
                 transfer = _ProgressSocket(source, adaptive=True)
-                with patch("mycelium.transfer.time", clock):
+                with patch("mycelium.transfer.time", clock), patch.object(transfer, "_buffered", return_value=False):
                     for _ in range(100):
                         self.assertEqual(transfer.recv_into(bytearray(size)), size)
                     self.assertAlmostEqual(clock.now, 100 * period)
@@ -125,6 +127,37 @@ class AdaptiveTests(unittest.TestCase):
                 clock.now += .1
                 return 1
         transfer = _ProgressSocket(Socket(), adaptive=True, deadline=.5)
-        with patch("mycelium.transfer.time", clock), self.assertRaisesRegex(TimeoutError, "owner timeout"):
+        with patch("mycelium.transfer.time", clock), patch.object(transfer, "_buffered", return_value=False), self.assertRaisesRegex(TimeoutError, "owner timeout"):
             transfer.sendall(b"long progressing upload")
         self.assertEqual(clock.now, .5)
+
+
+class BufferedProgressTests(unittest.TestCase):
+    def test_buffered_progress_survives_wire_gaps_and_then_stalls(self):
+        for owner in (None, .8):
+            with self.subTest(owner=owner):
+                receiver, sender = socket.socketpair()
+                stop = threading.Event()
+                def produce():
+                    try:
+                        for _ in range(6):
+                            sender.sendall(b"x" * 8192)
+                            if stop.wait(.05):
+                                return
+                        stop.wait()
+                    finally:
+                        sender.close()
+                thread = threading.Thread(target=produce, daemon=True)
+                thread.start()
+                deadline = None if owner is None else time.monotonic() + owner
+                transfer = _ProgressSocket(receiver, adaptive=True, deadline=deadline)
+                try:
+                    total = 0
+                    while total < 6 * 8192:
+                        total += transfer.recv_into(bytearray(256))
+                    with self.assertRaises(TimeoutError):
+                        transfer.recv_into(bytearray(256))
+                finally:
+                    stop.set()
+                    receiver.close()
+                    thread.join()

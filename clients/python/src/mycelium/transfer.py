@@ -2,6 +2,7 @@
 import http.client
 import functools
 import socket
+import select
 import ssl
 import time
 from .adaptive import Progress
@@ -25,12 +26,22 @@ class _ProgressSocket:
             budget = remaining if budget is None else min(budget, remaining)
         self._socket.settimeout(budget)
 
+    def _buffered(self, write):
+        try:
+            if not write and getattr(self._socket, "pending", lambda: 0)():
+                return True
+            ready = select.select([] if write else [self._socket], [self._socket] if write else [], [], 0)
+            return bool(ready[1] if write else ready[0])
+        except (TypeError, ValueError, AttributeError):
+            return True  # Opaque hooks cannot establish wire service time.
+
     def _operation(self, operation, data, progress, *args):
         if self._adaptive and hasattr(self._socket, "settimeout"):
             self._set_timeout(progress.window(len(data)))
+        waited = not self._buffered(progress is self._write_progress)
         started = time.monotonic()
         count = operation(data, *args)
-        if self._adaptive:
+        if self._adaptive and waited:
             progress.observe(time.monotonic() - started, count if isinstance(count, int) else len(count))
         return count
 
@@ -41,9 +52,10 @@ class _ProgressSocket:
         # Avoid allocating count bytes just to describe the sample size.
         if self._adaptive:
             self._set_timeout(self._read_progress.window(count))
+        waited = not self._buffered(False)
         started = time.monotonic()
         data = self._socket.recv(count, flags)
-        if self._adaptive:
+        if self._adaptive and waited:
             self._read_progress.observe(time.monotonic() - started, len(data))
         return data
 
@@ -90,6 +102,7 @@ class _ProgressTLS:
         self._io_refs = 0
         self._closed = False
         self._call(self._ssl.do_handshake)
+        self._sender._read_progress, self._sender._write_progress = Progress(), Progress()
 
     def __getattr__(self, name):
         return getattr(self._raw, name)
@@ -113,6 +126,9 @@ class _ProgressTLS:
                     self._incoming.write(data)
                 else:
                     self._incoming.write_eof()
+
+    def pending(self):
+        return self._ssl.pending()
 
     def send(self, data, flags=0):
         if flags:
@@ -186,7 +202,7 @@ class ProgressConnection:
 
     def connect(self):
         super().connect()
-        self.sock = _ProgressSocket(self.sock, self.timeout is None or self._progress_deadline is not None, self._progress_deadline)
+        self.sock = _ProgressSocket(self.sock, not isinstance(self.sock, _ProgressTLS) and (self.timeout is None or self._progress_deadline is not None), self._progress_deadline)
 
 
 class _HTTPConnection(ProgressConnection, http.client.HTTPConnection):

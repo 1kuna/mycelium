@@ -240,7 +240,7 @@ class Client:
                     }))
                 raise failure from None
 
-    def submit(self, job: Mapping[str, Any] | str | Path) -> dict[str, Any]:
+    def submit(self, job: Mapping[str, Any] | str | Path, *, timeout: float | None = None) -> dict[str, Any]:
         """Submit a mapping, YAML text, or a pathlib.Path to a YAML file.
 
         after={"job": parent_id, "outputs": {local: "KEY/OUTPUT_NAME"}}
@@ -248,10 +248,12 @@ class Client:
         readiness on an ordinary job. fan_out may accompany the whole-parent form.
         """
         if not isinstance(job, Mapping):
-            return self.submit_yaml(job)
+            return self.submit_yaml(job, timeout=timeout)
+        if timeout is not None:
+            return self._call("POST", "/api/jobs", _normalize(job), timeout=timeout)
         return self._call("POST", "/api/jobs", _normalize(job))
 
-    def submit_yaml(self, source: str | Path) -> dict[str, Any]:
+    def submit_yaml(self, source: str | Path, *, timeout: float | None = None) -> dict[str, Any]:
         """Load YAML safely. Pass Path for a file, str for YAML text."""
         try:
             import yaml
@@ -261,7 +263,7 @@ class Client:
         job = yaml.safe_load(text)
         if not isinstance(job, Mapping):
             raise ValueError("job YAML must contain one mapping")
-        return self.submit({**job, "authoring_origin": "job_spec"})
+        return self.submit({**job, "authoring_origin": "job_spec"}, timeout=timeout)
 
     def submit_and_wait(self, job: Mapping[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
         """Retry this call with the same spec/key after an uncertain response.
@@ -281,7 +283,7 @@ class Client:
             if remaining is not None and remaining <= 0:
                 raise TimeoutError("timed out submitting keyed job; retry the same key")
             try:
-                submitted = self._call("POST", "/api/jobs", spec, timeout=remaining)
+                submitted = self.submit(spec) if remaining is None else self.submit(spec, timeout=remaining)
                 break
             except (URLError, TimeoutError, ConnectionError) as error:
                 if isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError):
@@ -355,7 +357,7 @@ class Client:
             try:
                 return self._file_request_once(method, path, data, headers, size, remaining)
             except APIError as error:
-                if method not in {"GET", "HEAD"} or error.status not in {429, 503}:
+                if method not in {"GET", "HEAD"} or error.status not in {429, 503} or error.code == "file_blob_unavailable":
                     raise
                 pace.observe(self._clock.monotonic() - started)
                 delay = pace.next(self._clock.monotonic(), error=error)
@@ -387,7 +389,9 @@ class Client:
         except HTTPError as error:
             with error:
                 body = error.read(4096).decode("utf-8", errors="replace")
-            raise APIError(error.code, body, retry_after(error.headers.get("Retry-After"), self._clock.time())) from None
+            failure = APIError(error.code, body, retry_after(error.headers.get("Retry-After"), self._clock.time()))
+            failure.code = failure.code or error.headers.get("X-Myce-Error-Code")
+            raise failure from None
         except (TimeoutError, socket.timeout):
             raise TransferStalledError("file transfer made no network progress") from None
         except URLError as error:

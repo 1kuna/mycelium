@@ -725,8 +725,8 @@ func (c *fileTransferConn) Read(p []byte) (int, error) {
 		clock = RealClock{}
 	}
 	started := clock.Now()
-	n, err := c.Conn.Read(p)
-	if c.reading == nil || c.reading.Load() {
+	n, err, waited := fileSocketSome(c.Conn, p, false)
+	if waited && (c.reading == nil || c.reading.Load()) {
 		c.readProgress.observe(clock.Now().Sub(started), n)
 	}
 	return n, fileTransferTimeout(err, max(c.idle, c.readProgress.window(len(p))))
@@ -742,8 +742,8 @@ func (c *fileTransferConn) Write(p []byte) (int, error) {
 			clock = RealClock{}
 		}
 		started := clock.Now()
-		n, err := fileWriteSome(c.Conn, p)
-		if c.writing == nil || c.writing.Load() {
+		n, err, waited := fileSocketSome(c.Conn, p, true)
+		if waited && (c.writing == nil || c.writing.Load()) {
 			c.writeProgress.observe(clock.Now().Sub(started), n)
 		}
 		total += n
@@ -810,7 +810,7 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 	for {
 		started := c.clock().Now()
 		response, err := c.fileRequestOnce(ctx, method, path, body, headers, sizes...)
-		if err != nil || method != "GET" && method != "HEAD" || response.StatusCode != 429 && response.StatusCode != 503 {
+		if err != nil || method != "GET" && method != "HEAD" || response.StatusCode != 429 && response.StatusCode != 503 || response.Header.Get("X-Myce-Error-Code") != "" {
 			return response, err
 		}
 		failure := &HTTPError{Status: response.StatusCode, RetryAfter: retryAfter(response.Header.Get("Retry-After"), c.clock().Now())}

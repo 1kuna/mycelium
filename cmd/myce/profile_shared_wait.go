@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -127,6 +128,9 @@ type sharedProfileGroup struct {
 	next          time.Time
 	pace          myce.ClientPace
 	after         map[string]uint64
+	pending       bool
+	cancel        context.CancelFunc
+	retrying      bool
 }
 
 func waitSharedProfiles(ctx context.Context, root string) error {
@@ -185,10 +189,34 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 	if err != nil {
 		return err
 	}
-	return runSharedProfileLoop(ctx, root, lock, myce.RealClock{}, adaptivePause)
+	return runSharedProfileLoop(ctx, root, lock, myce.RealClock{}, adaptivePause, wakes)
 }
 
-func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock myce.Clock, pause func(context.Context, time.Duration) error) error {
+type sharedProfileFinish struct {
+	entry string
+	watch *sharedProfileWatch
+	job   *myce.Job
+	cause error
+}
+type sharedProfileRead struct {
+	key       string
+	owner     *sharedProfileGroup
+	group     sharedProfileGroup
+	finished  []sharedProfileFinish
+	cancelled bool
+}
+
+func sharedProfileAuthority(reg sharedProfileRegistration) string {
+	return profileHash(struct{ Queue, Config, Joining, Token string }{reg.Observer.Queue, reg.Observer.Config, reg.Observer.Joining, reg.Token})
+}
+
+// The coordinator owns receipts and their fences. Each authority has one
+// independent, cancellable network operation; a silent server cannot withhold
+// another authority's completion or an owner's deadline.
+func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock myce.Clock, pause func(context.Context, time.Duration) error, events ...<-chan struct{}) error {
+	ctx, cancelAll := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	defer func() { cancelAll(); workers.Wait() }()
 	watches := map[string]*sharedProfileWatch{}
 	defer func() {
 		for _, w := range watches {
@@ -217,10 +245,35 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 		watch.lock.Close()
 		return true
 	}
+
 	groups := map[string]*sharedProfileGroup{}
+	completed := make(chan sharedProfileRead)
+	var wake <-chan struct{}
+	if len(events) > 0 {
+		wake = events[0]
+	}
 	discovery := myce.ClientPace{}
 	previousCount := -1
+	apply := func(result sharedProfileRead) {
+		group := groups[result.key]
+		if group == nil || group != result.owner {
+			return
+		}
+		group.pending = false
+		group.cancel = nil
+		if !result.cancelled {
+			*group = result.group
+		}
+		for _, action := range result.finished {
+			if watches[action.entry] == action.watch {
+				finish(action.entry, action.job, action.cause)
+			}
+		}
+	}
 	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		passStarted := clock.Now()
 		entries, err := filepath.Glob(filepath.Join(root, "*.json"))
 		if err != nil {
@@ -265,8 +318,14 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 				reg.Expires = *receipt.Spec.Deadline
 			}
 			watches[entry] = &sharedProfileWatch{registration: reg, receipt: receipt, lock: receiptLock}
-			for _, group := range groups {
-				group.next = time.Time{}
+			key := sharedProfileAuthority(reg)
+			if group := groups[key]; group != nil {
+				if group.pending {
+					group.cancel()
+				}
+				if !group.retrying {
+					group.next = time.Time{}
+				}
 			}
 		}
 		if len(watches) == 0 {
@@ -284,25 +343,24 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 				start.Close()
 			}
 		}
+
 		byAuthority := map[string][]string{}
 		for entry, w := range watches {
-			key := profileHash(struct{ Queue, Config, Joining, Token string }{w.registration.Observer.Queue, w.registration.Observer.Config, w.registration.Observer.Joining, w.registration.Token})
+			key := sharedProfileAuthority(w.registration)
 			byAuthority[key] = append(byAuthority[key], entry)
 		}
 		for key, entries := range byAuthority {
-			started := clock.Now()
 			group := groups[key]
 			if group == nil {
 				group = &sharedProfileGroup{after: map[string]uint64{}}
 				groups[key] = group
 			}
 			sort.Strings(entries)
-			// Expiry is per receipt, including during backoff or a prolonged outage.
 			active := entries[:0]
 			for _, entry := range entries {
 				w := watches[entry]
 				if !w.registration.Expires.IsZero() && !clock.Now().Before(w.registration.Expires) || w.receipt.JobID == "" {
-					cause := context.DeadlineExceeded
+					cause := error(context.DeadlineExceeded)
 					if w.receipt.JobID == "" {
 						cause = errors.New("receipt has no job")
 					}
@@ -312,128 +370,234 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 				}
 			}
 			entries = active
-			if len(entries) == 0 || clock.Now().Before(group.next) {
+			if len(entries) == 0 || group.pending || clock.Now().Before(group.next) {
 				continue
 			}
-			sample := watches[entries[0]].registration
-			c, e := runClient(sample.Observer.Config, sample.Observer.Joining, sample.Observer.Queue, sample.Token)
-			if e != nil {
-				group.pace.Observe(clock.Now().Sub(started), false)
-				group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, e, nil))
-				continue
+			snapshot := make(map[string]*sharedProfileWatch, len(entries))
+			for _, entry := range entries {
+				snapshot[entry] = watches[entry]
 			}
-			c = c.WithoutRetries()
-			c.Clock = clock
-			for start := 0; start < len(entries); start += 256 {
-				batch := entries[start:min(start+256, len(entries))]
-				ids := make([]string, 0, len(batch))
-				for _, entry := range batch {
-					ids = append(ids, watches[entry].receipt.JobID)
-				}
-				readCtx, cancel := sharedProfileReadContext(ctx, batch, watches, clock)
-				seconds := group.pace.Seconds(clock.Now(), time.Time{})
-				// More than one group/batch shares this coordinator. Those reads stay
-				// nonblocking so one authority cannot hold another's completion.
-				if len(byAuthority) > 1 || len(entries) > 256 {
-					seconds = 0
-				}
-				reply, readErr := c.WaitBatch(readCtx, ids, group.after, seconds)
-				cancel()
-				if readErr != nil {
-					// Unknown IDs must not poison their healthy batch peers. Resolve this
-					// batch individually only on a permanent unknown response.
-					var api *myce.HTTPError
-					if errors.As(readErr, &api) && api.Code == "job_unknown" {
-						// Probe at most five rows per pass and rotate, so an
-						// unknown receipt cannot consume the source allowance
-						// repeatedly ahead of its healthy batch peers.
-						probeCount := min(5, len(batch))
-						for n := 0; n < probeCount; n++ {
-							entry := batch[(group.unknownOffset+n)%len(batch)]
-							w := watches[entry]
-							one, cancel := sharedProfileReadContext(ctx, []string{entry}, watches, clock)
-							j, jobErr := c.GetJobForWait(one, w.receipt.JobID)
-							cancel()
-							if jobErr == nil {
-								if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
-									finish(entry, j, nil)
-								}
-								continue
-							}
-							if errors.As(jobErr, &api) && api.Code == "job_unknown" {
-								// This receipt records accepted intent. Visibility retry ends only
-								// at its owner's deadline, not after a fixed grace period.
-								continue
-							}
-							if !myce.RetryStatusRead(jobErr) {
-								finish(entry, nil, jobErr)
-							}
-						}
-						group.unknownOffset = (group.unknownOffset + probeCount) % len(batch)
-					} else if !myce.RetryStatusRead(readErr) {
-						for _, entry := range batch {
-							finish(entry, nil, readErr)
-						}
-					}
-					group.pace.Observe(clock.Now().Sub(started), false)
-					group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, readErr, nil))
-					continue
-				}
-				changed := false
-				for _, state := range reply.Jobs {
-					changed = changed || group.after[state.ID] != state.Revision
-				}
-				group.pace.Observe(clock.Now().Sub(started), changed)
-				group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, nil, nil))
-				// A negotiated long-poll already paces unchanged jobs and wakes on a
-				// revision. Re-enter it without an additional growing sleep.
-				if seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0 {
-					group.next = clock.Now()
-				}
-				for i, state := range reply.Jobs {
-					group.after[state.ID] = state.Revision
-					if state.State != "succeeded" && state.State != "failed" && state.State != "cancelled" {
-						continue
-					}
-					entry := batch[i]
-					finalCtx, cancel := sharedProfileReadContext(ctx, []string{entry}, watches, clock)
-					j, finalErr := c.GetJobForWait(finalCtx, state.ID)
-					cancel()
-					if finalErr != nil {
-						if !myce.RetryStatusRead(finalErr) {
-							finish(entry, nil, finalErr)
-						} else {
-							group.pace.Observe(clock.Now().Sub(started), false)
-							group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, finalErr, nil))
-						}
-						continue
-					}
-					if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
-						finish(entry, j, nil)
-					}
-				}
+			state := *group
+			state.pending = false
+			state.cancel = nil
+			state.after = make(map[string]uint64, len(group.after))
+			for id, revision := range group.after {
+				state.after[id] = revision
 			}
-			if c.HTTP != nil {
-				c.HTTP.CloseIdleConnections()
+			requestCtx, stop := context.WithCancel(ctx)
+			group.pending = true
+			group.cancel = stop
+			workers.Add(1)
+			go func(key string, entries []string, state sharedProfileGroup, snapshot map[string]*sharedProfileWatch, owner *sharedProfileGroup) {
+				defer workers.Done()
+				defer stop()
+				result := readSharedProfileAuthority(requestCtx, entries, snapshot, state, clock)
+				result.key = key
+				result.owner = owner
+				select {
+				case completed <- result:
+				case <-ctx.Done():
+				}
+			}(key, append([]string(nil), entries...), state, snapshot, group)
+		}
+		// Retired groups must not contribute stale next times to pacing.
+		live := map[string]bool{}
+		for _, w := range watches {
+			live[sharedProfileAuthority(w.registration)] = true
+		}
+		for key, group := range groups {
+			if !live[key] {
+				if group.cancel != nil {
+					group.cancel()
+				}
+				delete(groups, key)
 			}
 		}
 		discovery.Observe(clock.Now().Sub(passStarted), previousCount != len(watches))
 		previousCount = len(watches)
 		delay := discovery.Delay(clock.Now(), time.Time{}, nil, nil)
+		pending := false
+		var due time.Time
 		for _, group := range groups {
-			if !group.next.IsZero() {
-				delay = min(delay, max(0, group.next.Sub(clock.Now())))
+			if group.pending {
+				pending = true
+				continue
+			}
+			if !group.next.IsZero() && (due.IsZero() || group.next.Before(due)) {
+				due = group.next
 			}
 		}
 		for _, watch := range watches {
-			if !watch.registration.Expires.IsZero() {
-				delay = min(delay, max(0, watch.registration.Expires.Sub(clock.Now())))
+			if end := watch.registration.Expires; !end.IsZero() && (due.IsZero() || end.Before(due)) {
+				due = end
 			}
+		}
+		if pending {
+			var timer *time.Timer
+			var timerC <-chan time.Time
+			if !due.IsZero() {
+				timer = time.NewTimer(max(0, due.Sub(clock.Now())))
+				timerC = timer.C
+			}
+			select {
+			case result := <-completed:
+				apply(result)
+			case <-wake:
+				for _, group := range groups {
+					if group.cancel != nil {
+						group.cancel()
+					}
+				}
+			case <-timerC:
+			case <-ctx.Done():
+				if timer != nil {
+					timer.Stop()
+				}
+				return ctx.Err()
+			}
+			if timer != nil {
+				timer.Stop()
+			}
+			// Preserve injected pacing between completed observation rounds. If other
+			// authorities are still in flight, return immediately to their event select.
+			anyPending := false
+			for _, group := range groups {
+				anyPending = anyPending || group.pending
+			}
+			if anyPending {
+				continue
+			}
+		}
+		if !due.IsZero() {
+			delay = min(delay, max(0, due.Sub(clock.Now())))
 		}
 		if err := pause(ctx, delay); err != nil {
 			return err
 		}
 	}
+}
+
+func readSharedProfileAuthority(ctx context.Context, entries []string, watches map[string]*sharedProfileWatch, state sharedProfileGroup, clock myce.Clock) (result sharedProfileRead) {
+	group := &state
+	defer func() { result.group = state; result.cancelled = ctx.Err() != nil }()
+	finish := func(entry string, j *myce.Job, cause error) bool {
+		result.finished = append(result.finished, sharedProfileFinish{entry, watches[entry], j, cause})
+		return true
+	}
+	started := clock.Now()
+	sample := watches[entries[0]].registration
+	c, e := runClient(sample.Observer.Config, sample.Observer.Joining, sample.Observer.Queue, sample.Token)
+	if e != nil {
+		group.pace.Observe(clock.Now().Sub(started), false)
+		group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, e, nil))
+		group.retrying = true
+		return
+	}
+	c = c.WithoutRetries()
+	c.Clock = clock
+batchLoop:
+	for start := 0; start < len(entries); start += 256 {
+		batch := entries[start:min(start+256, len(entries))]
+		ids := make([]string, 0, len(batch))
+		for _, entry := range batch {
+			ids = append(ids, watches[entry].receipt.JobID)
+		}
+		readCtx, cancel := sharedProfileReadContext(ctx, batch, watches, clock)
+		seconds := group.pace.Seconds(clock.Now(), time.Time{})
+		// One outstanding request per authority; other authorities run
+		// independently and the coordinator keeps processing deadlines.
+		if len(entries) > 256 {
+			seconds = 0
+		}
+		reply, readErr := c.WaitBatch(readCtx, ids, group.after, seconds)
+		cancel()
+		if readErr != nil {
+			// Unknown IDs must not poison their healthy batch peers. Resolve this
+			// batch individually only on a permanent unknown response.
+			var api *myce.HTTPError
+			if errors.As(readErr, &api) && api.Code == "job_unknown" {
+				// Probe at most five rows per pass and rotate, so an
+				// unknown receipt cannot consume the source allowance
+				// repeatedly ahead of its healthy batch peers.
+				probeCount := min(5, len(batch))
+				for n := 0; n < probeCount; n++ {
+					entry := batch[(group.unknownOffset+n)%len(batch)]
+					w := watches[entry]
+					one, cancel := sharedProfileReadContext(ctx, []string{entry}, watches, clock)
+					j, jobErr := c.GetJobForWait(one, w.receipt.JobID)
+					cancel()
+					if jobErr == nil {
+						if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
+							finish(entry, j, nil)
+						}
+						continue
+					}
+					if errors.As(jobErr, &api) && api.Code == "job_unknown" {
+						// This receipt records accepted intent. Visibility retry ends only
+						// at its owner's deadline, not after a fixed grace period.
+						continue
+					}
+					if !myce.RetryStatusRead(jobErr) {
+						finish(entry, nil, jobErr)
+					} else {
+						group.pace.Observe(clock.Now().Sub(started), false)
+						group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, jobErr, nil))
+						group.retrying = true
+						break batchLoop
+					}
+				}
+				group.unknownOffset = (group.unknownOffset + probeCount) % len(batch)
+			} else if !myce.RetryStatusRead(readErr) {
+				for _, entry := range batch {
+					finish(entry, nil, readErr)
+				}
+			}
+			group.pace.Observe(clock.Now().Sub(started), false)
+			group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, readErr, nil))
+			group.retrying = true
+			break
+		}
+		group.retrying = false
+		changed := false
+		for _, state := range reply.Jobs {
+			changed = changed || group.after[state.ID] != state.Revision
+		}
+		group.pace.Observe(clock.Now().Sub(started), changed)
+		group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, nil, nil))
+		// A negotiated long-poll already paces unchanged jobs and wakes on a
+		// revision. Re-enter it without an additional growing sleep.
+		if seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0 {
+			group.next = clock.Now()
+		}
+		for i, state := range reply.Jobs {
+			group.after[state.ID] = state.Revision
+			if state.State != "succeeded" && state.State != "failed" && state.State != "cancelled" {
+				continue
+			}
+			entry := batch[i]
+			finalCtx, cancel := sharedProfileReadContext(ctx, []string{entry}, watches, clock)
+			j, finalErr := c.GetJobForWait(finalCtx, state.ID)
+			cancel()
+			if finalErr != nil {
+				if !myce.RetryStatusRead(finalErr) {
+					finish(entry, nil, finalErr)
+				} else {
+					group.pace.Observe(clock.Now().Sub(started), false)
+					group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, finalErr, nil))
+					group.retrying = true
+					break batchLoop
+				}
+				continue
+			}
+			if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
+				finish(entry, j, nil)
+			}
+		}
+	}
+	if c.HTTP != nil {
+		c.HTTP.CloseIdleConnections()
+	}
+	return
 }
 
 // Context-bounded serialization for simultaneous submissions in different
