@@ -54,26 +54,13 @@ func TestSharedInputCapacityRefusalAndRouting(t *testing.T) {
 		t.Fatal("did not route to fitting cache")
 	}
 }
-func TestSharedInputCapacityUnknownAndPressure(t *testing.T) {
+func TestSharedInputCapacityPressure(t *testing.T) {
 	q, clock := fixture(t)
-	old := cacheCapacityMachine("legacy", 40<<30)
-	old.SharedInputCache = nil
-	check(t, q, old, nil)
-	s := sharedCapacitySpec()
-	if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
-		t.Fatal("unknown capacity refused at resolve", err)
-	}
-	j := submit(t, q, s)
-	if held := job(t, q, j.ID); held.State != "queued" || held.DiagnosticCode != "shared_input_cache_unreported" || !strings.Contains(held.Reason, fmt.Sprint(sharedInputRequired(s, nil))) {
-		t.Fatalf("unknown capacity did not wait with sizes: %+v", held)
-	}
 	big := cacheCapacityMachine("big", 80<<30)
 	big.SharedInputCache.FreeBytes = 1 << 30
 	big.SharedInputCache.EvictableBytes = 2 << 30
 	check(t, q, big, nil)
-	if r := check(t, q, old, nil); r.Job != nil {
-		t.Fatal("legacy worker accepted shared inputs")
-	}
+	j := submit(t, q, sharedCapacitySpec())
 	if r := check(t, q, big, nil); r.Job != nil {
 		t.Fatal("busy cache accepted job")
 	}
@@ -88,52 +75,49 @@ func TestSharedInputCapacityUnknownAndPressure(t *testing.T) {
 	}
 }
 
-func TestSharedInputCapacityWaitsAcrossStartupAndRollout(t *testing.T) {
-	q, clock := fixture(t)
-	s := sharedCapacitySpec()
-	// A fresh queue has no worker reports yet; that is not proof of rejection.
-	if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
-		t.Fatal("startup resolve refused", err)
-	}
-	j := submit(t, q, s)
-	if got := job(t, q, j.ID); got.DiagnosticCode != "shared_input_cache_unreported" {
-		t.Fatal("startup wait was untyped", got.Reason)
-	}
-	old := cacheCapacityMachine("legacy", 40<<30)
-	old.SharedInputCache = nil
-	if reply := check(t, q, old, nil); reply.Job != nil {
-		t.Fatal("old worker without a report accepted shared inputs")
-	}
-	small := cacheCapacityMachine("small", 10<<30)
-	if reply := check(t, q, small, nil); reply.Job != nil {
-		t.Fatal("undersized reporting worker accepted shared inputs")
-	}
-	// A known small cache plus an unknown cache must still accept submissions.
-	// require_target must keep other qualification checks without treating a
-	// temporarily missing capacity report as permanent incompatibility.
-	if err := q.SeedProjects(map[string]ProjectPolicy{s.Project: {Weight: 1, AllowedMachines: []string{old.ID, small.ID}}}); err != nil {
-		t.Fatal(err)
-	}
-	s.RequireTarget = true
-	if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
-		t.Fatal("mixed rollout resolve refused", err)
-	}
-	clock.Advance(time.Second)
-	second := submit(t, q, s)
-	if got := job(t, q, second.ID); got.DiagnosticCode != "shared_input_cache_unreported" {
-		t.Fatal("mixed rollout wait was untyped", got.Reason)
-	}
-	tooLarge := s
-	tooLarge.Needs.MemoryGB = 1e6
-	if _, err := q.Submit(tooLarge); err == nil {
-		t.Fatal("unknown cache bypassed other permanent qualification")
-	}
-	s.RequireTarget = false
-	submit(t, q, s) // Project capacity validation must also retain unknown intent.
-	clock.Advance(time.Second)
-	old.SharedInputCache = &SharedInputCapacity{CapacityBytes: 40 << 30, FreeBytes: 40 << 30}
-	if reply := check(t, q, old, nil); reply.Job == nil || reply.Job.ID != j.ID {
-		t.Fatal("first fitting capacity report did not resume queued work")
+func TestSharedInputCapacityLegacyWorkerLargeInputs(t *testing.T) {
+	for _, peers := range []int{0, 199} {
+		t.Run(fmt.Sprintf("hosts-%d", peers+1), func(t *testing.T) {
+			q, clock := fixture(t)
+			s := sharedCapacitySpec()
+			// No report at startup still cannot prove permanent impossibility.
+			if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
+				t.Fatal("startup resolve refused", err)
+			}
+			j := submit(t, q, s)
+			if got := job(t, q, j.ID); got.DiagnosticCode != "shared_input_cache_unreported" {
+				t.Fatal("startup wait was untyped", got.Reason)
+			}
+			for i := range peers {
+				small := cacheCapacityMachine(fmt.Sprintf("reporting-%03d", i), 10<<30)
+				if reply := check(t, q, small, nil); reply.Job != nil {
+					t.Fatal("undersized reporting worker accepted shared inputs")
+				}
+			}
+			old := cacheCapacityMachine("legacy", 40<<30)
+			old.SharedInputCache = nil // shared_inputs_v1 predates capacity reports.
+			clock.Advance(time.Second)
+			reply := check(t, q, old, nil)
+			if reply.Job == nil || reply.Job.ID != j.ID {
+				t.Fatal("large-input job stranded on legacy worker", job(t, q, j.ID).Reason)
+			}
+			if err := q.Started(result(reply.Job, true)); err != nil {
+				t.Fatal("legacy worker could not start assigned job", err)
+			}
+			// Unknown cache capacity retains every other qualification check.
+			s.RequireTarget = true
+			if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
+				t.Fatal("mixed rollout resolve refused", err)
+			}
+			second := submit(t, q, s)
+			if got := job(t, q, second.ID); got.DiagnosticCode == "shared_input_cache_unreported" {
+				t.Fatal("legacy capacity report still required", got.Reason)
+			}
+			s.Needs.MemoryGB = 1e6
+			if _, err := q.Submit(s); err == nil {
+				t.Fatal("legacy cache bypassed hardware qualification")
+			}
+		})
 	}
 }
 func TestSharedInputCapacityAccounting(t *testing.T) {

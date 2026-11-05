@@ -89,6 +89,10 @@ Success means `result` verified output hashes and sizes **and** `cmp` exited 0:
 the exact result is 23 bytes including newline. A wake or command exit alone is
 insufficient. Download within retention (default seven days).
 
+On releases with the mixed-version cache correction, workers without an optional
+shared-input cache-capacity report retain staging-time admission. Reporting workers
+are checked before placement; staging capacity failures give required/available/limit bytes.
+
 If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep full
 `myce status` out of loops. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium

@@ -150,8 +150,15 @@ func sharedInputCacheReason(s Spec, m *Machine, capacityOnly bool) string {
 		return ""
 	}
 	required := sharedInputRequired(s, m)
-	if m == nil || m.SharedInputCache == nil {
+	if m == nil {
 		return fmt.Sprintf("shared_input_cache: required=%d bytes capacity=unknown; worker capacity report required", required)
+	}
+	// Capacity reports are optional across worker upgrades. A worker without
+	// one retains staging-time admission, whose local cache enforces its actual
+	// limit and reports required/available bytes. Requiring the newer report
+	// here would permanently strand work on an otherwise compatible old worker.
+	if m.SharedInputCache == nil {
+		return ""
 	}
 	report := m.SharedInputCache
 	if required > report.CapacityBytes {
@@ -213,7 +220,7 @@ func (q *Queue) sharedInputCapacityRefusal(j *Job) error {
 		}
 	}
 	// Missing reports during startup or a mixed-version rollout cannot prove
-	// impossibility. Accept and wait; placement still requires a fitting report.
+	// impossibility. Legacy workers enforce capacity when staging the inputs.
 	if unreported || !reported {
 		return nil
 	}
@@ -226,25 +233,19 @@ func sharedInputWaitingReason(j *Job, machines map[string]*Machine) string {
 		return ""
 	}
 	var reasons []string
-	unreported, fittingCapacity := false, false
 	for _, m := range machines {
 		if !j.Spec.allowsMachine(m.ID) {
 			continue
 		}
 		for _, candidate := range sharedInputCandidates(j, m) {
-			if m.SharedInputCache == nil {
-				unreported = true
-				continue
-			}
 			reason := sharedInputCacheReason(candidate.Spec, m, false)
 			if reason == "" {
 				return ""
 			}
-			fittingCapacity = fittingCapacity || sharedInputCacheReason(candidate.Spec, m, true) == ""
 			reasons = append(reasons, reason)
 		}
 	}
-	if len(reasons) == 0 || unreported && !fittingCapacity {
+	if len(reasons) == 0 {
 		return fmt.Sprintf("shared_input_cache_unreported: required=%d bytes; waiting for worker capacity reports", sharedInputRequired(j.Spec, nil))
 	}
 	slices.Sort(reasons)
