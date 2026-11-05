@@ -76,6 +76,9 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 	handler := API{Queue: q, Token: "upgrade-fixture"}.Handler()
 	var mu sync.Mutex
 	receipts := []map[string]any{}
+	if err := os.WriteFile(filepath.Join(root, "receipts.json"), []byte("[]"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/workers/checkin" {
 			handler.ServeHTTP(w, r)
@@ -94,9 +97,17 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 		_ = json.Unmarshal(body, &request)
 		machine, _ := request["machine"].(map[string]any)
 		inventory, _ := machine["tool_inventory"].(map[string]any)
+		var reply map[string]any
+		_ = json.Unmarshal(capture.body, &reply)
 		mu.Lock()
 		defer mu.Unlock()
-		receipts = append(receipts, map[string]any{"status": capture.status, "bytes": len(body), "inventory_keys": len(inventory)})
+		receipts = append(receipts, map[string]any{
+			"status": capture.status, "bytes": len(body), "inventory_keys": len(inventory),
+			"hash": request["tool_inventory_hash"], "version": request["tool_inventory_version"],
+			"session": machine["session"], "attempt_protocol": request["attempt_protocol"],
+			"protocol": reply["tool_inventory_protocol"], "required": reply["tool_inventory_required"],
+			"ack_hash": reply["tool_inventory_hash"], "ack_version": reply["tool_inventory_version"],
+		})
 		data, _ := json.Marshal(receipts)
 		tmp := filepath.Join(root, "receipts.tmp")
 		if err := os.WriteFile(tmp, data, 0600); err != nil {
@@ -107,7 +118,11 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 			t.Error(err)
 		}
 	}), ReadHeaderTimeout: 5 * time.Second}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	address := os.Getenv("UPGRADE_LISTEN")
+	if address == "" {
+		address = "127.0.0.1:0"
+	}
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +146,12 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 type upgradeResponse struct {
 	http.ResponseWriter
 	status int
+	body   []byte
+}
+
+func (w *upgradeResponse) Write(data []byte) (int, error) {
+	w.body = append(w.body, data...)
+	return w.ResponseWriter.Write(data)
 }
 
 func (w *upgradeResponse) WriteHeader(status int) {

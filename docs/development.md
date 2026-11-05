@@ -133,9 +133,11 @@ The predecessor is s071 (`v3.1.0-rc.20261104.s071.100840b`), pinned to published
 commit `100840b4094d77bbc69a80d807dba58722db877c`. No v3 release tags were published;
 the harness uses this verified release commit rather than inventing a tag or
 silently substituting current code. Update the pin/version when qualifying a new
-release predecessor. The profile prepares its Git source and module dependencies
+release predecessor. The second baseline is the inventory-supporting #790 merge,
+`8b2585e1d7edaff376e96430bc614daa9f788342`, which still sends full reports and
+strictly rejects the newer delta fields. The profile prepares both Git sources and module dependencies
 before the offline gate and declares `needs.network: true` for that preparation;
-a local checkout with that commit needs no network.
+a local checkout containing both commits needs no network.
 For a fresh offline source archive, first run:
 
 ```sh
@@ -161,6 +163,15 @@ remain present while the worker joins and sends a second accepted check-in.
 Pairings cover candidate/candidate and predecessor-worker/candidate-queue. s071
 predates tool inventory and rejects the candidate's new fields in its strict JSON
 decoder; that reverse direction is an explicitly checked unsupported boundary.
+The #790 worker joins the candidate with full inventory on every heartbeat, and
+the candidate joins #790 without sending unadvertised delta fields. Another
+journey keeps one candidate worker alive across queue replacement: first reopen
+the candidate's disposable database, require its hash-only check-in to receive
+an explicit full request and verify the refresh; then start #790 with a fresh
+disposable database on the same loopback endpoint and require legacy full retry
+and subsequent accepted full heartbeats. This tests worker fallback, without
+claiming that an old queue can read a new queue's persisted data. Session and
+keyed-attempt protocol must remain unchanged throughout.
 The downgrade journey makes the candidate installer write an automatic-cache
 config, runs the actual s071 CLI installer with `--config ... --dry-run`, then
 starts an s071 worker from the same config and requires accepted check-ins.
@@ -178,7 +189,8 @@ python3 scripts/upgrade-compat.py run --candidate abce497c
 ```
 
 That command must fail both same-source startup and saved-config downgrade on the
-original release. A passing current run requires the fixes from #790.
+original release. A passing current run requires the fixes from #790 and the
+negotiated inventory protocol from #791.
 
 The committed `release-build` profile reuses this environment for Linux release
 artifacts, with literal version and commit arguments and build receipts. The

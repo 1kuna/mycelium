@@ -14,10 +14,12 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+import urllib.parse
 
 REPO = Path(__file__).resolve().parent.parent
 # No v3 release tag was published. This is the verified deployed s071 source.
 PREVIOUS = "100840b4094d77bbc69a80d807dba58722db877c"
+INVENTORY_BASELINE = "8b2585e1d7edaff376e96430bc614daa9f788342"
 OLD_VERSION = "v3.1.0-rc.20261104.s071.100840b"
 VERSION = "v3.1.0-rc.20261104.s072.abce497.1"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
@@ -86,11 +88,12 @@ def extract(source, destination):
 
 
 def prepare():
-    source = archive(PREVIOUS)
-    with tempfile.TemporaryDirectory(prefix="upgrade-modules-", dir=cache_root()) as tmp:
-        extract(source, tmp)
-        command(["go", "mod", "download"], cwd=tmp)
-    print(f"upgrade-compat: previous source {PREVIOUS[:12]} prepared", flush=True)
+    for revision in (PREVIOUS, INVENTORY_BASELINE):
+        source = archive(revision)
+        with tempfile.TemporaryDirectory(prefix="upgrade-modules-", dir=cache_root()) as tmp:
+            extract(source, tmp)
+            command(["go", "mod", "download"], cwd=tmp)
+        print(f"upgrade-compat: baseline source {revision[:12]} prepared", flush=True)
 
 
 def binaries(source, identity, version, scratch):
@@ -100,6 +103,7 @@ def binaries(source, identity, version, scratch):
     helper, cli = cached / "fixture.test", cached / "myce"
     if helper.exists() and cli.exists():
         return helper, cli
+    print(f"upgrade-compat: building source {identity[:12]}", flush=True)
     # Build in scratch and publish only completed executables. Go's own cache
     # shares compilation across gate runs; a failed build never poisons this key.
     tree = scratch / ("build-" + digest[:12])
@@ -142,7 +146,7 @@ def candidate_identity(source):
 
 
 @contextlib.contextmanager
-def process(binary, mode, root, *, queue="", config="", tools=None, expected_refusal=False):
+def process(binary, mode, root, *, queue="", config="", tools=None, expected_refusal=False, listen=""):
     root.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith("MYCE_") and not k.startswith("UPGRADE_")}
     home = root / "home"
@@ -150,7 +154,9 @@ def process(binary, mode, root, *, queue="", config="", tools=None, expected_ref
     env.update(HOME=str(home), USERPROFILE=str(home), XDG_CONFIG_HOME=str(home / ".config"),
                XDG_CACHE_HOME=str(home / ".cache"), XDG_DATA_HOME=str(home / ".local/share"),
                UPGRADE_MODE=mode, UPGRADE_ROOT=str(root), UPGRADE_QUEUE=queue,
-               UPGRADE_CONFIG=str(config or ""), GORACE="atexit_sleep_ms=0")
+               UPGRADE_CONFIG=str(config or ""), UPGRADE_LISTEN=listen, GORACE="atexit_sleep_ms=0")
+    if mode == "queue":
+        (root / "url").unlink(missing_ok=True)
     if tools:
         env["PATH"] = str(tools)  # Worker discovers exactly the authored tools.
     with (root / "process.log").open("w+") as log:
@@ -193,7 +199,7 @@ def await_file(path, child, predicate=lambda value: True, timeout=30):
     raise RuntimeError(f"fixture did not reach {path.name} within {timeout}s")
 
 
-def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, refusal=False, config=None):
+def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, refusal=False, config=None, full_only=False):
     with process(queue_binary, "queue", root / "queue") as queue:
         url = await_file(root / "queue/url", queue)
         with process(worker_binary, "worker", root / "worker", queue=url, tools=tools,
@@ -223,6 +229,10 @@ def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, refu
             if large:
                 assert max(row["bytes"] for row in rows) >= 1_871_955, "incident-size check-in no longer exercised"
                 assert max(row["inventory_keys"] for row in rows) >= 41, "prepared inventory missing"
+            if full_only:
+                assert all(row["inventory_keys"] == 41 and not row["hash"] and not row["version"] for row in rows), rows
+                assert max(row["bytes"] for row in rows) >= 1_871_955, "full legacy inventory missing"
+            assert all(row["attempt_protocol"] == "keyed-attempt-v1" for row in rows), "keyed attempts downgraded"
             print(f"upgrade-compat: PASS {name} (max check-in {max(row['bytes'] for row in rows)} bytes)", flush=True)
 
 
@@ -232,6 +242,7 @@ def run(args):
     with tempfile.TemporaryDirectory(prefix="upgrade-compat-", dir=scratch_parent) as tmp:
         scratch = Path(tmp)
         previous = binaries(archive(PREVIOUS, offline=True), PREVIOUS, OLD_VERSION, scratch)
+        baseline = binaries(archive(INVENTORY_BASELINE, offline=True), INVENTORY_BASELINE, VERSION, scratch)
         source = REPO
         if args.candidate:
             source = scratch / "candidate"
@@ -250,6 +261,9 @@ def run(args):
             ("candidate queue + previous worker", lambda: pairing("previous worker", candidate[0], previous[0], scratch / "old-worker", tools)),
             ("previous queue + candidate worker", lambda: reverse(previous, candidate, scratch, tools)),
             ("saved config downgrade", lambda: downgrade(previous, candidate, scratch, tools)),
+            ("full-inventory worker + candidate queue", lambda: pairing("#790 full worker", candidate[0], baseline[0], scratch / "full-worker", tools, full_only=True)),
+            ("candidate worker + strict inventory queue", lambda: pairing("#790 strict queue", baseline[0], candidate[0], scratch / "strict-queue", tools, full_only=True)),
+            ("negotiated worker + queue restart and downgrade", lambda: inventory_restarts(candidate, baseline, scratch, tools)),
         ]
         for name, case in cases:
             try:
@@ -267,6 +281,62 @@ def reverse(previous, candidate, scratch, tools):
     # support boundary until a negotiated protocol makes this direction work.
     pairing("previous queue", previous[0], candidate[0], scratch / "old-queue", tools, refusal=True)
     print("upgrade-compat: PASS s071 reverse pairing explicitly refuses unsupported inventory", flush=True)
+
+
+def inventory_restarts(candidate, baseline, scratch, tools):
+    root = scratch / "inventory-restarts"
+    queue_root = root / "queue"
+
+    def accepted_hash_only(value):
+        rows = json.loads(value)
+        if any(row["status"] != 200 for row in rows):
+            raise RuntimeError(f"inventory check-in refused: {rows}")
+        return len(rows) >= 3 and rows[-1]["hash"] and rows[-1]["inventory_keys"] == 0
+
+    with contextlib.ExitStack() as queues:
+        queue = queues.enter_context(process(candidate[0], "queue", queue_root))
+        url = await_file(queue_root / "url", queue)
+        address = urllib.parse.urlparse(url).netloc
+        with process(candidate[0], "worker", root / "worker", queue=url, tools=tools) as worker:
+            rows = json.loads(await_file(queue_root / "receipts.json", worker, accepted_hash_only))
+            assert rows[0]["inventory_keys"] == 41 and not rows[0]["hash"], "initial request was not legacy full"
+            assert rows[0]["protocol"] == "tool-inventory-v1", "queue did not advertise support"
+            session, inventory_hash = rows[-1]["session"], rows[-1]["hash"]
+
+            # Keep the worker and its negotiated state alive. Reopen the same
+            # disposable queue through production Open, retaining durable fences.
+            queues.close()
+            queue = queues.enter_context(process(candidate[0], "queue", queue_root, listen=address))
+            assert await_file(queue_root / "url", queue) == url
+
+            def refreshed(value):
+                rows = json.loads(value)
+                if not accepted_hash_only(value):
+                    return False
+                return (any(row["required"] is True for row in rows)
+                        and any(row["inventory_keys"] == 41 and row["hash"] for row in rows))
+
+            rows = json.loads(await_file(queue_root / "receipts.json", worker, refreshed))
+            assert rows[0]["hash"] == inventory_hash and rows[0]["inventory_keys"] == 0, "restart did not begin hash-only"
+            assert rows[0]["required"] is True, "lost inventory did not request full refresh"
+            assert all(row["session"] == session for row in rows), "worker restarted instead of recovering"
+            full = next(row for row in rows[1:] if row["inventory_keys"] == 41)
+            assert full["status"] == 200 and full["ack_hash"] == inventory_hash and not full["required"], "full refresh not acknowledged"
+            assert rows[-1]["inventory_keys"] == 0, "unchanged heartbeats still send full inventory"
+
+            # An older queue uses a fresh disposable DB on the same endpoint:
+            # this tests worker protocol fallback, not queue-data downgrades.
+            queues.close()
+            strict_root = root / "strict-queue"
+            queue = queues.enter_context(process(baseline[0], "queue", strict_root, listen=address))
+            assert await_file(strict_root / "url", queue) == url
+            rows = json.loads(await_file(strict_root / "receipts.json", worker,
+                                         lambda value: len(json.loads(value)) >= 3))
+            assert rows[0]["status"] == 400 and rows[0]["hash"] and rows[0]["inventory_keys"] == 0, "negotiated request did not hit strict decoder"
+            assert all(row["status"] == 200 and row["inventory_keys"] == 41
+                       and not row["hash"] and not row["version"] for row in rows[1:]), "legacy full fallback did not rejoin"
+            assert all(row["session"] == session and row["attempt_protocol"] == "keyed-attempt-v1" for row in rows), "fallback changed session or attempt protocol"
+    print("upgrade-compat: PASS hash-only -> queue restart -> explicit full refresh -> #790 strict fallback", flush=True)
 
 
 def downgrade(previous, candidate, scratch, tools):
