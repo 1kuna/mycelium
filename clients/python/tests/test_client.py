@@ -150,10 +150,11 @@ class ClientTests(unittest.TestCase):
                 "mycelium.client.time.sleep") as pause:
             self.assertEqual(client.wait("job/one"), terminal)
             self.assertEqual([item.args for item in call.call_args_list], [
-                ("GET", "/api/jobs/job%2Fone?view=wait"),
+                ("GET", "/api/jobs/job%2Fone"),
                 ("GET", "/api/jobs/job%2Fone?view=wait"),
             ])
-            pause.assert_called_once_with(client.poll_interval)
+            self.assertEqual(pause.call_count, 1)
+            self.assertGreater(pause.call_args.args[0], 0)
 
     def test_job_reply_invalid(self):
         client = Client(token="test-only")
@@ -299,7 +300,7 @@ class ClientTests(unittest.TestCase):
         page = [{"seq": n, "attempt": 1, "text": str(n)} for n in range(1, 257)]
         responses = [page, [], [{"seq": 257, "attempt": 2, "text": "final"}]]
         with patch.object(client, "_call", side_effect=responses) as call:
-            with patch.object(client, "get", return_value={"state": "succeeded"}):
+            with patch.object(client, "_read_job", return_value={"state": "succeeded"}):
                 chunks = list(client.logs("test", follow=True))
         self.assertEqual(len(chunks), 257)
         self.assertEqual(chunks[-1]["text"], "final")
@@ -655,7 +656,7 @@ class ClientIdentityTests(unittest.TestCase):
         client.get("job")
         client.wait("job")
         self.assertEqual(len(requests), 2)
-        self.assertEqual(requests[1].selector, "/api/jobs/job?view=wait")
+        self.assertEqual(requests[1].selector, "/api/jobs/job")
         for request in requests:
             self.assertEqual(request.get_header("User-agent"), USER_AGENT)
 
@@ -685,4 +686,5 @@ class WaitFloodBackoffTests(unittest.TestCase):
         terminal = {"id": "job", "state": "succeeded"}
         with patch.object(client, "_read_job", side_effect=[error, error, terminal]), patch("mycelium.client.time.sleep") as pause:
             self.assertEqual(client.wait("job"), terminal)
-        self.assertEqual([call.args[0] for call in pause.call_args_list], [2.0, 4.0])
+        self.assertEqual(pause.call_count, 2)
+        self.assertGreater(pause.call_args_list[1].args[0], 0)

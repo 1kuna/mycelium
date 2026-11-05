@@ -113,11 +113,9 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 	return waitJobsReporting(ctx, client, authority.client, ids, *timeout, out, errOut, myce.RealClock{}, waitPause, *jsonOutput)
 }
 
-// A wait with no successful status read for waitNoProgress logs its blocking
-// point and reconnects instead of waiting silently (#607). Each read is also
-// bounded by waitReadBudget so a half-open connection after a queue restart
-// cannot block forever when the HTTP client has no timeout of its own.
-var waitNoProgress, waitReadBudget = 2 * time.Minute, 30 * time.Second
+// Observation uses the owner deadline. A failed read refreshes installed
+// authority (#607); there is no fixed read or total-observer deadline.
+var waitReadBudget time.Duration // Optional test override; owner deadlines bound reads.
 
 func waitPause(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
@@ -154,11 +152,15 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 		return waitError(2, "wait accepts at most 256 job IDs; use one wait per batch")
 	}
 	deadline := clock.Now().Add(timeout)
-	delay := 3 * time.Second
+	pace := myce.ClientPace{}
+	c = c.WithoutRetries()
+	c.Clock = clock
 	failed, retrying := false, false
 	var outageSince, nextRetryLog time.Time
 	outageAttempts := 0
-	lastProgress := clock.Now()
+	last := map[string]string{}
+	metadata := map[string]*myce.Job{}
+	var event time.Time
 	for len(pending) > 0 {
 		if ctx.Err() != nil {
 			return waitError(4, "wait interrupted; jobs continue")
@@ -168,6 +170,8 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 		for id := range pending {
 			ids = append(ids, id)
 		}
+		started := clock.Now()
+		changed := false
 		unavailable := false
 		var readErr error
 		var batchJobs map[string]*myce.Job
@@ -182,9 +186,17 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 			}
 			budget := waitReadBudget
 			if timeout > 0 {
-				budget = min(budget, remaining)
+				if budget == 0 {
+					budget = remaining
+				} else {
+					budget = min(budget, remaining)
+				}
 			}
-			requestCtx, cancel := context.WithTimeout(ctx, budget)
+			requestCtx, cancel := context.WithCancel(ctx)
+			if budget > 0 {
+				cancel()
+				requestCtx, cancel = context.WithTimeout(ctx, budget)
+			}
 			read := c.GetJobForWait
 			// Preserve the initial placement/deadline advisory; steady-state
 			// polls need only state, and terminal replies are full Jobs.
@@ -197,7 +209,7 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				if batchJobs == nil {
 					batchJobs = map[string]*myce.Job{}
 					var reply myce.WaitReply
-					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, min(20, int(max(0, budget-time.Second)/time.Second)))
+					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, pace.Seconds(clock.Now(), event))
 					if batchErr == nil {
 						for i, state := range reply.Jobs {
 							revisions[state.ID] = state.Revision
@@ -233,15 +245,15 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				}
 				unavailable = true
 				readErr = err
-				if stalled := clock.Now().Sub(lastProgress); stalled >= waitNoProgress {
-					fmt.Fprintf(errOut, "wait: no progress for %s; blocked reading job %s (cause=%s); reconnecting\n", stalled.Truncate(time.Second), id, waitReadCause(err))
-					lastProgress = clock.Now()
+				if reconnect != nil {
+					fmt.Fprintf(errOut, "wait: blocked reading job %s (cause=%s); reconnecting\n", id, waitReadCause(err))
 					if c.HTTP != nil {
 						c.HTTP.CloseIdleConnections()
 					}
 					if reconnect != nil {
 						if fresh, e := reconnect(); e == nil {
-							c = fresh
+							c = fresh.WithoutRetries()
+							c.Clock = clock
 						} else {
 							fmt.Fprintln(errOut, "wait: reconnect could not resolve queue authority; retrying with the previous one")
 						}
@@ -249,7 +261,23 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				}
 				break
 			}
-			lastProgress = clock.Now()
+			if j.Spec.Deadline != nil && (timeout == 0 || j.Spec.Deadline.Before(deadline)) {
+				deadline = *j.Spec.Deadline
+				timeout = 1
+			}
+			if !observed[j.ID] {
+				metadata[j.ID] = j
+			}
+			if known := metadata[j.ID]; known != nil && known.StartedAt == nil && j.State == "running" {
+				now := clock.Now()
+				known.StartedAt = &now
+			}
+			signature := j.State + "\x00" + j.Reason
+			changed = changed || last[j.ID] != signature
+			last[j.ID] = signature
+			if next := myce.ClientJobEvent(metadata[j.ID], clock.Now()); !next.IsZero() && (event.IsZero() || next.Before(event)) {
+				event = next
+			}
 			observed[j.ID] = true
 			terminal := j.State == "succeeded" || j.State == "failed" || j.State == "cancelled"
 			if jsonOutput {
@@ -300,16 +328,21 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				fmt.Fprintf(errOut, "wait: queue unavailable; retrying (cause=%s attempts=%d elapsed=%s)\n", waitReadCause(readErr), outageAttempts, clock.Now().Sub(outageSince).Truncate(time.Second))
 				nextRetryLog = clock.Now().Add(time.Minute)
 			}
-			delay = min(delay*2, 10*time.Second)
+
 		} else {
 			if retrying {
 				fmt.Fprintln(errOut, "wait: queue connection restored")
 				retrying = false
 			}
-			delay = 3 * time.Second
+
 		}
 		if len(pending) == 0 {
 			break
+		}
+		pace.Observe(clock.Now().Sub(started), changed && !unavailable)
+		delay := pace.Delay(clock.Now(), event, readErr, c.Jitter)
+		if !unavailable && batchSupported {
+			delay = max(0, delay-clock.Now().Sub(started))
 		}
 		if timeout > 0 {
 			delay = min(delay, deadline.Sub(clock.Now()))

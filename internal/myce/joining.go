@@ -125,7 +125,7 @@ func (i Invitation) Client(address string) (Client, error) {
 			return nil
 		},
 	}}
-	return Client{URL: address, Token: i.Token, HTTP: &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return Client{URL: address, Token: i.Token, HTTP: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
 // Discovery finds addresses only; callers authenticate every candidate.

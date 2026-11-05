@@ -176,13 +176,23 @@ for worker selection and non-JSON atomic-manifest rules.
 
 Give your agent the [extension creation guide](../../docs/adapter.md)
 for a complete submit/wait/result example. `upload_file` stages hash-addressed
-inputs; `submit_and_wait` requires a stable submission key and retries one lost
-transport response; `download_result` resolves accepted output and verifies its
+inputs; `submit_and_wait` requires a stable submission key and retries identical
+intent after transient transport failures or 429/503 until the owner timeout; `download_result` resolves accepted output and verifies its
 hash before replacing an explicit destination. File transfers have no
-whole-request timeout: they fail with `TransferStalledError` (code
-`result_download_failed` for results) when a socket operation exceeds the idle
-budget: at least 60 seconds, or 30 seconds plus two full-blob verification passes
-at 100 MiB/s, whichever is greater.
+default whole-request deadline. They learn socket no-progress windows from observed
+byte service time and gaps, and fail with `TransferStalledError` (code
+`result_download_failed` for results) if progress then stops. Slow transfers can
+continue indefinitely while progressing. Before the first observation, and while
+waiting for queue verification before headers, there is no throughput estimate:
+set `Client(transfer_timeout=SECONDS)` to bound each transfer operation explicitly.
+API calls also have no default deadline; `Client(timeout=SECONDS)` preserves an
+explicit socket/request budget. `wait(timeout=SECONDS)` bounds the complete wait
+without cancelling the job, and the job's own deadline also bounds observation.
+Waits negotiate batch revisions when available, fall back on old queues, back off
+while unchanged and approach expected events using measured response costs.
+GET/HEAD overloads honour seconds or HTTP-date `Retry-After` with positive jitter;
+mutations are replayed only by the keyed-submission protocol. An explicit
+`poll_interval` remains a caller-selected minimum spacing.
 `cancel_submission(project, key)`
 also works when the submit response was lost. HTTP conflicts propagate.
 

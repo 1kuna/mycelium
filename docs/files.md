@@ -229,8 +229,12 @@ beside it after interruption. Rerunning resumes it. A bad range response, byte
 count or hash is refused; a server ignoring Range causes a safe complete restart.
 Upload creation/HEAD/PATCH follow tus 1.0; retries use its acknowledged offset.
 File transfers use per-socket-operation deadlines, with no whole-request timeout.
-The idle budget is the greater of 60 seconds and 30 seconds plus two full-blob
-hash passes at 100 MiB/s. API calls retain their ordinary 10-second budget.
+From #810, the no-progress window is learned from observed byte service time
+and gaps, independently of total duration or a presumed disk/network rate.
+Before throughput evidence, and during queue verification before headers, only
+the owner bounds the operation. Go callers use a context deadline; Python
+callers may set `transfer_timeout`. API calls have no default whole-request
+deadline; explicit caller HTTP/socket timeouts retain their meaning.
 Default and installed pinned TLS clients use this progress policy. An injected
 Go `DialTLSContext`, `DialTLS`, or custom `http.RoundTripper` retains its authority
 and protocol handling and owns its I/O deadlines; custom dial setup is bounded.
@@ -607,8 +611,10 @@ entry before retrying. Stored shared inputs use the ordinary queue retention
 window; NAS originals remain owned by their project.
 
 Input downloads renew their socket deadlines on progress instead of timing out
-a whole file after 30 seconds. The idle budget is at least 60 seconds and scales
-with two hash passes at 100 MiB/s. API control calls keep their normal timeout.
+a whole file after 30 seconds. From #810, each direction learns its no-progress window from observed
+throughput and gaps. Queue verification before headers cannot be estimated
+from network throughput and is bounded by the owner; there is no fixed
+whole-transfer or default API deadline.
 
 ## Declared model snapshots (#553)
 
