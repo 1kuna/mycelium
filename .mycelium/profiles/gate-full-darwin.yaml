@@ -9,6 +9,8 @@ run:
   env:
     GOMAXPROCS: '2'
 needs:
+  # Fetch the pinned predecessor source during preparation; gate.sh stays offline.
+  network: true
   cpu_cores: 2
   memory: auto
   platform: cpu

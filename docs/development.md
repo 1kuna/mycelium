@@ -130,7 +130,8 @@ commit `100840b4094d77bbc69a80d807dba58722db877c`. No v3 release tags were publi
 the harness uses this verified release commit rather than inventing a tag or
 silently substituting current code. Update the pin/version when qualifying a new
 release predecessor. The profile prepares its Git source and module dependencies
-before the offline gate; a local checkout with that commit needs no network.
+before the offline gate and declares `needs.network: true` for that preparation;
+a local checkout with that commit needs no network.
 For a fresh offline source archive, first run:
 
 ```sh
@@ -161,7 +162,8 @@ config, runs the actual s071 CLI installer with `--config ... --dry-run`, then
 starts an s071 worker from the same config and requires accepted check-ins.
 It does not claim explicit-cache metadata is readable by s071 (#790).
 
-Each build command has a three-minute deadline, each fixture process a 45-second
+The suite has a ten-minute total budget, including cold builds. Each build
+command has a three-minute deadline, each fixture process a 45-second
 test deadline, each join a 30-second deadline, and teardown eight seconds before
 killing and reporting a stuck owned fixture. These bound broken-build and startup
 costs without changing product deadlines. All cases run even after a failure.
