@@ -167,3 +167,54 @@ func TestClientAdaptiveTransferProgressClock(t *testing.T) {
 		}
 	}
 }
+
+func TestClientAdaptiveBufferedSocketProgress(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		peer, e := listener.Accept()
+		if e != nil {
+			return
+		}
+		defer peer.Close()
+		for i := 0; i < 6; i++ {
+			if _, e = peer.Write(make([]byte, 8192)); e != nil {
+				return
+			}
+			select {
+			case <-time.After(50 * time.Millisecond):
+			case <-stop:
+				return
+			}
+		}
+		<-stop
+	}()
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		close(stop)
+		<-done
+		t.Fatal(err)
+	}
+	defer func() { close(stop); conn.Close(); <-done }()
+	guard := time.AfterFunc(5*time.Second, func() { conn.Close() })
+	defer guard.Stop()
+	progress := &fileTransferConn{Conn: conn, clock: RealClock{}}
+	buffer := make([]byte, 256)
+	received := 0
+	for received < 6*8192 {
+		n, e := progress.Read(buffer)
+		if e != nil {
+			t.Fatal("buffered copies taught a false network rate", received, e)
+		}
+		received += n
+	}
+	if _, err := progress.Read(buffer); !errors.Is(err, errFileTransferStalled) {
+		t.Fatal("stopped stream was not detected", err)
+	}
+}

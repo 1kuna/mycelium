@@ -151,7 +151,11 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 	if len(pending) > 256 {
 		return waitError(2, "wait accepts at most 256 job IDs; use one wait per batch")
 	}
-	deadline := clock.Now().Add(timeout)
+	var ownerDeadline time.Time
+	if timeout > 0 {
+		ownerDeadline = clock.Now().Add(timeout)
+	}
+	deadline := ownerDeadline
 	pace := myce.ClientPace{}
 	c = c.WithoutRetries()
 	c.Clock = clock
@@ -165,6 +169,7 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 		if ctx.Err() != nil {
 			return waitError(4, "wait interrupted; jobs continue")
 		}
+		deadline, event = waitPendingTimes(pending, metadata, ownerDeadline, clock.Now())
 		// Iterate a fixed set: prefixes are replaced with exact IDs as they resolve.
 		ids := make([]string, 0, len(pending))
 		for id := range pending {
@@ -181,11 +186,11 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				continue
 			}
 			remaining := deadline.Sub(clock.Now())
-			if timeout > 0 && remaining <= 0 {
+			if !deadline.IsZero() && remaining <= 0 {
 				return waitError(3, "wait timed out; jobs continue")
 			}
 			budget := waitReadBudget
-			if timeout > 0 {
+			if !deadline.IsZero() {
 				if budget == 0 {
 					budget = remaining
 				} else {
@@ -231,7 +236,7 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 			if ctx.Err() != nil {
 				return waitError(4, "wait interrupted; jobs continue")
 			}
-			if timeout > 0 && (!clock.Now().Before(deadline) || deadlineExpired && budget == remaining) {
+			if !deadline.IsZero() && (!clock.Now().Before(deadline) || deadlineExpired && budget == remaining) {
 				return waitError(3, "wait timed out; jobs continue")
 			}
 			if err != nil {
@@ -261,10 +266,6 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				}
 				break
 			}
-			if j.Spec.Deadline != nil && (timeout == 0 || j.Spec.Deadline.Before(deadline)) {
-				deadline = *j.Spec.Deadline
-				timeout = 1
-			}
 			if !observed[j.ID] {
 				metadata[j.ID] = j
 			}
@@ -275,9 +276,6 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 			signature := j.State + "\x00" + j.Reason
 			changed = changed || last[j.ID] != signature
 			last[j.ID] = signature
-			if next := myce.ClientJobEvent(metadata[j.ID], clock.Now()); !next.IsZero() && (event.IsZero() || next.Before(event)) {
-				event = next
-			}
 			observed[j.ID] = true
 			terminal := j.State == "succeeded" || j.State == "failed" || j.State == "cancelled"
 			if jsonOutput {
@@ -339,12 +337,16 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 		if len(pending) == 0 {
 			break
 		}
+		deadline, event = waitPendingTimes(pending, metadata, ownerDeadline, clock.Now())
 		pace.Observe(clock.Now().Sub(started), changed && !unavailable)
 		delay := pace.Delay(clock.Now(), event, readErr, c.Jitter)
 		if !unavailable && batchSupported {
 			delay = max(0, delay-clock.Now().Sub(started))
 		}
-		if timeout > 0 {
+		if !deadline.IsZero() {
+			if !clock.Now().Before(deadline) {
+				return waitError(3, "wait timed out; jobs continue")
+			}
 			delay = min(delay, deadline.Sub(clock.Now()))
 		}
 		if err := pause(ctx, delay); err != nil {
@@ -371,4 +373,24 @@ func waitReadCause(err error) string {
 		return "response_incomplete"
 	}
 	return "read_error"
+}
+
+// Only pending jobs contribute deadlines/events. Recompute after every reply:
+// a completed job or a passed start event cannot constrain a later completion.
+func waitPendingTimes(pending map[string]bool, metadata map[string]*myce.Job, owner time.Time, now time.Time) (time.Time, time.Time) {
+	deadline := owner
+	var event time.Time
+	for id := range pending {
+		j := metadata[id]
+		if j == nil {
+			continue
+		}
+		if end := j.Spec.Deadline; end != nil && (deadline.IsZero() || end.Before(deadline)) {
+			deadline = *end
+		}
+		if next := myce.ClientJobEvent(j, now); !next.IsZero() && (event.IsZero() || next.Before(event)) {
+			event = next
+		}
+	}
+	return deadline, event
 }

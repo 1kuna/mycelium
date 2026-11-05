@@ -35,14 +35,18 @@ class Pace:
 class Progress:
     """The slowest observed byte cost and gap allow four periods of jitter.
 
-    Before the first observation only the owner's timeout can judge a stall.
+    Before two wire observations only the owner's timeout can judge a stall.
     Total transfer duration never enters the decision.
     """
     def __init__(self):
         self.gap = self.per_byte = 0
+        self.seen = False
 
     def observe(self, elapsed, count):
         if count > 0:
+            if not self.seen:
+                self.seen = True
+                return
             self.gap = max(self.gap, elapsed)
             self.per_byte = max(self.per_byte, elapsed / count)
 

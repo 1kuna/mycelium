@@ -293,7 +293,9 @@ From the checkpoint-probe correction, checkpoint health uses the existing tiny
 exclusive create/close/remove check instead of enumerating the checkpoint root.
 This removes unnecessary directory work; genuinely slow checkpoint metadata
 still withholds dependent jobs under the unchanged measured thresholds.
-**Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off while unchanged, and approach expected events. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from byte throughput and gaps, so slow progress can continue; before any evidence and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
+
+**Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off while unchanged, and approach expected events. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from wire throughput and gaps, ignoring buffered copies and the first arrival, so slow progress can continue; before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
+
 
 ## Read before extending this fixture
 

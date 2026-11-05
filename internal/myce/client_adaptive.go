@@ -118,10 +118,17 @@ func ClientJobEvent(j *Job, now time.Time) time.Time {
 type transferProgress struct {
 	gap     time.Duration
 	perByte float64
+	seen    bool
 }
 
 func (p *transferProgress) observe(elapsed time.Duration, n int) {
 	if n <= 0 {
+		return
+	}
+	// The first readiness wait may just catch bytes already arriving at
+	// connection startup. It establishes an observation, not a service period.
+	if !p.seen {
+		p.seen = true
 		return
 	}
 	p.gap = max(p.gap, elapsed)
