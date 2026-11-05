@@ -31,7 +31,10 @@ def command(args, *, cwd=REPO, timeout=180, env=None):
     except BaseException:
         # Build drivers can have compiler children. Signal only this command's
         # freshly created process group, then join before scratch is removed.
-        os.killpg(child.pid, signal.SIGKILL)
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         child.wait()
         raise
     if child.returncode:
@@ -139,7 +142,7 @@ def candidate_identity(source):
 
 
 @contextlib.contextmanager
-def process(binary, mode, root, *, queue="", config="", tools=None):
+def process(binary, mode, root, *, queue="", config="", tools=None, expected_refusal=False):
     root.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith("MYCE_") and not k.startswith("UPGRADE_")}
     home = root / "home"
@@ -165,7 +168,13 @@ def process(binary, mode, root, *, queue="", config="", tools=None):
                     child.kill()
                     child.wait(timeout=5)
                     raise RuntimeError(f"{mode} fixture required kill")
-            if child.returncode and (active_error is None or isinstance(active_error, Exception)):
+            if expected_refusal and active_error is None:
+                log.seek(0)
+                output = log.read()
+                if (child.returncode != 1 or "HTTP 426: worker_protocol_invalid" not in output
+                        or "DATA RACE" in output):
+                    raise RuntimeError(f"worker did not exit with the expected protocol refusal:\n{output[-6000:]}")
+            elif child.returncode and (active_error is None or isinstance(active_error, Exception)):
                 log.seek(0)
                 detail = f"{active_error}; " if active_error else ""
                 raise RuntimeError(f"{detail}{mode} fixture exited {child.returncode}:\n{log.read()[-6000:]}")
@@ -187,7 +196,8 @@ def await_file(path, child, predicate=lambda value: True, timeout=30):
 def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, refusal=False, config=None):
     with process(queue_binary, "queue", root / "queue") as queue:
         url = await_file(root / "queue/url", queue)
-        with process(worker_binary, "worker", root / "worker", queue=url, tools=tools, config=config) as worker:
+        with process(worker_binary, "worker", root / "worker", queue=url, tools=tools,
+                     config=config, expected_refusal=refusal) as worker:
             def ready(value):
                 rows = json.loads(value)
                 if refusal:
@@ -199,6 +209,8 @@ def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, refu
             if refusal:
                 # s071 predates tool_inventory and has strict JSON decoding. Its
                 # reverse pairing is explicitly unsupported, never silently skipped.
+                assert all(row["status"] == 400 for row in rows), rows
+                worker.wait(timeout=5)
                 return
             request = urllib.request.Request(url + "/api/status?detail=full", headers={"Authorization": "Bearer upgrade-fixture"})
             with urllib.request.urlopen(request, timeout=10) as response:
@@ -253,11 +265,7 @@ def reverse(previous, candidate, scratch, tools):
     # Candidate's tool inventory didn't exist in s071; its strict decoder rejects
     # it. Check the refusal through the real worker and retain it as an explicit
     # support boundary until a negotiated protocol makes this direction work.
-    try:
-        pairing("previous queue", previous[0], candidate[0], scratch / "old-queue", tools, refusal=True)
-    except RuntimeError as error:
-        if "worker_protocol_invalid" not in str(error):
-            raise
+    pairing("previous queue", previous[0], candidate[0], scratch / "old-queue", tools, refusal=True)
     print("upgrade-compat: PASS s071 reverse pairing explicitly refuses unsupported inventory", flush=True)
 
 
@@ -286,8 +294,24 @@ class SuiteDeadline(BaseException):
     pass
 
 
+class SuiteTerminated(BaseException):
+    pass
+
+
 def suite_deadline(_signal, _frame):
     raise SuiteDeadline("ten-minute compatibility-suite budget exhausted")
+
+
+def suite_terminated(signum, _frame):
+    # BaseException bypasses per-case failure collection and unwinds every owned
+    # process context before TemporaryDirectory removes its state.
+    raise SuiteTerminated(f"compatibility suite terminated by signal {signum}")
+
+
+def install_signal_handlers():
+    signal.signal(signal.SIGALRM, suite_deadline)
+    signal.signal(signal.SIGTERM, suite_terminated)
+    signal.signal(signal.SIGHUP, suite_terminated)
 
 
 if __name__ == "__main__":
@@ -295,10 +319,10 @@ if __name__ == "__main__":
     parser.add_argument("action", choices=["prepare", "run"])
     parser.add_argument("--candidate", help="Git revision for incident reproduction; default actual checkout bytes")
     args = parser.parse_args()
-    signal.signal(signal.SIGALRM, suite_deadline)
+    install_signal_handlers()
     signal.alarm(600)
     try:
         prepare() if args.action == "prepare" else run(args)
-    except (Exception, KeyboardInterrupt, SuiteDeadline) as error:
+    except (Exception, KeyboardInterrupt, SuiteDeadline, SuiteTerminated) as error:
         print(f"upgrade-compat: {error}", file=sys.stderr)
         sys.exit(1)

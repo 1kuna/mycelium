@@ -109,6 +109,7 @@ while read -r os arch cgo; do
   step "build-$os-$arch" env GOOS="$os" GOARCH="$arch" CGO_ENABLED="$cgo" go build -o "$scratch/bin/myce-$os-$arch" ./cmd/myce
 done < <("$scratch/bin/myce" release build-targets)
 if [[ $mode == full ]]; then
+  step upgrade-compat-supervisor python3 scripts/test-upgrade-compat.py
   # Real cross-release queue/worker and installer proof. Previous source must
   # already be local/cached; this gate remains offline.
   step upgrade-compat python3 scripts/upgrade-compat.py run

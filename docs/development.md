@@ -124,6 +124,10 @@ then runs real SQLite queues and worker startup loops over authenticated loopbac
 HTTP. Hardware probes and service managers are synthetic; no installed services,
 fleet authority, native GPUs, or production databases are involved. This is test
 proof, not automatic rollback machinery (MY-03) or native service qualification.
+The full gate first runs `python3 scripts/test-upgrade-compat.py`, covering
+termination of detached build commands and preservation of queue teardown failures
+when a worker's protocol refusal is expected. SIGTERM/SIGHUP unwind the supervisor
+and reap its owned commands before temporary state is removed.
 
 The predecessor is s071 (`v3.1.0-rc.20261104.s071.100840b`), pinned to published
 commit `100840b4094d77bbc69a80d807dba58722db877c`. No v3 release tags were published;
