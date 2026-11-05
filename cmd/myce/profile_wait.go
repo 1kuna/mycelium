@@ -23,11 +23,7 @@ func profileNotifier(ctx context.Context, path string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	resolved, err := exec.LookPath(path)
-	if err != nil {
-		return "", err
-	}
-	resolved, err = filepath.Abs(resolved)
+	resolved, err := resolveProfileNotifier(path)
 	if err != nil {
 		return "", err
 	}
@@ -40,6 +36,17 @@ func profileNotifier(ctx context.Context, path string) (string, error) {
 	}
 	return resolved, nil
 }
+
+// resolveProfileNotifier shares executable lookup with read-only diagnosis;
+// only profileNotifier executes the receiver's configuration check.
+func resolveProfileNotifier(path string) (string, error) {
+	resolved, err := exec.LookPath(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(resolved)
+}
+
 func notifierEnvironment() []string {
 	var env []string
 	for _, v := range os.Environ() {

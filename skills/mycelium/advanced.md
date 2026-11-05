@@ -267,3 +267,29 @@ its recipe error: fix immutable inputs rather than retrying unchanged bytes.
 `unknown_observation` is a queue-owner hold to restore observations. Keep other
 work moving on a hold. CPU resolve shows CPU views, and successful waits omit
 urgency tutorials. Source placeholders marked `needs-staging` are uploaded by run.
+
+## Diagnostic reference: project doctor
+
+On a supporting release, run `myce doctor --project` from the project root for
+one read-only diagnosis. Select an entry with `--entry NAME`, another adapter
+with `--adapter FILE`, or structured output with `--json`. It checks installed
+authority without exposing it, client/server support, adapter/source validity,
+dependency readability, resolve findings, target coverage and completion setup.
+It prints one next owner/action and exits nonzero for a blocker. Fix consumer
+findings; record installation, queue or storage-owner holds on your issue.
+
+No notifier is required for foreground `myce wait`. If using detached completion,
+pass this thread's executable with `--notify PATH` (or `MYCE_NOTIFY`); a missing or
+non-executable supplied notifier blocks; executable lookup follows run, including
+PATH lookup. Doctor never runs it, tests delivery or
+verifies thread ownership. Follow [T3 binding](t3-binding.md) for that proof.
+It also leaves application result checks unexecuted; verify downloaded results.
+
+Doctor uses existing read-only resolve and source checks. It uploads/builds
+nothing and changes no installation or receipts. Cold environments with a builder
+are normal submit-time preparation; failed recipes, unavailable builders, pressure
+and unknown observations retain resolve's action. NAS dependency reads remain an
+explicit storage-owner verification hold; doctor does not inspect worker NAS.
+An unsupported queue or missing installed authority is an owner hold, never a
+reason to find credentials or run heavy work locally. Ordinary `myce doctor`
+continues to diagnose an installation.

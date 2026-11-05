@@ -91,6 +91,14 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		flags = flags[1:]
 	}
 	f := flag.NewFlagSet(action, flag.ContinueOnError)
+	if action == "doctor" {
+		f.Usage = func() {
+			fmt.Fprintln(f.Output(), "Usage of doctor:")
+			fmt.Fprintln(f.Output(), "Consumer diagnosis (read-only): myce doctor --project [--adapter FILE] [--entry NAME] [--notify EXECUTABLE] [--json]")
+			fmt.Fprintln(f.Output(), "Installation diagnosis: myce doctor [options] (installed config)")
+			f.PrintDefaults()
+		}
+	}
 	instance := f.String("instance", "", "Linux worker instance")
 	root := f.String("root", "", "installation root")
 	var sources []string
