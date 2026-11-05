@@ -118,6 +118,47 @@ func TestApplicationProgressTwoStagesUnknownRemaining(t *testing.T) {
 	}
 }
 
+func TestApplicationProgressSourceOrderWithTransportDelay(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	j := startObservation(t, q, m, s)
+	sentAt := clock.Now()
+	stage, count := 1, 2
+	p := progressReport(10, 10, "records")
+	p.UpdatedAt, p.StageIndex, p.StageCount = sentAt, &stage, &count
+	report := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, ApplicationProgress: p}
+	send := func() {
+		t.Helper()
+		if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// First report spends two seconds in transport after being sampled fresh.
+	clock.Advance(2 * time.Second)
+	send()
+	// Stage two was written at t=1 and arrives at t=3 with age two. Source
+	// order is newer although age exceeds the queue's age-one first report.
+	clock.Advance(time.Second)
+	stage = 2
+	p = progressReport(1, 100, "iterations")
+	p.UpdatedAt, p.AgeSeconds, p.StageIndex, p.StageCount = sentAt.Add(time.Second), 2, &stage, &count
+	report.ApplicationProgress = p
+	send()
+	got := runtimeJob(t, q, j.ID)
+	if *got.ApplicationProgress.StageIndex != 2 || got.ApplicationProgress.AgeSeconds != 2 {
+		t.Fatalf("new source rejected due to transport: %+v", got.ApplicationProgress)
+	}
+	// Same-stage old evidence can also arrive fresh-at-send, after the newer one.
+	old := progressReport(0, 100, "iterations")
+	old.UpdatedAt, old.StageIndex, old.StageCount = sentAt, &stage, &count
+	report.ApplicationProgress = old
+	clock.Advance(time.Second)
+	send()
+	got = runtimeJob(t, q, j.ID)
+	if got.ApplicationProgress.Completed != 1 || got.ApplicationProgress.AgeSeconds != 3 {
+		t.Fatalf("late same-stage report replaced source: %+v", got.ApplicationProgress)
+	}
+}
+
 func TestApplicationProgressBoundedFileValidationAndRestartAge(t *testing.T) {
 	dir := t.TempDir()
 	j := Job{ID: "job", Attempt: 2, Session: "session"}

@@ -125,9 +125,10 @@ func (q *Queue) retainApplicationProgress(j *Job, report *AttemptReport, m *Mach
 		if !old.UpdatedAt.IsZero() && (p.UpdatedAt.IsZero() || !p.UpdatedAt.After(old.UpdatedAt)) {
 			return
 		}
-		// Reordered/cached heartbeats must not replace newer file evidence.
+		// Legacy workers lack source ordering. Only those reports use relative
+		// age; transport delay makes ages incomparable to timestamped evidence.
 		oldAge := old.AgeSeconds + max(0, now.Sub(old.ReceivedAt).Seconds())
-		if p.AgeSeconds > oldAge || (old.StageIndex != nil && p.StageIndex != nil && *p.StageIndex < *old.StageIndex) {
+		if (old.UpdatedAt.IsZero() && p.UpdatedAt.IsZero() && p.AgeSeconds > oldAge) || (old.StageIndex != nil && p.StageIndex != nil && *p.StageIndex < *old.StageIndex) {
 			return
 		}
 	}
