@@ -188,6 +188,9 @@ func ExtensionStatus(r ExtensionReport) string {
 }
 func JobReason(j *Job) string {
 	reason := j.Reason
+	if j.Blocker != nil {
+		reason = j.Blocker.Text()
+	}
 	if j.State == "paused" && j.Pause != nil {
 		reason = j.Pause.Reason
 		if j.Pause.Until != nil {
@@ -206,7 +209,7 @@ func JobReason(j *Job) string {
 	}
 	if isolation := jobNativeIsolationStatus(j); isolation != "" {
 		if reason != "" {
-			return isolation + "; " + reason
+			return reason + "; " + isolation
 		}
 		return isolation
 	}
@@ -231,11 +234,16 @@ func JobWork(j *Job) string {
 // Called under the queue lock on a detached status copy. The scheduler's reason
 // remains authoritative; only its generic no-fit explanation needs more detail.
 func (q *Queue) statusWaitingReason(j *Job) string {
+	j.Blocker = q.actionableBlocker(j)
+	return q.statusWaitingReasonDetail(j)
+}
+
+func (q *Queue) statusWaitingReasonDetail(j *Job) string {
 	reason := j.Reason
 	if rest, ok := strings.CutPrefix(reason, "requeued: disabled by operator; "); ok {
 		copy := *j
 		copy.Reason = rest
-		return "requeued after being disabled; " + q.statusWaitingReason(&copy)
+		return "requeued after being disabled; " + q.statusWaitingReasonDetail(&copy)
 	}
 	if strings.HasPrefix(reason, "waiting for an extension for ") {
 		return "no extension is installed for this " + statusWorkType(j)

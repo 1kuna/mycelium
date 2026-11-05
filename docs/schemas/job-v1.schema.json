@@ -393,6 +393,32 @@
       ],
       "type": "object"
     },
+    "Blocker": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "dependency": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "dependency",
+        "owner",
+        "action"
+      ],
+      "type": "object"
+    },
     "Cancellation": {
       "properties": {
         "acknowledged_at": {
@@ -1611,6 +1637,10 @@
         },
         "batch": {
           "$ref": "#/$defs/BatchWork",
+          "x-contract": "diagnostic"
+        },
+        "blocker": {
+          "$ref": "#/$defs/Blocker",
           "x-contract": "diagnostic"
         },
         "cancellation": {

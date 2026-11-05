@@ -224,6 +224,7 @@ func statusJobValue(job *Job) Job {
 		case strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
 			j.Reason = "production start deadline exceeded"
 		case strings.HasPrefix(j.Reason, "environment failed:"):
+			j.Blocker = &Blocker{"deterministically_failed", "environment", "consumer", "fix the recipe and resubmit with changed immutable inputs", j.Reason}
 			// Authenticated job status deliberately includes the preparation
 			// diagnostic, like the corresponding job log. Logs:none omits output.
 		case strings.HasPrefix(j.Reason, "production cannot start: no eligible host is enabled;"):

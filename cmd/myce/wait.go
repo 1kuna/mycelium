@@ -241,7 +241,7 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 			}
 			lastProgress = clock.Now()
 			observed[j.ID] = true
-			if guidance := myce.DeadlineGuidanceText(j); guidance != "" && guidance != lastGuidance[j.ID] {
+			if guidance := waitBlockerText(j); guidance != "" && guidance != lastGuidance[j.ID] {
 				fmt.Fprintf(errOut, "wait: %s %s\n", j.ID, guidance)
 				lastGuidance[j.ID] = guidance
 			}
@@ -318,4 +318,11 @@ func waitReadCause(err error) string {
 		return "response_incomplete"
 	}
 	return "read_error"
+}
+
+func waitBlockerText(j *myce.Job) string {
+	if j.Blocker != nil {
+		return j.Blocker.Text() + ". " + myce.DeadlineGuidanceText(j)
+	}
+	return myce.DeadlineGuidanceText(j)
 }
