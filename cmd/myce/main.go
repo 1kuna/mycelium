@@ -153,6 +153,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "sim" {
 		return simCommand(args[1:], os.Stdout)
 	}
+	if args[0] == "doctor" && hasEnrollmentFlag(args[1:], "--project") {
+		return projectDoctor(context.Background(), args[1:], os.Stdout, os.Stderr)
+	}
 	if args[0] == "install" || args[0] == "uninstall" || args[0] == "doctor" {
 		return setupCommand(args)
 	}
