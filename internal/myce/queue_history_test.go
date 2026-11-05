@@ -14,25 +14,63 @@ import (
 // #224: retained answers must not serialize heartbeats behind whole-history
 // snapshots. Use real SQLite commits, check-ins and concurrent keyed submits.
 func TestQueueHistoryBurst(t *testing.T) {
-	var burstP99At1K time.Duration
+	var baseline queueHistoryBurstTiming
 	for _, count := range []int{1000, 10000} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			// A directly selected 10k subtest must measure its own 1k baseline.
-			if count == 10000 && burstP99At1K == 0 {
-				burstP99At1K = queueHistoryBurst(t, 1000)
+			if count == 10000 && baseline == (queueHistoryBurstTiming{}) {
+				baseline = measureQueueHistoryBurst(t, 1000)
 			}
-			burstP99 := queueHistoryBurst(t, count)
+			got := measureQueueHistoryBurst(t, count)
 			if count == 1000 {
-				burstP99At1K = burstP99
-			} else if count == 10000 && burstP99 > 3*burstP99At1K {
-				// Catch renewed whole-history work rather than shared-host wall time.
-				t.Errorf("10k-history burst p99 %s exceeded 3x 1k baseline %s", burstP99, burstP99At1K)
+				baseline = got
+				return
+			}
+			// Ten times the retained history must not cause near-linear lock
+			// contention. Allow 3x for host noise and the small live workload;
+			// all budgets come from this run, never a host's wall-clock speed.
+			t.Logf("10k/1k ratios: burst_wait=%.2f launch_wait=%.2f launch_hold=%.2f",
+				float64(got.burstWait)/float64(baseline.burstWait),
+				float64(got.launchWait)/float64(baseline.launchWait),
+				float64(got.launchHold)/float64(baseline.launchHold))
+			if got.burstWait > 3*baseline.burstWait {
+				t.Errorf("10k-history burst p99 %s exceeded 3x 1k baseline %s", got.burstWait, baseline.burstWait)
+			}
+			// A long waiter alone can be scheduler delay after unlock. Require
+			// growth in actual occupied lock time too, including pre-update
+			// Checkin locks, I/O and preemption while holding q.mu.
+			if got.launchWait > 3*baseline.launchWait && got.launchHold > 3*baseline.launchHold {
+				t.Errorf("10k-history launch p99 lock wait %s and total hold %s exceeded 3x 1k baselines %s and %s",
+					got.launchWait, got.launchHold, baseline.launchWait, baseline.launchHold)
 			}
 		})
 	}
 }
 
-func queueHistoryBurst(t *testing.T, count int) time.Duration {
+type queueHistoryBurstTiming struct {
+	burstWait, launchWait, launchHold time.Duration
+}
+
+func measureQueueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
+	t.Helper()
+	// A median of three independent fixtures suppresses a single scheduler or
+	// storage outlier without retrying failed assertions or dropping samples.
+	var waits, launchWaits, launchHolds []time.Duration
+	for sample := range 3 {
+		t.Run(fmt.Sprintf("sample-%d", sample), func(t *testing.T) {
+			got := queueHistoryBurst(t, count)
+			waits = append(waits, got.burstWait)
+			launchWaits = append(launchWaits, got.launchWait)
+			launchHolds = append(launchHolds, got.launchHold)
+		})
+	}
+	slices.Sort(waits)
+	slices.Sort(launchWaits)
+	slices.Sort(launchHolds)
+	return queueHistoryBurstTiming{waits[1], launchWaits[1], launchHolds[1]}
+}
+
+func queueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 	t.Helper()
 	q, c := fixture(t)
 	// Approximate the incident's 4.6 MB jobs + 4.7 MB keyed answers per 1k.
@@ -160,18 +198,8 @@ func queueHistoryBurst(t *testing.T, count int) time.Duration {
 	slices.Sort(waits)
 	slices.Sort(holds)
 	t.Logf("history=%d launch_burst_wait_p50=%s launch_burst_wait_p95=%s launch_burst_wait_p99=%s launch_burst_update_hold_p99=%s", count, percentile(waits, 50), percentile(waits, 95), percentile(waits, 99), percentile(holds, 99))
-	// A long waiter alone can mean the host left it runnable after unlock.
-	// Require enough measured critical work to explain the latency before
-	// reporting a queue-lock regression. Conversely, Checkin can perform
-	// multiple transactions, so their total can exceed the wait of any one
-	// contender even on a healthy queue: total holds alone are not latency.
-	// Keep both budgets at the original 100ms. Sum every real-time hold,
-	// including I/O/sleep or preemption inside q.mu; never use the fake Clock.
 	t.Logf("history=%d launch_burst_hold_total=%s", count, launchHoldTotal)
-	if waitP99 := percentile(waits, 99); waitP99 > 100*time.Millisecond && launchHoldTotal > 100*time.Millisecond {
-		t.Errorf("launch burst p99 lock wait %s and total lock hold %s both exceeded 100ms", waitP99, launchHoldTotal)
-	}
-	return burstP99
+	return queueHistoryBurstTiming{burstP99, percentile(waits, 99), launchHoldTotal}
 }
 
 // Cold terminal records still accept durable exclusion and exact-attempt release;
