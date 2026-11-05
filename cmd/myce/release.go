@@ -57,12 +57,15 @@ func releaseCommand(args []string) error {
 		return nil
 	}
 	if len(args) == 0 || args[0] != "manifest" {
-		return errors.New("usage: myce release manifest --dir DIR --version VERSION --signing-key PRIVATE_PEM\n       myce release approve --release-manifest FILE --release-key PUBLIC_PEM --release-url HTTPS_DIRECTORY [--config CONFIG] [--release-ca PUBLIC_PEM] [--allow-downgrade]")
+		return errors.New("usage: myce release manifest --dir DIR --version VERSION --signing-key PRIVATE_PEM [--assembly-receipt FILE --assembly-sha256 SHA256 --commit COMMIT]\n       myce release approve --release-manifest FILE --release-key PUBLIC_PEM --release-url HTTPS_DIRECTORY [--config CONFIG] [--release-ca PUBLIC_PEM] [--allow-downgrade] [--verify-only]")
 	}
 	f := flag.NewFlagSet("release manifest", flag.ContinueOnError)
 	dir := f.String("dir", "", "release artifacts directory")
 	version := f.String("version", "", "release version")
 	key := f.String("signing-key", "", "private Ed25519 PKCS8 PEM")
+	receipt := f.String("assembly-receipt", "", "verified assembly receipt (avoids executing Darwin)")
+	receiptHash := f.String("assembly-sha256", "", "independently retained assembly receipt SHA-256")
+	commit := f.String("commit", "", "expected assembly source commit")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -70,56 +73,64 @@ func releaseCommand(args []string) error {
 		return errors.New("release directory and signing key required")
 	}
 	m := myce.ReleaseManifest{Version: *version, StartGate: myce.StartGateProtocol, AttemptProtocol: myce.AttemptProtocol}
-	for _, target := range myce.ReleaseTargets {
-		a := myce.ReleaseArtifact{OS: target.OS, Arch: target.Arch, File: "myce-" + target.OS + "-" + target.Arch}
-		path := filepath.Join(*dir, a.File)
-		st, err := os.Lstat(path)
+	if *receipt != "" || *receiptHash != "" || *commit != "" {
+		var err error
+		m, err = verifiedAssembly(*dir, *version, *commit, *receipt, *receiptHash)
 		if err != nil {
 			return err
 		}
-		if !st.Mode().IsRegular() {
-			return errors.New("release artifact must be a regular executable")
-		}
-		a.Size = st.Size()
-		if a.OS == "linux" {
-			bin, err := elf.Open(path)
+	} else {
+		for _, target := range myce.ReleaseTargets {
+			a := myce.ReleaseArtifact{OS: target.OS, Arch: target.Arch, File: "myce-" + target.OS + "-" + target.Arch}
+			path := filepath.Join(*dir, a.File)
+			st, err := os.Lstat(path)
 			if err != nil {
-				return errors.New("release artifact is not Linux ELF")
+				return err
 			}
-			machine := elf.EM_X86_64
-			if a.Arch == "arm64" {
-				machine = elf.EM_AARCH64
+			if !st.Mode().IsRegular() {
+				return errors.New("release artifact must be a regular executable")
 			}
-			valid := bin.Machine == machine
-			bin.Close()
-			if !valid {
-				return errors.New("wrong Linux release architecture")
+			a.Size = st.Size()
+			if a.OS == "linux" {
+				bin, err := elf.Open(path)
+				if err != nil {
+					return errors.New("release artifact is not Linux ELF")
+				}
+				machine := elf.EM_X86_64
+				if a.Arch == "arm64" {
+					machine = elf.EM_AARCH64
+				}
+				valid := bin.Machine == machine
+				bin.Close()
+				if !valid {
+					return errors.New("wrong Linux release architecture")
+				}
+			} else {
+				bin, err := macho.Open(path)
+				if err != nil {
+					return errors.New("release artifact is not native macOS Mach-O")
+				}
+				valid := bin.Cpu == macho.CpuArm64
+				bin.Close()
+				if !valid {
+					return errors.New("wrong macOS release architecture")
+				}
+				out, err := exec.Command(path, "version", "--json").Output()
+				if err != nil {
+					return errors.New("Mac release must be built and inspected natively on macOS arm64")
+				}
+				var info myce.VersionInfo
+				if json.Unmarshal(out, &info) != nil || info.Version != *version || info.StartGate != m.StartGate || info.AttemptProtocol != m.AttemptProtocol || !info.NativeSensing {
+					return errors.New("Mac release lacks the expected protocol or native sensing")
+				}
+				a.NativeSensing = true
 			}
-		} else {
-			bin, err := macho.Open(path)
+			a.SHA256, err = myce.FileSHA256(path)
 			if err != nil {
-				return errors.New("release artifact is not native macOS Mach-O")
+				return err
 			}
-			valid := bin.Cpu == macho.CpuArm64
-			bin.Close()
-			if !valid {
-				return errors.New("wrong macOS release architecture")
-			}
-			out, err := exec.Command(path, "version", "--json").Output()
-			if err != nil {
-				return errors.New("Mac release must be built and inspected natively on macOS arm64")
-			}
-			var info myce.VersionInfo
-			if json.Unmarshal(out, &info) != nil || info.Version != *version || info.StartGate != m.StartGate || info.AttemptProtocol != m.AttemptProtocol || !info.NativeSensing {
-				return errors.New("Mac release lacks the expected protocol or native sensing")
-			}
-			a.NativeSensing = true
+			m.Artifacts = append(m.Artifacts, a)
 		}
-		a.SHA256, err = myce.FileSHA256(path)
-		if err != nil {
-			return err
-		}
-		m.Artifacts = append(m.Artifacts, a)
 	}
 	data, err := myce.SignRelease(m, *key)
 	if err != nil {
@@ -142,6 +153,7 @@ func releaseApproveCommand(args []string) error {
 	key := f.String("release-key", "", "independently provisioned publisher Ed25519 public key PEM")
 	origin := f.String("release-url", "", "trusted publisher HTTPS directory")
 	ca := f.String("release-ca", "", "provisioned publisher CA PEM (default ordinary HTTPS trust)")
+	verifyOnly := f.Bool("verify-only", false, "verify signature, manifest and public trust without contacting the queue")
 	force := f.Bool("allow-downgrade", false, "explicitly replace an equal or older default approval")
 	if err := f.Parse(args); err != nil {
 		return err
@@ -171,6 +183,9 @@ func releaseApproveCommand(args []string) error {
 	}
 	if err = (myce.EnrollmentRelease{Manifest: m, Origin: approval.Origin, CACert: approval.CACert}).Validate(); err != nil {
 		return err
+	}
+	if *verifyOnly {
+		return json.NewEncoder(os.Stdout).Encode(map[string]string{"verified_version": m.Version, "origin": approval.Origin})
 	}
 	client, err := authority.client()
 	if err != nil {

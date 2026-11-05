@@ -455,6 +455,13 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	limit := int64(1 << 20)
+	if r.URL.Path == "/api/workers/checkin" {
+		// Tool inventories include the native PATH for every prepared environment.
+		// Release workers with dozens of environments exceeded 1 MiB (#789).
+		// Allow inventory growth while retaining a bounded authenticated body;
+		// other control requests keep their smaller budget.
+		limit = 8 << 20
+	}
 	if r.URL.Path == "/api/extensions" || r.URL.Path == "/api/portability" || r.URL.Path == "/api/resolve" {
 		limit = 2 << 20
 	} // base64 transport of a <=1 MiB folder
@@ -468,6 +475,11 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 		}
 	}
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			respond(w, nil, &HTTPError{Status: http.StatusRequestEntityTooLarge, Code: "request_too_large", Message: fmt.Sprintf("request body exceeds %d bytes", limit)})
+			return false
+		}
 		var rejected *rejectionError
 		if !errors.As(err, &rejected) {
 			err = reject("request_invalid", err)

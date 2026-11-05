@@ -2878,18 +2878,51 @@ SHA-256 hashes. Assembly checks both receipts, each artifact's embedded Go build
 (version and commit) and target/CGO metadata, the Darwin runtime version/protocol/sensing
 and its Developer ID signature, then rechecks copied hashes. A mismatch refuses
 assembly before manifest signing. Output includes `manifest.unsigned.json`,
-`build-provenance.json`, `SHA256SUMS` and the three executables; the unsigned
+`build-provenance.json`, `build-provenance.sha256`, `SHA256SUMS` and the three
+executables. The receipt records the checked Darwin runtime/protocol/native
+sensing and Developer ID verification, binding them to the artifact hashes,
+source commit and unsigned manifest bytes. Retain the receipt SHA-256 through an
+independent trusted channel from this native assembly step. The unsigned
 manifest is not an approved release.
 
 If the Ed25519 publisher key is on this same Mac, append
 `--signing-key PRIVATE_SIGNING_KEY` to `fleet` or `assemble` to generate the
 signed `release.json` through the existing `myce release manifest` command.
-Otherwise transfer the verified assembled artifacts unchanged to the key's
-native Mac host and run:
+Otherwise transfer the verified assembled directory unchanged to the provisioned
+key host, including Linux, and use a host-native `myce` with these options and Go
+installed for reading build IDs:
 
 ```sh
-ASSEMBLED_DIR/myce-darwin-arm64 release manifest --dir ASSEMBLED_DIR --version VERSION --signing-key PRIVATE_SIGNING_KEY
+myce release manifest --dir ASSEMBLED_DIR --version VERSION --commit COMMIT \
+  --assembly-receipt ASSEMBLED_DIR/build-provenance.json \
+  --assembly-sha256 TRUSTED_ASSEMBLY_RECEIPT_SHA256 --signing-key PRIVATE_SIGNING_KEY
 ```
+
+Use the receipt digest retained independently from native assembly; computing it
+only from the transported receipt (or trusting its adjacent checksum file) does
+not authenticate the recorded native checks. The publisher rechecks manifest,
+artifact and build-receipt hashes, source/version, target/CGO metadata and build
+IDs without executing any candidate artifact. Native Darwin qualification still
+happens on the Mac during assembly. Missing proof or a mismatch refuses signing.
+The signer parses the newline-terminated unsigned manifest and signs exactly the
+serialized JSON value it embeds in `release.json`; never sign the unsigned file
+with an external wrapper.
+
+Before immutable publication, use the host-native parser with the independently
+provisioned public key and publisher HTTPS origin:
+
+```sh
+myce release approve --verify-only --release-manifest ASSEMBLED_DIR/release.json \
+  --release-key PUBLIC_PEM --release-url HTTPS_PUBLISHER_DIRECTORY
+```
+
+Add `--release-ca PUBLIC_CA_PEM` when the publisher uses a privately provisioned
+CA. Verify-only checks signature, manifest matrix/protocols and public trust
+inputs through the ordinary approval validator, then exits without loading queue
+authority, contacting the queue or writing approval, invitation or service state.
+It does not fetch publisher artifacts, test HTTPS reachability or compare against
+the queue's existing approval/trust anchor; ordinary approval still enforces
+queue-side trust and upgrade policy.
 
 Never copy a key to a build worker for convenience. The existing
 `scripts/release.sh VERSION OUTPUT_DIR PRIVATE_SIGNING_KEY` remains a local
