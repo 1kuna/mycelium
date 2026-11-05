@@ -252,7 +252,7 @@ func TestHealthIncidentLearnedEnvelopeReplay(t *testing.T) {
 	first := startObservation(t, q, m, s)
 	clock.Advance(time.Second)
 	r := result(&first, true)
-	peak := 22.0 // #645's 27.1 GiB learned need versus a 24 GiB allowance.
+	peak := 26.0 // Measured need exceeds the 24 GiB allowance without retired percentage padding.
 	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)

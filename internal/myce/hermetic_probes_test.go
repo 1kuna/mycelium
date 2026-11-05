@@ -134,7 +134,7 @@ func TestSparkInventoryUsesInjectedFilesystem(t *testing.T) {
 		t.Fatal(devices, err)
 	}
 	d := devices[0]
-	if d.Identity != "GPU-synthetic-gb10" || !d.UnifiedMemory || !d.MemoryMeasured || d.ReserveMemoryGB != 16 || d.FreeMemoryGB != 16 || d.BudgetGB != 16 || d.Reason != "" {
+	if d.Identity != "GPU-synthetic-gb10" || !d.UnifiedMemory || !d.MemoryMeasured || d.ReserveMemoryGB != 0 || d.FreeMemoryGB != 32 || d.BudgetGB != 32 || d.Reason != "" {
 		t.Fatalf("injected unified-memory inventory: %+v", d)
 	}
 }

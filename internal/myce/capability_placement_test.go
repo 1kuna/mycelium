@@ -73,7 +73,7 @@ func TestCapabilityLearnedNeedsPersistAndScope(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	if job(t, q, queued.ID).Spec.Needs.MemoryGB != 50 {
+	if job(t, q, queued.ID).Spec.Needs.MemoryGB != 40 {
 		t.Fatal("already queued program did not learn")
 	}
 	if err := q.Close(); err != nil {
@@ -84,7 +84,7 @@ func TestCapabilityLearnedNeedsPersistAndScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	learned := submit(t, q, s)
-	if learned.Spec.Needs.MemoryGB != 50 || learned.Spec.Needs.HostMemoryGB != 5 {
+	if learned.Spec.Needs.MemoryGB != 40 || learned.Spec.Needs.HostMemoryGB != 4 {
 		t.Fatal("measurements did not survive restart", learned.Spec.Needs)
 	}
 	small := placementMachine("small", "separate", 64, 24, e)

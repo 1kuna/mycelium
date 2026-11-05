@@ -73,7 +73,7 @@ func TestHealthIncidentInheritedAutoMemoryReplay(t *testing.T) {
 			first := startObservation(t, q, m, s)
 			clock.Advance(time.Second)
 			r := result(&first, true)
-			peak := 22.0
+			peak := 26.0 // Measured demand itself exceeds the 24 GiB allowance; no universal padding.
 			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
@@ -149,7 +149,7 @@ func TestHealthIncidentOfflineUndersizedPeerDoesNotSuppress(t *testing.T) {
 	first := startObservation(t, q, m, s)
 	clock.Advance(time.Second)
 	r := result(&first, true)
-	peak := 22.0
+	peak := 26.0 // Measured demand itself exceeds the 24 GiB allowance; no universal padding.
 	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
