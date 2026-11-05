@@ -32,12 +32,13 @@ class ActionsFullTest(unittest.TestCase):
                 self.assertNotIn('os: ' + ('linux' if platform == 'darwin' else 'darwin'), profile)
                 self.assertNotIn('host:', profile)
                 self.assertNotIn('allowed_machines:', profile)
-                self.assertNotIn('arch: amd64', profile)
                 self.assertIn(f'  - {{os: {platform}, arch: arm64, platform: cpu}}', profile)
                 if platform == 'darwin':
+                    self.assertNotIn('arch: amd64', profile)
                     self.assertIn('  memory: auto\n', profile)
                     self.assertNotIn('memory_gb:', profile)
                 else:
+                    self.assertIn('  - {os: linux, arch: amd64, platform: cpu}\n', profile)
                     self.assertIn('  memory_gb: 6\n', profile)
                     self.assertNotIn('memory: auto', profile)
                 self.assertIn('check: [grep, -qx,', profile)
@@ -68,9 +69,7 @@ class ActionsFullTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()) as public, patch.object(ci, 'command', command), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(scratch / 'summary')}):
                 status = ci.run(ROOT, SHA, scratch)
             summary = (scratch / 'summary').read_text()
-            self.assertIn('Linux amd64 native full-suite coverage is deferred', public.getvalue())
-            self.assertIn('profiles lack a negative host selector', public.getvalue())
-            self.assertIn('https://github.com/1kuna/mycelium/issues/527', public.getvalue())
+            self.assertNotIn('coverage is deferred', public.getvalue())
             self.assertNotIn('PRIVATE', summary + public.getvalue())
             if submission_failure:
                 self.assertIn('infrastructure failure:', summary)
@@ -93,7 +92,7 @@ class ActionsFullTest(unittest.TestCase):
         self.assertEqual(self.exercise(), (0, ['darwin', 'linux'], ['darwin', 'linux']))
         self.assertEqual(self.exercise(bad_marker=True)[0], 1)
         with self.assertRaises(ValueError):
-            ci.platform_profile('source: {git: main}\n', SHA, 'linux')
+            ci.frozen_profile('source: {git: main}\n', SHA)
 
     def test_failure_does_not_skip_other_platform(self):
         self.assertEqual(self.exercise(linux='failed'), (1, ['darwin', 'linux'], ['darwin']))

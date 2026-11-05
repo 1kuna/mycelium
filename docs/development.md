@@ -432,17 +432,18 @@ platform outcomes and Mycelium job IDs.
 The workflow's own check reports success/failure; no commit-status credential or
 personal access token is needed.
 
-[`scripts/actions-full.py`](../scripts/actions-full.py) narrows the corresponding
+[`scripts/actions-full.py`](../scripts/actions-full.py) freezes the corresponding
 platform full-gate profile to the exact push SHA and submits it once for Darwin arm64
-and once for Linux arm64. As a temporary mitigation for
-[#527](https://github.com/1kuna/mycelium/issues/527), the generated CI profiles
-exclude the Linux amd64 target to keep full suites off the current queue host.
-Profiles have no negative host selector; target exclusion is the smallest
-supported exclusion and also excludes other Linux amd64 workers. Native Linux
-amd64 full-suite coverage is deferred; cross-build checks still run. Restore that
-target only after the production hold ends and queue I/O protection is qualified.
-Resources, environment, output contract and check
-remain unchanged. There are no host pins; Mycelium chooses each worker and
+and once for Linux, eligible on either amd64 or arm64. CI preserves the profile's
+targets, resources, environment, output contract and check. Linux is one chosen
+target per merge, not an architecture matrix. The temporary architecture-wide
+exclusion from [#527](https://github.com/1kuna/mycelium/issues/527) is removed after
+the bounded native gate-like I/O measurement described in
+[queue disk contention](operations.md#queue-disk-contention-527). The ordinary
+Linux full profile and converted adapter already included both architectures.
+Their measured 6 GiB declaration and Darwin's `memory: auto` remain as documented
+above; #767 did not establish an unconstrained Linux auto envelope.
+There are no host pins; Mycelium chooses each worker and
 provides the existing `mycelium-gate` environment. Both submissions happen
 before `myce wait` waits for all jobs, even if one fails. Successful jobs also
 require `myce result` to download the accepted, verified `gate-result.txt` marker.
