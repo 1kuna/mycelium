@@ -72,6 +72,51 @@ func TestMeasureSafetyNarrowReadIsFreshAndRetainsGuards(t *testing.T) {
 	}
 }
 
+func TestMeasureSafetyRemovedProductionCustodySurvivesReopen(t *testing.T) {
+	q, clock := fixture(t)
+	s := spec("production")
+	s.SubmissionKey = "retained-production"
+	j := submit(t, q, s)
+	run := check(t, q, machine("worker", "fake"), nil).Job
+	if run == nil {
+		t.Fatal("production attempt not assigned")
+	}
+	if err := q.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error { q.deleteJob(j.ID); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenCancellationQueue(t, q, clock)
+	if q.s.Jobs[j.ID] != nil || q.records.removed[j.ID] == nil {
+		t.Fatal("fixture did not reopen removed production custody")
+	}
+	assertSafety := func(safe bool) {
+		t.Helper()
+		got, err := q.measurementSafety(context.Background(), "local", "cuda")
+		if err != nil || got.Safe != safe || !safe && got.Refusal == "" {
+			t.Fatalf("safety=%+v err=%v, want safe=%t", got, err, safe)
+		}
+	}
+	assertSafety(false)
+	clock.Advance(RestartGrace + ProductionLossAfter)
+	assertSafety(false) // Grace expiry cannot discharge exact copy custody.
+	release := result(run, false)
+	release.ReleaseOnly = true
+	release.Session = "wrong-session"
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	assertSafety(false)
+	release.Session = run.Session
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	assertSafety(true)
+	q = reopenCancellationQueue(t, q, clock)
+	assertSafety(true)
+}
+
 func TestMeasureSafetyTimeoutBackoffThenFreshAcknowledgement(t *testing.T) {
 	o := measureTestOptions(t)
 	clock := &fakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}

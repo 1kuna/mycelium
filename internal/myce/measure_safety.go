@@ -38,15 +38,17 @@ func (q *Queue) measurementSafety(ctx context.Context, worker, platform string) 
 			return measurementSafetyReply{}, err
 		}
 	}
-	// The live index includes terminal attempts that still owe release custody;
-	// immutable history and submission payloads need no copying or projection.
-	jobs := q.s.Jobs
+	// Both compact indexes retain attempts that still owe release custody,
+	// including removed keyed jobs. Immutable history needs no projection.
+	jobs := []map[string]*Job{q.s.Jobs}
 	if q.records != nil && !q.simulation {
-		jobs = q.records.live
+		jobs = []map[string]*Job{q.records.live, q.records.removed}
 	}
-	for _, j := range jobs {
-		if (j.Spec.Priority == "production" || j.Spec.Class == "production") && (!terminal(j.State) || attemptReleasePending(j)) {
-			return measurementSafetyReply{Refusal: "production work outstanding; measurement refused"}, nil
+	for _, index := range jobs {
+		for _, j := range index {
+			if (j.Spec.Priority == "production" || j.Spec.Class == "production") && (!terminal(j.State) || attemptReleasePending(j)) {
+				return measurementSafetyReply{Refusal: "production work outstanding; measurement refused"}, nil
+			}
 		}
 	}
 	for _, c := range q.calls {
