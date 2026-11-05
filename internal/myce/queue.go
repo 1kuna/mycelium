@@ -2332,6 +2332,9 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 	if j.State == "queued" && strings.HasPrefix(j.Reason, "disk_headroom:") {
 		j.DiagnosticCode = "disk_headroom"
 	}
+	if j.State == "queued" && strings.HasPrefix(j.Reason, "host_capacity_accumulation:") {
+		j.DiagnosticCode = "host_capacity_accumulation"
+	}
 	if strings.Contains(j.Reason, cpuIsolationUnavailable) {
 		j.DiagnosticCode = cpuIsolationUnavailable
 	}

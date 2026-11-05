@@ -386,6 +386,17 @@ envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
 environment is not prepared and that the host never builds environments.
 
+`host_capacity_accumulation` names a ready queued accelerator job whose host RAM
+or cores would otherwise be repeatedly consumed by CPU backfill (#787). New
+CPU work at the same or lower tier waits on the demand's selected host unless
+it fits beside the demand. Existing attempts finish normally. The projection
+selects one currently ready target per demand, prefers immediate capacity, and
+otherwise uses ordinary placement value. It retains current device capacity,
+environment, qualification, cache, maintenance and liveness requirements; cold,
+impossible or card-blocked demand does not withhold CPU capacity. Cancellation
+or loss of readiness clears the projection on the next planning pass. There is
+no wait-age threshold, new resource allowance or persistent host reservation.
+
 Owner pressure on a shared interactive host is temporary: an otherwise qualified
 `require_target` job is accepted and waits with `shared host temporarily
 unavailable: shared host memory pressure` (or the current pressure observation

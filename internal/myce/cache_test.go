@@ -138,15 +138,15 @@ func TestCacheCancelledCopyAndSizeMismatch(t *testing.T) {
 	}
 }
 func TestFetchRejectsInternetAtLoadAndOverwrite(t *testing.T) {
-	if e := FetchModel(context.Background(), "http://huggingface.co/a", "unused", 1, strings.Repeat("0", 64)); e == nil {
+	if e := FetchModel(context.Background(), "http://huggingface.co/a", "unused", "file", 1, strings.Repeat("0", 64)); e == nil {
 		t.Fatal("insecure URL accepted")
 	}
-	if e := FetchModel(context.Background(), "https://example.com/a", "unused", 1, strings.Repeat("0", 64)); e == nil {
+	if e := FetchModel(context.Background(), "https://example.com/a", "unused", "file", 1, strings.Repeat("0", 64)); e == nil {
 		t.Fatal("unapproved source")
 	}
 	p := filepath.Join(t.TempDir(), "master")
 	os.WriteFile(p, []byte("existing"), 0600)
-	if e := FetchModel(context.Background(), "https://huggingface.co/a", p, 1, strings.Repeat("0", 64)); e == nil {
+	if e := FetchModel(context.Background(), "https://huggingface.co/a", filepath.Dir(p), filepath.Base(p), 1, strings.Repeat("0", 64)); e == nil {
 		t.Fatal("overwrite accepted")
 	}
 }
@@ -204,14 +204,14 @@ func TestExplicitFetchVerifiesMaster(t *testing.T) {
 	t.Setenv("HOME", home)
 	dest := filepath.Join(home, "nas", "m.gguf")
 	sum := fmt.Sprintf("%x", sha256.Sum256([]byte("data")))
-	if e := FetchModel(context.Background(), "https://huggingface.co/repo/resolve/hash/m.gguf", dest, 4, sum); e != nil {
+	if e := FetchModel(context.Background(), "https://huggingface.co/repo/resolve/hash/m.gguf", filepath.Dir(dest), filepath.Base(dest), 4, sum); e != nil {
 		t.Fatal(e)
 	}
 	if e := verifyModel(dest, Model{Name: "m", SizeBytes: 4, SHA256: sum}); e != nil {
 		t.Fatal(e)
 	}
 	bad := filepath.Join(home, "nas", "bad.gguf")
-	if e := FetchModel(context.Background(), "https://huggingface.co/repo/resolve/hash/m.gguf", bad, 4, strings.Repeat("0", 64)); e == nil {
+	if e := FetchModel(context.Background(), "https://huggingface.co/repo/resolve/hash/m.gguf", filepath.Dir(bad), filepath.Base(bad), 4, strings.Repeat("0", 64)); e == nil {
 		t.Fatal("fetch accepted bad master")
 	}
 	if _, e := os.Stat(bad); !os.IsNotExist(e) {

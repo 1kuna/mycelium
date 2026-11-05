@@ -476,13 +476,13 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		copy.FreeMemoryGB = least * float64(len(cards))
 		// Projection only changes exclusions, never queue state or inventory.
 		// Reuse the same read-only planning pass for every projected position.
-		sets = append(sets, q.buildCandidates(&copy))
+		sets = append(sets, q.buildCandidates(&copy, scan))
 	}
 	for _, j := range q.liveJobs() {
 		if j.State != "queued" {
 			continue
 		}
-		reasons[j.ID] = q.waitReason(j)
+		reasons[j.ID] = q.waitReason(j, scan)
 	}
 	excluded := map[string]bool{}
 	for n := 1; ; n++ {
@@ -570,7 +570,7 @@ func reservationWaitReason(m *Machine, batchSlot bool, sharedWith int) string {
 	}
 	return strings.Join(parts, "; ")
 }
-func (q *Queue) waitReason(j *Job) string {
+func (q *Queue) waitReason(j *Job, scans ...*placementScan) string {
 	if why := q.yieldWaitReason(j); why != "" {
 		return why
 	}
@@ -633,6 +633,11 @@ func (q *Queue) waitReason(j *Job) string {
 	}
 	if reason := q.memoryWaitingReason(j, machines); reason != "" {
 		return reason
+	}
+	if j.Spec.Needs.cpuOnly() {
+		if reason := q.hostBackfillWaitingReason(j, q.placementScan(scans...)); reason != "" {
+			return reason
+		}
 	}
 	return waitingReason(j, machines, q.s.Jobs)
 }
