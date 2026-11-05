@@ -66,10 +66,15 @@ func prepareCheckinToolInventory(c Checkin) (*toolInventory, error) {
 func (q *Queue) acceptToolInventory(c Checkin, m, old *Machine, prepared *toolInventory, reply *Reply) error {
 	fence := q.s.ToolInventories[m.ID]
 	if fence.Session == m.Session {
-		if c.ToolInventoryHash == "" && fence.Version > 0 && slices.Contains(m.Capabilities, toolInventoryCapability) {
+		if c.ToolInventoryHash == "" && fence.Version > 0 && (prepared == nil || slices.Contains(m.Capabilities, toolInventoryCapability)) {
 			// A restarted worker may retain its session while recovering custody,
 			// but loses its in-memory counter. Negotiate above the durable fence;
 			// never apply an unversioned (possibly delayed) inventory over it.
+			if prepared == nil && old != nil && old.Session == m.Session {
+				// Legacy control-only observers can omit an inventory. Omission
+				// cannot erase an already versioned same-session snapshot.
+				m.toolInventory = old.toolInventory
+			}
 			reply.ToolInventoryRequired = true
 			reply.ToolInventoryVersion = fence.Version
 			return nil
