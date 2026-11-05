@@ -556,6 +556,7 @@ type Job struct {
 }
 type Machine struct {
 	HygieneCollection *WorkerHygieneCollection `json:"hygiene_collection,omitempty"`
+	HostHealth        *HostHealth              `json:"host_health,omitempty"`
 	toolInventory     *toolInventory           // Immutable queue-owned inventory; never serialized.
 	// ToolInventory maps the native PATH (empty key) and prepared environment keys to executable names.
 	ToolInventory          map[string][]string    `json:"tool_inventory,omitempty"`
@@ -686,6 +687,7 @@ type Checkin struct {
 	Running              *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	HostHygieneProtocol        string                       `json:"host_hygiene_protocol,omitempty"`
 	ToolInventoryProtocol      string                       `json:"tool_inventory_protocol,omitempty"`
 	ToolInventoryRequired      bool                         `json:"tool_inventory_required,omitempty"`
 	ToolInventoryHash          string                       `json:"tool_inventory_hash,omitempty"`
