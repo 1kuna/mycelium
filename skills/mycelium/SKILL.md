@@ -13,6 +13,9 @@ Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
+On releases with inventory deltas, status omits full executable inventories. Use
+resolve/placement diagnostics for `needs.tools`; workers automatically refresh
+inventory after queue restart before qualifying tool-dependent work.
 
 This dependency-free CPU fixture uses only worker PATH tools (`sh`, `printf`,
 `cat`, `test`), not Python, Docker or a managed environment. From an empty project

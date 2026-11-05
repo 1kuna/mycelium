@@ -554,6 +554,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	toolInventory *toolInventory // Immutable queue-owned inventory; never serialized.
 	// ToolInventory maps the native PATH (empty key) and prepared environment keys to executable names.
 	ToolInventory          map[string][]string    `json:"tool_inventory,omitempty"`
 	OutputDestinationIDs   []string               `json:"output_destination_ids,omitempty"`
@@ -667,20 +668,26 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
-	NASPathReports  []NASPathReport   `json:"nas_path_reports,omitempty"`
-	AttemptProtocol string            `json:"attempt_protocol,omitempty"`
-	Attempts        []AttemptReport   `json:"attempts,omitempty"`
-	Recovering      bool              `json:"recovering,omitempty"` // Reconcile custody without offering new work.
-	CurveReports    []WorkObservation `json:"curve_reports,omitempty"`
-	BenchmarkDone   string            `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
-	Started         bool              `json:"started,omitempty"`
-	ModelReports    []ModelReport     `json:"model_reports,omitempty"`
-	PreviousSession string            `json:"previous_session,omitempty"`
-	Fresh           bool              `json:"fresh,omitempty"`
-	Machine         Machine           `json:"machine"`
-	Running         *Execution        `json:"running,omitempty"`
+	ToolInventoryHash    string            `json:"tool_inventory_hash,omitempty"`
+	ToolInventoryVersion uint64            `json:"tool_inventory_version,omitempty"`
+	NASPathReports       []NASPathReport   `json:"nas_path_reports,omitempty"`
+	AttemptProtocol      string            `json:"attempt_protocol,omitempty"`
+	Attempts             []AttemptReport   `json:"attempts,omitempty"`
+	Recovering           bool              `json:"recovering,omitempty"` // Reconcile custody without offering new work.
+	CurveReports         []WorkObservation `json:"curve_reports,omitempty"`
+	BenchmarkDone        string            `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
+	Started              bool              `json:"started,omitempty"`
+	ModelReports         []ModelReport     `json:"model_reports,omitempty"`
+	PreviousSession      string            `json:"previous_session,omitempty"`
+	Fresh                bool              `json:"fresh,omitempty"`
+	Machine              Machine           `json:"machine"`
+	Running              *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	ToolInventoryProtocol      string                       `json:"tool_inventory_protocol,omitempty"`
+	ToolInventoryRequired      bool                         `json:"tool_inventory_required,omitempty"`
+	ToolInventoryHash          string                       `json:"tool_inventory_hash,omitempty"`
+	ToolInventoryVersion       uint64                       `json:"tool_inventory_version,omitempty"`
 	NASPathChecks              []NASPathCheck               `json:"nas_path_checks,omitempty"`
 	SharedHost                 *SharedHostProfile           `json:"shared_host,omitempty"`
 	ExtensionQualificationPlan []ExtensionQualificationPlan `json:"extension_qualification_plan,omitempty"`

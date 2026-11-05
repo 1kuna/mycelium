@@ -1113,3 +1113,52 @@ serve late success. Durable worker operations separately consume their own late
 completion so completed publication/preparation is not repeated. Native installer
 progress/stall budgets remain as documented in operations; historical test timings
 and download receipts are in Git history, not current qualification claims.
+
+## Tool inventory check-in protocol
+
+Workers first send the existing full `machine.tool_inventory` request. A queue
+advertises `tool_inventory_protocol: tool-inventory-v1`, with
+`tool_inventory_hash` and `tool_inventory_version` acknowledging the accepted
+report. New workers also advertise `tool_inventory_v1` in the existing
+`machine.capabilities` list. Only after this advertisement does a worker send the additive top-level
+check-in fields `tool_inventory_hash` (SHA-256 of canonical JSON: sorted keys,
+sorted/deduplicated tool names) and `tool_inventory_version` (increasing on change
+within its machine/session). Unchanged reports omit `machine.tool_inventory`.
+A changed inventory includes the full map with the new hash/version.
+
+The queue answers `tool_inventory_required: true` when the matching snapshot is
+missing or full contents do not match the hash. The next heartbeat resends the
+full map; meanwhile missing inventory never qualifies `needs.tools`. The queue
+persists only the session/hash/version fence. Inventory contents are immutable,
+in-memory references, so a restart requests a full refresh and stale reports
+cannot roll back a newer version, including across queue restarts. New sessions
+must establish their own inventory. A worker process recovering custody in its
+existing session first negotiates above the durable version fence, then resends
+the full report; an unversioned report cannot overwrite it. Validation, canonicalization, hashing and
+machine JSON copying precede the queue transaction. Transaction rollback and
+detached diagnostic planning preserve the immutable reference.
+
+An older worker can continue sending the full inventory. Against an older queue
+that supports inventories but rejects additive request fields, a new worker
+keeps the full legacy shape because support was never advertised. If a previously
+negotiated queue is replaced by a strict older binary, an HTTP 400
+`request_invalid` decode refusal permits one retry using the full legacy shape.
+Other refusals retain their existing behavior. This does not
+extend compatibility to queues predating `machine.tool_inventory`. Tool-based
+placement and the worker's effective-PATH launch recheck retain their meaning.
+The queue's status projection omits the full inventory payload.
+
+`TestToolInventoryWorkerHandshake` exercises the real HTTP check-in path with the
+#790 fixture (40 prepared environments, 2,400 native executable names), inventory
+change, cache mismatch and restart. Fake-clock regressions cover session/version
+fences, a delayed concurrent report, rollback and diagnostic placement. The
+upgrade-compatibility process suite owns cross-binary coverage separately.
+
+For a before/after comparison, run `BenchmarkToolInventoryFleet` with
+`-benchtime=25x`. Its source is compatible with #790: run `full` there and `delta`
+on the candidate. Five synthetic CPU workers report against real SQLite with
+6,286 settled jobs, 1,655 retained curves and 1,384 storage observations. It
+reports check-in bytes and total queue mutex hold p50/p99, including transaction
+snapshots/commits and check-in read phases; JSON decoding stays outside that hold.
+The settled backlog isolates inventory overhead and does not model concurrent
+job GET traffic, active scheduling load, native device probes or live latency.

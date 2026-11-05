@@ -53,8 +53,22 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		c.Attempts = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
 	}
 	c.Running, c.Started = nil, false
+	full := c
+	if w.toolReport != nil {
+		c = w.toolReport.checkin(c)
+	}
 	var reply Reply
-	if err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply); err != nil {
+	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
+	var refusal *HTTPError
+	if w.toolReport != nil && c.ToolInventoryHash != "" && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+		// Strict decoding rejected the additive inventory fields before mutation
+		// (for example, a queue replaced with an older inventory-capable binary).
+		// Retry once with the full legacy inventory; attempt protocol is unchanged.
+		w.toolReport.supported = false
+		c = w.toolReport.checkin(full)
+		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
+	}
+	if err != nil {
 		var he *HTTPError
 		if errors.As(err, &he) && (he.Status == 400 && he.Code == "request_invalid" || he.Status == 426) {
 			return Reply{}, currentProtocolError("queue rejected keyed-attempt-v1: upgrade the queue before this worker; saved attempt custody is retained")
@@ -64,6 +78,9 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	validated, err := workerAttemptReply(c, reply)
 	if err != nil {
 		return Reply{}, err
+	}
+	if w.toolReport != nil {
+		w.toolReport.accept(c, reply)
 	}
 	// A lost/discarded assignment leaves no local custody to stop. Validate
 	// the whole reply first, then explicitly release only unheld own-session
