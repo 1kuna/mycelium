@@ -132,6 +132,37 @@ class AdaptiveTests(unittest.TestCase):
             transfer.sendall(b"long progressing upload")
         self.assertEqual(clock.now, .5)
 
+    def test_transfer_includes_complete_service_period(self):
+        for method in ("recv", "recv_into", "send"):
+            with self.subTest(method=method):
+                clock = Clock()
+                class Socket:
+                    period = .000001
+                    timeout = None
+                    def settimeout(self, timeout):
+                        self.timeout = timeout
+                    def advance(self):
+                        if self.timeout is not None and self.period > self.timeout:
+                            raise socket.timeout("brief readiness wait hid service period")
+                        clock.now += self.period
+                    def recv(self, count, flags=0):
+                        self.advance()
+                        return b"x" * count
+                    def recv_into(self, data, *args):
+                        self.advance()
+                        return len(data)
+                    send = recv_into
+                source = Socket()
+                transfer = _ProgressSocket(source, adaptive=True)
+                data = 256 if method == "recv" else bytearray(256)
+                operation = getattr(transfer, method)
+                with patch("mycelium.transfer.time", clock), patch.object(transfer, "_buffered", return_value=False):
+                    operation(data)
+                    clock.now += 1  # Buffered draining/consumer work between readiness edges.
+                    operation(data)
+                    source.period = .05
+                    operation(data)
+
 
 class BufferedProgressTests(unittest.TestCase):
     def test_buffered_progress_survives_wire_gaps_and_then_stalls(self):

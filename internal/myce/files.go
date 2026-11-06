@@ -726,8 +726,9 @@ func (c *fileTransferConn) Read(p []byte) (int, error) {
 	}
 	started := clock.Now()
 	n, err, waited := fileSocketSome(c.Conn, p, false)
-	if waited && (c.reading == nil || c.reading.Load()) {
-		c.readProgress.observe(clock.Now().Sub(started), n)
+	if c.reading == nil || c.reading.Load() {
+		now := clock.Now()
+		c.readProgress.record(now, now.Sub(started), n, waited)
 	}
 	return n, fileTransferTimeout(err, max(c.idle, c.readProgress.window(len(p))))
 }
@@ -743,8 +744,9 @@ func (c *fileTransferConn) Write(p []byte) (int, error) {
 		}
 		started := clock.Now()
 		n, err, waited := fileSocketSome(c.Conn, p, true)
-		if waited && (c.writing == nil || c.writing.Load()) {
-			c.writeProgress.observe(clock.Now().Sub(started), n)
+		if c.writing == nil || c.writing.Load() {
+			now := clock.Now()
+			c.writeProgress.record(now, now.Sub(started), n, waited)
 		}
 		total += n
 		p = p[n:]
@@ -924,9 +926,6 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 	}
 	res, err := local.Do(req)
 	if err != nil {
-		if errors.Is(err, errFileTransferStalled) {
-			return nil, fmt.Errorf("%w: no network progress for %s", errFileTransferStalled, c.fileTimeout(size))
-		}
 		return nil, fmt.Errorf("file transfer connection failed: %w", err)
 	}
 	reading.Store(true)

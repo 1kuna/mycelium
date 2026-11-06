@@ -220,6 +220,26 @@ type transferProgress struct {
 	gap     time.Duration
 	perByte float64
 	seen    bool
+	period  time.Time
+	bytes   int64
+}
+
+// A readiness wait ends a service period; buffered copies between waits belong
+// to that same period. Timing only the final poll wait can turn a brief EAGAIN
+// race into a microsecond rate, omitting producer/consumer scheduling and work.
+func (p *transferProgress) record(now time.Time, elapsed time.Duration, n int, waited bool) {
+	if n <= 0 {
+		return
+	}
+	p.bytes += int64(n)
+	if !waited {
+		return
+	}
+	if !p.period.IsZero() {
+		elapsed = now.Sub(p.period)
+	}
+	p.observe(elapsed, int(p.bytes))
+	p.period, p.bytes = now, 0
 }
 
 func (p *transferProgress) observe(elapsed time.Duration, n int) {

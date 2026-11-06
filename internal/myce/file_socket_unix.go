@@ -3,6 +3,7 @@
 package myce
 
 import (
+	"errors"
 	"io"
 	"net"
 	"syscall"
@@ -49,6 +50,20 @@ func fileSocketSome(conn net.Conn, p []byte, write bool) (int, error, bool) {
 		err = raw.Write(operation)
 	} else {
 		err = raw.Read(operation)
+	}
+	var timeout net.Error
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		// The runtime checks its deadline before invoking the callback. If
+		// this goroutine was descheduled, that can hide actual peer progress.
+		// Check once without blocking before declaring a network stall. This
+		// buffered copy must not teach a new wire rate from the expired wait.
+		ready := false
+		if checkErr := raw.Control(func(fd uintptr) { ready = operation(fd) }); checkErr != nil {
+			return 0, checkErr, waited
+		}
+		if ready {
+			err, waited = nil, false
+		}
 	}
 	if err != nil {
 		return 0, err, waited

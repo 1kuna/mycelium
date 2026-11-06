@@ -41,6 +41,19 @@ class Progress:
     def __init__(self):
         self.gap = self.per_byte = 0
         self.seen = False
+        self.period = None
+        self.count = 0
+
+    def record(self, now, elapsed, count, waited):
+        if count <= 0:
+            return
+        self.count += count
+        if not waited:
+            return
+        if self.period is not None:
+            elapsed = now - self.period
+        self.observe(elapsed, self.count)
+        self.period, self.count = now, 0
 
     def observe(self, elapsed, count):
         if count > 0:

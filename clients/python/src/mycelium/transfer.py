@@ -41,8 +41,9 @@ class _ProgressSocket:
         waited = not self._buffered(progress is self._write_progress)
         started = time.monotonic()
         count = operation(data, *args)
-        if self._adaptive and waited:
-            progress.observe(time.monotonic() - started, count if isinstance(count, int) else len(count))
+        if self._adaptive:
+            now = time.monotonic()
+            progress.record(now, now - started, count if isinstance(count, int) else len(count), waited)
         return count
 
     def send(self, data, flags=0):
@@ -55,8 +56,9 @@ class _ProgressSocket:
         waited = not self._buffered(False)
         started = time.monotonic()
         data = self._socket.recv(count, flags)
-        if self._adaptive and waited:
-            self._read_progress.observe(time.monotonic() - started, len(data))
+        if self._adaptive:
+            now = time.monotonic()
+            self._read_progress.record(now, now - started, len(data), waited)
         return data
 
     def recv_into(self, buffer, nbytes=0, flags=0):
