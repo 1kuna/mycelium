@@ -77,8 +77,7 @@ func (q *Queue) deadlineGuidance(j *Job) *DeadlineGuidance {
 			// rather than hiding the blocker when current capacity is full.
 			if !fitsCurrent {
 				projected := q.cpuAfterReleases(m, []*Job{r}, nil, 0)
-				owner := allocationMachine(q.s.Machines[r.Machine], r.AllocatedDevices)
-				projected.FreeHostMemoryGB += hostNeed(owner, r.Spec.Needs.MemoryGB, r.Spec.Needs.HostMemoryGB)
+				projected.FreeHostMemoryGB += q.hostJobCharge(r)
 				if !fits(j, &projected, max(m.TotalMemoryGB, m.FreeMemoryGB+r.Spec.Needs.MemoryGB)) {
 					continue
 				}

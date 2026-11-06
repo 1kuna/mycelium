@@ -441,7 +441,7 @@ func TestHostMemoryPressureStatusAdmissionAgreement(t *testing.T) {
 			held = candidate
 		}
 	}
-	if held == nil || held.State != "queued" || held.DiagnosticCode != "host_memory_headroom" || !strings.Contains(held.Reason, "live 3.0 GiB; reserved 0.0 GiB") {
+	if held == nil || held.State != "queued" || held.DiagnosticCode != "host_memory_headroom" || !strings.Contains(held.Reason, "live available 3.0 GiB; reserved 0.0 GiB") {
 		t.Fatalf("typed pressure status: %+v", held)
 	}
 	w := Worker{Machine: m, HostMemorySource: func(context.Context) (float64, error) { return 3, nil }}

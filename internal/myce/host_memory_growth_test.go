@@ -170,3 +170,39 @@ func TestHostMemoryCurrentCreditsOnlyAnonymousResident(t *testing.T) {
 		t.Fatal("stale session credited")
 	}
 }
+
+func TestHostMemoryProbeForecastRequiresCompleteTimedFootprint(t *testing.T) {
+	_, clock := fixture(t)
+	dir := t.TempDir()
+	write := func(name, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := &memoryAttempt{fs: osMemoryFS{}, path: dir}
+	write("memory.current", "8589934592")
+	stats := "kernel 134217728\nshmem 134217728\nunevictable 0\nfile_dirty 67108864\nfile_writeback 0\nfile 6442450944\n"
+	write("memory.stat", "anon 1073741824\n"+stats)
+	first := a.currentHostMemory(clock)
+	if first == nil || first.GrowthObserved || first.FootprintGB == nil || *first.FootprintGB != 1.3125 {
+		t.Fatal("invented first horizon or counted reclaimable cache", first)
+	}
+	clock.Advance(time.Second)
+	write("memory.stat", "anon 2147483648\n"+stats)
+	second := a.currentHostMemory(clock)
+	if second == nil || !second.GrowthObserved || second.GrowthGB != 1 || second.FootprintGB == nil || *second.FootprintGB != 2.3125 || second.NonreclaimableGB != 2 {
+		t.Fatal("missing measured footprint/growth", second)
+	}
+	clock.Advance(time.Second)
+	write("memory.stat", "anon 2147483648\n")
+	missing := a.currentHostMemory(clock)
+	if missing == nil || missing.GrowthObserved || missing.FootprintGB != nil {
+		t.Fatal("partial counters authorize forecast", missing)
+	}
+	clock.Advance(time.Second)
+	write("memory.stat", "anon 2147483648\n"+stats)
+	if a.currentHostMemory(clock).GrowthObserved {
+		t.Fatal("bridged missing observation interval")
+	}
+}
