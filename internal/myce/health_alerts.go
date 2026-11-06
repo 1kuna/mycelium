@@ -14,7 +14,6 @@ import (
 )
 
 const DefaultHealthStorageDelay = 5 * time.Minute
-const healthAlertCooldown = 15 * time.Minute
 
 // HealthAlert contains identities and fixed diagnostic codes, never worker text.
 // Receivers deduplicate DeliveryID, including after an ambiguous hook exit.
@@ -35,6 +34,7 @@ type HealthAlert struct {
 	Delivered   bool      `json:"delivered"`
 }
 type healthCondition struct {
+	Endings     []healthEnding `json:"endings,omitempty"`
 	Since       time.Time      `json:"since"`
 	LastAlert   time.Time      `json:"last_alert,omitempty"`
 	Active      bool           `json:"active"`
@@ -56,7 +56,8 @@ func WithHealthStorageDelay(delay time.Duration) QueueOption {
 }
 
 // observeHealth is called inside the queue transaction. Only a new episode can
-// alert; flapping is limited to one event per subject/code per 15 minutes.
+// alert; positive recovery rearms it. A wall-time cooldown can hide a new
+// failure on a fast installation and has no local/protocol basis.
 func (q *Queue) observeHealth(key string, bad bool, delay time.Duration, e HealthAlert) {
 	if q.s.Health.Conditions == nil {
 		q.s.Health.Conditions = map[string]healthCondition{}
@@ -70,7 +71,7 @@ func (q *Queue) observeHealth(key string, bad bool, delay time.Duration, e Healt
 		if c.Since.IsZero() {
 			c.Since = now
 		}
-		if !c.Active && now.Sub(c.Since) >= delay && (c.LastAlert.IsZero() || now.Sub(c.LastAlert) >= healthAlertCooldown) {
+		if !c.Active && now.Sub(c.Since) >= delay {
 			c.Active, c.LastAlert = true, now
 			q.appendHealthAlert(e)
 		}
@@ -142,6 +143,7 @@ func (q *Queue) detectHealth() {
 		}
 	}
 	q.detectIncidentHealth()
+	q.detectRemainingHealth()
 }
 func (q *Queue) alertAttemptLoss(j *Job, outcome AttemptOutcome, quiet bool) {
 	if j.Attempt == 0 || cancelled(j) || plannedStop(j) || historyPlannedStop(j) || j.Spec.Priority != "production" || outcome.PoliteStop || outcome.OperatorStop || outcome.PriorityStop != nil {
