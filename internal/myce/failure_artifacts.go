@@ -302,7 +302,7 @@ func DiagnosticFiles(j *Job, attempt int) (FileManifest, error) {
 		return nil, resultExpired()
 	}
 	for _, a := range j.AttemptHistory {
-		if a.Attempt == attempt && a.State == "failed" && a.Diagnostics != nil {
+		if a.Attempt == attempt && (a.State == "failed" || a.State == "queued") && a.Diagnostics != nil {
 			return a.Diagnostics.Files, nil
 		}
 	}

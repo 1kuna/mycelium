@@ -73,8 +73,19 @@ func TestFailureArtifactsWorker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			j, err = c.Wait(ctx, j.ID)
-			if err != nil || j == nil || j.State != "failed" {
+			wantState := "failed"
+			if tc.name == "exec-startup" {
+				// A missing executable is a diagnosed no-progress launch hold.
+				// Its exact attempt must still expose verified failure artifacts.
+				wantState = "queued"
+				await(t, func() bool {
+					j, err = c.GetJob(ctx, j.ID)
+					return err != nil || j.ExecutionCause != nil && len(j.AttemptHistory) > 0
+				})
+			} else {
+				j, err = c.Wait(ctx, j.ID)
+			}
+			if err != nil || j == nil || j.State != wantState {
 				t.Fatalf("failure lost: %+v %v", j, err)
 			}
 			if len(j.OutputRefs) != 0 {

@@ -65,6 +65,11 @@ func TestRemainingHealthStagingNeedsPositiveRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		requireIncident(t, q, "staging_cache_refused", "attempt-staging/worker", 1, true)
+		if next := check(t, q, m, nil).Job; next != nil {
+			t.Fatal("unchanged staging failure retried", next.ID)
+		}
+		// A repaired preparation/runtime permits a probe without clearing the incident.
+		m.ExtensionFingerprint += "-repaired"
 	}
 	a := check(t, q, m, nil).Job
 	if a == nil {

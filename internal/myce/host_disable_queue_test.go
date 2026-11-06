@@ -23,8 +23,8 @@ func TestAttemptHistoryLateRefund(t *testing.T) {
 		check(t, q, observer(), nil)
 	}
 	before := job(t, q, j.ID)
-	if before.State != "failed" || len(before.AttemptHistory) != 3 {
-		t.Fatal("missing third-loss outcome", before)
+	if before.State != "queued" || len(before.AttemptHistory) != 3 {
+		t.Fatal("missing adaptive loss history", before)
 	}
 	r := operatorResult(result(attempts[2], false))
 	r.Interrupted = true
@@ -49,7 +49,7 @@ func TestAttemptHistoryLateRefund(t *testing.T) {
 		if i < 2 && !reflect.DeepEqual(h, before.AttemptHistory[i]) {
 			t.Fatal("another attempt changed", h)
 		}
-		if i == 2 && (h.State != "queued" || h.Reason != "requeued: stopped by operator" || !h.OperatorStop || !h.EndedAt.Equal(before.AttemptHistory[i].EndedAt)) {
+		if i == 2 && (h.State != "queued" || h.Reason != before.AttemptHistory[i].Reason || !h.OperatorStop || !h.EndedAt.Equal(before.AttemptHistory[i].EndedAt)) {
 			t.Fatalf("stale refund decision: %+v", h)
 		}
 	}

@@ -179,6 +179,10 @@ func TestM3UnifiedMemoryDebtAndDeterminism(t *testing.T) {
 
 func TestM3StopEventsCoverMachineSession(t *testing.T) {
 	q, clock := fixture(t)
+	// This protocol/recovery fixture authors its cleanup deadline.
+	if err := q.SetPreemptionGrace(StopGrace); err != nil {
+		t.Fatal(err)
+	}
 	m := m3Machine()
 	submit(t, q, m3Spec("experiment", "0", 1, 1))
 	a := assignedJob(machineCheck(t, q, m))
@@ -239,6 +243,10 @@ func TestM3StopEventsCoverMachineSession(t *testing.T) {
 
 func TestM3SharedLossShortestAndPerAttemptBound(t *testing.T) {
 	q, clock := fixture(t)
+	// Exhaustion here is explicit operator intent, not the adaptive default.
+	if err := q.SetProductionInfrastructureRetries(2); err != nil {
+		t.Fatal(err)
+	}
 	q.lossTimeouts = [3]time.Duration{9 * time.Second, 3 * time.Second, 7 * time.Second}
 	m := m3Machine()
 	submit(t, q, m3Spec("production", "0", 1, 1))

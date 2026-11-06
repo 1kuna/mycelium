@@ -75,6 +75,10 @@ func TestM3ConcurrentDeviceSlotsAndCPU(t *testing.T) {
 
 func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
 	q, _ := fixture(t)
+	// This protocol/recovery fixture authors its cleanup deadline.
+	if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	m := m3Machine()
 	m.Devices[1].FreeMemoryGB = 0
 	s := spec("experiment")

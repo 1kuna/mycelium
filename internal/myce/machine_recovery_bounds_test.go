@@ -15,6 +15,10 @@ func TestMachineWedgedKillFallsBackBeforeStartBy(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			q, clock := fixture(t)
+			// This protocol/recovery fixture authors its cleanup deadline.
+			if err := q.SetPreemptionGrace(StopGrace); err != nil {
+				t.Fatal(err)
+			}
 			aMachine, bMachine := m3Machine(), m3Machine()
 			device := "1"
 			if !sameMachine {
@@ -52,7 +56,7 @@ func TestMachineWedgedKillFallsBackBeforeStartBy(t *testing.T) {
 			}
 			stopAt := *job(t, q, a.ID).StopAt
 			clock.Advance(stopAt.Sub(clock.Now()))
-			prod := submit(t, q, spec("production"))
+			prod := submit(t, q, authoredStartSpec())
 			heartbeat(b)
 			if got := job(t, q, b.ID); got.State != "running" || got.PreemptionCount != 0 {
 				t.Fatal("quick kill no longer spares neighbor", got.State)
@@ -108,7 +112,7 @@ func TestMachineRecoveryPlansElsewhere(t *testing.T) {
 	victim := assignedJob(machineCheck(t, q, b))
 	machineCheck(t, q, b, victim)
 	recoveringCheck(t, q, a)
-	prod := submit(t, q, spec("production"))
+	prod := submit(t, q, authoredStartSpec())
 	if got := assignedJob(recoveringCheck(t, q, a)); got != nil {
 		t.Fatal("recovery admitted work", got.ID)
 	}

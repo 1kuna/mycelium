@@ -63,6 +63,14 @@ func TestMachineRecoveryDoesNotSpendQueuedAttempts(t *testing.T) {
 		for _, priorRetry := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/prior-retry=%t", phase, priorRetry), func(t *testing.T) {
 				q, clock := fixture(t)
+				// Exhaustion here is explicit operator intent, not the adaptive default.
+				if err := q.SetProductionInfrastructureRetries(2); err != nil {
+					t.Fatal(err)
+				}
+				// This protocol/recovery fixture authors its cleanup deadline.
+				if err := q.SetPreemptionGrace(StopGrace); err != nil {
+					t.Fatal(err)
+				}
 				m := m3Machine()
 				submit(t, q, m3Spec("experiment", "0", 8, 1))
 				owned := assignedJob(machineCheck(t, q, m))
@@ -166,6 +174,10 @@ func TestMachineKillPhaseCapacitySparesNeighbor(t *testing.T) {
 	for _, phase := range []string{"grace", "kill"} {
 		t.Run(phase, func(t *testing.T) {
 			q, clock := fixture(t)
+			// This protocol/recovery fixture authors its cleanup deadline.
+			if err := q.SetPreemptionGrace(StopGrace); err != nil {
+				t.Fatal(err)
+			}
 			m := m3Machine()
 			submit(t, q, m3Spec("experiment", "0", 8, 1))
 			a := assignedJob(machineCheck(t, q, m))

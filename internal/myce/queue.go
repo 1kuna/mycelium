@@ -1117,7 +1117,7 @@ func (q *Queue) maintain() {
 		// Machine attempts retain their exact device and host charge through kill;
 		// only their release acknowledgement can retire the stopping attempt.
 		m := q.s.Machines[j.Machine]
-		if (m == nil || m.Devices == nil) && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !plannedPriorityStop(j) && !j.Spec.Run.Docker && expired(j.StopAt, now) {
+		if (m == nil || m.Devices == nil) && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !plannedStop(j) && !j.Spec.Run.Docker && expired(j.StopAt, now) {
 			if cancelled(j) {
 				q.finishCancellation(j)
 			} else {
@@ -1980,7 +1980,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	} else if !r.Success && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "resource_limit" {
 		q.requeue(j, "waiting for memory after prelaunch admission changed", false)
 	} else if r.Interrupted && r.PoliteStop {
-		q.retry(j, "requeued: hypha availability withdrawn")
+		q.requeue(j, "requeued: hypha availability withdrawn", false)
 	} else if r.Interrupted && r.OperatorStop {
 		q.retry(j, "requeued: stopped by operator")
 		j.RequeuedByOperator = true
@@ -2015,7 +2015,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		now := q.clock.Now()
 		j.FinishedAt = &now
 	}
-	if j.State == "failed" && filesVerified && !r.Success && j.Spec.Diagnostics != nil {
+	if (j.State == "failed" || j.State == "queued") && filesVerified && !r.Success && j.Spec.Diagnostics != nil {
 		outcome.Diagnostics = r.Diagnostics
 	}
 	q.recordAttemptOutcome(j, outcome)

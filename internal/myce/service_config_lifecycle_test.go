@@ -19,8 +19,15 @@ func TestServiceConfigLifecycleDefaultAndExplicitBudgets(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, present := raw["production_infrastructure_retries"]
-		if present != (budget >= 0) {
+		if !present {
 			t.Fatal("default/explicit intent lost", budget, present)
+		}
+		// Migration journals decode nested configs without ReadServiceConfig.
+		// Absence would turn adaptive -1 into the explicit zero-retry budget.
+		var nested struct{ Config ServiceConfig }
+		wrapped, err := json.Marshal(struct{ Config ServiceConfig }{c})
+		if err != nil || json.Unmarshal(wrapped, &nested) != nil || nested.Config.ProductionInfrastructureRetries != budget {
+			t.Fatal("nested retry budget changed", budget, nested.Config.ProductionInfrastructureRetries, err)
 		}
 		path := filepath.Join(t.TempDir(), "config.json")
 		if err := os.WriteFile(path, data, 0600); err != nil {

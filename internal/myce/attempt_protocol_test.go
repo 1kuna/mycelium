@@ -24,6 +24,10 @@ func attemptWire(t *testing.T, client Client, c Checkin) Reply {
 
 func TestAttemptProtocolLegacyWorkerNewQueue(t *testing.T) {
 	q, clock := fixture(t)
+	// This protocol/recovery fixture authors its cleanup deadline.
+	if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(API{q, "test"}.Handler())
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test"}
@@ -52,6 +56,10 @@ func TestAttemptProtocolLegacyWorkerNewQueue(t *testing.T) {
 
 func TestAttemptProtocolKeyedWorkerNewQueue(t *testing.T) {
 	q, clock := fixture(t)
+	// This protocol/recovery fixture authors its cleanup deadline.
+	if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(API{q, "test"}.Handler())
 	defer server.Close()
 	w := Worker{Clock: clock, Machine: machine("keyed", "fake"), Client: Client{URL: server.URL, Token: "test"}}
@@ -264,6 +272,10 @@ func TestAttemptProtocolWrongStopIgnored(t *testing.T) {
 
 func TestAttemptProtocolStopEventKey(t *testing.T) {
 	q, clock := fixture(t)
+	// This protocol/recovery fixture authors its cleanup deadline.
+	if err := q.SetPreemptionGrace(StopGrace); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(API{q, "test"}.Handler())
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test"}
@@ -350,6 +362,10 @@ func TestAttemptProtocolExactNativeReleaseAck(t *testing.T) {
 	for _, cancelJob := range []bool{false, true} {
 		t.Run(map[bool]string{false: "priority", true: "cancel"}[cancelJob], func(t *testing.T) {
 			q, clock := fixture(t)
+			// This protocol/recovery fixture authors its cleanup deadline.
+			if err := q.SetPreemptionGrace(StopGrace); err != nil {
+				t.Fatal(err)
+			}
 			m := machine("release", "fake")
 			submit(t, q, spec("experiment"))
 			c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m}
