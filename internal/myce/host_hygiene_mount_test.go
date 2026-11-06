@@ -74,6 +74,7 @@ func TestHostHygieneCheckpointAccessHangKeepsSingleRequest(t *testing.T) {
 	p := &hostMountProbe{root: "checkpoint", path: "fake", probe: healthMountAccess("checkpoint")}
 	p.sample(clock.Now(), nil)
 	await(t, func() bool { return calls.Load() == 1 })
+	clock.Advance(time.Nanosecond) // A stall must exceed the cold deadline.
 	for i := 0; i < hostHealthConfirmation; i++ {
 		clock.Advance(signalRefresh)
 		p.sample(clock.Now(), nil)
