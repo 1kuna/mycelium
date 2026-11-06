@@ -101,13 +101,16 @@ func (s *copyStream) progress(n int64) {
 		elapsed = g.clock.Now().Sub(g.at)
 	}
 	rate := float64(g.bytes) / elapsed.Seconds()
-	if g.probe && len(g.streams) >= g.limit {
-		if rate <= g.rate || g.controlSlow {
+	if g.controlSlow {
+		// Completed epochs can retract established concurrency as the volume's
+		// conditions change. Active streams finish; future admission contracts.
+		g.limit = max(1, g.limit-1)
+		g.blockedAt = 0
+		g.probe = false
+	} else if g.probe && len(g.streams) >= g.limit {
+		if rate <= g.rate {
 			g.limit = max(1, g.limit-1)
 			g.blockedAt = max(g.rate, rate)
-			if g.controlSlow && rate > g.rate {
-				g.blockedAt = 0
-			}
 		}
 		g.probe = false
 	} else if !g.probe && len(g.streams) == g.limit && g.waiters > 0 && rate > g.blockedAt && !g.controlSlow {

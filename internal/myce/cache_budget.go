@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -19,6 +20,7 @@ type cacheBudgets struct {
 	hostRoot     string
 	probe        func(string) (DiskReading, error)
 	allocation   func([]string) (int64, error)
+	helpers      func(int) ([]int, error)
 	volumes      map[string]*cacheVolume
 	reservations map[*cacheReservation]struct{}
 	reuse        map[string]cacheReuse
@@ -46,11 +48,12 @@ type cacheReservation struct {
 	started time.Time
 	clock   Clock
 	host    *os.File
-	once    sync.Once
+	mu      sync.Mutex
+	closing bool
 }
 
 func newCacheBudgets() *cacheBudgets {
-	return &cacheBudgets{probe: workerDiskProbe, allocation: cacheFootprint, volumes: map[string]*cacheVolume{}, reservations: map[*cacheReservation]struct{}{}, reuse: map[string]cacheReuse{}, copies: map[string]*copyGovernor{}}
+	return &cacheBudgets{probe: workerDiskProbe, allocation: cacheFootprint, helpers: workerGroupMembers, volumes: map[string]*cacheVolume{}, reservations: map[*cacheReservation]struct{}{}, reuse: map[string]cacheReuse{}, copies: map[string]*copyGovernor{}}
 }
 func cacheBytes(n uint64) int64 { return int64(min(n, uint64(math.MaxInt64))) }
 func cacheFloatBytes(n float64) int64 {
@@ -168,10 +171,10 @@ func (b *cacheBudgets) limitReading(root string, used, explicit int64, now time.
 		debt := float64(-spare)
 		reclaim := float64(0)
 		if cold > 0 {
-			reclaim = min(debt, float64(cold)) * float64(d.used-d.hot) / float64(cold)
+			reclaim = min(debt, float64(d.used-d.hot))
 		}
 		if debt > float64(cold) && v.managed > cold {
-			reclaim += (debt - float64(cold)) * float64(d.hot) / float64(v.managed-cold)
+			reclaim += min(debt-float64(cold), float64(d.hot))
 		}
 		limit = max(0, used-int64(math.Ceil(min(float64(used), reclaim))))
 	}
@@ -181,9 +184,9 @@ func (b *cacheBudgets) limitReading(root string, used, explicit int64, now time.
 	return limit, nil
 }
 func (b *cacheBudgets) reserve(root string, bytes int64, clock Clock, paths ...string) (*cacheReservation, error) {
-	return b.reserveClaim(root, bytes, clock, false, paths...)
+	return b.reserveClaim(root, bytes, clock, "", "", paths...)
 }
-func (b *cacheBudgets) reserveClaim(root string, bytes int64, clock Clock, adopt bool, paths ...string) (*cacheReservation, error) {
+func (b *cacheBudgets) reserveClaim(root string, bytes int64, clock Clock, kind, custody string, paths ...string) (*cacheReservation, error) {
 	disk, err := b.probe(root)
 	if err != nil {
 		return nil, err
@@ -193,6 +196,30 @@ func (b *cacheBudgets) reserveClaim(root string, bytes int64, clock Clock, adopt
 		return nil, err
 	}
 	defer host.close()
+	if custody != "" {
+		if path := host.persistent[custody]; path != "" {
+			f, err := os.OpenFile(path, os.O_RDWR, 0600)
+			if err != nil {
+				return nil, err
+			}
+			// Durable upload custody does not depend on this descriptor's lock.
+			// A same-root store replacement may still hold the previous handle.
+			var claim hostCacheClaim
+			if err = readCacheRecord(f, &claim); err != nil {
+				f.Close()
+				return nil, err
+			}
+			if bytes < 0 || cacheWriteCharge(disk, bytes) > claim.Bytes {
+				f.Close()
+				return nil, errors.New("upload length exceeds its durable capacity promise")
+			}
+			r := &cacheReservation{ledger: b, volume: disk.Volume, bytes: claim.Bytes, clock: clock, host: f}
+			b.mu.Lock()
+			b.reservations[r] = struct{}{}
+			b.mu.Unlock()
+			return r, nil
+		}
+	}
 	// Allocation observations precede this physical read. Pending blocks remain
 	// charged across processes even before any payload pathname exists.
 	disk, err = b.probe(root)
@@ -201,15 +228,20 @@ func (b *cacheBudgets) reserveClaim(root string, bytes int64, clock Clock, adopt
 	}
 	host.sample(disk, clock.Now(), 0)
 	charge := cacheWriteCharge(disk, bytes)
+	prospective, err := json.Marshal(hostCacheClaim{Kind: kind, Custody: custody, Root: root, Bytes: charge, Paths: paths})
+	if err != nil {
+		return nil, err
+	}
+	host.recordBytes = max(host.recordBytes, int64(len(prospective)))
 	free := cacheBytes(disk.FreeBytes) - cacheSum(host.floor(disk), host.pending)
-	if bytes < 0 || !adopt && charge > free {
+	if bytes < 0 || charge > free {
 		return nil, errors.New("insufficient shared filesystem cache headroom")
 	}
 	initial, err := b.allocation(paths)
 	if err != nil {
 		return nil, err
 	}
-	f, err := host.claim(hostCacheClaim{Root: root, Bytes: charge, Paths: paths, Initial: initial, Observed: initial})
+	f, err := host.claim(hostCacheClaim{Kind: kind, Custody: custody, Root: root, Bytes: charge, Paths: paths, Initial: initial})
 	if err != nil {
 		return nil, err
 	}
@@ -227,27 +259,54 @@ func (r *cacheReservation) release() {
 	if r == nil {
 		return
 	}
-	r.once.Do(func() {
-		b := r.ledger
-		// Observe final owned allocations before dropping the kernel claim. A later
-		// sample cannot mistake a completed download for external disk consumption.
-		host, err := b.hostView(r.volume)
-		if err == nil {
-			// Clearing the record prevents future unrelated writes at a reused path
-			// from being credited to a dead operation.
-			err = writeCacheRecord(r.host, hostCacheClaim{})
-			if err == nil {
-				_ = host.save()
-			}
-			host.close()
-		}
-		if err == nil {
-			r.host.Close()
-		}
-		b.mu.Lock()
-		delete(b.reservations, r)
-		b.mu.Unlock()
-	})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.host == nil {
+		return
+	}
+	r.closing = true
+	b := r.ledger
+	// A failed scan/publication retains the descriptor and map ownership. Idle
+	// maintenance retries; neither sync.Once nor garbage collection owns release.
+	host, err := b.hostView(r.volume)
+	if err != nil {
+		return
+	}
+	defer host.close()
+	if err = host.save(); err != nil {
+		return
+	}
+	if err = writeCacheRecord(r.host, hostCacheClaim{}); err != nil {
+		return
+	}
+	delete(host.paths, r.host.Name())
+	if err = host.resetOwned(); err != nil {
+		return
+	}
+	if err = host.save(); err != nil {
+		return
+	}
+	r.host.Close()
+	r.host = nil
+	b.mu.Lock()
+	delete(b.reservations, r)
+	b.mu.Unlock()
+}
+
+// Queue shutdown relinquishes its handle, not a resumable upload's promise.
+func (r *cacheReservation) detach() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.host != nil {
+		r.host.Close()
+		r.host = nil
+	}
+	r.ledger.mu.Lock()
+	delete(r.ledger.reservations, r)
+	r.ledger.mu.Unlock()
 }
 
 // One controller per destination volume observes the actual source/network and

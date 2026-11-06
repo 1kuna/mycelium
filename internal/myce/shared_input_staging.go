@@ -85,8 +85,8 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 			b.admission.Add(-1)
 		}
 	})
-	// A random build key uses the existing orphan-partial cleanup protocol.
-	// Its lock protects only disposable scratch, never execution admission.
+	// A random build key identifies scratch this writer alone created. Unknown
+	// orphan partials are retained; a hash-shaped name is no deletion authority.
 	stageKey := identityHash(ID())
 	stage := filepath.Join(c.cache.Root, stageKey+".partial")
 	result, consumed := make(chan error), make(chan struct{})

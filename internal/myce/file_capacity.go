@@ -431,6 +431,8 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			if err := store.syncDir(filepath.Join(store.root, "uploads")); err != nil {
 				return err
 			}
+			// The lifecycle fence still excludes resumed PATCH/publication.
+			store.releaseUpload(hash)
 			return q.updateRequest(requestCtx, func() error {
 				if published.IsZero() {
 					q.forgetFileInputClaims(hash, cutoff)

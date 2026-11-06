@@ -973,7 +973,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		return err
 	}
 	releaseBuildCopy = releaseCopy
-	ctx = copyCtx
+	ctx = context.WithValue(copyCtx, cacheBuildClaimKey{}, held)
 	if e = c.pruneDownloads(ctx, partial, env, output, run); e != nil {
 		return e
 	}
@@ -1219,6 +1219,23 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 		}
 		argv = append([]string(nil), argv...)
 		argv[0] = tool
+	}
+	if held, ok := ctx.Value(cacheBuildClaimKey{}).(*cacheReservation); ok {
+		parent := ctx
+		ctx = withLaunchGate(parent, func() error {
+			if err := checkLaunchGate(parent); err != nil {
+				return err
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "build-state.json"))
+			if err != nil {
+				return err
+			}
+			var state workerState
+			if err := json.Unmarshal(data, &state); err != nil {
+				return err
+			}
+			return held.recordHelper(state.PID)
+		})
 	}
 	return runRecordedCommand(ctx, argv, dir, env, stdout, commandScope{StateDir: dir, Clock: c.Clock, Stderr: stderr}, "build-state.json")
 }

@@ -10,12 +10,21 @@ does not select a physical cache size. Rollback retains the older disk policy.
 
 Cooperating queue and worker processes under the same account share pending
 blocks through local kernel-locked records keyed by filesystem identity. A
-writer retains its claim until it joins; process death releases the kernel lock.
-There are no timed leases or payloads in this accounting area. Inactive scalar
+writer retains its claim until it joins. Queue exit closes handles while accepted
+upload commitments remain durable until publication or fenced reclamation.
+Builder sessions are recorded before their payload gate opens; a parent crash
+retains exploration until those sessions have no live members. There are no
+timed leases or payloads in this accounting area. Inactive scalar
 slots are reused. Other accounts and unrelated programs remain external writers.
 
-Owned allocation changes are measured from writer paths, independently of
-asynchronously refreshed cache inventories. External loss is the remaining
+Owned allocation changes use one inode union across writer paths, independently
+of asynchronously refreshed cache inventories. Pending commitments stay charged
+in full through completion, so overlapping paths cannot discharge another
+writer's promise. This deliberately withholds already-written committed bytes
+while a transfer remains active; completing the transfer restores that capacity.
+Stable kernel-lock inodes are separate from atomically published, synced scalar
+records with a second recovery copy. Release failures retain explicit retry
+ownership in idle maintenance. External loss is the remaining
 physical free-space decline. Its response horizon follows the latest completed sampling interval;
 admission waits and long transfers do not become control-response deadlines. Demands make cold capacity reclaimable across cache kinds;
 collection never creates authority to delete a protected or unknown entry.
@@ -36,6 +45,7 @@ Retired numerical assumptions:
   add one experimental stream. Each epoch spans the previous measured window
   and a contribution from every active stream. Keep the increment only when
   aggregate throughput improves without degrading measured metadata latency.
+  Later completed epochs also retract established concurrency on control slowdown.
   Worker cache kinds share the volume controller; distinct processes independently
   observe contention while sharing physical capacity claims.
 - The authored `max_added_file_bytes_24h` quota remains an explicit, disabled-by-
@@ -46,7 +56,8 @@ source manifest, unchanged verification evidence, exact payload verification and
 an independently verifiable source. File/model copies also retain unavailable
 originals. This strengthens the earlier #720 policy: an expired original no
 longer authorizes deleting its last verified copy. Malformed/legacy shared
-records remain protected. Pins, loaded models, readers, builders, queue
+records and unverified partials remain protected. Healthy admissions inspect
+capacity before hashing selected eviction candidates and their originals. Pins, loaded models, readers, builders, queue
 references and exact-attempt custody remain binding.
 
 Unknown native installers explore alone on their destination volume: their
@@ -65,10 +76,12 @@ Remaining bounds, basis and cost:
   archive inventories refine allocation demand before extraction; actual encoded
   publication/upload metadata is charged before writing it. This can withhold
   capacity on filesystems that pack, compress or clone small objects.
-- Four control allocations cover the capacity record, its owner claim,
-  publication metadata and parent directory. Per-copy metadata accounts for
-  ready/verification records and publication directories. They prevent known
-  metadata from consuming the payload's last reserved blocks.
+- Encoded scalar record sizes determine control allocations: two synced copies
+  and one atomic-publication temporary for each state/owner record, their stable
+  lock inodes and the parent directory. Per-copy metadata accounts for ready/
+  verification records and publication directories. They prevent known metadata
+  from consuming the payload's last reserved blocks, at the cost of withholding
+  physical allocations for recoverable accounting.
 - SQLite's 32 KiB WAL-index region, 32-byte WAL header, 24-byte frame header and
   database page geometry supply cold control evidence. Active WAL/SHM allocation
   and observed control growth replace that bootstrap when larger. They retain
@@ -86,8 +99,9 @@ Remaining bounds, basis and cost:
 Fake-clock/fake-volume regressions cover tiny and multi-terabyte disks, separate
 ledgers, interrupted owners, completed writes with stale inventories, shrinking
 free space and recovery, hot sets above retired defaults, cross-cache demand,
-small-file allocations, slow/scalable streams, metadata latency and admission
-waits. These fixtures do not qualify native disk responsiveness, mount behavior,
+small-file allocations, slow/scalable streams, established-control degradation,
+admission waits, durable upload/helper custody, overlapping inodes, interrupted
+record publication/release retries, and unknown partial preservation. These fixtures do not qualify native disk responsiveness, mount behavior,
 OS write isolation or power-loss durability. Fleet gate acceptance is recorded
 separately in the pull request; no deployment or real-host collection is part of
 this change.

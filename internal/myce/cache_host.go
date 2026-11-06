@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,11 +15,12 @@ import (
 )
 
 // Local, same-account processes coordinate pending blocks with kernel-owned
-// locks. These are not leases: death releases a claim, no elapsed time grants
-// ownership, and no other process's payload is removed. Inactive scalar slots
+// locks and durable custody records. No elapsed time grants ownership, and
+// no other process's payload is removed. Inactive scalar slots
 // are reused. The coordination directory contains no payload or credentials.
 type hostCacheState struct {
 	Controls                     map[string]int64
+	Owned                        int64
 	ControlNeeds                 map[string]int64
 	At                           time.Time
 	Free, Written, SampleWritten int64
@@ -29,24 +29,29 @@ type hostCacheState struct {
 	Control                      int64
 }
 type hostCacheClaim struct {
-	ControlGrowth     int64
-	ControlPage       int64
-	ControlUnit       int64
-	Kind              string
-	Root              string
-	Bytes             int64
-	Paths             []string
-	Initial, Observed int64
+	Custody     string
+	Helpers     []int
+	ControlPage int64
+	ControlUnit int64
+	Kind        string
+	Root        string
+	Bytes       int64
+	Paths       []string
+	Initial     int64
 }
 type hostCacheView struct {
+	ledger          *cacheBudgets
+	paths           map[string][]string
 	valid           bool
 	state           hostCacheState
 	pending, demand int64
 	demandRoots     map[string]int64
 	pendingRoots    map[string]int64
+	persistent      map[string]string
 	file            *os.File
 	slot            *os.File
 	directory       string
+	recordBytes     int64
 }
 
 func (b *cacheBudgets) hostDirectory(volume string) (string, error) {
@@ -97,28 +102,38 @@ func cacheFootprint(paths []string) (int64, error) {
 	}
 	return total, nil
 }
+
+// Locks live on stable inodes; payload records use fsynced atomic replacement.
+// Two independently published copies recover a damaged publication without
+// confusing JSON truncation with an empty/released obligation.
 func writeCacheRecord(f *os.File, v any) error {
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
+	dir, name := filepath.Dir(f.Name()), filepath.Base(f.Name())
+	if err := saveWorkerJSON(dir, name+".previous", v); err != nil {
 		return err
 	}
-	data, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	if _, err = f.Write(data); err != nil {
-		return err
-	}
-	return f.Truncate(int64(len(data)))
+	return saveWorkerJSON(dir, name+".json", v)
 }
 func readCacheRecord(f *os.File, v any) error {
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return err
+	var failures []error
+	missing := 0
+	for _, suffix := range []string{".json", ".previous"} {
+		data, err := os.ReadFile(f.Name() + suffix)
+		if os.IsNotExist(err) {
+			missing++
+			continue
+		}
+		if err == nil {
+			err = json.Unmarshal(data, v)
+		}
+		if err == nil {
+			return nil
+		}
+		failures = append(failures, err)
 	}
-	err := json.NewDecoder(f).Decode(v)
-	if errors.Is(err, io.EOF) {
-		return nil
+	if missing == 2 {
+		return nil // Newly created lock, never a partially written payload record.
 	}
-	return err
+	return errors.Join(failures...)
 }
 
 // The filesystem mutex protects only admission metadata, outside q.mu. Probe
@@ -140,7 +155,7 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 		f.Close()
 		return nil, err
 	}
-	v := &hostCacheView{file: f, directory: dir, demandRoots: map[string]int64{}, pendingRoots: map[string]int64{}}
+	v := &hostCacheView{ledger: b, paths: map[string][]string{}, file: f, directory: dir, demandRoots: map[string]int64{}, pendingRoots: map[string]int64{}, persistent: map[string]string{}}
 	fail := func(err error) (*hostCacheView, error) { v.close(); return nil, err }
 	if err = readCacheRecord(f, &v.state); err != nil {
 		return fail(err)
@@ -150,6 +165,7 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 	if err != nil {
 		return fail(err)
 	}
+	var allPaths []string
 	controls := map[string]int64{}
 	needs := map[string]int64{}
 	for _, entry := range entries {
@@ -168,50 +184,65 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 		}
 		var c hostCacheClaim
 		if err = readCacheRecord(claim, &c); err == nil {
-			var used int64
-			used, err = b.allocation(c.Paths)
-			if err == nil {
-				// Signed net allocation includes interrupted writes and owned scratch
-				// removal, independently of asynchronously refreshed cache inventories.
+			// Upload custody is durable. Builders may outlive their parent in a
+			// separate session; only an empty exact recorded session proves exit.
+			custody := c.Kind == "upload"
+			if !active && c.Kind == "explore" {
+				for _, group := range c.Helpers {
+					members, inspectErr := b.helpers(group)
+					if inspectErr != nil || len(members) > 0 {
+						custody = true
+						break
+					}
+				}
+			}
+			live := active || custody
+			if c.Kind == "upload" {
+				v.persistent[c.Custody] = claim.Name()
+			}
+			encoded, encodeErr := json.Marshal(c)
+			if encodeErr != nil {
+				claim.Close()
+				return fail(encodeErr)
+			}
+			v.recordBytes = max(v.recordBytes, int64(len(encoded)))
+			allPaths = append(allPaths, c.Paths...)
+			if live {
+				v.paths[claim.Name()] = c.Paths
 				if c.Kind == "control" {
-					if active {
-						c.ControlGrowth = max(c.ControlGrowth, used-c.Observed)
+					used, allocationErr := b.allocation(c.Paths)
+					if allocationErr != nil {
+						err = allocationErr
+					} else {
+						previous, seen := v.state.Controls[c.Root]
+						if !seen {
+							previous = used
+						}
 						controls[c.Root] = used
 						wal, allocationErr := b.allocation(c.Paths[1:])
 						if allocationErr != nil {
 							err = allocationErr
 						} else {
-							// SQLite's WAL-index region is 32 KiB; a WAL starts with a
-							// 32-byte header and a 24-byte frame header plus one DB page.
 							bootstrap := cacheSum(cacheRound(32<<10, c.ControlUnit), cacheRound(cacheSum(c.ControlPage, 32+24), c.ControlUnit))
-							needs[c.Root] = max(needs[c.Root], wal, c.ControlGrowth, bootstrap)
+							needs[c.Root] = max(needs[c.Root], wal, max(0, used-previous), bootstrap)
 						}
 					}
+				} else if c.Kind == "demand" {
+					v.demand = cacheSum(v.demand, c.Bytes)
+					v.demandRoots[c.Root] = cacheSum(v.demandRoots[c.Root], c.Bytes)
 				} else {
-					v.state.Written += used - c.Observed
+					// Withhold the whole measured commitment through completion.
+					// Allocation at a shared/reused pathname cannot discharge a
+					// different writer's still-pending bytes.
+					v.pending = cacheSum(v.pending, c.Bytes)
+					v.pendingRoots[c.Root] = cacheSum(v.pendingRoots[c.Root], c.Bytes)
 				}
-				c.Observed = used
-				if active {
-					if c.Kind == "control" {
-						// Controls reserve their next measured rewrite, not payload blocks.
-					} else if c.Kind == "demand" {
-						v.demand = cacheSum(v.demand, c.Bytes)
-						v.demandRoots[c.Root] = cacheSum(v.demandRoots[c.Root], c.Bytes)
-					} else {
-						remaining := max(0, c.Bytes-max(0, used-c.Initial))
-						v.pending = cacheSum(v.pending, remaining)
-						v.pendingRoots[c.Root] = cacheSum(v.pendingRoots[c.Root], remaining)
-					}
-				}
-				if !active {
-					c = hostCacheClaim{}
-				}
-				if err == nil {
-					err = writeCacheRecord(claim, c)
-				}
+			} else {
+				c = hostCacheClaim{}
+				err = writeCacheRecord(claim, c)
 			}
 		}
-		if !active && v.slot == nil {
+		if !active && c.Kind == "" && v.slot == nil {
 			v.slot = claim
 		} else {
 			claim.Close()
@@ -220,10 +251,16 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 			return fail(err)
 		}
 	}
-	for root, current := range controls {
-		if previous, ok := v.state.Controls[root]; ok {
-			v.state.Written += current - previous
-		}
+	// A single inode-union census prevents two claims from crediting the same
+	// allocation twice. Removing a record changes the ownership baseline, not
+	// physical writes; completed data can remain at its published destination.
+	owned, err := b.allocation(allPaths)
+	if err != nil {
+		return fail(err)
+	}
+	v.state.Written += owned - v.state.Owned
+	if err := v.resetOwned(); err != nil {
+		return fail(err)
 	}
 	v.state.Controls, v.state.ControlNeeds = controls, needs
 	v.state.Control = 0
@@ -231,6 +268,17 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 		v.state.Control = cacheSum(v.state.Control, n)
 	}
 	return v, nil
+}
+func (v *hostCacheView) resetOwned() error {
+	var paths []string
+	for _, owned := range v.paths {
+		paths = append(paths, owned...)
+	}
+	used, err := v.ledger.allocation(paths)
+	if err == nil {
+		v.state.Owned = used
+	}
+	return err
 }
 func (v *hostCacheView) close() {
 	if v.valid {
@@ -250,12 +298,10 @@ func (v *hostCacheView) claim(c hostCacheClaim) (*os.File, error) {
 	if f != nil {
 		v.slot = nil
 	} else {
-		entries, err := os.ReadDir(v.directory)
-		if err != nil {
-			return nil, err
-		}
-		// At most one slot per simultaneously live claim, plus the state file.
-		f, err = os.OpenFile(filepath.Join(v.directory, strconv.Itoa(len(entries))+".claim"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+		var err error
+		// At most one scalar slot per live writer or durable obligation. Reuse
+		// inactive slots; random names avoid collisions with record sidecars.
+		f, err = os.OpenFile(filepath.Join(v.directory, ID()+".claim"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 		if err != nil {
 			return nil, err
 		}
@@ -264,7 +310,15 @@ func (v *hostCacheView) claim(c hostCacheClaim) (*os.File, error) {
 			return nil, err
 		}
 	}
-	err := writeCacheRecord(f, c)
+	encoded, err := json.Marshal(c)
+	if err == nil {
+		v.recordBytes = max(v.recordBytes, int64(len(encoded)))
+		err = writeCacheRecord(f, c)
+	}
+	if err == nil {
+		v.paths[f.Name()] = c.Paths
+		err = v.resetOwned()
+	}
 	if err != nil {
 		f.Close()
 		return nil, err
@@ -288,11 +342,19 @@ func cacheAllocationUnit(d DiskReading) int64 {
 	return max(512, cacheBytes(d.AllocationBytes))
 }
 func (v *hostCacheView) floor(d DiskReading) int64 {
-	// Four separate control objects may need a fresh allocation: a capacity
-	// record, its owner claim, publication metadata, and its parent directory.
-	// Queue control also reserves a rewrite of its observed SQLite/WAL/SHM set.
-	return cacheSum(cacheSum(4*cacheAllocationUnit(d), v.state.Control), cacheFloatBytes(v.state.Drain*v.state.Horizon.Seconds()))
+	// Each of the state and owner records needs two synced copies plus an
+	// atomic-publication temporary. Two stable lock inodes and the parent also
+	// need allocations. Encoded sizes scale this control requirement with the
+	// actual scalar/path working set instead of assuming one memory page.
+	state, _ := json.Marshal(v.state)
+	claim, _ := json.Marshal(hostCacheClaim{})
+	unit := cacheAllocationUnit(d)
+	stateBytes := cacheRound(int64(len(state)), unit)
+	claimBytes := cacheRound(max(int64(len(claim)), v.recordBytes), unit)
+	metadata := cacheSum(3*unit, cacheSum(cacheSum(stateBytes, cacheSum(stateBytes, stateBytes)), cacheSum(claimBytes, cacheSum(claimBytes, claimBytes))))
+	return cacheSum(cacheSum(metadata, v.state.Control), cacheFloatBytes(v.state.Drain*v.state.Horizon.Seconds()))
 }
+
 func cacheWriteCharge(d DiskReading, bytes int64) int64 {
 	unit := cacheAllocationUnit(d)
 	if bytes < 0 {
@@ -365,7 +427,7 @@ func (b *cacheBudgets) explore(root string, clock Clock, paths ...string) (*cach
 	if err != nil {
 		return nil, err
 	}
-	f, err := host.claim(hostCacheClaim{Kind: "explore", Root: root, Bytes: bytes, Paths: paths, Initial: initial, Observed: initial})
+	f, err := host.claim(hostCacheClaim{Kind: "explore", Root: root, Bytes: bytes, Paths: paths, Initial: initial})
 	if err != nil {
 		return nil, err
 	}
@@ -379,6 +441,33 @@ func (b *cacheBudgets) explore(root string, clock Clock, paths ...string) (*cach
 	b.mu.Unlock()
 	return r, nil
 }
+
+// The existing command supervisor calls this gate after persisting its process
+// session and before releasing the payload. A parent crash can never leave an
+// executing builder without a durable session receipt in the capacity ledger.
+func (r *cacheReservation) recordHelper(group int) error {
+	if group <= 0 {
+		return errors.New("builder storage custody lacks a process session")
+	}
+	host, err := r.ledger.hostView(r.volume)
+	if err != nil {
+		return err
+	}
+	defer host.close()
+	var claim hostCacheClaim
+	if err = readCacheRecord(r.host, &claim); err != nil {
+		return err
+	}
+	for _, previous := range claim.Helpers {
+		if previous == group {
+			return nil
+		}
+	}
+	claim.Helpers = append(claim.Helpers, group)
+	return writeCacheRecord(r.host, claim)
+}
+
+type cacheBuildClaimKey struct{}
 
 func (v *hostCacheView) ownPending(root string) int64 {
 	n := int64(0)
@@ -469,8 +558,11 @@ func (r *cacheReservation) addPath(path string) error {
 	}
 	claim.Paths = append(claim.Paths, path)
 	claim.Initial = cacheSum(claim.Initial, size)
-	claim.Observed = cacheSum(claim.Observed, size)
-	return writeCacheRecord(r.host, claim)
+	if err := writeCacheRecord(r.host, claim); err != nil {
+		return err
+	}
+	host.paths[r.host.Name()] = claim.Paths
+	return host.resetOwned()
 }
 func (r *cacheReservation) ensureMetadata(root string, bytes int64) error {
 	host, err := r.ledger.hostView(r.volume)
@@ -512,7 +604,7 @@ func (b *cacheBudgets) trackControl(root string, clock Clock, paths ...string) (
 	if err != nil {
 		return nil, err
 	}
-	f, err := host.claim(hostCacheClaim{Kind: "control", Root: root, Paths: paths, Initial: initial, Observed: initial, ControlPage: page, ControlUnit: cacheAllocationUnit(disk)})
+	f, err := host.claim(hostCacheClaim{Kind: "control", Root: root, Paths: paths, Initial: initial, ControlPage: page, ControlUnit: cacheAllocationUnit(disk)})
 	if err != nil {
 		return nil, err
 	}

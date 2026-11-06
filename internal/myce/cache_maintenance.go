@@ -24,7 +24,19 @@ func (b *cacheBudgets) maintain(ctx context.Context) {
 	for _, f := range b.maintenance {
 		tasks = append(tasks, f)
 	}
+	releases := make([]*cacheReservation, 0, len(b.reservations))
+	for r := range b.reservations {
+		releases = append(releases, r)
+	}
 	b.mu.Unlock()
+	for _, r := range releases {
+		r.mu.Lock()
+		closing := r.closing
+		r.mu.Unlock()
+		if closing {
+			r.release()
+		}
+	}
 	for _, f := range tasks {
 		if ctx.Err() != nil {
 			return

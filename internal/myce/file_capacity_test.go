@@ -80,6 +80,12 @@ func TestFileCapacityAbandonedUploadSweep(t *testing.T) {
 			}
 		}
 	}
+	q.files.hostMu.Lock()
+	_, pending := q.files.hostPending[abandoned.SHA256]
+	q.files.hostMu.Unlock()
+	if pending {
+		t.Error("reclaimed upload retained its host reservation")
+	}
 	if _, marked := q.s.JobInputUploads[abandoned.SHA256]; marked {
 		t.Error("reclaimed marker retained")
 	}

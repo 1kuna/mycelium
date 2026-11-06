@@ -380,7 +380,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			return "", err
 		}
 		used += entrySize
-		if k == key || c.active[k] != nil || c.Protected != nil && c.Protected(k) {
+		if strings.HasSuffix(ent.Name(), ".partial") || k == key || c.active[k] != nil || c.Protected != nil && c.Protected(k) {
 			continue
 		}
 		if background && c.Usage != nil && c.Usage(k) > score {

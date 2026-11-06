@@ -266,9 +266,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		if e != nil {
 			return e
 		}
-		if e = removeSharedEntry(root + ".partial"); e == nil {
-			e = c.admit(ctx, key, need)
-		}
+		e = c.admit(ctx, key, need)
 		reservation := strings.TrimSuffix(stage, ".partial") + ".reservation"
 		if e == nil {
 			e = os.WriteFile(reservation, []byte(strconv.FormatInt(need, 10)), 0600)
@@ -727,29 +725,16 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 			reserved += max(0, n-written)
 			continue
 		}
+		// A hash-shaped partial has no durable proof of scratch ownership.
+		// Only stageInput removes the random scratch directory it created.
 		if strings.HasSuffix(d.Name(), ".partial") {
-			k := strings.TrimSuffix(d.Name(), ".partial")
-			if (FileRef{SHA256: k}).validate() != nil {
-				continue
-			}
-			lock, e := c.cache.tryLock(k + ".build")
-			if e != nil {
-				return e
-			}
-			if lock != nil {
-				e = removeSharedEntry(filepath.Join(c.cache.Root, d.Name()))
-				unlockEnvironment(lock)
-				if e != nil {
-					return e
-				}
-			}
 			continue
 		}
 		if !d.IsDir() || (FileRef{SHA256: d.Name()}).validate() != nil || d.Name() == key {
 			continue
 		}
 		info, e := os.Stat(filepath.Join(c.cache.Root, d.Name(), "ready.json"))
-		if e != nil || !c.rebuildable(ctx, d.Name()) {
+		if e != nil {
 			continue
 		}
 		victims = append(victims, victim{d.Name(), info.ModTime().UnixNano()})

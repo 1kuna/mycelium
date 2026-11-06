@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -170,4 +171,137 @@ func TestCacheHostControlGrowthAndRecovery(t *testing.T) {
 	if err != nil || recovered <= after {
 		t.Fatal("inactive control writer retained a rewrite reserve", recovered, after, err)
 	}
+}
+
+func TestCacheHostBuilderCustodyOutlivesParent(t *testing.T) {
+	clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	b, _ := syntheticCacheBudget(t, clock, 10<<30, 5<<30)
+	live := true
+	b.helpers = func(group int) ([]int, error) {
+		if group != 123 {
+			t.Fatal("lost exact helper session", group)
+		}
+		if live {
+			return []int{124}, nil
+		}
+		return nil, nil
+	}
+	held, err := b.explore("environments", clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := held.recordHelper(123); err != nil {
+		t.Fatal(err)
+	}
+	held.host.Close() // Parent died; its separately launched helper is still live.
+	if _, err := b.reserve("worker", 1, clock); err == nil {
+		t.Fatal("parent death released a live helper's storage")
+	}
+	live = false
+	next, err := b.reserve("worker", 1, clock)
+	if err != nil {
+		t.Fatal("confirmed helper exit did not recover storage", err)
+	}
+	next.release()
+}
+
+func TestCacheHostOverlappingAllocationsCountOnce(t *testing.T) {
+	clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	b, _ := syntheticCacheBudget(t, clock, 10<<30, 5<<30)
+	root := t.TempDir()
+	a, z := filepath.Join(root, "a"), filepath.Join(root, "z")
+	first, err := b.reserve("first", 1<<20, clock, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.release()
+	second, err := b.reserve("second", 1<<20, clock, z)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.release()
+	if err := os.WriteFile(a, make([]byte, 4096), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(a, z); err != nil {
+		t.Fatal(err)
+	}
+	used, err := cacheFootprint([]string{a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := b.hostView("local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	written, pending := view.state.Written, view.pending
+	view.close()
+	if written != used || pending != first.bytes+second.bytes {
+		t.Fatalf("shared inode credited twice or discharged pending writer: written=%d want=%d pending=%d", written, used, pending)
+	}
+}
+
+func TestCacheHostRecoversRecordPublicationAndReleaseFailure(t *testing.T) {
+	clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	b, _ := syntheticCacheBudget(t, clock, 200<<30, 100<<30)
+	held, err := b.reserve("worker", 80<<30, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A killed atomic publisher can leave a truncated temporary file. A damaged
+	// primary also has an independently synced, identical recovery publication.
+	for _, path := range []string{held.host.Name() + ".json.tmp", held.host.Name() + ".json"} {
+		if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := b.reserve("other", 80<<30, clock); err == nil {
+		t.Fatal("recovery dropped an active promise")
+	}
+	allocation := b.allocation
+	b.allocation = func([]string) (int64, error) { return 0, errors.New("scan unavailable") }
+	held.release()
+	if held.host == nil || !held.closing || len(b.reservations) != 1 {
+		t.Fatal("failed release lost retry ownership")
+	}
+	b.allocation = allocation
+	b.maintain(context.Background())
+	if held.host != nil || len(b.reservations) != 0 {
+		t.Fatal("maintenance did not retry failed release")
+	}
+	next, err := b.reserve("other", 80<<30, clock)
+	if err != nil {
+		t.Fatal("record recovery permanently disabled admission", err)
+	}
+	next.release()
+}
+
+func TestCacheHostDemandReclaimsMultipleColdDomains(t *testing.T) {
+	clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	b, disk := syntheticCacheBudget(t, clock, 10<<30, 512<<20)
+	for _, root := range []string{"a", "b"} {
+		cold := int64(2 << 30)
+		if _, err := b.limit(root, cold, 0, clock.Now()); err != nil {
+			t.Fatal(err)
+		}
+		b.register(root, func(context.Context) {
+			limit, err := b.limit(root, cold, 0, clock.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			freed := max(0, cold-limit)
+			cold -= freed
+			disk.FreeBytes += uint64(freed)
+		})
+	}
+	release, err := b.borrow(context.Background(), "files", 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	held, err := b.reserve("files", 1<<30, clock)
+	if err != nil {
+		t.Fatal("one-pass fractional reclamation left satisfiable demand short", err)
+	}
+	held.release()
 }

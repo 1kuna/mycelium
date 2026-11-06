@@ -279,17 +279,8 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 		return err
 	}
 	s.handler = http.StripPrefix("/api/files/uploads/", h)
-	// Reestablish already accepted, unwritten tus commitments after restart.
-	payloads, inventoryErr := s.inventory(context.Background())
-	if inventoryErr != nil {
-		return inventoryErr
-	}
-	for hash, p := range payloads {
-		if p.length > p.size {
-			if err := s.reserveUpload(hash, int64(p.length-p.size), true); err != nil {
-				return err
-			}
-		}
+	if err := s.restoreUploadClaims(); err != nil {
+		return err
 	}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
@@ -355,6 +346,9 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 		return err
 	}
 	if err = s.syncDir(filepath.Join(s.root, "blobs")); err != nil {
+		return err
+	}
+	if err = s.trackUploadPublication(ref.SHA256, source, s.blob(ref)); err != nil {
 		return err
 	}
 	// Keep only the authoritative link after publication. A later tus creation
@@ -515,7 +509,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		return
 	}
-	if err := s.reserveUpload(hash, length, false); err != nil {
+	if err := s.reserveUpload(hash, length); err != nil {
 		respond(w, nil, &HTTPError{Status: 507, Code: "file_store_capacity", Message: "shared filesystem headroom unavailable"})
 		return
 	}
