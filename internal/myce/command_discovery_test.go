@@ -310,6 +310,14 @@ func TestCommandDiscoveryRealCPUResult(t *testing.T) {
 	defer dev.Close()
 	_, input := retentionJobInput(t, dev.Client(), "portable source fixture\n")
 	s.Files = map[string]FileRef{"source.txt": input}
+	// startDev returns before the worker's first inventory report. Preserve
+	// require_target by waiting for observable admission, not an arbitrary delay.
+	await(t, func() bool {
+		report, err := dev.Queue.Resolve(ResolveRequest{Spec: s})
+		return err == nil && slices.ContainsFunc(report.Targets, func(target ResolveTarget) bool {
+			return target.Eligible && target.Environment != nil && target.Environment.State == "ready"
+		})
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	j, err := dev.Client().Submit(ctx, s)
