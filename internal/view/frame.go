@@ -243,7 +243,7 @@ func (p *projector) project(doc statusDoc, pollGap time.Duration) Frame {
 		}
 		out := Job{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, State: j.State, Machine: j.Machine,
 			Production: j.Spec.Class == "production" || j.Spec.Priority == "production" || j.PriorityPolicy.Tier == "production",
-			Tier: j.PriorityPolicy.Tier, TierIndex: j.PriorityPolicy.Index, QueueOrder: j.QueueOrder,
+			Tier:       j.PriorityPolicy.Tier, TierIndex: j.PriorityPolicy.Index, QueueOrder: j.QueueOrder,
 			Attempt: j.Attempt, Losses: j.Losses, PreemptionCount: j.PreemptionCount, Resumable: j.Spec.Resumable,
 			Progress: progress(j), WaitingSince: j.WaitingSince, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt,
 			Needs: Needs{Platform: platform(j.Spec.Needs.Platform), MemoryGB: j.Spec.Needs.MemoryGB, CPUCores: j.Spec.Needs.CPUCores, HostMemoryGB: j.Spec.Needs.HostMemoryGB}}
