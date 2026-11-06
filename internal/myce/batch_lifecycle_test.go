@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -248,22 +250,53 @@ func TestBatchLifecycleColdRecoveryAcceptsForce(t *testing.T) {
 	defer func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() }()
 	nativeFile(t, dir, "ready")
 	clock := &manualWorkerClock{now: time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)}
-	deadline := clock.Now().Add(unmeasuredBatchGrace)
-	j := recoveryJob(t, []string{"true"})
-	j.Spec.Resumable = false // test cleanup rather than checkpoint transport.
-	j.Session = "session"
+	q, _ := fixture(t)
+	q.clock = clock
+	w := recoveryWorker(t)
+	w.Clock = clock
+	w.control = &processControl{clock: clock}
+	spec := spec("experiment")
+	spec.Resumable = false // Test cleanup rather than checkpoint transport.
+	queued := submit(t, q, spec)
+	j := *check(t, q, w.Machine, nil).Job
+	if j.ID != queued.ID {
+		t.Fatal("missing assigned recovery attempt")
+	}
+	if err := q.Started(result(&j, false)); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.SetPreemptionGrace(time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error { q.stop(q.touchJob(j.ID), "test checkpoint drain"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	deadline := clock.Now().Add(time.Minute)
 	birth, err := processBirth(cmd.Process.Pid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := workerState{Identity: identity, PID: cmd.Process.Pid, Session: j.Session, Job: &j, StopAt: &deadline, Groups: map[int]map[int]string{cmd.Process.Pid: {cmd.Process.Pid: birth}}}
+	st := workerState{Identity: identity, PID: cmd.Process.Pid, Session: j.Session, Job: &j, StopAt: &deadline, Log: "drain.log", Groups: map[int]map[int]string{cmd.Process.Pid: {cmd.Process.Pid: birth}}}
+	if err := os.WriteFile(filepath.Join(dir, st.Log), []byte("checkpoint drain still active\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := saveWorkerJSON(dir, "attempt-"+identity+".json", st); err != nil {
 		t.Fatal(err)
 	}
 	s := &workerStore{dir: dir, state: st}
-	w := recoveryWorker(t)
-	w.Clock = clock
-	w.control = &processControl{clock: clock}
+	completions := make(chan struct{}, 1)
+	handler := API{Queue: q, Token: "test"}.Handler()
+	w.Client = Client{URL: "http://fixture", Token: "test", HTTP: &http.Client{Transport: fetchTransport(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/api/workers/complete" {
+			select {
+			case completions <- struct{}{}:
+			default:
+			}
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder.Result(), nil
+	})}}
 	recovered := make(chan error, 1)
 	go func() { _, err := w.recoverAttempt(s); recovered <- err }()
 	select {
@@ -281,7 +314,26 @@ func TestBatchLifecycleColdRecoveryAcceptsForce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go a.run(ctx)
 	defer func() { cancel(); <-a.done }()
-	a.update(w, AttemptDirective{Stop: true, Kill: true}, true, false)
+	a.update(w, AttemptDirective{Stop: true, GraceSeconds: 60}, true, false)
+	await(t, func() bool { logs, _ := q.Logs(j.ID, 0); return len(logs) > 0 })
+	select {
+	case <-completions:
+		t.Fatal("cooperative recovery published a result before cleanup")
+	case <-time.After(50 * time.Millisecond): // Many actor turns at its 1ms interval.
+	}
+	if got := job(t, q, j.ID); got.State != "stopping" || got.StopAt == nil || !got.StopAt.Equal(deadline) {
+		t.Fatal("recovery abandoned the accepted drain", got.State, got.StopAt)
+	}
+	directive := check(t, q, w.Machine, &j)
+	if !directive.Stop || directive.Kill {
+		t.Fatal("cooperative recovery became stale", directive)
+	}
+	// An exact force still overrides the recovered cooperative deadline.
+	if err := q.update(func() error { now := clock.Now(); q.touchJob(j.ID).StopAt = &now; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	directive = check(t, q, w.Machine, &j)
+	a.update(w, AttemptDirective{Stop: directive.Stop, Kill: directive.Kill, GraceSeconds: directive.GraceSeconds}, true, false)
 	await(t, func() bool {
 		_, _, finished, err := a.snapshot()
 		a.mu.Lock()

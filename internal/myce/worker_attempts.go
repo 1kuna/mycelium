@@ -170,6 +170,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		// A failed inventory/cleanup keeps custody, but must not freeze the
 		// finished actor until a worker restart. Reuse recovery's exact process
 		// identity checks; only confirmed cleanup can clear pending release.
+		cooperativeCleanup := false
 		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 			var fs memoryFS = osMemoryFS{}
 			if w.memoryCeilings != nil {
@@ -212,6 +213,8 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					finish(err)
 					return
 				}
+			} else {
+				cooperativeCleanup = errors.Is(err, errRecoveryStopPending)
 			}
 		}
 		if connected {
@@ -352,7 +355,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if err == nil && (a.job.storedFileResults() || s.state.Result != nil && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
-				if s.state.Result != nil {
+				if s.state.Result != nil && !cooperativeCleanup {
 					if !s.state.Result.ReleasePending {
 						released := *s.state.Result
 						released.ReleaseOnly = true
@@ -399,7 +402,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 				}
 			}
-			if err == nil && s.state.Result != nil {
+			// A recovered cooperative drain is still active custody. Publishing
+			// its interruption now would requeue it and turn the next heartbeat
+			// into a stale-attempt kill before its accepted grace has elapsed.
+			// Logs and checkpoint progress above remain publishable meanwhile.
+			if err == nil && s.state.Result != nil && !cooperativeCleanup {
 				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 			}
 			if s.state.Result != nil && (err == nil || stale(err)) && !s.state.Result.ReleasePending {
