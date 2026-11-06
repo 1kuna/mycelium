@@ -83,6 +83,27 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	}
 	return r, a.diagnostics, a.finished, a.err
 }
+
+func ageAttemptReports(reports []AttemptReport, actors map[attemptKey]*attemptSupervisor, clock Clock) {
+	for i := range reports {
+		// Inventory probes can outlast the original report while the actor
+		// keeps sampling. Read its latest exact-attempt memory snapshot, with
+		// no process or sensor I/O, before applying the original sample age.
+		memory := (*CurrentHostMemory)(nil)
+		key := attemptKey{reports[i].ID, reports[i].Attempt, reports[i].Session}
+		if a := actors[key]; a != nil && reports[i].Started {
+			a.mu.Lock()
+			latest := a.report
+			if latest.Started && latest.ID == key.job && latest.Attempt == key.attempt && latest.Session == key.session {
+				memory = latest.CurrentHostMemory
+			}
+			a.mu.Unlock()
+		}
+		reports[i].Liveness = reports[i].Liveness.aged(clock.Now())
+		reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(clock.Now())
+		reports[i].CurrentHostMemory = memory.aged(clock.Now())
+	}
+}
 func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
 	// Scarce-host yield is provisional until its delivery authorization. It
 	// may be withdrawn while the exact process continues running normally.
@@ -1181,11 +1202,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.mu.Unlock()
 
 			// Age the actor snapshot at send time, including any intervening probes.
-			for i := range reports {
-				reports[i].Liveness = reports[i].Liveness.aged(w.Clock.Now())
-				reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
-				reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
-			}
+			ageAttemptReports(reports, actors, w.Clock)
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
 			rt.mu.Lock()
 			// Replaced, never mutated: model loads share this exact-attempt
