@@ -401,3 +401,45 @@ func TestInstallFileCacheAutomaticSavedConfigAllowsDowngrade(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallAutomaticUploadSpoolCompatibility(t *testing.T) {
+	for _, role := range []string{"queue", "worker"} {
+		c, err := PlanInstall(role, "/fixture/home", "", "/fixture/nas", "http://queue.invalid", "fixture", Detection{OS: "linux", Arch: "amd64", Platform: "fake", MemoryMode: "fixed", MemoryGB: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = c.ValidateInstall(); err != nil {
+			t.Fatal("automatic default rejected by installer", err)
+		}
+		data, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var legacy struct {
+			UploadSpoolBytes int64 `json:"upload_spool_bytes"`
+		}
+		if err = json.Unmarshal(data, &legacy); err != nil || installBytes(legacy.UploadSpoolBytes) != nil {
+			t.Fatal("automatic default cannot pass legacy positive-byte schema", err)
+		}
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err = os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		saved, err := ReadServiceConfig(path)
+		if err != nil || saved.UploadSpoolBytes != c.UploadSpoolBytes {
+			t.Fatal("automatic mode did not survive saved config", err)
+		}
+		for _, value := range []int64{-1, 12345} {
+			values := ServiceConfig{}
+			f := flag.NewFlagSet("install", flag.ContinueOnError)
+			RegisterInstallFlags(f, &values)
+			if err = f.Parse([]string{fmt.Sprintf("--upload-spool-bytes=%d", value)}); err != nil {
+				t.Fatal(err)
+			}
+			configured, err := OverlayInstallFlags(f, saved, values)
+			if err != nil || configured.UploadSpoolBytes != value {
+				t.Fatal("explicit spool mode rejected or changed", value, err)
+			}
+		}
+	}
+}

@@ -13,9 +13,12 @@ import (
 	"syscall"
 )
 
-// DefaultUploadSpoolBytes selects automatic physical-disk admission. Positive
-// authored budgets remain explicit user intent; -1 is a mode, not a byte cap.
-const DefaultUploadSpoolBytes int64 = -1
+// DefaultUploadSpoolBytes leaves physical-disk admission as the binding limit.
+// Saved configs must remain positive for older installers. The byte counter's
+// representable maximum satisfies that schema without imposing a workload-sized
+// ceiling; measured free disk and unwritten commitments always bind first.
+// New peers also accept -1 as an explicit automatic-mode alias.
+const DefaultUploadSpoolBytes int64 = math.MaxInt64
 
 var errUploadSpoolFull = errors.New("upload spool capacity exhausted")
 

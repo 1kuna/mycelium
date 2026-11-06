@@ -19,7 +19,7 @@ still determine when a full refresh is necessary.
 | Extension source: 1 MiB | Current host memory shared among source, clone, YAML/JSON, base64 and fingerprint representations. Folder reads enforce the remaining allowance using actual retained bytes even if a file grows after stat. | Source registration can refuse under memory pressure; large assets should use immutable file references. |
 | Resolve NAS: 256 pending, 8 checks/heartbeat, 1 minute | Pending metadata uses measured queue headroom; freshness expires at the existing worker session freshness fence. One check per heartbeat matches the worker's single outstanding syscall slot. | Cold/stale evidence remains unknown. This is existence advice, never byte verification or launch authority. |
 | Submission input verification: 30 seconds | Caller cancellation/deadline, retaining the existing single I/O slot until an uninterruptible syscall returns. | A caller without a deadline may wait for storage recovery; no additional I/O goroutines accumulate behind a stuck syscall. |
-| Generic model body: 8 GiB; shared spool: 16 GiB | Local free disk minus unwritten commitments and a measured current control-file working set for WAL/DB growth. Written bytes already reduce free disk and are not charged twice. Positive operator budgets remain explicit intent. `--upload-spool-bytes=-1` selects automatic capacity. | Competing disk writers can change capacity during upload; writes still report filesystem failures. This is local admission, not a filesystem quota against unrelated processes. |
+| Generic model body: 8 GiB; shared spool: 16 GiB | Local free disk minus unwritten commitments and a measured current control-file working set for WAL/DB growth. Written bytes already reduce free disk and are not charged twice. Positive operator budgets remain explicit intent. `--upload-spool-bytes=-1` explicitly selects automatic capacity on supporting peers. New saved defaults use the positive int64 representation ceiling so strict older installers can read them; measured disk capacity always binds first. | Competing disk writers can change capacity during upload; writes still report filesystem failures. This is local admission, not a filesystem quota against unrelated processes. |
 | OpenAI JSON body: 64 MiB | The same typed memory admission as other JSON bodies. | Requests exceeding available memory receive a typed size refusal. |
 
 Six wire representations cover growing input and decoder buffers (up to two
@@ -40,7 +40,9 @@ measures occupied queue work, excluding body/reply transport and mutex waits.
 Overlapping admissions share only an in-flight OS memory measurement; the next
 non-overlapping admission measures again. This prevents observation bursts from
 spawning one physical-memory helper per caller. The OS page size controls read chunks; it is not a body limit.
-Duration and stream-length maxima only prevent integer overflow. Existing JSON
+Duration, stream-length and default saved spool-counter maxima only prevent
+integer overflow. The positive saved spool representation preserves older
+installers’ positive-integer schema; it is not a disk-size estimate. Existing JSON
 syntax/depth and hash widths remain protocol representation boundaries.
 
 ## Peer negotiation and refusals
