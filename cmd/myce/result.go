@@ -75,6 +75,10 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 		return failure(err)
 	}
 	refs := j.OutputRefs
+	if j.State == "succeeded" && len(j.Findings) > 0 {
+		fmt.Fprintln(errOut, "warning: this job succeeded with findings that need attention")
+		printJobFindings(errOut, j.Findings)
+	}
 	if *recovered != "" {
 		r, e := c.GetRecoveredResult(ctx, j.ID, *recovered)
 		if e != nil {

@@ -231,3 +231,25 @@ their supported request shape while local collection continues.
 Installed/rollback images, active state, receipts and unknown data are retained;
 foreign services/processes and other projects' shared caches are owner context
 only. See [worker cleanup](https://github.com/1kuna/mycelium/blob/main/docs/status.md#worker-cleanup-834-next-release).
+
+## Job findings (next release)
+
+Read `findings` on `myce status JOB_ID` even when the job succeeded. Each finding
+includes classification, exact attempt where known, measured evidence and its
+scope, Mycelium's action, a next step, confidence and cause. Attempt outcomes
+also carry their own findings. `myce wait` prints them at completion, successful
+`myce result` warns, and completion callback JSON includes the same array.
+A successful exit or accepted output does not dismiss resource findings.
+
+Act on the next step: inspect this job's logs/profile, correct its declarations
+or excessive concurrency, and keep the same ID for an infrastructure retry.
+An infrastructure finding distinguishes interrupted execution from a proven
+job defect. `cause: unknown` stays unknown until the requested evidence establishes
+it; do not infer a leak, fork bomb, OOM or signal from an RSS sum or shell status.
+macOS RSS sums can count shared pages repeatedly; cgroup task counts include
+threads. Missing counters mean unknown. Comparable clean accepted history informs
+resource comparisons; the first process sample can miss earlier fan-out.
+Waiting findings explain the current blocker and options without declaring an
+arbitrary age abnormal. Broaden targets only after verifying the whole payload
+and required output parity. Findings contain only this job's evidence, with no
+other project or host identifiers; use the existing authenticated job interface.

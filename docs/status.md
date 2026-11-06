@@ -1996,3 +1996,37 @@ allocation completes. Unknown reconnect/restart gaps never add service age. See 
 
 These are conditional admission comparisons. Hard eligibility, quotas and tier
 precedence remain binding; active same-tier work is not stopped to repay debt.
+
+## Job findings (#871, next release)
+
+Job JSON `findings` and `attempt_history[].findings` are bounded projections of
+that job's retained attempt facts, not release or scheduling authority. Each
+entry has `code`, `classification` (`behaviour`, `infrastructure`, `waiting`),
+`attempt` where known, `message`, `evidence`, `action`, `next_step`, `confidence`
+(`measured` or `unknown`) and `cause`. Confidence describes evidence, not an
+unestablished root cause. Unknown causes name the evidence needed next.
+No raw worker errors, argv, paths, host identifiers or other projects' blockers
+are copied into findings. Authentication retains the existing queue authority
+boundary; this does not introduce project accounts or tenant authorization.
+
+Memory compares the declared/resolved and learned envelope with the measured
+scope. macOS process RSS sums are not physical RAM consumption. CPU compares
+observed CPU seconds per elapsed second to declared cores and accepted comparable
+history; sampled values remain lower bounds. Process fan-out compares the sampled
+peak with the initial live tree plus declared cores and accepted history. It is
+an observation, not a process cap: early fan-out and short-lived children can be
+missed. `resource_attempts[].resources.process_peak` and `process_initial` count
+processes on the sampled tree; Linux cgroup `pids.current` includes threads.
+Their separate wire negotiation preserves CPU/I/O delivery to older queues.
+Comparable CPU/process history uses the existing accepted-work identity and
+retention, scoped to the project; its upper comparison is the observed maximum
+plus range. Constrained and incomplete CPU observations do not teach a bound.
+
+Typed guard stops explain their recorded reason; interruptions reuse existing
+attempt flags and retry decisions. Environment failures expose safe typed failed
+reads where available; other package/build causes remain unknown and point to
+this job's logs. Queued findings give elapsed time and a current actionable
+blocker without a fixed long-wait threshold. Elapsed time is since submission,
+including earlier attempts. Reads perform no history scan or bulk I/O under the
+queue mutex. Human status, wait completion, successful-result warnings and
+completion callback JSON expose the same findings.

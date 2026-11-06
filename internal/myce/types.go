@@ -419,13 +419,15 @@ type SpecProjection struct {
 }
 
 type Job struct {
-	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
-	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
-	Blocker                 *Blocker               `json:"blocker,omitempty"`
-	WallTime                *WallTimeStatus        `json:"wall_time,omitempty"`
-	YieldPlan               *ScarceYieldProjection `json:"yield_plan,omitempty"`
-	ScarceHostYield         *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
-	YieldGeneration         int64                  `json:"yield_generation,omitempty"`
+	EnvironmentBuildFailure *EnvironmentBuildFailure `json:"environment_build_failure,omitempty"`
+	Findings                []JobFinding             `json:"findings,omitempty"`
+	ResourceAttempts        []AttemptResourceFacts   `json:"resource_attempts,omitempty"`
+	ResourceAttemptsDropped int                      `json:"resource_attempts_dropped,omitempty"`
+	Blocker                 *Blocker                 `json:"blocker,omitempty"`
+	WallTime                *WallTimeStatus          `json:"wall_time,omitempty"`
+	YieldPlan               *ScarceYieldProjection   `json:"yield_plan,omitempty"`
+	ScarceHostYield         *ScarceHostYield         `json:"scarce_host_yield,omitempty"`
+	YieldGeneration         int64                    `json:"yield_generation,omitempty"`
 	// Set only on read-only planner copies, never the durable job. Plain work's
 	// recipe and input identity is independent of the target or learned memory.
 	planningMemoryIdentity string

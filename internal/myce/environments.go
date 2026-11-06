@@ -1353,6 +1353,7 @@ func (q *Queue) reconcileEnvironments(m *Machine) error {
 				now := q.clock.Now()
 				j.FinishedAt = &now
 				j.Reason = environmentFailureReason(r, j.Spec.Logs != "none")
+				j.EnvironmentBuildFailure = environmentBuildFailure(r)
 				if e := q.copyEnvironmentLogs(j, m, r.Key); e != nil {
 					return e
 				}

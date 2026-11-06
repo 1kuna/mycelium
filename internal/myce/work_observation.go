@@ -58,6 +58,7 @@ type MemoryEscalationPrior struct {
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
+	FindingBehavior     *FindingBehavior       `json:"finding_behavior,omitempty"`
 	MemoryEscalation    *MemoryEscalationPrior `json:"memory_escalation,omitempty"`
 	GPUHostRange        *MemoryPeakRange       `json:"gpu_host_range,omitempty"`
 	MemoryRange         *MemoryPeakRange       `json:"memory_range,omitempty"`
@@ -383,6 +384,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 	if memory {
 		q.recordWorkMemory(*sample, old, &point)
 	}
+	q.recordFindingBehavior(j, r, old, &point, memory)
 	q.putWorkObservation(key, point)
 	q.recordCurveLearning(j, original, exists, point)
 }

@@ -307,6 +307,15 @@
         "execution_cause": {
           "$ref": "#/$defs/RuntimeCause"
         },
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/JobFinding"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "interrupted": {
           "type": "boolean"
         },
@@ -352,6 +361,12 @@
         "attempt": {
           "type": "integer"
         },
+        "baseline": {
+          "$ref": "#/$defs/FindingBehavior"
+        },
+        "cpu_cores": {
+          "type": "integer"
+        },
         "machine": {
           "type": "string"
         },
@@ -383,6 +398,12 @@
         },
         "io": {
           "$ref": "#/$defs/AttemptIO"
+        },
+        "process_initial": {
+          "type": "integer"
+        },
+        "process_peak": {
+          "type": "integer"
         },
         "received_at": {
           "format": "date-time",
@@ -935,6 +956,20 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "EnvironmentBuildFailure": {
+      "properties": {
+        "build_seconds": {
+          "type": "number"
+        },
+        "read_cause": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "build_seconds"
+      ],
       "type": "object"
     },
     "EnvironmentRecipe": {
@@ -1635,6 +1670,80 @@
       ],
       "type": "object"
     },
+    "FindingBehavior": {
+      "properties": {
+        "cpu": {
+          "$ref": "#/$defs/FindingRange"
+        },
+        "processes": {
+          "$ref": "#/$defs/FindingRange"
+        },
+        "project": {
+          "type": "string"
+        },
+        "recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "recorded_at"
+      ],
+      "type": "object"
+    },
+    "FindingEvidence": {
+      "properties": {
+        "declared": {
+          "type": "number"
+        },
+        "learned": {
+          "type": "number"
+        },
+        "limitation": {
+          "type": "string"
+        },
+        "metric": {
+          "type": "string"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "metric",
+        "source"
+      ],
+      "type": "object"
+    },
+    "FindingRange": {
+      "properties": {
+        "max": {
+          "type": "number"
+        },
+        "min": {
+          "type": "number"
+        },
+        "samples": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "min",
+        "max",
+        "samples"
+      ],
+      "type": "object"
+    },
     "GPUHostMemory": {
       "properties": {
         "driver_gb": {
@@ -1879,6 +1988,10 @@
           "type": "boolean",
           "x-contract": "diagnostic"
         },
+        "environment_build_failure": {
+          "$ref": "#/$defs/EnvironmentBuildFailure",
+          "x-contract": "diagnostic"
+        },
         "environment_failure_log": {
           "type": "string",
           "x-contract": "diagnostic"
@@ -1935,6 +2048,16 @@
         },
         "files_expired": {
           "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/JobFinding"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
           "x-contract": "diagnostic"
         },
         "finished_at": {
@@ -2381,6 +2504,54 @@
         "queued",
         "front",
         "checkpoint"
+      ],
+      "type": "object"
+    },
+    "JobFinding": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "classification": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/FindingEvidence"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_step": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "classification",
+        "message",
+        "evidence",
+        "action",
+        "next_step",
+        "confidence",
+        "cause"
       ],
       "type": "object"
     },

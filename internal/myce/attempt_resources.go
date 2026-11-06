@@ -50,6 +50,8 @@ type AttemptIO struct {
 	Unavailable string      `json:"unavailable,omitempty"`
 }
 type AttemptResources struct {
+	ProcessPeak    *uint64        `json:"process_peak,omitempty"`
+	ProcessInitial *uint64        `json:"process_initial,omitempty"`
 	CPU            AttemptCPUTime `json:"cpu"`
 	IO             AttemptIO      `json:"io"`
 	SampledAt      time.Time      `json:"sampled_at"`
@@ -58,6 +60,8 @@ type AttemptResources struct {
 	ReceivedAt     time.Time      `json:"received_at,omitempty"`
 }
 type AttemptResourceFacts struct {
+	Baseline  *FindingBehavior  `json:"baseline,omitempty"`
+	CPUCores  int               `json:"cpu_cores,omitempty"`
 	Attempt   int               `json:"attempt"`
 	Machine   string            `json:"machine"`
 	Session   string            `json:"session"`
@@ -132,6 +136,11 @@ func cgroupResources(a *memoryAttempt, at time.Time) *AttemptResources {
 		r.CPU.Unavailable = "no_local_cgroup"
 		r.IO.Unavailable = "no_local_cgroup"
 		return r
+	}
+	if b, err := a.fs.ReadFile(filepath.Join(a.path, "pids.current")); err == nil {
+		if n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil {
+			r.ProcessPeak = &n
+		}
 	}
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "cpu.stat")); err == nil {
 		m := memoryCounters(b)
@@ -327,6 +336,18 @@ func retainResourceCounters(previous, r *AttemptResources) *AttemptResources {
 	}
 	copy := *r
 	r = &copy
+	if r.ProcessPeak != nil && *r.ProcessPeak > 0 {
+		n := *r.ProcessPeak
+		r.ProcessInitial = &n
+	}
+	if previous != nil {
+		if previous.ProcessInitial != nil {
+			r.ProcessInitial = previous.ProcessInitial
+		}
+		if previous.ProcessPeak != nil && (r.ProcessPeak == nil || *previous.ProcessPeak > *r.ProcessPeak) {
+			r.ProcessPeak = previous.ProcessPeak
+		}
+	}
 	// A failed last read is explicit; retain previous CPU as a labeled lower
 	// bound, never let a missing cgroup silently turn a measured run into zero.
 	if old := previous; old != nil && r.CPU.UsageSeconds == nil && old.CPU.UsageSeconds != nil {
@@ -404,6 +425,8 @@ func (w Worker) observeResources(p *process, memory *memoryAttempt) *resourceObs
 				r.CPU.Unavailable = "read_failed"
 			} else {
 				r.CPU.UsageSeconds = &cpu
+				n := uint64(max(0, len(seen)-1)) // The empty key holds retired CPU lifetimes.
+				r.ProcessPeak = &n
 			}
 			return r
 		}
@@ -439,8 +462,11 @@ func (q *Queue) retainAttemptResources(j *Job, r *AttemptResources) {
 	}
 	r.ReceivedAt = q.clock.Now()
 	facts := AttemptResourceFacts{Attempt: j.Attempt, Machine: j.Machine, Session: j.Session, Resources: r}
+	facts.CPUCores = j.Spec.Needs.cores()
+	facts.Baseline = q.findingBehaviorBaseline(j)
 	for i, old := range j.ResourceAttempts {
 		if old.Attempt == facts.Attempt && old.Machine == facts.Machine && old.Session == facts.Session {
+			facts.Baseline = old.Baseline // Freeze history before this execution can teach it.
 			j.ResourceAttempts[i] = facts
 			return
 		}
@@ -528,7 +554,7 @@ func safeAttemptResources(r *AttemptResources) *AttemptResources {
 			*field = &n
 		}
 	}
-	for _, field := range []**uint64{&v.CPU.Periods, &v.CPU.ThrottledPeriods, &v.IO.ReadBytes, &v.IO.WriteBytes, &v.IO.ReadOps, &v.IO.WriteOps} {
+	for _, field := range []**uint64{&v.ProcessInitial, &v.ProcessPeak, &v.CPU.Periods, &v.CPU.ThrottledPeriods, &v.IO.ReadBytes, &v.IO.WriteBytes, &v.IO.ReadOps, &v.IO.WriteOps} {
 		if *field != nil {
 			n := **field
 			*field = &n
