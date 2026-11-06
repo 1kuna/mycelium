@@ -760,14 +760,18 @@ fallback remains available when no per-process figure can be retained.
 
 Check-ins refresh the estimate's source, exclusivity and original timestamp
 atomically alongside its value. Missing, stale or uncertain attribution prevents
-new unified CUDA sharing; existing shared attempts yield in the guard's normal
+new unified CUDA sharing. A newly started attempt may wait for its first sample
+within the existing two-period sensor freshness window; that wait cannot admit
+another tenant or excuse explicitly uncertain evidence. Once the window expires,
+missing samples also require exclusive execution. Existing shared attempts yield in the guard's normal
 lowest-tier, then greatest-over-reservation order until execution is exclusive.
 The running reason names uncertain attribution. Dedicated-card missing-sample
 behavior remains diagnostic only. Higher CUDA classes still stop every lower
 co-tenant and await exact release before starting. Workers negotiate
 `unified_memory_protocol: unified-attempt-memory-v1` before sending the new
 sample fields. An older or downgraded queue receives the legacy shape and a
-leaving/admission drain while a fallback estimate is live; attempt custody and
+unified CUDA capacity withheld through existing device-unavailable fields while
+a fallback estimate is live; no leave/stop is requested. Attempt custody and
 local evidence remain intact.
 
 Fresh, reconciled estimates enable the shared-card growth guard. For unified

@@ -42,7 +42,7 @@ func TestUnifiedMemoryWireNegotiationAndDowngrade(t *testing.T) {
 		}
 	}
 	send()
-	if !reports[0].Machine.Leaving || hasUnifiedMemoryWireFields(reports[0]) || reports[0].Attempts[0].CurrentHostMemory.DeviceGB != nil {
+	if reports[0].Machine.Leaving || reports[0].Machine.MemoryError == "" || hasUnifiedMemoryWireFields(reports[0]) || reports[0].Attempts[0].CurrentHostMemory.DeviceGB != nil {
 		t.Fatal("legacy queue received unsafe estimate", reports[0])
 	}
 	send()
@@ -56,11 +56,34 @@ func TestUnifiedMemoryWireNegotiationAndDowngrade(t *testing.T) {
 		t.Fatal("downgrade did not attempt negotiated shape once", len(reports))
 	}
 	for _, r := range reports[3:] {
-		if !r.Machine.Leaving || hasUnifiedMemoryWireFields(r) || r.Attempts[0].ID != "owned" || r.Attempts[0].Session != m.Session || r.Attempts[0].Attempt != 1 {
+		if r.Machine.Leaving || r.Machine.MemoryError == "" || hasUnifiedMemoryWireFields(r) || r.Attempts[0].ID != "owned" || r.Attempts[0].Session != m.Session || r.Attempts[0].Attempt != 1 {
 			t.Fatal("legacy retry lost drain or exact custody", r)
 		}
 	}
 	if sample.DeviceSource != deviceUnifiedResidentSource || !sample.DeviceExclusive || sample.DeviceGB == nil {
 		t.Fatal("wire stripping mutated sampler evidence")
+	}
+}
+
+func TestUnifiedMemoryWireLegacyWithholdsNewWork(t *testing.T) {
+	q, _ := fixture(t)
+	m := sharedUnifiedMachine()
+	first := assignGPU(t, q, m, submit(t, q, sharedSpec("experiment", 17)))
+	if err := q.Started(result(first, false)); err != nil {
+		t.Fatal(err)
+	}
+	waiting := submit(t, q, sharedSpec("experiment", 13))
+	gb := 17.0
+	c := legacyUnifiedMemoryCheckin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: first.ID, Attempt: first.Attempt}, Session: first.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{DeviceGB: &gb, DeviceSource: deviceUnifiedResidentSource}}}})
+	r, err := q.Checkin(c)
+	if err != nil || assignedJob(r) != nil {
+		t.Fatal("legacy admission withholding admitted new work", r, err)
+	}
+	requireState(t, q, first.ID, "running")
+	requireState(t, q, waiting.ID, "queued")
+	// Restoring the negotiated inventory resumes packing without stopping or
+	// replacing the incumbent. No leave/stop bit travels in the legacy request.
+	if r := machineCheck(t, q, m, first); assignedJob(r) == nil || assignedJob(r).ID != waiting.ID {
+		t.Fatal("negotiated recovery failed to resume sharing", r)
 	}
 }

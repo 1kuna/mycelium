@@ -237,3 +237,94 @@ func TestUnifiedAttemptMemoryStaleShedsCoTenant(t *testing.T) {
 		t.Fatal("stale unified telemetry retained sharing")
 	}
 }
+
+func TestUnifiedAttemptMemoryStartupWaitsForFirstSample(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		t.Run(fmt.Sprint(ready), func(t *testing.T) {
+			q, clock := fixture(t)
+			m := sharedUnifiedMachine()
+			a, b := sharedPair(t, q, m)
+			clock.Advance(time.Second)
+			// Heartbeats precede the newcomer's first five-second driver tick.
+			growthCheck(t, q, m, []*Job{a, b}, []float64{17}, 0)
+			requireState(t, q, a.ID, "running")
+			requireState(t, q, b.ID, "running")
+			third := submit(t, q, sharedSpec("experiment", 2))
+			if r := growthCheck(t, q, m, []*Job{a, b}, []float64{17}, 0); assignedJob(r) != nil {
+				t.Fatal("unmeasured startup admitted another tenant", third.ID)
+			}
+			if ready {
+				clock.Advance(deviceMemorySamplePeriod - time.Second)
+				growthCheck(t, q, m, []*Job{a, b}, []float64{17, 13}, 0)
+				requireState(t, q, a.ID, "running")
+				requireState(t, q, b.ID, "running")
+				return
+			}
+			clock.Advance(deviceMemorySampleFreshFor - time.Second)
+			growthCheck(t, q, m, []*Job{a, b}, []float64{17}, 0)
+			if job(t, q, a.ID).State != "stopping" && job(t, q, b.ID).State != "stopping" {
+				t.Fatal("first-sample wait bypassed stale fallback indefinitely")
+			}
+		})
+	}
+}
+
+func TestUnifiedAttemptMemoryLearningSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte("#!/bin/sh\nprintf 'GPU-one, 42, N/A\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	fs := &unifiedResidentFS{values: map[string]string{
+		"/synthetic/attempt/memory.stat": "anon 8589934592\nkernel 0\nshmem 0\n",
+		"/synthetic/memory.stat":         "anon 8589934592\nkernel 0\nshmem 0\n",
+		"/proc/42/status":                "VmRSS: 8388608 kB\n",
+		"/proc/meminfo":                  "MemAvailable: 58720256 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+	}}
+	q, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	m.Devices[0].ExtensionFingerprint = "synthetic-cuda-v1"
+	s := plainGPUSpec()
+	s.Needs.Memory = "auto"
+	seed := assignGPU(t, q, m, submit(t, q, s))
+	if err := q.Started(result(seed, false)); err != nil {
+		t.Fatal(err)
+	}
+	a := &memoryAttempt{fs: fs, path: "/synthetic/attempt", pageSize: 4096, hostBaseline: &gpuHostState{available: 64}, rootBaseline: new(float64)}
+	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	ticks := make(chan time.Time, 1)
+	device := w.observeDeviceMemory(ctx, func() (map[int]bool, map[int]bool, error) { return map[int]bool{42: true}, nil, nil }, fs, time.Second, clock, a, ticks)
+	ticks <- clock.Now()
+	await(t, func() bool { return a.device.Load() != nil })
+	cancel()
+	var peak *AttemptMemoryPeak
+	select {
+	case r := <-device:
+		peak = r.peak
+	case <-time.After(testWaitTimeout):
+		t.Fatal("sampler did not stop")
+	}
+	if peak.DeviceGB == nil || *peak.DeviceGB != 8 || peak.DeviceSource != deviceUnifiedResidentSource {
+		t.Fatal("complete fallback lost its labelled device evidence", peak)
+	}
+	host := 1.0
+	peak.HostGB = &host
+	clock.Advance(time.Second)
+	r := result(seed, true)
+	r.MemoryPeak = peak
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	q = memoryFactsRestart(t, q, clock)
+	facts := job(t, q, seed.ID).MemoryAttempts
+	if len(facts) != 1 || facts[0].LearningReason != "eligible" || facts[0].MemoryPeak.DeviceSource != deviceUnifiedResidentSource {
+		t.Fatal("restart lost fallback provenance", facts)
+	}
+	peer := assignGPU(t, q, m, submit(t, q, sharedSpec("experiment", 13)))
+	next := submit(t, q, s)
+	learned := assignedJob(machineCheck(t, q, m, peer))
+	if learned == nil || learned.ID != next.ID || learned.MemoryEnvelope.Basis != "learned" || learned.Spec.Needs.MemoryGB < 8 || learned.Spec.Needs.MemoryGB >= m.Devices[0].BudgetGB {
+		t.Fatal("accepted fallback did not enable learned sharing after restart", learned, job(t, q, next.ID).Reason)
+	}
+}

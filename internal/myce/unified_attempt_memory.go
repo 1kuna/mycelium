@@ -10,9 +10,18 @@ import (
 
 const deviceUnifiedResidentSource = "unified RSS/cgroup upper estimate with host reconciliation"
 const deviceUnifiedUncertain = "unified device attribution uncertain; exclusive execution required"
+const deviceUnifiedStarting = "unified device sample pending first sensor cycle"
 
 func sharedDeviceSampleReady(s hostMemorySample, now time.Time) bool {
 	return !s.exclusive && !s.deviceAt.IsZero() && !now.Before(s.deviceAt) && now.Sub(s.deviceAt) < deviceMemorySampleFreshFor
+}
+
+func unifiedDeviceSampleStarting(j *Job, s hostMemorySample, now time.Time) bool {
+	// A started process checks in before the first periodic probe. Reuse the
+	// sensor's existing one-missed-cycle freshness allowance, not a fleet-tuned
+	// startup delay. It cannot admit another tenant or excuse explicit unknown
+	// evidence, and expires even if the first sample never arrives.
+	return j.StartedAt != nil && s.deviceAt.IsZero() && !s.exclusive && !now.Before(*j.StartedAt) && now.Sub(*j.StartedAt) < deviceMemorySampleFreshFor
 }
 
 // RSS can count shared pages repeatedly and resident cgroup pages include CPU

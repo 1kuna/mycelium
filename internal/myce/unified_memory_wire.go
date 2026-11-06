@@ -22,8 +22,9 @@ func (w Worker) unifiedMemoryCheckin(c Checkin) Checkin {
 }
 
 // Older queues strictly decode nested samples. They must never interpret an
-// ambiguous estimate as a direct device counter. Drain admission while such
-// evidence is live, preserving exact attempt custody and local sampling.
+// ambiguous estimate as a direct device counter. Withhold unified CUDA capacity
+// while such evidence is live. Leaving requests stop running jobs, so use the
+// existing device-unavailable admission fields and preserve their custody.
 func legacyUnifiedMemoryCheckin(c Checkin) Checkin {
 	c.Attempts = slices.Clone(c.Attempts)
 	for i, r := range c.Attempts {
@@ -32,7 +33,22 @@ func legacyUnifiedMemoryCheckin(c Checkin) Checkin {
 		}
 		s := *r.CurrentHostMemory
 		if s.DeviceSource == deviceUnifiedResidentSource || s.DeviceExclusive {
-			c.Machine.Leaving = true
+			c.Machine.Devices = slices.Clone(c.Machine.Devices)
+			for n := range c.Machine.Devices {
+				d := &c.Machine.Devices[n]
+				if d.Platform == "cuda" && d.UnifiedMemory {
+					d.FreeMemoryGB = 0
+					if d.Reason == "" {
+						d.Reason = deviceUnifiedUncertain
+					}
+				}
+			}
+			if c.Machine.GPU == "cuda" {
+				c.Machine.FreeMemoryGB = 0
+				if c.Machine.MemoryError == "" {
+					c.Machine.MemoryError = deviceUnifiedUncertain
+				}
+			}
 			s.DeviceGB, s.DeviceGrowthGB, s.DeviceAgeSeconds = nil, 0, 0
 		}
 		s.DeviceSource, s.DeviceExclusive, s.DeviceGrowthRateGB = "", false, 0

@@ -25,9 +25,12 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 				if j.State != "running" {
 					continue
 				}
-				if !sharedDeviceSampleReady(q.hostMemorySamples[m.ID][jobKey(*j)], q.clock.Now()) {
+				s := q.hostMemorySamples[m.ID][jobKey(*j)]
+				if unifiedDeviceSampleStarting(j, s, q.clock.Now()) {
+					j.Reason = deviceUnifiedStarting
+				} else if !sharedDeviceSampleReady(s, q.clock.Now()) {
 					j.Reason = deviceUnifiedUncertain
-				} else if j.Reason == deviceUnifiedUncertain {
+				} else if j.Reason == deviceUnifiedUncertain || j.Reason == deviceUnifiedStarting {
 					j.Reason = ""
 				}
 			}
@@ -44,7 +47,7 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 			s, now := q.hostMemorySamples[m.ID][jobKey(*j)], q.clock.Now()
 			fresh := !s.deviceAt.IsZero() && !now.Before(s.deviceAt) && now.Sub(s.deviceAt) < deviceMemorySampleFreshFor
 			measured = measured && fresh
-			uncertain = uncertain || unifiedCUDA(&card) && (!fresh || s.exclusive)
+			uncertain = uncertain || unifiedCUDA(&card) && (!fresh && !unifiedDeviceSampleStarting(j, s, now) || s.exclusive)
 			peak := 0.0 // Stale or missing device samples contribute no growth.
 			if fresh {
 				peak = s.deviceGB
