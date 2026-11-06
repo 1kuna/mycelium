@@ -22,6 +22,13 @@ import (
 	"mycelium/internal/myce"
 )
 
+// Receipt/preparation fixtures need a permanent stop before submission. A
+// generic 503 is a transient outage and retries until its caller stops it.
+func refuseProfilePreparation(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = io.WriteString(w, `{"code":"file_store_unavailable"}`)
+}
+
 func TestProfileRequirementReasonsResolveAndAdapterSchema(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, ".mycelium", "profiles")
@@ -403,7 +410,7 @@ check: [true]
 	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
 	defer server.Close()
 	receipts := filepath.Join(root, ".mycelium", "receipts")
 	abandoned := filepath.Join(receipts, ".prepare-abandoned")

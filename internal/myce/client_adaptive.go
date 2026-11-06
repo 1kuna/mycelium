@@ -150,6 +150,11 @@ func (c Client) RetryTransient(ctx context.Context, operation func(context.Conte
 		}
 		pace.Observe(c.clock().Now().Sub(started), false)
 		delay := pace.Delay(c.clock().Now(), time.Time{}, err, c.Jitter)
+		if end, ok := ctx.Deadline(); ok {
+			// The owner may end recovery before the server permits a retry.
+			// A shortened pause ends observation; it never starts an early retry.
+			delay = min(delay, max(0, end.Sub(c.clock().Now())))
+		}
 		if report != nil {
 			report(err, delay)
 		}

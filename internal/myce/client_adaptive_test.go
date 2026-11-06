@@ -336,3 +336,70 @@ func TestClientAdaptiveTransientFileRetryAfter(t *testing.T) {
 		}
 	}
 }
+
+func TestClientAdaptiveTransientGeneric503WithoutDeadline(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls, reports := 0, 0
+	var latest error
+	c := Client{Clock: clock, Jitter: func() float64 { return 0 }, Pause: func(ctx context.Context, d time.Duration) error {
+		clock.Advance(d)
+		// The test owner interrupts after observing continued recovery. This
+		// is not a retry budget and uses no wall-clock waiting.
+		if reports == 8 {
+			cancel()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	err := c.RetryTransient(ctx, func(context.Context, Client) error {
+		calls++
+		clock.Advance(time.Millisecond)
+		latest = &HTTPError{Status: 503, Code: "request_failed", RetryAfter: time.Duration(calls) * time.Second}
+		return latest
+	}, func(cause error, d time.Duration) {
+		reports++
+		if cause != latest || d < time.Duration(calls)*time.Second || ClientErrorCause(cause) != ClientErrorCause(latest) {
+			t.Fatal("latest cause or server pacing lost", cause, latest, d)
+		}
+	})
+	if !errors.Is(err, context.Canceled) || calls != 8 || reports != 8 || ClientErrorCause(err) != ClientErrorCause(latest) {
+		t.Fatal("unbounded owner lost recovery or latest cause", err, calls, reports)
+	}
+}
+
+func TestClientAdaptiveTransientGeneric503OwnerDeadline(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	start := clock.Now()
+	ctx, cancel := context.WithDeadline(context.Background(), start.Add(10*time.Second))
+	defer cancel()
+	calls, reports := 0, 0
+	var latest error
+	c := Client{Clock: clock, Jitter: func() float64 { return 0 }, Pause: func(_ context.Context, d time.Duration) error { clock.Advance(d); return nil }}
+	err := c.RetryTransient(ctx, func(context.Context, Client) error {
+		calls++
+		clock.Advance(time.Second)
+		latest = &HTTPError{Status: 503, Code: "request_failed", RetryAfter: 7 * time.Second}
+		return latest
+	}, func(cause error, _ time.Duration) {
+		reports++
+		if cause != latest {
+			t.Fatal("latest cause lost")
+		}
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || clock.Now().Sub(start) != 10*time.Second || calls != 2 || reports != 2 || ClientErrorCause(err) != ClientErrorCause(latest) {
+		t.Fatal("owner deadline not exact or cause lost", err, clock.Now().Sub(start), calls, reports)
+	}
+}
+
+func TestClientAdaptiveTransientTypedPreparationRefusal(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	calls := 0
+	failure := &HTTPError{Status: 503, Code: "file_store_unavailable"}
+	c := Client{Clock: clock, Pause: func(context.Context, time.Duration) error { t.Fatal("permanent refusal paused"); return nil }}
+	err := c.RetryTransient(context.Background(), func(context.Context, Client) error { calls++; return failure }, func(error, time.Duration) { t.Fatal("permanent refusal retried") })
+	if err != failure || calls != 1 {
+		t.Fatal("permanent storage refusal did not stop", err, calls)
+	}
+}

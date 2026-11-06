@@ -20,7 +20,7 @@ func TestAuthoringOriginReaderPreparation(t *testing.T) {
 			root := t.TempDir()
 			t.Chdir(root)
 			conversionWrite(t, "source/run.sh", "echo ok\n")
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+			server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
 			defer server.Close()
 			var out bytes.Buffer
 			var err error
