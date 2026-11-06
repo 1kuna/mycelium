@@ -173,7 +173,7 @@ func TestCommandPortabilityCPUMemberCapsNormalizeBeforeLowering(t *testing.T) {
 // still goes through submit, accepted output verification and exact release.
 func TestCommandPortabilityRealCPUResult(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "breadth-fixture", Interval: 10 * time.Millisecond})
+	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "breadth-fixture", Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
