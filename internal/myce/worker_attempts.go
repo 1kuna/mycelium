@@ -1138,6 +1138,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 			}
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
+			rt.mu.Lock()
+			// Replaced, never mutated: model loads share this exact-attempt
+			// snapshot and age it with their own launch-time clock read.
+			rt.batchHostMemorySamples = w.hostMemorySamples
+			rt.mu.Unlock()
 			m.HostHealth = health.snapshot(m.DiskVolumes)
 			applyHostMountHealth(w, &m)
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)

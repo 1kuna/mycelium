@@ -840,8 +840,9 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 	} else {
 		a.currentGrowth = memoryGrowth{} // Never bridge a missing interval.
 	}
+	rate := a.currentGrowth.rate
 	a.currentMu.Unlock()
-	sample := &CurrentHostMemory{GrowthObserved: observed, FootprintGB: footprint, GrowthGB: margin, NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at, deviceSample: &a.device}
+	sample := &CurrentHostMemory{GrowthObserved: observed, GrowthRateGB: rate, FootprintGB: footprint, GrowthGB: margin, NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at, deviceSample: &a.device}
 	if device := a.device.Load(); device != nil {
 		gb := device.gb
 		sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB

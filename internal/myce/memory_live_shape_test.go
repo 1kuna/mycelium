@@ -161,7 +161,7 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 			report := func(j *Job) AttemptReport {
 				footprint := ram / 16
 				return AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true,
-					CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: ram / 32, FootprintGB: &footprint, GrowthGB: ram / 64, GrowthObserved: true}}
+					CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: ram / 32, FootprintGB: &footprint, GrowthGB: ram / 64, GrowthRateGB: ram / 64, GrowthObserved: true}}
 			}
 			pull := func(reports ...AttemptReport) *Job {
 				t.Helper()

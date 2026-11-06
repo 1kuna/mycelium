@@ -65,7 +65,7 @@ func legacyUnifiedMemoryCheckin(c Checkin) Checkin {
 
 func hasUnifiedMemoryWireFields(c Checkin) bool {
 	for _, r := range c.Attempts {
-		if s := r.CurrentHostMemory; s != nil && (s.DeviceSource != "" || s.DeviceExclusive || s.DeviceGrowthRateGB != 0 || s.GrowthObserved || s.FootprintGB != nil) {
+		if s := r.CurrentHostMemory; s != nil && (s.DeviceSource != "" || s.DeviceExclusive || s.DeviceGrowthRateGB != 0 || s.GrowthObserved || s.GrowthRateGB != 0 || s.FootprintGB != nil) {
 			return true
 		}
 	}
@@ -80,6 +80,7 @@ func legacyProbeMemoryCheckin(c Checkin) Checkin {
 		if r.CurrentHostMemory != nil {
 			s := *r.CurrentHostMemory
 			s.GrowthObserved, s.FootprintGB = false, nil
+			s.GrowthRateGB = 0
 			c.Attempts[i].CurrentHostMemory = &s
 		}
 	}

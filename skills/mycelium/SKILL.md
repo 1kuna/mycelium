@@ -61,7 +61,8 @@ YAML
 The tiny declared memory bounds this fixture; real work can omit memory to learn
 it. From the next release, cold auto-memory work reserves measured physical
 headroom on one host. A running CPU probe can share after fresh complete cgroup
-measurements establish its live footprint and growth over a sampling horizon;
+measurements establish its live footprint and growth over a sampling horizon,
+extended by the measured growth rate through the sample's age;
 its containment ceiling stays fixed. Missing/stale measurements retain the full
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a

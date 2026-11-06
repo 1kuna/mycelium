@@ -463,20 +463,21 @@ type workerModel struct {
 	drainRequested     bool
 }
 type modelRuntime struct {
-	worker                *Worker
-	batchJobs             []Job
-	verifyDevice          func() error
-	deviceEnv             map[string]string
-	authorize             func(HostLaunch) error
-	copyResults           map[string]CopyReport
-	localApprovals        map[string]string
-	localApprovalStates   map[string]ModelApprovalState
-	availability          *availabilityMonitor
-	admissionBlocked      bool
-	requireMemoryCeilings bool
-	memoryCeilings        *memoryCeilings
-	memoryMachine         Machine
-	memorySwapMaxBytes    int64
+	worker                 *Worker
+	batchJobs              []Job
+	batchHostMemorySamples map[attemptKey]hostMemorySample
+	verifyDevice           func() error
+	deviceEnv              map[string]string
+	authorize              func(HostLaunch) error
+	copyResults            map[string]CopyReport
+	localApprovals         map[string]string
+	localApprovalStates    map[string]ModelApprovalState
+	availability           *availabilityMonitor
+	admissionBlocked       bool
+	requireMemoryCeilings  bool
+	memoryCeilings         *memoryCeilings
+	memoryMachine          Machine
+	memorySwapMaxBytes     int64
 
 	lastSavedSpeed        float64
 	copies                map[string]*workerCopy
@@ -916,11 +917,13 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 		return errors.New("worker requires positive host_memory_gb")
 	}
 
+	hostMeasured, hostFree := false, 0.0
 	if loading.model.HostMemoryGB > 0 || unifiedCUDA(&machine) && loading.model.MemoryGB > 0 {
 		if rt.hostMemorySource == nil {
 			return errors.New("model load requires host RAM source")
 		}
 		free, e := rt.hostMemorySource(ctx)
+		hostMeasured, hostFree = true, free
 		machine.HostMemoryMeasured = true
 		need := hostNeed(&machine, loading.model.MemoryGB, loading.model.HostMemoryGB)
 		if e != nil || !validMemoryValue(free) || free < need {
@@ -930,21 +933,29 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 	// Include every admitted batch and resident engine in the same local host
 	// allowance. Device-local free memory alone cannot authorize another load.
 	rt.mu.Lock()
-	cores, ram := 0, 0.0
+	cores, ram, growth := 0, 0.0, 0.0
 	for _, j := range rt.batchJobs {
 		cores += j.Spec.Needs.cores()
-		ram += hostNeed(allocationMachine(&rt.memoryMachine, j.AllocatedDevices), j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
+		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], rt.clock.Now())
+		ram += charge
+		growth += pending
 	}
 	for _, other := range rt.models {
 		if other.state != "unloaded" && other.state != "failed" {
 			cores++
-			ram += hostNeed(allocationMachine(&rt.memoryMachine, []string{other.device}), other.model.MemoryGB, other.model.HostMemoryGB)
+			need := hostNeed(allocationMachine(&rt.memoryMachine, []string{other.device}), other.model.MemoryGB, other.model.HostMemoryGB)
+			ram += need
+			growth += need
 		}
 	}
 	rt.mu.Unlock()
 	capacity, reason := cpuCapacity(&machine)
 	if reason == "" && cores > capacity || machine.HostMemoryBudgetGB > 0 && ram > machine.HostMemoryBudgetGB {
 		return fmt.Errorf("%w: aggregate engine CPU/RAM allowance", errWorkerMemory)
+	}
+	if hostMeasured && hostFree < growth {
+		return fmt.Errorf("insufficient host RAM for model %s and pending growth: need %.3f GiB, available %.3f GiB", loading.model.Name, growth, hostFree)
 	}
 	if source == nil {
 		return errors.New("model load requires a free-memory source")

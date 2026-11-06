@@ -6,7 +6,9 @@ in `memory_envelope.host_gb`, with known need and member/retry floors in
 complete cgroup footprint plus observed growth and launch drift instead of
 reserving all initial headroom. Machine `host_memory_in_use_gb` sums those
 charges; declared and learned allocations retain their full reservations.
-Two timed samples establish a growth horizon. Missing counters, old workers,
+Two timed samples establish a growth horizon; the measured rate extends that
+forecast through the sample's age. Batch launches and model loads use the same
+exact-attempt charge. Missing counters, old workers,
 stale samples, restart and stopping custody restore the full ceiling charge.
 This forecasts measured growth; it cannot predict unseen bursts. Kernel
 ceilings, physical-memory rechecks and exact release remain independent.

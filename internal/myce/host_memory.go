@@ -390,6 +390,9 @@ type CurrentHostMemory struct {
 	// True only after two timed samples. An older worker's zero growth is
 	// unknown and cannot release a cold probe's physical-headroom reservation.
 	GrowthObserved bool `json:"growth_observed,omitempty"`
+	// Maximum measured positive GiB/second. Extend the sampling allowance
+	// through the observation's age instead of assuming growth stopped.
+	GrowthRateGB float64 `json:"growth_rate_gb,omitempty"`
 	// Complete cgroup anon/kernel/shmem/dirty/unevictable footprint. Separate
 	// from anonymous-only credit; nil cannot establish a probe's live charge.
 	FootprintGB *float64 `json:"footprint_gb,omitempty"`
@@ -464,14 +467,15 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 	samples := map[attemptKey]hostMemorySample{}
 	for _, r := range reports {
 		sample, s := r.CurrentHostMemory, hostMemorySample{}
-		if !r.Started || sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
+		if !r.Started || sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) && sample.AgeSeconds < hostMemorySampleFreshFor.Seconds() {
 			s.gb, s.at = sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds*float64(time.Second)))
 			s.growthGB = sample.GrowthGB
 			if sample.FootprintGB != nil && validMemoryValue(*sample.FootprintGB) {
-				s.growthObserved, s.footprintGB = sample.GrowthObserved, *sample.FootprintGB
+				s.growthObserved = sample.GrowthObserved && (sample.GrowthGB == 0 || sample.GrowthRateGB > 0)
+				s.footprintGB, s.rateGB = *sample.FootprintGB, sample.GrowthRateGB
 			}
 		}
 		if d := sample.DeviceGB; d != nil && validMemoryValue(*d) && validMemoryValue(sample.DeviceAgeSeconds) && sample.DeviceAgeSeconds < deviceMemorySampleFreshFor.Seconds() {
@@ -499,7 +503,8 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	if e == nil || e.ProbeFloorGB <= 0 || j.Spec.Needs.Memory != "auto" || !j.Spec.Needs.cpuOnly() || j.State != "running" || !sample.growthObserved || sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= hostMemorySampleFreshFor || !validMemoryValue(sample.gb) || !validMemoryValue(sample.growthGB) {
 		return
 	}
-	charge = max(e.ProbeFloorGB, sample.footprintGB+sample.growthGB+exploratoryDriftMarginGB(m))
+	forecast := sample.growthGB + sample.rateGB*now.Sub(sample.at).Seconds()
+	charge = max(e.ProbeFloorGB, sample.footprintGB+forecast+exploratoryDriftMarginGB(m))
 	growth = max(0, charge-sample.gb)
 	return
 }

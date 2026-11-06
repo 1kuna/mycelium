@@ -327,14 +327,10 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		} else if estimate.uncalibrated && (estimate.foreign || !n.cpuOnly() && !m.UnifiedMemory) {
 			refusal = memoryCapacityRemedies
 		}
-		if q.learnedMemory() && n.cpuOnly() && !estimate.escalation && !boundedMemorySource(estimate.source) && (estimate.uncalibrated || estimate.host == nil && estimate.source == "" && j.MemoryFallback == nil) {
+		if q.learnedMemory() && n.cpuOnly() && !estimate.escalation && !boundedMemorySource(estimate.source) && estimate.uncalibrated {
 			probeFloor = hostFloor
 			if estimate.host != nil {
 				probeFloor = max(probeFloor, hostMemoryPeakGB(estimate.host))
-			}
-			probeFloor = max(probeFloor, q.constrainedMemoryLowerFor(j, estimate, false))
-			if j.MemoryOOMFloor != nil {
-				probeFloor = max(probeFloor, j.MemoryOOMFloor.HostMemoryGB)
 			}
 		}
 		switch {
@@ -418,6 +414,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 				host, source, evidence = bound, bounded, similar
 			} else {
 				host, why = q.exploratoryMemory(j, m)
+				if q.learnedMemory() && n.cpuOnly() {
+					probeFloor = hostFloor
+				}
 			}
 			refusal = why
 			if len(m.groupMembers) > 0 && refusal == "" {
@@ -444,6 +443,12 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			n.HostMemoryGB = max(minimumHostMemoryGB, host, q.constrainedMemoryLowerFor(j, estimate, !n.cpuOnly() && !m.UnifiedMemory))
 		}
 		n.HostMemoryGB = max(n.HostMemoryGB, hostFloor)
+		if probeFloor > 0 {
+			probeFloor = max(probeFloor, q.constrainedMemoryLowerFor(j, estimate, false))
+			if j.MemoryOOMFloor != nil {
+				probeFloor = max(probeFloor, j.MemoryOOMFloor.HostMemoryGB)
+			}
+		}
 		if floor := j.MemoryOOMFloor; floor != nil {
 			n.MemoryGB = floor.MemoryGB // A host OOM is not a GPU measurement.
 			n.HostMemoryGB = max(n.HostMemoryGB, floor.HostMemoryGB)
@@ -470,7 +475,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		}
 	}
 	copy.MemoryEnvelope = &JobMemoryEnvelope{Source: source, Refusal: refusal, Machine: m.ID, Device: m.Device, HostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), DeviceGB: n.MemoryGB, Enforcement: enforcement, Basis: basis, Evidence: evidence}
-	if probeFloor > 0 && !strings.Contains(source, boundedFirstRun) {
+	if probeFloor > 0 {
 		copy.MemoryEnvelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
 	}
 	return &copy
