@@ -2371,10 +2371,21 @@ operation for the workers without restarting the already-current queue.
 These options require a queue version that implements them; they cannot change
 restart behavior inside an older installed queue or helper.
 
-Hosts update sequentially: enabled/drained hosts first (production hosts last
-within that group), then operator-disabled hosts. Started commands finish
-naturally before their host restarts. At queue cutover new model calls pause and
-existing calls/streams finish; batch attempts on other hosts reconnect unchanged.
+From the release containing #900's idle-moment slice, normal updates leave busy
+enabled hosts `pending`, with admission open. An hours-long command does not hold
+the host's spare capacity for maintenance. Other idle compatible hosts can
+progress. Fresh exact custody selects the next natural idle moment and acquires
+the upgrade drain atomically before placement refills it. Unreleased attempts,
+preparations, loading models, calls and unknown cleanup do not establish idle;
+a ready idle model can enter drain but must confirm unload before restart.
+Pending operations persist across queue restart without acquiring a drain.
+Earlier releases drain a selected host while waiting for its work to finish.
+
+Hosts update sequentially: eligible enabled/drained hosts first (production hosts
+last within that group), then operator-disabled hosts. Started commands finish
+naturally before their host restarts; there is no time-triggered cancellation.
+Queue cutover waits for calls/streams while admission remains open, then pauses
+new model calls at the idle selection. Batch attempts on other hosts reconnect unchanged.
 The queue precedes its colocated worker. This implementation accepts the current
 worker protocols only, so incompatible protocol migrations need a separate plan.
 
