@@ -21,7 +21,7 @@ type ResourceIntegral struct {
 	MeasuredMemoryGBSeconds        float64  `json:"measured_memory_gb_seconds"`
 	MemoryCoveredSeconds           float64  `json:"memory_covered_seconds"`
 	ReservedCPUSeconds             float64  `json:"reserved_cpu_seconds"`
-	MeasuredCPUSeconds             *float64 `json:"measured_cpu_seconds"`
+	MeasuredCPUSeconds             *float64 `json:"measured_cpu_seconds" jsonschema:"nullable"`
 	Seconds                        float64  `json:"seconds"`
 }
 
@@ -51,13 +51,13 @@ type EfficiencyAllocation struct {
 }
 type efficiencyRate struct {
 	ReservedDeviceGB float64   `json:"reserved_device_gb"`
-	MeasuredDeviceGB *float64  `json:"measured_device_gb"`
+	MeasuredDeviceGB *float64  `json:"measured_device_gb" jsonschema:"nullable"`
 	DeviceValidUntil time.Time `json:"device_valid_until"`
 	Host             string    `json:"host,omitempty"`
 	Basis            string    `json:"basis,omitempty"`
 	ReservedMemoryGB float64   `json:"reserved_memory_gb"`
 	ReservedCPUCores float64   `json:"reserved_cpu_cores"`
-	MeasuredMemoryGB *float64  `json:"measured_memory_gb"`
+	MeasuredMemoryGB *float64  `json:"measured_memory_gb" jsonschema:"nullable"`
 	ValidUntil       time.Time `json:"valid_until"`
 }
 type JobEfficiency struct {
@@ -76,8 +76,8 @@ type EfficiencyHost struct {
 	At       time.Time `json:"at"`
 	ResourceIntegral
 	Rate                 efficiencyRate `json:"current"`
-	TotalMemoryGB        *float64       `json:"total_memory_gb"`
-	PhysicalUsedMemoryGB *float64       `json:"physical_used_memory_gb"`
+	TotalMemoryGB        *float64       `json:"total_memory_gb" jsonschema:"nullable"`
+	PhysicalUsedMemoryGB *float64       `json:"physical_used_memory_gb" jsonschema:"nullable"`
 	IOStatus             string         `json:"io_status"`
 }
 type EfficiencyWait struct {
@@ -100,15 +100,15 @@ type PredictionError struct {
 	Attempt              int      `json:"attempt"`
 	Work                 string   `json:"work"`
 	Basis                string   `json:"basis"`
-	ReservedHostGB       *float64 `json:"reserved_host_gb"`
-	AcceptedHostPeakGB   *float64 `json:"accepted_host_peak_gb"`
-	HostErrorGB          *float64 `json:"host_error_gb"`
-	ReservedDeviceGB     *float64 `json:"reserved_device_gb"`
-	AcceptedDevicePeakGB *float64 `json:"accepted_device_peak_gb"`
-	DeviceErrorGB        *float64 `json:"device_error_gb"`
-	PredictedSeconds     *float64 `json:"predicted_seconds"`
-	ActualSeconds        *float64 `json:"actual_seconds"`
-	DurationErrorSeconds *float64 `json:"duration_error_seconds"`
+	ReservedHostGB       *float64 `json:"reserved_host_gb" jsonschema:"nullable"`
+	AcceptedHostPeakGB   *float64 `json:"accepted_host_peak_gb" jsonschema:"nullable"`
+	HostErrorGB          *float64 `json:"host_error_gb" jsonschema:"nullable"`
+	ReservedDeviceGB     *float64 `json:"reserved_device_gb" jsonschema:"nullable"`
+	AcceptedDevicePeakGB *float64 `json:"accepted_device_peak_gb" jsonschema:"nullable"`
+	DeviceErrorGB        *float64 `json:"device_error_gb" jsonschema:"nullable"`
+	PredictedSeconds     *float64 `json:"predicted_seconds" jsonschema:"nullable"`
+	ActualSeconds        *float64 `json:"actual_seconds" jsonschema:"nullable"`
+	DurationErrorSeconds *float64 `json:"duration_error_seconds" jsonschema:"nullable"`
 }
 
 // A queue-clock receipt snapshot at the first outcome, kept across later
@@ -116,12 +116,12 @@ type PredictionError struct {
 type AttemptStopObservation struct {
 	At                       time.Time `json:"at"`
 	HostSampleAgeSeconds     float64   `json:"host_sample_age_seconds"`
-	HeadroomGB               *float64  `json:"headroom_gb"`
-	PhysicalUsedGB           *float64  `json:"physical_used_gb"`
-	MemoryPressure           *float64  `json:"memory_pressure"`
+	HeadroomGB               *float64  `json:"headroom_gb" jsonschema:"nullable"`
+	PhysicalUsedGB           *float64  `json:"physical_used_gb" jsonschema:"nullable"`
+	MemoryPressure           *float64  `json:"memory_pressure" jsonschema:"nullable"`
 	PressureUnit             string    `json:"pressure_unit"`
-	PressureAgeSeconds       *float64  `json:"pressure_age_seconds"`
-	SwapGrowthBytesPerSecond *float64  `json:"swap_growth_bytes_per_second"`
+	PressureAgeSeconds       *float64  `json:"pressure_age_seconds" jsonschema:"nullable"`
+	SwapGrowthBytesPerSecond *float64  `json:"swap_growth_bytes_per_second" jsonschema:"nullable"`
 }
 
 func (q *Queue) attemptStopObservation(machine, session string) *AttemptStopObservation {
@@ -156,15 +156,15 @@ func (q *Queue) attemptStopObservation(machine, session string) *AttemptStopObse
 }
 
 type WastedAttempt struct {
-	StopObservation *AttemptStopObservation `json:"stop_observation"`
+	StopObservation *AttemptStopObservation `json:"stop_observation" jsonschema:"nullable"`
 	JobID           string                  `json:"job_id"`
 	Attempt         int                     `json:"attempt"`
 	Host            string                  `json:"host"`
 	Kind            string                  `json:"kind"`
 	EndedAt         time.Time               `json:"ended_at"`
-	Suspect         *bool                   `json:"suspect"`
-	Pressure        *MemoryPressureEvidence `json:"pressure"`
-	HeadroomGB      *float64                `json:"headroom_gb"`
+	Suspect         *bool                   `json:"suspect" jsonschema:"nullable"`
+	Pressure        *MemoryPressureEvidence `json:"pressure" jsonschema:"nullable"`
+	HeadroomGB      *float64                `json:"headroom_gb" jsonschema:"nullable"`
 	IOStatus        string                  `json:"io_status"`
 }
 type EfficiencySignal struct {
@@ -173,7 +173,7 @@ type EfficiencySignal struct {
 	Metric          string   `json:"metric"`
 	Value           float64  `json:"value"`
 	BaselineSamples int      `json:"baseline_samples"`
-	UpperBound      *float64 `json:"upper_bound"`
+	UpperBound      *float64 `json:"upper_bound" jsonschema:"nullable"`
 	Active          bool     `json:"active"`
 }
 type EfficiencyReport struct {

@@ -307,6 +307,9 @@
         "execution_cause": {
           "$ref": "#/$defs/RuntimeCause"
         },
+        "forced": {
+          "type": "boolean"
+        },
         "interrupted": {
           "type": "boolean"
         },
@@ -336,6 +339,9 @@
         },
         "state": {
           "type": "string"
+        },
+        "stop_observation": {
+          "$ref": "#/$defs/AttemptStopObservation"
         }
       },
       "required": [
@@ -399,6 +405,81 @@
         "sampled_at",
         "age_seconds",
         "elapsed_seconds"
+      ],
+      "type": "object"
+    },
+    "AttemptStopObservation": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "headroom_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host_sample_age_seconds": {
+          "type": "number"
+        },
+        "memory_pressure": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "physical_used_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pressure_age_seconds": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pressure_unit": {
+          "type": "string"
+        },
+        "swap_growth_bytes_per_second": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "host_sample_age_seconds",
+        "headroom_gb",
+        "physical_used_gb",
+        "memory_pressure",
+        "pressure_unit",
+        "pressure_age_seconds",
+        "swap_growth_bytes_per_second"
       ],
       "type": "object"
     },
@@ -928,6 +1009,72 @@
       "required": [
         "name",
         "command"
+      ],
+      "type": "object"
+    },
+    "EfficiencyAllocation": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "device_covered_seconds": {
+          "type": "number"
+        },
+        "host": {
+          "type": "string"
+        },
+        "measured_cpu_seconds": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measured_device_gb_seconds": {
+          "type": "number"
+        },
+        "measured_memory_gb_seconds": {
+          "type": "number"
+        },
+        "memory_covered_seconds": {
+          "type": "number"
+        },
+        "reserved_covered_memory_gb_seconds": {
+          "type": "number"
+        },
+        "reserved_cpu_seconds": {
+          "type": "number"
+        },
+        "reserved_device_gb_seconds": {
+          "type": "number"
+        },
+        "reserved_memory_gb_seconds": {
+          "type": "number"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "work",
+        "basis",
+        "reserved_covered_memory_gb_seconds",
+        "reserved_device_gb_seconds",
+        "measured_device_gb_seconds",
+        "device_covered_seconds",
+        "reserved_memory_gb_seconds",
+        "measured_memory_gb_seconds",
+        "memory_covered_seconds",
+        "reserved_cpu_seconds",
+        "measured_cpu_seconds",
+        "seconds"
       ],
       "type": "object"
     },
@@ -1876,6 +2023,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "efficiency": {
+          "$ref": "#/$defs/JobEfficiency",
+          "x-contract": "diagnostic"
+        },
         "eligible_hosts": {
           "items": {
             "type": "string"
@@ -2402,6 +2553,53 @@
         "queued",
         "front",
         "checkpoint"
+      ],
+      "type": "object"
+    },
+    "JobEfficiency": {
+      "properties": {
+        "allocations": {
+          "items": {
+            "$ref": "#/$defs/EfficiencyAllocation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "blocker": {
+          "type": "string"
+        },
+        "rate": {
+          "$ref": "#/$defs/efficiencyRate"
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "wait_seconds": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "at",
+        "work",
+        "wait_seconds",
+        "rate"
       ],
       "type": "object"
     },
@@ -4836,6 +5034,63 @@
       "required": [
         "input_shape",
         "units"
+      ],
+      "type": "object"
+    },
+    "efficiencyRate": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "device_valid_until": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "measured_device_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measured_memory_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reserved_cpu_cores": {
+          "type": "number"
+        },
+        "reserved_device_gb": {
+          "type": "number"
+        },
+        "reserved_memory_gb": {
+          "type": "number"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reserved_device_gb",
+        "measured_device_gb",
+        "device_valid_until",
+        "reserved_memory_gb",
+        "reserved_cpu_cores",
+        "measured_memory_gb",
+        "valid_until"
       ],
       "type": "object"
     }
