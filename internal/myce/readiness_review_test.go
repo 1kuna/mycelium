@@ -246,3 +246,35 @@ func TestAdaptiveReadinessActivityAndContendedColdAlert(t *testing.T) {
 		}
 	}
 }
+
+type readinessRecordingEngine struct {
+	FakeEngine
+	clock *manualWorkerClock
+}
+
+func (e *readinessRecordingEngine) Load(ctx context.Context, m Model) error {
+	e.clock.Advance(time.Second)
+	readinessFromContext(ctx).advance()
+	return e.FakeEngine.Load(ctx, m)
+}
+func TestAdaptiveReadinessRuntimeUsesResolvedDeviceHistory(t *testing.T) {
+	clock := &manualWorkerClock{now: time.Unix(1, 0)}
+	host := m3Machine()
+	worker := Worker{Machine: host, Clock: clock, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return host.Devices, nil }}
+	dir := t.TempDir()
+	model := Model{Name: "binding", Engine: "fake", Platforms: []string{"fake"}, MemoryGB: 1}
+	m := &workerModel{device: "1", model: model, bound: &worker, attempt: "attempt", state: "loading", engine: &readinessRecordingEngine{clock: clock}, cancel: func() {}}
+	rt := &modelRuntime{worker: &worker, models: map[string]*workerModel{"binding": m}, memoryMachine: host, platform: "unresolved", dir: dir, clock: clock}
+	rt.load(context.Background(), m)
+	if m.state != "ready" {
+		t.Fatalf("fixture did not load: %s %s", m.state, m.err)
+	}
+	resolved := model
+	resolved.Device = "1"
+	if h := readReadinessHistory(modelReadinessFile(dir, resolved)); h.Load.Mean == 0 {
+		t.Fatal("resolved device did not receive successful load evidence")
+	}
+	if h := readReadinessHistory(modelReadinessFile(dir, model)); h.Load.Mean != 0 {
+		t.Fatal("unresolved host inherited device load evidence")
+	}
+}

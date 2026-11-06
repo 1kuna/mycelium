@@ -132,12 +132,27 @@ func (d *dockerAttempt) initializationFile(operation string, args []string) stri
 			identity = args[1]
 		}
 	} else {
-		for i, arg := range args {
+		stable := []string{operation}
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
 			if strings.Contains(arg, "@sha256:") {
-				identity = strings.Join(args[i:], "\x00")
+				stable = append(stable, args[i:]...)
 				break
 			}
+			switch arg {
+			case "--env", "-e", "--memory", "--memory-swap", "--cpus", "--user", "-u", "--entrypoint", "--workdir", "-w":
+				if i+1 < len(args) {
+					value := args[i+1]
+					i++
+					if (arg == "--env" || arg == "-e") && strings.HasPrefix(value, "MYCE_") {
+						continue
+					}
+					stable = append(stable, arg, value)
+				}
+			}
 		}
+		identity = strings.Join(stable, "\x00")
 	}
+
 	return readinessFile(d.dir, []string{d.state.Endpoint, operation, identity})
 }

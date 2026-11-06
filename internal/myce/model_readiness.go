@@ -276,9 +276,11 @@ func (p *readinessProgress) observeActivity(values ...*float64) {
 	}
 	moving := false
 	for i, v := range values {
-		if v != nil && validMemoryValue(*v) && *v > p.activityValues[i] {
+		if v != nil && validMemoryValue(*v) {
+			moving = moving || *v > p.activityValues[i]
+			// Memory can be reclaimed and grow again below an earlier peak.
+			// Each observed increase is activity, not just an all-time maximum.
 			p.activityValues[i] = *v
-			moving = true
 		}
 	}
 	unchanged := p.activitySamples > 0 && p.activityRevision == p.revision && !moving

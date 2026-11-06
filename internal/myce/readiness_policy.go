@@ -97,6 +97,8 @@ type readinessHistory struct {
 }
 
 type readinessProgress struct {
+	activitySource   func() (time.Time, []*float64)
+	activityAt       time.Time
 	osObserver       bool
 	activityValues   []float64
 	activityRevision uint64
@@ -146,6 +148,7 @@ func (p *readinessProgress) advance() {
 func (p *readinessProgress) state() (time.Duration, bool) {
 	p.mu.Lock()
 	source := p.source
+	activitySource := p.activitySource
 	p.mu.Unlock()
 	if source != nil {
 		value := source()
@@ -157,6 +160,19 @@ func (p *readinessProgress) state() (time.Duration, bool) {
 			p.advance()
 		}
 	}
+	if activitySource != nil {
+		at, values := activitySource()
+		p.mu.Lock()
+		fresh := !at.IsZero() && !at.Equal(p.activityAt)
+		if fresh {
+			p.activityAt = at
+		}
+		p.mu.Unlock()
+		if fresh {
+			p.observeActivity(values...)
+		}
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Allow a repeat of the longest observed inter-progress gap, plus its

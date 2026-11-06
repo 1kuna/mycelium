@@ -816,31 +816,6 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 }
 
 func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
-	identity := m.model
-	if m.recipe != nil {
-		identity.readinessRecipe = m.recipe.Key
-	}
-	platform, device := rt.platform, rt.device
-	if m.bound != nil {
-		platform, device = m.bound.Machine.GPU, m.bound.Machine.Device
-	}
-	identity.Platforms, identity.Device = []string{platform}, device
-	ctx, progress, finishReadiness := superviseModelLoad(ctx, identity, rt.dir, rt.clock)
-	rt.mu.Lock()
-	m.progress = progress
-	rt.mu.Unlock()
-	if rt.cache != nil {
-		progress.mu.Lock()
-		progress.source = func() int64 {
-			if v, ok := rt.cache.progress.Load(cacheKey(m.model)); ok {
-				return v.(CopyReport).Bytes
-			}
-			return 0
-		}
-		progress.mu.Unlock()
-	}
-	loadSucceeded := false
-	defer func() { finishReadiness(loadSucceeded) }()
 	if m.device != "" && rt.worker != nil {
 		bound := *rt.worker
 		if m.bound != nil {
@@ -871,6 +846,31 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 			return checkLaunchGate(parent)
 		})
 	}
+	identity := m.model
+	if m.recipe != nil {
+		identity.readinessRecipe = m.recipe.Key
+	}
+	platform, device := rt.platform, rt.device
+	if m.bound != nil {
+		platform, device = m.bound.Machine.GPU, m.bound.Machine.Device
+	}
+	identity.Platforms, identity.Device = []string{platform}, device
+	ctx, progress, finishReadiness := superviseModelLoad(ctx, identity, rt.dir, rt.clock)
+	rt.mu.Lock()
+	m.progress = progress
+	rt.mu.Unlock()
+	if rt.cache != nil {
+		progress.mu.Lock()
+		progress.source = func() int64 {
+			if v, ok := rt.cache.progress.Load(cacheKey(m.model)); ok {
+				return v.(CopyReport).Bytes
+			}
+			return 0
+		}
+		progress.mu.Unlock()
+	}
+	loadSucceeded := false
+	defer func() { finishReadiness(loadSucceeded) }()
 	if e := rt.checkLoadMemory(ctx, m); e != nil {
 		m.cancel()
 		rt.mu.Lock()
