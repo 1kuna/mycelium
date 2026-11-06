@@ -353,6 +353,12 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				s.state.Result.InputsStagedAt = s.state.Job.InputsStagedAt
 			}
 		}
+		if p != nil {
+			report.Resources = p.resourceSnapshot()
+		}
+		if s.state.Result != nil && s.state.Result.Resources != nil {
+			report.Resources = s.state.Result.Resources
+		}
 		report.ApplicationProgress = readApplicationProgress(s.dir, a.job, w.Clock.Now())
 		diagnostics := Machine{CheckpointUnavailable: s.checkpointUnavailable, FileTransferError: s.fileError}
 		if p != nil && p.docker != nil {
@@ -844,6 +850,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	}
 	defer func() { cancel(); health.wait() }()
 	var qualification checkpointIO[bool]
+	var ioProbe checkpointIO[*IOPressure]
 	source := w.SharedPressureSource
 	if source == nil {
 		source = localSharedHostPressure
@@ -1223,6 +1230,15 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			// snapshot and age it with their own launch-time clock read.
 			rt.batchHostMemorySamples = w.hostMemorySamples
 			rt.mu.Unlock()
+			m.IOPressure, _ = ioProbe.run("host-io-pressure", func() (*IOPressure, error) {
+				if workerIOPressure == nil {
+					return &IOPressure{SampledAt: w.Clock.Now(), Unavailable: "unsupported_os"}, nil
+				}
+				return workerIOPressure(w.Clock), nil
+			})
+			if m.IOPressure != nil {
+				m.IOPressure.AgeSeconds = max(0, w.Clock.Now().Sub(m.IOPressure.SampledAt).Seconds())
+			}
 			m.HostHealth = health.snapshot(m.DiskVolumes)
 			applyHostMountHealth(w, &m)
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)

@@ -94,6 +94,38 @@
       ],
       "type": "object"
     },
+    "AttemptCPUTime": {
+      "properties": {
+        "lower_bound": {
+          "type": "boolean"
+        },
+        "periods": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "system_seconds": {
+          "type": "number"
+        },
+        "throttled_periods": {
+          "type": "integer"
+        },
+        "throttled_seconds": {
+          "type": "number"
+        },
+        "unavailable": {
+          "type": "string"
+        },
+        "usage_seconds": {
+          "type": "number"
+        },
+        "user_seconds": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
     "AttemptDiagnostics": {
       "properties": {
         "files": {
@@ -103,6 +135,29 @@
       "required": [
         "files"
       ],
+      "type": "object"
+    },
+    "AttemptIO": {
+      "properties": {
+        "pressure": {
+          "$ref": "#/$defs/IOPressure"
+        },
+        "read_bytes": {
+          "type": "integer"
+        },
+        "read_ops": {
+          "type": "integer"
+        },
+        "unavailable": {
+          "type": "string"
+        },
+        "write_bytes": {
+          "type": "integer"
+        },
+        "write_ops": {
+          "type": "integer"
+        }
+      },
       "type": "object"
     },
     "AttemptLiveness": {
@@ -289,6 +344,61 @@
         "session",
         "ended_at",
         "state"
+      ],
+      "type": "object"
+    },
+    "AttemptResourceFacts": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "resources": {
+          "$ref": "#/$defs/AttemptResources"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "machine",
+        "session",
+        "resources"
+      ],
+      "type": "object"
+    },
+    "AttemptResources": {
+      "properties": {
+        "age_seconds": {
+          "type": "number"
+        },
+        "cpu": {
+          "$ref": "#/$defs/AttemptCPUTime"
+        },
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "io": {
+          "$ref": "#/$defs/AttemptIO"
+        },
+        "received_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "sampled_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cpu",
+        "io",
+        "sampled_at",
+        "age_seconds",
+        "elapsed_seconds"
       ],
       "type": "object"
     },
@@ -1617,6 +1727,35 @@
       ],
       "type": "object"
     },
+    "IOPressure": {
+      "properties": {
+        "age_seconds": {
+          "type": "number"
+        },
+        "full": {
+          "$ref": "#/$defs/PressureStall"
+        },
+        "received_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "sampled_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "some": {
+          "$ref": "#/$defs/PressureStall"
+        },
+        "unavailable": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sampled_at",
+        "age_seconds"
+      ],
+      "type": "object"
+    },
     "Job": {
       "properties": {
         "allocated_devices": {
@@ -2036,6 +2175,23 @@
             "array",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "resource_attempts": {
+          "description": "Per-attempt cumulative CPU and block I/O counters, with latest I/O PSI. Exact attempt/machine/session fenced. Retains first and latest 31 rows, matching memory facts; resource_attempts_dropped counts evictions. Missing counters are unknown. Process-tree CPU is a sampled lower bound. Observational only.",
+          "items": {
+            "$ref": "#/$defs/AttemptResourceFacts"
+          },
+          "maxItems": 32,
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "resource_attempts_dropped": {
+          "minimum": 0,
+          "type": "integer",
           "x-contract": "diagnostic"
         },
         "resources": {
@@ -3184,6 +3340,29 @@
         "machine",
         "session",
         "device"
+      ],
+      "type": "object"
+    },
+    "PressureStall": {
+      "properties": {
+        "avg10": {
+          "type": "number"
+        },
+        "avg300": {
+          "type": "number"
+        },
+        "avg60": {
+          "type": "number"
+        },
+        "total_usec": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "avg10",
+        "avg60",
+        "avg300",
+        "total_usec"
       ],
       "type": "object"
     },

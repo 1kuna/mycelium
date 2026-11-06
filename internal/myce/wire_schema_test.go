@@ -117,6 +117,9 @@ func generatedJobSchema(t *testing.T) []byte {
 	job["attempt"].(map[string]any)["minimum"] = 0
 	job["attempt_history"].(map[string]any)["maxItems"] = attemptHistoryLimit
 	job["attempt_history"].(map[string]any)["description"] = "Latest four ended attempts, persisted with the job. Existing classifier facts and queue decisions, not release proof or retry charges. Older planned requeues roll off; historical causes are not reconstructed."
+	job["resource_attempts"].(map[string]any)["maxItems"] = memoryAttemptsLimit
+	job["resource_attempts"].(map[string]any)["description"] = "Per-attempt cumulative CPU and block I/O counters, with latest I/O PSI. Exact attempt/machine/session fenced. Retains first and latest 31 rows, matching memory facts; resource_attempts_dropped counts evictions. Missing counters are unknown. Process-tree CPU is a sampled lower bound. Observational only."
+	job["resource_attempts_dropped"].(map[string]any)["minimum"] = 0
 	job["memory_attempts"].(map[string]any)["maxItems"] = memoryAttemptsLimit
 	job["memory_attempts"].(map[string]any)["description"] = "Persisted memory facts, independent of learning and the four-entry diagnostic history. Retains the first and latest 31 rows; memory_attempts_dropped counts evicted rows. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed."
 	job["memory_attempts_dropped"].(map[string]any)["minimum"] = 0

@@ -92,6 +92,9 @@ func TestRunDevEndToEnd(t *testing.T) {
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "done" {
 		t.Fatal("real command effect missing")
 	}
+	t.Run("tagged-synthetic-resource-probes", func(t *testing.T) {
+		assertSyntheticResourceTelemetry(t, ctx, client, strings.Fields(string(output))[0])
+	})
 	// Profiles upload a frozen source and explicit inputs even with NAS checkpoints.
 	profileDir := filepath.Join(root, ".mycelium", "profiles")
 	if err := os.MkdirAll(profileDir, 0700); err != nil {

@@ -28,6 +28,9 @@ type WorkerProbeDefaults struct {
 	ProcessMemory func() *processMemoryProbe
 	// Nil disables process-tree CPU observation; cgroup accounting remains available.
 	ProcessCPU func(context.Context, int, string) (float64, string, error)
+	// Nil disables host I/O pressure and sampled per-attempt process-tree CPU.
+	IOPressure  func(Clock) *IOPressure
+	ResourceCPU func(context.Context, map[int]string, map[string]float64) (float64, error)
 }
 
 // SetWorkerProbeDefaults installs complete defaults during process setup.
@@ -46,6 +49,8 @@ func SetWorkerProbeDefaults(p WorkerProbeDefaults) {
 	workerProcessMemory = p.ProcessMemory
 	workerMemoryRSS = p.MemoryRSS
 	workerLivenessCPU = p.ProcessCPU
+	workerIOPressure = p.IOPressure
+	workerResourceCPU = p.ResourceCPU
 	extensionIdentityProbe = p.Identity
 	if p.DeviceFaults != nil {
 		workerDeviceFaultSource = p.DeviceFaults

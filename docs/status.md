@@ -302,6 +302,44 @@ version and commit from its check-in. Missing worker releases mean unknown
 embed the source commit even with Go VCS stamping disabled. Development builds
 use Go's VCS revision when available, otherwise `unknown`.
 
+Worker CPU and I/O telemetry (next release) appears on job GET and status in
+`resource_attempts`: exact attempt, machine, session and `resources`. This retains
+the first and latest 31 attempts like memory facts; `resource_attempts_dropped`
+counts evictions. Running heartbeats and final results update the same row, so
+lost attempts retain the last observation. Missing rows/counters mean unknown.
+These observations do not change CPU or I/O admission.
+
+`resources.cpu` reports cumulative `usage_seconds`, and Linux cgroup v2 also
+reports `user_seconds`, `system_seconds`, `periods`, `throttled_periods` and
+`throttled_seconds` where the controller exposes them. The parent includes all
+member cgroups once. macOS uses custody-fenced process-tree CPU inventories,
+retains exited observed lifetimes and supplements the root with exit rusage.
+`source: sampled_process_tree` and `lower_bound: true` identify its limits:
+short-lived unseen children and CPU between observations can be missed. Missing
+user/system or throttling counters on this path remain unknown.
+
+`resources.io` reports summed cgroup `read_bytes`, `write_bytes`, `read_ops`,
+`write_ops`, and `pressure.some` / `pressure.full` PSI (`avg10`, `avg60`, `avg300`
+percent and cumulative `total_usec`). Device identities are omitted. An empty
+Linux `io.stat` is a measured zero; absent/incomplete files are unavailable.
+Machine `io_pressure` reads host `/proc/pressure/io` on every heartbeat. No
+comparable host/attempt PSI or cgroup block-I/O attribution is implemented on
+macOS: it explicitly reports `unavailable: unsupported_os`. Other unavailable
+reasons distinguish missing local cgroups, failed reads and invalid counters.
+
+Worker `sampled_at`, worker `age_seconds`, and queue `received_at` distinguish
+sample time from receipt without assuming synchronized clocks. Host status ages
+the reading after receipt. Attempt `elapsed_seconds` spans its observer lifetime,
+including teardown; its counters include wrapper/preparation work in the attempt
+boundary. The final result is sampled before the cgroup disappears. An unavailable
+final CPU read retains its last observed value as an explicit lower bound.
+
+The `X-Myce-Resource-Telemetry: attempt-resources-v1` response header negotiates
+support. New workers initially omit additive telemetry JSON; after negotiation
+they send it on check-in and result. Strict old queues, including a downgrade,
+receive the old shape, with local buffered results preserved. Old workers keep
+working with new queues; their missing telemetry remains unknown.
+
 Each hypha shows its capability profile: CPU count, system memory, accelerator
 memory, shared or separate memory, and local storage. Missing measurements say
 unknown. Extension reports say which kind of work or program is qualified on

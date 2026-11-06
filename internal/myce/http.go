@@ -447,6 +447,9 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			respond(w, nil, &HTTPError{Status: 405, Code: "request_method_invalid", Message: rejectionMessages["request_method_invalid"]})
 			return
 		}
+		if workerProtocolEndpoint(r.URL.Path) {
+			w.Header().Set(resourceProtocolHeader, resourceProtocol)
+		}
 		finishObservation, admitted := observationLimit.admit(w, r)
 		if !admitted {
 			jobGets.recordRejection(r)
@@ -586,16 +589,28 @@ func (q *Queue) Run(ctx context.Context) error {
 }
 
 type Client struct {
-	URL   string
-	Token string
-	HTTP  *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
+	resourceWire *resourceWire
+	URL          string
+	Token        string
+	HTTP         *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
 	transferIdle time.Duration
 }
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
+	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
+	in, resourceFields := resourceWireInput(in, supported)
 	err := c.callOnce(ctx, method, path, in, out)
 	var api *HTTPError
+	if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
+		// Strict JSON rejection occurs before mutation. Retry only once, with
+		// additive telemetry removed; retain the original durable local result.
+		if c.resourceWire != nil {
+			c.resourceWire.supported.Store(false)
+		}
+		legacy, _ := resourceWireInput(in, false)
+		return c.callOnce(ctx, method, path, legacy, out)
+	}
 	// Ordinary idempotent reads get one refill retry. Wait loops own repeated
 	// backoff; worker control and mutations never silently replay.
 	if (method == "GET" || method == "HEAD") && errors.As(err, &api) && api.Status == 429 && api.Code == "client_rate_limited" {
@@ -635,6 +650,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		return err
 	}
 	defer res.Body.Close()
+	if c.resourceWire != nil && workerProtocolEndpoint(path) {
+		c.resourceWire.supported.Store(res.Header.Get(resourceProtocolHeader) == resourceProtocol)
+	}
 	if support, ok := ctx.Value(waitCapabilityKey{}).(*bool); ok {
 		*support = res.Header.Get("X-Myce-Wait") == "batch-v1"
 	}

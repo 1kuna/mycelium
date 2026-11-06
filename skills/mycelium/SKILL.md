@@ -139,6 +139,13 @@ for the response age. Inspection and filtered/full status take a fresh capture;
 default status can reuse a generation for up to one second, with immediate
 terminal/release invalidation.
 
+From the next collector release, job GET/status `resource_attempts` reports
+cumulative CPU time, block I/O and latest attempt PSI; machine `io_pressure`
+reports host PSI. Read the exact attempt/session, source, age and unavailable
+reason. Missing means unknown. macOS sampled CPU is a lower bound and I/O PSI
+is explicitly unavailable. These observations do not grant capacity or change
+admission. See [CPU and I/O fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
+
 If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
 repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium

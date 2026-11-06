@@ -324,6 +324,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	if w.control != nil {
 		w.control.set(p)
 	}
+	p.resources = w.observeResources(p, memory)
 	// A port-collision retry replaces the supervisor and its process group.
 	finishMemory := w.observeAttemptMemory(memory, j, func() []int {
 		p.mu.Lock()
@@ -376,6 +377,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		forced = forced || p.killed
 		p.mu.Unlock()
 		peak := finishMemory()
+		resources := withExitCPU(p.resources.finish(), g.supervisor.ProcessState)
 		oom := g.memoryFailure()
 		// A failed graceful drain retains custody. Do not bypass it through
 		// memory.cleanup's unconditional cgroup.kill on the error path.
@@ -389,7 +391,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		}
 		persist := errors.Join(syncCommandOutput(output), output.Close())
 		// Cleanup uncertainty holds custody, not the successful payload result.
-		r := Result{MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
+		r := Result{Resources: resources, MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
 		if runErr != nil {
 			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
