@@ -248,8 +248,6 @@ func (m *availabilityMonitor) refresh(ctx context.Context, source OwnerSignalSou
 
 func (m *availabilityMonitor) run(ctx context.Context, source OwnerSignalSource, wake chan<- struct{}) {
 	m.lane.clock = m.policy.clock
-	ticker := time.NewTicker(m.lane.timing.controlPeriod())
-	defer ticker.Stop()
 	for {
 		m.refresh(ctx, source)
 		m.snapshot() // stale facts cancel offline work even while a probe is stuck
@@ -257,12 +255,15 @@ func (m *availabilityMonitor) run(ctx context.Context, source OwnerSignalSource,
 		case wake <- struct{}{}:
 		default:
 		}
+		timer := time.NewTimer(m.lane.waitDuration())
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		case <-m.lane.done:
 		}
+		timer.Stop()
 	}
 }
 

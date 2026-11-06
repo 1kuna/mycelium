@@ -93,7 +93,7 @@ func (p *probeTiming) observe(start, end time.Time, changed bool) *ProbeObservat
 	}
 	valid := period + max(cost, p.cost.upper())
 	result := &ProbeObservation{PeriodSeconds: period, CostSeconds: cost, ValidSeconds: valid}
-	p.next = end.Add(time.Duration(period * float64(time.Second)))
+	p.next = start.Add(time.Duration(period * float64(time.Second)))
 	return result
 }
 
@@ -167,4 +167,41 @@ func (p *hostProbeLane[T]) fresh(now time.Time) bool {
 // resolution; this is a runtime mechanism, not a calibrated host freshness age.
 func hostProbeControlPeriod(interval time.Duration) time.Duration {
 	return max(interval, 100*time.Millisecond)
+}
+
+// waitDuration wakes at the measured due time, rather than rounding up to a
+// control tick. While an OS call is pending, control still checks expiry.
+func (p *hostProbeLane[T]) waitDuration() time.Duration {
+	wait := p.timing.controlPeriod()
+	if p.pending == nil && p.clock != nil {
+		return min(wait, max(0, p.timing.next.Sub(p.clock.Now())))
+	}
+	return wait
+}
+
+// Include time spent preparing a check-in or waiting behind queue transactions.
+// Worker timestamps are never trusted; receipt and processing use Queue.Clock.
+func ageHostObservations(m *Machine, received, processed time.Time) {
+	elapsed := processed.Sub(received).Seconds()
+	if elapsed < 0 {
+		if a := machineAvailability(m); a != nil && a.Probe != nil {
+			a.AgeSeconds = -1
+		}
+		if p := m.SharedHostPressure; p != nil {
+			p.AgeSeconds = -1
+		}
+		if h := m.HostHealth; h != nil && h.Probe != nil {
+			h.AgeSeconds = -1
+		}
+		return
+	}
+	if a := machineAvailability(m); a != nil && a.Probe != nil {
+		a.AgeSeconds += elapsed
+	}
+	if p := m.SharedHostPressure; p != nil {
+		p.AgeSeconds += elapsed
+	}
+	if h := m.HostHealth; h != nil && h.Probe != nil {
+		h.AgeSeconds += elapsed
+	}
 }

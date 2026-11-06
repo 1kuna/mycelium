@@ -3525,7 +3525,8 @@ readings back at its mean recover it. OS memory warnings remain immediate.
 
 Probe cadence and freshness follow this host's cost, variation and signal changes.
 Missing, failed or stale observations remain unknown and withhold new admission.
-Queue contact cannot indefinitely renew them. The first latency interruption
+Negotiated observations include queue processing delay; queue contact cannot
+renew them. The first latency interruption
 starts a job/host hold that requires a measured quiet recovery span. See
 [adaptive host observations](host-probes.md) for timing, protocol compatibility,
 remaining inventory and native qualification limits.

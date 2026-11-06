@@ -16,7 +16,9 @@ size are not proxies for latency: their actual effect on a probe is measured.
 The observation period is the greatest of the existing control delivery period,
 one probe plus its proportional CPU share, and the geometric mean of probe cost
 and time without a change divided by CPU capacity. With measured changes, two
-observations per change constrain the quiet-period term. A slower probe is never
+observations per change constrain the quiet-period term. Periods run from the
+original start; timers wake at the actual due time, including between control
+ticks. Inventory progresses independently of HTTP check-ins. A slower probe is never
 scheduled concurrently with itself. An uncancellable kernel call retains that
 one lane; it neither stalls heartbeat/control nor accumulates replacement calls.
 The lifecycle context cancels subprocesses; there is no fixed two-second owner
@@ -36,11 +38,11 @@ removes it immediately. Inventory retains stable device identity, but stale or
 failed capacity cannot qualify work; partial driver failures preserve fresh
 healthy siblings. Direct launch ownership/identity checks remain mandatory.
 
-The queue translates worker-local age to its own injected clock. Pressure can
-reuse matching-session check-in contact, bounded by the existing transport
-contact policy, but even repeated contact cannot extend an observation beyond
-its original validity plus that policy. Owner age is also carried explicitly;
-worker wall-clock skew cannot renew it.
+The queue translates worker-local age at request receipt to its own injected
+clock and includes preparation/transaction waiting time. New observations expire
+at their frozen validity even while check-in contact remains healthy. Owner age
+is carried explicitly; worker wall-clock skew cannot renew it. Older pressure
+reports without timing evidence retain the existing bounded contact policy.
 
 ## Owner availability and interference
 
@@ -57,6 +59,8 @@ A value beyond its prediction band yields; recovery requires readings back at
 the baseline mean. Adverse observations cannot train themselves into a healthy
 reference. The first reference cannot prove that a host was historically idle;
 OS warning/critical memory levels and measured memory stalls protect cold start.
+Missing observations retain session learning and the adverse-episode latch;
+only fresh healthy observations can establish recovery.
 No 20/5ms wake or 1/0.1% PSI bands remain in this path. The wake probe uses one
 OS timer, with its wait proportional to measured sensor cost and CPU capacity,
 instead of twenty fixed five-millisecond ticks.
@@ -72,7 +76,9 @@ accounting and cancellation precedence remain authoritative.
 
 `host-probe-v1` is negotiated before additive observation fields are sent.
 Strict older queues receive the legacy shape; a downgrade permits the existing
-single legacy retry. Local owner cancellation still applies. Older workers retain
+single legacy retry. Unknown health and confirmed drains use reversible
+availability withholding rather than the permanent worker leave signal. Local
+owner cancellation still applies. Older workers retain
 their legacy five-second cadence/fifteen-second freshness interpretation until
 upgraded; their absence of timing evidence cannot be interpreted as a learned
 horizon. Previously persisted fixed job cooldowns remain readable.

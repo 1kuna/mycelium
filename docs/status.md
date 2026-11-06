@@ -72,8 +72,8 @@ History serialization/fsync runs outside the mutex used by heartbeat snapshots.
 
 Workers send the additive health fields only after the queue advertises
 `host_hygiene_protocol: host-hygiene-v1`. A strict older queue receives the
-legacy shape; local evidence still persists and a confirmed local drain uses
-the existing leaving signal. A queue downgrade retries the legacy shape once
+legacy shape; local evidence still persists and unknown health or a confirmed
+local drain uses reversible availability withholding. A queue downgrade retries the legacy shape once
 after a strict-decoder rejection, preserving session and attempt custody.
 
 Drains withhold new command, model and preparation launches without changing
@@ -1295,8 +1295,8 @@ observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
 On negotiated `host-probe-v1` workers, `shared_host_pressure.probe` reports
 measured period/cost and frozen validity in seconds. Local sample age must remain
-below that validity. Bounded matching-session contact can discount queue delay,
-but cannot renew the original observation indefinitely. `availability.probe` and
+below that validity, including time waiting behind queue transactions.
+Matching-session contact cannot renew a negotiated observation. `availability.probe` and
 `availability.age_seconds` similarly preserve owner observation age across clock
 skew. `host_health.probe` applies the same frozen validity to health evidence;
 `host_probe_unknown` withholds admission when it expires or the source fails.
@@ -1304,7 +1304,7 @@ Older workers retain legacy age rules until upgraded. See
 [adaptive host observations](host-probes.md).
 
 Host maintenance `healthy`/`state` and fleet `host_states` use the same pressure
-and bounded contact facts. Normal owner-pressure yield remains temporary
+and freshness facts (legacy workers retain bounded contact credit). Normal owner-pressure yield remains temporary
 occupancy, without an infrastructure-failure alert; missing/stale evidence is
 unhealthy even with a yield latch set. Detached fleet snapshots freeze contact at snapshot
 `now`; the ordinary one-second status cache can still show an older observation

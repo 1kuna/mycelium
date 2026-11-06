@@ -1441,6 +1441,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			return err
 		}
 		q.acceptExtensionQualifications(&m)
+		ageHostObservations(&m, memoryReceivedAt, q.clock.Now())
 		acceptHostAvailability(&m, q.clock.Now())
 		q.acceptSharedPressure(&m, old)
 		m.IOPressure = safeIOPressure(m.IOPressure)

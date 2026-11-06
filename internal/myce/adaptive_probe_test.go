@@ -136,7 +136,7 @@ func TestAdaptiveProbeHealthFreshnessAndLegacyDrain(t *testing.T) {
 	}
 	m.HostHealth.AgeSeconds = 3
 	legacy := legacyHostProbeCheckin(Checkin{Machine: m})
-	if !legacy.Machine.Leaving || legacy.Machine.HostHealth.Probe != nil || m.HostHealth.Probe == nil {
+	if legacy.Machine.Leaving || !availabilityBlocked(&legacy.Machine) || legacy.Machine.HostHealth.DrainReason != "host_probe_unknown" || legacy.Machine.HostHealth.Probe != nil || m.HostHealth.Probe == nil {
 		t.Fatal("downgrade lost unknown-health drain or changed local facts")
 	}
 	m.HostHealth.AgeSeconds = 0
@@ -263,5 +263,143 @@ func TestAdaptiveProbeHostRelativePressure(t *testing.T) {
 		if q.s.Machines[m.ID].SharedHostYieldReason != "" {
 			t.Fatal("own baseline did not recover")
 		}
+	}
+}
+
+// Nonzero probe cost must not round each next scan up to a control tick and
+// repeatedly cancel healthy owner work or remove inventory capacity.
+func TestAdaptiveProbeHealthyCyclesKeepEvidence(t *testing.T) {
+	clock := &workerFakeClock{now: time.Unix(1000, 0)}
+	lane := hostProbeLane[OwnerSignals]{clock: clock, timing: probeTiming{base: time.Second, cores: 2}}
+	policy := availabilityPolicy{clock: clock, daily: true}
+	source := func(context.Context) (OwnerSignals, error) {
+		clock.Advance(10 * time.Millisecond)
+		return idleSignals(), nil
+	}
+	for i := 0; i < 8; i++ {
+		if i > 0 {
+			wait := lane.waitDuration()
+			if wait <= 0 || wait >= time.Second {
+				t.Fatal("scan did not wake at its actual due time", wait)
+			}
+			clock.Advance(wait)
+			if !lane.fresh(clock.Now()) {
+				t.Fatal("healthy observation expired before replacement started", i)
+			}
+		}
+		lane.step(t.Context(), source)
+		await(t, func() bool { return len(lane.pending) == 1 })
+		if i > 0 && !lane.fresh(clock.Now()) {
+			t.Fatal("healthy observation expired while ordinary replacement completed", i)
+		}
+		lane.step(t.Context(), source)
+		policy.probe = lane.observation
+		if !lane.fresh(clock.Now()) || !policy.evaluate(lane.value).Available {
+			t.Fatal("ordinary cost caused owner availability flapping", i)
+		}
+	}
+}
+
+func TestAdaptiveProbeUnknownHealthNegotiationRecovers(t *testing.T) {
+	q, clock := fixture(t)
+	handler := API{q, "test"}.Handler()
+	legacy := false
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if !legacy {
+			handler.ServeHTTP(rw, r)
+			return
+		}
+		data, _ := io.ReadAll(r.Body)
+		var c Checkin
+		_ = json.Unmarshal(data, &c)
+		if c.Machine.HostHealth != nil || hasHostProbeFields(c) || c.ToolInventoryHash != "" {
+			rw.WriteHeader(400)
+			_ = json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(data))
+		recorded := httptest.NewRecorder()
+		handler.ServeHTTP(recorded, r)
+		var reply Reply
+		_ = json.Unmarshal(recorded.Body.Bytes(), &reply)
+		reply.HostProbeProtocol, reply.HostHygieneProtocol, reply.ToolInventoryProtocol, reply.HostCollectionProtocol = "", "", "", ""
+		rw.WriteHeader(recorded.Code)
+		_ = json.NewEncoder(rw).Encode(reply)
+	}))
+	defer server.Close()
+	m := machine("health-recovery", "fake")
+	w := Worker{Clock: clock, Client: Client{URL: server.URL, Token: "test"}, toolReport: &workerToolReport{}, hygieneWire: &workerHygieneWire{}}
+	for _, downgrade := range []bool{false, true} {
+		legacy = downgrade
+		m.HostHealth = &HostHealth{Probe: &ProbeObservation{}}
+		for _, healthy := range []bool{false, true} {
+			if healthy {
+				m.HostHealth = &HostHealth{Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}, History: []HostHealthSample{{At: clock.Now()}}}
+			}
+			reply, err := w.checkin(t.Context(), Checkin{Machine: m})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored := q.s.Machines[m.ID]
+			if reply.Leave || stored.Leaving {
+				t.Fatal("temporary health uncertainty latched permanent leave", downgrade, healthy)
+			}
+			blocked := availabilityBlocked(stored) || q.hostHygieneReason(stored) != ""
+			if blocked == healthy {
+				t.Fatal("health admission failed to withhold or recover", downgrade, healthy, blocked)
+			}
+		}
+	}
+}
+
+func TestAdaptiveProbeMissingPressurePreservesBaseline(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedHostFixture(t, q)
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+	for i, wake := range []float64{0, 50, -1, 50, 0} {
+		clock.Advance(time.Second)
+		m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, WakeDelayMS: wake}
+		if wake < 0 {
+			m.SharedHostPressure = nil
+		}
+		check(t, q, m, nil)
+		stored := q.s.Machines[m.ID]
+		if i >= 1 && i <= 3 && stored.SharedHostYieldReason != "shared host owner scheduling latency" {
+			t.Fatal("missing evidence erased adverse-episode latch", i)
+		}
+		if stored.SharedHostPressure.Learning.Wake.Mean != 0 {
+			t.Fatal("adverse value trained healthy baseline", i)
+		}
+		if i == 4 && stored.SharedHostYieldReason != "" {
+			t.Fatal("fresh healthy evidence did not recover")
+		}
+	}
+}
+
+func TestAdaptiveProbeQueueDelayCannotRenewEvidence(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedHostFixture(t, q)
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+	check(t, q, m, nil)
+	observation := &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}
+	m = profileAvailability(m, Availability{Mode: "daily", Available: true, Signals: idleSignals(), Probe: observation})
+	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, Probe: observation}
+	m.HostHealth = &HostHealth{Probe: observation, History: []HostHealthSample{{At: clock.Now()}}}
+	q.mu.Lock()
+	done := make(chan error, 1)
+	go func() { _, err := q.Checkin(Checkin{Machine: m}); done <- err }()
+	await(t, func() bool {
+		q.contactMu.Lock()
+		defer q.contactMu.Unlock()
+		return len(q.contacts[m.ID].pending) > 0
+	})
+	clock.Advance(3 * time.Second)
+	q.mu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	stored := q.s.Machines[m.ID]
+	if hostAvailabilityFresh(stored, clock.Now()) || machineAvailability(stored).Available || q.sharedPressureFresh(stored) || q.hostHygieneReason(stored) != "host_probe_unknown" {
+		t.Fatal("queue delay renewed an expired observation")
 	}
 }

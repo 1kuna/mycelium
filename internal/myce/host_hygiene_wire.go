@@ -33,8 +33,8 @@ func (w Worker) hygieneCheckin(c Checkin) Checkin {
 func (w Worker) legacyHygieneCheckin(c Checkin) Checkin {
 	c = legacyHostProbeCheckin(c)
 	if c.Machine.HostHealth != nil && c.Machine.HostHealth.DrainReason != "" {
-		// The old leaving signal withholds admission without releasing custody.
-		c.Machine.Leaving = true
+		// Availability is reversible; Leaving is a terminal worker lifecycle signal.
+		c = withholdLegacyHostAdmission(c)
 	}
 	c.Machine.HostHealth = nil
 	c.Machine.HygieneCollection = nil
@@ -57,10 +57,11 @@ func hasHygieneWireFields(c Checkin) bool {
 // and the exact attempt/session remain authoritative during a queue downgrade.
 func legacyHostProbeCheckin(c Checkin) Checkin {
 	if h := c.Machine.HostHealth; h != nil {
-		if !hostHealthEvidenceValid(h, 0) {
-			c.Machine.Leaving = true
-		}
 		copy := *h
+		if !hostHealthEvidenceValid(h, 0) {
+			copy.DrainReason = "host_probe_unknown"
+			c = withholdLegacyHostAdmission(c)
+		}
 		copy.Probe = nil
 		c.Machine.HostHealth = &copy
 	}
@@ -84,4 +85,19 @@ func hasHostProbeFields(c Checkin) bool {
 	a := machineAvailability(&c.Machine)
 	h := c.Machine.HostHealth
 	return p != nil && (p.Probe != nil || p.Learning != nil) || a != nil && a.Probe != nil || h != nil && h.Probe != nil
+}
+
+func withholdLegacyHostAdmission(c Checkin) Checkin {
+	profile := CapabilityProfile{}
+	if c.Machine.CapabilityProfile != nil {
+		profile = *c.Machine.CapabilityProfile
+	}
+	a := Availability{Mode: "dedicated"}
+	if profile.Availability != nil {
+		a = *profile.Availability
+	}
+	a.Available, a.Reason = false, "host health observation unavailable"
+	profile.Availability = &a
+	c.Machine.CapabilityProfile = &profile
+	return c
 }

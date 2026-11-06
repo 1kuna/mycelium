@@ -51,19 +51,21 @@ func (q *Queue) acceptSharedPressure(m, old *Machine) {
 		m.SharedHostPressure = nil
 		return
 	}
-	if old != nil {
+	if old != nil && old.Session == m.Session {
 		m.SharedHostYieldReason = old.SharedHostYieldReason
 	}
-	p := m.SharedHostPressure
-	if !validSharedPressure(p) {
-		m.SharedHostPressure = nil
-		return
-	}
-	p.ReceivedAt = q.clock.Now().Add(-time.Duration(p.AgeSeconds * float64(time.Second)))
 	learned := sharedPressureLearning{}
 	if old != nil && old.Session == m.Session && old.SharedHostPressure != nil && old.SharedHostPressure.Learning != nil {
 		learned = *old.SharedHostPressure.Learning
 	}
+	p := m.SharedHostPressure
+	if !validSharedPressure(p) {
+		// Missing evidence invalidates admission, not session learning. Keep a
+		// deliberately invalid observation carrying only queue-owned history.
+		m.SharedHostPressure = &SharedHostPressure{Learning: &learned}
+		return
+	}
+	p.ReceivedAt = q.clock.Now().Add(-time.Duration(p.AgeSeconds * float64(time.Second)))
 	// Only fresh observations can train, and an adverse episode freezes the
 	// healthy baseline. OS warning/critical levels remain physical signals.
 	first := learned.At.IsZero()
@@ -104,7 +106,10 @@ func (q *Queue) sharedPressureFresh(m *Machine) bool {
 	if !validSharedPressure(p) || p.ReceivedAt.After(now) {
 		return false
 	}
-	// Reuse bounded matching-session contact during queue delay. Successive
+	if p.Probe != nil {
+		return now.Sub(p.ReceivedAt) < p.Probe.freshness()
+	}
+	// Legacy protocol: reuse bounded matching-session contact during queue delay. Successive
 	// pending requests must never extend one observation beyond that budget.
 	reportAt := p.ReceivedAt.Add(time.Duration(p.AgeSeconds * float64(time.Second)))
 	contact := maxTime(reportAt, q.lastContact(m, now))
@@ -264,21 +269,24 @@ func (m *sharedPressureMonitor) sample(ctx context.Context) {
 }
 
 func (m *sharedPressureMonitor) run(ctx context.Context) {
-	tick := time.NewTicker(m.lane.timing.controlPeriod())
-	defer tick.Stop()
 	for {
 		m.sample(ctx)
 		m.mu.Lock()
 		done := m.lane.done
+		wait := m.lane.waitDuration()
 		if !m.enabled {
 			done = nil
+			wait = m.lane.timing.controlPeriod()
 		}
 		m.mu.Unlock()
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-tick.C:
+		case <-timer.C:
 		case <-done:
 		}
+		timer.Stop()
 	}
 }
