@@ -24,8 +24,8 @@ func TestFileRetention(t *testing.T) {
 	if err := q.ConfigureFileRetention(time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.ConfigureFileRetention(0); err == nil {
-		t.Fatal("nonpositive retention accepted")
+	if err := q.ConfigureFileRetention(-time.Nanosecond); err == nil {
+		t.Fatal("negative retention accepted")
 	}
 	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer api.Close()
@@ -134,7 +134,7 @@ func TestFileRetentionSubmissionFence(t *testing.T) {
 	if err := q.Cancel(first.ID); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	if err := q.update(func() error { q.maintain(); return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestFileRetentionOrphanUploads(t *testing.T) {
 	if _, marked := q.s.JobInputUploads[referenced.SHA256]; marked {
 		t.Fatal("job admission did not clear input upload marker")
 	}
-	clock.Advance(DefaultFileRetention - time.Nanosecond)
+	clock.Advance(testFileRetention - time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestFileRetentionUnmarkedImports(t *testing.T) {
 	if err := q.ConfigureModels(catalog); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestFileRetentionOrphanReferences(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.reclaimJobFiles(); err != nil {
 		t.Fatal(err)
 	}
@@ -336,8 +336,8 @@ func TestFileRetentionOrphanBatch(t *testing.T) {
 	for i := 0; i < fileReclaimBatch+1; i++ {
 		retentionJobInput(t, c, fmt.Sprint("orphan-", i))
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
-	for _, want := range []int{1, 0} {
+	clock.Advance(testFileRetention + time.Nanosecond)
+	for _, want := range []int{0, 0} {
 		if err := q.Tick(); err != nil {
 			t.Fatal(err)
 		}
@@ -354,7 +354,7 @@ func TestFileRetentionOrphanSubmissionFence(t *testing.T) {
 	_, ref := retentionJobInput(t, c, "marked input awaiting verification")
 	s := spec("experiment")
 	s.Files = FileManifest{"input": ref}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	entered, unblock := gateSubmitVerification(t, q, nil)
 	defer unblock()
 	done := startSubmitVerification(q, context.Background(), s)
@@ -388,7 +388,7 @@ func TestFileRetentionUploadPurposeDedup(t *testing.T) {
 	if len(q.s.JobInputUploads) != 0 {
 		t.Fatal("generic import became collectible", q.s.JobInputUploads)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -488,11 +488,14 @@ func TestFileRetentionMarkedUploadRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { reopened.Close() })
+	if err := reopened.ConfigureFileRetention(testFileRetention); err != nil {
+		t.Fatal(err)
+	}
 	if err := reopened.ConfigureFileStore(storeRoot, 1<<20, true); err != nil {
 		t.Fatal(err)
 	}
 	// No model configuration is loaded after restart.
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := reopened.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +515,7 @@ func TestFileCacheEvictsExpiredVictims(t *testing.T) {
 		t.Run(fmt.Sprint("partial=", partial), func(t *testing.T) {
 			q, clock := fixture(t)
 			// Keep expiry metadata while testing eviction of expired cache bytes.
-			if err := q.ConfigureLogRetention(2 * DefaultFileRetention); err != nil {
+			if err := q.ConfigureLogRetention(2 * testFileRetention); err != nil {
 				t.Fatal(err)
 			}
 			c := retentionClient(t, q)
@@ -534,7 +537,7 @@ func TestFileCacheEvictsExpiredVictims(t *testing.T) {
 			if err := q.Cancel(j.ID); err != nil {
 				t.Fatal(err)
 			}
-			clock.Advance(DefaultFileRetention)
+			clock.Advance(testFileRetention)
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
@@ -565,7 +568,7 @@ func TestFileRetentionPublicationGrace(t *testing.T) {
 				if err := q.Cancel(first.ID); err != nil {
 					t.Fatal(err)
 				}
-				clock.Advance(DefaultFileRetention)
+				clock.Advance(testFileRetention)
 				if err := q.update(func() error { q.maintain(); return nil }); err != nil {
 					t.Fatal(err)
 				}
@@ -649,7 +652,7 @@ func TestFileRetentionRetriesRemovalFailure(t *testing.T) {
 	if err := os.Chtimes(path, clock.Now(), clock.Now()); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	var logs bytes.Buffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
@@ -694,12 +697,12 @@ func TestFileRetentionProgressAndBatch(t *testing.T) {
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if pending := q.retainedJob(j.ID).FileReclamation.Pending; len(pending) != 1 {
-		t.Fatal("filesystem work not bounded to one batch", len(pending))
+	if pending := q.retainedJob(j.ID).FileReclamation.Pending; len(pending) != 0 {
+		t.Fatal("idle queue did not drain reclaimable records", len(pending))
 	}
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
@@ -718,6 +721,9 @@ func TestFileRetentionProgressAndBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { reopened.Close() })
+	if err := reopened.ConfigureFileRetention(testFileRetention); err != nil {
+		t.Fatal(err)
+	}
 	if err := reopened.ConfigureFileStore(storeRoot, 1<<20, true); err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +751,7 @@ func TestFileRetentionDeferredDiagnostic(t *testing.T) {
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	var logs bytes.Buffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
@@ -797,7 +803,7 @@ func TestFileRetentionOpenDownload(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	if err = q.update(func() error { q.maintain(); return nil }); err != nil {
 		t.Fatal(err)
 	}

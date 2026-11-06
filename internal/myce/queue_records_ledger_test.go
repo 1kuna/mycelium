@@ -2,7 +2,6 @@ package myce
 
 import (
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -37,8 +36,8 @@ func TestJobLedgerRetentionAndExpiry(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if q.s.Jobs[j.ID] != nil {
-		t.Fatal("released job not pruned")
+	if q.s.Jobs[j.ID] == nil {
+		t.Fatal("custody job pruned")
 	}
 	page, err := q.JobLedger(j.ID, 0, -1, 256)
 	if err != nil || len(page.Entries) == 0 {
@@ -53,10 +52,9 @@ func TestJobLedgerRetentionAndExpiry(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	_, err = q.JobLedger(j.ID, 0, -1, 256)
-	var api *HTTPError
-	if !errors.As(err, &api) || api.Status != 410 || api.Code != "job_ledger_unavailable" {
-		t.Fatal("expiry reported as empty history", err)
+	retained, err := q.JobLedger(j.ID, 0, -1, 256)
+	if err != nil || len(retained.Entries) != len(page.Entries) {
+		t.Fatal("custody ledger expired", retained, err)
 	}
 	// Older retained jobs never claim complete history merely because arrays are empty.
 	if err := q.update(func() error { q.putJob("legacy", &Job{ID: "legacy", Attempt: 1, State: "running"}); return nil }); err != nil {

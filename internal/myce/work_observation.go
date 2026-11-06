@@ -268,15 +268,13 @@ func (q *Queue) beginWorkTiming(j *Job) {
 				j.Timing.HistoryReason = "measurement forbidden after resource failure"
 			case old.StaleReason != "":
 				j.Timing.HistoryReason = "measurement invalidated"
-			case q.clock.Now().Sub(old.RecordedAt) > workCurveMaxAge:
-				j.Timing.HistoryReason = "measurement older than 30 days"
 			default:
 				j.Timing.HistoryReason = "matching measurement has no qualified throughput"
 			}
 		}
 	}
 	if key != nil && reason == "" && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
-		if old, ok := q.s.WorkObservations[identityHash(key)]; ok && old.StaleReason == "" && !old.Forbidden && q.clock.Now().Sub(old.RecordedAt) <= 30*24*time.Hour && validRate(old.Units) && validRate(old.Seconds) {
+		if old, ok := q.s.WorkObservations[identityHash(key)]; ok && old.StaleReason == "" && !old.Forbidden && validRate(old.Units) && validRate(old.Seconds) {
 			rate := old.Rate
 			if !validRate(rate) {
 				rate = old.Units / old.Seconds
@@ -349,7 +347,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 	}
 	point := WorkObservation{Key: *t.Key, Samples: old.Samples + 1, Source: "accepted work",
 		RecordedAt: q.clock.Now(), Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
-	if old.StaleReason != "" || q.clock.Now().Sub(old.RecordedAt) > workCurveMaxAge {
+	if old.StaleReason != "" {
 		old.Rate, old.LatencySeconds = 0, 0
 	}
 	if throughput && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {

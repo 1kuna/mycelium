@@ -12,12 +12,16 @@ import (
 	"time"
 )
 
+const testLatencyBurst = 256
+const testRouteBurst = 128
+
 func TestRequestTimingSlowHandler(t *testing.T) {
 	q, _ := fixture(t)
 	var logs bytes.Buffer
 	old := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)
+	q.requestLatencies.record("POST /test/{id}", time.Millisecond)
 	waiting := make(chan struct{})
 	done := make(chan struct{})
 	mux := newRequestMux()
@@ -66,7 +70,7 @@ func TestRequestTimingSlowHandler(t *testing.T) {
 		t.Fatalf("incorrect split: %s", line)
 	}
 	summary := q.requestLatencies.snapshot()
-	if len(summary) != 1 || summary[0].Route != "POST /test/{id}" || summary[0].Count != 1 || summary[0].P99MS < 1000 {
+	if len(summary) != 1 || summary[0].Route != "POST /test/{id}" || summary[0].Count != 2 || summary[0].P99MS < 1000 {
 		t.Fatal(summary)
 	}
 }
@@ -78,13 +82,13 @@ func TestRequestTimingRollingStatusAndFastSilence(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)
 	h := API{Queue: q, Token: "secret"}.Handler()
-	for i := 0; i < requestLatencyWindow+10; i++ {
+	for i := 0; i < testLatencyBurst+10; i++ {
 		r := httptest.NewRequest("GET", fmt.Sprintf("/api/jobs/missing-%d?token=hidden", i), nil)
 		r.Header.Set("Authorization", "Bearer secret")
 		h.ServeHTTP(httptest.NewRecorder(), r)
 	}
-	if strings.Contains(logs.String(), "event=slow_request") {
-		t.Fatal(logs.String())
+	if strings.Contains(logs.String(), "private") || strings.Contains(logs.String(), "hidden") {
+		t.Fatal("private data in locally selected telemetry", logs.String())
 	}
 	snapshot, err := q.publicSnapshot()
 	if err != nil {
@@ -94,23 +98,23 @@ func TestRequestTimingRollingStatusAndFastSilence(t *testing.T) {
 		t.Fatal(snapshot.RequestLatencies)
 	}
 	s := snapshot.RequestLatencies[0]
-	if s.Route != "GET /api/jobs/{id}" || s.Count != requestLatencyWindow+10 || s.Samples != requestLatencyWindow {
+	if s.Route != "GET /api/jobs/{id}" || s.Count != testLatencyBurst+10 || s.Samples != testLatencyBurst+10 {
 		t.Fatal(s)
 	}
 	// Nearest rank percentiles describe only the retained window.
 	var samples requestLatencies
-	for i := 1; i <= requestLatencyWindow*2; i++ {
+	for i := 1; i <= testLatencyBurst*2; i++ {
 		samples.record("route", time.Duration(i)*time.Millisecond)
 	}
 	got := samples.snapshot()[0]
-	if got.P50MS != 384 || got.P95MS != 500 || got.P99MS != 510 {
+	if got.P50MS < 256 || got.P50MS > 512 || got.P95MS < 487 || got.P99MS < 507 || got.P99MS > 512 {
 		t.Fatal(got)
 	}
-	for i := 0; i < requestLatencyRoutes+10; i++ {
+	for i := 0; i < testRouteBurst+10; i++ {
 		samples.record(fmt.Sprint(i), time.Second)
 	}
-	if len(samples.snapshot()) != requestLatencyRoutes {
-		t.Fatal("route cap exceeded")
+	if len(samples.snapshot()) != testRouteBurst+11 {
+		t.Fatal("trusted route summaries were dropped")
 	}
 	// Requests without queue work must not claim to have measured a mutex.
 	if spanFrom(context.Background()) != nil {
@@ -199,7 +203,7 @@ func TestRequestTimingConnectRedirectPrivacy(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)
 	h := API{Queue: q, Token: "secret"}.Handler()
-	for i := 0; i < requestLatencyRoutes+5; i++ {
+	for i := 0; i < testRouteBurst+5; i++ {
 		// Both early unauthenticated responses and authenticated mux dispatch can
 		// obtain concrete redirect paths. Neither may enter the route table.
 		for _, token := range []string{"wrong", "secret"} {

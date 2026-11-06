@@ -188,7 +188,7 @@ func TestOutputDeliveryRestartRetentionAndReceiptReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { q.Close() }()
-	clock.Advance(DefaultFileRetention + time.Hour)
+	clock.Advance(testFileRetention + time.Hour)
 	// Ordinary expiry/collection cannot expire or unlink pending delivery.
 	if err = q.update(func() error { q.maintainFileExpiry(); return nil }); err != nil {
 		t.Fatal(err)

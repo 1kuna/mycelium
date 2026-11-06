@@ -48,12 +48,12 @@ func TestWorkerRetentionPrunesClearedAttemptStateAfterLogWindow(t *testing.T) {
 	}
 	pass := func() {
 		t.Helper()
-		if err := workerRetention(dir, clock.Now(), DefaultLogRetention); err != nil {
+		if err := workerRetention(dir, clock.Now(), testLogRetention); err != nil {
 			t.Fatal(err)
 		}
 	}
 	pass()
-	clock.Advance(DefaultLogRetention - time.Second)
+	clock.Advance(testLogRetention - time.Second)
 	pass()
 	assertPresent := func(name string, want bool) {
 		t.Helper()
@@ -116,11 +116,11 @@ func TestWorkerRetentionPrunesAcknowledgedLaunchRefusals(t *testing.T) {
 			}
 			pass := func() {
 				t.Helper()
-				if err := workerRetention(dir, clock.Now(), DefaultLogRetention); err != nil {
+				if err := workerRetention(dir, clock.Now(), testLogRetention); err != nil {
 					t.Fatal(err)
 				}
 			}
-			clock.Advance(2 * DefaultLogRetention)
+			clock.Advance(2 * testLogRetention)
 			pass() // Result replay remains pending regardless of diagnostic age.
 			for _, name := range []string{store.stateName, outcome} {
 				if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
@@ -138,7 +138,7 @@ func TestWorkerRetentionPrunesAcknowledgedLaunchRefusals(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dir, outcome)); err != nil {
 				t.Fatal(err)
 			}
-			clock.Advance(DefaultLogRetention)
+			clock.Advance(testLogRetention)
 			pass()
 			for _, name := range []string{store.stateName, outcome} {
 				if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
@@ -197,8 +197,8 @@ func TestWorkerRetentionNativeStartFailureAcknowledgement(t *testing.T) {
 	if err := os.Chtimes(filepath.Join(store.dir, store.state.LaunchOutcome), clock.Now(), clock.Now()); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultLogRetention)
-	if err := workerRetention(store.dir, clock.Now(), DefaultLogRetention); err != nil {
+	clock.Advance(testLogRetention)
+	if err := workerRetention(store.dir, clock.Now(), testLogRetention); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{store.stateName, store.state.LaunchOutcome} {

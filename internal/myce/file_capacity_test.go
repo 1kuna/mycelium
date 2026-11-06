@@ -50,7 +50,7 @@ func TestFileCapacityAbandonedUploadSweep(t *testing.T) {
 	abandoned := capacityPartial(t, c, "abandoned input", jobInputUploadPurpose)
 	recent := capacityPartial(t, c, "resumed input", jobInputUploadPurpose)
 	imported := capacityPartial(t, c, "unmarked import", "")
-	clock.Advance(DefaultFileRetention - time.Nanosecond)
+	clock.Advance(testFileRetention - time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestFileCapacityProtectedReferencesSurvive(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + filePublicationGrace)
+	clock.Advance(testFileRetention + filePublicationGrace)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestFileCapacityStatus(t *testing.T) {
 	_, expired := retentionJobInput(t, c, "expired")
 	partial := capacityPartial(t, c, "partial input", jobInputUploadPurpose)
 	_, kept := retentionUpload(t, c, "kept")
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	q.files.diskProbe = func(string) (DiskReading, error) {
 		// A filesystem probe must never execute inside the queue lock (#80).
 		if !q.mu.TryLock() {
@@ -256,7 +256,7 @@ func TestFileCapacityDataOnlyRetryDoesNotRefresh(t *testing.T) {
 	if err := os.Remove(path + ".info"); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	for _, method := range []string{"HEAD", "PATCH"} {
 		res, err := c.fileRequest(context.Background(), method, "/api/files/uploads/"+ref.SHA256, nil, map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "2", "Content-Type": "application/offset+octet-stream"})
 		if err != nil {
@@ -286,7 +286,7 @@ func TestFileCapacityUnpublishedBlobRecoversMarker(t *testing.T) {
 	if err := q.files.publish(context.Background(), ref); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention - time.Nanosecond)
+	clock.Advance(testFileRetention - time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}

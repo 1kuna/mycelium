@@ -16,10 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 )
-
-const dockerEventLimit = 256
-const dockerEventLineLimit = 64 * 1024
 
 // Diagnostic observations never supply successful Mycelium signal receipts.
 type dockerLifecycleEvent struct {
@@ -42,12 +40,13 @@ type dockerEventArchive struct {
 type dockerEventWriter struct {
 	archive       dockerEventArchive
 	identity, dir string
+	capacity      int64
 }
 
 func (w *dockerEventWriter) save() error {
 	return saveWorkerJSON(w.dir, w.identity+".docker-events.json", w.archive)
 }
-func (w *dockerEventWriter) event(line []byte) {
+func (w *dockerEventWriter) event(line []byte) error {
 	var raw struct {
 		Type     string
 		Action   string
@@ -59,21 +58,21 @@ func (w *dockerEventWriter) event(line []byte) {
 	}
 	if json.Unmarshal(line, &raw) != nil {
 		w.archive.Rejected++
-		return
+		return nil
 	}
 	if raw.Type != "container" || raw.Actor.Attributes["myce.attempt"] != w.identity {
 		w.archive.Rejected++
-		return
+		return nil
 	}
 	switch raw.Action {
 	case "create", "start", "kill", "die", "oom", "stop", "destroy":
 	default:
 		w.archive.Rejected++
-		return
+		return nil
 	}
 	if _, err := hex.DecodeString(raw.Actor.ID); err != nil || len(raw.Actor.ID) != 64 || raw.TimeNano <= 0 {
 		w.archive.Rejected++
-		return
+		return nil
 	}
 	e := dockerLifecycleEvent{Container: raw.Actor.ID, Action: raw.Action, At: time.Unix(0, raw.TimeNano).UTC()}
 	if signal, err := strconv.Atoi(raw.Actor.Attributes["signal"]); err == nil && signal > 0 && signal <= 64 {
@@ -82,12 +81,13 @@ func (w *dockerEventWriter) event(line []byte) {
 	if code, err := strconv.Atoi(raw.Actor.Attributes["exitCode"]); err == nil && code >= 0 && code <= 255 {
 		e.ExitCode = &code
 	}
-	if len(w.archive.Events) == dockerEventLimit {
-		copy(w.archive.Events, w.archive.Events[1:])
-		w.archive.Events = w.archive.Events[:dockerEventLimit-1]
-		w.archive.Dropped++
+	// Accepted events are unique attempt evidence. Exhaustion stops optional
+	// capture, never discards earlier custody diagnostics to make room.
+	if w.capacity > 0 && int64(len(w.archive.Events)+1)*int64(unsafe.Sizeof(e)+64) > w.capacity {
+		return errors.New("Docker event evidence capacity exhausted")
 	}
 	w.archive.Events = append(w.archive.Events, e)
+	return nil
 }
 
 // record keeps intake independent of disk latency. Notifications coalesce, not
@@ -99,19 +99,27 @@ func (w *dockerEventWriter) record(stdout io.ReadCloser, readDone chan<- struct{
 	finished := make(chan error, 1)
 	go func() {
 		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 4096), dockerEventLineLimit)
+		limit := w.capacity
+		if limit <= 0 {
+			limit = diagnosticCapacityBytes(w.dir)
+		}
+		scanner.Buffer(make([]byte, min(4096, limit)), int(max(1, limit)))
+		var captureErr error
 		for scanner.Scan() {
 			mu.Lock()
-			w.event(scanner.Bytes())
+			captureErr = w.event(scanner.Bytes())
 			w.archive.Status = "recording"
 			mu.Unlock()
+			if captureErr != nil {
+				break
+			}
 			select {
 			case dirty <- struct{}{}:
 			default:
 			}
 		}
 		close(readDone)
-		finished <- scanner.Err()
+		finished <- errors.Join(captureErr, scanner.Err())
 	}()
 	persist := func() error {
 		mu.Lock()
@@ -138,18 +146,28 @@ func (w *dockerEventWriter) record(stdout io.ReadCloser, readDone chan<- struct{
 func (d *dockerAttempt) observeDockerEvents() func() {
 	d.mu.Lock()
 	w := &dockerEventWriter{identity: d.state.Identity, dir: d.dir}
+	capacity, releaseBudget := reserveDiagnosticBytes(w.dir, ^uint64(0))
+	w.capacity = capacity
+	if w.capacity == 0 {
+		releaseBudget()
+		d.mu.Unlock()
+		log.Print("Docker event capacity unavailable; capture withheld")
+		return func() {}
+	}
 	endpoint := d.state.Endpoint
 	d.mu.Unlock()
 	path := filepath.Join(d.dir, w.identity+".docker-events.json")
 	if f, err := os.Open(path); err == nil {
-		data, readErr := io.ReadAll(io.LimitReader(f, 128*1024+1))
+		data, readErr := io.ReadAll(io.LimitReader(f, w.capacity+1))
 		f.Close()
-		if readErr != nil || len(data) > 128*1024 || json.Unmarshal(data, &w.archive) != nil || len(w.archive.Events) > dockerEventLimit {
+		if readErr != nil || int64(len(data)) > w.capacity || json.Unmarshal(data, &w.archive) != nil {
 			// Preserve damaged evidence rather than overwriting it on recovery.
+			releaseBudget()
 			log.Print("Docker events archive unreadable; capture unavailable")
 			return func() {}
 		}
 	} else if !os.IsNotExist(err) {
+		releaseBudget()
 		log.Print("Docker events archive unavailable")
 		return func() {}
 	}
@@ -173,6 +191,7 @@ func (d *dockerAttempt) observeDockerEvents() func() {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer releaseBudget()
 		err := w.save()
 		if err == nil {
 			var stdout io.ReadCloser

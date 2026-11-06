@@ -39,7 +39,7 @@ func memoryGrowthGB(p *AttemptMemoryPeak) float64 {
 func (q *Queue) acceptedMemoryPoint(p *WorkObservation) bool {
 	age := q.clock.Now().Sub(p.MemoryRecordedAt)
 	peak := p.MemoryPeak
-	return memoryIdentityUsable(*p) && !p.MemoryRecordedAt.IsZero() && age >= 0 && age <= workCurveMaxAge && peak != nil && !peak.constrained() && !peak.PressureUnavailable && peak.HostGB != nil && validRate(*peak.HostGB) && validRate(hostMemoryPeakGB(peak))
+	return memoryIdentityUsable(*p) && !p.MemoryRecordedAt.IsZero() && age >= 0 && peak != nil && !peak.constrained() && !peak.PressureUnavailable && peak.HostGB != nil && validRate(*peak.HostGB) && validRate(hostMemoryPeakGB(peak))
 }
 
 // Retain the conservative total charge until a complete resident range exists.

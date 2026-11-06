@@ -65,6 +65,8 @@ func reopenQueue(t *testing.T, q *Queue, clock *fakeClock) *Queue {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reopened.fileRetention, reopened.logRetention = q.fileRetention, q.logRetention
+	reopened.rebuildRecords()
 	t.Cleanup(func() { reopened.Close() })
 	fakeCheckpointAvailability(t, reopened, true)
 	return reopened
