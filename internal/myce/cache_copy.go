@@ -85,7 +85,8 @@ func (g *copyGovernor) acquire(ctx context.Context, explicit int) (func(), error
 		if g.active < limit {
 			g.active++
 			g.mu.Unlock()
-			return func() { g.mu.Lock(); g.active--; g.wakeLocked(); g.mu.Unlock() }, nil
+			var once sync.Once
+			return func() { once.Do(func() { g.mu.Lock(); g.active--; g.wakeLocked(); g.mu.Unlock() }) }, nil
 		}
 		wait := g.changed
 		g.mu.Unlock()

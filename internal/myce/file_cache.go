@@ -58,7 +58,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 			return err
 		}
 		operation = "copy"
-		return copyJobFileContext(ctx, p, dest)
+		return c.materialize(ctx, p, dest, ref.SizeBytes)
 	}
 	// Never replace corrupt cache bytes as if they were complete. They are disposable
 	// only after the durable authoritative copy has been checked.
@@ -179,7 +179,30 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 		return err
 	}
 	operation = "copy"
-	return copyJobFileContext(ctx, p, dest)
+	releaseCopy()
+	reservation.release()
+	return c.materialize(ctx, p, dest, ref.SizeBytes)
+}
+
+// A private attempt copy can live on a different volume from its cache. Charge
+// its destination separately; the cache's completed download no longer owns a
+// copy slot, so a single-stream volume cannot deadlock on nested acquisition.
+func (c *FileCache) materialize(ctx context.Context, source, dest string, size int64) error {
+	root := filepath.Dir(dest)
+	if _, err := c.budgets.limit(root, 0, 0, c.Clock.Now()); err != nil {
+		return err
+	}
+	held, err := c.budgets.reserve(root, size, c.Clock)
+	if err != nil {
+		return err
+	}
+	defer held.release()
+	copyCtx, release, err := c.budgets.copy(ctx, root, c.Clock, 0)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return copyJobFileContext(copyCtx, source, dest)
 }
 
 func validateJobFiles(s Spec) error {

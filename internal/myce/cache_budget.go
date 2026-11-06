@@ -25,11 +25,12 @@ type cacheBudgets struct {
 	maintenance  map[string]func(context.Context)
 }
 type cacheVolume struct {
-	at            time.Time
-	free, managed int64
-	horizon       time.Duration
-	drain         float64
-	domains       map[string]cacheDemand
+	at                     time.Time
+	free, managed          int64
+	horizon                time.Duration
+	drain                  float64
+	domains                map[string]cacheDemand
+	control, controlGrowth int64
 }
 type cacheDemand struct{ used, hot int64 }
 type cacheReuse struct {
@@ -117,7 +118,7 @@ func (b *cacheBudgets) sampleReading(root string, used int64, now time.Time, dis
 }
 func (b *cacheBudgets) floorLocked(v *cacheVolume) int64 {
 	predicted := v.drain * v.horizon.Seconds()
-	return max(int64(os.Getpagesize()), int64(min(float64(math.MaxInt64), predicted)))
+	return max(int64(os.Getpagesize()), v.controlGrowth, int64(min(float64(math.MaxInt64-1024), predicted)))
 }
 func (b *cacheBudgets) pendingLocked(volume string) int64 {
 	n := int64(0)
@@ -222,3 +223,34 @@ func (b *cacheBudgets) copy(ctx context.Context, root string, clock Clock, expli
 }
 
 type cacheCopyProgressKey struct{}
+
+// The fixed SQLite/WAL/SHM set supplies measured control-write growth without
+// traversing payloads. Keep room for another observed growth burst; inability to
+// read these files never grants extra capacity.
+func (s *FileStore) observeControl(ctx context.Context, volume string) error {
+	if s.controlFiles.database == "" {
+		return nil
+	}
+	seen := map[[2]uint64]bool{}
+	total := uint64(0)
+	for _, file := range []string{s.controlFiles.database, s.controlFiles.wal, s.controlFiles.shared} {
+		n, err := storageAllocation(ctx, file, true, seen)
+		if err != nil {
+			return err
+		}
+		total = addDiskBytes(total, n)
+	}
+	s.budgets.mu.Lock()
+	defer s.budgets.mu.Unlock()
+	v := s.budgets.volumes[volume]
+	if v == nil {
+		v = &cacheVolume{domains: map[string]cacheDemand{}}
+		s.budgets.volumes[volume] = v
+	}
+	n := cacheBytes(total)
+	if v.control > 0 {
+		v.controlGrowth = max(v.controlGrowth, n-v.control)
+	}
+	v.control = n
+	return nil
+}

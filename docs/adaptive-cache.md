@@ -17,7 +17,8 @@ Retired assumptions and their replacements:
 - Download-cache 16 GiB default: a separate demand domain on the same volume;
   standard package-manager pruning preserves installed hardlinks.
 - Disk guard 1%/256 MiB: filesystem Bavail, an OS-page control-write bootstrap,
-  and observed consumption over sampling/writer response intervals. Scheduling
+  observed control-file growth, and consumption over sampling/writer response
+  intervals. Scheduling
   also accounts for the worker's reported free-space trend and sample age.
 - Environment 24-hour minimum: actual inter-use/held-use observations and existing
   active locks. An unused entry has no presumed reuse period. Restart loses
