@@ -401,3 +401,26 @@ func TestAdaptiveReadinessSingleProcessResidentGrowth(t *testing.T) {
 		t.Fatal("PID reuse during RSS inventory supplied activity")
 	}
 }
+
+func TestAdaptiveReadinessDockerRPCClockAndReconcileLifetime(t *testing.T) {
+	clock := &manualWorkerClock{now: time.Unix(1, 0)}
+	d := &dockerAttempt{clock: clock, halt: make(chan struct{}), closed: make(chan struct{}), dir: t.TempDir()}
+	d.command = func(ctx context.Context, _ ...string) ([]byte, error) {
+		clock.Advance(time.Hour)
+		return []byte("inspected"), ctx.Err()
+	}
+	for range 10 {
+		if _, err := d.callWithTimeout(time.Second, "inspect", "owned"); err != nil {
+			t.Fatalf("lifecycle time expired an OS RPC: %v", err)
+		}
+	}
+	// Explicit reconciliation after the observer has joined still works; the
+	// existing shutdown regression separately covers cancellation of active RPCs.
+	close(d.halt)
+	close(d.closed)
+	for range 10 {
+		if _, err := d.call("inspect", "owned"); err != nil {
+			t.Fatalf("joined observer poisoned later custody reconciliation: %v", err)
+		}
+	}
+}

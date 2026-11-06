@@ -75,7 +75,12 @@ the representation limit to prevent overflow. The existing diagnostic line-size
 bound protects stream parser memory against unterminated untrusted lines;
 oversized lines cannot provide progress. These safeguards cost observation latency
 or lost malformed evidence, and none supplies release proof. Shutdown cancels
-active Docker observations even when an outage enlarged their allowance. After
+active Docker observations even when an outage enlarged their allowance.
+Daemon RPCs measure real transport elapsed time, independently of lifecycle clock
+advances. Their observers join when the response returns, before local history
+publication; slow durable metadata cannot turn a completed response into a
+transport timeout. Explicit reconciliation after the background observer has
+joined owns a separate lifetime and retains the same custody fences. After
 CLI cancellation, inherited pipes get one local inspect interval to drain, using
 the transport seed only while that latency is unknown; an escaping pipe holder
 cannot keep shutdown waiting through outage backoff. A drain failure retains

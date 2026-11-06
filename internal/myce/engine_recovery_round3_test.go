@@ -450,7 +450,8 @@ func TestEngineRecoveryDeadlineDoesNotMaskLoadFailure(t *testing.T) {
 	q, clock, m := modelFixture(t)
 	call := addModelCall(t, q, "experiment")
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	clock.Advance(s.LoadUntil.Sub(clock.Now()))
+	// The caller's explicit wait can expire; loads no longer have a queue wall deadline.
+	clock.Advance(q.models.Wait)
 	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "failed"}}}); err != nil {
 		t.Fatal(err)
 	}

@@ -291,6 +291,17 @@ func (d *dockerAttempt) recordObservationLoss() error {
 	return nil
 }
 
+// close stops the background reconciler and its active RPCs. Once it has joined,
+// an explicit synchronous recovery call owns its own lifetime and custody.
+func (d *dockerAttempt) rpcHalt() <-chan struct{} {
+	select {
+	case <-d.closed:
+		return nil
+	default:
+		return d.halt
+	}
+}
+
 func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 	observation := dockerObservation(args)
 	if !observation {
@@ -305,6 +316,7 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 		clock = RealClock{}
 	}
 	var since time.Time
+	halt := d.rpcHalt()
 	backoff := d.rpcBudget(args[0])
 	warned := false
 	for failures := 0; ; {
@@ -346,7 +358,7 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 		}
 		select {
 		case <-timer.C:
-		case <-d.halt:
+		case <-halt:
 			timer.Stop()
 			return nil, runtimeErrorFor(args[0], context.Canceled)
 		case <-parentDone:
@@ -376,7 +388,9 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	if d.dir != "" && !dockerObservation(args) {
 		history = readReadinessHistory(historyPath)
 	}
-	progress := newReadinessProgress(d.clock, history)
+	// Daemon RPC elapsed time is transport time. Lifecycle Clock jumps must
+	// not expire an in-flight OS command or teach fictitious daemon latency.
+	progress := newReadinessProgress(RealClock{}, history)
 	if timeout <= 0 && dockerObservation(args) {
 		timeout = d.rpcBudget(operation)
 	}
@@ -387,8 +401,10 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	ctx = context.WithValue(ctx, ioProgressKey{}, func() { progress.advance() })
 	defer cancel(context.Canceled)
 	done := make(chan struct{})
-	defer close(done)
+	supervised := make(chan struct{})
+	halt := d.rpcHalt()
 	go func() {
+		defer close(supervised)
 		for {
 			budget, stalled := progress.state()
 			if stalled {
@@ -401,7 +417,7 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 			timer := time.NewTimer(budget)
 			select {
 			case <-timer.C:
-			case <-d.halt:
+			case <-halt:
 				timer.Stop()
 				cancel(context.Canceled)
 				return
@@ -417,6 +433,10 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	started := progress.clock.Now()
 	realStarted := RealClock{}.Now()
 	defer func() {
+		// The RPC has returned. Join its observer before durable history I/O;
+		// a slow state-file sync is not a daemon-response timeout.
+		close(done)
+		<-supervised
 		if ctx.Err() != nil {
 			err = context.Cause(ctx)
 		}
