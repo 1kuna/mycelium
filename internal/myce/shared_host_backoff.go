@@ -7,16 +7,12 @@ import (
 	"time"
 )
 
-// Three interrupted executions in ten minutes capture the observed 1–3 minute
-// owner-latency restart loop. Fifteen minutes gives the owner a quiet interval,
-// costing this job only that host; other eligible hosts remain available.
-const sharedLatencyWindow = 10 * time.Minute
-const sharedLatencyThreshold = 3
-const sharedLatencyBackoff = 15 * time.Minute
-
 type SharedHostBackoff struct {
-	Stops []time.Time `json:"stops,omitempty"`
-	Until time.Time   `json:"until"`
+	Stops           []time.Time `json:"stops,omitempty"`
+	Until           time.Time   `json:"until"`
+	RecoverySeconds float64     `json:"recovery_seconds,omitempty"`
+	QuietSince      time.Time   `json:"quiet_since,omitempty"`
+	LastObservation time.Time   `json:"last_observation,omitempty"`
 }
 
 func (q *Queue) recordSharedHostLatencyStop(j *Job, r Result) {
@@ -30,17 +26,18 @@ func (q *Queue) recordSharedHostLatencyStop(j *Job, r Result) {
 	}
 	host, now := hostID(m), q.clock.Now()
 	b := j.SharedHostBackoff[host]
-	kept := []time.Time{}
-	for _, at := range b.Stops {
-		if !at.Before(now.Add(-sharedLatencyWindow)) && !at.After(now) {
-			kept = append(kept, at)
-		}
+	// A stopped execution already proves interference. Require a quiet span
+	// covering its measured time to interference, rather than permitting two
+	// more disruptive restarts before an arbitrary fifteen-minute timer.
+	span := now.Sub(j.Queued)
+	if j.StartedAt != nil {
+		span = now.Sub(*j.StartedAt)
 	}
-	b.Stops = append(kept, now)
-	if len(b.Stops) >= sharedLatencyThreshold {
-		b.Until = now.Add(sharedLatencyBackoff)
-		b.Stops = nil
+	if m.SharedHostPressure != nil {
+		span = max(span, m.SharedHostPressure.Probe.freshness())
 	}
+	b.RecoverySeconds = max(b.RecoverySeconds, max(time.Nanosecond, span).Seconds())
+	b.QuietSince, b.LastObservation, b.Until, b.Stops = time.Time{}, time.Time{}, time.Time{}, nil
 	if j.SharedHostBackoff == nil {
 		j.SharedHostBackoff = map[string]SharedHostBackoff{}
 	}
@@ -48,10 +45,43 @@ func (q *Queue) recordSharedHostLatencyStop(j *Job, r Result) {
 }
 
 func (q *Queue) sharedHostBackoffReason(j *Job, m *Machine) string {
-	if b, ok := j.SharedHostBackoff[hostID(m)]; ok && q.clock.Now().Before(b.Until) {
-		return fmt.Sprintf("shared host owner scheduling latency backoff on %s until %s", hostID(m), b.Until.UTC().Format(time.RFC3339))
+	if b, ok := j.SharedHostBackoff[hostID(m)]; ok {
+		if b.RecoverySeconds > 0 {
+			return "shared host owner scheduling latency backoff awaiting measured recovery"
+		}
+		// Read compatibility for an old persisted cooldown; no new fixed
+		// cooldown is created. An elapsed timer cannot clear new evidence.
+		if q.clock.Now().Before(b.Until) {
+			return fmt.Sprintf("shared host owner scheduling latency backoff until %s", b.Until.UTC().Format(time.RFC3339))
+		}
 	}
 	return ""
+}
+
+// Update only on successful, distinct observations in the check-in transaction.
+// Diagnostic reads never advance recovery. A gap/failure restarts the quiet
+// span; passing wall time or queue contact is not affirmative recovery.
+func (q *Queue) recoverSharedHostBackoff(m *Machine) {
+	for _, j := range q.liveJobs() {
+		b, ok := j.SharedHostBackoff[hostID(m)]
+		if !ok || b.RecoverySeconds <= 0 {
+			continue
+		}
+		p := m.SharedHostPressure
+		if !q.sharedPressureFresh(m) || m.SharedHostYieldReason != "" {
+			b.QuietSince, b.LastObservation = time.Time{}, time.Time{}
+		} else if p.ReceivedAt.After(b.LastObservation) {
+			if b.QuietSince.IsZero() || b.LastObservation.IsZero() || p.ReceivedAt.Sub(b.LastObservation) >= p.Probe.freshness() {
+				b.QuietSince = p.ReceivedAt
+			}
+			b.LastObservation = p.ReceivedAt
+			if p.ReceivedAt.Sub(b.QuietSince).Seconds() >= b.RecoverySeconds {
+				delete(j.SharedHostBackoff, hostID(m))
+				continue
+			}
+		}
+		j.SharedHostBackoff[hostID(m)] = b
+	}
 }
 
 func (q *Queue) hostRetryStorageWaitingReason(j *Job) string {

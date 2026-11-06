@@ -1293,13 +1293,15 @@ foreground wake lateness, local age and queue receipt time),
 attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
 observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
-Pressure sampling continues every five seconds independently of HTTP check-ins.
-The queue requires a worker-reported sample age below 15 seconds. Between
-reports, it discounts time covered by the existing matching-session check-in
-contact, including a request delayed in the queue for at most 30 seconds.
-One observation still expires at 45 seconds of total age, even if further
-requests arrive. A worker that stops reporting loses this credit; a stuck probe
-keeps aging and a completed probe failure reports no sample.
+On negotiated `host-probe-v1` workers, `shared_host_pressure.probe` reports
+measured period/cost and frozen validity in seconds. Local sample age must remain
+below that validity. Bounded matching-session contact can discount queue delay,
+but cannot renew the original observation indefinitely. `availability.probe` and
+`availability.age_seconds` similarly preserve owner observation age across clock
+skew. `host_health.probe` applies the same frozen validity to health evidence;
+`host_probe_unknown` withholds admission when it expires or the source fails.
+Older workers retain legacy age rules until upgraded. See
+[adaptive host observations](host-probes.md).
 
 Host maintenance `healthy`/`state` and fleet `host_states` use the same pressure
 and bounded contact facts. Normal owner-pressure yield remains temporary
@@ -1588,11 +1590,12 @@ still requires an explicit resume. Independently configured network roots are
 remembered after being observed mounted; installed NAS is checked even at cold
 startup. Root roles, never local paths or mount source addresses, cross the API.
 
-Job `shared_host_backoff` persists per-host latency-stop timestamps and cooldown
-expiry. Three interrupted owner-scheduling-latency attempts within ten minutes
-exclude that job from that host for fifteen minutes, using the queue clock. Other
-eligible hosts can admit it immediately. Status names the latency backoff and its
-expiry; ordinary pressure recovery alone does not erase the cooldown.
+Job `shared_host_backoff` persists each host's measured `recovery_seconds`,
+`quiet_since` and `last_observation`. The first owner-latency interruption holds
+that job on that host until distinct fresh healthy observations span its measured
+time to interference. Gaps/failures restart recovery; elapsed time alone cannot
+clear it. Other eligible hosts remain available. Old timestamp/expiry records
+remain readable for compatibility. See [owner recovery](host-probes.md).
 
 ## Incident health alerts
 

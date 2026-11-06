@@ -336,3 +336,13 @@ are not zero use. `efficiency_regression` wakes use the existing
 health notification path and this installation's learned baselines. Investigate
 an offender with its per-job status; keep authored hard requirements and parity
 checks. See [queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/status.md#queue-efficiency-next-release-857).
+
+## Adaptive host observations (next release)
+
+On negotiated `host-probe-v1` workers, owner/pressure status includes measured
+probe period, cost and frozen validity. Read age against that observation's
+validity; a successful check-in cannot renew a failed probe. Owner-latency holds
+now require fresh healthy evidence spanning the attempt's measured interference
+interval, rather than a fixed retry delay. Other eligible hosts remain available.
+Older workers retain legacy fields and age rules. See
+[host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).

@@ -1089,7 +1089,7 @@ func (q *Queue) maintain() {
 		}
 	}
 	for _, m := range q.s.Machines {
-		if a := machineAvailability(m); a != nil && a.Available && (a.Mode == "daily" || a.Signals.Laptop) && now.Sub(m.LastSeen) > signalMaxAge {
+		if a := machineAvailability(m); a != nil && a.Available && (a.Mode == "daily" || a.Signals.Laptop) && !hostAvailabilityFresh(m, now) {
 			a.Available = false
 			a.Reason = "owner signals stale"
 		}
@@ -1253,7 +1253,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	}
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
 		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
@@ -1441,6 +1441,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			return err
 		}
 		q.acceptExtensionQualifications(&m)
+		acceptHostAvailability(&m, q.clock.Now())
 		q.acceptSharedPressure(&m, old)
 		m.IOPressure = safeIOPressure(m.IOPressure)
 		if m.IOPressure != nil {
