@@ -583,9 +583,18 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 	for _, structured := range []bool{false, true} {
 		t.Run(fmt.Sprint(structured), func(t *testing.T) {
 			step := 0
+			var projectedReads atomic.Int32
 			reason := strings.Repeat("scheduler explanation ", 60) + "\nfull reason"
 			states := []string{"queued", "queued", "running", "succeeded"}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if structured {
+					w.Header().Set("X-Myce-Wait", "batch-v1")
+					if r.URL.Path != "/api/jobs/job" || r.URL.RawQuery != "" {
+						projectedReads.Add(1)
+						http.Error(w, "JSON must use full job reads", http.StatusBadRequest)
+						return
+					}
+				}
 				json.NewEncoder(w).Encode(myce.Job{ID: "job", State: states[step], Reason: fmt.Sprintf("%s %d", reason, step)})
 			}))
 			defer server.Close()
@@ -605,7 +614,7 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 				}
 			} else {
 				lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-				if len(lines) != len(states) || diagnostics.Len() != 0 {
+				if len(lines) != len(states) || diagnostics.Len() != 0 || projectedReads.Load() != 0 {
 					t.Fatal("lost reason updates", out.String(), diagnostics.String())
 				}
 				for i, line := range lines {
