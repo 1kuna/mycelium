@@ -87,10 +87,17 @@ func cgroupMemoryHeadroom(available int64, read func(string) ([]byte, error)) (i
 		for {
 			maxRaw, e1 := read(filepath.Join(current, maxName))
 			usedRaw, e2 := read(filepath.Join(current, usedName))
-			// The real unified hierarchy root has usage but no configurable
-			// memory.max. A delegated/bind-mounted root still has a limit.
-			if unified && current == mount && root == "/" && errors.Is(e1, os.ErrNotExist) && e2 == nil {
+			// A unified node without the memory controller has neither file;
+			// its nearest enabled ancestor can still constrain the process.
+			missingController := unified && errors.Is(e1, os.ErrNotExist) && errors.Is(e2, os.ErrNotExist)
+			// The real hierarchy root has no configurable memory.max. A
+			// delegated/bind-mounted root must expose its physical boundary.
+			if unified && current == mount && root == "/" && errors.Is(e1, os.ErrNotExist) && (e2 == nil || missingController) {
 				return available, nil
+			}
+			if missingController && current != mount {
+				current = filepath.Dir(current)
+				continue
 			}
 			if e1 != nil || e2 != nil {
 				return 0, unavailable

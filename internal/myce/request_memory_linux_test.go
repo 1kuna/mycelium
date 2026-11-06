@@ -78,7 +78,17 @@ func TestCgroupMemoryHybridAndHostRoot(t *testing.T) {
 	if n, err := cgroupMemoryHeadroom(1000000, read); err != nil || n != 100 {
 		t.Fatal(n, err)
 	}
+	files["/proc/self/cgroup"] = "0::/child\n"
+	files["/unified/memory.max"], files["/unified/memory.current"] = "1000", "900"
+	if n, err := cgroupMemoryHeadroom(1234, read); err != nil || n != 100 {
+		t.Fatal("disabled child controller lost enabled ancestor", n, err)
+	}
+	delete(files, "/unified/memory.max")
+	delete(files, "/unified/memory.current")
 	files["/proc/self/cgroup"] = "0::/\n"
+	if n, err := cgroupMemoryHeadroom(1234, read); err != nil || n != 1234 {
+		t.Fatal("unconfigured unified memory controller", n, err)
+	}
 	files["/unified/memory.current"] = "900"
 	if n, err := cgroupMemoryHeadroom(1234, read); err != nil || n != 1234 {
 		t.Fatal("host root without configurable memory.max", n, err)
