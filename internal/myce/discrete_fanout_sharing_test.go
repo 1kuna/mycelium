@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,7 +93,11 @@ func TestDiscreteFanOutSharingHeadroom(t *testing.T) {
 			}
 			w := Worker{Machine: m, Clock: clock, hostMemorySamples: q.hostMemorySamples[m.ID],
 				HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
-			if err := localAttemptAdmission(w, []Job{*job(t, q, a.ID)}, *b, nil); err != nil {
+			actor := attemptSupervisor{job: *a}
+			if actor.admissionJob().StartedAt != nil {
+				t.Fatal("fixture must retain the worker's immutable pre-Started assignment")
+			}
+			if err := localAttemptAdmission(w, []Job{actor.admissionJob()}, *b, nil); err != nil {
 				t.Fatal("worker rejected measured queue placement", err)
 			}
 			// Existing #625 growth handling must stop a grower and retain exact
@@ -113,6 +118,82 @@ func TestDiscreteFanOutSharingHeadroom(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDiscreteFanOutMeasuredOveruse(t *testing.T) {
+	q, clock, m, s := discreteFanOutFixture(t)
+	submit(t, q, s)
+	a := assignedJob(discreteFanOutCheck(t, q, m))
+	if a == nil {
+		t.Fatal("first piece missing")
+	}
+	if err := q.Started(result(a, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	free, device, host := 5.0, 6.0, 2.0
+	m.Devices[0].Telemetry.FreeGB = &free
+	m.Devices[0].Telemetry.AgeSeconds = 1
+	parent := submit(t, q, s)
+	r, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol,
+		Attempts: []AttemptReport{{Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Session: a.Session, Started: true,
+			CurrentHostMemory: &CurrentHostMemory{DeviceGB: &device, FootprintGB: &host, NonreclaimableGB: host, GrowthObserved: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignedJob(r) != nil {
+		t.Error("queue admitted 6 GiB measured + 3 GiB demand against an 8 GiB budget")
+	}
+	card := m.Devices[0].machine(*q.s.Machines[m.ID])
+	for _, target := range q.machineTargets(q.s.Machines[m.ID]) {
+		if target.Device == card.Device && target.GPU != "cpu" && target.FreeMemoryGB > 2 {
+			t.Error("queue projection ignored measured incumbent overuse", target.FreeMemoryGB)
+		}
+	}
+	next := *a
+	next.ID, next.Batch = parent.ID, &BatchWork{Parent: parent.ID}
+	w := Worker{Machine: m, Clock: clock, hostMemorySamples: q.hostMemorySamples[m.ID],
+		HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
+	actor := attemptSupervisor{job: *a}
+	if err := localAttemptAdmission(w, []Job{actor.admissionJob()}, next, nil); err == nil || !strings.Contains(err.Error(), "device_budget") {
+		t.Error("worker did not charge the measured overuse against the card budget", err)
+	}
+}
+
+func TestDiscreteFanOutPhysicalGrowth(t *testing.T) {
+	q, clock, m, s := discreteFanOutFixture(t)
+	var runs []*Job
+	for range 2 {
+		submit(t, q, s)
+		a := assignedJob(discreteFanOutCheck(t, q, m, runs...))
+		if a == nil {
+			t.Fatal("shared piece missing")
+		}
+		if err := q.Started(result(a, false)); err != nil {
+			t.Fatal(err)
+		}
+		runs = append(runs, a)
+		clock.Advance(time.Second)
+	}
+	free := .25
+	m.Devices[0].Telemetry.FreeGB = &free
+	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
+	for i, j := range runs {
+		gb := 3.0
+		sample := &CurrentHostMemory{DeviceGB: &gb}
+		if i == 0 {
+			sample.DeviceGrowthGB = 1.5
+		}
+		c.Attempts = append(c.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session,
+			Started: true, CurrentHostMemory: sample})
+	}
+	if _, err := q.Checkin(c); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, runs[0].ID); got.State != "stopping" || got.Reason != "shared GPU growth consumes physical memory headroom" {
+		t.Fatal("1.5 GiB forecast exceeded .25 GiB physical headroom without a planned stop", got.State, got.Reason)
+	}
+	requireState(t, q, runs[1].ID, "running")
 }
 
 func TestDiscreteFanOutWaitsForIncumbentSample(t *testing.T) {

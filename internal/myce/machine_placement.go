@@ -34,10 +34,7 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 		reserved := 0.0
 		for _, j := range q.liveJobs() {
 			if batchReservesCapacity(j) && batchOnTarget(j, &target) {
-				charge := deviceShareGB(j)
-				if s := q.hostMemorySamples[j.Machine][jobKey(*j)]; unifiedCUDA(&target) && sharedDeviceSampleReady(s, q.clock.Now()) {
-					charge = max(charge, s.deviceGB+s.deviceGrowthGB)
-				}
+				charge := sampledDeviceCharge(j, &target, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
 				reserved += charge
 				target.batchTenants++
 			}

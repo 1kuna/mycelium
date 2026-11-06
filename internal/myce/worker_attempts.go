@@ -741,7 +741,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 			card := allocationMachine(&w.Machine, j.AllocatedDevices)
 			sample, telemetry := w.hostMemorySamples[jobKey(j)], cardTelemetry(card)
 			if card.GPU != "xpu" || card.UnifiedMemory || !deviceTelemetryReady(telemetry, w.Clock.Now()) || *telemetry.ActivePercent >= 100 ||
-				!fanOutDeviceSampleReady(&j, sample, w.Clock.Now()) {
+				!fanOutDeviceSampleReady(sample, w.Clock.Now()) {
 				return errors.New("fan-out sharing requires fresh discrete XPU headroom evidence")
 			}
 		}
@@ -774,10 +774,8 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		fanOut, deviceGrowth := fanOutDeviceAttempt(&next), deviceShareGB(&next)
 		for _, j := range jobs {
 			if !j.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, id) {
-				charge := deviceShareGB(&j)
-				if s := w.hostMemorySamples[jobKey(j)]; d.UnifiedMemory && d.Platform == "cuda" && sharedDeviceSampleReady(s, w.Clock.Now()) {
-					charge = max(charge, s.deviceGB+s.deviceGrowthGB)
-				}
+				card := d.machine(w.Machine)
+				charge := sampledDeviceCharge(&j, &card, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 				usedGPU += charge // A co-tenant sharing this card (#538).
 				fanOut = fanOut || fanOutDeviceAttempt(&j)
 				s := w.hostMemorySamples[jobKey(j)]
