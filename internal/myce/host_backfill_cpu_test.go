@@ -169,3 +169,41 @@ func TestHostBackfillCPUUsesImmediateAlternative(t *testing.T) {
 		t.Fatal("CPU demand did not use immediately fitting alternative", got)
 	}
 }
+
+func TestHostBackfillCPULocalFairTurn(t *testing.T) {
+	for _, remoteDemand := range []bool{false, true} {
+		t.Run(fmt.Sprintf("remote-demand=%v", remoteDemand), func(t *testing.T) {
+			q, clock := fixture(t)
+			local, remote := cpuBackfillMachine("local", 64), cpuBackfillMachine("remote", 64)
+			machineCheck(t, q, local)
+			machineCheck(t, q, remote)
+			if err := q.ConfigureProjects(map[string]ProjectPolicy{
+				"a": {Weight: 1}, "b": {Weight: 2}, "c": {Weight: 100},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			a := cpuSpec(1, 48)
+			a.Project, a.AllowedMachines = "a", []string{local.ID}
+			large := submit(t, q, a)
+			clock.Advance(time.Second)
+			b := cpuSpec(1, 24)
+			b.Project, b.AllowedMachines = "b", []string{local.ID}
+			small := submit(t, q, b)
+			if remoteDemand {
+				c := cpuSpec(1, 48)
+				c.Project, c.AllowedMachines = "c", []string{remote.ID}
+				submit(t, q, c)
+			}
+			if err := q.update(func() error {
+				q.s.FairUsage[q.fairKey(large.Spec)] = FairUsage{Seconds: 100, At: clock.Now()}
+				q.s.FairUsage[q.fairKey(small.Spec)] = FairUsage{Seconds: 150, At: clock.Now()}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if got := assignedJob(machineCheck(t, q, local)); got == nil || got.ID != small.ID {
+				t.Fatal("remote-only project changed the earlier local fair turn", got)
+			}
+		})
+	}
+}

@@ -52,6 +52,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		projections[targetKey(m)] = &projected
 	}
 	choices := []*hostBackfillDemand{}
+	orders := map[string]*candidateSet{}
 	for _, j := range demands {
 		var best *hostBackfillDemand
 		for _, m := range scan.machines {
@@ -63,6 +64,11 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !q.batchSlotFree(m, candidate) || !fits(candidate, projected, m.FreeMemoryGB) {
 					continue
 				}
+				key := targetKey(m)
+				if orders[key] == nil {
+					orders[key] = &candidateSet{q: q, scores: map[string]float64{}, actives: map[string]float64{}}
+				}
+				orders[key].jobs = append(orders[key].jobs, candidate)
 				ready := fits(candidate, m, m.FreeMemoryGB)
 				bestReady := best != nil && fits(best.job, best.machine, best.machine.FreeMemoryGB)
 				if best == nil || ready && !bestReady || ready == bestReady && q.targetPlacementBetter(candidate, m, best.machine, scan) {
@@ -76,12 +82,10 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	}
 	// Use the existing tier/fair-turn comparator without recursively constructing
 	// candidate sets (these demands are precisely the ones ordinary fitting can
-	// omit). All otherwise ready demands participate in the fair-share scores.
-	set := &candidateSet{q: q, scores: map[string]float64{}, actives: map[string]float64{}}
+	// omit). Only projects eligible on that target compete for its fair share;
+	// demand restricted to another host cannot change a local fair turn.
 	for _, choice := range choices {
-		set.jobs = append(set.jobs, choice.job)
-	}
-	for _, choice := range choices {
+		set := orders[targetKey(choice.machine)]
 		choice.order = set
 		host := hostID(choice.machine)
 		previous := scan.hostBackfill[host]
