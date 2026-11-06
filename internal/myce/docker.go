@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -150,20 +151,23 @@ type dockerExecution struct {
 	ExitCode             int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
-	hostMemoryProbe checkpointIO[*CurrentHostMemory]
-	memory          *memoryAttempt
-	storageObserver *storageObserver
-	memoryWorker    *Worker
-	command         func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
-	persist         func(dockerExecution) error                      // Optional custody store for fault injection.
-	admit           func() error
-	dirty           bool
-	closed          chan struct{}
-	halt            chan struct{}
-	haltOnce        sync.Once
-	mu              sync.Mutex
-	state           dockerExecution
-	dir, binary     string
+	latencyMu         sync.Mutex
+	latency           map[string]readinessLatency
+	observationBudget map[string]time.Duration
+	hostMemoryProbe   checkpointIO[*CurrentHostMemory]
+	memory            *memoryAttempt
+	storageObserver   *storageObserver
+	memoryWorker      *Worker
+	command           func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
+	persist           func(dockerExecution) error                      // Optional custody store for fault injection.
+	admit             func() error
+	dirty             bool
+	closed            chan struct{}
+	halt              chan struct{}
+	haltOnce          sync.Once
+	mu                sync.Mutex
+	state             dockerExecution
+	dir, binary       string
 
 	ctx       context.Context
 	inventory func([]string)
@@ -172,11 +176,6 @@ type dockerAttempt struct {
 	clock     Clock
 	timeout   time.Duration
 }
-
-// Starting a container includes runtime/mount setup, unlike an observation RPC.
-// The former 2s budget cancelled real starts on a loaded host (#149). Allow
-// 30s for that work; a hung start costs at most 28s more before exact cleanup.
-const dockerStartTimeout = 30 * time.Second
 
 func (d *dockerAttempt) saveLocked() error {
 	err := runtimeErrorFor("persist", d.saveState(d.state))
@@ -297,18 +296,20 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 		return d.callWithTimeout(d.timeout, args...)
 	}
 	// A read timeout says nothing about the payload. Retry only the read,
-	// leaving exact custody and all stop/launch intent untouched. The capped
-	// backoff limits daemon load to one retry per 5s during a prolonged outage;
-	// its cost is at most 5s extra observation/cleanup latency after recovery.
+	// leaving exact custody and all stop/launch intent untouched. Retry spacing
+	// follows the preceding unavailable observation's cost, leaving as much
+	// time for daemon recovery as the observer just consumed.
 	clock := d.clock
 	if clock == nil {
 		clock = RealClock{}
 	}
 	var since time.Time
-	backoff := 100 * time.Millisecond
+	backoff := d.rpcBudget(args[0])
 	warned := false
 	for failures := 0; ; {
+		started := RealClock{}.Now()
 		out, err := d.callWithTimeout(d.timeout, args...)
+		backoff = max(time.Nanosecond, RealClock{}.Now().Sub(started))
 		if !errors.Is(err, context.DeadlineExceeded) || d.ctx != nil && d.ctx.Err() != nil {
 			if failures > 0 {
 				d.mu.Lock()
@@ -332,7 +333,7 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 			d.state.Error = "Docker cleanup unconfirmed; " + d.state.CleanupCause.String()
 		}
 		_ = d.saveLocked()
-		if elapsed >= 2*time.Minute && !warned {
+		if !warned {
 			log.Printf("attempt %s: %s", d.state.Identity, d.state.ObservationRetry)
 			warned = true
 		}
@@ -344,7 +345,6 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 			timer.Stop()
 			return nil, runtimeErrorFor(args[0], context.Canceled)
 		}
-		backoff = min(2*backoff, 5*time.Second)
 	}
 }
 func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (out []byte, err error) {
@@ -363,8 +363,46 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
+	if timeout <= 0 {
+		timeout = d.rpcBudget(operation)
+	}
+	progress := newReadinessProgress(d.clock, readinessHistory{})
+	progress.budget = timeout
+	ctx, cancel := context.WithCancelCause(parent)
+	ctx = context.WithValue(ctx, ioProgressKey{}, func() { progress.advance() })
+	defer cancel(context.Canceled)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			budget, stalled := progress.state()
+			if stalled {
+				cancel(context.DeadlineExceeded)
+				return
+			}
+			timer := time.NewTimer(budget)
+			select {
+			case <-timer.C:
+			case <-done:
+				timer.Stop()
+				return
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			}
+		}
+	}()
+	started := progress.clock.Now()
+	realStarted := RealClock{}.Now()
+	defer func() {
+		if err == nil {
+			d.noteRPCLatency(operation, max(progress.clock.Now().Sub(started), RealClock{}.Now().Sub(realStarted)))
+		}
+		if errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
+			err = context.DeadlineExceeded
+			d.backoffRPC(operation, timeout)
+		}
+	}()
 	if d.command != nil {
 		return d.command(ctx, args...)
 	}
@@ -374,9 +412,17 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = timeout
-	out, err = cmd.Output()
+	var stdout bytes.Buffer
+	var stderr dockerTail
+	cmd.Stdout = &dockerProgressOutput{output: &stdout, progress: progress}
+	cmd.Stderr = &dockerProgressOutput{output: &stderr, progress: progress}
+	err = cmd.Run()
+	out = stdout.Bytes()
+	if exit := new(exec.ExitError); errors.As(err, &exit) {
+		exit.Stderr = stderr.data
+	}
 	if ctx.Err() != nil {
-		return nil, ctx.Err()
+		return nil, context.Cause(ctx)
 	}
 	return out, err
 }
@@ -410,11 +456,7 @@ func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	timeout := d.timeout
-	if kind == "start" {
-		timeout = max(timeout, dockerStartTimeout)
-	}
-	out, err := d.callWithTimeout(timeout, args...)
+	out, err := d.callWithTimeout(d.timeout, args...)
 	if err != nil {
 		err = d.recordInfrastructure(infrastructureFact{Kind: launchFailed, At: time.Now().UTC()}, err)
 	}
@@ -465,6 +507,7 @@ type dockerInspection struct {
 		Status     string
 		ExitCode   int
 		OOMKilled  bool
+		Health     *struct{ Status string }
 	} `json:"State"`
 }
 
@@ -929,7 +972,7 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) (err error
 		}
 		tail := &dockerTail{}
 		if !logsNone {
-			ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+			ctx, cancel := context.WithTimeout(context.Background(), d.rpcBudget("logs"))
 			cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", "--tail", "256", c.ID)
 			cmd.Env = d.env
 			cmd.Dir = d.workdir
@@ -937,7 +980,7 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) (err error
 			cmd.Stderr = tail
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
-			cmd.WaitDelay = d.timeout
+			cmd.WaitDelay = d.rpcBudget("logs")
 			err := cmd.Run()
 			cancel()
 			if err != nil {
@@ -1083,9 +1126,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		d.state.Network = "myce-" + identity
 		d.state.Containers = map[string]dockerMember{}
 	}
-	if d.timeout <= 0 {
-		d.timeout = 2 * time.Second
-	}
+
 	for _, v := range os.Environ() {
 		k, _, _ := strings.Cut(v, "=")
 		if k != "MYCE_TOKEN" && k != "DOCKER_CONTEXT" {
@@ -1260,8 +1301,7 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 		}
 		d.mu.Unlock()
 	}
-	wake := time.NewTicker(100 * time.Millisecond)
-	defer wake.Stop()
+	reconcileLatency := readinessLatency{}
 	for {
 		// Release proof is already durable. Re-observing the intentionally
 		// disconnected containers here would fabricate a containment failure.
@@ -1271,7 +1311,9 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 		if released {
 			break
 		}
+		started := RealClock{}.Now()
 		done, cleanupErr := d.reconcile()
+		reconcileLatency.observe(RealClock{}.Now().Sub(started))
 		if cleanupErr != nil {
 			d.mu.Lock()
 			d.state.CleanupCause = runtimeDiagnostic(cleanupErr)
@@ -1283,7 +1325,7 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 			break
 		}
 		select {
-		case <-wake.C:
+		case <-time.After(reconcileLatency.cadence()):
 		case <-d.halt:
 			output.Close()
 			return
@@ -1305,14 +1347,14 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	mainRemoved := d.state.Containers[container].Removed
 	d.mu.Unlock()
 	if container != "" && !logsNone && !mainRemoved {
-		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+		ctx, cancel := context.WithTimeout(context.Background(), d.rpcBudget("logs"))
 		cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", container)
 		cmd.Env = d.env
 		cmd.Stdout = output
 		cmd.Stderr = output
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
-		cmd.WaitDelay = d.timeout
+		cmd.WaitDelay = d.rpcBudget("logs")
 		if logErr := cmd.Run(); logErr != nil {
 			result.Success = false
 			result.CleanupCause = runtimeDiagnostic(runtimeErrorFor("logs", logErr))
@@ -1443,16 +1485,15 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 // Let the independent reconciler deliver TERM to every member and enforce its
 // durable deadline before shutting observation down. Unknown release stays held.
 func (d *dockerAttempt) waitShutdown(clock Clock) {
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
+
 	for {
 		d.mu.Lock()
 		until, released := d.state.StopAt, d.state.Released || !d.state.Accelerator || d.state.UserCancel
 		d.mu.Unlock()
-		if released || until == nil || !clock.Now().Before(until.Add(5*time.Second)) {
+		if released || until == nil || !clock.Now().Before(until.Add(d.rpcBudget("inspect"))) {
 			return
 		}
-		<-tick.C
+		<-time.After(d.rpcCadence("inspect"))
 	}
 }
 
@@ -1536,9 +1577,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	state.Accelerator = !s.state.Job.Spec.Needs.cpuOnly()
 	state.LogsNone = state.LogsNone || s.state.Job.Spec.Logs == "none"
 	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), state: state, dir: s.dir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout}
-	if d.timeout <= 0 {
-		d.timeout = 2 * time.Second
-	}
+
 	for _, v := range os.Environ() {
 		k, _, _ := strings.Cut(v, "=")
 		if k != "MYCE_TOKEN" && k != "DOCKER_CONTEXT" {
@@ -1597,7 +1636,7 @@ func ReconcileDockerAttempt(ctx context.Context, dir, identity string) error {
 		return errors.New("invalid Docker custody record")
 	}
 	state.Accelerator = !store.state.Job.Spec.Needs.cpuOnly()
-	d := &dockerAttempt{ctx: ctx, dir: dir, binary: "docker", clock: RealClock{}, timeout: 2 * time.Second, state: state, env: dockerClientEnvironment()}
+	d := &dockerAttempt{ctx: ctx, dir: dir, binary: "docker", clock: RealClock{}, state: state, env: dockerClientEnvironment()}
 	d.stop(d.clock.Now(), StopGrace, false)
 	released, err := d.reconcile()
 	if err != nil {

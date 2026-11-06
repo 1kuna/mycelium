@@ -95,9 +95,18 @@ type LlamaEngine struct {
 	healthErr      error
 	healthRevision uint64
 	healthDegraded bool
+	probeLatency   readinessLatency
 }
 
 func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
+	progress := readinessFromContext(ctx)
+	loaded := false
+	if progress == nil {
+		var finish func(bool)
+		ctx, progress, finish = superviseModelLoad(ctx, m, l.Dir, l.Clock)
+		defer func() { finish(loaded) }()
+	}
+	progress.calibrate(m)
 	for _, v := range os.Environ() {
 		if strings.HasPrefix(v, "LLAMA_ARG_HF_") {
 			return errors.New("remote llama-server model environment is forbidden; use myce model fetch")
@@ -166,8 +175,8 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	if e != nil {
 		return e
 	}
-	l.cmd.Stdout = l.log
-	l.cmd.Stderr = l.log
+	output := &modelReadinessOutput{output: l.log, progress: progress}
+	l.cmd.Stdout, l.cmd.Stderr = output, output
 	reader, writer, e := os.Pipe()
 	if e != nil {
 		l.log.Close()
@@ -218,18 +227,26 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		return e
 	}
 	l.url = "http://127.0.0.1:" + strconv.Itoa(port)
-	tick := time.NewTicker(serverProbeInterval)
-	defer tick.Stop()
+
 	hc := &http.Client{
-		Timeout:       serverProbeTimeout,
+		Timeout:       l.probeLatency.budget(),
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
+	lastStatus := 0
 	for {
+		started := progress.clock.Now()
+		realStarted := RealClock{}.Now()
+		hc.Timeout = l.probeLatency.budget()
 		req, _ := http.NewRequestWithContext(ctx, "GET", health, nil)
 		res, err := hc.Do(req)
 		if err == nil {
+			l.probeLatency.observe(max(progress.clock.Now().Sub(started), RealClock{}.Now().Sub(realStarted)))
+			if res.StatusCode != lastStatus {
+				progress.advance()
+				lastStatus = res.StatusCode
+			}
 			res.Body.Close()
-			if res.StatusCode >= 200 && res.StatusCode < 300 {
+			if res.StatusCode >= 200 && res.StatusCode < 300 && ctx.Err() == nil {
 				select {
 				case <-l.exited:
 					oomErr := l.memoryAttempt.failure()
@@ -239,6 +256,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 					}
 					return fmt.Errorf("server exited as health became ready: %v%s", l.waitErr, logHint)
 				default:
+					loaded = true
 					l.startHealthMonitor(health)
 					return nil
 				}
@@ -251,7 +269,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 			if oomErr != nil {
 				return oomErr
 			}
-			return ctx.Err()
+			return context.Cause(ctx)
 		case <-l.exited:
 			oomErr := l.memoryAttempt.failure()
 			_ = l.Unload()
@@ -259,7 +277,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 				return oomErr
 			}
 			return fmt.Errorf("server exited during load: %v%s", l.waitErr, logHint)
-		case <-tick.C:
+		case <-time.After(l.probeLatency.cadence()):
 		}
 	}
 }
@@ -777,7 +795,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 				return authorize(launch)
 			})
 		}
-		ctx, cancel := context.WithTimeout(parent, rt.config.Wait)
+		ctx, cancel := context.WithCancel(parent)
 		m := &workerModel{device: s.Device, bound: bound, model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
 		rt.models[engineKey(s.Model, s.Device)] = m
 		rt.wg.Add(1)
@@ -789,6 +807,24 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 }
 
 func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
+	ctx, progress, finishReadiness := superviseModelLoad(ctx, m.model, rt.dir, rt.clock)
+	if rt.config.Wait > 0 {
+		progress.mu.Lock()
+		progress.budget = max(progress.budget, rt.config.Wait)
+		progress.mu.Unlock()
+	}
+	if rt.cache != nil {
+		progress.mu.Lock()
+		progress.source = func() int64 {
+			if v, ok := rt.cache.progress.Load(cacheKey(m.model)); ok {
+				return v.(CopyReport).Bytes
+			}
+			return 0
+		}
+		progress.mu.Unlock()
+	}
+	loadSucceeded := false
+	defer func() { finishReadiness(loadSucceeded) }()
 	if m.device != "" && rt.worker != nil {
 		bound := *rt.worker
 		if m.bound != nil {
@@ -863,7 +899,16 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 			if recipe.BinaryRelative != "" && rt.environmentSourceRoot != "" {
 				recipe.Binary = filepath.Join(rt.environmentSourceRoot, recipe.BinaryRelative)
 			}
+			// Environment preparation has its own progress/ownership protocol;
+			// a model-load timer cannot classify a queued builder as stalled.
+			progress.mu.Lock()
+			progress.suspended = true
+			progress.mu.Unlock()
 			model, m.releaseEnvironment, e = PrepareModelEnvironment(ctx, model, recipe.Platform, EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{model.Environment: {recipe.Platform: recipe}}}, rt.environmentCache)
+			progress.advance()
+			progress.mu.Lock()
+			progress.suspended = false
+			progress.mu.Unlock()
 		}
 	}
 	if e == nil && (model.Engine == "llama.cpp" || model.SizeBytes > 0) {
@@ -873,8 +918,13 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		e = checkLaunchGate(ctx)
 	}
 	if e == nil {
+		progress.calibrate(model)
 		e = m.engine.Load(ctx, model)
 	}
+	if e == nil && ctx.Err() != nil {
+		e = context.Cause(ctx)
+	}
+	loadSucceeded = e == nil
 	m.cancel()
 	// A failed load may have started a process. Keep its memory reserved unless
 	// cleanup actually succeeds, even when the engine's own load cleanup failed.

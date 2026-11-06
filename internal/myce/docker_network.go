@@ -85,8 +85,8 @@ func (s Spec) validateDockerGroup() error {
 		}
 		if c.Readiness != nil {
 			t, err := time.ParseDuration(c.Readiness.Timeout)
-			if err != nil || t <= 0 || c.Readiness.Port < 1 || c.Readiness.Port > 65535 || !strings.HasPrefix(c.Readiness.Path, "/") || strings.ContainsAny(c.Readiness.Path, "\r\n") {
-				return errors.New("sidecar readiness requires port, absolute HTTP path and positive timeout")
+			if c.Readiness.Timeout != "" && (err != nil || t <= 0) || c.Readiness.Port < 1 || c.Readiness.Port > 65535 || !strings.HasPrefix(c.Readiness.Path, "/") || strings.ContainsAny(c.Readiness.Path, "\r\n") {
+				return errors.New("sidecar readiness requires port, absolute HTTP path and optional positive timeout")
 			}
 		}
 	}
@@ -461,9 +461,11 @@ func (d *dockerAttempt) launchContainer(base, args []string, name string, memory
 func (d *dockerAttempt) waitReady(id, name string, r DockerReadiness) error {
 	duration, _ := time.ParseDuration(r.Timeout)
 	deadline := d.clock.Now().Add(duration)
-	wake := time.NewTicker(100 * time.Millisecond)
-	defer wake.Stop()
-	client := &http.Client{Timeout: d.timeout, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	progress := newReadinessProgress(d.clock, readinessHistory{})
+	progress.budget = d.rpcBudget("inspect")
+	latency := readinessLatency{}
+	states := map[string]string{}
+	client := &http.Client{Timeout: d.rpcBudget("readiness"), Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
 	for {
 		objects, e := d.containers()
@@ -486,10 +488,19 @@ func (d *dockerAttempt) waitReady(id, name string, r DockerReadiness) error {
 			}
 			return err
 		}
-		if !d.clock.Now().Before(deadline) {
+		_, stalled := progress.state()
+		if duration > 0 && !d.clock.Now().Before(deadline) || duration == 0 && stalled {
 			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: fmt.Errorf("Docker sidecar %s HTTP readiness timeout", name)}
 		}
 		for _, c := range objects {
+			state := c.State.Status
+			if c.State.Health != nil {
+				state += "/" + c.State.Health.Status
+			}
+			if c.ID == id && states[id] != state {
+				states[id] = state
+				progress.advance()
+			}
 			if c.ID != id || !*c.State.Running {
 				continue
 			}
@@ -497,19 +508,24 @@ func (d *dockerAttempt) waitReady(id, name string, r DockerReadiness) error {
 			if net.ParseIP(ip) == nil {
 				continue
 			}
+			started := RealClock{}.Now()
+			client.Timeout = d.rpcBudget("readiness")
 			resp, err := client.Get("http://" + net.JoinHostPort(ip, strconv.Itoa(r.Port)) + r.Path)
 			if err == nil {
+				latency.observe(RealClock{}.Now().Sub(started))
+				d.noteRPCLatency("readiness", RealClock{}.Now().Sub(started))
 				resp.Body.Close()
-				if resp.StatusCode >= 200 && resp.StatusCode < 300 && d.clock.Now().Before(deadline) {
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 && (duration == 0 || d.clock.Now().Before(deadline)) {
 					return nil
 				}
 			}
 		}
-		if !d.clock.Now().Before(deadline) {
+		_, stalled = progress.state()
+		if duration > 0 && !d.clock.Now().Before(deadline) || duration == 0 && stalled {
 			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: fmt.Errorf("Docker sidecar %s HTTP readiness timeout", name)}
 		}
 		select {
-		case <-wake.C:
+		case <-time.After(latency.cadence()):
 		case <-d.halt:
 			return errors.New("Docker readiness interrupted")
 		}

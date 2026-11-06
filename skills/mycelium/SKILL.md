@@ -164,6 +164,18 @@ caps/quotas still bind; running same-tier work is not stopped to repay debt.
 
 On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. During measured control pressure, expensive/lower-value nonproduction reads can return 429; honor `Retry-After` and prefer batched waits. Production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
 
+## Adaptive model readiness (next release)
+
+Omitted model `max_wait` follows caller cancellation and actual load failures;
+omitted `idle_timeout` follows measured model demand and reload cost. A healthy
+load with advancing copy/load/health signals has no automatic total load
+cutoff. Keep the same request while it progresses; a silent load reports failure
+and retains exact cleanup custody. Explicit caller, `max_wait`, `ready_timeout`
+and measurement `--load-timeout` deadlines still apply where configured. For
+custom servers, report monotonic `MYCE_LOAD_PROGRESS` records as described in
+[adaptive readiness](https://github.com/1kuna/mycelium/blob/main/docs/readiness.md).
+Managed Docker still uses local digest-pinned images with `--pull=never`.
+
 ## Explicit model master downloads (next release)
 
 Declared `model_snapshots` also handle SMB/CIFS `XSym` emulated symlinks from

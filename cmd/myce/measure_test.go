@@ -30,7 +30,7 @@ func TestRunMeasureRejectsUnknownOutputBeforeReadingCatalog(t *testing.T) {
 }
 
 func TestRunMeasureRejectsInvalidConcurrencyAndTimeout(t *testing.T) {
-	for _, args := range [][]string{{"--warmup-parallel", "0"}, {"--load-timeout", "0s"}, {"--warmup-parallel", "-1"}, {"--load-timeout", "-1s"}} {
+	for _, args := range [][]string{{"--warmup-parallel", "0"}, {"--warmup-parallel", "-1"}, {"--load-timeout", "-1s"}} {
 		var out, errout bytes.Buffer
 		if err := runMeasure(context.Background(), args, &out, &errout); err == nil || !strings.Contains(err.Error(), "must be positive") {
 			t.Fatalf("%v: %v", args, err)

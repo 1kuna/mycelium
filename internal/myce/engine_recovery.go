@@ -6,16 +6,7 @@ import (
 	"time"
 )
 
-const engineLoadSlack = 5 * time.Second
-
 func slotReservesMemory(s *ModelSlot) bool { return s.State != "failed" || s.RetryReserved }
-
-func (q *Queue) engineLoadDeadline() *time.Time {
-	// Match the worker's entire load context, including copies, environments
-	// and admission waits. ready_timeout starts only at engine launch.
-	until := q.clock.Now().Add(q.models.Wait + engineLoadSlack)
-	return &until
-}
 
 func (q *Queue) failModelLoadCalls(model string) {
 	for _, c := range q.calls {
@@ -25,25 +16,10 @@ func (q *Queue) failModelLoadCalls(model string) {
 	}
 }
 
-func (q *Queue) expireEngineLoad(s *ModelSlot) {
-	if s.State != "loading" {
-		return
-	}
-	if s.LoadUntil == nil {
-		// Upgrade persisted slots conservatively: initialize once, never extend
-		// this deadline on subsequent heartbeats or queue restarts.
-		s.LoadUntil = q.engineLoadDeadline()
-	}
-	if q.clock.Now().Before(*s.LoadUntil) {
-		return
-	}
-	q.noteEngineFailure(s)
-	s.LoadTimedOut = true
-	s.RuntimeFailed = false
-	s.State = "unloading"
-	s.Error = "model load timed out; cleanup pending"
-	q.failModelLoadCalls(s.Model)
-}
+// The worker measures byte/load/health progress and owns stall detection. A
+// queue wall timer cannot distinguish a progressing tiny host from a dead load.
+// Silent workers remain subject to the existing worker-loss/custody protocol.
+func (q *Queue) expireEngineLoad(s *ModelSlot) { s.LoadUntil = nil }
 
 // A slot's attempt identifies an engine, independently of the worker session.
 // Reports must identify the exact engine attempt.
@@ -131,6 +107,7 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 		}
 	case "ready":
 		if s.State == "loading" {
+			q.noteModelLoaded(s)
 			s.State = "ready"
 			s.Error = ""
 			s.RetryAt = nil
@@ -165,7 +142,7 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 func (q *Queue) engineDemand(s *ModelSlot, m *Machine) *ModelCall {
 	var best *ModelCall
 	for _, c := range q.calls {
-		if c.Model != s.Model || c.Machine != "" || c.Error != "" || q.clock.Now().Sub(c.Queued) >= q.models.Wait || !q.callPlacementAllowed(c, m) || q.capReasonFor(callJob(c), m) != "" {
+		if c.Model != s.Model || c.Machine != "" || c.Error != "" || q.models.Wait > 0 && q.clock.Now().Sub(c.Queued) >= q.models.Wait || !q.callPlacementAllowed(c, m) || q.capReasonFor(callJob(c), m) != "" {
 			continue
 		}
 		// The excluded attempt has died; a new attempt can satisfy this demand.
@@ -264,7 +241,7 @@ func (q *Queue) beginEngineAttempt(s *ModelSlot, priority string) {
 	s.RetryReserved = false
 	s.LoadTimedOut = false
 	s.RuntimeFailed = false
-	s.LoadUntil = q.engineLoadDeadline()
+	s.LoadUntil = nil
 	s.FailureCounted = false
 	s.Attempt = ID()
 	s.InFlight = 0

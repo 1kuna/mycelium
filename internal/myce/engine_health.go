@@ -7,35 +7,33 @@ import (
 	"time"
 )
 
-const (
-	serverProbeInterval  = 100 * time.Millisecond
-	serverProbeTimeout   = 5 * time.Second
-	serverHealthFailures = 3
-	serverHealthWindow   = 15 * time.Second
-)
-
 type serverProbeFailures struct {
-	count int
-	since time.Time
+	count   int
+	since   time.Time
+	latency readinessLatency
 }
 
 func (f *serverProbeFailures) observe(healthy bool, started, now time.Time) bool {
 	if healthy {
-		*f = serverProbeFailures{}
+		f.count, f.since = 0, time.Time{}
+		f.latency.observe(now.Sub(started))
 		return false
 	}
 	if f.count == 0 {
 		f.since = started
 	}
 	f.count++
-	return f.count >= serverHealthFailures && now.Sub(f.since) >= serverHealthWindow
+	// A second observation confirms continuous failure over the host's learned
+	// healthy-response envelope. One slow/failed request alone cannot withdraw
+	// readiness. This is confirmation, not a fleet-specific failure threshold.
+	return f.count > 1 && now.Sub(f.since) >= f.latency.budget()
 }
 
 // Probing is bounded I/O, independent of the queue's injected scheduling Clock.
 // It never releases custody or starts another process; the heartbeat owns that
 // transition. Completion remains observable even with logs directed to /dev/null.
 func (l *LlamaEngine) startHealthMonitor(health string) {
-	l.startHealthMonitorTimeout(health, serverProbeTimeout)
+	l.startHealthMonitorTimeout(health, 0)
 }
 
 func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Duration) {
@@ -48,19 +46,25 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 	}
 	go func() {
 		defer close(l.monitorDone)
-		tick := time.NewTicker(serverProbeInterval)
-		defer tick.Stop()
 		client := &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-		failures := serverProbeFailures{}
+		failures := serverProbeFailures{latency: l.probeLatency}
 		for {
+			if readinessPause(ctx, failures.latency.cadence()) != nil {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-l.exited:
 				return
-			case <-tick.C:
+			default:
+			}
+			client.Timeout = failures.latency.budget()
+			if timeout > 0 {
+				client.Timeout = timeout
 			}
 			started := clock.Now()
+			realStarted := RealClock{}.Now()
 			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, health, nil)
 			res, err := client.Do(req)
 			healthy := err == nil && res.StatusCode >= 200 && res.StatusCode < 300
@@ -75,7 +79,9 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 			if !healthy {
 				l.healthRevision++
 			}
-			failed := failures.observe(healthy, started, clock.Now())
+			now := clock.Now()
+			elapsed := max(now.Sub(started), RealClock{}.Now().Sub(realStarted))
+			failed := failures.observe(healthy, now.Add(-elapsed), now)
 			if failed {
 				l.healthErr = errors.New("server health failed")
 			}
