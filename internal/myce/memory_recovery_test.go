@@ -221,6 +221,7 @@ func TestMemoryRecoveryAutoVariantContainment(t *testing.T) {
 	v.Target = ExecutionTarget{OS: "linux", Arch: "amd64", Platform: "cpu"}
 	v.Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
 	v.Execution.Main.MemoryGB = 40
+	delete(v.Baselines, "kind:sample")
 	v.References = map[string]WorkReference{"extension:sample": {InputShape: "small-v1", Unit: "records", Units: 10}}
 	e = freezeComposition(t, e)
 	if err := q.AddExtension(e); err != nil {
