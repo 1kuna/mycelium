@@ -51,36 +51,49 @@ separate dev run. For an authorized urgent hotfix: run quick, deploy, run full
 afterwards, and fix forward if full finds a problem. This workflow does not grant
 fleet/deployment authorization.
 
-Quick has a five-minute work/termination budget, including cache setup and builds;
-on expiry it stops its fixture processes and suggests `./scripts/gate.sh full`
-(exit 124). It sends TERM at 295 seconds and KILL after five seconds if needed,
-then verifies fixture exit before removing scratch. Cleanup may extend the wall
-time; scratch is retained if a fixture cannot be stopped or inventoried. Cleanup
-uses the unique inherited run marker, isolated HOME/TMPDIR, ancestry and OS file
-handles in scratch (macOS's native `libproc` API, or Linux `/proc`). The macOS
-probe reads kernel process paths without walking mounts, while retaining
-same-user discovery of reparented fixtures. It has a five-second
-timeout and at most a 0.2s reap after killing the owned probe: stalled network filesystem I/O must not
-block the final report. A failed or timed-out inventory retains scratch and
-never authorizes fixture signals or deletion. It remembers start
-identities through TERM/KILL, including environment-scrubbed or reparented
-commands, and signals individual PIDs. The old 175-second
-deadline left only 19 seconds for builds/vet after an
-observed 156-second related-test selection, and repeatedly truncated passing work
-under shared load (#204). Five minutes keeps quick below the full gate's target
-without reducing test selection. Quick tests use Go's `-timeout` set before each
-invocation to the remaining
-supervisor work budget minus ten seconds, preserving goroutine dumps on hangs
-without an independent three-minute package cap (#382). Compilation occurs
-before Go starts its test timer, so sufficiently slow compilation can still
-leave the outer supervisor to terminate the run before a dump. Selection, race
-instrumentation and concurrency are unchanged.
-Full runs have no package-wide wall deadline:
-a healthy two-core Linux core suite has taken nearly fifteen minutes. Observe
-the JSON log stream and stop a run with no log growth for twenty minutes
-rather than killing active tests. Timings
-include build, vet, the three release target builds, test execution and scratch
-cleanup.
+Quick and full have no overall wall deadline. Each Go package runs under its
+own output-progress watchdog, keyed by package, exact selected test expression,
+OS/architecture, Go version and available/assigned CPU count. Timings live beside
+Go's execution-host build cache (`mycelium-gate-timings`), shared across checkouts
+on that host, and every invocation appends a sanitized record to
+`gate-timings.jsonl`. Fleet profiles return that report with their result marker.
+A new selection/toolchain/CPU configuration learns independently; a small quick
+selection cannot shorten a full-package deadline.
+
+A learned package stalls after **three times its expected package duration with
+no output**. Expected duration is the latest completed successful observation
+for that host/configuration/selection. Three intervals allow the normal expected
+completion plus two missed completions for transient contention; the cost is up
+to three expected durations to detect a silent hang. This is an operational
+tolerance, not a statistical confidence claim or a wall-time limit. Every output
+chunk resets only that package's silence clock. A run can exceed any previous
+wall duration while progressing, and sibling output cannot hide its hang.
+The watchdog starts at Go's JSON package-start event, after compilation: a warm
+cache measurement must not kill cold compilation. Build/vet/compatibility steps
+record elapsed time but do not infer silent deadlines from cache-dependent work.
+
+Cold packages retain `go test -timeout=1h` as the finite toolchain backstop.
+The prior ad-hoc 15-minute value would already truncate the measured 1,708s full
+package; one hour allows over twice that observed duration for first-run learning.
+This cold backstop can still reject an unprecedented, longer silent test; it is
+an explicit bootstrap tradeoff, not a learned throughput claim. Subsequent runs
+use `-timeout=0` and measured progress deadlines. All runs record elapsed time,
+longest output gap and status, including failed/stalled runs; only successful,
+uncensored observations train the cache. Regressions with fake time run via
+`python3 scripts/test-gate-progress.py`; custody regressions run via
+`python3 scripts/test-gate-budget.py`.
+
+Each package has a unique marker and private HOME/TMPDIR. On a stall it stops
+and verifies its own processes before releasing its package slot; an unconfirmed
+package cleanup stops the gate. Both gate modes also stop all remaining owned
+fixtures before removing scratch. Cleanup retains
+the existing unique run marker, isolated HOME/TMPDIR, ancestry and OS file-handle
+checks (macOS `libproc`, Linux `/proc`), PID start identities and individual
+signals. TERM gets five seconds for fixture checkpoint handlers, then KILL and
+one second for asynchronous exit verification; those custody bounds do not
+limit useful gate work. The native handle probe retains its five-second isolation
+bound and 0.2s post-KILL reap bound, so a stuck kernel probe retains scratch rather
+than blocking cleanup forever. Any inventory/exit uncertainty retains scratch.
 
 Go 1.25.6, a native macOS arm64 toolchain (for the CGO release target), `uv`
 and Python 3 are current laptop prerequisites. Install prerequisites separately:
@@ -92,13 +105,26 @@ workspace, which is deleted on exit because it holds only rebuildable test state
 Failure logs belong in an
 ignored `.reports/` folder (for example redirect stdout/stderr there).
 
-Before a full run, use `pgrep -fl 'go test'` and wait if two full race suites are
-already active. Do not terminate another worker's tests. The gate allows two
-Go packages at once (`-p 2`), rather than unbounded compiler parallelism. The
-suite runs at most four independent tests concurrently within each package.
-Quick overlaps up to two selected packages with their individual test-name
-expressions; it waits for both results even if one fails. Each quick test
-command uses one Go build slot, keeping the total at two.
+On macOS, the full supervisor holds one of two cross-checkout filesystem locks
+for its entire lifetime, independent of package commands or test expressions. It also
+accounts for older standalone full race commands before entering a slot. The
+slot also has a `mycelium-full-gate-N.custody` record beside its lock in
+`GOCACHE`, containing the run marker and scratch directory. Only verified fixture
+exit removes that record; failed inventory or supervisor death retains occupancy
+after the OS releases the lock. Recovery requires verifying the recorded run's
+fixtures have exited before removing its custody record. Never clear another
+owner's record merely to admit more work.
+The
+two-suite boundary preserves the repository's observed Mac safety rule: more
+concurrent full suites caused false failures. Linux fleet gates rely on the
+queue's CPU and learned-memory admission instead of this Mac-only count; waiting
+inside an already-admitted Linux job would strand its allocated resources. Do not
+terminate another worker's tests. Build and test concurrency follows the execution host's affinity, Linux CPU
+quota and optional `GOMAXPROCS` contract, rounded down to whole runnable cores
+(with a one-core minimum). Profiles retain their explicit two-core reservation
+and matching `GOMAXPROCS=2` contract. Each test command takes one build slot;
+quick and full overlap no more packages than available cores, each under its
+own selection and watchdog. Test parallelism uses that same CPU count.
 Tests that mutate process environment remain serial.
 `GORACE=atexit_sleep_ms=0` omits the race runtime's artificial one-second delay
 on each helper-process exit; product code and assertions remain race-instrumented
@@ -224,19 +250,20 @@ python3 scripts/gate-related.py "$(git merge-base HEAD origin/main)" > .reports/
 Commit first: the source is `HEAD`, while the selection also sees uncommitted
 files. A selection error (changed `go.mod`, unmapped code) means run `gate-full`;
 the `&&` keeps a failed selection's empty file from submitting a test-free run.
-Quick runs a subset of the full gate's commands at the same concurrency and
-retains the historical conservative 7 GiB bound; the same five-minute budget applies.
+Quick and full use the same execution-host progress supervision. Gate profiles
+and converted adapter entries use `memory: auto` for quick and Darwin full,
+allowing the queue's comparable
+accepted unconstrained evidence to supply reservations, and exploration where
+that evidence is absent or constrained. Quick uses `memory_class: per_item` so
+its submitted selection participates in memory comparability; a smoke run cannot
+teach a larger selection's envelope. Source changes still reuse the profile's
+comparable work identity. After a full run inspect memory eligibility, ceiling
+events and swap; a constrained peak is a lower bound, not a sizing sample.
 
-Full-gate profiles and their converted adapter entries declare 6 GiB for Linux
-and use `memory: auto` for Darwin. Both platforms have comparable learning
-evidence, but the Linux auto validation below hit its ceiling; accepted older
-samples alone did not establish sufficient total-charge headroom. Source SHA
-changes and removing a declaration do not change the memory work identity.
-Commands, two-core concurrency, environment, targets and result acceptance stay
-the same. Quick retains the conservative 7 GiB declaration: the full suite bounds its
-work, while the shared quick memory identity excludes selection inputs by
-default. A small selection's accepted peak cannot establish the largest
-selection's demand.
+The following is historical evidence from #766/#767, which initially retained
+explicit Linux bounds after an auto candidate hit its cgroup ceiling. Linux
+full retains main’s measured 6 GiB declaration pending separate memory-policy
+qualification; adaptive output supervision does not change that bound.
 
 Read-only job GET inspection on 2026-11-04 found these successful final attempts:
 
@@ -260,7 +287,7 @@ Linux auto validation job `2686318521495ce7787d3a2269635f8a` passed in 1495s,
 with 410.27s submission-to-command-start wait, but was constrained: its learned
 3.276315 GiB + 0.125 GiB slack ceiling recorded 160 `max` events. Total cgroup
 peak was 3.401348 GiB, non-reclaimable peak 2.427307 GiB, with zero swap/OOM.
-This is a lower bound, not a new accepted sizing sample. Keep an explicit Linux
+This is a lower bound, not a new accepted sizing sample. #767 kept an explicit Linux
 bound per #559: recent unconstrained total max 4.244785 GiB plus
 max(range 1.063103, 25% of max 1.061196) = 5.307888 GiB, rounded to 6 GiB.
 Its cost is 1.755215 GiB above that recent maximum; it saves 1 GiB per Linux
@@ -269,7 +296,7 @@ also fits below 6 GiB with 34% headroom, though its wider historical range
 would still round to 7 GiB. The revised bound uses the newer retained samples;
 it is not proof against all future suite growth. Darwin has no corresponding
 cgroup ceiling event and keeps its accepted RSS-based auto envelope.
-Unknown configurations can still explore; inspect envelope basis, learning
+Unknown configurations explore; inspect envelope basis, learning
 reason, memory events and swap after changes.
 
 A bounded recent-history snapshot contained 36 successful Linux full gates:
@@ -303,7 +330,7 @@ into Actions. No runner services or global queue policy change here. Reconsider
 submission concurrency only if measured waits remain high after right-sizing.
 
 For ad-hoc suites, `myce run --profile go-test -- -race ./...` defaults to the
-same `-timeout 15m` as the full gate. Arguments after `--` go to `go test`; an
+`-timeout 15m` backstop; the gate itself uses the learning policy above. Arguments after `--` go to `go test`; an
 explicit `-timeout 20m` overrides that default. A profile selects **one** eligible
 target from its `targets`, rather than running a platform matrix. To require a
 platform, copy `.mycelium/profiles/go-test.yaml` into an ignored path such as
