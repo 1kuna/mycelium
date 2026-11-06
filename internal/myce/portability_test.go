@@ -286,7 +286,7 @@ func TestPortabilityPlainCatalogPreparation(t *testing.T) {
 	}
 	row := portabilityRow(t, report, s.Targets[0])
 	h := row.Hosts[0]
-	if h.Prepared != "prepared" || h.Builds["catalog"] != "prepared" || len(row.Environments) != 1 || row.Environments[0].Inputs != "present" {
+	if h.Prepared != "prepared" || h.Builds["main"] != "ready" || len(row.Environments) != 1 || row.Environments[0].Inputs != "present" {
 		t.Fatalf("plain catalog projection: %+v", row)
 	}
 	if h.Admission != "can admit now" {

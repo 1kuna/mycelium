@@ -90,6 +90,11 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 	if err := view.defaultMemory(&s); err != nil {
 		return ResolveReport{}, specRejection(err)
 	}
+	if !s.extensionJob() {
+		if err := lowerExecution(&s); err != nil {
+			return ResolveReport{}, specRejection(err)
+		}
+	}
 	r := ResolveReport{ObservedAt: view.clock.Now(), Resolved: []string{}, Targets: []ResolveTarget{}, Findings: []ResolveFinding{}, Notes: []string{
 		"Read-only: no job, upload, build, reservation or placement change. Eligibility uses permanent capacity; current load decides when work starts. Submission revalidates everything.",
 	}}
@@ -152,6 +157,17 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		r.Findings = append(r.Findings, ResolveFinding{Field: "environment.platforms", Side: "queue", Problem: "the environment has no recipe for the platform this job's needs select", Fix: "Add a recipe for that platform (for CPU work, a cpu recipe), or change needs to match an existing recipe."})
 	}
 	r.Targets = view.resolveTargets(j)
+	if !s.extensionJob() {
+		sets := map[string]map[string]EnvironmentRecipe{}
+		if s.Environment.Key() != "" {
+			sets["main"] = recipes
+		}
+		for name, recipes := range sidecars {
+			sets[name] = recipes
+		}
+		p := view.portabilityWithRecipes(PortabilityRequest{Spec: &s, RequirementReasons: req.RequirementReasons}, sets)
+		r.Portability = &p
+	}
 	r.Blocker = view.actionableBlocker(j)
 	if r.Blocker != nil && r.Blocker.Code == "waiting_for_worker" {
 		r.Blocker = nil

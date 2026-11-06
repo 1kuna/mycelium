@@ -37,6 +37,15 @@ A recipe key identifies content, Python/backend/build settings and platform,
 not the library's physical mount path. Cache readiness is separate from source
 visibility, runtime coverage and output qualification.
 
+From the next release, each platform's `lock_coverage` reports the selected Pixi
+lock environment, its OS/architecture/backend `targets`, and whether unmapped
+package-manager platforms remain. Missing, malformed or unsupported metadata
+reports `unknown`; uv and binary recipes do not imply an OS list. Readback uses
+the loaded immutable bytes and exposes neither package contents nor paths.
+Declared lock coverage requires a native frozen installation and application
+output checks before claiming support. Resolve/portability intersect every
+member's coverage and show authored exclusions without widening accepted jobs.
+
 Keep the catalog and its inputs on the NAS, for example
 `NAS/mycelium/environments/catalog.yaml`. Start the queue with
 `--environment-config /queue/nas/mycelium/environments/catalog.yaml`. Workers

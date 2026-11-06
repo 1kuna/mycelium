@@ -5,6 +5,24 @@ one `.mycelium/adapter.yaml`, explicit targets, deliberately selected source, re
 and submit/wait/verified retrieval. Keep this package's [SKILL.md](SKILL.md) and
 supporting files together when installing it.
 
+Before choosing targets, run `myce portability`, inspect `myce env get NAME`,
+then run `myce spec check --resolve --entry NAME .mycelium/adapter.yaml` on the
+authored entry. Repeat after inventory or recipe changes. From the next release,
+resolve and portability compare authored eligibility with dependency candidates
+from the selected immutable lock environment, including all command members.
+The report names missing lock coverage, unknown build support, preparation and
+current admission separately. uv/installed-tool/binary coverage stays unknown
+without matching native evidence. A Pixi lock's platform keys are dependency
+metadata, not proof that payload binaries, downloads or shell commands work.
+
+Keep explicit targets for now. `portable: true` permits architecture omission
+within a declared OS; it does not expand existing lists or enable omitted
+targets in reusable entries. Plain-command admission needs no native baseline,
+but widening production work still needs owner-accepted MY-19 output parity.
+Preparation and exit-zero smoke checks do not supply it. Automatic omitted-target
+discovery and its isolated failures remain pending #853; the project-carried
+recipe decision hold in #251/#252 is unchanged.
+
 ## Existing profile compatibility
 
 Keep existing `.mycelium/profiles/NAME.yaml` callers working. To initialize a
