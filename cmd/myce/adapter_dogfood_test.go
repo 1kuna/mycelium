@@ -52,6 +52,9 @@ printf 'go test: exit=0\n' > go-test-result.txt
 	if got := adapterDogfoodResult(t, ctx, d, job.ID, "go-test-result.txt"); string(got) != "go test: exit=0\n" {
 		t.Fatalf("adapter result=%q", got)
 	}
+	t.Run("synthetic-resource-probes", func(t *testing.T) {
+		assertSyntheticResourceTelemetry(t, ctx, d.Client(), job.ID)
+	})
 }
 
 // The actual starter is deliberately unchanged: pinned uv environment, native

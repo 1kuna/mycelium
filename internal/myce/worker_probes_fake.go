@@ -42,5 +42,9 @@ func init() {
 	workerProcessMemory = nil
 	workerMemoryRSS = nil
 	workerLivenessCPU = nil
+	workerIOPressure = func(clock Clock) *IOPressure {
+		return &IOPressure{SampledAt: clock.Now(), Some: &PressureStall{TotalUS: 1234}, Full: &PressureStall{}}
+	}
+	workerResourceCPU = func(context.Context, map[int]string, map[string]float64) (float64, error) { return 1.25, nil }
 	probeguard.Before = func() { panic("test invoked a real hardware probe; inject a fake") }
 }

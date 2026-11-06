@@ -87,6 +87,10 @@ func cliTestMain(m *testing.M) int {
 func installSyntheticHost() {
 	myce.SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
 	myce.SetWorkerProbeDefaults(myce.WorkerProbeDefaults{
+		IOPressure: func(clock myce.Clock) *myce.IOPressure {
+			return &myce.IOPressure{SampledAt: clock.Now(), Some: &myce.PressureStall{TotalUS: 1234}, Full: &myce.PressureStall{}}
+		},
+		ResourceCPU:  func(context.Context, map[int]string, map[string]float64) (float64, error) { return 1.25, nil },
 		MountRoots:   func(context.Context) ([]string, error) { return []string{"/"}, nil },
 		DeviceFaults: func() myce.DeviceFaultSource { return nil },
 		Disk: func(string) (myce.DiskReading, error) {
