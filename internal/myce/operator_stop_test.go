@@ -190,7 +190,7 @@ func TestOperatorStopMarkerReconcilesWorkerWithQueue(t *testing.T) {
 	}
 }
 
-func TestOperatorStopRefundRevivesThirdLossAndPreservesOtherLosses(t *testing.T) {
+func TestOperatorStopRefundPreservesOtherLosses(t *testing.T) {
 	q, c := fixture(t)
 	m := machine("operator", "fake")
 	s := spec("experiment")
@@ -207,7 +207,7 @@ func TestOperatorStopRefundRevivesThirdLossAndPreservesOtherLosses(t *testing.T)
 		c.Advance(LossAfter)
 		check(t, q, observer(), nil)
 	}
-	if got := job(t, q, j.ID); got.Losses != 3 || got.State != "failed" {
+	if got := job(t, q, j.ID); got.Losses != 3 || got.State != "queued" {
 		t.Fatalf("not third loss: %+v", got)
 	}
 	r := operatorResult(result(old, false))
@@ -216,7 +216,7 @@ func TestOperatorStopRefundRevivesThirdLossAndPreservesOtherLosses(t *testing.T)
 		t.Fatalf("obsolete operator result accepted: %v", e)
 	}
 	if got := job(t, q, j.ID); got.Losses != 2 || got.State != "queued" {
-		t.Fatalf("refund did not revive: %+v", got)
+		t.Fatalf("refund changed adaptive recovery: %+v", got)
 	}
 	if e := q.Complete(r); !errors.Is(e, ErrStale) {
 		t.Fatalf("obsolete operator result accepted: %v", e)

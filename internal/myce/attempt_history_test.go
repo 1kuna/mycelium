@@ -107,6 +107,8 @@ func TestAttemptHistoryBoundedRequeues(t *testing.T) {
 	submit(t, q, spec("experiment"))
 	var current *Job
 	for attempt := 1; attempt <= attemptHistoryLimit+2; attempt++ {
+		// This history stress test models a repaired runtime between launch failures.
+		m.ExtensionFingerprint += "-repaired"
 		current = check(t, q, m, nil).Job
 		if current == nil || current.Attempt != attempt {
 			t.Fatal("missing attempt", attempt, current)

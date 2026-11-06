@@ -56,10 +56,10 @@ func TestSubmissionIdentity(t *testing.T) {
 		t.Fatal("key lost")
 	}
 	c.Advance(time.Second)
-	// Map insertion order is not part of identity; the generated start_by is not submitted.
+	// Map insertion order is not part of identity; omitted start cutoffs stay omitted.
 	s.Run.Env = map[string]string{"b": "two", "a": "one"}
 	again := submit(t, q, s)
-	if !again.SubmissionReused || again.ID != first.ID || !again.Queued.Equal(first.Queued) || !again.Spec.StartBy.Equal(*first.Spec.StartBy) {
+	if !again.SubmissionReused || again.ID != first.ID || !again.Queued.Equal(first.Queued) || again.Spec.StartBy != nil || first.Spec.StartBy != nil {
 		t.Fatal("repeat changed identity or timestamps")
 	}
 	for _, mutate := range []func(*Spec){

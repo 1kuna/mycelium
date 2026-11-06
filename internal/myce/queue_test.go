@@ -453,7 +453,7 @@ func stringBool(v bool) string {
 	}
 	return "false"
 }
-func TestThreeAttempts(t *testing.T) {
+func TestNonresumableInfrastructureLossesKeepRecovering(t *testing.T) {
 	t.Parallel()
 	q, c := fixture(t)
 	s := spec("experiment")
@@ -477,14 +477,12 @@ func TestThreeAttempts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	requireState(t, q, j.ID, "failed")
-	if !strings.Contains(job(t, q, j.ID).Reason, "3 infrastructure losses") {
-		t.Fatal("missing plain failure reason")
-	}
-	if check(t, q, m, nil).Job != nil {
-		t.Fatal("fourth attempt assigned")
+	requireState(t, q, j.ID, "queued")
+	if next := check(t, q, m, nil).Job; next == nil || next.Attempt != 4 || next.Losses != 3 {
+		t.Fatal("unexplained infrastructure losses exhausted recovery", next)
 	}
 }
+
 func TestWaitingReasonAndGiveUp(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{"platform", "pinned", "environment", "memory"} {
@@ -694,10 +692,10 @@ func TestResumableThreeInfrastructureLosses(t *testing.T) {
 	}
 	got := job(t, q, j.ID)
 	if got.Losses != 3 || got.State != "queued" {
-		t.Fatalf("after %d counted losses: state=%s, want failed", got.Losses, got.State)
+		t.Fatalf("after %d counted losses: state=%s, want queued", got.Losses, got.State)
 	}
-	if check(t, q, m, nil).Job != nil {
-		t.Fatal("failed job received a fourth execution")
+	if next := check(t, q, m, nil).Job; next == nil || next.Attempt != 4 || next.Losses != 3 {
+		t.Fatal("unexplained infrastructure losses exhausted recovery", next)
 	}
 }
 

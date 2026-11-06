@@ -1980,7 +1980,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	} else if !r.Success && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "resource_limit" {
 		q.requeue(j, "waiting for memory after prelaunch admission changed", false)
 	} else if r.Interrupted && r.PoliteStop {
-		q.requeue(j, "requeued: hypha availability withdrawn", false)
+		q.retry(j, "requeued: hypha availability withdrawn")
 	} else if r.Interrupted && r.OperatorStop {
 		q.retry(j, "requeued: stopped by operator")
 		j.RequeuedByOperator = true
