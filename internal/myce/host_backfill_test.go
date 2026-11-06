@@ -149,3 +149,39 @@ func TestHostBackfillProtectsOnlyOneTarget(t *testing.T) {
 		t.Fatal("demand did not start on its immediately fitting target", got)
 	}
 }
+
+// A completely occupied host needs no backfill projection yet. After a partial
+// natural release, the new pass must still protect a demand that cannot fit.
+func TestHostBackfillFullyOccupiedThenPartialRelease(t *testing.T) {
+	q, clock := fixture(t)
+	m := backfillMachine("accelerator", 64)
+	machineCheck(t, q, m)
+	firstJob := submit(t, q, cpuSpec(3, 1))
+	first := assignedJob(machineCheck(t, q, m))
+	secondJob := submit(t, q, cpuSpec(5, 1))
+	second := assignedJob(machineCheck(t, q, m, first))
+	if first == nil || second == nil || first.ID != firstJob.ID || second.ID != secondJob.ID {
+		t.Fatal("missing occupied-host fixture", first, second)
+	}
+	gpu := spec("experiment")
+	gpu.Needs.Platform = Platform{Required: []string{"cuda"}}
+	gpu.Needs.CPUCores, gpu.Needs.MemoryGB, gpu.Needs.HostMemoryGB = 4, 1, 1
+	demand := submit(t, q, gpu)
+	clock.Advance(time.Second)
+	later := submit(t, q, cpuSpec(1, 1))
+	if got := assignedJob(machineCheck(t, q, m, first, second)); got != nil {
+		t.Fatal("assigned work on a fully occupied host", got)
+	}
+	finish(t, q, first, true)
+	if got := assignedJob(machineCheck(t, q, m, second)); got != nil {
+		t.Fatal("partial release admitted backfill ahead of the waiting demand", got)
+	}
+	status, err := q.jobSnapshot(later.ID, context.Background())
+	if err != nil || status.DiagnosticCode != "host_capacity_accumulation" || !strings.Contains(status.Reason, demand.ID) {
+		t.Fatal("partial release lost the capacity blocker", status, err)
+	}
+	finish(t, q, second, true)
+	if got := assignedJob(machineCheck(t, q, m)); got == nil || got.ID != demand.ID {
+		t.Fatal("demand did not start after full release", got)
+	}
+}
