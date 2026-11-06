@@ -51,5 +51,10 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 			return err
 		}
 	}
+	if w.batchAdmission != nil {
+		if err := w.batchAdmission(ctx, HostLaunch{Machine: w.Machine.ID, Session: session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)}); err != nil {
+			return err
+		}
+	}
 	return w.checkAvailability()
 }

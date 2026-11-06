@@ -2269,6 +2269,9 @@
         "machine": {
           "type": "string"
         },
+        "probe_floor_gb": {
+          "type": "number"
+        },
         "refusal": {
           "type": "string"
         },

@@ -60,7 +60,13 @@ YAML
 
 The tiny declared memory bounds this fixture; real work can omit memory to learn
 it. From the next release, cold auto-memory work reserves measured physical
-headroom on one host until a clean accepted completion teaches a smaller bound.
+headroom on one host. A running CPU probe can share after fresh complete cgroup
+measurements establish its live footprint and growth over a sampling horizon,
+extended by the measured growth rate through the sample's age;
+its containment ceiling stays fixed. Missing/stale measurements retain the full
+charge. Protected attempts block only capacity they actually reserve, rather
+than excluding every exploratory job. A clean accepted completion teaches a
+reusable bound.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
@@ -128,6 +134,16 @@ repeated job observation on the per-job/wait interface. Record a hold with its n
 independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
+
+On a release containing #813, a projected queued job's waiting reason explains
+retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
+negative behind), the measured history horizon, weighted oldest project-wait
+round, observed active service age and completed service quantum. The horizon follows current demand/service
+cycles; no fixed daily half-life controls when a waiting project recovers a turn.
+A zero completed quantum means initial learning: history stays intact until an
+allocation completes. Unknown reconnect/restart gaps add no observed service.
+Tiers, eligibility and explicit
+caps/quotas still bind; running same-tier work is not stopped to repay debt.
 
 On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. During measured control pressure, expensive/lower-value nonproduction reads can return 429; honor `Retry-After` and prefer batched waits. Production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
 

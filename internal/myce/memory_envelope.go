@@ -176,13 +176,16 @@ func mergeMemoryEvents(old, next *MemoryEventCounts) *MemoryEventCounts {
 }
 
 type JobMemoryEnvelope struct {
-	Source      string  `json:"source"`
-	Refusal     string  `json:"refusal,omitempty"`
-	Machine     string  `json:"machine"`
-	Device      string  `json:"device,omitempty"`
-	HostGB      float64 `json:"host_gb"`
-	DeviceGB    float64 `json:"device_gb"`
-	Enforcement string  `json:"enforcement"`
+	// Cold CPU ceiling stays fixed for containment. Fresh attempt telemetry may
+	// reduce its admission charge, never below this known need including slack.
+	ProbeFloorGB float64 `json:"probe_floor_gb,omitempty"`
+	Source       string  `json:"source"`
+	Refusal      string  `json:"refusal,omitempty"`
+	Machine      string  `json:"machine"`
+	Device       string  `json:"device,omitempty"`
+	HostGB       float64 `json:"host_gb"`
+	DeviceGB     float64 `json:"device_gb"`
+	Enforcement  string  `json:"enforcement"`
 	// Basis is declared, learned, hint or exploratory; Evidence counts the
 	// accepted attempts behind a learned or bounded figure (#585).
 	Basis    string `json:"basis,omitempty"`
@@ -290,6 +293,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	copy := *j
 	n := &copy.Spec.Needs
 	source, refusal, basis, evidence := "declared", "", "declared", 0
+	probeFloor := 0.0
 	if n.Memory == "auto" {
 		// Explicit optional member caps remain declarations to preserve.
 		hostFloor := max(minimumHostMemoryGB, copy.Spec.Run.MemoryGB, copy.Spec.Run.DockerMemoryGB)
@@ -322,6 +326,12 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			}
 		} else if estimate.uncalibrated && (estimate.foreign || !n.cpuOnly() && !m.UnifiedMemory) {
 			refusal = memoryCapacityRemedies
+		}
+		if q.learnedMemory() && n.cpuOnly() && !estimate.escalation && !boundedMemorySource(estimate.source) && estimate.uncalibrated {
+			probeFloor = hostFloor
+			if estimate.host != nil {
+				probeFloor = max(probeFloor, hostMemoryPeakGB(estimate.host))
+			}
 		}
 		switch {
 		case estimate.host != nil:
@@ -404,6 +414,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 				host, source, evidence = bound, bounded, similar
 			} else {
 				host, why = q.exploratoryMemory(j, m)
+				if q.learnedMemory() && n.cpuOnly() {
+					probeFloor = hostFloor
+				}
 			}
 			refusal = why
 			if len(m.groupMembers) > 0 && refusal == "" {
@@ -430,6 +443,12 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			n.HostMemoryGB = max(minimumHostMemoryGB, host, q.constrainedMemoryLowerFor(j, estimate, !n.cpuOnly() && !m.UnifiedMemory))
 		}
 		n.HostMemoryGB = max(n.HostMemoryGB, hostFloor)
+		if probeFloor > 0 {
+			probeFloor = max(probeFloor, q.constrainedMemoryLowerFor(j, estimate, false))
+			if j.MemoryOOMFloor != nil {
+				probeFloor = max(probeFloor, j.MemoryOOMFloor.HostMemoryGB)
+			}
+		}
 		if floor := j.MemoryOOMFloor; floor != nil {
 			n.MemoryGB = floor.MemoryGB // A host OOM is not a GPU measurement.
 			n.HostMemoryGB = max(n.HostMemoryGB, floor.HostMemoryGB)
@@ -456,6 +475,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		}
 	}
 	copy.MemoryEnvelope = &JobMemoryEnvelope{Source: source, Refusal: refusal, Machine: m.ID, Device: m.Device, HostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), DeviceGB: n.MemoryGB, Enforcement: enforcement, Basis: basis, Evidence: evidence}
+	if probeFloor > 0 {
+		copy.MemoryEnvelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
+	}
 	return &copy
 }
 
@@ -825,10 +847,9 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 			continue
 		}
 		charge := hostNeed(owner, running.Spec.Needs.MemoryGB, running.Spec.Needs.HostMemoryGB)
+		charge, _ = jobHostMemoryCharge(running, owner, charge, q.hostMemorySamples[running.Machine][jobKey(*running)], q.clock.Now())
 		if q.batchPreemptible(running, j.Spec) {
 			room += charge
-		} else if charge > 0 {
-			return 0, "exploratory first run blocked by a protected memory-heavy attempt"
 		}
 	}
 	for _, slot := range q.s.ModelSlots {
@@ -840,8 +861,6 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 		charge := hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
 		if q.slotReclaimableFor(slot, j.Spec) {
 			room += charge
-		} else if charge > 0 {
-			return 0, "exploratory first run blocked by protected memory-heavy model residency"
 		}
 	}
 	room = min(room, allowance)
@@ -885,7 +904,7 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 			if hostFits(m, n.MemoryGB, n.HostMemoryGB) {
 				return ""
 			}
-			why := fmt.Sprintf("%s: %.1f GiB needed, %.1f GiB available (live %.1f GiB; reserved %.1f GiB; allowance %.1f GiB; %s)", m.ID, hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB, m.HostAvailableMemoryGB, m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB, candidate.MemoryEnvelope.Origin())
+			why := fmt.Sprintf("%s: %.1f GiB needed, %.1f GiB available (live available %.1f GiB; reserved %.1f GiB; allowance %.1f GiB; %s)", m.ID, hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB, m.HostAvailableMemoryGB, m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB, candidate.MemoryEnvelope.Origin())
 			if candidate.MemoryEnvelope.Source == spentMemoryExploration {
 				why += "; " + memoryCapacityRemedies
 			}

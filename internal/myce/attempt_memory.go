@@ -810,7 +810,8 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 	if err != nil {
 		return nil
 	}
-	anon, ok := memoryCounters(b)["anon"]
+	stats := memoryCounters(b)
+	anon, ok := stats["anon"]
 	if !ok {
 		return nil
 	}
@@ -823,9 +824,25 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 		return nil
 	}
 	a.currentMu.Lock()
-	margin := a.currentGrowth.observe(at, float64(min(anon, current))/(1<<30))
+	var footprint *float64
+	complete, bytes := true, 0.0
+	for _, name := range []string{"anon", "kernel", "shmem", "unevictable", "file_dirty", "file_writeback"} {
+		n, ok := stats[name]
+		complete = complete && ok
+		bytes += float64(n)
+	}
+	margin, observed := 0.0, false
+	if complete {
+		gb := bytes / (1 << 30)
+		footprint = &gb
+		margin = a.currentGrowth.observe(at, gb)
+		observed = a.currentGrowth.horizon > 0
+	} else {
+		a.currentGrowth = memoryGrowth{} // Never bridge a missing interval.
+	}
+	rate := a.currentGrowth.rate
 	a.currentMu.Unlock()
-	sample := &CurrentHostMemory{GrowthGB: margin, NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at, deviceSample: &a.device}
+	sample := &CurrentHostMemory{GrowthObserved: observed, GrowthRateGB: rate, FootprintGB: footprint, GrowthGB: margin, NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at, deviceSample: &a.device}
 	if device := a.device.Load(); device != nil {
 		gb := device.gb
 		sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB
