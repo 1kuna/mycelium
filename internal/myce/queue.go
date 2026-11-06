@@ -158,6 +158,8 @@ type Queue struct {
 	// Status views carry the admissions summary counted under q.mu, so
 	// dependency jobs need no envelope copy (#585).
 	statusAdmissions *[]HostAdmissions
+	observationScan  *placementScan // Only an immutable, detached wide-read generation.
+	observationLive  map[string]*Job
 
 	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
 	checkpointProbe  func() bool // Availability seam; bounded real I/O is the default.

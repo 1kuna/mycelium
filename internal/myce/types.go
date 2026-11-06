@@ -794,6 +794,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	Freshness           *SnapshotFreshness   `json:"freshness,omitempty"`
 	StorageObservations []StorageObservation `json:"storage_observations,omitempty"`
 	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`
 	RequestLatencies    []RequestLatency     `json:"request_latencies,omitempty"`
@@ -822,6 +823,14 @@ type Snapshot struct {
 
 	// Operator-retired fleet operations, oldest first (audit record, #588).
 	FleetSuperseded []FleetSupersession `json:"fleet_superseded,omitempty"`
+}
+
+// Ages describe observation only; they confer no scheduling or release authority.
+type SnapshotFreshness struct {
+	CapturedAt time.Time `json:"captured_at"`
+	ServedAt   time.Time `json:"served_at"`
+	AgeSeconds float64   `json:"age_seconds"`
+	Cached     bool      `json:"cached"`
 }
 
 func terminal(s string) bool { return s == "succeeded" || s == "failed" || s == "cancelled" }

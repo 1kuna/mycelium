@@ -108,8 +108,16 @@ On releases with the mixed-version cache correction, workers without an optional
 shared-input cache-capacity report retain staging-time admission. Reporting workers
 are checked before placement; staging capacity failures give required/available/limit bytes.
 
-If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep full
-`myce status` out of loops. Record a hold with its next owner and continue
+Use `myce status` for a fleet overview and `myce status --history` for all retained
+jobs. **Available from the next release:** status and inspection JSON include
+`freshness.captured_at`, `served_at`, `age_seconds` and `cached`; `now` remains
+capture time. Interpret worker freshness and diagnostics at that time, allowing
+for the response age. Inspection and filtered/full status take a fresh capture;
+default status can reuse a generation for up to one second, with immediate
+terminal/release invalidation.
+
+If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
+repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
