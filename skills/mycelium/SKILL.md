@@ -134,7 +134,14 @@ Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium
 resumes after measured recovery; an operator drain remains independent. Running
 attempts retain custody. NAS/checkpoint degradation withholds dependent work;
-independent local work can remain eligible. `host_degraded` and
+independent local work can remain eligible. Existing OS automounts are re-triggered
+with backoff. `mount_linux_operator_required` needs the storage operator to
+restore the configured mount; `mount_macos_approval_required` needs the owner to
+restore it and approve Keychain if requested. `host_mount_action_required` uses
+the existing health wake channel, including escalation after a generic alert.
+`mount_probe_stalled` retains its one request without blocking heartbeats; ask
+the storage owner to inspect the OS session. Workers never prompt for credentials
+or run privileged mount commands. `host_degraded` and
 `host_mount_degraded` use existing health notifications; silent-worker alerts
 carry `host_silent`. Read the job's waiting reason or one needed status snapshot;
 no agent polling or drain/resume loop is needed. Foreign CPU/RSS leaders are

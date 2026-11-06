@@ -881,6 +881,15 @@ without NAS checkpoint access and receives a local scratch checkpoint directory
 under the worker state directory. Declare `resumable: true` when production needs
 NAS checkpoints. Experiments and resumable production still wait for NAS recovery.
 
+The host-hygiene mount probe also checks configured checkpoint/NAS roots with a
+stat and one directory-entry read, using this host's healthy latency history.
+It retries existing OS automount access with backoff, holds only dependent work,
+and resumes after fresh successful probes. A missing mount that requires Linux
+operator privileges or macOS owner/Keychain approval is reported with a typed
+human-action code and an existing health wake; the worker never prompts for or
+stores credentials. See [worker mount recovery](operations.md#worker-mount-recovery-linux-and-macos)
+for platform ownership, cold-start deadlines and stuck-request behavior.
+
 The worker heartbeat allows 750 ms for its checkpoint-root probe, including
 creating and removing a temporary file; slower or blocked probes report the root
 unavailable. One-shot onboarding allows ten seconds per filesystem operation

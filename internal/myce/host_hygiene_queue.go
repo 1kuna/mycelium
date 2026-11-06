@@ -35,11 +35,14 @@ func (q *Queue) detectHostHygiene() {
 		for _, role := range []string{"nas", "checkpoint"} {
 			cause := ""
 			for _, mount := range s.Mounts {
-				if mount.Root == role && slices.Contains([]string{"mount_probe_failed", "mount_probe_slow", "mount_probe_stalled"}, mount.Reason) {
+				if mount.Root == role && slices.Contains([]string{"mount_probe_failed", "mount_probe_slow", "mount_probe_stalled", "mount_macos_approval_required", "mount_linux_operator_required", "mount_inventory_unavailable", "mount_automount_pending"}, mount.Reason) {
 					cause = mount.Reason
 				}
 			}
 			q.observeHealth("hygiene-mount/"+m.ID+"/"+role, cause != "", 0, HealthAlert{Kind: "host_mount_degraded", Host: hostID(m), Store: role, Reason: cause})
+			action := cause == "mount_macos_approval_required" || cause == "mount_linux_operator_required"
+			// Escalation must wake even if a generic degradation already alerted.
+			q.observeHealth("hygiene-mount-action/"+m.ID+"/"+role, action, 0, HealthAlert{Kind: "host_mount_action_required", Host: hostID(m), Store: role, Reason: cause})
 		}
 	}
 }
