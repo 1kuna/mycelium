@@ -9,6 +9,7 @@ import (
 	"html"
 	"io/fs"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"os/exec"
@@ -171,6 +172,18 @@ type ServiceConfig struct {
 	Credentials            string    `json:"credentials"`
 	Service                string    `json:"service"`
 	Config                 string    `json:"config"`
+}
+
+// s071's strict saved-config reader requires a positive model ceiling. Encode
+// automatic mode as the representation's unbounded sentinel for rollback; the
+// current reader restores zero before any cache admission uses this value.
+// This is wire compatibility, never an automatically chosen storage budget.
+func (c ServiceConfig) MarshalJSON() ([]byte, error) {
+	type wire ServiceConfig
+	if c.ModelCacheBytes == 0 {
+		c.ModelCacheBytes = math.MaxInt64
+	}
+	return json.Marshal(wire(c))
 }
 
 // PlanInstall is pure. The command boundary supplies the OS account; omitted
@@ -592,6 +605,9 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 		RequiredWorkers json.RawMessage `json:"required_workers"`
 	}{ServiceConfig: &c}
 	e = decoder.Decode(&legacy)
+	if e == nil && c.ModelCacheBytes == math.MaxInt64 {
+		c.ModelCacheBytes = 0
+	}
 	// Like environment sizing, retire only the exact old default. Earlier
 	// configurations did not distinguish an explicit 10 GiB from the default.
 	// New explicit values record intent, including an explicit 10 GiB.

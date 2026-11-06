@@ -235,7 +235,8 @@ func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 		refs = append(refs, ref)
 		if len(refs) == 3 {
 			// An interrupted download retains just one byte of the old full blob.
-			// The old partial is disposable without asking the queue to hash it.
+			// Without a verification record, its hash-shaped name alone does
+			// not establish that these bytes are a disposable managed copy.
 			old := filepath.Join(cache.Root, refs[0].SHA256)
 			if err := os.Rename(old, old+".partial"); err != nil {
 				t.Fatal(err)
@@ -259,8 +260,8 @@ func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(cache.Root, refs[0].SHA256)); !os.IsNotExist(err) {
 		t.Fatal("oldest cache entry retained", err)
 	}
-	if _, err := os.Stat(filepath.Join(cache.Root, refs[0].SHA256) + ".partial"); !os.IsNotExist(err) {
-		t.Fatal("old partial cache entry retained", err)
+	if data, err := os.ReadFile(filepath.Join(cache.Root, refs[0].SHA256) + ".partial"); err != nil || string(data) != "a" {
+		t.Fatal("unverified partial lost", err)
 	}
 	entries, _ := os.ReadDir(cache.Root)
 	var total int64
