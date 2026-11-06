@@ -227,7 +227,7 @@ func TestViewIsReadOnlyEndToEnd(t *testing.T) {
 	if res.StatusCode != http.StatusForbidden {
 		t.Errorf("non-loopback Host on a loopback view: status %d, want 403", res.StatusCode)
 	}
-	for _, path := range []string{"/", "/view.js", "/view.css"} {
+	for _, path := range []string{"/", "/data.js", "/scene.js", "/view.js", "/view.css"} {
 		res, err := http.Get(view.URL + path)
 		if err != nil {
 			t.Fatal(err)

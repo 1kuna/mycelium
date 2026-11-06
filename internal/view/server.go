@@ -39,7 +39,7 @@ func Handler(p *Poller, listen string) http.Handler {
 		switch r.URL.Path {
 		case "/events":
 			stream(w, r, p)
-		case "/", "/view.js", "/view.css":
+		case "/", "/data.js", "/scene.js", "/view.js", "/view.css":
 			h.Set("Cache-Control", "no-cache")
 			files.ServeHTTP(w, r)
 		default:
