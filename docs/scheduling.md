@@ -174,7 +174,7 @@ mapping; its parity semantics require a separate maintainer/consumer decision
 ([#400](https://github.com/1kuna/mycelium/issues/400)).
 
 Within each tier, fitting projects take turns by weighted recent usage before
-model/environment warmth. Usage has a 24-hour half-life and separate stable
+model/environment warmth. Usage has a demand/service-derived horizon and separate stable
 `tier/resource-family/project` keys. GPU work uses normalized allocated device
 seconds; CPU work charges allocated core-seconds in a separate family. Equal usage favors fewer
 active allocations per weight, then the existing affinity/deadline/queue order.
@@ -280,11 +280,14 @@ environment readiness, deadlines, front-of-line retries, and waiting time break
 ties within the selected project. Across projects, equal usage favors fewer
 active allocations per weight before warmth. Usage is keyed by stable tier
 name, resource family and project. Its exponential history horizon follows the
-current demand/service cycle: the largest of the sum of oldest waiting ages
-(once per ready, uncapped project), the longest covered active allocation age,
+current demand/service cycle: the largest of the weighted project-wait round,
+the longest covered active allocation age,
 and the latest completed allocation's covered duration in that tier/resource
-family. The sum retains a full round as contenders grow; many tiny jobs from one
-project cannot inflate it by their count. A completed allocation supplies the
+family. The wait round sums the oldest waiting age once per ready, uncapped
+project, multiplied by that project's policy weight divided by the smallest
+current demand weight. Thus one turn at the smallest weight retains a complete
+weighted round (3:1 demand retains four units, independent of the first winner).
+Many tiny jobs from one project cannot inflate it by their count. A completed allocation supplies the
 initial measured scale. Until that sample exists, preserve prior history and
 count new covered service without decay; no daily half-life is guessed.
 
@@ -339,7 +342,7 @@ change an existing policy.
 `transcribe goes first (sim is ahead of its fair share)`. The reason also reports
 retained resource-seconds, the weighted share among fitting competing projects,
 signed debt (positive means ahead, negative means behind), the measured horizon,
-aggregate project wait age, observed service age and the completed service
+weighted project-wait round, observed service age and the completed service
 quantum. A zero completed quantum means initial learning, with history preserved
 until an allocation completes. The horizon is shared across a tier/resource
 family; fit/cap filtering still determines the projects used for each target

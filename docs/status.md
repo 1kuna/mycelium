@@ -1934,7 +1934,7 @@ install is attempted. Older workers omit these observations.
 
 On a release containing #813, queued jobs in the dispatch projection explain
 retained resource-seconds, weighted share, signed debt (positive ahead, negative
-behind), the history horizon, aggregate oldest project wait age, observed active
+behind), the history horizon, weighted oldest project-wait round, observed active
 service age, latest completed service quantum and the number of fitting competing projects. The horizon is learned
 from the current tier/resource demand and service cycle, rather than a fixed
 daily half-life. CPU and GPU ledgers stay separate. A zero completed quantum means initial learning: history is

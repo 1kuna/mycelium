@@ -19,6 +19,7 @@ type fairCycle struct {
 	wait, waitRate, quantum float64
 	entries                 map[string]FairUsage
 	intervals               []fairInterval
+	waits                   map[string]float64
 }
 
 func fairAllocationKey(m *Machine, work, attempt string) string {
@@ -26,7 +27,7 @@ func fairAllocationKey(m *Machine, work, attempt string) string {
 	return string(key)
 }
 
-// A cycle spans a complete project round: oldest wait age once per demanding
+// A cycle spans a complete weighted round: oldest wait age once per demanding
 // project, the longest covered active allocation age, or the latest completed
 // allocation's covered duration. Completion supplies a measured positive scale;
 // before that first sample, preserve history and account service without decay.
@@ -35,7 +36,7 @@ func (q *Queue) accountFairHistory(from, now time.Time) {
 	groups := map[fairScope]*fairCycle{}
 	group := func(scope fairScope) *fairCycle {
 		if groups[scope] == nil {
-			groups[scope] = &fairCycle{entries: map[string]FairUsage{}}
+			groups[scope] = &fairCycle{entries: map[string]FairUsage{}, waits: map[string]float64{}}
 		}
 		return groups[scope]
 	}
@@ -48,7 +49,6 @@ func (q *Queue) accountFairHistory(from, now time.Time) {
 		g.entries[key] = u
 		g.quantum = max(g.quantum, u.QuantumSeconds)
 	}
-	waits := map[string]float64{}
 	observeWait := func(j *Job) {
 		if j.State != "queued" || !dependencyReady(j) || cancelled(j) || q.capReason(j) != "" {
 			return
@@ -63,13 +63,7 @@ func (q *Queue) accountFairHistory(from, now time.Time) {
 		key := q.fairKey(j.Spec)
 		age := max(0, from.Sub(since).Seconds())
 		g := group(fairScope{q.priorityMatch(j.Spec).Tier, fairResourceFamily(j.Spec)})
-		if old, exists := waits[key]; exists {
-			g.wait += max(0, age-old)
-		} else {
-			g.wait += age
-			g.waitRate++
-		}
-		waits[key] = max(waits[key], age)
+		g.waits[key] = max(g.waits[key], age)
 		if _, exists := g.entries[key]; !exists {
 			g.entries[key] = FairUsage{}
 		}
@@ -82,6 +76,25 @@ func (q *Queue) accountFairHistory(from, now time.Time) {
 			j := callJob(c)
 			j.State = "queued"
 			observeWait(j)
+		}
+	}
+	// One smallest-weight turn requires a complete weighted round. Counting
+	// project wait ages equally forgets too much of a high-weight project's
+	// service and makes the resulting share depend on the initial tie winner.
+	// Normalize by the smallest demand weight; no deployment time scale enters.
+	for _, g := range groups {
+		least := math.Inf(1)
+		for key := range g.waits {
+			var parts [3]string
+			_ = json.Unmarshal([]byte(key), &parts)
+			least = min(least, q.weight(parts[2]))
+		}
+		for key, age := range g.waits {
+			var parts [3]string
+			_ = json.Unmarshal([]byte(key), &parts)
+			rounds := min(math.MaxFloat64, q.weight(parts[2])/least)
+			g.wait = min(math.MaxFloat64, g.wait+age*rounds)
+			g.waitRate = min(math.MaxFloat64, g.waitRate+rounds)
 		}
 	}
 	span := now.Sub(from).Seconds()
@@ -187,7 +200,7 @@ func (q *Queue) accountFairHistory(from, now time.Time) {
 			serviceAge = max(serviceAge, r.age+r.covered)
 		}
 		for key, u := range g.entries {
-			u.WaitSeconds, u.ServiceSeconds = g.wait+g.waitRate*span, serviceAge
+			u.WaitSeconds, u.ServiceSeconds = (fairLine{g.wait, g.waitRate}).at(span), serviceAge
 			u.QuantumSeconds = g.quantum
 			u.HorizonSeconds = max(g.quantum, u.WaitSeconds, serviceAge)
 			if u.HorizonSeconds == 0 {
@@ -201,7 +214,8 @@ func (q *Queue) accountFairHistory(from, now time.Time) {
 
 type fairLine struct{ base, slope float64 }
 
-func (l fairLine) at(t float64) float64 { return l.base + l.slope*t }
+// Saturation is the floating-point representation bound, not a history cap.
+func (l fairLine) at(t float64) float64 { return min(math.MaxFloat64, l.base+l.slope*t) }
 
 // Solve dU/dt = rate - ln(2)*U/H(t) analytically. This composes exactly
 // when an unchanged interval is split by incidental reads or check-ins.
@@ -211,9 +225,13 @@ func (l fairLine) integral(from, until float64) (factor, service float64) {
 		exponent := -math.Ln2 * (until - from) / h0
 		return math.Exp(exponent), -math.Expm1(exponent) * h0 / math.Ln2
 	}
-	logRatio := math.Log1p(l.slope * (until - from) / h0)
+	ratio := l.slope * (until - from) / h0
+	logRatio := math.Log1p(ratio)
+	if math.IsInf(ratio, 1) {
+		logRatio = math.Log(l.at(until)) - math.Log(h0)
+	}
 	factor = math.Exp(-math.Ln2 / l.slope * logRatio)
-	service = (l.slope*(until-from) - h0*math.Expm1(-math.Ln2/l.slope*logRatio)) / (l.slope + math.Ln2)
+	service = ((until - from) - (h0/l.slope)*math.Expm1(-math.Ln2/l.slope*logRatio)) / (1 + math.Ln2/l.slope)
 	return
 }
 
@@ -231,5 +249,5 @@ func (s *candidateSet) fairExplanation(j *Job) string {
 	u := q.s.FairUsage[q.fairKey(j.Spec)]
 	usage := decayed(u, q.clock.Now())
 	share := total * (q.weight(j.Spec.Project) / largest) / weights
-	return fmt.Sprintf("fair share %s/%s: retained %.6gs, weighted share %.6gs, debt %+.6gs (positive ahead); horizon %.6gs, wait %.6gs, observed service age %.6gs, completed service quantum %.6gs; %d competing projects", q.priorityMatch(j.Spec).Tier, fairResourceFamily(j.Spec), usage, share, usage-share, u.HorizonSeconds, u.WaitSeconds, u.ServiceSeconds, u.QuantumSeconds, len(projects))
+	return fmt.Sprintf("fair share %s/%s: retained %.6gs, weighted share %.6gs, debt %+.6gs (positive ahead); horizon %.6gs, weighted wait %.6gs, observed service age %.6gs, completed service quantum %.6gs; %d competing projects", q.priorityMatch(j.Spec).Tier, fairResourceFamily(j.Spec), usage, share, usage-share, u.HorizonSeconds, u.WaitSeconds, u.ServiceSeconds, u.QuantumSeconds, len(projects))
 }

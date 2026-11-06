@@ -50,31 +50,45 @@ func TestTierFairnessInterleavesClasses(t *testing.T) {
 
 func TestTierFairnessWeightsAcrossClasses(t *testing.T) {
 	t.Parallel()
-	q, c := fixture(t)
-	policy := examplePriorityPolicy()
-	policy.Projects = map[string]ProjectPolicy{"atlas": {Weight: 3}, "verso": {Weight: 1}}
-	if _, err := q.SetPriorityPolicy(0, policy); err != nil {
-		t.Fatal(err)
-	}
-	for range 24 {
-		s := spec("production")
-		s.Project = "atlas"
-		submit(t, q, s)
-		submit(t, q, projectSpec("verso"))
-	}
-	counts := map[string]int{}
-	m := machine("one", "fake")
-	for range 24 {
-		run := check(t, q, m, nil).Job
-		if run == nil {
-			t.Fatal("fitting work left idle")
-		}
-		counts[run.Spec.Project]++
-		c.Advance(time.Second)
-		finish(t, q, run, true)
-	}
-	if counts["atlas"] != 18 || counts["verso"] != 6 {
-		t.Fatal("weighted service", counts)
+	for _, first := range []string{"atlas", "verso"} {
+		t.Run(first, func(t *testing.T) {
+			q, c := fixture(t)
+			policy := examplePriorityPolicy()
+			policy.Projects = map[string]ProjectPolicy{"atlas": {Weight: 3}, "verso": {Weight: 1}}
+			if _, err := q.SetPriorityPolicy(0, policy); err != nil {
+				t.Fatal(err)
+			}
+			for range 24 {
+				s := spec("production")
+				s.Project = "atlas"
+				submit(t, q, s)
+				submit(t, q, projectSpec("verso"))
+			}
+			// Force each possible initial tie winner without changing policy or
+			// elapsed service. Subsequent comparisons must repay the authored 3:1 share.
+			for _, j := range q.liveJobs() {
+				if j.Spec.Project == first {
+					j.Front = 1
+				}
+			}
+			counts := map[string]int{}
+			m := machine("one", "fake")
+			for turn := range 24 {
+				run := check(t, q, m, nil).Job
+				if run == nil {
+					t.Fatal("fitting work left idle")
+				}
+				if turn == 0 && run.Spec.Project != first {
+					t.Fatal("initial winner was not forced", run.Spec.Project, first)
+				}
+				counts[run.Spec.Project]++
+				c.Advance(time.Second)
+				finish(t, q, run, true)
+			}
+			if counts["atlas"] != 18 || counts["verso"] != 6 {
+				t.Fatal("weighted service", counts)
+			}
+		})
 	}
 }
 

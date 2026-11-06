@@ -131,8 +131,8 @@ observed behavior; omit credentials, webhook URLs, private paths and host detail
 
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
-negative behind), the measured history horizon, aggregate oldest project wait
-age, observed active service age and completed service quantum. The horizon follows current demand/service
+negative behind), the measured history horizon, weighted oldest project-wait
+round, observed active service age and completed service quantum. The horizon follows current demand/service
 cycles; no fixed daily half-life controls when a waiting project recovers a turn.
 A zero completed quantum means initial learning: history stays intact until an
 allocation completes. Unknown reconnect/restart gaps add no observed service.
