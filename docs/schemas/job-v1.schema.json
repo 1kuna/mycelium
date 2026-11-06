@@ -2489,11 +2489,10 @@
           "x-contract": "diagnostic"
         },
         "resource_attempts": {
-          "description": "Per-attempt cumulative CPU and block I/O counters, with latest I/O PSI. Exact attempt/machine/session fenced. Retains first and latest 31 rows, matching memory facts; resource_attempts_dropped counts evictions. Missing counters are unknown. Process-tree CPU is a sampled lower bound. Observational only.",
+          "description": "Per-attempt cumulative CPU and block I/O counters with latest I/O PSI, retaining every distinct attempt. resource_attempts_dropped reports historical evictions. Exact attempt/machine/session fenced; missing counters unknown; process-tree CPU a sampled lower bound. Observational only.",
           "items": {
             "$ref": "#/$defs/AttemptResourceFacts"
           },
-          "maxItems": 32,
           "type": [
             "array",
             "null"
