@@ -1,0 +1,4 @@
+:root { --loam: #12100c; --bone: #e8dfcc; }
+html, body { margin: 0; height: 100%; background: var(--loam); color: var(--bone); overflow: hidden; }
+canvas { display: block; }
+noscript { position: fixed; inset: 40% 0 auto; text-align: center; font: 16px/1.4 Georgia, serif; }
