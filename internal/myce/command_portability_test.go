@@ -101,6 +101,19 @@ func TestCommandPortabilityIntersectsEveryMember(t *testing.T) {
 	if len(d.Environments) != 2 || !strings.HasPrefix(d.EnvironmentCoverage, "missing:") {
 		t.Fatalf("main lock masked sidecar restriction: %+v", d)
 	}
+	// A managed sidecar cannot manufacture dependency coverage for a main
+	// command using unverified installed tools.
+	s.Environment = Environment{}
+	p, err = q.Portability(PortabilityRequest{Spec: &s})
+	l := portabilityRow(t, p, ExecutionTarget{"linux", "amd64", "cpu"})
+	if err != nil || !strings.HasPrefix(l.EnvironmentCoverage, "unknown:") || len(l.Environments) != 2 || strings.Contains(strings.Join(l.Actions, " "), "Dependency candidate only") {
+		t.Fatalf("sidecar hid unknown main dependencies: %+v %v", l, err)
+	}
+	resolved, err := q.Resolve(ResolveRequest{Spec: s})
+	if err != nil || resolved.Portability == nil || !strings.HasPrefix(portabilityRow(t, *resolved.Portability, l.Target).EnvironmentCoverage, "unknown:") {
+		t.Fatal(resolved, err)
+	}
+	s.Environment = Environment{Name: "tools"}
 	// Unknown coverage never turns into a successful dependency candidate.
 	q.environments.Environments["helper"]["cpu"] = EnvironmentRecipe{Backend: "uv", LockFile: "requirements.txt", Files: map[string][]byte{"requirements.txt": []byte("# pinned\n")}}
 	p, err = q.Portability(PortabilityRequest{Spec: &s})
@@ -113,6 +126,38 @@ func TestCommandPortabilityIntersectsEveryMember(t *testing.T) {
 	b, _ := json.Marshal(p)
 	if err != nil || bytes.Contains(b, []byte("/private/")) {
 		t.Fatalf("advice read or exposed inline path: %s %v", b, err)
+	}
+}
+
+func TestCommandPortabilityCPUMemberCapsNormalizeBeforeLowering(t *testing.T) {
+	q, _ := fixture(t)
+	r := breadthRecipe("linux-64", "osx-arm64")
+	q.environments = EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}
+	for _, composed := range []bool{false, true} {
+		s := cpuResolveSpec()
+		s.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 4}
+		if composed {
+			s.Run = RunSpec{}
+			s.Execution = &ExecutionSpec{Main: ExecutionMember{Command: []string{"echo", "ok"}, MemoryGB: 1, Environment: "tools"}}
+		} else {
+			s.Run.MemoryGB = 1
+			s.Environment = Environment{Name: "tools"}
+		}
+		if err := s.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		before := identityHash(s)
+		resolved, err := q.Resolve(ResolveRequest{Spec: s})
+		if err != nil || resolved.Portability == nil {
+			t.Fatalf("resolve rejected valid CPU member cap: %+v %v", resolved, err)
+		}
+		p, err := q.Portability(PortabilityRequest{Spec: &s})
+		if err != nil || len(p.Targets) != 2 || len(p.Targets[0].Environments) != 1 || p.Targets[0].Environments[0].Key != r.Key {
+			t.Fatalf("CPU member cap dropped lock discovery: %+v %v", p, err)
+		}
+		if identityHash(s) != before {
+			t.Fatal("normalization changed caller intent")
+		}
 	}
 }
 

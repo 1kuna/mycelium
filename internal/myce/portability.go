@@ -167,7 +167,7 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 	sets := map[string]map[string]EnvironmentRecipe{}
 	if req.Spec != nil && !req.Spec.extensionJob() {
 		s := cloneJob(&Job{Spec: *req.Spec}).Spec
-		if lowerExecution(&s) == nil {
+		if normalizeResources(&s) == nil && lowerExecution(&s) == nil {
 			req.Spec = &s
 			if s.Environment.Key() != "" {
 				sets["main"], _ = portabilityCatalog(q.environments, s.Environment)
@@ -484,7 +484,7 @@ func (q *Queue) portabilityWithRecipes(req PortabilityRequest, sets map[string]m
 		if r.Runtime != "supported" {
 			r.Actions = append(r.Actions, r.Runtime+"; a software variant cannot supply the missing Mycelium runtime.")
 		}
-		if (e != nil || req.Spec != nil) && !r.Declared {
+		if e != nil && !r.Declared {
 			r.Actions = append(r.Actions, "Investigate an exact variant with its own resources, implementation and checks; preserve genuine authored hard requirements. Missing coverage alone does not prove one.")
 		}
 		platform := lockPlatform(r.Target)

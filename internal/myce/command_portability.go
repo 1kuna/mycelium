@@ -24,7 +24,11 @@ func commandPortabilityTarget(r *PortabilityTarget, s Spec, sets map[string]map[
 	if len(sets) > 0 {
 		r.EnvironmentCoverage = "declared: all member locks cover target; native installation unverified"
 	}
-	unknown, missing := false, false
+	_, managedMain := sets["main"]
+	unknown, missing := !managedMain, false
+	if !managedMain && len(sets) > 0 {
+		r.Environments = append(r.Environments, PortabilityEnvironment{Name: "main", Backend: "installed-tools", Inputs: "unknown", LockCoverage: "unknown: installed tools are not lock coverage"})
+	}
 	for _, name := range sortedPortabilityKeys(sets) {
 		recipe, ok := sets[name][r.Target.Platform]
 		if !ok {

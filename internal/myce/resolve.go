@@ -90,6 +90,9 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 	if err := view.defaultMemory(&s); err != nil {
 		return ResolveReport{}, specRejection(err)
 	}
+	if err := normalizeResources(&s); err != nil {
+		return ResolveReport{}, specRejection(err)
+	}
 	if !s.extensionJob() {
 		if err := lowerExecution(&s); err != nil {
 			return ResolveReport{}, specRejection(err)
