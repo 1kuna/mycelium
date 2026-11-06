@@ -38,14 +38,16 @@ type FleetUpdateInstruction struct {
 const fleetUpdateReceiptFile = "fleet-update.json"
 
 type fleetInstallReceipt struct {
-	Instruction   FleetUpdateInstruction `json:"instruction"`
-	ConfigSHA256  string                 `json:"config_sha256"`
-	BeforeSHA256  string                 `json:"before_sha256"`
-	BeforeVersion string                 `json:"before_version"`
-	BeforePID     int                    `json:"before_pid"`
-	BeforeRuntime FleetRuntimeProof      `json:"before_runtime"`
-	Phase         string                 `json:"phase"`
-	Failure       string                 `json:"failure,omitempty"`
+	Instruction        FleetUpdateInstruction `json:"instruction"`
+	ConfigSHA256       string                 `json:"config_sha256"`
+	SlotReconciliation *slotReconciliation    `json:"slot_reconciliation,omitempty"`
+	BeforeSHA256       string                 `json:"before_sha256"`
+	BeforeVersion      string                 `json:"before_version"`
+	BeforePID          int                    `json:"before_pid"`
+	BeforeRuntime      FleetRuntimeProof      `json:"before_runtime"`
+	Phase              string                 `json:"phase"`
+	LaunchPending      bool                   `json:"launch_pending,omitempty"`
+	Failure            string                 `json:"failure,omitempty"`
 }
 
 type fleetInstallDeps struct {
@@ -287,7 +289,7 @@ func launchFleetUpdate(ctx context.Context, requested ServiceConfig, i FleetUpda
 			if !reflect.DeepEqual(frozen, i) || r.ConfigSHA256 != configHash || i.Revision < r.Instruction.Revision {
 				return errors.New("fleet_receipt_conflict")
 			}
-			if i.Revision == r.Instruction.Revision {
+			if i.Revision == r.Instruction.Revision && !r.LaunchPending {
 				if r.Phase == "failed" {
 					return errors.New("fleet_previous_failure")
 				}
@@ -295,12 +297,14 @@ func launchFleetUpdate(ctx context.Context, requested ServiceConfig, i FleetUpda
 			}
 			// Only an explicit operator revision can recover a vanished helper.
 			// A running/unknown transient is never duplicated or killed.
-			absent, err := fleetHelperAbsent(ctx, c, r.Instruction, d.command)
-			if err != nil {
-				return errors.New("fleet_helper_absence_unproven")
-			}
-			if !absent {
-				return nil // Proven active older revision continues unchanged.
+			if !r.LaunchPending {
+				absent, err := fleetHelperAbsent(ctx, c, r.Instruction, d.command)
+				if err != nil {
+					return errors.New("fleet_helper_absence_unproven")
+				}
+				if !absent {
+					return nil // Proven active older revision continues unchanged.
+				}
 			}
 			if !sameFleetRuntime(proof, r.BeforeRuntime) {
 				return errors.New("fleet_recovery_runtime_changed")
@@ -342,12 +346,37 @@ func launchFleetUpdate(ctx context.Context, requested ServiceConfig, i FleetUpda
 			r.Phase = "installed"
 		}
 	} else {
-		info, err := fleetVersion(ctx, c.Binary, d.command)
-		if err != nil || CheckReleaseUpgrade(i.Release.Manifest.Version, info.Version, false, before == a.SHA256) != nil {
+		slot, err := readReleaseSlot(c.Binary)
+		if err != nil || slot.SHA256 != before {
+			return errors.New("fleet_install_changed")
+		}
+		version := proof.Version
+		var reconciliation *slotReconciliation
+		if before != proof.SHA256 {
+			key, err := readFleetPublisher(filepath.Join(c.State, "fleet-publisher.pub"))
+			if err != nil {
+				return err
+			}
+			qualified, err := qualifyReleaseSlot(c, proof, slot, i.Release, key)
+			if err != nil {
+				var approved EnrollmentRelease
+				if client.Call(ctx, "GET", "/api/invites/release", nil, &approved) != nil {
+					return err
+				}
+				qualified, err = qualifyReleaseSlot(c, proof, slot, approved, key)
+				if err != nil {
+					return err
+				}
+			}
+			slot, version = qualified, qualified.Version
+			reconciliation = &slotReconciliation{Running: proof, Slot: slot, RollbackTarget: "installed_slot"}
+		}
+		if CheckReleaseUpgrade(i.Release.Manifest.Version, version, false, before == a.SHA256) != nil {
 			return errors.New("fleet_version_refused")
 		}
-		r = fleetInstallReceipt{Instruction: i, ConfigSHA256: configHash, BeforeSHA256: before, BeforeVersion: info.Version, BeforePID: pid, BeforeRuntime: proof, Phase: "prepared"}
+		r = fleetInstallReceipt{Instruction: i, ConfigSHA256: configHash, BeforeSHA256: before, BeforeVersion: version, BeforePID: pid, BeforeRuntime: proof, SlotReconciliation: reconciliation, Phase: "prepared"}
 	}
+	r.LaunchPending = true
 	if err = writeFleetReceipt(c, r); err != nil {
 		return errors.New("fleet_receipt_write_failed")
 	}
@@ -357,7 +386,16 @@ func launchFleetUpdate(ctx context.Context, requested ServiceConfig, i FleetUpda
 	claim := r
 	claim.Phase = "prepared"
 	if err = fleetAck(ctx, client, claim); err != nil {
+		if fleetStaleControl(err) {
+			return &fleetInstructionRefetchError{}
+		}
 		return err
+	}
+	// Fence ambiguous manager submission before invoking it. Only pending
+	// receipts are known never to have submitted a helper.
+	r.LaunchPending = false
+	if writeFleetReceipt(c, r) != nil {
+		return errors.New("fleet_receipt_write_failed")
 	}
 	label := fleetHelperLabel(c, i)
 	args := []string{c.Binary, "fleet-apply", "--config", c.Config, "--receipt", path}
@@ -434,7 +472,7 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	}
 	defer unlock()
 	r, err := readFleetReceipt(receiptPath)
-	if err != nil || r.ConfigSHA256 != configHash {
+	if err != nil || r.ConfigSHA256 != configHash || r.LaunchPending {
 		return errors.New("fleet_receipt_invalid")
 	}
 	if c.Detection.OS == "darwin" {
@@ -458,6 +496,12 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	client = fleetNoRedirect(client)
 	defer client.HTTP.CloseIdleConnections()
 	fail := func(code string) error {
+		// An obsolete control response is not an authoritative helper failure.
+		// Keep the last durable phase; never poison a newer operation or repeat
+		// an ambiguous restart. Temporary staleness is handled by refetch below.
+		if fleetStaleControl(errors.New(code)) {
+			return errors.New(code)
+		}
 		code = fleetFailureCode(code)
 		r.Phase, r.Failure = "failed", code
 		saveErr := writeFleetReceipt(c, r)
@@ -492,16 +536,11 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	manager := installManager{c.Detection.OS, d.command}
 	unit := installUnit{path: c.Service, label: "local.mycelium." + c.Role}
 	activate := func() error {
-		if err := fleetAck(ctx, client, r); err != nil {
+		if err := fleetRetryControl(ctx, client, r.Instruction, d.health.Wait, func() error { return fleetAck(ctx, client, r) }); err != nil {
 			return fail(err.Error())
 		}
-		if err := fleetAuthorize(ctx, client, r.Instruction); err != nil {
+		if err := fleetRetryControl(ctx, client, r.Instruction, d.health.Wait, func() error { return fleetAuthorize(ctx, client, r.Instruction) }); err != nil {
 			return fail(err.Error())
-		}
-		identity, err := EnrollmentServiceHealth(ctx, c, d.command)
-		pid, _, _ := strings.Cut(identity, "/")
-		if err != nil || pid != strconv.Itoa(r.BeforePID) {
-			return fail("fleet_recovery_runtime_changed")
 		}
 		// Installed is proof that this helper has not issued a restart yet:
 		// every manager call is preceded by durable restarting intent.
@@ -509,8 +548,23 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 		if writeFleetReceipt(c, r) != nil {
 			return fail("fleet_receipt_write_failed")
 		}
-		if err := fleetAck(ctx, client, r); err != nil {
+		if err := fleetRetryControl(ctx, client, r.Instruction, d.health.Wait, func() error { return fleetAck(ctx, client, r) }); err != nil {
 			return fail(err.Error())
+		}
+		// Control recovery may wait after publication. Recheck local authority
+		// after the last control wait, immediately before the manager action.
+		current, currentConfig, configErr := fleetConfig(configPath)
+		currentHash, hashErr := FileSHA256(c.Binary)
+		if configErr != nil || currentConfig != configHash || ValidateInstallIdentity(c, current) != nil || hashErr != nil || currentHash != a.SHA256 {
+			return fail("fleet_install_changed")
+		}
+		if _, err := fleetArtifact(c, r.Instruction); err != nil {
+			return fail(err.Error())
+		}
+		identity, err := EnrollmentServiceHealth(ctx, c, d.command)
+		pid, _, _ := strings.Cut(identity, "/")
+		if err != nil || pid != strconv.Itoa(r.BeforePID) {
+			return fail("fleet_recovery_runtime_changed")
 		}
 		if manager.activity(ctx, unit, true, true) != nil {
 			return fail("fleet_restart_failed")
@@ -527,7 +581,7 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 		}
 		return activate()
 	}
-	if err = fleetAuthorize(ctx, client, r.Instruction); err != nil {
+	if err = fleetRetryControl(ctx, client, r.Instruction, d.health.Wait, func() error { return fleetAuthorize(ctx, client, r.Instruction) }); err != nil {
 		return fail(err.Error())
 	}
 	before, err := FileSHA256(c.Binary)
@@ -563,6 +617,9 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	if err != nil || info.Version != m.Version || info.OS != a.OS || info.Arch != a.Arch || info.StartGate != m.StartGate || info.AttemptProtocol != m.AttemptProtocol || a.NativeSensing && !info.NativeSensing {
 		return fail("fleet_candidate_invalid")
 	}
+	if err := fleetRetryControl(ctx, client, r.Instruction, d.health.Wait, func() error { return fleetAuthorize(ctx, client, r.Instruction) }); err != nil {
+		return fail(err.Error())
+	}
 	// Recheck local settings/bytes and queue authority after potentially slow I/O.
 	current, currentConfig, err := fleetConfig(configPath)
 	currentHash, hashErr := FileSHA256(c.Binary)
@@ -570,9 +627,6 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 		return fail("fleet_install_changed")
 	}
 	if _, err = fleetArtifact(c, r.Instruction); err != nil {
-		return fail(err.Error())
-	}
-	if err := fleetAuthorize(ctx, client, r.Instruction); err != nil {
 		return fail(err.Error())
 	}
 	// writeInstallFile is the installer's same-directory, fsynced atomic

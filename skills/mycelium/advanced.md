@@ -41,7 +41,9 @@ In short: run `myce spec check --resolve` first; the job's class is the only urg
 
    **From the next release:** a learned host-memory envelope without a device measurement keeps the GPU exclusive for native jobs too. Its `memory_envelope.source` says `GPU recipe default`; a host peak alone does not establish safe GPU sharing. A later accepted device measurement can enable sharing.
 
-   If fresh per-process samples show a shared card exceeds its memory budget, the lowest tier yields; among equals the job most over its reservation yields. This planned stop requeues without a failure, with each grower's measured peak plus observed sampling growth retained as its next device-memory floor. Checkpoint grace and exact release still apply. Single tenants are unaffected. Missing or stale per-process samples cannot establish growth; a running job's reason reports when that evidence is unavailable.
+   **From the next release:** unified CUDA jobs also share when the driver lists PIDs with `N/A` memory, provided fresh per-attempt RSS/cgroup estimates reconcile with host `MemAvailable` deltas. These labelled upper estimates include CPU/shared pages and can overstate device use. Unexplained host growth, foreign GPU processes or incomplete evidence keep execution exclusive; missing or stale samples also prevent newcomers and shed existing co-tenants to exclusive use. A newly started tenant gets the existing sensor freshness window to supply its first sample, while another newcomer still waits. Declare a measured device figure or reuse accepted learning; cold probes still keep the card.
+
+   Fresh counters or reconciled unified estimates drive the shared-card guard. On unified CUDA, observed growth is projected across the sensor horizon plus existing stop grace, and checked against physical headroom as well as the card budget. The lowest tier yields first; among equals the job most over its reservation yields. This planned stop requeues without a failure, retaining the measured peak plus observed growth as the next device floor. Checkpoint grace and exact release still apply. Sampling cannot guarantee protection from unseen bursts. Single tenants keep their existing containment; status explains uncertain attribution.
 
    Shared interactive hosts admit only native CPU commands with already-prepared environments: no Docker, extension jobs or new environment preparation. Use a plain command via `myce run --cpu N --mem SIZE -- CMD` or a native command adapter entry with a prepared environment; work needing other execution modes waits for an eligible target.
 
@@ -208,10 +210,11 @@ The plan lists each job's files, what still protects them and `reclaimable_bytes
 
 ## When a job waits
 
-From the next release, `host_capacity_accumulation` names the ready accelerator
-job whose RAM/cores are being protected from new CPU backfill on one selected
-host. Running attempts finish normally; higher tiers, nonconflicting capacity
-and other hosts remain eligible. Unready environments, occupied GPU cards or
+From the next release, `host_capacity_accumulation` names the ready CPU or
+accelerator job whose RAM/cores are being protected from new backfill on one
+selected host. Running attempts finish normally; earlier fair turns, higher
+tiers, nonconflicting capacity and other hosts remain eligible. Unready
+environments, occupied GPU cards or
 impossible needs do not create this wait. Do not cancel/resubmit to bypass it.
 
 From s072, missing environments can prepare beside unrelated CPU commands on

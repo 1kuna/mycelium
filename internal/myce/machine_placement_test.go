@@ -21,7 +21,11 @@ func machineCheck(t *testing.T, q *Queue, m Machine, jobs ...*Job) Reply {
 	m.Devices = slices.Clone(m.Devices)
 	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
 	for _, j := range jobs {
-		c.Attempts = append(c.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true})
+		// This helper already models each reservation as resident in the card's
+		// free counter below. Supply the matching per-attempt sensor evidence;
+		// missing/stale/uncertain telemetry tests construct raw reports instead.
+		gb := j.Spec.Needs.MemoryGB
+		c.Attempts = append(c.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{DeviceGB: &gb}})
 		for i := range c.Machine.Devices {
 			if slices.Contains(j.AllocatedDevices, c.Machine.Devices[i].ID) {
 				c.Machine.Devices[i].FreeMemoryGB = max(0, c.Machine.Devices[i].FreeMemoryGB-j.Spec.Needs.MemoryGB)

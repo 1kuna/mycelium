@@ -1149,6 +1149,27 @@ attempt cgroups. Payload failures observed before worker stop remain failures.
 macOS uses the generated launchd service. Configuration and secret files stay
 private. Never run the ordinary binary as root.
 
+For an existing fleet-capable worker, installation compares the live process
+proof with the saved executable slot before taking its rollback snapshot. If
+publication succeeded but activation failed, the two hashes can differ. Only a
+slot matching the current queue-approved release's signed target, size and hash
+qualifies automatically; the provisioned publisher key still verifies it. The
+qualified **slot bytes** become the rollback target, even when the old process is
+still running. The private `slot-reconciliation.json` receipt retains both
+identities and this choice. An activation failure restores those slot bytes;
+it does not promise to recreate the old process image. Existing custody,
+maintenance, native signature and service checks still apply. A stopped service
+has no live image to reconcile; legacy installs without fleet proof keep their
+existing path.
+
+Unknown or unapproved slot bytes refuse with `fleet_slot_unapproved`, naming the
+running version/hash and the slot hash before any install publication or restart.
+Verify and approve the slot release through the ordinary release workflow, or
+have the authorized owner recover the installation; do not override the refusal.
+`myce status` and host status JSON expose `installed_slot`, `slot_mismatch` and
+`slot_error` in the worker fleet proof before any install is attempted. An old
+worker must first support these observations to report them.
+
 The transaction snapshots binary, config, credentials, GPU environment and
 service files/modes plus actual manager registration/activity. Failure restores
 that snapshot and verifies it independently. Incomplete rollback stops affected
@@ -2366,6 +2387,15 @@ root; rotation is a local provisioning operation, never an update instruction.
 A foreground queue or worker without saved service settings/runtime proof cannot
 participate; install the capable release normally before the first fleet update.
 
+Fleet helpers also retain both running and installed identities in their
+private receipt when they differ. A slot matching the frozen approved operation
+or the current queue-approved release is verified against local publisher trust
+and retained as the rollback identity; unknown bytes stop with
+`fleet_slot_unapproved`. Recovery still needs an explicit operator rerun and all
+existing operation/session, transient-helper absence, maintenance and custody
+fences. The helper's installed receipt proves publication, never activation;
+completion still requires a new healthy process with the approved image.
+
 A storage preflight failure is reported as `storage_preflight_failed`, including
 when recovered from the durable helper receipt; arbitrary helper error text is
 never exposed. Failed acknowledgements also retain `failure_code` in each host
@@ -2381,8 +2411,9 @@ authorized owner, then explicitly rerun `myce fleet upgrade`):
 
 | Code | Next step |
 | --- | --- |
-| `fleet_instruction_stale` | Refresh queue status and current operation/session/revision and runtime proof; let exact custody settle. An initial launch authorization refusal is refetched at the next normal worker poll, before any intent is written. After durable intent, inspect the receipt and explicitly rerun; never automatically repeat a helper or restart. |
-| `fleet_ack_stale` | Reconcile the receipt with the current operation/session/revision; an obsolete ack cannot replace current progress. Inspect the earlier failure first: an ack after an operation stopped is expected to be stale. |
+| `fleet_slot_unapproved` | Compare running and installed slot identities in worker status and the private receipt. Verify and approve the installed release, or recover through the authorized installation owner; never bypass this refusal. |
+| `fleet_instruction_stale` | Refresh queue status and current operation/session/revision and runtime proof; let exact custody settle. Before helper submission, refetch occurs at the next normal runtime poll. A pending receipt proves submission has not begun. A launched helper refetches its frozen instruction and retries only the refused control message once fresh proof/custody permits; publication and restart are not replayed. |
+| `fleet_ack_stale` | The helper refetches before retrying the same control message. An obsolete operation/session or superseded helper stops locally without reporting a new terminal failure; its receipt retains the last durable phase. An ack after an operation stopped is expected to be stale. |
 | `fleet_maintenance_changed`, `fleet_authorization_refused` | Reconcile maintenance ownership, exact custody, current runtime and queue authorization; never override the operator's drain. |
 | `fleet_ack_failed` | Restore authenticated queue connectivity, then reconcile the durable receipt before rerunning. |
 | `fleet_artifact_download_failed` | Restore authenticated artifact connectivity and queue/publisher availability. |
@@ -2415,9 +2446,25 @@ authorized owner, then explicitly rerun `myce fleet upgrade`):
 An initial authorization can become stale with an unchanged revision: a slow
 instruction request may outlive the queue's runtime-proof freshness window or
 custody may change before authorization. Cancellation/release alone does not
-advance the fleet revision. Refetching before durable intent changes no installed
-bytes and starts no helper; every later attempt still rechecks queue authority.
-Refusals after intent stay durable and require explicit operator recovery.
+advance the fleet revision. Before manager submission, the next normal runtime
+poll refetches and rechecks authority; a pending receipt can resume because no
+helper has been submitted. Once submission begins, that revision cannot launch
+again automatically, even after an ambiguous manager response.
+
+A launched helper also refetches after stale authorization or acknowledgement.
+An empty fenced response waits for fresh proof and exact custody; a matching
+instruction permits retrying only that control request, with its original
+operation, release, session and helper revision. A newer operator revision alone
+does not replace an active helper. A durable replacement claim, changed session,
+stopped operation or maintenance refusal ends recovery without authorizing any
+mutation. Before restart, the helper rechecks the installed target hash, saved
+configuration hash, locally provisioned publisher trust and original manager PID
+after its last control wait. Obsolete control messages do not create failed
+receipts or stop newer progress. Genuine validation/maintenance failures still retain their terminal
+receipt and repair guidance. Durable restarting intent still prevents repeating
+a manager restart after interruption. This recovery requires the updated queue
+and helper binaries; it cannot repair an older helper already stopped by #739's
+post-intent behavior.
 
 A failed worker step on an operator-disabled host is retained as
 per-host `phase: failed` with its failure code and repair guidance; the operation
@@ -2690,6 +2737,60 @@ heartbeats continuing, restore the network, and verify the share mounts and the
 held work is admitted without restarting either service. This native boot check
 is separate from the laptop fixture and requires an authorized test window.
 
+### Worker mount recovery (Linux and macOS)
+
+Workers reuse the host-hygiene mount probe for each configured checkpoint/NAS
+root. Each attempt stats the root and reads at most one directory entry. Access
+re-triggers an existing Linux systemd/autofs or macOS autofs mount through the
+OS; no separate repair daemon or privileged command is installed. Cached mount
+inventory is checked again after access, so an empty local mountpoint cannot
+pretend to be a recovered NAS. Independent local checkpoint roots remain local.
+
+The pending deadline is learned from this host's successful mount observations
+using the hygiene prediction band. Completed successful probes train through
+hygiene warmup before slow-completion classification; a single fast sample
+cannot permanently reject ordinary successful variation. Probe-format upgrades
+invalidate only incompatible mount baseline evidence, preserving other health
+evidence and historical diagnostics. Before any successful observation, one
+existing sampling interval bounds cold/unknown evidence. Three consecutive slow
+or stalled observations confirm degradation; explicit filesystem failures and
+unverified cold probes withhold dependent work immediately. Heartbeat delivery
+never waits for these filesystem calls. A stuck kernel request retains its one
+slot until it returns, including after its deadline; retries cannot multiply it.
+
+Returned failures retry with exponential backoff starting at the larger of the
+sampling interval and measured operation cost. The ceiling is the larger of the
+existing signal-freshness allowance and that measured cost: this limits repeated
+connection pressure while keeping recovery discovery within the host's evidence
+budget. Three newly completed healthy probes clear the hold automatically.
+NAS-dependent work waits with a typed root reason; local/cached work continues
+when its own dependencies are available. Existing operator drains and attempt
+custody are unchanged.
+
+On **Linux**, a surviving automount is retried by access, including a late
+network after boot. Apply the operator-owned boot integration above to prevent
+`mount-start-limit-hit`. When the automount has disappeared, the worker reports
+`mount_linux_operator_required`: an authorized operator must restore the exact
+mount/automount through the existing system configuration. The worker never
+runs root mount helpers, resets system units, or changes credentials.
+
+On **macOS**, access retries an existing autofs path and lets the OS reconnect
+an existing SMB session. If no mount/automount remains, or access is denied,
+`mount_macos_approval_required` asks the owner to restore the configured mount
+and approve Keychain access if macOS requests it. This code identifies the need
+for owner action, not the exact cause of a Keychain refusal. It never launches
+Finder, displays a password dialog, reads Keychain, or reconstructs an SMB URL.
+A dead SMB request that never returns stays `mount_probe_stalled`; inspect the
+OS session through the storage owner rather than force-unmounting active data.
+
+Status exposes these codes in `host_health.history[].mounts[].reason` and
+`unavailable_roots`. The existing #200 wake channel emits a deduplicated
+`host_mount_action_required` event, including escalation after an earlier
+`host_mount_degraded` event. Diagnoses contain root roles and fixed codes only,
+never paths, mount sources, syscall text or credentials. Native late-network
+boot, Wi-Fi/DNS loss and dead-SMB qualification require a separately authorized
+window; laptop fake-filesystem tests do not establish native remount success.
+
 On Linux, missing-runtime refusal applies to NVIDIA display controllers and
 Intel discrete PCIe display endpoints (Intel vendor ID and positive
 [`current_link_width`](https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-bus-pci)
@@ -2898,8 +2999,8 @@ If the Ed25519 publisher key is on this same Mac, append
 `--signing-key PRIVATE_SIGNING_KEY` to `fleet` or `assemble` to generate the
 signed `release.json` through the existing `myce release manifest` command.
 Otherwise transfer the verified assembled directory unchanged to the provisioned
-key host, including Linux, and use a host-native `myce` with these options and Go
-installed for reading build IDs:
+key host, including Linux, and use a host-native `myce` with these options.
+The signing-only publisher needs no Go toolchain:
 
 ```sh
 myce release manifest --dir ASSEMBLED_DIR --version VERSION --commit COMMIT \
@@ -2910,8 +3011,10 @@ myce release manifest --dir ASSEMBLED_DIR --version VERSION --commit COMMIT \
 Use the receipt digest retained independently from native assembly; computing it
 only from the transported receipt (or trusting its adjacent checksum file) does
 not authenticate the recorded native checks. The publisher rechecks manifest,
-artifact and build-receipt hashes, source/version, target/CGO metadata and build
-IDs without executing any candidate artifact. Native Darwin qualification still
+artifact and build-receipt hashes, source/version and target/CGO metadata without
+executing any candidate artifact. Exact build-ID version/commit proof comes from
+the authenticated native assembly receipt, whose artifact hashes must match.
+Native Darwin qualification still
 happens on the Mac during assembly. Missing proof or a mismatch refuses signing.
 The signer parses the newline-terminated unsigned manifest and signs exactly the
 serialized JSON value it embeds in `release.json`; never sign the unsigned file
@@ -3635,10 +3738,38 @@ Use the native verification above before claiming a WSL daily-use host ready.
 
 ## Queue disk contention (#527)
 
-Keep bulk copies, heavy tests and maintenance off the queue's backing device
-while qualifying I/O protection. Another directory or partition on the same
-device provides no physical isolation. Native protection remains unqualified;
-[#527](https://github.com/1kuna/mycelium/issues/527) owns measured acceptance.
+The 2026-11-05 native test on queue release s074-r2 (`b71c29ca`) did not reproduce
+the check-in deadline failure under bounded gate-like I/O. Test-class job
+`1179401000178688d5384d7083878797` ran four writers on the queue's backing device,
+inside the ordinary worker attempt cgroup: 2 GiB written over 90.001 seconds
+(22.755 MiB/s), fsync every 4 MiB, at most 256 MiB of disposable payload, with
+90-second before/after phases. Payload occupied less than 0.15% of measured free
+space. The experiment finished at 20:59:38Z, with zero attempt losses; its
+accepted result was retrieved and verified, payloads removed and processes exited.
+No service configuration or production database was changed or accessed.
+
+Before / during / after check-in p50 was 316.812 / 322.027 / 319.888 ms;
+p95 was 909.931 / 744.890 / 958.325 ms; p99 was
+1035.339 / 969.471 / 1124.875 ms. These are the API's rolling 256-sample windows
+read near each phase end, not independent phase histograms; windows can retain
+nearby phase samples. Journal counts use the exact phase timestamps. Slow
+control requests (>1 second) numbered 4 / 1 / 15, or 2.67 / 0.67 / 10.00 per
+minute, excluding intentional event/wait long polls and the three status reads
+used to observe latency. Slow check-ins numbered 4 / 1 / 10, with maxima
+1080.377 / 1136.772 / 1399.770 ms. No check-in over the unchanged ten-second
+deadline or local worker check-in timeout was observed. Background work was
+uncontrolled, and recovery had more slow requests; this is bounded native
+deadline evidence, not proof of causal isolation or unlimited I/O headroom.
+
+This supports removing CI's architecture-wide full-gate exclusion: the existing
+Linux profile's amd64 and arm64 targets are both eligible again in CI, without
+host pins or resource-policy changes. It does not qualify live backups, larger
+bursts, or sustained bulk maintenance. Keep those off the queue's backing device
+until separately measured. Another directory or partition on the same device
+provides no physical isolation. No effective I/O weighting was present in this
+test (no delegated io controller, scheduler `none`, no configured io.cost).
+Native protection remains unqualified; [#527](https://github.com/1kuna/mycelium/issues/527)
+retains that broader acceptance and the control options below.
 
 ## SQLite backup and commit limits
 

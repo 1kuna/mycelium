@@ -77,12 +77,21 @@ func memoryExplorationSeed(t *testing.T, q *Queue, clock *fakeClock, linux, darw
 	memoryExplorationComplete(t, q, clock, memoryExplorationRun(t, q, linux, s), prior, false, false)
 }
 
+// #850 changes a sizing-only refusal into a durable wait; dispatch must still
+// refuse to start below the prior or reopen a spent exploration claim.
 func memoryExplorationRefused(t *testing.T, q *Queue, s Spec) {
 	t.Helper()
-	_, err := q.Submit(s)
-	var api *HTTPError
-	if !errors.As(err, &api) || api.Code != "no_qualified_target" || !strings.Contains(api.Message, memoryCapacityRemedies) {
-		t.Fatalf("expected conservative refusal with remedies: %v", err)
+	if s.Needs.HostMemoryGB > 8 { // This fixture's declared Darwin allowance.
+		_, err := q.Submit(s)
+		var api *HTTPError
+		if !errors.As(err, &api) || api.Code != "no_qualified_target" {
+			t.Fatalf("hard requirement must refuse: %v", err)
+		}
+		return
+	}
+	queued := submit(t, q, s)
+	if why := q.memoryEvidenceWaitingReason(queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+		t.Fatalf("sizing-only mismatch must wait: %s", why)
 	}
 }
 

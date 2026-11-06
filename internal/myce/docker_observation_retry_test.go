@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,11 +22,29 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 			var armed atomic.Bool
 			var failures atomic.Int32
 			timedOut := make(chan struct{}, 2)
+			second, recovery := make(chan struct{}), make(chan struct{})
+			releaseSecond := sync.OnceFunc(func() { close(second) })
+			releaseRecovery := sync.OnceFunc(func() { close(recovery) })
+			defer releaseSecond()
+			defer releaseRecovery()
 			w.dockerCommand = func(ctx context.Context, args ...string) ([]byte, error) {
-				if armed.Load() && args[0] == operation && failures.Add(1) <= 2 {
-					<-ctx.Done()
-					timedOut <- struct{}{}
-					return nil, ctx.Err()
+				if armed.Load() && args[0] == operation {
+					n := failures.Add(1)
+					if n <= 2 {
+						<-ctx.Done()
+						if n == 2 {
+							<-second
+						}
+						timedOut <- struct{}{}
+						return nil, ctx.Err()
+					}
+					// Keep each observation phase available until its assertions
+					// finish; host scheduling must not consume the diagnostic.
+					select {
+					case <-recovery:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
 				}
 				cmd := exec.CommandContext(ctx, filepath.Join(root, "docker"), args...)
 				cmd.Env = dockerClientEnvironment()
@@ -77,6 +96,7 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 				t.Fatal("running observation timeout did not alert")
 			}
 			clock.advance(3 * time.Minute)
+			releaseSecond()
 			select {
 			case <-timedOut:
 			case <-time.After(5 * time.Second):
@@ -94,6 +114,7 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 				t.Fatalf("timeout finished a healthy attempt: %+v", f)
 			default:
 			}
+			releaseRecovery()
 			await(t, func() bool { return retryStatus() == "" && p.docker.status() == "running" })
 			if err := os.Remove(filepath.Join(root, "running")); err != nil {
 				t.Fatal(err)

@@ -221,7 +221,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	}
 	if next.DeviceGB != nil && validMemoryValue(*next.DeviceGB) && (out.DeviceGB == nil || *next.DeviceGB > *out.DeviceGB) {
 		out.DeviceSource = ""
-		if next.DeviceSource == deviceHostDeltaSource {
+		if next.DeviceSource == deviceHostDeltaSource || next.DeviceSource == deviceUnifiedResidentSource {
 			out.DeviceSource = next.DeviceSource
 		}
 	}
@@ -239,7 +239,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	} else {
 		// Publish only worker-owned labels, never raw command errors or output.
 		switch next.DeviceUnavailable {
-		case deviceMemoryNoSample, deviceMemoryUnsupported, deviceMemoryInventory, deviceMemoryTimeout, deviceMemoryNoCgroup, deviceMemoryNotReported, deviceMemoryShared:
+		case deviceMemoryNoSample, deviceMemoryUnsupported, deviceMemoryInventory, deviceMemoryTimeout, deviceMemoryNoCgroup, deviceMemoryNotReported, deviceMemoryShared, deviceUnifiedUncertain:
 			out.DeviceUnavailable = next.DeviceUnavailable
 		}
 	}
@@ -332,12 +332,6 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
 			if estimate.measuredHostGB > 0 {
 				host = estimate.measuredHostGB
-			}
-			if estimate.escalation {
-				if lower := q.constrainedMemoryLower(j, estimate); lower >= host {
-					room, why := q.exploratoryMemory(j, m)
-					host, refusal = max(host, lower, room), why
-				}
 			}
 			if !n.cpuOnly() {
 				peak, factor := estimate.device, estimate.deviceFactor
@@ -592,7 +586,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 	return seed
 }
 
-const acceptedMemoryEscalation = "exploratory (accepted prior invalidated; physical headroom)"
+const acceptedMemoryEscalation = "exploratory (accepted prior invalidated; measured recovery)"
 
 func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEstimate {
 	estimate := q.memoryEstimateForState(j, m, checkSeed, false)
@@ -603,11 +597,9 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	if prior.host == nil || prior.source == spentMemoryExploration {
 		return estimate
 	}
-	// Invalidated evidence is a lower bound, not a distribution. A fresh
-	// physical probe cannot shrink a retained requirement or an OOM floor.
-	room, why := q.exploratoryMemory(j, m)
-	prior.refusal = why
-	prior.measuredHostGB = max(room, prior.measuredHostGB, hostMemoryPeakGB(prior.host)*prior.hostFactor, estimate.constrainedGB)
+	// Reserve observed demand plus the measured overshoot/sampling error.
+	// Capacity bounds uncertainty only; confirmed need and retry floors win.
+	prior.measuredHostGB, prior.refusal = q.recoveryMemoryBound(j, m, estimate, prior.measuredHostGB, hostMemoryPeakGB(prior.host))
 	prior.samples = 0
 	prior.escalation = true
 	prior.constrainedGB = max(prior.constrainedGB, estimate.constrainedGB)
@@ -765,6 +757,22 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 		if sameHost != nil {
 			bound, _ := observedMemoryBoundForHost(acceptedMemoryPoints(q, points), *key, m)
 			estimate.measuredHostGB = max(estimate.measuredHostGB, bound)
+			if !escalation {
+				// Learned RSS is an estimate, not an explicit hard limit. Retain
+				// observed guard overshoot as uncertainty after clean recovery.
+				facts := q.memoryConstraintEvidence(*key, configuration, gpuHost)
+				if facts.margin > 0 {
+					bound := max(estimate.measuredHostGB, facts.lower) + facts.margin
+					capacity := q.qualificationCapacity(m)
+					room := capacity.FreeHostMemoryGB - capacity.MemoryCeilingSlackGB
+					if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
+						room -= j.Spec.Needs.MemoryGB
+					}
+					// Fresh clean evidence replaces the constrained class prior.
+					// Bound its uncertainty by this target, never the clean peak.
+					estimate.measuredHostGB = max(estimate.measuredHostGB, min(bound, room))
+				}
+			}
 		} else {
 			q.adaptMemoryTransfer(&estimate, j, m, acceptedMemoryPoints(q, points))
 		}

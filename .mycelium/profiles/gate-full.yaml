@@ -15,6 +15,7 @@ needs:
   memory_gb: 6
   platform: cpu
 targets:
+  # CI preserves both architectures and lets Mycelium choose the worker (#527).
   - {os: linux, arch: amd64, platform: cpu}
   - {os: linux, arch: arm64, platform: cpu}
 # Locked CPU tools for every declared target (see env/mycelium-gate/README.md).

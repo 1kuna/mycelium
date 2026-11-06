@@ -1,5 +1,68 @@
 # Seeing your mycelium
 
+From the next release (#850), `diagnostic_code: memory_evidence_recovering`
+means declared requirements have an eligible target but the learned/exploratory
+envelope does not. The durable queued job re-evaluates on evidence and capacity
+changes. No attempt starts below its resolved reservation or retained retry
+floor. A new clean comparable result may replace an invalidated class prior;
+explicit impossible needs, incompatible targets and impossible per-job retry
+floors still refuse. This wait grants no capacity or cleanup permission.
+
+## Automatic host health (#834, next release)
+
+Machine `host_health` contains a typed `drain_reason`, recent `history`, the
+healthy `baseline`, and CPU/RSS-leading `foreign` processes and service identities.
+Samples include OS memory pressure, swap/growth, load, timer wake latency,
+heartbeat duration, local free disk, and configured NAS/checkpoint metadata-probe
+latency or pending age. `age_seconds` is age at the worker's last report; worker
+freshness remains independent. `host-health.json` in worker state survives a
+restart. `persistence_error`, sample `error` and `foreign_error` are fixed codes,
+never raw errors or local paths.
+
+The sampler reuses the five-second observation cadence and keeps 64 recent and
+64 healthy samples to bound diagnostic memory and local writes. Eight healthy
+samples bootstrap each host's prediction bands: quartiles plus three
+interquartile ranges (Tukey's far-outlier fence), with observed adjacent changes
+supplying a noise floor. These are statistical/history bounds, not fleet capacity
+limits. Three consecutive adverse samples confirm degradation; three healthy
+samples resume admission. Missing evidence breaks confirmation and cannot prove
+recovery. Adverse samples never teach a new healthy baseline. Load requires
+increased wake latency; heartbeat delay also requires local wake latency, so
+ordinary useful CPU work or a slow queue alone does not drain a host. Memory
+pressure, swap growth with wake latency, and low free disk use the host's bands.
+Disk pressure also requires exhaustion against measured consumption over the
+confirmation horizon. `disk_recovery` retains that measured reserve until space
+actually recovers; aging history alone cannot clear it. Pending adverse mount
+samples (`adverse`) are excluded from healthy baselines before confirmation.
+History serialization/fsync runs outside the mutex used by heartbeat snapshots.
+
+Workers send the additive health fields only after the queue advertises
+`host_hygiene_protocol: host-hygiene-v1`. A strict older queue receives the
+legacy shape; local evidence still persists and a confirmed local drain uses
+the existing leaving signal. A queue downgrade retries the legacy shape once
+after a strict-decoder rejection, preserving session and attempt custody.
+
+Drains withhold new command, model and preparation launches without changing
+operator maintenance, killing running work or discarding exact-attempt custody.
+`host_degraded` alerts carry the typed cause; existing stale-worker alerts carry
+`reason: host_silent`. Existing notifier episode/cooldown and delivery custody
+apply. Operator drains still require their owner's resume.
+
+Mount probes inspect configured root metadata without traversing or remounting
+it. A blocked syscall remains the single owned outstanding operation for that
+root, off the heartbeat path. Pending age and completion latency are compared
+with successful history, with repeated degradation using existing root-specific
+admission. Independent local work stays eligible. Cold roots retain existing
+checkpoint and mount-inventory availability rules. No filesystem I/O runs in a
+queue transaction. Missing pre-hang evidence cannot establish an earlier hang's
+cause; native OS/mount qualification is separate from fake-clock proof.
+
+Foreign CPU/RSS leaders (up to five of each) refresh once per minute to keep
+enumeration out of the heartbeat path. Only executable basenames and available
+service identities are reported, without argv or environment values. The worker
+tree and birth-verified recorded surviving attempt members are excluded. This
+is owner context only; it causes no signals, service changes or cleanup.
+
 Run `myce status` using your usual queue address and private token. `--full`
 shows full job IDs. Open the queue address in a browser for the same information;
 sign in as `myce`, using the token as the password. The page is read-only and
@@ -14,6 +77,15 @@ usage/file-store I/O, status recaptures before returning, including uncached
 filtered and full views and per-job GET. This can repeat observation work during
 completions; ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
 injected queue time at capture, rather than the response completion time.
+
+Every status and inspection response includes additive `freshness` metadata:
+`captured_at` equals `now`; `served_at` is the queue time when the response is
+assembled; `age_seconds` is their nonnegative difference; and `cached` says
+whether this request reused a previously completed default-status generation.
+The age includes projection and observation I/O, even for an uncached response.
+It excludes JSON encoding and network transfer after assembly. Interpret a
+cached or slow observation at its capture time, including worker freshness.
+Old CLIs continue to decode the existing fields.
 
 From s072, machine `shared_input_cache` reports `capacity_bytes`, `free_bytes`
 and `evictable_bytes`. Free space excludes cache allocation and outstanding
@@ -81,7 +153,13 @@ another host's accepted sample alone never explains its mutation (#620).
 Only the unfiltered default shares the one-second cache. Filtered/full reads are
 fresh. Snapshot capture keeps scheduling inputs and dependency state under the
 queue lock; projection, usage queries, file inventory, encoding the reply and
-compression run after release. No bulk file or network I/O runs under `q.mu`.
+compression run after release. Cold retained jobs have immutable, payload-free
+observation inputs maintained by the existing committed-record journal; reads
+copy those inputs outside the lock. Mutable jobs and worker facts are still
+captured together under the lock. Each detached generation reuses one placement
+scan and memory-evidence catalog across ordering, startup and blocker diagnostics;
+derived capacity views keep their own scans. No bulk file or network I/O runs
+under `q.mu`. No jobs, curves, custody or foreign-load fields are removed.
 
 Jobs with explicitly recovered outputs expose an append-only `recovered_results`
 list in status and job GET. Each record has `kind: recovered`, its own result ID,
@@ -386,10 +464,11 @@ envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
 environment is not prepared and that the host never builds environments.
 
-`host_capacity_accumulation` names a ready queued accelerator job whose host RAM
-or cores would otherwise be repeatedly consumed by CPU backfill (#787). New
-CPU work at the same or lower tier waits on the demand's selected host unless
-it fits beside the demand. Existing attempts finish normally. The projection
+`host_capacity_accumulation` names a ready queued job whose host RAM or cores
+would otherwise be repeatedly consumed by smaller backfill (#787). From the
+next release this also covers CPU-only demand. New work behind the demand in
+tier/fair-turn order waits on its selected host unless it fits beside the
+demand. Existing attempts finish normally. The projection
 selects one currently ready target per demand, prefers immediate capacity, and
 otherwise uses ordinary placement value. It retains current device capacity,
 environment, qualification, cache, maintenance and liveness requirements; cold,
@@ -686,16 +765,49 @@ time, even if the actor's cached host-memory report predates CUDA initialization
 or is delayed by log/result I/O. Device age still starts at the original sensor
 reading, and the host counter keeps its own older age. A sampler that stops
 producing readings still becomes stale after ten seconds; refreshing the report
-does not renew its evidence. The shared-card guard uses only fresh per-process
-readings from every tenant; host-drop estimates cannot authorize that guard.
-When a unified-memory CUDA host lists the attempt's processes on its GPU but
-reports no per-process memory (`[N/A]`), the worker takes the largest host
-`MemAvailable` drop since launch outside every Mycelium cgroup as `device_gb`,
-labelled by `device_source`. It is used only when no other process appears on
-that GPU during the attempt; otherwise `device_unavailable` says the GPU was
-shared. The figure also counts growth by processes outside Mycelium and can
-miss use that coincides with their frees. It feeds learning like a
-per-process sample, so the device figure can grow from measured use.
+does not renew its evidence. From the next release, unified CUDA admission
+requires a fresh sample from every existing tenant before adding another.
+
+When CUDA lists attempt PIDs but reports `[N/A]`, a Linux worker also reads
+those PIDs' RSS and the exact attempt cgroup's resident anonymous, kernel and
+shared-memory pages. `device_source` labels their maximum as a **unified
+RSS/cgroup upper estimate with host reconciliation**. CPU pages and repeated
+shared RSS pages can overstate device demand; this is not a CUDA allocator
+counter. The worker checks the signed `MemAvailable` drop against growth of the
+entire delegated cgroup root and this attempt's RSS outside its cgroup charge.
+An unexplained residual larger than one kernel page, a foreign GPU process,
+missing baseline or incomplete RSS/cgroup/host evidence sets
+`current_host_memory.device_exclusive`. A residual is charged conservatively
+for live diagnostics, never divided proportionally among co-tenants. Such
+samples do not feed device learning. The older exclusive host-delta completion
+fallback remains available when no per-process figure can be retained.
+
+Check-ins refresh the estimate's source, exclusivity and original timestamp
+atomically alongside its value. Missing, stale or uncertain attribution prevents
+new unified CUDA sharing. A newly started attempt may wait for its first sample
+within the existing two-period sensor freshness window; that wait cannot admit
+another tenant or excuse explicitly uncertain evidence. Once the window expires,
+missing samples also require exclusive execution. Existing shared attempts yield in the guard's normal
+lowest-tier, then greatest-over-reservation order until execution is exclusive.
+The running reason names uncertain attribution. Dedicated-card missing-sample
+behavior remains diagnostic only. Higher CUDA classes still stop every lower
+co-tenant and await exact release before starting. Workers negotiate
+`unified_memory_protocol: unified-attempt-memory-v1` before sending the new
+sample fields. An older or downgraded queue receives the legacy shape and a
+unified CUDA capacity withheld through existing device-unavailable fields while
+a fallback estimate is live; no leave/stop is requested. Attempt custody and
+local evidence remain intact.
+
+Fresh, reconciled estimates enable the shared-card growth guard. For unified
+CUDA it compares reservations with measured usage plus growth projected over the
+observed sensor horizon and existing checkpoint/termination grace. It also
+checks that projected growth fits current physical headroom above the configured
+reserve/allowance floor. It requests a planned stop while headroom remains,
+retaining exact-release custody and measured retry floors without spending a
+failure budget. Graceful stop, kernel containment and sampling are not a hard
+bound against an unseen allocation burst. Simultaneous unrelated frees can hide
+host drops, and sampling can miss short peaks; native qualification remains
+separate from fake-sensor tests.
 These diagnostics grant no learning eligibility or accounting reduction. Shared
 physical RAM alone does not establish cgroup coverage: GB10 CUDA allocations can
 exceed the job's current cgroup charge. Unified admission retains conservative
@@ -1412,37 +1524,78 @@ expiry; ordinary pressure recovery alone does not erase the cooldown.
 `health_alerts` retains diagnostic events delivered by the existing optional
 queue `--health-notify` executable. Detectors run on queue mutations and ticks,
 using the queue clock; no polling service or automatic issue filing is added.
-Each condition has a stable subject key, emits once per episode, and rearms
-after recovery with the existing 15-minute cooldown. Delivery retries keep the
-same `delivery_id`. Clearing a condition retains its diagnostic event; it does
-not send a second notification or change admission, retries, or release custody.
+Each condition has a stable subject key and emits once per episode. Positive
+recovery rearms it without a wall-time cooldown, so a second real incident is
+not hidden for fifteen minutes. Delivery retries keep the same `delivery_id`.
+Clearing retains the diagnostic event; it sends no second notification and
+changes no admission, retry or release-custody decision.
 
-- `queue_overload`: two consecutive complete one-minute windows each contain
-  at least 100 slow responses (over one second), or at least 20 requests with
-  measured queue mutex wait of at least one second. Intentional worker event and batched consumer wait
-  long-poll duration is excluded from slow-response counts; its actual lock wait
-  still counts. One busy minute does not alert. This catches the recorded roughly
-  1,900 slow responses/minute and waits up to 15 seconds, while excluding the
-  quiet-history rate of about 0.4 slow responses/minute.
-- `client_request_flood`: the same client kind supplies at least 1,800 job GETs
-  and at least 80% of job GET volume in each of two consecutive complete minutes.
-  Both full and wait reads count, using the existing bounded attribution counters.
-  Versions aggregate by kind so a mixture of client releases cannot hide a flood.
-  The event's `client_kind` is only `cli`, `python`, or `unknown`; raw User-Agents,
-  addresses, versions and job identities are not copied into this alert. This is
-  attribution to a client family, not proof of an individual process's identity.
-  The 30 GETs/second floor is above the recorded 28.36/second baseline, below
-  roughly 63/second from 190 three-second waiters; the share requirement excludes
-  balanced traffic. Low-volume dominance alone does not alert.
+- `queue_overload`: sustained response-cost or mutex-wait regression against
+  this installation's healthy history, separately for each normalized API route.
+  Intentional worker-event and consumer-wait response duration is excluded;
+  their real lock waits still count. Eight completed observation intervals
+  establish a local baseline, and three consecutive adverse intervals confirm
+  a regression. The robust band uses quartiles, adjacent observed variation and
+  Tukey's far-outlier fence. The bounded 64-interval history replaces itself as
+  healthy service cost changes; adverse samples cannot teach degradation as
+  normal. Three healthy intervals, or an interval with no requests, clear it.
+- `client_request_flood`: only while the queue is degraded, one existing client
+  family supplies a strict majority of relative excess GET demand over its own
+  healthy rate band. Relative growth preserves the normal request mix even when
+  one family normally dominates. Healthy high volume, sole-family dominance
+  without degradation and proportional growth of multiple families do not fire.
+  Versions aggregate by kind; `client_kind` is only `cli`, `python` or `unknown`.
+  This attributes a family, not a process, and copies no User-Agent or address.
 
-These two traffic detectors compute fixed-size, process-local windows outside
-`q.mu` and reconcile the result on the existing maintenance tick. They fire in
-2–3 minutes plus tick/queue delay; a wedged queue cannot commit or deliver an
-alert until it progresses. The first partial minute after observation begins is
-excluded. A completed minute below the relevant threshold clears an episode;
-quiet traffic clears without needing another HTTP request. Restart discards
-traffic evidence and rebuilds the windows, clearing old active conditions until
-fresh sustained evidence exists. Retained events and cooldowns still persist.
+The traffic detectors close intervals on maintenance ticks and normalize rates
+by actual elapsed queue-clock time. They contain no request-per-minute, fixed
+latency or fleet-size threshold. Statistical work and aggregation run outside
+`q.mu`; ticks commit fixed booleans. A stopped queue cannot commit or deliver an
+alert until it progresses. Restart requires fresh local traffic history; retained
+delivery events persist. A cold installation has unknown latency, rather than
+an assumed universal healthy speed. The initial observed interval contributes
+cost evidence and its actual duration, never an assumed complete minute.
+
+- `worker_reports_missing`: an enabled joined worker omitted CPU capacity,
+  required host-memory telemetry, advertised device-memory telemetry or a tool
+  inventory needed by live demand. Optional reports without demand and positive
+  sensor errors already owned by host-health alerts are excluded. Reasons are
+  finite `*_report_missing` codes; supplied reports clear the condition.
+- `environment_recipe_failed`: a current worker environment report is failed
+  and the existing classifier says deterministic. Transient download/storage
+  failures and cold/preparing environments are excluded. Ready/replaced/removed
+  reports clear it; raw recipe errors and logs never enter notifications.
+- `pin_reason_missing`: live frozen host/device restrictions lack the corresponding
+  authored requirement reason. Terminal/cancelled work clears it. Authored prose
+  remains private, and reasons are never treated as qualification evidence.
+- `job_target_unsatisfied`: a queued job has known enabled targets, but none
+  passes resolve's permanent-capacity predicates. Busy or temporarily offline
+  fitting targets exclude it. Missing inventory makes the conclusion unknown;
+  it is owned by the missing-report detector. A fitting target or removal of the
+  live demand clears it. No scheduling decision is changed.
+- `infrastructure_loss_streak`: consecutive infrastructure endings on one worker,
+  across distinct exact executions. Two is a repeated loss, not a timed fleet
+  threshold. Final classification replaces provisional requeue evidence before detection.
+  Replays cannot increment it; planned stops are excluded. Successful
+  or workload-caused endings break the streak. Historical failures interrupted
+  by successful work do not fire. It preserves all existing attempt fences.
+- `staging_cache_refused`: accepted worker transfer/cache/copy failure reports or
+  an exact attempt's typed input-staging refusal. Cold caches, successful copies
+  and planned stops do not fire. A repaired report or later successful staging
+  clears its corresponding subject; missing staging evidence cannot clear it.
+  Only fixed reason codes enter notifications.
+- `update_failed`: the current update operation has a failed host or recorded
+  failure. It uses #741's sanitized `failure_code` allow-list (including the
+  explicit runner-smoke failure); successful retry/removal clears it. Helper,
+  download, installer and service text is never copied.
+
+#834 owns host degradation, silence, mount probes and collector diagnostics;
+these detectors do not create another host-hygiene alert class. All remaining
+checks use already accepted in-memory reports, intent and exact-attempt outcomes,
+with no network, blob/manifest verification or filesystem probes under `q.mu`.
+The older storage persistence delays and launch/flap history windows below are
+unchanged by the adaptive traffic replacement; their broader #803 follow-up is
+separate from the retired #768 thresholds.
 
 - `checkpoint_store_unavailable`: a worker reports its `checkpoint` NAS root
   unavailable (or `checkpoint_unavailable`) continuously for five minutes by
@@ -1480,7 +1633,7 @@ fresh sustained evidence exists. Retained events and cooldowns still persist.
   demand clears when it fits or leaves the queue. Auto sizing inherited from
   variants is included; explicit member caps are excluded from the learned
   comparison. Healthy demand creates no condition history, and recovered
-  envelope conditions are discarded after their cooldown. Events carry only project/job
+  envelope conditions are discarded on recovery. Events carry only project/job
   identities, never commands, mount paths or worker error text.
 
 ## Durable model interval API
@@ -1708,3 +1861,71 @@ and transport errors are withheld. Notifier lookup uses the same PATH/absolute
 executable resolution as run. Recognized cache-capacity refusals preserve the
 required/capacity byte evidence and a dependency remedy. This is diagnosis, not execution or
 release verification; submit revalidates and results still need acceptance checks.
+
+## Worker cleanup (#834, next release)
+
+Machine `hygiene_collection` reports the last automatic collection time, next
+eligible sweep, file/environment cache bytes and effective limits, reclaimed
+bytes, busy locks, protected entries and fixed diagnostic codes. File-cache
+accounting uses logical copy sizes; environments use existing allocated/inode
+accounting. Reclaimed counters are cache-accounting changes, not a promise of
+equivalent physical free space on clone/compressed filesystems.
+Unknown worker diagnostic strings are replaced by fixed codes at the public
+status boundary. Collection fields require separately advertised
+`hygiene_collection_protocol: worker-collection-v1`; health-only/older queues
+receive their supported request shape.
+
+The existing serialized retention lane applies the configured/automatically
+sized budgets even when no new download or environment build arrives. Complete
+file-cache copies evict oldest first under the same process and filesystem lock
+as staging; each attempt has a private materialization. Partials, unknown data
+and links remain protected. Environment collection reuses use/build/admission
+locks, recent-use retention, ready receipts and authoritative queue reference
+checks immediately before retirement. Unavailable reference state fails closed.
+Inventory and reference requests do not hold admission; only final atomic
+retirement tries that gate without waiting behind foreground work. Inventory
+checks cancellation between metadata operations. Per-prefix saving estimates
+can include shared inodes, so collection stops conservatively and recounts the
+union once after a batch. `pending` means a residual budget needs another sweep.
+In-use or referenced environments can leave a cache over budget; status explains
+that protection instead of deleting custody to satisfy a target. Existing
+shared-input/model caches keep their own separate policies and locks.
+
+Inventory runs no faster than the existing minute retention cadence. A sweep
+that takes longer backs off to ten times its measured duration, limiting hygiene
+to a 10% duty budget instead of repeatedly scanning a large cache. It runs off
+the heartbeat path, with no cache scan or network call under `q.mu`.
+
+Attempt scratch/log/diagnostic retention continues through existing publication,
+custody and grace checks. The installer already prunes its committed obsolete
+backups while retaining the installed and immediately replaced image. Periodic
+installer cleanup selects only the exact staging path owned by a failed durable
+transaction receipt, with matching config, updater lock and proven helper absence.
+It never scans or deletes rollback binaries, bootstrap release archives, active
+state, receipts or unknown staging. Foreign processes, services and shared
+personal/project caches are outside this collector.
+
+Worker mount recovery reuses `host_health.history[].mounts` and
+`unavailable_roots`. `mount_probe_pending` is cold/unverified access;
+`mount_probe_slow` and `mount_probe_stalled` use host-relative latency evidence;
+`mount_probe_failed` is returned I/O failure. `mount_inventory_unavailable`
+means the cached mount table could not establish backing storage, and
+`mount_automount_pending` means access has not established the network mount.
+`mount_linux_operator_required` and `mount_macos_approval_required` require
+storage-owner action, with a deduplicated `host_mount_action_required` health
+wake even after a prior generic degradation. The latter includes possible
+Keychain approval; it does not claim to diagnose a specific credential failure.
+Only dependent work is withheld; fresh completed healthy probes resume it.
+See [platform recovery](operations.md#worker-mount-recovery-linux-and-macos).
+
+### Installed executable versus running image (#824)
+
+Worker `fleet` proof keeps the running `version`, `sha256`, PID and session
+separate from `installed_slot` (`sha256`, `size`, and `version` when established).
+`slot_mismatch: true` means saved bytes differ from the active process, including
+publication followed by failed activation. `slot_error` means the slot could not
+be observed; neither condition asserts activation or release approval. These
+observations run outside queue locks and normal heartbeat work. Hashes are reused
+only while local file identity, size and modification time agree; installation
+rechecks the bytes independently. CLI status displays mismatches before an
+install is attempted. Older workers omit these observations.

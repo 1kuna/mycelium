@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// Synthetic history span retained for old replay fixtures, not an alert limit.
+const healthAlertCooldown = 15 * time.Minute
+
 func alertsOf(q *Queue, kind string) []HealthAlert {
 	var events []HealthAlert
 	for _, e := range q.s.Health.Events {

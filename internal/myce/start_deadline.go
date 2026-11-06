@@ -75,7 +75,7 @@ func (q *Queue) startupPending(j *Job) bool {
 	return (j.Spec.StartBy != nil || j.Spec.Priority == "production") && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
 }
 
-func (q *Queue) startWaitingReason(j *Job) string {
+func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
 	if reason := q.diskWaitingReason(j, j.ProductionHost); reason != "" {
 		return reason
 	}
@@ -113,7 +113,7 @@ func (q *Queue) startWaitingReason(j *Job) string {
 		}
 		return "waiting for command start on " + m.ID + " (preparing environment or command)"
 	}
-	return q.waitReason(j)
+	return q.waitReason(j, scans...)
 }
 
 // Expire before planning any new reclaim or assignment. Release custody is independent.
@@ -203,8 +203,8 @@ func (q *Queue) startupReleaseDetail(host string) HoldDetail {
 	return detail
 }
 
-func (q *Queue) startStatusReason(j *Job) string {
-	reason := q.startWaitingReason(j)
+func (q *Queue) startStatusReason(j *Job, scans ...*placementScan) string {
+	reason := q.startWaitingReason(j, scans...)
 	if j.Spec.StartBy != nil {
 		return reason + fmt.Sprintf("; %.0fs left to start", max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds()))
 	}

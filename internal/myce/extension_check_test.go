@@ -462,7 +462,8 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 }
 
 // Same-host RAM evidence can fit a sibling even when cross-machine transfer
-// would not. Truly impossible checks still reject before entering the queue.
+// would not. An oversized learned estimate waits for evidence or capacity;
+// neither case can bypass live admission.
 func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
 	for _, peak := range []float64{13.08499526977539, 25} {
 		t.Run(fmt.Sprint(peak), func(t *testing.T) {
@@ -489,21 +490,16 @@ func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
 			s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
 			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
 			j, err := q.Submit(s)
+			if err != nil || j == nil || j.State != "queued" {
+				t.Fatalf("learned sizing rejected a check: err=%v", err)
+			}
 			if peak+minimumHostMemoryGB > 24 {
-				var refusal *HTTPError
-				if !errors.As(err, &refusal) || refusal.Code != "no_qualified_target" || !strings.Contains(refusal.Message, "exceeds allowance 24 GiB") {
-					t.Fatalf("impossible sibling estimate was not rejected: job=%+v err=%v", j, err)
+				if why := q.memoryEvidenceWaitingReason(j); !strings.HasPrefix(why, memoryEvidenceRecovering+":") || !strings.Contains(why, "exceeds allowance 24 GiB") {
+					t.Fatalf("oversized sibling estimate lost its typed wait: %q", why)
 				}
-				if len(q.s.Jobs) != 0 {
-					t.Fatal("rejected runtime check entered the queue")
-				}
-			} else {
-				if err != nil || j == nil || j.State != "queued" {
-					t.Fatalf("temporary occupancy rejected a fitting check: job=%+v err=%v", j, err)
-				}
-				if got := assignedJob(machineCheck(t, q, m)); got != nil {
-					t.Fatalf("busy-host check bypassed live admission: %+v", got)
-				}
+			}
+			if got := assignedJob(machineCheck(t, q, m)); got != nil {
+				t.Fatalf("check bypassed live admission: %s", got.ID)
 			}
 		})
 	}

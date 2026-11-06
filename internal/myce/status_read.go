@@ -72,6 +72,7 @@ type statusCache struct {
 	mu               sync.Mutex
 	data             string
 	expires          time.Time
+	capturedAt       time.Time
 	generation       uint64
 	terminalRevision atomic.Uint64
 }
@@ -107,12 +108,13 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 	for {
 		revision := c.terminalRevision.Load()
 		if c.data != "" && c.generation == revision && q.clock.Now().Before(c.expires) {
-			return c.data, nil
+			return q.statusJSONFreshness(c.data, c.capturedAt, true)
 		}
 		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent", limit: defaultStatusJobs}, contexts...)
 		if err != nil {
 			return "", err
 		}
+		s.Freshness = nil // Age/served time belong to each response, not the cache.
 		data, err := json.Marshal(s)
 		if err != nil {
 			return "", err
@@ -124,8 +126,25 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 			continue
 		}
 		c.data, c.expires, c.generation = string(data), s.Now.Add(statusCacheLifetime), revision
-		return c.data, nil
+		c.capturedAt = s.Now
+		return q.statusJSONFreshness(c.data, c.capturedAt, false)
 	}
+}
+
+func (q *Queue) snapshotFreshness(captured time.Time, cached bool) *SnapshotFreshness {
+	now := q.clock.Now()
+	return &SnapshotFreshness{CapturedAt: captured, ServedAt: now,
+		AgeSeconds: max(0, now.Sub(captured).Seconds()), Cached: cached}
+}
+
+func (q *Queue) statusJSONFreshness(data string, captured time.Time, cached bool) (string, error) {
+	freshness, err := json.Marshal(q.snapshotFreshness(captured, cached))
+	if err != nil {
+		return "", err
+	}
+	// Splice one additive field into immutable JSON, without decoding/projecting
+	// the cached generation or retaining an old age as if it were current.
+	return data[:len(data)-1] + `,"freshness":` + string(freshness) + `}`, nil
 }
 
 type observationClock struct{ at time.Time }
@@ -149,6 +168,28 @@ type observationMachineLedger struct {
 	hostBudgetGB           float64
 	modelReservationDebtGB float64
 	hostReservationDebtGB  float64
+}
+
+// A committed cold job changes only through the record journal. Keep its
+// payload-free observation inputs detached at that boundary, rather than
+// deep-copying retained executions under q.mu for every wide read. Each read
+// copies these immutable values into its own generation after unlocking.
+type statusHistoryEntry struct {
+	source             *Job
+	inputs, dependency *Job
+}
+
+func (q *Queue) indexStatusHistory(id string, j *Job) {
+	if q.records.statusHistory == nil {
+		q.records.statusHistory = map[string]statusHistoryEntry{}
+	}
+	inputs := statusJobInputs(j)
+	inputs.Spec.SubmissionKey = j.Spec.SubmissionKey
+	q.records.statusHistory[id] = statusHistoryEntry{
+		source:     j,
+		inputs:     copyObservationValue(reflect.ValueOf(&inputs)).Interface().(*Job),
+		dependency: copyObservationValue(reflect.ValueOf(statusDependencyJob(j))).Interface().(*Job),
+	}
 }
 
 // Copy while protected, then encode and project outside q.mu. No mutable
@@ -179,6 +220,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	}
 	s := q.s
 	s.Jobs, s.Submissions = map[string]*Job{}, map[string]*submissionRecord{}
+	frozen := map[string]*Job{}
 	var selected *Job
 	var err error
 	if options != nil {
@@ -196,6 +238,15 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	// needed for its eligibility summary. Queued/startup work and calls still
 	// need the active diagnostic context, but never the fleet projection.
 	minimal := selected != nil && q.calls[id] == nil && (terminal(selected.State) || selected.State != "queued" && selected.StartedAt != nil && !jobHasVariants(selected))
+	if !minimal {
+		// Shared-device diagnostics use the same fresh attempt evidence as
+		// admission. Detach both map levels while the samples are protected;
+		// their values contain only scalars, strings and timestamps.
+		v.hostMemorySamples = make(map[string]map[attemptKey]hostMemorySample, len(q.hostMemorySamples))
+		for machine, samples := range q.hostMemorySamples {
+			v.hostMemorySamples[machine] = maps.Clone(samples)
+		}
+	}
 	if err == nil {
 		if minimal {
 			copy := statusJobInputs(selected)
@@ -213,11 +264,21 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 			for key, j := range q.s.Jobs {
 				if id == "" || mutableJob(j) || key == id {
 					if !mutableJob(j) {
-						copy := statusJobInputs(j)
+						if id == "" && q.records != nil {
+							if entry, ok := q.records.statusHistory[key]; ok && entry.source == j {
+								input := entry.inputs
+								if v.observationSelection != nil && !v.observationSelection.ids[key] {
+									input = entry.dependency
+								}
+								s.Jobs[key], frozen[key] = input, input
+								continue
+							}
+						}
 						if v.observationSelection != nil && !v.observationSelection.ids[key] {
 							s.Jobs[key] = statusDependencyJob(j)
 							continue
 						}
+						copy := statusJobInputs(j)
 						copy.Spec.SubmissionKey = j.Spec.SubmissionKey
 						s.Jobs[key] = &copy
 					} else {
@@ -305,6 +366,9 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	cancellationReleases := maps.Clone(q.s.HostReleases)
 	var detached observationState
 	if err == nil {
+		for key := range frozen {
+			delete(inputs.State.Jobs, key)
+		}
 		detached = copyObservation(inputs)
 	}
 	duration := queueHoldDuration(hold)
@@ -313,6 +377,9 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	logQueueHold(duration, "captureObservation", nil)
 	if err != nil {
 		return nil, files, err
+	}
+	for key, input := range frozen {
+		detached.State.Jobs[key] = copyObservationValue(reflect.ValueOf(input)).Interface().(*Job)
 	}
 	custody := &Queue{s: state{Jobs: map[string]*Job{}, Submissions: map[string]*submissionRecord{}, HostReleases: cancellationReleases}}
 	for key, input := range cancellations {
@@ -339,6 +406,16 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		detached.State.Jobs[key].simGatherWait = true
 	}
 	v.s, v.models, v.environments, v.calls, v.unreported = detached.State, detached.Models, detached.Environments, detached.Calls, detached.Unreported
+	// Diagnostics need the same active/custody set as writer-side planning.
+	// Keep full retained history in s.Jobs for evidence and public history rows;
+	// scanning it as live work constructs a device view for each cold execution
+	// on every exploratory-memory target comparison.
+	v.observationLive = map[string]*Job{}
+	for key, job := range v.s.Jobs {
+		if mutableJob(job) {
+			v.observationLive[key] = job
+		}
+	}
 	return v, files, nil
 }
 
@@ -483,12 +560,19 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	if err != nil {
 		return Snapshot{}, err
 	}
+	// One detached generation is one immutable planning pass. Without this,
+	// each queued job/target diagnostic rebuilds the retained-evidence catalog.
+	v.memoryPlanning = newMemoryPlanningCache()
+	v.observationScan = v.placementScan()
+	v.observationScan.observationOwner = v
+	v.observationScan.memory = v.memoryPlanning
 	out := v.projectSnapshot(true)
 	out.RequestLatencies = q.requestLatencies.snapshot()
 	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour))
 	if err == nil {
 		out.FileStore = files.status(context.Background())
 	}
+	out.Freshness = q.snapshotFreshness(out.Now, false)
 	return out, err
 }
 

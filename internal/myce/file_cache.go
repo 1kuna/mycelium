@@ -34,6 +34,11 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err := PrepareStateRoots(c.Root); err != nil {
 		return err
 	}
+	lock, err := c.collectionLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlockEnvironment(lock)
 	root, err := filepath.EvalSymlinks(c.Root)
 	if err != nil {
 		return err

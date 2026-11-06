@@ -178,6 +178,7 @@ func resolveModelSnapshot(ctx context.Context, modelRoot string, m ModelSnapshot
 		allowed[f], missing[f] = true, true
 	}
 	manifest := FileManifest{}
+	sources := map[string]string{}
 	err = filepath.WalkDir(snapshot, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -196,19 +197,19 @@ func resolveModelSnapshot(ctx context.Context, modelRoot string, m ModelSnapshot
 		if len(allowed) > 0 && !allowed[rel] {
 			return nil
 		}
-		source := p
-		if d.Type()&fs.ModeSymlink != 0 {
-			if source, err = filepath.EvalSymlinks(p); err != nil || !insideLocalRoot(blobs, source) {
-				return modelSnapshotError("model_snapshot_escape", "permission_denied", err)
-			}
-		} else if !d.Type().IsRegular() {
+		if d.Type()&fs.ModeSymlink == 0 && !d.Type().IsRegular() {
 			return modelSnapshotError("model_snapshot_mismatch", "io_error", nil)
+		}
+		source, err := modelSnapshotSource(ctx, p, blobs)
+		if err != nil {
+			return err
 		}
 		ref, err := modelBlobIdentity(ctx, source)
 		if err != nil {
 			return err
 		}
 		manifest[rel] = ref
+		sources[rel] = source
 		delete(missing, rel)
 		return nil
 	})
@@ -222,7 +223,7 @@ func resolveModelSnapshot(ctx context.Context, modelRoot string, m ModelSnapshot
 	if len(missing) > 0 || len(manifest) == 0 {
 		return SharedInput{}, "", modelSnapshotError("model_snapshot_mismatch", "not_found", nil)
 	}
-	return SharedInput{NAS: "snapshots/" + m.Revision, Manifest: manifest}, repo, nil
+	return SharedInput{NAS: "snapshots/" + m.Revision, Manifest: manifest, sources: sources}, repo, nil
 }
 
 // Hub blobs are named by their identity: SHA-256 for LFS files and the Git blob

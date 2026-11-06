@@ -161,6 +161,8 @@ type Queue struct {
 	// Status views carry the admissions summary counted under q.mu, so
 	// dependency jobs need no envelope copy (#585).
 	statusAdmissions *[]HostAdmissions
+	observationScan  *placementScan // Only an immutable, detached wide-read generation.
+	observationLive  map[string]*Job
 
 	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
 	checkpointProbe  func() bool // Availability seam; bounded real I/O is the default.
@@ -1144,9 +1146,11 @@ func (q *Queue) maintain() {
 	previous := q.memoryPlanning
 	q.memoryPlanning = newMemoryPlanningCache()
 	defer func() { q.memoryPlanning = previous }()
+	scan := q.placementScan()
+	scan.memory = q.memoryPlanning
 	for _, j := range q.liveJobs() {
 		if q.startupPending(j) {
-			j.Reason = q.startStatusReason(j)
+			j.Reason = q.startStatusReason(j, scan)
 		}
 	}
 }
@@ -1206,7 +1210,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	}
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
 		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
@@ -1395,6 +1399,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptExtensionQualifications(&m)
 		q.acceptSharedPressure(&m, old)
+		acceptHostHygiene(&m)
 		if old != nil && (old.Gone || old.Session != m.Session) {
 			q.clearPreemptionPlacements(old.ID, old.Session)
 		}
@@ -2323,6 +2328,9 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 
 func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 	j.YieldPlan = q.yieldProjection(j)
+	if j.State == "queued" && strings.HasPrefix(j.Reason, memoryEvidenceRecovering+":") {
+		j.DiagnosticCode = memoryEvidenceRecovering
+	}
 	if j.State == "queued" && strings.HasPrefix(j.Reason, "waiting for RAM envelope:") {
 		j.DiagnosticCode = "host_memory_headroom"
 	}

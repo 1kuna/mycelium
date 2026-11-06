@@ -246,6 +246,10 @@ func cloneFleetProof(p *FleetRuntimeProof) *FleetRuntimeProof {
 		return nil
 	}
 	out := *p
+	if p.InstalledSlot != nil {
+		slot := *p.InstalledSlot
+		out.InstalledSlot = &slot
+	}
 	return &out
 }
 

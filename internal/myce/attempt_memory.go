@@ -493,7 +493,14 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 		device = w.observeDeviceMemory(ctx, func() (map[int]bool, map[int]bool, error) {
 			ids := map[int]bool{}
 			err := a.processIDs(ids)
-			return ids, nil, err
+			known := map[int]bool{}
+			if err == nil && unifiedCUDA(&w.Machine) {
+				err = (&memoryAttempt{fs: a.fs, path: filepath.Dir(a.path)}).processIDs(known)
+				for pid := range ids {
+					delete(known, pid)
+				}
+			}
+			return ids, known, err
 		}, a.fs, devicePeriod, clock, a)
 	}
 	var once sync.Once
@@ -822,6 +829,7 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 	if device := a.device.Load(); device != nil {
 		gb := device.gb
 		sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB
+		sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB = device.source, device.exclusive, device.rateGB
 	}
 	return sample
 }
@@ -833,20 +841,33 @@ type deviceMemoryResult struct {
 
 // inventory returns exact attempt PIDs and other known attempts' PIDs. Only
 // the former contribute to the peak. The latter are not foreign workload.
-func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[int]bool, map[int]bool, error), fs memoryFS, period time.Duration, clock Clock, a *memoryAttempt) <-chan deviceMemoryResult {
+func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[int]bool, map[int]bool, error), fs memoryFS, period time.Duration, clock Clock, a *memoryAttempt, ticks ...<-chan time.Time) <-chan deviceMemoryResult {
 	result := make(chan deviceMemoryResult, 1)
 	go func() {
 		peak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
-		unreported, shared := false, false
+		unreported, shared, incompleteFallback := false, false, false
 		var growth memoryGrowth
-		defer func() { result <- deviceMemoryResult{peak, unreported, shared} }()
-		tick := time.NewTicker(period)
-		defer tick.Stop()
+		defer func() {
+			if incompleteFallback {
+				peak.DeviceGB, peak.DeviceGrowthGB, peak.DeviceSource = nil, nil, ""
+				peak.DeviceUnavailable = deviceUnifiedUncertain
+			}
+			result <- deviceMemoryResult{peak, unreported, shared}
+		}()
+		var sampleTick <-chan time.Time
+		if len(ticks) > 0 {
+			// Inject sensor events independently of the observation Clock.
+			sampleTick = ticks[0]
+		} else {
+			tick := time.NewTicker(period)
+			defer tick.Stop()
+			sampleTick = tick.C
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-tick.C:
+			case <-sampleTick:
 				ids, known, err := inventory()
 				if err != nil {
 					peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryInventory})
@@ -858,9 +879,20 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 				gb, foreign, err := w.attemptDeviceMemory(ctx, ids, fs, known)
 				// Known co-tenants also make a whole-host delta ambiguous.
 				shared = shared || foreign || len(known) > 0
+				source, exclusive := "", false
 				if errors.Is(err, errDeviceMemoryNotReported) {
 					unreported = true
-					continue
+					if !unifiedCUDA(&w.Machine) || a == nil {
+						continue
+					}
+					gb, exclusive, err = a.unifiedDeviceMemory(ids, foreign)
+					incompleteFallback = incompleteFallback || exclusive || err != nil
+					source = deviceUnifiedResidentSource
+					if err != nil {
+						a.device.Store(&hostMemorySample{at: clock.Now(), exclusive: true, source: source})
+						peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceUnifiedUncertain})
+						continue
+					}
 				}
 				if err != nil {
 					if !errors.Is(err, errAttemptMemoryPending) {
@@ -870,9 +902,9 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 					continue
 				}
 				margin := growth.observe(clock.Now(), gb)
-				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb, DeviceGrowthGB: &margin})
+				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb, DeviceGrowthGB: &margin, DeviceSource: source})
 				if a != nil {
-					a.device.Store(&hostMemorySample{gb: gb, at: clock.Now(), growthGB: margin})
+					a.device.Store(&hostMemorySample{gb: gb, at: clock.Now(), growthGB: margin, source: source, exclusive: exclusive, rateGB: growth.rate})
 				}
 			}
 		}

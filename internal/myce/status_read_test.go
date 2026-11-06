@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
+	"reflect"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +16,263 @@ import (
 	"testing"
 	"time"
 )
+
+func TestStatusReadHistoryGeneration(t *testing.T) {
+	q, clock := fixture(t)
+	peak := 3.0
+	j := &Job{ID: "retained", State: "succeeded", ReleaseConfirmed: true,
+		Spec: spec("experiment"), Queued: clock.Now(), Attempt: 1,
+		MemoryAttempts: []AttemptMemoryFacts{{MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}}}}
+	if err := q.update(func() error { q.putJob(j.ID, j); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := q.publicSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The incremental path must preserve every projected field of the original
+	// fresh capture, not just the commonly displayed lifecycle fields.
+	q.mu.Lock()
+	history := q.records.statusHistory
+	q.records.statusHistory = nil
+	q.mu.Unlock()
+	uncached, err := q.publicSnapshot()
+	if err != nil || !reflect.DeepEqual(indexed, uncached) {
+		t.Fatal("incremental history changed the full response", err)
+	}
+	q.mu.Lock()
+	q.records.statusHistory = history
+	q.mu.Unlock()
+	// Commit after capture/unlock, before the borrowed immutable history is
+	// copied. An in-flight generation must own the old nested memory sample.
+	q.observeRead = func(_ string, _, _ time.Duration) {
+		if err := q.update(func() error {
+			live := q.touchJob(j.ID)
+			*live.MemoryAttempts[0].MemoryPeak.HostGB = 9
+			live.Reason = "committed change"
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	view, _, err := q.captureObservation("")
+	q.observeRead = nil
+	if err != nil || *view.s.Jobs[j.ID].MemoryAttempts[0].MemoryPeak.HostGB != 3 {
+		t.Fatal("committed change leaked into an in-flight history generation", err)
+	}
+	current, err := q.publicSnapshot()
+	if err != nil || current.Jobs[0].Reason != "committed change" || *current.Jobs[0].MemoryAttempts[0].MemoryPeak.HostGB != 9 {
+		t.Fatal("inspection did not observe committed cold-history change", err)
+	}
+	rolledBack := errors.New("rollback")
+	if err := q.update(func() error {
+		q.touchJob(j.ID).Reason = "must roll back"
+		return rolledBack
+	}); !errors.Is(err, rolledBack) {
+		t.Fatal(err)
+	}
+	current, err = q.publicSnapshot()
+	if err != nil || current.Jobs[0].Reason != "committed change" {
+		t.Fatal("rolled-back history escaped into inspection", err)
+	}
+	if err := q.update(func() error { q.deleteJob(j.ID); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	current, err = q.publicSnapshot()
+	if err != nil || len(current.Jobs) != 0 {
+		t.Fatal("removed history remained in inspection", err)
+	}
+}
+
+func TestStatusReadPlanningEquivalence(t *testing.T) {
+	for _, occupied := range []bool{true, false} {
+		t.Run(fmt.Sprintf("occupied=%v", occupied), func(t *testing.T) {
+			q, _ := candidateCostFixture(t)
+			// Keep both CPU and accelerator demand, constrained execution history,
+			// occupied workers and learned curves; a smaller backlog is sufficient to
+			// compare every response field against the original unindexed projection.
+			for id, job := range q.s.Jobs {
+				if job.State == "queued" && id > "queued-009" {
+					delete(q.s.Jobs, id)
+				} else if job.State == "queued" {
+					// Equivalent occupied workers otherwise produce arbitrary diagnostic
+					// tie winners as the two captures iterate independent maps.
+					job.Spec.AllowedMachines = []string{"worker-0"}
+				}
+				if !occupied && job.State == "running" {
+					delete(q.s.Jobs, id)
+				}
+			}
+			q.refreshHostMemory()
+			q.refreshHostCPU()
+			before, _, err := q.captureObservation("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, _, err := q.captureObservation("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			before.observationLive = nil
+			want := before.projectSnapshot(true)
+			after.memoryPlanning = newMemoryPlanningCache()
+			after.observationScan = after.placementScan()
+			after.observationScan.observationOwner = after
+			after.observationScan.memory = after.memoryPlanning
+			got := after.projectSnapshot(true)
+			if !reflect.DeepEqual(want, got) {
+				for i := range want.Jobs {
+					if len(want.Jobs) == len(got.Jobs) && !reflect.DeepEqual(want.Jobs[i], got.Jobs[i]) {
+						w, _ := json.Marshal(want.Jobs[i])
+						g, _ := json.Marshal(got.Jobs[i])
+						t.Fatalf("immutable planning changed job %s:\nbefore: %s\nafter: %s", want.Jobs[i].ID, w, g)
+					}
+				}
+				t.Fatal("immutable planning changed non-job response fields")
+			}
+		})
+	}
+}
+
+func TestStatusReadFreshness(t *testing.T) {
+	q, clock := fixture(t)
+	submit(t, q, spec("experiment"))
+	first := readStatusOptions(t, q, "")
+	if first.Freshness == nil || first.Freshness.Cached || first.Freshness.AgeSeconds != 0 || !first.Freshness.CapturedAt.Equal(first.Now) {
+		t.Fatalf("fresh capture metadata: %+v", first.Freshness)
+	}
+	clock.Advance(500 * time.Millisecond)
+	cached := readStatusOptions(t, q, "")
+	if cached.Freshness == nil || !cached.Freshness.Cached || cached.Freshness.AgeSeconds != 0.5 || !cached.Freshness.CapturedAt.Equal(first.Now) || !cached.Freshness.ServedAt.Equal(clock.Now()) {
+		t.Fatalf("cached generation disguised as current: %+v", cached.Freshness)
+	}
+	q.observeRead = func(_ string, _, _ time.Duration) { clock.Advance(2 * time.Second) }
+	for _, path := range []string{"/api/status?detail=full", "/api/status?jobs=active", "/api/inspection"} {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r)
+		var got Snapshot
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &got) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		if got.Freshness == nil || got.Freshness.Cached || got.Freshness.AgeSeconds != 2 || !got.Freshness.CapturedAt.Equal(got.Now) || !got.Freshness.ServedAt.Equal(clock.Now()) {
+			t.Fatalf("%s: delayed capture disguised as current: %+v", path, got.Freshness)
+		}
+	}
+}
+
+// Compare cold HTTP reads, including public projection and JSON, with real
+// SQLite check-ins at the ordinary one-second heartbeat cadence. The fixed
+// injected clock keeps elapsed-time policy separate from wall-time measurement.
+func BenchmarkStatusReadScale(b *testing.B) {
+	for _, large := range []bool{false, true} {
+		for _, path := range []string{"/api/status", "/api/status?detail=full", "/api/inspection"} {
+			b.Run(fmt.Sprintf("large=%v%s", large, path), func(b *testing.B) {
+				q, workers := candidateCostFixture(b)
+				if large {
+					for i := 160; i < 6500; i++ {
+						source := q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)]
+						j := cloneJob(source)
+						j.ID = fmt.Sprintf("retained-%04d", i)
+						j.Timing.Execution.ID = j.ID
+						q.s.Jobs[j.ID] = &j
+					}
+				} else {
+					workers = workers[:3]
+					for id, j := range q.s.Jobs {
+						if j.State == "succeeded" && id > "retained-015" || j.State == "queued" && id > "queued-003" || id == "running-3" || id == "running-4" {
+							delete(q.s.Jobs, id)
+						}
+					}
+					for id := range q.s.Machines {
+						if id == "worker-3" || id == "worker-4" {
+							delete(q.s.Machines, id)
+						}
+					}
+					for id := range q.s.WorkObservations {
+						n, _ := strconv.Atoi(id)
+						if n >= 16 {
+							delete(q.s.WorkObservations, id)
+						}
+					}
+				}
+				if err := q.update(func() error { return nil }); err != nil {
+					b.Fatal(err)
+				}
+				var mu sync.Mutex
+				var checkinHolds []time.Duration
+				var holds []time.Duration
+				q.observeRead = func(kind string, _, hold time.Duration) {
+					if kind == "status" {
+						holds = append(holds, hold)
+					}
+				}
+				q.observeUpdate = func(_, hold time.Duration) {
+					mu.Lock()
+					checkinHolds = append(checkinHolds, hold)
+					mu.Unlock()
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				var wg sync.WaitGroup
+				for i, worker := range workers {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						ticker := time.NewTicker(time.Second)
+						defer ticker.Stop()
+						for {
+							_, err := q.CheckinContext(ctx, Checkin{Machine: worker, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: fmt.Sprintf("running-%d", i), Attempt: 1}, Session: worker.Session, Started: true}}})
+							if err != nil && ctx.Err() == nil {
+								b.Error(err)
+								return
+							}
+							select {
+							case <-ctx.Done():
+								return
+							case <-ticker.C:
+							}
+						}
+					}()
+				}
+				handler := API{Queue: q, Token: "test"}.Handler()
+				var latencies []time.Duration
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					// Each iteration measures a refresh, not an injected-clock cache
+					// hit. The production lifetime/invalidation behavior is unchanged.
+					q.statusCache.mu.Lock()
+					q.statusCache.expires = time.Time{}
+					q.statusCache.mu.Unlock()
+					span := &requestSpan{}
+					r := httptest.NewRequest("GET", path, nil).WithContext(context.WithValue(ctx, requestSpanKey{}, span))
+					r.Header.Set("Authorization", "Bearer test")
+					w := httptest.NewRecorder()
+					started := time.Now()
+					handler.ServeHTTP(w, r)
+					latencies = append(latencies, time.Since(started))
+					if w.Code != 200 {
+						b.Fatal(w.Code, w.Body.String())
+					}
+				}
+				b.StopTimer()
+				cancel()
+				wg.Wait()
+				report := func(values []time.Duration, name string) {
+					sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+					if len(values) > 0 {
+						b.ReportMetric(float64(values[(len(values)-1)/2].Microseconds())/1000, name+"-p50-ms")
+						b.ReportMetric(float64(values[(99*len(values)+99)/100-1].Microseconds())/1000, name+"-p99-ms")
+					}
+				}
+				report(latencies, "read")
+				report(holds, "read-hold")
+				report(checkinHolds, "checkin-hold")
+			})
+		}
+	}
+}
 
 // A diagnostic read must use the same occupied CPU ledger as admission. Four
 // admitted cores with three reserved cannot place the next two-core job.
@@ -207,7 +467,23 @@ func TestJobReadCommittedSubmissionIgnoresStatusCache(t *testing.T) {
 		}
 	}
 	after, err := q.cachedStatusJSON()
-	if err != nil || before != after {
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Freshness belongs to each response: cache reuse intentionally changes
+	// cached=false to true even with a fixed clock. The observed generation
+	// must still be byte-for-byte equivalent after removing that metadata.
+	var old, reused map[string]json.RawMessage
+	if json.Unmarshal([]byte(before), &old) != nil || json.Unmarshal([]byte(after), &reused) != nil {
+		t.Fatal("invalid status JSON")
+	}
+	var freshness SnapshotFreshness
+	if json.Unmarshal(reused["freshness"], &freshness) != nil || !freshness.Cached {
+		t.Fatal("aggregate generation was not reused")
+	}
+	delete(old, "freshness")
+	delete(reused, "freshness")
+	if !reflect.DeepEqual(old, reused) {
 		t.Fatal("fixture did not retain stale aggregate generation", err)
 	}
 }

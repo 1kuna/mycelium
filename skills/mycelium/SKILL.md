@@ -7,6 +7,12 @@ description: "Use when work needs fleet compute (heavy tests, builds, sims, trai
 
 # Mycelium
 
+From the next release, a worker fleet proof may report `slot_mismatch` with
+separate running and `installed_slot` hashes after a failed update. This does not
+prove activation. Report it to the Mycelium maintenance owner; an unapproved
+slot refuses recovery with `fleet_slot_unapproved`. Use the supported installer
+and preserve the refusal and identities for that owner.
+
 ## First run: adapter to verified result
 
 Mycelium runs CPU and GPU work through one queue. Describe needs and verified
@@ -14,9 +20,10 @@ targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolve
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
 From the next release, `host_capacity_accumulation` means new CPU work is waiting
-so ready accelerator work can acquire host RAM/cores as running CPU attempts
-finish. Mycelium chooses one fitting target; higher tiers and spare capacity
-elsewhere remain eligible. See [waiting reasons](advanced.md#when-a-job-waits).
+so ready CPU or accelerator work can acquire host RAM/cores as running CPU
+attempts finish. Mycelium chooses one fitting target; earlier fair turns,
+higher tiers and spare capacity elsewhere remain eligible. See
+[waiting reasons](advanced.md#when-a-job-waits).
 On releases with inventory deltas, status omits full executable inventories. Use
 resolve/placement diagnostics for `needs.tools`; workers automatically refresh
 inventory after queue restart before qualifying tool-dependent work.
@@ -56,7 +63,7 @@ it. From the next release, cold auto-memory work reserves measured physical
 headroom on one host until a clean accepted completion teaches a smaller bound.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
-and incomplete counters remain conservative. See [memory sizing](advanced.md#submit).
+and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
 Plain native commands default to **unsandboxed** under MY-25; explicitly set
 `isolation: sandboxed` to opt in. New native extension registrations default to
 sandboxing; retained registrations keep their frozen policy.
@@ -83,6 +90,12 @@ before submitting. Save the receipt's `key` and `job_id`. After a lost reply,
 repeat the same command with the saved key to recover that job; changed intent
 or an intentional repeat needs a new key.
 
+If a profile or entry exits 69 with `input storage unconfirmed`, its intent and
+frozen inputs remain in the receipt. The diagnostic names preflight or upload,
+the input, and a sanitized HTTP status/code or transport class. Rerunning the
+same command resumes from that receipt without
+duplicating anything. Keep its key and receipt rather than making a new submission.
+
 Replace `JOB_ID` below with the receipt's ID. No notifier or harness setup is
 required. Wait once in the foreground; exit 0 means the job succeeded. A timeout
 or interrupted wait leaves the job alive; resume waiting on the same ID.
@@ -102,8 +115,16 @@ On releases with the mixed-version cache correction, workers without an optional
 shared-input cache-capacity report retain staging-time admission. Reporting workers
 are checked before placement; staging capacity failures give required/available/limit bytes.
 
-If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep full
-`myce status` out of loops. Record a hold with its next owner and continue
+Use `myce status` for a fleet overview and `myce status --history` for all retained
+jobs. **Available from the next release:** status and inspection JSON include
+`freshness.captured_at`, `served_at`, `age_seconds` and `cached`; `now` remains
+capture time. Interpret worker freshness and diagnostics at that time, allowing
+for the response age. Inspection and filtered/full status take a fresh capture;
+default status can reuse a generation for up to one second, with immediate
+terminal/release invalidation.
+
+If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
+repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
@@ -135,6 +156,12 @@ never release an attempt or its resources, and output writes remain repeat-safe.
 
 ## Explicit model master downloads (next release)
 
+Declared `model_snapshots` also handle SMB/CIFS `XSym` emulated symlinks from
+the next release: jobs get verified blob bytes, or a `model_snapshot_mismatch`
+or `model_snapshot_escape` refusal. Keep the original hub cache intact; do not
+copy weights or rewrite shared links to work around a refusal. See
+[declared snapshots](advanced.md#submit) for submission and read-only access.
+
 For every declared bundle file, including nested paths, run
 `myce model fetch BUNDLE/FILE --model-root PARENT --url URL --size-bytes BYTES --sha256 HASH`.
 The root must contain the bundle. Fetch stages beside it, resumes interruptions,
@@ -145,9 +172,32 @@ verifies the master without replacing it. Keep staging while a fetch is active.
 Verify the whole manifest before use; loading never downloads weights. See
 [explicit master downloads](https://github.com/1kuna/mycelium/blob/main/docs/services.md#explicit-master-download-and-pins).
 
+## Automatic host hygiene (next release)
+
+Machine status `host_health` explains automatic admission drains with typed
+causes, persisted recent samples and the host's own healthy baseline. Mycelium
+resumes after measured recovery; an operator drain remains independent. Running
+attempts retain custody. NAS/checkpoint degradation withholds dependent work;
+independent local work can remain eligible. Existing OS automounts are re-triggered
+with backoff. `mount_linux_operator_required` needs the storage operator to
+restore the configured mount; `mount_macos_approval_required` needs the owner to
+restore it and approve Keychain if requested. `host_mount_action_required` uses
+the existing health wake channel, including escalation after a generic alert.
+`mount_probe_stalled` retains its one request without blocking heartbeats; ask
+the storage owner to inspect the OS session. Workers never prompt for credentials
+or run privileged mount commands. `host_degraded` and
+`host_mount_degraded` use existing health notifications; silent-worker alerts
+carry `host_silent`. Read the job's waiting reason or one needed status snapshot;
+no agent polling or drain/resume loop is needed. Foreign CPU/RSS leaders are
+context for the host owner: never stop their processes or services. See
+[host-health fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#automatic-host-health-834-next-release).
+Older queues omit the new status fields; workers retain local history and use
+the existing leaving signal for a confirmed local drain until support is negotiated.
+
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
+- **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
 - **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits.
 - **Large outputs, diagnostics, quotas or early release:** [results and custody](advanced.md#results). Release only your own terminal results after all downstream uses and verified copies are complete.
@@ -157,3 +207,17 @@ Verify the whole manifest before use; loading never downloads weights. See
 - **Mycelium repository changes:** [merge gates](advanced.md#mycelium-repository-merge-gates). Feature availability is version-dependent; see [release qualifiers](advanced.md).
 
 For a blocking dependency, next owner and action, see the [diagnostic reference](advanced.md#diagnostic-reference-one-blocker). For one read-only consumer check on supporting releases, use [project doctor](advanced.md#diagnostic-reference-project-doctor).
+
+## Automatic worker collection (next release)
+
+Mycelium maintains its own file/environment budgets during idle retention as
+well as new staging. Machine `hygiene_collection` shows effective limits,
+collection errors and protected/busy entries. A cache can remain over budget
+while references, recent use or locks protect data; do not remove it manually to
+force admission. Attempt custody and result/diagnostic retention still bind.
+`pending` can mean conservative shared-inode accounting left work for another
+sweep. Collector status requires matching queue support; older queues keep
+their supported request shape while local collection continues.
+Installed/rollback images, active state, receipts and unknown data are retained;
+foreign services/processes and other projects' shared caches are owner context
+only. See [worker cleanup](https://github.com/1kuna/mycelium/blob/main/docs/status.md#worker-cleanup-834-next-release).
