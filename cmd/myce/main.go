@@ -81,6 +81,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
 	}
+	if args[0] == "dev" && len(args) > 1 && args[1] == "--" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return devCommandSession(ctx, args[2:], os.Stdin, os.Stdout, os.Stderr)
+	}
 	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
 		return versionCommand(args[1:])
 	}

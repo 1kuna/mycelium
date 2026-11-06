@@ -6,27 +6,31 @@ The [approved design](design-proposal.md) is the product spec.
 
 ## Five-minute start
 
-With Go 1.25.6+ and a Unix shell, from this checkout:
+With Git, Go 1.25.6+ and a Unix shell on macOS or Linux (first build needs
+internet access to download Go modules):
 
 ```sh
+git clone https://github.com/1kuna/mycelium.git
+cd mycelium
 go build -o myce ./cmd/myce
-./myce dev --workers 2 --token dev-token
+./myce dev -- sh examples/quickstart.sh
+cat quickstart-result/result.txt
 ```
 
-Keep dev running. In a second terminal in the checkout:
+The script submits a CPU command and streams `hello from CPU`, then submits a
+fake-GPU job, waits for success and fetches its verified result. The last line
+prints `hello from Mycelium`. Both jobs use the real API and command runner;
+GPU inventory is simulated and requires no GPU or drivers.
 
-```sh
-export MYCE_QUEUE=http://127.0.0.1:7331
-export MYCE_TOKEN=dev-token
-./myce run -- echo hello
-```
+`dev -- COMMAND` supplies temporary local connection settings to COMMAND,
+ignoring ambient fleet settings. It chooses a free loopback port and private
+temporary state, then stops the queue and workers and removes that state when
+COMMAND finishes or you press Ctrl-C. The downloaded `quickstart-result/`
+remains. There is no token setup or second terminal.
 
-The command waits, streams logs and exits with the result. Plain `run` defaults
-to CPU; GPU inventory in dev is fake, but commands and the API are real. The
-loopback address and synthetic token above are for this demo only. Dev persists
-its state; use a fresh working directory for an independent demo. If port 7331
-is occupied, select another with `dev --listen 127.0.0.1:PORT` and update callers.
-Ctrl-C stops your dev process; do not stop another process to free a port.
+For interactive development, plain `./myce dev` still runs until Ctrl-C and
+persists its state. To try your own CPU command in a temporary session, run
+`./myce dev -- ./myce run -- echo hello`.
 
 ## Make work reusable
 
