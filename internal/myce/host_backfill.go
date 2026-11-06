@@ -89,11 +89,16 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		var best *hostBackfillDemand
 		demandInventory := inventory
 		if j.Spec.FanOut != nil && j.FanOut != nil {
-			components, _ := q.fanOutComponents(j)
-			if len(planBatch(components, len(j.Spec.FanOut.Pieces)-j.FanOut.Next, j.Spec.Workload.Units)) > 0 {
-				// Dispatch can use capacity now: protect its actual wave plan,
-				// not a different host made attractive by projected releases.
-				demandInventory = scan.machines
+			for _, target := range scan.machines {
+				if projections[targetKey(target)] == nil || !q.workerIdle(target, j) {
+					continue
+				}
+				if candidate := q.fanOutCandidateWithResources(j, target, nil, scan.machines); q.immediateCandidate(candidate, target) != nil {
+					// Dispatch can use capacity now, including serial fallback on
+					// a qualified target without curves. Preserve that destination.
+					demandInventory = scan.machines
+					break
+				}
 			}
 		}
 		for _, m := range scan.machines {
