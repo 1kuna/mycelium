@@ -8,9 +8,53 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type heldVolumeSink struct {
+	started chan struct{}
+	release chan struct{}
+	writes  atomic.Int32
+}
+
+func (s *heldVolumeSink) Write(p []byte) (int, error) {
+	if s.writes.Add(1) == 1 {
+		close(s.started)
+	}
+	<-s.release
+	return len(p), nil
+}
+
+func TestJobGetVolumePaysExpensiveSinkWithoutConcurrentSummaries(t *testing.T) {
+	clock := &workerFakeClock{now: time.Unix(1, 0)}
+	v := newJobGetVolume(clock)
+	sink := &heldVolumeSink{started: make(chan struct{}), release: make(chan struct{})}
+	old := log.Writer()
+	log.SetOutput(sink)
+	defer log.SetOutput(old)
+	clock.Advance(time.Nanosecond)
+	done := make(chan struct{})
+	go func() { defer close(done); v.record("myce/test", false) }()
+	<-sink.started
+	for range 1023 {
+		v.record("myce/test", false)
+	}
+	clock.Advance(5 * time.Second)
+	close(sink.release)
+	<-done
+	if sink.writes.Load() != 1 || v.logCost < 5*time.Second {
+		t.Fatal("summary concurrency or complete sink cost lost", sink.writes.Load(), v.logCost)
+	}
+	for range 1024 {
+		clock.Advance(time.Nanosecond)
+		v.record("myce/test", false)
+	}
+	if sink.writes.Load() > 2 || v.totals[jobGetIdentity{"cli", "test"}].Full != 2048 {
+		t.Fatal("sustained traffic logged per request or lost counts", sink.writes.Load())
+	}
+}
 
 func TestJobGetVolume(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)}

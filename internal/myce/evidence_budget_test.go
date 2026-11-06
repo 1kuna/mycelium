@@ -155,9 +155,89 @@ func TestEvidenceBudgetUsesLocalHeadroom(t *testing.T) {
 	}
 }
 
+func TestEvidenceRetentionRevisitsHistoryWhenCapacityFalls(t *testing.T) {
+	q, clock := fixture(t)
+	capacity := RetentionCapacity{MemoryAvailableBytes: 1 << 40, DiskAvailableBytes: 1 << 40}
+	q.evidenceMaintenance.capacity = func(context.Context) (RetentionCapacity, error) { return capacity, nil }
+	row := AttemptOutcome{Attempt: 1, EndedAt: clock.Now(), Reason: "same evidence"}
+	if err := q.update(func() error {
+		q.putJob("closed", &Job{ID: "closed", State: "cancelled", ReleaseConfirmed: true, AttemptHistory: []AttemptOutcome{row, row, row}})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	drainEvidence(t, q)
+	if len(q.s.Jobs["closed"].AttemptHistory) != 3 {
+		t.Fatal("history compacted without pressure")
+	}
+	capacity = RetentionCapacity{MemoryAvailableBytes: 1, DiskAvailableBytes: 1}
+	if err := q.maintainEvidence(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.s.Jobs["closed"].AttemptHistory) != 2 {
+		t.Fatal("unchanged history ignored reduced host capacity")
+	}
+}
+
+func TestExternalEvidenceNextSamplePreservesCompactedCounts(t *testing.T) {
+	q, clock := fixture(t)
+	q.s.ExternalMemory = map[string]*externalMemoryRing{"synthetic": {Slots: 10000, Buckets: map[int]*externalMemoryBucket{}}}
+	m := Machine{ID: "synthetic", MemoryObservation: &HostMemoryObservation{TotalGB: 16, UsedGB: 4}}
+	q.recordExternalMemory(&m)
+	clock.Advance(time.Second)
+	q.recordExternalMemory(&m)
+	ring := q.s.ExternalMemory["synthetic"]
+	compactExternalEvidence(ring, clock.Now(), 4096)
+	clock.Advance(time.Second)
+	q.recordExternalMemory(&m)
+	if got := q.externalMemoryStatus("synthetic").Week.Samples; got != 3 {
+		t.Fatalf("next check-in replaced compacted samples: got %d", got)
+	}
+}
+
+func TestExternalEvidenceExpiresWithoutNewCheckins(t *testing.T) {
+	q, clock := fixture(t)
+	q.evidenceMaintenance.capacity = func(context.Context) (RetentionCapacity, error) {
+		return RetentionCapacity{MemoryAvailableBytes: 1 << 40, DiskAvailableBytes: 1 << 40}, nil
+	}
+	m := Machine{ID: "synthetic", MemoryObservation: &HostMemoryObservation{TotalGB: 16, UsedGB: 4}}
+	if err := q.update(func() error { q.recordExternalMemory(&m); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	drainEvidence(t, q)
+	clock.Advance(8 * 24 * time.Hour)
+	if err := q.maintainEvidence(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.s.ExternalMemory["synthetic"].Buckets) != 0 {
+		t.Fatal("offline host retained evidence outside every reader window")
+	}
+	if q.evidenceMaintenance.expiry.Len() != 0 {
+		t.Fatal("empty history kept an expiry deadline")
+	}
+}
+
+func TestExternalEvidenceResizesWhenCapacityFallsWithoutCheckins(t *testing.T) {
+	q, _ := fixture(t)
+	capacity := RetentionCapacity{MemoryAvailableBytes: 1 << 40, DiskAvailableBytes: 1 << 40}
+	q.evidenceMaintenance.capacity = func(context.Context) (RetentionCapacity, error) { return capacity, nil }
+	m := Machine{ID: "synthetic", MemoryObservation: &HostMemoryObservation{TotalGB: 16, UsedGB: 4}}
+	if err := q.update(func() error { q.recordExternalMemory(&m); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	drainEvidence(t, q)
+	capacity = RetentionCapacity{MemoryAvailableBytes: 1, DiskAvailableBytes: 1}
+	if err := q.maintainEvidence(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.ExternalMemory["synthetic"].Slots != 1 {
+		t.Fatal("unchanged external summary ignored reduced capacity")
+	}
+}
+
 func drainEvidence(t *testing.T, q *Queue) {
 	t.Helper()
-	for len(q.evidenceRows) > 0 {
+	for len(q.evidenceRows) > 0 || q.evidenceMaintenance.revisiting {
 		if err := q.maintainEvidence(context.Background()); err != nil {
 			t.Fatal(err)
 		}

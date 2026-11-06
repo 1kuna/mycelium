@@ -2,7 +2,9 @@ package myce
 
 import (
 	"bytes"
+	"container/heap"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -39,6 +41,67 @@ type EvidenceRetention struct {
 type evidenceMaintenance struct {
 	mu       sync.Mutex // Maintenance only; status never acquires this mutex.
 	capacity func(context.Context) (RetentionCapacity, error)
+	// Retained keys let a new capacity-pressure episode revisit unchanged
+	// history one record at a time, without scanning/copying the queue map.
+	history         []string
+	historySeen     map[string]bool
+	cursor          int
+	revisiting      bool
+	overBudget      bool
+	expiry          evidenceExpiries
+	plannedExternal map[string][32]byte
+}
+
+// One deadline per reporting host, updated in place. Check-in cadence cannot
+// accumulate obsolete heap entries. This index belongs only to maintenance.
+type evidenceExpiry struct {
+	key   string
+	at    time.Time
+	index int
+}
+type evidenceExpiries struct {
+	rows  []*evidenceExpiry
+	byKey map[string]*evidenceExpiry
+}
+
+func (e evidenceExpiries) Len() int           { return len(e.rows) }
+func (e evidenceExpiries) Less(i, j int) bool { return e.rows[i].at.Before(e.rows[j].at) }
+func (e evidenceExpiries) Swap(i, j int) {
+	e.rows[i], e.rows[j] = e.rows[j], e.rows[i]
+	e.rows[i].index = i
+	e.rows[j].index = j
+}
+func (e *evidenceExpiries) Push(v any) {
+	row := v.(*evidenceExpiry)
+	row.index = len(e.rows)
+	e.rows = append(e.rows, row)
+}
+func (e *evidenceExpiries) Pop() any {
+	n := len(e.rows) - 1
+	row := e.rows[n]
+	e.rows[n] = nil
+	e.rows = e.rows[:n]
+	delete(e.byKey, row.key)
+	return row
+}
+func (e *evidenceExpiries) set(key string, at time.Time) {
+	if row := e.byKey[key]; row != nil {
+		if at.IsZero() {
+			heap.Remove(e, row.index)
+		} else {
+			row.at = at
+			heap.Fix(e, row.index)
+		}
+		return
+	}
+	if !at.IsZero() {
+		if e.byKey == nil {
+			e.byKey = map[string]*evidenceExpiry{}
+		}
+		row := &evidenceExpiry{key: key, at: at}
+		e.byKey[key] = row
+		heap.Push(e, row)
+	}
 }
 
 // WithRetentionCapacity supplies local measurements, including deterministic
@@ -134,6 +197,11 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 	report := EvidenceRetention{At: now, Capacity: capacity, Unavailable: err != nil, RetainedBytes: q.evidenceBytes}
 	report.BudgetBytes = evidenceBudget(capacity, q.evidenceBytes, mem.HeapAlloc)
 	unlock()
+	overBudget := err == nil && report.RetainedBytes > report.BudgetBytes
+	if overBudget && !m.overBudget {
+		m.cursor, m.revisiting = 0, true
+	}
+	m.overBudget = overBudget
 	started := q.clock.Now()
 	for {
 		if e := ctx.Err(); e != nil {
@@ -144,16 +212,27 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 			break
 		}
 		unlock = requestLock(ctx, &q.mu)
-		if len(q.evidenceRows) == 0 {
+		var key string
+		revisit := false
+		due := err == nil && m.expiry.Len() > 0 && !m.expiry.rows[0].at.After(now)
+		if due {
+			key = m.expiry.rows[0].key
+		} else if len(q.evidenceRows) > 0 {
+			key = q.evidenceRows[0]
+			q.evidenceRows = q.evidenceRows[1:]
+			if len(q.evidenceRows) == 0 {
+				q.evidenceRows = nil
+			}
+			delete(q.evidencePending, key)
+		} else if overBudget && m.revisiting && m.cursor < len(m.history) {
+			key = m.history[m.cursor]
+			m.cursor++
+			revisit = true
+		} else {
+			m.revisiting = false
 			unlock()
 			break
 		}
-		key := q.evidenceRows[0]
-		q.evidenceRows = q.evidenceRows[1:]
-		if len(q.evidenceRows) == 0 {
-			q.evidenceRows = nil
-		}
-		delete(q.evidencePending, key)
 		data := q.persisted[key]
 		revision := q.fileReferenceRevision
 		open := len(q.records.live) > 0 || len(q.calls) > 0
@@ -161,12 +240,25 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 		pinned := q.evidenceLearned[id]
 		hostCount := max(1, len(q.s.ExternalMemory))
 		unlock()
+		if (strings.HasPrefix(key, "jobs/") || strings.HasPrefix(key, "external_memory/")) && !m.historySeen[key] {
+			if m.historySeen == nil {
+				m.historySeen = map[string]bool{}
+			}
+			m.historySeen[key] = true
+			m.history = append(m.history, key)
+		}
 		var apply func()
 		var replacement []byte
+		completed := true
+		external := strings.HasPrefix(key, "external_memory/") && err == nil
+		fingerprint, alreadyPlanned := m.plannedExternal[key]
 		drift := false
 		deferWork := false
 		switch {
 		case len(data) == 0: // Removed independently; nothing to decode.
+		case external && !due && !revisit && alreadyPlanned && fingerprint == sha256.Sum256(data):
+			// A maintenance rewrite is already planned. Its commit notification
+			// must not feed budget/slot changes back into another rewrite.
 		case strings.HasPrefix(key, "work_observations/"):
 			var point WorkObservation
 			if e := json.Unmarshal(data, &point); e != nil {
@@ -212,6 +304,16 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 				replacement, _ = json.Marshal(ring)
 				apply = func() { q.s.ExternalMemory[host] = &ring }
 			}
+			var next time.Time
+			for _, bucket := range ring.Buckets {
+				// The reader includes the exact boundary sample. One duration
+				// quantum later no public window can still read that bucket.
+				at := maxTime(bucket.Start, bucket.End).Add(7*24*time.Hour + time.Nanosecond)
+				if next.IsZero() || at.Before(next) {
+					next = at
+				}
+			}
+			m.expiry.set(key, next)
 		}
 		if deferWork {
 			unlock = requestLock(ctx, &q.mu)
@@ -239,10 +341,22 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 			}
 			if applied {
 				report.ReclaimedBytes = addDiskBytes(report.ReclaimedBytes, uint64(max(0, len(data)-len(replacement))))
+				data = replacement
 				if drift {
 					report.DriftedRows++
 				}
+			} else {
+				completed = false
+				if external {
+					m.expiry.set(key, now)
+				}
 			}
+		}
+		if external && completed {
+			if m.plannedExternal == nil {
+				m.plannedExternal = map[string][32]byte{}
+			}
+			m.plannedExternal[key] = sha256.Sum256(data)
 		}
 		// An individual record is the indivisible progress unit. Yield after the
 		// measured service quantum; cold installations do one record to learn cost.
@@ -311,6 +425,9 @@ func compactExternalEvidence(r *externalMemoryRing, now time.Time, budget uint64
 		if a == nil {
 			copy := *b
 			a = &copy
+			// The writer identifies buckets by their aligned start. Keeping an
+			// old subdivision's start would replace this summary on the next sample.
+			a.Start = start
 			a.Counts = maps.Clone(b.Counts)
 			a.Values = maps.Clone(b.Values)
 			a.ByteCounts = maps.Clone(b.ByteCounts)
