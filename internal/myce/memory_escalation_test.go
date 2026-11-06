@@ -7,8 +7,8 @@ import (
 )
 
 // Replay the incident's retained accepted range with a genuine payload failure.
-// 2x the largest conservative peak gives 37.4 GiB, 60% more than its ordinary
-// 23.375 GiB envelope, independent of how much allowance the host exposes.
+// Without observed overshoot or growth there is no finite upper estimate; the
+// physical probe and retained lower bound remain authoritative.
 func TestMemoryEscalationMeasuredIncidentRange(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	s.Needs.Memory = "auto"

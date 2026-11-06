@@ -298,10 +298,16 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 		if mode == "auto" {
 			s.Needs.HostMemoryGB = 0 // The rejection must come from the learned peak.
 		}
-		_, err := q.Submit(s)
-		var api *HTTPError
-		if !errors.As(err, &api) || api.Code != "no_qualified_target" {
-			t.Fatalf("oversized %q memory must retain exit-78 rejection: %v", mode, err)
+		queued, err := q.Submit(s)
+		if mode == "auto" {
+			if err != nil || !strings.HasPrefix(q.memoryEvidenceWaitingReason(queued), memoryEvidenceRecovering+":") {
+				t.Fatalf("learned-only mismatch must wait: %v", err)
+			}
+		} else {
+			var api *HTTPError
+			if !errors.As(err, &api) || api.Code != "no_qualified_target" {
+				t.Fatalf("declared impossibility must refuse: %v", err)
+			}
 		}
 	}
 }
@@ -372,14 +378,11 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 	complete(start(darwin, "accepted peak + measured uncertainty", 4+minimumHostMemoryGB), 2, true)
 	// Rejected local success cannot erase the accepted 4 GiB peak (#490).
 	complete(start(darwin, "accepted peak + measured uncertainty", 4+minimumHostMemoryGB), 8.5, false)
-	_, err := q.Submit(s)
-	var api *HTTPError
-	if !errors.As(err, &api) || api.Code != "no_qualified_target" {
-		t.Fatalf("real local requirement must still refuse: %v", err)
-	}
-	for _, want := range []string{"no qualified target can fit this job", "8.62506103515625 GiB", "allowance 8 GiB", "reduce the workload", "clean target-platform measurement", "operator approve", "retrying unchanged cannot fix capacity"} {
-		if !strings.Contains(api.Message, want) {
-			t.Errorf("refusal %q missing %q", api.Message, want)
+	queued := submit(t, q, s)
+	why := q.memoryEvidenceWaitingReason(queued)
+	for _, want := range []string{memoryEvidenceRecovering, "8.62506103515625 GiB", "allowance 8 GiB"} {
+		if !strings.Contains(why, want) {
+			t.Errorf("wait %q missing %q", why, want)
 		}
 	}
 	// The accepted source-OS peak and its original margin remain usable.
@@ -1048,7 +1051,7 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	third := startObservation(t, q, m, s)
-	// The accepted prior remains exploratory; the new 8 GiB lower bound doubles.
+	// With no measured overshoot or growth, the prior remains a physical probe.
 	if third.MemoryEnvelope.Source != acceptedMemoryEscalation || third.MemoryEnvelope.HostGB != 32-minimumHostMemoryGB {
 		t.Errorf("auto pressure failed to clear the explicit seed: %+v", third.MemoryEnvelope)
 	}

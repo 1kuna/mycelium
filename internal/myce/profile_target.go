@@ -218,9 +218,21 @@ func (q *Queue) hasQualifiedTarget(j *Job) bool {
 }
 
 func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
+	ok, reason := q.qualifiedTargetSized(j)
+	if !ok && q.memorySizingRecoverable(j) {
+		return true, ""
+	}
+	return ok, reason
+}
+
+func (q *Queue) qualifiedTargetSized(j *Job) (bool, string) {
+	return q.qualifiedTargetMemory(j, true)
+}
+
+func (q *Queue) qualifiedTargetMemory(j *Job, sizeMemory bool) (bool, string) {
 	var best *targetFit
 	reason := "no known machine targets"
-	q.evaluateTargets(j, func(fit targetFit, candidate *Job, m *Machine) bool {
+	q.evaluateTargetsMemory(j, sizeMemory, func(fit targetFit, candidate *Job, m *Machine) bool {
 		// A missing cache report is a temporary admission hold, not evidence
 		// against require_target. Keep every other qualification check intact.
 		unknownCacheOnly := m.SharedInputCache == nil && fit.failures == 1 && fit.first == "shared input cache"
@@ -255,6 +267,10 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 // target, ignoring temporary occupancy and release holds. Submission and
 // resolve share it so their explanations cannot drift. visit returns false to stop.
 func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job, m *Machine) bool) {
+	q.evaluateTargetsMemory(j, true, visit)
+}
+
+func (q *Queue) evaluateTargetsMemory(j *Job, sizeMemory bool, visit func(fit targetFit, candidate *Job, m *Machine) bool) {
 	// Resolve envelopes with the planner's code, but without temporary
 	// occupancy or release holds. Retain observations for learned needs.
 	capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: newMemoryPlanningCache()}
@@ -291,7 +307,19 @@ func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job
 				}
 			}
 			for _, candidate := range candidates {
-				candidate = capacity.memoryCandidate(candidate, &copy)
+				if sizeMemory {
+					candidate = capacity.memoryCandidate(candidate, &copy)
+				} else {
+					candidate = memoryIntent(candidate)
+					if e := qualifiedExtension(candidate, &copy); e != nil {
+						if v := e.variant(machineTarget(&copy)); v != nil {
+							candidate.Spec.Needs.HostMemoryGB = max(candidate.Spec.Needs.HostMemoryGB, v.Execution.Main.MemoryGB)
+							for _, side := range v.Execution.Sidecars {
+								candidate.Spec.Needs.HostMemoryGB = max(candidate.Spec.Needs.HostMemoryGB, side.MemoryGB)
+							}
+						}
+					}
+				}
 				fit := targetFit{key: targetKey(&copy)}
 				fit.check(q.variantParityReason(candidate, &copy) == "", "production parity")
 				fitsResourcesChecked(candidate, &copy, copy.TotalMemoryGB, &fit)

@@ -10,6 +10,9 @@ import (
 // resolved envelopes as placement. Network and preparation failures are useful
 // diagnostics; unrelated platforms, devices and qualifications are not.
 func (q *Queue) targetWaitingReason(j *Job) string {
+	if why := q.memoryEvidenceWaitingReason(j); why != "" {
+		return why
+	}
 	var reasons []string
 	specific := false
 	for _, m := range q.plannerMachines() {

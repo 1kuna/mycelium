@@ -72,6 +72,13 @@ func (q *Queue) coldMemoryBound(j *Job, m *Machine, estimate memoryEstimate, flo
 		source = estimate.source
 	}
 	lower := q.constrainedMemoryLowerFor(j, estimate, !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory)
+	if lower > 0 && estimate.key != nil {
+		facts := q.memoryConstraintEvidence(*estimate.key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program), !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory)
+		if facts.margin > 0 {
+			bound, _ := q.recoveryMemoryBound(j, m, estimate, host, 0)
+			return bound, source, 0, true
+		}
+	}
 	// A constrained completion is not an upper bound, even with a prior. Do
 	// not invent headroom by multiplying it. Physical probing remains subject
 	// to normal admission, release custody and the retained OOM requirement.
