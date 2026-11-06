@@ -87,6 +87,12 @@ func (q *Queue) ConfigureUploadSpool(dir string, budget int64) error {
 // unwritten reservations are deducted from free disk; written bytes already
 // reduced it. One current control working set remains free for WAL/DB growth.
 func (s *uploadSpool) reserve(n int64) error {
+	// Serialize the local measurement with written-accounting publication.
+	// In-flight writes remain unwritten commitments until this lock releases,
+	// so a stale free-space sample cannot be combined with newer write credit.
+	// This mutex is independent of q.mu; filesystem I/O never holds q.mu.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	probe := s.free
 	if probe == nil {
 		probe = diskFree
@@ -102,8 +108,6 @@ func (s *uploadSpool) reserve(n int64) error {
 			control += info.Size()
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	available := max(0, free-control-(s.used-s.written))
 	if s.limit > 0 {
 		available = min(available, max(0, s.limit-s.used))

@@ -158,8 +158,18 @@ func (s *waitStateIndex) observationPriority(id string) (int, bool) {
 	return len(s.policy.Tiers), false
 }
 func (s *waitStateIndex) read(request WaitRequest) ([]WaitState, <-chan struct{}, bool, error) {
+	return s.readContext(context.Background(), request)
+}
+func (s *waitStateIndex) readContext(ctx context.Context, request WaitRequest) ([]WaitState, <-chan struct{}, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if allocation := projectionAllocation(ctx); allocation != nil {
+		// Three fixed slices can coexist through public reply and encoding.
+		width := 3 * int64(reflect.TypeFor[WaitState]().Size())
+		if int64(len(request.IDs)) > (allocation.limit-allocation.held)/width || !allocation.charge(width*int64(len(request.IDs))) {
+			return nil, nil, false, projectionRefusal(allocation.limit - allocation.held)
+		}
+	}
 	jobs := make([]WaitState, 0, len(request.IDs))
 	changed := false
 	for _, id := range request.IDs {
@@ -178,6 +188,9 @@ func (s *waitStateIndex) read(request WaitRequest) ([]WaitState, <-chan struct{}
 			return nil, nil, false, &HTTPError{Status: 404, Code: "job_unknown", Message: "unknown job"}
 		}
 		changed = changed || request.After[j.ID] != j.Revision || terminal(j.State)
+		if err := chargeProjectionValue(ctx, j); err != nil {
+			return nil, nil, false, err
+		}
 		jobs = append(jobs, j)
 	}
 	return jobs, s.changed, changed, nil
@@ -190,8 +203,16 @@ func (s *waitStateIndex) waitFor(ctx context.Context, request WaitRequest, durat
 	// per request; cancellation releases it. State/limits use the injected Clock.
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
+	var mark int64
+	allocation := projectionAllocation(ctx)
+	if allocation != nil {
+		mark = allocation.held
+	}
 	for {
-		jobs, wake, changed, err := s.read(request)
+		if allocation != nil {
+			allocation.rewind(mark)
+		}
+		jobs, wake, changed, err := s.readContext(ctx, request)
 		if err != nil {
 			return WaitReply{}, err
 		}

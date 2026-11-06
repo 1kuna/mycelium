@@ -2,4 +2,4 @@
 
 package myce
 
-func processMemoryHeadroom(available int64) int64 { return available }
+func processMemoryHeadroom(available int64) (int64, error) { return available, nil }

@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 )
@@ -20,7 +19,7 @@ func setStatusTestCapacity(q *Queue) {
 	q.requestBudgets.rowTime = 1
 	q.requestBudgets.controlTime = defaultStatusJobs
 	q.requestBudgets.memory = func(context.Context) (int64, error) {
-		return 3 * int64(reflect.TypeFor[Job]().Size()) * defaultStatusJobs, nil
+		return 256 << 20, nil
 	}
 }
 

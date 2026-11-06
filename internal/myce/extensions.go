@@ -280,7 +280,13 @@ func extensionFromFiles(files map[string][]byte) (Extension, error) {
 	return e, nil
 }
 func ReadExtension(folder string) (Extension, error) {
-	limit := int64(extensionByteLimit())
+	files, err := readExtensionFolder(folder, int64(extensionByteLimit()), readCapacityFile)
+	if err != nil {
+		return Extension{}, err
+	}
+	return extensionFromFiles(files)
+}
+func readExtensionFolder(folder string, limit int64, read func(string, int64) ([]byte, error)) (map[string][]byte, error) {
 	files := map[string][]byte{}
 	total := int64(0)
 	err := filepath.WalkDir(folder, func(p string, d fs.DirEntry, err error) error {
@@ -297,25 +303,25 @@ func ReadExtension(folder string) (Extension, error) {
 		if err != nil {
 			return err
 		}
-		total += info.Size()
-		if total > limit {
+		if info.Size() > limit-total {
 			return budgetRefusal(int64(limit))
 		}
 		n, err := filepath.Rel(folder, p)
 		if err != nil {
 			return err
 		}
-		b, err := readCapacityFile(p, limit-int64(total)+info.Size())
+		b, err := read(p, limit-total)
 		if err != nil {
 			return err
 		}
+		total += int64(len(b))
 		files[filepath.ToSlash(n)] = b
 		return nil
 	})
 	if err != nil {
-		return Extension{}, err
+		return nil, err
 	}
-	return extensionFromFiles(files)
+	return files, nil
 }
 func (q *Queue) AddExtension(e Extension, requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)

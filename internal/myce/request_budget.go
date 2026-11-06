@@ -18,9 +18,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const requestBudgetProtocol = "capacity-v1"
+
+type requestMemoryMeasurement struct {
+	done  chan struct{}
+	bytes int64
+	err   error
+}
 
 type requestBudgetKey struct{}
 type peerResponseBudgetKey struct{}
@@ -36,6 +44,7 @@ type requestAllocation struct {
 // they are not installation-sized body ceilings. Charges live through the handler.
 type requestBudgets struct {
 	mu                   sync.Mutex
+	measurement          *requestMemoryMeasurement
 	memory               func(context.Context) (int64, error) // injected physical headroom
 	lanes                int                                  // test seam; production uses runnable CPUs + control
 	held, ceiling        int64
@@ -51,7 +60,10 @@ func requestMemory(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	available := int64(min(gb*(1<<30), float64(math.MaxInt64)))
-	available = processMemoryHeadroom(available)
+	available, err = processMemoryHeadroom(available)
+	if err != nil {
+		return 0, err
+	}
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	// The OS reading excludes resident process memory. Reserve the next GC growth
@@ -64,12 +76,43 @@ func requestMemory(ctx context.Context) (int64, error) {
 	return max(0, min(available, limit-used-growth)), nil
 }
 
-func (b *requestBudgets) capacity(ctx context.Context) (int64, error) {
-	source := b.memory
-	if source == nil {
-		source = requestMemory
+// Overlapping admissions share an in-flight physical observation. There is no
+// time-based cache: the next non-overlapping admission measures again. This
+// keeps a burst of reads from spawning one OS helper per caller on platforms
+// whose memory interface is a command. Waiting never holds the queue mutex.
+func (b *requestBudgets) measureMemory(ctx context.Context) (int64, error) {
+	if b.memory != nil {
+		return b.memory(ctx)
 	}
-	n, err := source(ctx)
+	b.mu.Lock()
+	if active := b.measurement; active != nil {
+		b.mu.Unlock()
+		select {
+		case <-active.done:
+			return active.bytes, active.err
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	active := &requestMemoryMeasurement{done: make(chan struct{})}
+	b.measurement = active
+	b.mu.Unlock()
+	active.bytes, active.err = requestMemory(ctx)
+	b.mu.Lock()
+	b.measurement = nil
+	close(active.done)
+	b.mu.Unlock()
+	return active.bytes, active.err
+}
+
+func (b *requestBudgets) capacity(ctx context.Context) (int64, error) {
+	if a := projectionAllocation(ctx); a != nil && a.budgets == b {
+		b.mu.Lock()
+		remaining := max(0, b.ceiling-b.held)
+		b.mu.Unlock()
+		return min(max(0, a.limit-a.held), remaining), nil
+	}
+	n, err := b.measureMemory(ctx)
 	if err != nil {
 		return 0, &HTTPError{Status: 503, Code: "request_capacity_unavailable", Message: "queue memory headroom is unavailable; fitting bytes=0; retry after memory measurement recovers"}
 	}
@@ -142,11 +185,21 @@ func jsonAllocationCost(data []byte, target reflect.Type, limit int64) (int64, e
 		cost += n
 		return nil
 	}
-	var scan func(reflect.Type) error
-	scan = func(t reflect.Type) error {
+	var scan func(reflect.Type, bool) error
+	scan = func(t reflect.Type, custom bool) error {
 		tok, err := d.Token()
 		if err != nil {
 			return err
+		}
+		// Custom JSON decoders can build a YAML tree even for invalid shapes.
+		// Charge every node/key and content-pointer growth before invoking them.
+		if t != nil && (t.Implements(reflect.TypeFor[json.Unmarshaler]()) || t.Kind() != reflect.Pointer && reflect.PointerTo(t).Implements(reflect.TypeFor[json.Unmarshaler]())) {
+			custom = true
+		}
+		if custom {
+			if err = add(2*int64(reflect.TypeFor[yaml.Node]().Size()) + 2*int64(reflect.TypeFor[uintptr]().Size())); err != nil {
+				return err
+			}
 		}
 		if tok == nil {
 			return nil
@@ -173,6 +226,11 @@ func jsonAllocationCost(data []byte, target reflect.Type, limit int64) (int64, e
 					return e
 				}
 				var child reflect.Type
+				if custom {
+					if e = add(2*int64(reflect.TypeFor[yaml.Node]().Size()) + 2*int64(reflect.TypeFor[uintptr]().Size())); e != nil {
+						return e
+					}
+				}
 				if t != nil {
 					switch t.Kind() {
 					case reflect.Struct:
@@ -190,7 +248,7 @@ func jsonAllocationCost(data []byte, target reflect.Type, limit int64) (int64, e
 						}
 					}
 				}
-				if e = scan(child); e != nil {
+				if e = scan(child, custom); e != nil {
 					return e
 				}
 			}
@@ -210,7 +268,7 @@ func jsonAllocationCost(data []byte, target reflect.Type, limit int64) (int64, e
 						return err
 					}
 				}
-				if err = scan(child); err != nil {
+				if err = scan(child, custom); err != nil {
 					return err
 				}
 			}
@@ -220,7 +278,7 @@ func jsonAllocationCost(data []byte, target reflect.Type, limit int64) (int64, e
 		_, err = d.Token()
 		return err
 	}
-	err := scan(target)
+	err := scan(target, false)
 	if err == nil {
 		_, err = d.Token()
 		if err == io.EOF {

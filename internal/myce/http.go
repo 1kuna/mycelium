@@ -214,7 +214,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		var j *Job
 		var err error
 		if r.URL.Query().Get("view") == "wait" {
-			states, _, _, readErr := waitStates.read(WaitRequest{IDs: []string{r.PathValue("id")}})
+			states, _, _, readErr := waitStates.readContext(r.Context(), WaitRequest{IDs: []string{r.PathValue("id")}})
 			err = readErr
 			if err == nil {
 				state := publicWaitReply(states).Jobs[0]
@@ -511,7 +511,7 @@ func publicErrorCode(code string) bool {
 // unavailability). Any other 5xx is an internal failure whose message may
 // carry private causes, so it stays request_failed (#593 follow-up).
 func knownServerRefusal(code string) bool {
-	return rejectionMessages[code] != "" || fileStoreRefusalCode(code)
+	return code == "request_capacity_unavailable" || code == "projection_capacity_exceeded" || rejectionMessages[code] != "" || fileStoreRefusalCode(code)
 }
 
 func respond(w http.ResponseWriter, v any, err error) {

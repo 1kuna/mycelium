@@ -79,6 +79,11 @@ func ledgerAttempt(j *Job, kind, reason string) JobLedgerEntry {
 // outside it. highWater == -1 begins a snapshot (including an empty snapshot).
 func (q *Queue) JobLedger(id string, after, highWater, limit int, requestContexts ...context.Context) (JobLedgerPage, error) {
 	requestCtx := requestContext(requestContexts)
+	requestCtx, finishBudget, budgetErr := q.requestBudgets.projectionContext(requestCtx)
+	if budgetErr != nil {
+		return JobLedgerPage{}, budgetErr
+	}
+	defer finishBudget()
 	if limit < 0 {
 		return JobLedgerPage{}, &HTTPError{Status: 400, Code: "job_ledger_cursor_invalid", Message: "limit must be nonnegative"}
 	}
@@ -121,8 +126,21 @@ func (q *Queue) JobLedger(id string, after, highWater, limit int, requestContext
 	complete := j.Ledger != nil && j.Ledger.Complete
 	requestUnlock1()
 	locked = false
-	entries := make([]JobLedgerEntry, end-after)
-	copy(entries, source)
+	// Entries are immutable. Size pointed-to placement data and strings outside
+	// the queue lock before allocating the page, preserving the next cursor.
+	count := 0
+	for i := range source {
+		if err := chargeProjectionValue(requestCtx, source[i]); err != nil {
+			if count == 0 {
+				return JobLedgerPage{}, err
+			}
+			break
+		}
+		count++
+	}
+	end = after + count
+	entries := make([]JobLedgerEntry, count)
+	copy(entries, source[:count])
 	// Timestamp pointers belong to immutable entries and are copied for callers.
 	for i := range entries {
 		if entries[i].WorkLearning != nil {
