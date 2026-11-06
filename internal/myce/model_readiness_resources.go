@@ -36,8 +36,8 @@ func (l *LlamaEngine) observeReadinessActivity(ctx context.Context, p *readiness
 		if sample := memory.currentHostMemory(p.clock); sample != nil {
 			return &sample.NonreclaimableGB, sample.DeviceGB
 		}
-		if w.processMemory != nil && w.processMemory.OwnedResident != nil {
-			bytes, members, err := w.processMemory.OwnedResident(owned.rssRoots())
+		if w.processMemory != nil && w.processMemory.Resident != nil {
+			bytes, members, err := readinessProcessResident(w.processMemory, owned.rssRoots(), processBirth)
 			if err == nil && members > 0 {
 				gb := float64(bytes) / (1 << 30)
 				return &gb, nil
@@ -49,10 +49,7 @@ func (l *LlamaEngine) observeReadinessActivity(ctx context.Context, p *readiness
 	// Silence cannot be established before the next shared sensor observation.
 	// Two sampling periods allow one interval plus observation scheduling jitter;
 	// this is an observability floor, never a deadline on an unknown cold load.
-	p.activityPeriod = attemptMemorySamplePeriod
-	if memory == nil && runtime.GOOS == "darwin" {
-		p.activityPeriod = attemptStorageSamplePeriod
-	}
+	p.activityPeriod = readinessSensorPeriod(memory != nil, runtime.GOOS, deviceDone != nil)
 	p.osObserver, p.activitySource = true, source
 	p.mu.Unlock()
 	var once sync.Once
@@ -95,4 +92,43 @@ func readinessActivitySource(snapshot func() *AttemptResources, memory func() (*
 		}
 		return previous, values
 	}
+}
+
+func readinessSensorPeriod(cgroup bool, goos string, device bool) time.Duration {
+	period := attemptMemorySamplePeriod
+	if !cgroup && goos == "darwin" {
+		period = max(period, attemptStorageSamplePeriod)
+	}
+	if device {
+		period = max(period, deviceMemorySamplePeriod)
+	}
+	return period
+}
+
+// The model execs in the launch root itself. Unlike control-anchor accounting,
+// include that root's RSS via the existing group inventory, with birth checks
+// on both sides so a recycled group identity cannot supply readiness activity.
+func readinessProcessResident(probe *processMemoryProbe, roots map[int]string, birthOf func(int) (string, error)) (uint64, int, error) {
+	groups := map[int]bool{}
+	check := func() error {
+		for pid, saved := range roots {
+			birth, err := birthOf(pid)
+			if err != nil || saved == "" || birth != saved {
+				return errLivenessUnavailable
+			}
+			groups[pid] = true
+		}
+		return nil
+	}
+	if err := check(); err != nil {
+		return 0, 0, err
+	}
+	bytes, members, err := probe.Resident(groups)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := check(); err != nil {
+		return 0, 0, err
+	}
+	return bytes, members, nil
 }

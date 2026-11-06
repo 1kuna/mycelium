@@ -343,15 +343,61 @@ func TestAdaptiveReadinessSharedResourceActivity(t *testing.T) {
 func TestAdaptiveReadinessSharedSensorHorizon(t *testing.T) {
 	clock := &manualWorkerClock{now: time.Unix(1, 0)}
 	p := newReadinessProgress(clock, readinessHistory{Load: readinessLatency{Mean: time.Millisecond}})
-	p.activityPeriod = attemptStorageSamplePeriod
-	clock.Advance(attemptStorageSamplePeriod)
-	if _, stalled := p.state(); stalled {
-		t.Fatal("learned cutoff beat the shared sensor's next observation")
+	// Linux cgroup CPU samples are faster than device-memory samples. A load
+	// whose only advancing signal is GPU allocation must survive until it arrives.
+	p.activityPeriod = readinessSensorPeriod(true, "linux", true)
+	device := 0.0
+	p.observeActivity(nil, nil, nil, &device)
+	for range 3 {
+		clock.Advance(deviceMemorySamplePeriod)
+		if _, stalled := p.state(); stalled {
+			t.Fatal("learned cutoff beat the device sensor's next observation")
+		}
+		device++
+		p.observeActivity(nil, nil, nil, &device)
 	}
-	cpu := 1.0
-	p.observeActivity(&cpu)
-	clock.Advance(2 * attemptStorageSamplePeriod)
+	clock.Advance(2 * deviceMemorySamplePeriod)
 	if _, stalled := p.state(); !stalled {
 		t.Fatal("learned silent stall was not caught after the observable horizon")
+	}
+}
+
+func TestAdaptiveReadinessSingleProcessResidentGrowth(t *testing.T) {
+	clock := &manualWorkerClock{now: time.Unix(1, 0)}
+	p := newReadinessProgress(clock, readinessHistory{})
+	kib := "1024"
+	birth := "original-model"
+	probe := &processMemoryProbe{Resident: func(groups map[int]bool) (uint64, int, error) {
+		// Root 7 execs the model and has no children; other groups are excluded.
+		return processGroupResident([]byte("7 7 "+kib+"\n8 8 999999\n"), groups)
+	}}
+	birthOf := func(int) (string, error) { return birth, nil }
+	sample := func() {
+		t.Helper()
+		bytes, members, err := readinessProcessResident(probe, map[int]string{7: "original-model"}, birthOf)
+		if err != nil || members != 1 {
+			t.Fatalf("single-process model RSS unavailable: %d %v", members, err)
+		}
+		gb := float64(bytes) / (1 << 30)
+		p.observeActivity(nil, nil, &gb)
+	}
+	sample()
+	clock.Advance(time.Hour)
+	sample()
+	if p.coldReason() != coldLoadInactive {
+		t.Fatal("unchanged root RSS credited as growth")
+	}
+	kib = "2048"
+	clock.Advance(time.Hour)
+	sample()
+	if p.coldReason() != coldLoadActive {
+		t.Fatal("single-process model growth was excluded")
+	}
+	probe.Resident = func(map[int]bool) (uint64, int, error) {
+		birth = "reused"
+		return 1 << 30, 1, nil
+	}
+	if _, _, err := readinessProcessResident(probe, map[int]string{7: "original-model"}, birthOf); err == nil {
+		t.Fatal("PID reuse during RSS inventory supplied activity")
 	}
 }
