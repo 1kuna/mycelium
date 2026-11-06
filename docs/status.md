@@ -1628,8 +1628,10 @@ omit configuration and attempt evidence, so `delivered: false` alone cannot
 establish why delivery has not been acknowledged. The queue owner must verify
 the running hook configuration and sanitized delivery/commit evidence.
 Successful hook exit does not itself prove downstream thread execution.
-Restarting without a hook clears its historical configuration flag and restores
-the existing 256-event diagnostic retention window. Job completion observers
+Restarting without a hook clears its historical configuration flag. On releases
+containing #811, all unique alert and delivery history remains protected, including
+events recorded without a hook; disabling delivery never reinstates a count cap.
+Job completion observers
 and their thread-bound notifiers are independent of this queue-level channel.
 
 `health_alerts` retains diagnostic events delivered by the existing optional
