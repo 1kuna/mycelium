@@ -89,6 +89,27 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 		t.Fatal("dev startup", ctx.Err())
 	}
 	t.Setenv("MYCE_QUEUE", queue)
+	// The dev banner advertises its listener before the worker's asynchronous
+	// enrollment. Qualification requires that enrolled worker, not just HTTP.
+	client := myce.Client{URL: queue, Token: token}
+	for {
+		var snapshot myce.Snapshot
+		if err := client.Call(ctx, "GET", "/api/inspection", nil, &snapshot); err != nil {
+			t.Fatal("worker readiness", err)
+		}
+		ready := false
+		for _, m := range snapshot.Machines {
+			if m.ID == "fake-1" && m.HostID == "dev-host" && !m.Gone && !m.Leaving && m.ExtensionFingerprint != "" {
+				ready = true
+			}
+		}
+		if ready {
+			break
+		}
+		if err := waitPause(ctx, 10*time.Millisecond); err != nil {
+			t.Fatal("worker enrollment", err)
+		}
+	}
 	run := func(args ...string) {
 		t.Helper()
 		c := exec.CommandContext(ctx, binary, args...)
@@ -178,7 +199,6 @@ print(j["id"])
 		t.Fatal(err)
 	}
 	id := strings.TrimSpace(string(out))
-	client := myce.Client{URL: queue, Token: token}
 	job, err := client.GetJob(ctx, id)
 	if err != nil {
 		t.Fatal(err)
