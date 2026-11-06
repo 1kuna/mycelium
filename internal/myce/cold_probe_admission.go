@@ -60,7 +60,8 @@ func (q *Queue) recordColdProbeAssignment(j *Job, m *Machine) {
 	if j.MemoryEnvelope == nil || j.MemoryEnvelope.Basis != "exploratory" {
 		return
 	}
-	q.recordHostLaunchMemory(m, nil)
+	// Check-in already sampled this inventory before sizing the offer. Do not
+	// sample again: a history rollover could discard the drop admission used.
 	h := q.s.HostLaunchMemory[hostID(m)]
 	if h == nil {
 		return
