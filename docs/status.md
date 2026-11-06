@@ -2073,6 +2073,7 @@ recovery restores borrowing. A reused working set can exceed the retired
 80/100 GiB defaults when the physical volume supports it. Cold entries pay
 pressure debt before the observed reused set. Protected entries may leave a
 cache above its current target. Copy admission learns throughput with an
-additional stream and retracts it when aggregate throughput does not improve.
+additional stream and retracts it when aggregate throughput does not improve
+or measured metadata latency degrades.
 These are synthetic-testable admission decisions, not native disk isolation or
 proof that an unobserved owner-write burst cannot fill the volume.

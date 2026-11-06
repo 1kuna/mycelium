@@ -253,6 +253,8 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		need += s.SizeBytes
 	}
 	err = c.stageInput(ctx, func(ctx context.Context, stage string) error {
+		doneWaiting := cacheWait(ctx)
+		defer doneWaiting()
 		releaseDemand, e := c.cache.budgets.borrow(ctx, c.cache.Root, need)
 		if e != nil {
 			return e
@@ -301,7 +303,8 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 			return e
 		}
 		defer releaseCopy()
-		if e = c.populateInput(copyCtx, s, nasRoot, stage); e != nil {
+		doneWaiting()
+		if e = c.populateInput(context.WithValue(copyCtx, cacheReservationKey{}, held), s, nasRoot, stage); e != nil {
 			return e
 		}
 		if c.beforePublish != nil {
@@ -404,6 +407,11 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			return errors.New("shared manifest exceeds unpacked_bytes")
 		}
 	}
+	if len(s.Manifest) > 0 {
+		if err = c.chargeManifest(ctx, original.key(), s.Manifest, 0); err != nil {
+			return err
+		}
+	}
 	dst := filepath.Join(stage, "data")
 	files := FileManifest{}
 	if len(s.Manifest) > 0 {
@@ -448,6 +456,13 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			}
 		}
 		if s.Archive != "" {
+			planned, err := sharedArchiveManifest(withoutCopyProgress(ctx), target, s.Archive, s.UnpackedBytes)
+			if err != nil {
+				return err
+			}
+			if err = c.chargeManifest(ctx, original.key(), planned, s.SizeBytes); err != nil {
+				return err
+			}
 			if err = unpackSharedArchive(ctx, target, dst, s.Archive, s.UnpackedBytes); err != nil {
 				return err
 			}
@@ -487,6 +502,11 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	b, err := json.Marshal(sharedEntry{Files: files, Source: &original, NASRoot: nasRoot, Sources: s.sources})
 	if err != nil {
 		return err
+	}
+	if held, ok := ctx.Value(cacheReservationKey{}).(*cacheReservation); ok {
+		if err = held.ensureMetadata(c.cache.Root, int64(len(b))); err != nil {
+			return err
+		}
 	}
 	if err = os.WriteFile(filepath.Join(stage, "ready.json"), b, 0400); err != nil {
 		return err
@@ -654,6 +674,9 @@ func sharedSignature(root string) (string, error) {
 	return identityHash(entries), err
 }
 func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) error {
+	if err := c.cache.init(); err != nil {
+		return err
+	}
 	type victim struct {
 		name string
 		used int64
@@ -752,7 +775,7 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		if e != nil {
 			return false, e
 		}
-		floor := uint64(os.Getpagesize())
+		floor := uint64(cacheAllocationUnit(disk))
 		if reserved > int64(^uint64(0)>>1)-need {
 			return false, nil
 		}
@@ -804,6 +827,7 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		c.mu.Lock()
 		delete(c.verified, v.name)
 		c.mu.Unlock()
+		c.cache.budgets.forget(c.cache.Root, v.name)
 	}
 	ok, err := enough()
 	if err != nil {
@@ -946,4 +970,85 @@ func (c *SharedInputCache) rebuildable(ctx context.Context, key string) bool {
 	}
 	p, err := c.nasPathContext(ctx, r.NASRoot, s.NAS)
 	return err == nil && verifyFile(ctx, p, s.ref()) == nil
+}
+
+func (c *SharedInputCache) chargeManifest(ctx context.Context, key string, files FileManifest, archiveBytes int64) error {
+	held, ok := ctx.Value(cacheReservationKey{}).(*cacheReservation)
+	if !ok {
+		return nil
+	} // Direct fixture helpers do not own publication admission.
+	disk, err := c.cache.budgets.probe(c.cache.Root)
+	if err != nil {
+		return err
+	}
+	charge := cacheManifestCharge(disk, files)
+	if archiveBytes > 0 {
+		charge = cacheSum(charge, cacheWriteCharge(disk, archiveBytes))
+	}
+	if charge <= held.bytes {
+		return nil
+	}
+	extra := charge - held.bytes
+	demand, err := c.cache.budgets.borrow(ctx, c.cache.Root, extra)
+	if err != nil {
+		return err
+	}
+	defer demand()
+	gate, err := c.cache.lock(ctx, "admission", syscall.LOCK_EX)
+	if err != nil {
+		return err
+	}
+	defer unlockEnvironment(gate)
+	if err = c.admit(ctx, key, extra); err != nil {
+		return err
+	}
+	return held.ensureCharge(c.cache.Root, charge)
+}
+func sharedArchiveManifest(ctx context.Context, path, format string, limit int64) (FileManifest, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var reader io.Reader = contextReader{ctx, f}
+	if format == "tar.gz" {
+		z, err := gzip.NewReader(reader)
+		if err != nil {
+			return nil, err
+		}
+		defer z.Close()
+		reader = z
+	}
+	files := FileManifest{}
+	tr := tar.NewReader(reader)
+	var used int64
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return files, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(h.Name, "./"), "/")
+		if name == "" && h.Typeflag == tar.TypeDir {
+			continue
+		}
+		if !safeRelative(name) {
+			return nil, errors.New("unsafe shared archive path")
+		}
+		switch h.Typeflag {
+		case tar.TypeDir:
+			// A zero-byte synthetic child charges even an otherwise empty directory.
+			files[name+"/.directory-allocation"] = FileRef{}
+		case tar.TypeReg, tar.TypeRegA:
+			if h.Size < 0 || h.Size > limit-used {
+				return nil, errors.New("shared archive exceeds unpacked_bytes")
+			}
+			used += h.Size
+			files[name] = FileRef{SizeBytes: h.Size}
+		default:
+			return nil, errors.New("shared archives require regular files and directories")
+		}
+	}
 }

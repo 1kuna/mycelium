@@ -123,6 +123,7 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
+	hostControl                 *cacheReservation
 	hostMu                      sync.Mutex
 	hostPending                 map[string]*cacheReservation
 	inputClaim                  func(context.Context, FileRef, bool) (context.Context, error)
@@ -204,10 +205,35 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 		}
 	}
 	s := &FileStore{budgets: newCacheBudgets(), inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s.budgets.probe = func(path string) (DiskReading, error) {
+		probe := s.diskProbe
+		if probe == nil {
+			probe = workerDiskProbe
+		}
+		return probe(path)
+	}
 	if q.lock != nil {
 		database := strings.TrimSuffix(q.lock.Name(), ".lock")
 		s.controlFiles = controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
 	}
+	if s.controlFiles.database != "" {
+		s.hostControl, err = s.budgets.trackControl(s.controlFiles.database, s.clock, s.controlFiles.database, s.controlFiles.wal, s.controlFiles.shared)
+		if err != nil {
+			return err
+		}
+	}
+	configured := false
+	var previous *FileStore
+	defer func() {
+		if !configured {
+			s.closeHostClaims()
+			s.hostControl.release()
+		}
+		if configured && previous != nil {
+			previous.closeHostClaims()
+			previous.hostControl.release()
+		}
+	}()
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -265,16 +291,6 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			}
 		}
 	}
-	configured := false
-	var previous *FileStore
-	defer func() {
-		if !configured {
-			s.closeHostClaims()
-		}
-		if configured && previous != nil {
-			previous.closeHostClaims()
-		}
-	}()
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()

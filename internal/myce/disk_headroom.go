@@ -3,7 +3,6 @@ package myce
 import (
 	"fmt"
 	"math"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -111,9 +110,10 @@ func diskVolumeNeed(j *Job, v DiskVolume, machines ...*Machine) (uint64, bool) {
 	return need, relevant
 }
 func diskFreeFloor(total uint64) uint64 {
-	// Bavail excludes filesystem-reserved blocks. Before consumption is known,
-	// retain one OS page for a control write, rather than an installation fraction.
-	return min(total, uint64(os.Getpagesize()))
+	// This is only a nonempty-volume sanity fence in the scheduler: one
+	// physical allocation-counter sector. Local write admission separately
+	// charges filesystem rounding, control allocations and measured pressure.
+	return min(total, uint64(512))
 }
 func diskVolumeReason(m *Machine, v DiskVolume, need uint64) string {
 	label := fmt.Sprintf("disk_headroom: host %s %s", hostID(m), strings.Join(v.Roots, "+"))

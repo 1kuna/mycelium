@@ -2,6 +2,8 @@ package myce
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -113,5 +115,59 @@ func TestCacheHostUnknownBuilderFencesOtherWriters(t *testing.T) {
 	defer copy.release()
 	if _, err = b.explore("environments", clock); err == nil {
 		t.Fatal("unknown installer overlaps promised copy capacity")
+	}
+}
+
+func TestCacheHostManySmallFilesChargeSeparateAllocations(t *testing.T) {
+	disk := DiskReading{AllocationBytes: 4096}
+	files := FileManifest{}
+	for _, name := range []string{"a", "b", "nested/c"} {
+		files[name] = FileRef{SizeBytes: 1}
+	}
+	if charge := cacheManifestCharge(disk, files); charge < 3*4096 {
+		t.Fatal("packed tiny files into one logical allocation", charge)
+	}
+}
+
+func TestCacheHostControlGrowthAndRecovery(t *testing.T) {
+	clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	b, disk := syntheticCacheBudget(t, clock, 1<<30, 100<<20)
+	database := filepath.Join(t.TempDir(), "control.db")
+	header := append([]byte("SQLite format 3\x00"), 0x10, 0)
+	if err := os.WriteFile(database, header, 0600); err != nil {
+		t.Fatal(err)
+	}
+	data, wal := int64(10<<20), int64(64<<10)
+	b.allocation = func(paths []string) (int64, error) {
+		switch len(paths) {
+		case 3:
+			return data + wal, nil
+		case 2:
+			return wal, nil
+		}
+		return 0, nil
+	}
+	control, err := b.trackControl(database, clock, database, database+"-wal", database+"-shm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := b.limit("cache", 0, 0, clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	wal += 1 << 20
+	disk.FreeBytes -= 1 << 20
+	after, err := b.limit("cache", 0, 0, clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before-after > 3<<20 {
+		t.Fatal("owned control growth became external consumption", before, after)
+	}
+	control.release()
+	recovered, err := b.limit("cache", 0, 0, clock.Now())
+	if err != nil || recovered <= after {
+		t.Fatal("inactive control writer retained a rewrite reserve", recovered, after, err)
 	}
 }

@@ -56,7 +56,14 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	defer lock.Unlock()
 	err = s.verify(context.Background(), next)
 	missing := os.IsNotExist(err)
+	var held *cacheReservation
 	if err != nil {
+		var capacityErr error
+		held, capacityErr = s.budgets.reserve(s.root, next.SizeBytes, s.clock, s.blob(next))
+		if capacityErr != nil {
+			return capacityErr
+		}
+		defer held.release()
 		ctx := context.WithValue(requestContext(contexts), fileStoreOrdinaryKey{}, true)
 		view := s.snapshotCapacity(ctx)
 		_, e := s.admitCreation(ctx, view, next)
@@ -80,7 +87,20 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 			return e
 		}
 		defer os.Remove(f.Name())
-		_, writeErr := f.Write(data)
+		if e = held.addPath(f.Name()); e != nil {
+			f.Close()
+			return e
+		}
+		copyCtx, releaseCopy, copyErr := s.budgets.copy(requestContext(contexts), s.root, s.clock, 0)
+		if copyErr != nil {
+			f.Close()
+			return copyErr
+		}
+		defer releaseCopy()
+		n, writeErr := f.Write(data)
+		if progress, ok := copyCtx.Value(cacheCopyProgressKey{}).(func(int64)); ok {
+			progress(int64(n))
+		}
 		if e = errors.Join(writeErr, f.Sync(), f.Close()); e != nil {
 			return e
 		}

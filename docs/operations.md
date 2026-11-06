@@ -2116,17 +2116,22 @@ private-file, shared-input, model and snapshot caches on that volume share one
 worker ledger. Unused capacity is borrowed on demand; no startup fraction,
 minimum disk size or maximum automatic GiB allowance is saved.
 
-The ledger subtracts pending copies in full until their writers join, and predicts
-external free-space loss over the longest observed sampling/writer interval.
-Measured cache growth is excluded from that external trend. Before measurements
-exist, available blocks already exclude filesystem reserves and one OS page is
-kept for a control write. This is admission headroom, not filesystem isolation:
-unknown writers and arbitrary native commands can still exhaust a disk. A
-shrinking disk reduces budgets; observed recovery restores borrowing.
+Cooperating queue and worker processes under the same account share kernel-held
+filesystem claims for pending writes. Allocation scans distinguish their own
+growth from external free-space loss, without depending on cache inventory
+refresh timing. Physical file/directory rounding and actual publication/upload
+metadata are charged separately. Control headroom uses the active SQLite WAL
+working set, observed growth and SQLite's initial WAL/index geometry. A writer's
+claim remains until its I/O and process custody joins; an inactive owner is
+recognized by its kernel lock, never by a timed lease. Unknown native installers
+explore without sibling writers. Admission is not OS write isolation: unrelated
+writers can still exhaust disk between observations. Shrinking space reduces
+budgets; observed recovery restores borrowing. See [the accounting contract](adaptive-cache.md).
 
 Eviction orders cold reproducible entries before entries reused within their
 observed inter-use interval. Use/build locks, durable pins, queue references,
-unknown data and authoritative results keep their existing protection. Active
+unknown data and authoritative results keep their existing protection. Originals
+that cannot be independently verified retain their cached last copies. Active
 copies reserve capacity across cache kinds. Model and shared-input caches also
 re-evaluate budgets in the existing idle retention lane. No queue mutex is held
 for scans, verification, copy or eviction.

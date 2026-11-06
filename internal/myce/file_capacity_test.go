@@ -118,10 +118,10 @@ func TestFileCapacityTypedRefusal(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(q.files.root, "uploads", ref.SHA256)); !os.IsNotExist(err) {
 		t.Error("refused upload wrote payload", err)
 	}
-	// Reuse #158's per-volume floor even when the configured store has room.
+	// Physical headroom still refuses even when the authored store cap has room.
 	q.files.limit = 1 << 20
 	q.files.diskProbe = func(string) (DiskReading, error) {
-		return DiskReading{TotalBytes: 1 << 30, FreeBytes: (256 << 20) + 4}, nil
+		return DiskReading{TotalBytes: 1 << 30, FreeBytes: 4*uint64(cacheAllocationUnit(DiskReading{})) + 4}, nil
 	}
 	assert(c.PreflightFileStore(context.Background(), FileManifest{"input": ref}))
 }
@@ -187,7 +187,7 @@ func TestFileCapacityStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	fs := snap.FileStore
-	if fs == nil || fs.Store != "queue-file-store" || fs.UsedBytes != 13 || fs.FreeBytes != 40 || fs.ReclaimableBytes != 9 || fs.DiskFreeBytes != 1<<30 || fs.FloorBytes != 256<<20 {
+	if fs == nil || fs.Store != "queue-file-store" || fs.UsedBytes != 13 || fs.FreeBytes != 40 || fs.ReclaimableBytes != 9 || fs.DiskFreeBytes != 1<<30 || fs.FloorBytes < 4*uint64(cacheAllocationUnit(DiskReading{})) || fs.FloorBytes >= fs.DiskFreeBytes {
 		t.Fatalf("incorrect byte status: %+v", fs)
 	}
 	// Read-only status must leave even collectible data alone.

@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,6 +20,8 @@ import (
 // ownership, and no other process's payload is removed. Inactive scalar slots
 // are reused. The coordination directory contains no payload or credentials.
 type hostCacheState struct {
+	Controls                     map[string]int64
+	ControlNeeds                 map[string]int64
 	At                           time.Time
 	Free, Written, SampleWritten int64
 	Horizon                      time.Duration
@@ -26,6 +29,9 @@ type hostCacheState struct {
 	Control                      int64
 }
 type hostCacheClaim struct {
+	ControlGrowth     int64
+	ControlPage       int64
+	ControlUnit       int64
 	Kind              string
 	Root              string
 	Bytes             int64
@@ -33,6 +39,7 @@ type hostCacheClaim struct {
 	Initial, Observed int64
 }
 type hostCacheView struct {
+	valid           bool
 	state           hostCacheState
 	pending, demand int64
 	demandRoots     map[string]int64
@@ -138,10 +145,13 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 	if err = readCacheRecord(f, &v.state); err != nil {
 		return fail(err)
 	}
+	v.valid = true
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fail(err)
 	}
+	controls := map[string]int64{}
+	needs := map[string]int64{}
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".claim") {
 			continue
@@ -163,10 +173,28 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 			if err == nil {
 				// Signed net allocation includes interrupted writes and owned scratch
 				// removal, independently of asynchronously refreshed cache inventories.
-				v.state.Written += used - c.Observed
+				if c.Kind == "control" {
+					if active {
+						c.ControlGrowth = max(c.ControlGrowth, used-c.Observed)
+						controls[c.Root] = used
+						wal, allocationErr := b.allocation(c.Paths[1:])
+						if allocationErr != nil {
+							err = allocationErr
+						} else {
+							// SQLite's WAL-index region is 32 KiB; a WAL starts with a
+							// 32-byte header and a 24-byte frame header plus one DB page.
+							bootstrap := cacheSum(cacheRound(32<<10, c.ControlUnit), cacheRound(cacheSum(c.ControlPage, 32+24), c.ControlUnit))
+							needs[c.Root] = max(needs[c.Root], wal, c.ControlGrowth, bootstrap)
+						}
+					}
+				} else {
+					v.state.Written += used - c.Observed
+				}
 				c.Observed = used
 				if active {
-					if c.Kind == "demand" {
+					if c.Kind == "control" {
+						// Controls reserve their next measured rewrite, not payload blocks.
+					} else if c.Kind == "demand" {
 						v.demand = cacheSum(v.demand, c.Bytes)
 						v.demandRoots[c.Root] = cacheSum(v.demandRoots[c.Root], c.Bytes)
 					} else {
@@ -178,7 +206,9 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 				if !active {
 					c = hostCacheClaim{}
 				}
-				err = writeCacheRecord(claim, c)
+				if err == nil {
+					err = writeCacheRecord(claim, c)
+				}
 			}
 		}
 		if !active && v.slot == nil {
@@ -190,9 +220,22 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 			return fail(err)
 		}
 	}
+	for root, current := range controls {
+		if previous, ok := v.state.Controls[root]; ok {
+			v.state.Written += current - previous
+		}
+	}
+	v.state.Controls, v.state.ControlNeeds = controls, needs
+	v.state.Control = 0
+	for _, n := range needs {
+		v.state.Control = cacheSum(v.state.Control, n)
+	}
 	return v, nil
 }
 func (v *hostCacheView) close() {
+	if v.valid {
+		_ = v.save()
+	}
 	if v.slot != nil {
 		v.slot.Close()
 	}
@@ -233,7 +276,7 @@ func (v *hostCacheView) sample(disk DiskReading, now time.Time, control int64) {
 	if !s.At.IsZero() && now.After(s.At) {
 		interval := now.Sub(s.At)
 		loss := (s.Free - cacheBytes(disk.FreeBytes)) - (s.Written - s.SampleWritten)
-		s.Horizon = max(s.Horizon, interval)
+		s.Horizon = interval
 		s.Drain = float64(max(0, loss)) / interval.Seconds()
 	}
 	s.At, s.Free, s.SampleWritten = now, cacheBytes(disk.FreeBytes), s.Written
@@ -267,6 +310,7 @@ func cacheWriteCharge(d DiskReading, bytes int64) int64 {
 // Demand is observable by all cache domains, including other local processes.
 // It grants no write authority and survives exactly as long as its owner lock.
 func (b *cacheBudgets) borrow(ctx context.Context, root string, bytes int64) (func(), error) {
+	defer cacheWait(ctx)()
 	disk, err := b.probe(root)
 	if err != nil {
 		return nil, err
@@ -344,4 +388,164 @@ func (v *hostCacheView) ownPending(root string) int64 {
 		}
 	}
 	return n
+}
+
+// Each file has its own rounded data allocation and inode/entry allowance.
+// Directory allocations are counted once per distinct ancestor. This prevents
+// many tiny files from being admitted as a single packed logical byte string.
+func cacheManifestCharge(disk DiskReading, files FileManifest) int64 {
+	unit := cacheAllocationUnit(disk)
+	dirs := map[string]bool{".": true}
+	total := 3 * unit // ready, verification record, publication parent
+	for name, ref := range files {
+		rounded := ref.SizeBytes
+		if remainder := rounded % unit; remainder > 0 {
+			rounded = cacheSum(rounded, unit-remainder)
+		}
+		total = cacheSum(total, cacheSum(rounded, unit))
+		if name == "." {
+			continue
+		}
+		for dir := filepath.Dir(name); dir != "."; dir = filepath.Dir(dir) {
+			dirs[dir] = true
+		}
+	}
+	for range dirs {
+		total = cacheSum(total, unit)
+	}
+	return total
+}
+func (r *cacheReservation) ensureCharge(root string, charge int64) error {
+	b := r.ledger
+	host, err := b.hostView(r.volume)
+	if err != nil {
+		return err
+	}
+	defer host.close()
+	var claim hostCacheClaim
+	if err = readCacheRecord(r.host, &claim); err != nil {
+		return err
+	}
+	if charge <= claim.Bytes {
+		return nil
+	}
+	disk, err := b.probe(root)
+	if err != nil {
+		return err
+	}
+	if disk.Volume != r.volume {
+		return errors.New("cache volume changed during reservation")
+	}
+	available := cacheBytes(disk.FreeBytes) - cacheSum(host.floor(disk), host.pending)
+	if charge-claim.Bytes > available {
+		return errors.New("insufficient filesystem allocation space for cache manifest")
+	}
+	claim.Bytes = charge
+	if err = writeCacheRecord(r.host, claim); err != nil {
+		return err
+	}
+	if err = host.save(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	r.bytes = charge
+	b.mu.Unlock()
+	return nil
+}
+
+func (r *cacheReservation) addPath(path string) error {
+	host, err := r.ledger.hostView(r.volume)
+	if err != nil {
+		return err
+	}
+	defer host.close()
+	var claim hostCacheClaim
+	if err = readCacheRecord(r.host, &claim); err != nil {
+		return err
+	}
+	size, err := r.ledger.allocation([]string{path})
+	if err != nil {
+		return err
+	}
+	claim.Paths = append(claim.Paths, path)
+	claim.Initial = cacheSum(claim.Initial, size)
+	claim.Observed = cacheSum(claim.Observed, size)
+	return writeCacheRecord(r.host, claim)
+}
+func (r *cacheReservation) ensureMetadata(root string, bytes int64) error {
+	host, err := r.ledger.hostView(r.volume)
+	if err != nil {
+		return err
+	}
+	var claim hostCacheClaim
+	err = readCacheRecord(r.host, &claim)
+	host.close()
+	if err != nil {
+		return err
+	}
+	used, err := r.ledger.allocation(claim.Paths)
+	if err != nil {
+		return err
+	}
+	disk, err := r.ledger.probe(root)
+	if err != nil {
+		return err
+	}
+	return r.ensureCharge(root, cacheSum(max(0, used-claim.Initial), cacheWriteCharge(disk, bytes)))
+}
+
+func (b *cacheBudgets) trackControl(root string, clock Clock, paths ...string) (*cacheReservation, error) {
+	disk, err := b.probe(root)
+	if err != nil {
+		return nil, err
+	}
+	host, err := b.hostView(disk.Volume)
+	if err != nil {
+		return nil, err
+	}
+	defer host.close()
+	page, err := sqliteControlPage(paths[0])
+	if err != nil {
+		return nil, err
+	}
+	initial, err := b.allocation(paths)
+	if err != nil {
+		return nil, err
+	}
+	f, err := host.claim(hostCacheClaim{Kind: "control", Root: root, Paths: paths, Initial: initial, Observed: initial, ControlPage: page, ControlUnit: cacheAllocationUnit(disk)})
+	if err != nil {
+		return nil, err
+	}
+	return &cacheReservation{ledger: b, volume: disk.Volume, started: clock.Now(), clock: clock, host: f}, nil
+}
+
+func sqliteControlPage(path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	var header [18]byte
+	if _, err = io.ReadFull(f, header[:]); err != nil {
+		return 0, err
+	}
+	if string(header[:16]) != "SQLite format 3\x00" {
+		return 0, errors.New("SQLite control format unavailable")
+	}
+	page := int64(binary.BigEndian.Uint16(header[16:]))
+	if page == 1 {
+		page = 65536
+	}
+	if page < 512 || page > 65536 || page&(page-1) != 0 {
+		return 0, errors.New("SQLite page geometry unavailable")
+	}
+	return page, nil
+}
+
+func cacheRound(bytes, unit int64) int64 {
+	unit = max(512, unit)
+	if remainder := bytes % unit; remainder > 0 {
+		return cacheSum(bytes, unit-remainder)
+	}
+	return bytes
 }

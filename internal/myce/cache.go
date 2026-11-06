@@ -22,6 +22,7 @@ type ModelCache struct {
 	budgets       *cacheBudgets
 	ApprovalRoot  string
 	storedModels  sync.Map
+	knownModels   sync.Map
 	FileClient    *Client
 	mu            sync.Mutex
 	Root, NASRoot string
@@ -248,6 +249,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		}
 	}
 	key := cacheKey(m)
+	c.knownModels.Store(key, m)
 	if m.FileStore {
 		c.storedModels.Store(key, m)
 	}
@@ -441,12 +443,16 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		if background && c.Usage != nil && c.Usage(v.key) > score {
 			continue
 		}
+		if !c.rebuildable(ctx, v.key) {
+			continue
+		}
 		if e = c.discardContext(ctx, v.path); e != nil {
 			c.mu.Unlock()
 			return "", e
 		}
 		c.verified.Delete(v.key)
 		c.progress.Delete(v.key)
+		c.budgets.forget(c.Root, v.key)
 		used -= v.size
 		free, e = c.Free(c.Root)
 		if e != nil {
@@ -478,6 +484,24 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		return "", err
 	}
 	defer reservation.release()
+	if len(m.Files) > 0 {
+		files := FileManifest{}
+		for _, f := range m.Files {
+			files[f.Path] = FileRef{SHA256: f.SHA256, SizeBytes: f.SizeBytes}
+		}
+		disk, probeErr := c.budgets.probe(c.Root)
+		if probeErr != nil {
+			return "", probeErr
+		}
+		existing, allocationErr := cacheFootprint([]string{temp})
+		if allocationErr != nil {
+			return "", allocationErr
+		}
+		charge := max(0, cacheManifestCharge(disk, files)-existing)
+		if err := reservation.ensureCharge(c.Root, charge); err != nil {
+			return "", err
+		}
+	}
 	releaseDemand()
 	started := c.Clock.Now()
 	copied := int64(0)
@@ -650,6 +674,7 @@ func (c *ModelCache) ValidateInventory(models []Model) {
 		if m.LocalSource != "" {
 			continue
 		}
+		c.knownModels.Store(cacheKey(m), m)
 		if m.FileStore {
 			c.storedModels.Store(cacheKey(m), m)
 		}
@@ -742,3 +767,27 @@ func (c *ModelCache) noteCopyError(m Model, err error) {
 
 // Initialize prepares a standalone cache, as used by local measurement.
 func (c *ModelCache) Initialize() error { return c.init() }
+
+func (c *ModelCache) rebuildable(ctx context.Context, key string) bool {
+	value, ok := c.knownModels.Load(key)
+	if !ok {
+		return false
+	}
+	m := value.(Model)
+	if m.FileStore {
+		if c.FileClient == nil {
+			return false
+		}
+		if len(m.Files) == 0 {
+			return c.FileClient.HasFile(ctx, FileRef{SHA256: m.SHA256, SizeBytes: m.SizeBytes}) == nil
+		}
+		for _, f := range m.Files {
+			if c.FileClient.HasFile(ctx, FileRef{SHA256: f.SHA256, SizeBytes: f.SizeBytes}) != nil {
+				return false
+			}
+		}
+		return true
+	}
+	source, err := c.source(m)
+	return err == nil && verifyModelContext(ctx, source, m) == nil
+}

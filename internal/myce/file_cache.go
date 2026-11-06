@@ -138,14 +138,16 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 		if (FileRef{SHA256: hash}).validate() != nil {
 			return errors.New("unknown file in cache; refusing eviction")
 		}
-		// These are disposable cache copies, never checkpoint/result custody.
-		// Each attempt owns a private materialization. Queue expiry or a
-		// transient HEAD failure for an unrelated victim must not block new
-		// inputs. The requested blob was verified above before any eviction.
+		// A hash-shaped pathname alone is not deletion authority. Preserve
+		// malformed, partial and last-copy bytes when their original is unavailable.
+		if !c.rebuildable(ctx, filepath.Join(root, v.name), v.size) {
+			continue
+		}
 		operation = "cache_evict"
 		if err = os.Remove(filepath.Join(root, v.name)); err != nil {
 			return err
 		}
+		c.budgets.forget(c.Root, v.name)
 		used -= v.size
 		free, err = diskFree(root)
 		if err != nil {
@@ -247,4 +249,12 @@ func validateJobFiles(s Spec) error {
 		all[n] = FileRef{SHA256: strings.Repeat("0", 64)}
 	}
 	return all.validate()
+}
+
+func (c *FileCache) rebuildable(ctx context.Context, path string, size int64) bool {
+	ref := FileRef{SHA256: filepath.Base(path), SizeBytes: size}
+	if ref.validate() != nil {
+		return false
+	}
+	return verifyFile(ctx, path, ref) == nil && c.Client.HasFile(ctx, ref) == nil
 }

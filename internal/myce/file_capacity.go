@@ -162,9 +162,6 @@ func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[stri
 	}
 	// Automatic store growth follows physical capacity; authoritative bytes are
 	// never candidates for cache eviction. Existing upload/output ledgers bind.
-	if err := s.observeControl(ctx, disk.Volume); err != nil {
-		return status, payloads, err
-	}
 	limit, err := s.budgets.limitReading(s.root, cacheBytes(status.UsedBytes), s.limit, s.clock.Now(), disk)
 	if err != nil {
 		return status, payloads, err

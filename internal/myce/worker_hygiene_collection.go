@@ -205,10 +205,15 @@ func (c *FileCache) collect(ctx context.Context) (r CacheCollection) {
 			r.Error = "file_cache_collect_changed"
 			return r
 		}
+		if !c.rebuildable(ctx, path, info.Size()) {
+			r.Protected = true
+			continue
+		}
 		if err := os.Remove(path); err != nil {
 			r.Error = "file_cache_collect_failed"
 			return r
 		}
+		c.budgets.forget(c.Root, v.name)
 		r.Bytes -= info.Size()
 		r.Reclaimed += info.Size()
 	}

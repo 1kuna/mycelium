@@ -425,7 +425,9 @@ cache limits retain their behavior. Extensions can receive models as job inputs.
 
 `--file-cache` and `--file-cache-bytes` configure each hypha's reproducible cache
 (automatic from disk headroom by default, under its state folder). It counts complete and partial bytes,
-evicts least-recently-used entries, and refuses a file larger than its allowance.
+prefers cold verified entries with an independently verifiable original, and
+refuses a file larger than its allowance. Unavailable originals retain their last
+cached copies.
 A private materialization keeps active jobs independent of eviction. Model
 loading/pre-copy uses the existing `--model-cache-bytes` admission and pin/loaded
 protection. Stored model eviction verifies that authoritative files remain before

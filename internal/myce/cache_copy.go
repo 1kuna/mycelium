@@ -24,6 +24,12 @@ type copyGovernor struct {
 	window          time.Duration
 	probe           bool
 	controlBaseline time.Duration
+	controlRange    time.Duration
+	controlPrevious time.Duration
+	controlSamples  int
+	measureControl  func() (time.Duration, error)
+	epoch           uint64
+	measuring       bool
 	controlSlow     bool
 }
 type copyStream struct {
@@ -47,6 +53,7 @@ func (g *copyGovernor) initLocked() {
 }
 func (g *copyGovernor) wakeLocked() { close(g.changed); g.changed = make(chan struct{}) }
 func (g *copyGovernor) resetLocked() {
+	g.epoch++
 	g.at, g.bytes = g.clock.Now(), 0
 	for s := range g.streams {
 		g.streams[s] = false
@@ -73,11 +80,34 @@ func (s *copyStream) progress(n int64) {
 			return
 		}
 	}
+	if g.measureControl != nil {
+		if g.measuring {
+			return
+		}
+		probe, epoch := g.measureControl, g.epoch
+		g.measuring = true
+		g.mu.Unlock()
+		duration, err := probe()
+		g.mu.Lock()
+		g.measuring = false
+		if epoch != g.epoch {
+			return
+		}
+		if err != nil {
+			g.controlSlow = true
+		} else {
+			g.controlLocked(duration)
+		}
+		elapsed = g.clock.Now().Sub(g.at)
+	}
 	rate := float64(g.bytes) / elapsed.Seconds()
 	if g.probe && len(g.streams) >= g.limit {
 		if rate <= g.rate || g.controlSlow {
 			g.limit = max(1, g.limit-1)
 			g.blockedAt = max(g.rate, rate)
+			if g.controlSlow && rate > g.rate {
+				g.blockedAt = 0
+			}
 		}
 		g.probe = false
 	} else if !g.probe && len(g.streams) == g.limit && g.waiters > 0 && rate > g.blockedAt && !g.controlSlow {
@@ -97,11 +127,31 @@ func (g *copyGovernor) control(d time.Duration) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.controlSlow = g.controlBaseline > 0 && d > g.controlBaseline
-	if !g.probe {
-		g.controlBaseline = d
+
+	g.controlLocked(d)
+}
+func (g *copyGovernor) controlLocked(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	ceiling := time.Duration(cacheSum(int64(g.controlBaseline), int64(g.controlRange)))
+	g.controlSlow = g.controlBaseline > 0 && d > ceiling
+	baseline := !g.probe || len(g.streams) < g.limit
+	// Two observations are the minimum pair that can measure natural variation.
+	if baseline && (g.controlSamples < 2 || !g.controlSlow) {
+		if g.controlPrevious > 0 {
+			delta := d - g.controlPrevious
+			if delta < 0 {
+				delta = -delta
+			}
+			g.controlRange = max(g.controlRange, delta)
+		}
+		g.controlBaseline, g.controlPrevious = d, d
+		g.controlSamples = min(2, g.controlSamples+1)
+		g.controlSlow = false
 	}
 }
+
 func (g *copyGovernor) acquire(ctx context.Context, explicit int) (*copyStream, error) {
 	g.mu.Lock()
 	g.initLocked()

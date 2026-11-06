@@ -2,10 +2,12 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 func (b *cacheBudgets) register(root string, maintain func(context.Context)) {
@@ -107,6 +109,9 @@ func (c *ModelCache) collectAdaptive(ctx context.Context) {
 		if c.active[v.key] != nil || c.Protected != nil && c.Protected(v.key) {
 			continue
 		}
+		if !c.rebuildable(ctx, v.key) {
+			continue
+		}
 		if c.discardContext(ctx, filepath.Join(c.Root, v.key)) != nil {
 			return
 		}
@@ -115,4 +120,37 @@ func (c *ModelCache) collectAdaptive(ctx context.Context) {
 		c.progress.Delete(v.key)
 		c.budgets.forget(c.Root, v.key)
 	}
+}
+
+// A cancellation tail keeps capacity and I/O custody until the exact recorded
+// helper has physically joined. Reuse the existing idle-maintenance lane to
+// discharge it; elapsed time alone never releases a reservation.
+func (c *EnvironmentCache) retainBuildStorage(path string, held *cacheReservation, releaseCopy func()) {
+	data, err := os.ReadFile(filepath.Join(path, "build-state.json"))
+	if err != nil {
+		return
+	}
+	var state workerState
+	if json.Unmarshal(data, &state) != nil || state.PID <= 0 || state.Identity == "" {
+		return
+	}
+	helper := workerStore{state: state}
+	var mu sync.Mutex
+	key := "pending-build:" + ID()
+	c.budgets.register(key, func(ctx context.Context) {
+		if ctx.Err() != nil || !mu.TryLock() {
+			return
+		}
+		defer mu.Unlock()
+		if helper.cleanupOrphanCustody(c.Clock, true) != nil {
+			return
+		}
+		held.release()
+		if releaseCopy != nil {
+			releaseCopy()
+		}
+		c.budgets.mu.Lock()
+		delete(c.budgets.maintenance, key)
+		c.budgets.mu.Unlock()
+	})
 }

@@ -14,7 +14,7 @@ type sharedInputStaging struct {
 	ctx       context.Context
 	withdrawn bool
 	progress  atomic.Int64
-	admission atomic.Bool
+	admission atomic.Int64
 }
 
 func sharedInputProgress(ctx context.Context) error {
@@ -79,7 +79,11 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 	ctx = context.WithValue(ctx, ioProgressKey{}, progress)
 	ctx = context.WithValue(ctx, cacheAdmissionKey{}, func(waiting bool) {
 		progress()
-		b.admission.Store(waiting)
+		if waiting {
+			b.admission.Add(1)
+		} else {
+			b.admission.Add(-1)
+		}
 	})
 	// A random build key uses the existing orphan-partial cleanup protocol.
 	// Its lock protects only disposable scratch, never execution admission.
@@ -134,7 +138,7 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 			}
 			return publish(stage)
 		case <-tick.C:
-			if !b.admission.Load() && c.cache.Clock.Now().Sub(time.Unix(0, b.progress.Load())) >= checkpointAvailabilityStallBudget {
+			if b.admission.Load() == 0 && c.cache.Clock.Now().Sub(time.Unix(0, b.progress.Load())) >= checkpointAvailabilityStallBudget {
 				return errCheckpointIOTimeout
 			}
 		}

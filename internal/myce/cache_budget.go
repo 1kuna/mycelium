@@ -10,10 +10,9 @@ import (
 	"time"
 )
 
-// cacheBudgets accounts for all cache kinds on each physical filesystem. Only
-// metadata probes run here, outside both this mutex and the queue mutex. A
-// reservation is charged in full until its writer joins: double counting bytes
-// already written is preferable to promising the same free blocks twice.
+// cacheBudgets learns reuse and coordinates all cache kinds with a host-local
+// filesystem ledger. Allocation scans and physical probes never hold q.mu.
+// Kernel-held claims retain pending blocks until their writer joins.
 // A zero authored limit means borrowing available capacity, never a saved size.
 type cacheBudgets struct {
 	mu           sync.Mutex
@@ -27,13 +26,12 @@ type cacheBudgets struct {
 	maintenance  map[string]func(context.Context)
 }
 type cacheVolume struct {
-	at                     time.Time
-	free, managed          int64
-	horizon                time.Duration
-	drain                  float64
-	domains                map[string]cacheDemand
-	control, controlGrowth int64
-	floor                  int64
+	at            time.Time
+	free, managed int64
+	horizon       time.Duration
+	drain         float64
+	domains       map[string]cacheDemand
+	floor         int64
 }
 type cacheDemand struct{ used, hot int64 }
 type cacheReuse struct {
@@ -85,10 +83,8 @@ func (b *cacheBudgets) forget(root, key string) {
 	b.mu.Unlock()
 }
 
-// sample predicts external consumption over the longest observed sampling or
-// writer interval. Managed growth is removed from that trend. The bootstrap is
-// one OS page: Bavail already excludes the filesystem's reserved blocks; a page
-// is the smallest control-write allocation we can justify before measurements.
+// Inventories describe eviction demand, independently of the host ledger
+// that measures owned allocations and physical free-space changes.
 func (b *cacheBudgets) sample(root string, used int64, now time.Time) (DiskReading, error) {
 	disk, err := b.probe(root)
 	if err != nil {
@@ -125,15 +121,6 @@ func (b *cacheBudgets) sampleReading(root string, used int64, now time.Time, dis
 func (b *cacheBudgets) floorLocked(v *cacheVolume) int64 {
 	return v.floor
 }
-func (b *cacheBudgets) pendingLocked(volume string) int64 {
-	n := int64(0)
-	for r := range b.reservations {
-		if r.volume == volume {
-			n = cacheSum(n, r.bytes)
-		}
-	}
-	return n
-}
 func (b *cacheBudgets) limit(root string, used, explicit int64, now time.Time) (int64, error) {
 	disk, err := b.probe(root)
 	if err != nil {
@@ -142,18 +129,26 @@ func (b *cacheBudgets) limit(root string, used, explicit int64, now time.Time) (
 	return b.limitReading(root, used, explicit, now, disk)
 }
 func (b *cacheBudgets) limitReading(root string, used, explicit int64, now time.Time, disk DiskReading) (int64, error) {
-	if _, err := b.sampleReading(root, used, now, disk); err != nil {
-		return 0, err
-	}
 	host, err := b.hostView(disk.Volume)
 	if err != nil {
 		return 0, err
 	}
 	defer host.close()
+	fresh, err := b.probe(root)
+	if err != nil {
+		return 0, err
+	}
+	if fresh.Volume != disk.Volume {
+		return 0, errors.New("cache volume changed during capacity observation")
+	}
+	disk = fresh
+	if _, err = b.sampleReading(root, used, now, disk); err != nil {
+		return 0, err
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	v := b.volumes[disk.Volume]
-	host.sample(disk, now, max(v.control, v.controlGrowth))
+	host.sample(disk, now, 0)
 	if err = host.save(); err != nil {
 		return 0, err
 	}
@@ -238,7 +233,6 @@ func (r *cacheReservation) release() {
 		// sample cannot mistake a completed download for external disk consumption.
 		host, err := b.hostView(r.volume)
 		if err == nil {
-			host.state.Horizon = max(host.state.Horizon, r.clock.Now().Sub(r.started))
 			// Clearing the record prevents future unrelated writes at a reused path
 			// from being credited to a dead operation.
 			err = writeCacheRecord(r.host, hostCacheClaim{})
@@ -273,11 +267,15 @@ func (b *cacheBudgets) copy(ctx context.Context, root string, clock Clock, expli
 		b.copies[disk.Volume] = g
 	}
 	b.mu.Unlock()
-	g.control(latency)
-	if waiting, ok := ctx.Value(cacheAdmissionKey{}).(func(bool)); ok {
-		waiting(true)
-		defer waiting(false)
+	g.mu.Lock()
+	g.measureControl = func() (time.Duration, error) {
+		start := clock.Now()
+		_, err := b.probe(root)
+		return clock.Now().Sub(start), err
 	}
+	g.mu.Unlock()
+	g.control(latency)
+	defer cacheWait(ctx)()
 	stream, err := g.acquire(ctx, explicit)
 	if err != nil {
 		return ctx, nil, err
@@ -287,38 +285,18 @@ func (b *cacheBudgets) copy(ctx context.Context, root string, clock Clock, expli
 
 type cacheCopyProgressKey struct{}
 type cacheAdmissionKey struct{}
+type cacheReservationKey struct{}
 
 func withoutCopyProgress(ctx context.Context) context.Context {
 	return context.WithValue(ctx, cacheCopyProgressKey{}, func(int64) {})
 }
 
-// The fixed SQLite/WAL/SHM set supplies measured control-write growth without
-// traversing payloads. Keep room for another observed growth burst; inability to
-// read these files never grants extra capacity.
-func (s *FileStore) observeControl(ctx context.Context, volume string) error {
-	if s.controlFiles.database == "" {
-		return nil
+func cacheWait(ctx context.Context) func() {
+	waiting, ok := ctx.Value(cacheAdmissionKey{}).(func(bool))
+	if !ok {
+		return func() {}
 	}
-	seen := map[[2]uint64]bool{}
-	total := uint64(0)
-	for _, file := range []string{s.controlFiles.database, s.controlFiles.wal, s.controlFiles.shared} {
-		n, err := storageAllocation(ctx, file, true, seen)
-		if err != nil {
-			return err
-		}
-		total = addDiskBytes(total, n)
-	}
-	s.budgets.mu.Lock()
-	defer s.budgets.mu.Unlock()
-	v := s.budgets.volumes[volume]
-	if v == nil {
-		v = &cacheVolume{domains: map[string]cacheDemand{}}
-		s.budgets.volumes[volume] = v
-	}
-	n := cacheBytes(total)
-	if v.control > 0 {
-		v.controlGrowth = max(v.controlGrowth, n-v.control)
-	}
-	v.control = n
-	return nil
+	waiting(true)
+	var once sync.Once
+	return func() { once.Do(func() { waiting(false) }) }
 }

@@ -900,6 +900,9 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 	defer func() {
 		if !c.ready(r.Key) {
 			if err := c.cleanupBuild(partial); err != nil {
+				if buildReservation != nil {
+					c.retainBuildStorage(partial, buildReservation, releaseBuildCopy)
+				}
 				// Transfer unconfirmed helper custody while .build still fences
 				// this receipt. An attempt must not release merely because its
 				// cancelled builder returned an ordinary command error.

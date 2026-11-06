@@ -480,6 +480,7 @@ func (q *Queue) Close() error {
 	q.mu.RUnlock()
 	if files != nil {
 		files.closeHostClaims()
+		defer files.hostControl.release()
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()

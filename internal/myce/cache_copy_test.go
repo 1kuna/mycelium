@@ -123,3 +123,35 @@ func TestCacheCopyAdmissionWaitIsNotSourceStall(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCacheCopyRejectsThroughputGainThatDelaysControl(t *testing.T) {
+	clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	latency := time.Millisecond
+	g := &copyGovernor{clock: clock, measureControl: func() (time.Duration, error) { return latency, nil }}
+	g.control(latency)
+	first, err := g.acquire(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.release()
+	g.mu.Lock()
+	g.waiters++
+	g.mu.Unlock()
+	clock.Advance(time.Second)
+	first.progress(100)
+	second, err := g.acquire(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.release()
+	g.mu.Lock()
+	g.waiters--
+	g.mu.Unlock()
+	latency = 10 * time.Millisecond
+	clock.Advance(time.Second)
+	first.progress(100)
+	second.progress(100)
+	if g.capacity() != 1 {
+		t.Fatal("throughput gain overrode measured control delay", g.capacity())
+	}
+}
