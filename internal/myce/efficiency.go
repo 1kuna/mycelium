@@ -264,11 +264,18 @@ func efficiencyBasis(j *Job) string {
 }
 func (q *Queue) refreshEfficiency() {
 	now := q.clock.Now()
+	releases := map[attemptKey]HostRelease{}
+	for _, r := range q.s.HostReleases {
+		if !r.Preparation {
+			releases[attemptKey{r.Job, r.Attempt, r.Session}] = r
+		}
+	}
 	for _, j := range q.liveJobs() {
 		if j.Efficiency == nil {
 			j.Efficiency = &JobEfficiency{Since: now, At: now, Work: profileMemoryIdentity(j), WaitSeconds: map[string]float64{}}
 		}
 		e := j.Efficiency
+		previousBasis := e.Rate.Basis
 		e.Rate = efficiencyRate{}
 		if j.State == "queued" && !cancelled(j) {
 			if e.Blocker == "" {
@@ -279,7 +286,8 @@ func (q *Queue) refreshEfficiency() {
 		} else {
 			e.Blocker = ""
 		}
-		if !batchReservesCapacity(j) {
+		release, hasRelease := releases[jobKey(*j)]
+		if !batchReservesCapacity(j) && (!hasRelease || release.Machine != j.Machine) {
 			continue
 		}
 		m := q.s.Machines[j.Machine]
@@ -287,6 +295,9 @@ func (q *Queue) refreshEfficiency() {
 			continue
 		}
 		e.Rate = efficiencyRate{Host: hostID(m), Basis: efficiencyBasis(j), ReservedMemoryGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), ReservedCPUCores: float64(j.Spec.Needs.cores()), ReservedDeviceGB: j.Spec.Needs.MemoryGB}
+		if !batchReservesCapacity(j) {
+			e.Rate = efficiencyRate{Host: release.Host, Basis: previousBasis, ReservedMemoryGB: release.HostChargeGB, ReservedCPUCores: float64(max(1, release.CPUCores)), ReservedDeviceGB: release.MemoryGB * float64(max(1, len(release.Devices)))}
+		}
 		sample := q.hostMemorySamples[j.Machine][jobKey(*j)]
 		if !sample.deviceAt.IsZero() && now.Before(sample.deviceAt.Add(deviceMemorySampleFreshFor)) {
 			gb := sample.deviceGB
@@ -366,6 +377,16 @@ func (q *Queue) refreshEfficiency() {
 			if owner := q.s.Machines[slot.Machine]; owner != nil && hostID(owner) == host && slotReservesMemory(slot) {
 				reservedDevice += q.slotMemory(slot)
 			}
+		}
+		for _, r := range q.s.HostReleases {
+			if r.Host != host || r.CPUOnly || r.Preparation {
+				continue
+			}
+			j := q.s.Jobs[r.Job]
+			if j != nil && j.Attempt == r.Attempt && j.Session == r.Session && batchReservesCapacity(j) {
+				continue
+			}
+			reservedDevice += r.MemoryGB * float64(max(1, len(r.Devices)))
 		}
 		h.Rate.ReservedDeviceGB = reservedDevice
 		if deviceCount > 0 && deviceKnown {
