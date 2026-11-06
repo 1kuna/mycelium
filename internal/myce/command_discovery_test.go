@@ -195,7 +195,8 @@ func TestCommandDiscoveryPreparesEveryMemberAndIsolatesSidecarFailure(t *testing
 	m.EnvironmentBuilder = true
 	check(t, q, m, nil)
 	s := discoverySpec()
-	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Environment: "helper", Command: []string{"helper"}}}
+	s.Run, s.Environment = RunSpec{}, Environment{}
+	s.Execution = &ExecutionSpec{Main: ExecutionMember{Command: []string{"main"}, Environment: "tools", MemoryGB: 0.25}, Sidecars: []NativeSidecar{{Name: "helper", Environment: "helper", Command: []string{"helper"}, MemoryGB: 0.25}}}
 	j := submit(t, q, s)
 	if len(j.CommandDiscovery.Targets) != 1 || j.CommandDiscovery.Targets[0].OS != "darwin" {
 		t.Fatal(j.CommandDiscovery)
@@ -224,6 +225,10 @@ func TestCommandDiscoveryPreparesEveryMemberAndIsolatesSidecarFailure(t *testing
 	requireState(t, q, j.ID, "queued")
 	if reason := q.environmentFailureWaitingReason(q.s.Jobs[j.ID], map[string]*Machine{m.ID: &m}); !strings.Contains(reason, "No solution found") {
 		t.Fatal("sidecar failure hidden", reason)
+	}
+	m.Environments = nil // Main eviction must not hide the known failed helper.
+	if got := check(t, q, m, nil); got.Job != nil || len(got.EnvironmentPlan) != 0 {
+		t.Fatal("rebuilding a failed candidate after main eviction", got)
 	}
 }
 
