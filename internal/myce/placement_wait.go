@@ -73,9 +73,14 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 					_, why = cpuCapacity(m)
 				}
 				if why == "" {
-					why = fmt.Sprintf("%d cores needed, %d unreserved of %d admitted (%d reserved; CPU utilization unknown)", candidate.Spec.Needs.cores(), m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
+					why = fmt.Sprintf("%d cores needed; %d cores unreserved of %d admitted (%d reserved; CPU utilization unknown)", candidate.Spec.Needs.cores(), m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
 				}
 				blocked = append(blocked, "CPU capacity: "+why)
+			}
+			// Permanent qualification also clears temporary availability. Such
+			// a host cannot serve this job just because its cores and RAM fit.
+			if m.Disabled != "" || m.Gone || m.Leaving || m.Recovering || availabilityBlocked(m) {
+				blocked = append(blocked, HyphaAvailability(m))
 			}
 			specific = specific || len(blocked) > 0
 			if why := hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB); why != "" {

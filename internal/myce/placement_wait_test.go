@@ -72,7 +72,7 @@ func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, reason := range []string{q.waitReason(q.s.Jobs[j.ID]), job(t, q, j.ID).Reason, receipt.Reason} {
-				for _, want := range []string{"arm-host: CPU capacity: 2 cores needed, 0 unreserved of 8 admitted", "amd-host: RAM envelope: 4.0 GiB needed, 0.5 GiB available"} {
+				for _, want := range []string{"arm-host: CPU capacity: 2 cores needed; 0 cores unreserved of 8 admitted", "amd-host: RAM envelope: 4.0 GiB needed, 0.5 GiB available"} {
 					if !strings.Contains(reason, want) {
 						t.Errorf("missing %q: %s", want, reason)
 					}
@@ -91,6 +91,31 @@ func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
 				t.Fatal("fitting peer did not admit queued work", got)
 			}
 		})
+	}
+}
+
+func TestQueuedReasonUnavailablePeerAndRAMShortage(t *testing.T) {
+	q, clock := fixture(t)
+	owner := cpuMachine("owner-host", "owner-host", "cpu", 8, 32)
+	owner.CapabilityProfile.Availability = &Availability{Mode: "daily", Available: false, Reason: "on battery", CheckedAt: clock.Now(), Signals: idleSignals()}
+	check(t, q, owner, nil)
+	ram := cpuMachine("ram-host", "ram-host", "cpu", 8, 0.5)
+	check(t, q, ram, nil)
+	j := submit(t, q, cpuSpec(2, 4))
+	clock.Advance(time.Second)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for _, reason := range []string{q.waitReason(q.s.Jobs[j.ID]), job(t, q, j.ID).Reason, q.statusWaitingReason(job(t, q, j.ID))} {
+		for _, want := range []string{"owner-host: hypha on battery", "ram-host: RAM envelope: 4.0 GiB needed, 0.5 GiB available"} {
+			if !strings.Contains(reason, want) {
+				t.Errorf("missing %q: %s", want, reason)
+			}
+		}
+	}
+	owner.CapabilityProfile.Availability.Available = true
+	if got := assignedJob(check(t, q, owner, nil)); got == nil || got.ID != j.ID {
+		t.Fatal("available peer did not admit queued work", got)
 	}
 }
 
