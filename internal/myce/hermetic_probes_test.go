@@ -50,6 +50,10 @@ func installSyntheticWorkerHost() {
 
 func TestRealProbeGuard(t *testing.T) {
 	for name, call := range map[string]func(){
+		"io-pressure": func() { _ = localIOPressure(RealClock{}) },
+		"resource-cpu": func() {
+			_, _ = localResourceCPU(context.Background(), nil, nil)
+		},
 		"profile":  func() { _ = LocalProfileProbe().Detect(context.Background(), Machine{GPU: "metal"}, ".", time.Time{}) },
 		"disk":     func() { _, _, _ = LocalProfileProbe().Disk(".") },
 		"identity": func() { _, _ = localExtensionIdentityProbe().Command(context.Background(), "nvidia-smi") },
