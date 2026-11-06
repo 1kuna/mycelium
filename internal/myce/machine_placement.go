@@ -218,7 +218,7 @@ func dockerSharesDevice(j *Job) bool {
 
 // A single-card batch attempt with a declared or learned memory vector may share
 // its card when memory fits (MY-30/31, #538). Model-server,
-// extension-check, fan-out, exploratory and multi-card work keeps the card, as
+// extension-check, exploratory and multi-card work keeps the card, as
 // does a hint naming no device memory: its device figure is only a default.
 func sharesDevice(j *Job) bool {
 	n, e := j.Spec.Needs, j.MemoryEnvelope
@@ -226,7 +226,7 @@ func sharesDevice(j *Job) bool {
 	// Host-only learning can retain a recipe default for device memory. Native
 	// and Docker attempts both keep the card until that vector is measured.
 	unstated = unstated || e != nil && e.Basis == "learned" && strings.Contains(e.Source, "GPU recipe default")
-	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && dockerSharesDevice(j) && j.Spec.ExtensionCheck == nil && j.Spec.FanOut == nil && len(j.AllocatedDevices) <= 1 && !unstated
+	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && dockerSharesDevice(j) && j.Spec.ExtensionCheck == nil && (j.Spec.FanOut == nil || fanOutDeviceAttempt(j)) && len(j.AllocatedDevices) <= 1 && !unstated
 }
 
 // XPU teardown can reset shared engines (#652). CUDA co-tenants can grow past
@@ -246,6 +246,8 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		return 0, false
 	}
 	n := 0
+	fanOut := fanOutDeviceAttempt(demand)
+	var holders []*Job
 	for _, j := range q.liveJobs() {
 		if j.ID == demand.ID || !batchOnTarget(j, m) || !batchReservesCapacity(j) {
 			continue
@@ -258,6 +260,8 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 			return 0, false
 		}
 		n++
+		fanOut = fanOut || fanOutDeviceAttempt(j)
+		holders = append(holders, j)
 	}
 	for _, r := range q.s.HostReleases {
 		if !q.batchReleaseOnTarget(r, m) {
@@ -266,6 +270,9 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		if j := q.s.Jobs[r.Job]; j == nil || r.Device == "" || len(r.Devices) > 1 || !sharesDevice(j) {
 			return 0, false
 		}
+	}
+	if joining && n > 0 && fanOut && !q.fanOutDeviceHeadroom(m, demand, holders) {
+		return 0, false
 	}
 	return n, true
 }

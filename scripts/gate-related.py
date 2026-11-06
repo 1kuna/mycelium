@@ -30,9 +30,9 @@ for source in ('file_socket_unix', 'file_socket_other'):
         'client_adaptive_test.go', 'file_transfer_test.go')
 
 # The non-Linux Xe probe withholds telemetry; Linux exercises the read-only PMU
-# implementation; portable device telemetry tests exercise missing evidence.
+# implementation; portable device and admission tests exercise missing evidence.
 SUPPLEMENTAL_CONSUMERS['internal/myce/xe_activity_other.go'] = (
-    'xe_activity_linux_test.go', 'device_telemetry_test.go')
+    'xe_activity_linux_test.go', 'device_telemetry_test.go', 'discrete_fanout_sharing_test.go')
 
 
 def changed_symbols(diff):
