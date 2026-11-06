@@ -52,6 +52,7 @@ type state struct {
 	MemoryExplorations     map[string]memoryExploration   `json:"memory_explorations,omitempty"`
 	StorageObservations    map[string]StorageObservation  `json:"storage_observations,omitempty"`
 	ExternalMemory         map[string]*externalMemoryRing `json:"external_memory,omitempty"`
+	HostLaunchMemory       map[string]*hostLaunchMemory   `json:"host_launch_memory,omitempty"`
 	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
 	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
 	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
@@ -1412,6 +1413,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptEnvironmentFailures(&m, old)
 		q.s.Machines[m.ID] = &m
+		q.recordHostLaunchMemory(&m, old)
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
 			cause := report.DockerCause
@@ -1871,6 +1873,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		r.ExecutionCause, r.Error = wallTimeCause(), wallTimeLimit
 	}
 	r.ExecutionCause = safeAttemptRuntimeCause(j, r.ExecutionCause)
+	q.recordColdProbeRefusal(j, r)
 	if r.ExecutionCause != nil && r.ExecutionCause.Operation == "input_staging" {
 		// Keep the durable reason as safe as the structured cause; Error may
 		// contain the original worker-supplied diagnostic name or private text.
