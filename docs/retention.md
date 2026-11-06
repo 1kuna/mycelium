@@ -76,6 +76,10 @@ immutable generations and copies/projects their histories after unlocking.
   their named payloads. They never expire job history. Recovered results without
   an explicit deadline remain protected. Seven-day defaults on an existing
   installation remain its saved policy until its owner changes them.
+  Older installers that require positive retention refuse a new zero-retention
+  saved config without changing it; omitting the zero to recover an old default
+  would silently weaken protection. Explicit positive saved policies retain the
+  supported installer/worker interoperability journey.
 - Publication six hours and attempt/Docker 24 hours: claims, references, measured
   publication delay and exact acknowledgement replace elapsed default authority.
   Unknown folders remain. Docker's automatic sentinel is the maximum representable
