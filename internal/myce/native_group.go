@@ -595,7 +595,7 @@ func (g *nativeGroup) cleanupProcesses(writer *os.File, retry bool) error {
 		}
 		tick.Stop()
 	} else if graceful {
-		g.p.stop(g.worker.Clock.Now(), acceleratorStopGrace(g.worker.AcceleratorStopGrace), false)
+		g.p.stopAfterExit(g.worker.Clock.Now(), acceleratorStopGrace(g.worker.AcceleratorStopGrace))
 		g.p.waitStopGrace(g.worker.Clock, g.supervisor.Process.Pid, g.supervisor.Process.Pid)
 	}
 	// Cancellation may arrive while the normal completion path starts its

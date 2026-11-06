@@ -92,7 +92,6 @@ func testGPUStopNative(t *testing.T, cooperative bool, stopPath string, directiv
 	grace := 10 * time.Second
 	if len(directives) > 0 {
 		grace = time.Duration(directives[0].GraceSeconds * float64(time.Second))
-		w.AcceleratorStopGrace = grace
 	}
 	clock := &manualWorkerClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
 	w.Clock = clock
