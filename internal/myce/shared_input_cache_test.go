@@ -197,7 +197,7 @@ func TestSharedInputsInterruptedStagingAndNASSizeGuard(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "bounded")
 	bad := ref
 	bad.SizeBytes = 1
-	if err := copySharedFile(ctx, filepath.Join(nas, "input"), target, bad); err == nil {
+	if err := cache.copySharedFile(ctx, filepath.Join(nas, "input"), target, bad); err == nil {
 		t.Fatal("wrong NAS size accepted")
 	}
 	if info, err := os.Stat(target); err == nil && info.Size() > bad.SizeBytes {

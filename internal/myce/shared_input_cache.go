@@ -296,13 +296,8 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		}
 		defer held.release()
 		releaseDemand()
-		copyCtx, releaseCopy, e := c.cache.budgets.copy(ctx, c.cache.Root, c.cache.Clock, 0)
-		if e != nil {
-			return e
-		}
-		defer releaseCopy()
 		doneWaiting()
-		if e = c.populateInput(context.WithValue(copyCtx, cacheReservationKey{}, held), s, nasRoot, stage); e != nil {
+		if e = c.populateInput(context.WithValue(ctx, cacheReservationKey{}, held), s, nasRoot, stage); e != nil {
 			return e
 		}
 		if c.beforePublish != nil {
@@ -376,15 +371,18 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 		if e != nil {
 			return e
 		}
-		if e = verifyFile(ctx, manifestPath, s.ref()); e != nil {
-			return e
-		}
-		f, e := os.Open(manifestPath)
-		if e != nil {
-			return e
-		}
-		b, e := io.ReadAll(io.LimitReader(contextReader{ctx, f}, s.SizeBytes+1))
-		e = errors.Join(e, f.Close())
+		var b []byte
+		e = c.copyInput(ctx, func(ctx context.Context) error {
+			if err := verifyFile(ctx, manifestPath, s.ref()); err != nil {
+				return err
+			}
+			f, err := os.Open(manifestPath)
+			if err != nil {
+				return err
+			}
+			b, err = io.ReadAll(io.LimitReader(contextReader{ctx, f}, s.SizeBytes+1))
+			return errors.Join(err, f.Close())
+		})
 		if e != nil {
 			return e
 		}
@@ -429,7 +427,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 				}
 			}
 			target := filepath.Join(dst, name)
-			if e := copySharedFile(ctx, source, target, ref); e != nil {
+			if e := c.copySharedFile(ctx, source, target, ref); e != nil {
 				return e
 			}
 			files[name] = ref
@@ -444,11 +442,13 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			if e != nil {
 				return e
 			}
-			if err = copySharedFile(ctx, source, target, s.ref()); err != nil {
+			if err = c.copySharedFile(ctx, source, target, s.ref()); err != nil {
 				return err
 			}
 		} else {
-			err = c.Client.DownloadFile(ctx, s.ref(), target)
+			err = c.copyInput(ctx, func(ctx context.Context) error {
+				return c.Client.DownloadFile(ctx, s.ref(), target)
+			})
 			if err != nil {
 				return err
 			}
@@ -461,7 +461,9 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			if err = c.chargeManifest(ctx, original.key(), planned, s.SizeBytes); err != nil {
 				return err
 			}
-			if err = unpackSharedArchive(ctx, target, dst, s.Archive, s.UnpackedBytes); err != nil {
+			if err = c.copyInput(ctx, func(ctx context.Context) error {
+				return unpackSharedArchive(ctx, target, dst, s.Archive, s.UnpackedBytes)
+			}); err != nil {
 				return err
 			}
 			if err = os.Remove(target); err != nil {
@@ -512,7 +514,19 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	return syncModelDirectoryContext(ctx, stage)
 }
 
-func copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
+// Copy admission covers data I/O, not source discovery or publication fences.
+// Short copies release their slots without needing a clock-driven throughput
+// epoch; fake-clock callers and paused publishers cannot retain a phantom load.
+func (c *SharedInputCache) copyInput(ctx context.Context, copy func(context.Context) error) error {
+	ctx, release, err := c.cache.budgets.copy(ctx, c.cache.Root, c.cache.Clock, 0)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return copy(ctx)
+}
+
+func (c *SharedInputCache) copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
@@ -540,6 +554,13 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) err
 	if !info.Mode().IsRegular() || info.Size() != ref.SizeBytes {
 		return errors.New("shared NAS file size/type differs from manifest")
 	}
+	// Resolve and open the source before taking a destination I/O slot. A
+	// blocked mount lookup must not serialize unrelated healthy inputs.
+	ctx, releaseCopy, err := c.cache.budgets.copy(ctx, c.cache.Root, c.cache.Clock, 0)
+	if err != nil {
+		return err
+	}
+	defer releaseCopy()
 	if err = os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
 	}
