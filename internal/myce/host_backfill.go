@@ -12,6 +12,29 @@ type hostBackfillDemand struct {
 	order   *candidateSet
 }
 
+// Wave executions finish too. The movement predicate deliberately excludes
+// them, but that is not a reason to hide their eventual RAM/core release from
+// admission. Parents describe demand; they never own execution capacity.
+func backfillFiniteExecution(j *Job) bool {
+	return j.Spec.Needs.Model == "" && j.Spec.FanOut == nil && j.Spec.ExtensionCheck == nil
+}
+
+func (q *Queue) backfillCandidates(j *Job, m, projected *Machine, inventory []*Machine) []*Job {
+	if j.Spec.FanOut != nil {
+		if candidate := q.fanOutCandidateWithResources(j, projected, nil, inventory); candidate != nil {
+			return []*Job{candidate}
+		}
+		return nil
+	}
+	if j.Batch != nil && j.Batch.Run {
+		if candidate := q.retryWaveCandidate(j, m); candidate != nil {
+			return []*Job{candidate}
+		}
+		return nil
+	}
+	return q.memoryCandidates(j, m)
+}
+
 // Select one currently usable target per demand, preferring immediate capacity
 // and then ordinary placement value. Busy cards, cold environments, missing
 // qualification, pressure and stale workers cannot withhold backfill. Only
@@ -24,7 +47,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	scan.hostBackfill = map[string]*hostBackfillDemand{}
 	demands := []*Job{}
 	for _, j := range q.liveJobs() {
-		if j.State == "queued" && finiteYieldJob(j) {
+		if j.State == "queued" && (backfillFiniteExecution(j) || j.Spec.FanOut != nil) {
 			demands = append(demands, j)
 		}
 	}
@@ -41,7 +64,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		room := m.FreeHostMemoryGB - m.hostReservationDebtGB
 		for _, running := range q.liveJobs() {
 			owner := q.s.Machines[running.Machine]
-			if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && running.Spec.Needs.cpuOnly() && finiteYieldJob(running) && batchReservesCapacity(running) {
+			if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && running.Spec.Needs.cpuOnly() && backfillFiniteExecution(running) && batchReservesCapacity(running) {
 				jobs = append(jobs, running)
 				room += q.hostJobCharge(running)
 			}
@@ -51,16 +74,34 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		projected.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, max(0, room))
 		projections[targetKey(m)] = &projected
 	}
+	// Keep dispatch's target order and global wave planner. Passing the entire
+	// projected inventory selects one wave/target rather than reserving every
+	// host independently for a fan-out parent's unscaled per-piece template.
+	inventory := make([]*Machine, 0, len(projections))
+	for _, m := range scan.machines {
+		if projected := projections[targetKey(m)]; projected != nil {
+			inventory = append(inventory, projected)
+		}
+	}
 	choices := []*hostBackfillDemand{}
 	orders := map[string]*candidateSet{}
 	for _, j := range demands {
 		var best *hostBackfillDemand
+		demandInventory := inventory
+		if j.Spec.FanOut != nil && j.FanOut != nil {
+			components, _ := q.fanOutComponents(j)
+			if len(planBatch(components, len(j.Spec.FanOut.Pieces)-j.FanOut.Next, j.Spec.Workload.Units)) > 0 {
+				// Dispatch can use capacity now: protect its actual wave plan,
+				// not a different host made attractive by projected releases.
+				demandInventory = scan.machines
+			}
+		}
 		for _, m := range scan.machines {
 			projected := projections[targetKey(m)]
 			if projected == nil || !q.placementAllowed(j, m) || !q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) || !q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
 				continue
 			}
-			for _, candidate := range q.memoryCandidates(j, m) {
+			for _, candidate := range q.backfillCandidates(j, m, projected, demandInventory) {
 				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !q.batchSlotFree(m, candidate) || !fits(candidate, projected, m.FreeMemoryGB) {
 					continue
 				}
