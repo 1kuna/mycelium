@@ -66,7 +66,7 @@ func TestFairSharingUsesClockAndExplains(t *testing.T) {
 		t.Fatalf("wanted atlas, got %+v", got)
 	}
 	c.Advance(24 * time.Hour)
-	if got := decayed(FairUsage{Seconds: 100, At: c.Now().Add(-24 * time.Hour)}, c.Now()); math.Abs(got-50) > 1e-9 {
+	if got := decayed(FairUsage{Seconds: 100, At: c.Now().Add(-24 * time.Hour), HorizonSeconds: (24 * time.Hour).Seconds()}, c.Now()); math.Abs(got-50) > 1e-9 {
 		t.Fatal(got)
 	}
 }

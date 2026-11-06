@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
@@ -52,6 +51,7 @@ type usageSample struct {
 	// existing started-work GPU-hour semantics.
 	Tier, Family                         string
 	Fair                                 float64
+	FairSince                            time.Time
 	Busy, Idle, Pinned, Memory, Observed float64
 }
 
@@ -70,23 +70,33 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 				busy = 1
 				active++
 			}
-			rows = append(rows, usageSample{Project: j.Spec.Project, Job: j.ID, Memory: j.Spec.Needs.MemoryGB, Busy: busy, Fair: fair, Tier: q.priorityMatch(j.Spec).Tier, Family: fairResourceFamily(j.Spec)})
+			since := q.s.UsageAt
+			if j.AssignedAt != nil {
+				since = *j.AssignedAt
+			}
+			rows = append(rows, usageSample{FairSince: since, Project: j.Spec.Project, Job: j.ID, Memory: j.Spec.Needs.MemoryGB, Busy: busy, Fair: fair, Tier: q.priorityMatch(j.Spec).Tier, Family: fairResourceFamily(j.Spec)})
 			if !j.Spec.Needs.cpuOnly() {
 				allocated++
 			}
 		}
 	}
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	for _, c := range q.calls {
 		if c.Machine == m.ID && (m.Devices == nil || c.Device == m.Device && m.GPU != "cpu") && c.Error == "" {
 			key := fairUsageKey(q.priorityMatch(callJob(c).Spec).Tier, c.Project, c.Model)
-			if !seen[key] {
-				model, _ := q.model(c.Model)
-				rows = append(rows, usageSample{Project: c.Project, Model: c.Model, Memory: model.MemoryGB, Busy: 1, Fair: 1, Tier: q.priorityMatch(callJob(c).Spec).Tier, Family: "gpu"})
-				active++
-				allocated++
-				seen[key] = true
+			since := q.s.UsageAt
+			if c.StartedAt != nil {
+				since = *c.StartedAt
 			}
+			if index, exists := seen[key]; exists {
+				rows[index].FairSince = minTime(rows[index].FairSince, since)
+				continue
+			}
+			model, _ := q.model(c.Model)
+			rows = append(rows, usageSample{FairSince: since, Project: c.Project, Model: c.Model, Memory: model.MemoryGB, Busy: 1, Fair: 1, Tier: q.priorityMatch(callJob(c).Spec).Tier, Family: "gpu"})
+			active++
+			allocated++
+			seen[key] = len(rows) - 1
 		}
 	}
 	if active > 0 {
@@ -121,6 +131,10 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 					row.Project = slot.Project
 					row.Tier = q.priorityMatch(q.slotSpec(slot)).Tier
 					row.Family, row.Fair = "gpu", 1
+					row.FairSince = q.s.UsageAt
+					if slot.Interval != nil && slot.Interval.AssignedAt != nil {
+						row.FairSince = *slot.Interval.AssignedAt
+					}
 					allocated++
 				}
 				rows = append(rows, row)
@@ -164,9 +178,7 @@ func (q *Queue) accountUsage(now time.Time) {
 	if q.s.FairUsage == nil {
 		q.s.FairUsage = map[string]FairUsage{}
 	}
-	for project, u := range q.s.FairUsage {
-		q.s.FairUsage[project] = FairUsage{Seconds: decayed(u, now), At: now}
-	}
+	q.accountFairHistory(from, now)
 	from = maxTime(from, now.Add(-90*24*time.Hour))
 	for _, m := range q.plannerMachines() {
 		if m.Gone || q.unreported[m.ID] || m.MemoryError != "" {
@@ -190,15 +202,6 @@ func (q *Queue) accountUsage(now time.Time) {
 				r.Memory *= seconds
 				r.Observed *= seconds
 				q.usageWrites = append(q.usageWrites, r)
-				if r.Fair > 0 && r.Project != "" {
-					key := fairUsageKey(r.Tier, r.Family, r.Project)
-					u := q.s.FairUsage[key]
-					k := math.Ln2 / FairHalfLife.Seconds()
-					credit := (1 - math.Exp(-k*seconds)) / k * math.Exp(-k*now.Sub(stop).Seconds()) * r.Fair
-					u.Seconds += credit
-					u.At = now
-					q.s.FairUsage[key] = u
-				}
 			}
 			start = stop
 		}

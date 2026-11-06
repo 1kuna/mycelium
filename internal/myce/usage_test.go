@@ -41,7 +41,15 @@ func TestUsageRecordingBusyIdleAndDecay(t *testing.T) {
 		t.Fatal(r)
 	}
 	u := q.s.FairUsage[fairUsageKey("experiment", "gpu", "atlas")].Seconds
-	if u <= 119 || u >= 120 {
+	// Each covered 30s interval uses the allocation age as its measured
+	// horizon, followed by 30s idle decay on the last 120s horizon.
+	want := 0.0
+	for _, horizon := range []float64{30, 60, 90, 120} {
+		k := math.Ln2 / horizon
+		want = want*math.Exp(-k*30) + -math.Expm1(-k*30)/k
+	}
+	want *= math.Exp2(-30.0 / 120)
+	if math.Abs(u-want) > 1e-9 {
 		t.Fatal("decaying integral", u)
 	}
 	var count int

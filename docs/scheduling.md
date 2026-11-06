@@ -278,8 +278,24 @@ It totals those projects' recent usage, computes each project's weighted share,
 and selects the project with the largest deficit (share minus usage). Model and
 environment readiness, deadlines, front-of-line retries, and waiting time break
 ties within the selected project. Across projects, equal usage favors fewer
-active allocations per weight before warmth. Usage decays continuously with a
-24-hour half-life and is keyed by stable tier name, resource family and project.
+active allocations per weight before warmth. Usage is keyed by stable tier
+name, resource family and project. Its exponential history horizon follows the
+current demand/service cycle: the larger of the sum of oldest waiting ages
+(once per ready, uncapped project) and the longest observed active allocation
+age in that tier/resource family. The sum retains a full round as contenders
+grow; many tiny jobs from one project cannot inflate it by their count. Each
+accounting interval uses that measured horizon for every project in the ledger,
+including absent projects. Idle ledgers keep decaying on their last measured
+cycle. Old persisted usage without a measured horizon is preserved until local
+demand or service supplies one; no daily half-life is guessed.
+
+A fresh short burst can shorten the retained history; sustained service or
+long waits lengthen it. While a project waits and competitors keep receiving
+finite allocations, its old debt decays and their new service accumulates,
+allowing the waiter to regain a turn. No fleet-tuned time floor, ceiling or
+reporting-retention cutoff controls this history. The separately retained
+90-day usage report is unchanged. Historical usage is an admission signal,
+not a promise of capacity on incompatible or occupied resources.
 GPU device-seconds and CPU core-seconds use separate accounting families. Assigned batch preparation and model loading charge their owning
 demand once, as do calls sharing a model allocation. Idle models/pins do not
 consume fair usage. Running work is accounted before each scheduling decision.
@@ -314,7 +330,14 @@ current owner policy, edit its `projects` mapping, and import it with
 change an existing policy.
 
 `myce status` and the page show cap or fairness reasons, for example:
-`transcribe goes first (sim is ahead of its fair share)`. NAS and machine fit failures
+`transcribe goes first (sim is ahead of its fair share)`. The reason also reports
+retained resource-seconds, the weighted share among fitting competing projects,
+signed debt (positive means ahead, negative means behind), the measured horizon,
+aggregate project wait age and observed service age. A horizon of zero means no
+local cycle has yet been observed. The horizon is shared across a tier/resource
+family; fit/cap filtering still determines the projects used for each target
+comparison. CPU seconds are core-seconds; GPU seconds are device-seconds.
+NAS and machine fit failures
 remain visible. The page is available at the queue root URL; it uses no external
 assets, frontend build, or fleet token. Like the existing page, it is read-only
 and visible to anyone who can reach that URL. The API remains token-protected.
