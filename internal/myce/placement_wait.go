@@ -104,7 +104,13 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 		return ""
 	}
 	slices.Sort(reasons)
-	return strings.Join(slices.Compact(reasons), "; ")
+	reason := strings.Join(slices.Compact(reasons), "; ")
+	if len(j.Spec.AllowedMachines) > 0 {
+		// Preserve authored placement context when a pinned host's temporary
+		// blocker is more specific than the ordinary allowed-machine wait.
+		reason = "waiting for allowed machines: " + strings.Join(j.Spec.AllowedMachines, ", ") + "; " + reason
+	}
+	return reason
 }
 
 // Occupancy is not RAM pressure. Explain the same sharing/release gate used by
