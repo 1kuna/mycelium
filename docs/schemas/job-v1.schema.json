@@ -2280,6 +2280,16 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "startup_timing": {
+          "items": {
+            "$ref": "#/$defs/StartupPhase"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "state": {
           "enum": [
             "queued",
@@ -4428,6 +4438,38 @@
       "required": [
         "operation",
         "error"
+      ],
+      "type": "object"
+    },
+    "StartupPhase": {
+      "properties": {
+        "calls": {
+          "type": "integer"
+        },
+        "finished_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "sidecar": {
+          "type": "integer"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "phase",
+        "calls",
+        "seconds",
+        "started_at",
+        "finished_at"
       ],
       "type": "object"
     },

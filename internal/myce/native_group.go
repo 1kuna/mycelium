@@ -431,6 +431,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 				r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))
 			}
 		}
+		r.StartupTiming = w.startup.snapshot()
 		saveErr := saveWorkerJSON(g.dir, identity+".result.json", r)
 		p.done <- workerFinish{result: r, err: saveErr}
 	}()
@@ -442,6 +443,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 // Only the initial launch updates worker state; later groups remain in the same
 // durable attempt custody so the worker loop retains sole ownership of state.
 func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*os.File, error) {
+	defer g.worker.startup.begin("native_supervisor", 0)()
 	g.p.mu.Lock()
 	defer g.p.mu.Unlock()
 	if err := g.ctx.Err(); err != nil {
@@ -668,6 +670,15 @@ func environmentList(env map[string]string) []string {
 }
 
 func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]string, dir string, output *os.File) error {
+	component := 0
+	for i, member := range g.members {
+		if member == m && m.Name != "main" {
+			component = i + 1
+			break
+		}
+	}
+	defer g.worker.startup.begin("native_member_launch", component)()
+
 	if err := g.worker.verifyDevice(); err != nil {
 		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}
@@ -741,7 +752,10 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if err = g.saveLocked(); err != nil {
 		return err
 	}
-	if err = cmd.Start(); err != nil {
+	finishProcess := g.worker.startup.begin("process_start", component)
+	err = cmd.Start()
+	finishProcess()
+	if err != nil {
 		return g.recordInfrastructureLocked(launchFailed, m.Name, "", err)
 	}
 	m.cmd = cmd
@@ -830,8 +844,10 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 	// Acquire all helper environments before starting any payload; hold cache use
 	// protections until every member has exited (the outer goroutine defers release).
 	roots := map[string]string{}
-	for _, side := range j.Spec.Run.Sidecars {
+	for i, side := range j.Spec.Run.Sidecars {
+		finishEnvironment := g.worker.startup.begin("environment_acquire", i+1)
 		root, release, err := g.sidecarEnvironment(j, side, mainEnvironment)
+		finishEnvironment()
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				err = g.recordInfrastructure(environmentFailed, side.Name, "", err)
@@ -945,7 +961,10 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			if err != nil {
 				return err, true
 			}
-			if err := g.waitReady(g.members[i], port, *side.Readiness); err != nil {
+			finishReady := g.worker.startup.begin("sidecar_readiness", i+1)
+			readyErr := g.waitReady(g.members[i], port, *side.Readiness)
+			finishReady()
+			if err := readyErr; err != nil {
 				if errors.Is(err, errNativePortCollision) {
 					return err, false
 				}

@@ -241,6 +241,41 @@ and `started_at`, allowing for clock differences between worker and queue.
 Upgrade the queue before workers that report this field; older queues reject
 unknown request fields.
 
+**Next release:** per-job JSON also includes `startup_timing`, a list of
+completed worker-clock phase observations for the current exact attempt.
+Each entry has a fixed `phase`, a one-based `sidecar` ordinal (omitted for the
+main process/attempt), cumulative `calls` and `seconds`, and the first
+`started_at` / latest `finished_at`. Repeated preparation within the same attempt
+retains its cost; a new execution resets the observations. Completed observations
+survive worker/queue recovery. Incomplete intervals and older workers remain
+unknown, rather than being assigned zero. Failed calls are included.
+
+The native extension path observes `extension_preparation` (frozen source and
+qualification checks, lowering and assets), `shared_input_staging`,
+`input_staging` (the actual detached private-copy operation),
+`checkpoint_preparation`, `environment_acquire` (prepared-cache acquisition),
+`native_supervisor`, `native_member_launch`, `process_start` (OS process creation),
+`launch_authorization`, `start_authorization` and `sidecar_readiness` (member-launch completion
+to observed HTTP health, including remaining wrapper/import/verification/load
+costs). Main-process application initialization after exec is not observed by
+these worker timers. Docker lifecycle readiness retains its separate telemetry.
+`shared_input_staging` measures acquisition calls, including waits; a detached
+cache operation can outlive one call. Private `input_staging` instead follows
+the detached operation through completion, not the later retry consuming it.
+
+Intervals can overlap: `native_member_launch` includes authorizations and OS
+process creation; `extension_preparation` can include asset environment
+acquisition. Do not sum nested phases into total startup. With repeated calls,
+the first-to-last interval includes gaps, while `seconds` sums only measured
+calls. Compare worker durations directly; comparing their timestamps with queue
+`assigned_at` / `started_at` additionally requires clock-offset evidence.
+The Started authorization precedes main launch; it is not an application-ready
+timestamp. Pure model load remains **unknown** without model-loader start/end
+markers from the application; sidecar readiness alone cannot separate hashing,
+imports, model loading and warm-up. These observations never authorize launch,
+release resources, alter qualification, or establish output parity. Upgrade the
+queue before workers that report the additive request field.
+
 Running job reads and status rows include `liveness`, also retained on the exact
 entry in `copies` (attempt, machine and session). **Available in the next fleet
 release:** this worker observation requires no application reporter, log output

@@ -530,6 +530,7 @@ type Job struct {
 	PreemptionPlacement   *PreemptionPlacement         `json:"preemption_placement,omitempty"`
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
 	AssignedAt            *time.Time                   `json:"assigned_at,omitempty"`
+	StartupTiming         []StartupPhase               `json:"startup_timing,omitempty"`
 	InputsStagedAt        *time.Time                   `json:"inputs_staged_at,omitempty"` // Worker clock; diagnostic only, scoped to this attempt.
 	FinishedAt            *time.Time                   `json:"finished_at,omitempty"`
 	QueueOrder            int                          `json:"queue_order,omitempty"`
@@ -740,9 +741,10 @@ type AttemptReport struct {
 	CurrentHostMemory *CurrentHostMemory `json:"current_host_memory,omitempty"`
 	DockerCause       *RuntimeCause      `json:"docker_cause,omitempty"`
 	Execution
-	InputsStagedAt *time.Time `json:"inputs_staged_at,omitempty"`
-	Session        string     `json:"session"`
-	Started        bool       `json:"started,omitempty"`
+	StartupTiming  []StartupPhase `json:"startup_timing,omitempty"`
+	InputsStagedAt *time.Time     `json:"inputs_staged_at,omitempty"`
+	Session        string         `json:"session"`
+	Started        bool           `json:"started,omitempty"`
 }
 
 // AttemptDirective carries one assignment or control decision for an exact key.
@@ -762,6 +764,7 @@ type Result struct {
 	Resources                 *AttemptResources   `json:"resources,omitempty"`
 	FinalCheckpointGeneration *int64              `json:"final_checkpoint_generation,omitempty"`
 	StoragePeak               *AttemptStoragePeak `json:"storage_peak,omitempty"`
+	StartupTiming             []StartupPhase      `json:"startup_timing,omitempty"`
 	InputsStagedAt            *time.Time          `json:"inputs_staged_at,omitempty"`
 	Diagnostics               *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	PriorityStop              *PriorityPreemption `json:"priority_stop,omitempty"`

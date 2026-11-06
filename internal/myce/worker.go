@@ -26,6 +26,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	startup              *startupTimings
 	hygieneCollector     *workerHygieneCollector
 	hygieneWire          *workerHygieneWire
 	unifiedMemoryWire    *workerUnifiedMemoryWire
@@ -402,6 +403,13 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
+	execution := Execution{ID: j.ID, Attempt: j.Attempt}
+	if s.startup == nil || s.startupExecution.ID != j.ID || s.startupExecution.Attempt != j.Attempt || s.startupSession != j.Session {
+		s.startup = &startupTimings{clock: w.Clock, phases: slices.Clone(j.StartupTiming)}
+		s.startupExecution, s.startupSession = execution, j.Session
+	}
+	w.startup = s.startup
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -432,7 +440,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if reason := w.storageRootReason(&j); reason != "" {
 		return nil, s.startFailure(j, launchRefused, errors.New(reason))
 	}
+	finishExtension := w.startup.begin("extension_preparation", 0)
 	extensionEnv, extensionRelease, extensionErr := w.prepareExtensionExecution(&j)
+	finishExtension()
 	if extensionErr != nil {
 		return nil, extensionErr
 	}
@@ -445,7 +455,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err := s.warnNativeIsolation(&j); err != nil {
 		return nil, err
 	}
+	finishShared := w.startup.begin("shared_input_staging", 0)
 	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(context.WithValue(ctx, sharedInputOwnerKey{}, s), j)
+	finishShared()
 	if sharedErr != nil {
 		if errors.Is(sharedErr, errCheckpointIOPending) {
 			return nil, fmt.Errorf("%w: shared input copy pending", errWorkerCheckpoint)
@@ -467,6 +479,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if !j.Spec.Run.Docker || dockerFileJob(j.Spec) || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j)) > 0 || sharedReaders(j.Spec) {
 		value := j
 		staged, err := s.extensionFiles.runBounded(ctx, attemptCheckpoint(j), func() (stagedInputs, error) {
+			finishStaging := w.startup.begin("input_staging", 0)
+			defer finishStaging()
 			// Keep the slot until the filesystem call really returns, even after
 			// this attempt has released. Two copies inside one stage remain allowed.
 			if s.inputStaging != nil && !s.inputStaging.CompareAndSwap(false, true) {
@@ -531,7 +545,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	var checkpoint string
 	var err error
 	if needsCheckpoint(&j) {
-		checkpoint, err = s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (string, error) { return prepare(j) }, false)
+		checkpoint, err = s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (string, error) {
+			defer w.startup.begin("checkpoint_preparation", 0)()
+			return prepare(j)
+		}, false)
 		if err == nil {
 			err = ctx.Err()
 		}
@@ -563,9 +580,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 		r.readyOnly = j.Spec.extensionJob() || w.Machine.SharedHost != nil
 		buildCtx := context.WithValue(ctx, preparationCustodyKey{}, s.retainPreparation)
+		finishEnvironment := w.startup.begin("environment_acquire", 0)
 		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(buildCtx, func() error {
 			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), r)
+		finishEnvironment()
 		if err != nil {
 			return nil, s.startFailure(j, environmentFailed, err)
 		}
@@ -814,7 +833,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		output.Close()
 		return nil, s.startFailure(j, launchRefused, err)
 	}
-	if err = cmd.Start(); err != nil {
+	finishProcess := w.startup.begin("process_start", 0)
+	err = cmd.Start()
+	finishProcess()
+	if err != nil {
 		output.Close()
 		return nil, s.startFailure(j, launchFailed, err)
 	}
@@ -934,7 +956,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			p.outcome.Infrastructure = recorded.facts.Infrastructure
 		}
 	}
-	result := Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	result := Result{StartupTiming: w.startup.snapshot(), InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	extensionStarted = true
 	sharedStarted = true

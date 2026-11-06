@@ -152,6 +152,13 @@ independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
 
+From the next release, `myce status --json JOB_ID` includes `startup_timing`
+for completed worker preparation phases on the exact attempt. Read phase
+`seconds` and `calls`, with one-based `sidecar` ordinals; missing phases are
+unknown. Nested intervals overlap and must not be summed. Sidecar readiness
+includes wrapper verification/imports/loading/warm-up, so pure model-load cost
+needs application start/end markers. See [startup observations](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
+
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
 negative behind), the measured history horizon, weighted oldest project-wait
