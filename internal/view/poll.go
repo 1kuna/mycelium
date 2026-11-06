@@ -34,9 +34,9 @@ func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) 
 //     occupies the status path at most a tenth of the time however slow the
 //     queue is. A slow read lengthens the next wait at once; faster reads
 //     bring it back down gradually.
-//   - failures double the wait, up to maxBackoff, so a recovered queue shows
-//     up again within a short recording; a 429's Retry-After always wins,
-//     even beyond that.
+//   - failures add a doubling backoff, capped at maxBackoff so a recovered
+//     queue shows up again within a short recording. The cap never lowers
+//     the duty wait, and a 429's Retry-After always wins, even beyond it.
 type pacer struct {
 	floor, maxBackoff time.Duration
 	duty              float64
@@ -56,16 +56,20 @@ func (p *pacer) next(latency, retryAfter time.Duration, failed bool) time.Durati
 	} else {
 		p.smoothed = (p.smoothed*7 + latency*3) / 10
 	}
+	// The duty floor always holds, for failures too: a read that took 4 s
+	// waits at least 36 s whatever the backoff says.
+	floor := max(p.floor, time.Duration(p.duty*float64(p.smoothed)))
 	if !failed {
 		p.failures = 0
-		return max(p.floor, time.Duration(p.duty*float64(p.smoothed)))
+		return floor
 	}
 	p.failures++
-	d := max(p.floor, time.Duration(p.duty*float64(p.smoothed)))
-	for i := 0; i < p.failures && d < p.maxBackoff; i++ {
-		d *= 2
+	// Only the exponential component is capped.
+	backoff := p.floor
+	for i := 0; i < p.failures && backoff < p.maxBackoff; i++ {
+		backoff *= 2
 	}
-	return max(min(d, p.maxBackoff), retryAfter)
+	return max(floor, min(backoff, p.maxBackoff), retryAfter)
 }
 
 // rateLimited carries a 429's Retry-After.
@@ -110,10 +114,14 @@ func (u UpstreamReader) read(ctx context.Context) (statusDoc, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+u.Token)
 	req.Header.Set("User-Agent", u.UserAgent)
-	hc := u.HTTP
-	if hc == nil {
-		hc = &http.Client{Timeout: 10 * time.Second}
+	// A copy that never follows redirects: a redirect could otherwise turn the
+	// one cheap default read into another (for example ?detail=full) or a chain.
+	hc := &http.Client{Timeout: 10 * time.Second}
+	if u.HTTP != nil {
+		copied := *u.HTTP
+		hc = &copied
 	}
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	res, err := hc.Do(req) // the transport negotiates and decodes gzip
 	if err != nil {
 		return statusDoc{}, err

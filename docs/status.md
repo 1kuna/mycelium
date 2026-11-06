@@ -2014,8 +2014,11 @@ myce view                      # installed config, or --queue URL with MYCE_TOKE
 myce view --anonymize          # generic labels for recordings and screenshots
 ```
 
-It prints a local address (loopback by default; `--listen` chooses another) and
-runs only on the computer where you start it, never in the queue process. It
+It prints a local address and runs only on the computer where you start it,
+never in the queue process. It listens on loopback by default and then refuses
+requests that name any other host. The page has no sign-in: if you choose a
+non-loopback `--listen` address, anyone who can reach it can watch the stream
+(names included, unless `--anonymize`), though never the token or any write. It
 is an ordinary status client:
 
 - It reads only the default `GET /api/status`, the shared one-second snapshot.
@@ -2025,8 +2028,9 @@ is an ordinary status client:
   open page shares that read.
 - It waits at least a second between reads (the snapshot's sharing period) and
   at least nine times the last read's duration, so a slow queue is read less
-  often. Failures back off, doubling to 30 s; a 429's `Retry-After` is always
-  honoured, even beyond that.
+  often; this holds for failed reads too. Failures add a backoff doubling to
+  30 s; a 429's `Retry-After` is always honoured, even beyond that. Redirects
+  are never followed.
 - Silence is learned from each machine's own heartbeat cadence; a machine
   already gone when the view opened is not drawn.
 

@@ -80,6 +80,42 @@ func TestPacerAdaptsToLatencyFailuresAndRetryAfter(t *testing.T) {
 	if d := q.next(10*time.Millisecond, 0, false); d > 2*time.Second {
 		t.Fatalf("a success resets the backoff, got %s", d)
 	}
+	// The backoff cap never undercuts the duty wait for a slow failure.
+	r := newPacer()
+	if d := r.next(4003*time.Millisecond, 0, true); d < 36027*time.Millisecond {
+		t.Fatalf("a failed 4.003 s read must wait at least 9x its latency, got %s", d)
+	}
+	for i := 0; i < 5; i++ {
+		if d := r.next(10*time.Second, 0, true); d < 90*time.Second {
+			t.Fatalf("repeated 10 s timeouts must keep the 10%% duty bound, got %s", d)
+		}
+	}
+}
+
+// A redirect from the queue is never followed: the only request stays the
+// default status read.
+func TestUpstreamNeverFollowsRedirects(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	queue := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.URL.RequestURI())
+		mu.Unlock()
+		http.Redirect(w, r, "/api/status?detail=full", http.StatusFound)
+	}))
+	defer queue.Close()
+	u := UpstreamReader{URL: queue.URL, Token: "t", Clock: realClock{}, HTTP: &http.Client{Timeout: 5 * time.Second}}
+	if _, err := u.read(context.Background()); err == nil {
+		t.Fatal("a redirect must be an error, not a followed read")
+	}
+	if u.HTTP.CheckRedirect != nil {
+		t.Fatal("the caller's client must not be modified")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 || seen[0] != "/api/status" {
+		t.Fatalf("upstream requests %v, want only /api/status", seen)
+	}
 }
 
 func TestRetryAfterParsing(t *testing.T) {
