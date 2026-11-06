@@ -139,9 +139,7 @@ func (q *Queue) detectIncidentHealth() {
 				q.observeEnvelopeHealth(c.Envelope, true)
 			} else if !seen[key] {
 				q.observeHealth(key, false, 0, HealthAlert{})
-				if c.LastAlert.IsZero() || now.Sub(c.LastAlert) >= healthAlertCooldown {
-					delete(q.s.Health.Conditions, key)
-				}
+				delete(q.s.Health.Conditions, key)
 			}
 		case strings.HasPrefix(key, "stale-flaps/"), strings.HasPrefix(key, "teardown-faults/"), strings.HasPrefix(key, "reservation-never-ready/"):
 			if !seen[key] {
@@ -214,8 +212,7 @@ func (q *Queue) learnedEnvelopeOversized(j *Job) bool {
 func (q *Queue) observeEnvelopeHealth(j *Job, refused bool) {
 	key := envelopeHealthKey(j)
 	bad := q.learnedEnvelopeOversized(j)
-	old, exists := q.s.Health.Conditions[key]
-	if !bad && (!exists || old.LastAlert.IsZero() || q.clock.Now().Sub(old.LastAlert) >= healthAlertCooldown) {
+	if !bad {
 		delete(q.s.Health.Conditions, key)
 		return
 	}

@@ -8,250 +8,168 @@ import (
 	"time"
 )
 
-func TestRequestHealthOverloadReplay(t *testing.T) {
-	for _, mode := range []string{"slow", "lock-wait"} {
-		t.Run(mode, func(t *testing.T) {
-			q, c := fixture(t)
-			record := func() {
-				for range 1900 {
-					duration, wait := 2*time.Second, time.Duration(0)
-					route := "GET /api/jobs/{id}"
-					if mode == "lock-wait" {
-						duration, wait, route = 15*time.Second, 15*time.Second, "GET /api/workers/{id}/events"
+// Replaces the #768 fleet-count fixtures: #803 explicitly invalidates their
+// fixed-rate expected outcomes. Healthy high volume must now remain healthy;
+// cold history is unknown, not proof of overload. Retain lifecycle/HTTP proof.
+func TestRequestHealthAdaptiveReplay(t *testing.T) {
+	for _, hosts := range []int{2, 200} {
+		for _, mode := range []string{"slow", "lock-wait", "long-poll"} {
+			t.Run(fmt.Sprintf("%d/%s", hosts, mode), func(t *testing.T) {
+				q, c := fixture(t)
+				route := "POST /api/workers/{id}/checkin"
+				if mode == "long-poll" {
+					route = "GET /api/workers/{id}/events"
+				}
+				step := func(count int, cost, wait time.Duration) {
+					for range count {
+						q.requestHealth.recordRequest(c.Now(), route, cost, wait)
 					}
-					q.requestHealth.recordRequest(c.Now(), route, duration, wait)
+					for range count {
+						q.requestHealth.recordClient(c.Now(), "cli")
+					}
+					c.Advance(time.Duration(hosts) * time.Millisecond)
+					q.applyRequestHealth(q.requestHealth.snapshot(c.Now()))
 				}
-			}
-			tick := func() {
-				t.Helper()
-				if err := q.Tick(); err != nil {
-					t.Fatal(err)
+				baseline := time.Duration(hosts) * time.Microsecond
+				for range alertWarmup {
+					step(hosts, baseline, 0)
 				}
-			}
-			// A full incident minute followed by a healthy minute is a brief spike.
-			record()
-			c.Advance(time.Minute)
-			tick()
-			c.Advance(time.Minute)
-			tick()
-			if len(alertsOf(q, "queue_overload")) != 0 {
-				t.Fatal("brief spike alerted")
-			}
-			record()
-			c.Advance(time.Minute)
-			record()
-			c.Advance(time.Minute)
-			tick()
-			if len(alertsOf(q, "queue_overload")) != 1 {
-				t.Fatal("sustained overload did not alert")
-			}
-			tick()
-			if len(alertsOf(q, "queue_overload")) != 1 {
-				t.Fatal("duplicate alert")
-			}
-			// Continuous pressure stays one episode even beyond the cooldown.
-			for range 16 {
-				record()
-				c.Advance(time.Minute)
-				tick()
-			}
-			if len(alertsOf(q, "queue_overload")) != 1 {
-				t.Fatal("continuous overload repeated")
-			}
-			c.Advance(time.Minute)
-			tick()
-			if q.s.Health.Conditions["queue-overload"].Active {
-				t.Fatal("recovery did not clear")
-			}
-			record()
-			c.Advance(time.Minute)
-			record()
-			c.Advance(time.Minute)
-			tick()
-			if len(alertsOf(q, "queue_overload")) != 2 {
-				t.Fatal("recovery did not rearm")
-			}
-		})
+				if len(alertsOf(q, "queue_overload")) != 0 {
+					t.Fatal("healthy baseline alerted")
+				}
+				cost, wait := baseline*10, time.Duration(0)
+				if mode != "slow" {
+					wait = baseline * 10
+				}
+				if mode == "long-poll" {
+					cost = time.Hour
+				}
+				step(hosts*4, cost, wait)
+				step(hosts, baseline, 0)
+				if len(alertsOf(q, "queue_overload")) != 0 {
+					t.Fatal("spike alerted")
+				}
+				for range alertConfirmation {
+					step(hosts*4, cost, wait)
+				}
+				requireIncident(t, q, "queue_overload", "queue-overload", 1, true)
+				requireIncident(t, q, "client_request_flood", "client-flood/cli", 1, true)
+				for range alertHistorySize {
+					step(hosts*4, cost, wait)
+				}
+				requireIncident(t, q, "queue_overload", "queue-overload", 1, true)
+				for range alertConfirmation {
+					step(hosts, baseline, 0)
+				}
+				requireIncident(t, q, "queue_overload", "queue-overload", 1, false)
+				c.Advance(healthAlertCooldown)
+				for range alertConfirmation {
+					step(hosts*4, cost, wait)
+				}
+				requireIncident(t, q, "queue_overload", "queue-overload", 2, true)
+				// Silence closes the episode without another HTTP request.
+				c.Advance(time.Second)
+				q.applyRequestHealth(q.requestHealth.snapshot(c.Now()))
+				requireIncident(t, q, "queue_overload", "queue-overload", 2, false)
+			})
+		}
 	}
 }
-
 func TestRequestHealthHealthyHistory(t *testing.T) {
-	q, c := fixture(t)
-	for range 4 {
-		for range 1900 {
-			q.requestHealth.recordRequest(c.Now(), "GET /api/workers/{id}/events", 5*time.Second, 0)
-			q.requestHealth.recordRequest(c.Now(), "POST /api/wait", 25*time.Second, 0)
-		}
-		// Healthy history was ~0.4 slow/min; even 99/min is below this detector.
-		for range 99 {
-			q.requestHealth.recordRequest(c.Now(), "POST /api/workers/{id}/checkin", 2*time.Second, 0)
-		}
-		for range 19 {
-			q.requestHealth.recordRequest(c.Now(), "GET /api/jobs/{id}", time.Second, time.Second)
-		}
-		c.Advance(time.Minute)
-		if err := q.Tick(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(alertsOf(q, "queue_overload")) != 0 {
-		t.Fatal("healthy history alerted")
-	}
-}
-
-func TestRequestHealthClientFloodReplay(t *testing.T) {
-	for _, agent := range []string{"myce/s072", "mycelium-python/0.1.0", "myce/private/path?secret=value"} {
-		t.Run(jobGetClient(agent).Kind, func(t *testing.T) {
-			q, c := fixture(t)
-			v := newJobGetVolume(c)
-			v.observe = q.requestHealth.recordClient
-			kind := jobGetClient(agent).Kind
-			key := "client-flood/" + kind
-			record := func(n int) {
-				for i := 0; i < n; i++ {
-					v.record(agent, i%2 == 0)
+	for _, count := range []int{2, 2000} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			var h requestHealth
+			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			for n := range alertHistorySize * 2 {
+				// Baseline shifts smoothly with service cost and request volume. There
+				// is no absolute latency/rate ceiling; long-poll duration never counts.
+				for range count + n {
+					h.recordRequest(now, "POST /api/workers/{id}/checkin", time.Duration(100+n)*time.Millisecond, 0)
+					h.recordRequest(now, "POST /api/wait", time.Hour, 0)
+					h.recordClient(now, "cli")
+				}
+				now = now.Add(time.Second)
+				s := h.snapshot(now)
+				if s.overload || s.clients[0] {
+					t.Fatalf("healthy shifting baseline alerted at %d", n)
 				}
 			}
-			tick := func() {
-				t.Helper()
-				if err := q.Tick(); err != nil {
-					t.Fatal(err)
-				}
+			if len(h.rates[0]) != alertHistorySize {
+				t.Fatal("unbounded baseline")
 			}
-			record(3800)
-			c.Advance(time.Minute)
-			tick()
-			c.Advance(time.Minute)
-			tick()
-			if len(alertsOf(q, "client_request_flood")) != 0 {
-				t.Fatal("brief flood alerted")
-			}
-			for range 2 {
-				record(3800)
-				c.Advance(time.Minute)
-			}
-			tick()
-			tick()
-			events := alertsOf(q, "client_request_flood")
-			if len(events) != 1 || events[0].ClientKind != kind {
-				t.Fatalf("missing sanitized/deduplicated attribution: %+v", events)
-			}
-			for range 16 {
-				record(3800)
-				c.Advance(time.Minute)
-				tick()
-			}
-			if len(alertsOf(q, "client_request_flood")) != 1 {
-				t.Fatal("continuous flood repeated")
-			}
-			c.Advance(time.Minute)
-			tick()
-			if q.s.Health.Conditions[key].Active {
-				t.Fatal("quiet recovery did not clear")
-			}
-			for range 2 {
-				record(3800)
-				c.Advance(time.Minute)
-			}
-			tick()
-			if len(alertsOf(q, "client_request_flood")) != 2 {
-				t.Fatal("flood did not rearm")
+			_, hi := h.routes["POST /api/workers/{id}/checkin"].duration.band()
+			if hi < float64(220*time.Millisecond) {
+				t.Fatal("baseline failed to adapt")
 			}
 		})
 	}
 }
-
 func TestRequestHealthClientHealthyExclusions(t *testing.T) {
-	for _, mode := range []string{"normal-volume", "balanced", "split-versions"} {
-		t.Run(mode, func(t *testing.T) {
-			q, c := fixture(t)
-			v := newJobGetVolume(c)
-			v.observe = q.requestHealth.recordClient
-			for range 2 {
-				n := 1702 // Recorded 28.36/s job GET baseline, even if all one kind.
-				if mode != "normal-volume" {
-					n = 3800
-				}
-				for i := 0; i < n; i++ {
-					agent := "myce/s072"
-					if mode == "balanced" && i%2 == 0 {
-						agent = "mycelium-python/0.1.0"
+	for _, balanced := range []bool{false, true} {
+		t.Run(fmt.Sprint(balanced), func(t *testing.T) {
+			var h requestHealth
+			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			step := func(count int, cost time.Duration) requestHealthSnapshot {
+				for range count {
+					h.recordRequest(now, "GET /api/jobs/{id}", cost, 0)
+					h.recordClient(now, "cli")
+					if balanced {
+						h.recordClient(now, "python")
 					}
-					if mode == "split-versions" && i%2 == 0 {
-						agent = "myce/s071"
-					}
-					v.record(agent, true)
 				}
-				c.Advance(time.Minute)
+				now = now.Add(time.Second)
+				return h.snapshot(now)
 			}
-			if err := q.Tick(); err != nil {
-				t.Fatal(err)
+			for range alertWarmup {
+				step(10, time.Millisecond)
 			}
-			got := len(alertsOf(q, "client_request_flood"))
-			if mode == "split-versions" && got != 1 {
-				t.Fatal("split versions hid dominant kind")
+			// Healthy high volume is not a flood even with sole-client dominance.
+			for range alertHistorySize {
+				if step(2000, time.Millisecond).clients[0] {
+					t.Fatal("healthy volume alerted")
+				}
 			}
-			if mode != "split-versions" && got != 0 {
-				t.Fatal("healthy volume/share alerted")
+			for range alertConfirmation {
+				s := step(8000, time.Second)
+				if balanced && (s.clients[0] || s.clients[1]) {
+					t.Fatal("proportional mix blamed a family")
+				}
 			}
 		})
 	}
 }
-
 func TestRequestHealthHTTPWiring(t *testing.T) {
 	q, c := fixture(t)
 	handler := (API{Queue: q, Token: "fixture"}).handler("", c)
-	for range 2 {
-		for i := range requestHealthClientPerMinute {
-			r := httptest.NewRequest("GET", "/api/jobs/missing?view=wait", nil)
-			r.Header.Set("Authorization", "Bearer fixture")
-			r.Header.Set("User-Agent", "myce/s072")
-			// Independent peers preserve the merged per-source observation budget.
-			r.RemoteAddr = fmt.Sprintf("192.0.2.%d:1234", i/10+1)
-			handler.ServeHTTP(httptest.NewRecorder(), r)
-		}
-		c.Advance(time.Minute)
+	for range alertWarmup {
+		r := httptest.NewRequest("GET", "/api/jobs/missing?view=wait", nil)
+		r.Header.Set("Authorization", "Bearer fixture")
+		r.Header.Set("User-Agent", "myce/test")
+		handler.ServeHTTP(httptest.NewRecorder(), r)
+		c.Advance(time.Second)
+		q.requestHealth.snapshot(c.Now())
 	}
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
+	if len(q.requestHealth.rates[0]) != alertWarmup {
+		t.Fatal("HTTP client attribution absent")
 	}
-	if len(alertsOf(q, "client_request_flood")) != 1 {
-		t.Fatal("HTTP attribution was not observed")
-	}
-	// Drive the real timing middleware with a synthetic observed span; no sleeps.
+	// Synthetic timing through real middleware; timing is observational wall
+	// time, while interval/lifecycle decisions use the injected queue clock.
 	measured := q.measureRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Pattern = "GET /api/jobs/{id}"
+		r.Pattern = "POST /api/workers/{id}/checkin"
 		s := spanFrom(r.Context())
-		s.started = s.started.Add(-2 * time.Second)
+		s.started = s.started.Add(-time.Second)
 		w.WriteHeader(http.StatusOK)
-	}), map[string]struct{}{"GET /api/jobs/{id}": {}})
-	for range 2 {
-		for range requestHealthSlowPerMinute {
-			measured.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/jobs/missing", nil))
-		}
-		c.Advance(time.Minute)
+	}), map[string]struct{}{"POST /api/workers/{id}/checkin": {}})
+	// First teach this route's independent healthy cost.
+	for range alertWarmup {
+		q.requestHealth.recordRequest(c.Now(), "POST /api/workers/{id}/checkin", time.Millisecond, 0)
+		c.Advance(time.Second)
+		q.requestHealth.snapshot(c.Now())
 	}
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
+	for range alertConfirmation {
+		measured.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/workers/test/checkin", nil))
+		c.Advance(time.Second)
+		q.applyRequestHealth(q.requestHealth.snapshot(c.Now()))
 	}
-	if len(alertsOf(q, "queue_overload")) != 1 {
-		t.Fatal("HTTP timings were not observed")
-	}
-}
-
-func TestRequestHealthPartialMinuteExcluded(t *testing.T) {
-	q, c := fixture(t)
-	c.Advance(59 * time.Second)
-	for range 2 {
-		for range 1900 {
-			q.requestHealth.recordRequest(c.Now(), "GET /api/jobs/{id}", 2*time.Second, 0)
-		}
-		c.Advance(time.Minute)
-	}
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	if len(alertsOf(q, "queue_overload")) != 0 {
-		t.Fatal("initial partial minute counted as sustained")
-	}
+	requireIncident(t, q, "queue_overload", "queue-overload", 1, true)
 }

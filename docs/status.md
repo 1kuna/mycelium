@@ -1524,37 +1524,78 @@ expiry; ordinary pressure recovery alone does not erase the cooldown.
 `health_alerts` retains diagnostic events delivered by the existing optional
 queue `--health-notify` executable. Detectors run on queue mutations and ticks,
 using the queue clock; no polling service or automatic issue filing is added.
-Each condition has a stable subject key, emits once per episode, and rearms
-after recovery with the existing 15-minute cooldown. Delivery retries keep the
-same `delivery_id`. Clearing a condition retains its diagnostic event; it does
-not send a second notification or change admission, retries, or release custody.
+Each condition has a stable subject key and emits once per episode. Positive
+recovery rearms it without a wall-time cooldown, so a second real incident is
+not hidden for fifteen minutes. Delivery retries keep the same `delivery_id`.
+Clearing retains the diagnostic event; it sends no second notification and
+changes no admission, retry or release-custody decision.
 
-- `queue_overload`: two consecutive complete one-minute windows each contain
-  at least 100 slow responses (over one second), or at least 20 requests with
-  measured queue mutex wait of at least one second. Intentional worker event and batched consumer wait
-  long-poll duration is excluded from slow-response counts; its actual lock wait
-  still counts. One busy minute does not alert. This catches the recorded roughly
-  1,900 slow responses/minute and waits up to 15 seconds, while excluding the
-  quiet-history rate of about 0.4 slow responses/minute.
-- `client_request_flood`: the same client kind supplies at least 1,800 job GETs
-  and at least 80% of job GET volume in each of two consecutive complete minutes.
-  Both full and wait reads count, using the existing bounded attribution counters.
-  Versions aggregate by kind so a mixture of client releases cannot hide a flood.
-  The event's `client_kind` is only `cli`, `python`, or `unknown`; raw User-Agents,
-  addresses, versions and job identities are not copied into this alert. This is
-  attribution to a client family, not proof of an individual process's identity.
-  The 30 GETs/second floor is above the recorded 28.36/second baseline, below
-  roughly 63/second from 190 three-second waiters; the share requirement excludes
-  balanced traffic. Low-volume dominance alone does not alert.
+- `queue_overload`: sustained response-cost or mutex-wait regression against
+  this installation's healthy history, separately for each normalized API route.
+  Intentional worker-event and consumer-wait response duration is excluded;
+  their real lock waits still count. Eight completed observation intervals
+  establish a local baseline, and three consecutive adverse intervals confirm
+  a regression. The robust band uses quartiles, adjacent observed variation and
+  Tukey's far-outlier fence. The bounded 64-interval history replaces itself as
+  healthy service cost changes; adverse samples cannot teach degradation as
+  normal. Three healthy intervals, or an interval with no requests, clear it.
+- `client_request_flood`: only while the queue is degraded, one existing client
+  family supplies a strict majority of relative excess GET demand over its own
+  healthy rate band. Relative growth preserves the normal request mix even when
+  one family normally dominates. Healthy high volume, sole-family dominance
+  without degradation and proportional growth of multiple families do not fire.
+  Versions aggregate by kind; `client_kind` is only `cli`, `python` or `unknown`.
+  This attributes a family, not a process, and copies no User-Agent or address.
 
-These two traffic detectors compute fixed-size, process-local windows outside
-`q.mu` and reconcile the result on the existing maintenance tick. They fire in
-2–3 minutes plus tick/queue delay; a wedged queue cannot commit or deliver an
-alert until it progresses. The first partial minute after observation begins is
-excluded. A completed minute below the relevant threshold clears an episode;
-quiet traffic clears without needing another HTTP request. Restart discards
-traffic evidence and rebuilds the windows, clearing old active conditions until
-fresh sustained evidence exists. Retained events and cooldowns still persist.
+The traffic detectors close intervals on maintenance ticks and normalize rates
+by actual elapsed queue-clock time. They contain no request-per-minute, fixed
+latency or fleet-size threshold. Statistical work and aggregation run outside
+`q.mu`; ticks commit fixed booleans. A stopped queue cannot commit or deliver an
+alert until it progresses. Restart requires fresh local traffic history; retained
+delivery events persist. A cold installation has unknown latency, rather than
+an assumed universal healthy speed. The initial observed interval contributes
+cost evidence and its actual duration, never an assumed complete minute.
+
+- `worker_reports_missing`: an enabled joined worker omitted CPU capacity,
+  required host-memory telemetry, advertised device-memory telemetry or a tool
+  inventory needed by live demand. Optional reports without demand and positive
+  sensor errors already owned by host-health alerts are excluded. Reasons are
+  finite `*_report_missing` codes; supplied reports clear the condition.
+- `environment_recipe_failed`: a current worker environment report is failed
+  and the existing classifier says deterministic. Transient download/storage
+  failures and cold/preparing environments are excluded. Ready/replaced/removed
+  reports clear it; raw recipe errors and logs never enter notifications.
+- `pin_reason_missing`: live frozen host/device restrictions lack the corresponding
+  authored requirement reason. Terminal/cancelled work clears it. Authored prose
+  remains private, and reasons are never treated as qualification evidence.
+- `job_target_unsatisfied`: a queued job has known enabled targets, but none
+  passes resolve's permanent-capacity predicates. Busy or temporarily offline
+  fitting targets exclude it. Missing inventory makes the conclusion unknown;
+  it is owned by the missing-report detector. A fitting target or removal of the
+  live demand clears it. No scheduling decision is changed.
+- `infrastructure_loss_streak`: consecutive infrastructure endings on one worker,
+  across distinct exact executions. Two is a repeated loss, not a timed fleet
+  threshold. Final classification replaces provisional requeue evidence before detection.
+  Replays cannot increment it; planned stops are excluded. Successful
+  or workload-caused endings break the streak. Historical failures interrupted
+  by successful work do not fire. It preserves all existing attempt fences.
+- `staging_cache_refused`: accepted worker transfer/cache/copy failure reports or
+  an exact attempt's typed input-staging refusal. Cold caches, successful copies
+  and planned stops do not fire. A repaired report or later successful staging
+  clears its corresponding subject; missing staging evidence cannot clear it.
+  Only fixed reason codes enter notifications.
+- `update_failed`: the current update operation has a failed host or recorded
+  failure. It uses #741's sanitized `failure_code` allow-list (including the
+  explicit runner-smoke failure); successful retry/removal clears it. Helper,
+  download, installer and service text is never copied.
+
+#834 owns host degradation, silence, mount probes and collector diagnostics;
+these detectors do not create another host-hygiene alert class. All remaining
+checks use already accepted in-memory reports, intent and exact-attempt outcomes,
+with no network, blob/manifest verification or filesystem probes under `q.mu`.
+The older storage persistence delays and launch/flap history windows below are
+unchanged by the adaptive traffic replacement; their broader #803 follow-up is
+separate from the retired #768 thresholds.
 
 - `checkpoint_store_unavailable`: a worker reports its `checkpoint` NAS root
   unavailable (or `checkpoint_unavailable`) continuously for five minutes by
@@ -1592,7 +1633,7 @@ fresh sustained evidence exists. Retained events and cooldowns still persist.
   demand clears when it fits or leaves the queue. Auto sizing inherited from
   variants is included; explicit member caps are excluded from the learned
   comparison. Healthy demand creates no condition history, and recovered
-  envelope conditions are discarded after their cooldown. Events carry only project/job
+  envelope conditions are discarded on recovery. Events carry only project/job
   identities, never commands, mount paths or worker error text.
 
 ## Durable model interval API

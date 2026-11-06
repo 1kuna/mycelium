@@ -14,6 +14,7 @@ const attemptHistoryLimit = max(3, DefaultProductionInfrastructureRetries+1) + 1
 // taxonomy. State is the queue decision after this attempt (queued or terminal).
 // It is diagnostic evidence, never release proof or a retry/accounting input.
 type AttemptOutcome struct {
+	inputsStaged   bool                // transient positive staging evidence; not part of the wire/history shape.
 	Placement      *PlacementDecision  `json:"placement,omitempty"`
 	Diagnostics    *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	Attempt        int                 `json:"attempt"`
@@ -40,8 +41,9 @@ func historyPlannedStop(j *Job) bool {
 
 func attemptOutcome(j *Job, r Result) AttemptOutcome {
 	return AttemptOutcome{
-		Placement: j.Placement,
-		Attempt:   j.Attempt, Machine: j.Machine, Session: j.Session,
+		inputsStaged: r.Success || j.StartedAt != nil || j.InputsStagedAt != nil || r.InputsStagedAt != nil,
+		Placement:    j.Placement,
+		Attempt:      j.Attempt, Machine: j.Machine, Session: j.Session,
 		ExecutionCause: safeAttemptRuntimeCause(j, r.ExecutionCause), CleanupCause: safeRuntimeCause(r.CleanupCause),
 		Interrupted: r.Interrupted, OutOfMemory: r.OutOfMemory,
 		PoliteStop: r.PoliteStop, OperatorStop: r.OperatorStop || plannedMaintenanceStop(j),
@@ -85,6 +87,7 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	}
 	q.alertAttemptLoss(j, outcome, false)
 	q.recordLaunchRefusalHealth(j, outcome)
+	q.recordRemainingAttemptHealth(j, outcome)
 	for i, old := range j.AttemptHistory {
 		if old.Attempt == outcome.Attempt && old.Machine == outcome.Machine && old.Session == outcome.Session {
 			j.AttemptHistory[i] = outcome
