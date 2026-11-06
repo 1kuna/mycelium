@@ -55,7 +55,8 @@ func TestCommandDiscoveryFailureIsolationReplayAndChangedRecipe(t *testing.T) {
 	discoveryCatalog(t, q, r)
 	linux, darwin := cpuMachine("linux", "linux", "cpu", 8, 32), cpuMachine("darwin", "darwin", "cpu", 8, 32)
 	darwin.CapabilityProfile.OS, darwin.CapabilityProfile.Arch = "darwin", "arm64"
-	linux.EnvironmentBuilder, darwin.EnvironmentBuilder = true, true
+	// Control builder availability rather than relying on a placement tie.
+	linux.EnvironmentBuilder = true
 	check(t, q, linux, nil)
 	check(t, q, darwin, nil)
 	s := discoverySpec()
@@ -77,6 +78,7 @@ func TestCommandDiscoveryFailureIsolationReplayAndChangedRecipe(t *testing.T) {
 	}
 	requireState(t, q, j.ID, "queued")
 	clock.Advance(time.Second)
+	darwin.EnvironmentBuilder = true
 	second := check(t, q, darwin, nil).EnvironmentPlan
 	if len(second) != 1 || second[0].Key == first[0].Key || second[0].Target.OS != "darwin" {
 		t.Fatal(second)
@@ -91,6 +93,8 @@ func TestCommandDiscoveryFailureIsolationReplayAndChangedRecipe(t *testing.T) {
 		t.Fatal("viable target failed to execute", assigned)
 	}
 	finish(t, q, assigned, true)
+	darwin.EnvironmentBuilder = false
+	check(t, q, darwin, nil)
 	if replay := submit(t, q, s); replay.ID != j.ID || !replay.SubmissionReused {
 		t.Fatal(replay)
 	}
@@ -290,13 +294,16 @@ func TestCommandDiscoveryRealCPUResult(t *testing.T) {
 	m := &Machine{GPU: "cpu", CapabilityProfile: &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}}
 	recipe, _ := commandEnvironmentRecipe(&Job{CommandDiscovery: d}, map[string]EnvironmentRecipe{"cpu": r}, m)
 	cache := filepath.Join(root, "workers", "fake-1", "environment-cache", recipe.Key)
-	if err := os.MkdirAll(cache, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveWorkerJSON(cache, "ready.json", EnvironmentReport{Key: recipe.Key, State: "ready"}); err != nil {
-		t.Fatal(err)
-	}
-	dev, err := StartDev(DevConfig{Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "discovery-fixture", EnvironmentConfig: EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}, Interval: 10 * time.Millisecond})
+	dev, err := startDev(DevConfig{Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "discovery-fixture", EnvironmentConfig: EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}, Interval: 10 * time.Millisecond}, func(*Queue) {
+		// Seed fixture readiness after the ordinary state-root safety gate,
+		// before the dev workers start; never disguise existing state as fresh.
+		if err := os.MkdirAll(cache, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := saveWorkerJSON(cache, "ready.json", EnvironmentReport{Key: recipe.Key, State: "ready"}); err != nil {
+			t.Fatal(err)
+		}
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
