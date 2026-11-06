@@ -116,7 +116,7 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	m.MemoryEnforcement = "memory ceiling not enforced on this host (requires Linux cgroup v2)"
 	s.Needs.Memory = "auto"
 	first := startObservation(t, q, m, s)
-	if first.MemoryEnvelope.Source != boundedQuarter {
+	if first.MemoryEnvelope.Source != physicalMemoryProbe {
 		t.Fatalf("first darwin auto run must explore: %+v", first.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)
@@ -126,7 +126,7 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 		t.Fatal(err)
 	}
 	same := startObservation(t, q, m, s)
-	if same.Spec.Needs.HostMemoryGB != 2.5 || same.MemoryEnvelope.Source != "accepted peak × 1.25" {
+	if same.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB || same.MemoryEnvelope.Source != "accepted peak + measured uncertainty" {
 		t.Fatalf("same-host rerun not sized from the peak: %+v", same.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)
@@ -134,8 +134,8 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A 16 GiB host with 4.6 GiB free after its reserve cannot explore
-	// (half the allowance), but fits the same-family estimate.
+	// A new 16 GiB target with 4.6 GiB actually free gets a physical
+	// probe; the source peak alone cannot quantify its transfer error.
 	m.ID, m.HostID, m.Session = "m4-16", "m4-16-host", "session-m4-16"
 	m.CapabilityProfile.SystemMemoryBytes = 16 << 30
 	m.HostAvailableMemoryGB = 4.6
@@ -144,8 +144,8 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	report.Setup, report.Qualified, report.CheckID = true, true, "m4-16-check"
 	m.ExtensionReports = []ExtensionReport{report}
 	check(t, q, m, nil)
-	if _, why := q.exploratoryMemory(&first, q.s.Machines[m.ID]); !strings.Contains(why, "half the host allowance") {
-		t.Fatalf("16 GiB host must refuse exploration: %q", why)
+	if room, why := q.exploratoryMemory(&first, q.s.Machines[m.ID]); why != "" || room != 4.6-minimumHostMemoryGB {
+		t.Fatalf("physical exploration ignored actual free memory: %v %q", room, why)
 	}
 	s.AllowedMachines = []string{m.ID}
 	queued := submit(t, q, s)
@@ -153,17 +153,21 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	if next == nil {
 		t.Fatalf("16 GiB host refused the learned estimate: %s", job(t, q, queued.ID).Reason)
 	}
-	if next.Spec.Needs.HostMemoryGB != 3.75 || next.MemoryEnvelope.Source != "cross-machine estimate" {
-		t.Fatalf("same-family peak must use 1.25 × 1.5: %+v", next.MemoryEnvelope)
+	if next.Spec.Needs.HostMemoryGB != 4.6-minimumHostMemoryGB || next.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatalf("uncalibrated same-family transfer must probe measured headroom: %+v", next.MemoryEnvelope)
 	}
 	for id, point := range q.s.WorkObservations {
 		point.Key.Target.Arch = "arm64"
 		q.s.WorkObservations[id] = point
 	}
+	if err := q.Complete(result(next, true)); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, m, nil)
 	probe := *q.s.Jobs[next.ID]
 	probe.State = "queued"
-	if other := q.memoryCandidate(&probe, q.s.Machines[m.ID]); other.Spec.Needs.HostMemoryGB != 5 {
-		t.Fatalf("other-family peak must use 1.25 × 2: %+v", other.Spec.Needs)
+	if other := q.memoryCandidate(&probe, q.s.Machines[m.ID]); other.Spec.Needs.HostMemoryGB != 4.6-minimumHostMemoryGB || other.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatalf("uncalibrated other-family transfer must remain physical exploration: %+v", other.Spec.Needs)
 	}
 }
 
@@ -202,7 +206,7 @@ func TestProcessMemoryPeakNeverInvalidatesLearnedPeaks(t *testing.T) {
 	onLinux := s
 	onLinux.AllowedMachines = []string{linux.ID}
 	next := startObservation(t, q, linux, onLinux)
-	if next.Spec.Needs.HostMemoryGB != 2.5 || next.MemoryEnvelope.Source != "accepted peak × 1.25" {
+	if next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB || next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" {
 		t.Fatalf("darwin attempt invalidated the Linux peak: %+v", next.MemoryEnvelope)
 	}
 }

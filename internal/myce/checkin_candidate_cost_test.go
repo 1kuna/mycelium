@@ -144,6 +144,9 @@ func BenchmarkCheckinCandidateCost(b *testing.B) {
 
 // Freeze the original planner's full per-target candidate sequence, resolved
 // resource vectors and memory envelopes, not just its first winning job.
+// #806 intentionally changes these envelopes: physical cold headroom, measured
+// local uncertainty and uncalibrated transfers replace universal multipliers.
+// The refreshed digests retain all 402 decisions for each history shape.
 func TestCandidateCostPlacementEquivalence(t *testing.T) {
 	for _, retained := range []bool{true, false} {
 		t.Run(fmt.Sprintf("retained=%v", retained), func(t *testing.T) {
@@ -181,7 +184,7 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 				t.Fatal(err)
 			}
 			digest := fmt.Sprintf("%x", sha256.Sum256(data))
-			want := map[bool]string{true: "18b20f0b5f071470f9b8d0c22f22c44255b385cbe83828ee1668b78858576b28", false: "a529ce44d72fbea3bd49e8dcdba79155beef7ec2a6d8a6b29573d8389d828f41"}[retained]
+			want := map[bool]string{true: "e9f4b9d045be93da1e29e78e0df42d8c64e872cf186cc554314316187883fb71", false: "64f5571bc125dc317237aa5b4e477dbfa3646573bb59b9fba02f899bd9ed0b09"}[retained]
 			if digest != want {
 				t.Fatalf("placement digest %s (%d decisions), want %s", digest, len(decisions), want)
 			}

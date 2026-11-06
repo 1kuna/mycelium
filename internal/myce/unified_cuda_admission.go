@@ -5,10 +5,6 @@ import (
 	"time"
 )
 
-// Reuse the installed unified-CUDA OS/driver reserve, not a crash-derived
-// carve-out. A smaller host allowance protects the larger physical remainder.
-const unifiedCUDAReserveGB = 16.0
-
 func unifiedCUDA(m *Machine) bool { return m != nil && m.GPU == "cuda" && m.UnifiedMemory }
 
 func hostHasUnifiedCUDA(m *Machine) bool {
@@ -28,7 +24,9 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 		return 0, false
 	}
 	total := float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
-	floor := max(unifiedCUDAReserveGB, m.ReservedMemoryGB)
+	// Raw available memory already reflects OS and driver use. Only an
+	// explicit reserve or configured physical allowance withholds more RAM.
+	floor := m.ReservedMemoryGB
 	for _, d := range m.Devices {
 		if d.Platform == "cuda" && d.UnifiedMemory {
 			floor = max(floor, d.ReserveMemoryGB)

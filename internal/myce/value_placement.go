@@ -168,23 +168,28 @@ func compareHostValue(values map[string]*hostValue, a, b *Machine) (int, bool) {
 // Candidate sets, liveness, scarcity and the global next-pull plan belong to
 // this one read-only pass; no job asks what a peer would pick.
 type placementScan struct {
-	values          map[string]*hostValue
-	machines        []*Machine
-	sets            map[string]*candidateSet
-	live            map[string]bool
-	assignments     map[string]*Job
-	planBuilds      int
-	rankingBuilds   int
-	livenessBuilds  int
-	candidateBuilds int
+	observationOwner *Queue // A derived capacity view must build its own scan.
+	values           map[string]*hostValue
+	machines         []*Machine
+	sets             map[string]*candidateSet
+	live             map[string]bool
+	assignments      map[string]*Job
+	planBuilds       int
+	rankingBuilds    int
+	livenessBuilds   int
+	candidateBuilds  int
 
 	memoryIdentities map[*Job]string
 	memory           *memoryPlanningCache
+	hostBackfill     map[string]*hostBackfillDemand
 }
 
 func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
 	if len(scans) > 0 {
 		return scans[0]
+	}
+	if scan := q.observationScan; scan != nil && scan.observationOwner == q {
+		return scan
 	}
 	return &placementScan{machines: q.plannerMachines(), sets: map[string]*candidateSet{}, memoryIdentities: q.checkinMemoryIdentities}
 }

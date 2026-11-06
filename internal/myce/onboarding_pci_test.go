@@ -158,7 +158,7 @@ func TestDetectIntelMemoryUsesPCITopology(t *testing.T) {
 					return command(ctx, n, args...)
 				}
 				got, err := p.Detect(context.Background())
-				if err != nil || got.MemoryMode != "unified" || got.MemoryGB != 0 || got.ReserveGB != 8 {
+				if err != nil || got.MemoryMode != "unified" || got.MemoryGB != 0 || got.ReserveGB != 0 {
 					t.Fatalf("%+v %v", got, err)
 				}
 			})

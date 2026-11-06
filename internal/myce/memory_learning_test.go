@@ -56,7 +56,7 @@ func TestMemoryLearningRejectedProgramUsage(t *testing.T) {
 					if seed {
 						accepted, _ := complete(SizeHint{MemoryGB: 2, HostMemoryGB: 4}, false)
 						key := programNeedsKey(accepted, e, "fake")
-						if got := q.s.ProgramNeeds[key]; got.MemoryGB != 2.5 || got.HostMemoryGB != 5 {
+						if got := q.s.ProgramNeeds[key]; got.MemoryGB != 2 || got.HostMemoryGB != 4 {
 							t.Fatal("eligible program sample did not establish control", got)
 						}
 						if facts := job(t, q, accepted.ID).MemoryAttempts; len(facts) != 1 || facts[0].LearningReason != "eligible" {
@@ -80,7 +80,7 @@ func TestMemoryLearningRejectedProgramUsage(t *testing.T) {
 					next := submit(t, q, spec)
 					wantDevice, wantHost := rejected.Spec.Needs.MemoryGB, rejected.Spec.Needs.HostMemoryGB
 					if seed {
-						wantDevice, wantHost = 2.5, 5
+						wantDevice, wantHost = 2, 4
 					}
 					if next.Spec.Needs.MemoryGB != wantDevice || next.Spec.Needs.HostMemoryGB != wantHost {
 						t.Errorf("rejected sample changed future reservations: want=%v/%v got=%+v", wantDevice, wantHost, next.Spec.Needs)

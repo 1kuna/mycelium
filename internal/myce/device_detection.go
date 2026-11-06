@@ -37,7 +37,7 @@ func (p MachineProbe) detectAccelerator(ctx context.Context, device MachineDevic
 		return d, preflightError(device.Reason, device.Selector, "component facts are unavailable or ambiguous; restore access and re-detect")
 	}
 	if device.Platform == "metal" {
-		d.MemoryMode, d.ReserveGB = "unified", 4
+		d.MemoryMode = "unified"
 		return d, nil
 	}
 	fact := device.pciFact
@@ -46,11 +46,8 @@ func (p MachineProbe) detectAccelerator(ctx context.Context, device MachineDevic
 	}
 	if fact.integrated {
 		d.MemoryMode = "unified"
-		if device.Platform == "cuda" {
-			d.ReserveGB = 16
-		} else {
-			d.ReserveGB = 8
-		}
+		// Unified sources report actual available RAM; OS/driver pages are
+		// already absent. Keep explicit reserves, never guess a second one.
 		return d, nil
 	}
 	if device.Platform == "cuda" {
@@ -74,14 +71,14 @@ func (p MachineProbe) detectAccelerator(ctx context.Context, device MachineDevic
 			b, propertyErr := p.Command(ctx, "python3", "-c", cudaIntegratedAttribute, fact.address)
 			if propertyErr == nil && strings.TrimSpace(string(b)) == "1" {
 				fact.integrated, fact.topologyKnown = true, true
-				d.MemoryMode, d.ReserveGB = "unified", 16
+				d.MemoryMode = "unified"
 				return d, nil
 			}
 		}
 		if err != nil || n <= 0 {
 			return d, preflightError("gpu_memory_unavailable", "cuda", "discrete CUDA memory unavailable; specify an explicit fixed device budget")
 		}
-		d.GPU, d.MemoryMode, d.MemoryGB, d.ReserveGB = strings.TrimSpace(fields[0]), "dedicated", n, 2
+		d.GPU, d.MemoryMode, d.MemoryGB, d.ReserveGB = strings.TrimSpace(fields[0]), "dedicated", n, 0
 		return d, nil
 	}
 	budget := device.TotalMemoryGB
@@ -123,7 +120,7 @@ func (p MachineProbe) detectAccelerator(ctx context.Context, device MachineDevic
 	if budget <= 0 {
 		return d, preflightError("gpu_memory_unavailable", "xpu", "discrete Intel GPU memory unavailable: specify --gpu xpu --memory-mode fixed --memory-gb with an explicit device budget")
 	}
-	d.MemoryMode, d.MemoryGB, d.ReserveGB = "fixed", budget, min(2, budget/4)
+	d.MemoryMode, d.MemoryGB, d.ReserveGB = "fixed", budget, 0
 	return d, nil
 }
 

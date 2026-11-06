@@ -8,6 +8,8 @@ import (
 // queuePressure measures every mutex acquisition, not just slow-log samples.
 // Its mutex protects only local scalar metadata. It is NEVER held while taking
 // q.mu, calling a handler, or doing I/O; q.mu -> mu therefore has no reverse edge.
+// The injected clock must synchronize its own reads and mutations: wait and
+// measurement sample it without q.mu, even while the queue owner advances time.
 // The mean uncontended occupied interval is the installation's service baseline.
 // Waiting longer than one such interval means work is queued beyond an ordinary
 // control turn. There is no rate, fleet-calibrated latency, or recovery timer.

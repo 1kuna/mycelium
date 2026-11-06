@@ -77,12 +77,21 @@ func memoryExplorationSeed(t *testing.T, q *Queue, clock *fakeClock, linux, darw
 	memoryExplorationComplete(t, q, clock, memoryExplorationRun(t, q, linux, s), prior, false, false)
 }
 
+// #850 changes a sizing-only refusal into a durable wait; dispatch must still
+// refuse to start below the prior or reopen a spent exploration claim.
 func memoryExplorationRefused(t *testing.T, q *Queue, s Spec) {
 	t.Helper()
-	_, err := q.Submit(s)
-	var api *HTTPError
-	if !errors.As(err, &api) || api.Code != "no_qualified_target" || !strings.Contains(api.Message, memoryCapacityRemedies) {
-		t.Fatalf("expected conservative refusal with remedies: %v", err)
+	if s.Needs.HostMemoryGB > 8 { // This fixture's declared Darwin allowance.
+		_, err := q.Submit(s)
+		var api *HTTPError
+		if !errors.As(err, &api) || api.Code != "no_qualified_target" {
+			t.Fatalf("hard requirement must refuse: %v", err)
+		}
+		return
+	}
+	queued := submit(t, q, s)
+	if why := q.memoryEvidenceWaitingReason(queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+		t.Fatalf("sizing-only mismatch must wait: %s", why)
 	}
 }
 
@@ -164,9 +173,18 @@ func TestMemoryExplorationLargestEligibleHost(t *testing.T) {
 		t.Fatal("bounded attempt bypassed stale-result fence", err)
 	}
 	memoryExplorationComplete(t, q, clock, run, 4, false, false)
-	next := check(t, q, darwin, nil).Job
-	if next == nil || next.ID != second.ID || next.Spec.Needs.HostMemoryGB != 5 || next.MemoryEnvelope.Source != "accepted peak × 1.25" {
-		t.Fatal("clean local learning did not supersede the foreign prior", next)
+	// A different host has no calibrated transfer error, so its next run
+	// remains a physical probe even after this clean local completion.
+	next := check(t, q, small, nil).Job
+	if next == nil || next.ID != second.ID || next.Spec.Needs.HostMemoryGB != 5 || next.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatal("uncalibrated same-OS transfer lost its physical bound", next, job(t, q, second.ID).Reason)
+	}
+	localSpec := s
+	localSpec.AllowedMachines = []string{darwin.ID}
+	local := submit(t, q, localSpec)
+	learned := check(t, q, darwin, nil).Job
+	if learned == nil || learned.ID != local.ID || learned.Spec.Needs.HostMemoryGB != 4+minimumHostMemoryGB || learned.MemoryEnvelope.Source != "accepted peak + measured uncertainty" {
+		t.Fatal("clean local learning did not supersede the foreign prior", learned, job(t, q, local.ID).Reason)
 	}
 	if len(q.s.MemoryExplorations) != 1 {
 		t.Fatal("accepted learning consumed another probe")

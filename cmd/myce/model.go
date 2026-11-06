@@ -87,7 +87,7 @@ func modelCommand(args []string) error {
 		if *root == "" || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
 			return errors.New("fetch needs NAS --model-root and a relative destination")
 		}
-		return myce.FetchModel(context.Background(), *url, filepath.Join(*root, p), *size, *sum)
+		return myce.FetchModel(context.Background(), *url, *root, p, *size, *sum)
 	}
 	if *token == "" {
 		return errors.New("set MYCE_TOKEN")

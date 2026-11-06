@@ -124,10 +124,10 @@ func TestWorkCurveMemoryRecoversAfterQueueRestart(t *testing.T) {
 			started := startObservation(t, reopened, m, s)
 			next := job(t, reopened, started.ID)
 			if !changed {
-				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 || next.Timing.Samples != 1 {
+				if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB || next.Timing.Samples != 1 {
 					t.Fatalf("restart lost learned memory or timing: envelope=%+v timing=%+v", next.MemoryEnvelope, next.Timing)
 				}
-			} else if next.MemoryEnvelope.Source != boundedQuarter {
+			} else if next.MemoryEnvelope.Source != physicalMemoryProbe {
 				t.Fatalf("changed backend reused historical peak: %+v", next.MemoryEnvelope)
 			}
 		})
@@ -195,11 +195,11 @@ func TestWorkCurveMemorySurvivesBudgetChange(t *testing.T) {
 			if next == nil {
 				t.Fatalf("post-change attempt not assigned: %+v", q.s.Machines[m.ID])
 			}
-			want := "accepted peak × 1.25"
+			want := "accepted peak + measured uncertainty"
 			if changed {
-				want = "exploratory first run"
+				want = "exploratory first run exploratory shared physical headroom; exclusive device"
 			}
-			if next.MemoryEnvelope.Source != want || !changed && next.MemoryEnvelope.HostGB != 6.375 {
+			if next.MemoryEnvelope.Source != want || !changed && next.MemoryEnvelope.HostGB != 5.125+2*minimumHostMemoryGB {
 				t.Fatalf("post-change memory: %+v", next.MemoryEnvelope)
 			}
 			for _, p := range q.s.WorkObservations {
@@ -582,9 +582,9 @@ func TestWorkCurveMemorySurvivesIncompleteUpgradeInventory(t *testing.T) {
 			if assigned == nil || assigned.ID != next.ID {
 				t.Fatal("post-upgrade attempt not assigned")
 			}
-			want := "accepted peak × 1.25"
+			want := "accepted peak + measured uncertainty"
 			if changed {
-				want = "exploratory first run"
+				want = "exploratory first run exploratory shared physical headroom; exclusive device"
 			}
 			if err := q.Started(result(assigned, false)); err != nil {
 				t.Fatal(err)

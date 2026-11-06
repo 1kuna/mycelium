@@ -20,7 +20,7 @@ import (
 )
 
 // Work without its own memory evidence is seeded by its checks' peaks (#186).
-const checkSeededPeak = "accepted peak × 1.25; from qualification checks"
+const checkSeededPeak = "accepted peak + measured uncertainty; from qualification checks"
 
 func TestExtensionCheckAutoMemory(t *testing.T) {
 	t.Run("floor-free variant", func(t *testing.T) {
@@ -172,7 +172,7 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 				}
 				// The day-29 check memory is fresh on its own clock and seeds
 				// work that has no memory evidence of its own (#186).
-				if got := q.s.Jobs[next.ID]; got.MemoryEnvelope == nil || got.MemoryEnvelope.Source != checkSeededPeak || got.Spec.Needs.HostMemoryGB != 2.5 {
+				if got := q.s.Jobs[next.ID]; got.MemoryEnvelope == nil || got.MemoryEnvelope.Source != checkSeededPeak || got.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
 					t.Errorf("fresh check peak not reused after throughput expired: %+v", got.MemoryEnvelope)
 				}
 			}
@@ -222,7 +222,7 @@ func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
 	if next == nil || next.ID != queued.ID {
 		t.Fatalf("comparable work not assigned: %+v", next)
 	}
-	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2.5 {
+	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
 		t.Fatalf("check peak beside a benchmark point not reused: %+v", next.MemoryEnvelope)
 	}
 }
@@ -273,7 +273,7 @@ func TestExtensionCheckAutoMemorySurvivesOldBenchmarkReport(t *testing.T) {
 	if next == nil || next.ID != queued.ID {
 		t.Fatalf("comparable work not assigned: %+v", next)
 	}
-	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2.5 {
+	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
 		t.Fatalf("old benchmark report expired fresh memory: %+v", next.MemoryEnvelope)
 	}
 }
@@ -301,7 +301,7 @@ func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
 			probe.Needs.Memory = "auto"
 			probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
 			first := startObservation(t, q, m, probe)
-			if first.MemoryEnvelope == nil || first.MemoryEnvelope.Source != boundedQuarter {
+			if first.MemoryEnvelope == nil || first.MemoryEnvelope.Source != physicalMemoryProbe {
 				t.Fatalf("check did not explore: %+v", first.MemoryEnvelope)
 			}
 			clock.Advance(time.Second)
@@ -337,7 +337,7 @@ func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
 				t.Fatalf("variant auto was lost: %+v", next.Spec.Needs)
 			}
 			if outcome == "accepted" {
-				if next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2.5 {
+				if next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
 					t.Fatalf("check peak not reused: %+v", next.MemoryEnvelope)
 				}
 			} else if !strings.HasPrefix(next.MemoryEnvelope.Source, "exploratory") {
@@ -462,9 +462,10 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 }
 
 // Same-host RAM evidence can fit a sibling even when cross-machine transfer
-// would not. Truly impossible checks still reject before entering the queue.
+// would not. An oversized learned estimate waits for evidence or capacity;
+// neither case can bypass live admission.
 func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
-	for _, peak := range []float64{13.08499526977539, 20} {
+	for _, peak := range []float64{13.08499526977539, 25} {
 		t.Run(fmt.Sprint(peak), func(t *testing.T) {
 			q, _, m, s := floorFreeFitFixture(t, 24)
 			sibling := m.Devices[0]
@@ -489,21 +490,16 @@ func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
 			s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
 			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
 			j, err := q.Submit(s)
-			if peak*1.25 > 24 {
-				var refusal *HTTPError
-				if !errors.As(err, &refusal) || refusal.Code != "no_qualified_target" || !strings.Contains(refusal.Message, "exceeds allowance 24 GiB") {
-					t.Fatalf("impossible sibling estimate was not rejected: job=%+v err=%v", j, err)
+			if err != nil || j == nil || j.State != "queued" {
+				t.Fatalf("learned sizing rejected a check: err=%v", err)
+			}
+			if peak+minimumHostMemoryGB > 24 {
+				if why := q.memoryEvidenceWaitingReason(j); !strings.HasPrefix(why, memoryEvidenceRecovering+":") || !strings.Contains(why, "exceeds allowance 24 GiB") {
+					t.Fatalf("oversized sibling estimate lost its typed wait: %q", why)
 				}
-				if len(q.s.Jobs) != 0 {
-					t.Fatal("rejected runtime check entered the queue")
-				}
-			} else {
-				if err != nil || j == nil || j.State != "queued" {
-					t.Fatalf("temporary occupancy rejected a fitting check: job=%+v err=%v", j, err)
-				}
-				if got := assignedJob(machineCheck(t, q, m)); got != nil {
-					t.Fatalf("busy-host check bypassed live admission: %+v", got)
-				}
+			}
+			if got := assignedJob(machineCheck(t, q, m)); got != nil {
+				t.Fatalf("check bypassed live admission: %s", got.ID)
 			}
 		})
 	}

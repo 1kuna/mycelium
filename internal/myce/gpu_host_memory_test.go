@@ -711,7 +711,7 @@ func TestGPUHostMemoryTwoCardAdmission(t *testing.T) {
 					if err := q.Started(result(run, false)); err != nil {
 						t.Fatal(err)
 					}
-					if n == 1 && math.Abs(run.Spec.Needs.HostMemoryGB-totals[kind]*1.25) > 1e-8 {
+					if n == 1 && math.Abs(run.Spec.Needs.HostMemoryGB-(totals[kind]+minimumHostMemoryGB)) > 1e-8 {
 						t.Fatalf("single complete attempt shrank: %+v", run.MemoryEnvelope)
 					}
 					clock.Advance(time.Second)
@@ -724,7 +724,9 @@ func TestGPUHostMemoryTwoCardAdmission(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				wants[kind] = (peaks[kind][1] + outside[kind]) * 1.25
+				low := max(max(peaks[kind][0], components[kind][0])+outside[kind], drops[kind])
+				high := max(max(peaks[kind][1], components[kind][1])+outside[kind], drops[kind])
+				wants[kind] = high + max(high-low, minimumHostMemoryGB)
 			}
 			// Exercise persistence and identity revalidation before using either card.
 			var db string
@@ -853,15 +855,15 @@ func TestGPUHostMemoryFallbackAndFloors(t *testing.T) {
 			estimate := q.memoryEstimate(&probe, &target)
 			switch mode {
 			case "complete":
-				if math.Abs(estimate.measuredHostGB-9.875) > 1e-8 {
+				if math.Abs(estimate.measuredHostGB-8) > 1e-8 {
 					t.Fatalf("wrong complete sizing: %+v", estimate)
 				}
 			case "resident floor":
-				if estimate.measuredHostGB < (9+.16)*1.25 {
+				if estimate.measuredHostGB < (9 + .16) {
 					t.Fatalf("lost historical resident+driver floor: %+v", estimate)
 				}
 			case "driver floor":
-				if estimate.measuredHostGB < (7.7+2)*1.25 {
+				if estimate.measuredHostGB < (7.7 + 2) {
 					t.Fatalf("lost driver floor: %+v", estimate)
 				}
 			case "variance":
@@ -869,10 +871,10 @@ func TestGPUHostMemoryFallbackAndFloors(t *testing.T) {
 					t.Fatalf("lost measured variance: %+v", estimate)
 				}
 			default:
-				if estimate.measuredHostGB != 0 {
+				if mode != "stale" && estimate.measuredHostGB < hostMemoryPeakGB(estimate.host) || mode == "stale" && estimate.measuredHostGB != 0 {
 					t.Fatalf("incomplete/nonlocal evidence reduced GPU memory: %+v", estimate)
 				}
-				if mode == "transfer" && (estimate.host == nil || hostMemoryPeakGB(estimate.host)*estimate.hostFactor < (host+20)*1.25) {
+				if mode == "transfer" && (estimate.host == nil || hostMemoryPeakGB(estimate.host)*estimate.hostFactor < (host+20)) {
 					t.Fatalf("transfer discarded observed outside-cgroup memory: %+v", estimate)
 				}
 			}

@@ -17,6 +17,24 @@ Zero/unresolved reservations have no guard. GPU jobs, managed Docker, preparatio
 and model servers retain their existing behavior; Linux retains cgroup ceilings.
 The worker reports `sampled RSS guard (native CPU); no kernel memory ceiling`.
 
+A learned reservation is an estimate, not an authored hard limit. From the next
+release (#850), failed comparable attempts contribute their observed overshoot
+and sampling growth as headroom. Fresh accepted evidence restores learning,
+retaining this observed variance within the target allowance; it never shrinks
+the clean measured bound. Explicit limits and durable per-job OOM retry floors
+retain their existing contract. The guard uses that resolved reservation, so
+admission and the stop threshold agree without a second unreserved allowance.
+
+The 2026-11-06 incident recorded 4.4857635498046875 GiB RSS against a
+3.9251251220703125 GiB threshold. The numeric stop followed the guard contract;
+its 0.560638427734375 GiB overshoot now supplies measured headroom instead of
+doubling demand. The receipt cannot establish exclusive physical demand,
+complete shared-page attribution or contemporaneous host pressure. It therefore
+does not establish physical OOM or prove that the historical stop was warranted
+by real contention. Existing birth/session fencing, control-process exclusion,
+descendant/sidecar inventory and unknown-sample resets remain unchanged.
+
+
 The existing process-memory observer samples once per second. It reuses the
 cleanup session inventory, launch birth identities and tree-RSS parser to include
 main, helpers and attributable descendants, excluding sibling attempts and the

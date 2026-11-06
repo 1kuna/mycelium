@@ -185,6 +185,19 @@ No real GPU/model validation is implied by laptop tests.
 
 Qualify runtime memory with `myce measure` during coordinated maintenance, with
 the worker stopped and its exact spool selected; never bypass the spool lock.
+Measurement first requests a fresh, compact `GET /api/measure/safety` read from
+the queue. It checks outstanding production jobs (including unreleased attempts),
+production model calls, matching pins, and active models/calls on the selected
+worker without projecting `/api/inspection` or host inventories. Queue and
+measurement binary must both support this route; an older queue's refusal is
+not a reason to fall back or bypass the check.
+Transient read timeouts retry with backoff derived from the failed request's
+duration, at least the configured sample interval, doubling between failures.
+The safety phase is bounded by `--load-timeout` and any earlier caller deadline;
+backoff consumes that budget and never extends an enclosing maintenance window.
+Production blockers, HTTP refusals, malformed replies, cancellation, and an
+exhausted safety budget stop before model preparation/loading. A timeout never
+counts as evidence that production is idle.
 On Linux unified CUDA devices with unsupported used/free counters, the report's
 `basis: unified/host` means both memory figures track `MemTotal - MemAvailable`.
 Use its sampled load/warm-up peak and baseline delta as shared-RAM observations;
@@ -283,6 +296,25 @@ model's worker, loading/ready/draining state, idle seconds, calls in flight, and
 unload errors. In-flight calls show zero idle seconds.
 
 ## Explicit master download and pins
+
+For a multi-file master, keep `--model-root` at the directory **containing**
+the bundle and include the bundle name in each destination, including nested
+paths (for example `bundle/weights/model.bin`). Fetch downloads into a stable
+staging directory beside the bundle, on the same filesystem, and atomically
+renames each file into the bundle only after size and SHA-256 verification.
+The bundle contains neither partial downloads nor Trash. Run fetch for every
+manifest file before verifying or using the immutable master.
+
+Interrupted downloads resume from staging. If a server ignores `Range`, fetch
+restarts that file from its full response. Invalid partials move into a
+quarantine inside staging; fetch reports their preserved paths. A corrupt
+resumed file retries once from zero; a corrupt fresh response fails visibly.
+Fetch flushes files and directory entries before returning success. A directory
+sync failure rolls publication back into staging for a later retry. Repeating
+fetch verifies an already published file without overwriting it. Concurrent
+fetches of one bundle fail with an in-use error; retry when its active fetch
+finishes. Staging directories remain as stable lock locations and to retain
+quarantined bytes; do not remove them while a fetch is active.
 
 ```sh
 myce model fetch chat.gguf --model-root /shared/models \

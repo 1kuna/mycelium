@@ -19,6 +19,9 @@ type SharedInput struct {
 	UnpackedBytes int64        `json:"unpacked_bytes,omitempty" yaml:"unpacked_bytes,omitempty"`
 	ManifestFile  string       `json:"manifest_file,omitempty" yaml:"manifest_file,omitempty"`
 	Manifest      FileManifest `json:"manifest,omitempty" yaml:"manifest,omitempty"`
+	// Worker-only resolved model sources. These are not authored paths or wire
+	// identity: the manifest still verifies every copied/cloned destination.
+	sources map[string]string
 }
 
 // SharedInputEvidence counts successful cache acquisitions during this worker

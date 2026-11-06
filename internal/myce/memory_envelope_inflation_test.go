@@ -65,7 +65,7 @@ func TestMemoryEnvelopeInfrastructureSampleFilter(t *testing.T) {
 			check(t, q, m, nil) // Refresh qualification after queue restart.
 			candidate := first
 			candidate.State = "queued"
-			if envelope := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; envelope.HostGB != 2.5 || envelope.Basis != "learned" {
+			if envelope := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; envelope.HostGB != 2+minimumHostMemoryGB || envelope.Basis != "learned" {
 				t.Fatalf("interruption escalated accepted peak: %+v", envelope)
 			}
 			candidate.MemoryAttempts = job(t, q, run.ID).MemoryAttempts
@@ -114,7 +114,7 @@ func TestMemoryEnvelopeGenuineConstraintEscalationBounded(t *testing.T) {
 			candidate := first
 			candidate.State = "queued"
 			got := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope
-			if got.HostGB != 4 || got.Basis != "exploratory" || !strings.Contains(got.Source, "accepted peak × 2") {
+			if got.HostGB != 32-minimumHostMemoryGB || got.Basis != "exploratory" || !strings.Contains(got.Source, "accepted prior invalidated") {
 				t.Fatalf("genuine failure lost measured exploration bound: %+v", got)
 			}
 			retryState := job(t, q, run.ID)
@@ -128,7 +128,7 @@ func TestMemoryEnvelopeGenuineConstraintEscalationBounded(t *testing.T) {
 			}
 			q = memoryFactsRestart(t, q, clock)
 			check(t, q, m, nil)
-			if e := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; e.HostGB != 4 || e.Basis != "exploratory" {
+			if e := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; e.HostGB < 2+minimumHostMemoryGB || e.Basis != "exploratory" {
 				t.Fatalf("restart lost bounded prior: %+v", e)
 			}
 
@@ -150,7 +150,7 @@ func TestMemoryEnvelopeGenuineConstraintEscalationBounded(t *testing.T) {
 			if err := q.Complete(accepted); err != nil {
 				t.Fatal(err)
 			}
-			if got := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; got.HostGB != 2.5 || got.Basis != "learned" {
+			if got := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; got.HostGB != 2+minimumHostMemoryGB || got.Basis != "learned" {
 				t.Fatalf("clean completion did not re-teach aggregate: %+v", got)
 			}
 		})
@@ -203,7 +203,7 @@ func TestMemoryEnvelopeIncidentSamplesIgnoreInfrastructure(t *testing.T) {
 	candidate.State = "queued"
 	target := allocationMachine(q.s.Machines[m.ID], []string{"0"})
 	got := q.memoryCandidate(&candidate, target).MemoryEnvelope
-	want := hostNeed(target, device*1.25, 18.7*1.25)
+	want := hostNeed(target, device+minimumHostMemoryGB, 18.7+minimumHostMemoryGB)
 	t.Logf("incident envelope: host %.6f GiB device %.6f GiB source %s", got.HostGB, got.DeviceGB, got.Source)
 	if got.HostGB != want || got.Basis != "learned" || got.Evidence != 3 {
 		t.Fatalf("interruptions changed accepted incident peaks: want %.6f, got %+v", want, got)
@@ -253,7 +253,7 @@ func TestMemoryEnvelopeExhaustedLossLateReleaseSample(t *testing.T) {
 	}
 	candidate := first
 	candidate.State = "queued"
-	if got := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; got.HostGB != 2.5 || got.Basis != "learned" {
+	if got := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; got.HostGB != 2+minimumHostMemoryGB || got.Basis != "learned" {
 		t.Fatalf("loss changed accepted memory: %+v", got)
 	}
 }

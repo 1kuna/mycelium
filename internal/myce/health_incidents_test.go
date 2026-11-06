@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -252,7 +253,7 @@ func TestHealthIncidentLearnedEnvelopeReplay(t *testing.T) {
 	first := startObservation(t, q, m, s)
 	clock.Advance(time.Second)
 	r := result(&first, true)
-	peak := 22.0 // #645's 27.1 GiB learned need versus a 24 GiB allowance.
+	peak := 26.0 // Measured need exceeds the 24 GiB allowance without retired percentage padding.
 	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
@@ -263,33 +264,42 @@ func TestHealthIncidentLearnedEnvelopeReplay(t *testing.T) {
 		t.Fatal("fitting history alerted")
 	}
 	incidentAllowance(t, q, &m, 24)
-	if _, err := q.Submit(s); err == nil {
-		t.Fatal("oversized learned submission was admitted")
+	s.SubmissionKey = "learned-incident"
+	queued := submit(t, q, s)
+	if why := q.memoryEvidenceWaitingReason(queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+		t.Fatal("oversized learned submission lost typed wait", why)
 	}
 	if len(alertsOf(q, kind)) != 1 {
-		t.Fatal("refused learned demand did not alert", q.s.Health)
+		t.Fatal("waiting learned demand did not alert", q.s.Health)
 	}
 	var key string
-	for k, c := range q.s.Health.Conditions {
-		if c.Envelope != nil {
+	for k := range q.s.Health.Conditions {
+		if strings.HasPrefix(k, "learned-envelope/") {
 			key = k
 		}
 	}
 	if key == "" {
-		t.Fatal("no retained rejected demand")
+		t.Fatal("no retained waiting demand condition")
 	}
-	if _, err := q.Submit(s); err == nil {
-		t.Fatal("unchanged retry admitted")
+	if retry := submit(t, q, s); retry.ID != queued.ID {
+		t.Fatal("unchanged retry created a new job")
+	}
+	if assigned := assignedJob(machineCheck(t, q, m)); assigned != nil {
+		t.Fatal("oversized learned work assigned", assigned.ID)
 	}
 	requireIncident(t, q, kind, key, 1, true)
 	// A larger allowance recovers automatically without a resubmission.
 	incidentAllowance(t, q, &m, 32)
 	requireIncident(t, q, kind, key, 1, false)
+	if assigned := assignedJob(machineCheck(t, q, m)); assigned == nil || assigned.ID != queued.ID {
+		t.Fatal("waiting job did not recover automatically")
+	}
 	if q.s.Health.Conditions[key].Envelope != nil {
 		t.Fatal("recovered probe retained")
 	}
 	// Cold/exploratory and declared oversize work aren't learned incidents.
 	s.Needs.Memory, s.Needs.HostMemoryGB = "", 100
+	s.SubmissionKey = "declared-incident"
 	if _, err := q.Submit(s); err == nil {
 		t.Fatal("declared oversize work admitted")
 	}

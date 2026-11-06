@@ -220,8 +220,11 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.DB = filepath.Join(c.State, "myce.db")
 
 	c.HostID, _ = os.Hostname()
-	c.ReserveHostMemoryGB = 4
-	c.MemoryCeilingSlackGB = .125
+	// Live free memory already excludes the OS/driver working set. New
+	// installations do not subtract a second, guessed reserve; explicit
+	// operator reserves and ceiling slack remain supported and preserved.
+	c.ReserveHostMemoryGB = 0
+	c.MemoryCeilingSlackGB = 0
 	c.Heartbeat = time.Second
 	c.LogRetention = DefaultLogRetention
 	c.FileRetention = DefaultFileRetention
@@ -232,7 +235,8 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.UploadSpoolDir = filepath.Join(c.State, "uploads")
 	c.UploadSpoolBytes = DefaultUploadSpoolBytes
 	c.PrivateDevices, c.NoNewPrivileges = false, true
-	c.CPUReserveCores = 1
+	// The OS preempts CPU work; an idle logical CPU is not a memory reserve.
+	c.CPUReserveCores = 0
 	c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = 10, "25%", "512M", "64"
 	if role == "queue" {
 		// Control transactions and heartbeats must not share job politeness limits.
@@ -422,9 +426,21 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			return err
 		}
 	}
+	var reconciliation *slotReconciliation
+	if existing && !files.machineConversion {
+		reconciliationConfig := installed
+		reconciliationConfig.Queue = c.Queue // Address repair already verified the saved certificate pin.
+		reconciliation, err = preflightInstallSlot(ctx, reconciliationConfig, command)
+		if err != nil {
+			return err
+		}
+	}
 	var extraPaths []string
 	if invitation != nil {
 		extraPaths = append(extraPaths, c.JoiningFile)
+	}
+	if reconciliation != nil {
+		extraPaths = append(extraPaths, filepath.Join(c.State, "slot-reconciliation.json"))
 	}
 	tx, err := snapshotInstall(ctx, c, files, command, extraPaths...)
 	if err != nil {
@@ -451,6 +467,24 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	}
 	for _, path := range []string{filepath.Dir(c.Config), filepath.Dir(c.Service), c.State} {
 		if err = os.MkdirAll(path, 0700); err != nil {
+			return err
+		}
+	}
+	if reconciliation != nil {
+		// The rollback snapshot must contain exactly the qualified slot bytes.
+		original := tx.originals[c.Binary]
+		if fleetBytesHash(original.data) != reconciliation.Slot.SHA256 || int64(len(original.data)) != reconciliation.Slot.Size {
+			return errors.New("fleet_install_changed")
+		}
+		current, err := readReleaseSlot(c.Binary)
+		if err != nil || current.SHA256 != reconciliation.Slot.SHA256 {
+			return errors.New("fleet_install_changed")
+		}
+		receipt, err := json.Marshal(reconciliation)
+		if err != nil {
+			return err
+		}
+		if err = tx.put(filepath.Join(c.State, "slot-reconciliation.json"), receipt, 0600); err != nil {
 			return err
 		}
 	}

@@ -79,8 +79,9 @@ func TestMemorySamplingDeclaredGPUStartsLate(t *testing.T) {
 	t.Setenv("MYCE_TEST_DEVICE_PROBE", dir)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	// Empty, timeout, then memory. The fourth probe establishes that the
-	// preceding measurement was consumed before cancellation, and stops as
-	// unsupported. A host spike during the timeout must remain observable.
+	// preceding measurement was consumed before cancellation, and uses malformed
+	// output to stop as unsupported. N/A now activates the unified fallback.
+	// A host spike during the timeout must remain observable.
 	script := `#!/bin/sh
 if [ ! -e "$MYCE_TEST_DEVICE_PROBE/empty" ]; then
   : > "$MYCE_TEST_DEVICE_PROBE/empty"
@@ -95,7 +96,7 @@ if [ ! -e "$MYCE_TEST_DEVICE_PROBE/value" ]; then
   printf 'GPU-one, 42, 18556\n'
   exit 0
 fi
-printf 'GPU-one, 42, N/A\n'
+printf 'GPU-one, 42, unsupported-memory\n'
 : > "$MYCE_TEST_DEVICE_PROBE/measured"
 `
 	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte(script), 0700); err != nil {
@@ -177,7 +178,7 @@ func TestMemorySamplingOOMInvalidatesAndRelearns(t *testing.T) {
 		t.Fatal(err)
 	}
 	explore := startObservation(t, q, m, s)
-	if explore.MemoryEnvelope.Source != acceptedMemoryEscalation || explore.MemoryEnvelope.Basis != "exploratory" || explore.MemoryEnvelope.HostGB != 4 {
+	if explore.MemoryEnvelope.Source != acceptedMemoryEscalation || explore.MemoryEnvelope.Basis != "exploratory" || explore.MemoryEnvelope.HostGB != 32-minimumHostMemoryGB {
 		t.Fatalf("invalidated class did not explore: %+v", explore.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)
@@ -188,7 +189,7 @@ func TestMemorySamplingOOMInvalidatesAndRelearns(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := startObservation(t, q, m, s)
-	if next.Spec.Needs.HostMemoryGB != 10 || !strings.Contains(next.MemoryEnvelope.Source, "accepted peak") {
+	if next.Spec.Needs.HostMemoryGB != 8+minimumHostMemoryGB || !strings.Contains(next.MemoryEnvelope.Source, "accepted peak") {
 		t.Fatalf("successful exploration did not re-teach memory: %+v", next.MemoryEnvelope)
 	}
 }

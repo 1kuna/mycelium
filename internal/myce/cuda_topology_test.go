@@ -47,11 +47,11 @@ func TestCUDAIntegratedPropertyOverridesPCITransport(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || hardware.MemoryMode != "unified" || hardware.ReserveGB != 16 || hardware.MemoryGB != 0 || queries == 0 {
+			if err != nil || hardware.MemoryMode != "unified" || hardware.ReserveGB != 0 || hardware.MemoryGB != 0 || queries == 0 {
 				t.Fatalf("integrated runtime property ignored: %+v %v queries=%d", hardware, err, queries)
 			}
 			devices, err := (Worker{Machine: Machine{GPU: "cuda"}}).localInventoryWithProbe(context.Background(), p)
-			if err != nil || len(devices) != 1 || devices[0].Reason != "" || !devices[0].UnifiedMemory || !devices[0].MemoryMeasured || devices[0].BudgetGB != 16 {
+			if err != nil || len(devices) != 1 || devices[0].Reason != "" || !devices[0].UnifiedMemory || !devices[0].MemoryMeasured || devices[0].BudgetGB != 32 {
 				t.Fatalf("worker disagrees with onboarding: %+v %v", devices, err)
 			}
 		})

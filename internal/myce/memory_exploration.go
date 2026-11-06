@@ -5,6 +5,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 )
 
 const boundedMemoryExploration = "bounded cross-OS exploration"
@@ -64,30 +65,52 @@ func (q *Queue) sameOSMemoryLowerBound(key ObservationKey, configuration string)
 // Discrete host bounds can use constrained GPU host peaks. Keep this opt-in
 // separate from the existing CPU/unified readers and their planning cache.
 func (q *Queue) memoryLowerBound(key ObservationKey, configuration string, discrete bool) float64 {
+	return q.memoryConstraintEvidence(key, configuration, discrete).lower
+}
+
+type memoryConstraintEvidence struct{ lower, margin float64 }
+
+func (q *Queue) memoryConstraintEvidence(key ObservationKey, configuration string, discrete bool) memoryConstraintEvidence {
 	if cache := q.memoryPlanning; cache != nil {
 		id := memoryLowerIdentity(key, configuration)
 		id.discrete = discrete
 		if lower, ok := cache.history.lower[id]; ok {
 			return lower
 		}
-		lower := q.sameOSMemoryLowerBoundFrom(key, configuration, slices.Values(cache.retainedMemoryJobs(q, id)), discrete)
+		lower := q.memoryConstraintEvidenceFrom(key, configuration, slices.Values(cache.retainedMemoryJobs(q, id)), discrete)
 		cache.history.lower[id] = lower
 		return lower
 	}
-	return q.sameOSMemoryLowerBoundFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs), discrete)
+	return q.memoryConstraintEvidenceFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs), discrete)
 }
 func (q *Queue) sameOSMemoryLowerBoundUncached(key ObservationKey, configuration string) float64 {
 	return q.sameOSMemoryLowerBoundFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs), false)
 }
 
 func (q *Queue) sameOSMemoryLowerBoundFrom(key ObservationKey, configuration string, jobs iter.Seq[*Job], discrete bool) float64 {
+	return q.memoryConstraintEvidenceFrom(key, configuration, jobs, discrete).lower
+}
+
+func (q *Queue) memoryConstraintEvidenceFrom(key ObservationKey, configuration string, jobs iter.Seq[*Job], discrete bool) memoryConstraintEvidence {
 	history := q.memoryHistory()
-	lower := 0.0
+	evidence := memoryConstraintEvidence{}
 	for j := range jobs {
-		if j.Timing == nil || j.Timing.Key == nil || j.StartedAt == nil || j.FinishedAt == nil {
+		if j.Timing == nil || j.Timing.Key == nil {
 			continue
 		}
-		age := q.clock.Now().Sub(*j.FinishedAt)
+		ended := time.Time{}
+		for _, outcome := range j.AttemptHistory {
+			if outcome.Attempt == j.Timing.Execution.Attempt && outcome.Machine == j.Timing.Machine && outcome.Session == j.Timing.Session {
+				ended = outcome.EndedAt
+			}
+		}
+		if ended.IsZero() && j.StartedAt != nil && j.FinishedAt != nil {
+			ended = *j.FinishedAt
+		}
+		if ended.IsZero() {
+			continue
+		}
+		age := q.clock.Now().Sub(ended)
 		k := *j.Timing.Key
 		if k.Work != key.Work || age < 0 || age > workCurveMaxAge || k.Target.OS != key.Target.OS {
 			continue // Cheap identity filter before hashing the configuration.
@@ -131,10 +154,18 @@ func (q *Queue) sameOSMemoryLowerBoundFrom(key ObservationKey, configuration str
 			if facts.Attempt != j.Timing.Execution.Attempt || j.Timing.Execution.ID != j.ID || facts.Machine != j.Timing.Machine || facts.Session != j.Timing.Session || p == nil || !p.constrained() || p.HostGB == nil || !validRate(*p.HostGB) || !memoryConstraintFacts(facts) {
 				continue
 			}
-			lower = max(lower, hostMemoryPeakGB(p))
+			peak := hostMemoryPeakGB(p)
+			evidence.lower = max(evidence.lower, peak)
+			margin := memoryGrowthGB(p)
+			if envelope := facts.MemoryEnvelope; envelope != nil && envelope.HostGB > 0 {
+				margin = max(margin, peak-envelope.HostGB)
+			}
+			if facts.LearningReason == "oom" || facts.LearningReason == "attempt_failed" {
+				evidence.margin = max(evidence.margin, margin)
+			}
 		}
 	}
-	return lower
+	return evidence
 }
 
 // Reuse permanent qualification (including platform, recipe, policy and disk)
@@ -172,8 +203,8 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	// Fan-out changes the selected piece/configuration during assignment; it
 	// cannot share this single-attempt claim. An OOM floor is already negative
 	// evidence, never permission to try a smaller exploratory envelope.
-	crossGPU := !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory && len(m.groupMembers) == 0 && estimate.hostFactor == 2.5 && estimate.samples == 1
-	if estimate.escalation || (!estimate.foreign && !crossGPU) || estimate.key == nil || j.Batch != nil || j.Spec.FanOut != nil || j.MemoryOOMFloor != nil {
+	crossGPU := !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory && len(m.groupMembers) == 0 && estimate.uncalibrated
+	if !estimate.uncalibrated || estimate.escalation || (!estimate.foreign && !crossGPU) || estimate.key == nil || j.Batch != nil || j.Spec.FanOut != nil || j.MemoryOOMFloor != nil {
 		return 0, "", false
 	}
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
@@ -182,15 +213,18 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	}
 	prior := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
 	cap, priorFits := q.largestMemoryExplorationHost(j, m, prior)
-	if priorFits || cap <= 0 || q.qualificationCapacity(m).FreeHostMemoryGB != cap {
+	if (!estimate.uncalibrated && priorFits) || cap <= 0 || q.qualificationCapacity(m).FreeHostMemoryGB != cap {
 		return 0, "", false
 	}
-	lower := q.sameOSMemoryLowerBound(*estimate.key, configuration)
+	lower := max(q.sameOSMemoryLowerBound(*estimate.key, configuration), q.constrainedMemoryLowerFor(j, estimate, crossGPU))
+	if lower <= 0 {
+		lower = prior
+	}
 	if crossGPU {
 		// One foreign-family sample is a prior, not a target measurement.
-		// Retain its conservative total-cgroup peak and 25% headroom; only
-		// the extra transfer margin may yield to one bounded measurement.
-		lower = max(hostMemoryPeakGB(estimate.host), estimate.constrainedGB)
+		// Retain the observed total-cgroup lower bound. Unknown transfer
+		// error requires a physical probe, never another guessed factor.
+		lower = max(lower, hostMemoryPeakGB(estimate.host), estimate.constrainedGB)
 	}
 	budget := cap - m.MemoryCeilingSlackGB - exploratoryDriftMarginGB(m)
 	hint := 0.0
@@ -200,7 +234,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 			hint = max(hint, j.MemoryFallback.MemoryGB)
 		}
 	}
-	if lower <= 0 || !validRate(lower*1.25) || lower*1.25 > budget || hint > budget {
+	if lower <= 0 || !validRate(lower) || lower > budget || hint > budget {
 		return 0, "", false
 	}
 	room, why := q.exploratoryMemory(j, m)

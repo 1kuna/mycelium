@@ -51,7 +51,7 @@ func TestSharedGPUPressureGrowth(t *testing.T) {
 			fakeCheckpointAvailability(t, q, true)
 			finish(t, q, b, true)
 			next := assignedJob(machineCheck(t, q, m))
-			if next == nil || next.ID != a.ID || next.Attempt <= a.Attempt || next.Spec.Needs.MemoryGB != 37.5 || next.MemoryEnvelope == nil || !strings.Contains(next.MemoryEnvelope.Source, "shared GPU peak") {
+			if next == nil || next.ID != a.ID || next.Attempt <= a.Attempt || next.Spec.Needs.MemoryGB != 30 || next.MemoryEnvelope == nil || !strings.Contains(next.MemoryEnvelope.Source, "shared GPU measured") {
 				t.Fatal("retry did not reserve measured peak times the learning factor", next)
 			}
 		})
@@ -88,6 +88,11 @@ func TestSharedGPUPressureVictimOrder(t *testing.T) {
 func TestSharedGPUPressureStaleAndUnavailable(t *testing.T) {
 	q, clock := fixture(t)
 	m := sharedUnifiedMachine()
+	// Dedicated cards retain the original diagnostic-only missing-counter
+	// behavior. Unified RAM now sheds to exclusive on missing evidence.
+	m.Devices[0].UnifiedMemory = false
+	m.Devices[0].MemoryMode = "fixed"
+	m.CapabilityProfile.MemoryLayout = "separate"
 	a, b := sharedPair(t, q, m)
 	clock.Advance(time.Second)
 	growthCheck(t, q, m, []*Job{a, b}, []float64{30, 13}, 10)

@@ -378,10 +378,12 @@ From s072, resolve and submit refuse impossible shared-input jobs with HTTP
 409 `shared_input_cache_capacity`: the reason gives required bytes and the
 largest enabled matching worker cache capacity. Refusal requires known capacity
 from every enabled worker under consideration and no fitting matching target.
-Missing reports during startup or a rolling upgrade leave capacity unknown:
-resolve returns its target findings, and submit accepts the job with the typed
-waiting reason `shared_input_cache_unreported`. Older workers cannot receive
-shared-input work until they report a fitting capacity. Declaration sizes are a hard requirement: file bytes, manifest
+During startup with no matching worker, submit accepts the job with the typed
+waiting reason `shared_input_cache_unreported`. A worker without the optional
+capacity report retains staging-time admission, so a queue upgrade does not
+strand work on older workers. Its local cache still enforces its actual capacity
+and reports required/available/limit bytes if staging cannot fit. Workers that
+report capacity retain queue-side checks. Declaration sizes are a hard requirement: file bytes, manifest
 file totals, or `unpacked_bytes` for a tree/archive, plus compressed archive
 bytes for cold staging. Every distinct cache identity needed simultaneously must fit together; aliases
 with identical verified content share one entry.
@@ -629,7 +631,12 @@ rules: worker-owned mounts and environment only.
 The worker resolves the snapshot in the standard hub-cache layout under its
 `--model-root` (`hub/models--OWNER--NAME/snapshots/REVISION`), never an authored
 path. Each snapshot file must be a link into that repository's `blobs/` folder
-or a regular file. Blobs named by SHA-256 (large files) are verified while
+or a regular file. On SMB/CIFS volumes without native symlinks, the worker
+recognizes fixed `XSym` (mfsymlink) files, checks their format checksum and
+resolves their targets within the same repository's content-addressed blobs.
+It stages the resolved blob bytes. Malformed or unsupported link encodings,
+missing targets and changed blobs receive a typed refusal; the source hub is
+never rewritten. Blobs named by SHA-256 (large files) are verified while
 copying; blobs named by Git SHA-1 (small files) are hashed and checked against
 their name. The verified closure is copied into the worker's model snapshot
 cache (`model-snapshots` under the file cache folder), reused by identical
@@ -878,6 +885,15 @@ Non-resumable production (`priority: production`, `resumable: false`) starts
 without NAS checkpoint access and receives a local scratch checkpoint directory
 under the worker state directory. Declare `resumable: true` when production needs
 NAS checkpoints. Experiments and resumable production still wait for NAS recovery.
+
+The host-hygiene mount probe also checks configured checkpoint/NAS roots with a
+stat and one directory-entry read, using this host's healthy latency history.
+It retries existing OS automount access with backoff, holds only dependent work,
+and resumes after fresh successful probes. A missing mount that requires Linux
+operator privileges or macOS owner/Keychain approval is reported with a typed
+human-action code and an existing health wake; the worker never prompts for or
+stores credentials. See [worker mount recovery](operations.md#worker-mount-recovery-linux-and-macos)
+for platform ownership, cold-start deadlines and stuck-request behavior.
 
 The worker heartbeat allows 750 ms for its checkpoint-root probe, including
 creating and removing a temporary file; slower or blocked probes report the root

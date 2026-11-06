@@ -1,4 +1,4 @@
-# Comparable accepted observations supply memory; cold configurations explore.
+# Total cgroup peak plus measured range/25% margin, rounded up; see docs/development.md.
 name: mycelium-gate-full
 project: mycelium
 class: test
@@ -12,9 +12,10 @@ needs:
   # Fetch the pinned predecessor source during preparation; gate.sh stays offline.
   network: true
   cpu_cores: 2
-  memory: auto
+  memory_gb: 6
   platform: cpu
 targets:
+  # CI preserves both architectures and lets Mycelium choose the worker (#527).
   - {os: linux, arch: amd64, platform: cpu}
   - {os: linux, arch: arm64, platform: cpu}
 # Locked CPU tools for every declared target (see env/mycelium-gate/README.md).

@@ -555,7 +555,9 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
-	toolInventory *toolInventory // Immutable queue-owned inventory; never serialized.
+	HygieneCollection *WorkerHygieneCollection `json:"hygiene_collection,omitempty"`
+	HostHealth        *HostHealth              `json:"host_health,omitempty"`
+	toolInventory     *toolInventory           // Immutable queue-owned inventory; never serialized.
 	// ToolInventory maps the native PATH (empty key) and prepared environment keys to executable names.
 	ToolInventory          map[string][]string    `json:"tool_inventory,omitempty"`
 	OutputDestinationIDs   []string               `json:"output_destination_ids,omitempty"`
@@ -685,6 +687,9 @@ type Checkin struct {
 	Running              *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	UnifiedMemoryProtocol      string                       `json:"unified_memory_protocol,omitempty"`
+	HostCollectionProtocol     string                       `json:"hygiene_collection_protocol,omitempty"`
+	HostHygieneProtocol        string                       `json:"host_hygiene_protocol,omitempty"`
 	ToolInventoryProtocol      string                       `json:"tool_inventory_protocol,omitempty"`
 	ToolInventoryRequired      bool                         `json:"tool_inventory_required,omitempty"`
 	ToolInventoryHash          string                       `json:"tool_inventory_hash,omitempty"`
@@ -790,6 +795,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	Freshness           *SnapshotFreshness   `json:"freshness,omitempty"`
 	StorageObservations []StorageObservation `json:"storage_observations,omitempty"`
 	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`
 	RequestLatencies    []RequestLatency     `json:"request_latencies,omitempty"`
@@ -818,6 +824,14 @@ type Snapshot struct {
 
 	// Operator-retired fleet operations, oldest first (audit record, #588).
 	FleetSuperseded []FleetSupersession `json:"fleet_superseded,omitempty"`
+}
+
+// Ages describe observation only; they confer no scheduling or release authority.
+type SnapshotFreshness struct {
+	CapturedAt time.Time `json:"captured_at"`
+	ServedAt   time.Time `json:"served_at"`
+	AgeSeconds float64   `json:"age_seconds"`
+	Cached     bool      `json:"cached"`
 }
 
 func terminal(s string) bool { return s == "succeeded" || s == "failed" || s == "cancelled" }

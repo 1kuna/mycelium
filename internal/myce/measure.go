@@ -67,7 +67,8 @@ type MeasureOptions struct {
 	Force            bool
 	Warmup           map[string]MeasureWarmup
 	ReadMemory       func(context.Context) (MemoryReading, error)
-	Status           func(context.Context) (Snapshot, error)
+	ProductionSafety func(context.Context) error
+	SafetyWait       func(context.Context, time.Duration) error
 	Prepare          func(context.Context, Model, string) (Model, func(), error)
 	NewEngine        func(Model, string, Clock) Engine
 	SampleInterval   time.Duration
@@ -146,30 +147,14 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 		}
 	}
 	if !o.Force {
-		status := o.Status
-		if status == nil {
-			status = func(c context.Context) (Snapshot, error) {
-				return o.Worker.Client.inspectionSnapshot(c)
+		check := o.ProductionSafety
+		if check == nil {
+			check = func(c context.Context) error {
+				return o.Worker.Client.measurementSafety(c, o.Worker.Machine.ID, o.Platform)
 			}
 		}
-		snap, e := status(ctx)
-		if e != nil {
+		if e := waitMeasurementSafety(ctx, o.Worker.Clock, o.LoadTimeout, o.SampleInterval, check, o.SafetyWait); e != nil {
 			return report, fmt.Errorf("cannot establish production safety from queue: %w", e)
-		}
-		for _, j := range snap.Jobs {
-			if j != nil && j.Spec.Priority == "production" && !terminal(j.State) {
-				return report, errors.New("production work outstanding; measurement refused (use --force only during an approved maintenance window)")
-			}
-		}
-		for _, p := range snap.Pins {
-			if p.Machine == o.Worker.Machine.ID || p.Platform == o.Platform {
-				return report, errors.New("production pin targets this worker/platform; measurement refused")
-			}
-		}
-		for _, m := range snap.LoadedModels {
-			if m.Machine == o.Worker.Machine.ID && (m.Priority == "production" || m.InFlight > 0) {
-				return report, errors.New("production model or active calls on selected worker; measurement refused")
-			}
 		}
 	}
 	report = Measurement{WarmupParallel: o.WarmupParallel, LoadTimeoutSeconds: o.LoadTimeout.Seconds(), DeviceBinding: binding, SampleIntervalMS: o.SampleInterval.Milliseconds(), CatalogHash: modelConfigHash(ModelConfig{Models: o.Models}), Worker: o.Worker.Machine.ID, Platform: o.Platform, Device: o.Device, BudgetGB: o.BudgetGB}

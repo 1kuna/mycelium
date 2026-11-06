@@ -658,6 +658,10 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		need := localJobHostNeed(w, j)
 		usedRAM += need
 		growth += remainingAllocationGrowth(allocationMachine(&w.Machine, j.AllocatedDevices), j.Spec.Needs.MemoryGB, need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
+		sharedCard := !next.Spec.Needs.cpuOnly() && !j.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) })
+		if sharedCard && unifiedCUDA(allocationMachine(&w.Machine, j.AllocatedDevices)) && !sharedDeviceSampleReady(w.hostMemorySamples[jobKey(j)], w.Clock.Now()) {
+			return errors.New(deviceUnifiedUncertain)
+		}
 		if !next.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }) && !(sharesDevice(&next) && sharesDevice(&j)) {
 			return refuseAdmission("local_device_reservation", "slots", 1, 0, false)
 		}
@@ -686,7 +690,11 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		usedGPU := deviceShareGB(&next)
 		for _, j := range jobs {
 			if !j.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, id) {
-				usedGPU += deviceShareGB(&j) // A co-tenant sharing this card (#538).
+				charge := deviceShareGB(&j)
+				if s := w.hostMemorySamples[jobKey(j)]; d.UnifiedMemory && d.Platform == "cuda" && sharedDeviceSampleReady(s, w.Clock.Now()) {
+					charge = max(charge, s.deviceGB+s.deviceGrowthGB)
+				}
+				usedGPU += charge // A co-tenant sharing this card (#538).
 			}
 		}
 		for _, r := range models {
@@ -756,6 +764,11 @@ func firstDevice(j Job, m Machine) string {
 func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*workerStore, rt *modelRuntime, environments *environmentRuntime, rawMemory MemorySource, requestRetention func(string, time.Time)) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	health, err := startWorkerHealth(ctx, w, root)
+	if err != nil {
+		return err
+	}
+	defer func() { cancel(); health.wait() }()
 	var qualification checkpointIO[bool]
 	source := w.SharedPressureSource
 	if source == nil {
@@ -907,6 +920,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		}
 		if retry.ready(now) {
 			m := cloneMachine(&w.Machine)
+			m.HygieneCollection = w.hygieneCollector.snapshot()
 			if w.sharedInputs != nil {
 				m.CachedSharedInputs = w.sharedInputs.readyKeys()
 				m.SharedInputCache = w.sharedInputs.capacityReport()
@@ -1123,7 +1137,12 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 			}
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
+			m.HostHealth = health.snapshot(m.DiskVolumes)
+			applyHostMountHealth(w, &m)
+			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
+			heartbeatStarted := w.Clock.Now()
 			reply, err := w.checkin(ctx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
+			health.noteHeartbeat(w.Clock.Now().Sub(heartbeatStarted))
 			if err == nil {
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {
 					// Enrollment is an observer, never authority to terminate live work.
@@ -1178,6 +1197,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				admissionWorker := w
 				admissionWorker.Machine.Environments = m.Environments
 				admissionWorker.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, root.state.CheckpointRoot)
+				admissionWorker.Machine.HostHealth = health.snapshot(m.DiskVolumes)
+				applyHostMountHealth(w, &admissionWorker.Machine)
 				for _, d := range reply.Attempts {
 					key := attemptKey{d.ID, d.Attempt, d.Session}
 					if d.Job != nil {

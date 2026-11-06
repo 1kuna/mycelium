@@ -102,9 +102,9 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 			run := start(m)
 			wantSource := boundedGPUExploration
 			if tc.missingDevice {
-				wantSource += "; GPU recipe default with host estimate floor"
+				wantSource += "; unknown device peak; exclusive card"
 			}
-			if run.MemoryEnvelope.Basis != "exploratory" || run.MemoryEnvelope.Source != wantSource || run.Spec.Needs.HostMemoryGB != 23.875 || len(q.s.MemoryExplorations) != 1 {
+			if run.MemoryEnvelope.Basis != "exploratory" || run.MemoryEnvelope.Source != wantSource || run.Spec.Needs.HostMemoryGB != 24-minimumHostMemoryGB || len(q.s.MemoryExplorations) != 1 {
 				t.Fatalf("single cross-family prior still blocks bounded measurement: %+v", run.MemoryEnvelope)
 			}
 			host, residual := 7.25, .25
@@ -123,7 +123,7 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 					// observation or replace it with the discrete spent prior.
 					s.AllowedMachines = []string{source.ID}
 					local := start(source)
-					if local.MemoryEnvelope.Basis != "learned" || local.Spec.Needs.HostMemoryGB != tc.total*1.25 {
+					if local.MemoryEnvelope.Basis != "learned" || local.Spec.Needs.HostMemoryGB != tc.total+minimumHostMemoryGB {
 						t.Fatalf("probe changed the other layout's accepted need: %+v", local.MemoryEnvelope)
 					}
 					complete(local, seed, false)
@@ -138,7 +138,7 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 				return
 			}
 			next := start(m)
-			if next.MemoryEnvelope.Basis != "learned" || next.Spec.Needs.HostMemoryGB != 9.375 {
+			if next.MemoryEnvelope.Basis != "learned" || next.Spec.Needs.HostMemoryGB != 7.5+minimumHostMemoryGB {
 				t.Fatalf("accepted target sample did not replace transferred prior: %+v", next.MemoryEnvelope)
 			}
 			// Once measured on this family, a genuinely oversized peak is binding.
@@ -188,11 +188,11 @@ func TestExtensionCheckMemoryLearnsFromChecksNotWorkload(t *testing.T) {
 	}
 
 	first := runCheck(.4, .18)
-	if e := first.MemoryEnvelope; e == nil || e.Source != boundedQuarter || first.Spec.Needs.HostMemoryGB != 6 {
-		t.Fatalf("first check not bounded to a quarter of the allowance: host=%.2f GiB %+v", first.Spec.Needs.HostMemoryGB, e)
+	if e := first.MemoryEnvelope; e == nil || e.Source != physicalMemoryProbe || first.Spec.Needs.HostMemoryGB != 24-minimumHostMemoryGB {
+		t.Fatalf("first check did not reserve physical headroom: host=%.2f GiB %+v", first.Spec.Needs.HostMemoryGB, e)
 	}
 	second := runCheck(.4, .18)
-	if e := second.MemoryEnvelope; e == nil || e.Basis != "learned" || math.Abs(second.Spec.Needs.HostMemoryGB-.5) > 1e-9 || math.Abs(second.Spec.Needs.MemoryGB-.225) > 1e-9 {
+	if e := second.MemoryEnvelope; e == nil || e.Basis != "learned" || math.Abs(second.Spec.Needs.HostMemoryGB-(.4+minimumHostMemoryGB)) > 1e-9 || math.Abs(second.Spec.Needs.MemoryGB-(.18+minimumHostMemoryGB)) > 1e-9 {
 		t.Fatalf("check not charged from its own accepted peak: host=%.3f device=%.3f GiB %+v", second.Spec.Needs.HostMemoryGB, second.Spec.Needs.MemoryGB, e)
 	}
 
@@ -201,7 +201,7 @@ func TestExtensionCheckMemoryLearnsFromChecksNotWorkload(t *testing.T) {
 	if work == nil || work.ID != queued.ID {
 		t.Fatalf("workload not assigned: %s", job(t, q, queued.ID).Reason)
 	}
-	if e := work.MemoryEnvelope; e == nil || e.Source != "accepted peak × 1.25" || work.Spec.Needs.HostMemoryGB != workloadHost*1.25 || work.Spec.Needs.MemoryGB != workloadDevice*1.25 {
+	if e := work.MemoryEnvelope; e == nil || e.Source != "accepted peak + measured uncertainty" || work.Spec.Needs.HostMemoryGB != workloadHost+minimumHostMemoryGB || work.Spec.Needs.MemoryGB != workloadDevice+minimumHostMemoryGB {
 		t.Fatalf("check peaks changed the workload's envelope: host=%.2f device=%.2f GiB %+v", work.Spec.Needs.HostMemoryGB, work.Spec.Needs.MemoryGB, e)
 	}
 }

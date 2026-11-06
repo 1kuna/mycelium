@@ -11,18 +11,10 @@ PLATFORMS = ('darwin', 'linux')
 TERMINAL = {'succeeded', 'failed', 'cancelled'}
 
 
-def platform_profile(text, sha, platform):
-    """Narrow the existing profile without changing its resources or acceptance."""
+def frozen_profile(text, sha):
+    """Freeze the selected platform profile, preserving its placement and resources."""
     text, sources = re.subn(r'(?m)^  git: HEAD$', f'  git: {sha}', text)
-    # https://github.com/1kuna/mycelium/issues/527: exclude the queue host's
-    # Linux amd64 target while heavy jobs must stay off it. Profiles have no
-    # negative host selector; excluding this target is the smallest supported
-    # exclusion, at the cost of native amd64 full-suite coverage. Keep placement
-    # open to every eligible arm64 worker rather than pinning a replacement host.
-    targets = ('  - {os: darwin, arch: arm64, platform: cpu}\n' if platform == 'darwin'
-               else '  - {os: linux, arch: arm64, platform: cpu}\n')
-    text, matrices = re.subn(r'(?m)^targets:\n(?:  - .*\n)+', 'targets:\n' + targets, text)
-    if sources != 1 or matrices != 1:
+    if sources != 1:
         raise ValueError('gate-full profile format changed')
     return text
 
@@ -64,8 +56,6 @@ def failure_state(job):
 
 
 def run(root, sha, scratch):
-    print('Linux amd64 native full-suite coverage is deferred: profiles lack a negative host selector; '
-          'the queue host must be excluded during #527: https://github.com/1kuna/mycelium/issues/527', flush=True)
     jobs, states, refusals = {}, {}, {}
     failed = False
     # Submit both before waiting. An error on one platform must not skip the other.
@@ -73,7 +63,7 @@ def run(root, sha, scratch):
         name = 'gate-full-darwin' if platform == 'darwin' else 'gate-full'
         profile = (root / f'.mycelium/profiles/{name}.yaml').read_text()
         path = scratch / f'{platform}.yaml'
-        path.write_text(platform_profile(profile, sha, platform))
+        path.write_text(frozen_profile(profile, sha))
         reply = command('run', '--profile', str(path), '--key', f'main-ci:{sha}:{platform}')
         try:
             receipt = json.loads(reply.stdout)

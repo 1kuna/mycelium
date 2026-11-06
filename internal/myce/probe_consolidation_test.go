@@ -129,7 +129,7 @@ func TestConsolidatedHostMatrix(t *testing.T) {
 					t.Fatalf("worker withheld healthy device: %+v err=%v", d, probeErr)
 				}
 			}
-			if tc.name == "spark" && (!observed[0].UnifiedMemory || !observed[0].MemoryMeasured || observed[0].FreeMemoryGB != 84 || observed[0].ReserveMemoryGB != 16 || probeErr != nil) {
+			if tc.name == "spark" && (!observed[0].UnifiedMemory || !observed[0].MemoryMeasured || observed[0].FreeMemoryGB != 100 || observed[0].ReserveMemoryGB != 0 || probeErr != nil) {
 				t.Fatalf("shared unified memory/reserve: %+v %v", observed, probeErr)
 			}
 			w.InventoryProbe = func(ctx context.Context) ([]MachineDevice, error) { return w.localInventoryWithProbe(ctx, p) }
@@ -148,7 +148,7 @@ func TestConsolidatedAppleWithoutPCISysfs(t *testing.T) {
 	p.Glob = func(string) ([]string, error) { t.Fatal("Apple host accessed PCI"); return nil, nil }
 	p.ReadFile = func(string) ([]byte, error) { t.Fatal("Apple host accessed PCI"); return nil, nil }
 	got, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
-	if err != nil || len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 4 {
+	if err != nil || len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 0 {
 		t.Fatal(got, err)
 	}
 }

@@ -4,17 +4,16 @@ package myce
 // Never retained across placements, inventory changes, or transaction boundaries.
 type memoryPlanningCache struct {
 	observations *memoryObservationCatalog
+	transfers    map[memoryTransferKey]memoryTransferResult
 	history      *memoryHistoryCache
 	constrained  map[constrainedMemoryKey]float64
-	similar      map[similarMemoryKey]similarMemoryResult
-	cold         map[coldMemoryKey]coldMemoryResult
 }
 
 // Only retained execution evidence is shared with permanent-capacity views.
 // Admission-dependent estimates stay in each view's own planning cache.
 type memoryHistoryCache struct {
 	jobs  map[memoryHistoryKey][]*Job
-	lower map[memoryLowerKey]float64
+	lower map[memoryLowerKey]memoryConstraintEvidence
 }
 
 // Retained constrained executions used to be scanned once per distinct work
@@ -25,7 +24,7 @@ func (c *memoryPlanningCache) retainedMemoryJobs(q *Queue, key memoryLowerKey) [
 	if c.history.jobs == nil {
 		c.history.jobs = map[memoryHistoryKey][]*Job{}
 		for _, j := range q.memoryHistory().s.Jobs {
-			if j.Timing == nil || j.Timing.Key == nil || j.StartedAt == nil || j.FinishedAt == nil || len(j.MemoryAttempts) == 0 {
+			if j.Timing == nil || j.Timing.Key == nil || len(j.MemoryAttempts) == 0 {
 				continue
 			}
 			k := j.Timing.Key
@@ -53,26 +52,10 @@ type similarMemoryKey struct {
 	gpu        bool
 	layout     string
 }
-type similarMemoryResult struct {
-	peak     float64
-	evidence int
-}
-type coldMemoryKey struct {
-	family           similarMemoryKey
-	constrained      constrainedMemoryKey
-	allowance, floor float64
-	source           string
-}
-type coldMemoryResult struct {
-	host     float64
-	source   string
-	evidence int
-	ok       bool
-}
 
 func newMemoryPlanningCache() *memoryPlanningCache {
 	return &memoryPlanningCache{
-		history: &memoryHistoryCache{lower: map[memoryLowerKey]float64{}}, constrained: map[constrainedMemoryKey]float64{}, similar: map[similarMemoryKey]similarMemoryResult{}, cold: map[coldMemoryKey]coldMemoryResult{},
+		history: &memoryHistoryCache{lower: map[memoryLowerKey]memoryConstraintEvidence{}}, constrained: map[constrainedMemoryKey]float64{},
 	}
 }
 func memoryLowerIdentity(key ObservationKey, configuration string) memoryLowerKey {

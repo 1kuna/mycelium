@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -682,57 +680,6 @@ func (c *ModelCache) CopyReports() ([]CopyReport, float64) {
 	speed := c.speed
 	c.speedMu.Unlock()
 	return out, speed
-}
-
-// FetchModel is the only network download path. Loading never invokes it.
-func FetchModel(ctx context.Context, raw, dest string, size int64, sum string) error {
-	u, e := url.Parse(raw)
-	if e != nil || u.Scheme != "https" || u.Host != "huggingface.co" {
-		return errors.New("fetch requires an HTTPS huggingface.co file URL")
-	}
-	if size <= 0 || len(sum) != 64 {
-		return errors.New("fetch requires size and SHA-256")
-	}
-	if _, e = os.Stat(dest); !os.IsNotExist(e) {
-		return errors.New("destination already exists or cannot be inspected")
-	}
-	if e = os.MkdirAll(filepath.Dir(dest), 0700); e != nil {
-		return e
-	}
-	req, e := http.NewRequestWithContext(ctx, "GET", raw, nil)
-	if e != nil {
-		return e
-	}
-	res, e := http.DefaultClient.Do(req)
-	if e != nil {
-		return e
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return fmt.Errorf("fetch: HTTP %d", res.StatusCode)
-	}
-	temp := dest + ".partial"
-	f, e := os.OpenFile(temp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if e != nil {
-		return e
-	}
-	_, e = io.Copy(f, io.LimitReader(res.Body, size+1))
-	if e == nil {
-		e = f.Sync()
-	}
-	e = errors.Join(e, f.Close())
-	if e != nil {
-		return e
-	}
-	if e = verifyModel(temp, Model{Name: dest, SizeBytes: size, SHA256: sum}); e != nil {
-		return e
-	}
-	// Link rather than overwrite a master published by another fetch.
-	if e = os.Link(temp, dest); e != nil {
-		return e
-	}
-	c := ModelCache{NASRoot: filepath.Dir(dest)}
-	return c.discard(temp)
 }
 
 func (c *ModelCache) noteCopyError(m Model, err error) {

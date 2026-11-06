@@ -18,10 +18,10 @@ func TestJoinGPUDetection(t *testing.T) {
 		name, os, arch, output, platform, mode string
 		memory, reserve                        float64
 	}{
-		{"CUDA", "linux", "amd64", "RTX 4090, 24576", "cuda", "dedicated", 24, 2},
-		{"Metal", "darwin", "arm64", "Metal Support: Metal 3", "metal", "unified", 0, 4},
-		{"UnifiedCUDA", "linux", "arm64", "NVIDIA GB10, N/A", "cuda", "unified", 0, 16},
-		{"IntegratedXPU", "linux", "amd64", "[level_zero:gpu] Intel UHD Integrated GPU", "xpu", "unified", 0, 8},
+		{"CUDA", "linux", "amd64", "RTX 4090, 24576", "cuda", "dedicated", 24, 0},
+		{"Metal", "darwin", "arm64", "Metal Support: Metal 3", "metal", "unified", 0, 0},
+		{"UnifiedCUDA", "linux", "arm64", "NVIDIA GB10, N/A", "cuda", "unified", 0, 0},
+		{"IntegratedXPU", "linux", "amd64", "[level_zero:gpu] Intel UHD Integrated GPU", "xpu", "unified", 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			probe := myce.MachineProbe{OS: tc.os, Arch: tc.arch, Command: func(_ context.Context, name string, args ...string) ([]byte, error) {

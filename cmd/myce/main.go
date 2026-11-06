@@ -283,14 +283,14 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	f.DurationVar(productionGrace, "production-stop-grace", 10*time.Second, "legacy alias for preemption-stop-grace")
 	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
 	memoryMode := f.String("memory-mode", "auto", "memory source: auto, unified, dedicated, or fixed")
-	cpuReserve := f.Int("reserve-cpu-cores", 1, "logical cores reserved for the owner")
+	cpuReserve := f.Int("reserve-cpu-cores", 0, "logical cores reserved for the owner")
 	cpuBudget := f.Int("cpu-budget-cores", 0, "initial host CPU allowance; zero uses logical cores minus reserve")
 	hostBudget := f.Float64("host-memory-budget-gb", 0, "initial host RAM allowance in GiB; change with myce host budget while drained or disabled")
-	memorySlack := f.Float64("memory-ceiling-slack-gb", .125, "extra GiB per declared RAM ceiling (counts against host budget)")
+	memorySlack := f.Float64("memory-ceiling-slack-gb", 0, "extra GiB per declared RAM ceiling (counts against host budget)")
 	requireCeilings := f.Bool("require-memory-ceilings", false, "refuse startup unless per-attempt cgroup v2 memory ceilings are enforceable; require host_memory_gb")
 	memorySwap := f.Int64("memory-swap-max-bytes", 0, "swap allowance per memory ceiling in bytes")
 	gpuTelemetryHelper := f.String("gpu-telemetry-helper", "", "optional read-only GPU telemetry executable (absolute path; empty disables helper)")
-	hostReserve := f.Float64("reserve-host-memory-gb", 4, "host RAM reserve in GiB (unified uses the larger GPU/host reserve once)")
+	hostReserve := f.Float64("reserve-host-memory-gb", 0, "host RAM reserve in GiB (unified uses the larger GPU/host reserve once)")
 	reserve := f.Float64("reserve-memory-gb", 0, "GPU memory to keep outside Mycelium")
 	productionRetries := f.Int("production-infrastructure-retries", myce.DefaultProductionInfrastructureRetries, "maximum infrastructure requeues per production job")
 	productionLoss := f.Duration("production-loss-timeout", myce.ProductionLossAfter, "quiet timeout for production work")
@@ -965,6 +965,13 @@ func printStatus(s myce.Snapshot, full bool) {
 			fmt.Printf("worker %s release: %s (%s)\n", m.ID, m.Release.Version, m.Release.Commit)
 		} else {
 			fmt.Printf("worker %s release: unknown\n", m.ID)
+		}
+		if p := m.Fleet; p != nil && (p.SlotMismatch || p.SlotError != "") {
+			slot := "unavailable"
+			if p.InstalledSlot != nil {
+				slot = p.InstalledSlot.SHA256
+			}
+			fmt.Printf("worker %s installed slot differs: running=%s/sha256:%s slot=sha256:%s error=%s\n", m.ID, p.Version, p.SHA256, slot, p.SlotError)
 		}
 		state := myce.HyphaAvailability(m)
 		state += "; " + myce.NativeIsolationStatus(*m)

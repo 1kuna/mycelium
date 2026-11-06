@@ -10,10 +10,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type fakeClock struct{ now time.Time }
+// HTTP observation samples time outside q.mu, including before lock acquisition.
+// Queue fixtures therefore need the same synchronized clock as worker fixtures.
+type fakeClock = workerFakeClock
 
-func (c *fakeClock) Now() time.Time          { return c.now }
-func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
 func fixture(t *testing.T) (*Queue, *fakeClock) {
 	t.Helper()
 	c := &fakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}

@@ -12,7 +12,7 @@ entries:
         name: mycelium-gate-full
         needs:
             cpu_cores: 2
-            memory: auto
+            memory_gb: 6
             network: true
             platform: cpu
         outputs:

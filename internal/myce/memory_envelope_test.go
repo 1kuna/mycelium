@@ -31,8 +31,8 @@ func TestMemoryEnvelopeMeasuredAccepted(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := startObservation(t, q, m, auto)
-	if next.Spec.Needs.HostMemoryGB != 2.5 {
-		t.Fatalf("peak × 1.25 not reserved: %+v", next.Spec.Needs)
+	if next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
+		t.Fatalf("accepted peak and measured uncertainty not reserved: %+v", next.Spec.Needs)
 	}
 }
 
@@ -59,7 +59,7 @@ func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
 				}
 			}
 			bound := startObservation(t, q, m, s)
-			if tc.mode == "auto" && bound.MemoryEnvelope.Source != "accepted peak × 1.25" {
+			if tc.mode == "auto" && bound.MemoryEnvelope.Source != "accepted peak + measured uncertainty" {
 				t.Fatalf("auto run did not reuse seed peak: %+v", bound.MemoryEnvelope)
 			}
 			a, err := fakeCeilings(t).create("attempt-bound", 5<<29, 0)
@@ -100,12 +100,12 @@ func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
 			}
 			s.Needs.Memory = "auto"
 			next := startObservation(t, q, m, s)
-			wantSource := boundedQuarter
+			wantSource := physicalMemoryProbe
 			if tc.mode == "auto" {
 				wantSource = acceptedMemoryEscalation
 			}
 			if tc.success && tc.mode == "auto" {
-				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
+				if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
 					t.Fatalf("rejected sample changed accepted envelope: %+v", next.MemoryEnvelope)
 				}
 				return
@@ -163,12 +163,12 @@ func TestMemoryEnvelopeCPUOnGPUHostReusesAndRelearnsPeak(t *testing.T) {
 			t.Fatal("successful solo CPU run did not record a peak")
 		}
 	}
-	first := start(boundedQuarter, 0)
+	first := start(physicalMemoryProbe, 0)
 	if owner := q.s.Machines[m.ID]; len(owner.Devices) != 2 || owner.ReservedMemoryGB != 1 {
 		t.Fatalf("missing multi-device GPU reserve: %+v", owner)
 	}
 	complete(first, 2)
-	next := start("accepted peak × 1.25", 2.5)
+	next := start("accepted peak + measured uncertainty", 2+minimumHostMemoryGB)
 	clock.Advance(time.Second)
 	r := result(next, false)
 	r.OutOfMemory = true
@@ -183,8 +183,8 @@ func TestMemoryEnvelopeCPUOnGPUHostReusesAndRelearnsPeak(t *testing.T) {
 	if err := q.Cancel(next.ID); err != nil {
 		t.Fatal(err)
 	}
-	complete(start(acceptedMemoryEscalation, 4), 8)
-	start("accepted peak × 1.25", 10)
+	complete(start(acceptedMemoryEscalation, 0), 8)
+	start("accepted peak + measured uncertainty", 8+minimumHostMemoryGB)
 }
 
 func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
@@ -250,21 +250,24 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 		}
 	}
 	setSource("commit one")
-	first := start(boundedQuarter, 0)
+	first := start(physicalMemoryProbe, 0)
 	// #559: a bounded first run leaves room for other work beside it.
 	busy := submit(t, q, s)
-	beside := assignedJob(machineCheck(t, q, m, first))
-	if beside == nil || beside.ID != busy.ID || beside.MemoryEnvelope.Source != boundedQuarter {
-		t.Fatal("bounded first run blocked a second job", job(t, q, busy.ID).Reason)
+	if beside := assignedJob(machineCheck(t, q, m, first)); beside != nil {
+		t.Fatal("cold probe shared unknown demand", beside)
+	}
+	complete(first, 2)
+	beside := assignedJob(machineCheck(t, q, m))
+	if beside == nil || beside.ID != busy.ID || beside.MemoryEnvelope.Basis != "learned" {
+		t.Fatal("accepted peak did not release probe exclusivity")
 	}
 	if err := q.Started(result(beside, false)); err != nil {
 		t.Fatal(err)
 	}
 	complete(beside, 2)
-	complete(first, 2)
-	complete(start("accepted peak × 1.25", 2.5), 2)
+	complete(start("accepted peak + measured uncertainty", 2+minimumHostMemoryGB), 2)
 	setSource("commit two")
-	oom := start("accepted peak × 1.25", 2.5)
+	oom := start("accepted peak + measured uncertainty", 2+minimumHostMemoryGB)
 	r := result(oom, false)
 	r.OutOfMemory = true
 	if err := q.Complete(r); err != nil {
@@ -273,11 +276,11 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 	if err := q.Cancel(oom.ID); err != nil {
 		t.Fatal(err)
 	}
-	complete(start(acceptedMemoryEscalation, 4), 4)
-	complete(start("accepted peak × 1.25", 5), 4)
+	complete(start(acceptedMemoryEscalation, 0), 4)
+	complete(start("accepted peak + measured uncertainty", 4+minimumHostMemoryGB), 4)
 	s.Run.Command = []string{"sh", "-ec", "tar -xf .myce-source.tar\nbash scripts/other-suite.sh"}
-	// Similar work's 4 GiB peak × 2.5 exceeds half the allowance: host-wide.
-	complete(start("exploratory first run", 0), 1)
+	// Similar local work uses its accepted peak and measured variability.
+	complete(start("exploratory first run (bounded: accepted family peaks + measured uncertainty)", 4+minimumHostMemoryGB), 1)
 	for _, point := range q.s.WorkObservations {
 		if point.StaleReason != "" || point.Rate != 0 || point.Seconds != 0 || point.Units != 0 || point.LatencySeconds != 0 {
 			t.Fatalf("profile memory observation contains stale/timing data: %+v", point)
@@ -288,17 +291,23 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 	// A first run can fit while its learned peak plus safety margin cannot.
 	s.Needs.Memory, s.Needs.HostMemoryGB = "auto", 0
 	s.Run.Command = []string{"sh", "-ec", "bash scripts/memory-heavy-suite.sh"}
-	complete(start("exploratory first run", 0), 13)
+	complete(start("exploratory first run (bounded: accepted family peaks + measured uncertainty)", 7), 17)
 	for _, mode := range []string{"auto", ""} {
 		s.Needs.Memory = mode
 		s.Needs.HostMemoryGB = 17
 		if mode == "auto" {
 			s.Needs.HostMemoryGB = 0 // The rejection must come from the learned peak.
 		}
-		_, err := q.Submit(s)
-		var api *HTTPError
-		if !errors.As(err, &api) || api.Code != "no_qualified_target" {
-			t.Fatalf("oversized %q memory must retain exit-78 rejection: %v", mode, err)
+		queued, err := q.Submit(s)
+		if mode == "auto" {
+			if err != nil || !strings.HasPrefix(q.memoryEvidenceWaitingReason(queued), memoryEvidenceRecovering+":") {
+				t.Fatalf("learned-only mismatch must wait: %v", err)
+			}
+		} else {
+			var api *HTTPError
+			if !errors.As(err, &api) || api.Code != "no_qualified_target" {
+				t.Fatalf("declared impossibility must refuse: %v", err)
+			}
 		}
 	}
 }
@@ -344,7 +353,7 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 	complete(first, 3, true)
 	s.Needs.Memory, s.Needs.HostMemoryGB = "auto", 0
 	const linuxPeak = 3.634326934814453
-	complete(start(linux, boundedQuarter, 8), linuxPeak, false)
+	complete(start(linux, physicalMemoryProbe, 31.75), linuxPeak, false)
 	if facts := job(t, q, first.ID).MemoryAttempts; len(facts) != 1 || facts[0].LearningReason != "constrained" || *facts[0].MemoryPeak.HostGB != 3 {
 		t.Fatal("constrained diagnostic was not retained", facts)
 	}
@@ -366,21 +375,18 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 	}
 	// The lower bound permits one full-allowance measurement, not a 3 GiB cap.
 	complete(start(darwin, boundedMemoryExploration, 7.75), 4, false)
-	complete(start(darwin, "accepted peak × 1.25", 5), 2, true)
+	complete(start(darwin, "accepted peak + measured uncertainty", 4+minimumHostMemoryGB), 2, true)
 	// Rejected local success cannot erase the accepted 4 GiB peak (#490).
-	complete(start(darwin, "accepted peak × 1.25", 5), 6.5, false)
-	_, err := q.Submit(s)
-	var api *HTTPError
-	if !errors.As(err, &api) || api.Code != "no_qualified_target" {
-		t.Fatalf("real local requirement must still refuse: %v", err)
-	}
-	for _, want := range []string{"no qualified target can fit this job", "8.25 GiB", "allowance 8 GiB", "reduce the workload", "clean target-platform measurement", "operator approve", "retrying unchanged cannot fix capacity"} {
-		if !strings.Contains(api.Message, want) {
-			t.Errorf("refusal %q missing %q", api.Message, want)
+	complete(start(darwin, "accepted peak + measured uncertainty", 4+minimumHostMemoryGB), 8.5, false)
+	queued := submit(t, q, s)
+	why := q.memoryEvidenceWaitingReason(queued)
+	for _, want := range []string{memoryEvidenceRecovering, "8.62506103515625 GiB", "allowance 8 GiB"} {
+		if !strings.Contains(why, want) {
+			t.Errorf("wait %q missing %q", why, want)
 		}
 	}
 	// The accepted source-OS peak and its original margin remain usable.
-	complete(start(linux, "accepted peak × 1.25", linuxPeak*1.25), linuxPeak, false)
+	complete(start(linux, "accepted peak + measured uncertainty", linuxPeak+minimumHostMemoryGB), linuxPeak, false)
 }
 
 func TestMemoryEnvelopeCrossMachineEstimate(t *testing.T) {
@@ -412,10 +418,10 @@ func TestMemoryEnvelopeCrossMachineEstimate(t *testing.T) {
 		t.Fatalf("cross-machine candidate refused: %s", job(t, q, queued.ID).Reason)
 	}
 	data, _ := json.Marshal(next)
-	if next.Spec.Needs.HostMemoryGB != 3.75 || !strings.Contains(string(data), "cross-machine estimate") {
-		t.Fatalf("same-family peak must use 1.25 × 1.5: %s", data)
+	if next.Spec.Needs.HostMemoryGB != 32-minimumHostMemoryGB || !strings.Contains(string(data), "transfer error unavailable") {
+		t.Fatalf("uncalibrated same-family transfer must remain physical exploration: %s", data)
 	}
-	// The same accepted recipe on a different family gets the larger margin.
+	// A different family also needs measured transfer error.
 	for id, point := range q.s.WorkObservations {
 		point.Key.Target.Arch = "arm64"
 		q.s.WorkObservations[id] = point
@@ -423,8 +429,8 @@ func TestMemoryEnvelopeCrossMachineEstimate(t *testing.T) {
 	probe := *q.s.Jobs[next.ID]
 	probe.State = "queued"
 	estimate := q.memoryCandidate(&probe, q.s.Machines[m.ID])
-	if estimate.Spec.Needs.HostMemoryGB != 5 {
-		t.Fatalf("other-family peak must use 1.25 × 2: %+v", estimate.Spec.Needs)
+	if estimate.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatalf("uncalibrated other-family transfer must remain exploratory: %+v", estimate.Spec.Needs)
 	}
 }
 
@@ -458,21 +464,22 @@ func TestMemoryEnvelopeSiblingHostRAM(t *testing.T) {
 			probe := &Job{State: "queued", Spec: s, Extensions: []Extension{registeredExtension(t, q, s.Extension)}}
 			probe = extensionJobs(probe, &target, true)[0]
 			estimate := q.memoryCandidate(probe, &target)
-			factor := 1.25 * 1.5
+			want := 24 - minimumHostMemoryGB
 			if variant == "same host" {
-				factor = 1.25
+				want = total + minimumHostMemoryGB
 				if !strings.Contains(estimate.MemoryEnvelope.Source, "same-host") || !hostFits(&target, estimate.Spec.Needs.MemoryGB, estimate.Spec.Needs.HostMemoryGB) {
-					t.Fatalf("same-host sibling must fit the 24 GiB allowance: %+v", estimate.MemoryEnvelope)
+					t.Fatal("same-host evidence lost", estimate.MemoryEnvelope)
 				}
-			} else if estimate.MemoryEnvelope.Source != "cross-machine estimate" {
-				t.Fatalf("nonmatching evidence lost its conservative tier: %+v", estimate.MemoryEnvelope)
+			} else if !strings.Contains(estimate.MemoryEnvelope.Source, "exploration") {
+				t.Fatal("unknown transfer was accepted", estimate.MemoryEnvelope)
 			}
-			if got := estimate.Spec.Needs.HostMemoryGB; math.Abs(got-total*factor) > 1e-9 {
-				t.Fatalf("host RAM = %.12f, want %.12f", got, total*factor)
+			if got := estimate.Spec.Needs.HostMemoryGB; math.Abs(got-want) > 1e-9 {
+				t.Fatalf("host RAM=%v want=%v", got, want)
 			}
-			if got := estimate.Spec.Needs.MemoryGB; math.Abs(got-min(device*1.25*1.5, target.TotalMemoryGB)) > 1e-9 {
-				t.Fatalf("sibling VRAM lost its transfer margin: %.12f", got)
+			if estimate.Spec.Needs.MemoryGB != target.TotalMemoryGB || estimate.MemoryEnvelope.Basis != "exploratory" {
+				t.Fatal("unknown sibling device transfer shared", estimate.MemoryEnvelope)
 			}
+
 			if variant == "same host" {
 				// Exact-device VRAM wins independently; host RAM retains the larger
 				// same-host peak rather than dropping to this card's smaller sample.
@@ -480,7 +487,7 @@ func TestMemoryEnvelopeSiblingHostRAM(t *testing.T) {
 				host, gpu := 2.0, 1.0
 				q.s.WorkObservations[identityHash(key)] = WorkObservation{Key: *key, MemoryLayout: "separate", MemoryConfiguration: memoryConfiguration(probe.Spec.Needs, probe.Spec.Args, probe.Spec.Program), MemoryRecordedAt: clock.Now(), MemoryPeak: &AttemptMemoryPeak{HostGB: &host, DeviceGB: &gpu}}
 				estimate = q.memoryCandidate(probe, &target)
-				if math.Abs(estimate.Spec.Needs.HostMemoryGB-total*1.25) > 1e-9 || estimate.Spec.Needs.MemoryGB != 1.25 {
+				if math.Abs(estimate.Spec.Needs.HostMemoryGB-(total+(total-2))) > 1e-9 || estimate.Spec.Needs.MemoryGB != 1+minimumHostMemoryGB {
 					t.Fatalf("host/device tiers were coupled: %+v", estimate.MemoryEnvelope)
 				}
 			}
@@ -514,20 +521,20 @@ func TestMemoryEnvelopeSiblingHostBudget(t *testing.T) {
 			s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
 			first := submit(t, q, s)
 			a := assignedJob(machineCheck(t, q, m))
-			if a == nil || a.ID != first.ID || math.Abs(a.Spec.Needs.HostMemoryGB-peak*1.25) > 1e-9 {
+			if a == nil || a.ID != first.ID || math.Abs(a.Spec.Needs.HostMemoryGB-(peak+minimumHostMemoryGB)) > 1e-9 {
 				t.Fatalf("same-host estimate was not admitted: job=%+v", a)
 			}
 			clock.Advance(time.Second)
 			s.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
 			second := submit(t, q, s)
 			b := assignedJob(machineCheck(t, q, m, a))
-			wantReserved := peak * 1.25
+			wantReserved := (peak + minimumHostMemoryGB)
 			if 2*wantReserved > 24 {
 				if b != nil || job(t, q, second.ID).State != "queued" {
 					t.Fatalf("sibling spent RAM beyond the shared allowance: %+v", b)
 				}
 			} else {
-				if b == nil || b.ID != second.ID || math.Abs(b.Spec.Needs.HostMemoryGB-peak*1.25) > 1e-9 {
+				if b == nil || b.ID != second.ID || math.Abs(b.Spec.Needs.HostMemoryGB-(peak+minimumHostMemoryGB)) > 1e-9 {
 					t.Fatalf("fitting sibling did not get its own reservation: %+v", b)
 				}
 				wantReserved *= 2
@@ -542,7 +549,7 @@ func TestMemoryEnvelopeSiblingHostBudget(t *testing.T) {
 					t.Fatal("sibling did not start after the first reservation was released")
 				}
 			}
-			if got := q.s.Machines[m.ID].HostMemoryInUseGB; math.Abs(got-peak*1.25) > 1e-9 {
+			if got := q.s.Machines[m.ID].HostMemoryInUseGB; math.Abs(got-(peak+minimumHostMemoryGB)) > 1e-9 {
 				t.Fatalf("release removed the sibling's reservation: %.12f GiB", got)
 			}
 		})
@@ -562,7 +569,7 @@ func TestMemoryEnvelopeExploratoryFirstRun(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"memory":"auto"}`), &s.Needs); err != nil {
 		t.Fatal(err)
 	}
-	m.HostAvailableMemoryGB = 15 // Less than half the physical 64 GiB allowance.
+	m.HostAvailableMemoryGB = 0 // No measured physical headroom.
 	j := submit(t, q, s)
 	if check(t, q, m, nil).Job != nil {
 		t.Fatal("exploration admitted without large free headroom")
@@ -580,7 +587,7 @@ func TestMemoryEnvelopeExploratoryFirstRun(t *testing.T) {
 	m.HostAvailableMemoryGB = 32 // This telemetry already excludes the host reserve.
 	first := check(t, q, m, nil).Job
 	data, _ := json.Marshal(first)
-	if first == nil || first.Spec.Needs.HostMemoryGB != 31.875 || !strings.Contains(string(data), "exploratory first run") {
+	if first == nil || first.Spec.Needs.HostMemoryGB != 32-minimumHostMemoryGB || !strings.Contains(string(data), "exploratory first run") {
 		t.Fatalf("no-hint first run must leave launch drift headroom: %+v; %s", first, job(t, q, j.ID).Reason)
 	}
 	if err := q.Started(result(first, false)); err != nil {
@@ -596,7 +603,7 @@ func TestMemoryEnvelopeExploratoryFirstRun(t *testing.T) {
 	}
 	next := startObservation(t, q, m, s)
 	data, _ = json.Marshal(next)
-	if next.Spec.Needs.HostMemoryGB != 2.5 || !strings.Contains(string(data), "accepted peak × 1.25") {
+	if next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB || !strings.Contains(string(data), "accepted peak + measured uncertainty") {
 		t.Fatalf("exploration did not become a measurement: %s", data)
 	}
 }
@@ -612,7 +619,7 @@ func TestMemoryEnvelopeExploratoryLaunchWithRAMDrift(t *testing.T) {
 	s.Run.Command = []string{"true"}
 	queued := submit(t, q, s)
 	j := check(t, q, m, nil).Job
-	if j == nil || j.ID != queued.ID || j.MemoryEnvelope.Source != "exploratory first run" {
+	if j == nil || j.ID != queued.ID || !strings.Contains(j.MemoryEnvelope.Source, "exploratory") {
 		t.Fatal("exploratory job did not dispatch", j)
 	}
 	w := recoveryWorker(t)
@@ -742,7 +749,7 @@ func TestMemoryEnvelopeUnifiedCappedAutoStarts(t *testing.T) {
 	if j == nil || j.ID != queued.ID {
 		t.Fatalf("capped auto job did not qualify and dispatch: %s", job(t, q, queued.ID).Reason)
 	}
-	if j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal != "" || j.MemoryEnvelope.Source != "exploratory first run" || j.Spec.Needs.HostMemoryGB < .25 || j.Spec.Needs.MemoryGB <= 0 || j.MemoryEnvelope.HostGB > 64 {
+	if j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal != "" || !strings.Contains(j.MemoryEnvelope.Source, "exploratory") || j.Spec.Needs.HostMemoryGB < .25 || j.Spec.Needs.MemoryGB <= 0 || j.MemoryEnvelope.HostGB > 64 {
 		t.Fatalf("capped exploration exceeds shared allowance: %+v", j)
 	}
 	if err := q.Started(result(j, false)); err != nil {
@@ -772,7 +779,7 @@ func TestMemoryEnvelopeUnifiedAutoReusesPeakAcrossLiveDrift(t *testing.T) {
 		if j == nil || j.ID != queued.ID {
 			t.Fatalf("solo CUDA run %d not assigned: %s", run, job(t, q, queued.ID).Reason)
 		}
-		if run == 1 && (j.MemoryEnvelope.Source != "accepted peak × 1.25" || j.Spec.Needs.HostMemoryGB != .15625 || j.Spec.Needs.MemoryGB != .3125 || j.MemoryEnvelope.HostGB != .59375) {
+		if run == 1 && (j.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || j.Spec.Needs.HostMemoryGB != .125+minimumHostMemoryGB || j.Spec.Needs.MemoryGB != .25+minimumHostMemoryGB || j.MemoryEnvelope.HostGB != .5+2*minimumHostMemoryGB) {
 			t.Fatalf("second CUDA run did not sum learned host + GPU + slack: %+v", j.MemoryEnvelope)
 		}
 		if err := q.Started(result(j, false)); err != nil {
@@ -858,17 +865,17 @@ func TestMemoryEnvelopeUnifiedHeadroom(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"memory":"auto"}`), &auto.Needs); err != nil {
 		t.Fatal(err)
 	}
-	m.HostAvailableMemoryGB = 22.5
+	m.HostAvailableMemoryGB = 18.125
 	j := submit(t, q, auto)
 	if assignedJob(machineCheck(t, q, m)) != nil {
 		t.Fatal("unified peak admitted without existing slack")
 	}
-	m.HostAvailableMemoryGB = 22.625
+	m.HostAvailableMemoryGB = 18.125 + 2*minimumHostMemoryGB
 	assigned := assignedJob(machineCheck(t, q, m))
 	if assigned == nil || assigned.ID != j.ID {
 		t.Fatalf("conservative host + GPU reservation did not fit: %s", job(t, q, j.ID).Reason)
 	}
-	if assigned.Spec.Needs.MemoryGB != 10 || assigned.Spec.Needs.HostMemoryGB != 12.5 {
+	if assigned.Spec.Needs.MemoryGB != 8+minimumHostMemoryGB || assigned.Spec.Needs.HostMemoryGB != 10+minimumHostMemoryGB {
 		t.Fatalf("wrong unified vector: %+v", assigned.Spec.Needs)
 	}
 	// No auto opt-in: production keeps the existing 8 + 4 + slack declaration.
@@ -890,7 +897,7 @@ func TestMemoryEnvelopeUnifiedHeadroom(t *testing.T) {
 	}
 	probe := *assigned
 	probe.State = "queued"
-	if candidate := q.memoryCandidate(&probe, separateTarget); !strings.Contains(candidate.MemoryEnvelope.Source, "GPU recipe default") {
+	if candidate := q.memoryCandidate(&probe, separateTarget); !strings.Contains(candidate.MemoryEnvelope.Source, "unknown device peak; exclusive card") {
 		t.Fatalf("unknown GPU peak has misleading source: %+v", candidate.MemoryEnvelope)
 	}
 	s.Priority = "production"
@@ -1033,7 +1040,7 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 	s.Needs.Memory = "auto"
 	s.SizeHint = SizeHint{} // An old declaration must not act as a submitter hint.
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != acceptedMemoryEscalation || next.MemoryEnvelope.HostGB != 8 {
+	if next.MemoryEnvelope.Source != acceptedMemoryEscalation || next.MemoryEnvelope.HostGB != 32-minimumHostMemoryGB {
 		t.Errorf("constrained explicit attempt left its old seed usable: %+v", next.MemoryEnvelope)
 	}
 	// Subsequent failed auto pressure still invalidates comparable evidence.
@@ -1044,8 +1051,8 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	third := startObservation(t, q, m, s)
-	// The accepted prior remains exploratory; the new 8 GiB lower bound doubles.
-	if third.MemoryEnvelope.Source != acceptedMemoryEscalation || third.MemoryEnvelope.HostGB != 16 {
+	// With no measured overshoot or growth, the prior remains a physical probe.
+	if third.MemoryEnvelope.Source != acceptedMemoryEscalation || third.MemoryEnvelope.HostGB != 32-minimumHostMemoryGB {
 		t.Errorf("auto pressure failed to clear the explicit seed: %+v", third.MemoryEnvelope)
 	}
 }
@@ -1155,9 +1162,9 @@ func TestMemoryEnvelopePerItemProfile(t *testing.T) {
 		if j == nil || j.ID != queued.ID {
 			t.Fatal("profile not assigned", queued)
 		}
-		expected := "accepted peak × 1.25"
+		expected := "accepted peak + measured uncertainty"
 		if i == 0 {
-			expected = boundedQuarter
+			expected = physicalMemoryProbe
 		}
 		if j.MemoryEnvelope == nil || j.MemoryEnvelope.Source != expected {
 			t.Fatalf("item %d estimate: %+v", i, j.MemoryEnvelope)
@@ -1179,7 +1186,7 @@ func TestMemoryEnvelopePerItemProfile(t *testing.T) {
 	s.ProfileMemory = strings.Repeat("b", 64) // Changed base configuration or per_item identity.
 	queued := submit(t, q, s)
 	j := assignedJob(machineCheck(t, q, m))
-	if j == nil || j.ID != queued.ID || j.MemoryEnvelope == nil || j.MemoryEnvelope.Source != "exploratory first run (bounded: similar work peak × 2.5)" || j.MemoryEnvelope.Basis != "exploratory" {
+	if j == nil || j.ID != queued.ID || j.MemoryEnvelope == nil || j.MemoryEnvelope.Source != "exploratory first run (bounded: accepted family peaks + measured uncertainty)" || j.MemoryEnvelope.Basis != "exploratory" {
 		t.Fatalf("changed profile reused old memory: %+v", j.MemoryEnvelope)
 	}
 }
@@ -1200,7 +1207,7 @@ func TestMemoryEnvelopeTotalPeakAndFileBackedPressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	bound := startObservation(t, q, m, s)
-	if bound.MemoryEnvelope.Source != "accepted peak × 1.25" || bound.MemoryEnvelope.HostGB != 15 {
+	if bound.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || bound.MemoryEnvelope.HostGB != 12+minimumHostMemoryGB {
 		t.Errorf("envelope below measured total with headroom: %+v", bound.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)
@@ -1215,7 +1222,7 @@ func TestMemoryEnvelopeTotalPeakAndFileBackedPressure(t *testing.T) {
 		t.Fatal("pressure changed successful outcome")
 	}
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.MemoryEnvelope.HostGB != 15 {
+	if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.MemoryEnvelope.HostGB != 12+minimumHostMemoryGB {
 		t.Errorf("successful constrained sample changed accepted envelope: %+v", next.MemoryEnvelope)
 	}
 	for _, point := range q.s.WorkObservations {
@@ -1231,7 +1238,7 @@ func TestMemoryEnvelopeTotalPeakAndFileBackedPressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	relearned := startObservation(t, q, m, s)
-	if relearned.MemoryEnvelope.Source != "accepted peak × 1.25" || relearned.MemoryEnvelope.HostGB != 15 {
+	if relearned.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || relearned.MemoryEnvelope.HostGB != 12+minimumHostMemoryGB {
 		t.Errorf("unconstrained exploration did not re-teach total peak: %+v", relearned.MemoryEnvelope)
 	}
 }
@@ -1254,7 +1261,7 @@ func TestMemoryEnvelopeStoredFileBackedPressure(t *testing.T) {
 		q.s.WorkObservations[id] = point
 	}
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained) (bounded: constrained peak × 2)" {
+	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
 		t.Errorf("stored cap-bound curve was reused: %+v", next.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)
@@ -1265,7 +1272,7 @@ func TestMemoryEnvelopeStoredFileBackedPressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	relearned := startObservation(t, q, m, s)
-	if relearned.MemoryEnvelope.Source != "accepted peak × 1.25" || relearned.MemoryEnvelope.HostGB != 15 {
+	if relearned.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || relearned.MemoryEnvelope.HostGB != 12+minimumHostMemoryGB {
 		t.Errorf("stored pressure poisoned fresh learning: %+v", relearned.MemoryEnvelope)
 	}
 }
@@ -1294,7 +1301,7 @@ func TestMemoryEnvelopeTotalPeakKeepsDeviceSeparate(t *testing.T) {
 	}
 	next := start()
 	// Unified accounting still adds the separate device reservation and slack.
-	if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 15 || next.Spec.Needs.MemoryGB != 5 || next.MemoryEnvelope.HostGB != 20.125 {
+	if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.Spec.Needs.HostMemoryGB != 12+minimumHostMemoryGB || next.Spec.Needs.MemoryGB != 4+minimumHostMemoryGB || next.MemoryEnvelope.HostGB != 16.125+2*minimumHostMemoryGB {
 		t.Fatalf("total host/device peaks mixed: %+v; %+v", next.MemoryEnvelope, next.Spec.Needs)
 	}
 }
@@ -1318,11 +1325,11 @@ func TestMemoryEnvelopeMeasuredRangeAdmissionAndPressure(t *testing.T) {
 	specs[0].Args, specs[1].Args = []string{"separation"}, []string{"asr"}
 	samples := [][2]float64{{7.645931243896484, 7.8166961669921875}, {3.725048065185547, 4.041187286376953}}
 	totals := []float64{13.08499526977539, 9.590682983398438}
-	wants := []float64{7.8166961669921875 * 1.25, 4.041187286376953 * 1.25}
+	wants := []float64{7.8166961669921875 + (7.8166961669921875 - 7.645931243896484), 4.041187286376953 + (4.041187286376953 - 3.725048065185547)}
 	for i, spec := range specs {
 		for n, host := range samples[i] {
 			j := startObservation(t, q, m, spec)
-			if n == 1 && j.Spec.Needs.HostMemoryGB != totals[i]*1.25 {
+			if n == 1 && j.Spec.Needs.HostMemoryGB != totals[i]+minimumHostMemoryGB {
 				t.Fatalf("single peak cannot measure variance: %+v", j.MemoryEnvelope)
 			}
 			clock.Advance(time.Second)
@@ -1387,7 +1394,7 @@ func TestMemoryEnvelopeMeasuredRangeAdmissionAndPressure(t *testing.T) {
 	probe := *q.s.Jobs[running[0].ID]
 	probe.State = "queued"
 	estimate := q.memoryEstimate(&probe, q.s.Machines[m.ID])
-	if estimate.host == nil || !estimate.escalation || estimate.samples != 0 || estimate.measuredHostGB != 0 || estimate.hostFactor != 2 {
+	if estimate.host == nil || !estimate.escalation || estimate.samples != 0 || estimate.measuredHostGB < totals[0] || estimate.hostFactor != 1 {
 		t.Fatalf("pressure preserved a reduced estimate: %+v", estimate)
 	}
 	for _, point := range q.s.WorkObservations {
@@ -1412,8 +1419,8 @@ func TestMemoryEnvelopeMeasuredRangeFloorsAndExpiry(t *testing.T) {
 	}
 	probe := &Job{State: "queued", Spec: s, Extensions: []Extension{registeredExtension(t, q, s.Extension)}}
 	candidate := extensionJobs(probe, &m, true)[0]
-	if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got != 10 {
-		t.Fatalf("narrow range lost 25%% growth allowance: %v", got)
+	if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got != 8+minimumHostMemoryGB {
+		t.Fatalf("narrow range lost physical page rounding floor: %v", got)
 	}
 	for id, point := range q.s.WorkObservations {
 		// Even a prior larger anon/resident peak cannot be discounted by new data.
@@ -1421,7 +1428,7 @@ func TestMemoryEnvelopeMeasuredRangeFloorsAndExpiry(t *testing.T) {
 		point.MemoryPeak.HostGB = &host
 		q.s.WorkObservations[id] = point
 	}
-	if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got < 11.25 {
+	if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got < 9+minimumHostMemoryGB {
 		t.Fatalf("fell below observed resident peak: %v", got)
 	}
 	clock.Advance(workCurveMaxAge + time.Second)
@@ -1455,7 +1462,7 @@ func TestMemoryEnvelopeGPUKeepsTotalPeakWithComponentSamples(t *testing.T) {
 		}
 	}
 	next := start()
-	if got, want := next.Spec.Needs.HostMemoryGB, 19.918118*1.25; math.Abs(got-want) > 1e-9 {
+	if got, want := next.Spec.Needs.HostMemoryGB, 19.918118+minimumHostMemoryGB; math.Abs(got-want) > 1e-9 {
 		t.Fatalf("GPU host-backed storage discarded: got %v want %v", got, want)
 	}
 }
@@ -1467,7 +1474,7 @@ func TestMemoryEnvelopeMeasuredRangeVariationAndTinyWork(t *testing.T) {
 		want  float64
 	}{
 		{"observed variation exceeds 25 percent", [2]float64{4, 8}, 12},
-		{"tiny command retains launch drift", [2]float64{.1, .1}, .225},
+		{"tiny command retains physical page rounding", [2]float64{.1, .1}, .1 + minimumHostMemoryGB},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock, m, s := observationFixture(t)
@@ -1497,7 +1504,7 @@ func TestMemoryEnvelopeMeasuredRangeVariationAndTinyWork(t *testing.T) {
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
-			if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got != 15 {
+			if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got != 12+minimumHostMemoryGB {
 				t.Fatalf("missing counters preserved reduced range: %v", got)
 			}
 		})
@@ -1528,7 +1535,7 @@ func TestMemoryEnvelopeIncompleteLocalHistoryKeepsTotalPeak(t *testing.T) {
 	}
 	probe := &Job{State: "queued", Spec: s, Extensions: []Extension{registeredExtension(t, q, s.Extension)}}
 	candidate := extensionJobs(probe, &m, true)[0]
-	if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got != 15 {
+	if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got != 12+minimumHostMemoryGB {
 		t.Fatalf("complete row discounted incomplete local history: %v", got)
 	}
 }
@@ -1537,7 +1544,7 @@ func TestMemoryEnvelopeIncompleteLocalHistoryKeepsTotalPeak(t *testing.T) {
 // RAM-envelope candidate. Observed: an xpu-only job listed a macOS host.
 func TestMemoryEnvelopeReasonSkipsIneligibleHosts(t *testing.T) {
 	q, _ := fixture(t)
-	xpu := cpuMachine("xpu-host", "xpu-host", "xpu", 8, 15) // Under half of 64 GiB free.
+	xpu := cpuMachine("xpu-host", "xpu-host", "xpu", 8, 0) // No physical headroom.
 	mac := cpuMachine("mac-host", "mac-host", "metal", 8, 15)
 	mac.CapabilityProfile.OS, mac.CapabilityProfile.Arch = "darwin", "arm64"
 	s := cpuSpec(2, 0)

@@ -14,8 +14,9 @@ func memoryWorkIdentity(k ObservationKey, configuration string) memoryWorkKey {
 }
 
 type memoryObservationCatalog struct {
-	work   map[memoryWorkKey][]*WorkObservation
-	family map[similarMemoryKey][]*WorkObservation
+	targets map[memoryTransferTarget]map[memoryWorkKey][]*WorkObservation
+	work    map[memoryWorkKey][]*WorkObservation
+	family  map[similarMemoryKey][]*WorkObservation
 }
 
 // Copy each aggregate once, then lend immutable pointers to both readers. Only
@@ -30,11 +31,16 @@ func (q *Queue) memoryObservationCatalog() *memoryObservationCatalog {
 		index = q.memoryPlanning.observations
 	}
 	if index == nil {
-		index = &memoryObservationCatalog{work: map[memoryWorkKey][]*WorkObservation{}, family: map[similarMemoryKey][]*WorkObservation{}}
+		index = &memoryObservationCatalog{targets: map[memoryTransferTarget]map[memoryWorkKey][]*WorkObservation{}, work: map[memoryWorkKey][]*WorkObservation{}, family: map[similarMemoryKey][]*WorkObservation{}}
 		for _, point := range q.s.WorkObservations {
 			if point.MemoryConfiguration != "" {
 				key := memoryWorkIdentity(point.Key, point.MemoryConfiguration)
 				index.work[key] = append(index.work[key], &point)
+				target := transferTarget(point.Key, point.MemoryLayout)
+				if index.targets[target] == nil {
+					index.targets[target] = map[memoryWorkKey][]*WorkObservation{}
+				}
+				index.targets[target][key] = append(index.targets[target][key], &point)
 			}
 			layout := point.MemoryLayout
 			if point.Key.Component == "cpu" {
