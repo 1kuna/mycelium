@@ -90,7 +90,7 @@ func submissionPlacementIntent(s Spec, j *Job) *PlacementIntent {
 		p.DeviceConstraint = "selector"
 		p.Scope = "host_device_restriction"
 	}
-	if s.extensionJob() || s.RequireTarget {
+	if s.extensionJob() {
 		p.Qualification = "required"
 	}
 	p.Environment = PlacementCoverage{Origin: "submission", State: "not_required"}

@@ -9,8 +9,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // PortabilityRequest is advice input, never a registration or submission.
@@ -38,15 +36,18 @@ type PortabilityRequirement struct {
 	Reason string `json:"reason"`
 }
 type PortabilityTarget struct {
-	Target        ExecutionTarget          `json:"target"`
-	Observed      bool                     `json:"observed"`
-	Declared      bool                     `json:"declared"`
-	Runtime       string                   `json:"runtime"`
-	VariantDigest string                   `json:"variant_digest,omitempty"`
-	Needs         *PortabilityResources    `json:"needs,omitempty"`
-	Environments  []PortabilityEnvironment `json:"environments"`
-	Hosts         []PortabilityHost        `json:"hosts"`
-	Actions       []string                 `json:"actions"`
+	AuthoredEligibility string                   `json:"authored_eligibility,omitempty"`
+	EnvironmentCoverage string                   `json:"environment_coverage,omitempty"`
+	Parity              string                   `json:"parity,omitempty"`
+	Target              ExecutionTarget          `json:"target"`
+	Observed            bool                     `json:"observed"`
+	Declared            bool                     `json:"declared"`
+	Runtime             string                   `json:"runtime"`
+	VariantDigest       string                   `json:"variant_digest,omitempty"`
+	Needs               *PortabilityResources    `json:"needs,omitempty"`
+	Environments        []PortabilityEnvironment `json:"environments"`
+	Hosts               []PortabilityHost        `json:"hosts"`
+	Actions             []string                 `json:"actions"`
 }
 type PortabilityResources struct {
 	CPUCores        int     `json:"cpu_cores"`
@@ -163,6 +164,25 @@ func lockPlatform(t ExecutionTarget) string {
 }
 
 func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
+	sets := map[string]map[string]EnvironmentRecipe{}
+	if req.Spec != nil && !req.Spec.extensionJob() {
+		s := cloneJob(&Job{Spec: *req.Spec}).Spec
+		if normalizeResources(&s) == nil && lowerExecution(&s) == nil {
+			req.Spec = &s
+			if s.Environment.Key() != "" {
+				sets["main"], _ = portabilityCatalog(q.environments, s.Environment)
+			}
+			for _, side := range s.Run.Sidecars {
+				if side.Environment != "" {
+					sets[side.Name], _ = portabilityCatalog(q.environments, Environment{Name: side.Environment})
+				}
+			}
+		}
+	}
+	return q.portabilityWithRecipes(req, sets)
+}
+
+func (q *Queue) portabilityWithRecipes(req PortabilityRequest, sets map[string]map[string]EnvironmentRecipe) PortabilityReport {
 	report := PortabilityReport{ObservedAt: q.clock.Now(), Inventory: "unknown", Requirements: []PortabilityRequirement{}, Targets: []PortabilityTarget{}, Notes: []string{
 		"Read-only advice; no registration, preparation, execution or placement change. Admission is a snapshot, not a reservation.",
 		"Missing variants are portability gaps, not proof of hard software requirements. Unauthored requirement reasons remain unknown.",
@@ -242,6 +262,15 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 		}
 		report.Requirements = append(report.Requirements, PortabilityRequirement{safe, source, reason})
 	}
+	if req.Spec != nil && !req.Spec.extensionJob() {
+		for _, recipes := range sets {
+			for platform, recipe := range recipes {
+				for _, target := range environmentLockCoverage(recipe, nil, platform).Targets {
+					row(target)
+				}
+			}
+		}
+	}
 	anyFresh, anyStale := false, false
 	ids := sortedPortabilityKeys(q.s.Machines)
 	for index, id := range ids {
@@ -253,6 +282,9 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 			targets = append(targets, cpuMachineView(m))
 		}
 		for _, target := range targets {
+			if req.Spec != nil && !req.Spec.extensionJob() && req.Spec.Needs.cpuOnly() && target.GPU != "cpu" {
+				continue
+			}
 			r := row(machineTarget(target))
 			r.Observed = true
 			if req.Spec != nil && slices.ContainsFunc(req.Spec.Targets, func(t ExecutionTarget) bool { return t.matches(machineTarget(target)) }) {
@@ -350,34 +382,35 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 			} else if req.Spec != nil {
 				s := *req.Spec
 				j = &Job{ID: "portability", State: "queued", Spec: s}
-				h.Qualification = "plain command: result checks required; native qualification not applicable"
-				if s.Environment.Key() == "" {
-					h.Prepared = "installed tools: unverified"
-				} else {
-					recipes, err := portabilityCatalog(q.environments, s.Environment)
-					if err == nil {
-						j.EnvironmentRecipes = recipes
-						if recipe, ok := recipes[target.GPU]; ok {
-							found := false
-							for _, existing := range r.Environments {
-								found = found || existing.Key == recipe.Key
-							}
-							if !found {
-								r.Environments = append(r.Environments, portabilityEnvironment("catalog", recipe, nil, machineTarget(target)))
-							}
-							h.Prepared = "not prepared"
-							if slices.Contains(target.Environments, recipe.Key) {
-								h.Prepared = "prepared"
-							}
-							h.Builds["catalog"] = h.Prepared
-							for _, b := range target.EnvironmentReports {
-								if b.Key == recipe.Key {
-									h.Builds["catalog"] = portabilityBuildState(b.State)
-								}
+				h.Qualification = "plain command: native qualification not applicable; result acceptance is separate"
+				j.EnvironmentRecipes = sets["main"]
+				j.SidecarEnvironmentRecipes = map[string]map[string]EnvironmentRecipe{}
+				h.Prepared = "not required: installed tools unverified"
+				for _, name := range sortedPortabilityKeys(sets) {
+					recipes := sets[name]
+					if name != "main" {
+						j.SidecarEnvironmentRecipes[name] = recipes
+					}
+					state := "unknown: recipe unavailable"
+					if recipe, ok := recipes[target.GPU]; ok {
+						state = "prepare-needed"
+						if slices.Contains(target.Environments, recipe.Key) && recipe.Key != "" {
+							state = "ready"
+						}
+						for _, b := range target.EnvironmentReports {
+							if b.Key == recipe.Key && recipe.Key != "" && state != "ready" {
+								state = portabilityBuildState(b.State)
 							}
 						}
-					} else {
-						h.Prepared = "catalog recipe unavailable"
+					}
+					h.Builds[safePortabilityID(name)] = state
+				}
+				if len(sets) > 0 {
+					h.Prepared = "prepared"
+					for _, state := range h.Builds {
+						if state != "ready" {
+							h.Prepared = "prepare-needed or unavailable: inspect member builds"
+						}
 					}
 				}
 			}
@@ -387,6 +420,9 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 				} else {
 					candidates := q.memoryCandidates(j, target)
 					h.Admission = "blocked by resources, environment or qualification"
+					if req.Spec != nil && !req.Spec.extensionJob() {
+						h.Admission = "blocked by authored requirements, resources or environments"
+					}
 					for _, candidate := range candidates {
 						fit := targetFit{}
 						fitsResourcesChecked(candidate, target, target.FreeMemoryGB, &fit)
@@ -442,13 +478,16 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 		report.Inventory = "stale or unknown"
 	}
 	for _, r := range rows {
+		if req.Spec != nil && !req.Spec.extensionJob() {
+			commandPortabilityTarget(r, *req.Spec, sets)
+		}
 		if !r.Observed {
-			r.Actions = append(r.Actions, "Declared target absent from inventory; add a native worker before claiming cluster support.")
+			r.Actions = append(r.Actions, "Target absent from inventory; add a native worker before claiming cluster support.")
 		}
 		if r.Runtime != "supported" {
 			r.Actions = append(r.Actions, r.Runtime+"; a software variant cannot supply the missing Mycelium runtime.")
 		}
-		if (e != nil || req.Spec != nil) && !r.Declared {
+		if e != nil && !r.Declared {
 			r.Actions = append(r.Actions, "Investigate an exact variant with its own resources, implementation and checks; preserve genuine authored hard requirements. Missing coverage alone does not prove one.")
 		}
 		platform := lockPlatform(r.Target)
@@ -525,15 +564,7 @@ func portabilityEnvironment(name string, r EnvironmentRecipe, files map[string][
 	if len(out.Key) != 64 || strings.Trim(out.Key, "0123456789abcdef") != "" {
 		out.Key = ""
 	}
-	read := func(name string) []byte {
-		if b := r.Files[name]; len(b) > 0 {
-			return b
-		}
-		if b := r.Files["extension/"+path.Join(path.Dir(r.LockFile), name)]; len(b) > 0 {
-			return b
-		}
-		return files[path.Join(path.Dir(r.LockFile), name)]
-	}
+	read := func(name string) []byte { return environmentInput(r, files, name) }
 	names := []string{"uv.lock", "pyproject.toml"}
 	if backend == "pixi" {
 		names = []string{"pixi.lock", "pixi.toml"}
@@ -564,24 +595,11 @@ func portabilityEnvironment(name string, r EnvironmentRecipe, files map[string][
 		out.LockCoverage = "not applicable: binary build"
 		out.MissingInputs = nil
 	}
-	if backend == "pixi" && out.Inputs == "present" && len(read("pixi.lock")) > 0 {
-		var lock struct {
-			Environments map[string]struct {
-				Packages map[string]any `yaml:"packages"`
-			} `yaml:"environments"`
-		}
-		if yaml.Unmarshal(read("pixi.lock"), &lock) == nil {
-			name := r.Environment
-			if name == "" {
-				name = "default"
-			}
-			if env, ok := lock.Environments[name]; ok {
-				if _, ok := env.Packages[lockPlatform(t)]; ok && lockPlatform(t) != "" {
-					out.LockCoverage = "declared: native frozen install required"
-				} else {
-					out.LockCoverage = "missing target"
-				}
-			}
+	if backend == "pixi" && out.Inputs == "present" {
+		coverage := environmentLockCoverage(r, files, t.Platform)
+		out.LockCoverage = coverage.State
+		if strings.HasPrefix(coverage.State, "declared:") && !slices.Contains(coverage.Targets, t) {
+			out.LockCoverage = "missing target"
 		}
 	}
 	return out
@@ -602,8 +620,15 @@ func WritePortability(dest io.Writer, r PortabilityReport, asJSON bool) error {
 	}
 	for _, t := range r.Targets {
 		fmt.Fprintf(&out, "\n%s: observed=%t declared=%t runtime=%s\n", targetLabel(t.Target), t.Observed, t.Declared, t.Runtime)
+		if t.AuthoredEligibility != "" {
+			fmt.Fprintf(&out, "  authored=%s; environment coverage=%s; parity=%s\n", t.AuthoredEligibility, t.EnvironmentCoverage, t.Parity)
+		}
 		if t.Needs != nil {
-			fmt.Fprintf(&out, "  resources: CPU=%d accelerator=%g GiB host=%g GiB automatic_memory=%t\n", t.Needs.CPUCores, t.Needs.MemoryGB, t.Needs.HostMemoryGB, t.Needs.AutomaticMemory)
+			if t.Target.Platform == "cpu" {
+				fmt.Fprintf(&out, "  resources: CPU=%d host=%g GiB automatic_memory=%t\n", t.Needs.CPUCores, max(t.Needs.MemoryGB, t.Needs.HostMemoryGB), t.Needs.AutomaticMemory)
+			} else {
+				fmt.Fprintf(&out, "  resources: CPU=%d accelerator=%g GiB host=%g GiB automatic_memory=%t\n", t.Needs.CPUCores, t.Needs.MemoryGB, t.Needs.HostMemoryGB, t.Needs.AutomaticMemory)
+			}
 		}
 		if t.VariantDigest != "" {
 			fmt.Fprintf(&out, "  variant digest: %s\n", t.VariantDigest)
@@ -615,7 +640,11 @@ func WritePortability(dest io.Writer, r PortabilityReport, asJSON bool) error {
 			}
 		}
 		for _, h := range t.Hosts {
-			fmt.Fprintf(&out, "  %s: %s; CPU=%d free=%d; accelerator=%g GiB free=%g; %s; %s; admission=%s\n", h.Host, h.Freshness, h.LogicalCPUs, h.FreeCPUCores, h.AcceleratorMemoryGB, h.FreeAcceleratorMemoryGB, h.Prepared, h.Qualification, h.Admission)
+			fmt.Fprintf(&out, "  %s: %s; CPU=%d free=%d; ", h.Host, h.Freshness, h.LogicalCPUs, h.FreeCPUCores)
+			if t.Target.Platform != "cpu" {
+				fmt.Fprintf(&out, "accelerator=%g GiB free=%g; ", h.AcceleratorMemoryGB, h.FreeAcceleratorMemoryGB)
+			}
+			fmt.Fprintf(&out, "%s; %s; admission=%s\n", h.Prepared, h.Qualification, h.Admission)
 			if h.SharedHost != nil {
 				fmt.Fprintf(&out, "    shared interactive fallback: reserve=%g GiB; native CPU commands in prepared environments; nice>=10; inspect worker CPU enforcement and pressure status\n", h.SharedHost.InteractiveReserveGB)
 			}

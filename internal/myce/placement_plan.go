@@ -258,7 +258,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 	overuse := 0.0
 	for _, r := range p.jobs {
 		releasedJobs[r] = true
-		projected.FreeHostMemoryGB += hostNeed(allocationMachine(q.s.Machines[r.Machine], r.AllocatedDevices), r.Spec.Needs.MemoryGB, r.Spec.Needs.HostMemoryGB)
+		projected.FreeHostMemoryGB += q.hostJobCharge(r)
 		overuse += q.unifiedOveruseGB(r)
 	}
 	for _, s := range p.slots {

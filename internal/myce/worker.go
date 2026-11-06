@@ -103,6 +103,8 @@ type Worker struct {
 
 	checkpointPrepare     func(Job) (string, error) // Filesystem fault seam.
 	control               *processControl
+	batchAdmission        func(context.Context, HostLaunch) error
+	stopAdmission         func()
 	DeviceBinding         string
 	EnvironmentSourceRoot string
 	EnvironmentRoot       string
@@ -145,6 +147,8 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
+	stopAdmission    func()
+	resources        *resourceObserver
 	saveStopIntent   func(*time.Time, bool) error
 	savePriorityStop func(*PriorityPreemption) error
 	priorityStop     *PriorityPreemption
@@ -216,6 +220,9 @@ func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
 	p.stopDirective(now, grace, kill, false)
 }
 func (p *process) stopService(now time.Time, grace time.Duration) {
+	if p.stopAdmission != nil {
+		p.stopAdmission()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.shutdown = true
@@ -231,6 +238,9 @@ func (p *process) stopService(now time.Time, grace time.Duration) {
 	p.stopLocked(now, grace, false)
 }
 func (p *process) stopDirective(now time.Time, grace time.Duration, kill, userCancel bool) {
+	if p.stopAdmission != nil {
+		p.stopAdmission()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.userCancel = p.userCancel || userCancel
@@ -245,6 +255,9 @@ func (p *process) enforceGrace(now time.Time) {
 	}
 }
 func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
+	if p.stopAdmission != nil {
+		p.stopAdmission()
+	}
 	if p.stopRequested.IsZero() {
 		p.stopRequested = now
 	}
@@ -855,7 +868,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err = w.reportNativeCustody(j, s.state.Session, identity, identity, "started", cmd.Process.Pid); err != nil {
 		return nil, abort(s.startFailure(j, launchRefused, err))
 	}
-	p := &process{job: j, stopGrace: w.AcceleratorStopGrace, cmd: cmd, birth: custody.Groups[cmd.Process.Pid][cmd.Process.Pid], done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder(), memory: memoryAttempt}
+	p := &process{job: j, stopAdmission: w.stopAdmission, stopGrace: w.AcceleratorStopGrace, cmd: cmd, birth: custody.Groups[cmd.Process.Pid][cmd.Process.Pid], done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder(), memory: memoryAttempt}
 	var savedStopAt *time.Time
 	var savedUserCancel bool
 	p.saveStopIntent = func(deadline *time.Time, userCancel bool) error {
@@ -926,6 +939,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	extensionStarted = true
 	sharedStarted = true
 	started = true
+	p.resources = w.observeResources(p, memoryAttempt)
 	finishMemory := w.observeAttemptMemory(memoryAttempt, j, func() []int { return []int{cmd.Process.Pid} }, p)
 	go func() {
 		if extensionRelease != nil {
@@ -953,6 +967,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		p.mu.Unlock()
 		groupErr := errors.Join(custodyErr, signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL), waitWorkerGroup(cmd.Process.Pid, w.Clock))
 		peak := withExitMaxRSS(finishMemory(), cmd.ProcessState)
+		result.Resources = p.resources.finish()
+		result.Resources = withExitCPU(result.Resources, cmd.ProcessState)
 		oomErr := memoryAttempt.failure()
 		groupErr = errors.Join(groupErr, memoryAttempt.cleanup(w.Clock))
 		result.MemoryPeak = peak
@@ -1066,6 +1082,7 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	w.Client.resourceWire = &resourceWire{}
 	w.hygieneWire = &workerHygieneWire{}
 	w.unifiedMemoryWire = &workerUnifiedMemoryWire{}
 	w.toolReport = &workerToolReport{}

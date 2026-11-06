@@ -196,6 +196,10 @@ func TestPortabilityLocksAndCPUChecks(t *testing.T) {
 	if row.Needs.CPUCores != 3 || row.Needs.MemoryGB != 2 || !strings.Contains(strings.Join(row.Actions, " "), "own resource needs and CPU checks") {
 		t.Fatal(row)
 	}
+	var text strings.Builder
+	if err := WritePortability(&text, r, false); err != nil || !strings.Contains(text.String(), "resources: CPU=3 host=2 GiB") || strings.Contains(text.String(), "accelerator=") {
+		t.Fatalf("CPU variant RAM lost or mislabelled: %s %v", text.String(), err)
+	}
 	if r.Inventory != "unknown" || len(row.Hosts) != 0 {
 		t.Fatal("empty inventory implies support")
 	}
@@ -286,7 +290,7 @@ func TestPortabilityPlainCatalogPreparation(t *testing.T) {
 	}
 	row := portabilityRow(t, report, s.Targets[0])
 	h := row.Hosts[0]
-	if h.Prepared != "prepared" || h.Builds["catalog"] != "prepared" || len(row.Environments) != 1 || row.Environments[0].Inputs != "present" {
+	if h.Prepared != "prepared" || h.Builds["main"] != "ready" || len(row.Environments) != 1 || row.Environments[0].Inputs != "present" {
 		t.Fatalf("plain catalog projection: %+v", row)
 	}
 	if h.Admission != "can admit now" {

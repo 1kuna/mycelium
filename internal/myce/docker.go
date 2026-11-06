@@ -102,6 +102,7 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
+	Resources        *AttemptResources   `json:"resources,omitempty"`
 	FileMounts       []dockerFileMount   `json:"file_mounts,omitempty"`
 	Accelerator      bool                `json:"accelerator,omitempty"`
 	UserCancel       bool                `json:"user_cancel,omitempty"`
@@ -1121,7 +1122,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		output.Close()
 		return nil, err
 	}
-	p := &process{machine: w.Machine.ID, job: j, done: make(chan workerFinish, 1), docker: d, savePriorityStop: s.priorityStopRecorder()}
+	p := &process{stopAdmission: w.stopAdmission, machine: w.Machine.ID, job: j, done: make(chan workerFinish, 1), docker: d, savePriorityStop: s.priorityStopRecorder()}
 	if w.control != nil {
 		w.control.set(p)
 	}
@@ -1231,6 +1232,11 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 }
 func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, release func(), launch func() error) {
 	defer close(d.closed)
+	p.mu.Lock()
+	p.resources = Worker{Clock: d.clock}.observeResources(p, d.envelope())
+	resources := p.resources
+	p.mu.Unlock()
+	defer resources.finish()
 	finishMemory := d.observeMemory(j, deviceMemorySamplePeriod)
 	defer finishMemory()
 	stopEvents := d.observeDockerEvents()
@@ -1287,7 +1293,9 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	result.PoliteStop = p.polite
 	p.mu.Unlock()
 	sample := finishMemory()
+	resourceSample := resources.finish()
 	d.mu.Lock()
+	d.finishResourceObservation(resourceSample)
 	if !d.state.EnvelopeEvidenceLost {
 		d.state.MemoryPeak = sampledMemoryPeak(d.state.MemoryPeak, sample)
 	}
@@ -1338,6 +1346,7 @@ func (state dockerExecution) completedMain() bool {
 func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 	result := owner
 	result.MemoryPeak = state.MemoryPeak
+	result.Resources = state.Resources
 	// Recovery is a cause only when no terminal main outcome was observed.
 	if state.MainFinished && errors.Is(e, errDockerRecovery) {
 		e = nil

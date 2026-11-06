@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,6 +31,8 @@ type attemptSupervisor struct {
 	connected   bool
 	released    bool
 	finished    bool
+	stopping    atomic.Bool // Latched until exact-attempt release, including reconnects.
+	admissionMu *sync.Mutex // Shared host ledger; never held for process I/O.
 	err         error
 	liveness    *attemptLivenessSampler
 	wake        chan struct{}
@@ -56,6 +60,20 @@ func dockerHeartbeatDiagnostic(d *dockerAttempt) (string, *RuntimeCause) {
 }
 
 func jobKey(j Job) attemptKey { return attemptKey{j.ID, j.Attempt, j.Session} }
+func (a *attemptSupervisor) admissionJob() Job {
+	j := a.job // Immutable execution identity; never inspect a process mutex here.
+	if a.stopping.Load() {
+		j.State = "stopping"
+	}
+	return j
+}
+func (a *attemptSupervisor) stopAdmission() {
+	if a.admissionMu != nil {
+		a.admissionMu.Lock()
+		defer a.admissionMu.Unlock()
+	}
+	a.stopping.Store(true)
+}
 func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -66,6 +84,12 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	return r, a.diagnostics, a.finished, a.err
 }
 func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
+	// Scarce-host yield is provisional until its delivery authorization. It
+	// may be withdrawn while the exact process continues running normally.
+	if d.Stop && (d.UserCancel || !scarceYieldStop(d.PriorityStop)) {
+		a.stopAdmission()
+	}
+	w.stopAdmission = a.stopAdmission
 	a.mu.Lock()
 	a.worker, a.directive, a.connected = w, d, connected
 	a.admissionBlocked = admissionBlocked
@@ -77,6 +101,20 @@ func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admi
 	case a.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (a *attemptSupervisor) authorizeYieldStop(ctx context.Context, w Worker) (bool, error) {
+	var authorization struct {
+		Allowed bool `json:"allowed"`
+	}
+	identity := Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}}
+	err := w.Client.Call(ctx, "POST", "/api/workers/yield-stop", identity, &authorization)
+	if err == nil && authorization.Allowed {
+		// Successful authorization is durable stop custody, before persistence
+		// or signal delivery can block. Reconnect never clears this latch.
+		a.stopAdmission()
+	}
+	return err == nil && authorization.Allowed, err
 }
 func (a *attemptSupervisor) run(ctx context.Context) {
 	defer close(a.done)
@@ -229,11 +267,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 			}
 			if p != nil && d.Stop && !d.UserCancel && scarceYieldStop(d.PriorityStop) && s.state.PriorityStop == nil {
-				var authorization struct {
-					Allowed bool `json:"allowed"`
-				}
-				identity := Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}}
-				if e := w.Client.Call(ctx, "POST", "/api/workers/yield-stop", identity, &authorization); e != nil || !authorization.Allowed {
+				if allowed, e := a.authorizeYieldStop(ctx, w); e != nil || !allowed {
 					d.Stop = false
 				}
 			}
@@ -293,6 +327,12 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			if s.state.Result != nil {
 				s.state.Result.InputsStagedAt = s.state.Job.InputsStagedAt
 			}
+		}
+		if p != nil {
+			report.Resources = p.resourceSnapshot()
+		}
+		if s.state.Result != nil && s.state.Result.Resources != nil {
+			report.Resources = s.state.Result.Resources
 		}
 		report.ApplicationProgress = readApplicationProgress(s.dir, a.job, w.Clock.Now())
 		diagnostics := Machine{CheckpointUnavailable: s.checkpointUnavailable, FileTransferError: s.fileError}
@@ -656,8 +696,9 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 	for _, j := range jobs {
 		usedCores += j.Spec.Needs.cores()
 		need := localJobHostNeed(w, j)
-		usedRAM += need
-		growth += remainingAllocationGrowth(allocationMachine(&w.Machine, j.AllocatedDevices), j.Spec.Needs.MemoryGB, need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
+		charge, pending := jobHostMemoryCharge(&j, allocationMachine(&w.Machine, j.AllocatedDevices), need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
+		usedRAM += charge
+		growth += pending
 		sharedCard := !next.Spec.Needs.cpuOnly() && !j.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) })
 		if sharedCard && unifiedCUDA(allocationMachine(&w.Machine, j.AllocatedDevices)) && !sharedDeviceSampleReady(w.hostMemorySamples[jobKey(j)], w.Clock.Now()) {
 			return errors.New(deviceUnifiedUncertain)
@@ -762,6 +803,7 @@ func firstDevice(j Job, m Machine) string {
 }
 
 func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*workerStore, rt *modelRuntime, environments *environmentRuntime, rawMemory MemorySource, requestRetention func(string, time.Time)) error {
+	w.batchAdmission = rt.checkBatchLaunchMemory
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	health, err := startWorkerHealth(ctx, w, root)
@@ -770,6 +812,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	}
 	defer func() { cancel(); health.wait() }()
 	var qualification checkpointIO[bool]
+	var ioProbe checkpointIO[*IOPressure]
 	source := w.SharedPressureSource
 	if source == nil {
 		source = localSharedHostPressure
@@ -798,7 +841,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			released := actor.released || actor.finished
 			actor.mu.Unlock()
 			if !released {
-				jobs = append(jobs, actor.job)
+				jobs = append(jobs, actor.admissionJob())
 			}
 		}
 		return jobs
@@ -807,8 +850,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	spawn := func(s *workerStore, p *process) {
 		j := *s.state.Job
 		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p}
+		a.admissionMu, a.worker.stopAdmission = &rt.admissionMu, a.stopAdmission
 		actors[jobKey(j)] = a
+		// Publish reservations before the actor can reach its final launch gate.
+		rt.mu.Lock()
+		rt.batchJobs, rt.batchSupervisors = activeJobs(), maps.Clone(actors)
+		rt.mu.Unlock()
 		if p != nil {
+			p.stopAdmission = a.stopAdmission
 			w.control.set(p)
 		}
 		go a.run(ctx)
@@ -899,7 +948,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			released := a.released
 			a.mu.Unlock()
 			if !released {
-				jobs = append(jobs, a.job)
+				jobs = append(jobs, a.admissionJob())
 				batch += a.job.Spec.Needs.MemoryGB
 			}
 		}
@@ -1128,6 +1177,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.mu.Lock()
 			rt.memoryMachine, rt.session = w.Machine, w.Machine.Session
 			rt.batchJobs = slices.Clone(jobs)
+			rt.batchSupervisors = maps.Clone(actors)
 			rt.mu.Unlock()
 
 			// Age the actor snapshot at send time, including any intervening probes.
@@ -1137,6 +1187,20 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 			}
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
+			rt.mu.Lock()
+			// Replaced, never mutated: model loads share this exact-attempt
+			// snapshot and age it with their own launch-time clock read.
+			rt.batchHostMemorySamples = w.hostMemorySamples
+			rt.mu.Unlock()
+			m.IOPressure, _ = ioProbe.run("host-io-pressure", func() (*IOPressure, error) {
+				if workerIOPressure == nil {
+					return &IOPressure{SampledAt: w.Clock.Now(), Unavailable: "unsupported_os"}, nil
+				}
+				return workerIOPressure(w.Clock), nil
+			})
+			if m.IOPressure != nil {
+				m.IOPressure.AgeSeconds = max(0, w.Clock.Now().Sub(m.IOPressure.SampledAt).Seconds())
+			}
 			m.HostHealth = health.snapshot(m.DiskVolumes)
 			applyHostMountHealth(w, &m)
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
@@ -1280,6 +1344,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				currentJobs := activeJobs()
 				rt.mu.Lock()
 				rt.batchJobs = currentJobs
+				rt.batchSupervisors = maps.Clone(actors)
 				rt.admissionBlocked = reply.AdmissionBlocked
 				rt.mu.Unlock()
 				rt.sync(reply.ModelPlan)

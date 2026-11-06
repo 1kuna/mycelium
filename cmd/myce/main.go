@@ -914,6 +914,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	if s.HealthAlertDelivery != nil {
+		fmt.Println(s.HealthAlertDelivery.Summary())
+	}
 	if s.QueueRelease.Version != "" {
 		fmt.Printf("queue release: %s (%s)\n", s.QueueRelease.Version, s.QueueRelease.Commit)
 	}

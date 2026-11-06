@@ -60,7 +60,13 @@ YAML
 
 The tiny declared memory bounds this fixture; real work can omit memory to learn
 it. From the next release, cold auto-memory work reserves measured physical
-headroom on one host until a clean accepted completion teaches a smaller bound.
+headroom on one host. A running CPU probe can share after fresh complete cgroup
+measurements establish its live footprint and growth over a sampling horizon,
+extended by the measured growth rate through the sample's age;
+its containment ceiling stays fixed. Missing/stale measurements retain the full
+charge. Protected attempts block only capacity they actually reserve, rather
+than excluding every exploratory job. A clean accepted completion teaches a
+reusable bound.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
@@ -75,6 +81,16 @@ commit those source bytes, while the adapter's uncommitted edits are frozen
 separately. Keep private receipts ignored and retained for recovery.
 
 Resolve read-only, then submit once:
+
+From the next release, resolve and `myce portability --adapter
+.mycelium/adapter.yaml --entry NAME` also expose lost platform breadth: authored
+target exclusions, additional selected-lock dependency candidates, every member's
+coverage, native preparation and current admission remain separate. Run this
+before choosing targets and after inventory or recipe changes. A dependency
+candidate is not application compatibility or owner-accepted production parity.
+Plain-command `require_target` checks admission, not native qualification.
+Explicit targets remain binding; reusable entries still require them, and
+`portable: true` does not infer additional operating systems.
 
 ```sh
 myce version
@@ -128,6 +144,13 @@ hosts alongside the other hosts' RAM shortages. Reserved cores are admission
 accounting, not measured CPU utilization; a RAM figure alone does not explain
 why every eligible host is waiting.
 
+From the next collector release, job GET/status `resource_attempts` reports
+cumulative CPU time, block I/O and latest attempt PSI; machine `io_pressure`
+reports host PSI. Read the exact attempt/session, source, age and unavailable
+reason. Missing means unknown. macOS sampled CPU is a lower bound and I/O PSI
+is explicitly unavailable. These observations do not grant capacity or change
+admission. See [CPU and I/O fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
+
 If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
 repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium
@@ -165,6 +188,14 @@ Verify the whole manifest before use; loading never downloads weights. See
 [explicit master downloads](https://github.com/1kuna/mycelium/blob/main/docs/services.md#explicit-master-download-and-pins).
 
 ## Automatic host hygiene (next release)
+
+On releases exposing `health_alert_delivery`, status explains whether the
+queue health notifier is configured and counts retained unacknowledged alerts.
+Without a configured hook, `delivered: false` is diagnostic-only history by
+design. With a hook, false alone cannot establish whether delivery was attempted
+or failed; the queue owner checks sanitized hook and commit evidence. This
+channel is separate from your job completion notifier and does not prove a
+thread wake. Older releases omit configuration; do not infer a cause from false.
 
 Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium
