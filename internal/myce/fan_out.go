@@ -171,13 +171,19 @@ func (q *Queue) waveObservationKey(j *Job) (*ObservationKey, string) {
 	return nil, "declared wave; component evidence unavailable"
 }
 
-func (q *Queue) fanOutComponents(j *Job) ([]batchComponent, map[string]*Job) {
+func (q *Queue) fanOutComponents(j *Job, inventories ...[]*Machine) ([]batchComponent, map[string]*Job) {
 	var components []batchComponent
 	candidates := map[string]*Job{}
 	if q.preemptionReleasesPending(j) {
 		return nil, candidates
 	}
-	for _, m := range q.plannerMachines() {
+	var machines []*Machine
+	if len(inventories) > 0 {
+		machines = inventories[0]
+	} else {
+		machines = q.plannerMachines()
+	}
+	for _, m := range machines {
 		if !q.preemptionPlacementAllows(j, m) || !q.workerIdle(m, j) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 			continue
 		}
@@ -238,11 +244,11 @@ func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
 	return q.fanOutCandidateWithResources(j, m, nil)
 }
 
-func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
+func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom, inventories ...[]*Machine) *Job {
 	if j.State != "queued" || expired(fanOutStartCutoff(j), q.clock.Now()) || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
-	components, candidates := q.fanOutComponents(j)
+	components, candidates := q.fanOutComponents(j, inventories...)
 	remaining := len(j.Spec.FanOut.Pieces) - j.FanOut.Next
 	plan := planBatch(components, remaining, j.Spec.Workload.Units)
 	for _, a := range plan {

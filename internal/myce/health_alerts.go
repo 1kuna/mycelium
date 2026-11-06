@@ -51,6 +51,31 @@ type healthAlerts struct {
 	Events             []HealthAlert              `json:"events,omitempty"`
 }
 
+// HealthAlertDelivery explains unacknowledged diagnostic history without
+// exposing the executable or claiming that pending events were attempted.
+type HealthAlertDelivery struct {
+	Configured bool `json:"configured"`
+	Pending    int  `json:"pending"`
+}
+
+func (d HealthAlertDelivery) Summary() string {
+	configuration := "health notifier is not configured"
+	if d.Configured {
+		configuration = "health notifier is configured"
+	}
+	return fmt.Sprintf("Health notifications: %s; %d retained alerts have no delivery acknowledgement.", configuration, d.Pending)
+}
+
+func (q *Queue) healthAlertDelivery() *HealthAlertDelivery {
+	d := &HealthAlertDelivery{Configured: q.s.Health.DeliveryConfigured}
+	for _, e := range q.s.Health.Events {
+		if !e.Delivered {
+			d.Pending++
+		}
+	}
+	return d
+}
+
 func WithHealthStorageDelay(delay time.Duration) QueueOption {
 	return func(q *Queue) { q.healthStorageDelay = delay }
 }
@@ -168,7 +193,14 @@ func (q *Queue) alertAttemptLoss(j *Job, outcome AttemptOutcome, quiet bool) {
 // completion notification's --check/JSON contract, but is queue-scoped.
 func (q *Queue) ConfigureHealthNotifier(ctx context.Context, hook string) error {
 	if hook == "" {
-		return nil
+		q.mu.Lock()
+		q.healthNotifier = ""
+		q.mu.Unlock()
+		return q.update(func() error {
+			q.s.Health.DeliveryConfigured = false
+			q.pruneHealthEvents()
+			return nil
+		})
 	}
 	resolved, err := exec.LookPath(hook)
 	if err != nil {

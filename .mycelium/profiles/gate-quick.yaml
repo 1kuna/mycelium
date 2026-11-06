@@ -1,9 +1,8 @@
-# Quick retains the historical conservative 7 GiB Linux bound across selections.
-# Its shared memory identity excludes selection inputs; see docs/development.md.
-# Submit with --input gate-selection.tsv=FILE from scripts/gate-related.py BASE.
+# Comparable accepted observations supply memory; cold configurations explore.
 name: mycelium-gate-quick
 project: mycelium
 class: test
+memory_class: per_item
 source:
   git: HEAD
 run:
@@ -12,7 +11,7 @@ run:
     GOMAXPROCS: '2'
 needs:
   cpu_cores: 2
-  memory_gb: 7
+  memory: auto
   platform: cpu
 targets:
   - {os: linux, arch: amd64, platform: cpu}
@@ -21,4 +20,5 @@ targets:
 environment: mycelium-gate
 outputs:
   gate-result.txt: results
+  gate-timings.jsonl: results
 check: [grep, -qx, 'gate quick: exit=0', gate-result.txt]

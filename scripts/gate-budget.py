@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Bound quick and stop its fixtures before removing their working files."""
+"""Supervise gate custody and stop fixtures before removing working files."""
 import os
+import fcntl
+import json
 from pathlib import Path
 import shutil
 import re
@@ -140,28 +142,81 @@ def remove_scratch(path):
     shutil.rmtree(path, onerror=writable)
 
 
+def acquire_full_slot():
+    """Hold a cross-checkout slot for the whole full gate, not each package."""
+    cache = Path(subprocess.check_output(['go', 'env', 'GOCACHE'], text=True).strip())
+    cache.mkdir(parents=True, exist_ok=True)
+    announced = False
+    while True:
+        # Serialize the availability snapshot. Slot numbers do not encode how
+        # many suites are active: slot 1 can remain held after slot 0 exits.
+        with (cache / 'mycelium-full-gate-admission.lock').open('a') as admission:
+            fcntl.flock(admission, fcntl.LOCK_EX)
+            processes = subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True)
+            legacy = sum(bool(re.search(r'\s(?:\S*/)?go test .*?-race', line)) and '-run' not in line
+                         for line in processes.splitlines())
+            available = []
+            try:
+                # Two full suites is the repository's observed Mac safety
+                # boundary, independent of package count and CPU defaults.
+                for index in range(2):
+                    handle = (cache / f'mycelium-full-gate-{index}.lock').open('a')
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        if Path(handle.name).with_suffix('.custody').exists():
+                            handle.close()
+                        else:
+                            available.append(handle)
+                    except BlockingIOError:
+                        handle.close()
+                occupied = 2 - len(available)
+                if available and occupied + legacy < 2:
+                    handle = available[0]
+                    # Persist occupancy before starting work. A supervisor exit
+                    # releases flock even when its fixtures have not exited.
+                    Path(handle.name).with_suffix('.custody').touch()
+                    return available.pop(0)
+            finally:
+                for handle in available:
+                    handle.close()
+        if not announced:
+            print('waiting for a full-race slot (two-suite custody boundary)', flush=True)
+            announced = True
+        time.sleep(.25)  # Local semaphore readiness check, not a work deadline.
+
+
+def release_full_slot(slot, stopped):
+    if stopped:
+        Path(slot.name).with_suffix('.custody').unlink()
+    else:
+        print('gate: full-suite custody unconfirmed; admission slot retained', file=sys.stderr)
+    slot.close()
+
+
 def main():
     signal.signal(signal.SIGTERM, interrupted)
     started = time.monotonic()
-    status, timed_out = 1, False
+    status = 1
+    mode = 'full' if 'full' in sys.argv[2:] else 'quick'
+    # The repository's two-suite safety rule is specific to Macs. Linux fleet
+    # jobs are already admitted against declared CPU and learned host memory;
+    # an additional fixed suite count would strand those allocated resources.
+    slot = acquire_full_slot() if mode == 'full' and sys.platform == 'darwin' else None
     root = Path(sys.argv[1]).resolve().parent.parent / '.gate'
     root.mkdir(exist_ok=True)
     scratch = tempfile.mkdtemp(prefix='run.', dir=root)
     marker = 'GATE_RUN_ID=' + uuid.uuid4().hex
+    if slot is not None:
+        Path(slot.name).with_suffix('.custody').write_text(
+            json.dumps(dict(marker=marker, scratch=scratch)) + '\n')
     child_env = dict(os.environ, MYCE_GATE_BUDGET='1', GATE_SCRATCH=scratch)
     child_env['GATE_RUN_ID'] = marker.split('=', 1)[1]
-    child_env['GATE_TEST_DEADLINE'] = str(started + 285)
     child = subprocess.Popen(['bash', *sys.argv[1:]], env=child_env, start_new_session=not bool(os.environ.get('MYCE_PROCESS_SESSION')))
     try:
-        # Reported related tests alone take 156s, before builds/vet. Allow five
-        # minutes for quick feedback; reserve the last five seconds for TERM.
-        status = child.wait(timeout=295)
+        # Per-command progress watchdogs decide stalls; no gate wall deadline.
+        status = child.wait()
         if status < 0:
             status = 128 - status
-    except subprocess.TimeoutExpired:
-        status, timed_out = 124, True
-        print('quick: five-minute budget exhausted; run ./scripts/gate.sh full',
-              file=sys.stderr, flush=True)
     except (KeyboardInterrupt, SystemExit) as error:
         status = error.code if isinstance(error, SystemExit) else 130
     finally:
@@ -178,8 +233,9 @@ def main():
             print(f'gate scratch retained: {scratch}', file=sys.stderr)
             if status == 0:
                 status = 1
-        detail = ' (timed out; run full)' if timed_out else ''
-        print(f'gate quick: exit={status}{detail} wall={int(time.monotonic() - started)}s', flush=True)
+        if slot is not None:
+            release_full_slot(slot, stopped)
+        print(f'gate {mode}: exit={status} wall={int(time.monotonic() - started)}s', flush=True)
     return status
 
 
