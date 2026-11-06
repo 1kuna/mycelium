@@ -2063,3 +2063,56 @@ To try it without a cluster, run `./myce dev --workers 5`, then
 leaving, and a production job. `scripts/view-smoke.sh` loads the page in
 headless Chrome or Chromium against `myce dev` and checks for live frames and
 no script errors.
+
+## Fault evidence (next release)
+
+`machines[].devices[].fault_evidence` retains a byte-bounded history of observed
+NVRM allocation errors and recognized xe/i915/Xid faults. Each record contains
+an event hash, typed signature, kernel wall timestamp, capture timestamp and
+measured capture duration. Raw kernel messages are excluded. NVRM allocation
+observations do not quarantine a device. A message without a device address
+lists CUDA candidates and explicitly reports ambiguous device attribution.
+Existing teardown/quarantine classification is unchanged.
+
+Each snapshot names the currently running attempts on that device, their exact
+job/attempt/session and PIDs, and their latest existing host/device samples with
+the original sample timestamps and device source. Missing samples remain absent.
+Readable Linux memory/page state includes `/proc/meminfo`, `vmstat`, `buddyinfo`
+and memory PSI; missing or truncated sections are listed. Compressed-memory
+counters are available only where the kernel exports them in these tables.
+Capture follows kernel-log observation, not the actual allocation instruction:
+compare `kernel_at`, `captured_at` and sample times before drawing conclusions.
+Exited processes and allocations between samples can remain unknown.
+
+Affected jobs expose `fault_evidence`; terminal `attempt_history` retains the
+same exact-attempt records. Old sessions cannot attach evidence to a new attempt.
+Histories evict oldest records to the existing 1 MiB diagnostic-report budget per
+device/current attempt, with `replaced` and `omitted_attempts` recording loss.
+Attempt history keeps its existing bounded retry window. This is evidence, not
+an admission, retry, release or root-cause signal.
+
+Fatal native SIGSEGV/SIGBUS/SIGABRT outcomes include
+`attempt_history[].signal_evidence`: signal, PID, exit observation, kernel fault
+address when readable, and loaded executable/library mappings from matching
+systemd-coredump metadata (basename, address/offset and filesystem device/inode).
+These are mapped identities, not ELF build IDs. A shell-reported exit status
+alone does not prove a signal; matching child-PID kernel/core evidence is needed,
+and the signal otherwise remains `unknown`.
+
+`core_capture` distinguishes a disabled inherited soft limit, an existing pipe
+handler/file pattern without a confirmed record, a recorded core, and unavailable
+capture. `core_pointer`, size where readable and truncation metadata refer to an
+existing core; Mycelium never reads, uploads, enables or deletes core bytes.
+Core storage/expiry remains the operator's configured policy; only the bounded
+pointer metadata follows Mycelium attempt retention. Core metadata can arrive
+after the immediate exit lookup; a missing record does not prove no core exists.
+Native stacks/registers and ELF identities must be recovered privately from that
+operator-owned core to establish a cause. Hosts with a zero soft limit or an
+unsuitable handler need a separately authorized operator task. No core limit,
+core pattern, sysctl or driver setting is changed automatically.
+
+Capture excludes environment values, argv and raw journal/core text. Older
+queues negotiate without the additive fields; the worker keeps local receipts.
+GPU-host/native capture qualification remains separate from synthetic laptop
+proof. A recorded event is never itself a causal finding: report `unknown` until
+the retained evidence establishes the actual chain.

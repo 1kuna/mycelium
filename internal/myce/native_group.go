@@ -752,6 +752,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	go func() {
 		waitErr := cmd.Wait()
 		observed := m.exitObservation.observe(cmd)
+		g.worker.captureSignalEvidence(cmd, observed)
 		g.p.mu.Lock()
 		m.err = waitErr
 		m.Exit = observed

@@ -418,7 +418,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 			}
 			if err == nil && s.state.Result != nil {
-				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
+				err = w.completeEvidence(ctx, *s.state.Result)
 			}
 			if s.state.Result != nil && (err == nil || stale(err)) && !s.state.Result.ReleasePending {
 				// Release callbacks are best effort and may race result delivery.
