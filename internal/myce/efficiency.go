@@ -177,7 +177,6 @@ type EfficiencySignal struct {
 	Active          bool     `json:"active"`
 }
 type EfficiencyReport struct {
-	LiveWork    []string               `json:"live_work,omitempty"`
 	At          time.Time              `json:"at"`
 	Hosts       []EfficiencyHost       `json:"hosts"`
 	Programs    []EfficiencyAllocation `json:"programs"`
@@ -603,11 +602,7 @@ func (q *Queue) efficiencyReport() *EfficiencyReport {
 		h.advance(now)
 		r.Hosts = append(r.Hosts, h)
 	}
-	liveWork := map[string]bool{}
 	for _, j := range q.s.Jobs {
-		if mutableJob(j) && j.Efficiency != nil {
-			liveWork[j.Efficiency.Work] = true
-		}
 		if e := j.Efficiency; e != nil {
 			copy := *e
 			copy.WaitSeconds = maps.Clone(e.WaitSeconds)
@@ -635,7 +630,6 @@ func (q *Queue) efficiencyReport() *EfficiencyReport {
 		r.Predictions = append(r.Predictions, efficiencyPredictions(j)...)
 		r.Wasted = append(r.Wasted, efficiencyWasted(j)...)
 	}
-	r.LiveWork = slices.Sorted(maps.Keys(liveWork))
 	for _, a := range programs {
 		r.Programs = append(r.Programs, a)
 	}
@@ -684,7 +678,7 @@ func efficiencyPredictions(j *Job) []PredictionError {
 			continue
 		}
 		e := f.MemoryEnvelope
-		row := PredictionError{JobID: j.ID, Attempt: f.Attempt, Basis: e.Basis}
+		row := PredictionError{JobID: j.ID, Work: profileMemoryIdentity(j), Attempt: f.Attempt, Basis: e.Basis}
 		if j.Efficiency != nil {
 			row.Work = j.Efficiency.Work
 		}
@@ -829,9 +823,6 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 	predictionSums := map[string]float64{}
 	predictionCounts := map[string]int{}
 	for _, p := range r.Predictions {
-		if !slices.Contains(r.LiveWork, p.Work) {
-			continue
-		}
 		subject := "work:" + p.Work + ":" + p.Basis
 		if p.AcceptedHostPeakGB != nil && *p.AcceptedHostPeakGB > 0 && p.HostErrorGB != nil {
 			key := subject + "/memory_prediction_relative_error"

@@ -2106,9 +2106,12 @@ admission, placement, authored intent or retry decisions.
   constrained, failed and pressure-unknown peaks are excluded.
 - `wasted_attempts` reports lost, killed, guard-stopped and OOM endings, excluding
   explicit operator and priority stops. The exact attempt's pressure window and
-  minimum headroom accompany it. `suspect: true` requires positive headroom and
-  complete zero-stall, zero-swap and zero-host-OOM evidence; unavailable evidence
-  is `null`, not healthy. Suspect is a diagnosis to investigate, not proof the
+  minimum headroom accompany it. The first outcome also preserves fresh host
+  headroom, pressure and swap observations across cleanup replays. `suspect: true`
+  requires positive headroom with complete zero-stall/swap/OOM attempt evidence,
+  or fresh first-outcome host evidence showing normal OS memory pressure and no
+  swap growth. Adverse host evidence overrides an apparently healthy attempt
+  window. Unavailable evidence is `null`, not healthy. Suspect is a diagnosis to investigate, not proof the
   stop was erroneous. CPU use and I/O remain explicitly unknown until collectors
   supply them; reservation cores are not utilization.
 
