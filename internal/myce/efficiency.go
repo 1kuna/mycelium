@@ -129,6 +129,7 @@ type EfficiencySignal struct {
 	Active          bool     `json:"active"`
 }
 type EfficiencyReport struct {
+	LiveWork    []string               `json:"live_work,omitempty"`
 	At          time.Time              `json:"at"`
 	Hosts       []EfficiencyHost       `json:"hosts"`
 	Programs    []EfficiencyAllocation `json:"programs"`
@@ -256,14 +257,18 @@ func (q *Queue) refreshEfficiency() {
 		q.s.EfficiencyHosts = map[string]EfficiencyHost{}
 	}
 	seen := map[string]bool{}
+	owners := map[string]*Machine{}
 	for _, m := range q.s.Machines {
 		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
 			continue
 		}
 		host := hostID(m)
-		if seen[host] {
-			continue
+		old := owners[host]
+		if old == nil || m.LastSeen.After(old.LastSeen) || m.LastSeen.Equal(old.LastSeen) && m.ID < old.ID {
+			owners[host] = m
 		}
+	}
+	for host, m := range owners {
 		seen[host] = true
 		h, ok := q.s.EfficiencyHosts[host]
 		if !ok {
@@ -281,6 +286,42 @@ func (q *Queue) refreshEfficiency() {
 				h.Rate.ValidUntil = m.LastSeen.Add(q.machineLossTimeout(m.ID))
 			}
 		}
+		// Device memory is separate on discrete hosts; on unified systems this
+		// remains a diagnostic dimension and is never added to host physical use.
+		var deviceUsed, reservedDevice float64
+		deviceKnown := true
+		deviceCount := 0
+		for _, owner := range q.s.Machines {
+			if hostID(owner) != host || owner.Replacement != nil {
+				continue
+			}
+			if owner.Devices != nil {
+				for _, d := range owner.Devices {
+					deviceCount++
+					deviceKnown = deviceKnown && d.MemoryMeasured && d.Reason == "" && !owner.Gone && now.Before(owner.LastSeen.Add(q.machineLossTimeout(owner.ID)))
+					deviceUsed += max(0, d.TotalMemoryGB-d.FreeMemoryGB)
+				}
+			} else if owner.GPU != "cpu" {
+				deviceCount++
+				deviceKnown = deviceKnown && owner.MemoryError == "" && owner.TotalMemoryGB > 0 && !owner.Gone && now.Before(owner.LastSeen.Add(q.machineLossTimeout(owner.ID)))
+				deviceUsed += owner.MemoryUsedGB
+			}
+		}
+		for _, j := range q.liveJobs() {
+			if owner := q.s.Machines[j.Machine]; owner != nil && hostID(owner) == host && batchReservesCapacity(j) {
+				reservedDevice += j.Spec.Needs.MemoryGB
+			}
+		}
+		for _, slot := range q.s.ModelSlots {
+			if owner := q.s.Machines[slot.Machine]; owner != nil && hostID(owner) == host && slotReservesMemory(slot) {
+				reservedDevice += q.slotMemory(slot)
+			}
+		}
+		h.Rate.ReservedDeviceGB = reservedDevice
+		if deviceCount > 0 && deviceKnown {
+			h.Rate.MeasuredDeviceGB = &deviceUsed
+			h.Rate.DeviceValidUntil = m.LastSeen.Add(q.machineLossTimeout(m.ID))
+		}
 		q.s.EfficiencyHosts[host] = h
 	}
 	for host := range q.s.EfficiencyHosts {
@@ -295,7 +336,7 @@ func (q *Queue) refreshEfficiency() {
 func efficiencyBlocker(reason string) string {
 	r := strings.ToLower(reason)
 	switch {
-	case strings.Contains(r, "hold"), strings.Contains(r, "reservation"), strings.Contains(r, "disabled"), strings.Contains(r, "paused"):
+	case strings.Contains(r, "hold"), strings.Contains(r, "validation reservation"), strings.Contains(r, "disabled"), strings.Contains(r, "paused"):
 		return "holds"
 	case strings.Contains(r, "building"), strings.Contains(r, "prepar"), strings.Contains(r, "copying"), strings.Contains(r, "staging"):
 		return "preparation"
@@ -373,6 +414,9 @@ type efficiencyDiagnostics struct {
 }
 
 func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDiagnostics, error) {
+	if q.simulation {
+		return nil, nil
+	}
 	q.mu.RLock()
 	revision := q.fileReferenceRevision
 	q.mu.RUnlock()
@@ -463,7 +507,11 @@ func (q *Queue) efficiencyReport() *EfficiencyReport {
 		h.advance(now)
 		r.Hosts = append(r.Hosts, h)
 	}
+	liveWork := map[string]bool{}
 	for _, j := range q.s.Jobs {
+		if mutableJob(j) && j.Efficiency != nil {
+			liveWork[j.Efficiency.Work] = true
+		}
 		if e := j.Efficiency; e != nil {
 			copy := *e
 			copy.WaitSeconds = maps.Clone(e.WaitSeconds)
@@ -491,6 +539,7 @@ func (q *Queue) efficiencyReport() *EfficiencyReport {
 		r.Predictions = append(r.Predictions, efficiencyPredictions(j)...)
 		r.Wasted = append(r.Wasted, efficiencyWasted(j)...)
 	}
+	r.LiveWork = slices.Sorted(maps.Keys(liveWork))
 	for _, a := range programs {
 		r.Programs = append(r.Programs, a)
 	}
@@ -618,6 +667,7 @@ func efficiencyWasted(j *Job) []WastedAttempt {
 }
 
 type efficiencyBaseline struct {
+	At         time.Time   `json:"at"`
 	History    alertSeries `json:"history"`
 	Adverse    int         `json:"adverse"`
 	Recovering int         `json:"recovering"`
@@ -653,6 +703,9 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 	predictionSums := map[string]float64{}
 	predictionCounts := map[string]int{}
 	for _, p := range r.Predictions {
+		if !slices.Contains(r.LiveWork, p.Work) {
+			continue
+		}
 		subject := "work:" + p.Work + ":" + p.Basis
 		if p.AcceptedHostPeakGB != nil && *p.AcceptedHostPeakGB > 0 && p.HostErrorGB != nil {
 			key := subject + "/memory_prediction_relative_error"
@@ -692,6 +745,12 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 	var signals []EfficiencySignal
 	for key, value := range values {
 		b := old[key]
+		if !b.At.IsZero() && !r.At.After(b.At) {
+			next[key] = b
+			signals = append(signals, b.signal(key))
+			continue
+		}
+		b.At = r.At
 		b.History = slices.Clone(b.History)
 		b.Value = value
 		if b.History.high(value) {

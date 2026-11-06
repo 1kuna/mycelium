@@ -146,11 +146,13 @@ func TestEfficiencyPredictionAndSuspectAttempts(t *testing.T) {
 	}
 }
 func TestEfficiencyLearnedAlerts(t *testing.T) {
-	q, _ := fixture(t)
+	q, c := fixture(t)
 	used := 10.0
 	r := &EfficiencyReport{Hosts: []EfficiencyHost{{Host: "host", Rate: efficiencyRate{ReservedMemoryGB: 12, MeasuredMemoryGB: &used}}}}
 	var baseline map[string]efficiencyBaseline
 	step := func() {
+		c.Advance(time.Second)
+		r.At = c.Now()
 		var signals []EfficiencySignal
 		baseline, signals = efficiencySignals(r, baseline)
 		for _, s := range signals {
@@ -187,5 +189,42 @@ func TestEfficiencyLearnedAlerts(t *testing.T) {
 	baseline, _ = efficiencySignals(r, baseline)
 	if _, ok := baseline["host/reservation_gap_gb"]; ok {
 		t.Fatal("unknown attribution trained as zero")
+	}
+}
+
+func TestEfficiencyRollbackAndRevisionFence(t *testing.T) {
+	q, c := fixture(t)
+	if err := q.update(func() error {
+		q.putJob("wait", &Job{ID: "wait", Spec: spec("experiment"), State: "queued", Queued: c.Now()})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(time.Second)
+	if err := q.update(func() error { return context.Canceled }); err != context.Canceled {
+		t.Fatal(err)
+	}
+	if len(q.s.Jobs["wait"].Efficiency.WaitSeconds) != 0 {
+		t.Fatal("failed transaction advanced accounting")
+	}
+	c.Advance(time.Second)
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.Jobs["wait"].Efficiency.WaitSeconds["unknown"] != 2 {
+		t.Fatal("rollback lost or doubled elapsed time")
+	}
+	d, err := q.prepareEfficiencyDiagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error { q.s.Jobs["wait"].State = "paused"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error { q.applyEfficiencyDiagnostics(d); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if d.applied || q.s.Jobs["wait"].Efficiency.Blocker != "holds" {
+		t.Fatal("stale diagnostic crossed revision fence")
 	}
 }
