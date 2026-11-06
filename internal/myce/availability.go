@@ -381,6 +381,11 @@ func acceptHostAvailability(m *Machine, now time.Time) {
 	if a == nil {
 		return
 	}
+	// Dedicated hosts do not depend on owner observations. Sensor age must not
+	// turn their affirmative dedicated policy into an owner-activity withdrawal.
+	if a.Mode != "daily" && !a.Signals.Laptop && a.Signals.Power != "battery" {
+		return
+	}
 	if a.Probe == nil {
 		a.CheckedAt = now
 		return

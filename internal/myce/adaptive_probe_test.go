@@ -403,3 +403,18 @@ func TestAdaptiveProbeQueueDelayCannotRenewEvidence(t *testing.T) {
 		t.Fatal("queue delay renewed an expired observation")
 	}
 }
+
+func TestAdaptiveProbeDedicatedPolicyDoesNotDependOnOwnerSensorAge(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("dedicated-owner", "fake")
+	m = profileAvailability(m, Availability{Mode: "dedicated", Available: true, Probe: &ProbeObservation{PeriodSeconds: .1, CostSeconds: .001, ValidSeconds: .2}, AgeSeconds: 1})
+	check(t, q, m, nil)
+	if !machineAvailability(q.s.Machines[m.ID]).Available {
+		t.Fatal("dedicated host withdrew work for irrelevant owner-sensor age")
+	}
+	clock.Advance(time.Second)
+	q.maintain()
+	if !machineAvailability(q.s.Machines[m.ID]).Available {
+		t.Fatal("dedicated host acquired daily-owner freshness policy")
+	}
+}
