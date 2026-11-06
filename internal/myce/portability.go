@@ -625,7 +625,7 @@ func WritePortability(dest io.Writer, r PortabilityReport, asJSON bool) error {
 		}
 		if t.Needs != nil {
 			if t.Target.Platform == "cpu" {
-				fmt.Fprintf(&out, "  resources: CPU=%d host=%g GiB automatic_memory=%t\n", t.Needs.CPUCores, t.Needs.HostMemoryGB, t.Needs.AutomaticMemory)
+				fmt.Fprintf(&out, "  resources: CPU=%d host=%g GiB automatic_memory=%t\n", t.Needs.CPUCores, max(t.Needs.MemoryGB, t.Needs.HostMemoryGB), t.Needs.AutomaticMemory)
 			} else {
 				fmt.Fprintf(&out, "  resources: CPU=%d accelerator=%g GiB host=%g GiB automatic_memory=%t\n", t.Needs.CPUCores, t.Needs.MemoryGB, t.Needs.HostMemoryGB, t.Needs.AutomaticMemory)
 			}
