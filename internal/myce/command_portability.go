@@ -33,7 +33,11 @@ func commandPortabilityTarget(r *PortabilityTarget, s Spec, sets map[string]map[
 		recipe, ok := sets[name][r.Target.Platform]
 		if !ok {
 			r.Environments = append(r.Environments, PortabilityEnvironment{Name: safePortabilityID(name), Backend: "unknown", Inputs: "unknown", LockCoverage: "unknown: recipe unavailable for backend"})
-			missing = true
+			if len(sets[name]) == 0 {
+				unknown = true
+			} else {
+				missing = true
+			}
 			continue
 		}
 		env := portabilityEnvironment(name, recipe, nil, r.Target)

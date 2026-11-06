@@ -127,6 +127,9 @@ func TestCommandPortabilityIntersectsEveryMember(t *testing.T) {
 	if err != nil || bytes.Contains(b, []byte("/private/")) {
 		t.Fatalf("advice read or exposed inline path: %s %v", b, err)
 	}
+	if got := portabilityRow(t, p, ExecutionTarget{"darwin", "arm64", "cpu"}); !strings.HasPrefix(got.EnvironmentCoverage, "unknown:") {
+		t.Fatalf("unread inline metadata became a known exclusion: %+v", got)
+	}
 }
 
 func TestCommandPortabilityCPUMemberCapsNormalizeBeforeLowering(t *testing.T) {
