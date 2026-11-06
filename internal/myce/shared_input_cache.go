@@ -214,7 +214,13 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 			if c.beforeVerify != nil {
 				c.beforeVerify()
 			}
-			if e = verifySharedEntry(ctx, payload, record.Files); e != nil {
+			verifyCtx, releaseVerify, copyErr := c.cache.budgets.copy(ctx, c.cache.Root, c.cache.Clock, 0)
+			if copyErr != nil {
+				return "", copyErr
+			}
+			e = verifySharedEntry(verifyCtx, payload, record.Files)
+			releaseVerify()
+			if e != nil {
 				return "", e
 			}
 			if e = recordSharedVerification(root, signature); e != nil {

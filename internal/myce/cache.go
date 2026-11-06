@@ -281,10 +281,19 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	}
 	done := make(chan struct{})
 	c.active[key] = done
+
+	defer func() { c.mu.Lock(); delete(c.active, key); c.reservations.Delete(key); close(done); c.mu.Unlock() }()
+	c.mu.Unlock()
+	copyCtx, releaseCopy, err := c.budgets.copy(ctx, c.Root, c.Clock, c.Parallel)
+	if err != nil {
+		return "", err
+	}
+	defer releaseCopy()
+	ctx = copyCtx
 	if !m.DirectNAS {
 		c.reservations.Store(key, m.SizeBytes)
 	}
-	defer func() { c.mu.Lock(); delete(c.active, key); c.reservations.Delete(key); close(done); c.mu.Unlock() }()
+	c.mu.Lock()
 	source, e := c.source(m)
 	if e != nil {
 		c.mu.Unlock()
@@ -463,12 +472,6 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		return "", err
 	}
 	defer reservation.release()
-	copyCtx, releaseCopy, err := c.budgets.copy(ctx, c.Root, c.Clock, c.Parallel)
-	if err != nil {
-		return "", err
-	}
-	defer releaseCopy()
-	ctx = copyCtx
 	started := c.Clock.Now()
 	copied := int64(0)
 	defer func() {

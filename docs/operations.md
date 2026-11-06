@@ -808,7 +808,7 @@ Unmarked imports and unknown files remain for explicit inspection.
 `myce status` and `/api/status.file_store` report the queue-file-store's payload
 `used_bytes`, admission `free_bytes`, and currently `reclaimable_bytes`. Free space
 is the smaller of the configured store allowance and disk space remaining after
-existing tus lengths and the shared disk floor (1%, minimum 256 MiB). The JSON
+existing tus lengths and adaptive control-write/free-space headroom. The JSON
 also exposes `limit_bytes`, `disk_free_bytes`, `floor_bytes`, and an explicit error
 when the reading is unavailable. Status never deletes files.
 
