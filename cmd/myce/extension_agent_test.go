@@ -135,6 +135,31 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 	}
 	run("extension", "check", "--static", folder)
 	run("extension", "add", "--root", extensionRoot, folder)
+	// The listener banner precedes asynchronous worker enrollment. Runtime
+	// qualification needs the enrolled identity, not merely a listening queue.
+	client := myce.Client{URL: queue, Token: token}
+	fingerprint, err := myce.ExtensionFingerprint(ctx, "fake", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		var snapshot myce.Snapshot
+		if err := client.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		ready := false
+		for _, m := range snapshot.Machines {
+			if m.ID == "fake-1" && m.HostID == "dev-host" && m.GPU == "fake" && m.Device == "0" && m.ExtensionFingerprint == fingerprint && !m.Gone && !m.Leaving {
+				ready = true
+			}
+		}
+		if ready {
+			break
+		}
+		if err := waitPause(ctx, 10*time.Millisecond); err != nil {
+			t.Fatalf("worker enrollment: %v; last machines: %+v", err, snapshot.Machines)
+		}
+	}
 	run("extension", "check", "--reserve", "--owner", "dev-agent", "--reason", "runtime qualification", "--root", extensionRoot, "http-stage@1")
 	var reservations []myce.Reservation
 	if err := (myce.Client{URL: queue, Token: token}).Call(ctx, "GET", "/api/reservations", nil, &reservations); err != nil {
@@ -178,7 +203,6 @@ print(j["id"])
 		t.Fatal(err)
 	}
 	id := strings.TrimSpace(string(out))
-	client := myce.Client{URL: queue, Token: token}
 	job, err := client.GetJob(ctx, id)
 	if err != nil {
 		t.Fatal(err)

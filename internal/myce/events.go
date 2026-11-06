@@ -165,6 +165,9 @@ func (c *processControl) apply() {
 	now := c.clock.Now()
 	for key, p := range c.processes {
 		if c.availability != nil && !c.availability.snapshot().Available {
+			if p.stopAdmission != nil {
+				p.stopAdmission()
+			}
 			p.mu.Lock()
 			p.polite = true
 			p.mu.Unlock()
@@ -186,6 +189,10 @@ func (c *processControl) apply() {
 			}
 		}
 		if event, ok := c.pendingEvents[key]; ok {
+			// Publish before receipt persistence or signaling can wait on p.mu.
+			if p.stopAdmission != nil {
+				p.stopAdmission()
+			}
 			if err := p.recordPriorityStop(nil, event.PriorityStop); err != nil {
 				continue // Retry persistence before delivering the priority stop.
 			}
@@ -233,6 +240,9 @@ func (c *processControl) run(ctx, stop context.Context, events <-chan WorkerEven
 			key := eventKey(event)
 			if old, ok := c.pendingEvents[key]; !ok || event.deadline.Before(old.deadline) || old.PriorityStop == nil && event.PriorityStop != nil {
 				c.pendingEvents[key] = event
+			}
+			if p := c.processes[key]; p != nil && p.stopAdmission != nil {
+				p.stopAdmission()
 			}
 			c.apply()
 			c.mu.Unlock()

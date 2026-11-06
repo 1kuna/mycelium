@@ -103,8 +103,9 @@ func (q *Queue) refreshHostMemory() {
 			owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 			if !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
 				need := hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-				reserved += need
-				growth += remainingAllocationGrowth(owner, j.Spec.Needs.MemoryGB, need, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
+				charge, pending := jobHostMemoryCharge(j, owner, need, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
+				reserved += charge
+				growth += pending
 			}
 		}
 		for _, r := range q.s.HostReleases {
@@ -247,7 +248,9 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 	ramDeficit := max(0, need-room)
 	// Fresh unified over-use is freed too, up to the shortfall (#596).
 	freedRAM := func(j *Job) float64 {
-		return hostNeed(allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices), j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) + min(q.unifiedOveruseGB(j), ramDeficit)
+		owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+		charge, _ := jobHostMemoryCharge(j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
+		return charge + min(q.unifiedOveruseGB(j), ramDeficit)
 	}
 	// Exclude victims that free neither RAM nor cores, including build hand-back.
 	jobs = slices.DeleteFunc(jobs, func(j *Job) bool {
@@ -384,6 +387,15 @@ func hostMemoryAvailableFits(m *Machine, gpu, host, available float64) bool {
 // CurrentHostMemory credits only nonreclaimable, uniquely charged cgroup RAM.
 // Peaks and RSS (shared pages on macOS) cannot safely reduce growth room.
 type CurrentHostMemory struct {
+	// True only after two timed samples. An older worker's zero growth is
+	// unknown and cannot release a cold probe's physical-headroom reservation.
+	GrowthObserved bool `json:"growth_observed,omitempty"`
+	// Maximum measured positive GiB/second. Extend the sampling allowance
+	// through the observation's age instead of assuming growth stopped.
+	GrowthRateGB float64 `json:"growth_rate_gb,omitempty"`
+	// Complete cgroup anon/kernel/shmem/dirty/unevictable footprint. Separate
+	// from anonymous-only credit; nil cannot establish a probe's live charge.
+	FootprintGB *float64 `json:"footprint_gb,omitempty"`
 	// Projection over this sensor's observed sampling horizon. Older workers
 	// still protect their full unconsumed reservation, without this forecast.
 	GrowthGB           float64 `json:"growth_gb,omitempty"`
@@ -434,6 +446,8 @@ const deviceMemorySamplePeriod = 5 * time.Second
 const deviceMemorySampleFreshFor = 2 * deviceMemorySamplePeriod
 
 type hostMemorySample struct {
+	growthObserved           bool
+	footprintGB              float64
 	source                   string
 	exclusive                bool
 	gb, deviceGB             float64
@@ -453,12 +467,16 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 	samples := map[attemptKey]hostMemorySample{}
 	for _, r := range reports {
 		sample, s := r.CurrentHostMemory, hostMemorySample{}
-		if !r.Started || sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
+		if !r.Started || sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) && sample.AgeSeconds < hostMemorySampleFreshFor.Seconds() {
 			s.gb, s.at = sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds*float64(time.Second)))
 			s.growthGB = sample.GrowthGB
+			if sample.FootprintGB != nil && validMemoryValue(*sample.FootprintGB) {
+				s.growthObserved = sample.GrowthObserved && (sample.GrowthGB == 0 || sample.GrowthRateGB > 0)
+				s.footprintGB, s.rateGB = *sample.FootprintGB, sample.GrowthRateGB
+			}
 		}
 		if d := sample.DeviceGB; d != nil && validMemoryValue(*d) && validMemoryValue(sample.DeviceAgeSeconds) && sample.DeviceAgeSeconds < deviceMemorySampleFreshFor.Seconds() {
 			s.deviceGB, s.deviceAt = *d, now.Add(-time.Duration(sample.DeviceAgeSeconds*float64(time.Second)))
@@ -470,4 +488,29 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 		}
 	}
 	return samples
+}
+
+// A CPU probe's ceiling contains an unknown run; it is not measured demand.
+// Once its exact attempt supplies fresh, uniquely charged resident usage and a
+// measured growth horizon, account for that forecast instead of holding the
+// whole initial ceiling. Known need/member limits remain a floor. No GPU or RSS
+// attribution earns this credit. Unknown/stale samples and stopping attempts
+// retain the complete ceiling, including after restart or worker downgrade.
+func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
+	charge = ceiling
+	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, ceiling, sample, now)
+	e := j.MemoryEnvelope
+	if e == nil || e.ProbeFloorGB <= 0 || j.Spec.Needs.Memory != "auto" || !j.Spec.Needs.cpuOnly() || j.State != "running" || !sample.growthObserved || sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= hostMemorySampleFreshFor || !validMemoryValue(sample.gb) || !validMemoryValue(sample.growthGB) {
+		return
+	}
+	forecast := sample.growthGB + sample.rateGB*now.Sub(sample.at).Seconds()
+	charge = max(e.ProbeFloorGB, sample.footprintGB+forecast+exploratoryDriftMarginGB(m))
+	growth = max(0, charge-sample.gb)
+	return
+}
+
+func (q *Queue) hostJobCharge(j *Job) float64 {
+	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+	charge, _ := jobHostMemoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
+	return charge
 }

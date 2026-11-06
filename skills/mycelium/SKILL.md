@@ -60,7 +60,13 @@ YAML
 
 The tiny declared memory bounds this fixture; real work can omit memory to learn
 it. From the next release, cold auto-memory work reserves measured physical
-headroom on one host until a clean accepted completion teaches a smaller bound.
+headroom on one host. A running CPU probe can share after fresh complete cgroup
+measurements establish its live footprint and growth over a sampling horizon,
+extended by the measured growth rate through the sample's age;
+its containment ceiling stays fixed. Missing/stale measurements retain the full
+charge. Protected attempts block only capacity they actually reserve, rather
+than excluding every exploratory job. A clean accepted completion teaches a
+reusable bound.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
