@@ -209,13 +209,13 @@ func (q *Queue) storageEnvelope(j *Job, m *Machine) *JobStorageEnvelope {
 		if ok {
 			e.Evidence = &point
 			outputAge := q.clock.Now().Sub(point.OutputRecordedAt)
-			if point.Output.Samples > 0 && outputAge >= 0 && outputAge <= workCurveMaxAge {
+			if point.Output.Samples > 0 && outputAge >= 0 {
 				e.OutputBytes = storageValue(point.Output.need(1))
 				e.Source = "accepted logical output; scratch unknown"
 				e.Samples = point.Output.Samples
 			}
 			age := q.clock.Now().Sub(point.RecordedAt)
-			if point.Managed.Samples > 0 && age >= 0 && age <= workCurveMaxAge {
+			if point.Managed.Samples > 0 && age >= 0 {
 				e.Source, e.Samples = "accepted managed storage peaks", point.Managed.Samples
 				e.InputBytes = max(e.InputBytes, point.Staging.need(point.AllocationUnit))
 				e.OutputBytes = storageValue(point.Output.need(1))
@@ -279,10 +279,7 @@ func (q *Queue) recordAttemptStorage(j *Job, r Result) {
 	reason = storageLearningReason(sample, reason, j, r)
 	facts := AttemptStorageFacts{Execution: r.Execution, Machine: r.Machine, Session: r.Session, Peak: r.StoragePeak, Envelope: j.StorageEnvelope, LearningReason: reason, OutputLearned: storageOutputEligible(reason)}
 	j.StorageAttempts = append(slices.Clone(j.StorageAttempts), facts)
-	if len(j.StorageAttempts) > memoryAttemptsLimit {
-		j.StorageAttempts = append(j.StorageAttempts[:1:1], j.StorageAttempts[len(j.StorageAttempts)-memoryAttemptsLimit+1:]...)
-		j.StorageAttemptsDropped++
-	}
+
 	if reason == "eligible" || r.StoragePeak == nil || j.StorageEnvelope == nil || j.StorageEnvelope.Key == nil {
 		return
 	}

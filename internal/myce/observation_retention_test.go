@@ -39,11 +39,11 @@ func TestObservationRetentionDropsOnlyUnreadRows(t *testing.T) {
 	}
 	q = reopenQueue(t, q, clock)
 	check(t, q, m, nil)
-	if got := len(q.s.WorkObservations); got != rows {
-		t.Fatalf("want old row gone and the fresh one added: %d rows, had %d", got, rows)
+	if got := len(q.s.WorkObservations); got != rows+1 {
+		t.Fatalf("want valid old row retained and the fresh one added: %d rows, had %d", got, rows)
 	}
-	if len(q.s.StorageObservations) != 0 {
-		t.Fatal("expired storage observation kept")
+	if len(q.s.StorageObservations) != 1 {
+		t.Fatal("usable storage evidence lost")
 	}
 	if _, ok := q.s.WorkObservations[identityHash(forbidden.Key)]; !ok {
 		t.Fatal("forbidden point dropped; sweeps would retry it")
@@ -55,7 +55,7 @@ func TestObservationRetentionDropsOnlyUnreadRows(t *testing.T) {
 	if j := runMemory(t, q, clock, m, named("fresh"), 2, nil); j.MemoryEnvelope.Basis != "learned" || j.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
 		t.Fatalf("fresh learned sizing changed: %+v", j.MemoryEnvelope)
 	}
-	if j := runMemory(t, q, clock, m, named("old"), 2, nil); j.MemoryEnvelope.Source != physicalMemoryProbe {
-		t.Fatalf("expired evidence still sized a run: %+v", j.MemoryEnvelope)
+	if j := runMemory(t, q, clock, m, named("old"), 2, nil); j.MemoryEnvelope.Basis != "learned" {
+		t.Fatalf("age alone expired a learned bound: %+v", j.MemoryEnvelope)
 	}
 }

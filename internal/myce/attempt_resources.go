@@ -446,10 +446,7 @@ func (q *Queue) retainAttemptResources(j *Job, r *AttemptResources) {
 		}
 	}
 	j.ResourceAttempts = append(j.ResourceAttempts, facts)
-	if n := len(j.ResourceAttempts) - memoryAttemptsLimit; n > 0 {
-		j.ResourceAttempts = append(j.ResourceAttempts[:1], j.ResourceAttempts[1+n:]...)
-		j.ResourceAttemptsDropped += n
-	}
+
 }
 
 // Root rusage catches short commands between process-tree samples. The sampled

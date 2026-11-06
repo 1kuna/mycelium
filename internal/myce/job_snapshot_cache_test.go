@@ -48,12 +48,14 @@ func TestJobSnapshotCacheTTL(t *testing.T) {
 		return *got.Runtime.ElapsedSeconds
 	}
 	initial := read()
-	clock.Advance(jobSnapshotLifetime - time.Nanosecond)
+	lease := observationCacheLease(time.Second, time.Millisecond, 2*time.Second)
+	q.jobSnapshots[j.ID].expires = clock.Now().Add(lease)
+	clock.Advance(lease - time.Nanosecond)
 	if got := read(); got != initial {
 		t.Fatal("did not reuse within TTL", got)
 	}
 	clock.Advance(time.Nanosecond)
-	if got := read(); got != initial+jobSnapshotLifetime.Seconds() {
+	if got := read(); got != initial+lease.Seconds() {
 		t.Fatal("TTL did not refresh elapsed time", got)
 	}
 }

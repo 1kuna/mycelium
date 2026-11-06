@@ -21,12 +21,9 @@ type FileInputClaim struct {
 	SettledAt time.Time `json:"settled_at,omitempty"`
 }
 
-func (c FileInputClaim) valid(now time.Time) bool {
-	if !c.SettledAt.IsZero() {
-		return c.SettledAt.Add(filePublicationGrace).After(now)
-	}
-	return c.Allocated || c.At.Add(filePublicationGrace).After(now)
-}
+// A claim is explicit upload/submission intent. Elapsed time cannot release
+// its bytes or reservation; settlement transfers accounting to the job.
+func (c FileInputClaim) valid(_ time.Time) bool { return true }
 
 type fileInputClaimKey struct{}
 type fileDeclaredOutputKey struct{}
@@ -65,7 +62,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 	store := q.files
 	stale := map[string]FileInputClaim{}
 	for id, claim := range q.s.FileInputClaims {
-		if !claim.At.Add(filePublicationGrace).After(q.clock.Now()) && (claim.SettledAt.IsZero() || !claim.valid(q.clock.Now())) {
+		if !claim.SettledAt.IsZero() {
 			stale[id] = claim
 		}
 	}
@@ -210,6 +207,7 @@ func (q *Queue) settleFileInputClaims(s Spec) {
 	for _, ref := range submissionFiles(s) {
 		for id, claim := range q.s.FileInputClaims {
 			if claim.Project == s.Project && claim.File == ref {
+				q.s.PublicationHorizon = max(q.s.PublicationHorizon, q.clock.Now().Sub(claim.At))
 				claim.SettledAt = q.clock.Now()
 				q.s.FileInputClaims[id] = claim
 			}

@@ -43,20 +43,27 @@ func TestJobGetVolume(t *testing.T) {
 	}
 	clock.Advance(time.Minute)
 	v.record("myce/s072", false)
-	if !strings.Contains(output.String(), `"full":3,"wait":2`) {
-		t.Fatal("totals were reset", output.String())
+	if output.Len() != 0 || v.totals[jobGetIdentity{"cli", "s072"}].Full != 3 {
+		t.Fatal("magnitude unchanged or totals reset", output.String())
+	}
+	for range 5 {
+		v.record("myce/s072", false)
+	}
+	if !strings.Contains(output.String(), `"full":8,"wait":2`) {
+		t.Fatal("new traffic magnitude lost cumulative totals", output.String())
 	}
 }
 
 func TestJobGetVolumeBoundedConcurrent(t *testing.T) {
 	v := newJobGetVolume(&fakeClock{now: time.Unix(1, 0)})
+	v.identityLimit = 4
 	var wg sync.WaitGroup
 	for i := range 1000 {
 		wg.Go(func() { v.record(fmt.Sprintf("myce/v%d", i), i%2 == 0) })
 	}
 	wg.Wait()
 	v.record("", false)
-	if len(v.totals) > jobGetIdentityLimit+3 {
+	if len(v.totals) > v.identityLimit+3 {
 		t.Fatal("unbounded identities", len(v.totals))
 	}
 	var full, wait uint64
@@ -158,7 +165,7 @@ func TestJobGetVolumeRejectedObservations(t *testing.T) {
 		t.Fatal("rejection did not trigger summary", output.String())
 	}
 	var totals []jobGetTotal
-	if err := json.Unmarshal([]byte(strings.TrimSpace(data)), &totals); err != nil {
+	if err := json.Unmarshal([]byte(strings.Split(strings.TrimSpace(data), "\n")[0]), &totals); err != nil {
 		t.Fatal(err)
 	}
 	want := []jobGetTotal{
@@ -203,7 +210,7 @@ func TestJobGetVolumeRejectedConcurrent(t *testing.T) {
 			t.Fatal("rejection counted as admitted observation")
 		}
 	}
-	if rejected != 1000 || len(v.totals) > jobGetIdentityLimit+3 {
+	if rejected != 1000 || len(v.totals) > v.identityLimit+3 {
 		t.Fatal("lost or unbounded rejection attribution", rejected, len(v.totals))
 	}
 	if !strings.Contains(output.String(), `"rate_limited":{"job_wait":`) {

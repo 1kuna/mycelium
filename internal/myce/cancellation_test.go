@@ -272,6 +272,8 @@ func reopenCancellationQueue(t *testing.T, q *Queue, c Clock) *Queue {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reopened.fileRetention, reopened.logRetention = q.fileRetention, q.logRetention
+	reopened.rebuildRecords()
 	t.Cleanup(func() { reopened.Close() })
 	return reopened
 }

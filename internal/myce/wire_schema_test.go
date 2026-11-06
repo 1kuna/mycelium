@@ -115,15 +115,12 @@ func generatedJobSchema(t *testing.T) []byte {
 		job[name].(map[string]any)["minLength"] = 1
 	}
 	job["attempt"].(map[string]any)["minimum"] = 0
-	job["attempt_history"].(map[string]any)["maxItems"] = attemptHistoryLimit
-	job["attempt_history"].(map[string]any)["description"] = "Latest four ended attempts, persisted with the job. Existing classifier facts and queue decisions, not release proof or retry charges. Older planned requeues roll off; historical causes are not reconstructed."
-	job["resource_attempts"].(map[string]any)["maxItems"] = memoryAttemptsLimit
-	job["resource_attempts"].(map[string]any)["description"] = "Per-attempt cumulative CPU and block I/O counters, with latest I/O PSI. Exact attempt/machine/session fenced. Retains first and latest 31 rows, matching memory facts; resource_attempts_dropped counts evictions. Missing counters are unknown. Process-tree CPU is a sampled lower bound. Observational only."
+	job["attempt_history"].(map[string]any)["description"] = "Ended-attempt diagnostic evidence. Open work is pinned; capacity-aware maintenance may compact redundant closed-attempt diagnoses. Immutable custody/learning ledgers remain separate. Historical causes are not reconstructed."
+	job["memory_attempts"].(map[string]any)["description"] = "Persisted memory facts, independent of learning and diagnostic history. Retention follows local capacity and evidence dependencies; open attempts and distinct measurements are preserved. memory_attempts_dropped counts historical evictions. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed."
+	job["resource_attempts"].(map[string]any)["description"] = "Per-attempt cumulative CPU and block I/O counters with latest I/O PSI, retaining every distinct attempt. resource_attempts_dropped reports historical evictions. Exact attempt/machine/session fenced; missing counters unknown; process-tree CPU a sampled lower bound. Observational only."
 	job["resource_attempts_dropped"].(map[string]any)["minimum"] = 0
-	job["memory_attempts"].(map[string]any)["maxItems"] = memoryAttemptsLimit
-	job["memory_attempts"].(map[string]any)["description"] = "Persisted memory facts, independent of learning and the four-entry diagnostic history. Retains the first and latest 31 rows; memory_attempts_dropped counts evicted rows. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed."
 	job["memory_attempts_dropped"].(map[string]any)["minimum"] = 0
-	job["memory_attempts_dropped"].(map[string]any)["description"] = "Number of memory attempt rows evicted by the 32-row limit. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count."
+	job["memory_attempts_dropped"].(map[string]any)["description"] = "Number of historical memory attempt rows evicted by earlier releases. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count."
 	peak := defs["AttemptMemoryPeak"].(map[string]any)["properties"].(map[string]any)
 	peak["device_gb"].(map[string]any)["description"] = "Sampled per-attempt process GPU memory in GiB, not GPU-wide memory.used or an allocator high-water mark. CUDA uses nvidia-smi compute-apps even on unified-memory devices. Sampling is a lower bound; missing means unknown, not zero."
 	peak["device_unavailable"].(map[string]any)["description"] = "Diagnostic reason no usable process GPU sample was retained. New CUDA/XPU cgroup observers report this when device_gb is absent; older workers may omit both. Does not authorize reduced unified-memory accounting."

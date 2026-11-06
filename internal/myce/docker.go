@@ -1011,18 +1011,22 @@ func (d *dockerAttempt) recordSignal(id, name string, at time.Time) error {
 	return nil
 }
 
-const dockerStderrTailBytes = 64 * 1024
-
 // Docker --tail bounds lines; this writer additionally bounds bytes, including
 // one arbitrarily long line. stdout is discarded, never folded into stderr.
-type dockerTail struct{ data []byte }
+type dockerTail struct {
+	data  []byte
+	limit int
+}
 
 func (b *dockerTail) Write(p []byte) (int, error) {
 	n := len(p)
-	if len(p) >= dockerStderrTailBytes {
-		b.data = append(b.data[:0], p[len(p)-dockerStderrTailBytes:]...)
+	if b.limit <= 0 {
+		return n, nil
+	}
+	if len(p) >= b.limit {
+		b.data = append(b.data[:0], p[len(p)-b.limit:]...)
 	} else {
-		if extra := len(b.data) + len(p) - dockerStderrTailBytes; extra > 0 {
+		if extra := len(b.data) + len(p) - b.limit; extra > 0 {
 			b.data = append(b.data[:0], b.data[extra:]...)
 		}
 		b.data = append(b.data, p...)
@@ -1050,10 +1054,12 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) (err error
 		if m.ExitCode != nil {
 			continue
 		}
-		tail := &dockerTail{}
+		limit, releaseBudget := reserveDiagnosticBytes(d.dir, ^uint64(0))
+		tail := &dockerTail{limit: int(limit)}
+		defer releaseBudget()
 		if !logsNone {
 			ctx, cancel := context.WithTimeout(context.Background(), d.rpcBudget("logs"))
-			cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", "--tail", "256", c.ID)
+			cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", c.ID)
 			cmd.Env = d.env
 			cmd.Dir = d.workdir
 			cmd.Stdout = io.Discard

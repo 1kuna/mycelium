@@ -97,6 +97,9 @@
         "attempt": {
           "type": "integer"
         },
+        "cadence_seconds": {
+          "type": "number"
+        },
         "completed": {
           "type": "number"
         },
@@ -1853,11 +1856,10 @@
           "x-contract": "stable"
         },
         "attempt_history": {
-          "description": "Latest four ended attempts, persisted with the job. Existing classifier facts and queue decisions, not release proof or retry charges. Older planned requeues roll off; historical causes are not reconstructed.",
+          "description": "Ended-attempt diagnostic evidence. Open work is pinned; capacity-aware maintenance may compact redundant closed-attempt diagnoses. Immutable custody/learning ledgers remain separate. Historical causes are not reconstructed.",
           "items": {
             "$ref": "#/$defs/AttemptOutcome"
           },
-          "maxItems": 4,
           "type": [
             "array",
             "null"
@@ -2082,11 +2084,10 @@
           "x-contract": "diagnostic"
         },
         "memory_attempts": {
-          "description": "Persisted memory facts, independent of learning and the four-entry diagnostic history. Retains the first and latest 31 rows; memory_attempts_dropped counts evicted rows. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
+          "description": "Persisted memory facts, independent of learning and diagnostic history. Retention follows local capacity and evidence dependencies; open attempts and distinct measurements are preserved. memory_attempts_dropped counts historical evictions. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
           "items": {
             "$ref": "#/$defs/AttemptMemoryFacts"
           },
-          "maxItems": 32,
           "type": [
             "array",
             "null"
@@ -2094,7 +2095,7 @@
           "x-contract": "diagnostic"
         },
         "memory_attempts_dropped": {
-          "description": "Number of memory attempt rows evicted by the 32-row limit. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count.",
+          "description": "Number of historical memory attempt rows evicted by earlier releases. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count.",
           "minimum": 0,
           "type": "integer",
           "x-contract": "diagnostic"
