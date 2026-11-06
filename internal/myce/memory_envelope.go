@@ -599,7 +599,7 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	}
 	// Reserve observed demand plus the measured overshoot/sampling error.
 	// Capacity bounds uncertainty only; confirmed need and retry floors win.
-	prior.measuredHostGB, prior.refusal = q.recoveryMemoryBound(j, m, estimate, prior.measuredHostGB)
+	prior.measuredHostGB, prior.refusal = q.recoveryMemoryBound(j, m, estimate, prior.measuredHostGB, hostMemoryPeakGB(prior.host))
 	prior.samples = 0
 	prior.escalation = true
 	prior.constrainedGB = max(prior.constrainedGB, estimate.constrainedGB)

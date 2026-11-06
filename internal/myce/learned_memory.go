@@ -75,7 +75,7 @@ func (q *Queue) coldMemoryBound(j *Job, m *Machine, estimate memoryEstimate, flo
 	if lower > 0 && estimate.key != nil {
 		facts := q.memoryConstraintEvidence(*estimate.key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program), !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory)
 		if facts.margin > 0 {
-			bound, _ := q.recoveryMemoryBound(j, m, estimate, host)
+			bound, _ := q.recoveryMemoryBound(j, m, estimate, host, 0)
 			return bound, source, 0, true
 		}
 	}

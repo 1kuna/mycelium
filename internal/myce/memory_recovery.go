@@ -25,16 +25,44 @@ func memoryIntent(j *Job) *Job {
 	return &copy
 }
 
+func memoryMayAuto(j *Job) bool {
+	if j.Spec.Needs.Memory == "auto" {
+		return true
+	}
+	for _, e := range j.Extensions {
+		for _, v := range e.Variants {
+			if v.Needs.Memory == "auto" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (q *Queue) memorySizingRecoverable(j *Job) bool {
-	if j.Spec.Needs.Memory != "auto" {
+	if !memoryMayAuto(j) {
 		return false
 	}
-	ok, _ := q.qualifiedTargetMemory(memoryIntent(j), false)
-	return ok
+	recoverable := false
+	q.evaluateTargetsMemory(j, false, func(fit targetFit, candidate *Job, m *Machine) bool {
+		auto := j.Spec.Needs.Memory == "auto"
+		if e := qualifiedExtension(candidate, m); e != nil {
+			if v := e.variant(machineTarget(m)); v != nil {
+				auto = auto || v.Needs.Memory == "auto"
+			}
+		}
+		unknownCacheOnly := m.SharedInputCache == nil && fit.failures == 1 && fit.first == "shared input cache"
+		if auto && (fit.failures == 0 || unknownCacheOnly) {
+			recoverable = true
+			return false
+		}
+		return true
+	})
+	return recoverable
 }
 
 func (q *Queue) memoryEvidenceWaitingReason(j *Job) string {
-	if j.Spec.Needs.Memory != "auto" {
+	if !memoryMayAuto(j) {
 		return ""
 	}
 	if ok, why := q.qualifiedTargetSized(j); !ok && q.memorySizingRecoverable(j) {
@@ -43,7 +71,7 @@ func (q *Queue) memoryEvidenceWaitingReason(j *Job) string {
 	return ""
 }
 
-func (q *Queue) recoveryMemoryBound(j *Job, m *Machine, estimate memoryEstimate, prior float64) (float64, string) {
+func (q *Queue) recoveryMemoryBound(j *Job, m *Machine, estimate memoryEstimate, prior, measuredPrior float64) (float64, string) {
 	lower := q.constrainedMemoryLowerFor(j, estimate, !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory)
 	margin := 0.0
 	if estimate.key != nil {
@@ -54,7 +82,7 @@ func (q *Queue) recoveryMemoryBound(j *Job, m *Machine, estimate memoryEstimate,
 		// Without an observed error/growth margin there is no finite upper
 		// estimate. Preserve physical probing, including the measured floor.
 		room, why := q.exploratoryMemory(j, m)
-		return max(prior, room, lower), why
+		return max(prior, room, lower, measuredPrior), why
 	}
 	bound := max(prior, lower+margin)
 	largest := 0.0
@@ -72,5 +100,5 @@ func (q *Queue) recoveryMemoryBound(j *Job, m *Machine, estimate memoryEstimate,
 		bound = min(bound, largest)
 	}
 	// Capping uncertainty never authorizes a run below measured need.
-	return max(bound, lower), ""
+	return max(bound, lower, measuredPrior), ""
 }

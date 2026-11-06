@@ -240,3 +240,71 @@ func TestMemoryRecoveryAutoVariantContainment(t *testing.T) {
 		t.Fatal("auto variant lost authored containment", err)
 	}
 }
+
+func TestMemoryRecoveryVariantAutoSizingWaits(t *testing.T) {
+	q, clock := fixture(t)
+	e := compositionExtension(t, false)
+	e.Kinds = nil
+	v := &e.Variants[0]
+	v.Target = ExecutionTarget{OS: "linux", Arch: "amd64", Platform: "cpu"}
+	v.Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
+	delete(v.Baselines, "kind:sample")
+	v.References = map[string]WorkReference{"extension:sample": {InputShape: "small-v1", Unit: "records", Units: 10}}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	m := cpuMachine("worker", "host", "cpu", 8, 32)
+	m.HostMemoryBudgetGB, m.ExtensionFingerprint = 32, "cpu-v1"
+	report := newExtensionReport(e, &m, "extension:sample")
+	report.Setup, report.Qualified, report.CheckID = true, true, "check"
+	m.ExtensionReports = []ExtensionReport{report}
+	check(t, q, m, nil)
+	s := Spec{Name: "sample", Project: "sample", Extension: extensionKey(e), RequireTarget: true, Workload: &Workload{InputShape: "small-v1", Units: 10}}
+	runMemory(t, q, clock, m, s, 40, nil)
+	pending := submit(t, q, s)
+	if pending.Spec.Needs.Memory != "" {
+		t.Fatal("test no longer exercises variant-owned mode")
+	}
+	if why := q.memoryEvidenceWaitingReason(pending); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+		t.Fatal("variant-owned auto missed typed wait", why)
+	}
+	if run := check(t, q, m, nil).Job; run != nil {
+		t.Fatal("ran below accepted variant peak")
+	}
+}
+
+func TestMemoryRecoveryCapRetainsAcceptedMeasurement(t *testing.T) {
+	q, clock, m := learnedMemoryFixture(t)
+	s := cpuSpec(1, 0)
+	s.RequireTarget = true
+	runMemory(t, q, clock, m, s, 12, nil)
+	runMemory(t, q, clock, m, s, 4, func(r *Result) {
+		r.Success = false
+		r.MemoryPeak.Constrained = true
+		growth := 1.0
+		r.MemoryPeak.GrowthGB = &growth
+	})
+	if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "drain"}); err != nil {
+		t.Fatal(err)
+	}
+	budget := 8.0
+	if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "budget", MemoryBudgetGB: &budget}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+	m.HostMemoryBudgetGB = budget
+	check(t, q, m, nil)
+	pending := submit(t, q, s)
+	if e := q.memoryCandidate(pending, q.s.Machines[m.ID]).MemoryEnvelope; e.HostGB < 12 {
+		t.Fatal("uncertainty cap discarded the accepted measurement", e)
+	}
+	if why := q.memoryEvidenceWaitingReason(pending); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+		t.Fatal("unrecovered measurement must wait", why)
+	}
+	if run := check(t, q, m, nil).Job; run != nil {
+		t.Fatal("ran below unrecovered accepted peak")
+	}
+}
