@@ -37,6 +37,11 @@ short spikes between samples remain unknown. No polling loop on the queue is
 required. Do not infer permission to run a replay or change an installed worker
 from the availability of this command.
 
+Cancellation or a sensor slot deadline emits the partial sample with unavailable
+readings marked missing, then exits with an error. Retain that exit status; a
+partial receipt is not a completed capture. Sensor cancellation kills the owned
+process group; inherited output pipes have an additional one-second drain bound.
+
 Only assert `--native-worker-only` when the worker has no managed Docker
 attempts outside its process tree. Otherwise omit it: external attribution is
 explicitly missing, while independent RAM/RSS/card readings remain available.

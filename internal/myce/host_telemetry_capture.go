@@ -82,6 +82,7 @@ type HostTelemetryCapture struct {
 }
 
 func (c *HostTelemetryCapture) Init() error {
+	c.Probe = c.Probe.withFilesystem()
 	if c.Probe.OS != "linux" || c.Probe.ReadFile == nil || c.Probe.Command == nil {
 		return errors.New("host telemetry capture requires local Linux probes")
 	}
@@ -217,7 +218,7 @@ func (c *HostTelemetryCapture) Sample(ctx context.Context) (HostTelemetrySample,
 	if queueChanged || workerChanged {
 		return r, errors.New("process_identity_changed: capture stopped; no PID rebinding")
 	}
-	return r, nil
+	return r, ctx.Err()
 }
 
 func captureXPUMemory(ctx context.Context, p MachineProbe, pci string) ([3]float64, error) {

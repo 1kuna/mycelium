@@ -60,6 +60,20 @@ func LocalMachineProbe() MachineProbe {
 			return cachedMountInventory(ctx)
 		}
 		cmd := exec.CommandContext(ctx, n, args...)
+		// A probe owns its process group. Killing only the tool can leave
+		// descendants holding stdout/stderr and defeat the caller's deadline.
+		cmd.SysProcAttr = commandProcessAttributes()
+		killGroup := func() error {
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		cmd.Cancel = killGroup
+		// Match the existing OS inventory drain allowance: shorter drains
+		// falsely failed under contention. This also bounds inherited pipes.
+		cmd.WaitDelay = time.Second
 		cmd.Env = withoutMyceToken(os.Environ())
 		for key, value := range env {
 			if key == "MYCE_TOKEN" {
@@ -71,6 +85,11 @@ func LocalMachineProbe() MachineProbe {
 		stdout.limit, stderr.limit = 1<<20, 4096
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		err := cmd.Run()
+		if errors.Is(err, exec.ErrWaitDelay) {
+			if cleanupErr := killGroup(); !errors.Is(cleanupErr, os.ErrProcessDone) {
+				err = errors.Join(err, cleanupErr)
+			}
+		}
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
 			exit.Stderr = stderr.Bytes()

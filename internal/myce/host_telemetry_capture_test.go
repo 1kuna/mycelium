@@ -6,12 +6,94 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	generate "github.com/invopop/jsonschema"
 )
+
+func TestHostTelemetryCaptureLocalProbe(t *testing.T) {
+	p := LocalMachineProbe()
+	p.OS = "linux" // Exercise Linux initialization without reading this host.
+	p.Files = fstest.MapFS{"proc/meminfo": {Data: []byte("MemTotal: 33554432 kB\nMemAvailable: 25165824 kB\n")}}
+	p.Command = func(context.Context, string, ...string) ([]byte, error) { return []byte("10 1 1024\n20 1 2048\n"), nil }
+	c := HostTelemetryCapture{Probe: p, RunID: "baseline", HostRef: "host-a", QueuePID: 10, WorkerPID: 20, Birth: func(int) (string, error) { return "birth", nil }}
+	if err := c.Init(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.Sample(context.Background())
+	if err != nil || r.HostUsed.Value == nil || *r.HostUsed.Value != 8<<30 {
+		t.Fatalf("production filesystem adapter: %+v, %v", r.HostUsed, err)
+	}
+}
+
+func TestHostTelemetryCaptureSensorDescendants(t *testing.T) {
+	for _, mode := range []string{"cancel", "exited-parent"} {
+		t.Run(mode, func(t *testing.T) {
+			c, _ := captureFixture(t)
+			dir := t.TempDir()
+			pidPath := filepath.Join(dir, "child.pid")
+			// uv is an allowed fake-tool boundary in LocalMachineProbe. No hardware
+			// command runs: only this owned shell and its sleeping descendant.
+			helper := filepath.Join(dir, "uv")
+			if err := os.WriteFile(helper, []byte("#!/bin/sh\nsleep 10 &\nprintf '%s' \"$!\" > \"$1\"\nif [ \"$2\" = exited-parent ]; then exit 0; fi\nwait\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			run, original := LocalMachineProbe().Command, c.Probe.Command
+			ready := make(chan struct{})
+			c.Probe.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				if name != "xpu-smi" {
+					return original(ctx, name, args...)
+				}
+				close(ready)
+				return run(ctx, helper, pidPath, mode)
+			}
+			c.Probe.XeActivity = nil
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := c.Sample(ctx); done <- err }()
+			<-ready
+			var pid int
+			until := time.Now().Add(2 * time.Second)
+			for time.Now().Before(until) {
+				if b, err := os.ReadFile(pidPath); err == nil {
+					pid, _ = strconv.Atoi(string(b))
+					if pid > 0 {
+						break
+					}
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if pid <= 0 {
+				t.Fatal("scratch sensor did not start")
+			}
+			defer syscall.Kill(pid, syscall.SIGKILL) // Only our scratch descendant.
+			if mode == "cancel" {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if mode == "cancel" && !errors.Is(err, context.Canceled) || mode != "cancel" && err != nil {
+					t.Errorf("canceled sample returned %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				<-done
+				t.Fatal("sensor deadline left inherited pipes blocked")
+			}
+			state, err := processPS("-p", strconv.Itoa(pid), "-o", "stat=")
+			// Linux can retain a dead orphan until init reaps it; zombies cannot run.
+			if err == nil && strings.TrimSpace(string(state)) != "" && !strings.HasPrefix(strings.TrimSpace(string(state)), "Z") {
+				t.Fatalf("owned sensor descendant still running: %s", state)
+			}
+		})
+	}
+}
 
 func captureFixture(t *testing.T) (*HostTelemetryCapture, *fakeClock) {
 	t.Helper()

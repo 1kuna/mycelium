@@ -71,6 +71,9 @@ func hostTelemetryCommand(ctx context.Context, args []string, probe myce.Machine
 		if encodeErr := encoder.Encode(r); encodeErr != nil {
 			return encodeErr
 		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			return err
 		}
