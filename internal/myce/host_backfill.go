@@ -117,7 +117,6 @@ func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {
 	if !j.Spec.Needs.cpuOnly() {
 		return ""
 	}
-	fences := q.hostBackfillFences(scan)
 	var demand *Job
 	for _, m := range scan.machines {
 		if !q.placementLiveness(scan)[m.ID] || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) || !environmentReady(j, m) || q.preparationActive(m) || q.preparationStopping(m) {
@@ -127,7 +126,9 @@ func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {
 			if !q.batchSlotFree(m, candidate) || !fits(candidate, m, m.FreeMemoryGB) {
 				continue
 			}
-			fence := fences[hostID(m)]
+			// No fitting target means capacity accumulation cannot be this job's
+			// blocker. Avoid sizing the entire backlog just to discover that.
+			fence := q.hostBackfillFences(scan)[hostID(m)]
 			if q.hostBackfillAllows(candidate, m, fence) {
 				return "" // Another currently fitting host is not withheld.
 			}
