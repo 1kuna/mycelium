@@ -123,15 +123,15 @@ func TestUnifiedAttemptMemorySharing(t *testing.T) {
 			if err := q.Started(result(b, false)); err != nil {
 				t.Fatal(err)
 			}
-			clock.Advance(time.Second)
-			// The grower consumes another quarter of RAM in one sample horizon.
+			clock.Advance(maxGPUStopGrace + deviceMemorySamplePeriod)
+			// The grower consumes another 1/32 of RAM in one sample horizon.
 			// Its forecast consumes the remaining physical headroom before zero.
 			fs.mu.Lock()
-			workerClock.advance(time.Second)
-			fs.values[filepath.Join(memory[0].path, "memory.stat")] = stat(total * 3 / 8)
-			fs.values["/proc/42/status"] = fmt.Sprintf("VmRSS: %d kB\n", uint64(total*3/8*(1<<20)))
-			fs.values[filepath.Join(ceilings.root, "memory.stat")] = stat(total / 2)
-			fs.values["/proc/meminfo"] = fmt.Sprintf("MemAvailable: %d kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n", uint64(total/2*(1<<20)))
+			workerClock.advance(maxGPUStopGrace + deviceMemorySamplePeriod)
+			fs.values[filepath.Join(memory[0].path, "memory.stat")] = stat(total * 5 / 32)
+			fs.values["/proc/42/status"] = fmt.Sprintf("VmRSS: %d kB\n", uint64(total*5/32*(1<<20)))
+			fs.values[filepath.Join(ceilings.root, "memory.stat")] = stat(total * 9 / 32)
+			fs.values["/proc/meminfo"] = fmt.Sprintf("MemAvailable: %d kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n", uint64(total*23/32*(1<<20)))
 			fs.mu.Unlock()
 			for _, tick := range ticks {
 				tick <- workerClock.Now()
@@ -139,20 +139,20 @@ func TestUnifiedAttemptMemorySharing(t *testing.T) {
 			await(t, func() bool {
 				return memory[0].device.Load().at.Equal(workerClock.Now()) && memory[1].device.Load().at.Equal(workerClock.Now())
 			})
-			if sample := memory[0].device.Load(); sample.gb != total*3/8 || sample.growthGB != total/4 || sample.exclusive {
+			if sample := memory[0].device.Load(); sample.gb != total*5/32 || sample.growthGB != total/32 || sample.exclusive {
 				t.Fatal("fake-clock growth signal incorrect", sample)
 			}
 			// Host pressure from other users leaves less than one observed growth
 			// horizon, though both reservations and current samples fit the card.
-			m.MemoryObservation.UsedGB = total * 7 / 8
+			m.MemoryObservation.UsedGB = total * 63 / 64
 			_, err = q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report(a, 0), report(b, 1)}})
 			if err != nil {
 				t.Fatal(err)
 			}
 			requireState(t, q, a.ID, "stopping")
 			requireState(t, q, b.ID, "running")
-			if priorityStop(job(t, q, a.ID)) == nil {
-				t.Fatal("not a planned memory stop")
+			if got := job(t, q, a.ID); priorityStop(got) == nil || got.Reason != "shared GPU growth consumes physical memory headroom" {
+				t.Fatal("physical headroom did not trigger a planned stop", got.Reason)
 			}
 		})
 	}
