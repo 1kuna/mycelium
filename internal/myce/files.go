@@ -1039,6 +1039,11 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 	}
 	if err = c.hasFile(ctx, ref, headPurpose); err == nil {
 		return nil
+	} else {
+		var he *HTTPError
+		if !errors.As(err, &he) || (he.Status != 404 && he.Status != 410) {
+			return err
+		}
 	}
 	endpoint := "/api/files/uploads/" + ref.SHA256
 	res, err = c.fileRequest(ctx, "HEAD", endpoint, nil, map[string]string{"Tus-Resumable": "1.0.0"}, 0)
