@@ -25,6 +25,7 @@ ops/private/
 /checkpoints/
 /job.yaml
 /resume.py
+/quickstart-result/
 
 /workers/
 
