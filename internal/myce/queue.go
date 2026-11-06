@@ -1143,9 +1143,11 @@ func (q *Queue) maintain() {
 	previous := q.memoryPlanning
 	q.memoryPlanning = newMemoryPlanningCache()
 	defer func() { q.memoryPlanning = previous }()
+	scan := q.placementScan()
+	scan.memory = q.memoryPlanning
 	for _, j := range q.liveJobs() {
 		if q.startupPending(j) {
-			j.Reason = q.startStatusReason(j)
+			j.Reason = q.startStatusReason(j, scan)
 		}
 	}
 }

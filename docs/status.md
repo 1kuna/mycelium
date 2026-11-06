@@ -456,10 +456,11 @@ envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
 environment is not prepared and that the host never builds environments.
 
-`host_capacity_accumulation` names a ready queued accelerator job whose host RAM
-or cores would otherwise be repeatedly consumed by CPU backfill (#787). New
-CPU work at the same or lower tier waits on the demand's selected host unless
-it fits beside the demand. Existing attempts finish normally. The projection
+`host_capacity_accumulation` names a ready queued job whose host RAM or cores
+would otherwise be repeatedly consumed by smaller backfill (#787). From the
+next release this also covers CPU-only demand. New work behind the demand in
+tier/fair-turn order waits on its selected host unless it fits beside the
+demand. Existing attempts finish normally. The projection
 selects one currently ready target per demand, prefers immediate capacity, and
 otherwise uses ordinary placement value. It retains current device capacity,
 environment, qualification, cache, maintenance and liveness requirements; cold,
