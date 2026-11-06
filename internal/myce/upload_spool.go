@@ -14,11 +14,11 @@ import (
 )
 
 // DefaultUploadSpoolBytes leaves physical-disk admission as the binding limit.
-// Saved configs must remain positive for older installers. The byte counter's
-// representable maximum satisfies that schema without imposing a workload-sized
-// ceiling; measured free disk and unwritten commitments always bind first.
+// Saved configs must remain positive for older installers. The largest integer
+// exactly interoperable through JSON float64 readers satisfies that schema
+// without imposing a workload-sized ceiling; measured free disk and unwritten commitments always bind first.
 // New peers also accept -1 as an explicit automatic-mode alias.
-const DefaultUploadSpoolBytes int64 = math.MaxInt64
+const DefaultUploadSpoolBytes int64 = 1<<53 - 1
 
 var errUploadSpoolFull = errors.New("upload spool capacity exhausted")
 
@@ -100,7 +100,11 @@ func (s *uploadSpool) reserve(n int64) error {
 	if probe == nil {
 		probe = diskFree
 	}
-	free, err := probe(s.dir)
+	dir := s.dir
+	if dir == "" {
+		dir = os.TempDir() // Same filesystem selected by os.CreateTemp below.
+	}
+	free, err := probe(dir)
 	if err != nil {
 		return fmt.Errorf("%w: disk measurement unavailable; fitting bytes=0", errUploadSpoolFull)
 	}

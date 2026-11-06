@@ -415,6 +415,17 @@ func TestInstallAutomaticUploadSpoolCompatibility(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Older config editors decode JSON into map[string]any before saving.
+		// Its float64 numbers must not round the positive automatic sentinel
+		// beyond int64, or change its meaning for the next installer.
+		var edited map[string]any
+		if err = json.Unmarshal(data, &edited); err != nil {
+			t.Fatal(err)
+		}
+		data, err = json.Marshal(edited)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var legacy struct {
 			UploadSpoolBytes int64 `json:"upload_spool_bytes"`
 		}
