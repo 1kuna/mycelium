@@ -138,7 +138,7 @@ func TestRemainingHealthAttemptStreak(t *testing.T) {
 			record := func(attempt int, infra, planned, staging bool) {
 				t.Helper()
 				c.Advance(time.Second)
-				o := AttemptOutcome{Attempt: attempt, Machine: m.ID, Session: m.Session, Interrupted: infra, PoliteStop: planned}
+				o := AttemptOutcome{Attempt: attempt, Machine: m.ID, Session: m.Session, Interrupted: infra, PoliteStop: planned, inputsStaged: !infra}
 				if staging {
 					o.ExecutionCause = &RuntimeCause{Operation: "input_staging", Class: "storage_full"}
 				}

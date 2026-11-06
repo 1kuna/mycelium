@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"fmt"
 	"slices"
 	"strings"
 )
@@ -26,7 +25,11 @@ func (q *Queue) observeCurrentHealth(key string, bad bool, e HealthAlert) {
 // attempt outcomes. No filesystem probes, hashes, network or manifest reads.
 // #834 owns host pressure, silence, mount health and collector diagnostics.
 func (q *Queue) detectRemainingHealth() {
+	previous := q.memoryPlanning
+	q.memoryPlanning = newMemoryPlanningCache()
+	defer func() { q.memoryPlanning = previous }()
 	seen := map[string]bool{}
+	toolNeeded := map[string]bool{}
 	observe := func(key string, bad bool, e HealthAlert) { seen[key] = true; q.observeCurrentHealth(key, bad, e) }
 	for _, m := range q.s.Machines {
 		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
@@ -36,21 +39,19 @@ func (q *Queue) detectRemainingHealth() {
 		intentional := m.Leaving || mode == "disabled" || mode == "drained" || mode == "draining"
 		// Positive sensor errors belong to existing host-health alerts. Omitted
 		// admission reports are configuration evidence, not a pressure diagnosis.
-		toolReportNeeded := false
 		hostReportNeeded := m.HostMemoryBudgetGB > 0 || strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced")
 		for _, j := range q.liveJobs() {
 			if !terminal(j.State) && !cancelled(j) && q.jobAllowsMachine(j, m.ID) && executionTargetMatches(j.Spec, m) && (j.Spec.Needs.HostMemoryGB > 0 || j.Spec.Needs.Memory == "auto") {
 				hostReportNeeded = true
 			}
 			if !terminal(j.State) && !cancelled(j) && q.jobAllowsMachine(j, m.ID) && len(j.Spec.Needs.Tools) > 0 {
-				toolReportNeeded = true
+				toolNeeded[m.ID] = true
 			}
 		}
 		reasons := map[string]bool{
-			"tool_inventory_report_missing": toolReportNeeded && m.toolInventory == nil,
-			"cpu_capacity_report_missing":   m.CapabilityProfile == nil || m.CapabilityProfile.LogicalCPUs <= 0,
-			"host_memory_report_missing":    hostReportNeeded && !m.HostMemoryMeasured && m.HostMemoryError == "",
-			"device_memory_report_missing":  slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return !d.MemoryMeasured && d.Reason == "" }),
+			"cpu_capacity_report_missing":  m.CapabilityProfile == nil || m.CapabilityProfile.LogicalCPUs <= 0,
+			"host_memory_report_missing":   hostReportNeeded && !m.HostMemoryMeasured && m.HostMemoryError == "",
+			"device_memory_report_missing": slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return !d.MemoryMeasured && d.Reason == "" }),
 		}
 		for reason, bad := range reasons {
 			observe("reports/"+m.ID+"/"+reason, !intentional && bad, HealthAlert{Kind: "worker_reports_missing", Host: hostID(m), Reason: reason})
@@ -74,7 +75,7 @@ func (q *Queue) detectRemainingHealth() {
 			continue
 		}
 		known, fit, unknown := false, false, false
-		q.evaluateTargets(j, func(f targetFit, _ *Job, m *Machine) bool {
+		q.evaluateTargets(j, func(f targetFit, candidate *Job, m *Machine) bool {
 			if q.s.HostMaintenance[hostID(m)].Mode == "disabled" || m.Replacement != nil || q.migrationHistoricalMachine(m) {
 				return true
 			}
@@ -84,7 +85,10 @@ func (q *Queue) detectRemainingHealth() {
 				known = true
 				return true
 			}
-			if m.CapabilityProfile == nil || !m.HostMemoryMeasured {
+			if len(candidate.Spec.Needs.Tools) > 0 {
+				toolNeeded[m.ID] = true
+			}
+			if m.CapabilityProfile == nil || !m.HostMemoryMeasured || toolInventoryUnknown(candidate, m) {
 				unknown = true
 				return true
 			}
@@ -94,13 +98,20 @@ func (q *Queue) detectRemainingHealth() {
 		})
 		observe("target/"+j.ID, known && !fit && !unknown, HealthAlert{Kind: "job_target_unsatisfied", Project: j.Spec.Project, JobID: j.ID, Reason: "no_enabled_target"})
 	}
+	for _, m := range q.s.Machines {
+		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
+			continue
+		}
+		mode := q.s.HostMaintenance[hostID(m)].Mode
+		intentional := m.Leaving || mode == "disabled" || mode == "drained" || mode == "draining"
+		observe("reports/"+m.ID+"/tool_inventory_report_missing", !intentional && toolNeeded[m.ID] && m.toolInventory == nil && m.ToolInventory == nil, HealthAlert{Kind: "worker_reports_missing", Host: hostID(m), Reason: "tool_inventory_report_missing"})
+	}
+	q.detectAttemptEndingHealth()
 	if u := q.s.FleetUpgrade; u != nil {
 		for _, h := range u.Hosts {
-			reason := h.FailureCode
-			if reason == "runner_smoke_failed" {
+			reason := fleetFailureCode(h.FailureCode)
+			if h.FailureCode == "runner_smoke_failed" {
 				reason = "runner_smoke_failed"
-			} else if reason != "" {
-				reason = fleetFailureCode(reason)
 			}
 			observe("update/"+h.Host, h.Phase == "failed" || h.Failure != "", HealthAlert{Kind: "update_failed", Host: h.Host, Reason: reason})
 		}
@@ -113,48 +124,87 @@ func (q *Queue) detectRemainingHealth() {
 	}
 }
 
-// A streak is consecutive exact executions, not elapsed minutes or heartbeat
-// counts. Two losses is the definition of a repeated loss; one is already
-// covered by the production-attempt alert. A successful or workload-caused
-// ending breaks it. Planned stops neither count nor manufacture recovery.
+// The two latest non-planned endings are enough to prove repetition. Store
+// replaceable evidence first; detect only after the queue transaction's final
+// classifier has overwritten any provisional requeue record. Two is a protocol
+// definition of repeated loss, not a timed fleet threshold.
+type healthEnding struct {
+	JobID   string `json:"job_id"`
+	Attempt int    `json:"attempt"`
+	Session string `json:"session"`
+	Infra   bool   `json:"infra,omitempty"`
+	Staged  bool   `json:"staged,omitempty"`
+	Refused bool   `json:"refused,omitempty"`
+}
+
+func sameHealthEnding(a healthEnding, j *Job, o AttemptOutcome) bool {
+	return a.JobID == j.ID && a.Attempt == o.Attempt && a.Session == o.Session
+}
+
 func (q *Queue) recordRemainingAttemptHealth(j *Job, o AttemptOutcome) {
-	duplicate := false
-	for _, old := range j.AttemptHistory {
-		if old.Attempt == o.Attempt && old.Machine == o.Machine && old.Session == o.Session {
-			duplicate = true
-			break
-		}
-	}
-	if cancelled(j) || o.PoliteStop || o.OperatorStop || o.PriorityStop != nil || plannedStop(j) || historyPlannedStop(j) {
-		return
-	}
-	host := o.Machine
-	if m := q.s.Machines[o.Machine]; m != nil {
-		host = hostID(m)
-	}
-	if !duplicate {
-		key := "infrastructure-streak/" + o.Machine
-		c := q.s.Health.Conditions[key]
-		infra := o.Interrupted && !o.OutOfMemory
-		if infra {
-			c.Samples = append(slices.Clone(c.Samples), healthSample{ID: fmt.Sprintf("%s/%d/%s", j.ID, o.Attempt, o.Session), At: q.clock.Now()})
-			if len(c.Samples) > 2 {
-				c.Samples = c.Samples[len(c.Samples)-2:]
-			}
-		} else {
-			c.Samples = nil
-		}
-		if infra || len(c.Samples) > 0 || !c.LastAlert.IsZero() {
-			if q.s.Health.Conditions == nil {
-				q.s.Health.Conditions = map[string]healthCondition{}
-			}
+	key := "attempt-endings/" + o.Machine
+	c := q.s.Health.Conditions[key]
+	c.Endings = slices.Clone(c.Endings)
+	i := slices.IndexFunc(c.Endings, func(e healthEnding) bool { return sameHealthEnding(e, j, o) })
+	planned := cancelled(j) || o.PoliteStop || o.OperatorStop || o.PriorityStop != nil || plannedStop(j) || historyPlannedStop(j)
+	if planned {
+		if i >= 0 {
+			c.Endings = slices.Delete(c.Endings, i, i+1)
 			q.s.Health.Conditions[key] = c
 		}
-		q.observeCurrentHealth(key, len(c.Samples) >= 2, HealthAlert{Kind: "infrastructure_loss_streak", Host: host, JobID: j.ID, Attempt: o.Attempt, Reason: "consecutive_infrastructure_losses"})
+		return
 	}
-	staging := o.ExecutionCause
-	refused := staging != nil && staging.Operation == "input_staging" && staging.Class != "cancelled"
-	if !duplicate || refused {
-		q.observeCurrentHealth("attempt-staging/"+o.Machine, refused, HealthAlert{Kind: "staging_cache_refused", Host: host, JobID: j.ID, Attempt: o.Attempt, Reason: "input_staging_refused"})
+	cause := o.ExecutionCause
+	e := healthEnding{JobID: j.ID, Attempt: o.Attempt, Session: o.Session, Infra: o.Interrupted && !o.OutOfMemory && !launchRefusalOutcome(o), Staged: o.inputsStaged, Refused: cause != nil && cause.Operation == "input_staging" && cause.Class != "cancelled"}
+	if i >= 0 {
+		c.Endings[i] = e
+	} else {
+		c.Endings = append(c.Endings, e)
+		if len(c.Endings) > 2 {
+			c.Endings = c.Endings[len(c.Endings)-2:]
+		}
 	}
+	if q.s.Health.Conditions == nil {
+		q.s.Health.Conditions = map[string]healthCondition{}
+	}
+	q.s.Health.Conditions[key] = c
+}
+
+func (q *Queue) detectAttemptEndingHealth() {
+	for key, c := range q.s.Health.Conditions {
+		machine, ok := strings.CutPrefix(key, "attempt-endings/")
+		if !ok {
+			continue
+		}
+		host := machine
+		if m := q.s.Machines[machine]; m != nil {
+			host = hostID(m)
+		}
+		e := healthEnding{}
+		if len(c.Endings) > 0 {
+			e = c.Endings[len(c.Endings)-1]
+		}
+		repeated := len(c.Endings) == 2 && c.Endings[0].Infra && c.Endings[1].Infra
+		q.observeCurrentHealth("infrastructure-streak/"+machine, repeated, HealthAlert{Kind: "infrastructure_loss_streak", Host: host, JobID: e.JobID, Attempt: e.Attempt, Reason: "consecutive_infrastructure_losses"})
+		// Missing staging facts cannot establish recovery. Use the latest positive
+		// refusal or successful staging/start fact; unknown endings leave it alone.
+		for i := len(c.Endings) - 1; i >= 0; i-- {
+			ending := c.Endings[i]
+			if ending.Refused || ending.Staged {
+				q.observeCurrentHealth("attempt-staging/"+machine, ending.Refused, HealthAlert{Kind: "staging_cache_refused", Host: host, JobID: ending.JobID, Attempt: ending.Attempt, Reason: "input_staging_refused"})
+				break
+			}
+		}
+	}
+}
+
+func toolInventoryUnknown(j *Job, m *Machine) bool {
+	if len(j.Spec.Needs.Tools) == 0 {
+		return false
+	}
+	inventory := m.ToolInventory
+	if m.toolInventory != nil {
+		inventory = m.toolInventory.tools
+	}
+	return inventory == nil
 }

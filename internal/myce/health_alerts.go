@@ -34,6 +34,7 @@ type HealthAlert struct {
 	Delivered   bool      `json:"delivered"`
 }
 type healthCondition struct {
+	Endings     []healthEnding `json:"endings,omitempty"`
 	Since       time.Time      `json:"since"`
 	LastAlert   time.Time      `json:"last_alert,omitempty"`
 	Active      bool           `json:"active"`

@@ -1534,13 +1534,15 @@ cost evidence and its actual duration, never an assumed complete minute.
   live demand clears it. No scheduling decision is changed.
 - `infrastructure_loss_streak`: consecutive infrastructure endings on one worker,
   across distinct exact executions. Two is a repeated loss, not a timed fleet
-  threshold. Replays cannot increment it; planned stops are excluded. Successful
+  threshold. Final classification replaces provisional requeue evidence before detection.
+  Replays cannot increment it; planned stops are excluded. Successful
   or workload-caused endings break the streak. Historical failures interrupted
   by successful work do not fire. It preserves all existing attempt fences.
 - `staging_cache_refused`: accepted worker transfer/cache/copy failure reports or
   an exact attempt's typed input-staging refusal. Cold caches, successful copies
   and planned stops do not fire. A repaired report or later successful staging
-  clears its corresponding subject. Only fixed reason codes enter notifications.
+  clears its corresponding subject; missing staging evidence cannot clear it.
+  Only fixed reason codes enter notifications.
 - `update_failed`: the current update operation has a failed host or recorded
   failure. It uses #741's sanitized `failure_code` allow-list (including the
   explicit runner-smoke failure); successful retry/removal clears it. Helper,
