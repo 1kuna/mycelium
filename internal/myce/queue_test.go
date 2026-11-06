@@ -238,6 +238,10 @@ func TestMakingRoom(t *testing.T) {
 	}{{"production stops experiment", "production", true, true}, {"deadline stops experiment", "deadline", true, true}, {"production stops nonresumable", "production", false, true}, {"deadline preserves nonresumable", "deadline", false, false}, {"experiment cannot stop peer", "experiment", true, false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, _ := fixture(t)
+			// This preemption protocol fixture authors the grace it asserts.
+			if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+				t.Fatal(err)
+			}
 			s := spec("experiment")
 			s.Resumable = tc.resumable
 			submit(t, q, s)
@@ -313,6 +317,9 @@ func TestMakingRoom(t *testing.T) {
 func TestGraceAndFrontOfLine(t *testing.T) {
 	t.Parallel()
 	q, c := fixture(t)
+	if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	r := check(t, q, m, nil).Job

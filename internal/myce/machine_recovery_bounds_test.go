@@ -181,6 +181,9 @@ func TestMachineCompletionPlanningCreditBound(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			q, clock := fixture(t)
+			if err := q.SetPreemptionGrace(StopGrace); err != nil {
+				t.Fatal(err)
+			}
 			m := m3Machine()
 			submit(t, q, m3Spec("experiment", "0", 8, 1))
 			a := assignedJob(machineCheck(t, q, m))

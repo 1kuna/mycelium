@@ -17,6 +17,8 @@ func TestNativeGroupGPUCancellationSidecarGrace(t *testing.T) {
 	for _, mode := range []string{"cooperative", "sidecar-escalation", "main-escalation"} {
 		t.Run(mode, func(t *testing.T) {
 			w := recoveryWorker(t)
+			// This fixture exercises a measured ten-second accelerator cutoff.
+			w.AcceleratorStopGrace = 10 * time.Second
 			clock := &manualWorkerClock{now: time.Date(2026, 10, 29, 21, 0, 0, 0, time.UTC)}
 			w.Clock = clock
 			w.memoryCeilings = fakeCeilings(t)

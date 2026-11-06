@@ -36,6 +36,9 @@ func TestWorkerStopAndGraceDuringBlockedCheckin(t *testing.T) {
 func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	t.Helper()
 	q, _ := fixture(t)
+	if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	clock := &workerFakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
 	q.clock = clock
 	entered, release := make(chan struct{}), make(chan struct{})
