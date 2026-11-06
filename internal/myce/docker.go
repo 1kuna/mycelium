@@ -291,6 +291,20 @@ func (d *dockerAttempt) recordObservationLoss() error {
 	return nil
 }
 
+// Deliberate observer cancellation preserves custody without inventing lost
+// execution evidence or contaminating a later recovered terminal result.
+func (d *dockerAttempt) observerShutdown(err error) bool {
+	if !errors.Is(err, context.Canceled) {
+		return false
+	}
+	select {
+	case <-d.halt:
+		return true
+	default:
+		return false
+	}
+}
+
 // close stops the background reconciler and its active RPCs. Once it has joined,
 // an explicit synchronous recovery call owns its own lifetime and custody.
 func (d *dockerAttempt) rpcHalt() <-chan struct{} {
@@ -403,6 +417,11 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	done := make(chan struct{})
 	supervised := make(chan struct{})
 	halt := d.rpcHalt()
+	if !dockerObservation(args) {
+		// halt joins background observation, not a daemon mutation whose reply
+		// can settle dispatch custody. Explicit parent/user cancellation binds.
+		halt = nil
+	}
 	go func() {
 		defer close(supervised)
 		for {
@@ -626,7 +645,7 @@ func (d *dockerAttempt) containers() ([]dockerInspection, error) {
 		}
 		return b, err
 	})
-	if err != nil && d.clock != nil {
+	if err != nil && d.clock != nil && !d.observerShutdown(err) {
 		if saveErr := d.recordObservationLoss(); saveErr != nil {
 			return nil, errors.Join(err, saveErr)
 		}
@@ -1375,6 +1394,10 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 		started := RealClock{}.Now()
 		done, cleanupErr := d.reconcile()
 		reconcileLatency.observe(RealClock{}.Now().Sub(started))
+		if d.observerShutdown(cleanupErr) {
+			output.Close()
+			return
+		}
 		if cleanupErr != nil {
 			d.mu.Lock()
 			d.state.CleanupCause = runtimeDiagnostic(cleanupErr)

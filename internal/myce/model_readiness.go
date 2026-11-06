@@ -137,7 +137,7 @@ func publishReadinessHistory(path string, b []byte) error {
 var modelLoadPercent = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)%`)
 
 // stdout/stderr share one writer, so fragmented lines cannot interleave. The
-// existing diagnostic line budget bounds parser memory even with logs:none.
+// existing diagnostic line budget bounds captured-output parser memory.
 type modelReadinessOutput struct {
 	mu       sync.Mutex
 	output   io.Writer

@@ -245,7 +245,9 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 	if d.state.Network != "" && !stopped {
 		nets, e := d.networks()
 		if e != nil {
-			d.stop(d.clock.Now(), 0, true)
+			if !d.observerShutdown(e) {
+				d.stop(d.clock.Now(), 0, true)
+			}
 			return e
 		}
 		if len(nets) != 1 || nets[0].Name != d.state.Network || nets[0].Driver != "bridge" || !nets[0].Internal {

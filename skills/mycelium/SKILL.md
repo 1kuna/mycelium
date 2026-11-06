@@ -180,6 +180,8 @@ not stop it. Explicit caller, `max_wait`, `ready_timeout`
 and measurement `--load-timeout` deadlines still apply where configured. For
 custom servers, report monotonic `MYCE_LOAD_PROGRESS` records as described in
 [adaptive readiness](https://github.com/1kuna/mycelium/blob/main/docs/readiness.md).
+Stdout progress records require captured logs; `logs: none` preserves null output
+descriptors and uses health/OS activity instead.
 Managed Docker still uses local digest-pinned images with `--pull=never`.
 
 ## Explicit model master downloads (next release)

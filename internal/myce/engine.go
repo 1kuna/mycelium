@@ -176,7 +176,13 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		return e
 	}
 	output := &modelReadinessOutput{output: l.log, progress: progress}
-	l.cmd.Stdout, l.cmd.Stderr = output, output
+	if m.Logs == "none" {
+		// Preserve null OS descriptors. OS activity still supplies progress;
+		// stdout progress records require captured output.
+		l.cmd.Stdout, l.cmd.Stderr = l.log, l.log
+	} else {
+		l.cmd.Stdout, l.cmd.Stderr = output, output
+	}
 	reader, writer, e := os.Pipe()
 	if e != nil {
 		l.log.Close()
@@ -947,7 +953,12 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		e = m.engine.Load(ctx, model)
 	}
 	if e == nil && ctx.Err() != nil {
-		e = context.Cause(ctx)
+		rt.mu.Lock()
+		draining := rt.closing || m.drainRequested
+		rt.mu.Unlock()
+		if !draining {
+			e = context.Cause(ctx)
+		}
 	}
 	loadSucceeded = e == nil
 	m.cancel()

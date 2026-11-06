@@ -37,7 +37,9 @@ merge the latest state and publish through unique temporary files. Cache copy
 reports and verification reads renew progress. Environment preparation retains
 its separate builder protocol; a queued builder is not a stalled model process.
 
-Custom servers can report progress on stdout/stderr, including with `logs: none`:
+Custom servers with captured logs can report progress on stdout/stderr.
+With `logs: none`, output descriptors remain null devices, so progress comes
+from health transitions and shared OS activity instead of stdout records:
 
 ```text
 MYCE_LOAD_PROGRESS {"stage":1,"completed":12,"total":100}
@@ -75,7 +77,9 @@ the representation limit to prevent overflow. The existing diagnostic line-size
 bound protects stream parser memory against unterminated untrusted lines;
 oversized lines cannot provide progress. These safeguards cost observation latency
 or lost malformed evidence, and none supplies release proof. Shutdown cancels
-active Docker observations even when an outage enlarged their allowance.
+active Docker observations even when an outage enlarged their allowance, without
+recording deliberate observer shutdown as execution loss. A mutation reply can
+still settle its dispatch custody; explicit parent/user cancellation binds.
 Daemon RPCs measure real transport elapsed time, independently of lifecycle clock
 advances. Their observers join when the response returns, before local history
 publication; slow durable metadata cannot turn a completed response into a

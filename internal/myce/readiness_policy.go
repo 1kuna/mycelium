@@ -194,7 +194,7 @@ func (p *readinessProgress) result() readinessHistory {
 }
 
 // A repeated status/log line is not progress. Servers can emit this small
-// monotonic record on stdout even with logs:none. Each stage is identified by
+// monotonic record on captured stdout. Each stage is identified by
 // an increasing numeric index; counters cannot regress within a stage.
 func (p *readinessProgress) record(line []byte) {
 	var v struct {

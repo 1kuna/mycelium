@@ -1193,6 +1193,8 @@ func TestDockerOperatorResolutionIsOfflineAndExact(t *testing.T) {
 
 func TestDockerDelayedCreateAfterEmptyScanRetainsCustody(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
+	// This incident simulates an explicit lost CLI reply, not cold initialization expiry.
+	w.dockerCallTimeout = 2 * time.Second
 	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("late-create"), 0600)
 	j := dockerJob()
 	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
