@@ -4,7 +4,8 @@ const sharedGPUPressureCause = "shared_gpu_pressure"
 const sharedGPUUnknown = "shared GPU growth guard: per-process device sample unavailable or stale"
 
 // Check-in already collected the samples outside q.mu. Use only exact-attempt,
-// fresh per-process measurements here; host-wide deltas cannot identify a tenant.
+// fresh counters or reconciled attempt estimates here; an ambiguous host
+// delta forces exclusive execution rather than claiming a tenant grew.
 func (q *Queue) guardSharedGPU(m *Machine) {
 	if m.Gone || m.Leaving || q.unreported[m.ID] || m.Replacement != nil {
 		return
@@ -19,20 +20,41 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 				settled = settled && j.State == "running" && j.StartedAt != nil && j.Session == m.Session && len(j.AllocatedDevices) == 1 && !cancelled(j)
 			}
 		}
+		if unifiedCUDA(&card) {
+			for _, j := range tenants {
+				if j.State != "running" {
+					continue
+				}
+				if !sharedDeviceSampleReady(q.hostMemorySamples[m.ID][jobKey(*j)], q.clock.Now()) {
+					j.Reason = deviceUnifiedUncertain
+				} else if j.Reason == deviceUnifiedUncertain {
+					j.Reason = ""
+				}
+			}
+		}
 		if len(tenants) < 2 || !settled || d.BudgetGB <= 0 {
 			continue // Own limits handle single tenants; pending stops retain custody.
 		}
 		used, over := 0.0, map[string]float64{}
 		growth := false
 		measured := true
+		uncertain, forecast := false, 0.0
 		var victim *Job
 		for _, j := range tenants {
 			s, now := q.hostMemorySamples[m.ID][jobKey(*j)], q.clock.Now()
 			fresh := !s.deviceAt.IsZero() && !now.Before(s.deviceAt) && now.Sub(s.deviceAt) < deviceMemorySampleFreshFor
 			measured = measured && fresh
+			uncertain = uncertain || unifiedCUDA(&card) && (!fresh || s.exclusive)
 			peak := 0.0 // Stale or missing device samples contribute no growth.
 			if fresh {
 				peak = s.deviceGB
+				if unifiedCUDA(&card) {
+					// Cover both the next observed sensor horizon and the existing
+					// checkpoint/termination grace, using the measured growth rate.
+					margin := s.deviceGrowthGB + s.deviceRateGB*q.gpuStopGrace().Seconds()
+					forecast += margin
+					peak += margin
+				}
 				if j.Reason == sharedGPUUnknown {
 					j.Reason = ""
 				}
@@ -52,13 +74,19 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 				used += q.slotMemory(slot)
 			}
 		}
-		if !measured || !growth || used <= d.BudgetGB {
+		physicalPressure := false
+		if unifiedCUDA(&card) && forecast > 0 && validHostMemoryObservation(m.MemoryObservation) {
+			if floor, ok := unifiedCUDAFloor(m); ok {
+				physicalPressure = m.MemoryObservation.TotalGB-m.MemoryObservation.UsedGB-floor <= forecast
+			}
+		}
+		if !uncertain && (!measured || !growth && !physicalPressure || used <= d.BudgetGB && !physicalPressure) {
 			continue
 		}
 		// Retain each grower's lower bound even if a lower tier yields for it.
 		// Measured growth covers the sensor horizon. Never resize active custody.
 		for _, j := range tenants {
-			if over[j.ID] > 0 || j.ID == victim.ID {
+			if !uncertain && (over[j.ID] > 0 || j.ID == victim.ID) {
 				sample := q.hostMemorySamples[m.ID][jobKey(*j)]
 				j.DeviceMemoryFloorGB = max(j.DeviceMemoryFloorGB, sample.deviceGB+sample.deviceGrowthGB)
 			}
@@ -73,5 +101,11 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 		}
 		q.stopFor(victim, "GPU", "memory pressure")
 		victim.Reason = "shared GPU memory growth exceeds device budget"
+		if physicalPressure {
+			victim.Reason = "shared GPU growth consumes physical memory headroom"
+		}
+		if uncertain {
+			victim.Reason = deviceUnifiedUncertain
+		}
 	}
 }

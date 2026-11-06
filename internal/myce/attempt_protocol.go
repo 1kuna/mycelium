@@ -55,17 +55,21 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	c.Running, c.Started = nil, false
 	c = w.hygieneCheckin(c)
 	full := c
+	c = w.unifiedMemoryCheckin(c)
 	if w.toolReport != nil {
 		c = w.toolReport.checkin(c)
 	}
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	var refusal *HTTPError
-	if (w.toolReport != nil && c.ToolInventoryHash != "" || hasHygieneWireFields(c)) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+	if (w.toolReport != nil && c.ToolInventoryHash != "" || hasHygieneWireFields(c) || hasUnifiedMemoryWireFields(c)) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
 		// Strict decoding rejected additive inventory/hygiene fields before mutation
 		// (for example, a queue replaced with an older inventory-capable binary).
 		// Retry once with the full legacy inventory; attempt protocol is unchanged.
-		c = w.legacyHygieneCheckin(full)
+		c = legacyUnifiedMemoryCheckin(w.legacyHygieneCheckin(full))
+		if w.unifiedMemoryWire != nil {
+			w.unifiedMemoryWire.supported = false
+		}
 		if w.toolReport != nil {
 			w.toolReport.supported = false
 			c = w.toolReport.checkin(c)
@@ -87,6 +91,9 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		w.toolReport.accept(c, reply)
 	}
 	w.acceptHygieneReply(reply)
+	if w.unifiedMemoryWire != nil {
+		w.unifiedMemoryWire.supported = reply.UnifiedMemoryProtocol == unifiedMemoryProtocol
+	}
 	// A lost/discarded assignment leaves no local custody to stop. Validate
 	// the whole reply first, then explicitly release only unheld own-session
 	// keys; omission alone is never the queue's release evidence.

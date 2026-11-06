@@ -146,6 +146,7 @@ the existing leaving signal for a confirmed local drain until support is negotia
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
+- **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
 - **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits.
 - **Large outputs, diagnostics, quotas or early release:** [results and custody](advanced.md#results). Release only your own terminal results after all downstream uses and verified copies are complete.

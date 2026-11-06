@@ -34,7 +34,11 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 		reserved := 0.0
 		for _, j := range q.liveJobs() {
 			if batchReservesCapacity(j) && batchOnTarget(j, &target) {
-				reserved += deviceShareGB(j)
+				charge := deviceShareGB(j)
+				if s := q.hostMemorySamples[j.Machine][jobKey(*j)]; unifiedCUDA(&target) && sharedDeviceSampleReady(s, q.clock.Now()) {
+					charge = max(charge, s.deviceGB+s.deviceGrowthGB)
+				}
+				reserved += charge
 				target.batchTenants++
 			}
 		}
@@ -248,6 +252,9 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		}
 		tier := q.comparePriority(j.Spec, demand.Spec)
 		if !sharesDevice(j) || joining && (tier < 0 || isolatesDeviceTiers(m) && tier != 0) {
+			return 0, false
+		}
+		if joining && unifiedCUDA(m) && !sharedDeviceSampleReady(q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now()) {
 			return 0, false
 		}
 		n++

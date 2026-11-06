@@ -741,16 +741,45 @@ time, even if the actor's cached host-memory report predates CUDA initialization
 or is delayed by log/result I/O. Device age still starts at the original sensor
 reading, and the host counter keeps its own older age. A sampler that stops
 producing readings still becomes stale after ten seconds; refreshing the report
-does not renew its evidence. The shared-card guard uses only fresh per-process
-readings from every tenant; host-drop estimates cannot authorize that guard.
-When a unified-memory CUDA host lists the attempt's processes on its GPU but
-reports no per-process memory (`[N/A]`), the worker takes the largest host
-`MemAvailable` drop since launch outside every Mycelium cgroup as `device_gb`,
-labelled by `device_source`. It is used only when no other process appears on
-that GPU during the attempt; otherwise `device_unavailable` says the GPU was
-shared. The figure also counts growth by processes outside Mycelium and can
-miss use that coincides with their frees. It feeds learning like a
-per-process sample, so the device figure can grow from measured use.
+does not renew its evidence. From the next release, unified CUDA admission
+requires a fresh sample from every existing tenant before adding another.
+
+When CUDA lists attempt PIDs but reports `[N/A]`, a Linux worker also reads
+those PIDs' RSS and the exact attempt cgroup's resident anonymous, kernel and
+shared-memory pages. `device_source` labels their maximum as a **unified
+RSS/cgroup upper estimate with host reconciliation**. CPU pages and repeated
+shared RSS pages can overstate device demand; this is not a CUDA allocator
+counter. The worker checks the signed `MemAvailable` drop against growth of the
+entire delegated cgroup root and this attempt's RSS outside its cgroup charge.
+An unexplained residual larger than one kernel page, a foreign GPU process,
+missing baseline or incomplete RSS/cgroup/host evidence sets
+`current_host_memory.device_exclusive`. A residual is charged conservatively
+for live diagnostics, never divided proportionally among co-tenants. Such
+samples do not feed device learning. The older exclusive host-delta completion
+fallback remains available when no per-process figure can be retained.
+
+Check-ins refresh the estimate's source, exclusivity and original timestamp
+atomically alongside its value. Missing, stale or uncertain attribution prevents
+new unified CUDA sharing; existing shared attempts yield in the guard's normal
+lowest-tier, then greatest-over-reservation order until execution is exclusive.
+The running reason names uncertain attribution. Dedicated-card missing-sample
+behavior remains diagnostic only. Higher CUDA classes still stop every lower
+co-tenant and await exact release before starting. Workers negotiate
+`unified_memory_protocol: unified-attempt-memory-v1` before sending the new
+sample fields. An older or downgraded queue receives the legacy shape and a
+leaving/admission drain while a fallback estimate is live; attempt custody and
+local evidence remain intact.
+
+Fresh, reconciled estimates enable the shared-card growth guard. For unified
+CUDA it compares reservations with measured usage plus growth projected over the
+observed sensor horizon and existing checkpoint/termination grace. It also
+checks that projected growth fits current physical headroom above the configured
+reserve/allowance floor. It requests a planned stop while headroom remains,
+retaining exact-release custody and measured retry floors without spending a
+failure budget. Graceful stop, kernel containment and sampling are not a hard
+bound against an unseen allocation burst. Simultaneous unrelated frees can hide
+host drops, and sampling can miss short peaks; native qualification remains
+separate from fake-sensor tests.
 These diagnostics grant no learning eligibility or accounting reduction. Shared
 physical RAM alone does not establish cgroup coverage: GB10 CUDA allocations can
 exceed the job's current cgroup charge. Unified admission retains conservative
