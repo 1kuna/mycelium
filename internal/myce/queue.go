@@ -982,6 +982,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	j.Session = ""
 	j.StopAt = nil
 	j.StartedAt = nil
+	j.StartupTiming = nil
 	j.InputsStagedAt = nil
 	j.FinishedAt = nil
 	j.Reason = why
@@ -1882,6 +1883,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		r.Error = r.ExecutionCause.String()
 	}
 	q.retainAttemptResources(j, r.Resources)
+	retainStartupTiming(j, r.StartupTiming)
 	retainInputsStagedAt(j, r.InputsStagedAt)
 	if m := q.s.Machines[r.Machine]; m != nil {
 		m.LastSeen = q.clock.Now()
@@ -2574,6 +2576,7 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 			return nil
 		}
 		q.retainAttemptResources(j, r.Resources)
+		retainStartupTiming(j, r.StartupTiming)
 		retainInputsStagedAt(j, r.InputsStagedAt)
 		q.markStarted(j)
 		if at := wallTimeDeadline(j); at != nil {
@@ -2623,6 +2626,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 				for i := range j.Copies {
 					j.Copies[i].Recoverable = false
 				}
+				j.StartupTiming = nil
 				j.InputsStagedAt = nil // Recovery adopts a different execution.
 				j.Attempt = copy.Attempt
 				j.Machine = m.ID
@@ -2656,6 +2660,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		j.YieldGeneration = max(j.YieldGeneration, progress.durable)
 	}
 	q.retainAttemptResources(j, report.Resources)
+	retainStartupTiming(j, report.StartupTiming)
 	retainInputsStagedAt(j, report.InputsStagedAt)
 	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)
@@ -2722,6 +2727,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.ReleaseConfirmed = false
 	j.RequeuedByOperator = false
 	j.StartedAt = nil
+	j.StartupTiming = nil
 	j.InputsStagedAt = nil
 	j.Timing = nil
 	j.ApplicationProgress = nil

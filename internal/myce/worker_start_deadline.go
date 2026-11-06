@@ -20,6 +20,7 @@ const workerStartRequestTimeout = 10 * time.Second
 
 // A positive reply means this exact attempt is durably started, before execution.
 func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) error {
+	defer w.startup.begin("start_authorization", 0)()
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
@@ -37,7 +38,7 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 		OK                       bool     `json:"ok"`
 		StartGate                string   `json:"start_gate"`
 	}
-	if err := w.Client.Call(ctx, "POST", "/api/workers/started", Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply); err != nil {
+	if err := w.Client.Call(ctx, "POST", "/api/workers/started", Result{StartupTiming: w.startup.snapshot(), InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply); err != nil {
 		return fmt.Errorf("%w: %w", errWorkerStartHandoff, err)
 	}
 	if !reply.OK || reply.StartGate != startGateProtocol {

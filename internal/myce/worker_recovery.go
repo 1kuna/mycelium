@@ -79,6 +79,9 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
+	startup               *startupTimings
+	startupExecution      Execution
+	startupSession        string
 	storageObserver       *storageObserver // Exact attempt; shared with its publication callbacks.
 	inputStaging          *atomic.Bool     // Shared by all attempt stores; bounds detached ordinary staging.
 	sharedRelease         func()           // Idempotent; retained until exact process cleanup.
@@ -273,6 +276,12 @@ func (s *workerStore) close() {
 	_ = s.lock.Close()
 }
 func (s *workerStore) save() error {
+	if s.startup != nil && s.state.Job != nil && s.state.Job.ID == s.startupExecution.ID && s.state.Job.Attempt == s.startupExecution.Attempt && s.state.Job.Session == s.startupSession {
+		s.state.Job.StartupTiming = s.startup.snapshot()
+		if s.state.Result != nil {
+			s.state.Result.StartupTiming = s.state.Job.StartupTiming
+		}
+	}
 	name := s.stateName
 	if name == "" {
 		name = "state.json"

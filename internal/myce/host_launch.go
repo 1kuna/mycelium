@@ -222,6 +222,7 @@ func (q *Queue) reconcilePreparationPlans(c Checkin) {
 	}
 }
 func (w Worker) authorizeLaunch(l HostLaunch) error {
+	defer w.startup.begin("launch_authorization", 0)()
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
