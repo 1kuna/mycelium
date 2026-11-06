@@ -1536,6 +1536,20 @@ expiry; ordinary pressure recovery alone does not erase the cooldown.
 
 ## Incident health alerts
 
+From the next release, `health_alert_delivery` reports `configured` and `pending`
+in status/inspection JSON; CLI and page status explain the same state. No hook
+is a supported diagnostic-only mode: retained alerts stay `delivered: false`.
+`pending` counts retained events without a durable hook acknowledgement, including
+events recorded before a hook was configured. It does not prove an attempt or
+distinguish hook failures from queue acknowledgement failures. Older releases
+omit configuration and attempt evidence, so `delivered: false` alone cannot
+establish why delivery has not been acknowledged. The queue owner must verify
+the running hook configuration and sanitized delivery/commit evidence.
+Successful hook exit does not itself prove downstream thread execution.
+Restarting without a hook clears its historical configuration flag and restores
+the existing 256-event diagnostic retention window. Job completion observers
+and their thread-bound notifiers are independent of this queue-level channel.
+
 `health_alerts` retains diagnostic events delivered by the existing optional
 queue `--health-notify` executable. Detectors run on queue mutations and ticks,
 using the queue clock; no polling service or automatic issue filing is added.
