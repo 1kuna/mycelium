@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -257,5 +258,37 @@ func TestProbeMemoryAdmissionDoesNotWaitForProcessReceipts(t *testing.T) {
 		case <-time.After(testWaitTimeout):
 			t.Fatal("admission waited for unrelated process receipt")
 		}
+	}
+}
+
+func TestProbeMemoryWithdrawnYieldKeepsAdmission(t *testing.T) {
+	rt, actor, loading := probeMemoryRuntimeFixture(t)
+	var allowed atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workers/yield-stop" {
+			t.Errorf("unexpected yield request %s", r.URL.Path)
+		}
+		fmt.Fprintf(w, `{"allowed":%t}`, allowed.Load())
+	}))
+	defer server.Close()
+	worker := actor.worker
+	worker.Machine = rt.memoryMachine
+	worker.Client = Client{URL: server.URL}
+	directive := AttemptDirective{Stop: true, PriorityStop: &PriorityPreemption{Cause: scarceHostYieldCause, Demand: "demand", Victim: actor.job.ID}}
+	actor.update(worker, directive, true, false)
+	if ok, err := actor.authorizeYieldStop(context.Background(), worker); err != nil || ok {
+		t.Fatalf("yield was not withdrawn: %v %v", ok, err)
+	}
+	if err := rt.checkLoadMemory(context.Background(), loading); err != nil {
+		t.Fatal("withdrawn yield retained full probe charge", err)
+	}
+	allowed.Store(true)
+	actor.update(worker, directive, true, false)
+	if ok, err := actor.authorizeYieldStop(context.Background(), worker); err != nil || !ok {
+		t.Fatalf("yield was not committed: %v %v", ok, err)
+	}
+	actor.update(worker, AttemptDirective{}, false, false)
+	if err := rt.checkLoadMemory(context.Background(), loading); !errors.Is(err, errWorkerMemory) {
+		t.Fatal("reconnect cleared committed stop custody", err)
 	}
 }

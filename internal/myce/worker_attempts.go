@@ -84,7 +84,9 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	return r, a.diagnostics, a.finished, a.err
 }
 func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
-	if d.Stop {
+	// Scarce-host yield is provisional until its delivery authorization. It
+	// may be withdrawn while the exact process continues running normally.
+	if d.Stop && (d.UserCancel || !scarceYieldStop(d.PriorityStop)) {
 		a.stopAdmission()
 	}
 	w.stopAdmission = a.stopAdmission
@@ -99,6 +101,20 @@ func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admi
 	case a.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (a *attemptSupervisor) authorizeYieldStop(ctx context.Context, w Worker) (bool, error) {
+	var authorization struct {
+		Allowed bool `json:"allowed"`
+	}
+	identity := Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}}
+	err := w.Client.Call(ctx, "POST", "/api/workers/yield-stop", identity, &authorization)
+	if err == nil && authorization.Allowed {
+		// Successful authorization is durable stop custody, before persistence
+		// or signal delivery can block. Reconnect never clears this latch.
+		a.stopAdmission()
+	}
+	return err == nil && authorization.Allowed, err
 }
 func (a *attemptSupervisor) run(ctx context.Context) {
 	defer close(a.done)
@@ -251,11 +267,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 			}
 			if p != nil && d.Stop && !d.UserCancel && scarceYieldStop(d.PriorityStop) && s.state.PriorityStop == nil {
-				var authorization struct {
-					Allowed bool `json:"allowed"`
-				}
-				identity := Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}}
-				if e := w.Client.Call(ctx, "POST", "/api/workers/yield-stop", identity, &authorization); e != nil || !authorization.Allowed {
+				if allowed, e := a.authorizeYieldStop(ctx, w); e != nil || !allowed {
 					d.Stop = false
 				}
 			}
