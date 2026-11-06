@@ -50,7 +50,7 @@ func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
 			holderSpec := cpuSpec(8, 1)
 			holderSpec.AllowedMachines = []string{busy.ID}
 			holder := submit(t, q, holderSpec)
-			if got := assignedJob(check(t, q, busy, nil)); got == nil || got.ID != holder.ID {
+			if got := check(t, q, busy, nil).Job; got == nil || got.ID != holder.ID {
 				t.Fatal("fixture did not reserve all cores", got)
 			} else {
 				holder = got
@@ -87,7 +87,7 @@ func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
 			// A newly fitting target restores normal admission; diagnostics do
 			// not turn another host's shortage into a scheduling restriction.
 			ram.HostAvailableMemoryGB = 32
-			if got := assignedJob(check(t, q, ram, nil)); got == nil || got.ID != j.ID {
+			if got := check(t, q, ram, nil).Job; got == nil || got.ID != j.ID {
 				t.Fatal("fitting peer did not admit queued work", got)
 			}
 		})
@@ -114,7 +114,7 @@ func TestQueuedReasonUnavailablePeerAndRAMShortage(t *testing.T) {
 		}
 	}
 	owner.CapabilityProfile.Availability.Available = true
-	if got := assignedJob(check(t, q, owner, nil)); got == nil || got.ID != j.ID {
+	if got := check(t, q, owner, nil).Job; got == nil || got.ID != j.ID {
 		t.Fatal("available peer did not admit queued work", got)
 	}
 }
