@@ -97,6 +97,15 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 	if !got.At.Equal(report.At) || len(got.Stranded) != 1 {
 		t.Fatalf("endpoint=%+v", got)
 	}
+	for _, path := range []string{"/api/status", "/api/inspection"} {
+		var snapshot Snapshot
+		if err := client.Call(context.Background(), http.MethodGet, path, nil, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Efficiency == nil || !snapshot.Efficiency.At.Equal(report.At) || len(snapshot.Efficiency.Stranded) != 1 {
+			t.Fatalf("%s omitted the maintenance report", path)
+		}
+	}
 	// Capability failure is not authored stranding, even when targets exclude it.
 	q.s.Machines["idle"].FreeCPUCores = 0
 	if len(q.strandedDemand(waiting)) != 0 {
