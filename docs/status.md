@@ -1806,3 +1806,16 @@ transaction receipt, with matching config, updater lock and proven helper absenc
 It never scans or deletes rollback binaries, bootstrap release archives, active
 state, receipts or unknown staging. Foreign processes, services and shared
 personal/project caches are outside this collector.
+
+Worker mount recovery reuses `host_health.history[].mounts` and
+`unavailable_roots`. `mount_probe_pending` is cold/unverified access;
+`mount_probe_slow` and `mount_probe_stalled` use host-relative latency evidence;
+`mount_probe_failed` is returned I/O failure. `mount_inventory_unavailable`
+means the cached mount table could not establish backing storage, and
+`mount_automount_pending` means access has not established the network mount.
+`mount_linux_operator_required` and `mount_macos_approval_required` require
+storage-owner action, with a deduplicated `host_mount_action_required` health
+wake even after a prior generic degradation. The latter includes possible
+Keychain approval; it does not claim to diagnose a specific credential failure.
+Only dependent work is withheld; fresh completed healthy probes resume it.
+See [platform recovery](operations.md#worker-mount-recovery-linux-and-macos).

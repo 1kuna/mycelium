@@ -1131,6 +1131,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
 			m.HostHealth = health.snapshot(m.DiskVolumes)
 			applyHostMountHealth(w, &m)
+			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			heartbeatStarted := w.Clock.Now()
 			reply, err := w.checkin(ctx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			health.noteHeartbeat(w.Clock.Now().Sub(heartbeatStarted))
@@ -1188,6 +1189,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				admissionWorker := w
 				admissionWorker.Machine.Environments = m.Environments
 				admissionWorker.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, root.state.CheckpointRoot)
+				admissionWorker.Machine.HostHealth = health.snapshot(m.DiskVolumes)
+				applyHostMountHealth(w, &admissionWorker.Machine)
 				for _, d := range reply.Attempts {
 					key := attemptKey{d.ID, d.Attempt, d.Session}
 					if d.Job != nil {

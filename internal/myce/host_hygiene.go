@@ -319,7 +319,7 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 	}
 	m.done = make(chan struct{})
 	for role, path := range workerHealthMounts(w) {
-		m.mounts[role] = &hostMountProbe{root: role, path: path, probe: workerHealthMountProbe}
+		m.mounts[role] = &hostMountProbe{root: role, path: path, probe: recoveryMountProbe(w, role, path)}
 	}
 	go func() {
 		defer close(m.done)
