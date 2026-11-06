@@ -67,8 +67,8 @@ func incidentVariantFixture(t *testing.T, capGB float64) (*Queue, *fakeClock, Ma
 }
 
 func TestHealthIncidentInheritedAutoMemoryReplay(t *testing.T) {
-	for _, refuse := range []bool{false, true} {
-		t.Run(fmt.Sprint("refused=", refuse), func(t *testing.T) {
+	for _, requireTarget := range []bool{false, true} {
+		t.Run(fmt.Sprint("require_target=", requireTarget), func(t *testing.T) {
 			q, clock, m, s := incidentVariantFixture(t, 0)
 			first := startObservation(t, q, m, s)
 			clock.Advance(time.Second)
@@ -79,13 +79,16 @@ func TestHealthIncidentInheritedAutoMemoryReplay(t *testing.T) {
 				t.Fatal(err)
 			}
 			incidentAllowance(t, q, &m, 24)
-			s.RequireTarget = refuse
+			s.RequireTarget = requireTarget
 			queued, err := q.Submit(s)
-			if (err != nil) != refuse {
+			if err != nil {
 				t.Fatal("unexpected admission", err)
 			}
-			if !refuse && queued.Spec.Needs.Memory != "" {
+			if queued.Spec.Needs.Memory != "" {
 				t.Fatal("fixture did not inherit auto from variant")
+			}
+			if why := q.memoryEvidenceWaitingReason(queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+				t.Fatal("inherited learned sizing lost typed wait", why)
 			}
 			kind := "learned_envelope_exceeds_allowances"
 			var key string
@@ -163,8 +166,12 @@ func TestHealthIncidentOfflineUndersizedPeerDoesNotSuppress(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Needs.Memory, s.RequireTarget = "auto", true
-	if _, err := q.Submit(s); err == nil {
-		t.Fatal("oversized work admitted")
+	queued := submit(t, q, s)
+	if why := q.memoryEvidenceWaitingReason(queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+		t.Fatal("oversized learned work lost typed wait", why)
+	}
+	if assigned := assignedJob(machineCheck(t, q, m)); assigned != nil {
+		t.Fatal("oversized learned work assigned", assigned.ID)
 	}
 	if events := alertsOf(q, "learned_envelope_exceeds_allowances"); len(events) != 1 {
 		t.Fatal("offline undersized peer suppressed the incident", events)
