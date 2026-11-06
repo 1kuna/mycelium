@@ -159,6 +159,10 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 					route = r.Pattern
 				}
 			}
+			if route == "POST /api/workers/checkin" && response.status < 400 {
+				// Contention must not teach a wider observation allowance.
+				q.requestBudgets.recordControl(max(0, duration-wait))
+			}
 			q.requestLatencies.record(route, duration)
 			q.requestHealth.recordRequest(q.clock.Now(), route, duration, wait)
 			if duration <= requestSlowThreshold {

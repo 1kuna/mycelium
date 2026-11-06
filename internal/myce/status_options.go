@@ -8,8 +8,7 @@ import (
 )
 
 // Bound retained history, never hide active work or outstanding cleanup custody.
-// A page costs at most 1000 detailed jobs; the default keeps 100 recent answers.
-const defaultStatusJobs = 100
+// Page size is supplied from the queue host's current capacity before capture.
 
 type StatusJobsPage struct {
 	Mode       string `json:"mode"`
@@ -31,7 +30,7 @@ type statusSelection struct {
 }
 
 func parseStatusOptions(v url.Values) (statusOptions, error) {
-	o := statusOptions{jobs: "recent", limit: defaultStatusJobs}
+	o := statusOptions{jobs: "recent", limit: 0}
 	if s := v.Get("jobs"); s != "" {
 		o.jobs = s
 	}
@@ -41,7 +40,7 @@ func parseStatusOptions(v url.Values) (statusOptions, error) {
 	o.project, o.before = v.Get("project"), v.Get("before")
 	if s := v.Get("limit"); s != "" {
 		n, err := strconv.Atoi(s)
-		if err != nil || n < 1 || n > 1000 {
+		if err != nil || n < 1 {
 			return o, reject("status_query_invalid", err)
 		}
 		o.limit = n
@@ -107,7 +106,7 @@ func (q *Queue) selectStatusJobs(o statusOptions) (*statusSelection, error) {
 	}
 	end := len(jobs)
 	if !o.full && o.jobs != "active" {
-		end = min(end, start+o.limit)
+		end = start + min(end-start, max(1, o.limit))
 	}
 	for _, j := range jobs[start:end] {
 		s.ids[j.ID] = true

@@ -11,7 +11,6 @@ import (
 	"io"
 	"io/fs"
 	"math"
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -21,7 +20,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const extensionMaxBytes = 1 << 20
+// Eight representations can coexist during extension read, clone, YAML/JSON,
+// base64 transport and fingerprinting. Each gets a physical memory share.
+func extensionByteLimit() int {
+	b := &requestBudgets{}
+	n, err := b.capacity(context.Background())
+	if err != nil {
+		return 0
+	}
+	return int(min(int64(math.MaxInt), n/8))
+}
 
 var extensionName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
@@ -223,6 +231,14 @@ func (e Extension) validateBaselines(baselines map[string]ExtensionBaseline) err
 	return nil
 }
 func extensionFromFiles(files map[string][]byte) (Extension, error) {
+	limit := extensionByteLimit()
+	var totalBytes int64
+	for _, b := range files {
+		totalBytes += int64(len(b))
+		if totalBytes > int64(limit) {
+			return Extension{}, budgetRefusal(int64(limit))
+		}
+	}
 	owned := make(map[string][]byte, len(files))
 	for n, b := range files {
 		owned[n] = slices.Clone(b)
@@ -236,8 +252,8 @@ func extensionFromFiles(files map[string][]byte) (Extension, error) {
 		}
 		total += len(b)
 	}
-	if total > extensionMaxBytes {
-		return e, errors.New("extension exceeds 1 MiB; downloads belong in the cache")
+	if total > limit {
+		return e, budgetRefusal(int64(limit))
 	}
 	d := yaml.NewDecoder(bytes.NewReader(files["extension.yaml"]))
 	d.KnownFields(true)
@@ -264,6 +280,7 @@ func extensionFromFiles(files map[string][]byte) (Extension, error) {
 	return e, nil
 }
 func ReadExtension(folder string) (Extension, error) {
+	limit := int64(extensionByteLimit())
 	files := map[string][]byte{}
 	total := int64(0)
 	err := filepath.WalkDir(folder, func(p string, d fs.DirEntry, err error) error {
@@ -281,14 +298,14 @@ func ReadExtension(folder string) (Extension, error) {
 			return err
 		}
 		total += info.Size()
-		if total > extensionMaxBytes {
-			return errors.New("extension exceeds 1 MiB")
+		if total > limit {
+			return budgetRefusal(int64(limit))
 		}
 		n, err := filepath.Rel(folder, p)
 		if err != nil {
 			return err
 		}
-		b, err := os.ReadFile(p)
+		b, err := readCapacityFile(p, limit-int64(total)+info.Size())
 		if err != nil {
 			return err
 		}

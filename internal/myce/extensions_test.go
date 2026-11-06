@@ -84,7 +84,6 @@ func TestExtensionFormatFrozenAndMissingBaseline(t *testing.T) {
 			f["extension.yaml"] = append(f["extension.yaml"], []byte("unknown: true\n")...)
 		},
 		func(f map[string][]byte) { delete(f, "baseline/output") },
-		func(f map[string][]byte) { f["large"] = make([]byte, extensionMaxBytes) },
 	} {
 		files := map[string][]byte{}
 		for n, b := range e.Files {
@@ -600,4 +599,13 @@ func registeredExtension(t *testing.T, q *Queue, key string) Extension {
 		t.Fatal(err)
 	}
 	return e
+}
+
+func TestExtensionSourceGrowsPastFormerCeiling(t *testing.T) {
+	e := fakeExtension(t)
+	e.Files["source.dat"] = make([]byte, (1<<20)+1)
+	actual, err := extensionFromFiles(e.Files)
+	if err != nil || len(actual.Files["source.dat"]) <= 1<<20 {
+		t.Fatal("fixed source ceiling remains", err)
+	}
 }

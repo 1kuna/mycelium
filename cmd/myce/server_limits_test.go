@@ -8,7 +8,7 @@ import (
 
 func TestQueueUploadSpoolFlagsRejectNonpositiveBudget(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "test-token")
-	for _, budget := range []string{"0", "-1"} {
+	for _, budget := range []string{"0", "-2"} {
 		t.Run(budget, func(t *testing.T) {
 			dir := t.TempDir()
 			err := run([]string{"queue", "--db", filepath.Join(dir, "queue.db"), "--checkpoints", dir, "--upload-spool-dir", filepath.Join(dir, "uploads"), "--upload-spool-bytes", budget})

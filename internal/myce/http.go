@@ -39,7 +39,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	observationLimit := newObservationLimit(observationClock, a.Queue)
 	a.registerWait(mux)
 	waitStates := a.Queue.waitIndex()
-	nas := newResolveNASCache(a.Queue.clock)
+	nas := newResolveNASCache(a.Queue.clock, &a.Queue.requestBudgets)
 	// Joining needs authenticated identity/version only, never the growing status
 	// snapshot. Transport pinning authenticates this identity to joining clients.
 	mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
@@ -121,7 +121,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	mux.HandleFunc("GET /api/extensions", func(w http.ResponseWriter, r *http.Request) { respond(w, a.Queue.Extensions(r.Context()), nil) })
 	mux.HandleFunc("GET /api/usage", func(w http.ResponseWriter, r *http.Request) {
 		d, e := time.ParseDuration(r.URL.Query().Get("since"))
-		if e != nil || d <= 0 || d > 90*24*time.Hour {
+		if e != nil || d <= 0 {
 			respond(w, nil, reject("usage_invalid", nil))
 			return
 		}
@@ -252,7 +252,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	a.registerModelIntervals(mux)
 	mux.HandleFunc("GET /api/jobs/{id}/ledger", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		values := []int{0, -1, 100}
+		values := []int{0, -1, 0}
 		for i, key := range []string{"after", "high_water", "limit"} {
 			if query.Has(key) {
 				v, err := strconv.Atoi(query.Get(key))
@@ -450,6 +450,14 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		if workerProtocolEndpoint(r.URL.Path) {
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
 		}
+		var finishBudget func()
+		var budgetErr error
+		r, finishBudget, budgetErr = a.Queue.withRequestBudget(w, r)
+		if budgetErr != nil {
+			respond(w, nil, budgetErr)
+			return
+		}
+		defer finishBudget()
 		finishObservation, admitted := observationLimit.admit(w, r)
 		if !admitted {
 			jobGets.recordRejection(r)
@@ -460,30 +468,16 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	}), mux.patterns)
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	limit := int64(1 << 20)
-	if r.URL.Path == "/api/workers/checkin" {
-		// Tool inventories include the native PATH for every prepared environment.
-		// Release workers with dozens of environments exceeded 1 MiB (#789).
-		// Allow inventory growth while retaining a bounded authenticated body;
-		// other control requests keep their smaller budget.
-		limit = 8 << 20
-	}
-	if r.URL.Path == "/api/extensions" || r.URL.Path == "/api/portability" || r.URL.Path == "/api/resolve" {
-		limit = 2 << 20
-	} // base64 transport of a <=1 MiB folder
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
-	d.DisallowUnknownFields()
-	err := d.Decode(v)
-	if err == nil {
-		var extra any
-		if d.Decode(&extra) != io.EOF {
-			err = errors.New("expected one JSON object")
-		}
-	}
+	err := decodeBudget(w, r, v)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			respond(w, nil, &HTTPError{Status: http.StatusRequestEntityTooLarge, Code: "request_too_large", Message: fmt.Sprintf("request body exceeds %d bytes", limit)})
+			respond(w, nil, budgetRefusal(tooLarge.Limit))
+			return false
+		}
+		var capacityError *HTTPError
+		if errors.As(err, &capacityError) {
+			respond(w, nil, err)
 			return false
 		}
 		var rejected *rejectionError

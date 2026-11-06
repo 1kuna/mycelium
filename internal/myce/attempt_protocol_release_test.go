@@ -64,6 +64,8 @@ func TestAttemptProtocolReleaseWorkerJoins(t *testing.T) {
 		})
 	}
 	t.Run("oversized inventory remains a size refusal", func(t *testing.T) {
+		q.requestBudgets.memory = func(context.Context) (int64, error) { return 32 << 20, nil }
+		q.requestBudgets.lanes = 1
 		m := machine("oversized-worker", "fake")
 		m.ToolInventory = map[string][]string{"": {strings.Repeat("x", 8<<20)}}
 		w := Worker{Machine: m, Clock: clock, Client: client}

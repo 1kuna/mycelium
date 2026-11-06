@@ -2,8 +2,10 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -181,16 +183,19 @@ func (s *waitStateIndex) read(request WaitRequest) ([]WaitState, <-chan struct{}
 	return jobs, s.changed, changed, nil
 }
 func (s *waitStateIndex) wait(ctx context.Context, request WaitRequest) (WaitReply, error) {
+	return s.waitFor(ctx, request, time.Duration(request.Seconds)*time.Second)
+}
+func (s *waitStateIndex) waitFor(ctx context.Context, request WaitRequest, duration time.Duration) (WaitReply, error) {
 	// This is an HTTP transport wait, not queue/scheduler time. One bounded timer
 	// per request; cancellation releases it. State/limits use the injected Clock.
-	timer := time.NewTimer(time.Duration(request.Seconds) * time.Second)
+	timer := time.NewTimer(duration)
 	defer timer.Stop()
 	for {
 		jobs, wake, changed, err := s.read(request)
 		if err != nil {
 			return WaitReply{}, err
 		}
-		if changed || request.Seconds == 0 {
+		if changed || duration == 0 {
 			return publicWaitReply(jobs), nil
 		}
 		select {
@@ -216,13 +221,22 @@ func (a API) registerWait(mux *requestMux) {
 		if !decode(w, r, &request) {
 			return
 		}
-		// 256 covers the incident's 200 jobs in one request and bounds lookup/JSON
-		// work and response size independently of retained history.
-		if len(request.IDs) == 0 || len(request.IDs) > 256 || request.Seconds < 0 || request.Seconds > 20 {
-			respond(w, nil, &HTTPError{Status: 400, Code: "wait_invalid", Message: "wait requires 1..256 IDs and seconds in 0..20"})
+		duration, err := a.Queue.requestBudgets.waitDuration(r, request.Seconds, a.Queue.clock.Now())
+		if err != nil {
+			respond(w, nil, err)
 			return
 		}
-		result, err := index.wait(r.Context(), request)
+		limit, err := a.Queue.requestBudgets.pageLimit(r.Context(), reflect.TypeFor[WaitState]())
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		w.Header().Set("X-Myce-Max-Wait-IDs", strconv.Itoa(limit))
+		if len(request.IDs) == 0 || len(request.IDs) > limit {
+			respond(w, nil, &HTTPError{Status: 413, Code: "wait_capacity_exceeded", Message: fmt.Sprintf("wait requires 1..%d IDs at current queue capacity", limit)})
+			return
+		}
+		result, err := index.waitFor(r.Context(), request, duration)
 		respondOperation(w, result, err, "status_unavailable")
 	})
 }

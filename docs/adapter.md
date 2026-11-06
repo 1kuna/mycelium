@@ -129,7 +129,7 @@ maps are supported; single `environment` and `environments` cannot coexist.
 Native entries use complete `variants`, each with one exact `target`, `needs`,
 `execution`, optional existing `environments`, and `checks.qualification` plus
 native baselines. They cannot mix flat recipe fields with variants. Keep their
-small description/source closure within the existing 1 MiB bundle contract;
+small description/source closure within the host's measured source memory allowance;
 large immutable assets use file references. Preparation triggers exact-host/device
 checks from worker-owned scratch. Useful work waits for an accepted baseline
 comparison; a warm repeat reuses matching evidence. Failure remains visible and
@@ -693,7 +693,7 @@ GPU qualification must run the selected backend and cannot fall back to CPU.
 Current native execution is Unix; native Windows needs its own runtime port.
 Use logical `{extension}`, `{work}`, prepared `{env.NAME.python}`/`{env.NAME.root}`
 and verified `{assets.NAME}` paths; large model weights do not belong in the
-1 MiB description bundle. A smoke check alone never supplies native qualification.
+memory-admitted description bundle. A smoke check alone never supplies native qualification.
 
 Jobs declare software requirements; Mycelium selects the host and device.
 Author every feasible platform variant with its own locks and native checks.
@@ -740,7 +740,8 @@ GPU memory reservation and a run argv. Setup and check are optional; without a
 check and matching native baseline, the version stays not qualified. No implicit
 shell, background service or dependencies in the description format. Explicit
 `[sh, script.sh]` is fine. Include only regular files, no symlinks. Total folder
-contents are limited to 1 MiB. Execute scripts through their interpreter; file
+contents fit the host's measured memory allowance; see
+[request budgets](request-budgets.md). Execute scripts through their interpreter; file
 execute permissions are not part of the frozen content identity.
 Mycelium sets `PYTHONDONTWRITEBYTECODE=1` for extension setup, checks and jobs
 to keep ordinary Python imports from writing `__pycache__`/`.pyc` files into
@@ -1200,7 +1201,7 @@ sweeps keep their existing acceptance criteria. Setup, assets, resumability,
 member caps/readiness and existing inline composed environments are preserved.
 Native source points to the original small extension directory relative to the
 invocation root, so sources need not move and existing commands keep working.
-The existing 1 MiB native bundle limit still applies. Output lists use the
+The host's measured native source memory allowance applies. Output lists use the
 existing `filename: results` convention; omitted outputs remain omitted.
 Legacy `benchmark` has no equivalent and is refused instead of becoming an
 invented sweep.

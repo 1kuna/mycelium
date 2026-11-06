@@ -132,7 +132,8 @@ filtered `total`, `returned`, `mode`, and optional `next_before` job ID.
 - `GET /api/status?jobs=active` returns all active/cleanup-pending jobs.
 - `?jobs=all&limit=100` pages all history, newest submission first; append
   `&before=NEXT_BEFORE` from each reply until that field is absent. `limit` is
-  1–1000 and defaults to 100. The normal status presentation order is retained
+  positive and bounded by current queue memory and measured projection cost from
+  the next release; omission chooses an adaptive page. See [request budgets](request-budgets.md). The normal status presentation order is retained
   within each page; use the returned cursor rather than the last displayed ID.
 - `?project=example&since=2026-10-30T00:00:00Z` filters jobs by project and
   inclusive submission timestamp. Filters do not alter fleet health, eligibility
@@ -1723,8 +1724,10 @@ The first request may omit `after` and returns immediately. Replies contain
 `jobs`, an ordered array of scalar `id`, `state`, sanitized `reason` and
 `revision` records. Send the returned revisions on the next request; it waits
 until a selected record changes, becomes terminal, or the transport timeout
-expires. Use exact IDs after initial prefix resolution. The maximum is 256 IDs
-and 20 seconds; malformed/empty requests receive `wait_invalid`. Unknown and
+expires. Use exact IDs after initial prefix resolution. From the next release, fitting ID count follows current memory capacity and
+wait duration follows caller intent and negotiated transport deadlines; see
+[request budgets](request-budgets.md). Malformed requests receive `wait_invalid`;
+capacity refusals name the fitting ID count. Unknown and
 ambiguous IDs retain typed errors. Cancellation releases the transport wait.
 The committed scalar index uses its own mutex; waiting never takes the queue
 control mutex. Rollbacks cannot publish or wake consumers. HTTP job GET replies

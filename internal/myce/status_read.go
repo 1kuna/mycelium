@@ -110,7 +110,7 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 		if c.data != "" && c.generation == revision && q.clock.Now().Before(c.expires) {
 			return q.statusJSONFreshness(c.data, c.capturedAt, true)
 		}
-		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent", limit: defaultStatusJobs}, contexts...)
+		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent"}, contexts...)
 		if err != nil {
 			return "", err
 		}
@@ -556,6 +556,20 @@ func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...contex
 }
 
 func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
+	started := q.clock.Now()
+	if options != nil {
+		owned := *options
+		limit, err := q.requestBudgets.pageLimit(requestContext(contexts), reflect.TypeFor[Job]())
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if owned.limit == 0 {
+			owned.limit = limit
+		} else {
+			owned.limit = min(owned.limit, limit)
+		}
+		options = &owned
+	}
 	v, files, err := q.captureStatusObservation("", options, contexts...)
 	if err != nil {
 		return Snapshot{}, err
@@ -573,6 +587,12 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 		out.FileStore = files.status(context.Background())
 	}
 	out.Freshness = q.snapshotFreshness(out.Now, false)
+	if err == nil {
+		data, encodeErr := json.Marshal(out)
+		if encodeErr == nil {
+			q.requestBudgets.recordProjection(len(out.Jobs), len(data), q.clock.Now().Sub(started))
+		}
+	}
 	return out, err
 }
 
