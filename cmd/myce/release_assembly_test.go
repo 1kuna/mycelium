@@ -110,6 +110,12 @@ func TestReleaseVerifiedAssemblySigning(t *testing.T) {
 	publicPath := filepath.Join(dir, "fake-public.pem")
 	write(publicPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
 	args := []string{"manifest", "--dir", dir, "--version", version, "--commit", commit, "--assembly-receipt", receiptPath, "--assembly-sha256", receiptHash, "--signing-key", keyPath}
+	// Assembly needs Go; the publisher only needs myce. Keep Go unavailable
+	// for signing, verify-only and every tampering refusal below.
+	t.Setenv("PATH", t.TempDir())
+	if _, err := exec.LookPath("go"); err == nil {
+		t.Fatal("publisher fixture unexpectedly has Go")
+	}
 	t.Run("receipt-replacement", func(t *testing.T) {
 		// A FIFO can serve pinned bytes to the first read and unrelated proof
 		// to a second read. The signer must parse only the first snapshot.
