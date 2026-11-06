@@ -70,9 +70,10 @@ type JobEfficiency struct {
 	Rate        efficiencyRate         `json:"rate"`
 }
 type EfficiencyHost struct {
-	Host  string    `json:"host"`
-	Since time.Time `json:"since"`
-	At    time.Time `json:"at"`
+	Identity string    `json:"identity"`
+	Host     string    `json:"host"`
+	Since    time.Time `json:"since"`
+	At       time.Time `json:"at"`
 	ResourceIntegral
 	Rate                 efficiencyRate `json:"current"`
 	TotalMemoryGB        *float64       `json:"total_memory_gb"`
@@ -195,6 +196,9 @@ func (e *JobEfficiency) advance(now time.Time) {
 	}
 	seconds := now.Sub(e.At).Seconds()
 	if e.Blocker != "" {
+		if e.WaitSeconds == nil {
+			e.WaitSeconds = map[string]float64{}
+		}
 		e.WaitSeconds[e.Blocker] += seconds
 	}
 	if e.Rate.Host != "" {
@@ -327,9 +331,14 @@ func (q *Queue) refreshEfficiency() {
 	}
 	for host, m := range owners {
 		seen[host] = true
+		identity := identityHash(struct {
+			Hardware, CPU string
+			Cores         int
+			RAM           float64
+		}{m.ExtensionFingerprint, m.CPUExtensionFingerprint, m.EffectiveCPUCores, m.EffectiveHostMemoryBudgetGB})
 		h, ok := q.s.EfficiencyHosts[host]
-		if !ok {
-			h = EfficiencyHost{Host: host, Since: now, At: now}
+		if !ok || h.Identity != identity {
+			h = EfficiencyHost{Host: host, Since: now, At: now, Identity: identity}
 		}
 		h.Rate = efficiencyRate{Host: host, ReservedMemoryGB: m.HostMemoryInUseGB, ReservedCPUCores: float64(m.CPUInUseCores)}
 		h.TotalMemoryGB, h.PhysicalUsedMemoryGB = nil, nil
@@ -756,6 +765,7 @@ func efficiencyWasted(j *Job) []WastedAttempt {
 }
 
 type efficiencyBaseline struct {
+	Identity   string      `json:"identity,omitempty"`
 	At         time.Time   `json:"at"`
 	History    alertSeries `json:"history"`
 	Adverse    int         `json:"adverse"`
@@ -775,6 +785,12 @@ func (b efficiencyBaseline) signal(key string) EfficiencySignal {
 }
 func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (map[string]efficiencyBaseline, []EfficiencySignal) {
 	values := map[string]float64{}
+	identities := map[string]string{}
+	for _, h := range r.Hosts {
+		for _, metric := range []string{"reservation_gap_gb", "stranded_demand", "wasted_attempts", "suspect_attempts"} {
+			identities[h.Host+"/"+metric] = h.Identity
+		}
+	}
 	for _, h := range r.Hosts {
 		if h.Rate.MeasuredMemoryGB != nil {
 			values[h.Host+"/reservation_gap_gb"] = max(0, h.Rate.ReservedMemoryGB-*h.Rate.MeasuredMemoryGB)
@@ -834,6 +850,9 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 	var signals []EfficiencySignal
 	for key, value := range values {
 		b := old[key]
+		if b.Identity != identities[key] {
+			b = efficiencyBaseline{Identity: identities[key]}
+		}
 		if !b.At.IsZero() && !r.At.After(b.At) {
 			next[key] = b
 			signals = append(signals, b.signal(key))
