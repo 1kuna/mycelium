@@ -6,7 +6,7 @@ import "errors"
 // allow-list is shared by live reporting, durable replay and queue status.
 func fleetFailureCode(code string) string {
 	switch code {
-	case "fleet_ack_failed", "fleet_artifact_refused", "fleet_authorization_refused",
+	case "fleet_slot_unapproved", "fleet_ack_failed", "fleet_artifact_refused", "fleet_authorization_refused",
 		"fleet_artifact_download_failed", "fleet_artifact_transfer_failed",
 		"fleet_staging_exists", "fleet_staging_write_failed",
 		"fleet_binary_unavailable", "fleet_candidate_invalid", "fleet_config_invalid",

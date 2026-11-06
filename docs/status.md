@@ -1806,3 +1806,15 @@ transaction receipt, with matching config, updater lock and proven helper absenc
 It never scans or deletes rollback binaries, bootstrap release archives, active
 state, receipts or unknown staging. Foreign processes, services and shared
 personal/project caches are outside this collector.
+
+### Installed executable versus running image (#824)
+
+Worker `fleet` proof keeps the running `version`, `sha256`, PID and session
+separate from `installed_slot` (`sha256`, `size`, and `version` when established).
+`slot_mismatch: true` means saved bytes differ from the active process, including
+publication followed by failed activation. `slot_error` means the slot could not
+be observed; neither condition asserts activation or release approval. These
+observations run outside queue locks and normal heartbeat work. Hashes are reused
+only while local file identity, size and modification time agree; installation
+rechecks the bytes independently. CLI status displays mismatches before an
+install is attempted. Older workers omit these observations.

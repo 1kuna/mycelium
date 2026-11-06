@@ -7,6 +7,12 @@ description: "Use when work needs fleet compute (heavy tests, builds, sims, trai
 
 # Mycelium
 
+From the next release, a worker fleet proof may report `slot_mismatch` with
+separate running and `installed_slot` hashes after a failed update. This does not
+prove activation. Report it to the Mycelium maintenance owner; an unapproved
+slot refuses recovery with `fleet_slot_unapproved`. Use the supported installer
+and preserve the refusal and identities for that owner.
+
 ## First run: adapter to verified result
 
 Mycelium runs CPU and GPU work through one queue. Describe needs and verified

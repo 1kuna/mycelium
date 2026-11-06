@@ -38,14 +38,15 @@ type FleetUpdateInstruction struct {
 const fleetUpdateReceiptFile = "fleet-update.json"
 
 type fleetInstallReceipt struct {
-	Instruction   FleetUpdateInstruction `json:"instruction"`
-	ConfigSHA256  string                 `json:"config_sha256"`
-	BeforeSHA256  string                 `json:"before_sha256"`
-	BeforeVersion string                 `json:"before_version"`
-	BeforePID     int                    `json:"before_pid"`
-	BeforeRuntime FleetRuntimeProof      `json:"before_runtime"`
-	Phase         string                 `json:"phase"`
-	Failure       string                 `json:"failure,omitempty"`
+	Instruction        FleetUpdateInstruction `json:"instruction"`
+	ConfigSHA256       string                 `json:"config_sha256"`
+	SlotReconciliation *slotReconciliation    `json:"slot_reconciliation,omitempty"`
+	BeforeSHA256       string                 `json:"before_sha256"`
+	BeforeVersion      string                 `json:"before_version"`
+	BeforePID          int                    `json:"before_pid"`
+	BeforeRuntime      FleetRuntimeProof      `json:"before_runtime"`
+	Phase              string                 `json:"phase"`
+	Failure            string                 `json:"failure,omitempty"`
 }
 
 type fleetInstallDeps struct {
@@ -342,11 +343,35 @@ func launchFleetUpdate(ctx context.Context, requested ServiceConfig, i FleetUpda
 			r.Phase = "installed"
 		}
 	} else {
-		info, err := fleetVersion(ctx, c.Binary, d.command)
-		if err != nil || CheckReleaseUpgrade(i.Release.Manifest.Version, info.Version, false, before == a.SHA256) != nil {
+		slot, err := readReleaseSlot(c.Binary)
+		if err != nil || slot.SHA256 != before {
+			return errors.New("fleet_install_changed")
+		}
+		version := proof.Version
+		var reconciliation *slotReconciliation
+		if before != proof.SHA256 {
+			key, err := readFleetPublisher(filepath.Join(c.State, "fleet-publisher.pub"))
+			if err != nil {
+				return err
+			}
+			qualified, err := qualifyReleaseSlot(c, proof, slot, i.Release, key)
+			if err != nil {
+				var approved EnrollmentRelease
+				if client.Call(ctx, "GET", "/api/invites/release", nil, &approved) != nil {
+					return err
+				}
+				qualified, err = qualifyReleaseSlot(c, proof, slot, approved, key)
+				if err != nil {
+					return err
+				}
+			}
+			slot, version = qualified, qualified.Version
+			reconciliation = &slotReconciliation{Running: proof, Slot: slot, RollbackTarget: "installed_slot"}
+		}
+		if CheckReleaseUpgrade(i.Release.Manifest.Version, version, false, before == a.SHA256) != nil {
 			return errors.New("fleet_version_refused")
 		}
-		r = fleetInstallReceipt{Instruction: i, ConfigSHA256: configHash, BeforeSHA256: before, BeforeVersion: info.Version, BeforePID: pid, BeforeRuntime: proof, Phase: "prepared"}
+		r = fleetInstallReceipt{Instruction: i, ConfigSHA256: configHash, BeforeSHA256: before, BeforeVersion: version, BeforePID: pid, BeforeRuntime: proof, SlotReconciliation: reconciliation, Phase: "prepared"}
 	}
 	if err = writeFleetReceipt(c, r); err != nil {
 		return errors.New("fleet_receipt_write_failed")

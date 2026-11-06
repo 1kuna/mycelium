@@ -88,6 +88,10 @@ func newFleetInstallFixture(t *testing.T, goos string) *fleetInstallFixture {
 			return
 		}
 		switch r.URL.Path {
+		case "/api/invites/release":
+			_ = json.NewEncoder(w).Encode(f.i.Release)
+		case "/api/hosts/fixture-host/maintenance":
+			_ = json.NewEncoder(w).Encode(HostMaintenanceStatus{Workers: []MaintenanceWorker{{Fresh: true, Machine: Machine{ID: f.c.Name, Session: f.i.Session, Fleet: &FleetRuntimeProof{Version: f.runtimeVersion, SHA256: fleetBytesHash(f.old), Session: f.i.Session, PID: f.runtimePID, ServiceHealthy: true, RunnerSmoke: true, StartGate: StartGateProtocol, AttemptProtocol: AttemptProtocol}}}}})
 		case "/api/fleet/authorize":
 			f.authorizations++
 			if r.URL.Query().Get("revision") != strconv.Itoa(f.i.Revision) || r.URL.Query().Get("operation") != f.i.Operation || r.URL.Query().Get("host") != f.i.Host || r.URL.Query().Get("machine") != f.i.Machine || r.URL.Query().Get("session") != f.i.Session {

@@ -1149,6 +1149,27 @@ attempt cgroups. Payload failures observed before worker stop remain failures.
 macOS uses the generated launchd service. Configuration and secret files stay
 private. Never run the ordinary binary as root.
 
+For an existing fleet-capable worker, installation compares the live process
+proof with the saved executable slot before taking its rollback snapshot. If
+publication succeeded but activation failed, the two hashes can differ. Only a
+slot matching the current queue-approved release's signed target, size and hash
+qualifies automatically; the provisioned publisher key still verifies it. The
+qualified **slot bytes** become the rollback target, even when the old process is
+still running. The private `slot-reconciliation.json` receipt retains both
+identities and this choice. An activation failure restores those slot bytes;
+it does not promise to recreate the old process image. Existing custody,
+maintenance, native signature and service checks still apply. A stopped service
+has no live image to reconcile; legacy installs without fleet proof keep their
+existing path.
+
+Unknown or unapproved slot bytes refuse with `fleet_slot_unapproved`, naming the
+running version/hash and the slot hash before any install publication or restart.
+Verify and approve the slot release through the ordinary release workflow, or
+have the authorized owner recover the installation; do not override the refusal.
+`myce status` and host status JSON expose `installed_slot`, `slot_mismatch` and
+`slot_error` in the worker fleet proof before any install is attempted. An old
+worker must first support these observations to report them.
+
 The transaction snapshots binary, config, credentials, GPU environment and
 service files/modes plus actual manager registration/activity. Failure restores
 that snapshot and verifies it independently. Incomplete rollback stops affected
@@ -2366,6 +2387,15 @@ root; rotation is a local provisioning operation, never an update instruction.
 A foreground queue or worker without saved service settings/runtime proof cannot
 participate; install the capable release normally before the first fleet update.
 
+Fleet helpers also retain both running and installed identities in their
+private receipt when they differ. A slot matching the frozen approved operation
+or the current queue-approved release is verified against local publisher trust
+and retained as the rollback identity; unknown bytes stop with
+`fleet_slot_unapproved`. Recovery still needs an explicit operator rerun and all
+existing operation/session, transient-helper absence, maintenance and custody
+fences. The helper's installed receipt proves publication, never activation;
+completion still requires a new healthy process with the approved image.
+
 A storage preflight failure is reported as `storage_preflight_failed`, including
 when recovered from the durable helper receipt; arbitrary helper error text is
 never exposed. Failed acknowledgements also retain `failure_code` in each host
@@ -2381,6 +2411,7 @@ authorized owner, then explicitly rerun `myce fleet upgrade`):
 
 | Code | Next step |
 | --- | --- |
+| `fleet_slot_unapproved` | Compare running and installed slot identities in worker status and the private receipt. Verify and approve the installed release, or recover through the authorized installation owner; never bypass this refusal. |
 | `fleet_instruction_stale` | Refresh queue status and current operation/session/revision and runtime proof; let exact custody settle. An initial launch authorization refusal is refetched at the next normal worker poll, before any intent is written. After durable intent, inspect the receipt and explicitly rerun; never automatically repeat a helper or restart. |
 | `fleet_ack_stale` | Reconcile the receipt with the current operation/session/revision; an obsolete ack cannot replace current progress. Inspect the earlier failure first: an ack after an operation stopped is expected to be stale. |
 | `fleet_maintenance_changed`, `fleet_authorization_refused` | Reconcile maintenance ownership, exact custody, current runtime and queue authorization; never override the operator's drain. |
