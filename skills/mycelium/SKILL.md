@@ -14,9 +14,10 @@ targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolve
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
 From the next release, `host_capacity_accumulation` means new CPU work is waiting
-so ready accelerator work can acquire host RAM/cores as running CPU attempts
-finish. Mycelium chooses one fitting target; higher tiers and spare capacity
-elsewhere remain eligible. See [waiting reasons](advanced.md#when-a-job-waits).
+so ready CPU or accelerator work can acquire host RAM/cores as running CPU
+attempts finish. Mycelium chooses one fitting target; earlier fair turns,
+higher tiers and spare capacity elsewhere remain eligible. See
+[waiting reasons](advanced.md#when-a-job-waits).
 On releases with inventory deltas, status omits full executable inventories. Use
 resolve/placement diagnostics for `needs.tools`; workers automatically refresh
 inventory after queue restart before qualifying tool-dependent work.
