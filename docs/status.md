@@ -83,6 +83,53 @@ shows full job IDs. Open the queue address in a browser for the same information
 sign in as `myce`, using the token as the password. The page is read-only and
 refreshes every five seconds. Keep tokens in private configuration, not URLs.
 
+## Live view (`myce view`)
+
+`myce view` serves a live, read-only picture of the cluster on this computer:
+waiting jobs gather in the middle, a thread runs to each machine, and each
+machine fills from the bottom as it gets busier. Running jobs sit inside their
+machine, beads travel the threads as work is placed or returned, a machine that
+drops out drains and shows a dashed ×, and production work is gold. One line
+counts running, waiting, done and offline work; one line below names the latest
+event. Machine size follows its memory capacity. "How busy" is the most-held of
+CPU cores, host memory and GPU memory reserved by running work; status reports
+memory held, not GPU utilisation.
+
+```sh
+myce view                      # installed config, or --queue URL with MYCE_TOKEN
+myce view --anonymize          # generic labels for recordings and screenshots
+```
+
+It prints a local address (loopback by default; `--listen` chooses another) and
+runs only on the computer where you start it, never in the queue process. It
+is an ordinary status client:
+
+- It reads only the default `GET /api/status`, the shared one-second snapshot.
+  It never asks for `detail=full`, history or filtered views, and it never
+  writes to the queue. The page cannot send anything to the queue.
+- It reads only while at least one page is open, one read at a time, and every
+  open page shares that read.
+- It waits at least a second between reads (the snapshot's sharing period) and
+  at least nine times the last read's duration, so a slow queue is read less
+  often. Failures back off, doubling to 30 s; a 429's `Retry-After` is always
+  honoured, even beyond that.
+- Silence is learned from each machine's own heartbeat cadence; a machine
+  already gone when the view opened is not drawn.
+
+`--anonymize` replaces machine, project, job, tier and device names with labels
+such as `hypha-1`, `project-a` and `job-07`, assigned in order of first
+appearance and stable while the view runs. Other text is dropped or reduced to
+fixed words, and errors on the page are fixed codes, so a recording shows no
+host names, addresses or project names. Assets are embedded in the binary; the
+page loads nothing from the network.
+
+To try it without a cluster, run `./myce dev --workers 5`, then
+`./myce view --queue http://127.0.0.1:7331 --token dev-token --anonymize`, and
+`examples/fleet-view-demo.sh` for a varied stream of small jobs, one machine
+leaving, and a production job. `scripts/view-smoke.sh` loads the page in
+headless Chrome or Chromium against `myce dev` and checks for live frames and
+no script errors.
+
 The page and `GET /api/status` share a snapshot for up to one second. Job receipt
 polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
 not drive start authorization, cancellation or result publication.
