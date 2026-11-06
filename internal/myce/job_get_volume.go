@@ -51,8 +51,8 @@ func jobGetClient(agent string) jobGetIdentity {
 	return jobGetIdentity{"unknown", "unknown"}
 }
 
-// Called before job observation, outside q.mu. Summaries are traffic-triggered
-// at most once per minute; totals last for this handler's lifetime, not in SQLite.
+// Called before job observation, outside q.mu. Summaries follow traffic
+// magnitude and measured sink cost; totals last for this handler, not in SQLite.
 func (v *jobGetVolume) record(agent string, wait bool) {
 	v.recordObservation(agent, wait, "")
 }

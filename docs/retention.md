@@ -28,6 +28,14 @@ releases lifecycle/control fences between objects and yields to waiting control
 work; it has no numerical object batch limit. SQLite changes use normal undo and
 FULL-synchronous commits.
 
+A new episode of measured capacity pressure revisits unchanged history through
+a resumable key cursor. Completed external-summary rewrites are fingerprinted
+so their commit notifications cannot feed back into repeated resizing. An indexed
+deadline per host expires buckets after their final public reader window even
+when that host stops checking in; deadlines update in place rather than growing
+with check-in count. Resized buckets keep their aligned identity so the next
+sample adds to their retained counts.
+
 ## Evidence value and dependency rules
 
 - Job intent, cancellation, wait/error attribution, individual attempt facts,
