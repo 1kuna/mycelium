@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"time"
 )
 
 // Worker defaults are factories so package tests can inject a complete synthetic
@@ -18,7 +17,7 @@ var workerMachineProbe = LocalMachineProbe
 // Embedded callers may inject these before starting any worker goroutines.
 type WorkerProbeDefaults struct {
 	FaultHost      func() (map[string]string, []string)
-	SignalEvidence func(int, time.Time, string) *SignalEvidence
+	SignalEvidence func(SignalCapture) *SignalEvidence
 	HostHealth     func(context.Context) (HostHealthReading, error)
 	MountRoots     func(context.Context) ([]string, error)
 	// Nil disables the current worker-tree RSS observation.

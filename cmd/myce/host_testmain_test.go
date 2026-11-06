@@ -89,7 +89,7 @@ func installSyntheticHost() {
 	myce.SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
 	myce.SetWorkerProbeDefaults(myce.WorkerProbeDefaults{
 		FaultHost: func() (map[string]string, []string) { return nil, []string{"synthetic_host"} },
-		SignalEvidence: func(int, time.Time, string) *myce.SignalEvidence {
+		SignalEvidence: func(myce.SignalCapture) *myce.SignalEvidence {
 			return &myce.SignalEvidence{CoreCapture: "unavailable"}
 		},
 		IOPressure: func(clock myce.Clock) *myce.IOPressure {

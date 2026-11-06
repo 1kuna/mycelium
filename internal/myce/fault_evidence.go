@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -37,6 +38,7 @@ type FaultEvidence struct {
 }
 
 type FaultAttempt struct {
+	AssignedAt *time.Time `json:"assigned_at,omitempty"`
 	Execution
 	Session      string    `json:"session"`
 	PIDs         []int     `json:"pids"`
@@ -141,10 +143,10 @@ func (w *Worker) captureFault(d MachineDevice, line KernelLogLine, key, kind, at
 	}
 	for _, p := range processes {
 		j := p.job
-		if j.Spec.Needs.cpuOnly() || !slices.Contains(j.AllocatedDevices, d.ID) || j.AssignedAt != nil && !line.At.IsZero() && line.At.Before(*j.AssignedAt) {
+		if j.Spec.Needs.cpuOnly() || !slices.Contains(j.AllocatedDevices, d.ID) {
 			continue
 		}
-		a := FaultAttempt{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}
+		a := FaultAttempt{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, AssignedAt: j.AssignedAt}
 		p.mu.Lock()
 		memory := p.memory
 		roots := p.rssRootsLocked()
@@ -156,12 +158,16 @@ func (w *Worker) captureFault(d MachineDevice, line KernelLogLine, key, kind, at
 		if memory != nil {
 			a.PIDError = memory.processIDs(ids) != nil
 		} else {
-			for pid, birth := range roots {
-				if actual, err := processBirth(pid); err == nil && birth != "" && actual == birth {
-					ids[pid] = true
-				} else {
-					a.PIDError = true
+			source := w.FaultProcessSource
+			if source == nil {
+				source = func(roots map[int]string) ([]int, error) {
+					return faultOwnedPIDs(roots, processBirth, workerGroupMembers)
 				}
+			}
+			members, err := source(roots)
+			a.PIDError = err != nil
+			for _, pid := range members {
+				ids[pid] = true
 			}
 		}
 		for pid := range ids {
@@ -276,4 +282,57 @@ func corePatternPath(pattern string, pid int, at time.Time, dir string) (string,
 		pattern = filepath.Join(dir, pattern)
 	}
 	return pattern, true
+}
+
+// Reuse cleanup's whole session/group inventory, fenced by recorded root and
+// member births on both sides of enumeration. A vanished root is unknown.
+func faultOwnedPIDs(roots map[int]string, birthOf func(int) (string, error), membersOf func(int) ([]int, error)) ([]int, error) {
+	if len(roots) == 0 {
+		return nil, errors.New("attempt process ownership unavailable")
+	}
+	ids := map[int]string{}
+	for root, saved := range roots {
+		before, err := birthOf(root)
+		if err != nil || saved == "" || before != saved {
+			return nil, errors.New("attempt process ownership changed")
+		}
+		members, err := membersOf(root)
+		if err != nil {
+			return nil, err
+		}
+		for _, pid := range members {
+			birth, err := birthOf(pid)
+			if err != nil || birth == "" {
+				return nil, errors.New("attempt member ownership unavailable")
+			}
+			ids[pid] = birth
+		}
+	}
+	for root, saved := range roots {
+		after, err := birthOf(root)
+		if err != nil || after != saved {
+			return nil, errors.New("attempt process ownership changed")
+		}
+	}
+	var pids []int
+	for pid, saved := range ids {
+		after, err := birthOf(pid)
+		if err != nil || after != saved {
+			return nil, errors.New("attempt member ownership changed")
+		}
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+	return pids, nil
+}
+func faultAtLine(base *FaultEvidence, line KernelLogLine, key, kind, attribution string) *FaultEvidence {
+	copy := *base
+	copy.Event, copy.Kind, copy.KernelAt, copy.DeviceAttribution = key, kind, line.At, attribution
+	copy.Attempts = nil
+	for _, a := range base.Attempts {
+		if a.AssignedAt == nil || line.At.IsZero() || !line.At.Before(*a.AssignedAt) {
+			copy.Attempts = append(copy.Attempts, a)
+		}
+	}
+	return &copy
 }

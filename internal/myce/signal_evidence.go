@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,7 +19,29 @@ import (
 	"mycelium/internal/probeguard"
 )
 
+type SignalCapture struct {
+	PID                   int
+	Birth                 string
+	StartedAt, ObservedAt time.Time
+	Directory             string
+	Cgroup                string // Exact attempt/member cgroup, from worker custody.
+}
+
+// Publish the immutable exit before optional I/O. A copied exit receives the
+// metadata so readers never race a mutation of a published teardown fact.
+func collectPublishedExit(exit *memberExit, publish func(*memberExit) error, collect func(*memberExit)) error {
+	first := publish(exit)
+	next := *exit
+	collect(&next)
+	if next.Evidence == nil {
+		return first
+	}
+	return errors.Join(first, publish(&next))
+}
+
 type SignalEvidence struct {
+	StartedAt     time.Time      `json:"started_at"`
+	Attribution   string         `json:"attribution"`
 	ExitStatus    int            `json:"exit_status"`
 	CoreDumped    bool           `json:"kernel_core_dumped,omitempty"`
 	PID           int            `json:"pid"`
@@ -60,7 +83,7 @@ func (w Worker) captureSignalEvidence(cmd *exec.Cmd, e *memberExit) {
 		w.captureSignalEvidencePID(cmd.Process.Pid, cmd.Dir, e, false)
 	}
 }
-func (w Worker) captureSignalEvidencePID(pid int, dir string, e *memberExit, candidate bool) {
+func (w Worker) captureSignalEvidencePID(pid int, dir string, e *memberExit, candidate bool, scopes ...SignalCapture) {
 	if e == nil {
 		return
 	}
@@ -72,14 +95,22 @@ func (w Worker) captureSignalEvidencePID(pid int, dir string, e *memberExit, can
 	if source == nil {
 		source = workerSignalEvidence
 	}
+	request := SignalCapture{PID: pid, ObservedAt: e.ObservedAt, Directory: dir, StartedAt: e.ObservedAt}
+	if len(scopes) > 0 {
+		request = scopes[0]
+		request.ObservedAt = e.ObservedAt
+	}
 	var evidence *SignalEvidence
-	if pid > 0 {
-		evidence = source(pid, e.ObservedAt, dir)
+	if request.PID > 0 || request.Cgroup != "" {
+		evidence = source(request)
 	}
 	if evidence == nil {
 		evidence = &SignalEvidence{CoreCapture: "unavailable", Unavailable: []string{"payload_pid"}}
 	}
-	evidence.PID, evidence.ObservedAt, evidence.ExitStatus, evidence.CoreDumped = pid, e.ObservedAt, e.Status, e.CoreDumped
+	if evidence.PID == 0 {
+		evidence.PID = request.PID
+	}
+	evidence.StartedAt, evidence.ObservedAt, evidence.ExitStatus, evidence.CoreDumped = request.StartedAt, e.ObservedAt, e.Status, e.CoreDumped
 	if e.Signal != "" {
 		evidence.Signal = e.Signal
 	}
@@ -115,7 +146,8 @@ func faultJournal(ctx context.Context, args ...string) ([]byte, bool, error) {
 	return out.Bytes(), out.truncated, err
 }
 
-func localSignalEvidence(pid int, at time.Time, dir string) *SignalEvidence {
+func localSignalEvidence(request SignalCapture) *SignalEvidence {
+	pid, at, dir := request.PID, request.ObservedAt, request.Directory
 	started := time.Now()
 	e := &SignalEvidence{CoreCapture: "unavailable", Unavailable: []string{"native_stack_and_registers_require_operator_core_capture"}}
 	if runtime.GOOS != "linux" {
@@ -130,20 +162,43 @@ func localSignalEvidence(pid int, at time.Time, dir string) *SignalEvidence {
 		if e.CoreCapture == "disabled_soft_limit" {
 			e.Unavailable = append(e.Unavailable, "core_capture_requires_operator_enablement")
 		}
-		if path, ok := corePatternPath(strings.TrimSpace(string(pattern)), pid, at, dir); ok {
-			if st, err := os.Stat(path); err == nil && st.Mode().IsRegular() && st.ModTime().After(at.Add(-time.Second)) {
-				e.CorePointer, e.CoreBytes, e.CoreCapture = path, st.Size(), "file_core_recorded"
-			}
-		}
 	}
 	// Reuse the fault monitor's two-second journal I/O budget. This runs only
 	// for a fatal signal, off q.mu and process.mu, and never enables a core limit.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	since := "--since=@" + strconv.FormatInt(at.Add(-time.Second).Unix(), 10)
-	until := "--until=@" + strconv.FormatInt(at.Add(time.Second).Unix()+1, 10)
-	kernel, truncated, err := faultJournal(ctx, "-k", "-b", "--no-pager", "--quiet", "--output=json", since, until)
-	if err == nil {
+	kernel := collectSignalJournal(ctx, e, request, faultJournal)
+	if patternErr == nil {
+		_, crashed := kernelSignalRecord(kernel, pid)
+		patternText := strings.TrimSpace(string(pattern))
+		stamp := at
+		if !crashed.IsZero() {
+			stamp = crashed
+		}
+		if !strings.Contains(patternText, "%t") || !crashed.IsZero() {
+			if path, ok := corePatternPath(patternText, pid, stamp, dir); ok && pid > 0 {
+				if st, err := os.Stat(path); err == nil && st.Mode().IsRegular() && !st.ModTime().Before(request.StartedAt) {
+					e.CorePointer, e.CoreBytes, e.CoreCapture = path, st.Size(), "file_core_recorded"
+				}
+			}
+		}
+	}
+
+	if e.FaultAddress == "" {
+		e.Unavailable = append(e.Unavailable, "fault_address")
+	}
+	if len(e.Libraries) == 0 {
+		e.Unavailable = append(e.Unavailable, "loaded_libraries")
+	}
+	e.CaptureNS = time.Since(started).Nanoseconds()
+	return e
+}
+func collectSignalJournal(ctx context.Context, e *SignalEvidence, request SignalCapture, read func(context.Context, ...string) ([]byte, bool, error)) []byte {
+	pid, at := request.PID, request.ObservedAt
+	since := "--since=@" + strconv.FormatInt(request.StartedAt.Unix(), 10)
+	until := "--until=@" + strconv.FormatInt(at.Unix()+1, 10)
+	kernel, truncated, err := read(ctx, "-k", "-b", "--all", "--no-pager", "--quiet", "--output=json", since, until)
+	if err == nil && pid > 0 {
 		e.FaultAddress = kernelFaultAddress(kernel, pid)
 		if e.FaultAddress != "" {
 			e.Signal = "SIGSEGV"
@@ -156,24 +211,27 @@ func localSignalEvidence(pid int, at time.Time, dir string) *SignalEvidence {
 	}
 	// Request only specific metadata: COREDUMP_ENVIRON, CMDLINE, stack text and
 	// memory bytes are deliberately excluded. PID + boot + event time fence reuse.
-	core, truncated, err := faultJournal(ctx, "-b", "--no-pager", "--quiet", "--output=json", since, until, "COREDUMP_PID="+strconv.Itoa(pid), "--output-fields=COREDUMP_PID,COREDUMP_SIGNAL,COREDUMP_TIMESTAMP,COREDUMP_FILENAME,COREDUMP_TRUNCATED,COREDUMP_PROC_MAPS")
+	coreArgs := []string{"-b", "--all", "--no-pager", "--quiet", "--output=json", since, until, "--output-fields=COREDUMP_PID,COREDUMP_SIGNAL,COREDUMP_TIMESTAMP,COREDUMP_FILENAME,COREDUMP_TRUNCATED,COREDUMP_PROC_MAPS,COREDUMP_PROC_STAT,COREDUMP_CGROUP"}
+	if pid > 0 {
+		coreArgs = append(coreArgs, "COREDUMP_PID="+strconv.Itoa(pid))
+	} else if request.Cgroup != "" {
+		coreArgs = append(coreArgs, "COREDUMP_CGROUP="+request.Cgroup)
+	}
+	core, truncated, err := read(ctx, coreArgs...)
 	if err == nil {
-		applyCoreMetadata(e, core, pid, at)
+		applyCoreMetadataFor(e, core, request)
 	} else {
 		e.Unavailable = append(e.Unavailable, "core_metadata")
+	}
+	if e.PID > 0 && e.FaultAddress == "" {
+		e.FaultAddress = kernelFaultAddress(kernel, e.PID)
 	}
 	if truncated {
 		e.Unavailable = append(e.Unavailable, "core_metadata_truncated")
 	}
-	if e.FaultAddress == "" {
-		e.Unavailable = append(e.Unavailable, "fault_address")
-	}
-	if len(e.Libraries) == 0 {
-		e.Unavailable = append(e.Unavailable, "loaded_libraries")
-	}
-	e.CaptureNS = time.Since(started).Nanoseconds()
-	return e
+	return kernel
 }
+
 func coreCaptureState(pattern, limits string) string {
 	for _, line := range strings.Split(limits, "\n") {
 		f := strings.Fields(line)
@@ -194,20 +252,33 @@ func coreCaptureState(pattern, limits string) string {
 	return "unavailable"
 }
 func kernelFaultAddress(data []byte, pid int) string {
+	address, _ := kernelSignalRecord(data, pid)
+	return address
+}
+func kernelSignalRecord(data []byte, pid int) (string, time.Time) {
 	re := regexp.MustCompile(`\[` + strconv.Itoa(pid) + `\]: (?:segfault|general protection fault).*? at ([0-9a-fA-Fx]+)\b`)
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		var entry struct {
-			Message string `json:"MESSAGE"`
+			Message  string `json:"MESSAGE"`
+			Realtime string `json:"__REALTIME_TIMESTAMP"`
 		}
 		if json.Unmarshal(line, &entry) == nil {
 			if m := re.FindStringSubmatch(entry.Message); m != nil {
-				return m[1]
+				micros, _ := strconv.ParseInt(entry.Realtime, 10, 64)
+				var at time.Time
+				if micros > 0 {
+					at = time.UnixMicro(micros)
+				}
+				return m[1], at
 			}
 		}
 	}
-	return ""
+	return "", time.Time{}
 }
 func applyCoreMetadata(e *SignalEvidence, data []byte, pid int, at time.Time) {
+	applyCoreMetadataFor(e, data, SignalCapture{PID: pid, StartedAt: at, ObservedAt: at})
+}
+func applyCoreMetadataFor(e *SignalEvidence, data []byte, request SignalCapture) {
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		var entry struct {
 			PID       string `json:"COREDUMP_PID"`
@@ -216,17 +287,30 @@ func applyCoreMetadata(e *SignalEvidence, data []byte, pid int, at time.Time) {
 			Filename  string `json:"COREDUMP_FILENAME"`
 			Truncated string `json:"COREDUMP_TRUNCATED"`
 			Maps      string `json:"COREDUMP_PROC_MAPS"`
+			Stat      string `json:"COREDUMP_PROC_STAT"`
+			Cgroup    string `json:"COREDUMP_CGROUP"`
 		}
-		if json.Unmarshal(line, &entry) != nil || entry.PID != strconv.Itoa(pid) {
+		if json.Unmarshal(line, &entry) != nil || request.PID > 0 && entry.PID != strconv.Itoa(request.PID) || request.PID == 0 && (request.Cgroup == "" || entry.Cgroup != request.Cgroup) {
 			continue
 		}
 		micros, err := strconv.ParseInt(entry.Timestamp, 10, 64)
 		if err != nil {
 			continue
 		}
-		delta := time.UnixMicro(micros).Sub(at)
-		if delta < -time.Second || delta > time.Second {
+		at := time.UnixMicro(micros)
+		if at.Before(request.StartedAt) || at.After(request.ObservedAt) {
 			continue
+		}
+		if request.Birth != "" {
+			_, start, ok := strings.Cut(request.Birth, ":")
+			i := strings.LastIndex(entry.Stat, ") ")
+			if i < 0 {
+				continue
+			}
+			fields := strings.Fields(entry.Stat[i+2:])
+			if !ok || len(fields) < 20 || fields[19] != start {
+				continue
+			}
 		}
 		signal, err := strconv.Atoi(entry.Signal)
 		if err != nil || crashSignal(syscall.Signal(signal)) == "" {
@@ -234,6 +318,12 @@ func applyCoreMetadata(e *SignalEvidence, data []byte, pid int, at time.Time) {
 		}
 		if e.Signal != "" && e.Signal != crashSignal(syscall.Signal(signal)) {
 			continue
+		}
+		e.PID, _ = strconv.Atoi(entry.PID)
+		if request.PID > 0 {
+			e.Attribution = "payload_pid"
+		} else {
+			e.Attribution = "attempt_cgroup"
 		}
 		e.Signal = crashSignal(syscall.Signal(signal))
 		e.Libraries = parseFaultMaps(entry.Maps)
@@ -261,4 +351,19 @@ func parseFaultMaps(data string) []FaultLibrary {
 		out = append(out, FaultLibrary{Name: filepath.Base(f[5]), Address: f[0], Offset: f[2], Device: f[3], Inode: f[4]})
 	}
 	return out
+}
+
+func signalCgroup(path string) string {
+	if value, ok := strings.CutPrefix(path, "/sys/fs/cgroup"); ok && strings.HasPrefix(value, "/") {
+		return value
+	}
+	return ""
+}
+func commandNamespaceLauncher(cmd *exec.Cmd) bool {
+	for i, arg := range cmd.Args {
+		if arg == "_native-exec" && i+1 < len(cmd.Args) && cmd.Args[i+1] == "namespace-monitor" {
+			return true
+		}
+	}
+	return false
 }

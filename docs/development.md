@@ -1330,10 +1330,15 @@ placement. Capture durations are recorded per snapshot for native measurement.
 Fatal-signal metadata queries reuse the monitor's two-second journal I/O budget,
 only after a matching fatal exit and outside process/queue locks. The cost is
 up to that budget in result latency; timeout reports missing evidence and never
-blocks process-control locking. One small PID pipe preserves the plain command's
-actual child identity without tracing or modifying its environment. Synthetic
+blocks process-control locking. The exit is published before collection so the
+teardown classifier sees it immediately. One small PID pipe preserves an
+unwrapped plain command's child identity without tracing or modifying its
+environment. Joined native members reuse the launch handshake's payload PID;
+other wrappers need exact-attempt cgroup core metadata or report unknown. Core
+queries cover the execution lifetime and fence retained PID births, allowing
+core writing to delay Wait without losing earlier crash metadata. Synthetic
 `BenchmarkFaultEvidenceCapture` measures parsing/attribution overhead, not GPU
-sampling or native journal latency. A Darwin arm64 synthetic run measured 1.071 µs/op,
+sampling or native journal latency. A Darwin arm64 synthetic run measured 3.623 µs/op,
 1,256 bytes/op and 30 allocations/op (200 ms benchmark); this excludes real
 proc/PID I/O and is not a native latency claim.
 

@@ -1596,6 +1596,10 @@
     },
     "FaultAttempt": {
       "properties": {
+        "assigned_at": {
+          "format": "date-time",
+          "type": "string"
+        },
         "attempt": {
           "type": "integer"
         },
@@ -4237,6 +4241,9 @@
     },
     "SignalEvidence": {
       "properties": {
+        "attribution": {
+          "type": "string"
+        },
         "capture_ns": {
           "type": "integer"
         },
@@ -4280,6 +4287,10 @@
         "signal": {
           "type": "string"
         },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        },
         "unavailable": {
           "items": {
             "type": "string"
@@ -4291,6 +4302,8 @@
         }
       },
       "required": [
+        "started_at",
+        "attribution",
         "exit_status",
         "pid",
         "signal",

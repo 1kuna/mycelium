@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -162,7 +163,8 @@ func TestSignalEvidenceSyntheticExitsAndCoreMetadata(t *testing.T) {
 	for _, signal := range []syscall.Signal{syscall.SIGSEGV, syscall.SIGBUS, syscall.SIGABRT} {
 		t.Run(signal.String(), func(t *testing.T) {
 			e := nativeWaitExit(syscall.WaitStatus(signal)|0x80, clock.Now())
-			w := Worker{SignalEvidenceSource: func(pid int, at time.Time, dir string) *SignalEvidence {
+			w := Worker{SignalEvidenceSource: func(request SignalCapture) *SignalEvidence {
+				pid, at := request.PID, request.ObservedAt
 				evidence := &SignalEvidence{CoreCapture: "disabled_soft_limit"}
 				applyCoreMetadata(evidence, []byte(fmt.Sprintf(`{"COREDUMP_PID":"42","COREDUMP_SIGNAL":"%d","COREDUMP_TIMESTAMP":"%d","COREDUMP_FILENAME":"/operator-cores/core.42","COREDUMP_PROC_MAPS":"1000-2000 r-xp 00001000 08:01 123 /runtime/libc.so.6\n","COREDUMP_ENVIRON":"TOKEN=secret"}`, signal, at.UnixMicro())), pid, at)
 				return evidence
@@ -252,9 +254,152 @@ func TestFaultEvidenceResultDowngrade(t *testing.T) {
 func TestSignalEvidenceShellStatusUnknown(t *testing.T) {
 	_, clock := fixture(t)
 	e := nativeWaitExit(syscall.WaitStatus(139<<8), clock.Now())
-	w := Worker{SignalEvidenceSource: func(int, time.Time, string) *SignalEvidence { return &SignalEvidence{CoreCapture: "unavailable"} }}
+	w := Worker{SignalEvidenceSource: func(SignalCapture) *SignalEvidence { return &SignalEvidence{CoreCapture: "unavailable"} }}
 	w.captureSignalEvidencePID(42, "", e, true)
 	if e.Signal != "" || e.Evidence == nil || e.Evidence.Signal != "unknown" {
 		t.Fatal("shell exit manufactured a signal", e)
+	}
+}
+
+func TestSignalEvidencePublishesExitBeforeBlockedCapture(t *testing.T) {
+	_, clock := fixture(t)
+	at := clock.Now()
+	for _, native := range []bool{false, true} {
+		p := &process{job: Job{AllocatedDevices: []string{"0"}}}
+		member := &nativeMember{}
+		if native {
+			p.native = &nativeGroup{members: []*nativeMember{member}}
+		}
+		entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		w := Worker{SignalEvidenceSource: func(SignalCapture) *SignalEvidence {
+			close(entered)
+			<-release
+			return &SignalEvidence{CoreCapture: "unavailable"}
+		}}
+		exit := nativeWaitExit(syscall.WaitStatus(syscall.SIGSEGV), at)
+		go func() {
+			done <- collectPublishedExit(exit, func(e *memberExit) error {
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				if native {
+					member.Exit = e
+				} else {
+					p.outcome.Exit = e
+				}
+				return nil
+			}, func(e *memberExit) { w.captureSignalEvidencePID(42, "", e, false) })
+		}()
+		<-entered
+		times := p.teardownTimes()
+		if len(times) != 1 || times[0] != at {
+			t.Error("blocked metadata hid exit fact", times)
+		}
+		c := &processControl{clock: clock, processes: map[attemptKey]*process{{job: "job"}: p}}
+		if !c.teardownNear("0", at) {
+			t.Error("concurrent fault would quarantine teardown")
+		}
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSignalEvidenceLongCoreAndLibraryMaps(t *testing.T) {
+	_, clock := fixture(t)
+	start := clock.Now()
+	crash := start.Add(2 * time.Second)
+	observed := crash.Add(20 * time.Second) // Wait includes a slow core writer.
+	request := SignalCapture{PID: 42, StartedAt: start, ObservedAt: observed, Birth: "boot:123"}
+	// /proc/PID/stat fields 3..22, with the launch starttime in field 22.
+	stat := "42 (payload name) S " + strings.Repeat("0 ", 18) + "123"
+	maps := strings.Repeat("1000-2000 r--p 00000000 08:01 123 /runtime/libc.so.6\n", 100) + "2000-3000 r-xp 00001000 08:01 123 /runtime/libc.so.6\n"
+	if len(maps) <= 4096 {
+		t.Fatal("fixture must exceed journalctl's default field limit")
+	}
+	core, _ := json.Marshal(map[string]string{"COREDUMP_PID": "42", "COREDUMP_SIGNAL": "11", "COREDUMP_TIMESTAMP": fmt.Sprint(crash.UnixMicro()), "COREDUMP_FILENAME": "/operator-cores/core.42", "COREDUMP_PROC_MAPS": maps, "COREDUMP_PROC_STAT": stat})
+	kernel, _ := json.Marshal(map[string]string{"MESSAGE": "python[42]: segfault at ffffffe0 ip 123", "__REALTIME_TIMESTAMP": fmt.Sprint(crash.UnixMicro())})
+	e := &SignalEvidence{}
+	calls := 0
+	collectSignalJournal(context.Background(), e, request, func(_ context.Context, args ...string) ([]byte, bool, error) {
+		calls++
+		if !slices.Contains(args, "--all") || !slices.Contains(args, "--since=@"+fmt.Sprint(start.Unix())) {
+			t.Error("query loses large fields or crash lifetime", args)
+		}
+		if slices.Contains(args, "-k") {
+			return kernel, false, nil
+		}
+		if !slices.Contains(args, "COREDUMP_PID=42") {
+			t.Error("missing PID selector")
+		}
+		return core, false, nil
+	})
+	if calls != 2 || e.CorePointer == "" || len(e.Libraries) != 1 || e.Libraries[0].Name != "libc.so.6" || e.FaultAddress != "ffffffe0" {
+		t.Fatalf("slow core evidence lost: %+v", e)
+	}
+	// Recycled PID in the same lifetime window must not supply the loaded closure.
+	request.Birth = "boot:999"
+	other := &SignalEvidence{}
+	applyCoreMetadataFor(other, core, request)
+	if other.CorePointer != "" || len(other.Libraries) != 0 {
+		t.Fatal("recycled PID supplied core")
+	}
+}
+
+func TestSignalEvidenceWrappedAttemptUsesCorePayloadPID(t *testing.T) {
+	_, clock := fixture(t)
+	request := SignalCapture{StartedAt: clock.Now(), ObservedAt: clock.Now().Add(10 * time.Second), Cgroup: "/worker/attempt-unique/main"}
+	core, _ := json.Marshal(map[string]string{"COREDUMP_PID": "43", "COREDUMP_SIGNAL": "11", "COREDUMP_TIMESTAMP": fmt.Sprint(request.StartedAt.Add(time.Second).UnixMicro()), "COREDUMP_CGROUP": request.Cgroup, "COREDUMP_FILENAME": "/operator-cores/core.43"})
+	e := &SignalEvidence{}
+	collectSignalJournal(context.Background(), e, request, func(_ context.Context, args ...string) ([]byte, bool, error) {
+		if slices.Contains(args, "-k") {
+			return nil, false, nil
+		}
+		if !slices.Contains(args, "COREDUMP_CGROUP="+request.Cgroup) || slices.Contains(args, "COREDUMP_PID=42") {
+			t.Error("wrapped job selected launcher", args)
+		}
+		return core, false, nil
+	})
+	if e.PID != 43 || e.Attribution != "attempt_cgroup" || e.CorePointer == "" {
+		t.Fatal("actual core payload identity missing", e)
+	}
+	wrong := request
+	wrong.Cgroup = "/worker/another-attempt/main"
+	e = &SignalEvidence{}
+	applyCoreMetadataFor(e, core, wrong)
+	if e.PID != 0 || e.CorePointer != "" {
+		t.Fatal("foreign attempt core attached")
+	}
+}
+
+func TestFaultEvidenceNoCgroupIncludesOwnedDescendants(t *testing.T) {
+	births := map[int]string{10: "root", 11: "child", 12: "grandchild"}
+	birth := func(pid int) (string, error) { return births[pid], nil }
+	members := func(root int) ([]int, error) { return []int{10, 11, 12}, nil }
+	pids, err := faultOwnedPIDs(map[int]string{10: "root"}, birth, members)
+	if err != nil || !slices.Equal(pids, []int{10, 11, 12}) {
+		t.Fatal("payload descendants missing", pids, err)
+	}
+	if _, err := faultOwnedPIDs(map[int]string{10: "old-birth"}, birth, members); err == nil {
+		t.Fatal("recycled supervisor adopted")
+	}
+	members = func(root int) ([]int, error) { births[10] = "reused"; return []int{10, 11}, nil }
+	if _, err := faultOwnedPIDs(map[int]string{10: "root"}, birth, members); err == nil {
+		t.Fatal("reuse during inventory adopted")
+	}
+}
+
+func TestFaultEvidenceBurstFiltersEachKernelTime(t *testing.T) {
+	_, clock := fixture(t)
+	assigned := clock.Now().Add(time.Second)
+	w := Worker{Clock: clock, FaultHostSource: func() (map[string]string, []string) { return nil, nil }, FaultProcessSource: func(map[int]string) ([]int, error) { return []int{42}, nil }}
+	j := Job{ID: "job", Attempt: 1, AssignedAt: &assigned, AllocatedDevices: []string{"0"}}
+	w.control = &processControl{clock: clock, processes: map[attemptKey]*process{jobKey(j): {job: j}}}
+	d := MachineDevice{ID: "0"}
+	base := w.captureFault(d, KernelLogLine{At: clock.Now()}, "one", "xe", "pci")
+	first := faultAtLine(base, KernelLogLine{At: clock.Now()}, "one", "xe", "pci")
+	second := faultAtLine(base, KernelLogLine{At: assigned.Add(time.Second)}, "two", "xe", "pci")
+	if len(first.Attempts) != 0 || len(second.Attempts) != 1 || len(base.Attempts) != 1 {
+		t.Fatal("first event filter contaminated burst", first, second)
 	}
 }

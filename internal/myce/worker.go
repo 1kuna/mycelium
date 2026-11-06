@@ -46,8 +46,9 @@ type Worker struct {
 	ServiceConfig *ServiceConfig
 	fleet         *workerFleetRuntime
 
+	FaultProcessSource   func(map[int]string) ([]int, error)
 	FaultHostSource      func() (map[string]string, []string)
-	SignalEvidenceSource func(int, time.Time, string) *SignalEvidence
+	SignalEvidenceSource func(SignalCapture) *SignalEvidence
 	DeviceFaultSource    DeviceFaultSource
 	DeviceFaultMatchers  map[string]DeviceFaultMatcher
 	faults               *deviceQuarantine
@@ -785,6 +786,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	defer childWriter.Close()
 	cmd.ExtraFiles = []*os.File{readyWriter, approvalReader, childWriter}
 	childPID := 0
+	signalScope := SignalCapture{StartedAt: w.Clock.Now(), Directory: cmd.Dir}
+	if memoryAttempt != nil {
+		signalScope.Cgroup = signalCgroup(memoryAttempt.path)
+	}
 	gateReader, gateWriter, err := os.Pipe()
 	if err != nil {
 		output.Close()
@@ -920,6 +925,12 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	_ = childReader.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if raw, e := io.ReadAll(io.LimitReader(childReader, 32)); e == nil {
 		childPID, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+		signalScope.PID = childPID
+		signalScope.Birth, _ = processBirth(childPID)
+		if commandNamespaceLauncher(cmd) {
+			signalScope.PID = 0
+			signalScope.Birth = ""
+		}
 	}
 	if readyReader != nil {
 		// Bound receipt I/O; queue startup decisions still use its injected Clock.
@@ -972,11 +983,12 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 		waitErr := cmd.Wait()
 		observed := p.exitObservation.observe(cmd)
-		w.captureSignalEvidencePID(childPID, cmd.Dir, observed, true)
-		p.mu.Lock()
-		p.outcome.Exit = observed
-		observationErr := p.saveOutcome(p.outcome)
-		p.mu.Unlock()
+		observationErr := collectPublishedExit(observed, func(exit *memberExit) error {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.outcome.Exit = exit
+			return p.saveOutcome(p.outcome)
+		}, func(exit *memberExit) { w.captureSignalEvidencePID(childPID, cmd.Dir, exit, true, signalScope) })
 		if !j.Spec.Needs.cpuOnly() {
 			p.stop(w.Clock.Now(), acceleratorStopGrace(w.AcceleratorStopGrace), false)
 		}

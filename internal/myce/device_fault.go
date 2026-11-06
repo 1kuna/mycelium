@@ -183,9 +183,7 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 					base = w.captureFault(d, line, key, kind, attribution)
 					observations[deviceFaultKey(d)] = base
 				}
-				copy := *base
-				copy.Event, copy.Kind, copy.KernelAt, copy.DeviceAttribution = key, kind, line.At, attribution
-				e = &copy
+				e = faultAtLine(base, line, key, kind, attribution)
 				line.evidence[deviceFaultKey(d)] = e
 			}
 			next.Evidence[deviceFaultKey(d)] = retainFaultEvidence(next.Evidence[deviceFaultKey(d)], e)

@@ -2082,7 +2082,10 @@ and memory PSI; missing or truncated sections are listed. Compressed-memory
 counters are available only where the kernel exports them in these tables.
 Capture follows kernel-log observation, not the actual allocation instruction:
 compare `kernel_at`, `captured_at` and sample times before drawing conclusions.
-Exited processes and allocations between samples can remain unknown.
+Attempt eligibility is evaluated against each kernel timestamp even when burst
+lines share a capture. Without a cgroup, birth-verified owned process groups
+include payload descendants; missing ownership is reported explicitly. Exited
+processes and allocations between samples can remain unknown.
 
 Affected jobs expose `fault_evidence`; terminal `attempt_history` retains the
 same exact-attempt records. Old sessions cannot attach evidence to a new attempt.
@@ -2097,7 +2100,13 @@ address when readable, and loaded executable/library mappings from matching
 systemd-coredump metadata (basename, address/offset and filesystem device/inode).
 These are mapped identities, not ELF build IDs. A shell-reported exit status
 alone does not prove a signal; matching child-PID kernel/core evidence is needed,
-and the signal otherwise remains `unknown`.
+and the signal otherwise remains `unknown`. Exits are published before optional
+metadata I/O so teardown classification does not wait for capture. Core lookup
+covers the execution lifetime, matching the payload birth where retained. Queries
+request complete selected journal fields within the capture byte budget. Native
+namespace main members use their joined payload PID. Other wrapped commands use
+exact-attempt cgroup core metadata where available; absent that identity, capture
+reports unknown rather than recording the launcher as the payload.
 
 `core_capture` distinguishes a disabled inherited soft limit, an existing pipe
 handler/file pattern without a confirmed record, a recorded core, and unavailable
