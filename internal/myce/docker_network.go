@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -461,11 +462,31 @@ func (d *dockerAttempt) launchContainer(base, args []string, name string, memory
 func (d *dockerAttempt) waitReady(id, name string, r DockerReadiness) error {
 	duration, _ := time.ParseDuration(r.Timeout)
 	deadline := d.clock.Now().Add(duration)
-	progress := newReadinessProgress(d.clock, readinessHistory{})
-	progress.budget = d.rpcBudget("inspect")
-	latency := readinessLatency{}
+	parent := d.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	if duration > 0 {
+		cancel()
+		ctx, cancel = context.WithTimeout(parent, duration)
+	}
+	defer cancel()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-d.halt:
+			cancel()
+		case <-done:
+		case <-ctx.Done():
+		}
+	}()
+	var progress *readinessProgress
+	var path string
 	states := map[string]string{}
-	client := &http.Client{Timeout: d.rpcBudget("readiness"), Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	lastStatus := 0
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
 	for {
 		objects, e := d.containers()
@@ -476,32 +497,46 @@ func (d *dockerAttempt) waitReady(id, name string, r DockerReadiness) error {
 			return e
 		}
 		d.mu.Lock()
-		stopped := d.state.Stopped
-		failure := d.state.Failure
-		infrastructureStop := d.state.InfrastructureStop
+		stopped, failure, infrastructureStop := d.state.Stopped, d.state.Failure, d.state.InfrastructureStop
 		d.mu.Unlock()
 		if stopped {
 			err := fmt.Errorf("Docker sidecar %s readiness stopped: %s", name, failure)
 			if failure == "" && infrastructureStop {
-				// Mycelium refuses main launch while readiness is interrupted.
 				return d.recordInfrastructure(infrastructureFact{Kind: launchRefused, At: time.Now().UTC(), Member: "main"}, err)
 			}
 			return err
 		}
-		_, stalled := progress.state()
-		if duration > 0 && !d.clock.Now().Before(deadline) || duration == 0 && stalled {
-			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: fmt.Errorf("Docker sidecar %s HTTP readiness timeout", name)}
-		}
 		for _, c := range objects {
+			if c.ID != id {
+				continue
+			}
+			if progress == nil {
+				d.latencyMu.Lock()
+				identity := d.initializations[id]
+				d.latencyMu.Unlock()
+				if identity == "" {
+					identity = c.Config.Image
+				}
+				// Legacy inspectors without an image have no comparable initialization history.
+				if identity == "" {
+					identity = id
+				}
+				path = readinessFile(d.dir, []any{d.state.Endpoint, "ready", identity, r.Port, r.Path})
+				history := readinessHistory{}
+				if d.dir != "" {
+					history = readReadinessHistory(path)
+				}
+				progress = newReadinessProgress(d.clock, history)
+			}
 			state := c.State.Status
 			if c.State.Health != nil {
 				state += "/" + c.State.Health.Status
 			}
-			if c.ID == id && states[id] != state {
+			if states[id] != state {
 				states[id] = state
 				progress.advance()
 			}
-			if c.ID != id || !*c.State.Running {
+			if !*c.State.Running {
 				continue
 			}
 			ip := c.NetworkSettings.Networks[d.state.Network].IPAddress
@@ -509,25 +544,41 @@ func (d *dockerAttempt) waitReady(id, name string, r DockerReadiness) error {
 				continue
 			}
 			started := RealClock{}.Now()
-			client.Timeout = d.rpcBudget("readiness")
-			resp, err := client.Get("http://" + net.JoinHostPort(ip, strconv.Itoa(r.Port)) + r.Path)
+			budget := d.rpcBudget("readiness")
+			client.Timeout = budget
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(ip, strconv.Itoa(r.Port))+r.Path, nil)
+			resp, err := client.Do(req)
 			if err == nil {
-				latency.observe(RealClock{}.Now().Sub(started))
 				d.noteRPCLatency("readiness", RealClock{}.Now().Sub(started))
+				if resp.StatusCode != lastStatus {
+					lastStatus = resp.StatusCode
+					progress.advance()
+				}
 				resp.Body.Close()
-				if resp.StatusCode >= 200 && resp.StatusCode < 300 && (duration == 0 || d.clock.Now().Before(deadline)) {
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 && ctx.Err() == nil && (duration == 0 || d.clock.Now().Before(deadline)) {
+					if d.dir != "" {
+						mergeReadinessHistory(path, progress.result())
+					}
 					return nil
 				}
+			} else if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+				// A timed-out response is censored evidence: widen the next observation
+				// instead of permanently preventing a slower healthy reply from arriving.
+				d.backoffRPC("readiness", budget)
 			}
 		}
-		_, stalled = progress.state()
-		if duration > 0 && !d.clock.Now().Before(deadline) || duration == 0 && stalled {
-			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: fmt.Errorf("Docker sidecar %s HTTP readiness timeout", name)}
+		stalled := false
+		if progress != nil {
+			_, stalled = progress.state()
 		}
-		select {
-		case <-time.After(latency.cadence()):
-		case <-d.halt:
-			return errors.New("Docker readiness interrupted")
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		if duration > 0 && !d.clock.Now().Before(deadline) || duration == 0 && stalled {
+			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: fmt.Errorf("Docker sidecar %s HTTP readiness timeout or stalled", name)}
+		}
+		if err := readinessPause(ctx, d.rpcCadence("readiness")); err != nil {
+			return err
 		}
 	}
 }

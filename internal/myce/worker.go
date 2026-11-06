@@ -1185,12 +1185,6 @@ func (w Worker) Run(stop context.Context) error {
 	w.fleet = w.newFleetRuntime()
 	// Startup may rotate an idle session after exact orphan recovery. The first
 	// queue checkin binds the recovered session before admission.
-	if w.ModelConfig.Idle <= 0 {
-		w.ModelConfig.Idle = 10 * time.Minute
-	}
-	if w.ModelConfig.Wait <= 0 {
-		w.ModelConfig.Wait = 5 * time.Minute
-	}
 	if err = validateModels(w.ModelConfig); err != nil {
 		return err
 	}

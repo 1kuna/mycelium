@@ -48,6 +48,7 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 		defer close(l.monitorDone)
 		client := &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		failures := serverProbeFailures{latency: l.probeLatency}
+		probe := readinessProbe{latency: l.probeLatency}
 		for {
 			if readinessPause(ctx, failures.latency.cadence()) != nil {
 				return
@@ -59,7 +60,7 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 				return
 			default:
 			}
-			client.Timeout = failures.latency.budget()
+			client.Timeout = probe.budget()
 			if timeout > 0 {
 				client.Timeout = timeout
 			}
@@ -81,7 +82,15 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 			}
 			now := clock.Now()
 			elapsed := max(now.Sub(started), RealClock{}.Now().Sub(realStarted))
-			failed := failures.observe(healthy, now.Add(-elapsed), now)
+			timedOut := errors.Is(err, context.DeadlineExceeded)
+			probe.observe(elapsed, timedOut)
+			// A learned transport allowance can censor a newly slower healthy
+			// response. Preserve degraded custody and retry with more uncertainty.
+			// An explicit injected observation deadline retains its test/author contract.
+			failed := false
+			if !timedOut || timeout > 0 {
+				failed = failures.observe(healthy, now.Add(-elapsed), now)
+			}
 			if failed {
 				l.healthErr = errors.New("server health failed")
 			}

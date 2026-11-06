@@ -395,8 +395,11 @@ precede PATH. `{environment}` is the published environment directory;
 the physical selector; `{port}` is a chosen loopback port. Templates substitute
 individual argv strings with no implicit shell. The health check requires HTTP
 2xx. The whole load, including copies, environment setup and admission waits,
-has no default wall deadline. Worker-local progress and latency detect a silent
-load; advancing loads continue. The optional explicit `ready_timeout` starts
+has no default wall deadline. Comparable successful local load history detects
+silent stalls; unknown cold loads retain custody without a guessed deadline.
+Observed process CPU time, reads and memory growth also count as activity. An
+inactive cold load under eligible resource contention reports owner attention
+and raises an episode-based health alert, preserving custody. Advancing loads continue. The optional explicit `ready_timeout` starts
 at engine launch and bounds process readiness. Timeout or crash
 kills the owned group and returns a visible error. The optional stop command
 and TERM share `stop_timeout` (default 10 seconds), followed by KILL and group
@@ -557,8 +560,10 @@ upstream bodies.
 After readiness, the supervisor watches process exit for the entire engine
 lifetime. Serial health checks learn their cost, response envelope and failure
 window from that worker. They require HTTP 2xx without redirects; one failed
-probe alone cannot withdraw readiness. A second observation confirms continuous
-failure beyond the learned envelope; success resets failure continuity. See
+probe alone cannot withdraw readiness. Completed failures confirm continuous
+failure beyond the learned envelope; success resets failure continuity. A timed-out
+observation widens the next transport allowance and retains degraded custody, so
+a slower healthy response can still be observed. See
 [adaptive readiness](readiness.md) for load signals and the retired assumptions.
 Process exit requires no health-failure threshold.
 At the next worker check-in the slot leaves `ready`, routing stops, and cleanup
@@ -584,8 +589,9 @@ persist; a new worker session reloads. If a rejoining worker still holds a
 different engine attempt, it drains and cleans that attempt before starting the
 replacement. Cleanup failure blocks the replacement and retains custody. A load
 plan does not expire by a queue wall clock. The worker's progress supervisor
-reports a silent load failure under the exact attempt and retains cleanup
-custody until release is confirmed. Explicit positive `max_wait` still bounds
+reports learned silent stalls under the exact attempt and retains cleanup
+custody until release is confirmed. Unknown cold loads remain owned, with
+activity/contended inactivity visible through status and health alerts. Explicit positive `max_wait` still bounds
 queued calls; omission waits for cancellation or a real failure.
 The failed-worker exclusion is scoped to an engine attempt: a fresh attempt on
 the same worker is eligible. In-flight calls with `retry_safe: false`

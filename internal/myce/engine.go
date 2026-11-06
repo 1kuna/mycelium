@@ -106,7 +106,6 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		ctx, progress, finish = superviseModelLoad(ctx, m, l.Dir, l.Clock)
 		defer func() { finish(loaded) }()
 	}
-	progress.calibrate(m)
 	for _, v := range os.Environ() {
 		if strings.HasPrefix(v, "LLAMA_ARG_HF_") {
 			return errors.New("remote llama-server model environment is forbidden; use myce model fetch")
@@ -233,14 +232,16 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	lastStatus := 0
+	probe := readinessProbe{latency: l.probeLatency}
 	for {
 		started := progress.clock.Now()
 		realStarted := RealClock{}.Now()
-		hc.Timeout = l.probeLatency.budget()
+		hc.Timeout = probe.budget()
 		req, _ := http.NewRequestWithContext(ctx, "GET", health, nil)
 		res, err := hc.Do(req)
 		if err == nil {
-			l.probeLatency.observe(max(progress.clock.Now().Sub(started), RealClock{}.Now().Sub(realStarted)))
+			probe.observe(max(progress.clock.Now().Sub(started), RealClock{}.Now().Sub(realStarted)), false)
+			l.probeLatency = probe.latency
 			if res.StatusCode != lastStatus {
 				progress.advance()
 				lastStatus = res.StatusCode
@@ -262,6 +263,10 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 				}
 			}
 		}
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			probe.observe(max(progress.clock.Now().Sub(started), RealClock{}.Now().Sub(realStarted)), true)
+		}
+
 		select {
 		case <-ctx.Done():
 			oomErr := l.memoryAttempt.failure()
@@ -466,6 +471,7 @@ func cleanupRecordedProcesses(dir, pattern string, clock Clock) error {
 }
 
 type workerModel struct {
+	progress           *readinessProgress
 	device             string
 	bound              *Worker
 	runtimeFailed      bool
@@ -635,6 +641,9 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	for _, m := range rt.models {
 		rt.checkEngineHealth(m)
 		report := ModelReport{Name: m.model.Name, Device: m.device, Attempt: m.attempt, RuntimeFailed: m.runtimeFailed, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true}
+		if m.state == "loading" {
+			report.Error = m.progress.coldReason()
+		}
 		if m.state == "ready" {
 			if owned, ok := m.engine.(*LlamaEngine); ok {
 				_, report.HealthRevision, report.HealthDegraded = owned.runtimeHealth()
@@ -807,12 +816,19 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 }
 
 func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
-	ctx, progress, finishReadiness := superviseModelLoad(ctx, m.model, rt.dir, rt.clock)
-	if rt.config.Wait > 0 {
-		progress.mu.Lock()
-		progress.budget = max(progress.budget, rt.config.Wait)
-		progress.mu.Unlock()
+	identity := m.model
+	if m.recipe != nil {
+		identity.readinessRecipe = m.recipe.Key
 	}
+	platform, device := rt.platform, rt.device
+	if m.bound != nil {
+		platform, device = m.bound.Machine.GPU, m.bound.Machine.Device
+	}
+	identity.Platforms, identity.Device = []string{platform}, device
+	ctx, progress, finishReadiness := superviseModelLoad(ctx, identity, rt.dir, rt.clock)
+	rt.mu.Lock()
+	m.progress = progress
+	rt.mu.Unlock()
 	if rt.cache != nil {
 		progress.mu.Lock()
 		progress.source = func() int64 {
@@ -872,7 +888,8 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		}
 		return rt.checkLoadMemory(parent, m)
 	})
-	platform, device, deviceEnv := rt.platform, rt.device, rt.deviceEnv
+	deviceEnv := rt.deviceEnv
+	platform, device = rt.platform, rt.device
 	if m.bound != nil {
 		platform, device = m.bound.Machine.GPU, m.bound.Machine.Device
 		deviceEnv, _ = m.bound.deviceEnvironment()
@@ -918,7 +935,6 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		e = checkLaunchGate(ctx)
 	}
 	if e == nil {
-		progress.calibrate(model)
 		e = m.engine.Load(ctx, model)
 	}
 	if e == nil && ctx.Err() != nil {

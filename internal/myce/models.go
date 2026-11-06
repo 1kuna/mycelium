@@ -33,6 +33,7 @@ type VLLMPreset struct {
 	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
 }
 type Model struct {
+	readinessRecipe string
 	Measurement     *ModelMeasurementBinding `yaml:"measurement,omitempty" json:"measurement,omitempty"`
 	Project         string                   `yaml:"project,omitempty" json:"project,omitempty"`
 	AllowedMachines []string                 `yaml:"allowed_machines,omitempty" json:"allowed_machines,omitempty"`

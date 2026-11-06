@@ -152,6 +152,7 @@ type dockerExecution struct {
 }
 type dockerAttempt struct {
 	latencyMu         sync.Mutex
+	initializations   map[string]string
 	latency           map[string]readinessLatency
 	observationBudget map[string]time.Duration
 	hostMemoryProbe   checkpointIO[*CurrentHostMemory]
@@ -291,7 +292,7 @@ func (d *dockerAttempt) recordObservationLoss() error {
 }
 
 func (d *dockerAttempt) call(args ...string) ([]byte, error) {
-	observation := len(args) > 0 && (args[0] == "ps" || args[0] == "inspect" || args[0] == "network" && len(args) > 1 && (args[1] == "ls" || args[1] == "inspect"))
+	observation := dockerObservation(args)
 	if !observation {
 		return d.callWithTimeout(d.timeout, args...)
 	}
@@ -339,11 +340,18 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 		}
 		d.mu.Unlock()
 		timer := time.NewTimer(backoff)
+		var parentDone <-chan struct{}
+		if d.ctx != nil {
+			parentDone = d.ctx.Done()
+		}
 		select {
 		case <-timer.C:
 		case <-d.halt:
 			timer.Stop()
 			return nil, runtimeErrorFor(args[0], context.Canceled)
+		case <-parentDone:
+			timer.Stop()
+			return nil, runtimeErrorFor(args[0], d.ctx.Err())
 		}
 	}
 }
@@ -363,11 +371,18 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	if parent == nil {
 		parent = context.Background()
 	}
-	if timeout <= 0 {
+	historyPath := d.initializationFile(operation, args)
+	history := readinessHistory{}
+	if d.dir != "" && !dockerObservation(args) {
+		history = readReadinessHistory(historyPath)
+	}
+	progress := newReadinessProgress(d.clock, history)
+	if timeout <= 0 && dockerObservation(args) {
 		timeout = d.rpcBudget(operation)
 	}
-	progress := newReadinessProgress(d.clock, readinessHistory{})
-	progress.budget = timeout
+	if timeout > 0 {
+		progress.budget = timeout
+	}
 	ctx, cancel := context.WithCancelCause(parent)
 	ctx = context.WithValue(ctx, ioProgressKey{}, func() { progress.advance() })
 	defer cancel(context.Canceled)
@@ -380,9 +395,16 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 				cancel(context.DeadlineExceeded)
 				return
 			}
+			if budget <= 0 {
+				budget = readinessInitialRTT
+			} // observation only, no cold cutoff
 			timer := time.NewTimer(budget)
 			select {
 			case <-timer.C:
+			case <-d.halt:
+				timer.Stop()
+				cancel(context.Canceled)
+				return
 			case <-done:
 				timer.Stop()
 				return
@@ -395,8 +417,22 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	started := progress.clock.Now()
 	realStarted := RealClock{}.Now()
 	defer func() {
+		if ctx.Err() != nil {
+			err = context.Cause(ctx)
+		}
 		if err == nil {
 			d.noteRPCLatency(operation, max(progress.clock.Now().Sub(started), RealClock{}.Now().Sub(realStarted)))
+			if !dockerObservation(args) && d.dir != "" {
+				mergeReadinessHistory(historyPath, progress.result())
+			}
+			if operation == "create" {
+				d.latencyMu.Lock()
+				if d.initializations == nil {
+					d.initializations = map[string]string{}
+				}
+				d.initializations[strings.TrimSpace(string(out))] = historyPath
+				d.latencyMu.Unlock()
+			}
 		}
 		if errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
 			err = context.DeadlineExceeded
@@ -411,7 +447,9 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	cmd.Dir = d.workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = timeout
+	// After CLI exit/cancellation, inherited pipes get one local observation
+	// interval to drain. Outage backoff must not strand worker shutdown.
+	cmd.WaitDelay = d.rpcCadence("inspect")
 	var stdout bytes.Buffer
 	var stderr dockerTail
 	cmd.Stdout = &dockerProgressOutput{output: &stdout, progress: progress}
@@ -494,11 +532,14 @@ type dockerInspection struct {
 	NetworkSettings struct {
 		Networks map[string]struct{ IPAddress string }
 	} `json:"NetworkSettings"`
-	Mounts []dockerFileMount                  `json:"Mounts"`
-	ID     string                             `json:"Id"`
-	Name   string                             `json:"Name"`
-	Config struct{ Labels map[string]string } `json:"Config"`
-	State  struct {
+	Mounts []dockerFileMount `json:"Mounts"`
+	ID     string            `json:"Id"`
+	Name   string            `json:"Name"`
+	Config struct {
+		Labels map[string]string
+		Image  string
+	} `json:"Config"`
+	State struct {
 		Pid        int
 		StartedAt  time.Time
 		Paused     bool

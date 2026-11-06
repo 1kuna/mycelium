@@ -74,6 +74,13 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 		s.State = "unloading"
 	}
 	switch r.State {
+	case "loading":
+		if s.State == "loading" {
+			switch r.Error {
+			case coldLoadInactive, coldLoadActive, "":
+				s.Error = r.Error
+			}
+		}
 	case "failed":
 		// Preserve prompt failure of an initial load (for example corrupt
 		// weights). Runtime recovery keeps queued demand through its backoff;

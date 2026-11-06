@@ -1,20 +1,37 @@
 # Adaptive runtime readiness (#808, next release)
 
 Readiness observes the worker's own latency and forward progress. It has no
-automatic whole-load wall deadline. A slow load can continue indefinitely while
-its verified byte counts, load counters or health state advance. A silent load
-fails through the existing exact-attempt cleanup path; neither a failed probe
-nor elapsed time releases memory or Docker custody.
+automatic whole-load wall deadline. An advancing load can continue indefinitely.
+Successful comparable local loads teach a silence envelope; a learned load with
+no advancing signal can fail through exact-attempt cleanup. Neither an observation
+timeout nor elapsed time supplies release proof.
 
-Model load history lives in the worker's local state directory, keyed by the
-complete model configuration (weights, engine, arguments and environment).
-Another worker or changed model starts cold. Successful readiness updates the
-load mean/deviation and longest observed quiet gap. Cold local weights are
-calibrated by reading at most one OS page and projecting its measured latency
-over the declared weight bytes. This is an uncertainty allowance, not a GPU
-throughput prediction. Model cache copy reports and verification reads renew
-progress. Environment preparation retains its separate builder protocol; a
-queued builder is not evidence of a stalled model process.
+A cold load has no inferred silence deadline, including after its first progress
+signal. Valid silent initialization and an unknown stall are indistinguishable
+without guessing. This is an **orchestrator default under MY-34**, not a direct
+maintainer ruling. Explicit caller deadlines and authored readiness limits bind.
+CPU time, read bytes attributable to the owned model process tree, and observed
+host/device memory growth count as activity. CPU/I/O use #858's shared per-attempt
+resource fields and observer; no duplicate CPU/I/O sampler is introduced. Missing
+OS counters remain unknown. Physical read bytes can exclude cached model reads,
+and process reads can include runtime dependencies; they establish activity,
+not completed tensor loading. Process existence alone is not activity.
+
+If a cold load has no activity between resource observations while eligible,
+prepared demand waits for its resources, status says that custody is retained and
+owner attention is needed. The existing adaptive health path raises one
+`model_load_needs_attention` alert per episode, with reason
+`cold_load_inactive_contended`. Activity or contention clearing rearms it.
+No alert kills the load. Observation cadence determines visibility latency;
+it does not become a cold-load deadline.
+
+Model load history lives in the worker's local state directory, bound to model
+configuration, immutable environment recipe, OS/architecture and resolved device
+and platform. Another host, recipe or target starts cold. Successful readiness
+updates load mean/deviation and the longest quiet gap. Concurrent completions
+merge the latest state and publish through unique temporary files. Cache copy
+reports and verification reads renew progress. Environment preparation retains
+its separate builder protocol; a queued builder is not a stalled model process.
 
 Custom servers can report progress on stdout/stderr, including with `logs: none`:
 
@@ -36,28 +53,29 @@ actual loading progress. Process existence, heartbeat arrival and repeated HTTP
 
 | Previous policy | Replacement, failure prevented and cost |
 | --- | --- |
-| Docker observation 2s and start 30s | An operation-local response envelope learns completed RPC latency. A timed-out read increases its next uncertainty allowance. Streaming forward progress renews silence without extending any explicit caller deadline. This catches an unresponsive CLI/daemon without imposing a whole-operation load clock; cold observations have less evidence than later ones. |
+| Docker observation 2s and start 30s | Observation RPCs learn their response envelope. Mutating operations and sidecar initialization separately learn successful initialization for the same local daemon/image/command; unknown initialization has no guessed cutoff. A timed-out read increases its next uncertainty allowance. Streaming forward progress renews silence without extending any explicit caller deadline. This catches an unresponsive CLI/daemon without imposing a whole-operation load clock; cold observations have less evidence than later ones. |
 | Docker retry 100ms..5s and warning after 2m | Each failed observation leaves the daemon an idle interval equal to the I/O cost it just consumed. The first unavailable observation records one warning. Recovery can be delayed by the preceding failed request, rather than a deployment-specific cooldown. |
 | Docker reconcile 100ms, shutdown checks 10ms, post-stop 5s | Serial reconciliation leaves an interval equal to its measured cost; shutdown uses the observed inspect envelope after the existing stop deadline. Unknown disposition stays pending, including after shutdown. |
-| Readiness probes 100ms, timeout 5s, three failures over 15s | Serial probes use their own measured cost for cadence and mean plus deviation for I/O uncertainty. A second failed observation confirms continuous failure beyond that envelope; one failure cannot withdraw readiness. HTTP/container health transitions renew load observation. Explicit sidecar timeouts still win; omission opts into progress-based readiness. |
-| Model idle 10m | Per-model, per-worker request spacing and successful reload cost determine how long retaining idle residency is useful. In-flight/queued demand and pins retain their existing protection; competing work can still reclaim residency through the scheduler. Explicit `idle_timeout` remains authoritative. |
+| Readiness probes 100ms, timeout 5s, three failures over 15s | Serial probes use their own measured cost for cadence and mean plus deviation for I/O uncertainty. Completed failures confirm continuous failure beyond that envelope; one failure cannot withdraw readiness. Timed-out responses widen the next probe allowance and retain degraded custody so slower healthy replies remain observable. HTTP/container health transitions renew load observation. Explicit sidecar timeouts still win; omission opts into progress-based readiness. |
+| Model idle 10m | Per-model, per-worker request spacing and successful reload cost determine how long retaining idle residency is useful. Assigned or eligible local demand and pins protect the matching residency; competing work can still reclaim residency through the scheduler. Explicit `idle_timeout` remains authoritative. |
 | Model wait 5m, queue load slack 5s | Omitted `max_wait` waits for caller cancellation or a real load failure. A positive authored value bounds that caller's queued wait, not a progressing worker load. The worker owns stall detection; the queue's worker-loss and exact-release protocol remain independent. Legacy `load_until` values are cleared. |
 | Measurement load 5m | Measurement uses the same progress supervisor and local history. A positive `--load-timeout` is an explicit wall deadline. Safety observations retry only transport timeouts, using measured request cost; an actual safety refusal stops immediately. |
 | Measurement warm-up parallelism 1 | Retained for individual incremental-memory attribution: concurrent warm-ups confound per-model peaks. Explicit parallelism instead measures a joint peak. This is a measurement-method boundary, not a host capacity guess. |
 
-The latency estimator uses RFC 6298's mean/deviation smoothing and initial
-one-second unmeasured transport allowance. Completed local observations replace
-that seed; it is not a universal measured load time. An unmeasured custom server
-without accessible local weights has no inferred cold-load deadline until it
-provides a first progress/health signal; use an explicit `ready_timeout` when
-that unknown initialization must have a wall bound. Real model weights supply
-the local I/O calibration instead. Quiet-gap uncertainty
-allows one additional observed gap, so a single delayed progress report is not
-enough to establish a stall. Duration arithmetic saturates at the representation
-limit to prevent overflow. The existing diagnostic line-size bound protects the
-stream parser from an unterminated untrusted line; oversized lines cannot provide
-progress. These safeguards cost observation latency or lost malformed evidence,
-and none supplies release proof.
+The latency estimator uses RFC 6298 mean/deviation smoothing and a one-second
+initial **transport observation** allowance. Completed observations replace that
+protocol seed; timeouts expand the next allowance. It never bounds cold process,
+container start or sidecar initialization. Learned silence permits one additional
+observed quiet gap as measurement uncertainty. Duration arithmetic saturates at
+the representation limit to prevent overflow. The existing diagnostic line-size
+bound protects stream parser memory against unterminated untrusted lines;
+oversized lines cannot provide progress. These safeguards cost observation latency
+or lost malformed evidence, and none supplies release proof. Shutdown cancels
+active Docker observations even when an outage enlarged their allowance. After
+CLI cancellation, inherited pipes get one local inspect interval to drain, using
+the transport seed only while that latency is unknown; an escaping pipe holder
+cannot keep shutdown waiting through outage backoff. A drain failure retains
+unresolved custody.
 
 Managed Docker continues to require already-local digest-pinned images and
 `--pull=never`. The pull/extract decoder observes per-layer forward byte counts

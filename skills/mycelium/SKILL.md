@@ -169,8 +169,12 @@ On releases with adaptive observation admission (#800), healthy queues accept re
 Omitted model `max_wait` follows caller cancellation and actual load failures;
 omitted `idle_timeout` follows measured model demand and reload cost. A healthy
 load with advancing copy/load/health signals has no automatic total load
-cutoff. Keep the same request while it progresses; a silent load reports failure
-and retains exact cleanup custody. Explicit caller, `max_wait`, `ready_timeout`
+cutoff. Keep the same request while it progresses. Learned loads detect silent
+stalls; an unknown cold load retains custody without a guessed deadline. Observable
+CPU time, reads and memory growth count as activity. A cold load with no observed
+activity while eligible demand waits exposes an owner-attention reason and raises
+`model_load_needs_attention` through the existing health channel; the alert does
+not stop it. Explicit caller, `max_wait`, `ready_timeout`
 and measurement `--load-timeout` deadlines still apply where configured. For
 custom servers, report monotonic `MYCE_LOAD_PROGRESS` records as described in
 [adaptive readiness](https://github.com/1kuna/mycelium/blob/main/docs/readiness.md).

@@ -41,6 +41,23 @@ func (l readinessLatency) budget() time.Duration {
 	return addReadinessDuration(l.Mean, max(time.Nanosecond, scaleReadinessDuration(l.Deviation, 4)))
 }
 
+// Timeouts are lower bounds on latency, not completed samples. Recovery probes
+// expand their allowance until a response can teach the new local envelope.
+type readinessProbe struct {
+	latency     readinessLatency
+	uncertainty time.Duration
+}
+
+func (p *readinessProbe) budget() time.Duration { return max(p.latency.budget(), p.uncertainty) }
+func (p *readinessProbe) observe(elapsed time.Duration, timedOut bool) {
+	if timedOut {
+		p.uncertainty = scaleReadinessDuration(max(p.budget(), elapsed), 2)
+		return
+	}
+	p.latency.observe(elapsed)
+	p.uncertainty = 0
+}
+
 func (l readinessLatency) cadence() time.Duration {
 	if l.Mean == 0 {
 		return readinessInitialRTT
@@ -80,19 +97,24 @@ type readinessHistory struct {
 }
 
 type readinessProgress struct {
-	source        func() int64
-	sourceValue   int64
-	suspended     bool
-	realStarted   time.Time
-	mu            sync.Mutex
-	clock         Clock
-	started, last time.Time
-	realLast      time.Time // transport I/O must also terminate when a test Clock is stationary
-	gap           time.Duration
-	budget        time.Duration
-	revision      uint64
-	stage         int
-	completed     float64
+	osObserver       bool
+	activityValues   []float64
+	activityRevision uint64
+	activitySamples  int
+	inactive         bool
+	source           func() int64
+	sourceValue      int64
+	suspended        bool
+	realStarted      time.Time
+	mu               sync.Mutex
+	clock            Clock
+	started, last    time.Time
+	realLast         time.Time // transport I/O must also terminate when a test Clock is stationary
+	gap              time.Duration
+	budget           time.Duration
+	revision         uint64
+	stage            int
+	completed        float64
 }
 
 func newReadinessProgress(clock Clock, history readinessHistory) *readinessProgress {
@@ -100,7 +122,11 @@ func newReadinessProgress(clock Clock, history readinessHistory) *readinessProgr
 		clock = RealClock{}
 	}
 	now := clock.Now()
-	return &readinessProgress{clock: clock, started: now, last: now, realLast: RealClock{}.Now(), realStarted: RealClock{}.Now(), budget: max(history.Load.budget(), history.Gap)}
+	budget := time.Duration(0)
+	if history.Load.Mean > 0 {
+		budget = max(history.Load.budget(), history.Gap)
+	}
+	return &readinessProgress{clock: clock, started: now, last: now, realLast: RealClock{}.Now(), realStarted: RealClock{}.Now(), budget: budget}
 }
 
 func (p *readinessProgress) advance() {
@@ -114,6 +140,7 @@ func (p *readinessProgress) advance() {
 	p.last = now
 	p.realLast = RealClock{}.Now()
 	p.revision++
+	p.inactive = false
 }
 
 func (p *readinessProgress) state() (time.Duration, bool) {
@@ -134,7 +161,10 @@ func (p *readinessProgress) state() (time.Duration, bool) {
 	defer p.mu.Unlock()
 	// Allow a repeat of the longest observed inter-progress gap, plus its
 	// measurement uncertainty (one more gap). No whole-load wall deadline.
-	budget := max(p.budget, scaleReadinessDuration(p.gap, 2))
+	budget := p.budget
+	if budget > 0 {
+		budget = max(budget, scaleReadinessDuration(p.gap, 2))
+	}
 	return budget, budget > 0 && !p.suspended && max(p.clock.Now().Sub(p.last), RealClock{}.Now().Sub(p.realLast)) >= budget
 }
 

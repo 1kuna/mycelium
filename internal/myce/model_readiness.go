@@ -3,14 +3,17 @@ package myce
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,31 +22,25 @@ import (
 
 var errModelLoadStalled = errors.New("model load stalled: no advancing load signal")
 
-// The state directory is worker-local: history never transfers between hosts.
-// The catalog identity binds weights, engine, arguments and environment.
+// Local histories bind the immutable recipe and execution target as well as the
+// catalog. Never infer cold initialization speed from transport or cached I/O.
 func modelReadinessFile(dir string, model Model) string {
-	return filepath.Join(dir, "readiness-"+modelConfigHash(ModelConfig{Models: []Model{model}})+".json")
+	identity := struct {
+		Model            string
+		Recipe, OS, Arch string
+	}{
+		modelConfigHash(ModelConfig{Models: []Model{model}}), model.readinessRecipe, runtime.GOOS, runtime.GOARCH,
+	}
+	return readinessFile(dir, identity)
 }
 
 func superviseModelLoad(parent context.Context, model Model, dir string, clock Clock) (context.Context, *readinessProgress, func(bool)) {
-	var history readinessHistory
+	path := modelReadinessFile(dir, model)
+	history := readinessHistory{}
 	if dir != "" {
-		if b, err := os.ReadFile(modelReadinessFile(dir, model)); err == nil {
-			_ = json.Unmarshal(b, &history)
-		}
+		history = readReadinessHistory(path)
 	}
 	p := newReadinessProgress(clock, history)
-	// Unknown initialization is not a measured one-second load. A cold load
-	// obtains its silence allowance from local weight I/O or its first actual
-	// progress gap; explicit caller budgets still bound unknown custom servers.
-	if history.Load.Mean <= 0 && history.Gap <= 0 {
-		p.budget = 0
-	}
-	// An explicit caller budget is authoritative when cold calibration is
-	// unavailable (for example, a custom server without local weight files).
-	if until, ok := parent.Deadline(); ok {
-		p.budget = max(p.budget, time.Until(until))
-	}
 	ctx, cancel := context.WithCancelCause(parent)
 	ctx = context.WithValue(ctx, readinessProgressKey{}, p)
 	previous, _ := parent.Value(ioProgressKey{}).(func())
@@ -58,13 +55,21 @@ func superviseModelLoad(parent context.Context, model Model, dir string, clock C
 		defer close(done)
 		for {
 			budget, stalled := p.state()
+			p.mu.Lock()
+			observingOS := p.osObserver
+			p.mu.Unlock()
+			if !observingOS {
+				p.observeActivity()
+			}
 			if stalled {
 				cancel(errModelLoadStalled)
 				return
 			}
+			// This is only an observation cadence. Unknown loads have no silence bound,
+			// even after an initial progress signal. Parent/user deadlines still bind.
 			if budget <= 0 {
 				budget = readinessInitialRTT
-			} // observation cadence only, never a cold load deadline
+			}
 			if readinessPause(ctx, budget) != nil {
 				return
 			}
@@ -73,47 +78,60 @@ func superviseModelLoad(parent context.Context, model Model, dir string, clock C
 	finish := func(success bool) {
 		cancel(context.Canceled)
 		<-done
-		if !success || dir == "" {
-			return
-		}
-		observed := p.result()
-		history.Load.observe(observed.Load.Mean)
-		history.Gap = max(history.Gap, observed.Gap)
-		if err := saveWorkerJSON(dir, filepath.Base(modelReadinessFile(dir, model)), history); err != nil {
-			log.Print("model readiness history unavailable; next load will recalibrate")
+		if success && dir != "" {
+			mergeReadinessHistory(path, p.result())
 		}
 	}
 	return ctx, p, finish
 }
 
-// Cold-start calibration reads at most one OS page, then projects its measured
-// latency over the declared weight bytes. This intentionally overestimates
-// startup I/O (including open/stat), avoiding a universal disk/GPU speed guess.
-// It runs outside queue/runtime locks. Historical load and gap evidence can
-// only increase this first-load uncertainty allowance.
-func (p *readinessProgress) calibrate(model Model) {
-	path := model.Path
-	if len(model.Files) > 0 {
-		path = filepath.Join(path, filepath.FromSlash(model.Files[0].Path))
+// One mutex serializes these tiny local state updates, outside queue/runtime
+// locks. Merge the latest committed observations, never a load-start snapshot.
+var readinessHistoryMu sync.Mutex
+
+func readinessFile(dir string, identity any) string {
+	b, _ := json.Marshal(identity)
+	return filepath.Join(dir, fmt.Sprintf("readiness-v2-%x.json", sha256.Sum256(b)))
+}
+func readReadinessHistory(path string) readinessHistory {
+	readinessHistoryMu.Lock()
+	defer readinessHistoryMu.Unlock()
+	return readReadinessHistoryLocked(path)
+}
+func readReadinessHistoryLocked(path string) (h readinessHistory) {
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &h)
 	}
-	started := p.clock.Now()
-	realStarted := RealClock{}.Now()
-	f, err := os.Open(path)
+	return h
+}
+func mergeReadinessHistory(path string, observed readinessHistory) {
+	readinessHistoryMu.Lock()
+	defer readinessHistoryMu.Unlock()
+	h := readReadinessHistoryLocked(path)
+	h.Load.observe(observed.Load.Mean)
+	h.Gap = max(h.Gap, observed.Gap)
+	b, err := json.Marshal(h)
+	if err == nil {
+		err = publishReadinessHistory(path, b)
+	}
 	if err != nil {
-		return
+		log.Print("readiness history unavailable; next initialization may remain unknown")
 	}
-	defer f.Close()
-	b := make([]byte, os.Getpagesize())
-	n, _ := f.Read(b)
-	if n == 0 {
-		return
+}
+func publishReadinessHistory(path string, b []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".readiness-*")
+	if err != nil {
+		return err
 	}
-	pages := max(int64(1), model.SizeBytes/int64(n))
-	budget := scaleReadinessDuration(max(time.Nanosecond, p.clock.Now().Sub(started), RealClock{}.Now().Sub(realStarted)), pages)
-	p.mu.Lock()
-	p.budget = max(p.budget, scaleReadinessDuration(budget, 2))
-	p.mu.Unlock()
-	p.advance()
+	defer os.Remove(f.Name())
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	err = errors.Join(err, f.Close())
+	if err == nil {
+		err = os.Rename(f.Name(), path)
+	}
+	return err
 }
 
 var modelLoadPercent = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)%`)
@@ -216,7 +234,17 @@ func (q *Queue) modelIdleExpired(s *ModelSlot) bool {
 		return q.clock.Now().Sub(s.LastUsed) >= q.models.Idle
 	}
 	for _, c := range q.calls {
-		if c.Model == s.Model && c.Error == "" {
+		if c.Model != s.Model || c.Error != "" {
+			continue
+		}
+		if c.Machine != "" {
+			if c.Machine == s.Machine && c.Device == s.Device && c.Session == s.Session && c.Attempt == s.Attempt {
+				return false
+			}
+			continue
+		}
+		m := slotMachine(q.s.Machines[s.Machine], s)
+		if m != nil && (q.models.Wait <= 0 || q.clock.Now().Sub(c.Queued) < q.models.Wait) && q.callCanUse(m, c) {
 			return false
 		}
 	}
@@ -229,4 +257,62 @@ func (q *Queue) modelIdleExpired(s *ModelSlot) bool {
 		budget = max(budget, d.Spacing.budget())
 	}
 	return q.clock.Now().Sub(s.LastUsed) >= budget
+}
+
+const coldLoadInactive = "cold load: no observed activity; custody retained"
+const coldLoadContended = coldLoadInactive + "; eligible demand waits for these resources; owner attention needed"
+const coldLoadActive = "cold load: activity observed; initialization duration unknown"
+
+// Called by the shared resource observer, never by a second sampler. Nil means
+// unavailable, including cached model reads the OS cannot attribute separately.
+// A change on any observable CPU/read/memory counter is sufficient activity.
+func (p *readinessProgress) observeActivity(values ...*float64) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if len(p.activityValues) < len(values) {
+		p.activityValues = make([]float64, len(values))
+	}
+	moving := false
+	for i, v := range values {
+		if v != nil && validMemoryValue(*v) && *v > p.activityValues[i] {
+			p.activityValues[i] = *v
+			moving = true
+		}
+	}
+	unchanged := p.activitySamples > 0 && p.activityRevision == p.revision && !moving
+	p.activitySamples++
+	p.inactive = unchanged
+	p.activityRevision = p.revision
+	p.mu.Unlock()
+	if moving {
+		p.advance()
+		p.mu.Lock()
+		p.activityRevision = p.revision
+		p.mu.Unlock()
+	}
+}
+func (p *readinessProgress) coldReason() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.budget > 0 || p.suspended || p.activitySamples == 0 {
+		return ""
+	}
+	if p.inactive {
+		return coldLoadInactive
+	}
+	return coldLoadActive
+}
+
+func modelReadinessDiagnostic(reason string) string {
+	switch reason {
+	case coldLoadInactive, coldLoadActive, coldLoadContended:
+		return reason
+	default:
+		return ceilingDiagnostic(reason, "model load or unload failed")
+	}
 }

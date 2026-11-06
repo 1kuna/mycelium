@@ -32,6 +32,7 @@ func PrepareModelEnvironment(ctx context.Context, m Model, platform string, cata
 		return m, nil, err
 	}
 	m.EnvironmentPath = root
+	m.readinessRecipe = r.Key
 	return m, release, nil
 }
 

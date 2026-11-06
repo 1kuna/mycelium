@@ -246,8 +246,7 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 				loadCtx, cancel = context.WithTimeout(c, o.LoadTimeout)
 			}
 			defer cancel()
-			loadCtx, progress, finish := superviseModelLoad(loadCtx, m, s.dir, o.Worker.Clock)
-			progress.calibrate(m)
+			loadCtx, _, finish := superviseModelLoad(loadCtx, m, s.dir, o.Worker.Clock)
 			e := engine.Load(loadCtx, m)
 			if e == nil && loadCtx.Err() != nil {
 				e = context.Cause(loadCtx)

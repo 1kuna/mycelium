@@ -3,6 +3,7 @@ package myce
 import (
 	"encoding/json"
 	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -114,4 +115,29 @@ func dockerProgressPhase(status string) int {
 		return 4
 	}
 	return 0
+}
+
+func dockerObservation(args []string) bool {
+	return len(args) > 0 && (args[0] == "ps" || args[0] == "inspect" || args[0] == "network" && len(args) > 1 && (args[1] == "ls" || args[1] == "inspect"))
+}
+
+func (d *dockerAttempt) initializationFile(operation string, args []string) string {
+	identity := operation
+	if operation == "start" && len(args) > 1 {
+		d.latencyMu.Lock()
+		identity = d.initializations[args[1]]
+		d.latencyMu.Unlock()
+		// An unknown/restored ID must not inherit an unrelated image's timings.
+		if identity == "" {
+			identity = args[1]
+		}
+	} else {
+		for i, arg := range args {
+			if strings.Contains(arg, "@sha256:") {
+				identity = strings.Join(args[i:], "\x00")
+				break
+			}
+		}
+	}
+	return readinessFile(d.dir, []string{d.state.Endpoint, operation, identity})
 }
