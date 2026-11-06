@@ -7,6 +7,16 @@ description: "Use when work needs fleet compute (heavy tests, builds, sims, trai
 
 # Mycelium
 
+## Try locally without a fleet
+
+On macOS or Linux with Git, Go 1.25.6+ and a Unix shell, follow the five
+[quick-start commands](../../docs/START-HERE.md#five-minute-start).
+`./myce dev -- sh examples/quickstart.sh` supplies private temporary local
+connection settings, submits a real CPU command and a fake-GPU command, waits
+and fetches verified output. No installed fleet or token setup is needed.
+The queue and workers stop automatically; `quickstart-result/result.txt` remains.
+Plain `myce dev` retains its existing persistent, foreground behavior.
+
 From the next release, a worker fleet proof may report `slot_mismatch` with
 separate running and `installed_slot` hashes after a failed update. This does not
 prove activation. Report it to the Mycelium maintenance owner; an unapproved
