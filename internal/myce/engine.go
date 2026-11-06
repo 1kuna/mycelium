@@ -906,6 +906,61 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	}
 }
 
+// All blocking sensors run before this exact-attempt accounting snapshot.
+// Call with rt.mu held; model and batch payload gates share the same host ledger.
+func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool) error {
+	cores, ram, growth := 0, 0.0, 0.0
+	for _, j := range rt.batchJobs {
+		// Preparation can outlast a heartbeat or receive an out-of-band stop.
+		// Consult the exact actor at launch time, not its original running job.
+		if a := rt.batchSupervisors[jobKey(j)]; a != nil {
+			j = a.admissionJob()
+		}
+		cores += j.Spec.Needs.cores()
+		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
+		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], rt.clock.Now())
+		ram += charge
+		growth += pending
+	}
+	for _, other := range rt.models {
+		if other.state != "unloaded" && other.state != "failed" {
+			cores++
+			need := hostNeed(allocationMachine(&rt.memoryMachine, []string{other.device}), other.model.MemoryGB, other.model.HostMemoryGB)
+			ram += need
+			growth += need
+		}
+	}
+	capacity, reason := cpuCapacity(&rt.memoryMachine)
+	if reason == "" && cores > capacity || rt.memoryMachine.HostMemoryBudgetGB > 0 && ram > rt.memoryMachine.HostMemoryBudgetGB {
+		return fmt.Errorf("%w: aggregate engine CPU/RAM allowance", errWorkerMemory)
+	}
+	if hostMeasured && hostFree < growth {
+		return fmt.Errorf("%w: insufficient host RAM for launch and pending growth: need %.3f GiB, available %.3f GiB", errWorkerMemory, growth, hostFree)
+	}
+	return nil
+}
+
+// Queue authorization can outlast preparation or any sensor read. Revalidate
+// the exact local reservation after those reads and before releasing a batch.
+func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostLaunch) error {
+	hostFree, measured := 0.0, rt.hostMemorySource != nil
+	if measured {
+		var err error
+		hostFree, err = rt.hostMemorySource(ctx)
+		if err != nil || !validMemoryValue(hostFree) {
+			return fmt.Errorf("%w: host RAM observation unavailable", errWorkerMemory)
+		}
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	attempt, err := strconv.Atoi(launch.Attempt)
+	actor := rt.batchSupervisors[attemptKey{launch.Key, attempt, launch.Session}]
+	if err != nil || actor == nil || launch.Machine != rt.machine || actor.admissionJob().State == "stopping" {
+		return fmt.Errorf("%w: batch admission custody changed", errWorkerMemory)
+	}
+	return rt.checkHostAdmissionLocked(hostFree, measured)
+}
+
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {
 	if rt.availability != nil && !rt.availability.snapshot().Available {
 		return errWorkerUnavailable
@@ -937,38 +992,6 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 			return fmt.Errorf("insufficient host RAM for model %s: need %.1f GiB, available %.1f GiB: %v", loading.model.Name, need, free, e)
 		}
 	}
-	// Include every admitted batch and resident engine in the same local host
-	// allowance. Device-local free memory alone cannot authorize another load.
-	rt.mu.Lock()
-	cores, ram, growth := 0, 0.0, 0.0
-	for _, j := range rt.batchJobs {
-		// Preparation can outlast a heartbeat or receive an out-of-band stop.
-		// Consult the exact actor at launch time, not its original running job.
-		if a := rt.batchSupervisors[jobKey(j)]; a != nil {
-			j = a.admissionJob()
-		}
-		cores += j.Spec.Needs.cores()
-		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], rt.clock.Now())
-		ram += charge
-		growth += pending
-	}
-	for _, other := range rt.models {
-		if other.state != "unloaded" && other.state != "failed" {
-			cores++
-			need := hostNeed(allocationMachine(&rt.memoryMachine, []string{other.device}), other.model.MemoryGB, other.model.HostMemoryGB)
-			ram += need
-			growth += need
-		}
-	}
-	rt.mu.Unlock()
-	capacity, reason := cpuCapacity(&machine)
-	if reason == "" && cores > capacity || machine.HostMemoryBudgetGB > 0 && ram > machine.HostMemoryBudgetGB {
-		return fmt.Errorf("%w: aggregate engine CPU/RAM allowance", errWorkerMemory)
-	}
-	if hostMeasured && hostFree < growth {
-		return fmt.Errorf("insufficient host RAM for model %s and pending growth: need %.3f GiB, available %.3f GiB", loading.model.Name, growth, hostFree)
-	}
 	if source == nil {
 		return errors.New("model load requires a free-memory source")
 	}
@@ -999,7 +1022,11 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 			free -= other.model.MemoryGB
 		}
 	}
+	hostErr := rt.checkHostAdmissionLocked(hostFree, hostMeasured)
 	rt.mu.Unlock()
+	if hostErr != nil {
+		return hostErr
+	}
 	if free < loading.model.MemoryGB {
 		return fmt.Errorf("insufficient free GPU memory for model %s: need %.1f GB, available %.1f GB", loading.model.Name, loading.model.MemoryGB, max(0, free))
 	}

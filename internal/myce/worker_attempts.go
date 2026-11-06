@@ -789,6 +789,7 @@ func firstDevice(j Job, m Machine) string {
 }
 
 func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*workerStore, rt *modelRuntime, environments *environmentRuntime, rawMemory MemorySource, requestRetention func(string, time.Time)) error {
+	w.batchAdmission = rt.checkBatchLaunchMemory
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	health, err := startWorkerHealth(ctx, w, root)
@@ -835,6 +836,10 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		j := *s.state.Job
 		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p}
 		actors[jobKey(j)] = a
+		// Publish reservations before the actor can reach its final launch gate.
+		rt.mu.Lock()
+		rt.batchJobs, rt.batchSupervisors = activeJobs(), maps.Clone(actors)
+		rt.mu.Unlock()
 		if p != nil {
 			w.control.set(p)
 		}

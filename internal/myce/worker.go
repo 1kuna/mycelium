@@ -103,6 +103,7 @@ type Worker struct {
 
 	checkpointPrepare     func(Job) (string, error) // Filesystem fault seam.
 	control               *processControl
+	batchAdmission        func(context.Context, HostLaunch) error
 	DeviceBinding         string
 	EnvironmentSourceRoot string
 	EnvironmentRoot       string

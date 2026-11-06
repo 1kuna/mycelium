@@ -239,6 +239,11 @@ func (w Worker) authorizeLaunch(l HostLaunch) error {
 	if !reply.OK || reply.StartGate != startGateProtocol {
 		return errWorkerStartAuthorization
 	}
+	if l.Kind == "batch" && w.batchAdmission != nil {
+		if err := w.batchAdmission(ctx, l); err != nil {
+			return err
+		}
+	}
 	return w.checkAvailability()
 }
 
