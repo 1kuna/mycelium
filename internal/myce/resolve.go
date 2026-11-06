@@ -159,6 +159,14 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 	if !environmentPlatformsMatch(j.Spec.Needs, recipes) {
 		r.Findings = append(r.Findings, ResolveFinding{Field: "environment.platforms", Side: "queue", Problem: "the environment has no recipe for the platform this job's needs select", Fix: "Add a recipe for that platform (for CPU work, a cpu recipe), or change needs to match an existing recipe."})
 	}
+	if WantsCommandDiscovery(s) {
+		discovery, err := deriveCommandDiscovery(s, recipes, sidecars)
+		if err != nil {
+			r.Findings = append(r.Findings, ResolveFinding{Field: "portable", Side: "queue", Problem: err.Error(), Fix: "Select managed member locks with known intersecting targets, or author explicit targets."})
+			discovery = &CommandDiscovery{}
+		}
+		j.CommandDiscovery = discovery
+	}
 	r.Targets = view.resolveTargets(j)
 	if !s.extensionJob() {
 		sets := map[string]map[string]EnvironmentRecipe{}

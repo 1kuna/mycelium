@@ -5,6 +5,9 @@ import "errors"
 // ValidateTargetPortability checks the author's declaration, never payload bytes
 // or input locations. Explicit-arch targets retain their existing behavior.
 func ValidateTargetPortability(s Spec) error {
+	if err := validateCommandDiscovery(s); err != nil {
+		return rejectFieldRule("job_placement_invalid", err)
+	}
 	if !s.Portable {
 		for _, target := range s.Targets {
 			if target.Arch == "" {

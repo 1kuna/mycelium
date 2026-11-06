@@ -22,6 +22,16 @@ never switches callers or removes old readers. See [jobs](jobs.md) for keyed
 intent/cancellation, [files](files.md) for custody, and
 [scheduling](scheduling.md) for live portability advice.
 
+From the next release, a flat non-production native CPU entry or compatibility
+profile may set `portable: true` and omit targets when all member environments
+have selected immutable managed Pixi lock coverage. Mycelium derives candidates
+from those locks, supported runtimes and fresh inventory; see
+[managed CPU discovery](environments.md#cpu-tools-with-pixi). `portable: true`
+asserts the entire payload. Unknown coverage requires explicit verified targets.
+Nonempty explicit targets always bind. Production widening still uses exact
+MY-19 acceptance through native variants/baselines or an explicit owner-accepted
+target list; automatic plain-command production discovery remains held.
+
 Before authoring, run `myce portability`, then
 `myce portability --adapter .mycelium/adapter.yaml --entry NAME`. Declare verified
 targets and software requirements; Mycelium chooses the host. Document a hard

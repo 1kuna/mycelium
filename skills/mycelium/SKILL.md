@@ -89,8 +89,17 @@ coverage, native preparation and current admission remain separate. Run this
 before choosing targets and after inventory or recipe changes. A dependency
 candidate is not application compatibility or owner-accepted production parity.
 Plain-command `require_target` checks admission, not native qualification.
-Explicit targets remain binding; reusable entries still require them, and
-`portable: true` does not infer additional operating systems.
+Explicit targets remain binding. From the next release, a native CPU entry or
+profile may set `portable: true` and omit targets to discover candidates from
+all members' selected immutable managed Pixi locks and fresh worker inventory.
+This declares the whole payload portable, including binaries, shell commands,
+archives and runtime downloads. Unknown coverage grants no candidate. Failed
+preparation excludes only its exact target/recipe candidate; keep the same job
+while a viable alternative runs. Fix a deterministic recipe failure with changed
+immutable inputs and a new key. Automatic plain-command discovery is for
+non-production tiers: production needs the existing native variant/baseline and
+MY-19 parity workflow, or an explicit owner-accepted target list. Preparation,
+exit-zero checks and `portable: true` never constitute parity acceptance.
 
 ```sh
 myce version

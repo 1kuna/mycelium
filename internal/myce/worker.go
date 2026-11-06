@@ -553,14 +553,14 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			release()
 		}
 	}()
-	if r, ok := j.EnvironmentRecipes[w.Machine.GPU]; ok {
+	if r, ok := commandEnvironmentRecipe(&j, j.EnvironmentRecipes, &w.Machine); ok {
 		if r.BinaryRelative != "" && w.EnvironmentSourceRoot != "" {
 			r.Binary = filepath.Join(w.EnvironmentSourceRoot, r.BinaryRelative)
 		}
 		if w.environmentCache == nil {
 			return nil, s.startFailure(j, environmentFailed, errors.New("environment builder unavailable"))
 		}
-		r.readyOnly = j.Spec.extensionJob() || w.Machine.SharedHost != nil
+		r.readyOnly = j.CommandDiscovery != nil || j.Spec.extensionJob() || w.Machine.SharedHost != nil
 		buildCtx := context.WithValue(ctx, preparationCustodyKey{}, s.retainPreparation)
 		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(buildCtx, func() error {
 			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})

@@ -692,10 +692,17 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	var recipes map[string]EnvironmentRecipe
 	var sidecarRecipes map[string]map[string]EnvironmentRecipe
 	var recipeErr error
+	var discovery *CommandDiscovery
 	if !replay {
 		recipes, recipeErr = catalog.resolveEnvironment(prepared.Environment)
 		if recipeErr == nil {
 			sidecarRecipes, recipeErr = catalog.resolveSidecarEnvironments(prepared)
+		}
+		if recipeErr == nil {
+			discovery, recipeErr = deriveCommandDiscovery(prepared, recipes, sidecarRecipes)
+			if recipeErr != nil {
+				recipeErr = rejectFieldRule("job_environment_invalid", recipeErr)
+			}
 		}
 		if recipeErr == nil && !q.simulation {
 			verified := map[FileRef]bool{}
@@ -835,7 +842,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		} else {
 			id = ID()
 		}
-		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j := &Job{CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		j.ModelLimits = modelLimits
 		j.PlacementIntent = submissionPlacementIntent(submitted, j)
 		explicitStartBy := s.StartBy != nil

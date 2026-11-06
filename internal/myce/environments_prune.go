@@ -235,6 +235,16 @@ func (q *Queue) environmentReferenced(ctx context.Context, key string) bool {
 		if j.Spec.Environment.Key() == key {
 			return true
 		}
+		if j.CommandDiscovery != nil {
+			for _, target := range j.CommandDiscovery.Targets {
+				m := &Machine{GPU: target.Platform, CapabilityProfile: &CapabilityProfile{OS: target.OS, Arch: target.Arch}}
+				for _, r := range commandEnvironmentRecipes(j, m) {
+					if r.Key == key {
+						return true
+					}
+				}
+			}
+		}
 		for _, r := range j.EnvironmentRecipes {
 			if r.Key == key {
 				return true
