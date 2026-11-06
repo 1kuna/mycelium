@@ -25,6 +25,7 @@ func (q *Queue) observeSharedCPU(j *Job, r *AttemptResources) {
 	}
 	usage, elapsed, peak := *r.CPU.UsageSeconds, r.ElapsedSeconds, 0.0
 	previous := j.CPUObservation
+	comparable := false
 	if previous != nil {
 		peak = previous.PeakCores
 		if previous.Attempt == j.Attempt && previous.Machine == j.Machine && previous.Session == j.Session {
@@ -33,11 +34,16 @@ func (q *Queue) observeSharedCPU(j *Job, r *AttemptResources) {
 			}
 			usage -= previous.UsageSeconds
 			elapsed -= previous.ElapsedSeconds
+			comparable = true
 		}
 	}
 	// The physical logical CPU count bounds possible simultaneous execution;
 	// the operator's smaller admission budget must not hide actual overuse.
-	peak = max(peak, min(float64(m.CapabilityProfile.LogicalCPUs), usage/elapsed))
+	// Process-tree CPU can include supervisor time before observation began.
+	// Establish an origin first; only adjacent counters demonstrate a rate.
+	if comparable {
+		peak = max(peak, min(float64(m.CapabilityProfile.LogicalCPUs), usage/elapsed))
+	}
 	j.CPUObservation = &SharedCPUObservation{j.Attempt, j.Machine, j.Session, r.ElapsedSeconds, *r.CPU.UsageSeconds, peak}
 }
 

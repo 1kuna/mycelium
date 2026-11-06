@@ -85,7 +85,7 @@ func jobResources(j *Job) []ResourceBasis {
 	if n.CPUCores > 0 {
 		cpu.Declared, cpu.Basis = value(float64(n.CPUCores)), "declared"
 	}
-	if o := j.CPUObservation; o != nil {
+	if o := j.CPUObservation; o != nil && o.PeakCores > 0 {
 		cpu.Learned = value(o.PeakCores)
 		cpu.Note = "observed logical-job peak CPU need; shared-host admission rounds up and never charges below declaration"
 		cpu.Evidence = 1
