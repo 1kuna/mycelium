@@ -46,9 +46,12 @@ func fleetControlFailure(err error, fallback string) error {
 	return errors.New(fallback)
 }
 
-// Only launch's initial authorization can request a refetch: no receipt has
-// been written or helper started. Later refusals must retain failed intent and
-// must never automatically repeat publication or activation.
+// Launch can yield to the next runtime poll only before manager submission.
+// A pending receipt records that boundary durably.
 type fleetInstructionRefetchError struct{}
 
 func (*fleetInstructionRefetchError) Error() string { return "fleet_instruction_stale" }
+
+func fleetStaleControl(err error) bool {
+	return err != nil && (err.Error() == "fleet_instruction_stale" || err.Error() == "fleet_ack_stale")
+}

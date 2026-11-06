@@ -2381,8 +2381,8 @@ authorized owner, then explicitly rerun `myce fleet upgrade`):
 
 | Code | Next step |
 | --- | --- |
-| `fleet_instruction_stale` | Refresh queue status and current operation/session/revision and runtime proof; let exact custody settle. An initial launch authorization refusal is refetched at the next normal worker poll, before any intent is written. After durable intent, inspect the receipt and explicitly rerun; never automatically repeat a helper or restart. |
-| `fleet_ack_stale` | Reconcile the receipt with the current operation/session/revision; an obsolete ack cannot replace current progress. Inspect the earlier failure first: an ack after an operation stopped is expected to be stale. |
+| `fleet_instruction_stale` | Refresh queue status and current operation/session/revision and runtime proof; let exact custody settle. Before helper submission, refetch occurs at the next normal runtime poll. A pending receipt proves submission has not begun. A launched helper refetches its frozen instruction and retries only the refused control message once fresh proof/custody permits; publication and restart are not replayed. |
+| `fleet_ack_stale` | The helper refetches before retrying the same control message. An obsolete operation/session or superseded helper stops locally without reporting a new terminal failure; its receipt retains the last durable phase. An ack after an operation stopped is expected to be stale. |
 | `fleet_maintenance_changed`, `fleet_authorization_refused` | Reconcile maintenance ownership, exact custody, current runtime and queue authorization; never override the operator's drain. |
 | `fleet_ack_failed` | Restore authenticated queue connectivity, then reconcile the durable receipt before rerunning. |
 | `fleet_artifact_download_failed` | Restore authenticated artifact connectivity and queue/publisher availability. |
@@ -2415,9 +2415,23 @@ authorized owner, then explicitly rerun `myce fleet upgrade`):
 An initial authorization can become stale with an unchanged revision: a slow
 instruction request may outlive the queue's runtime-proof freshness window or
 custody may change before authorization. Cancellation/release alone does not
-advance the fleet revision. Refetching before durable intent changes no installed
-bytes and starts no helper; every later attempt still rechecks queue authority.
-Refusals after intent stay durable and require explicit operator recovery.
+advance the fleet revision. Before manager submission, the next normal runtime
+poll refetches and rechecks authority; a pending receipt can resume because no
+helper has been submitted. Once submission begins, that revision cannot launch
+again automatically, even after an ambiguous manager response.
+
+A launched helper also refetches after stale authorization or acknowledgement.
+An empty fenced response waits for fresh proof and exact custody; a matching
+instruction permits retrying only that control request, with its original
+operation, release, session and helper revision. A newer operator revision alone
+does not replace an active helper. A durable replacement claim, changed session,
+stopped operation or maintenance refusal ends recovery without authorizing any
+mutation. Obsolete control messages do not create failed receipts or stop newer
+progress. Genuine validation/maintenance failures still retain their terminal
+receipt and repair guidance. Durable restarting intent still prevents repeating
+a manager restart after interruption. This recovery requires the updated queue
+and helper binaries; it cannot repair an older helper already stopped by #739's
+post-intent behavior.
 
 A failed worker step on an operator-disabled host is retained as
 per-host `phase: failed` with its failure code and repair guidance; the operation
