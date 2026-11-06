@@ -142,8 +142,17 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 	if len(s.Files) > 0 {
 		r.Notes = append(r.Notes, "file_inputs reports ready only after a bounded read-only SHA-256/size verification of file-store bytes; local placeholders need staging, and incomplete observations stay unknown. Submit verifies all bytes again before admission.")
 	}
+	var discovery *CommandDiscovery
+	if WantsCommandDiscovery(s) {
+		var err error
+		discovery, err = deriveCommandDiscovery(s, recipes, sidecars)
+		if err != nil {
+			r.Findings = append(r.Findings, ResolveFinding{Field: "portable", Side: "queue", Problem: err.Error(), Fix: "Select managed member locks with known intersecting targets, or author explicit targets."})
+			discovery = &CommandDiscovery{}
+		}
+	}
 	job := func(s Spec) *Job {
-		j := &Job{ID: "resolve", State: "queued", Spec: s, Extensions: extensions, EnvironmentRecipes: recipes, SidecarEnvironmentRecipes: sidecars}
+		j := &Job{ID: "resolve", State: "queued", Spec: s, Extensions: extensions, EnvironmentRecipes: recipes, SidecarEnvironmentRecipes: sidecars, CommandDiscovery: discovery}
 		_ = normalizeJobClass(&j.Spec)
 		_ = normalizeResources(&j.Spec)
 		if !j.Spec.extensionJob() {
@@ -158,14 +167,6 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 	}
 	if !environmentPlatformsMatch(j.Spec.Needs, recipes) {
 		r.Findings = append(r.Findings, ResolveFinding{Field: "environment.platforms", Side: "queue", Problem: "the environment has no recipe for the platform this job's needs select", Fix: "Add a recipe for that platform (for CPU work, a cpu recipe), or change needs to match an existing recipe."})
-	}
-	if WantsCommandDiscovery(s) {
-		discovery, err := deriveCommandDiscovery(s, recipes, sidecars)
-		if err != nil {
-			r.Findings = append(r.Findings, ResolveFinding{Field: "portable", Side: "queue", Problem: err.Error(), Fix: "Select managed member locks with known intersecting targets, or author explicit targets."})
-			discovery = &CommandDiscovery{}
-		}
-		j.CommandDiscovery = discovery
 	}
 	r.Targets = view.resolveTargets(j)
 	if !s.extensionJob() {

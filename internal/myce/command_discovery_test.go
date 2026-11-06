@@ -113,6 +113,9 @@ func TestCommandDiscoveryFailureIsolationReplayAndChangedRecipe(t *testing.T) {
 	if err := q.Cancel(changed.ID); err != nil {
 		t.Fatal(err)
 	}
+	if err := q.AuthorizeLaunch(*plan[0].Launch); err == nil {
+		t.Fatal("cached discovery offer launched after cancellation without a heartbeat")
+	}
 	if got := check(t, q, linux, nil); got.Job != nil || len(got.EnvironmentPlan) != 0 {
 		t.Fatal("cancelled discovery still offered", got)
 	}
@@ -128,6 +131,44 @@ func TestCommandDiscoveryFailureIsolationReplayAndChangedRecipe(t *testing.T) {
 	defer reopened.Close()
 	if replay := submit(t, reopened, s); replay.ID != changed.ID || replay.CommandDiscovery == nil || replay.State != "cancelled" {
 		t.Fatal(replay)
+	}
+}
+
+func TestCommandDiscoveryUnpinningPreservesCoverageAndParity(t *testing.T) {
+	for _, production := range []bool{false, true} {
+		q, _ := fixture(t)
+		r := breadthRecipe("linux-64")
+		if production {
+			r = breadthRecipe("linux-64", "osx-arm64")
+		}
+		discoveryCatalog(t, q, r)
+		for _, os := range []string{"linux", "darwin"} {
+			m := cpuMachine(os, os, "cpu", 8, 32)
+			m.CapabilityProfile.OS = os
+			if os == "darwin" {
+				m.CapabilityProfile.Arch = "arm64"
+			}
+			m.EnvironmentBuilder = true
+			check(t, q, m, nil)
+		}
+		s := discoverySpec()
+		s.AllowedMachines = []string{"linux"}
+		if production {
+			s.Class, s.Priority = "production", ""
+		}
+		before := identityHash(q.s)
+		report, err := q.Resolve(ResolveRequest{Spec: s})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range report.Findings {
+			if f.Field == "allowed_machines" && strings.Contains(f.Problem, "could also run it") {
+				t.Fatalf("unpinning bypassed discovery coverage/parity: %+v", f)
+			}
+		}
+		if identityHash(q.s) != before {
+			t.Fatal("unpinning advice mutated demand")
+		}
 	}
 }
 
@@ -260,6 +301,8 @@ func TestCommandDiscoveryRealCPUResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dev.Close()
+	_, input := retentionJobInput(t, dev.Client(), "portable source fixture\n")
+	s.Files = map[string]FileRef{"source.txt": input}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	j, err := dev.Client().Submit(ctx, s)
