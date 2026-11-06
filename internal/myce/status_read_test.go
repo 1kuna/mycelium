@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +15,118 @@ import (
 	"testing"
 	"time"
 )
+
+// Compare cold HTTP reads, including public projection and JSON, with real
+// SQLite check-ins at the ordinary one-second heartbeat cadence. The fixed
+// injected clock keeps elapsed-time policy separate from wall-time measurement.
+func BenchmarkStatusReadScale(b *testing.B) {
+	for _, large := range []bool{false, true} {
+		for _, path := range []string{"/api/status", "/api/status?detail=full", "/api/inspection"} {
+			b.Run(fmt.Sprintf("large=%v%s", large, path), func(b *testing.B) {
+				q, workers := candidateCostFixture(b)
+				if large {
+					for i := 160; i < 6500; i++ {
+						source := q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)]
+						j := cloneJob(source)
+						j.ID = fmt.Sprintf("retained-%04d", i)
+						j.Timing.Execution.ID = j.ID
+						q.s.Jobs[j.ID] = &j
+					}
+				} else {
+					workers = workers[:3]
+					for id, j := range q.s.Jobs {
+						if j.State == "succeeded" && id > "retained-015" || j.State == "queued" && id > "queued-003" || id == "running-3" || id == "running-4" {
+							delete(q.s.Jobs, id)
+						}
+					}
+					for id := range q.s.Machines {
+						if id == "worker-3" || id == "worker-4" {
+							delete(q.s.Machines, id)
+						}
+					}
+					for id := range q.s.WorkObservations {
+						n, _ := strconv.Atoi(id)
+						if n >= 16 {
+							delete(q.s.WorkObservations, id)
+						}
+					}
+				}
+				if err := q.update(func() error { return nil }); err != nil {
+					b.Fatal(err)
+				}
+				var mu sync.Mutex
+				var checkinHolds []time.Duration
+				var holds []time.Duration
+				q.observeRead = func(kind string, _, hold time.Duration) {
+					if kind == "status" {
+						holds = append(holds, hold)
+					}
+				}
+				q.observeUpdate = func(_, hold time.Duration) {
+					mu.Lock()
+					checkinHolds = append(checkinHolds, hold)
+					mu.Unlock()
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				var wg sync.WaitGroup
+				for i, worker := range workers {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						ticker := time.NewTicker(time.Second)
+						defer ticker.Stop()
+						for {
+							_, err := q.CheckinContext(ctx, Checkin{Machine: worker, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: fmt.Sprintf("running-%d", i), Attempt: 1}, Session: worker.Session, Started: true}}})
+							if err != nil && ctx.Err() == nil {
+								b.Error(err)
+								return
+							}
+							select {
+							case <-ctx.Done():
+								return
+							case <-ticker.C:
+							}
+						}
+					}()
+				}
+				handler := API{Queue: q, Token: "test"}.Handler()
+				var latencies []time.Duration
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					// Each iteration measures a refresh, not an injected-clock cache
+					// hit. The production lifetime/invalidation behavior is unchanged.
+					q.statusCache.mu.Lock()
+					q.statusCache.expires = time.Time{}
+					q.statusCache.mu.Unlock()
+					span := &requestSpan{}
+					r := httptest.NewRequest("GET", path, nil).WithContext(context.WithValue(ctx, requestSpanKey{}, span))
+					r.Header.Set("Authorization", "Bearer test")
+					w := httptest.NewRecorder()
+					started := time.Now()
+					handler.ServeHTTP(w, r)
+					latencies = append(latencies, time.Since(started))
+					if w.Code != 200 {
+						b.Fatal(w.Code, w.Body.String())
+					}
+				}
+				b.StopTimer()
+				cancel()
+				wg.Wait()
+				report := func(values []time.Duration, name string) {
+					sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+					if len(values) > 0 {
+						b.ReportMetric(float64(values[(len(values)-1)/2].Microseconds())/1000, name+"-p50-ms")
+						b.ReportMetric(float64(values[(99*len(values)+99)/100-1].Microseconds())/1000, name+"-p99-ms")
+					}
+				}
+				report(latencies, "read")
+				report(holds, "read-hold")
+				report(checkinHolds, "checkin-hold")
+			})
+		}
+	}
+}
 
 // A diagnostic read must use the same occupied CPU ledger as admission. Four
 // admitted cores with three reserved cannot place the next two-core job.
