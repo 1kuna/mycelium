@@ -161,6 +161,9 @@ func TestEfficiencyLearnedAlerts(t *testing.T) {
 		var signals []EfficiencySignal
 		baseline, signals = efficiencySignals(r, baseline)
 		for _, s := range signals {
+			if !s.Observed {
+				continue
+			}
 			q.observeCurrentHealth("efficiency/"+s.Subject+"/"+s.Metric, s.Active, HealthAlert{Kind: "efficiency_regression", Reason: s.Metric})
 		}
 	}
@@ -192,8 +195,8 @@ func TestEfficiencyLearnedAlerts(t *testing.T) {
 	}
 	r.Hosts[0].Rate.MeasuredMemoryGB = nil
 	baseline, _ = efficiencySignals(r, baseline)
-	if _, ok := baseline["host/reservation_gap_gb"]; ok {
-		t.Fatal("unknown attribution trained as zero")
+	if b := baseline["host/reservation_gap_gb"]; b.Observed || len(b.History) == 0 {
+		t.Fatal("unknown attribution trained as zero or discarded local evidence")
 	}
 }
 

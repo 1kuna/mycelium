@@ -168,6 +168,7 @@ type WastedAttempt struct {
 	IOStatus        string                  `json:"io_status"`
 }
 type EfficiencySignal struct {
+	Observed        bool     `json:"observed"`
 	Subject         string   `json:"subject"`
 	Metric          string   `json:"metric"`
 	Value           float64  `json:"value"`
@@ -549,6 +550,9 @@ func (q *Queue) applyEfficiencyDiagnostics(d *efficiencyDiagnostics) {
 	for _, s := range d.signals {
 		key := "efficiency/" + s.Subject + "/" + s.Metric
 		seen[key] = true
+		if !s.Observed {
+			continue
+		}
 		event := HealthAlert{Kind: "efficiency_regression", Reason: s.Metric}
 		if _, ok := q.s.EfficiencyHosts[s.Subject]; ok {
 			event.Host = s.Subject
@@ -765,6 +769,7 @@ func efficiencyWasted(j *Job) []WastedAttempt {
 }
 
 type efficiencyBaseline struct {
+	Observed   bool        `json:"observed"`
 	Identity   string      `json:"identity,omitempty"`
 	At         time.Time   `json:"at"`
 	History    alertSeries `json:"history"`
@@ -776,7 +781,7 @@ type efficiencyBaseline struct {
 
 func (b efficiencyBaseline) signal(key string) EfficiencySignal {
 	subject, metric, _ := strings.Cut(key, "/")
-	s := EfficiencySignal{Subject: subject, Metric: metric, Value: b.Value, BaselineSamples: len(b.History), Active: b.Active}
+	s := EfficiencySignal{Observed: b.Observed, Subject: subject, Metric: metric, Value: b.Value, BaselineSamples: len(b.History), Active: b.Active}
 	if len(b.History) >= alertWarmup {
 		_, hi := b.History.band()
 		s.UpperBound = &hi
@@ -859,6 +864,7 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 			continue
 		}
 		b.At = r.At
+		b.Observed = true
 		b.History = slices.Clone(b.History)
 		b.Value = value
 		if b.History.high(value) {
@@ -877,6 +883,19 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 		}
 		next[key] = b
 		signals = append(signals, b.signal(key))
+	}
+	// Missing host attribution cannot train zero use or establish recovery.
+	// Keep its bounded local evidence until the host/identity leaves inventory.
+	for key, b := range old {
+		if _, ok := next[key]; ok {
+			continue
+		}
+		identity, present := identities[key]
+		if present && identity == b.Identity {
+			b.Observed = false
+			next[key] = b
+			signals = append(signals, b.signal(key))
+		}
 	}
 	return next, signals
 }
