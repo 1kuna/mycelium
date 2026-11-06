@@ -162,8 +162,9 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 			return m.Root == p.root && m.LatencySeconds > 0 && m.PendingSeconds == 0 && m.Reason == "" && !m.Adverse
 		})
 	})
-	// Cold start gets one observation cadence. Once measured, the host's robust
-	// prediction band supplies the deadline, including during baseline warmup.
+	// Cold start gets one observation cadence. Measured samples can detect a
+	// pending stall immediately, but completed successes train through warmup:
+	// one unusually fast read must not freeze all later successful evidence.
 	limit := signalRefresh
 	if len(base) > 0 {
 		_, hi := healthBand(base, func(s HostHealthSample) float64 {
@@ -214,7 +215,7 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		}
 		return p.confirm(result)
 	}
-	if completed && result.LatencySeconds > limit.Seconds() && result.Reason == "" {
+	if completed && len(base) >= hostHealthWarmup && result.LatencySeconds > limit.Seconds() && result.Reason == "" {
 		result.Reason = "mount_probe_slow"
 	}
 	if !now.Before(p.nextProbe) {

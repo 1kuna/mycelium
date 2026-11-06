@@ -278,3 +278,84 @@ func TestHostHygieneMountPendingReadCannotConfirmRecovery(t *testing.T) {
 	close(release)
 	await(t, func() bool { return len(p.pending) == 1 })
 }
+
+func TestHostHygieneMountWarmupAcceptsSuccessfulLatencyVariation(t *testing.T) {
+	m, clock := healthFixture(t, 1)
+	// Replay the review incident: one accepted 1ms success, then normal 2ms reads.
+	m.health.Baseline[0].Mounts = []HostMountHealth{{Root: "checkpoint", LatencySeconds: .001}}
+	p := &hostMountProbe{root: "checkpoint", path: "fake", measure: func(string) hostMountResult { return hostMountResult{latency: 2 * time.Millisecond} }}
+	m.mounts["checkpoint"] = p
+	for i := 0; i < hostHealthWarmup+hostHealthConfirmation+1; i++ {
+		clock.Advance(signalRefresh)
+		if err := m.sample(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		await(t, func() bool { return len(p.pending) == 1 })
+	}
+	if got := m.health.History[len(m.health.History)-1].Mounts[0].Reason; got != "" {
+		t.Fatal("healthy variation permanently withheld storage", got)
+	}
+	successes := 0
+	for _, s := range m.health.Baseline {
+		for _, mount := range s.Mounts {
+			if mount.Root == "checkpoint" && mount.Reason == "" {
+				successes++
+			}
+		}
+	}
+	if successes < hostHealthWarmup {
+		t.Fatal("successful warmup was frozen", successes)
+	}
+}
+
+func TestHostHygieneMountUpgradeDiscardsOnlyStatBaseline(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
+	dir := t.TempDir()
+	old := HostHealth{DrainReason: "host_memory_pressure", DiskRecovery: map[string]float64{"disk": 100}, History: []HostHealthSample{{At: clock.Now(), Mounts: []HostMountHealth{{Root: "checkpoint", LatencySeconds: .001}}}}}
+	for i := 0; i < hostHealthWarmup; i++ {
+		old.Baseline = append(old.Baseline, HostHealthSample{HostHealthReading: HostHealthReading{Load: 1, WakeSeconds: .001}, Mounts: []HostMountHealth{{Root: "checkpoint", LatencySeconds: .001}}})
+	}
+	// This is the actual unversioned stat-only disk format from #835.
+	if err := saveWorkerJSON(dir, "host-health.json", old); err != nil {
+		t.Fatal(err)
+	}
+	m, err := openHostHealth(dir, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.health.DrainReason != old.DrainReason || m.health.DiskRecovery["disk"] != 100 || len(m.health.History) != 1 || len(m.health.History[0].Mounts) != 1 {
+		t.Fatal("upgrade lost other evidence/history")
+	}
+	for _, s := range m.health.Baseline {
+		if len(s.Mounts) != 0 || s.Load != 1 {
+			t.Fatal("old probe baseline reused or other baseline lost", s)
+		}
+	}
+	m.disks = map[string]float64{"disk": 200} // Affirmative recovery of the retained disk reserve.
+	m.source = func(context.Context) (HostHealthReading, error) {
+		return HostHealthReading{Load: 1, WakeSeconds: .001}, nil
+	}
+	p := &hostMountProbe{root: "checkpoint", path: "fake", measure: func(string) hostMountResult { return hostMountResult{latency: 2 * time.Millisecond} }}
+	m.mounts["checkpoint"] = p
+	for i := 0; i < hostHealthWarmup+hostHealthConfirmation+1; i++ {
+		clock.Advance(signalRefresh)
+		if err := m.sample(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		await(t, func() bool { return len(p.pending) == 1 })
+	}
+	if got := m.health.History[len(m.health.History)-1].Mounts[0].Reason; got != "" {
+		t.Fatal("upgraded probe could not recover", got)
+	}
+	reopened, err := openHostHealth(dir, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := 0
+	for _, s := range reopened.health.Baseline {
+		fresh += len(s.Mounts)
+	}
+	if fresh < hostHealthWarmup {
+		t.Fatal("current probe baseline not retained on restart", fresh)
+	}
+}

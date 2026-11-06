@@ -2700,7 +2700,11 @@ inventory is checked again after access, so an empty local mountpoint cannot
 pretend to be a recovered NAS. Independent local checkpoint roots remain local.
 
 The pending deadline is learned from this host's successful mount observations
-using the hygiene prediction band. Before any successful observation, one
+using the hygiene prediction band. Completed successful probes train through
+hygiene warmup before slow-completion classification; a single fast sample
+cannot permanently reject ordinary successful variation. Probe-format upgrades
+invalidate only incompatible mount baseline evidence, preserving other health
+evidence and historical diagnostics. Before any successful observation, one
 existing sampling interval bounds cold/unknown evidence. Three consecutive slow
 or stalled observations confirm degradation; explicit filesystem failures and
 unverified cold probes withhold dependent work immediately. Heartbeat delivery

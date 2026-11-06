@@ -193,9 +193,20 @@ type hostHealthMonitor struct {
 	persist   func(HostHealth) error
 }
 
+// Version the on-disk probe evidence only. The wire shape is unchanged, and
+// other host evidence and historical diagnostics survive an upgraded probe.
+const hostMountProbeVersion = "stat-readdir-v1"
+
+type hostHealthDisk struct {
+	HostHealth
+	MountProbeVersion string `json:"mount_probe_version,omitempty"`
+}
+
 func openHostHealth(dir string, clock Clock) (*hostHealthMonitor, error) {
 	m := &hostHealthMonitor{dir: dir, clock: clock, mounts: map[string]*hostMountProbe{}}
-	m.persist = func(h HostHealth) error { return saveWorkerJSON(dir, "host-health.json", h) }
+	m.persist = func(h HostHealth) error {
+		return saveWorkerJSON(dir, "host-health.json", hostHealthDisk{HostHealth: h, MountProbeVersion: hostMountProbeVersion})
+	}
 	b, err := os.ReadFile(filepath.Join(dir, "host-health.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return m, nil
@@ -203,8 +214,15 @@ func openHostHealth(dir string, clock Clock) (*hostHealthMonitor, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := decodeWorkerJSON(b, &m.health); err != nil {
+	var saved hostHealthDisk
+	if err := decodeWorkerJSON(b, &saved); err != nil {
 		return nil, err
+	}
+	m.health = saved.HostHealth
+	if saved.MountProbeVersion != hostMountProbeVersion {
+		for i := range m.health.Baseline {
+			m.health.Baseline[i].Mounts = nil
+		}
 	}
 	if len(m.health.History) > hostHealthHistorySize {
 		m.health.History = m.health.History[len(m.health.History)-hostHealthHistorySize:]
