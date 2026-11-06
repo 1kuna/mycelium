@@ -26,6 +26,10 @@ type sharedProfileRegistration struct {
 }
 
 func sharedProfileRoot() (string, error) {
+	if session := os.Getenv("MYCE_DEV_SESSION_ROOT"); session != "" {
+		root := filepath.Join(session, "observers")
+		return root, os.MkdirAll(root, 0700)
+	}
 	root, err := os.UserCacheDir()
 	if err != nil {
 		return "", err
@@ -78,6 +82,11 @@ func registerSharedObserver(ctx context.Context, dir string, cfg profileObserver
 	cmd.Env = append(notifierEnvironment(), "MYCE_SHARED_OBSERVER=1")
 	cmd.ExtraFiles = []*os.File{lock, writeReady}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if os.Getenv("MYCE_DEV_SESSION_ROOT") != "" {
+		// The temporary queue cannot outlive its dev command. Keep this isolated
+		// observer in that command's group so dev shutdown also retires it.
+		cmd.SysProcAttr = nil
+	}
 	if err = cmd.Start(); err != nil {
 		return err
 	}

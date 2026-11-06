@@ -107,8 +107,47 @@ func TestDevCommandQuickstart(t *testing.T) {
 		t.Fatalf("helper failure: %v", err)
 	}
 	assertClean()
+	// A real controlling terminal must remain readable by the helper group.
+	run(filepath.Join(root, "mycelium"), env, "python3", "-c", `
+import os, pty, select, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv('./myce', ['./myce', 'dev', '--', 'sh', '-c', 'test -t 0 && read line && test "$line" = terminal-input && echo terminal-ok'])
+try:
+    os.write(fd, b'terminal-input\n')
+    data = b''
+    until = time.monotonic() + 15
+    while time.monotonic() < until:
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if ready:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            data += chunk
+    done, status = os.waitpid(pid, os.WNOHANG)
+    assert done == pid and os.waitstatus_to_exitcode(status) == 0 and b'terminal-ok' in data, data
+finally:
+    try:
+        os.kill(pid, 15)
+        os.waitpid(pid, 0)
+    except ProcessLookupError:
+        pass
+    os.close(fd)
+`)
+	assertClean()
 	// Interrupt a real command tree, then prove its child and listener are gone.
-	script := `sleep 60 & echo $! > child.pid; printf '%s' "$MYCE_QUEUE" > endpoint; wait`
+	profilePath := filepath.Join(root, "mycelium", ".mycelium", "profiles", "quickstart.yaml")
+	profile, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(profilePath), "interrupt.yaml"), []byte(strings.Replace(string(profile), "cat hello.txt", "sleep 60; cat hello.txt", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `./myce run --profile interrupt --key interrupt-fixture > receipt.json; sleep 60 & echo $! > child.pid; printf '%s' "$MYCE_DEV_SESSION_ROOT" > dev-root; printf '%s' "$MYCE_QUEUE" > endpoint; wait`
 	cmd = exec.CommandContext(ctx, "./myce", "dev", "--", "sh", "-c", script)
 	cmd.Dir, cmd.Env = filepath.Join(root, "mycelium"), env
 	if err := cmd.Start(); err != nil {
@@ -116,9 +155,10 @@ func TestDevCommandQuickstart(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	joined := false
 	defer func() {
-		if cmd.ProcessState == nil {
-			_ = cmd.Process.Kill()
+		if !joined {
+			_ = cmd.Process.Signal(os.Interrupt)
 			<-done
 		}
 	}()
@@ -129,11 +169,32 @@ func TestDevCommandQuickstart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	sessionRoot, err := os.ReadFile(filepath.Join(cmd.Dir, "dev-root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observerRoot := filepath.Join(string(sessionRoot), "observers")
+	registrations, err := filepath.Glob(filepath.Join(observerRoot, "*.json"))
+	if err != nil || len(registrations) != 1 {
+		t.Fatal("missing isolated observer registration", err)
+	}
+	processes := run(root, os.Environ(), "ps", "-axo", "pid=,command=")
+	observerPID := 0
+	for _, line := range strings.Split(processes, "\n") {
+		if strings.Contains(line, "--observer-dir "+observerRoot+" --detached") {
+			_, _ = fmt.Sscan(line, &observerPID)
+		}
+	}
+	if observerPID == 0 {
+		t.Fatal("missing isolated observer process")
+	}
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-done; err == nil || cmd.ProcessState.ExitCode() != 130 {
-		t.Fatalf("interrupt exit: %v", err)
+	interruptErr := <-done
+	joined = true
+	if interruptErr == nil || cmd.ProcessState.ExitCode() != 130 {
+		t.Fatalf("interrupt exit: %v", interruptErr)
 	}
 	pidBytes, err := os.ReadFile(filepath.Join(cmd.Dir, "child.pid"))
 	if err != nil {
@@ -151,6 +212,10 @@ func TestDevCommandQuickstart(t *testing.T) {
 	state := string(stateBytes)
 	if state != "" && !strings.HasPrefix(strings.TrimSpace(state), "Z") {
 		t.Fatalf("helper survived: %s", state)
+	}
+	observerState, _ := exec.Command("ps", "-o", "stat=", "-p", fmt.Sprint(observerPID)).Output()
+	if state := strings.TrimSpace(string(observerState)); state != "" && !strings.HasPrefix(state, "Z") {
+		t.Fatalf("observer survived: %s", state)
 	}
 	conn, err := net.DialTimeout("tcp", strings.TrimPrefix(string(endpoint), "http://"), time.Second)
 	if err == nil {

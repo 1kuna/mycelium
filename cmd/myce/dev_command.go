@@ -8,11 +8,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"mycelium/internal/myce"
 )
 
@@ -52,8 +54,23 @@ func devCommandSession(ctx context.Context, args []string, in io.Reader, out, er
 			cmd.Env = append(cmd.Env, value)
 		}
 	}
-	cmd.Env = append(cmd.Env, "MYCE_QUEUE="+d.URL, "MYCE_TOKEN="+token)
+	cmd.Env = append(cmd.Env, "MYCE_QUEUE="+d.URL, "MYCE_TOKEN="+token, "MYCE_DEV_SESSION_ROOT="+root)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if terminal, ok := in.(*os.File); ok {
+		fd := int(terminal.Fd())
+		if group, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP); err == nil && group == syscall.Getpgrp() {
+			cmd.SysProcAttr.Foreground, cmd.SysProcAttr.Ctty = true, fd
+			defer func() {
+				// The parent is in the background until it reclaims the terminal.
+				ignored := signal.Ignored(syscall.SIGTTOU)
+				signal.Ignore(syscall.SIGTTOU)
+				result = errors.Join(result, unix.IoctlSetPointerInt(fd, unix.TIOCSPGRP, group))
+				if !ignored {
+					signal.Reset(syscall.SIGTTOU)
+				}
+			}()
+		}
+	}
 	// Cancellation must stop the command's descendants as well as its shell;
 	// ordinary dev shutdown then handles any submitted jobs through exact release.
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
@@ -71,6 +88,11 @@ func devCommandSession(ctx context.Context, args []string, in io.Reader, out, er
 			var exited *exec.ExitError
 			if errors.As(err, &exited) && exited.ExitCode() > 0 {
 				code = exited.ExitCode()
+			}
+			if exited != nil {
+				if status, ok := exited.Sys().(syscall.WaitStatus); ok && status.Signaled() && status.Signal() == syscall.SIGINT {
+					code = 130
+				}
 			}
 			if commandCtx.Err() != nil {
 				code = 130
