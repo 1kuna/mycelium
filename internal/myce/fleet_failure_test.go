@@ -240,6 +240,8 @@ func TestFleetFailureFinalPublisherRecheckPreservesCode(t *testing.T) {
 	}
 }
 
+// #846 reproduces transient stale proof after intent. Maintenance changes remain
+// terminal at each boundary; only stale control responses may refetch.
 func TestFleetFailureAfterIntentRemainsDurable(t *testing.T) {
 	for _, denyAt := range []int{2, 3, 4} {
 		t.Run(map[int]string{2: "before-fetch", 3: "before-publication", 4: "before-restart"}[denyAt], func(t *testing.T) {
@@ -247,12 +249,12 @@ func TestFleetFailureAfterIntentRemainsDurable(t *testing.T) {
 			if err := f.launch(); err != nil {
 				t.Fatal(err)
 			}
-			f.denyAt, f.denyCode = denyAt, "fleet_instruction_stale"
-			if err := f.apply(); err == nil || err.Error() != "fleet_instruction_stale" {
-				t.Fatal("stale helper authorization lost code", err)
+			f.denyAt, f.denyCode = denyAt, "fleet_maintenance_changed"
+			if err := f.apply(); err == nil || err.Error() != "fleet_maintenance_changed" {
+				t.Fatal("maintenance refusal lost code", err)
 			}
 			ack, err := ReadFleetUpdateFailure(f.c)
-			if err != nil || ack == nil || ack.Failure != "fleet_instruction_stale" || len(f.failureCodes) != 1 || f.failureCodes[0] != ack.Failure || f.restarts != 0 {
+			if err != nil || ack == nil || ack.Failure != "fleet_maintenance_changed" || len(f.failureCodes) != 1 || f.failureCodes[0] != ack.Failure || f.restarts != 0 {
 				t.Fatalf("helper failure not preserved: %+v %v", ack, err)
 			}
 			if err := f.apply(); err == nil || f.restarts != 0 || f.launches != 1 {
