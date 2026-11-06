@@ -377,6 +377,10 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 			s.Submissions[key] = &copy
 		}
 	}
+	// These diagnostic generations are replaced, never mutated in place.
+	// Their retained-fleet-sized copies do not belong under the queue mutex.
+	efficiencyHealth, strandedDemand := s.EfficiencyHealth, s.StrandedDemand
+	s.EfficiencyHealth, s.StrandedDemand = nil, nil
 	inputs := observationState{State: s, Models: q.models, Environments: q.environments, Calls: q.calls, Unreported: q.unreported}
 	if minimal {
 		inputs.Models, inputs.Environments, inputs.Calls, inputs.Unreported = ModelConfig{}, EnvironmentCatalog{}, nil, nil
@@ -411,6 +415,12 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	}
 	duration := queueHoldDuration(hold)
 	unlockRequest()
+	if efficiencyHealth != nil {
+		detached.State.EfficiencyHealth = copyObservationValue(reflect.ValueOf(efficiencyHealth)).Interface().(map[string]efficiencyBaseline)
+	}
+	if strandedDemand != nil {
+		detached.State.StrandedDemand = copyObservationValue(reflect.ValueOf(strandedDemand)).Interface().([]StrandedDemand)
+	}
 	if v.efficiencyView != nil {
 		v.efficiencyView = copyObservationValue(reflect.ValueOf(v.efficiencyView)).Interface().(*EfficiencyReport)
 	}
