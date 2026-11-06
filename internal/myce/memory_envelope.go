@@ -478,6 +478,14 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	if probeFloor > 0 {
 		copy.MemoryEnvelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
 	}
+	// The envelope acknowledgement keeps new workers on the old stop contract
+	// with older queues, and older workers on their existing kernel ceilings.
+	if contains(m.Capabilities, learnedMemoryGuardCapability) {
+		copy.MemoryEnvelope.Enforcement = learnedMemoryGuardEnforcement
+		if learnedMemoryCeilingGB(&copy, m) <= 0 {
+			copy.MemoryEnvelope.Enforcement = enforcement
+		}
+	}
 	return &copy
 }
 
