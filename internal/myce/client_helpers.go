@@ -187,11 +187,14 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 		}
 		var j *Job
 		var err error
+		held := false
 		if batchSupported {
 			var reply WaitReply
-			reply, err = c.WaitBatch(requestCtx, []string{id}, revisions, pace.Seconds(clock.Now(), ClientJobEvent(initial, clock.Now())))
+			seconds := pace.Seconds(clock.Now(), ClientJobEvent(initial, clock.Now()))
+			reply, err = c.WaitBatch(requestCtx, []string{id}, revisions, seconds)
 			if err == nil {
 				state := reply.Jobs[0]
+				held = seconds > 0 && state.Revision > 0
 				revisions[state.ID] = state.Revision
 				j = &Job{ID: state.ID, State: state.State, Reason: state.Reason}
 				if terminal(j.State) {
@@ -252,8 +255,10 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 			pace.Observe(clock.Now().Sub(started), false)
 		}
 		delay := pace.Delay(clock.Now(), ClientJobEvent(initial, clock.Now()), err, c.Jitter)
-		if err == nil && batchSupported {
-			delay = max(0, delay-clock.Now().Sub(started))
+		if err == nil && held {
+			// The negotiated hold paces reads and wakes on changes. Sleeping
+			// between holds would leave completion unobserved as pacing grows.
+			delay = 0
 		}
 		if jobDeadline != nil {
 			delay = min(delay, max(0, jobDeadline.Sub(clock.Now())))
