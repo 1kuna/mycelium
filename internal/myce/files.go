@@ -810,7 +810,7 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 	for {
 		started := c.clock().Now()
 		response, err := c.fileRequestOnce(ctx, method, path, body, headers, sizes...)
-		if err != nil || method != "GET" && method != "HEAD" || response.StatusCode != 429 && response.StatusCode != 503 || response.Header.Get("X-Myce-Error-Code") != "" {
+		if c.singleAttempt || err != nil || method != "GET" && method != "HEAD" || response.StatusCode != 429 && response.StatusCode != 503 || response.Header.Get("X-Myce-Error-Code") != "" {
 			return response, err
 		}
 		failure := &HTTPError{Status: response.StatusCode, RetryAfter: retryAfter(response.Header.Get("Retry-After"), c.clock().Now())}
@@ -933,10 +933,10 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 	return res, nil
 }
 
-func fileResponse(res *http.Response, want int) error {
+func fileResponse(res *http.Response, want int, now ...time.Time) error {
 	defer res.Body.Close()
 	if res.StatusCode != want {
-		return fileTransferError(res, "file transfer failed")
+		return fileTransferError(res, "file transfer failed", now...)
 	}
 	_, err := io.Copy(io.Discard, res.Body)
 	return err
@@ -963,7 +963,7 @@ func (c Client) hasFile(ctx context.Context, ref FileRef, purpose string) error 
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
-		return fileTransferError(res, "file unavailable")
+		return fileTransferError(res, "file unavailable", c.clock().Now())
 	}
 	if res.ContentLength != ref.SizeBytes || res.Header.Get("ETag") != `"`+ref.SHA256+`"` {
 		return errors.New("stored file identity mismatch")
@@ -1034,7 +1034,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 	if err != nil {
 		return err
 	}
-	if err = fileResponse(res, 201); err != nil {
+	if err = fileResponse(res, 201, c.clock().Now()); err != nil {
 		return err
 	}
 	if err = c.hasFile(ctx, ref, headPurpose); err == nil {
@@ -1047,7 +1047,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 	}
 	offset, e := strconv.ParseInt(res.Header.Get("Upload-Offset"), 10, 64)
 	size, se := strconv.ParseInt(res.Header.Get("Upload-Length"), 10, 64)
-	err = fileResponse(res, 200)
+	err = fileResponse(res, 200, c.clock().Now())
 	if err != nil {
 		return err
 	}
@@ -1065,7 +1065,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 			return err
 		}
 		next, e := strconv.ParseInt(res.Header.Get("Upload-Offset"), 10, 64)
-		if err = fileResponse(res, 204); err != nil {
+		if err = fileResponse(res, 204, c.clock().Now()); err != nil {
 			return err
 		}
 		if e != nil || next != offset+n {
@@ -1131,7 +1131,7 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 && res.StatusCode != 206 {
-		return fileTransferError(res, "download failed")
+		return fileTransferError(res, "download failed", c.clock().Now())
 	}
 	if res.Header.Get("ETag") != `"`+ref.SHA256+`"` {
 		return errors.New("download identity mismatch")
@@ -1166,11 +1166,16 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	return verifyFile(ctx, dest, ref)
 }
 
-func fileTransferError(res *http.Response, message string) error {
+func fileTransferError(res *http.Response, message string, observed ...time.Time) error {
+	now := (RealClock{}).Now()
+	if len(observed) > 0 {
+		now = observed[0]
+	}
+	delay := retryAfter(res.Header.Get("Retry-After"), now)
 	if res.Header.Get("X-Myce-Error-Code") == "file_blob_unavailable" {
 		d := safeStagingCause(&StagingCause{Operation: res.Header.Get("X-Myce-Storage-Operation"), Error: res.Header.Get("X-Myce-Storage-Error"), Status: res.StatusCode})
 		if d != nil {
-			return &stagingError{*d, &HTTPError{Status: res.StatusCode, Code: "file_blob_unavailable", Message: "queue blob read failed"}}
+			return &stagingError{*d, &HTTPError{Status: res.StatusCode, Code: "file_blob_unavailable", Message: "queue blob read failed", RetryAfter: delay}}
 		}
 	}
 	var body struct {
@@ -1179,15 +1184,15 @@ func fileTransferError(res *http.Response, message string) error {
 	}
 	if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil {
 		if fileStoreRefusalCode(body.Code) {
-			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error}
+			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error, RetryAfter: delay}
 		}
 		if publicErrorCode(body.Code) || body.Code == "request_failed" {
-			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: message}
+			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: message, RetryAfter: delay}
 		}
 	}
 
 	if res.StatusCode == 410 && res.Header.Get("X-Myce-Error-Code") == "result_expired" {
 		return resultExpired()
 	}
-	return &HTTPError{Status: res.StatusCode, Message: message}
+	return &HTTPError{Status: res.StatusCode, Message: message, RetryAfter: delay}
 }

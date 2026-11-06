@@ -188,6 +188,8 @@ On releases with adaptive observation admission (#800), healthy queues accept re
 
 **Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; each CLI job gets an initial diagnostic read to retain its deadline. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from wire throughput and gaps, ignoring buffered copies and the first arrival, so slow progress can continue; before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
 
+**Input and accepted-result recovery (next release, #831/#751):** profile/adapter input storage retries span preflight and reconciled uploads under the caller's one context deadline; each retry reports its sanitized cause and honours `Retry-After`. `myce result` uses the same transient recovery for accepted retrieval, including CI. Permanent authentication, TLS, capacity, integrity and configuration errors stop immediately. No retry count or new default deadline is imposed; without an owner deadline, interrupt to stop observation/recovery and resume the saved intent later.
+
 ## Explicit model master downloads (next release)
 
 Declared `model_snapshots` also handle SMB/CIFS `XSym` emulated symlinks from
