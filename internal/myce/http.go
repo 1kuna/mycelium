@@ -66,7 +66,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		respond(w, map[string]bool{"referenced": a.Queue.environmentReferenced(r.Context(), key)}, nil)
 	})
 	mux.HandleFunc("GET /api/portability", func(w http.ResponseWriter, r *http.Request) {
-		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")})
+		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")}, r.Context())
 		respondOperation(w, report, err, "portability_invalid")
 	})
 	mux.HandleFunc("POST /api/portability", func(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +74,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		if !decode(w, r, &request) {
 			return
 		}
-		report, err := a.Queue.Portability(request)
+		report, err := a.Queue.Portability(request, r.Context())
 		respondOperation(w, report, err, "portability_invalid")
 	})
 	mux.HandleFunc("POST /api/resolve", func(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +112,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			respondOperation(w, nil, err, "extension_invalid")
 			return
 		}
-		respond(w, ExtensionRegistration{OK: true, Warnings: a.Queue.extensionRegistrationWarnings(e)}, nil)
+		respond(w, ExtensionRegistration{OK: true, Warnings: a.Queue.extensionRegistrationWarnings(e, r.Context())}, nil)
 	})
 	mux.HandleFunc("GET /api/extensions/{digest}", func(w http.ResponseWriter, r *http.Request) {
 		e, err := a.Queue.extensionByDigest(r.PathValue("digest"), r.Context())

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -184,5 +185,74 @@ func TestQueueShutdownRollsBackUncommittedControl(t *testing.T) {
 	}
 	if q.s.Jobs[j.ID].State != "queued" {
 		t.Fatal("uncommitted control state survived shutdown")
+	}
+}
+
+func TestQueueShutdownCancelsPortability(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			q, clock := fixture(t)
+			handler := API{Queue: q, Token: "test"}.Handler()
+			pressure := q.mu.enablePressure(clock)
+			q.mu.Lock()
+			request := httptest.NewRequest(method, "/api/portability", strings.NewReader(`{}`))
+			request.Header.Set("Authorization", "Bearer test")
+			done := make(chan struct{})
+			go func() { defer close(done); handler.ServeHTTP(httptest.NewRecorder(), request) }()
+			await(t, func() bool {
+				pressure.mu.Lock()
+				defer pressure.mu.Unlock()
+				return len(pressure.waiting) > 0
+			})
+			q.BeginShutdown()
+			select {
+			case <-done:
+				q.mu.Unlock()
+			case <-time.After(time.Second):
+				q.mu.Unlock()
+				<-done
+				t.Fatal("portability retained its queue lock wait after shutdown")
+			}
+		})
+	}
+}
+
+func TestQueueShutdownCancelsFileStatus(t *testing.T) {
+	for _, phase := range []string{"lifecycle", "reservations"} {
+		t.Run(phase, func(t *testing.T) {
+			q, _ := fixture(t)
+			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+				t.Fatal(err)
+			}
+			view := q.captureFileStoreStatus()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			entered := make(chan struct{})
+			unlock := q.fileLifecycle.Unlock
+			if phase == "lifecycle" {
+				q.fileLifecycle.Lock()
+				close(entered)
+			} else {
+				q.mu.Lock()
+				unlock = q.mu.Unlock
+				original := q.files.reservedOutputs
+				q.files.reservedOutputs = func(payloads map[string]storedPayload, contexts ...context.Context) uint64 {
+					close(entered)
+					return original(payloads, contexts...)
+				}
+			}
+			done := make(chan struct{})
+			go func() { defer close(done); _ = view.status(ctx) }()
+			<-entered
+			cancel()
+			select {
+			case <-done:
+				unlock()
+			case <-time.After(time.Second):
+				unlock()
+				<-done
+				t.Fatal("file status retained its " + phase + " lock wait after cancellation")
+			}
+		})
 	}
 }

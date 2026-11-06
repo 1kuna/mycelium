@@ -584,6 +584,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
 	if err == nil {
 		out.FileStore = files.status(ctx)
+		err = ctx.Err()
 	}
 	out.Freshness = q.snapshotFreshness(out.Now, false)
 	return out, err

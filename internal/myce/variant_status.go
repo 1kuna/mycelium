@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -37,8 +38,8 @@ func portabilityWarnings(report PortabilityReport) []string {
 	return warnings
 }
 
-func (q *Queue) extensionRegistrationWarnings(e Extension) []string {
-	report, err := q.Portability(PortabilityRequest{Extension: extensionKey(e)})
+func (q *Queue) extensionRegistrationWarnings(e Extension, contexts ...context.Context) []string {
+	report, err := q.Portability(PortabilityRequest{Extension: extensionKey(e)}, contexts...)
 	if err != nil {
 		return []string{"Live portability coverage unknown; run myce portability --extension NAME@VERSION after repairing inventory or frozen inputs. Registration remains accepted."}
 	}
