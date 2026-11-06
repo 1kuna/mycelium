@@ -29,7 +29,7 @@ func (q *Queue) memorySizingRecoverable(j *Job) bool {
 	if j.Spec.Needs.Memory != "auto" {
 		return false
 	}
-	ok, _ := q.qualifiedTargetSized(memoryIntent(j))
+	ok, _ := q.qualifiedTargetMemory(memoryIntent(j), false)
 	return ok
 }
 
@@ -58,7 +58,7 @@ func (q *Queue) recoveryMemoryBound(j *Job, m *Machine, estimate memoryEstimate,
 	}
 	bound := max(prior, lower+margin)
 	largest := 0.0
-	q.memoryHistory().evaluateTargets(memoryIntent(j), func(fit targetFit, candidate *Job, target *Machine) bool {
+	q.memoryHistory().evaluateTargetsMemory(memoryIntent(j), false, func(fit targetFit, candidate *Job, target *Machine) bool {
 		if fit.failures == 0 {
 			room := target.FreeHostMemoryGB - target.MemoryCeilingSlackGB
 			if target.UnifiedMemory && !candidate.Spec.Needs.cpuOnly() {

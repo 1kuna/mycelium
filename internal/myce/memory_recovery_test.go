@@ -210,3 +210,32 @@ func TestMemoryRecoveryNewEligibleCapacity(t *testing.T) {
 		t.Fatal("same job not assigned")
 	}
 }
+
+// Authored containment remains a hard requirement even when the variant itself
+// selects auto memory. Qualification must not recursively size this diagnostic.
+func TestMemoryRecoveryAutoVariantContainment(t *testing.T) {
+	q, _ := fixture(t)
+	e := compositionExtension(t, false)
+	e.Kinds = nil
+	v := &e.Variants[0]
+	v.Target = ExecutionTarget{OS: "linux", Arch: "amd64", Platform: "cpu"}
+	v.Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
+	v.Execution.Main.MemoryGB = 40
+	v.References = map[string]WorkReference{"extension:sample": {InputShape: "small-v1", Unit: "records", Units: 10}}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	m := cpuMachine("worker", "host", "cpu", 8, 32)
+	m.HostMemoryBudgetGB, m.ExtensionFingerprint = 32, "cpu-v1"
+	report := newExtensionReport(e, &m, "extension:sample")
+	report.Setup, report.Qualified, report.CheckID = true, true, "check"
+	m.ExtensionReports = []ExtensionReport{report}
+	check(t, q, m, nil)
+	s := Spec{Name: "sample", Project: "sample", Extension: extensionKey(e), RequireTarget: true, Workload: &Workload{InputShape: "small-v1", Units: 10}}
+	_, err := q.Submit(s)
+	var api *HTTPError
+	if !errors.As(err, &api) || api.Code != "no_qualified_target" {
+		t.Fatal("auto variant lost authored containment", err)
+	}
+}
