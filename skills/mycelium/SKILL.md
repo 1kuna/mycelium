@@ -118,6 +118,12 @@ On releases with adaptive observation admission (#800), healthy queues accept re
 
 ## Explicit model master downloads (next release)
 
+Declared `model_snapshots` also handle SMB/CIFS `XSym` emulated symlinks from
+the next release: jobs get verified blob bytes, or a `model_snapshot_mismatch`
+or `model_snapshot_escape` refusal. Keep the original hub cache intact; do not
+copy weights or rewrite shared links to work around a refusal. See
+[declared snapshots](advanced.md#submit) for submission and read-only access.
+
 For every declared bundle file, including nested paths, run
 `myce model fetch BUNDLE/FILE --model-root PARENT --url URL --size-bytes BYTES --sha256 HASH`.
 The root must contain the bundle. Fetch stages beside it, resumes interruptions,
