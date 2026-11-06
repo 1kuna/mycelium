@@ -421,6 +421,7 @@ type SpecProjection struct {
 type Job struct {
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
+	Efficiency              *JobEfficiency         `json:"efficiency,omitempty"`
 	Blocker                 *Blocker               `json:"blocker,omitempty"`
 	WallTime                *WallTimeStatus        `json:"wall_time,omitempty"`
 	YieldPlan               *ScarceYieldProjection `json:"yield_plan,omitempty"`
@@ -802,6 +803,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	Efficiency          *EfficiencyReport    `json:"efficiency,omitempty"`
 	Freshness           *SnapshotFreshness   `json:"freshness,omitempty"`
 	StorageObservations []StorageObservation `json:"storage_observations,omitempty"`
 	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`

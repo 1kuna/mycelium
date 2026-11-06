@@ -237,7 +237,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	locked := readWallStart(q.observeRead)
 	hold := q.statusHolds.start()
 	var files fileStoreObservation
-	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
+	v := &Queue{efficiencyView: q.efficiencyView, clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root}
@@ -405,6 +405,9 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	}
 	duration := queueHoldDuration(hold)
 	unlockRequest()
+	if v.efficiencyView != nil {
+		v.efficiencyView = copyObservationValue(reflect.ValueOf(v.efficiencyView)).Interface().(*EfficiencyReport)
+	}
 	observeRead(q.observeRead, id, started, locked)
 	logQueueHold(duration, "captureObservation", nil)
 	if err != nil {

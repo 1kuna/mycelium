@@ -204,6 +204,12 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	})
 	// Administrative inspection must remain fresh for migration custody and
 	// measurement safety. It never consumes the observational status cache.
+	mux.HandleFunc("GET /api/efficiency", func(w http.ResponseWriter, r *http.Request) {
+		a.Queue.mu.RLock()
+		report := a.Queue.efficiencyView
+		a.Queue.mu.RUnlock()
+		respond(w, report, nil) // immutable projection; encoding stays outside q.mu.
+	})
 	mux.HandleFunc("GET /api/inspection", func(w http.ResponseWriter, r *http.Request) {
 		s, err := a.Queue.publicSnapshot(r.Context())
 		respondOperation(w, s, err, "status_unavailable")

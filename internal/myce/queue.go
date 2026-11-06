@@ -40,6 +40,9 @@ type batchRelease struct {
 }
 
 type state struct {
+	EfficiencyHosts        map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
+	EfficiencyHealth       map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
+	StrandedDemand         []StrandedDemand              `json:"stranded_demand,omitempty"`
 	ToolInventories        map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
 	FileInputClaims        map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
 	ModelIntervalSince     *time.Time                    `json:"model_interval_since,omitempty"`
@@ -113,7 +116,8 @@ type state struct {
 }
 type Queue struct {
 	requestBudgets      requestBudgets
-	waitStates          *waitStateIndex // scalar committed wait observations; separate reader mutex.
+	efficiencyView      *EfficiencyReport // immutable maintenance projection; published only after commit.
+	waitStates          *waitStateIndex   // scalar committed wait observations; separate reader mutex.
 	modelIntervalWrites []ModelIntervalEvent
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin *Queue
@@ -575,7 +579,11 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 	q.modelIntervalWrites = nil
 	q.accountUsage(q.clock.Now())
 	hold.next(holdBody)
+	q.accountEfficiency(q.clock.Now())
 	err = fn()
+	if err == nil {
+		q.refreshEfficiency()
+	}
 	if err == nil {
 		q.observeModelIntervals()
 	}
@@ -1162,6 +1170,10 @@ func (q *Queue) Tick() error { return q.TickContext(context.Background()) }
 func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
 	traffic := q.requestHealth.snapshot(q.clock.Now())
+	diagnostics, err := q.prepareEfficiencyDiagnostics(requestCtx)
+	if err != nil {
+		return err
+	}
 
 	// File-store health belongs to existing maintenance, not every control
 	// transaction. Snapshot under the lock, then perform bounded I/O outside it.
@@ -1178,12 +1190,14 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 			delay = DefaultHealthStorageDelay
 		}
 		q.applyRequestHealth(traffic)
+		q.applyEfficiencyDiagnostics(diagnostics)
 		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
 		q.maintain()
 		return nil
 	}, nil); err != nil {
 		return err
 	}
+	q.publishEfficiencyDiagnostics(diagnostics)
 	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
@@ -2067,6 +2081,9 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	out := Snapshot{HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
+	if forStatus {
+		out.Efficiency = q.efficiencyView
+	}
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)

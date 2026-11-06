@@ -1,0 +1,776 @@
+package myce
+
+import (
+	"context"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+	"time"
+)
+
+// Accounting follows the owning job's retention, not a second time-series
+// store. Rates are queue-clock observations; missing coverage is never zero use.
+// Host rows live only as long as their inventory. No payload or command is kept.
+type ResourceIntegral struct {
+	ReservedCoveredMemoryGBSeconds float64  `json:"reserved_covered_memory_gb_seconds"`
+	ReservedDeviceGBSeconds        float64  `json:"reserved_device_gb_seconds"`
+	MeasuredDeviceGBSeconds        float64  `json:"measured_device_gb_seconds"`
+	DeviceCoveredSeconds           float64  `json:"device_covered_seconds"`
+	ReservedMemoryGBSeconds        float64  `json:"reserved_memory_gb_seconds"`
+	MeasuredMemoryGBSeconds        float64  `json:"measured_memory_gb_seconds"`
+	MemoryCoveredSeconds           float64  `json:"memory_covered_seconds"`
+	ReservedCPUSeconds             float64  `json:"reserved_cpu_seconds"`
+	MeasuredCPUSeconds             *float64 `json:"measured_cpu_seconds"`
+	Seconds                        float64  `json:"seconds"`
+}
+
+func (a *ResourceIntegral) add(b ResourceIntegral) {
+	a.ReservedCoveredMemoryGBSeconds += b.ReservedCoveredMemoryGBSeconds
+	a.ReservedDeviceGBSeconds += b.ReservedDeviceGBSeconds
+	a.MeasuredDeviceGBSeconds += b.MeasuredDeviceGBSeconds
+	a.DeviceCoveredSeconds += b.DeviceCoveredSeconds
+	a.ReservedMemoryGBSeconds += b.ReservedMemoryGBSeconds
+	a.MeasuredMemoryGBSeconds += b.MeasuredMemoryGBSeconds
+	a.MemoryCoveredSeconds += b.MemoryCoveredSeconds
+	a.ReservedCPUSeconds += b.ReservedCPUSeconds
+	a.Seconds += b.Seconds
+	if b.MeasuredCPUSeconds != nil {
+		if a.MeasuredCPUSeconds == nil {
+			a.MeasuredCPUSeconds = new(float64)
+		}
+		*a.MeasuredCPUSeconds += *b.MeasuredCPUSeconds
+	}
+}
+
+type EfficiencyAllocation struct {
+	Host  string `json:"host"`
+	Work  string `json:"work"`
+	Basis string `json:"basis"`
+	ResourceIntegral
+}
+type efficiencyRate struct {
+	ReservedDeviceGB float64   `json:"reserved_device_gb"`
+	MeasuredDeviceGB *float64  `json:"measured_device_gb"`
+	DeviceValidUntil time.Time `json:"device_valid_until"`
+	Host             string    `json:"host,omitempty"`
+	Basis            string    `json:"basis,omitempty"`
+	ReservedMemoryGB float64   `json:"reserved_memory_gb"`
+	ReservedCPUCores float64   `json:"reserved_cpu_cores"`
+	MeasuredMemoryGB *float64  `json:"measured_memory_gb"`
+	ValidUntil       time.Time `json:"valid_until"`
+}
+type JobEfficiency struct {
+	Since       time.Time              `json:"since"`
+	At          time.Time              `json:"at"`
+	Work        string                 `json:"work"`
+	Blocker     string                 `json:"blocker,omitempty"`
+	WaitSeconds map[string]float64     `json:"wait_seconds"`
+	Allocations []EfficiencyAllocation `json:"allocations,omitempty"`
+	Rate        efficiencyRate         `json:"rate"`
+}
+type EfficiencyHost struct {
+	Host  string    `json:"host"`
+	Since time.Time `json:"since"`
+	At    time.Time `json:"at"`
+	ResourceIntegral
+	Rate                 efficiencyRate `json:"current"`
+	TotalMemoryGB        *float64       `json:"total_memory_gb"`
+	PhysicalUsedMemoryGB *float64       `json:"physical_used_memory_gb"`
+	IOStatus             string         `json:"io_status"`
+}
+type EfficiencyWait struct {
+	Active  bool               `json:"active"`
+	Blocker string             `json:"current_blocker,omitempty"`
+	JobID   string             `json:"job_id,omitempty"`
+	Project string             `json:"project"`
+	Seconds map[string]float64 `json:"seconds"`
+}
+type StrandedDemand struct {
+	JobID    string   `json:"job_id"`
+	Project  string   `json:"project"`
+	Host     string   `json:"host"`
+	Fields   []string `json:"excluding_fields"`
+	MemoryGB float64  `json:"memory_gb"`
+	CPUCores int      `json:"cpu_cores"`
+}
+type PredictionError struct {
+	JobID                string   `json:"job_id"`
+	Attempt              int      `json:"attempt"`
+	Work                 string   `json:"work"`
+	Basis                string   `json:"basis"`
+	ReservedHostGB       *float64 `json:"reserved_host_gb"`
+	AcceptedHostPeakGB   *float64 `json:"accepted_host_peak_gb"`
+	HostErrorGB          *float64 `json:"host_error_gb"`
+	ReservedDeviceGB     *float64 `json:"reserved_device_gb"`
+	AcceptedDevicePeakGB *float64 `json:"accepted_device_peak_gb"`
+	DeviceErrorGB        *float64 `json:"device_error_gb"`
+	PredictedSeconds     *float64 `json:"predicted_seconds"`
+	ActualSeconds        *float64 `json:"actual_seconds"`
+	DurationErrorSeconds *float64 `json:"duration_error_seconds"`
+}
+type WastedAttempt struct {
+	JobID      string                  `json:"job_id"`
+	Attempt    int                     `json:"attempt"`
+	Host       string                  `json:"host"`
+	Kind       string                  `json:"kind"`
+	EndedAt    time.Time               `json:"ended_at"`
+	Suspect    *bool                   `json:"suspect"`
+	Pressure   *MemoryPressureEvidence `json:"pressure"`
+	HeadroomGB *float64                `json:"headroom_gb"`
+	IOStatus   string                  `json:"io_status"`
+}
+type EfficiencySignal struct {
+	Subject         string   `json:"subject"`
+	Metric          string   `json:"metric"`
+	Value           float64  `json:"value"`
+	BaselineSamples int      `json:"baseline_samples"`
+	UpperBound      *float64 `json:"upper_bound"`
+	Active          bool     `json:"active"`
+}
+type EfficiencyReport struct {
+	At          time.Time              `json:"at"`
+	Hosts       []EfficiencyHost       `json:"hosts"`
+	Programs    []EfficiencyAllocation `json:"programs"`
+	Jobs        []EfficiencyWait       `json:"jobs"`
+	Projects    []EfficiencyWait       `json:"projects"`
+	Stranded    []StrandedDemand       `json:"stranded"`
+	Predictions []PredictionError      `json:"predictions"`
+	Wasted      []WastedAttempt        `json:"wasted_attempts"`
+	Signals     []EfficiencySignal     `json:"signals"`
+	CPUStatus   string                 `json:"cpu_status"`
+	Coverage    string                 `json:"coverage"`
+}
+
+func (e *JobEfficiency) advance(now time.Time) {
+	if !now.After(e.At) {
+		return
+	}
+	seconds := now.Sub(e.At).Seconds()
+	if e.Blocker != "" {
+		e.WaitSeconds[e.Blocker] += seconds
+	}
+	if e.Rate.Host != "" {
+		row := EfficiencyAllocation{Host: e.Rate.Host, Work: e.Work, Basis: e.Rate.Basis}
+		row.Seconds, row.ReservedMemoryGBSeconds, row.ReservedCPUSeconds = seconds, seconds*e.Rate.ReservedMemoryGB, seconds*e.Rate.ReservedCPUCores
+		covered := max(0, min(now.Sub(e.At), e.Rate.ValidUntil.Sub(e.At)).Seconds())
+		if e.Rate.MeasuredMemoryGB != nil {
+			row.MemoryCoveredSeconds, row.MeasuredMemoryGBSeconds = covered, covered**e.Rate.MeasuredMemoryGB
+			row.ReservedCoveredMemoryGBSeconds = covered * e.Rate.ReservedMemoryGB
+		}
+		row.ReservedDeviceGBSeconds = seconds * e.Rate.ReservedDeviceGB
+		deviceCovered := max(0, min(now.Sub(e.At), e.Rate.DeviceValidUntil.Sub(e.At)).Seconds())
+		if e.Rate.MeasuredDeviceGB != nil {
+			row.DeviceCoveredSeconds = deviceCovered
+			row.MeasuredDeviceGBSeconds = deviceCovered * *e.Rate.MeasuredDeviceGB
+		}
+		i := slices.IndexFunc(e.Allocations, func(a EfficiencyAllocation) bool { return a.Host == row.Host && a.Basis == row.Basis })
+		if i < 0 {
+			e.Allocations = append(e.Allocations, row)
+		} else {
+			e.Allocations[i].ResourceIntegral.add(row.ResourceIntegral)
+		}
+	}
+	e.At = now
+}
+func (h *EfficiencyHost) advance(now time.Time) {
+	if !now.After(h.At) {
+		return
+	}
+	seconds := now.Sub(h.At).Seconds()
+	h.Seconds += seconds
+	h.ReservedMemoryGBSeconds += seconds * h.Rate.ReservedMemoryGB
+	h.ReservedCPUSeconds += seconds * h.Rate.ReservedCPUCores
+	covered := max(0, min(now.Sub(h.At), h.Rate.ValidUntil.Sub(h.At)).Seconds())
+	if h.Rate.MeasuredMemoryGB != nil {
+		h.ReservedCoveredMemoryGBSeconds += covered * h.Rate.ReservedMemoryGB
+		h.MemoryCoveredSeconds += covered
+		h.MeasuredMemoryGBSeconds += covered * *h.Rate.MeasuredMemoryGB
+	}
+	h.ReservedDeviceGBSeconds += seconds * h.Rate.ReservedDeviceGB
+	deviceCovered := max(0, min(now.Sub(h.At), h.Rate.DeviceValidUntil.Sub(h.At)).Seconds())
+	if h.Rate.MeasuredDeviceGB != nil {
+		h.DeviceCoveredSeconds += deviceCovered
+		h.MeasuredDeviceGBSeconds += deviceCovered * *h.Rate.MeasuredDeviceGB
+	}
+	h.At = now
+}
+func (q *Queue) accountEfficiency(now time.Time) {
+	for _, j := range q.liveJobs() {
+		if j.Efficiency != nil {
+			j.Efficiency.advance(now)
+		}
+	}
+	for host, h := range q.s.EfficiencyHosts {
+		h.advance(now)
+		q.s.EfficiencyHosts[host] = h
+	}
+}
+func efficiencyBasis(j *Job) string {
+	if j.MemoryEnvelope != nil && j.MemoryEnvelope.Basis != "" {
+		return j.MemoryEnvelope.Basis
+	}
+	if j.Spec.Needs.Memory != "auto" && (j.Spec.Needs.HostMemoryGB > 0 || j.Spec.Needs.MemoryGB > 0) {
+		return "declared"
+	}
+	return "unknown"
+}
+func (q *Queue) refreshEfficiency() {
+	now := q.clock.Now()
+	for _, j := range q.liveJobs() {
+		if j.Efficiency == nil {
+			j.Efficiency = &JobEfficiency{Since: now, At: now, Work: profileMemoryIdentity(j), WaitSeconds: map[string]float64{}}
+		}
+		e := j.Efficiency
+		e.Rate = efficiencyRate{}
+		if j.State == "queued" && !cancelled(j) {
+			if e.Blocker == "" {
+				e.Blocker = "unknown"
+			}
+		} else if j.State == "paused" {
+			e.Blocker = "holds"
+		} else {
+			e.Blocker = ""
+		}
+		if !batchReservesCapacity(j) {
+			continue
+		}
+		m := q.s.Machines[j.Machine]
+		if m == nil {
+			continue
+		}
+		e.Rate = efficiencyRate{Host: hostID(m), Basis: efficiencyBasis(j), ReservedMemoryGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), ReservedCPUCores: float64(j.Spec.Needs.cores()), ReservedDeviceGB: j.Spec.Needs.MemoryGB}
+		sample := q.hostMemorySamples[j.Machine][jobKey(*j)]
+		if !sample.deviceAt.IsZero() && now.Before(sample.deviceAt.Add(deviceMemorySampleFreshFor)) {
+			gb := sample.deviceGB
+			e.Rate.MeasuredDeviceGB = &gb
+			e.Rate.DeviceValidUntil = sample.deviceAt.Add(deviceMemorySampleFreshFor)
+		}
+		if !sample.at.IsZero() && now.Before(sample.at.Add(hostMemorySampleFreshFor)) {
+			gb := sample.gb
+			e.Rate.MeasuredMemoryGB = &gb
+			e.Rate.ValidUntil = sample.at.Add(hostMemorySampleFreshFor)
+		}
+	}
+	if q.s.EfficiencyHosts == nil {
+		q.s.EfficiencyHosts = map[string]EfficiencyHost{}
+	}
+	seen := map[string]bool{}
+	for _, m := range q.s.Machines {
+		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
+			continue
+		}
+		host := hostID(m)
+		if seen[host] {
+			continue
+		}
+		seen[host] = true
+		h, ok := q.s.EfficiencyHosts[host]
+		if !ok {
+			h = EfficiencyHost{Host: host, Since: now, At: now}
+		}
+		h.Rate = efficiencyRate{Host: host, ReservedMemoryGB: m.HostMemoryInUseGB, ReservedCPUCores: float64(m.CPUInUseCores)}
+		h.TotalMemoryGB, h.PhysicalUsedMemoryGB = nil, nil
+		h.IOStatus = "unknown"
+		if o := m.MemoryObservation; o != nil && !m.Gone && now.Before(m.LastSeen.Add(q.machineLossTimeout(m.ID))) {
+			total, used := o.TotalGB, o.UsedGB
+			h.TotalMemoryGB, h.PhysicalUsedMemoryGB = &total, &used
+			if !o.AttributionUnknown {
+				gb := o.MyceliumGB
+				h.Rate.MeasuredMemoryGB = &gb
+				h.Rate.ValidUntil = m.LastSeen.Add(q.machineLossTimeout(m.ID))
+			}
+		}
+		q.s.EfficiencyHosts[host] = h
+	}
+	for host := range q.s.EfficiencyHosts {
+		if !seen[host] {
+			delete(q.s.EfficiencyHosts, host)
+		}
+	}
+}
+
+// Only the sampled reason's category is retained, never worker text. The
+// authoritative planner runs on a detached observation, not under q.mu.
+func efficiencyBlocker(reason string) string {
+	r := strings.ToLower(reason)
+	switch {
+	case strings.Contains(r, "hold"), strings.Contains(r, "reservation"), strings.Contains(r, "disabled"), strings.Contains(r, "paused"):
+		return "holds"
+	case strings.Contains(r, "building"), strings.Contains(r, "prepar"), strings.Contains(r, "copying"), strings.Contains(r, "staging"):
+		return "preparation"
+	case strings.Contains(r, "environment"), strings.Contains(r, "software"), strings.Contains(r, "extension"), strings.Contains(r, "qualification"), strings.Contains(r, "parity"):
+		return "environment"
+	case strings.Contains(r, "memory"), strings.Contains(r, "ram envelope"), strings.Contains(r, "host_capacity_accumulation"):
+		return "memory_reservation"
+	case strings.Contains(r, "target"), strings.Contains(r, "platform"), strings.Contains(r, "allow-list"), strings.Contains(r, "no_matching_device"):
+		return "authored_platform_targets"
+	case strings.Contains(r, "priority"), strings.Contains(r, "fair"), strings.Contains(r, "cap"), strings.Contains(r, "ahead"), strings.Contains(r, "backfill"):
+		return "priority_fairness"
+	case strings.Contains(r, "upstream"), strings.Contains(r, "producer"):
+		return "dependency"
+	default:
+		return "capacity"
+	}
+}
+
+// Stranded means the actual current fit succeeds after removing ONLY these
+// authored placement/policy exclusions. Capabilities, qualification, recipes,
+// parity, live resources, custody and preparation all remain required. Targets
+// are author intent; this report neither changes them nor asserts output parity.
+func (q *Queue) strandedDemand(j *Job) []StrandedDemand {
+	var rows []StrandedDemand
+	for _, m := range q.plannerMachines() {
+		fields := []string{}
+		if !machineAllowed(j.Spec.AllowedMachines, m.ID) {
+			fields = append(fields, "allowed_machines")
+		}
+		if contains(j.Spec.ExcludedMachines, m.ID) {
+			fields = append(fields, "excluded_machines")
+		}
+		if !q.projectAllows(j.Spec.Project, m.ID) {
+			fields = append(fields, "policy.projects.allowed_machines")
+		}
+		targetProbe := *j
+		targetProbe.Spec.Targets = nil
+		if !executionTargetMatches(j.Spec, m) && executionTargetMatches(targetProbe.Spec, m) {
+			fields = append(fields, "targets")
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		probe := *j
+		probe.Spec.AllowedMachines, probe.Spec.ExcludedMachines, probe.Spec.Targets = nil, nil, nil
+		if q.maintenanceBlocked(hostID(m)) || q.held(hostID(m)) || q.machineLimitReason(m) != "" || q.reservationReasonOnTarget(j, m) != "" {
+			continue
+		}
+		for _, candidate := range q.memoryCandidates(&probe, m) {
+			if !fitsResources(candidate, m, m.FreeMemoryGB) || !hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) || q.variantParityReason(candidate, m) != "" || !environmentReady(candidate, m) || !q.batchSlotFreeForEfficiency(candidate, m) {
+				continue
+			}
+			rows = append(rows, StrandedDemand{JobID: j.ID, Project: j.Spec.Project, Host: hostID(m), Fields: fields, MemoryGB: hostNeed(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB), CPUCores: candidate.Spec.Needs.cores()})
+			break
+		}
+	}
+	slices.SortFunc(rows, func(a, b StrandedDemand) int { return strings.Compare(a.JobID+a.Host, b.JobID+b.Host) })
+	return rows
+}
+func (q *Queue) batchSlotFreeForEfficiency(j *Job, m *Machine) bool {
+	return j.Spec.Needs.cpuOnly() || q.batchSlotFree(m, j)
+}
+
+// The existing detached read capture uses immutable cold summaries and copies
+// live planning inputs. Diagnostics run once on maintenance, never per GET.
+// Revision fencing prevents applying a pre-checkin category to changed demand.
+type efficiencyDiagnostics struct {
+	blockers  map[string]string
+	revision  uint64
+	report    *EfficiencyReport
+	stranded  []StrandedDemand
+	baselines map[string]efficiencyBaseline
+	signals   []EfficiencySignal
+	applied   bool
+}
+
+func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDiagnostics, error) {
+	q.mu.RLock()
+	revision := q.fileReferenceRevision
+	q.mu.RUnlock()
+	v, _, err := q.captureObservation("", ctx)
+	if err != nil {
+		return nil, err
+	}
+	d := &efficiencyDiagnostics{revision: revision, blockers: map[string]string{}}
+	v.memoryPlanning = newMemoryPlanningCache()
+	for _, j := range v.liveJobs() {
+		if j.State == "queued" && !cancelled(j) {
+			d.blockers[j.ID] = efficiencyBlocker(v.waitReason(j))
+			if j.Efficiency != nil {
+				j.Efficiency.advance(v.clock.Now())
+				j.Efficiency.Blocker = d.blockers[j.ID]
+			}
+			d.stranded = append(d.stranded, v.strandedDemand(j)...)
+		}
+	}
+	v.s.StrandedDemand = d.stranded
+	d.report = v.efficiencyReport()
+	d.baselines, d.signals = efficiencySignals(d.report, v.s.EfficiencyHealth)
+	slices.SortFunc(d.signals, func(a, b EfficiencySignal) int { return strings.Compare(a.Subject+a.Metric, b.Subject+b.Metric) })
+	d.report.Signals = d.signals
+	return d, nil
+}
+func (q *Queue) applyEfficiencyDiagnostics(d *efficiencyDiagnostics) {
+	if d == nil || d.revision != q.fileReferenceRevision {
+		return
+	}
+	for id, blocker := range d.blockers {
+		if j := q.s.Jobs[id]; j != nil && j.State == "queued" && j.Efficiency != nil {
+			j.Efficiency.Blocker = blocker
+		}
+	}
+	q.s.StrandedDemand = d.stranded
+	q.s.EfficiencyHealth = d.baselines
+	d.applied = true
+	seen := map[string]bool{}
+	for _, s := range d.signals {
+		key := "efficiency/" + s.Subject + "/" + s.Metric
+		seen[key] = true
+		event := HealthAlert{Kind: "efficiency_regression", Reason: s.Metric}
+		if _, ok := q.s.EfficiencyHosts[s.Subject]; ok {
+			event.Host = s.Subject
+		}
+		if project, ok := strings.CutPrefix(s.Subject, "project:"); ok {
+			event.Project = project
+		}
+		q.observeCurrentHealth(key, s.Active, event)
+	}
+	for key := range q.s.Health.Conditions {
+		if strings.HasPrefix(key, "efficiency/") && !seen[key] {
+			delete(q.s.Health.Conditions, key)
+		}
+	}
+}
+func (q *Queue) publishEfficiencyDiagnostics(d *efficiencyDiagnostics) {
+	if d == nil || !d.applied {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.efficiencyView == nil || !d.report.At.Before(q.efficiencyView.At) {
+		q.efficiencyView = d.report
+	}
+}
+
+// Test/explicit maintenance entry point; ordinary Tick shares its existing commit.
+func (q *Queue) updateEfficiencyDiagnostics(ctx context.Context) error {
+	d, err := q.prepareEfficiencyDiagnostics(ctx)
+	if err != nil {
+		return err
+	}
+	err = q.updateRequest(ctx, func() error { q.applyEfficiencyDiagnostics(d); return nil }, nil)
+	if err == nil {
+		q.publishEfficiencyDiagnostics(d)
+	}
+	return err
+}
+
+func (q *Queue) efficiencyReport() *EfficiencyReport {
+	now := q.clock.Now()
+	r := &EfficiencyReport{At: now, CPUStatus: "unknown", Coverage: "queue-clock integrals since first observation; measured memory covers fresh samples only; per-program memory is nonreclaimable attribution, host memory includes worker and managed descendants; retained jobs only"}
+	programs := map[string]EfficiencyAllocation{}
+	projects := map[string]map[string]float64{}
+	for _, h := range q.s.EfficiencyHosts {
+		h.advance(now)
+		r.Hosts = append(r.Hosts, h)
+	}
+	for _, j := range q.s.Jobs {
+		if e := j.Efficiency; e != nil {
+			copy := *e
+			copy.WaitSeconds = maps.Clone(e.WaitSeconds)
+			copy.Allocations = slices.Clone(e.Allocations)
+			if mutableJob(j) {
+				copy.advance(now)
+			}
+			if len(copy.WaitSeconds) > 0 {
+				r.Jobs = append(r.Jobs, EfficiencyWait{JobID: j.ID, Project: j.Spec.Project, Seconds: copy.WaitSeconds, Active: j.State == "queued" || j.State == "paused", Blocker: copy.Blocker})
+				if projects[j.Spec.Project] == nil {
+					projects[j.Spec.Project] = map[string]float64{}
+				}
+				for k, s := range copy.WaitSeconds {
+					projects[j.Spec.Project][k] += s
+				}
+			}
+			for _, a := range copy.Allocations {
+				key := a.Host + "/" + a.Work + "/" + a.Basis
+				row := programs[key]
+				row.Host, row.Work, row.Basis = a.Host, a.Work, a.Basis
+				row.ResourceIntegral.add(a.ResourceIntegral)
+				programs[key] = row
+			}
+		}
+		r.Predictions = append(r.Predictions, efficiencyPredictions(j)...)
+		r.Wasted = append(r.Wasted, efficiencyWasted(j)...)
+	}
+	for _, a := range programs {
+		r.Programs = append(r.Programs, a)
+	}
+	for project, seconds := range projects {
+		r.Projects = append(r.Projects, EfficiencyWait{Project: project, Seconds: seconds})
+	}
+	r.Stranded = slices.Clone(q.s.StrandedDemand)
+	for key, b := range q.s.EfficiencyHealth {
+		r.Signals = append(r.Signals, b.signal(key))
+	}
+	slices.SortFunc(r.Hosts, func(a, b EfficiencyHost) int { return strings.Compare(a.Host, b.Host) })
+	slices.SortFunc(r.Programs, func(a, b EfficiencyAllocation) int {
+		if (a.MemoryCoveredSeconds > 0) != (b.MemoryCoveredSeconds > 0) {
+			if a.MemoryCoveredSeconds > 0 {
+				return -1
+			}
+			return 1
+		}
+		if d := b.ReservedCoveredMemoryGBSeconds - b.MeasuredMemoryGBSeconds - (a.ReservedCoveredMemoryGBSeconds - a.MeasuredMemoryGBSeconds); d > 0 {
+			return 1
+		} else if d < 0 {
+			return -1
+		}
+		return strings.Compare(a.Host+a.Work+a.Basis, b.Host+b.Work+b.Basis)
+	})
+	slices.SortFunc(r.Jobs, func(a, b EfficiencyWait) int { return strings.Compare(a.JobID, b.JobID) })
+	slices.SortFunc(r.Projects, func(a, b EfficiencyWait) int { return strings.Compare(a.Project, b.Project) })
+	slices.SortFunc(r.Predictions, func(a, b PredictionError) int {
+		return strings.Compare(fmt.Sprintf("%s/%09d", a.JobID, a.Attempt), fmt.Sprintf("%s/%09d", b.JobID, b.Attempt))
+	})
+	slices.SortFunc(r.Wasted, func(a, b WastedAttempt) int {
+		return strings.Compare(fmt.Sprintf("%s/%09d", a.JobID, a.Attempt), fmt.Sprintf("%s/%09d", b.JobID, b.Attempt))
+	})
+	slices.SortFunc(r.Signals, func(a, b EfficiencySignal) int { return strings.Compare(a.Subject+a.Metric, b.Subject+b.Metric) })
+	return r
+}
+func efficiencyPredictions(j *Job) []PredictionError {
+	var rows []PredictionError
+	for _, f := range j.MemoryAttempts {
+		// LearningReason is the acceptance classifier, not an inference from exit 0.
+		if f.MemoryEnvelope == nil || f.MemoryPeak == nil || f.LearningReason != "eligible" {
+			continue
+		}
+		p := f.MemoryPeak
+		if p.constrained() || p.PressureUnavailable {
+			continue
+		}
+		e := f.MemoryEnvelope
+		row := PredictionError{JobID: j.ID, Attempt: f.Attempt, Basis: e.Basis}
+		if j.Efficiency != nil {
+			row.Work = j.Efficiency.Work
+		}
+		if p.HostGB != nil || p.CgroupGB != nil || p.CombinedHostGB != nil {
+			peak := hostMemoryPeakGB(p)
+			reserved := e.HostGB
+			delta := reserved - peak
+			row.ReservedHostGB, row.AcceptedHostPeakGB, row.HostErrorGB = &reserved, &peak, &delta
+		}
+		if p.DeviceGB != nil {
+			reserved, peak := e.DeviceGB, *p.DeviceGB
+			delta := reserved - peak
+			row.ReservedDeviceGB, row.AcceptedDevicePeakGB, row.DeviceErrorGB = &reserved, &peak, &delta
+		}
+		if t := j.Timing; t != nil && t.Execution.Attempt == f.Attempt && t.PredictedSeconds != nil && t.ActualSeconds != nil {
+			delta := *t.PredictedSeconds - *t.ActualSeconds
+			row.PredictedSeconds, row.ActualSeconds, row.DurationErrorSeconds = t.PredictedSeconds, t.ActualSeconds, &delta
+		}
+		rows = append(rows, row)
+	}
+	// Timing can exist without memory telemetry (including older workers).
+	if t := j.Timing; t != nil && t.PredictedSeconds != nil && t.ActualSeconds != nil && !slices.ContainsFunc(rows, func(r PredictionError) bool { return r.Attempt == t.Execution.Attempt }) {
+		delta := *t.PredictedSeconds - *t.ActualSeconds
+		rows = append(rows, PredictionError{JobID: j.ID, Attempt: t.Execution.Attempt, Basis: efficiencyBasis(j), PredictedSeconds: t.PredictedSeconds, ActualSeconds: t.ActualSeconds, DurationErrorSeconds: &delta})
+	}
+	return rows
+}
+func efficiencyWasted(j *Job) []WastedAttempt {
+	var rows []WastedAttempt
+	for _, o := range j.AttemptHistory {
+		kind := ""
+		if o.Interrupted {
+			kind = "lost"
+		}
+		if o.Forced || o.ExecutionCause != nil && (o.ExecutionCause.Class == "killed" || o.ExecutionCause.Class == "signal" || o.ExecutionCause.ExitCode != nil && *o.ExecutionCause.ExitCode == 137) {
+			kind = "killed"
+		}
+		if o.PoliteStop {
+			kind = "guard_stopped"
+		}
+		if o.OutOfMemory {
+			kind = "oom"
+		}
+		if kind == "" || o.OperatorStop || o.PriorityStop != nil {
+			continue
+		}
+		row := WastedAttempt{JobID: j.ID, Attempt: o.Attempt, Host: o.Machine, Kind: kind, EndedAt: o.EndedAt, IOStatus: "unknown"}
+		if o.Placement != nil {
+			row.Host = o.Placement.Host
+		}
+		for _, f := range j.MemoryAttempts {
+			if f.Attempt != o.Attempt || f.Machine != o.Machine || f.Session != o.Session || f.MemoryPeak == nil {
+				continue
+			}
+			p := f.MemoryPeak
+			if p.Pressure != nil {
+				pressure := *p.Pressure
+				pressure.Reason = "attempt_memory_window"
+				row.Pressure = &pressure
+			}
+			if p.Pressure != nil && !p.PressureUnavailable {
+				e := p.Pressure
+				if e.MinAvailableGB != nil {
+					gb := *e.MinAvailableGB - e.AvailableFloorGB
+					row.HeadroomGB = &gb
+				}
+				if e.ElapsedUS > 0 && e.HostStallUS != nil && e.CgroupStallUS != nil && row.HeadroomGB != nil {
+					suspect := *row.HeadroomGB > 0 && *e.HostStallUS == 0 && *e.CgroupStallUS == 0 && e.HostOOMDelta == 0 && e.HostPressureLevel == 0 && e.HostSwapGrowthBytes == 0 && e.HostSwapOutBytes == 0
+					row.Suspect = &suspect
+				}
+			}
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+type efficiencyBaseline struct {
+	History    alertSeries `json:"history"`
+	Adverse    int         `json:"adverse"`
+	Recovering int         `json:"recovering"`
+	Active     bool        `json:"active"`
+	Value      float64     `json:"value"`
+}
+
+func (b efficiencyBaseline) signal(key string) EfficiencySignal {
+	subject, metric, _ := strings.Cut(key, "/")
+	s := EfficiencySignal{Subject: subject, Metric: metric, Value: b.Value, BaselineSamples: len(b.History), Active: b.Active}
+	if len(b.History) >= alertWarmup {
+		_, hi := b.History.band()
+		s.UpperBound = &hi
+	}
+	return s
+}
+func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (map[string]efficiencyBaseline, []EfficiencySignal) {
+	values := map[string]float64{}
+	for _, h := range r.Hosts {
+		if h.Rate.MeasuredMemoryGB != nil {
+			values[h.Host+"/reservation_gap_gb"] = max(0, h.Rate.ReservedMemoryGB-*h.Rate.MeasuredMemoryGB)
+		}
+	}
+	for _, p := range r.Jobs {
+		if !p.Active {
+			continue
+		}
+		for _, category := range []string{"memory_reservation", "authored_platform_targets", "environment", "priority_fairness", "preparation", "capacity", "holds", "dependency", "unknown"} {
+			key := "project:" + p.Project + "/wait_" + category + "_seconds"
+			values[key] = max(values[key], p.Seconds[category])
+		}
+	}
+	predictionSums := map[string]float64{}
+	predictionCounts := map[string]int{}
+	for _, p := range r.Predictions {
+		subject := "work:" + p.Work + ":" + p.Basis
+		if p.AcceptedHostPeakGB != nil && *p.AcceptedHostPeakGB > 0 && p.HostErrorGB != nil {
+			key := subject + "/memory_prediction_relative_error"
+			predictionSums[key] += absHealth(*p.HostErrorGB / *p.AcceptedHostPeakGB)
+			predictionCounts[key]++
+		}
+		if p.ActualSeconds != nil && *p.ActualSeconds > 0 && p.DurationErrorSeconds != nil {
+			key := subject + "/duration_prediction_relative_error"
+			predictionSums[key] += absHealth(*p.DurationErrorSeconds / *p.ActualSeconds)
+			predictionCounts[key]++
+		}
+	}
+	for key, sum := range predictionSums {
+		values[key] = sum / float64(predictionCounts[key])
+	}
+	for _, h := range r.Hosts {
+		values[h.Host+"/wasted_attempts"] = 0
+		values[h.Host+"/suspect_attempts"] = 0
+	}
+	for _, a := range r.Wasted {
+		values[a.Host+"/wasted_attempts"]++
+		if a.Suspect != nil && *a.Suspect {
+			values[a.Host+"/suspect_attempts"]++
+		}
+	}
+
+	for _, s := range r.Stranded {
+		values[s.Host+"/stranded_demand"]++
+	}
+	// Preserve a zero baseline for enabled hosts before an exclusion appears.
+	for _, h := range r.Hosts {
+		if _, ok := values[h.Host+"/stranded_demand"]; !ok {
+			values[h.Host+"/stranded_demand"] = 0
+		}
+	}
+	next := map[string]efficiencyBaseline{}
+	var signals []EfficiencySignal
+	for key, value := range values {
+		b := old[key]
+		b.History = slices.Clone(b.History)
+		b.Value = value
+		if b.History.high(value) {
+			b.Adverse++
+			b.Recovering = 0
+		} else {
+			b.Adverse = 0
+			b.Recovering++
+			b.History.add(value)
+		}
+		if b.Adverse >= alertConfirmation {
+			b.Active = true
+		}
+		if b.Recovering >= alertConfirmation {
+			b.Active = false
+		}
+		next[key] = b
+		signals = append(signals, b.signal(key))
+	}
+	return next, signals
+}
+
+// A concise overview, with no made-up CPU/I/O measurement or ranked zero use.
+func (r *EfficiencyReport) Lines() []string {
+	if r == nil {
+		return nil
+	}
+	lines := []string{fmt.Sprintf("efficiency: %d stranded placements; %d wasted attempts; CPU use %s", len(r.Stranded), len(r.Wasted), r.CPUStatus)}
+	for _, h := range r.Hosts {
+		used := "unknown"
+		if h.Rate.MeasuredMemoryGB != nil {
+			used = fmt.Sprintf("%.1f GiB", *h.Rate.MeasuredMemoryGB)
+		}
+		physical := "unknown"
+		if h.PhysicalUsedMemoryGB != nil {
+			physical = fmt.Sprintf("%.1f GiB", *h.PhysicalUsedMemoryGB)
+		}
+		lines = append(lines, fmt.Sprintf("  %s: reserved %.1f GiB; measured Mycelium %s; physical used %s; integrated %.1f reserved / %.1f measured GiB-hours (%.0fs coverage); I/O %s", h.Host, h.Rate.ReservedMemoryGB, used, physical, h.ReservedMemoryGBSeconds/3600, h.MeasuredMemoryGBSeconds/3600, h.MemoryCoveredSeconds, h.IOStatus))
+	}
+	for _, p := range r.Projects {
+		for _, category := range slices.Sorted(maps.Keys(p.Seconds)) {
+			lines = append(lines, fmt.Sprintf("  project %s: %s wait %.1f hours", p.Project, category, p.Seconds[category]/3600))
+		}
+	}
+	for _, s := range r.Stranded {
+		lines = append(lines, fmt.Sprintf("  stranded %s on %s: excluded by %s", s.JobID, s.Host, strings.Join(s.Fields, ", ")))
+	}
+	seen := map[string]bool{}
+	for _, p := range r.Programs {
+		key := p.Host + "/" + p.Basis
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		lines = append(lines, fmt.Sprintf("  sizing %s %s: work %s; %.1f reserved / %.1f measured GiB-hours (%.0fs coverage)", p.Host, p.Basis, p.Work, p.ReservedMemoryGBSeconds/3600, p.MeasuredMemoryGBSeconds/3600, p.MemoryCoveredSeconds))
+	}
+	byBasis := map[string]int{}
+	for _, p := range r.Predictions {
+		byBasis[p.Basis]++
+	}
+	for _, basis := range slices.Sorted(maps.Keys(byBasis)) {
+		lines = append(lines, fmt.Sprintf("  predictions %s: %d accepted comparisons (signed errors in JSON)", basis, byBasis[basis]))
+	}
+	suspect, unknown := 0, 0
+	for _, a := range r.Wasted {
+		if a.Suspect == nil {
+			unknown++
+		} else if *a.Suspect {
+			suspect++
+		}
+	}
+	if len(r.Wasted) > 0 {
+		lines = append(lines, fmt.Sprintf("  stops: %d suspect; %d with unknown pressure", suspect, unknown))
+	}
+	for _, s := range r.Signals {
+		if s.Active {
+			lines = append(lines, "  efficiency regression: "+s.Subject+" "+s.Metric)
+		}
+	}
+
+	return lines
+}

@@ -25,6 +25,7 @@ type AttemptOutcome struct {
 	Reason         string              `json:"reason,omitempty"`
 	ExecutionCause *RuntimeCause       `json:"execution_cause,omitempty"`
 	CleanupCause   *RuntimeCause       `json:"cleanup_cause,omitempty"`
+	Forced         bool                `json:"forced,omitempty"`
 	Interrupted    bool                `json:"interrupted,omitempty"`
 	OutOfMemory    bool                `json:"out_of_memory,omitempty"`
 	PoliteStop     bool                `json:"polite_stop,omitempty"`
@@ -45,7 +46,7 @@ func attemptOutcome(j *Job, r Result) AttemptOutcome {
 		Placement:    j.Placement,
 		Attempt:      j.Attempt, Machine: j.Machine, Session: j.Session,
 		ExecutionCause: safeAttemptRuntimeCause(j, r.ExecutionCause), CleanupCause: safeRuntimeCause(r.CleanupCause),
-		Interrupted: r.Interrupted, OutOfMemory: r.OutOfMemory,
+		Forced: r.Forced, Interrupted: r.Interrupted, OutOfMemory: r.OutOfMemory,
 		PoliteStop: r.PoliteStop, OperatorStop: r.OperatorStop || plannedMaintenanceStop(j),
 		PriorityStop: r.PriorityStop,
 	}
