@@ -583,15 +583,7 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(b))
 	decoder.DisallowUnknownFields()
-	// Decode only known retired settings for saved-config overlays. They have no
-	// runtime representation and disappear when the current config is written.
-	legacy := struct {
-		*ServiceConfig
-		HostStateDir    json.RawMessage `json:"host_state_dir"`
-		StartDisabled   json.RawMessage `json:"start_disabled"`
-		RequiredWorkers json.RawMessage `json:"required_workers"`
-	}{ServiceConfig: &c}
-	e = decoder.Decode(&legacy)
+	e = decoder.Decode(&c)
 	// Like environment sizing, retire only the exact old default. Earlier
 	// configurations did not distinguish an explicit 10 GiB from the default.
 	// New explicit values record intent, including an explicit 10 GiB.

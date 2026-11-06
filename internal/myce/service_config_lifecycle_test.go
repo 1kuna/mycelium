@@ -19,11 +19,11 @@ func TestServiceConfigLifecycleDefaultAndExplicitBudgets(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, present := raw["production_infrastructure_retries"]
-		if !present {
+		if present != (budget != DefaultProductionInfrastructureRetries) {
 			t.Fatal("default/explicit intent lost", budget, present)
 		}
 		// Migration journals decode nested configs without ReadServiceConfig.
-		// Absence would turn adaptive -1 into the explicit zero-retry budget.
+		// They must apply the same absent default as installed config reads.
 		var nested struct{ Config ServiceConfig }
 		wrapped, err := json.Marshal(struct{ Config ServiceConfig }{c})
 		if err != nil || json.Unmarshal(wrapped, &nested) != nil || nested.Config.ProductionInfrastructureRetries != budget {
@@ -37,5 +37,15 @@ func TestServiceConfigLifecycleDefaultAndExplicitBudgets(t *testing.T) {
 		if err != nil || got.ProductionInfrastructureRetries != budget {
 			t.Fatal(budget, got.ProductionInfrastructureRetries, err)
 		}
+	}
+}
+
+func TestServiceConfigLifecycleStrictDecode(t *testing.T) {
+	var c ServiceConfig
+	if err := json.Unmarshal([]byte(`{"role":"worker","host_state_dir":"retired"}`), &c); err != nil || c.Role != "worker" || c.ProductionInfrastructureRetries != DefaultProductionInfrastructureRetries {
+		t.Fatal("legacy overlay/adaptive default", c.Role, c.ProductionInfrastructureRetries, err)
+	}
+	if err := json.Unmarshal([]byte(`{"unknown_setting":true}`), &c); err == nil {
+		t.Fatal("unknown installed setting accepted")
 	}
 }
