@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"os"
 	"testing"
 )
 
@@ -14,14 +13,10 @@ func TestEnvironmentCacheAutoSizing(t *testing.T) {
 		t.Fatalf("unbounded auto limit %d", c.Limit)
 	}
 
-	for _, tc := range []struct{ free, want int64 }{
-		{1 << 20, (1 << 20) - int64(os.Getpagesize())}, {23 << 30, (23 << 30) - int64(os.Getpagesize())}, {1000 << 30, (1000 << 30) - int64(os.Getpagesize())},
-	} {
-		got, err := environmentCacheSize(tc.free)
-		if got != tc.want || err != nil {
-			t.Fatalf("free=%d limit=%d err=%v", tc.free, got, err)
-		}
+	if limit, err := AutoEnvironmentCacheLimit(c.Root); err != nil || limit <= 0 {
+		t.Fatalf("measured cache headroom unavailable: limit=%d err=%v", limit, err)
 	}
+
 	for _, tc := range []struct {
 		saved    int64
 		explicit bool

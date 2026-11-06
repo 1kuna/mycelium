@@ -831,9 +831,11 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 	release := func() {
 		released.Do(func() {
 			at := c.Clock.Now()
-			bytes, _ := environmentDiskUsage(filepath.Join(c.Root, r.Key))
-			c.budgets.touch(c.Root, r.Key, bytes, at)
-			_ = os.Chtimes(filepath.Join(c.Root, r.Key, "ready.json"), at, at)
+			if c.ready(r.Key) {
+				bytes, _ := environmentDiskUsage(filepath.Join(c.Root, r.Key))
+				c.budgets.touch(c.Root, r.Key, bytes, at)
+				_ = os.Chtimes(filepath.Join(c.Root, r.Key, "ready.json"), at, at)
+			}
 			unlockEnvironment(use)
 			c.purgeReleased()
 		})

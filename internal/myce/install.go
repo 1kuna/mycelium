@@ -174,14 +174,17 @@ type ServiceConfig struct {
 	Config                 string    `json:"config"`
 }
 
-// s071's strict saved-config reader requires a positive model ceiling. Encode
-// automatic mode as the representation's unbounded sentinel for rollback; the
+// s071's strict saved-config reader requires positive cache ceilings. Encode
+// automatic modes as the representation's unbounded sentinel for rollback; the
 // current reader restores zero before any cache admission uses this value.
 // This is wire compatibility, never an automatically chosen storage budget.
 func (c ServiceConfig) MarshalJSON() ([]byte, error) {
 	type wire ServiceConfig
 	if c.ModelCacheBytes == 0 {
 		c.ModelCacheBytes = math.MaxInt64
+	}
+	if c.EnvironmentCacheBytes == 0 {
+		c.EnvironmentCacheBytes = math.MaxInt64
 	}
 	return json.Marshal(wire(c))
 }
@@ -607,6 +610,9 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	e = decoder.Decode(&legacy)
 	if e == nil && c.ModelCacheBytes == math.MaxInt64 {
 		c.ModelCacheBytes = 0
+	}
+	if e == nil && c.EnvironmentCacheBytes == math.MaxInt64 {
+		c.EnvironmentCacheBytes = 0
 	}
 	// Like environment sizing, retire only the exact old default. Earlier
 	// configurations did not distinguish an explicit 10 GiB from the default.

@@ -2,7 +2,6 @@ package myce
 
 import (
 	"errors"
-	"os"
 )
 
 // AutoEnvironmentCacheLimit reports current physical headroom. Runtime caches
@@ -11,14 +10,7 @@ func AutoEnvironmentCacheLimit(root string) (int64, error) {
 	if root == "" {
 		return 0, errors.New("environment cache root is required")
 	}
-	disk, err := workerDiskProbe(root)
-	if err != nil {
-		return 0, err
-	}
-	return environmentCacheSize(cacheBytes(disk.FreeBytes))
-}
-func environmentCacheSize(free int64) (int64, error) {
-	return max(0, free-int64(os.Getpagesize())), nil
+	return newCacheBudgets().limit(root, 0, 0, RealClock{}.Now())
 }
 
 // An explicit flag wins. Only the exact retired 20 GiB default migrates.

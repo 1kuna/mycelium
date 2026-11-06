@@ -41,6 +41,14 @@ func TestCacheUploadRestartRetainsAcceptedCommitment(t *testing.T) {
 	if err := store.reserveUpload("interrupted", 80<<30); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(root, "uploads"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", ".info"} {
+		if err := os.WriteFile(filepath.Join(root, "uploads", "interrupted"+suffix), []byte("accepted"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	store.closeHostClaims() // Queue exit relinquishes handles, never accepted custody.
 	disk.FreeBytes = 10 << 30
 	if _, err := b.reserve("worker", 1, clock); err == nil {
@@ -91,4 +99,21 @@ func TestCacheUploadRestoreDoesNotDeduplicateIndependentPartial(t *testing.T) {
 		t.Fatal("blob deduplication hid a separate resumable upload")
 	}
 	restarted.releaseUpload(hash)
+}
+
+func TestCacheUploadDeadOwnerWithNoResumablePathsRecovers(t *testing.T) {
+	clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	b, _ := syntheticCacheBudget(t, clock, 200<<30, 100<<30)
+	store := &FileStore{root: t.TempDir(), clock: clock, budgets: b}
+	if err := store.reserveUpload("uncreated", 80<<30); err != nil {
+		t.Fatal(err)
+	}
+	// A queue can die before tus creates its resumable pair, or after fenced
+	// removal and before retiring the record. Neither leaves resumable writes.
+	store.closeHostClaims()
+	next, err := b.reserve("worker", 80<<30, clock)
+	if err != nil {
+		t.Fatal("dead handle with no resumable pair permanently withheld capacity", err)
+	}
+	next.release()
 }

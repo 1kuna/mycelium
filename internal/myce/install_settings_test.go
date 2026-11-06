@@ -352,7 +352,7 @@ func TestInstallFileCacheOmittedAutomatic(t *testing.T) {
 
 func TestInstallAutomaticModelCacheRollbackEncoding(t *testing.T) {
 	for _, limit := range []int64{0, 32 << 30} {
-		c := ServiceConfig{Role: "worker", ModelCacheBytes: limit}
+		c := ServiceConfig{Role: "worker", ModelCacheBytes: limit, EnvironmentCacheBytes: limit}
 		data, err := json.Marshal(c)
 		if err != nil {
 			t.Fatal(err)
@@ -360,12 +360,13 @@ func TestInstallAutomaticModelCacheRollbackEncoding(t *testing.T) {
 		// The old strict decoder recognizes this field and requires a positive
 		// integer. The real downgrade journey also exercises its worker.
 		var legacy struct {
-			ModelCacheBytes int64 `json:"model_cache_bytes"`
+			ModelCacheBytes       int64 `json:"model_cache_bytes"`
+			EnvironmentCacheBytes int64 `json:"environment_cache_bytes"`
 		}
-		if err := json.Unmarshal(data, &legacy); err != nil || legacy.ModelCacheBytes <= 0 {
+		if err := json.Unmarshal(data, &legacy); err != nil || legacy.ModelCacheBytes <= 0 || legacy.EnvironmentCacheBytes <= 0 {
 			t.Fatalf("rollback reader cannot accept automatic ceiling: %v", err)
 		}
-		if limit == 0 && legacy.ModelCacheBytes != math.MaxInt64 {
+		if limit == 0 && (legacy.ModelCacheBytes != math.MaxInt64 || legacy.EnvironmentCacheBytes != math.MaxInt64) {
 			t.Fatal("automatic ceiling was serialized as a finite default")
 		}
 		path := filepath.Join(t.TempDir(), "config.json")
@@ -373,7 +374,7 @@ func TestInstallAutomaticModelCacheRollbackEncoding(t *testing.T) {
 			t.Fatal(err)
 		}
 		saved, err := ReadServiceConfig(path)
-		if err != nil || saved.ModelCacheBytes != limit {
+		if err != nil || saved.ModelCacheBytes != limit || saved.EnvironmentCacheBytes != limit {
 			t.Fatalf("cache intent changed after reload: %d, %v", saved.ModelCacheBytes, err)
 		}
 	}

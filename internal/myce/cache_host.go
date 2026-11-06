@@ -187,6 +187,17 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 			// Upload custody is durable. Builders may outlive their parent in a
 			// separate session; only an empty exact recorded session proves exit.
 			custody := c.Kind == "upload"
+			if !active && custody && len(c.Paths) >= 2 {
+				// Durable custody follows resumable tus authority, not a dead
+				// queue handle. Completed/fenced removal can precede scalar
+				// retirement; no remaining pair means no writer can resume it.
+				custody = false
+				for _, path := range c.Paths[:2] {
+					if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+						custody = true // Unknown/permission failures retain custody.
+					}
+				}
+			}
 			if !active && c.Kind == "explore" {
 				for _, group := range c.Helpers {
 					members, inspectErr := b.helpers(group)
@@ -197,7 +208,7 @@ func (b *cacheBudgets) hostView(volume string) (*hostCacheView, error) {
 				}
 			}
 			live := active || custody
-			if c.Kind == "upload" {
+			if c.Kind == "upload" && live {
 				v.persistent[c.Custody] = claim.Name()
 			}
 			encoded, encodeErr := json.Marshal(c)
