@@ -226,7 +226,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 		// error requires a physical probe, never another guessed factor.
 		lower = max(lower, hostMemoryPeakGB(estimate.host), estimate.constrainedGB)
 	}
-	budget := cap - m.MemoryCeilingSlackGB - exploratoryDriftMarginGB(m)
+	budget := cap - m.MemoryCeilingSlackGB - q.coldProbeDriftMarginGB(m)
 	hint := 0.0
 	if j.MemoryFallback != nil {
 		hint = j.MemoryFallback.HostMemoryGB

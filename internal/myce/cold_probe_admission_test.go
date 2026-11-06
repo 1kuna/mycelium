@@ -126,12 +126,19 @@ func TestColdProbeAdmissionLearnsExactRefusalAcrossRestart(t *testing.T) {
 	if q.coldProbeDriftMarginGB(&m) != minimumHostMemoryGB {
 		t.Fatal("stale refusal changed margin")
 	}
+	// The worker reports this same decline before it completes the refusal.
+	// Availability and the exact refusal are two observations of one drop.
+	clock.Advance(time.Second)
+	m.HostAvailableMemoryGB = free
+	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: r.Execution, Session: r.Session}}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
 	margin := q.coldProbeDriftMarginGB(&m)
-	if margin < .03 {
-		t.Fatal("strict refusal failed to teach snapshot-to-launch drop", margin)
+	if margin < .03 || margin > .03+2*minimumHostMemoryGB {
+		t.Fatal("strict refusal failed to retain one snapshot-to-launch drop", margin)
 	}
 	q = memoryFactsRestart(t, q, clock)
 	clock.Advance(time.Second)
@@ -149,5 +156,27 @@ func TestColdProbeAdmissionLearnsExactRefusalAcrossRestart(t *testing.T) {
 	candidate := q.memoryCandidate(&queued, q.s.Machines[m.ID])
 	if candidate.Spec.Needs.HostMemoryGB < 20 || hostFits(q.s.Machines[m.ID], 0, candidate.Spec.Needs.HostMemoryGB) {
 		t.Fatal("launch drift lowered a retained OOM requirement")
+	}
+}
+
+func TestColdProbeAdmissionBoundedExplorationUsesSameDrift(t *testing.T) {
+	q, clock, linux, darwin, s := memoryExplorationFixture(t)
+	memoryExplorationSeed(t, q, clock, linux, darwin, s, 3, 3.634326934814453)
+	clock.Advance(time.Second)
+	darwin.HostAvailableMemoryGB -= .5
+	check(t, q, darwin, nil)
+	if q.coldProbeDriftMarginGB(&darwin) <= exploratoryDriftMarginGB(&darwin) {
+		t.Fatal("fixture has no learned drift")
+	}
+	s.Targets = []ExecutionTarget{machineTarget(&darwin)}
+	s.Needs.HostMemoryGB = 1
+	queued := submit(t, q, s)
+	probe := check(t, q, darwin, nil).Job
+	if probe == nil || probe.ID != queued.ID || probe.MemoryEnvelope.Source != boundedMemoryExploration {
+		t.Fatal("learned launch drift blocked bounded exploration on idle host", job(t, q, queued.ID).Reason)
+	}
+	want := darwin.HostMemoryBudgetGB - darwin.MemoryCeilingSlackGB - q.coldProbeDriftMarginGB(&darwin)
+	if math.Abs(probe.Spec.Needs.HostMemoryGB-want) > 1e-9 {
+		t.Fatal("bounded and physical budgets used different drift reserves", probe.Spec.Needs.HostMemoryGB, want)
 	}
 }
