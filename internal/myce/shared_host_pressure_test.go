@@ -38,6 +38,9 @@ func TestSharedHostPressureYieldHysteresisAndExactRelease(t *testing.T) {
 	for _, sensor := range []string{"darwin memory", "linux PSI", "owner latency"} {
 		t.Run(sensor, func(t *testing.T) {
 			q, clock, m, run := sharedRunning(t, true)
+			if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+				t.Fatal(err)
+			}
 			p := SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
 			switch sensor {
 			case "darwin memory":

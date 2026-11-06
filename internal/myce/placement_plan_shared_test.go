@@ -278,6 +278,9 @@ func TestSharedDeviceXPUEnginePromotionWaitsForTierRelease(t *testing.T) {
 
 func TestSharedDeviceXPUPinnedEngineRetryWaitsForTierRelease(t *testing.T) {
 	q, clock, m := sharedXPUModelFixture(t)
+	if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	queued := submit(t, q, sharedSpec("experiment", 3))
 	run := assignedJob(machineCheck(t, q, m))
 	if run == nil || run.ID != queued.ID {

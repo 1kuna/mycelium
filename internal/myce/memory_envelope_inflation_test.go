@@ -118,6 +118,9 @@ func TestMemoryEnvelopeGenuineConstraintEscalationBounded(t *testing.T) {
 				t.Fatalf("genuine failure lost measured exploration bound: %+v", got)
 			}
 			retryState := job(t, q, run.ID)
+			if ending == "payload exit with interrupted flag" && retryState.State != "failed" {
+				t.Fatal("payload exit became an infrastructure retry", retryState.State)
+			}
 			if retryState.MemoryOOMFloor != nil {
 				retryCandidate := *retryState
 				retryCandidate.State = "queued"
