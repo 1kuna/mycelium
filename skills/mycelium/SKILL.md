@@ -211,6 +211,10 @@ context for the host owner: never stop their processes or services. See
 [host-health fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#automatic-host-health-834-next-release).
 Older queues omit the new status fields; workers retain local history and use
 the existing leaving signal for a confirmed local drain until support is negotiated.
+From the checkpoint-probe correction, checkpoint health uses the existing tiny
+exclusive create/close/remove check instead of enumerating the checkpoint root.
+This removes unnecessary directory work; genuinely slow checkpoint metadata
+still withholds dependent jobs under the unchanged measured thresholds.
 
 ## Read before extending this fixture
 

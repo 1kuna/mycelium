@@ -2740,7 +2740,15 @@ is separate from the laptop fixture and requires an authorized test window.
 ### Worker mount recovery (Linux and macOS)
 
 Workers reuse the host-hygiene mount probe for each configured checkpoint/NAS
-root. Each attempt stats the root and reads at most one directory entry. Access
+root. Checkpoint health reuses the existing admission access check: stat the
+root, exclusively create one empty `.myce-probe-*.tmp` file, close it and remove
+it. It does not enumerate checkpoint entries or retain a directory stream.
+NAS-root health stats the root and reads one directory entry, preserving
+read-only access checks. On macOS SMB, opening a directory stream can enumerate
+the directory even when the caller requests one entry. Avoiding that work
+removes unnecessary load and long directory-handle lifetimes; it does not make
+slow checkpoint create/remove operations healthy. Their measured latency still
+uses the unchanged host-relative thresholds. Access
 re-triggers an existing Linux systemd/autofs or macOS autofs mount through the
 OS; no separate repair daemon or privileged command is installed. Cached mount
 inventory is checked again after access, so an empty local mountpoint cannot

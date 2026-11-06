@@ -20,6 +20,14 @@ var workerHealthMountProbe = func(path string) error {
 	return readHealthMount(path, os.Stat, func(path string) (fs.ReadDirFile, error) { return os.Open(path) })
 }
 
+// Reuse checkpoint admission's exclusive create/close/remove access check.
+// ReadDir(1) can enumerate a large SMB directory while opening its stream on
+// macOS; health sampling must not repeatedly scan active checkpoint entries.
+var workerHealthCheckpointProbe = func(path string) error {
+	probeguard.Check()
+	return workerCheckpointAvailable(path, func() {})
+}
+
 func readHealthMount(path string, stat func(string) (os.FileInfo, error), open func(string) (fs.ReadDirFile, error)) error {
 	info, err := stat(path)
 	if err != nil {
@@ -93,7 +101,15 @@ func probeRecoveryMount(path, required, osname string, probe func(string) error,
 	return err
 }
 
+func healthMountAccess(role string) func(string) error {
+	if role == "checkpoint" {
+		return workerHealthCheckpointProbe
+	}
+	return workerHealthMountProbe
+}
+
 func recoveryMountProbe(w Worker, role, path string) func(string) error {
+	probe := healthMountAccess(role)
 	required := ""
 	if w.ServiceConfig != nil && withinNAS(w.ServiceConfig.NAS, path) && w.ServiceConfig.NAS != "" {
 		required = w.ServiceConfig.NAS
@@ -113,7 +129,7 @@ func recoveryMountProbe(w Worker, role, path string) func(string) error {
 			}
 			w.rootMonitor.mu.Unlock()
 		}
-		return probeRecoveryMount(path, required, runtime.GOOS, workerHealthMountProbe, func() ([]nasMount, error) {
+		return probeRecoveryMount(path, required, runtime.GOOS, probe, func() ([]nasMount, error) {
 			probeguard.Check()
 			return mountedNASInventory(context.Background(), runtime.GOOS, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
 				if runtime.GOOS == "linux" {
