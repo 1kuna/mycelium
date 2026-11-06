@@ -12,8 +12,12 @@ import (
 // Synthetic capacities replay the CPU-only render/OCR contention without any
 // installation identity. A CPU job on a unified host still uses host RAM only.
 func TestMemoryLiveShapeLearnedFamilyCoSchedules(t *testing.T) {
-	for _, ram := range []float64{2, 256} {
-		t.Run(fmt.Sprint(ram), func(t *testing.T) {
+	for _, tc := range []struct {
+		ram      float64
+		evidence int
+	}{{2, 1}, {2, 41}, {256, 1}, {256, 41}} {
+		ram := tc.ram
+		t.Run(fmt.Sprintf("%g/%d", ram, tc.evidence), func(t *testing.T) {
 			q, clock := fixture(t)
 			m := cpuMachine("worker", "host", "cpu", 32, ram)
 			m.HostMemoryBudgetGB, m.ExtensionFingerprint = ram*.75, "cpu-v1"
@@ -24,14 +28,17 @@ func TestMemoryLiveShapeLearnedFamilyCoSchedules(t *testing.T) {
 			check(t, q, m, nil)
 			s := cpuSpec(2, 0)
 			low, peak, spread := ram/16, ram/12, ram/12-ram/16
-			for i := 0; i < 41; i++ {
+			for i := 0; i < tc.evidence; i++ {
 				n := low
 				if i%2 == 0 {
 					n = peak
 				}
 				runMemory(t, q, clock, m, s, n, func(r *Result) { r.MemoryPeak.NonreclaimableGB = &n; r.MemoryPeak.Events = &MemoryEventCounts{} })
 			}
-			// New commands in the same work family must reuse all 41 accepted
+			if tc.evidence == 1 {
+				spread = minimumHostMemoryGB
+			}
+			// New commands in the same work family must reuse all accepted
 			// attempts, with observed spread rather than an arbitrary multiplier.
 			s.Run.Command = []string{"echo", "ocr-next-band"}
 			for i := 0; i < 5; i++ {
@@ -44,7 +51,7 @@ func TestMemoryLiveShapeLearnedFamilyCoSchedules(t *testing.T) {
 					t.Fatalf("job %d serialized", i)
 				}
 				e := j.MemoryEnvelope
-				if e.Basis != "exploratory" || e.Evidence != 41 || math.Abs(e.HostGB-(peak+spread)) > 1e-8 {
+				if e.Basis != "exploratory" || e.Evidence != tc.evidence || math.Abs(e.HostGB-(peak+spread)) > 1e-8 {
 					t.Fatalf("not measured peak plus spread: %+v", e)
 				}
 				active = append(active, j)
