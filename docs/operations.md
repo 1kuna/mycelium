@@ -2898,8 +2898,8 @@ If the Ed25519 publisher key is on this same Mac, append
 `--signing-key PRIVATE_SIGNING_KEY` to `fleet` or `assemble` to generate the
 signed `release.json` through the existing `myce release manifest` command.
 Otherwise transfer the verified assembled directory unchanged to the provisioned
-key host, including Linux, and use a host-native `myce` with these options and Go
-installed for reading build IDs:
+key host, including Linux, and use a host-native `myce` with these options.
+The signing-only publisher needs no Go toolchain:
 
 ```sh
 myce release manifest --dir ASSEMBLED_DIR --version VERSION --commit COMMIT \
@@ -2910,8 +2910,10 @@ myce release manifest --dir ASSEMBLED_DIR --version VERSION --commit COMMIT \
 Use the receipt digest retained independently from native assembly; computing it
 only from the transported receipt (or trusting its adjacent checksum file) does
 not authenticate the recorded native checks. The publisher rechecks manifest,
-artifact and build-receipt hashes, source/version, target/CGO metadata and build
-IDs without executing any candidate artifact. Native Darwin qualification still
+artifact and build-receipt hashes, source/version and target/CGO metadata without
+executing any candidate artifact. Exact build-ID version/commit proof comes from
+the authenticated native assembly receipt, whose artifact hashes must match.
+Native Darwin qualification still
 happens on the Mac during assembly. Missing proof or a mismatch refuses signing.
 The signer parses the newline-terminated unsigned manifest and signs exactly the
 serialized JSON value it embeds in `release.json`; never sign the unsigned file

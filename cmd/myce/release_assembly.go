@@ -7,10 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strings"
 
 	"mycelium/internal/myce"
 )
@@ -128,13 +126,10 @@ func verifiedAssembly(dir, version, commit, receiptPath, receiptHash string) (my
 		if settings["GOOS"] != a.OS || settings["GOARCH"] != a.Arch || settings["CGO_ENABLED"] != cgo {
 			return refuse()
 		}
-		out, err := exec.Command("go", "tool", "buildid", path).Output()
-		if err != nil {
-			return m, fmt.Errorf("read assembly build ID: %w", err)
-		}
-		if strings.TrimSpace(string(out)) != "myce-release:"+version+":"+commit {
-			return refuse()
-		}
+		// Native assembly verified the build ID's exact version and commit
+		// before retaining this artifact's hash/size in its build receipt.
+		// The independently pinned assembly digest authenticates that proof;
+		// matching the bytes above preserves it without a publisher toolchain.
 	}
 	return m, nil
 }
