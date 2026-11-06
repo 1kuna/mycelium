@@ -14,10 +14,15 @@ import (
 )
 
 func TestProductionStartGateSingleDurableWinner(t *testing.T) {
-	for _, boundary := range []bool{false, true} {
-		t.Run(map[bool]string{false: "before", true: "exactly"}[boundary], func(t *testing.T) {
+	for _, mode := range []string{"unbounded", "before", "exactly"} {
+		t.Run(mode, func(t *testing.T) {
+			boundary := mode == "exactly"
 			q, c := fixture(t)
-			submit(t, q, authoredStartSpec())
+			s := spec("production")
+			if mode != "unbounded" {
+				s = authoredStartSpec()
+			}
+			submit(t, q, s)
 			a := check(t, q, machine("b70", "xpu"), nil).Job
 			c.Advance(ProductionStartTimeout - time.Second)
 			if boundary {

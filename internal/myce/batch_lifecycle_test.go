@@ -239,111 +239,151 @@ func TestBatchLifecycleExpiredFanOutDoesNotReclaim(t *testing.T) {
 }
 
 func TestBatchLifecycleColdRecoveryAcceptsForce(t *testing.T) {
-	dir, identity := t.TempDir(), ID()
-	ready := filepath.Join(dir, "ready")
-	cmd := exec.Command("sh", "-c", `trap '' TERM; touch "$1"; while :; do sleep .01; done`, "fixture", ready)
-	cmd.Env = append(os.Environ(), "MYCE_PROCESS_ID="+identity)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() }()
-	nativeFile(t, dir, "ready")
-	clock := &manualWorkerClock{now: time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)}
-	q, _ := fixture(t)
-	q.clock = clock
-	w := recoveryWorker(t)
-	w.Clock = clock
-	w.control = &processControl{clock: clock}
-	spec := spec("experiment")
-	spec.Resumable = false // Test cleanup rather than checkpoint transport.
-	queued := submit(t, q, spec)
-	j := *check(t, q, w.Machine, nil).Job
-	if j.ID != queued.ID {
-		t.Fatal("missing assigned recovery attempt")
-	}
-	if err := q.Started(result(&j, false)); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.SetPreemptionGrace(time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.update(func() error { q.stop(q.touchJob(j.ID), "test checkpoint drain"); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	deadline := clock.Now().Add(time.Minute)
-	birth, err := processBirth(cmd.Process.Pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st := workerState{Identity: identity, PID: cmd.Process.Pid, Session: j.Session, Job: &j, StopAt: &deadline, Log: "drain.log", Groups: map[int]map[int]string{cmd.Process.Pid: {cmd.Process.Pid: birth}}}
-	if err := os.WriteFile(filepath.Join(dir, st.Log), []byte("checkpoint drain still active\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveWorkerJSON(dir, "attempt-"+identity+".json", st); err != nil {
-		t.Fatal(err)
-	}
-	s := &workerStore{dir: dir, state: st}
-	completions := make(chan struct{}, 1)
-	handler := API{Queue: q, Token: "test"}.Handler()
-	w.Client = Client{URL: "http://fixture", Token: "test", HTTP: &http.Client{Transport: fetchTransport(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Path == "/api/workers/complete" {
-			select {
-			case completions <- struct{}{}:
-			default:
+	for _, nativeCancel := range []bool{false, true} {
+		t.Run(fmt.Sprint("native-cancel=", nativeCancel), func(t *testing.T) {
+			dir, identity := t.TempDir(), ID()
+			ready := filepath.Join(dir, "ready")
+			cmd := exec.Command("sh", "-c", `trap '' TERM; touch "$1"; while :; do sleep .01; done`, "fixture", ready)
+			cmd.Env = append(os.Environ(), "MYCE_PROCESS_ID="+identity)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
 			}
-		}
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, req)
-		return recorder.Result(), nil
-	})}}
-	recovered := make(chan error, 1)
-	go func() { _, err := w.recoverAttempt(s); recovered <- err }()
-	select {
-	case err := <-recovered:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("cold recovery blocked control startup")
-	}
-	if s.state.Result == nil || !s.state.Result.ReleasePending {
-		t.Fatal("cold recovery lost custody")
-	}
-	a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{})}
-	ctx, cancel := context.WithCancel(context.Background())
-	go a.run(ctx)
-	defer func() { cancel(); <-a.done }()
-	a.update(w, AttemptDirective{Stop: true, GraceSeconds: 60}, true, false)
-	await(t, func() bool { logs, _ := q.Logs(j.ID, 0); return len(logs) > 0 })
-	select {
-	case <-completions:
-		t.Fatal("cooperative recovery published a result before cleanup")
-	case <-time.After(50 * time.Millisecond): // Many actor turns at its 1ms interval.
-	}
-	if got := job(t, q, j.ID); got.State != "stopping" || got.StopAt == nil || !got.StopAt.Equal(deadline) {
-		t.Fatal("recovery abandoned the accepted drain", got.State, got.StopAt)
-	}
-	directive := check(t, q, w.Machine, &j)
-	if !directive.Stop || directive.Kill {
-		t.Fatal("cooperative recovery became stale", directive)
-	}
-	// An exact force still overrides the recovered cooperative deadline.
-	if err := q.update(func() error { now := clock.Now(); q.touchJob(j.ID).StopAt = &now; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	directive = check(t, q, w.Machine, &j)
-	a.update(w, AttemptDirective{Stop: directive.Stop, Kill: directive.Kill, GraceSeconds: directive.GraceSeconds}, true, false)
-	await(t, func() bool {
-		_, _, finished, err := a.snapshot()
-		a.mu.Lock()
-		released := a.released
-		a.mu.Unlock()
-		return released || finished && err == nil
-	})
-	members, err := workerGroupMembers(cmd.Process.Pid)
-	if err != nil || len(members) != 0 {
-		t.Fatal("force failed to release recovered group", members, err)
+			defer func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() }()
+			nativeFile(t, dir, "ready")
+			clock := &manualWorkerClock{now: time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)}
+			q, _ := fixture(t)
+			q.clock = clock
+			w := recoveryWorker(t)
+			w.Clock = clock
+			w.control = &processControl{clock: clock}
+			spec := spec("experiment")
+			spec.Resumable = false // Test cleanup rather than checkpoint transport.
+			queued := submit(t, q, spec)
+			j := *check(t, q, w.Machine, nil).Job
+			if j.ID != queued.ID {
+				t.Fatal("missing assigned recovery attempt")
+			}
+			if err := q.Started(result(&j, false)); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.SetPreemptionGrace(time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.update(func() error { q.stop(q.touchJob(j.ID), "test checkpoint drain"); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			grace := time.Minute
+			if nativeCancel {
+				grace = unmeasuredBatchGrace
+				if err := q.Cancel(j.ID); err != nil {
+					t.Fatal(err)
+				}
+				if err := q.update(func() error { at := clock.Now().Add(grace); q.touchJob(j.ID).StopAt = &at; return nil }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			deadline := clock.Now().Add(grace)
+			birth, err := processBirth(cmd.Process.Pid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st := workerState{Identity: identity, PID: cmd.Process.Pid, Session: j.Session, Job: &j, StopAt: &deadline, Log: "drain.log", Groups: map[int]map[int]string{cmd.Process.Pid: {cmd.Process.Pid: birth}}}
+			if err := os.WriteFile(filepath.Join(dir, st.Log), []byte("checkpoint drain still active\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := saveWorkerJSON(dir, "attempt-"+identity+".json", st); err != nil {
+				t.Fatal(err)
+			}
+			if nativeCancel {
+				helper := exec.Command("sh", "-c", `touch "$1"; while :; do sleep .01; done`, "fixture", filepath.Join(dir, "helper"))
+				helper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+				if err := helper.Start(); err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = syscall.Kill(-helper.Process.Pid, syscall.SIGKILL); _ = helper.Wait() }()
+				nativeFile(t, dir, "helper")
+				helperBirth, err := processBirth(helper.Process.Pid)
+				if err != nil {
+					t.Fatal(err)
+				}
+				st.UserCancel, st.StopGrace = true, grace
+				st.Groups[helper.Process.Pid] = map[int]string{helper.Process.Pid: helperBirth}
+				if err := saveWorkerJSON(dir, "attempt-"+identity+".json", st); err != nil {
+					t.Fatal(err)
+				}
+				record := struct {
+					Identity string
+					Members  []nativeMember
+				}{identity, []nativeMember{{Name: "main", PID: cmd.Process.Pid, Birth: birth}, {Name: "helper", PID: helper.Process.Pid, Birth: helperBirth}}}
+				if err := saveWorkerJSON(dir, "native-"+identity+".json", record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := &workerStore{dir: dir, state: st}
+			completions := make(chan struct{}, 1)
+			handler := API{Queue: q, Token: "test"}.Handler()
+			w.Client = Client{URL: "http://fixture", Token: "test", HTTP: &http.Client{Transport: fetchTransport(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path == "/api/workers/complete" {
+					select {
+					case completions <- struct{}{}:
+					default:
+					}
+				}
+				recorder := httptest.NewRecorder()
+				handler.ServeHTTP(recorder, req)
+				return recorder.Result(), nil
+			})}}
+			recovered := make(chan error, 1)
+			go func() { _, err := w.recoverAttempt(s); recovered <- err }()
+			select {
+			case err := <-recovered:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("cold recovery blocked control startup")
+			}
+			if s.state.Result == nil || !s.state.Result.ReleasePending {
+				t.Fatal("cold recovery lost custody")
+			}
+			a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{})}
+			ctx, cancel := context.WithCancel(context.Background())
+			go a.run(ctx)
+			defer func() { cancel(); <-a.done }()
+			a.update(w, AttemptDirective{Stop: true, UserCancel: nativeCancel, GraceSeconds: grace.Seconds()}, true, false)
+			await(t, func() bool { logs, _ := q.Logs(j.ID, 0); return len(logs) > 0 })
+			select {
+			case <-completions:
+				t.Fatal("cooperative recovery published a result before cleanup")
+			case <-time.After(50 * time.Millisecond): // Many actor turns at its 1ms interval.
+			}
+			if got := job(t, q, j.ID); got.State != "stopping" || got.StopAt == nil || !got.StopAt.Equal(deadline) {
+				t.Fatal("recovery abandoned the accepted drain", got.State, got.StopAt)
+			}
+			directive := check(t, q, w.Machine, &j)
+			if !directive.Stop || directive.Kill {
+				t.Fatal("cooperative recovery became stale", directive)
+			}
+			// An exact force still overrides the recovered cooperative deadline.
+			if err := q.update(func() error { now := clock.Now(); q.touchJob(j.ID).StopAt = &now; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			directive = check(t, q, w.Machine, &j)
+			a.update(w, AttemptDirective{Stop: directive.Stop, Kill: directive.Kill, GraceSeconds: directive.GraceSeconds, UserCancel: directive.UserCancel}, true, false)
+			await(t, func() bool {
+				_, _, finished, err := a.snapshot()
+				a.mu.Lock()
+				released := a.released
+				a.mu.Unlock()
+				return released || finished && err == nil
+			})
+			members, err := workerGroupMembers(cmd.Process.Pid)
+			if err != nil || len(members) != 0 {
+				t.Fatal("force failed to release recovered group", members, err)
+			}
+
+		})
 	}
 }
 

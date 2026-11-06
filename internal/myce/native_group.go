@@ -1353,6 +1353,10 @@ func (s *workerStore) drainCancelledNativeMain(st *workerState, clock Clock, mem
 					if err := memory.stop(clock); err != nil {
 						return err
 					}
+				} else if s.cleanupNonblocking {
+					// Keep control startup and heartbeats available while main
+					// drains, so an exact force can still reach this attempt.
+					return errRecoveryStopPending
 				}
 				<-tick.C
 			}

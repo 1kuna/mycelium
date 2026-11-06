@@ -2557,7 +2557,7 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 			rejected = e
 			return nil
 		}
-		if j.State != "running" || j.ReleaseConfirmed || !dependencyReady(j) || cancelled(j) || (j.Spec.StartBy != nil && j.StartedAt != nil) {
+		if j.State != "running" || j.ReleaseConfirmed || !dependencyReady(j) || cancelled(j) || ((j.Spec.Priority == "production" || j.Spec.StartBy != nil) && j.StartedAt != nil) {
 			rejected = ErrStale
 			return nil
 		}

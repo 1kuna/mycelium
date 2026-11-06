@@ -46,7 +46,9 @@ func (q *Queue) observeBatchProgress(j *Job, generation int64) {
 		v.ReportMax = max(v.ReportMax, d)
 	}
 	v.ReportAt = now
-	if generation <= j.Progress || generation <= 0 {
+	// Assignment clears the current report, but restoring an accepted generation
+	// is not a newly saved checkpoint and cannot teach a stop cadence.
+	if generation <= max(j.Progress, q.s.BatchRetries[j.ID].Progress) || generation <= 0 {
 		q.s.BatchLifecycle[j.ID] = v
 		q.boundLearnedBatchStop(j, now)
 		return

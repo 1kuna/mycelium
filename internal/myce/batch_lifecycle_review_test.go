@@ -129,6 +129,7 @@ func TestBatchLifecycleRestoredNASGenerationIsNotNewProgress(t *testing.T) {
 		if err := q.Started(result(a, false)); err != nil {
 			t.Fatal(err)
 		}
+		clock.Advance(time.Second)
 		dir := filepath.Join(q.root, attemptCheckpoint(*a))
 		if filepath.IsAbs(attemptCheckpoint(*a)) {
 			dir = attemptCheckpoint(*a)
@@ -141,6 +142,11 @@ func TestBatchLifecycleRestoredNASGenerationIsNotNewProgress(t *testing.T) {
 		}
 		if _, err := q.Checkin(Checkin{Machine: m, Running: &Execution{ID: a.ID, Attempt: a.Attempt, Progress: 7}}); err != nil {
 			t.Fatal(err)
+		}
+		if attempt == 1 {
+			if grace := q.batchStopGrace(q.s.Jobs[j.ID]); grace != unmeasuredBatchGrace {
+				t.Fatal("restoration manufactured a checkpoint cadence", grace)
+			}
 		}
 		r := result(a, false)
 		r.Interrupted = true
