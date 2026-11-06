@@ -58,7 +58,7 @@ exec "$MYCE_TEST_REAL_PS" "$@"
 				s.Run.MemoryGB = 1
 			}
 			j := submit(t, q, s)
-			w := Worker{StateDir: t.TempDir(), Clock: clock, Interval: time.Millisecond, Machine: machine("worker", "fake"), Client: Client{URL: api.URL, Token: "test"}, memoryCeilings: fakeCeilings(t)}
+			w := Worker{EnvironmentLimit: 1 << 30, StateDir: t.TempDir(), Clock: clock, Interval: time.Millisecond, Machine: machine("worker", "fake"), Client: Client{URL: api.URL, Token: "test"}, memoryCeilings: fakeCeilings(t)}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- w.Run(ctx) }()

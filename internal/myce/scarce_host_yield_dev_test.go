@@ -24,7 +24,7 @@ func TestScarceHostYieldDev(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "files"), Token: "local-fixture", Workers: 1, Devices: 2, HostID: "scarce", CPUBudgetCores: 2, MemoryGB: 8, Interval: 20 * time.Millisecond})
+	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "files"), Token: "local-fixture", Workers: 1, Devices: 2, HostID: "scarce", CPUBudgetCores: 2, MemoryGB: 8, Interval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ while True:time.sleep(.01)
 	general.Devices = []MachineDevice{}
 	general.CapabilityProfile.OS = runtime.GOOS
 	general.CapabilityProfile.Arch = runtime.GOARCH
-	w := Worker{sharedCPUDev: true, CPUIsolationProbe: func(context.Context) error { return nil }, Machine: general, StateDir: filepath.Join(root, "general"), Client: c, ModelConfig: d.Queue.models, Clock: d.Queue.clock, Interval: 20 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 8, nil }}
+	w := Worker{EnvironmentLimit: 1 << 20, sharedCPUDev: true, CPUIsolationProbe: func(context.Context) error { return nil }, Machine: general, StateDir: filepath.Join(root, "general"), Client: c, ModelConfig: d.Queue.models, Clock: d.Queue.clock, Interval: 20 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 8, nil }}
 	go func() { done <- w.Run(workerCtx) }()
 	defer func() {
 		stopWorker()

@@ -69,7 +69,7 @@ func TestInstallCLIDryRunFakeDetection(t *testing.T) {
 				p.OS = "darwin"
 				p.Arch = "arm64"
 			}
-			if e := setupCommandWithProbe([]string{"install", "worker", "--nas", filepath.Join(home, "nas"), "--dry-run"}, p, home); e != nil {
+			if e := setupCommandWithProbe([]string{"install", "worker", "--nas", filepath.Join(home, "nas"), "--dry-run", "--environment-cache-bytes", "1048576"}, p, home); e != nil {
 				t.Fatal(e)
 			}
 			entries, _ := os.ReadDir(home)
@@ -186,7 +186,7 @@ func TestInstallCLICPUWithoutGPU(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Glob: func(string) ([]string, error) { return nil, nil }, Command: func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }}
-			args := append([]string{"install", "worker", "--nas", home, "--dry-run"}, tc.args...)
+			args := append([]string{"install", "worker", "--nas", home, "--dry-run", "--environment-cache-bytes", "1048576"}, tc.args...)
 			err := setupCommandWithProbe(args, probe, home)
 			if (err == nil) != tc.ok {
 				t.Fatal(err)
@@ -353,7 +353,7 @@ func TestInstallWorkerOverridesDetectedReserve(t *testing.T) {
 		return []byte("NVIDIA GB10, [N/A]"), nil
 	}}
 	probe = cudaPCIFixture(probe, true)
-	if err := setupCommandWithProbe([]string{"install", "worker", "--nas", home, "--reserve-memory-gb", "24", "--dry-run"}, probe, home); err != nil {
+	if err := setupCommandWithProbe([]string{"install", "worker", "--nas", home, "--reserve-memory-gb", "24", "--dry-run", "--environment-cache-bytes", "1048576"}, probe, home); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(out.Name())
@@ -469,7 +469,7 @@ func TestInstallWithoutPasswdEntry(t *testing.T) {
 			}
 			args := []string{"install", role, "--nas", home, "--dry-run"}
 			if role == "worker" {
-				args = append(args, "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "2")
+				args = append(args, "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "2", "--environment-cache-bytes", "1048576")
 			}
 			captureJoiningOutput(t, func() error {
 				return setupCommandWithAccountLookup(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home, lookup)
@@ -506,6 +506,7 @@ func TestM4InstallCLIConversionDryRunAndGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	base.HostID = "host"
+	base.EnvironmentCacheBytes = 1 << 20
 	args := []string{"install", "worker", "--config", base.Config, "--dry-run"}
 	for _, device := range []string{"0", "1"} {
 		c := base

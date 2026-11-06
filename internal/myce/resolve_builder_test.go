@@ -93,7 +93,7 @@ func TestResolveOldInterpreterBuilderJourney(t *testing.T) {
 					}
 					var builds atomic.Int32
 					devices := slices.Clone(m.Devices)
-					w := Worker{StateDir: newTestStateRoot(t), Machine: m, Client: client, Interval: time.Millisecond,
+					w := Worker{EnvironmentLimit: 1 << 30, StateDir: newTestStateRoot(t), Machine: m, Client: client, Interval: time.Millisecond,
 						CPUIsolationProbe: func(context.Context) error { return nil },
 						InventoryProbe:    func(context.Context) ([]MachineDevice, error) { return slices.Clone(devices), nil },
 					}

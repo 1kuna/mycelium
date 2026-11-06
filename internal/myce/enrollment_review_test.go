@@ -95,7 +95,7 @@ func TestEnrollmentReceiptFailureDoesNotStopWorker(t *testing.T) {
 		api.ServeHTTP(w, r)
 	}))
 	defer server.Close()
-	w := Worker{Enrollment: true, Machine: machine("receipt-test", "fake"), StateDir: dir, Clock: RealClock{}, Interval: 10 * time.Millisecond, Client: Client{URL: server.URL, Token: "test"}, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w := Worker{EnvironmentLimit: 1 << 30, Enrollment: true, Machine: machine("receipt-test", "fake"), StateDir: dir, Clock: RealClock{}, Interval: 10 * time.Millisecond, Client: Client{URL: server.URL, Token: "test"}, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)

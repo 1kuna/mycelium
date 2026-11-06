@@ -25,7 +25,7 @@ func prepareTestWorker(t *testing.T, e Extension) (*Queue, Worker) {
 	m.EnvironmentBuilder = true
 	server := testServerForEnvironments(t, q)
 	c := &EnvironmentCache{Root: t.TempDir(), Limit: 4 << 20}
-	return q, Worker{StateDir: newTestStateRoot(t), ExtensionRoot: t.TempDir(), Machine: m, Clock: RealClock{}, environmentCache: c, Client: Client{URL: server, Token: "test"}, extensionFingerprint: m.ExtensionFingerprint}
+	return q, Worker{StateDir: newTestStateRoot(t), ExtensionRoot: t.TempDir(), Machine: m, Clock: RealClock{}, EnvironmentLimit: 4 << 20, environmentCache: c, Client: Client{URL: server, Token: "test"}, extensionFingerprint: m.ExtensionFingerprint}
 }
 func TestExtensionAutomaticPrepareTwoJobsOneBuildAndPlacement(t *testing.T) {
 	e := compositionExtension(t, true)

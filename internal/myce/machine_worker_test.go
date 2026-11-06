@@ -521,7 +521,7 @@ func TestMachineWorkerUnsupportedMasksBeforeLaunch(t *testing.T) {
 	c.Models[0].Device = ""
 	c.Models[0].DeviceEnv = map[string]string{"ONEAPI_DEVICE_SELECTOR": "level_zero:0,1"}
 	check(validateModels(c))
-	w := Worker{Machine: Machine{Device: "0,0"}}
+	w := Worker{EnvironmentLimit: 1 << 30, Machine: Machine{Device: "0,0"}}
 	if err := w.Run(context.Background()); !errors.As(err, &rule) || rule.code != "gpu_selector_invalid" {
 		t.Fatalf("duplicate inventory selectors accepted: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestMachineWorkerCrashHelper(t *testing.T) {
 	m := machine("machine", "fake", "machine")
 	m.Devices = fakeMachineDevices()
 	m.HostMemoryBudgetGB = 32
-	w := Worker{nativeGPUDeviceProbe: syntheticNativeGPUDeviceProbe(fakeMachineDevices()...), Machine: m, StateDir: os.Getenv("MYCE_MACHINE_CRASH_STATE"), Client: Client{URL: os.Getenv("MYCE_MACHINE_CRASH_URL")}, Interval: 10 * time.Millisecond, Clock: RealClock{}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w := Worker{EnvironmentLimit: 1 << 30, nativeGPUDeviceProbe: syntheticNativeGPUDeviceProbe(fakeMachineDevices()...), Machine: m, StateDir: os.Getenv("MYCE_MACHINE_CRASH_STATE"), Client: Client{URL: os.Getenv("MYCE_MACHINE_CRASH_URL")}, Interval: 10 * time.Millisecond, Clock: RealClock{}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 	if err := w.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}

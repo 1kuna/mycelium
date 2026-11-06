@@ -110,6 +110,7 @@ type Worker struct {
 	EnvironmentRoot       string
 	EnvironmentLimit      int64
 	environmentCache      *EnvironmentCache
+	environmentSizeLimit  func(string) (int64, error) // Test seam for cache filesystem headroom.
 	environmentRun        func(context.Context, []string, string, []string, io.Writer, io.Writer) error
 	// Test seams for deterministic filesystem faults and audited fake engines.
 	beforeModelCopy      func(context.Context)
@@ -1144,7 +1145,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.EnvironmentRoot == "" {
 		w.EnvironmentRoot = filepath.Join(s.dir, "environment-cache")
 	}
-	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
+	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun, sizeLimit: w.environmentSizeLimit}
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}

@@ -133,7 +133,7 @@ func TestAttemptProtocolOldQueueWorkerRetainsCustody(t *testing.T) {
 		_ = json.NewEncoder(rw).Encode(Reply{}) // no keyed revision echo
 	}))
 	defer server.Close()
-	w := Worker{Machine: m, Clock: clock, StateDir: t.TempDir(), Client: Client{URL: server.URL, Token: "test"}}
+	w := Worker{EnvironmentLimit: 1 << 20, Machine: m, Clock: clock, StateDir: t.TempDir(), Client: Client{URL: server.URL, Token: "test"}}
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)

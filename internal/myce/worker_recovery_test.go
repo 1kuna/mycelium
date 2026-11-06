@@ -59,7 +59,7 @@ func recoveryWorker(t *testing.T) Worker {
 		handler.ServeHTTP(w, r)
 		return w.Result(), nil
 	})}
-	return Worker{Client: Client{URL: "http://worker-test.invalid", HTTP: client}, Machine: machine("recovery-worker", "fake"), StateDir: newTestStateRoot(t), Interval: time.Millisecond, Clock: RealClock{}}
+	return Worker{EnvironmentLimit: 1 << 20, Client: Client{URL: "http://worker-test.invalid", HTTP: client}, Machine: machine("recovery-worker", "fake"), StateDir: newTestStateRoot(t), Interval: time.Millisecond, Clock: RealClock{}}
 }
 func recoveryJob(t *testing.T, command []string) Job {
 	t.Helper()
@@ -530,7 +530,7 @@ func TestWorkerRecoveryCrashHelper(t *testing.T) {
 	if os.Getenv("MYCE_RECOVERY_TEST_HELPER") != "1" {
 		return
 	}
-	w := Worker{Client: Client{URL: os.Getenv("MYCE_RECOVERY_TEST_URL"), Token: "test"}, Machine: machine("crash-worker", "fake"), StateDir: os.Getenv("MYCE_RECOVERY_TEST_STATE"), Interval: 5 * time.Millisecond}
+	w := Worker{EnvironmentLimit: 1 << 20, Client: Client{URL: os.Getenv("MYCE_RECOVERY_TEST_URL"), Token: "test"}, Machine: machine("crash-worker", "fake"), StateDir: os.Getenv("MYCE_RECOVERY_TEST_STATE"), Interval: 5 * time.Millisecond}
 	if err := w.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +588,7 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := Worker{Client: Client{URL: server.URL, Token: "test"}, Machine: machine("crash-worker", "fake"), StateDir: stateDir, Interval: 5 * time.Millisecond}
+	w := Worker{EnvironmentLimit: 1 << 20, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("crash-worker", "fake"), StateDir: stateDir, Interval: 5 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	t.Cleanup(func() {

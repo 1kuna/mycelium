@@ -40,7 +40,7 @@ func TestCPUIsolationUnsupportedBeforePlacement(t *testing.T) {
 	j := submit(t, q, cpuSpec(1, 1))
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	w := Worker{Machine: cpuMachine("unsupported", "host", "fake", 4, 8), StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Clock: RealClock{}, Interval: time.Millisecond,
+	w := Worker{EnvironmentLimit: 1 << 30, Machine: cpuMachine("unsupported", "host", "fake", 4, 8), StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Clock: RealClock{}, Interval: time.Millisecond,
 		InventoryProbe: func(context.Context) ([]MachineDevice, error) {
 			devices := inventoryReviewDevices()
 			for i := range devices {

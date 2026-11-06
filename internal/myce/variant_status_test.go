@@ -375,7 +375,7 @@ func TestVariantStatusDev(t *testing.T) {
 	}
 	e.Outputs = []string{"output"}
 	e = freezeComposition(t, e)
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "files"), ExtensionRoot: filepath.Join(root, "extensions"), Token: "variant-dev-fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "files"), ExtensionRoot: filepath.Join(root, "extensions"), Token: "variant-dev-fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

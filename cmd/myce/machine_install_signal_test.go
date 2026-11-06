@@ -72,6 +72,7 @@ func TestM4InstallSignalJournal(t *testing.T) {
 			c.Service = filepath.Join(root, "units", "myce-worker@gpu0.service")
 			c.Device = "0"
 			c.HostID = "host"
+			c.EnvironmentCacheBytes = 1 << 20
 			c.EnvironmentFile = filepath.Join(root, "synthetic-secret-reference")
 			for _, p := range []string{filepath.Dir(c.Config), filepath.Dir(c.Service)} {
 				if err = os.MkdirAll(p, 0700); err != nil {

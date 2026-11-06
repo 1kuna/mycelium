@@ -105,7 +105,7 @@ func TestResolveLockedCPUJobWithStagedInputOnTwoRoots(t *testing.T) {
 	root := t.TempDir()
 	key := strings.Repeat("c", 64)
 	catalog := EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": {Key: key, Backend: "uv", LockFile: "requirements.txt", Python: "3.12", Files: map[string][]byte{"requirements.txt": []byte("# locked fixture\n")}}}}}
-	d, err := StartDev(DevConfig{Workers: 2, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "dev-resolve-token", Interval: 10 * time.Millisecond, EnvironmentConfig: catalog, Environments: []string{key}})
+	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 2, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "dev-resolve-token", Interval: 10 * time.Millisecond, EnvironmentConfig: catalog, Environments: []string{key}})
 	if err != nil {
 		t.Fatal(err)
 	}

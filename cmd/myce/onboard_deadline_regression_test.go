@@ -95,6 +95,7 @@ func TestEnrollmentDrainHasSeparateInstallBudget(t *testing.T) {
 	// The old non-enrollment worker has no prior receipt. The injected manager
 	// publishes an exact replacement receipt when it activates the new install.
 	c.EnvironmentFile, c.JoiningFile, c.HostID, c.AllowDeviceless = "", filepath.Join(home, "joining.json"), "hypha", true
+	c.EnvironmentCacheBytes = 1 << 20
 	roots, err := c.StateRoots()
 	if err != nil {
 		t.Fatal(err)

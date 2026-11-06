@@ -30,7 +30,7 @@ func TestInstallDockerNativeDefaults(t *testing.T) {
 			saved := os.Stdout
 			os.Stdout = out
 			defer func() { os.Stdout = saved; out.Close() }()
-			args := append([]string{"install", "worker", "--gpu", "fake", "--memory-gb", "8", "--nas", home, "--dry-run"}, tc.args...)
+			args := append([]string{"install", "worker", "--gpu", "fake", "--memory-gb", "8", "--nas", home, "--dry-run", "--environment-cache-bytes", "1048576"}, tc.args...)
 			if err := setupCommandWithProbe(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home); err != nil {
 				t.Fatal(err)
 			}

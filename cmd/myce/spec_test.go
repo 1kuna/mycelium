@@ -134,7 +134,7 @@ func TestSpecCheckOfflineNoAuthorityNetworkOrUploads(t *testing.T) {
 // An adapter's source warns when large bundled members defeat deduplication.
 func TestSpecCheckResolveNamesSideAndSourceBundles(t *testing.T) {
 	root := t.TempDir()
-	d, err := myce.StartDev(myce.DevConfig{Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-spec-token", Interval: 10 * time.Millisecond})
+	d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-spec-token", Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
