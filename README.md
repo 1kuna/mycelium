@@ -24,7 +24,7 @@ You should see this (job IDs, state changes, warnings and timestamps vary):
 Mycelium dev: temporary local queue · 2 fake workers · stops when the command exits
 hello from CPU
 Submitted fake-GPU job <job-id>
-<job-id> succeeded ...
+<job-id> succeeded
 Verified quickstart-result/result.txt
 hello from Mycelium
 ```
