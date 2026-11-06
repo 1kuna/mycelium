@@ -356,18 +356,19 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 	go func() {
 		defer close(m.done)
 		lane := hostProbeLane[HostHealthReading]{clock: w.Clock, timing: m.timing}
-		tick := time.NewTicker(lane.timing.controlPeriod())
-		defer tick.Stop()
 		for {
 			if completed, err := lane.step(ctx, m.source); completed {
 				_ = m.record(ctx, lane.at, lane.value, err, lane.observation)
 			}
+			timer := time.NewTimer(lane.waitDuration())
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return
-			case <-tick.C:
+			case <-timer.C:
 			case <-lane.done:
 			}
+			timer.Stop()
 		}
 	}()
 	return m, nil

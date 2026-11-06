@@ -820,7 +820,16 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	pressureProbe := &sharedPressureMonitor{clock: w.Clock, source: source, enabled: w.Machine.SharedHost != nil}
 	pressureProbe.lane.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go pressureProbe.run(ctx)
-	inventoryLane := hostProbeLane[[]MachineDevice]{clock: w.Clock, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}
+	inventory := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: w.Clock, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}}
+	probeInventory := w.InventoryProbe
+	go inventory.run(ctx, func(probeCtx context.Context) ([]MachineDevice, error) {
+		devices, err := probeInventory(probeCtx)
+		for i := range devices {
+			d := &devices[i]
+			d.ExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, d.Platform, d.ID)
+		}
+		return devices, err
+	})
 	var cpuProbe checkpointIO[*memoryCeilings]
 	sharedCPUAllowance := 0
 	events := make(chan WorkerEvent, 16)
@@ -986,15 +995,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)
 			m.DockerCleanup, m.DockerCause = diagnostics.DockerCleanup, diagnostics.DockerCause
 			m.FileTransferError = diagnostics.FileTransferError
-			probeInventory := w.InventoryProbe
-			observed, probeErr := sampleHostInventory(ctx, &inventoryLane, func(probeCtx context.Context) ([]MachineDevice, error) {
-				devices, err := probeInventory(probeCtx)
-				for i := range devices {
-					d := &devices[i]
-					d.ExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, d.Platform, d.ID)
-				}
-				return devices, err
-			})
+			observed, probeErr := inventory.snapshot()
 			if err := w.refreshInventory(ctx, observed, probeErr, root); err != nil {
 				return err
 			}

@@ -202,7 +202,8 @@ no agent polling or drain/resume loop is needed. Foreign CPU/RSS leaders are
 context for the host owner: never stop their processes or services. See
 [host-health fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#automatic-host-health-834-next-release).
 Older queues omit the new status fields; workers retain local history and use
-the existing leaving signal for a confirmed local drain until support is negotiated.
+reversible availability withholding for unknown health or a confirmed local drain
+until support is negotiated.
 
 ## Read before extending this fixture
 
