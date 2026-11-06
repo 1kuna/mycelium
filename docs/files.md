@@ -631,7 +631,12 @@ rules: worker-owned mounts and environment only.
 The worker resolves the snapshot in the standard hub-cache layout under its
 `--model-root` (`hub/models--OWNER--NAME/snapshots/REVISION`), never an authored
 path. Each snapshot file must be a link into that repository's `blobs/` folder
-or a regular file. Blobs named by SHA-256 (large files) are verified while
+or a regular file. On SMB/CIFS volumes without native symlinks, the worker
+recognizes fixed `XSym` (mfsymlink) files, checks their format checksum and
+resolves their targets within the same repository's content-addressed blobs.
+It stages the resolved blob bytes. Malformed or unsupported link encodings,
+missing targets and changed blobs receive a typed refusal; the source hub is
+never rewritten. Blobs named by SHA-256 (large files) are verified while
 copying; blobs named by Git SHA-1 (small files) are hashed and checked against
 their name. The verified closure is copied into the worker's model snapshot
 cache (`model-snapshots` under the file cache folder), reused by identical
