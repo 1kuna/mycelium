@@ -123,6 +123,11 @@ for the response age. Inspection and filtered/full status take a fresh capture;
 default status can reuse a generation for up to one second, with immediate
 terminal/release invalidation.
 
+From the next release, mixed CPU/RAM waits name occupied cores on eligible
+hosts alongside the other hosts' RAM shortages. Reserved cores are admission
+accounting, not measured CPU utilization; a RAM figure alone does not explain
+why every eligible host is waiting.
+
 If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
 repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium

@@ -52,6 +52,8 @@ func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
 			holder := submit(t, q, holderSpec)
 			if got := assignedJob(check(t, q, busy, nil)); got == nil || got.ID != holder.ID {
 				t.Fatal("fixture did not reserve all cores", got)
+			} else {
+				holder = got
 			}
 			ram := cpuMachine("amd-host", "amd-host", "cpu", 8, 0.5)
 			check(t, q, ram, nil)
