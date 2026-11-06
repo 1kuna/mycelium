@@ -184,8 +184,11 @@ func TestSignalEvidenceSyntheticExitsAndCoreMetadata(t *testing.T) {
 	if kernelFaultAddress(data, 42) != "ffffffe0" || kernelFaultAddress(data, 43) != "" {
 		t.Fatal("fault address/PID matching")
 	}
-	if coreCaptureState("|/usr/bin/handler", "Max core file size 0 unlimited bytes") != "disabled_soft_limit" {
+	if coreCaptureState("core.%p", "Max core file size 0 unlimited bytes") != "disabled_soft_limit" {
 		t.Fatal("disabled core capture hidden")
+	}
+	if coreCaptureState("|/usr/bin/handler", "Max core file size 0 unlimited bytes") != "pipe_handler_configured_no_record" {
+		t.Fatal("pipe handler availability inferred from ignored soft limit")
 	}
 	e := &SignalEvidence{CoreCapture: "unavailable"}
 	applyCoreMetadata(e, []byte(`{"COREDUMP_PID":"42","COREDUMP_TIMESTAMP":"1","COREDUMP_SIGNAL":"11","COREDUMP_FILENAME":"/old/core"}`), 42, clock.Now())
@@ -307,23 +310,21 @@ func TestSignalEvidencePublishesExitBeforeBlockedCapture(t *testing.T) {
 
 func TestSignalEvidenceLongCoreAndLibraryMaps(t *testing.T) {
 	_, clock := fixture(t)
-	start := clock.Now()
-	crash := start.Add(2 * time.Second)
-	observed := crash.Add(20 * time.Second) // Wait includes a slow core writer.
+	start := clock.Now().Add(800 * time.Millisecond)
+	crash := start.Truncate(time.Second)    // Kernel %t rounds a rapid crash down.
+	observed := start.Add(20 * time.Second) // Wait includes a slow core writer.
 	request := SignalCapture{PID: 42, StartedAt: start, ObservedAt: observed, Birth: "boot:123"}
-	// /proc/PID/stat fields 3..22, with the launch starttime in field 22.
-	stat := "42 (payload name) S " + strings.Repeat("0 ", 18) + "123"
 	maps := strings.Repeat("1000-2000 r--p 00000000 08:01 123 /runtime/libc.so.6\n", 100) + "2000-3000 r-xp 00001000 08:01 123 /runtime/libc.so.6\n"
 	if len(maps) <= 4096 {
 		t.Fatal("fixture must exceed journalctl's default field limit")
 	}
-	core, _ := json.Marshal(map[string]string{"COREDUMP_PID": "42", "COREDUMP_SIGNAL": "11", "COREDUMP_TIMESTAMP": fmt.Sprint(crash.UnixMicro()), "COREDUMP_FILENAME": "/operator-cores/core.42", "COREDUMP_PROC_MAPS": maps, "COREDUMP_PROC_STAT": stat})
+	core, _ := json.Marshal(map[string]string{"COREDUMP_PID": "42", "COREDUMP_SIGNAL": "11", "COREDUMP_TIMESTAMP": fmt.Sprint(crash.UnixMicro()), "COREDUMP_FILENAME": "/operator-cores/core.42", "COREDUMP_PROC_MAPS": maps})
 	kernel, _ := json.Marshal(map[string]string{"MESSAGE": "python[42]: segfault at ffffffe0 ip 123", "__REALTIME_TIMESTAMP": fmt.Sprint(crash.UnixMicro())})
 	e := &SignalEvidence{}
 	calls := 0
 	collectSignalJournal(context.Background(), e, request, func(_ context.Context, args ...string) ([]byte, bool, error) {
 		calls++
-		if !slices.Contains(args, "--all") || !slices.Contains(args, "--since=@"+fmt.Sprint(start.Unix())) {
+		if !slices.Contains(args, "--all") || !slices.Contains(args, "--reverse") || !slices.Contains(args, "--since=@"+fmt.Sprint(start.Unix())) {
 			t.Error("query loses large fields or crash lifetime", args)
 		}
 		if slices.Contains(args, "-k") {
@@ -337,12 +338,12 @@ func TestSignalEvidenceLongCoreAndLibraryMaps(t *testing.T) {
 	if calls != 2 || e.CorePointer == "" || len(e.Libraries) != 1 || e.Libraries[0].Name != "libc.so.6" || e.FaultAddress != "ffffffe0" {
 		t.Fatalf("slow core evidence lost: %+v", e)
 	}
-	// Recycled PID in the same lifetime window must not supply the loaded closure.
-	request.Birth = "boot:999"
+	// A same-number PID from before this execution must not supply its core.
+	request.StartedAt = observed.Add(-time.Second)
 	other := &SignalEvidence{}
 	applyCoreMetadataFor(other, core, request)
 	if other.CorePointer != "" || len(other.Libraries) != 0 {
-		t.Fatal("recycled PID supplied core")
+		t.Fatal("earlier execution supplied core")
 	}
 }
 

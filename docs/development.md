@@ -1335,8 +1335,10 @@ teardown classifier sees it immediately. One small PID pipe preserves an
 unwrapped plain command's child identity without tracing or modifying its
 environment. Joined native members reuse the launch handshake's payload PID;
 other wrappers need exact-attempt cgroup core metadata or report unknown. Core
-queries cover the execution lifetime and fence retained PID births, allowing
-core writing to delay Wait without losing earlier crash metadata. Synthetic
+queries cover the execution lifetime and match current-boot payload PIDs, allowing
+core writing to delay Wait without losing earlier crash metadata. Systemd does
+not export process births; kernel crash timestamps have second resolution.
+Newest-first bounded journal reads retain recent evidence on long attempts. Synthetic
 `BenchmarkFaultEvidenceCapture` measures parsing/attribution overhead, not GPU
 sampling or native journal latency. A Darwin arm64 synthetic run measured 3.623 µs/op,
 1,256 bytes/op and 30 allocations/op (200 ms benchmark); this excludes real

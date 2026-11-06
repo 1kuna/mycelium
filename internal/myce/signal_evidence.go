@@ -197,7 +197,7 @@ func collectSignalJournal(ctx context.Context, e *SignalEvidence, request Signal
 	pid, at := request.PID, request.ObservedAt
 	since := "--since=@" + strconv.FormatInt(request.StartedAt.Unix(), 10)
 	until := "--until=@" + strconv.FormatInt(at.Unix()+1, 10)
-	kernel, truncated, err := read(ctx, "-k", "-b", "--all", "--no-pager", "--quiet", "--output=json", since, until)
+	kernel, truncated, err := read(ctx, "-k", "-b", "--reverse", "--all", "--no-pager", "--quiet", "--output=json", since, until)
 	if err == nil && pid > 0 {
 		e.FaultAddress = kernelFaultAddress(kernel, pid)
 		if e.FaultAddress != "" {
@@ -211,7 +211,7 @@ func collectSignalJournal(ctx context.Context, e *SignalEvidence, request Signal
 	}
 	// Request only specific metadata: COREDUMP_ENVIRON, CMDLINE, stack text and
 	// memory bytes are deliberately excluded. PID + boot + event time fence reuse.
-	coreArgs := []string{"-b", "--all", "--no-pager", "--quiet", "--output=json", since, until, "--output-fields=COREDUMP_PID,COREDUMP_SIGNAL,COREDUMP_TIMESTAMP,COREDUMP_FILENAME,COREDUMP_TRUNCATED,COREDUMP_PROC_MAPS,COREDUMP_PROC_STAT,COREDUMP_CGROUP"}
+	coreArgs := []string{"-b", "--reverse", "--all", "--no-pager", "--quiet", "--output=json", since, until, "--output-fields=COREDUMP_PID,COREDUMP_SIGNAL,COREDUMP_TIMESTAMP,COREDUMP_FILENAME,COREDUMP_TRUNCATED,COREDUMP_PROC_MAPS,COREDUMP_CGROUP"}
 	if pid > 0 {
 		coreArgs = append(coreArgs, "COREDUMP_PID="+strconv.Itoa(pid))
 	} else if request.Cgroup != "" {
@@ -233,24 +233,27 @@ func collectSignalJournal(ctx context.Context, e *SignalEvidence, request Signal
 }
 
 func coreCaptureState(pattern, limits string) string {
-	for _, line := range strings.Split(limits, "\n") {
-		f := strings.Fields(line)
-		if len(f) >= 5 && strings.Join(f[:4], " ") == "Max core file size" && f[4] == "0" {
-			return "disabled_soft_limit"
-		}
-	}
 	p := strings.TrimSpace(pattern)
+	// Linux ignores RLIMIT_CORE for pipe handlers. Whether the configured
+	// handler accepts this process remains unknown until its record is readable.
 	if strings.HasPrefix(p, "|") {
 		if strings.Contains(p, "systemd-coredump") {
 			return "systemd_coredump_configured_no_record"
 		}
 		return "pipe_handler_configured_no_record"
 	}
+	for _, line := range strings.Split(limits, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 5 && strings.Join(f[:4], " ") == "Max core file size" && f[4] == "0" {
+			return "disabled_soft_limit"
+		}
+	}
 	if p != "" {
 		return "file_pattern_configured_no_record"
 	}
 	return "unavailable"
 }
+
 func kernelFaultAddress(data []byte, pid int) string {
 	address, _ := kernelSignalRecord(data, pid)
 	return address
@@ -287,7 +290,6 @@ func applyCoreMetadataFor(e *SignalEvidence, data []byte, request SignalCapture)
 			Filename  string `json:"COREDUMP_FILENAME"`
 			Truncated string `json:"COREDUMP_TRUNCATED"`
 			Maps      string `json:"COREDUMP_PROC_MAPS"`
-			Stat      string `json:"COREDUMP_PROC_STAT"`
 			Cgroup    string `json:"COREDUMP_CGROUP"`
 		}
 		if json.Unmarshal(line, &entry) != nil || request.PID > 0 && entry.PID != strconv.Itoa(request.PID) || request.PID == 0 && (request.Cgroup == "" || entry.Cgroup != request.Cgroup) {
@@ -298,19 +300,12 @@ func applyCoreMetadataFor(e *SignalEvidence, data []byte, request SignalCapture)
 			continue
 		}
 		at := time.UnixMicro(micros)
-		if at.Before(request.StartedAt) || at.After(request.ObservedAt) {
+		// The kernel's %t is whole seconds, even though systemd serializes
+		// microseconds. Do not discard a crash in its launch second. Matching
+		// is current boot + retained payload PID + execution window; systemd
+		// exports no /proc/PID/stat birth value to independently compare.
+		if at.Before(request.StartedAt.Truncate(time.Second)) || at.After(request.ObservedAt) {
 			continue
-		}
-		if request.Birth != "" {
-			_, start, ok := strings.Cut(request.Birth, ":")
-			i := strings.LastIndex(entry.Stat, ") ")
-			if i < 0 {
-				continue
-			}
-			fields := strings.Fields(entry.Stat[i+2:])
-			if !ok || len(fields) < 20 || fields[19] != start {
-				continue
-			}
 		}
 		signal, err := strconv.Atoi(entry.Signal)
 		if err != nil || crashSignal(syscall.Signal(signal)) == "" {
@@ -330,6 +325,7 @@ func applyCoreMetadataFor(e *SignalEvidence, data []byte, request SignalCapture)
 		if filepath.IsAbs(entry.Filename) && !strings.ContainsAny(entry.Filename, "\n\x00") {
 			e.CorePointer, e.CoreCapture, e.CoreTruncated = entry.Filename, "systemd_core_recorded", entry.Truncated == "1"
 		}
+		return // journal queries are newest-first; keep the first matching record.
 	}
 }
 func parseFaultMaps(data string) []FaultLibrary {

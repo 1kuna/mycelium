@@ -2102,7 +2102,9 @@ These are mapped identities, not ELF build IDs. A shell-reported exit status
 alone does not prove a signal; matching child-PID kernel/core evidence is needed,
 and the signal otherwise remains `unknown`. Exits are published before optional
 metadata I/O so teardown classification does not wait for capture. Core lookup
-covers the execution lifetime, matching the payload birth where retained. Queries
+matches the current boot, retained payload PID and execution lifetime, with
+second-resolution kernel crash timestamps. Systemd does not export a process
+birth value for independent comparison. Queries
 request complete selected journal fields within the capture byte budget. Native
 namespace main members use their joined payload PID. Other wrapped commands use
 exact-attempt cgroup core metadata where available; absent that identity, capture
@@ -2110,7 +2112,9 @@ reports unknown rather than recording the launcher as the payload.
 
 `core_capture` distinguishes a disabled inherited soft limit, an existing pipe
 handler/file pattern without a confirmed record, a recorded core, and unavailable
-capture. `core_pointer`, size where readable and truncation metadata refer to an
+capture. A zero soft limit disables file-pattern dumps; Linux pipe handlers
+ignore that limit, so their availability remains unconfirmed without a record.
+`core_pointer`, size where readable and truncation metadata refer to an
 existing core; Mycelium never reads, uploads, enables or deletes core bytes.
 Core storage/expiry remains the operator's configured policy; only the bounded
 pointer metadata follows Mycelium attempt retention. Core metadata can arrive
