@@ -90,6 +90,7 @@ func preflightInstallSlot(ctx context.Context, c ServiceConfig, command func(con
 	if err != nil {
 		return nil, err
 	}
+	client = fleetNoRedirect(client)
 	defer client.HTTP.CloseIdleConnections()
 	var status HostMaintenanceStatus
 	if err = client.Call(ctx, "GET", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", nil, &status); err != nil {
@@ -113,7 +114,8 @@ func preflightInstallSlot(ctx context.Context, c ServiceConfig, command func(con
 		return nil, err
 	}
 	if slot.SHA256 == running.SHA256 {
-		return nil, nil
+		slot.Version = running.Version
+		return &slotReconciliation{Running: *running, Slot: slot, RollbackTarget: "installed_slot"}, nil
 	}
 	var approved EnrollmentRelease
 	if err = client.Call(ctx, "GET", "/api/invites/release", nil, &approved); err != nil {

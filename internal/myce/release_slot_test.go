@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,5 +194,97 @@ func TestReleaseSlotAfterFailedFleetActivation(t *testing.T) {
 	r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
 	if err != nil || r.SlotReconciliation == nil || r.BeforeRuntime.SHA256 != fleetBytesHash(f.old) || r.BeforeSHA256 != fleetBytesHash(f.next) {
 		t.Fatalf("failed activation lost identities: %+v %v", r, err)
+	}
+}
+
+func TestReleaseSlotRepairVerifiedAddress(t *testing.T) {
+	f := newFleetInstallFixture(t, "linux")
+	server, authority := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/maintenance") {
+			_ = json.NewEncoder(w).Encode(HostMaintenanceStatus{Workers: []MaintenanceWorker{{Fresh: true, Machine: Machine{ID: f.c.Name, Session: f.i.Session, Fleet: &FleetRuntimeProof{Version: f.runtimeVersion, SHA256: fleetBytesHash(f.old), Session: f.i.Session, PID: f.runtimePID, ServiceHealthy: true, RunnerSmoke: true, StartGate: StartGateProtocol, AttemptProtocol: AttemptProtocol}}}}})
+		}
+	}))
+	stale := httptest.NewTLSServer(nil)
+	oldAddress := stale.URL
+	stale.Close()
+	authority.Address = oldAddress
+	f.c.Queue = oldAddress
+	f.c.JoiningFile = filepath.Join(f.c.State, "joining.json")
+	if err := WriteInvitation(f.c.JoiningFile, authority); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(f.c)
+	if err := os.WriteFile(f.c.Config, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	next := f.c
+	next.Queue = server.URL
+	source := filepath.Join(t.TempDir(), "candidate")
+	if err := os.WriteFile(source, f.old, 0700); err != nil {
+		t.Fatal(err)
+	}
+	command := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "systemctl" {
+			t.Fatalf("unexpected manager: %s", name)
+		}
+		text := strings.Join(args, " ")
+		if strings.Contains(text, "MainPID") {
+			return []byte(fmt.Sprintf("ActiveState=active\nSubState=running\nMainPID=%d\nNRestarts=0\nResult=success\n", f.managerPID)), nil
+		}
+		if strings.Contains(text, "UnitFileState") {
+			return []byte("enabled\n"), nil
+		}
+		return nil, nil
+	}
+	err := installWithFiles(context.Background(), next, source, "", command, installFiles{})
+	if err != nil {
+		t.Fatalf("verified queue address repair failed: %v", err)
+	}
+}
+
+func TestReleaseSlotMatchThenChangesBeforeSnapshot(t *testing.T) {
+	f := newFleetInstallFixture(t, "linux")
+	candidate := filepath.Join(t.TempDir(), "candidate")
+	if err := os.WriteFile(candidate, f.next, 0700); err != nil {
+		t.Fatal(err)
+	}
+	unitReads, restarts := 0, 0
+	unapproved := []byte("unknown bytes published after preflight")
+	failure := errors.New("synthetic activation failure")
+	command := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "systemctl" {
+			t.Fatalf("unexpected command %s", name)
+		}
+		text := strings.Join(args, " ")
+		if strings.Contains(text, "MainPID") {
+			return []byte(fmt.Sprintf("ActiveState=active\nSubState=running\nMainPID=%d\nNRestarts=0\nResult=success\n", f.managerPID)), nil
+		}
+		if strings.Contains(text, "UnitFileState") {
+			unitReads++
+			if unitReads == 2 {
+				if err := os.WriteFile(f.c.Binary, unapproved, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return []byte("enabled\n"), nil
+		}
+		if len(args) > 1 && args[1] == "restart" {
+			restarts++
+			if restarts == 1 {
+				return nil, failure
+			}
+		}
+		return nil, nil
+	}
+	err := installWithFiles(context.Background(), f.c, candidate, "", command, installFiles{})
+	got, readErr := os.ReadFile(f.c.Binary)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if errors.Is(err, failure) && string(got) == string(unapproved) {
+		t.Fatalf("installer published and then restored unapproved rollback bytes after matching preflight; restarts=%d", restarts)
+	}
+	if err == nil || err.Error() != "fleet_install_changed" {
+		t.Fatalf("wanted slot-change refusal, got %v", err)
 	}
 }

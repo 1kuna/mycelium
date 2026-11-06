@@ -428,7 +428,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	}
 	var reconciliation *slotReconciliation
 	if existing && !files.machineConversion {
-		reconciliation, err = preflightInstallSlot(ctx, installed, command)
+		reconciliationConfig := installed
+		reconciliationConfig.Queue = c.Queue // Address repair already verified the saved certificate pin.
+		reconciliation, err = preflightInstallSlot(ctx, reconciliationConfig, command)
 		if err != nil {
 			return err
 		}
