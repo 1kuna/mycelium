@@ -23,6 +23,7 @@ type EnvironmentReadObservation struct {
 }
 
 type EnvironmentPlatform struct {
+	LockCoverage *EnvironmentLockCoverage     `json:"lock_coverage,omitempty"`
 	WorkerReads  []EnvironmentReadObservation `json:"worker_reads,omitempty"`
 	Platform     string                       `json:"platform"`
 	Backend      string                       `json:"backend"`
@@ -73,6 +74,8 @@ func (q *Queue) EnvironmentEntries() []EnvironmentEntry {
 				}
 			}
 			p := EnvironmentPlatform{WorkerReads: observations[recipe.Key], Platform: platform, Backend: backend, Key: recipe.Key, InputDigests: map[string]string{}}
+			coverage := environmentLockCoverage(recipe, nil, platform)
+			p.LockCoverage = &coverage
 			// Only canonical input labels are public; arbitrary source names stay private.
 			for _, name := range []string{"requirements.txt", "uv.lock", "pyproject.toml", "pixi.lock", "pixi.toml", "binary.sha256"} {
 				if data, ok := recipe.Files[name]; ok {
