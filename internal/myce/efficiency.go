@@ -807,7 +807,11 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 		}
 		for _, category := range []string{"memory_reservation", "authored_platform_targets", "environment", "priority_fairness", "preparation", "capacity", "holds", "dependency", "unknown"} {
 			key := "project:" + p.Project + "/wait_" + category + "_seconds"
-			values[key] = max(values[key], p.Seconds[category])
+			if p.Blocker == category {
+				values[key] = max(values[key], p.Seconds[category])
+			} else if _, ok := values[key]; !ok {
+				values[key] = 0
+			}
 		}
 	}
 	predictionSums := map[string]float64{}
