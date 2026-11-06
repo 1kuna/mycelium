@@ -419,11 +419,13 @@ type SpecProjection struct {
 }
 
 type Job struct {
-	Blocker         *Blocker               `json:"blocker,omitempty"`
-	WallTime        *WallTimeStatus        `json:"wall_time,omitempty"`
-	YieldPlan       *ScarceYieldProjection `json:"yield_plan,omitempty"`
-	ScarceHostYield *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
-	YieldGeneration int64                  `json:"yield_generation,omitempty"`
+	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
+	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
+	Blocker                 *Blocker               `json:"blocker,omitempty"`
+	WallTime                *WallTimeStatus        `json:"wall_time,omitempty"`
+	YieldPlan               *ScarceYieldProjection `json:"yield_plan,omitempty"`
+	ScarceHostYield         *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
+	YieldGeneration         int64                  `json:"yield_generation,omitempty"`
 	// Set only on read-only planner copies, never the durable job. Plain work's
 	// recipe and input identity is independent of the target or learned memory.
 	planningMemoryIdentity string
@@ -555,6 +557,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	IOPressure        *IOPressure              `json:"io_pressure,omitempty"`
 	HygieneCollection *WorkerHygieneCollection `json:"hygiene_collection,omitempty"`
 	HostHealth        *HostHealth              `json:"host_health,omitempty"`
 	toolInventory     *toolInventory           // Immutable queue-owned inventory; never serialized.
@@ -729,9 +732,10 @@ type Reply struct {
 // AttemptReport binds heartbeat, progress and Started to an exact execution.
 // Collections have no wire cardinality limit; admission remains in the planner.
 type AttemptReport struct {
-	Liveness               *LivenessReport `json:"liveness,omitempty"`
-	OutputDeliveryProgress uint64          `json:"output_delivery_progress,omitempty"`
-	ApplicationProgress    *ProgressReport `json:"application_progress,omitempty"`
+	Resources              *AttemptResources `json:"resources,omitempty"`
+	Liveness               *LivenessReport   `json:"liveness,omitempty"`
+	OutputDeliveryProgress uint64            `json:"output_delivery_progress,omitempty"`
+	ApplicationProgress    *ProgressReport   `json:"application_progress,omitempty"`
 
 	CurrentHostMemory *CurrentHostMemory `json:"current_host_memory,omitempty"`
 	DockerCause       *RuntimeCause      `json:"docker_cause,omitempty"`
@@ -755,6 +759,7 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
+	Resources                 *AttemptResources   `json:"resources,omitempty"`
 	FinalCheckpointGeneration *int64              `json:"final_checkpoint_generation,omitempty"`
 	StoragePeak               *AttemptStoragePeak `json:"storage_peak,omitempty"`
 	InputsStagedAt            *time.Time          `json:"inputs_staged_at,omitempty"`

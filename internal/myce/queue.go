@@ -1396,6 +1396,10 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptExtensionQualifications(&m)
 		q.acceptSharedPressure(&m, old)
+		m.IOPressure = safeIOPressure(m.IOPressure)
+		if m.IOPressure != nil {
+			m.IOPressure.ReceivedAt = q.clock.Now()
+		}
 		acceptHostHygiene(&m)
 		if old != nil && (old.Gone || old.Session != m.Session) {
 			q.clearPreemptionPlacements(old.ID, old.Session)
@@ -1777,6 +1781,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		q.settleRelease(r, true)
 		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 			q.recordAttemptMemory(j, r)
+			q.retainAttemptResources(j, r.Resources)
 			j.ReleaseConfirmed = true
 			if r.Forced {
 				j.LastStopOutcome = "forced"
@@ -1876,6 +1881,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		// contain the original worker-supplied diagnostic name or private text.
 		r.Error = r.ExecutionCause.String()
 	}
+	q.retainAttemptResources(j, r.Resources)
 	retainInputsStagedAt(j, r.InputsStagedAt)
 	if m := q.s.Machines[r.Machine]; m != nil {
 		m.LastSeen = q.clock.Now()
@@ -2180,6 +2186,9 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	for _, m := range q.s.Machines {
 		copy := cloneMachine(m)
 		copy.ExternalMemory = q.externalMemoryStatus(hostID(m))
+		if copy.IOPressure != nil {
+			copy.IOPressure.AgeSeconds += max(0, q.clock.Now().Sub(copy.IOPressure.ReceivedAt).Seconds())
+		}
 		for i, v := range copy.DiskVolumes {
 			copy.DiskVolumes[i] = q.currentDiskVolume(v, m.DiskReceivedAt)
 		}
@@ -2563,6 +2572,7 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 			rejected = ErrStale
 			return nil
 		}
+		q.retainAttemptResources(j, r.Resources)
 		retainInputsStagedAt(j, r.InputsStagedAt)
 		q.markStarted(j)
 		if at := wallTimeDeadline(j); at != nil {
@@ -2644,6 +2654,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	if !j.FileTransport && j.Spec.ResumeCompatibility != nil && progress.path == attemptCheckpoint(*j) && progress.err == nil && progress.durable > 0 {
 		j.YieldGeneration = max(j.YieldGeneration, progress.durable)
 	}
+	q.retainAttemptResources(j, report.Resources)
 	retainInputsStagedAt(j, report.InputsStagedAt)
 	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)

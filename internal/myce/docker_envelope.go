@@ -92,6 +92,7 @@ func (d *dockerAttempt) releaseEnvelope() error {
 		}
 		d.state.OOMKilled = true
 	}
+	d.state.Resources = cgroupResources(a, d.clock.Now())
 	d.state.MemoryPeak = a.peak()
 	if peak := d.state.MemoryPeak; d.memoryWorker == nil && peak != nil && (peak.HostGB != nil || peak.CgroupGB != nil || peak.DeviceGB != nil || peak.Constrained) {
 		// Recovery has no running sampler's resident high-water mark. The

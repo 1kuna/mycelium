@@ -1250,3 +1250,34 @@ reports check-in bytes and total queue mutex hold p50/p99, including transaction
 snapshots/commits and check-in read phases; JSON decoding stays outside that hold.
 The settled backlog isolates inventory overhead and does not model concurrent
 job GET traffic, active scheduling load, native device probes or live latency.
+
+## CPU and I/O collector cost (#857 item 6)
+
+The collectors are diagnostic. Linux reuses the existing 200 ms cgroup sampler
+cadence and reads three aggregate counter files, with no descendant walk. Three
+300 ms laptop benchmark runs over a synthetic cgroup tree measured 39.4–45.4 us
+per complete CPU/stat/PSI sample (about 0.020–0.023% of one core at that cadence).
+This measures parser/filesystem overhead on ordinary local files, not native
+Linux virtual-file cost or contention. Host PSI adds one local read per existing
+heartbeat, through the existing single-outstanding local-observation probe. That
+probe's 25 ms control budget prevents a slow read from blocking heartbeat work;
+it can leave that heartbeat's pressure unknown and never spawns overlapping reads.
+
+Twenty native macOS process-tree CPU reads measured median 32.065 ms, p95
+35.676 ms and maximum 38.702 ms under shared load. At the 500 ms RSS cadence,
+median inventory cost would consume 6.4% of a core per attempt. CPU therefore
+reuses the existing five-second CPU/liveness cadence (tenfold fewer inventories,
+about 0.64% at that median). The cost is missed short-lived child CPU; the source
+is explicitly a lower bound, with root exit rusage supplementing sampling. The
+inventory deadline shares that cadence and its existing 200 ms drain allowance;
+a hung ps can delay final observation by that budget, while control stays separate.
+No new refusal, policy threshold, host preference or controller setting is added.
+
+Reproduce parser/filesystem cost with
+`go test ./internal/myce -run '^$' -bench '^BenchmarkAttemptResourceCgroupSample$'`.
+`MYCE_NATIVE_RESOURCE_TEST=1 go test ./internal/myce -run '^TestAttemptResourcesNativeRead$' -count=1 -v`
+is a separate read-only native process-tree/host-PSI check. Normal gates use fake
+cgroup/proc data and an injected clock. The initial implementation ran that native
+check on macOS (CPU readings and explicit unsupported I/O); native Linux delegated
+cgroup CPU/stat/PSI and Linux host PSI were not run. No daemon, GPU, I/O isolation
+or loaded queue-latency qualification follows from these measurements.

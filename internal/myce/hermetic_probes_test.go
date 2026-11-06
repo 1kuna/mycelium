@@ -43,6 +43,8 @@ func installSyntheticWorkerHost() {
 	workerProcessMemory = nil
 	workerMemoryRSS = nil
 	workerLivenessCPU = nil
+	workerResourceCPU = nil
+	workerIOPressure = nil
 	probeguard.Before = func() { panic("test invoked a real hardware probe; inject a fake") }
 }
 
