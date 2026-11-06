@@ -443,3 +443,34 @@ func TestEfficiencyProjectWaitBaselineSurvivesQueueEpisodes(t *testing.T) {
 		t.Fatal("removed owning wait records retained a baseline")
 	}
 }
+
+func TestEfficiencyReservationUsesLiveAdmissionCharge(t *testing.T) {
+	q, c := fixture(t)
+	m := cpuMachine("host", "host", "cpu", 8, 32)
+	check(t, q, m, nil)
+	s := cpuSpec(2, 8)
+	if err := normalizeResources(&s); err != nil {
+		t.Fatal(err)
+	}
+	s.Needs.Memory = "auto"
+	j := &Job{ID: "probe", State: "running", Spec: s, Machine: m.ID, Session: m.Session, Attempt: 1, MemoryEnvelope: &JobMemoryEnvelope{Basis: "exploratory", HostGB: 8, ProbeFloorGB: minimumHostMemoryGB}}
+	if err := q.update(func() error {
+		q.putJob(j.ID, j)
+		q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: {jobKey(*j): {at: c.Now(), gb: 1, footprintGB: 1, growthObserved: true}}}
+		q.refreshHostMemory()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	charge := q.hostJobCharge(j)
+	if charge >= 8 || j.Efficiency.Rate.ReservedMemoryGB != charge || q.s.Machines[m.ID].HostMemoryInUseGB != charge {
+		t.Fatalf("diagnostics disagree with admission: charge=%g rate=%g host=%g", charge, j.Efficiency.Rate.ReservedMemoryGB, q.s.Machines[m.ID].HostMemoryInUseGB)
+	}
+	c.Advance(time.Second)
+	if err := q.update(func() error { q.refreshHostMemory(); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := j.Efficiency.Allocations[0].ReservedMemoryGBSeconds; got != charge {
+		t.Fatalf("integrated ceiling instead of admission charge: got %g want %g", got, charge)
+	}
+}

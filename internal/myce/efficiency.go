@@ -327,7 +327,7 @@ func (q *Queue) refreshEfficiency() {
 		if m == nil {
 			continue
 		}
-		e.Rate = efficiencyRate{Host: hostID(m), Basis: efficiencyBasis(j), ReservedMemoryGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), ReservedCPUCores: float64(j.Spec.Needs.cores()), ReservedDeviceGB: j.Spec.Needs.MemoryGB}
+		e.Rate = efficiencyRate{Host: hostID(m), Basis: efficiencyBasis(j), ReservedMemoryGB: q.hostJobCharge(j), ReservedCPUCores: float64(j.Spec.Needs.cores()), ReservedDeviceGB: j.Spec.Needs.MemoryGB}
 		q.efficiencySample(&e.Rate, j.Machine, jobKey(*j), now)
 	}
 	if q.s.EfficiencyHosts == nil {

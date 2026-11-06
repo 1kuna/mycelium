@@ -2080,6 +2080,9 @@ admission, placement, authored intent or retry decisions.
   independent physical used/total RAM. `programs` groups reservation-time and
   measured-use integrals by host, opaque work identity and sizing basis. These
   include assigned/startup/stopping custody until release, not just execution.
+  Current program reservations use the admission ledger's charge, including
+  fresh measured CPU-probe growth credit; the fixed execution ceiling remains
+  the separate prediction-envelope comparison.
   Retained rates keep the original host/work/basis after requeue clears the
   current assignment, and end only when exact release settles that obligation.
   Host attribution includes the worker and managed descendants. Per-program
