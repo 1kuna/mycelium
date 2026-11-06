@@ -221,7 +221,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	}
 	if next.DeviceGB != nil && validMemoryValue(*next.DeviceGB) && (out.DeviceGB == nil || *next.DeviceGB > *out.DeviceGB) {
 		out.DeviceSource = ""
-		if next.DeviceSource == deviceHostDeltaSource {
+		if next.DeviceSource == deviceHostDeltaSource || next.DeviceSource == deviceUnifiedResidentSource {
 			out.DeviceSource = next.DeviceSource
 		}
 	}
@@ -239,7 +239,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	} else {
 		// Publish only worker-owned labels, never raw command errors or output.
 		switch next.DeviceUnavailable {
-		case deviceMemoryNoSample, deviceMemoryUnsupported, deviceMemoryInventory, deviceMemoryTimeout, deviceMemoryNoCgroup, deviceMemoryNotReported, deviceMemoryShared:
+		case deviceMemoryNoSample, deviceMemoryUnsupported, deviceMemoryInventory, deviceMemoryTimeout, deviceMemoryNoCgroup, deviceMemoryNotReported, deviceMemoryShared, deviceUnifiedUncertain:
 			out.DeviceUnavailable = next.DeviceUnavailable
 		}
 	}

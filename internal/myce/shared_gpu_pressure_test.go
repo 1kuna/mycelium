@@ -88,6 +88,11 @@ func TestSharedGPUPressureVictimOrder(t *testing.T) {
 func TestSharedGPUPressureStaleAndUnavailable(t *testing.T) {
 	q, clock := fixture(t)
 	m := sharedUnifiedMachine()
+	// Dedicated cards retain the original diagnostic-only missing-counter
+	// behavior. Unified RAM now sheds to exclusive on missing evidence.
+	m.Devices[0].UnifiedMemory = false
+	m.Devices[0].MemoryMode = "fixed"
+	m.CapabilityProfile.MemoryLayout = "separate"
 	a, b := sharedPair(t, q, m)
 	clock.Advance(time.Second)
 	growthCheck(t, q, m, []*Job{a, b}, []float64{30, 13}, 10)

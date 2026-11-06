@@ -386,14 +386,17 @@ func hostMemoryAvailableFits(m *Machine, gpu, host, available float64) bool {
 type CurrentHostMemory struct {
 	// Projection over this sensor's observed sampling horizon. Older workers
 	// still protect their full unconsumed reservation, without this forecast.
-	GrowthGB         float64 `json:"growth_gb,omitempty"`
-	DeviceGrowthGB   float64 `json:"device_growth_gb,omitempty"`
-	NonreclaimableGB float64 `json:"nonreclaimable_gb"`
-	AgeSeconds       float64 `json:"age_seconds"`
-	sampledAt        time.Time
-	// The attempt's latest per-process device sample. Unified CUDA cgroups
-	// cannot see device allocations, so planning credits use above the
-	// reservation from it (#596).
+	GrowthGB           float64 `json:"growth_gb,omitempty"`
+	DeviceGrowthRateGB float64 `json:"device_growth_rate_gb,omitempty"`
+	DeviceGrowthGB     float64 `json:"device_growth_gb,omitempty"`
+	NonreclaimableGB   float64 `json:"nonreclaimable_gb"`
+	AgeSeconds         float64 `json:"age_seconds"`
+	sampledAt          time.Time
+	// The latest device counter or labelled conservative unified-RAM estimate.
+	// Exclusive marks uncertain ownership and forbids co-tenancy. Neither RSS
+	// nor this estimate grants nonreclaimable host-memory credit.
+	DeviceSource     string   `json:"device_source,omitempty"`
+	DeviceExclusive  bool     `json:"device_exclusive,omitempty"`
 	DeviceGB         *float64 `json:"device_gb,omitempty"`
 	DeviceAgeSeconds float64  `json:"device_age_seconds,omitempty"`
 	deviceSampledAt  time.Time
@@ -412,6 +415,7 @@ func (s *CurrentHostMemory) aged(now time.Time) *CurrentHostMemory {
 		if device := s.deviceSample.Load(); device != nil {
 			gb := device.gb
 			sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB
+			sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB = device.source, device.exclusive, device.rateGB
 		}
 	}
 	sample.AgeSeconds = now.Sub(sample.sampledAt).Seconds()
@@ -430,8 +434,11 @@ const deviceMemorySamplePeriod = 5 * time.Second
 const deviceMemorySampleFreshFor = 2 * deviceMemorySamplePeriod
 
 type hostMemorySample struct {
+	source                   string
+	exclusive                bool
 	gb, deviceGB             float64
 	growthGB, deviceGrowthGB float64
+	rateGB, deviceRateGB     float64
 	at, deviceAt             time.Time
 }
 
@@ -446,7 +453,7 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 	samples := map[attemptKey]hostMemorySample{}
 	for _, r := range reports {
 		sample, s := r.CurrentHostMemory, hostMemorySample{}
-		if !r.Started || sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.DeviceGrowthGB) {
+		if !r.Started || sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) && sample.AgeSeconds < hostMemorySampleFreshFor.Seconds() {
@@ -456,6 +463,7 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 		if d := sample.DeviceGB; d != nil && validMemoryValue(*d) && validMemoryValue(sample.DeviceAgeSeconds) && sample.DeviceAgeSeconds < deviceMemorySampleFreshFor.Seconds() {
 			s.deviceGB, s.deviceAt = *d, now.Add(-time.Duration(sample.DeviceAgeSeconds*float64(time.Second)))
 			s.deviceGrowthGB = sample.DeviceGrowthGB
+			s.source, s.exclusive, s.deviceRateGB = sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB
 		}
 		if !s.at.IsZero() || !s.deviceAt.IsZero() {
 			samples[attemptKey{r.ID, r.Attempt, r.Session}] = s
