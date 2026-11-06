@@ -314,7 +314,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, errors.New("machine conversion publication incomplete; keep queue stopped and rerun install queue conversion or rollback")
 	}
-	fileRoot, fileLimit, fileCheckpoints := "", int64(100<<30), false
+	fileRoot, fileLimit, fileCheckpoints := "", int64(0), false
 	if q.startupFiles != nil {
 		fileRoot, fileLimit, fileCheckpoints = q.startupFiles.root, q.startupFiles.limit, q.startupFiles.checkpoints
 	}

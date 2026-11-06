@@ -1,21 +1,24 @@
 package myce
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestEnvironmentCacheAutoSizing(t *testing.T) {
 	c := EnvironmentCache{Root: t.TempDir()}
 	if err := c.init(); err != nil {
 		t.Fatal("omitted cache limit must auto-size:", err)
 	}
-	if c.Limit < 4<<30 || c.Limit > 80<<30 {
+	if c.Limit != 0 {
 		t.Fatalf("unbounded auto limit %d", c.Limit)
 	}
 
 	for _, tc := range []struct{ free, want int64 }{
-		{23 << 30, 0}, {24 << 30, 4 << 30}, {200 << 30, 50 << 30}, {1000 << 30, 80 << 30},
+		{1 << 20, (1 << 20) - int64(os.Getpagesize())}, {23 << 30, (23 << 30) - int64(os.Getpagesize())}, {1000 << 30, (1000 << 30) - int64(os.Getpagesize())},
 	} {
 		got, err := environmentCacheSize(tc.free)
-		if got != tc.want || (err != nil) != (tc.want == 0) {
+		if got != tc.want || err != nil {
 			t.Fatalf("free=%d limit=%d err=%v", tc.free, got, err)
 		}
 	}
@@ -31,7 +34,7 @@ func TestEnvironmentCacheAutoSizing(t *testing.T) {
 		}
 		want := tc.saved
 		if tc.saved == 20<<30 && !tc.explicit {
-			want = 50 << 30
+			want = 0
 		}
 		if s.EnvironmentCacheBytes != want {
 			t.Fatalf("saved %d explicit=%v became %d", tc.saved, tc.explicit, s.EnvironmentCacheBytes)

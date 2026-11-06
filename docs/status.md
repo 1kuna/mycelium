@@ -1958,7 +1958,8 @@ can include shared inodes, so collection stops conservatively and recounts the
 union once after a batch. `pending` means a residual budget needs another sweep.
 In-use or referenced environments can leave a cache over budget; status explains
 that protection instead of deleting custody to satisfy a target. Existing
-shared-input/model caches keep their own separate policies and locks.
+shared-input/model caches retain their own integrity and use locks, and share
+adaptive filesystem accounting with the other cache kinds (#805).
 
 Inventory runs no faster than the existing minute retention cadence. A sweep
 that takes longer backs off to ten times its measured duration, limiting hygiene
@@ -2063,3 +2064,15 @@ To try it without a cluster, run `./myce dev --workers 5`, then
 leaving, and a production job. `scripts/view-smoke.sh` loads the page in
 headless Chrome or Chromium against `myce dev` and checks for live frames and
 no script errors.
+
+### Adaptive cache evidence (#805, next release)
+
+Automatic limits in hygiene and shared-input capacity are current measurements,
+not saved startup quotas. Free-space loss reduces the shared volume allowance;
+recovery restores borrowing. A reused working set can exceed the retired
+80/100 GiB defaults when the physical volume supports it. Cold entries pay
+pressure debt before the observed reused set. Protected entries may leave a
+cache above its current target. Copy admission learns throughput with an
+additional stream and retracts it when aggregate throughput does not improve.
+These are synthetic-testable admission decisions, not native disk isolation or
+proof that an unobserved owner-write burst cannot fill the volume.

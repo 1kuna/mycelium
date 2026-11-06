@@ -93,7 +93,7 @@ func TestInstallQueueFileStoreDefaults(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, got := range []ServiceConfig{c, saved} {
-				if got.FileStoreBytes != 100<<30 || got.FileStoreProductionReserve != 0 {
+				if got.FileStoreBytes != 0 || got.FileStoreProductionReserve != 0 {
 					t.Fatal("fresh/legacy install changed file-store defaults")
 				}
 			}
@@ -118,7 +118,7 @@ func TestInstallQueueFileStoreDefaults(t *testing.T) {
 					t.Errorf("generated unit omitted %v", pair)
 				}
 			}
-			for _, limits := range [][2]int64{{0, 0}, {-1, 0}, {12, -1}, {12, 13}} {
+			for _, limits := range [][2]int64{{-1, 0}, {12, -1}, {12, 13}} {
 				invalid := configured
 				invalid.FileStoreBytes, invalid.FileStoreProductionReserve = limits[0], limits[1]
 				if invalid.ValidateInstall() == nil {

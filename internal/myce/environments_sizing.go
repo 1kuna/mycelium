@@ -3,36 +3,22 @@ package myce
 import (
 	"errors"
 	"os"
-	"path/filepath"
 )
 
-// AutoEnvironmentCacheLimit uses the cache filesystem, including its nearest
-// existing ancestor on fresh installs. It reserves 20 GiB and never allocates.
+// AutoEnvironmentCacheLimit reports current physical headroom. Runtime caches
+// keep zero as automatic and remeasure admission rather than saving this value.
 func AutoEnvironmentCacheLimit(root string) (int64, error) {
 	if root == "" {
 		return 0, errors.New("environment cache root is required")
 	}
-	for {
-		free, err := diskFree(root)
-		if err == nil {
-			return environmentCacheSize(free)
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return 0, err
-		}
-		parent := filepath.Dir(root)
-		if parent == root {
-			return 0, err
-		}
-		root = parent
+	disk, err := workerDiskProbe(root)
+	if err != nil {
+		return 0, err
 	}
+	return environmentCacheSize(cacheBytes(disk.FreeBytes))
 }
 func environmentCacheSize(free int64) (int64, error) {
-	const floor, ceiling, reserve = int64(4 << 30), int64(80 << 30), int64(20 << 30)
-	if free < reserve+floor {
-		return 0, errors.New("environment cache auto-size requires 24 GiB free; supply an explicit --environment-cache-bytes limit")
-	}
-	return min(max(free/4, floor), ceiling, free-reserve), nil
+	return max(0, free-int64(os.Getpagesize())), nil
 }
 
 // An explicit flag wins. Only the exact retired 20 GiB default migrates.
@@ -44,10 +30,8 @@ func resolveEnvironmentCacheSizing(c *ServiceConfig, explicit bool, size func(st
 	if c.Role != "worker" || explicit || c.EnvironmentCacheBytes != 0 && c.EnvironmentCacheBytes != 20<<30 {
 		return nil
 	}
-	limit, err := size(c.EnvironmentCache)
-	if err != nil {
-		return err
-	}
-	c.EnvironmentCacheBytes = limit
+	// Preserve automatic intent in generated services. An old implicit value can
+	// migrate, but an explicitly supplied positive limit is never reinterpreted.
+	c.EnvironmentCacheBytes = 0
 	return nil
 }

@@ -255,3 +255,14 @@ their supported request shape while local collection continues.
 Installed/rollback images, active state, receipts and unknown data are retained;
 foreign services/processes and other projects' shared caches are owner context
 only. See [worker cleanup](https://github.com/1kuna/mycelium/blob/main/docs/status.md#worker-cleanup-834-next-release).
+
+
+## Adaptive cache capacity (next release, #805)
+
+Omitted cache limits follow measured shared-filesystem capacity, free-space loss,
+reuse and pending writes; no machine-specific GiB setting is required. Explicit
+positive caps remain binding. Cold reproducible copies are reclaimed first;
+active/pinned/reference-held and unique data stay protected. Copy concurrency
+learns the destination/source path's streaming throughput. A capacity refusal
+needs available physical headroom or an explicit cap correction, not manual
+cache deletion. See [cache policy](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#file-and-shared-input-cache-capacity).

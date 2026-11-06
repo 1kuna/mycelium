@@ -19,6 +19,7 @@ import (
 
 // ModelCache reserves complete copy sizes under one admission lock.
 type ModelCache struct {
+	budgets       *cacheBudgets
 	ApprovalRoot  string
 	storedModels  sync.Map
 	FileClient    *Client
@@ -61,8 +62,11 @@ func (c *ModelCache) init() error {
 	if c.Free == nil {
 		c.Free = diskFree
 	}
-	if c.Limit <= 0 {
-		return errors.New("model cache size limit must be positive")
+	if c.budgets == nil {
+		c.budgets = newCacheBudgets()
+	}
+	if c.Limit < 0 {
+		return errors.New("model cache size limit must be nonnegative")
 	}
 	if err := PrepareStateRoots(c.Root); err != nil {
 		return err
@@ -190,6 +194,9 @@ func (r contextReader) Read(p []byte) (int, error) {
 	}
 	n, err := r.reader.Read(p)
 	if n > 0 {
+		if progress, ok := r.ctx.Value(cacheCopyProgressKey{}).(func(int64)); ok {
+			progress(int64(n))
+		}
 		if progress, ok := r.ctx.Value(ioProgressKey{}).(func()); ok {
 			progress()
 		}
@@ -250,9 +257,9 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		if c.active == nil {
 			c.active = map[string]chan struct{}{}
 		}
-		parallel := max(1, c.Parallel)
+		parallel := c.Parallel
 		wait := c.active[key]
-		if wait == nil && len(c.active) >= parallel {
+		if wait == nil && parallel > 0 && len(c.active) >= parallel {
 			for _, ch := range c.active {
 				wait = ch
 				break
@@ -287,7 +294,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		c.mu.Unlock()
 		return source, verifyModelContext(ctx, source, m)
 	}
-	if m.SizeBytes <= 0 || m.SizeBytes > c.Limit {
+	if m.SizeBytes <= 0 || c.Limit > 0 && m.SizeBytes > c.Limit {
 		c.mu.Unlock()
 		return "", fmt.Errorf("model %s exceeds cache size limit or has no verified size", m.Name)
 	}
@@ -377,11 +384,20 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		c.mu.Unlock()
 		return "", e
 	}
+	limit, e := c.budgets.limit(c.Root, used, c.Limit, c.Clock.Now())
+	if e != nil {
+		c.mu.Unlock()
+		return "", e
+	}
 	need := m.SizeBytes - offset
 	if cached {
 		need = 0
 	}
 	sort.Slice(victims, func(i, j int) bool {
+		hi, hj := c.budgets.recent(c.Root, victims[i].key, c.Clock.Now()), c.budgets.recent(c.Root, victims[j].key, c.Clock.Now())
+		if hi != hj {
+			return !hi
+		}
 		if victims[i].used == victims[j].used {
 			return victims[i].path < victims[j].path
 		}
@@ -391,12 +407,12 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	for _, v := range victims {
 		reclaim += v.size
 	}
-	if used+reserved+need-reclaim > c.Limit {
+	if used+reserved+need-reclaim > limit {
 		c.mu.Unlock()
 		return "", errors.New("insufficient local model cache space (protected or more-used copies)")
 	}
 	for _, v := range victims {
-		if used+reserved+need <= c.Limit && free-reserved >= need {
+		if used+reserved+need <= limit && free-reserved >= need {
 			break
 		}
 		if e = ctx.Err(); e != nil {
@@ -423,11 +439,12 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			return "", e
 		}
 	}
-	if used+reserved+need > c.Limit || free-reserved < need {
+	if used+reserved+need > limit || free-reserved < need {
 		c.mu.Unlock()
 		return "", errors.New("insufficient local model cache space")
 	}
 	if cached {
+		c.budgets.touch(c.Root, key, m.SizeBytes, c.Clock.Now())
 		c.mu.Unlock()
 		c.verified.Store(key, true)
 		now := c.Clock.Now()
@@ -441,6 +458,17 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		c.progress.Store(key, r)
 		return "", err
 	}
+	reservation, err := c.budgets.reserve(c.Root, need, c.Clock)
+	if err != nil {
+		return "", err
+	}
+	defer reservation.release()
+	copyCtx, releaseCopy, err := c.budgets.copy(ctx, c.Root, c.Clock, c.Parallel)
+	if err != nil {
+		return "", err
+	}
+	defer releaseCopy()
+	ctx = copyCtx
 	started := c.Clock.Now()
 	copied := int64(0)
 	defer func() {
@@ -468,6 +496,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			return "", e
 		}
 		c.verified.Store(key, true)
+		c.budgets.touch(c.Root, key, m.SizeBytes, c.Clock.Now())
 		r.State = "ready"
 		r.Error = ""
 		r.Bytes = m.SizeBytes
@@ -502,6 +531,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			return "", e
 		}
 		c.verified.Store(key, true)
+		c.budgets.touch(c.Root, key, m.SizeBytes, c.Clock.Now())
 		r.State = "ready"
 		r.Error = ""
 		c.progress.Store(key, r)
@@ -549,6 +579,9 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			written, writeErr := io.MultiWriter(out, h).Write(buf[:count])
 			n += int64(written)
 			copied += int64(written)
+			if progress, ok := ctx.Value(cacheCopyProgressKey{}).(func(int64)); ok {
+				progress(int64(written))
+			}
 			r.Bytes = n
 			c.progress.Store(key, r)
 			if writeErr != nil {
@@ -592,6 +625,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		return "", e
 	}
 	c.verified.Store(key, true)
+	c.budgets.touch(c.Root, key, m.SizeBytes, c.Clock.Now())
 	r.State = "ready"
 	r.Error = ""
 	c.progress.Store(key, r)
@@ -670,7 +704,11 @@ func (c *ModelCache) report(models []Model, approved map[string]string) ([]strin
 		return true
 	})
 	sort.Strings(names)
-	return names, max(0, min(free-pending, c.Limit-used-pending)), e
+	limit, err := c.budgets.limit(c.Root, used, c.Limit, c.Clock.Now())
+	if err != nil {
+		return names, 0, err
+	}
+	return names, max(0, min(free-pending, limit-used-pending)), e
 }
 func (c *ModelCache) CopyReports() ([]CopyReport, float64) {
 	out := []CopyReport{}

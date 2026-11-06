@@ -81,11 +81,12 @@ func (c *EnvironmentCache) evict(key, reason string, check func() (bool, error))
 	if err = c.trash(path); err != nil {
 		return false, err
 	}
+	c.budgets.forget(c.Root, key)
 	log.Printf("environment eviction key=%s reason=%s", key, reason)
 	return true, nil
 }
 
-// Prune retains the same 24-hour minimum as pressure eviction. references is a
+// Prune retains measured reuse protection, like pressure eviction. references is a
 // fresh authoritative query, also repeated under each candidate's local locks.
 // Dry-run only inspects prefixes; it never retires or purges environments.
 func (c *EnvironmentCache) Prune(ctx context.Context, apply bool, references func(context.Context, string) (bool, error)) (report EnvironmentPruneReport, err error) {
@@ -160,7 +161,7 @@ func (c *EnvironmentCache) Prune(ctx context.Context, apply bool, references fun
 		if err != nil {
 			return report, err
 		}
-		v.Recent = v.Age < environmentRecentWindow
+		v.Recent = c.recent(filepath.Join(c.Root, v.Key))
 		for _, suffix := range []string{".use", ".build"} {
 			lock, lockErr := c.tryLock(v.Key + suffix)
 			if lockErr != nil {

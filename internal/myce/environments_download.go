@@ -38,10 +38,14 @@ func (c *EnvironmentCache) pruneDownloads(ctx context.Context, dir string, env [
 	if err != nil {
 		return err
 	}
-	if size <= c.DownloadLimit {
+	limit, err := c.budgets.limit(root, size, c.DownloadLimit, c.Clock.Now())
+	if err != nil {
+		return err
+	}
+	if size <= limit {
 		return nil
 	}
-	fmt.Fprintf(out, "download cache: %d bytes exceeds separate %d-byte limit; pruning\n", size, c.DownloadLimit)
+	fmt.Fprintf(out, "download cache: %d bytes exceeds separate %d-byte limit; pruning\n", size, limit)
 	for _, tool := range []string{"uv", "pixi"} {
 		n, err := environmentSize(c.downloadCache(tool))
 		if err != nil {
@@ -62,8 +66,8 @@ func (c *EnvironmentCache) pruneDownloads(ctx context.Context, dir string, env [
 	if err != nil {
 		return err
 	}
-	if size > c.DownloadLimit {
-		return fmt.Errorf("download cache remains %d bytes after standard pruning; limit %d", size, c.DownloadLimit)
+	if size > limit {
+		return fmt.Errorf("download cache remains %d bytes after standard pruning; limit %d", size, limit)
 	}
 	return nil
 }

@@ -451,6 +451,7 @@ func environmentSeconds(j *Job, m *Machine) float64 {
 // EnvironmentCache uses OS file locks, atomic publication and shared use leases.
 // Partial builds and evictions are retired, then purged once use/build locks allow it.
 type EnvironmentCache struct {
+	budgets     *cacheBudgets
 	Tools       *EnvironmentToolSource
 	once        sync.Once
 	initErr     error
@@ -466,11 +467,16 @@ type EnvironmentCache struct {
 	DownloadLimit int64
 }
 
-const environmentRecentWindow = 24 * time.Hour
-
 func (c *EnvironmentCache) recent(path string) bool {
-	st, err := os.Stat(filepath.Join(path, "ready.json"))
-	return err == nil && c.Clock.Now().Sub(st.ModTime()) < environmentRecentWindow
+	key := filepath.Base(path)
+	if filepath.Base(filepath.Dir(path)) == ".Trash" {
+		_, key, _ = strings.Cut(key, "-")
+		key = strings.TrimSuffix(key, ".partial")
+	}
+	return c.budgets != nil && c.budgets.recent(c.Root, key, c.Clock.Now())
+}
+func (c *EnvironmentCache) budget(used int64) (int64, error) {
+	return c.budgets.limit(c.Root, used, c.Limit, c.Clock.Now())
 }
 
 func (c *EnvironmentCache) init() error {
@@ -478,20 +484,13 @@ func (c *EnvironmentCache) init() error {
 		return err
 	}
 	c.once.Do(func() {
-		if c.Limit == 0 && c.Root != "" {
-			size := c.sizeLimit
-			if size == nil {
-				size = AutoEnvironmentCacheLimit
-			}
-			c.Limit, c.initErr = size(c.Root)
-			if c.initErr != nil {
-				return
-			}
+		if c.Limit == 0 && c.sizeLimit != nil {
+			c.Limit, c.initErr = c.sizeLimit(c.Root)
 		}
-		if c.Limit <= 0 {
-			c.initErr = errors.New("environment-cache-bytes must be positive")
-			return
+		if c.Limit < 0 {
+			c.initErr = errors.New("environment-cache-bytes must be nonnegative")
 		}
+
 	})
 	return c.initErr
 }
@@ -500,6 +499,9 @@ func (c *EnvironmentCache) init() error {
 // but no capacity admission or free-space floor.
 func (c *EnvironmentCache) initStorage() error {
 	c.storageOnce.Do(func() {
+		if c.budgets == nil {
+			c.budgets = newCacheBudgets()
+		}
 		if c.Clock == nil {
 			c.Clock = RealClock{}
 		}
@@ -522,9 +524,6 @@ func (c *EnvironmentCache) initStorage() error {
 			return
 		}
 		c.Root = root
-		if c.DownloadLimit == 0 {
-			c.DownloadLimit = 16 << 30
-		}
 		for _, p := range []string{filepath.Join(c.Root, "locks"), filepath.Join(c.Root, ".Trash")} {
 			if e := os.MkdirAll(p, 0700); e != nil {
 				c.storageErr = e
@@ -780,9 +779,13 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 	if e != nil {
 		return e
 	}
-	total += size
+	limit, e := c.budget(total)
+	if e != nil {
+		return e
+	}
+	total = cacheSum(total, size)
 	for _, v := range candidates {
-		if total <= c.Limit {
+		if total <= limit {
 			break
 		}
 		removed, e := c.evict(v.Key, "cache_limit", nil)
@@ -801,8 +804,8 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 			total += size
 		}
 	}
-	if total > c.Limit {
-		return fmt.Errorf("environment cache needs %d bytes; limit %d (in-use entries protected)", total, c.Limit)
+	if total > limit {
+		return fmt.Errorf("environment cache needs %d bytes; limit %d (in-use entries protected)", total, limit)
 	}
 	return nil
 }
@@ -828,6 +831,8 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 	release := func() {
 		released.Do(func() {
 			at := c.Clock.Now()
+			bytes, _ := environmentDiskUsage(filepath.Join(c.Root, r.Key))
+			c.budgets.touch(c.Root, r.Key, bytes, at)
 			_ = os.Chtimes(filepath.Join(c.Root, r.Key, "ready.json"), at, at)
 			unlockEnvironment(use)
 			c.purgeReleased()
@@ -854,6 +859,8 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 		return "", nil, e
 	}
 	path := filepath.Join(c.Root, r.Key)
+	bytes, _ := environmentDiskUsage(path)
+	c.budgets.touch(c.Root, r.Key, bytes, c.Clock.Now())
 	at := c.Clock.Now()
 	if e = os.Chtimes(filepath.Join(path, "ready.json"), at, at); e != nil {
 		release()
@@ -990,8 +997,8 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 				if e == nil {
 					var free int64
 					free, e = diskFree(c.Root)
-					if e == nil && free < 64*1024*1024 {
-						e = errors.New("environment build disk space below 64 MiB")
+					if e == nil && free < int64(os.Getpagesize()) {
+						e = errors.New("environment build disk space below one control-write page")
 					}
 				}
 				if e != nil {

@@ -163,7 +163,7 @@ func TestSharedInputCacheAutomaticAndExplicitSizing(t *testing.T) {
 		if explicit > 0 && w.sharedInputs.cache.Limit != explicit {
 			t.Fatal("explicit cache size changed")
 		}
-		if explicit == 0 && (w.sharedInputs.cache.Limit < 4<<30 || w.sharedInputs.cache.Limit > 80<<30) {
+		if explicit == 0 && w.sharedInputs.cache.Limit != 0 {
 			t.Fatal("automatic cache size outside policy")
 		}
 	}

@@ -45,6 +45,8 @@ func TestEnvironmentPrune(t *testing.T) {
 	eligible := pruneFixture(t, c, 1, old)
 	referenced := pruneFixture(t, c, 2, old)
 	recent := pruneFixture(t, c, 3, time.Hour)
+	c.budgets.touch(c.Root, recent, 8192, clock.Now().Add(-3*time.Hour))
+	c.budgets.touch(c.Root, recent, 8192, clock.Now().Add(-time.Hour))
 	useLocked := pruneFixture(t, c, 4, old)
 	buildLocked := pruneFixture(t, c, 5, old)
 	for _, key := range []string{useLocked + ".use", buildLocked + ".build"} {
@@ -138,11 +140,11 @@ func TestEnvironmentPruneBelowPreparationFreeSpaceFloor(t *testing.T) {
 	capacityChecks := 0
 	c := &EnvironmentCache{Root: t.TempDir(), Clock: clock, sizeLimit: func(string) (int64, error) {
 		capacityChecks++
-		return environmentCacheSize(23 << 30)
+		return 0, errors.New("synthetic capacity unavailable")
 	}}
 	// The same low-space cache must still refuse new preparation, but that
 	// failure must not poison maintenance of an already prepared environment.
-	if err := c.init(); err == nil || !strings.Contains(err.Error(), "24 GiB free") {
+	if err := c.init(); err == nil || !strings.Contains(err.Error(), "synthetic capacity unavailable") {
 		t.Fatal("preparation did not enforce its free-space floor", err)
 	}
 	key := pruneFixture(t, c, 1, 48*time.Hour)

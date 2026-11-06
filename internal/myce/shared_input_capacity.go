@@ -67,12 +67,17 @@ func (c *SharedInputCache) refreshCapacity() {
 // The existing cache admission lock serializes accounting with reservations and
 // eviction. A failed inventory withholds space; it never invents free capacity.
 func (c *SharedInputCache) refreshCapacityLocked() {
-	report := &SharedInputCapacity{CapacityBytes: uint64(max(0, c.cache.Limit)), Protected: map[string]uint64{}}
+	report := &SharedInputCapacity{Protected: map[string]uint64{}}
 	defer func() { c.mu.Lock(); c.capacity = report; c.mu.Unlock() }()
 	used, err := c.cache.DiskUsage()
 	if err != nil {
 		return
 	}
+	limit, err := c.cache.budget(used)
+	if err != nil {
+		return
+	}
+	report.CapacityBytes = uint64(limit)
 	entries, err := os.ReadDir(c.cache.Root)
 	if err != nil {
 		return

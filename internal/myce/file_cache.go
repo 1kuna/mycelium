@@ -13,11 +13,12 @@ import (
 // FileCache contains only reproducible store copies. Attempt folders hold private
 // copies, so commands cannot mutate shared blobs and cache eviction cannot race use.
 type FileCache struct {
-	Root   string
-	Limit  int64
-	Clock  Clock
-	Client Client
-	mu     sync.Mutex
+	budgets *cacheBudgets
+	Root    string
+	Limit   int64
+	Clock   Clock
+	Client  Client
+	mu      sync.Mutex
 }
 
 func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stageErr error) {
@@ -28,7 +29,13 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err := ref.validate(); err != nil {
 		return err
 	}
-	if c.Limit <= 0 || ref.SizeBytes > c.Limit {
+	if c.Clock == nil {
+		c.Clock = RealClock{}
+	}
+	if c.budgets == nil {
+		c.budgets = newCacheBudgets()
+	}
+	if c.Limit < 0 || c.Limit > 0 && ref.SizeBytes > c.Limit {
 		return errors.New("file exceeds local cache limit")
 	}
 	if err := PrepareStateRoots(c.Root); err != nil {
@@ -45,6 +52,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	}
 	p := filepath.Join(root, ref.SHA256)
 	if verifyFile(ctx, p, ref) == nil {
+		c.budgets.touch(c.Root, ref.SHA256, ref.SizeBytes, c.Clock.Now())
 		now := c.Clock.Now()
 		if err = os.Chtimes(p, now, now); err != nil {
 			return err
@@ -102,15 +110,23 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err != nil {
 		return err
 	}
+	limit, err := c.budgets.limit(c.Root, used, c.Limit, c.Clock.Now())
+	if err != nil {
+		return err
+	}
 	need := ref.SizeBytes - prefix
 	sort.Slice(victims, func(i, j int) bool {
+		hi, hj := c.budgets.recent(c.Root, victims[i].name, c.Clock.Now()), c.budgets.recent(c.Root, victims[j].name, c.Clock.Now())
+		if hi != hj {
+			return !hi
+		}
 		if victims[i].used == victims[j].used {
 			return victims[i].name < victims[j].name
 		}
 		return victims[i].used < victims[j].used
 	})
 	for _, v := range victims {
-		if used+need <= c.Limit && free >= need {
+		if used+need <= limit && free >= need {
 			break
 		}
 		hash := strings.TrimSuffix(v.name, ".partial")
@@ -132,9 +148,20 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 		}
 	}
 	operation = "cache_admission"
-	if used+need > c.Limit || free < need {
+	if used+need > limit || free < need {
 		return errors.New("insufficient local file cache space")
 	}
+	reservation, err := c.budgets.reserve(c.Root, need, c.Clock)
+	if err != nil {
+		return err
+	}
+	defer reservation.release()
+	copyCtx, releaseCopy, err := c.budgets.copy(ctx, c.Root, c.Clock, 0)
+	if err != nil {
+		return err
+	}
+	defer releaseCopy()
+	ctx = copyCtx
 	operation = "cache_download"
 	if err = c.Client.DownloadFile(ctx, ref, partial); err != nil {
 		return err
@@ -146,6 +173,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err = syncWorkerDir(root); err != nil {
 		return err
 	}
+	c.budgets.touch(c.Root, ref.SHA256, ref.SizeBytes, c.Clock.Now())
 	now := c.Clock.Now()
 	if err = os.Chtimes(p, now, now); err != nil {
 		return err

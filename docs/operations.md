@@ -848,8 +848,8 @@ myce install queue --config QUEUE_CONFIG \
 These flags also work on a fresh queue install. They are saved as
 `file_store_bytes` and `file_store_production_reserve` and included in the
 generated service. Omitted flags preserve saved values across reinstalls and
-upgrades. Fresh installs and older configs without these fields keep the
-existing defaults: 100 GiB capacity and zero reserve. Set
+upgrades. Fresh installs and older configs without these fields select adaptive
+physical capacity and zero production reserve. Set
 `--file-store-production-reserve 0` explicitly to disable the reserve.
 
 To retire an existing systemd `ExecStart` drop-in during an authorized upgrade:
@@ -2109,30 +2109,40 @@ semantics apply unchanged. Native Windows/WSL CPU qualification is later work.
 
 ## File and shared-input cache capacity
 
-From s072, omitted `--file-cache-bytes` (or `0`) selects automatic sizing at
-worker startup, using the local cache filesystem's nearest existing ancestor.
-It reuses the environment policy: `min(max(free/4, 4 GiB), 80 GiB, free-20 GiB)`;
-less than 24 GiB free refuses automatic startup. These are ceilings for **each**
-of the private file and shared-input caches, not allocations or reservations.
-The quarter fraction leaves room for both caches, environments and active work;
-the existing physical free-space floor also applies at admission. This sampled
-policy is not the native disk-isolation guarantee parked under #504/#506.
+From the next release (#805), zero or omitted cache-byte flags retain automatic
+intent. Each admission and idle sweep measures the actual filesystem, including
+the nearest existing ancestor for a new root. Environment, package-download,
+private-file, shared-input, model and snapshot caches on that volume share one
+worker ledger. Unused capacity is borrowed on demand; no startup fraction,
+minimum disk size or maximum automatic GiB allowance is saved.
 
-Read-only measurements for this change found approximately 152 GiB and
-1,085 GiB free on two worker filesystems. The reused formula yields about
-38 GiB and 80 GiB, respectively, enough for the incident's 16.5 + 3.4 GiB
-file inputs. The old 10 GiB default could never hold that pair. The 80 GiB
-ceiling preserves the existing bounded environment-cache policy; this change
-does not invent a fleet-wide storage allocator or reserve disk from other writers.
+The ledger subtracts pending copies in full until their writers join, and predicts
+external free-space loss over the longest observed sampling/writer interval.
+Measured cache growth is excluded from that external trend. Before measurements
+exist, available blocks already exclude filesystem reserves and one OS page is
+kept for a control write. This is admission headroom, not filesystem isolation:
+unknown writers and arbitrary native commands can still exhaust a disk. A
+shrinking disk reduces budgets; observed recovery restores borrowing.
 
-`myce install worker --config CONFIG --file-cache-bytes 34359738368` retains an
-explicit 32 GiB ceiling across reinstall and signed upgrade. Saved distinct positive
-values remain authoritative. Like environment sizing, the exact retired 10 GiB
-default in an older configuration migrates to automatic mode: older settings did
-not record whether that value was explicit. New explicit settings persist that
-intent, including an explicit 10 GiB. An omitted field selects automatic mode; reinstall with `--file-cache-bytes 0`
-clears a saved override. No installer writes a machine-specific automatic size:
-the worker recomputes it from its actual filesystem at each startup.
+Eviction orders cold reproducible entries before entries reused within their
+observed inter-use interval. Use/build locks, durable pins, queue references,
+unknown data and authoritative results keep their existing protection. Active
+copies reserve capacity across cache kinds. Model and shared-input caches also
+re-evaluate budgets in the existing idle retention lane. No queue mutex is held
+for scans, verification, copy or eviction.
+
+Positive authored/saved byte ceilings remain additional constraints. Zero clears
+an override. Existing positive model/store settings remain operator intent; they
+are not silently migrated merely because they equal an old default. The existing
+explicit-intent migration for legacy file-cache settings remains supported.
+
+Copy admission is shared by destination filesystem and observes actual streaming
+throughput, including the source/network path. One stream bootstraps an unknown
+path; a productive saturated observation permits one additional stream. The
+controller withdraws that increment when aggregate throughput does not improve.
+Demand bounds exploration. Cancellation releases a waiting request, while an
+active writer retains its slot and disk reservation until it joins. Explicit
+`--model-copy-parallel` remains an operator-selected concurrency bound.
 
 Workers report shared-input capacity, free and evictable bytes without cache
 scans in check-in. Discovery and accounting run at startup and cache changes,
@@ -2147,23 +2157,10 @@ Temporary occupancy waits, and mixed fleets route to a fitting worker. See
 
 ## Environment cache capacity
 
-Omitting `--environment-cache-bytes` auto-sizes from available bytes on the local
-cache filesystem (the nearest existing ancestor for a fresh path): one quarter
-of free space, bounded to 4–80 GiB and capped to retain 20 GiB free. Below 24 GiB
-free, automatic sizing refuses; choose an explicit byte limit after checking
-headroom. The limit is a ceiling, not a preallocation. Explicit CLI byte values
-win. Saved-config upgrades migrate only the exact former 20 GiB default;
-other saved limits stay unchanged. A historical explicitly selected 20 GiB
-cannot be distinguished from that former default; pass it explicitly again to
-retain it during an upgrade.
-
-After a cache-capacity refusal, reconfigure the idle worker with the supported
-`myce install worker --config CONFIG --environment-cache-bytes BYTES` path.
-The worker reconsiders saved capacity failures when its allowance changes,
-including failures written by older releases. Other preparation failures remain
-cached. No state-file edit or cache deletion is needed. Preparation may be
-admitted on the next heartbeat; successful preparation and qualification are
-separate results.
+Omitting `--environment-cache-bytes` selects the shared adaptive mechanism
+above. Explicit positive limits remain binding. Capacity failures remain
+transient and use normal preparation recovery; no manual cache deletion or
+machine-specific default is required.
 
 One-shot NAS install/reconfigure validation allows 30 seconds per filesystem
 operation. Successful operations advance validation without a shared total
@@ -2185,8 +2182,9 @@ up to the existing 10-second network allowance, accommodating the measured slow
 share without delaying heartbeats. Cold observations, completed failures and
 probes still pending after that allowance fence checkpoint-dependent work.
 
-Workers retain prepared environments for at least 24 hours after preparation or
-last use (including qualification checks and completion of long-running jobs).
+Workers learn recent-use protection from the intervals between actual uses
+(including qualification and release of long-running jobs). A first use supplies
+no invented time-to-reuse; active locks always protect that execution.
 Active attempt/build locks also protect them. If protected entries fill the
 configured limit, preparation refuses capacity rather than evicting them.
 Evictions record the environment key and cache-limit reason in the worker log.
@@ -2202,14 +2200,14 @@ myce worker env prune --apply
 The default is a dry-run. Each ready prefix is listed with its age since
 preparation/last use, allocated size in bytes, queue reference state, use/build
 lock state and recent-use protection. `--apply` uses the same eviction path and
-24-hour minimum retention as pressure eviction. Locked, recently used, and
+measured reuse protection as pressure eviction. Locked, recently used, and
 queue-referenced environments are preserved, including queued work, sidecars,
 extension variants and attempts still awaiting physical release. Reference
 state is queried again under the candidate's local locks before retirement;
 an unavailable queue refuses deletion. The queue must support this command's
 reference API. Shared downloads and unrelated retired prefixes are preserved.
-Pruning does not auto-size preparation capacity or require its 24 GiB free-space
-floor; both dry-run and apply remain available below that floor.
+Pruning needs no preparation capacity admission; dry-run and apply remain
+available when new preparation cannot fit.
 
 `--config FILE` selects an installed worker; `--environment-cache DIR` overrides
 its cache directory. Without installed settings, supply that directory and queue
@@ -2222,8 +2220,8 @@ Apply appends synced retirement intents and a final timestamped report to
 
 Package downloads use persistent worker-wide `.downloads/uv` and
 `.downloads/pixi` caches under the configured environment-cache root. These bytes
-are excluded from the prepared-environment budget and have a separate 16 GiB
-combined high-water limit. Before and after builds, excess downloads are pruned
+have a separate measured demand domain in the same filesystem ledger; an
+explicit download ceiling remains an additional constraint. Before and after builds, excess downloads are pruned
 with `uv cache prune --ci` and `pixi clean cache --yes`, while no Mycelium
 installer uses the shared cache. If standard pruning cannot bring the cache
 under budget, preparation fails with the remaining byte count. Active builds

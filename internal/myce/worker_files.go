@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -15,26 +14,16 @@ func (w *Worker) initFileTransfers(ctx context.Context, s *workerStore) error {
 		root = filepath.Join(s.dir, "file-cache")
 	}
 	limit := w.FileCacheLimit
-	if limit == 0 {
-		var err error
-		limit, err = AutoEnvironmentCacheLimit(root)
-		if err != nil {
-			return fmt.Errorf("file cache auto-size: %w", err)
-		}
+	if limit < 0 || w.CacheLimit < 0 {
+		return errors.New("cache limits must be nonnegative")
 	}
-	if limit <= 0 {
-		return errors.New("file cache limit must be positive")
-	}
-	w.fileCache = &FileCache{Root: root, Limit: limit, Clock: w.Clock, Client: w.Client}
-	w.sharedInputs = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "shared-inputs"), Limit: limit, Clock: w.Clock}, Client: w.Client}
+	budgets := newCacheBudgets()
+	w.fileCache = &FileCache{Root: root, Limit: limit, Clock: w.Clock, Client: w.Client, budgets: budgets}
+	w.sharedInputs = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "shared-inputs"), Limit: limit, Clock: w.Clock, budgets: budgets}, Client: w.Client}
 	w.sharedInputs.refreshCapacity()
-	// Model snapshots are tens of gigabytes, so they share the model cache's
-	// size setting rather than the small file cache's.
-	models := w.CacheLimit
-	if models == 0 {
-		models = defaultModelCacheBytes
-	}
-	w.modelSnapshots = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "model-snapshots"), Limit: models, Clock: w.Clock}, Client: w.Client}
+	w.modelSnapshots = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "model-snapshots"), Limit: w.CacheLimit, Clock: w.Clock, budgets: budgets}, Client: w.Client}
+	budgets.register(w.sharedInputs.cache.Root, w.sharedInputs.collectAdaptive)
+	budgets.register(w.modelSnapshots.cache.Root, w.modelSnapshots.collectAdaptive)
 	if w.fileCheckpoints {
 		if w.CheckpointRoot != "" {
 			return errors.New("NAS checkpoint-root cannot be combined with queue file-store checkpoints")

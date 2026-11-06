@@ -213,8 +213,8 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.ModelCache = filepath.Join(c.State, "model-cache")
 	c.EnvironmentCache = filepath.Join(c.State, "environment-cache")
 	c.FileCacheBytes = 0
-	c.ModelCacheBytes = 100 * 1024 * 1024 * 1024
-	c.EnvironmentCacheBytes = 20 * 1024 * 1024 * 1024
+	c.ModelCacheBytes = 0
+	c.EnvironmentCacheBytes = 0
 	c.Checkpoints = filepath.Join(nas, "mycelium", "checkpoints")
 	c.ModelRoot = filepath.Join(nas, "mycelium", "models")
 	c.DB = filepath.Join(c.State, "myce.db")
@@ -228,7 +228,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.Heartbeat = time.Second
 	c.LogRetention = DefaultLogRetention
 	c.FileRetention = DefaultFileRetention
-	c.FileStoreBytes = 100 << 30
+	c.FileStoreBytes = 0
 	c.RestartGrace = RestartGrace
 	c.ProductionInfrastructureRetries = DefaultProductionInfrastructureRetries
 	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
@@ -573,7 +573,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 }
 
 func ReadServiceConfig(path string) (ServiceConfig, error) {
-	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention, FileStoreBytes: 100 << 30, FileCacheBytes: 0}
+	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention, FileStoreBytes: 0, FileCacheBytes: 0}
 	b, e := os.ReadFile(path)
 	if e != nil {
 		return c, e

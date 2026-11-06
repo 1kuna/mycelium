@@ -228,6 +228,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		c.verified[key] = signature
 		c.mu.Unlock()
 		valid = true
+		c.cache.budgets.touch(c.cache.Root, key, s.bytes(), c.cache.Clock.Now())
 		c.mu.Lock()
 		c.hits++
 		c.mu.Unlock()
@@ -275,7 +276,17 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 				unlockEnvironment(gate)
 			}
 		}()
-		if e = c.populateInput(ctx, s, nasRoot, stage); e != nil {
+		held, e := c.cache.budgets.reserve(c.cache.Root, need, c.cache.Clock)
+		if e != nil {
+			return e
+		}
+		defer held.release()
+		copyCtx, releaseCopy, e := c.cache.budgets.copy(ctx, c.cache.Root, c.cache.Clock, 0)
+		if e != nil {
+			return e
+		}
+		defer releaseCopy()
+		if e = c.populateInput(copyCtx, s, nasRoot, stage); e != nil {
 			return e
 		}
 		if c.beforePublish != nil {
@@ -299,6 +310,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 	if err != nil {
 		return "", err
 	}
+	c.cache.budgets.touch(c.cache.Root, key, s.bytes(), c.cache.Clock.Now())
 	if err = syncWorkerDir(c.cache.Root); err != nil {
 		return "", err
 	}
@@ -703,7 +715,13 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		}
 		victims = append(victims, victim{d.Name(), info.ModTime().UnixNano()})
 	}
-	sort.Slice(victims, func(i, j int) bool { return victims[i].used < victims[j].used })
+	sort.Slice(victims, func(i, j int) bool {
+		hi, hj := c.cache.budgets.recent(c.cache.Root, victims[i].name, c.cache.Clock.Now()), c.cache.budgets.recent(c.cache.Root, victims[j].name, c.cache.Clock.Now())
+		if hi != hj {
+			return !hi
+		}
+		return victims[i].used < victims[j].used
+	})
 	var cacheAvailable, diskAvailable int64
 	enough := func() (bool, error) {
 		used, e := c.cache.DiskUsage()
@@ -714,17 +732,21 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		if e != nil {
 			return false, e
 		}
-		floor := diskFreeFloor(disk.TotalBytes)
+		limit, e := c.cache.budget(used)
+		if e != nil {
+			return false, e
+		}
+		floor := uint64(os.Getpagesize())
 		if reserved > int64(^uint64(0)>>1)-need {
 			return false, nil
 		}
 		projected := need + reserved
-		cacheAvailable = max(0, c.cache.Limit-used-reserved)
+		cacheAvailable = max(0, limit-used-reserved)
 		diskAvailable = 0
 		if disk.FreeBytes >= floor {
 			diskAvailable = int64(min(uint64(^uint64(0)>>1), disk.FreeBytes-floor))
 		}
-		return projected <= c.cache.Limit-used && disk.FreeBytes >= floor && uint64(projected) <= disk.FreeBytes-floor, nil
+		return projected <= limit-used && disk.FreeBytes >= floor && uint64(projected) <= disk.FreeBytes-floor, nil
 	}
 	for _, v := range victims {
 		ok, e := enough()

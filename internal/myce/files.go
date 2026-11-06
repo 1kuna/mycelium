@@ -128,6 +128,7 @@ type FileStore struct {
 	productionReserve           uint64
 	admit                       func(context.Context, FileStoreStatus, map[string]storedPayload, FileManifest, uint64, uint64) (uint64, error)
 	reservedOutputs             func(map[string]storedPayload, ...context.Context) uint64
+	budgets                     *cacheBudgets
 	diskProbe                   func(string) (DiskReading, error)
 	controlFiles                controlStorageFiles
 	root                        string
@@ -174,11 +175,11 @@ func (j Job) storedFileResults() bool {
 }
 
 func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
-	if q.fileStoreProductionReserve < 0 || q.fileStoreProductionReserve > limit {
+	if q.fileStoreProductionReserve < 0 || limit > 0 && q.fileStoreProductionReserve > limit {
 		return errors.New("file store production reserve must be between zero and the store limit")
 	}
-	if limit <= 0 {
-		return errors.New("file store limit must be positive")
+	if limit < 0 {
+		return errors.New("file store limit must be nonnegative")
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -199,7 +200,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s := &FileStore{budgets: newCacheBudgets(), inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	if q.lock != nil {
 		database := strings.TrimSuffix(q.lock.Name(), ".lock")
 		s.controlFiles = controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}

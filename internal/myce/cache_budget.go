@@ -1,0 +1,224 @@
+package myce
+
+import (
+	"context"
+	"errors"
+	"math"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+// cacheBudgets accounts for all cache kinds on each physical filesystem. Only
+// metadata probes run here, outside both this mutex and the queue mutex. A
+// reservation is charged in full until its writer joins: double counting bytes
+// already written is preferable to promising the same free blocks twice.
+// A zero authored limit means borrowing available capacity, never a saved size.
+type cacheBudgets struct {
+	mu           sync.Mutex
+	probe        func(string) (DiskReading, error)
+	volumes      map[string]*cacheVolume
+	reservations map[*cacheReservation]struct{}
+	reuse        map[string]cacheReuse
+	copies       map[string]*copyGovernor
+	maintenance  map[string]func(context.Context)
+}
+type cacheVolume struct {
+	at            time.Time
+	free, managed int64
+	horizon       time.Duration
+	drain         float64
+	domains       map[string]cacheDemand
+}
+type cacheDemand struct{ used, hot int64 }
+type cacheReuse struct {
+	at       time.Time
+	interval time.Duration
+	bytes    int64
+}
+type cacheReservation struct {
+	ledger  *cacheBudgets
+	volume  string
+	bytes   int64
+	started time.Time
+	clock   Clock
+}
+
+func newCacheBudgets() *cacheBudgets {
+	return &cacheBudgets{probe: workerDiskProbe, volumes: map[string]*cacheVolume{}, reservations: map[*cacheReservation]struct{}{}, reuse: map[string]cacheReuse{}, copies: map[string]*copyGovernor{}}
+}
+func cacheBytes(n uint64) int64 { return int64(min(n, uint64(math.MaxInt64))) }
+func cacheSum(a, b int64) int64 { return a + min(max(0, b), math.MaxInt64-a) }
+func (b *cacheBudgets) touch(root, key string, bytes int64, now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id := root + "/" + key
+	r := b.reuse[id]
+	if !r.at.IsZero() && now.After(r.at) {
+		r.interval = now.Sub(r.at)
+	}
+	r.at, r.bytes = now, bytes
+	b.reuse[id] = r
+}
+func (b *cacheBudgets) recent(root, key string, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	r := b.reuse[root+"/"+key]
+	return r.interval > 0 && now.Sub(r.at) < r.interval
+}
+func (b *cacheBudgets) forget(root, key string) {
+	b.mu.Lock()
+	delete(b.reuse, root+"/"+key)
+	b.mu.Unlock()
+}
+
+// sample predicts external consumption over the longest observed sampling or
+// writer interval. Managed growth is removed from that trend. The bootstrap is
+// one OS page: Bavail already excludes the filesystem's reserved blocks; a page
+// is the smallest control-write allocation we can justify before measurements.
+func (b *cacheBudgets) sample(root string, used int64, now time.Time) (DiskReading, error) {
+	disk, err := b.probe(root)
+	if err != nil {
+		return disk, err
+	}
+	return b.sampleReading(root, used, now, disk)
+}
+func (b *cacheBudgets) sampleReading(root string, used int64, now time.Time, disk DiskReading) (DiskReading, error) {
+	if disk.TotalBytes == 0 {
+		return disk, errors.New("disk capacity unavailable")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v := b.volumes[disk.Volume]
+	if v == nil {
+		v = &cacheVolume{domains: map[string]cacheDemand{}}
+		b.volumes[disk.Volume] = v
+	}
+	hot := int64(0)
+	for id, r := range b.reuse {
+		if filepath.Dir(id) == root && r.interval > 0 && now.Sub(r.at) < r.interval {
+			hot = cacheSum(hot, r.bytes)
+		}
+	}
+	v.domains[root] = cacheDemand{max(0, used), min(max(0, used), hot)}
+	managed := int64(0)
+	for _, d := range v.domains {
+		managed = cacheSum(managed, d.used)
+	}
+	if now.After(v.at) && !v.at.IsZero() {
+		interval := now.Sub(v.at)
+		v.horizon = max(v.horizon, interval)
+		loss := (v.free - cacheBytes(disk.FreeBytes)) - (managed - v.managed)
+		v.drain = float64(max(0, loss)) / interval.Seconds()
+	}
+	v.at, v.free, v.managed = now, cacheBytes(disk.FreeBytes), managed
+	return disk, nil
+}
+func (b *cacheBudgets) floorLocked(v *cacheVolume) int64 {
+	predicted := v.drain * v.horizon.Seconds()
+	return max(int64(os.Getpagesize()), int64(min(float64(math.MaxInt64), predicted)))
+}
+func (b *cacheBudgets) pendingLocked(volume string) int64 {
+	n := int64(0)
+	for r := range b.reservations {
+		if r.volume == volume {
+			n = cacheSum(n, r.bytes)
+		}
+	}
+	return n
+}
+func (b *cacheBudgets) limit(root string, used, explicit int64, now time.Time) (int64, error) {
+	disk, err := b.probe(root)
+	if err != nil {
+		return 0, err
+	}
+	return b.limitReading(root, used, explicit, now, disk)
+}
+func (b *cacheBudgets) limitReading(root string, used, explicit int64, now time.Time, disk DiskReading) (int64, error) {
+	if _, err := b.sampleReading(root, used, now, disk); err != nil {
+		return 0, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v := b.volumes[disk.Volume]
+	spare := v.free - b.floorLocked(v) - b.pendingLocked(disk.Volume)
+	limit := cacheSum(max(0, used), max(0, spare))
+	if spare < 0 {
+		// Reclaim cold bytes across domains before applying pressure to the reused
+		// working set. No domain gets an independent fraction of the same free disk.
+		cold := int64(0)
+		for _, d := range v.domains {
+			cold = cacheSum(cold, d.used-d.hot)
+		}
+		d := v.domains[root]
+		debt := float64(-spare)
+		reclaim := float64(0)
+		if cold > 0 {
+			reclaim = min(debt, float64(cold)) * float64(d.used-d.hot) / float64(cold)
+		}
+		if debt > float64(cold) && v.managed > cold {
+			reclaim += (debt - float64(cold)) * float64(d.hot) / float64(v.managed-cold)
+		}
+		limit = max(0, used-int64(math.Ceil(min(float64(used), reclaim))))
+	}
+	if explicit > 0 {
+		limit = min(limit, explicit)
+	}
+	return limit, nil
+}
+func (b *cacheBudgets) reserve(root string, bytes int64, clock Clock) (*cacheReservation, error) {
+	disk, err := b.probe(root)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v := b.volumes[disk.Volume]
+	if v == nil {
+		return nil, errors.New("cache capacity not sampled")
+	}
+	free := cacheBytes(disk.FreeBytes) - b.floorLocked(v) - b.pendingLocked(disk.Volume)
+	if bytes < 0 || bytes > free {
+		return nil, errors.New("insufficient shared filesystem cache headroom")
+	}
+	r := &cacheReservation{b, disk.Volume, bytes, clock.Now(), clock}
+	b.reservations[r] = struct{}{}
+	return r, nil
+}
+func (r *cacheReservation) release() {
+	if r == nil {
+		return
+	}
+	b := r.ledger
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.reservations, r)
+	if v := b.volumes[r.volume]; v != nil {
+		v.horizon = max(v.horizon, r.clock.Now().Sub(r.started))
+	}
+}
+
+// One controller per destination volume observes the actual source/network and
+// local-write path together. Different cache kinds cannot independently saturate
+// the same disk. All streams finish before the slot is released.
+func (b *cacheBudgets) copy(ctx context.Context, root string, clock Clock, explicit int) (context.Context, func(), error) {
+	disk, err := b.probe(root)
+	if err != nil {
+		return ctx, nil, err
+	}
+	b.mu.Lock()
+	g := b.copies[disk.Volume]
+	if g == nil {
+		g = &copyGovernor{clock: clock}
+		b.copies[disk.Volume] = g
+	}
+	b.mu.Unlock()
+	release, err := g.acquire(ctx, explicit)
+	if err != nil {
+		return ctx, nil, err
+	}
+	return context.WithValue(ctx, cacheCopyProgressKey{}, g.progress), release, nil
+}
+
+type cacheCopyProgressKey struct{}

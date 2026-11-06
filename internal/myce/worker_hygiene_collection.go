@@ -71,6 +71,9 @@ func (c *workerHygieneCollector) collect(ctx context.Context) {
 			return state.Referenced, err
 		})
 	}
+	if c.w.fileCache != nil && c.w.fileCache.budgets != nil {
+		c.w.fileCache.budgets.maintain(ctx)
+	}
 	if c.w.ServiceConfig != nil {
 		if err := collectFailedFleetStaging(ctx, *c.w.ServiceConfig, fleetCommand); err != nil {
 			r.StagingError = "installer_staging_retained"
@@ -173,7 +176,21 @@ func (c *FileCache) collect(ctx context.Context) (r CacheCollection) {
 		}
 		victims = append(victims, victim{entry.Name(), info})
 	}
-	sort.Slice(victims, func(i, j int) bool { return victims[i].info.ModTime().Before(victims[j].info.ModTime()) })
+	if c.budgets == nil {
+		c.budgets = newCacheBudgets()
+	}
+	r.Limit, err = c.budgets.limit(c.Root, r.Bytes, c.Limit, c.Clock.Now())
+	if err != nil {
+		r.Error = "file_cache_capacity_unavailable"
+		return r
+	}
+	sort.Slice(victims, func(i, j int) bool {
+		hi, hj := c.budgets.recent(c.Root, victims[i].name, c.Clock.Now()), c.budgets.recent(c.Root, victims[j].name, c.Clock.Now())
+		if hi != hj {
+			return !hi
+		}
+		return victims[i].info.ModTime().Before(victims[j].info.ModTime())
+	})
 	for _, v := range victims {
 		if r.Bytes <= r.Limit {
 			break
@@ -213,6 +230,11 @@ func (c *EnvironmentCache) collectBudget(ctx context.Context, references func(co
 	r.Bytes, err = c.collectionUsage(ctx)
 	if err != nil {
 		r.Error = "environment_collect_failed"
+		return r
+	}
+	r.Limit, err = c.budget(r.Bytes)
+	if err != nil {
+		r.Error = "environment_capacity_unavailable"
 		return r
 	}
 	if r.Bytes <= r.Limit {

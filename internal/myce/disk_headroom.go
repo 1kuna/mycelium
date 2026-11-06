@@ -3,6 +3,7 @@ package myce
 import (
 	"fmt"
 	"math"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -110,9 +111,9 @@ func diskVolumeNeed(j *Job, v DiskVolume, machines ...*Machine) (uint64, bool) {
 	return need, relevant
 }
 func diskFreeFloor(total uint64) uint64 {
-	// Leave 1% for filesystem metadata and other writers; on small volumes keep
-	// at least 256 MiB for control logs/state. This is headroom, not a job-size cap.
-	return max(total/100, 256<<20)
+	// Bavail excludes filesystem-reserved blocks. Before consumption is known,
+	// retain one OS page for a control write, rather than an installation fraction.
+	return min(total, uint64(os.Getpagesize()))
 }
 func diskVolumeReason(m *Machine, v DiskVolume, need uint64) string {
 	label := fmt.Sprintf("disk_headroom: host %s %s", hostID(m), strings.Join(v.Roots, "+"))
@@ -120,6 +121,10 @@ func diskVolumeReason(m *Machine, v DiskVolume, need uint64) string {
 		return fmt.Sprintf("%s disk reading unavailable (last sample age %.1fs); need=%d bytes", label, v.AgeSeconds, need)
 	}
 	floor := diskFreeFloor(v.TotalBytes)
+	if v.ChangeBytesPerHour != nil && *v.ChangeBytesPerHour < 0 {
+		predicted := -*v.ChangeBytesPerHour * (v.SampleIntervalSeconds + v.AgeSeconds) / 3600
+		floor = max(floor, uint64(min(float64(v.TotalBytes), predicted)))
+	}
 	if v.FreeBytes < floor || need > v.FreeBytes-floor {
 		return fmt.Sprintf("%s free=%d bytes floor=%d bytes need=%d bytes total=%d bytes", label, v.FreeBytes, floor, need, v.TotalBytes)
 	}
