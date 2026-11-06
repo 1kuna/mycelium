@@ -286,6 +286,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
     <div class="refresh-state" data-refresh-state role="status" aria-live="polite"><span class="refresh-dot"></span><span data-refresh-copy>Live · every 5s</span></div>
   </header>
 
+  {{if .HealthAlertDelivery}}<p class="muted" role="status">{{.HealthAlertDelivery.Summary}}</p>{{end}}
   {{$failed := failedJobs .Jobs}}{{$lost := lostMachines .Machines}}{{$nas := checkpointWarnings .Machines}}
   {{if or .Warning .HostHolds .DeviceMaintenance .ComponentExclusions .Reservations $failed $lost $nas}}<div class="alerts" aria-label="Recent problems">
     {{range .HostHolds}}<div class="alert" role="status">{{.}}</div>{{end}}

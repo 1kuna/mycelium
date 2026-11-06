@@ -809,6 +809,8 @@ type Snapshot struct {
 	ComponentExclusions []ComponentExclusion `json:"component_exclusions,omitempty"`
 	DeviceMaintenance   []DeviceMaintenance  `json:"device_maintenance,omitempty"`
 
+	HealthAlertDelivery *HealthAlertDelivery `json:"health_alert_delivery,omitempty"`
+
 	HealthAlerts   []HealthAlert        `json:"health_alerts,omitempty"`
 	QueueRelease   RunningRelease       `json:"queue_release"`
 	FleetUpgrade   *FleetUpgradeStatus  `json:"fleet_upgrade,omitempty"`

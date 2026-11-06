@@ -184,6 +184,14 @@ Verify the whole manifest before use; loading never downloads weights. See
 
 ## Automatic host hygiene (next release)
 
+On releases exposing `health_alert_delivery`, status explains whether the
+queue health notifier is configured and counts retained unacknowledged alerts.
+Without a configured hook, `delivered: false` is diagnostic-only history by
+design. With a hook, false alone cannot establish whether delivery was attempted
+or failed; the queue owner checks sanitized hook and commit evidence. This
+channel is separate from your job completion notifier and does not prove a
+thread wake. Older releases omit configuration; do not infer a cause from false.
+
 Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium
 resumes after measured recovery; an operator drain remains independent. Running
