@@ -1,6 +1,8 @@
 package myce
 
 import (
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -160,24 +162,72 @@ type batchRetryEvidence struct {
 	Progress int64             `json:"progress,omitempty"`
 }
 
-func batchInfrastructureState(m *Machine) string {
+func batchRetryTarget(m *Machine) string {
+	devices := slices.Clone(targetDevices(m))
+	slices.Sort(devices)
+	return m.ID + "/" + m.GPU + "/" + strings.Join(devices, ",")
+}
+
+func batchInfrastructureState(j *Job, m *Machine) string {
 	if m == nil {
 		return ""
 	}
-	type preparationState struct{ Key, State, Failure string }
-	reports := make([]preparationState, 0, len(m.EnvironmentReports))
-	for _, r := range m.EnvironmentReports {
-		reports = append(reports, preparationState{r.Key, r.State, r.FailureKind})
+	// Hash only this job's preparation. Heartbeat report order, unrelated
+	// builds and diagnostic counters are not evidence that its fault changed.
+	keys := map[string]bool{}
+	if key := environmentKey(j, m); key != "" {
+		keys[key] = true
 	}
+	digests := map[string]bool{}
+	for _, e := range j.Extensions {
+		if !e.matchesTarget(m) || !slices.Contains(e.platforms(), m.GPU) {
+			continue
+		}
+		digests[e.Digest] = true
+		keys[extensionPreparationKey(e, m)] = true
+		if v := e.variant(machineTarget(m)); v != nil {
+			for _, r := range v.Environments {
+				keys[r.Key] = true
+			}
+		}
+	}
+	type preparationState struct{ Key, State, Failure string }
+	reports := []string{}
+	for _, r := range m.EnvironmentReports {
+		if keys[r.Key] {
+			reports = append(reports, identityHash(preparationState{r.Key, r.State, r.FailureKind}))
+		}
+	}
+	slices.Sort(reports)
+	environments := []string{}
+	for _, key := range m.Environments {
+		if keys[key] {
+			environments = append(environments, key)
+		}
+	}
+	slices.Sort(environments)
+	qualification := []string{}
+	for _, r := range m.ExtensionReports {
+		if digests[r.Digest] && r.Work == j.Spec.workType() && (r.Device == "" || slices.Contains(targetDevices(m), r.Device)) {
+			qualification = append(qualification, identityHash(r))
+		}
+	}
+	slices.Sort(qualification)
+	// A grouped target needs every member's qualification/runtime evidence.
+	members := []string{}
+	for _, card := range m.groupMembers {
+		members = append(members, batchInfrastructureState(j, card))
+	}
+	slices.Sort(members)
 	return identityHash(struct {
 		Session                   string
-		Environments              []string
-		Reports                   []preparationState
+		Environments, Reports     []string
+		Qualification, Members    []string
 		Extension, CPU, Inventory string
 		Roots                     []UnavailableRoot
 		Checkpoint                bool
 		CacheError                string
-	}{m.Session, m.Environments, reports, m.ExtensionFingerprint, m.CPUIsolation, m.InventoryReason, m.UnavailableRoots, m.CheckpointUnavailable, m.CacheError})
+	}{m.Session, environments, reports, qualification, members, m.ExtensionFingerprint, m.CPUIsolation, m.InventoryReason, m.UnavailableRoots, m.CheckpointUnavailable, m.CacheError})
 }
 
 func (q *Queue) holdUnproductiveInfrastructure(j *Job) {
@@ -206,7 +256,16 @@ func (q *Queue) holdUnproductiveInfrastructure(j *Job) {
 			m.InventoryReason = j.ExecutionCause.Predicate
 		}
 	}
-	evidence.Targets[j.Machine] = batchInfrastructureState(q.s.Machines[j.Machine])
+	m := q.s.Machines[j.Machine]
+	if m == nil {
+		return
+	}
+	if j.Spec.Needs.cpuOnly() && m.Devices != nil {
+		m = cpuMachineView(m)
+	} else {
+		m = allocationMachine(m, j.AllocatedDevices)
+	}
+	evidence.Targets[batchRetryTarget(m)] = batchInfrastructureState(j, m)
 	q.s.BatchRetries[j.ID] = evidence
 }
 
@@ -215,8 +274,8 @@ func (q *Queue) batchRetryBlocked(j *Job, m *Machine) bool {
 		return false
 	}
 	evidence := q.s.BatchRetries[j.ID]
-	fingerprint, ok := evidence.Targets[m.ID]
-	return ok && fingerprint == batchInfrastructureState(m)
+	fingerprint, ok := evidence.Targets[batchRetryTarget(m)]
+	return ok && fingerprint == batchInfrastructureState(j, m)
 }
 
 func (q *Queue) batchRetryWaitingReason(j *Job) string {
@@ -237,7 +296,9 @@ func (q *Queue) beginBatchRetryEvidence(j *Job) {
 		q.s.BatchRetries = map[string]batchRetryEvidence{}
 	}
 	evidence := q.s.BatchRetries[j.ID]
-	evidence.Progress = 0
+	// The last exact attempt's accepted NAS report survives requeue. Restoring
+	// the same generation is not new progress, including after queue restart.
+	evidence.Progress = max(evidence.Progress, j.Progress)
 	for _, c := range j.Copies {
 		evidence.Progress = max(evidence.Progress, c.Progress)
 	}

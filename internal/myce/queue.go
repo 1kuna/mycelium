@@ -981,7 +981,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 			j.InfrastructureRetries++
 		}
 	}
-	if chargeInfrastructure && q.productionInfrastructureRetries < 0 {
+	if chargeInfrastructure && (j.Spec.Priority != "production" || q.productionInfrastructureRetries < 0) {
 		q.holdUnproductiveInfrastructure(j)
 	}
 	j.Machine = ""

@@ -215,6 +215,17 @@ func (p *process) recordPriorityStop(s *workerStore, stop *PriorityPreemption) e
 func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
 	p.stopDirective(now, grace, kill, false)
 }
+
+// Main exit starts cleanup only when cooperative shutdown is not already in
+// progress. An exit cannot replace a queue-issued checkpoint/drain deadline.
+func (p *process) stopAfterExit(now time.Time, grace time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopRequested.IsZero() {
+		p.stopGroup = !p.job.Spec.Needs.cpuOnly() && !p.userCancel
+		p.stopLocked(now, grace, false)
+	}
+}
 func (p *process) stopService(now time.Time, grace time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -943,7 +954,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		observationErr := p.saveOutcome(p.outcome)
 		p.mu.Unlock()
 		if !j.Spec.Needs.cpuOnly() {
-			p.stop(w.Clock.Now(), acceleratorStopGrace(w.AcceleratorStopGrace), false)
+			p.stopAfterExit(w.Clock.Now(), acceleratorStopGrace(w.AcceleratorStopGrace))
 		}
 		p.waitStopGrace(w.Clock, cmd.Process.Pid, 0)
 		p.mu.Lock()

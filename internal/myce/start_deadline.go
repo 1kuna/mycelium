@@ -56,11 +56,21 @@ func absoluteStartBy(j *Job) bool {
 	return j.Spec.StartBy != nil && (j.StartByExplicit == nil || *j.StartByExplicit)
 }
 
+// A logical parent's relative window belongs to physical children. Only
+// caller-owned absolute cutoffs can expire unmaterialized fan-out work.
+func fanOutStartCutoff(j *Job) *time.Time {
+	cutoff := j.Spec.Deadline
+	if absoluteStartBy(j) && (cutoff == nil || j.Spec.StartBy.Before(*cutoff)) {
+		cutoff = j.Spec.StartBy
+	}
+	return cutoff
+}
+
 func (q *Queue) startupPending(j *Job) bool {
 	if j.Spec.FanOut != nil && j.FanOut != nil {
 		// A logical parent holds no launch slot. Its relative window belongs
 		// to each physical child from assignment, including the first wave.
-		if (!absoluteStartBy(j) && j.Spec.Deadline == nil) || j.FanOut.Next == len(j.Spec.FanOut.Pieces) {
+		if fanOutStartCutoff(j) == nil || j.FanOut.Next == len(j.Spec.FanOut.Pieces) {
 			return false
 		}
 		// An expired tail cannot dispatch, but already materialized children
@@ -136,7 +146,11 @@ func (q *Queue) maintainStartDeadlines() {
 		if !pending && !disabled && !executionExpired {
 			continue
 		}
-		if !expired(j.Spec.StartBy, now) && !disabled && !executionExpired {
+		cutoff := j.Spec.StartBy
+		if j.Spec.FanOut != nil {
+			cutoff = fanOutStartCutoff(j)
+		}
+		if !expired(cutoff, now) && !disabled && !executionExpired {
 			continue
 		}
 		reason := q.startWaitingReason(j)
