@@ -59,7 +59,7 @@ pick() { # pick N WORDS... -> the Nth word, wrapping
   n=$1; shift; set -- "$@"; i=$(( n % $# + 1 )); eval "echo \${$i}"
 }
 kinds="embed render sim eval transcode index"
-sizes="12 20 8 28 16 24 10 36"
+sizes="10 18 6 26 14 22 8 32"
 steps="6 9 5 12 7 10 4 14"
 
 n=0
