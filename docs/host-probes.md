@@ -85,7 +85,7 @@ accounting and cancellation precedence remain authoritative.
 
 ## Protocol and remaining boundaries
 
-`host-probe-v1` is negotiated before additive observation fields are sent.
+`host-probe-v2` is negotiated before additive observation fields are sent.
 Strict older queues receive the legacy shape; a downgrade permits the existing
 single legacy retry. Unknown health and confirmed drains use reversible
 availability withholding rather than the permanent worker leave signal. Local

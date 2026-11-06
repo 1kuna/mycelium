@@ -149,11 +149,11 @@ func TestSharedHostPressureUnknownAndStale(t *testing.T) {
 func TestSharedHostPressureFailureAndCancellationPrecedence(t *testing.T) {
 	for _, ending := range []string{"independent failure", "cancellation", "completed before signal"} {
 		t.Run(ending, func(t *testing.T) {
-			q, _, m, run := sharedRunning(t, false)
+			q, _, m, run := sharedRunning(t, true)
 			m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 2}
 			r := check(t, q, m, run)
-			if !r.Kill || r.GraceSeconds != 0 {
-				t.Fatal("nonresumable work got checkpoint delay")
+			if !r.Stop || r.Kill || r.GraceSeconds <= 0 {
+				t.Fatal("resumable work did not receive checkpoint grace")
 			}
 			out := result(run, false)
 			want := "failed"
