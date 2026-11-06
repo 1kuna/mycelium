@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,7 +31,8 @@ type attemptSupervisor struct {
 	connected   bool
 	released    bool
 	finished    bool
-	stopping    bool // Latched until exact-attempt release, including reconnects.
+	stopping    atomic.Bool // Latched until exact-attempt release, including reconnects.
+	admissionMu *sync.Mutex // Shared host ledger; never held for process I/O.
 	err         error
 	liveness    *attemptLivenessSampler
 	wake        chan struct{}
@@ -59,27 +61,18 @@ func dockerHeartbeatDiagnostic(d *dockerAttempt) (string, *RuntimeCause) {
 
 func jobKey(j Job) attemptKey { return attemptKey{j.ID, j.Attempt, j.Session} }
 func (a *attemptSupervisor) admissionJob() Job {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	j := a.job
-	if c := a.worker.control; c != nil {
-		c.mu.Lock()
-		if _, pending := c.pendingEvents[jobKey(j)]; pending {
-			a.stopping = true
-		}
-		if p := c.processes[jobKey(j)]; p != nil {
-			p.mu.Lock()
-			if !p.stopRequested.IsZero() {
-				a.stopping = true
-			}
-			p.mu.Unlock()
-		}
-		c.mu.Unlock()
-	}
-	if a.stopping {
+	j := a.job // Immutable execution identity; never inspect a process mutex here.
+	if a.stopping.Load() {
 		j.State = "stopping"
 	}
 	return j
+}
+func (a *attemptSupervisor) stopAdmission() {
+	if a.admissionMu != nil {
+		a.admissionMu.Lock()
+		defer a.admissionMu.Unlock()
+	}
+	a.stopping.Store(true)
 }
 func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	a.mu.Lock()
@@ -91,9 +84,12 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	return r, a.diagnostics, a.finished, a.err
 }
 func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
+	if d.Stop {
+		a.stopAdmission()
+	}
+	w.stopAdmission = a.stopAdmission
 	a.mu.Lock()
 	a.worker, a.directive, a.connected = w, d, connected
-	a.stopping = a.stopping || d.Stop
 	a.admissionBlocked = admissionBlocked
 	if d.Stop && a.preparing != nil {
 		a.preparing()
@@ -835,12 +831,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	spawn := func(s *workerStore, p *process) {
 		j := *s.state.Job
 		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p}
+		a.admissionMu, a.worker.stopAdmission = &rt.admissionMu, a.stopAdmission
 		actors[jobKey(j)] = a
 		// Publish reservations before the actor can reach its final launch gate.
 		rt.mu.Lock()
 		rt.batchJobs, rt.batchSupervisors = activeJobs(), maps.Clone(actors)
 		rt.mu.Unlock()
 		if p != nil {
+			p.stopAdmission = a.stopAdmission
 			w.control.set(p)
 		}
 		go a.run(ctx)

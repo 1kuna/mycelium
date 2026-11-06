@@ -466,6 +466,7 @@ type modelRuntime struct {
 	worker                 *Worker
 	batchJobs              []Job
 	batchSupervisors       map[attemptKey]*attemptSupervisor
+	admissionMu            sync.Mutex // Coherent stop publication and final accounting; no I/O.
 	batchHostMemorySamples map[attemptKey]hostMemorySample
 	verifyDevice           func() error
 	deviceEnv              map[string]string
@@ -907,9 +908,14 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 }
 
 // All blocking sensors run before this exact-attempt accounting snapshot.
-// Call with rt.mu held; model and batch payload gates share the same host ledger.
+// Call with rt.mu and rt.admissionMu held. Stop publication shares this ledger;
+// actor reads never acquire process/control locks or perform receipt I/O.
 func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool) error {
 	cores, ram, growth := 0, 0.0, 0.0
+	now := time.Time{}
+	if rt.clock != nil {
+		now = rt.clock.Now()
+	}
 	for _, j := range rt.batchJobs {
 		// Preparation can outlast a heartbeat or receive an out-of-band stop.
 		// Consult the exact actor at launch time, not its original running job.
@@ -918,7 +924,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		}
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], rt.clock.Now())
+		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], now)
 		ram += charge
 		growth += pending
 	}
@@ -953,6 +959,8 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	rt.admissionMu.Lock()
+	defer rt.admissionMu.Unlock()
 	attempt, err := strconv.Atoi(launch.Attempt)
 	actor := rt.batchSupervisors[attemptKey{launch.Key, attempt, launch.Session}]
 	if err != nil || actor == nil || launch.Machine != rt.machine || actor.admissionJob().State == "stopping" {
@@ -1022,7 +1030,9 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 			free -= other.model.MemoryGB
 		}
 	}
+	rt.admissionMu.Lock()
 	hostErr := rt.checkHostAdmissionLocked(hostFree, hostMeasured)
+	rt.admissionMu.Unlock()
 	rt.mu.Unlock()
 	if hostErr != nil {
 		return hostErr

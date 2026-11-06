@@ -29,6 +29,14 @@ func TestNativeMainMemoryCapComposition(t *testing.T) {
 	j.Spec.Needs.HostMemoryGB = 2
 	j.Spec.Run = RunSpec{}
 	j.Spec.Execution = &ExecutionSpec{Main: ExecutionMember{MemoryGB: .5, Command: []string{"sh", "-c", `printf '%s' "$MYCE_MEMORY_LIMIT_BYTES" > "$1"`, "main", "{work}/main-cap"}}}
+	// Native member release holds p.mu. Exercise the real final admission
+	// callback with this same process registered in control, as Worker.Run does.
+	j.Session, j.Machine = store.state.Session, w.Machine.ID
+	w.control = &processControl{clock: w.Clock}
+	rt := &modelRuntime{machine: w.Machine.ID, clock: w.Clock, memoryMachine: w.Machine, hostMemorySource: w.HostMemorySource, models: map[string]*workerModel{}, batchJobs: []Job{j}}
+	a := &attemptSupervisor{job: j, worker: w, admissionMu: &rt.admissionMu}
+	rt.batchSupervisors = map[attemptKey]*attemptSupervisor{jobKey(j): a}
+	w.batchAdmission, w.stopAdmission = rt.checkBatchLaunchMemory, a.stopAdmission
 	var p *process
 	// Direct starts must consume asynchronous input preparation before launch.
 	await(t, func() bool {

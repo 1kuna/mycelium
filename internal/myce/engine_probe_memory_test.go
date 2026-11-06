@@ -93,9 +93,9 @@ func TestEngineProbeMemoryStopDuringPreparation(t *testing.T) {
 				// A reconnect must not restore running-state admission credit.
 				actor.update(actor.worker, AttemptDirective{}, false, false)
 			} else {
-				actor.mu.Lock()
-				actor.worker.control = &processControl{pendingEvents: map[attemptKey]WorkerEvent{jobKey(actor.job): {Execution: Execution{ID: actor.job.ID, Attempt: actor.job.Attempt}, Session: actor.job.Session}}}
-				actor.mu.Unlock()
+				p := &process{job: actor.job, stopAdmission: actor.stopAdmission}
+				c := &processControl{clock: rt.clock, processes: map[attemptKey]*process{jobKey(actor.job): p}, pendingEvents: map[attemptKey]WorkerEvent{jobKey(actor.job): {Execution: Execution{ID: actor.job.ID, Attempt: actor.job.Attempt}, Session: actor.job.Session, deadline: rt.clock.Now().Add(time.Minute)}}}
+				c.apply()
 			}
 			close(resume)
 			select {
@@ -134,6 +134,7 @@ func probeMemoryRuntimeFixture(t *testing.T) (*modelRuntime, *attemptSupervisor,
 	rt := &modelRuntime{clock: clock, machine: machine.ID, memoryMachine: machine, memoryMeasured: true,
 		batchJobs: []Job{probe}, batchSupervisors: map[attemptKey]*attemptSupervisor{jobKey(probe): actor}, batchHostMemorySamples: currentHostMemorySamples([]AttemptReport{report}, clock.Now()),
 		models: map[string]*workerModel{"shared": loading}, hostMemorySource: func(context.Context) (float64, error) { return 14, nil }, memorySource: func(context.Context) (float64, error) { return 8, nil }}
+	actor.admissionMu = &rt.admissionMu
 	return rt, actor, loading
 }
 
@@ -177,7 +178,7 @@ func TestBatchProbeMemoryStopDuringAuthorization(t *testing.T) {
 			if err := normalizeResources(&next.Spec); err != nil {
 				t.Fatal(err)
 			}
-			actor := &attemptSupervisor{job: next}
+			actor := &attemptSupervisor{job: next, admissionMu: &rt.admissionMu}
 			rt.batchJobs = append(rt.batchJobs, next)
 			rt.batchSupervisors[jobKey(next)] = actor
 			launch := HostLaunch{Machine: rt.machine, Session: next.Session, Kind: "batch", Key: next.ID, Attempt: fmt.Sprint(next.Attempt)}
@@ -220,5 +221,41 @@ func TestBatchProbeMemoryStopDuringAuthorization(t *testing.T) {
 				t.Fatal("authorization did not finish")
 			}
 		})
+	}
+}
+
+func TestProbeMemoryAdmissionDoesNotWaitForProcessReceipts(t *testing.T) {
+	rt, probe, loading := probeMemoryRuntimeFixture(t)
+	holder := Job{ID: "holder", Attempt: 1, Session: probe.job.Session, State: "running", Spec: cpuSpec(1, 1)}
+	if err := normalizeResources(&holder.Spec); err != nil {
+		t.Fatal(err)
+	}
+	p := &process{job: holder}
+	control := &processControl{processes: map[attemptKey]*process{jobKey(holder): p}}
+	actor := &attemptSupervisor{job: holder, worker: Worker{control: control}, admissionMu: &rt.admissionMu}
+	rt.batchJobs = append(rt.batchJobs, holder)
+	rt.batchSupervisors[jobKey(holder)] = actor
+	p.mu.Lock() // A different member is persisting its process receipt.
+	defer p.mu.Unlock()
+	for _, changed := range []string{"running", "stopping", "expired"} {
+		if changed == "stopping" {
+			probe.update(probe.worker, AttemptDirective{Stop: true}, true, false)
+		}
+		if changed == "expired" {
+			// A fresh attempt, without a stop, must also lose aged telemetry credit.
+			fresh := &attemptSupervisor{job: probe.job, admissionMu: &rt.admissionMu}
+			rt.batchSupervisors[jobKey(probe.job)] = fresh
+			rt.clock.(*fakeClock).Advance(hostMemorySampleFreshFor)
+		}
+		done := make(chan error, 1)
+		go func() { done <- rt.checkLoadMemory(context.Background(), loading) }()
+		select {
+		case err := <-done:
+			if (err == nil) != (changed == "running") {
+				t.Fatalf("%s admission: %v", changed, err)
+			}
+		case <-time.After(testWaitTimeout):
+			t.Fatal("admission waited for unrelated process receipt")
+		}
 	}
 }
