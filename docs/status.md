@@ -2117,8 +2117,23 @@ admission, placement, authored intent or retry decisions.
   or fresh first-outcome host evidence showing normal OS memory pressure and no
   swap growth. Adverse host evidence overrides an apparently healthy attempt
   window. Unavailable evidence is `null`, not healthy. Suspect is a diagnosis to investigate, not proof the
-  stop was erroneous. CPU use and I/O remain explicitly unknown until collectors
-  supply them; reservation cores are not utilization.
+  stop was erroneous. Exact retained `resources` add CPU and I/O counters to each
+  ending; the first stop observation also freezes host I/O pressure when available.
+  Missing counters remain unknown; reservation cores are not utilization.
+
+Host/program `measured_cpu_seconds`, `cpu_observed_elapsed_seconds` and
+`cpu_observed_attempts` sum the collector's one cumulative record per exact
+retained attempt, never successive heartbeat totals. `cpu_lower_bound` marks
+sampled or incomplete/live counters. Nullable `read_bytes`, `write_bytes`,
+`read_ops` and `write_ops` preserve measured zero versus unknown;
+`io_observed_attempts` and `io_lower_bound` describe their coverage. The report's
+`resource_attempts_dropped` names the owning history's first-plus-latest retention
+loss. These full observed attempt windows can differ from the reservation
+integrals' horizon; do not divide them to infer utilization over a common period.
+Historical sizing basis is unknown if its matching memory record is gone.
+Host `io_pressure` retains nullable PSI dimensions and source age; unavailable or
+stale evidence cannot train a healthy zero. Fresh I/O pressure compares against
+its own learned local baseline. No extra telemetry retention is introduced.
 
 `efficiency_regression` uses the existing adaptive health notification path.
 Reservation gaps, live blocker waits, stranded demand, accepted prediction errors

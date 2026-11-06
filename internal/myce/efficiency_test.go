@@ -263,6 +263,7 @@ func TestEfficiencyStopSnapshotSurvivesCleanup(t *testing.T) {
 	m := cpuMachine("host", "host", "cpu", 8, 16)
 	m.MemoryObservation = &HostMemoryObservation{TotalGB: 16, UsedGB: 3, MyceliumGB: 2}
 	m.HostHealth = &HostHealth{History: []HostHealthSample{{At: c.Now(), HostHealthReading: HostHealthReading{Pressure: 0}}}}
+	m.IOPressure = &IOPressure{Some: &PressureStall{Avg10: 2}, SampledAt: c.Now()}
 	check(t, q, m, nil)
 	var first time.Time
 	if err := q.update(func() error {
@@ -278,6 +279,7 @@ func TestEfficiencyStopSnapshotSurvivesCleanup(t *testing.T) {
 	if err := q.update(func() error {
 		q.s.Machines[m.ID].MemoryObservation.UsedGB = 15
 		q.s.Machines[m.ID].HostHealth.History[0].Pressure = 10
+		q.s.Machines[m.ID].IOPressure.Some.Avg10 = 20
 		j := q.s.Jobs["stopped"]
 		q.recordAttemptOutcome(j, AttemptOutcome{Attempt: 1, Machine: m.ID, Session: m.Session, Interrupted: true, Forced: true})
 		return nil
@@ -285,7 +287,7 @@ func TestEfficiencyStopSnapshotSurvivesCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	o := q.s.Jobs["stopped"].AttemptHistory[0].StopObservation
-	if o == nil || !o.At.Equal(first) || o.HeadroomGB == nil || *o.HeadroomGB != 13 || o.MemoryPressure == nil || *o.MemoryPressure != 0 {
+	if o == nil || !o.At.Equal(first) || o.HeadroomGB == nil || *o.HeadroomGB != 13 || o.MemoryPressure == nil || *o.MemoryPressure != 0 || o.IOPressure == nil || o.IOPressure.Some == nil || o.IOPressure.Some.Avg10 != 2 {
 		t.Fatalf("cleanup rewrote original stop evidence: %+v", o)
 	}
 	wasted := efficiencyWasted(q.s.Jobs["stopped"])

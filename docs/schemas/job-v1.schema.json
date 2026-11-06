@@ -427,6 +427,16 @@
         "host_sample_age_seconds": {
           "type": "number"
         },
+        "io_pressure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IOPressure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "memory_pressure": {
           "oneOf": [
             {
@@ -472,6 +482,7 @@
         }
       },
       "required": [
+        "io_pressure",
         "at",
         "host_sample_age_seconds",
         "headroom_gb",
@@ -1017,11 +1028,26 @@
         "basis": {
           "type": "string"
         },
+        "cpu_lower_bound": {
+          "type": "boolean"
+        },
+        "cpu_observed_attempts": {
+          "type": "integer"
+        },
+        "cpu_observed_elapsed_seconds": {
+          "type": "number"
+        },
         "device_covered_seconds": {
           "type": "number"
         },
         "host": {
           "type": "string"
+        },
+        "io_lower_bound": {
+          "type": "boolean"
+        },
+        "io_observed_attempts": {
+          "type": "integer"
         },
         "measured_cpu_seconds": {
           "oneOf": [
@@ -1042,6 +1068,26 @@
         "memory_covered_seconds": {
           "type": "number"
         },
+        "read_bytes": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "read_ops": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "reserved_covered_memory_gb_seconds": {
           "type": "number"
         },
@@ -1059,6 +1105,26 @@
         },
         "work": {
           "type": "string"
+        },
+        "write_bytes": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "write_ops": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1074,6 +1140,15 @@
         "memory_covered_seconds",
         "reserved_cpu_seconds",
         "measured_cpu_seconds",
+        "cpu_observed_elapsed_seconds",
+        "cpu_observed_attempts",
+        "cpu_lower_bound",
+        "read_bytes",
+        "write_bytes",
+        "read_ops",
+        "write_ops",
+        "io_observed_attempts",
+        "io_lower_bound",
         "seconds"
       ],
       "type": "object"

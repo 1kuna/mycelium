@@ -22,6 +22,15 @@ type ResourceIntegral struct {
 	MemoryCoveredSeconds           float64  `json:"memory_covered_seconds"`
 	ReservedCPUSeconds             float64  `json:"reserved_cpu_seconds"`
 	MeasuredCPUSeconds             *float64 `json:"measured_cpu_seconds" jsonschema:"nullable"`
+	CPUObservedElapsedSeconds      float64  `json:"cpu_observed_elapsed_seconds"`
+	CPUObservedAttempts            int      `json:"cpu_observed_attempts"`
+	CPULowerBound                  bool     `json:"cpu_lower_bound"`
+	ReadBytes                      *uint64  `json:"read_bytes" jsonschema:"nullable"`
+	WriteBytes                     *uint64  `json:"write_bytes" jsonschema:"nullable"`
+	ReadOps                        *uint64  `json:"read_ops" jsonschema:"nullable"`
+	WriteOps                       *uint64  `json:"write_ops" jsonschema:"nullable"`
+	IOObservedAttempts             int      `json:"io_observed_attempts"`
+	IOLowerBound                   bool     `json:"io_lower_bound"`
 	Seconds                        float64  `json:"seconds"`
 }
 
@@ -35,6 +44,25 @@ func (a *ResourceIntegral) add(b ResourceIntegral) {
 	a.MemoryCoveredSeconds += b.MemoryCoveredSeconds
 	a.ReservedCPUSeconds += b.ReservedCPUSeconds
 	a.Seconds += b.Seconds
+	a.CPUObservedElapsedSeconds += b.CPUObservedElapsedSeconds
+	a.CPUObservedAttempts += b.CPUObservedAttempts
+	a.CPULowerBound = a.CPULowerBound || b.CPULowerBound
+	a.IOObservedAttempts += b.IOObservedAttempts
+	a.IOLowerBound = a.IOLowerBound || b.IOLowerBound
+	for _, pair := range [][2]**uint64{{&a.ReadBytes, &b.ReadBytes}, {&a.WriteBytes, &b.WriteBytes}, {&a.ReadOps, &b.ReadOps}, {&a.WriteOps, &b.WriteOps}} {
+		if *pair[1] == nil {
+			continue
+		}
+		if *pair[0] == nil {
+			*pair[0] = new(uint64)
+		}
+		if **pair[1] > ^uint64(0)-**pair[0] {
+			**pair[0] = ^uint64(0)
+			a.IOLowerBound = true
+		} else {
+			**pair[0] += **pair[1]
+		}
+	}
 	if b.MeasuredCPUSeconds != nil {
 		if a.MeasuredCPUSeconds == nil {
 			a.MeasuredCPUSeconds = new(float64)
@@ -81,6 +109,7 @@ type EfficiencyHost struct {
 	TotalMemoryGB        *float64       `json:"total_memory_gb" jsonschema:"nullable"`
 	PhysicalUsedMemoryGB *float64       `json:"physical_used_memory_gb" jsonschema:"nullable"`
 	IOStatus             string         `json:"io_status"`
+	IOPressure           *IOPressure    `json:"io_pressure" jsonschema:"nullable"`
 }
 type EfficiencyWait struct {
 	Active  bool               `json:"active"`
@@ -116,14 +145,15 @@ type PredictionError struct {
 // A queue-clock receipt snapshot at the first outcome, kept across later
 // cleanup replays. Nil means there was no fresh accepted host report.
 type AttemptStopObservation struct {
-	At                       time.Time `json:"at"`
-	HostSampleAgeSeconds     float64   `json:"host_sample_age_seconds"`
-	HeadroomGB               *float64  `json:"headroom_gb" jsonschema:"nullable"`
-	PhysicalUsedGB           *float64  `json:"physical_used_gb" jsonschema:"nullable"`
-	MemoryPressure           *float64  `json:"memory_pressure" jsonschema:"nullable"`
-	PressureUnit             string    `json:"pressure_unit"`
-	PressureAgeSeconds       *float64  `json:"pressure_age_seconds" jsonschema:"nullable"`
-	SwapGrowthBytesPerSecond *float64  `json:"swap_growth_bytes_per_second" jsonschema:"nullable"`
+	IOPressure               *IOPressure `json:"io_pressure" jsonschema:"nullable"`
+	At                       time.Time   `json:"at"`
+	HostSampleAgeSeconds     float64     `json:"host_sample_age_seconds"`
+	HeadroomGB               *float64    `json:"headroom_gb" jsonschema:"nullable"`
+	PhysicalUsedGB           *float64    `json:"physical_used_gb" jsonschema:"nullable"`
+	MemoryPressure           *float64    `json:"memory_pressure" jsonschema:"nullable"`
+	PressureUnit             string      `json:"pressure_unit"`
+	PressureAgeSeconds       *float64    `json:"pressure_age_seconds" jsonschema:"nullable"`
+	SwapGrowthBytesPerSecond *float64    `json:"swap_growth_bytes_per_second" jsonschema:"nullable"`
 }
 
 func (q *Queue) attemptStopObservation(machine, session string) *AttemptStopObservation {
@@ -133,6 +163,14 @@ func (q *Queue) attemptStopObservation(machine, session string) *AttemptStopObse
 		return nil
 	}
 	o := &AttemptStopObservation{At: now, HostSampleAgeSeconds: now.Sub(m.LastSeen).Seconds(), PressureUnit: "unknown"}
+	if p := safeIOPressure(m.IOPressure); p != nil {
+		p.ReceivedAt = m.IOPressure.ReceivedAt
+		p.AgeSeconds += max(0, now.Sub(p.ReceivedAt).Seconds())
+		if p.Unavailable == "" && (p.ReceivedAt.IsZero() || now.Before(p.ReceivedAt) || p.AgeSeconds >= q.machineLossTimeout(m.ID).Seconds()) {
+			p.Unavailable = "stale"
+		}
+		o.IOPressure = p
+	}
 	if m.MemoryObservation != nil {
 		headroom := m.MemoryObservation.TotalGB - m.MemoryObservation.UsedGB
 		used := m.MemoryObservation.UsedGB
@@ -158,6 +196,7 @@ func (q *Queue) attemptStopObservation(machine, session string) *AttemptStopObse
 }
 
 type WastedAttempt struct {
+	Resources       *AttemptResources       `json:"resources" jsonschema:"nullable"`
 	StopObservation *AttemptStopObservation `json:"stop_observation" jsonschema:"nullable"`
 	JobID           string                  `json:"job_id"`
 	Attempt         int                     `json:"attempt"`
@@ -179,17 +218,18 @@ type EfficiencySignal struct {
 	Active          bool     `json:"active"`
 }
 type EfficiencyReport struct {
-	At          time.Time              `json:"at"`
-	Hosts       []EfficiencyHost       `json:"hosts"`
-	Programs    []EfficiencyAllocation `json:"programs"`
-	Jobs        []EfficiencyWait       `json:"jobs"`
-	Projects    []EfficiencyWait       `json:"projects"`
-	Stranded    []StrandedDemand       `json:"stranded"`
-	Predictions []PredictionError      `json:"predictions"`
-	Wasted      []WastedAttempt        `json:"wasted_attempts"`
-	Signals     []EfficiencySignal     `json:"signals"`
-	CPUStatus   string                 `json:"cpu_status"`
-	Coverage    string                 `json:"coverage"`
+	At                      time.Time              `json:"at"`
+	Hosts                   []EfficiencyHost       `json:"hosts"`
+	Programs                []EfficiencyAllocation `json:"programs"`
+	Jobs                    []EfficiencyWait       `json:"jobs"`
+	Projects                []EfficiencyWait       `json:"projects"`
+	Stranded                []StrandedDemand       `json:"stranded"`
+	Predictions             []PredictionError      `json:"predictions"`
+	Wasted                  []WastedAttempt        `json:"wasted_attempts"`
+	Signals                 []EfficiencySignal     `json:"signals"`
+	CPUStatus               string                 `json:"cpu_status"`
+	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped"`
+	Coverage                string                 `json:"coverage"`
 }
 
 func (e *JobEfficiency) advance(now time.Time) {
@@ -644,11 +684,22 @@ func (q *Queue) updateEfficiencyDiagnostics(ctx context.Context) error {
 
 func (q *Queue) efficiencyReport() *EfficiencyReport {
 	now := q.clock.Now()
-	r := &EfficiencyReport{At: now, CPUStatus: "unknown", Coverage: "queue-clock integrals since first observation; measured memory covers fresh samples only; per-program memory is nonreclaimable attribution, host memory includes worker and managed descendants; retained jobs only"}
+	r := &EfficiencyReport{At: now, CPUStatus: "unknown", Coverage: "queue-clock reservation/memory integrals since first observation; measured memory covers fresh samples only; CPU/I/O counters cover retained attempt windows (elapsed coverage is not the reservation horizon), may be lower bounds, and exclude dropped attempts; per-program memory is nonreclaimable attribution, host memory includes worker and managed descendants; retained jobs only"}
 	programs := map[string]EfficiencyAllocation{}
+	resourceHosts := map[string]ResourceIntegral{}
+	resourceAttempts, cpuAttempts, cpuPartial := 0, 0, false
+	ioPressure := q.efficiencyIOPressure(now)
 	projects := map[string]map[string]float64{}
 	for _, h := range q.s.EfficiencyHosts {
 		h.advance(now)
+		h.IOPressure = ioPressure[h.Host]
+		if h.IOPressure != nil {
+			if h.IOPressure.Unavailable != "" {
+				h.IOStatus = "unknown: " + h.IOPressure.Unavailable
+			} else if h.IOPressure.Some != nil {
+				h.IOStatus = "measured host pressure"
+			}
+		}
 		r.Hosts = append(r.Hosts, h)
 	}
 	for _, j := range q.s.Jobs {
@@ -676,8 +727,35 @@ func (q *Queue) efficiencyReport() *EfficiencyReport {
 				programs[key] = row
 			}
 		}
+		r.ResourceAttemptsDropped += j.ResourceAttemptsDropped
+		if j.Attempt > 0 && len(j.ResourceAttempts) == 0 {
+			cpuPartial = true
+		}
+		for _, f := range j.ResourceAttempts {
+			resourceAttempts++
+			a := q.efficiencyResourceAllocation(j, f)
+			cpuAttempts += a.CPUObservedAttempts
+			cpuPartial = cpuPartial || a.CPULowerBound
+			key := a.Host + "/" + a.Work + "/" + a.Basis
+			row := programs[key]
+			row.Host, row.Work, row.Basis = a.Host, a.Work, a.Basis
+			row.ResourceIntegral.add(a.ResourceIntegral)
+			programs[key] = row
+			h := resourceHosts[a.Host]
+			h.add(a.ResourceIntegral)
+			resourceHosts[a.Host] = h
+		}
 		r.Predictions = append(r.Predictions, efficiencyPredictions(j)...)
 		r.Wasted = append(r.Wasted, efficiencyWasted(j)...)
+	}
+	for i := range r.Hosts {
+		r.Hosts[i].ResourceIntegral.add(resourceHosts[r.Hosts[i].Host])
+	}
+	if cpuAttempts > 0 {
+		r.CPUStatus = "measured retained attempts"
+		if cpuPartial || cpuAttempts < resourceAttempts || r.ResourceAttemptsDropped > 0 {
+			r.CPUStatus = "partial retained attempts"
+		}
 	}
 	for _, a := range programs {
 		r.Programs = append(r.Programs, a)
@@ -779,6 +857,12 @@ func efficiencyWasted(j *Job) []WastedAttempt {
 			continue
 		}
 		row := WastedAttempt{JobID: j.ID, Attempt: o.Attempt, Host: o.Machine, Kind: kind, EndedAt: o.EndedAt, IOStatus: "unknown", StopObservation: o.StopObservation}
+		for _, f := range j.ResourceAttempts {
+			if f.Attempt == o.Attempt && f.Machine == o.Machine && f.Session == o.Session {
+				row.Resources, row.IOStatus = f.Resources, attemptIOStatus(f.Resources)
+				break
+			}
+		}
 		if o.Placement != nil {
 			row.Host = o.Placement.Host
 		}
@@ -847,13 +931,16 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 	values := map[string]float64{}
 	identities := map[string]string{}
 	for _, h := range r.Hosts {
-		for _, metric := range []string{"reservation_gap_gb", "stranded_demand", "wasted_attempts", "suspect_attempts"} {
+		for _, metric := range []string{"reservation_gap_gb", "stranded_demand", "wasted_attempts", "suspect_attempts", "io_pressure_some_percent"} {
 			identities[h.Host+"/"+metric] = h.Identity
 		}
 	}
 	for _, h := range r.Hosts {
 		if h.Rate.MeasuredMemoryGB != nil {
 			values[h.Host+"/reservation_gap_gb"] = max(0, h.Rate.ReservedMemoryGB-*h.Rate.MeasuredMemoryGB)
+		}
+		if h.IOPressure != nil && h.IOPressure.Unavailable == "" && h.IOPressure.Some != nil {
+			values[h.Host+"/io_pressure_some_percent"] = h.IOPressure.Some.Avg10
 		}
 	}
 	for _, p := range r.Jobs {
@@ -978,7 +1065,7 @@ func (r *EfficiencyReport) Lines() []string {
 		if h.PhysicalUsedMemoryGB != nil {
 			physical = fmt.Sprintf("%.1f GiB", *h.PhysicalUsedMemoryGB)
 		}
-		lines = append(lines, fmt.Sprintf("  %s: reserved %.1f GiB; measured Mycelium %s; physical used %s; %s; I/O %s", h.Host, h.Rate.ReservedMemoryGB, used, physical, efficiencyMemoryWords(h.ResourceIntegral), h.IOStatus))
+		lines = append(lines, fmt.Sprintf("  %s: reserved %.1f GiB; measured Mycelium %s; physical used %s; %s; %s; %s; host I/O %s", h.Host, h.Rate.ReservedMemoryGB, used, physical, efficiencyMemoryWords(h.ResourceIntegral), efficiencyCPUWords(h.ResourceIntegral), efficiencyIOWords(h.ResourceIntegral), h.IOStatus))
 	}
 	for _, p := range r.Projects {
 		for _, category := range slices.Sorted(maps.Keys(p.Seconds)) {
@@ -999,7 +1086,10 @@ func (r *EfficiencyReport) Lines() []string {
 			continue
 		}
 		seen[key] = true
-		lines = append(lines, fmt.Sprintf("  sizing %s %s: work %s; %s", p.Host, p.Basis, p.Work, efficiencyMemoryWords(p.ResourceIntegral)))
+		lines = append(lines, fmt.Sprintf("  sizing %s %s: work %s; %s; %s; %s", p.Host, p.Basis, p.Work, efficiencyMemoryWords(p.ResourceIntegral), efficiencyCPUWords(p.ResourceIntegral), efficiencyIOWords(p.ResourceIntegral)))
+	}
+	if r.ResourceAttemptsDropped > 0 {
+		lines = append(lines, fmt.Sprintf("  resource coverage: %d attempt records dropped by owning-job retention", r.ResourceAttemptsDropped))
 	}
 	type predictionSummary struct {
 		count, memoryCount, durationCount int

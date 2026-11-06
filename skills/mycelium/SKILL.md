@@ -281,8 +281,11 @@ Use `myce efficiency` for one concise read of reservation versus measured use,
 blocker wait totals, authored exclusions stranding fitting work, prediction
 errors and wasted/suspect attempts. `myce efficiency --json` reads the immutable
 maintenance report without fetching job payloads; status/inspection JSON also
-include `efficiency`. Read its `at` and coverage: unknown CPU/I/O or missing
-memory samples are not zero use. `efficiency_regression` wakes use the existing
+include `efficiency`. Read its `at` and coverage: nullable CPU/I/O counters,
+lower-bound flags, elapsed attempt windows and dropped-attempt count distinguish
+observed use from unknown. CPU/I/O counter windows can differ from the
+reservation horizon; they are not a utilization ratio. Missing memory samples
+are not zero use. `efficiency_regression` wakes use the existing
 health notification path and this installation's learned baselines. Investigate
 an offender with its per-job status; keep authored hard requirements and parity
 checks. See [queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/status.md#queue-efficiency-next-release-857).
