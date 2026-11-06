@@ -36,15 +36,15 @@ type FindingEvidence struct {
 // Reuse accepted work identity, eligibility and retention. A range is observed
 // variation, not a confidence interval or a universal workload multiplier.
 type FindingRange struct {
-	Min     float64 `json:"min"`
-	Max     float64 `json:"max"`
-	Samples int     `json:"samples"`
+	RecordedAt time.Time `json:"recorded_at"`
+	Min        float64   `json:"min"`
+	Max        float64   `json:"max"`
+	Samples    int       `json:"samples"`
 }
 type FindingBehavior struct {
-	Project    string        `json:"project"`
-	CPU        *FindingRange `json:"cpu,omitempty"`
-	Processes  *FindingRange `json:"processes,omitempty"`
-	RecordedAt time.Time     `json:"recorded_at"`
+	Project   string        `json:"project"`
+	CPU       *FindingRange `json:"cpu,omitempty"`
+	Processes *FindingRange `json:"processes,omitempty"`
 }
 
 func (r *FindingRange) upper() float64 {
@@ -53,14 +53,20 @@ func (r *FindingRange) upper() float64 {
 	}
 	return r.Max + (r.Max - r.Min)
 }
-func findingRange(r *FindingRange, value float64) *FindingRange {
+func freshFindingRange(r *FindingRange, at time.Time) *FindingRange {
+	if r == nil || at.Before(r.RecordedAt) || at.Sub(r.RecordedAt) > workCurveMaxAge {
+		return nil
+	}
+	return r
+}
+func findingRange(r *FindingRange, value float64, at time.Time) *FindingRange {
 	if !validMemoryValue(value) {
 		return r
 	}
 	if r == nil {
-		return &FindingRange{Min: value, Max: value, Samples: 1}
+		return &FindingRange{Min: value, Max: value, Samples: 1, RecordedAt: at}
 	}
-	return &FindingRange{Min: min(r.Min, value), Max: max(r.Max, value), Samples: r.Samples + 1}
+	return &FindingRange{Min: min(r.Min, value), Max: max(r.Max, value), Samples: r.Samples + 1, RecordedAt: at}
 }
 func (q *Queue) findingBehaviorBaseline(j *Job) *FindingBehavior {
 	if j.Timing == nil || j.Timing.Key == nil {
@@ -68,10 +74,15 @@ func (q *Queue) findingBehaviorBaseline(j *Job) *FindingBehavior {
 	}
 	point := q.s.WorkObservations[identityHash(j.Timing.Key)]
 	b := point.FindingBehavior
-	if point.StaleReason != "" || point.Forbidden || b == nil || b.Project != j.Spec.Project || q.clock.Now().Before(b.RecordedAt) || q.clock.Now().Sub(b.RecordedAt) > workCurveMaxAge {
+	if point.StaleReason != "" || point.Forbidden || b == nil || b.Project != j.Spec.Project {
 		return nil
 	}
-	return b // immutable; the accepted writer always replaces it.
+	copy := *b
+	copy.CPU, copy.Processes = freshFindingRange(b.CPU, q.clock.Now()), freshFindingRange(b.Processes, q.clock.Now())
+	if copy.CPU == nil && copy.Processes == nil {
+		return nil
+	}
+	return &copy
 }
 func (q *Queue) recordFindingBehavior(j *Job, r Result, old WorkObservation, point *WorkObservation, eligible bool) {
 	point.FindingBehavior = old.FindingBehavior
@@ -81,17 +92,17 @@ func (q *Queue) recordFindingBehavior(j *Job, r Result, old WorkObservation, poi
 		return
 	}
 	b := FindingBehavior{Project: j.Spec.Project}
-	if old.FindingBehavior != nil && old.FindingBehavior.Project == j.Spec.Project && q.clock.Now().Sub(old.FindingBehavior.RecordedAt) <= workCurveMaxAge && old.StaleReason == "" {
+	if old.FindingBehavior != nil && old.FindingBehavior.Project == j.Spec.Project && old.StaleReason == "" {
 		b = *old.FindingBehavior
+		b.CPU, b.Processes = freshFindingRange(b.CPU, q.clock.Now()), freshFindingRange(b.Processes, q.clock.Now())
 	}
 	v := r.Resources
 	if v.CPU.UsageSeconds != nil && !v.CPU.LowerBound && v.CPU.Unavailable == "" && validRate(v.ElapsedSeconds) {
-		b.CPU = findingRange(b.CPU, *v.CPU.UsageSeconds/v.ElapsedSeconds)
+		b.CPU = findingRange(b.CPU, *v.CPU.UsageSeconds/v.ElapsedSeconds, q.clock.Now())
 	}
 	if v.ProcessPeak != nil {
-		b.Processes = findingRange(b.Processes, float64(*v.ProcessPeak))
+		b.Processes = findingRange(b.Processes, float64(*v.ProcessPeak), q.clock.Now())
 	}
-	b.RecordedAt = q.clock.Now()
 	point.FindingBehavior = &b
 }
 

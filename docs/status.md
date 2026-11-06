@@ -2020,7 +2020,9 @@ processes on the sampled tree; Linux cgroup `pids.current` includes threads.
 Their separate wire negotiation preserves CPU/I/O delivery to older queues.
 Comparable CPU/process history uses the existing accepted-work identity and
 retention, scoped to the project; its upper comparison is the observed maximum
-plus range. Constrained and incomplete CPU observations do not teach a bound.
+plus range. CPU and process ranges carry independent `recorded_at` freshness;
+unavailable counters never renew either range. Constrained and incomplete CPU
+observations do not teach a bound.
 
 Typed guard stops explain their recorded reason; interruptions reuse existing
 attempt flags and retry decisions. Environment failures expose safe typed failed

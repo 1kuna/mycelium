@@ -1680,15 +1680,10 @@
         },
         "project": {
           "type": "string"
-        },
-        "recorded_at": {
-          "format": "date-time",
-          "type": "string"
         }
       },
       "required": [
-        "project",
-        "recorded_at"
+        "project"
       ],
       "type": "object"
     },
@@ -1733,11 +1728,16 @@
         "min": {
           "type": "number"
         },
+        "recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        },
         "samples": {
           "type": "integer"
         }
       },
       "required": [
+        "recorded_at",
         "min",
         "max",
         "samples"

@@ -16,9 +16,12 @@ func TestProcessTelemetryNegotiationAndDowngrade(t *testing.T) {
 			wire := &resourceWire{}
 			version := 1
 			var sent []bool
+			var retained []bool
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				data, _ := io.ReadAll(r.Body)
 				has := bytes.Contains(data, []byte("process_peak"))
+				retained = append(retained, bytes.Contains(data, []byte("usage_seconds")))
+				w.Header().Set(resourceProtocolHeader, resourceProtocol)
 				sent = append(sent, has)
 				if version == 1 && has {
 					w.WriteHeader(400)
@@ -59,6 +62,9 @@ func TestProcessTelemetryNegotiationAndDowngrade(t *testing.T) {
 			}
 			if !reflect.DeepEqual(sent, []bool{false, false, true, true, false, false}) {
 				t.Fatal(sent)
+			}
+			if !reflect.DeepEqual(retained, []bool{false, true, true, true, true, true}) {
+				t.Fatalf("CPU/I/O lost during process downgrade: %v", retained)
 			}
 			if resources.ProcessPeak == nil || *resources.ProcessPeak != 2000 {
 				t.Fatal("durable telemetry mutated")

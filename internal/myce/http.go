@@ -607,10 +607,10 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
 		// Strict JSON rejection occurs before mutation. Retry only once, with
 		// additive telemetry removed; retain the original durable local result.
-		if c.resourceWire != nil {
-			c.resourceWire.supported.Store(false)
-		}
-		legacy, _ := resourceWireInput(in, false)
+		// The rejection headers describe the downgraded queue. Keep CPU/I/O
+		// when resource-v1 is still advertised and only process fields are new.
+		legacy, _ := resourceWireInput(in, c.resourceWire != nil && c.resourceWire.supported.Load())
+		legacy = processTelemetryInput(legacy, c.resourceWire != nil && c.resourceWire.processes.Load())
 		return c.callOnce(ctx, method, path, legacy, out)
 	}
 	// Ordinary idempotent reads get one refill retry. Wait loops own repeated

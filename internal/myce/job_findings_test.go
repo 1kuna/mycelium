@@ -159,7 +159,7 @@ func TestJobFindingsLearnedBehaviorAndHealthy(t *testing.T) {
 	q, clock := fixture(t)
 	initial, peak := uint64(2), uint64(20)
 	resources := &AttemptResources{ProcessInitial: &initial, ProcessPeak: &peak, ElapsedSeconds: 10, CPU: AttemptCPUTime{UsageSeconds: findingValue(30)}}
-	baseline := &FindingBehavior{CPU: &FindingRange{Min: 2, Max: 3, Samples: 3}, Processes: &FindingRange{Min: 10, Max: 20, Samples: 3}, RecordedAt: clock.Now()}
+	baseline := &FindingBehavior{CPU: &FindingRange{Min: 2, Max: 3, Samples: 3, RecordedAt: clock.Now()}, Processes: &FindingRange{Min: 10, Max: 20, Samples: 3, RecordedAt: clock.Now()}}
 	j := &Job{State: "succeeded", ResourceAttempts: []AttemptResourceFacts{{Attempt: 1, CPUCores: 1, Baseline: baseline, Resources: resources}}}
 	q.projectJobFindings(j)
 	if len(j.Findings) != 0 {
@@ -176,7 +176,7 @@ func TestJobFindingsLearnedBehaviorAndHealthy(t *testing.T) {
 	key := ObservationKey{Work: "frozen-work"}
 	job := &Job{Timing: &WorkTiming{Key: &key}}
 	q.s.WorkObservations = map[string]WorkObservation{identityHash(&key): {FindingBehavior: baseline}}
-	if q.findingBehaviorBaseline(job) != baseline {
+	if got := q.findingBehaviorBaseline(job); got == nil || got.CPU != baseline.CPU || got.Processes != baseline.Processes {
 		t.Fatal("missing frozen history")
 	}
 	clock.Advance(workCurveMaxAge + time.Second)
@@ -235,5 +235,35 @@ func TestJobFindingsTypedEnvironmentCause(t *testing.T) {
 	q.projectJobFindings(j)
 	if f = findingCode(t, j, "environment_build_failed"); f.Cause != "unknown" {
 		t.Fatal(f)
+	}
+}
+
+func TestJobFindingsUnavailableCountersDoNotRenewHistory(t *testing.T) {
+	q, clock := fixture(t)
+	job := &Job{Spec: Spec{Project: "own"}, Timing: &WorkTiming{Key: &ObservationKey{Work: "freshness"}}}
+	old := WorkObservation{FindingBehavior: &FindingBehavior{Project: "own", CPU: &FindingRange{Min: 1, Max: 4, Samples: 2, RecordedAt: clock.Now()}, Processes: &FindingRange{Min: 2, Max: 2000, Samples: 2, RecordedAt: clock.Now()}}}
+	original := clock.Now()
+	clock.Advance(workCurveMaxAge)
+	point := WorkObservation{}
+	// A complete CPU measurement cannot renew a missing process measurement.
+	q.recordFindingBehavior(job, Result{Success: true, Resources: &AttemptResources{ElapsedSeconds: 10, CPU: AttemptCPUTime{UsageSeconds: findingValue(20)}}}, old, &point, true)
+	if point.FindingBehavior.Processes.RecordedAt != original {
+		t.Fatal("process history renewed by CPU")
+	}
+	clock.Advance(time.Second)
+	q.s.WorkObservations = map[string]WorkObservation{identityHash(job.Timing.Key): point}
+	got := q.findingBehaviorBaseline(job)
+	if got == nil || got.CPU == nil || got.Processes != nil {
+		t.Fatal(got)
+	}
+	old = point
+	q.recordFindingBehavior(job, Result{Success: true, Resources: &AttemptResources{}}, old, &point, true)
+	if point.FindingBehavior.Processes != nil {
+		t.Fatal("expired process history survived")
+	}
+	clock.Advance(workCurveMaxAge)
+	q.s.WorkObservations[identityHash(job.Timing.Key)] = point
+	if q.findingBehaviorBaseline(job) != nil {
+		t.Fatal("unavailable counters renewed learned comparisons")
 	}
 }
