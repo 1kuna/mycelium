@@ -208,7 +208,9 @@ func batchInfrastructureState(j *Job, m *Machine) string {
 	slices.Sort(environments)
 	qualification := []string{}
 	for _, r := range m.ExtensionReports {
-		if digests[r.Digest] && r.Work == j.Spec.workType() && (r.Device == "" || slices.Contains(targetDevices(m), r.Device)) {
+		if digests[r.Digest] && r.Work == j.Spec.workType() && r.Platform == m.GPU && slices.ContainsFunc(targetDevices(m), func(device string) bool {
+			return extensionReportDevice(r.Platform, r.Device) == extensionReportDevice(m.GPU, device)
+		}) {
 			qualification = append(qualification, identityHash(r))
 		}
 	}

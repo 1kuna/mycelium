@@ -175,6 +175,9 @@ func (q *Queue) maintainStartDeadlines() {
 		j.Reason = "production start deadline exceeded: " + reason
 		if j.Spec.ExtensionCheck != nil {
 			j.Reason = "never started: " + reason
+			if j.StartedAt != nil || slices.ContainsFunc(j.Copies, func(c Copy) bool { return c.StartedAt != nil }) {
+				j.Reason = "check start deadline exceeded after interruption: " + reason
+			}
 			if executionExpired {
 				j.Reason = "check execution timeout exceeded"
 			}
