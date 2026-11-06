@@ -931,7 +931,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		launchErr = s.startFailure(j, launchRefused, launchErr)
 		var recorded *recordedStartError
 		if errors.As(launchErr, &recorded) {
+			p.mu.Lock()
 			p.outcome.Infrastructure = recorded.facts.Infrastructure
+			p.mu.Unlock()
 		}
 	}
 	result := Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
