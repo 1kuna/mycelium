@@ -167,7 +167,7 @@ func TestWaitQueueOutcomes(t *testing.T) {
 					t.Fatal(out.String())
 				}
 			}
-			if tc.name == "failure" && (!strings.Contains(out.String(), "execution failed") || strings.Contains(out.String(), "bad command")) {
+			if tc.name == "failure" && out.String() != ids[0]+" failed\n" {
 				t.Fatal(out.String())
 			}
 		})
@@ -205,7 +205,7 @@ func TestWaitImmediatelyAfterSubmitWithStaleStatus(t *testing.T) {
 		}
 		return q.Cancel(j.ID)
 	})
-	if exitCode(err) != 1 || out.String() != j.ID+" cancelled cancel requested\n" || pauses != 1 {
+	if exitCode(err) != 1 || out.String() != j.ID+" cancelled\n" || pauses != 1 {
 		t.Fatalf("immediate wait: err=%v output=%q pauses=%d", err, out.String(), pauses)
 	}
 	if aggregateReads.Load() != 1 {
@@ -380,7 +380,7 @@ func TestWaitOutageDiagnosticsAndTerminalRecovery(t *testing.T) {
 				t.Fatalf("wait err=%v output=%q", err, out.String())
 			}
 			lines := strings.Split(strings.TrimSpace(diagnostics.String()), "\n")
-			if len(lines) != 3 || !strings.Contains(lines[0], "cause="+tc.cause+" attempts=1 elapsed=0s") || !strings.Contains(lines[1], "cause="+tc.cause+" attempts=8 elapsed=1m6s") || lines[2] != "wait: queue connection restored" {
+			if len(lines) != 4 || lines[0] != "job running" || !strings.Contains(lines[1], "cause="+tc.cause+" attempts=1 elapsed=0s") || !strings.Contains(lines[2], "cause="+tc.cause+" attempts=8 elapsed=1m6s") || lines[3] != "wait: queue connection restored" {
 				t.Fatalf("missing sanitized retry progress or recovery: %q", diagnostics.String())
 			}
 			if strings.Contains(diagnostics.String(), "private") || strings.Contains(diagnostics.String(), "fixture.invalid") {
@@ -501,7 +501,7 @@ func TestWaitProductionStartDeadline(t *testing.T) {
 	defer server.Close()
 	var out, diagnostics bytes.Buffer
 	err = waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return q.Tick() })
-	if exitCode(err) != 1 || !strings.Contains(out.String(), "production start deadline exceeded") || strings.Contains(out.String(), "needs xpu") {
+	if exitCode(err) != 1 || out.String() != j.ID+" failed\n" {
 		t.Fatalf("exit=%d output=%s err=%v", exitCode(err), out.String(), err)
 	}
 }
@@ -524,14 +524,15 @@ func TestWaitDeadlineGuidance(t *testing.T) {
 	if exitCode(err) != 3 || out.Len() != 0 {
 		t.Fatal(err, out.String())
 	}
-	text := diagnostics.String()
-	for _, want := range []string{"tier experiment selector */* revision 0", "tier deadline selector */deadline revision 0", "higher tier precedence", "Blockers:", "ETA unknown", "class: deadline; deadline:", "does not preempt non-resumable"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("missing %q: %s", want, text)
-		}
+	if diagnostics.String() != j.ID+" queued\n" {
+		t.Fatal("default wait repeated scheduler details", diagnostics.String())
 	}
-	if strings.Count(text, "priority advisory:") != 1 {
-		t.Fatal("unchanged guidance repeated", text)
+	var structured bytes.Buffer
+	clock = &waitClock{now: clock.Now()}
+	err = waitJobsReporting(context.Background(), client, nil, []string{j.ID}, 7*time.Second, &structured, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil }, true)
+	var observed myce.Job
+	if exitCode(err) != 3 || json.Unmarshal(bytes.TrimSpace(structured.Bytes()), &observed) != nil || observed.DeadlineGuidance == nil {
+		t.Fatal("JSON lost deadline diagnostics", err, structured.String())
 	}
 }
 
@@ -575,5 +576,54 @@ func TestWaitReconnectsAfterQueueRestartWithoutProgress(t *testing.T) {
 	})
 	if err != nil || reconnects != 1 || out.String() != j.ID+" succeeded\n" || !strings.Contains(diagnostics.String(), "no progress for 2m") || !strings.Contains(diagnostics.String(), "blocked reading job "+j.ID+" (cause=timeout)") {
 		t.Fatalf("%v reconnects=%d out=%s diagnostics=%s", err, reconnects, &out, &diagnostics)
+	}
+}
+
+func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
+	for _, structured := range []bool{false, true} {
+		t.Run(fmt.Sprint(structured), func(t *testing.T) {
+			step := 0
+			reason := strings.Repeat("scheduler explanation ", 60) + "\nfull reason"
+			states := []string{"queued", "queued", "running", "succeeded"}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(myce.Job{ID: "job", State: states[step], Reason: fmt.Sprintf("%s %d", reason, step)})
+			}))
+			defer server.Close()
+			clock := &waitClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
+			var out, diagnostics bytes.Buffer
+			err := waitJobsReporting(context.Background(), myce.Client{URL: server.URL, Token: "fixture"}, nil, []string{"job"}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error {
+				step++
+				clock.advance(d)
+				return nil
+			}, structured)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !structured {
+				if out.String() != "job succeeded\n" || diagnostics.String() != "job queued\njob running\n" {
+					t.Fatalf("verbose or repeated states: %q %q", out.String(), diagnostics.String())
+				}
+			} else {
+				lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+				if len(lines) != len(states) || diagnostics.Len() != 0 {
+					t.Fatal("lost reason updates", out.String(), diagnostics.String())
+				}
+				for i, line := range lines {
+					var j myce.Job
+					if err := json.Unmarshal([]byte(line), &j); err != nil || j.State != states[i] || j.Reason != fmt.Sprintf("%s %d", reason, i) {
+						t.Fatal("truncated JSON diagnostics", line, err)
+					}
+				}
+			}
+		})
+	}
+	// The public flag must select the structured renderer too.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":"job","state":"succeeded","reason":"full terminal reason"}`)
+	}))
+	defer server.Close()
+	var out bytes.Buffer
+	if err := waitCommand(context.Background(), []string{"job", "--json", "--queue", server.URL, "--token", "fixture"}, &out, io.Discard); err != nil || !strings.Contains(out.String(), `"reason":"full terminal reason"`) {
+		t.Fatal("--json flag", err, out.String())
 	}
 }

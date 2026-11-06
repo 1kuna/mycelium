@@ -1528,8 +1528,10 @@ These are live observations, separate from immutable submission intent and job
 holds. They do not change the accepted class or submission key.
 
 `myce submit` writes this advice to stderr and keeps the job ID on stdout.
-`myce wait` writes advice when it changes to stderr, preserving final-state
-lines on stdout; `myce status JOB` shows it alongside job details.
+`myce wait` prints one short line per state change: progress on stderr and
+terminal states on stdout. `myce wait --json JOB` emits JSON lines on state or
+reason changes, retaining full reasons and initial placement/deadline diagnostics;
+`myce status JOB` shows the current details.
 
 For deadline work, author a **new submission** with, for example:
 

@@ -21,7 +21,12 @@ func TestDevCommandQuickstart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := t.TempDir()
+	// Preserve a logical cwd with a symlinked ancestor, like macOS /tmp.
+	physical := t.TempDir()
+	root := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(physical, root); err != nil {
+		t.Fatal(err)
+	}
 	origin := filepath.Join(root, "origin")
 	if err := os.MkdirAll(origin, 0700); err != nil {
 		t.Fatal(err)
@@ -72,7 +77,7 @@ func TestDevCommandQuickstart(t *testing.T) {
 	run(origin, env, "git", "add", ".")
 	run(origin, env, "git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
 	env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+origin+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/1kuna/mycelium.git",
-		"MYCE_TOKEN=ambient-fixture-secret", "MYCE_QUEUE=http://127.0.0.1:1", "MYCE_JOINING_FILE=/nonexistent-fixture-authority", "TMPDIR="+root)
+		"MYCE_TOKEN=ambient-fixture-secret", "MYCE_QUEUE=http://127.0.0.1:1", "MYCE_JOINING_FILE=/nonexistent-fixture-authority", "TMPDIR="+root, "PWD="+root)
 	commands, err := os.ReadFile(filepath.Join(source, "examples/quickstart-commands.sh"))
 	if err != nil {
 		t.Fatal(err)
