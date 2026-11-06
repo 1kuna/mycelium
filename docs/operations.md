@@ -2344,6 +2344,9 @@ grace, missing heartbeat and empty local inventory never permit restart without
 exact release. Repeat `--urgency critical` when resuming or fixing forward; an
 unfinished operation refuses an urgency change. Existing operator drains and
 disable policies remain owned by the operator.
+Replacing an operation that recorded critical stops retains those records under
+its original operation in `fleet_superseded`, including after newer-release
+fix-forward and queue restart; released work need not recreate the evidence.
 Queued jobs retain their authored start/give-up deadlines during critical
 maintenance, as with the existing idle policy; urgency does not extend them.
 
