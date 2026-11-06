@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ type attemptSupervisor struct {
 	connected   bool
 	released    bool
 	finished    bool
+	stopping    bool // Latched until exact-attempt release, including reconnects.
 	err         error
 	liveness    *attemptLivenessSampler
 	wake        chan struct{}
@@ -56,6 +58,29 @@ func dockerHeartbeatDiagnostic(d *dockerAttempt) (string, *RuntimeCause) {
 }
 
 func jobKey(j Job) attemptKey { return attemptKey{j.ID, j.Attempt, j.Session} }
+func (a *attemptSupervisor) admissionJob() Job {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	j := a.job
+	if c := a.worker.control; c != nil {
+		c.mu.Lock()
+		if _, pending := c.pendingEvents[jobKey(j)]; pending {
+			a.stopping = true
+		}
+		if p := c.processes[jobKey(j)]; p != nil {
+			p.mu.Lock()
+			if !p.stopRequested.IsZero() {
+				a.stopping = true
+			}
+			p.mu.Unlock()
+		}
+		c.mu.Unlock()
+	}
+	if a.stopping {
+		j.State = "stopping"
+	}
+	return j
+}
 func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -68,6 +93,7 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
 	a.mu.Lock()
 	a.worker, a.directive, a.connected = w, d, connected
+	a.stopping = a.stopping || d.Stop
 	a.admissionBlocked = admissionBlocked
 	if d.Stop && a.preparing != nil {
 		a.preparing()
@@ -799,7 +825,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			released := actor.released || actor.finished
 			actor.mu.Unlock()
 			if !released {
-				jobs = append(jobs, actor.job)
+				jobs = append(jobs, actor.admissionJob())
 			}
 		}
 		return jobs
@@ -900,7 +926,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			released := a.released
 			a.mu.Unlock()
 			if !released {
-				jobs = append(jobs, a.job)
+				jobs = append(jobs, a.admissionJob())
 				batch += a.job.Spec.Needs.MemoryGB
 			}
 		}
@@ -1129,6 +1155,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.mu.Lock()
 			rt.memoryMachine, rt.session = w.Machine, w.Machine.Session
 			rt.batchJobs = slices.Clone(jobs)
+			rt.batchSupervisors = maps.Clone(actors)
 			rt.mu.Unlock()
 
 			// Age the actor snapshot at send time, including any intervening probes.
@@ -1286,6 +1313,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				currentJobs := activeJobs()
 				rt.mu.Lock()
 				rt.batchJobs = currentJobs
+				rt.batchSupervisors = maps.Clone(actors)
 				rt.admissionBlocked = reply.AdmissionBlocked
 				rt.mu.Unlock()
 				rt.sync(reply.ModelPlan)

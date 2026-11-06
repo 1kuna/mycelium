@@ -465,6 +465,7 @@ type workerModel struct {
 type modelRuntime struct {
 	worker                 *Worker
 	batchJobs              []Job
+	batchSupervisors       map[attemptKey]*attemptSupervisor
 	batchHostMemorySamples map[attemptKey]hostMemorySample
 	verifyDevice           func() error
 	deviceEnv              map[string]string
@@ -825,6 +826,15 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		rt.mu.Unlock()
 		return
 	}
+	// Authorization and preparation may block while a batch receives a stop.
+	// Recheck current admission after authorization at every engine launch gate.
+	parent := ctx
+	ctx = withLaunchGate(parent, func() error {
+		if err := checkLaunchGate(parent); err != nil {
+			return err
+		}
+		return rt.checkLoadMemory(parent, m)
+	})
 	platform, device, deviceEnv := rt.platform, rt.device, rt.deviceEnv
 	if m.bound != nil {
 		platform, device = m.bound.Machine.GPU, m.bound.Machine.Device
@@ -857,9 +867,6 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	}
 	if e == nil && (model.Engine == "llama.cpp" || model.SizeBytes > 0) {
 		model.Path, e = rt.cache.Prepare(ctx, model)
-	}
-	if e == nil {
-		e = rt.checkLoadMemory(ctx, m)
 	}
 	if e == nil {
 		e = checkLaunchGate(ctx)
@@ -935,6 +942,11 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 	rt.mu.Lock()
 	cores, ram, growth := 0, 0.0, 0.0
 	for _, j := range rt.batchJobs {
+		// Preparation can outlast a heartbeat or receive an out-of-band stop.
+		// Consult the exact actor at launch time, not its original running job.
+		if a := rt.batchSupervisors[jobKey(j)]; a != nil {
+			j = a.admissionJob()
+		}
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
 		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], rt.clock.Now())
