@@ -12,6 +12,9 @@ import (
 // Replay a machine heartbeat whose inventory work outlasts its original actor
 // snapshot, while the command actor continues sampling a small CPU footprint.
 func TestColdCPUProbeChargeAfterSlowHeartbeatInventory(t *testing.T) {
+	oldRSS := workerMemoryRSS
+	workerMemoryRSS = func(context.Context) (float64, error) { return 0, nil }
+	t.Cleanup(func() { workerMemoryRSS = oldRSS })
 	for _, evidence := range []string{"fresh", "missing", "stale", "legacy", "wrong attempt"} {
 		t.Run(evidence, func(t *testing.T) {
 			q, clock := fixture(t)
@@ -54,7 +57,8 @@ func TestColdCPUProbeChargeAfterSlowHeartbeatInventory(t *testing.T) {
 				actor.report.Attempt++
 			}
 			pending := submit(t, q, cpuSpec(2, 2))
-			ageAttemptReports(reports, actors, clock)
+			w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 16, HostMemorySource: func(context.Context) (float64, error) { return 99, nil }}
+			w.sampleHeartbeatMemory(context.Background(), &m, []Job{*probe}, reports, actors)
 			if evidence == "legacy" {
 				reports = legacyProbeMemoryCheckin(Checkin{Attempts: reports}).Attempts
 			}
@@ -78,10 +82,44 @@ func TestColdCPUProbeChargeAfterSlowHeartbeatInventory(t *testing.T) {
 			if q.s.Jobs[probe.ID].Spec.Needs.HostMemoryGB != ceiling {
 				t.Fatal("changed execution containment ceiling")
 			}
-			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 99, nil }, hostMemorySamples: currentHostMemorySamples(reports, clock.Now())}
+			w.Machine, w.hostMemorySamples = m, currentHostMemorySamples(reports, clock.Now())
 			if err := localAttemptAdmission(w, []Job{*q.s.Jobs[probe.ID]}, *q.s.Jobs[pending.ID], nil); (err == nil) != (evidence == "fresh") {
 				t.Fatalf("worker admission disagrees with queue: %v", err)
 			}
 		})
+	}
+}
+
+func TestHeartbeatMemoryGrowthRefreshesPhysicalHeadroom(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 16, 24)
+	m.Devices = []MachineDevice{}
+	m.HostMemoryBudgetGB = 24
+	submit(t, q, cpuSpec(2, 16))
+	holder := assignedJob(machineCheck(t, q, m))
+	if holder == nil {
+		t.Fatal("holder not assigned")
+	}
+	m.HostAvailableMemoryGB = 14
+	report := AttemptReport{Execution: Execution{ID: holder.ID, Attempt: holder.Attempt}, Session: holder.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 2, sampledAt: clock.Now()}}
+	reports := []AttemptReport{report}
+	actor := &attemptSupervisor{job: *holder, report: report}
+	// During inventory the holder consumes eight more GiB. A newer resident
+	// counter must not cancel growth against the old 14 GiB availability.
+	clock.Advance(hostMemorySampleFreshFor + time.Second)
+	actor.report.CurrentHostMemory = &CurrentHostMemory{NonreclaimableGB: 10, sampledAt: clock.Now()}
+	w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 6, nil }}
+	w.sampleHeartbeatMemory(context.Background(), &m, []Job{*holder}, reports, map[attemptKey]*attemptSupervisor{jobKey(*holder): actor})
+	pending := submit(t, q, cpuSpec(2, 2))
+	reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignedJob(reply) != nil || m.HostAvailableMemoryGB != 6 {
+		t.Fatal("new resident usage spent old physical headroom")
+	}
+	w.Machine, w.hostMemorySamples = m, currentHostMemorySamples(reports, clock.Now())
+	if err := localAttemptAdmission(w, []Job{*q.s.Jobs[holder.ID]}, *q.s.Jobs[pending.ID], nil); err == nil {
+		t.Fatal("worker admitted without physical growth room")
 	}
 }
