@@ -2378,6 +2378,8 @@ progress. Fresh exact custody selects the next natural idle moment and acquires
 the upgrade drain atomically before placement refills it. Unreleased attempts,
 preparations, loading models, calls and unknown cleanup do not establish idle;
 a ready idle model can enter drain but must confirm unload before restart.
+After queue restart, each retained engine needs a fresh exact zero-call report
+before it can count as idle, regardless of the host's production-hold policy.
 Pending operations persist across queue restart without acquiring a drain.
 Earlier releases drain a selected host while waiting for its work to finish.
 

@@ -217,6 +217,7 @@ type ModelSlot struct {
 	RetryDelay        time.Duration      `json:"retry_delay,omitempty"`
 	ReleasingCalls    bool               `json:"releasing_calls,omitempty"`
 	Recovering        bool               `json:"recovering,omitempty"`
+	CallsUnconfirmed  bool               `json:"calls_unconfirmed,omitempty"`
 	ProductionUsed    bool               `json:"production_used,omitempty"`
 	StopAt            *time.Time         `json:"stop_at,omitempty"`
 	EnvironmentRecipe *EnvironmentRecipe `json:"environment_recipe,omitempty"`
@@ -327,6 +328,9 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 		}
 		// HTTP requests do not survive queue restart. Reconnected workers reconcile slots.
 		for _, s := range q.s.ModelSlots {
+			// Reset accounting is not evidence of idle. Retain this uncertainty
+			// until this exact engine reports zero calls, on every host policy.
+			s.CallsUnconfirmed = true
 			m := q.s.Machines[s.Machine]
 			if m != nil {
 				if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.ProductionHold {
@@ -401,6 +405,7 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 				}
 				if r.CallsMeasured && r.InFlight == 0 {
 					s.ReleasingCalls = false
+					s.CallsUnconfirmed = false
 				}
 				if s.Recovering {
 					if !r.CallsMeasured {

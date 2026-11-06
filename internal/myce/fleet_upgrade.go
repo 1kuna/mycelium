@@ -399,7 +399,7 @@ func (q *Queue) fleetPendingWait(h *fleetUpgradeHost) string {
 				// A ready idle model can unload through the existing drain. It
 				// has custody, but no work is interrupted. Loading, live calls
 				// and uncertain teardown are not an idle moment.
-				if slot := q.s.ModelSlots[slotKey(engine.Machine, engine.Model, engine.Device)]; slot != nil && slot.Session == engine.Session && slot.Attempt == engine.Attempt && slot.State == "ready" && slot.InFlight == 0 && !slot.Recovering && !slot.ReleasingCalls {
+				if slot := q.s.ModelSlots[slotKey(engine.Machine, engine.Model, engine.Device)]; slot != nil && slot.Session == engine.Session && slot.Attempt == engine.Attempt && slot.State == "ready" && slot.InFlight == 0 && !slot.Recovering && !slot.ReleasingCalls && !slot.CallsUnconfirmed {
 					continue
 				}
 			}

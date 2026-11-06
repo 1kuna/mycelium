@@ -145,3 +145,59 @@ func TestFleetUpgradeIdleDeviceEngineMustReleaseBeforeInstruction(t *testing.T) 
 		t.Fatal("released engine did not permit queue update")
 	}
 }
+
+func TestFleetUpgradePendingRestartNeedsExactZeroEngineCalls(t *testing.T) {
+	q, c, m := modelFixture(t, "host")
+	config := q.models
+	signed, key, _ := signedTestRelease(t)
+	if err := q.ConfigureEnrollmentRelease(signed, key, "https://publisher.invalid/release"); err != nil {
+		t.Fatal(err)
+	}
+	m.Fleet = fleetTestProof(c, m.Session, 200, false)
+	check(t, q, m, nil)
+	q.fleetQueue = &fleetQueueRuntime{Host: "host", OS: "linux", Arch: "amd64", Proof: fleetTestProof(c, "queue-old", 100, false)}
+	call := addModelCall(t, q, "experiment")
+	reportModel(t, q, m, "ready")
+	if call.Machine != m.ID {
+		t.Fatal("model call not admitted")
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if q.fleetActiveHost() != nil {
+		t.Fatal("live inference acquired upgrade drain")
+	}
+	q = reopenCancellationQueue(t, q, c)
+	fakeCheckpointAvailability(t, q, true)
+	if err := q.ConfigureModels(config); err != nil {
+		t.Fatal(err)
+	}
+	q.fleetQueue = &fleetQueueRuntime{Host: "host", OS: "linux", Arch: "amd64", Proof: fleetTestProof(c, "queue-reopened", 101, false)}
+	slot := q.s.ModelSlots[slotKey(m.ID, "test")]
+	attempt := slot.Attempt
+	if slot.InFlight != 0 || slot.Recovering || q.s.Hosts["host"] != nil && q.s.Hosts["host"].Policy.ProductionHold {
+		t.Fatal("fixture must exercise reset calls without production-hold recovery")
+	}
+	for _, report := range []ModelReport{
+		{Name: "test", Attempt: "stale-engine", State: "ready", CallsMeasured: true},
+		{Name: "test", Attempt: attempt, State: "ready"},
+		{Name: "test", Attempt: attempt, State: "ready", CallsMeasured: true, InFlight: 1},
+	} {
+		if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{report}}); err != nil {
+			t.Fatal(err)
+		}
+		if q.maintenanceBlocked("host") || q.fleetPausesCalls() || q.fleetActiveHost() != nil || q.s.ModelSlots[slotKey(m.ID, "test")].State != "ready" {
+			t.Fatal("unknown or live engine calls acquired drain", q.fleetUpgradeStatus())
+		}
+	}
+	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: attempt, State: "ready", CallsMeasured: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if h := q.fleetActiveHost(); h == nil || h.Phase != "draining" || !h.Owned {
+		t.Fatal("exact zero call report did not select idle cutover", h)
+	}
+	if i, err := q.fleetInstruction("host", "@queue", "queue-reopened"); err != nil || i.Operation != "" {
+		t.Fatal("resident engine bypassed unload custody", i, err)
+	}
+}
