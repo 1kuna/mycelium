@@ -3,7 +3,6 @@ package myce
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,8 +11,8 @@ import (
 )
 
 func TestResourceProtocolCompatibility(t *testing.T) {
-	for _, result := range []bool{false, true} {
-		t.Run(fmt.Sprint(result), func(t *testing.T) {
+	for _, shape := range []string{"checkin", "result", "saved-result", "saved-log"} {
+		t.Run(shape, func(t *testing.T) {
 			wire := &resourceWire{}
 			old := false
 			sent := []bool{}
@@ -36,8 +35,15 @@ func TestResourceProtocolCompatibility(t *testing.T) {
 			resources := &AttemptResources{CPU: AttemptCPUTime{Source: "cgroup_v2"}}
 			input := any(Checkin{Machine: Machine{IOPressure: &IOPressure{}}, Attempts: []AttemptReport{{Resources: resources}}})
 			path := "/api/workers/checkin"
-			if result {
-				input = Result{Resources: resources}
+			if shape != "checkin" {
+				r := Result{Resources: resources}
+				input = r
+				if shape == "saved-result" {
+					input = &r
+				}
+				if shape == "saved-log" {
+					input = &LogChunk{Result: r}
+				}
 				path = "/api/workers/complete"
 			}
 			for i := 0; i < 4; i++ {

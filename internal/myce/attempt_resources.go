@@ -316,20 +316,31 @@ func (o *resourceObserver) sample() {
 	r.ElapsedSeconds = max(0, o.clock.Now().Sub(o.start).Seconds())
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.value = retainResourceCounters(o.value, r)
+}
+
+// Final counter reads can fail during teardown. Preserve prior measurements
+// explicitly as lower bounds, including Docker's durable pre-removal snapshot.
+func retainResourceCounters(previous, r *AttemptResources) *AttemptResources {
+	if r == nil {
+		return previous
+	}
+	copy := *r
+	r = &copy
 	// A failed last read is explicit; retain previous CPU as a labeled lower
 	// bound, never let a missing cgroup silently turn a measured run into zero.
-	if old := o.value; old != nil && r.CPU.UsageSeconds == nil && old.CPU.UsageSeconds != nil {
+	if old := previous; old != nil && r.CPU.UsageSeconds == nil && old.CPU.UsageSeconds != nil {
 		r.CPU = old.CPU
 		r.CPU.LowerBound = true
 		r.CPU.Unavailable = "final_read_failed"
 	}
-	if old := o.value; old != nil && r.IO.ReadBytes == nil && old.IO.ReadBytes != nil {
+	if old := previous; old != nil && r.IO.ReadBytes == nil && old.IO.ReadBytes != nil {
 		pressure := r.IO.Pressure
 		r.IO = old.IO
 		r.IO.Pressure = pressure
 		r.IO.Unavailable = "final_read_failed"
 	}
-	o.value = r
+	return r
 }
 func (o *resourceObserver) snapshot() *AttemptResources {
 	if o == nil {

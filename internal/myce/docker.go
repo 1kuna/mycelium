@@ -1295,11 +1295,7 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	sample := finishMemory()
 	resourceSample := resources.finish()
 	d.mu.Lock()
-	if d.state.Resources == nil {
-		d.state.Resources = resourceSample
-	} else {
-		d.state.Resources.ElapsedSeconds = resourceSample.ElapsedSeconds
-	}
+	d.finishResourceObservation(resourceSample)
 	if !d.state.EnvelopeEvidenceLost {
 		d.state.MemoryPeak = sampledMemoryPeak(d.state.MemoryPeak, sample)
 	}

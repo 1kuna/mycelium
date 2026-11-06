@@ -17,6 +17,18 @@ func resourceWireInput(in any, supported bool) (any, bool) {
 		return in, hasResourceFields(in)
 	}
 	switch c := in.(type) {
+	case *Checkin:
+		if c != nil {
+			return resourceWireInput(*c, false)
+		}
+	case *Result:
+		if c != nil {
+			return resourceWireInput(*c, false)
+		}
+	case *LogChunk:
+		if c != nil {
+			return resourceWireInput(*c, false)
+		}
 	case Checkin:
 		c.Machine.IOPressure = nil
 		c.Attempts = slices.Clone(c.Attempts)
@@ -35,6 +47,12 @@ func resourceWireInput(in any, supported bool) (any, bool) {
 }
 func hasResourceFields(in any) bool {
 	switch c := in.(type) {
+	case *Checkin:
+		return c != nil && hasResourceFields(*c)
+	case *Result:
+		return c != nil && c.Resources != nil
+	case *LogChunk:
+		return c != nil && c.Resources != nil
 	case Checkin:
 		if c.Machine.IOPressure != nil {
 			return true
