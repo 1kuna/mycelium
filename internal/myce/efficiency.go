@@ -396,7 +396,7 @@ func efficiencyBlocker(reason string) string {
 		return "memory_reservation"
 	case strings.Contains(r, "target"), strings.Contains(r, "platform"), strings.Contains(r, "allow-list"), strings.Contains(r, "no_matching_device"):
 		return "authored_platform_targets"
-	case strings.Contains(r, "priority"), strings.Contains(r, "fair"), strings.Contains(r, "cap"), strings.Contains(r, "ahead"), strings.Contains(r, "backfill"):
+	case strings.Contains(r, "priority"), strings.Contains(r, "fair"), strings.Contains(r, "work cap"), strings.Contains(r, "experiment cap"), strings.Contains(r, "share cap"), strings.Contains(r, "ahead"), strings.Contains(r, "backfill"):
 		return "priority_fairness"
 	case strings.Contains(r, "upstream"), strings.Contains(r, "producer"):
 		return "dependency"
@@ -457,10 +457,17 @@ func (q *Queue) batchSlotFreeForEfficiency(j *Job, m *Machine) bool {
 
 // The existing detached read capture uses immutable cold summaries and copies
 // live planning inputs. Diagnostics run once on maintenance, never per GET.
-// Revision fencing prevents applying a pre-checkin category to changed demand.
+// Exact-job fences protect categories; monotonic captures protect publication.
+// Ordinary heartbeats must not starve diagnostics by invalidating the whole fleet.
+type efficiencyBlockerObservation struct {
+	Category string
+	Attempt  int
+	Session  string
+	Queued   time.Time
+}
 type efficiencyDiagnostics struct {
-	blockers  map[string]string
-	revision  uint64
+	blockers map[string]efficiencyBlockerObservation
+
 	report    *EfficiencyReport
 	stranded  []StrandedDemand
 	baselines map[string]efficiencyBaseline
@@ -472,21 +479,18 @@ func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDi
 	if q.simulation {
 		return nil, nil
 	}
-	q.mu.RLock()
-	revision := q.fileReferenceRevision
-	q.mu.RUnlock()
 	v, _, err := q.captureObservation("", ctx)
 	if err != nil {
 		return nil, err
 	}
-	d := &efficiencyDiagnostics{revision: revision, blockers: map[string]string{}}
+	d := &efficiencyDiagnostics{blockers: map[string]efficiencyBlockerObservation{}}
 	v.memoryPlanning = newMemoryPlanningCache()
 	for _, j := range v.liveJobs() {
 		if j.State == "queued" && !cancelled(j) {
-			d.blockers[j.ID] = efficiencyBlocker(v.waitReason(j))
+			d.blockers[j.ID] = efficiencyBlockerObservation{Category: efficiencyBlocker(v.waitReason(j)), Attempt: j.Attempt, Session: j.Session, Queued: j.Queued}
 			if j.Efficiency != nil {
 				j.Efficiency.advance(v.clock.Now())
-				j.Efficiency.Blocker = d.blockers[j.ID]
+				j.Efficiency.Blocker = d.blockers[j.ID].Category
 			}
 			d.stranded = append(d.stranded, v.strandedDemand(j)...)
 		}
@@ -499,14 +503,15 @@ func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDi
 	return d, nil
 }
 func (q *Queue) applyEfficiencyDiagnostics(d *efficiencyDiagnostics) {
-	if d == nil || d.revision != q.fileReferenceRevision {
+	if d == nil || d.report.At.Before(q.s.EfficiencyAt) {
 		return
 	}
 	for id, blocker := range d.blockers {
-		if j := q.s.Jobs[id]; j != nil && j.State == "queued" && j.Efficiency != nil {
-			j.Efficiency.Blocker = blocker
+		if j := q.s.Jobs[id]; j != nil && j.State == "queued" && j.Attempt == blocker.Attempt && j.Session == blocker.Session && j.Queued.Equal(blocker.Queued) && j.Efficiency != nil {
+			j.Efficiency.Blocker = blocker.Category
 		}
 	}
+	q.s.EfficiencyAt = d.report.At
 	q.s.StrandedDemand = d.stranded
 	q.s.EfficiencyHealth = d.baselines
 	d.applied = true

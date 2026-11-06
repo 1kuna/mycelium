@@ -2126,6 +2126,7 @@ Accounting is compact and stored with its owning job, so job removal also remove
 its diagnostic contribution; there is no new age-based history policy or raw
 sample log. Host aggregates follow inventory, and baseline subjects follow the
 retained evidence. Bulk projection, sorting and baseline statistics run outside
-`q.mu`; the existing maintenance commit applies only revision-fenced results.
+`q.mu`; the existing maintenance commit applies monotonic observations and exact-job
+fences. Unrelated heartbeats do not starve diagnostic publication.
 Reads reuse the published generation. Sensor coverage and maintenance sampling
 limits are evidence limits, not authorization to release custody or shrink needs.

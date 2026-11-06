@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	EfficiencyAt           time.Time                     `json:"efficiency_at,omitempty"`
 	EfficiencyHosts        map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
 	EfficiencyHealth       map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
 	StrandedDemand         []StrandedDemand              `json:"stranded_demand,omitempty"`

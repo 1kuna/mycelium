@@ -82,6 +82,7 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 	}
 	// Read-only endpoint returns the same materialized generation without invoking
 	// planning or the full snapshot path. The mutable state can subsequently change.
+	q.observeRead = func(string, time.Duration, time.Duration) { t.Error("efficiency endpoint performed a full capture") }
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test"}
@@ -89,6 +90,7 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 	if err := client.Call(context.Background(), http.MethodGet, "/api/efficiency", nil, &got); err != nil {
 		t.Fatal(err)
 	}
+	q.observeRead = nil
 	if !got.At.Equal(report.At) || len(got.Stranded) != 1 {
 		t.Fatalf("endpoint=%+v", got)
 	}
@@ -224,7 +226,47 @@ func TestEfficiencyRollbackAndRevisionFence(t *testing.T) {
 	if err := q.update(func() error { q.applyEfficiencyDiagnostics(d); return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if d.applied || q.s.Jobs["wait"].Efficiency.Blocker != "holds" {
-		t.Fatal("stale diagnostic crossed revision fence")
+	if q.s.Jobs["wait"].Efficiency.Blocker != "holds" {
+		t.Fatal("stale diagnostic crossed job-state fence")
+	}
+}
+
+func TestEfficiencyStopSnapshotSurvivesCleanup(t *testing.T) {
+	q, c := fixture(t)
+	m := cpuMachine("host", "host", "cpu", 8, 16)
+	m.MemoryObservation = &HostMemoryObservation{TotalGB: 16, UsedGB: 3, MyceliumGB: 2}
+	m.HostHealth = &HostHealth{History: []HostHealthSample{{At: c.Now(), HostHealthReading: HostHealthReading{Pressure: 0}}}}
+	check(t, q, m, nil)
+	var first time.Time
+	if err := q.update(func() error {
+		j := &Job{ID: "stopped", Spec: cpuSpec(1, 2), State: "running", Attempt: 1, Machine: m.ID, Session: m.Session}
+		q.putJob(j.ID, j)
+		q.recordAttemptOutcome(j, AttemptOutcome{Attempt: 1, Machine: m.ID, Session: m.Session, Interrupted: true, Forced: true})
+		first = j.AttemptHistory[0].StopObservation.At
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(time.Second)
+	if err := q.update(func() error {
+		q.s.Machines[m.ID].MemoryObservation.UsedGB = 15
+		q.s.Machines[m.ID].HostHealth.History[0].Pressure = 10
+		j := q.s.Jobs["stopped"]
+		q.recordAttemptOutcome(j, AttemptOutcome{Attempt: 1, Machine: m.ID, Session: m.Session, Interrupted: true, Forced: true})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	o := q.s.Jobs["stopped"].AttemptHistory[0].StopObservation
+	if o == nil || !o.At.Equal(first) || o.HeadroomGB == nil || *o.HeadroomGB != 13 || o.MemoryPressure == nil || *o.MemoryPressure != 0 {
+		t.Fatalf("cleanup rewrote original stop evidence: %+v", o)
+	}
+	// A late statistical projection cannot replace a newer committed observation.
+	newer := &efficiencyDiagnostics{report: &EfficiencyReport{At: c.Now().Add(time.Second)}}
+	older := &efficiencyDiagnostics{report: &EfficiencyReport{At: c.Now()}}
+	q.applyEfficiencyDiagnostics(newer)
+	q.applyEfficiencyDiagnostics(older)
+	if older.applied {
+		t.Fatal("out-of-order capture was committed")
 	}
 }
