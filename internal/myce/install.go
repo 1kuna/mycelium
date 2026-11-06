@@ -186,6 +186,9 @@ func (c ServiceConfig) MarshalJSON() ([]byte, error) {
 	if c.EnvironmentCacheBytes == 0 {
 		c.EnvironmentCacheBytes = math.MaxInt64
 	}
+	if c.FileStoreBytes == 0 {
+		c.FileStoreBytes = math.MaxInt64
+	}
 	return json.Marshal(wire(c))
 }
 
@@ -613,6 +616,9 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	}
 	if e == nil && c.EnvironmentCacheBytes == math.MaxInt64 {
 		c.EnvironmentCacheBytes = 0
+	}
+	if e == nil && c.FileStoreBytes == math.MaxInt64 {
+		c.FileStoreBytes = 0
 	}
 	// Like environment sizing, retire only the exact old default. Earlier
 	// configurations did not distinguish an explicit 10 GiB from the default.

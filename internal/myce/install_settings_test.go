@@ -350,23 +350,26 @@ func TestInstallFileCacheOmittedAutomatic(t *testing.T) {
 	}
 }
 
-func TestInstallAutomaticModelCacheRollbackEncoding(t *testing.T) {
+func TestInstallAutomaticCacheRollbackEncoding(t *testing.T) {
 	for _, limit := range []int64{0, 32 << 30} {
-		c := ServiceConfig{Role: "worker", ModelCacheBytes: limit, EnvironmentCacheBytes: limit}
+		c := ServiceConfig{Role: "worker", ModelCacheBytes: limit, EnvironmentCacheBytes: limit, FileStoreBytes: limit}
 		data, err := json.Marshal(c)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The old strict decoder recognizes this field and requires a positive
-		// integer. The real downgrade journey also exercises its worker.
+		// The old validator requires every model/environment/store ceiling to
+		// be positive, even in a worker config. File-cache zero is omitted;
+		// upload-spool bytes remain positive. The real downgrade journey also
+		// exercises the unmodified previous installer and worker.
 		var legacy struct {
 			ModelCacheBytes       int64 `json:"model_cache_bytes"`
 			EnvironmentCacheBytes int64 `json:"environment_cache_bytes"`
+			FileStoreBytes        int64 `json:"file_store_bytes"`
 		}
-		if err := json.Unmarshal(data, &legacy); err != nil || legacy.ModelCacheBytes <= 0 || legacy.EnvironmentCacheBytes <= 0 {
+		if err := json.Unmarshal(data, &legacy); err != nil || legacy.ModelCacheBytes <= 0 || legacy.EnvironmentCacheBytes <= 0 || legacy.FileStoreBytes <= 0 {
 			t.Fatalf("rollback reader cannot accept automatic ceiling: %v", err)
 		}
-		if limit == 0 && (legacy.ModelCacheBytes != math.MaxInt64 || legacy.EnvironmentCacheBytes != math.MaxInt64) {
+		if limit == 0 && (legacy.ModelCacheBytes != math.MaxInt64 || legacy.EnvironmentCacheBytes != math.MaxInt64 || legacy.FileStoreBytes != math.MaxInt64) {
 			t.Fatal("automatic ceiling was serialized as a finite default")
 		}
 		path := filepath.Join(t.TempDir(), "config.json")
@@ -374,7 +377,7 @@ func TestInstallAutomaticModelCacheRollbackEncoding(t *testing.T) {
 			t.Fatal(err)
 		}
 		saved, err := ReadServiceConfig(path)
-		if err != nil || saved.ModelCacheBytes != limit || saved.EnvironmentCacheBytes != limit {
+		if err != nil || saved.ModelCacheBytes != limit || saved.EnvironmentCacheBytes != limit || saved.FileStoreBytes != limit {
 			t.Fatalf("cache intent changed after reload: %d, %v", saved.ModelCacheBytes, err)
 		}
 	}
