@@ -13,7 +13,7 @@ type memoryPlanningCache struct {
 // Admission-dependent estimates stay in each view's own planning cache.
 type memoryHistoryCache struct {
 	jobs  map[memoryHistoryKey][]*Job
-	lower map[memoryLowerKey]float64
+	lower map[memoryLowerKey]memoryConstraintEvidence
 }
 
 // Retained constrained executions used to be scanned once per distinct work
@@ -24,7 +24,7 @@ func (c *memoryPlanningCache) retainedMemoryJobs(q *Queue, key memoryLowerKey) [
 	if c.history.jobs == nil {
 		c.history.jobs = map[memoryHistoryKey][]*Job{}
 		for _, j := range q.memoryHistory().s.Jobs {
-			if j.Timing == nil || j.Timing.Key == nil || j.StartedAt == nil || j.FinishedAt == nil || len(j.MemoryAttempts) == 0 {
+			if j.Timing == nil || j.Timing.Key == nil || len(j.MemoryAttempts) == 0 {
 				continue
 			}
 			k := j.Timing.Key
@@ -55,7 +55,7 @@ type similarMemoryKey struct {
 
 func newMemoryPlanningCache() *memoryPlanningCache {
 	return &memoryPlanningCache{
-		history: &memoryHistoryCache{lower: map[memoryLowerKey]float64{}}, constrained: map[constrainedMemoryKey]float64{},
+		history: &memoryHistoryCache{lower: map[memoryLowerKey]memoryConstraintEvidence{}}, constrained: map[constrainedMemoryKey]float64{},
 	}
 }
 func memoryLowerIdentity(key ObservationKey, configuration string) memoryLowerKey {

@@ -218,6 +218,14 @@ func (q *Queue) hasQualifiedTarget(j *Job) bool {
 }
 
 func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
+	ok, reason := q.qualifiedTargetSized(j)
+	if !ok && q.memorySizingRecoverable(j) {
+		return true, ""
+	}
+	return ok, reason
+}
+
+func (q *Queue) qualifiedTargetSized(j *Job) (bool, string) {
 	var best *targetFit
 	reason := "no known machine targets"
 	q.evaluateTargets(j, func(fit targetFit, candidate *Job, m *Machine) bool {

@@ -1,5 +1,13 @@
 # Seeing your mycelium
 
+From the next release (#850), `diagnostic_code: memory_evidence_recovering`
+means declared requirements have an eligible target but the learned/exploratory
+envelope does not. The durable queued job re-evaluates on evidence and capacity
+changes. No attempt starts below its resolved reservation or retained retry
+floor. A new clean comparable result may replace an invalidated class prior;
+explicit impossible needs, incompatible targets and impossible per-job retry
+floors still refuse. This wait grants no capacity or cleanup permission.
+
 ## Automatic host health (#834, next release)
 
 Machine `host_health` contains a typed `drain_reason`, recent `history`, the
