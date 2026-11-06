@@ -10,11 +10,11 @@ import (
 func TestSharedHostBackoffMeasuredRecovery(t *testing.T) {
 	for _, elsewhere := range []bool{false, true} {
 		t.Run(fmt.Sprint(elsewhere), func(t *testing.T) {
-			q, clock, m, run := sharedRunning(t, false)
+			q, clock, m, run := sharedRunning(t, true)
 			clock.Advance(time.Minute) // This attempt's observed time to interference.
 			m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, WakeDelayMS: 20}
 			directive := check(t, q, m, run)
-			if !directive.Stop || !directive.Kill {
+			if !directive.Stop || directive.Kill {
 				t.Fatal("no latency stop")
 			}
 			released := result(run, false)
@@ -68,7 +68,7 @@ func TestSharedHostBackoffMeasuredRecovery(t *testing.T) {
 }
 
 func TestSharedHostBackoffFailureBreaksRecovery(t *testing.T) {
-	q, clock, m, run := sharedRunning(t, false)
+	q, clock, m, run := sharedRunning(t, true)
 	clock.Advance(20 * time.Second)
 	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, WakeDelayMS: 20}
 	check(t, q, m, run)

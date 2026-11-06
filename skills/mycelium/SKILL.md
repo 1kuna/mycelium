@@ -242,3 +242,16 @@ now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
 [host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).
+
+## Shared owner pressure (next release)
+
+Shared hosts charge measured CPU overuse from per-attempt telemetry, retaining
+the logical job's learned need across checkpoint/requeue. `resources` on job
+status shows the observed CPU need. Linux memory/CPU PSI, macOS memory warnings,
+owner scheduling latency and confirmed host-relative swap-growth pressure
+withhold new work. Resumable lower-tier jobs checkpoint and requeue without an
+infrastructure retry; wait on the same job and submission key. Production tier
+and non-resumable work continue, with the job reason naming pressure and retained
+work. No owner-pressure kill policy is implied. macOS containment remains
+cooperative. Read one `myce status JOB_ID` or the normal wait result; no agent
+pressure polling or manual resume is required.

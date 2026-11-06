@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const hostProbeProtocol = "host-probe-v1"
+const hostProbeProtocol = "host-probe-v2"
 
 // ProbeObservation describes one completed observation, not a renewable lease.
 // Age is carried by the containing signal. No worker wall timestamp is trusted.

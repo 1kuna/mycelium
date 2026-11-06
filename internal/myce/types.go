@@ -419,6 +419,7 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	CPUObservation          *SharedCPUObservation  `json:"cpu_observation,omitempty"`
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
 	Blocker                 *Blocker               `json:"blocker,omitempty"`

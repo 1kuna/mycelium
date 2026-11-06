@@ -114,7 +114,7 @@ func (q *Queue) hostCPUInUse(m *Machine, releasedJobs map[*Job]bool, releasedSlo
 	for _, j := range q.liveJobs() {
 		owner := q.s.Machines[j.Machine]
 		if !releasedJobs[j] && !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
-			used += j.Spec.Needs.cores()
+			used += jobCPUCharge(j, m)
 			covered[j.Machine] = true
 		}
 	}
@@ -164,12 +164,12 @@ func cpuFits(j *Job, m *Machine) bool {
 	}
 	if !m.cpuLedger {
 		capacity, reason := cpuCapacity(m)
-		return reason == "" && capacity >= j.Spec.Needs.cores()
+		return reason == "" && capacity >= jobCPUCharge(j, m)
 	}
 	if j.State == "running" || j.State == "stopping" {
 		return m.CPUInUseCores <= m.EffectiveCPUCores
 	}
-	return m.FreeCPUCores >= j.Spec.Needs.cores()
+	return m.FreeCPUCores >= jobCPUCharge(j, m)
 }
 
 // Planning may credit only the exact releases chosen by the existing planner.
@@ -208,7 +208,7 @@ func cpuWaitingReason(j *Job, machines map[string]*Machine) string {
 			_, reason = cpuCapacity(m)
 		}
 		if reason == "" {
-			reason = fmt.Sprintf("%d cores unreserved of %d admitted (%d reserved; CPU utilization unknown)", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
+			reason = fmt.Sprintf("%d cores unreserved of %d admitted (%d charged; shared hosts include measured CPU overuse)", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
 		}
 		reasons = append(reasons, m.ID+": "+reason)
 	}

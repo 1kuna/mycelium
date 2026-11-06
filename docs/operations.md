@@ -3391,7 +3391,13 @@ application logs a warning; the payload still establishes its own policy.
 If the system helper cannot establish policy or execute the command, that
 execution fails rather than launching the command without its policy.
 The existing physical-host CPU ledger caps aggregate
-**declared cores** at `cpu_budget_cores`. Common Go, OpenMP, BLAS and Rayon runtime
+cores at `cpu_budget_cores`; from the next release, the queue charges each
+logical job at the larger of its declaration and its observed peak core use,
+rounded up. CPU counters come from existing per-attempt telemetry. Increasing
+usage over elapsed sample time raises the learned need, retained through
+checkpoint/requeue. Missing, repeated or reordered counters never lower that
+need. This learned lower bound is per logical job, not a qualified prediction
+for a different command or another submission. Common Go, OpenMP, BLAS and Rayon runtime
 thread-count variables are clamped to each command's declared cores, including
 sidecars. A payload can ignore these variables or start more processes.
 
@@ -3484,7 +3490,7 @@ does not repair storage or authorize clearing maintenance.
 ## Pressure response
 
 Only shared-profile workers collect pressure samples. An independent lane reads
-the OS memory-pressure level or memory PSI, then performs one OS timer wake
+the OS memory-pressure level or Linux memory/CPU PSI, then performs one OS timer wake
 proportional to measured probe cost and CPU capacity. Each host learns its own
 wake/PSI prediction band; adverse samples freeze the healthy baseline and fresh
 readings back at its mean recover it. OS memory warnings remain immediate.
@@ -3498,9 +3504,13 @@ starts a job/host hold that requires a measured quiet recovery span. See
 remaining inventory and native qualification limits.
 
 On measured pressure, the queue withholds new work on the physical host and
-attaches `shared_host_pressure` planned-stop provenance to each exact running
-attempt. The existing preemption path grants resumable work its configured stop
-grace (normally 10 seconds); nonresumable CPU work stops immediately. Existing
+attaches `shared_host_pressure` planned-stop provenance to each exact resumable
+lower-tier attempt. Production tier work retains precedence. Non-resumable work
+continues and its job reason reports retained work; owner pressure alone never
+authorizes killing it. The existing preemption path grants resumable work its
+configured checkpoint stop grace (normally 10 seconds). Confirmed host-relative
+swap growth with scheduling latency also triggers this policy, using the
+existing host-health observation rather than another sampler. Existing
 checkpoint preparation resumes the same logical job and submission key, without
 infrastructure retry/loss charges. Independent command/OOM failure, cancellation,
 stale results and exact cleanup acknowledgement retain their existing precedence.

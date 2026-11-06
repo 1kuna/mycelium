@@ -1273,7 +1273,7 @@ foreground wake lateness, local age and queue receipt time),
 attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
 observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
-On negotiated `host-probe-v1` workers, `shared_host_pressure.probe` reports
+On negotiated `host-probe-v2` workers, `shared_host_pressure.probe` reports
 measured period/cost and frozen validity in seconds. Local sample age must remain
 below that validity, including time waiting behind queue transactions.
 Matching-session contact cannot renew a negotiated observation. `availability.probe` and

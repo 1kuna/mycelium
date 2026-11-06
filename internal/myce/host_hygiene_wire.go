@@ -68,6 +68,7 @@ func legacyHostProbeCheckin(c Checkin) Checkin {
 	if p := c.Machine.SharedHostPressure; p != nil {
 		copy := *p
 		copy.Probe, copy.Learning = nil, nil
+		copy.CPUKnown, copy.CPUPSI = false, 0
 		c.Machine.SharedHostPressure = &copy
 	}
 	if profile := c.Machine.CapabilityProfile; profile != nil && profile.Availability != nil {
@@ -84,7 +85,7 @@ func hasHostProbeFields(c Checkin) bool {
 	p := c.Machine.SharedHostPressure
 	a := machineAvailability(&c.Machine)
 	h := c.Machine.HostHealth
-	return p != nil && (p.Probe != nil || p.Learning != nil) || a != nil && a.Probe != nil || h != nil && h.Probe != nil
+	return p != nil && (p.Probe != nil || p.Learning != nil || p.CPUKnown || p.CPUPSI != 0) || a != nil && a.Probe != nil || h != nil && h.Probe != nil
 }
 
 func withholdLegacyHostAdmission(c Checkin) Checkin {
