@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -219,5 +220,38 @@ func TestModelSnapshotEmulatedSymlinkJob(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(repo, "snapshots", tinyRevision, "model.safetensors"))
 	if err != nil || len(data) != 1067 || !strings.HasPrefix(string(data), "XSym\n") {
 		t.Fatal("source hub changed", err)
+	}
+}
+
+func TestModelSnapshotEmulatedSymlinkNestedStub(t *testing.T) {
+	root := t.TempDir()
+	repo := tinyModel(t, root)
+	file := filepath.Join(repo, "snapshots", tinyRevision, "model.safetensors")
+	target := emulateModelSymlink(t, file)
+	stub, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second content-addressed file is itself an emulated link. Its hash is
+	// valid for the stub, so copy verification alone cannot reject these bytes.
+	sum := sha256.Sum256(stub)
+	nested := filepath.Join(repo, "blobs", fmt.Sprintf("%x", sum))
+	if err := os.WriteFile(nested, stub, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(filepath.Dir(target), filepath.Base(nested)), file); err != nil {
+		t.Fatal(err)
+	}
+	emulateModelSymlink(t, file)
+	w := snapshotWorker(t, root, &fakeClock{now: time.Unix(1000, 0)})
+	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
+	for _, release := range releases {
+		release()
+	}
+	if err == nil || runtimeDiagnostic(err).Predicate != "model_snapshot_mismatch" || len(paths) != 0 {
+		t.Fatalf("nested stub exposed: paths=%v error=%v", paths, err)
 	}
 }

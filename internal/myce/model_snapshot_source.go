@@ -15,6 +15,10 @@ import (
 // Without this step an XSym regular file would declare its OWN hash, allowing
 // the shared-input verifier to faithfully copy a stub instead of model bytes.
 func modelSnapshotSource(ctx context.Context, file, blobs string) (string, error) {
+	return modelSnapshotSourceLink(ctx, file, blobs, true)
+}
+
+func modelSnapshotSourceLink(ctx context.Context, file, blobs string, allowEmulated bool) (string, error) {
 	source, err := filepath.EvalSymlinks(file)
 	if err != nil {
 		return "", modelSnapshotError("model_snapshot_mismatch", "io_error", err)
@@ -43,6 +47,11 @@ func modelSnapshotSource(ctx context.Context, file, blobs string) (string, error
 		return "", modelSnapshotError("model_snapshot_mismatch", "io_error", err)
 	}
 	if strings.HasPrefix(string(header[:n]), "XSym") {
+		if !allowEmulated {
+			// A blob containing another link is not qualified model content,
+			// even if that blob is named by the hash of its own stub bytes.
+			return "", modelSnapshotError("model_snapshot_mismatch", "io_error", nil)
+		}
 		rest, err := io.ReadAll(io.LimitReader(contextReader{ctx, f}, 1068-int64(n)))
 		data := append(header[:n], rest...)
 		if err != nil || info.Size() != 1067 || len(data) != 1067 || string(data[:5]) != "XSym\n" || data[9] != '\n' || data[42] != '\n' {
@@ -64,9 +73,9 @@ func modelSnapshotSource(ctx context.Context, file, blobs string) (string, error
 		if !insideLocalRoot(blobs, target) {
 			return "", modelSnapshotError("model_snapshot_escape", "permission_denied", nil)
 		}
-		source, err = filepath.EvalSymlinks(target)
+		source, err = modelSnapshotSourceLink(ctx, target, blobs, false)
 		if err != nil {
-			return "", modelSnapshotError("model_snapshot_mismatch", "io_error", err)
+			return "", err
 		}
 		linked = true
 	} else if string(header[:n]) == "IntxLNK\x01" || strings.HasPrefix(string(header[:n]), "../") {
