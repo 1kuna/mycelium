@@ -85,43 +85,52 @@ func TestStatusReadHistoryGeneration(t *testing.T) {
 }
 
 func TestStatusReadPlanningEquivalence(t *testing.T) {
-	q, _ := candidateCostFixture(t)
-	// Keep both CPU and accelerator demand, constrained execution history,
-	// occupied workers and learned curves; a smaller backlog is sufficient to
-	// compare every response field against the original unindexed projection.
-	for id, job := range q.s.Jobs {
-		if job.State == "queued" && id > "queued-009" {
-			delete(q.s.Jobs, id)
-		} else if job.State == "queued" {
-			// Equivalent occupied workers otherwise produce arbitrary diagnostic
-			// tie winners as the two captures iterate independent maps.
-			job.Spec.AllowedMachines = []string{"worker-0"}
-		}
-	}
-	before, _, err := q.captureObservation("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, _, err := q.captureObservation("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	before.observationLive = nil
-	want := before.projectSnapshot(true)
-	after.memoryPlanning = newMemoryPlanningCache()
-	after.observationScan = after.placementScan()
-	after.observationScan.observationOwner = after
-	after.observationScan.memory = after.memoryPlanning
-	got := after.projectSnapshot(true)
-	if !reflect.DeepEqual(want, got) {
-		for i := range want.Jobs {
-			if len(want.Jobs) == len(got.Jobs) && !reflect.DeepEqual(want.Jobs[i], got.Jobs[i]) {
-				w, _ := json.Marshal(want.Jobs[i])
-				g, _ := json.Marshal(got.Jobs[i])
-				t.Fatalf("immutable planning changed job %s:\nbefore: %s\nafter: %s", want.Jobs[i].ID, w, g)
+	for _, occupied := range []bool{true, false} {
+		t.Run(fmt.Sprintf("occupied=%v", occupied), func(t *testing.T) {
+			q, _ := candidateCostFixture(t)
+			// Keep both CPU and accelerator demand, constrained execution history,
+			// occupied workers and learned curves; a smaller backlog is sufficient to
+			// compare every response field against the original unindexed projection.
+			for id, job := range q.s.Jobs {
+				if job.State == "queued" && id > "queued-009" {
+					delete(q.s.Jobs, id)
+				} else if job.State == "queued" {
+					// Equivalent occupied workers otherwise produce arbitrary diagnostic
+					// tie winners as the two captures iterate independent maps.
+					job.Spec.AllowedMachines = []string{"worker-0"}
+				}
+				if !occupied && job.State == "running" {
+					delete(q.s.Jobs, id)
+				}
 			}
-		}
-		t.Fatal("immutable planning changed non-job response fields")
+			q.refreshHostMemory()
+			q.refreshHostCPU()
+			before, _, err := q.captureObservation("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, _, err := q.captureObservation("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			before.observationLive = nil
+			want := before.projectSnapshot(true)
+			after.memoryPlanning = newMemoryPlanningCache()
+			after.observationScan = after.placementScan()
+			after.observationScan.observationOwner = after
+			after.observationScan.memory = after.memoryPlanning
+			got := after.projectSnapshot(true)
+			if !reflect.DeepEqual(want, got) {
+				for i := range want.Jobs {
+					if len(want.Jobs) == len(got.Jobs) && !reflect.DeepEqual(want.Jobs[i], got.Jobs[i]) {
+						w, _ := json.Marshal(want.Jobs[i])
+						g, _ := json.Marshal(got.Jobs[i])
+						t.Fatalf("immutable planning changed job %s:\nbefore: %s\nafter: %s", want.Jobs[i].ID, w, g)
+					}
+				}
+				t.Fatal("immutable planning changed non-job response fields")
+			}
+		})
 	}
 }
 
@@ -458,7 +467,23 @@ func TestJobReadCommittedSubmissionIgnoresStatusCache(t *testing.T) {
 		}
 	}
 	after, err := q.cachedStatusJSON()
-	if err != nil || before != after {
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Freshness belongs to each response: cache reuse intentionally changes
+	// cached=false to true even with a fixed clock. The observed generation
+	// must still be byte-for-byte equivalent after removing that metadata.
+	var old, reused map[string]json.RawMessage
+	if json.Unmarshal([]byte(before), &old) != nil || json.Unmarshal([]byte(after), &reused) != nil {
+		t.Fatal("invalid status JSON")
+	}
+	var freshness SnapshotFreshness
+	if json.Unmarshal(reused["freshness"], &freshness) != nil || !freshness.Cached {
+		t.Fatal("aggregate generation was not reused")
+	}
+	delete(old, "freshness")
+	delete(reused, "freshness")
+	if !reflect.DeepEqual(old, reused) {
 		t.Fatal("fixture did not retain stale aggregate generation", err)
 	}
 }
