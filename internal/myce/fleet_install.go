@@ -517,11 +517,6 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 		if err := fleetRetryControl(ctx, client, r.Instruction, d.health.Wait, func() error { return fleetAuthorize(ctx, client, r.Instruction) }); err != nil {
 			return fail(err.Error())
 		}
-		identity, err := EnrollmentServiceHealth(ctx, c, d.command)
-		pid, _, _ := strings.Cut(identity, "/")
-		if err != nil || pid != strconv.Itoa(r.BeforePID) {
-			return fail("fleet_recovery_runtime_changed")
-		}
 		// Installed is proof that this helper has not issued a restart yet:
 		// every manager call is preceded by durable restarting intent.
 		r.Phase = "restarting"
@@ -530,6 +525,21 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 		}
 		if err := fleetRetryControl(ctx, client, r.Instruction, d.health.Wait, func() error { return fleetAck(ctx, client, r) }); err != nil {
 			return fail(err.Error())
+		}
+		// Control recovery may wait after publication. Recheck local authority
+		// after the last control wait, immediately before the manager action.
+		current, currentConfig, configErr := fleetConfig(configPath)
+		currentHash, hashErr := FileSHA256(c.Binary)
+		if configErr != nil || currentConfig != configHash || ValidateInstallIdentity(c, current) != nil || hashErr != nil || currentHash != a.SHA256 {
+			return fail("fleet_install_changed")
+		}
+		if _, err := fleetArtifact(c, r.Instruction); err != nil {
+			return fail(err.Error())
+		}
+		identity, err := EnrollmentServiceHealth(ctx, c, d.command)
+		pid, _, _ := strings.Cut(identity, "/")
+		if err != nil || pid != strconv.Itoa(r.BeforePID) {
+			return fail("fleet_recovery_runtime_changed")
 		}
 		if manager.activity(ctx, unit, true, true) != nil {
 			return fail("fleet_restart_failed")

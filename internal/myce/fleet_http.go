@@ -66,6 +66,14 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 				}
 				queue := h.Phase == "queue_update" && v.Get("machine") == "@queue" && h.QueueBefore != nil && h.QueueBefore.Session == v.Get("session")
 				worker := h.Phase == "worker_update" && h.Machine == v.Get("machine") && h.Before != nil && h.Before.Session == v.Get("session")
+				if queue {
+					live := a.Queue.fleetQueue
+					queue = live != nil && (live.Session == "" || live.Session == v.Get("session")) && (live.Proof == nil || live.Proof.Session == v.Get("session"))
+				}
+				if worker {
+					live := a.Queue.s.Machines[v.Get("machine")]
+					worker = live != nil && live.Session == v.Get("session")
+				}
 				if !queue && !worker {
 					return fleetError("fleet_instruction_stale")
 				}

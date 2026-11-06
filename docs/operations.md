@@ -2426,8 +2426,10 @@ instruction permits retrying only that control request, with its original
 operation, release, session and helper revision. A newer operator revision alone
 does not replace an active helper. A durable replacement claim, changed session,
 stopped operation or maintenance refusal ends recovery without authorizing any
-mutation. Obsolete control messages do not create failed receipts or stop newer
-progress. Genuine validation/maintenance failures still retain their terminal
+mutation. Before restart, the helper rechecks the installed target hash, saved
+configuration hash, locally provisioned publisher trust and original manager PID
+after its last control wait. Obsolete control messages do not create failed
+receipts or stop newer progress. Genuine validation/maintenance failures still retain their terminal
 receipt and repair guidance. Durable restarting intent still prevents repeating
 a manager restart after interruption. This recovery requires the updated queue
 and helper binaries; it cannot repair an older helper already stopped by #739's
