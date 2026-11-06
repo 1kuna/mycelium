@@ -17,6 +17,7 @@ func TestBatchLifecycleRetryHoldUsesAllocatedTarget(t *testing.T) {
 			m := m3Machine()
 			m.CPUExtensionFingerprint = "cpu-runtime"
 			m.Devices[0].Fingerprint, m.Devices[1].Fingerprint = "runtime-0", "runtime-1"
+			m.Devices[0].ExtensionFingerprint, m.Devices[1].ExtensionFingerprint = "extension-0", "extension-1"
 			s := cpuSpec(1, 1)
 			if target != "cpu" {
 				s = spec("experiment")
@@ -35,6 +36,9 @@ func TestBatchLifecycleRetryHoldUsesAllocatedTarget(t *testing.T) {
 			r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: launchRefused}
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
+			}
+			if target == "0,1" {
+				m.Devices[0].FreeMemoryGB = 7 // Reorders the same group in placement.
 			}
 			if next := assignedJob(machineCheck(t, q, m)); next != nil {
 				t.Fatal("unchanged projected target retried", next.ID, next.AllocatedDevices)

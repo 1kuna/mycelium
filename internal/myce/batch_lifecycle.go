@@ -172,6 +172,13 @@ func batchInfrastructureState(j *Job, m *Machine) string {
 	if m == nil {
 		return ""
 	}
+	if len(m.groupMembers) > 0 {
+		// Group placement orders cards by free memory. Its first-card scalar
+		// projection is not new runtime evidence when that ordering changes.
+		cards := slices.Clone(m.groupMembers)
+		slices.SortFunc(cards, func(a, b *Machine) int { return strings.Compare(a.Device, b.Device) })
+		m = groupView(cards)
+	}
 	// Hash only this job's preparation. Heartbeat report order, unrelated
 	// builds and diagnostic counters are not evidence that its fault changed.
 	keys := map[string]bool{}
