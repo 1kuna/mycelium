@@ -17,33 +17,34 @@ import (
 // Pressure readings are aggregate OS signals, never owner input or app names.
 // AgeSeconds crosses clocks; ReceivedAt belongs exclusively to the queue.
 type SharedHostPressure struct {
-	MemoryKnown bool      `json:"memory_known"`
-	WakeKnown   bool      `json:"wake_known"`
-	MemoryLevel int       `json:"memory_level"`  // Darwin: normal=1, warning=2, critical=4.
-	MemoryPSI   float64   `json:"memory_psi"`    // Linux memory.some avg10, percent.
-	WakeDelayMS float64   `json:"wake_delay_ms"` // Normal-priority timer wake lateness.
-	AgeSeconds  float64   `json:"age_seconds"`
-	ReceivedAt  time.Time `json:"received_at"`
+	Probe       *ProbeObservation       `json:"probe,omitempty"`
+	Learning    *sharedPressureLearning `json:"learning,omitempty"` // Queue-owned; never accepted from a worker.
+	MemoryKnown bool                    `json:"memory_known"`
+	WakeKnown   bool                    `json:"wake_known"`
+	MemoryLevel int                     `json:"memory_level"`  // Darwin: normal=1, warning=2, critical=4.
+	MemoryPSI   float64                 `json:"memory_psi"`    // Linux memory.some avg10, percent.
+	WakeDelayMS float64                 `json:"wake_delay_ms"` // Normal-priority timer wake lateness.
+	AgeSeconds  float64                 `json:"age_seconds"`
+	ReceivedAt  time.Time               `json:"received_at"`
 	sampledAt   time.Time
 }
 
 const sharedHostPressureCause = "shared_host_pressure"
 
-// Wake-delay bands are informed by the laptop interference canary documented
-// in shared-hosts.md. PSI bands bound stalled time to 100/10 ms per ten seconds;
-// native Linux qualification is separate from this conservative policy.
-const sharedWakeHighMS = 20.0
-const sharedWakeLowMS = 5.0
-const sharedPSIHigh = 1.0
-const sharedPSILow = 0.1
+type sharedPressureLearning struct {
+	Wake probeEstimate `json:"wake"`
+	PSI  probeEstimate `json:"psi"`
+	At   time.Time     `json:"at"`
+}
 
 func validSharedPressure(p *SharedHostPressure) bool {
 	return p != nil && p.MemoryKnown && p.WakeKnown && (p.MemoryLevel == 0 || p.MemoryLevel == 1 || p.MemoryLevel == 2 || p.MemoryLevel == 4) &&
 		validMemoryValue(p.MemoryPSI) && p.MemoryPSI <= 100 && validMemoryValue(p.WakeDelayMS) &&
-		validMemoryValue(p.AgeSeconds) && p.AgeSeconds < signalMaxAge.Seconds()
+		validMemoryValue(p.AgeSeconds) && (p.Probe == nil || p.Probe.valid()) && p.AgeSeconds < p.Probe.freshness().Seconds()
 }
 
 func (q *Queue) acceptSharedPressure(m, old *Machine) {
+	defer q.recoverSharedHostBackoff(m)
 	m.SharedHostYieldReason = ""
 	m.SharedCPUEnforcement = sharedCPUEnforcementStatus(m)
 	if q.s.HostMaintenance[hostID(m)].SharedHost == nil {
@@ -59,15 +60,30 @@ func (q *Queue) acceptSharedPressure(m, old *Machine) {
 		return
 	}
 	p.ReceivedAt = q.clock.Now().Add(-time.Duration(p.AgeSeconds * float64(time.Second)))
+	learned := sharedPressureLearning{}
+	if old != nil && old.Session == m.Session && old.SharedHostPressure != nil && old.SharedHostPressure.Learning != nil {
+		learned = *old.SharedHostPressure.Learning
+	}
+	// Only fresh observations can train, and an adverse episode freezes the
+	// healthy baseline. OS warning/critical levels remain physical signals.
+	first := learned.At.IsZero()
+	wakeHigh := !first && p.WakeDelayMS > learned.Wake.upper()
+	psiHigh := !first && p.MemoryPSI > learned.PSI.upper()
 	if p.MemoryLevel >= 2 {
 		m.SharedHostYieldReason = "shared host memory pressure"
-	} else if p.MemoryPSI >= sharedPSIHigh {
+	} else if psiHigh || first && p.MemoryPSI > 0 {
 		m.SharedHostYieldReason = "shared host memory PSI"
-	} else if p.WakeDelayMS >= sharedWakeHighMS {
+	} else if wakeHigh {
 		m.SharedHostYieldReason = "shared host owner scheduling latency"
-	} else if p.MemoryLevel <= 1 && p.MemoryPSI <= sharedPSILow && p.WakeDelayMS <= sharedWakeLowMS {
+	} else if first || p.MemoryLevel <= 1 && p.MemoryPSI <= learned.PSI.Mean && p.WakeDelayMS <= learned.Wake.Mean {
 		m.SharedHostYieldReason = ""
 	}
+	if m.SharedHostYieldReason == "" && (first || p.ReceivedAt.After(learned.At)) {
+		learned.Wake.observe(p.WakeDelayMS)
+		learned.PSI.observe(p.MemoryPSI)
+		learned.At = p.ReceivedAt
+	}
+	p.Learning = &learned
 }
 
 func (q *Queue) sharedPressureReason(m *Machine) string {
@@ -92,8 +108,8 @@ func (q *Queue) sharedPressureFresh(m *Machine) bool {
 	// pending requests must never extend one observation beyond that budget.
 	reportAt := p.ReceivedAt.Add(time.Duration(p.AgeSeconds * float64(time.Second)))
 	contact := maxTime(reportAt, q.lastContact(m, now))
-	return now.Sub(contact)+time.Duration(p.AgeSeconds*float64(time.Second)) < signalMaxAge &&
-		now.Sub(p.ReceivedAt) < signalMaxAge+pendingCheckinContactLimit
+	return now.Sub(contact)+time.Duration(p.AgeSeconds*float64(time.Second)) < p.Probe.freshness() &&
+		now.Sub(p.ReceivedAt) < p.Probe.freshness()+pendingCheckinContactLimit
 }
 
 // hostPressureReason is the first owner-pressure reason among m's host
@@ -140,6 +156,7 @@ func (q *Queue) maintainSharedHosts() {
 // evidence; all freshness, admission and hysteresis decisions use Queue.Clock.
 func localSharedHostPressure(ctx context.Context) (SharedHostPressure, error) {
 	probeguard.Check()
+	probeStart := time.Now()
 	p := SharedHostPressure{MemoryKnown: true, WakeKnown: true}
 	switch runtime.GOOS {
 	case "darwin":
@@ -164,18 +181,18 @@ func localSharedHostPressure(ctx context.Context) (SharedHostPressure, error) {
 	default:
 		return p, errors.New("host pressure unavailable")
 	}
-	// A 5ms periodic foreground-class wake probe catches scheduling contention
-	// without a busy loop. Twenty samples cost 100ms in a background lane.
-	tick := time.NewTicker(5 * time.Millisecond)
-	defer tick.Stop()
-	for i := 0; i < 20; i++ {
-		select {
-		case due := <-tick.C:
-			p.WakeDelayMS = max(p.WakeDelayMS, time.Since(due).Seconds()*1000)
-		case <-ctx.Done():
-			return p, ctx.Err()
-		}
+	// Spend one measured sensor-cost share on an OS timer wake, rather than
+	// twenty fixed 5ms ticks. This observes OS scheduling, not merely Go queues.
+	quantum := max(time.Nanosecond, time.Since(probeStart)/time.Duration(runtime.NumCPU()))
+	started := time.Now()
+	timer := time.NewTimer(quantum)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return p, ctx.Err()
+	case <-timer.C:
 	}
+	p.WakeDelayMS = max(0, time.Since(started)-quantum).Seconds() * 1000
 	return p, nil
 }
 
@@ -205,8 +222,8 @@ type sharedPressureMonitor struct {
 	clock   Clock
 	source  func(context.Context) (SharedHostPressure, error)
 	enabled bool
-	epoch   uint64
 	current *SharedHostPressure
+	lane    hostProbeLane[SharedHostPressure]
 }
 
 func (m *sharedPressureMonitor) snapshot(enabled bool) *SharedHostPressure {
@@ -214,8 +231,10 @@ func (m *sharedPressureMonitor) snapshot(enabled bool) *SharedHostPressure {
 	defer m.mu.Unlock()
 	if m.enabled != enabled {
 		m.enabled = enabled
-		m.epoch++
 		m.current = nil
+		m.lane.known = false
+		m.lane.timing.next = time.Time{}
+		m.lane.discard = m.lane.pending != nil
 	}
 	if m.current == nil {
 		return nil
@@ -227,44 +246,39 @@ func (m *sharedPressureMonitor) snapshot(enabled bool) *SharedHostPressure {
 
 func (m *sharedPressureMonitor) sample(ctx context.Context) {
 	m.mu.Lock()
-	enabled, epoch := m.enabled, m.epoch
-	m.mu.Unlock()
-	if !enabled {
-		return
-	}
-	sampledAt := m.clock.Now()
-	// Sensor I/O uses a real deadline; freshness and cadence use Clock.
-	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	p, err := m.source(probe)
-	if probe.Err() != nil {
-		err = probe.Err()
-	}
-	p.sampledAt = sampledAt
-	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.enabled || m.epoch != epoch {
+	if !m.enabled {
 		return
 	}
-	m.current = nil
-	if err == nil {
-		m.current = &p
+	if m.lane.clock == nil {
+		m.lane.clock = m.clock
+	}
+	if completed, err := m.lane.step(ctx, m.source); completed {
+		m.current = nil
+		if err == nil {
+			p := m.lane.value
+			p.sampledAt, p.Probe = m.lane.at, m.lane.observation
+			m.current = &p
+		}
 	}
 }
 
 func (m *sharedPressureMonitor) run(ctx context.Context) {
-	tick := time.NewTicker(100 * time.Millisecond)
+	tick := time.NewTicker(m.lane.timing.controlPeriod())
 	defer tick.Stop()
-	var next time.Time
 	for {
-		if now := m.clock.Now(); !now.Before(next) {
-			m.sample(ctx)
-			next = now.Add(signalRefresh)
+		m.sample(ctx)
+		m.mu.Lock()
+		done := m.lane.done
+		if !m.enabled {
+			done = nil
 		}
+		m.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-done:
 		}
 	}
 }

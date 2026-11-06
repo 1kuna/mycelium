@@ -21,21 +21,21 @@ func TestAvailabilityTransitions(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
 	p := availabilityPolicy{clock: clock, daily: true}
 	s := idleSignals()
-	s.IdleSeconds = 299
+	s.IdleSeconds = 0.5
 	if p.evaluate(s).Available {
-		t.Fatal("admitted before 5 idle minutes")
+		t.Fatal("admitted within the observation resolution")
 	}
 	clock.Advance(time.Second)
-	s.IdleSeconds = 300
+	s.IdleSeconds = 2
 	if !p.evaluate(s).Available {
-		t.Fatal("not admitted at 5 minutes")
+		t.Fatal("not admitted after observed idle recovery")
 	}
 	for _, tc := range []struct {
 		name   string
 		change func(*OwnerSignals)
 		reason string
 	}{
-		{"owner", func(s *OwnerSignals) { s.IdleSeconds = 0 }, "waiting for 5 idle minutes"},
+		{"owner", func(s *OwnerSignals) { s.IdleSeconds = 0 }, "waiting for owner idle recovery"},
 		{"battery", func(s *OwnerSignals) { s.Power = "battery" }, "on battery"},
 		{"power unknown", func(s *OwnerSignals) { s.Power = "unknown" }, "power source unavailable"},
 		{"idle unknown", func(s *OwnerSignals) { s.IdleKnown = false }, "owner activity unavailable"},
@@ -57,52 +57,49 @@ func TestAvailabilityTransitions(t *testing.T) {
 }
 func TestAvailabilityCoolingAndWake(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
-	p := availabilityPolicy{clock: clock, daily: true}
+	p := availabilityPolicy{clock: clock, daily: true, probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}}
 	s := idleSignals()
+	advance := func(d time.Duration) { clock.Advance(d); s.IdleSeconds += d.Seconds() }
 	s.Heat = "fair"
 	if p.evaluate(s).Available {
-		t.Fatal("fair heat admitted")
+		t.Fatal("hot admitted")
 	}
+	advance(time.Second)
 	s.Heat = "nominal"
-	for i := 0; i < 12; i++ {
-		if p.evaluate(s).Available {
-			t.Fatal("cooling dwell skipped")
-		}
-		clock.Advance(5 * time.Second)
+	if p.evaluate(s).Available {
+		t.Fatal("thermal recovery skipped")
 	}
+	advance(500 * time.Millisecond)
+	s.Heat = "serious"
+	p.evaluate(s) // Measured failed recovery span.
+	advance(time.Second)
+	s.Heat = "nominal"
+	p.evaluate(s)
+	advance(time.Second)
+	if p.evaluate(s).Available {
+		t.Fatal("learned thermal hysteresis skipped")
+	}
+	advance(time.Second)
 	if !p.evaluate(s).Available {
-		t.Fatal("cooling didn't recover after 60s")
+		t.Fatal("thermal recovery failed")
+	}
+	advance(time.Hour)
+	if p.evaluate(s).Available {
+		t.Fatal("sleep counted toward idle")
+	}
+	advance(time.Second)
+	if !p.evaluate(s).Available {
+		t.Fatal("fresh awake recovery failed")
 	}
 	s.Heat = "critical"
 	p.evaluate(s)
-	s.Heat = "nominal"
-	p.evaluate(s)
-	clock.Advance(5 * time.Second)
+	advance(time.Second)
 	s.Heat = "unknown"
 	p.evaluate(s)
+	advance(time.Second)
 	s.Heat = "nominal"
-	for i := 0; i < 12; i++ {
-		if p.evaluate(s).Available {
-			t.Fatal("unknown heat counted as cooling")
-		}
-		clock.Advance(5 * time.Second)
-	}
-	if !p.evaluate(s).Available {
-		t.Fatal("cooling didn't recover")
-	}
-	clock.Advance(time.Hour)
 	if p.evaluate(s).Available {
-		t.Fatal("sleep counted towards idle")
-	}
-	for i := 0; i < 60; i++ {
-		clock.Advance(5 * time.Second)
-		a := p.evaluate(s)
-		if i < 59 && a.Available {
-			t.Fatal("wake wait skipped")
-		}
-	}
-	if !p.evaluate(s).Available {
-		t.Fatal("wake idle didn't recover")
+		t.Fatal("unknown heat proved cooling")
 	}
 }
 func TestDedicatedAvailabilityAndStaleness(t *testing.T) {
@@ -524,7 +521,7 @@ func TestDailyDesktopCPUThermalWaiver(t *testing.T) {
 		{"unknown GPU", true, false, false, "ac", "unknown", 300, true, false, "heat sensing unavailable"},
 		{"unknown power", true, false, false, "unknown", "nominal", 300, true, false, "power source unavailable"},
 		{"unknown idle", true, false, false, "ac", "nominal", 300, false, false, "owner activity unavailable"},
-		{"owner returned", true, false, false, "ac", "nominal", 0, true, false, "waiting for 5 idle minutes"},
+		{"owner returned", true, false, false, "ac", "nominal", 0, true, false, "waiting for owner idle recovery"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := &fakeClock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}

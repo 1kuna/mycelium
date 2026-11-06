@@ -7,6 +7,7 @@ const hostCollectionProtocol = "worker-collection-v1"
 // requests, so local evidence stays durable without sending unknown fields.
 type workerHygieneWire struct {
 	machine, session    string
+	probeSupported      bool
 	supported           bool
 	collectionSupported bool
 }
@@ -15,6 +16,9 @@ func (w Worker) hygieneCheckin(c Checkin) Checkin {
 	if r := w.hygieneWire; r != nil {
 		if r.machine != c.Machine.ID || r.session != c.Machine.Session {
 			*r = workerHygieneWire{machine: c.Machine.ID, session: c.Machine.Session}
+		}
+		if !r.probeSupported {
+			c = legacyHostProbeCheckin(c)
 		}
 		if !r.collectionSupported {
 			c.Machine.HygieneCollection = nil
@@ -27,6 +31,7 @@ func (w Worker) hygieneCheckin(c Checkin) Checkin {
 }
 
 func (w Worker) legacyHygieneCheckin(c Checkin) Checkin {
+	c = legacyHostProbeCheckin(c)
 	if c.Machine.HostHealth != nil && c.Machine.HostHealth.DrainReason != "" {
 		// The old leaving signal withholds admission without releasing custody.
 		c.Machine.Leaving = true
@@ -38,11 +43,45 @@ func (w Worker) legacyHygieneCheckin(c Checkin) Checkin {
 
 func (w Worker) acceptHygieneReply(reply Reply) {
 	if w.hygieneWire != nil {
+		w.hygieneWire.probeSupported = reply.HostProbeProtocol == hostProbeProtocol
 		w.hygieneWire.supported = reply.HostHygieneProtocol == hostHygieneProtocol
 		w.hygieneWire.collectionSupported = reply.HostCollectionProtocol == hostCollectionProtocol
 	}
 }
 
 func hasHygieneWireFields(c Checkin) bool {
-	return c.Machine.HostHealth != nil || c.Machine.HygieneCollection != nil
+	return c.Machine.HostHealth != nil || c.Machine.HygieneCollection != nil || hasHostProbeFields(c)
+}
+
+// Copy the nested records before stripping negotiated fields. Local freshness
+// and the exact attempt/session remain authoritative during a queue downgrade.
+func legacyHostProbeCheckin(c Checkin) Checkin {
+	if h := c.Machine.HostHealth; h != nil {
+		if !hostHealthEvidenceValid(h, 0) {
+			c.Machine.Leaving = true
+		}
+		copy := *h
+		copy.Probe = nil
+		c.Machine.HostHealth = &copy
+	}
+	if p := c.Machine.SharedHostPressure; p != nil {
+		copy := *p
+		copy.Probe, copy.Learning = nil, nil
+		c.Machine.SharedHostPressure = &copy
+	}
+	if profile := c.Machine.CapabilityProfile; profile != nil && profile.Availability != nil {
+		copy := *profile
+		a := *profile.Availability
+		a.Probe = nil
+		a.AgeSeconds = 0
+		copy.Availability = &a
+		c.Machine.CapabilityProfile = &copy
+	}
+	return c
+}
+func hasHostProbeFields(c Checkin) bool {
+	p := c.Machine.SharedHostPressure
+	a := machineAvailability(&c.Machine)
+	h := c.Machine.HostHealth
+	return p != nil && (p.Probe != nil || p.Learning != nil) || a != nil && a.Probe != nil || h != nil && h.Probe != nil
 }

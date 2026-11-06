@@ -231,3 +231,13 @@ their supported request shape while local collection continues.
 Installed/rollback images, active state, receipts and unknown data are retained;
 foreign services/processes and other projects' shared caches are owner context
 only. See [worker cleanup](https://github.com/1kuna/mycelium/blob/main/docs/status.md#worker-cleanup-834-next-release).
+
+## Adaptive host observations (next release)
+
+On negotiated `host-probe-v1` workers, owner/pressure status includes measured
+probe period, cost and frozen validity. Read age against that observation's
+validity; a successful check-in cannot renew a failed probe. Owner-latency holds
+now require fresh healthy evidence spanning the attempt's measured interference
+interval, rather than a fixed retry delay. Other eligible hosts remain available.
+Older workers retain legacy fields and age rules. See
+[host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).
