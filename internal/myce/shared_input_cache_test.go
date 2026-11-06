@@ -113,8 +113,8 @@ func TestSharedInputsReuseTamperAndEviction(t *testing.T) {
 	if err = cache.admit(ctx, "other", 10); err == nil {
 		t.Fatal("over budget admission succeeded")
 	}
-	if _, err = os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("released entry was not evicted", err)
+	if _, err = os.Stat(path); err != nil {
+		t.Fatal("tampered entry with unavailable original must retain custody", err)
 	}
 }
 func TestSharedInputsNASTreeAndArchiveConfinement(t *testing.T) {

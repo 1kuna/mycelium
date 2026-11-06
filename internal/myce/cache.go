@@ -207,6 +207,7 @@ func (r contextReader) Read(p []byte) (int, error) {
 	return n, err
 }
 func verifyModelContext(ctx context.Context, path string, m Model) error {
+	ctx = withoutCopyProgress(ctx)
 	if len(m.Files) > 0 {
 		return verifyModelFiles(ctx, path, m)
 	}
@@ -293,6 +294,11 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	if !m.DirectNAS {
 		c.reservations.Store(key, m.SizeBytes)
 	}
+	releaseDemand, err := c.budgets.borrow(ctx, c.Root, m.SizeBytes)
+	if err != nil {
+		return "", err
+	}
+	defer releaseDemand()
 	c.mu.Lock()
 	source, e := c.source(m)
 	if e != nil {
@@ -467,11 +473,12 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		c.progress.Store(key, r)
 		return "", err
 	}
-	reservation, err := c.budgets.reserve(c.Root, need, c.Clock)
+	reservation, err := c.budgets.reserve(c.Root, need, c.Clock, dest, temp)
 	if err != nil {
 		return "", err
 	}
 	defer reservation.release()
+	releaseDemand()
 	started := c.Clock.Now()
 	copied := int64(0)
 	defer func() {
@@ -558,7 +565,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	}
 	h := sha256.New()
 	// Rehash durable prefix after restart; only a full final hash permits publication.
-	_, e = io.CopyN(h, contextReader{ctx, out}, offset)
+	_, e = io.CopyN(h, contextReader{withoutCopyProgress(ctx), out}, offset)
 	if e == nil {
 		_, e = in.Seek(offset, io.SeekStart)
 	}

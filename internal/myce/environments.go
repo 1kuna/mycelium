@@ -874,6 +874,17 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		return e
 	}
 	defer unlockEnvironment(build)
+	var buildReservation *cacheReservation
+	var releaseBuildCopy func()
+	storageSafe := false
+	defer func() {
+		if storageSafe {
+			buildReservation.release()
+			if releaseBuildCopy != nil {
+				releaseBuildCopy()
+			}
+		}
+	}()
 	if c.ready(r.Key) {
 		return nil
 	}
@@ -897,6 +908,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 				}
 				return
 			}
+			storageSafe = true
 			if errors.Is(e, errEnvironmentBuildStalled) {
 				// Only this just-created, never-published build is disposable.
 				// Its recorded process has been reaped and .build is still held;
@@ -905,6 +917,8 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 			} else {
 				_ = c.trash(partial)
 			}
+		} else {
+			storageSafe = true
 		}
 	}()
 	if e = os.MkdirAll(filepath.Join(partial, "bin"), 0700); e != nil {
@@ -932,6 +946,31 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 			return custom(ctx, argv, dir, env, stdout, stderr)
 		}
 	}
+
+	for name, ref := range r.Assets {
+		if !safeRelative(name) || c.Fetch == nil {
+			return errors.New("asset transport unavailable or invalid asset name")
+		}
+		if e = checkLaunchGate(ctx); e != nil {
+			return e
+		}
+		if e = c.Fetch(ctx, ref, filepath.Join(partial, "assets", name)); e != nil {
+			return e
+		}
+	}
+	// Assets have declared sizes and finish their individually charged transfers
+	// before the unknown native build claims the remaining volume exploration.
+	held, err := c.budgets.explore(c.Root, c.Clock, partial, filepath.Join(c.Root, ".downloads"), output.Name())
+	if err != nil {
+		return err
+	}
+	buildReservation = held
+	copyCtx, releaseCopy, err := c.budgets.copy(ctx, c.Root, c.Clock, 0)
+	if err != nil {
+		return err
+	}
+	releaseBuildCopy = releaseCopy
+	ctx = copyCtx
 	if e = c.pruneDownloads(ctx, partial, env, output, run); e != nil {
 		return e
 	}
@@ -952,6 +991,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		logSize = st.Size()
 	}
 	cacheSize, _ = environmentSize(filepath.Join(c.Root, ".downloads"))
+	buildAllocation, _ := cacheFootprint([]string{partial, filepath.Join(c.Root, ".downloads")})
 	go func() {
 		defer close(monitorDone)
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -997,8 +1037,33 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 				if e == nil {
 					var free int64
 					free, e = diskFree(c.Root)
-					if e == nil && free < int64(os.Getpagesize()) {
-						e = errors.New("environment build disk space below one control-write page")
+					if e == nil {
+						disk, probeErr := c.budgets.probe(c.Root)
+						if probeErr != nil {
+							e = probeErr
+						} else {
+							host, hostErr := c.budgets.hostView(disk.Volume)
+							if hostErr != nil {
+								e = hostErr
+							} else {
+								floor := host.floor(disk)
+								host.close()
+								if free < floor {
+									e = errors.New("environment build reached measured filesystem control headroom")
+								}
+							}
+						}
+					}
+				}
+				if e == nil {
+					allocated, allocationErr := cacheFootprint([]string{partial, filepath.Join(c.Root, ".downloads")})
+					if allocationErr != nil {
+						e = allocationErr
+					} else {
+						if progress, ok := buildCtx.Value(cacheCopyProgressKey{}).(func(int64)); ok {
+							progress(max(0, allocated-buildAllocation))
+						}
+						buildAllocation = allocated
 					}
 				}
 				if e != nil {
@@ -1019,17 +1084,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		cancelBuild()
 	}
 	defer stopMonitor()
-	for name, ref := range r.Assets {
-		if !safeRelative(name) || c.Fetch == nil {
-			return errors.New("asset transport unavailable or invalid asset name")
-		}
-		if e = checkLaunchGate(buildCtx); e != nil {
-			return e
-		}
-		if e = c.Fetch(buildCtx, ref, filepath.Join(partial, "assets", name)); e != nil {
-			return e
-		}
-	}
+
 	{
 		for n, b := range r.Files {
 			if r.Binary != "" {

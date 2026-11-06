@@ -22,6 +22,7 @@ func (w *Worker) initFileTransfers(ctx context.Context, s *workerStore) error {
 	w.sharedInputs = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "shared-inputs"), Limit: limit, Clock: w.Clock, budgets: budgets}, Client: w.Client}
 	w.sharedInputs.refreshCapacity()
 	w.modelSnapshots = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "model-snapshots"), Limit: w.CacheLimit, Clock: w.Clock, budgets: budgets}, Client: w.Client}
+	budgets.register(w.fileCache.Root, func(ctx context.Context) { w.fileCache.collect(ctx) })
 	budgets.register(w.sharedInputs.cache.Root, w.sharedInputs.collectAdaptive)
 	budgets.register(w.modelSnapshots.cache.Root, w.modelSnapshots.collectAdaptive)
 	if w.fileCheckpoints {

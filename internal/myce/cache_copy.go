@@ -6,22 +6,29 @@ import (
 	"time"
 )
 
-// copyGovernor probes one additional writer only after a productive observation.
-// It keeps that writer only if aggregate throughput increases. Starting with one
-// is the minimum experiment that can measure a previously unknown volume/link,
-// not a throughput assumption. Demand bounds exploration; cancellation wakes a
-// waiter without discarding the active writer's custody.
+// Each experiment spans at least the previous measured observation window and
+// a contribution from every active stream. This measures aggregate throughput,
+// rather than rewarding whichever reader happens to report a burst first.
+// A single stream is the minimum cold experiment; only waiting demand adds one
+// experimental stream. No CPU count or installation-specific rate is assumed.
 type copyGovernor struct {
-	mu            sync.Mutex
-	clock         Clock
-	limit, active int
-	changed       chan struct{}
-	at            time.Time
-	bytes         int64
-	rate          float64
-	probe         bool
-	sampleActive  int
-	blockedAt     float64
+	mu              sync.Mutex
+	clock           Clock
+	limit           int
+	streams         map[*copyStream]bool
+	waiters         int
+	changed         chan struct{}
+	at              time.Time
+	bytes           int64
+	rate, blockedAt float64
+	window          time.Duration
+	probe           bool
+	controlBaseline time.Duration
+	controlSlow     bool
+}
+type copyStream struct {
+	governor *copyGovernor
+	once     sync.Once
 }
 
 func (g *copyGovernor) initLocked() {
@@ -34,68 +41,109 @@ func (g *copyGovernor) initLocked() {
 	if g.clock == nil {
 		g.clock = RealClock{}
 	}
+	if g.streams == nil {
+		g.streams = map[*copyStream]bool{}
+	}
 }
 func (g *copyGovernor) wakeLocked() { close(g.changed); g.changed = make(chan struct{}) }
-func (g *copyGovernor) progress(n int64) {
+func (g *copyGovernor) resetLocked() {
+	g.at, g.bytes = g.clock.Now(), 0
+	for s := range g.streams {
+		g.streams[s] = false
+	}
+}
+func (s *copyStream) progress(n int64) {
+	if n <= 0 {
+		return
+	}
+	g := s.governor
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.initLocked()
-	now := g.clock.Now()
-	if g.sampleActive != g.active {
-		g.at = now
-		g.bytes = 0
-		g.sampleActive = g.active
+	if _, active := g.streams[s]; !active {
 		return
 	}
+	g.streams[s] = true
 	g.bytes = cacheSum(g.bytes, n)
-	if g.at.IsZero() {
-		g.at = now
+	elapsed := g.clock.Now().Sub(g.at)
+	if elapsed <= 0 || elapsed < g.window {
 		return
 	}
-	elapsed := now.Sub(g.at)
-	if elapsed <= 0 {
-		return
+	for _, seen := range g.streams {
+		if !seen {
+			return
+		}
 	}
 	rate := float64(g.bytes) / elapsed.Seconds()
-	if g.probe && g.active >= g.limit {
-		if rate <= g.rate {
+	if g.probe && len(g.streams) >= g.limit {
+		if rate <= g.rate || g.controlSlow {
 			g.limit = max(1, g.limit-1)
-			g.blockedAt = rate
+			g.blockedAt = max(g.rate, rate)
 		}
 		g.probe = false
-	} else if !g.probe && g.active == g.limit && rate > g.blockedAt {
+	} else if !g.probe && len(g.streams) == g.limit && g.waiters > 0 && rate > g.blockedAt && !g.controlSlow {
 		g.limit++
 		g.probe = true
 	}
-	g.rate, g.at, g.bytes = rate, now, 0
+	g.rate, g.window = rate, elapsed
+	g.resetLocked()
 	g.wakeLocked()
 }
-func (g *copyGovernor) acquire(ctx context.Context, explicit int) (func(), error) {
+
+// Metadata latency is measured independently of transfer reads. An experiment
+// cannot buy throughput at the cost of worsening this volume's control access.
+func (g *copyGovernor) control(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.controlSlow = g.controlBaseline > 0 && d > g.controlBaseline
+	if !g.probe {
+		g.controlBaseline = d
+	}
+}
+func (g *copyGovernor) acquire(ctx context.Context, explicit int) (*copyStream, error) {
+	g.mu.Lock()
+	g.initLocked()
+	g.waiters++
+	defer func() { g.waiters--; g.mu.Unlock() }()
 	for {
-		g.mu.Lock()
-		g.initLocked()
 		limit := g.limit
 		if explicit > 0 {
 			limit = explicit
 		}
 		if err := ctx.Err(); err != nil {
-			g.mu.Unlock()
 			return nil, err
 		}
-		if g.active < limit {
-			g.active++
-			g.mu.Unlock()
-			var once sync.Once
-			return func() { once.Do(func() { g.mu.Lock(); g.active--; g.wakeLocked(); g.mu.Unlock() }) }, nil
+		if len(g.streams) < limit {
+			s := &copyStream{governor: g}
+			g.streams[s] = false
+			g.resetLocked()
+			return s, nil
 		}
 		wait := g.changed
 		g.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
 		case <-wait:
 		}
+		g.mu.Lock()
 	}
+}
+func (s *copyStream) release() {
+	s.once.Do(func() {
+		g := s.governor
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		delete(g.streams, s)
+		// A completed short stream is not evidence for a larger experiment.
+		if g.probe {
+			g.limit = max(1, len(g.streams))
+			g.probe = false
+		}
+		g.resetLocked()
+		g.wakeLocked()
+	})
 }
 func (g *copyGovernor) capacity() int {
 	g.mu.Lock()

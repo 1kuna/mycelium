@@ -475,6 +475,12 @@ func (q *Queue) BeginShutdown() {
 }
 
 func (q *Queue) Close() error {
+	q.mu.RLock()
+	files := q.files
+	q.mu.RUnlock()
+	if files != nil {
+		files.closeHostClaims()
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var err error

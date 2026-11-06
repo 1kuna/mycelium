@@ -546,6 +546,17 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 		return nil, e
 	}
 	rt.cache.budgets.register(rt.cache.Root, rt.cache.collectAdaptive)
+	if w.environmentCache != nil {
+		rt.cache.budgets.register(w.environmentCache.Root, func(ctx context.Context) {
+			w.environmentCache.collectBudget(ctx, func(ctx context.Context, key string) (bool, error) {
+				var state struct {
+					Referenced bool `json:"referenced"`
+				}
+				err := w.Client.Call(ctx, "GET", "/api/environments/"+key+"/reference", nil, &state)
+				return state.Referenced, err
+			})
+		})
+	}
 	rt.cache.ValidateInventory(w.ModelConfig.Models)
 	if data, e := os.ReadFile(filepath.Join(dir, "copy-speed.json")); e == nil {
 		if e := decodeWorkerJSON(data, &rt.cache.speed); e != nil {

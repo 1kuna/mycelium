@@ -30,6 +30,7 @@ type DiskVolume struct {
 type DiskReading struct {
 	Volume                string
 	TotalBytes, FreeBytes uint64
+	AllocationBytes       uint64
 }
 
 var workerDiskProbe = localDiskReading
@@ -51,7 +52,7 @@ func localDiskReading(path string) (DiskReading, error) {
 		if err != nil {
 			return DiskReading{}, err
 		}
-		return DiskReading{Volume: fmt.Sprint(st.Fsid), TotalBytes: st.Blocks * diskBlockSize(&st), FreeBytes: st.Bavail * diskBlockSize(&st)}, nil
+		return DiskReading{Volume: fmt.Sprint(st.Fsid), TotalBytes: st.Blocks * diskBlockSize(&st), FreeBytes: st.Bavail * diskBlockSize(&st), AllocationBytes: diskBlockSize(&st)}, nil
 	}
 }
 

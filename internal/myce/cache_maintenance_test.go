@@ -38,7 +38,16 @@ func TestCacheMaintenanceSharedInputsKeepsPins(t *testing.T) {
 	if err := c.cache.init(); err != nil {
 		t.Fatal(err)
 	}
-	key := pruneFixture(t, &c.cache, 1, 0)
+	nas := t.TempDir()
+	ref := sharedFixtureFile(t, nas, "source", "rebuildable")
+	input := SharedInput{NAS: "source", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
+	_, release, err := c.Acquire(context.Background(), input, nas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	key := input.key()
+	unknown := pruneFixture(t, &c.cache, 1, 0)
 	lock, err := c.cache.lock(context.Background(), key+".use", syscall.LOCK_SH)
 	if err != nil {
 		t.Fatal(err)
@@ -50,6 +59,9 @@ func TestCacheMaintenanceSharedInputsKeepsPins(t *testing.T) {
 	}
 	unlockEnvironment(lock)
 	c.collectAdaptive(context.Background())
+	if _, err := os.Stat(filepath.Join(c.cache.Root, unknown)); err != nil {
+		t.Fatal("unknown metadata deleted", err)
+	}
 	if _, err := os.Stat(filepath.Join(c.cache.Root, key)); !os.IsNotExist(err) {
 		t.Fatal("inactive cache not collected", err)
 	}

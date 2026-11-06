@@ -63,6 +63,7 @@ func IdentifyFile(path string) (FileRef, error) {
 }
 
 func identifyFileContext(ctx context.Context, path string) (FileRef, error) {
+	ctx = withoutCopyProgress(ctx)
 	if err := ctx.Err(); err != nil {
 		return FileRef{}, err
 	}
@@ -122,6 +123,8 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
+	hostMu                      sync.Mutex
+	hostPending                 map[string]*cacheReservation
 	inputClaim                  func(context.Context, FileRef, bool) (context.Context, error)
 	unidentifiedReserveAdmitted atomic.Uint64
 	checkAttempt                func(context.Context) error
@@ -237,6 +240,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			if err := s.publish(ctx, ref); err != nil {
 				return tus.HTTPResponse{}, err
 			}
+			defer s.releaseUpload(ref.SHA256)
 			// An internal writer may have created the same blob after this
 			// upload's POST. Publication must still honor the import's custody.
 			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], false, ctx); err != nil {
@@ -249,6 +253,28 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 		return err
 	}
 	s.handler = http.StripPrefix("/api/files/uploads/", h)
+	// Reestablish already accepted, unwritten tus commitments after restart.
+	payloads, inventoryErr := s.inventory(context.Background())
+	if inventoryErr != nil {
+		return inventoryErr
+	}
+	for hash, p := range payloads {
+		if p.length > p.size {
+			if err := s.reserveUpload(hash, int64(p.length-p.size), true); err != nil {
+				return err
+			}
+		}
+	}
+	configured := false
+	var previous *FileStore
+	defer func() {
+		if !configured {
+			s.closeHostClaims()
+		}
+		if configured && previous != nil {
+			previous.closeHostClaims()
+		}
+	}()
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()
@@ -263,7 +289,10 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			}
 		}
 	}
+
+	previous = q.files
 	q.files = s
+	configured = true
 	q.fileCheckpoints = checkpoints
 	return nil
 }
@@ -470,6 +499,16 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		return
 	}
+	if err := s.reserveUpload(hash, length, false); err != nil {
+		respond(w, nil, &HTTPError{Status: 507, Code: "file_store_capacity", Message: "shared filesystem headroom unavailable"})
+		return
+	}
+	created := false
+	defer func() {
+		if !created {
+			s.releaseUpload(hash)
+		}
+	}()
 	// Disk work happens before queue acquisition. The queue admission checks
 	// current in-memory allocations and commits this reservation atomically.
 	view := s.snapshotCapacity(r.Context())
@@ -496,6 +535,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	response := &uploadResponse{ResponseWriter: w}
 	s.handler.ServeHTTP(response, r)
 	if response.status == http.StatusCreated {
+		created = true
 		s.unidentifiedReserveAdmitted.Add(unidentified)
 	}
 	if err := s.refreshUpload(hash); err != nil {

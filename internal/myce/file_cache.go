@@ -110,11 +110,16 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err != nil {
 		return err
 	}
+	need := ref.SizeBytes - prefix
+	releaseDemand, err := c.budgets.borrow(ctx, c.Root, need)
+	if err != nil {
+		return err
+	}
+	defer releaseDemand()
 	limit, err := c.budgets.limit(c.Root, used, c.Limit, c.Clock.Now())
 	if err != nil {
 		return err
 	}
-	need := ref.SizeBytes - prefix
 	sort.Slice(victims, func(i, j int) bool {
 		hi, hj := c.budgets.recent(c.Root, victims[i].name, c.Clock.Now()), c.budgets.recent(c.Root, victims[j].name, c.Clock.Now())
 		if hi != hj {
@@ -151,11 +156,12 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if used+need > limit || free < need {
 		return errors.New("insufficient local file cache space")
 	}
-	reservation, err := c.budgets.reserve(c.Root, need, c.Clock)
+	reservation, err := c.budgets.reserve(c.Root, need, c.Clock, partial, p)
 	if err != nil {
 		return err
 	}
 	defer reservation.release()
+	releaseDemand()
 	copyCtx, releaseCopy, err := c.budgets.copy(ctx, c.Root, c.Clock, 0)
 	if err != nil {
 		return err
@@ -189,14 +195,20 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 // copy slot, so a single-stream volume cannot deadlock on nested acquisition.
 func (c *FileCache) materialize(ctx context.Context, source, dest string, size int64) error {
 	root := filepath.Dir(dest)
+	releaseDemand, err := c.budgets.borrow(ctx, root, size)
+	if err != nil {
+		return err
+	}
+	defer releaseDemand()
 	if _, err := c.budgets.limit(root, 0, 0, c.Clock.Now()); err != nil {
 		return err
 	}
-	held, err := c.budgets.reserve(root, size, c.Clock)
+	held, err := c.budgets.reserve(root, size, c.Clock, dest)
 	if err != nil {
 		return err
 	}
 	defer held.release()
+	releaseDemand()
 	copyCtx, release, err := c.budgets.copy(ctx, root, c.Clock, 0)
 	if err != nil {
 		return err

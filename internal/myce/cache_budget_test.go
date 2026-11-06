@@ -3,14 +3,14 @@ package myce
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 )
 
-func syntheticCacheBudget(clock Clock, total, free uint64) (*cacheBudgets, *DiskReading) {
+func syntheticCacheBudget(t *testing.T, clock Clock, total, free uint64) (*cacheBudgets, *DiskReading) {
 	disk := &DiskReading{Volume: "local", TotalBytes: total, FreeBytes: free}
 	b := newCacheBudgets()
+	b.hostRoot = t.TempDir()
 	b.probe = func(string) (DiskReading, error) { return *disk, nil }
 	return b, disk
 }
@@ -18,12 +18,12 @@ func TestCacheBudgetPhysicalScaleAndSharedReservations(t *testing.T) {
 	for _, total := range []uint64{8 << 20, 8 << 40} {
 		t.Run(time.Duration(total).String(), func(t *testing.T) {
 			clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-			b, disk := syntheticCacheBudget(clock, total, total/2)
+			b, disk := syntheticCacheBudget(t, clock, total, total/2)
 			limit, err := b.limit("environments", 0, 0, clock.Now())
-			if err != nil || limit != int64(total/2)-int64(os.Getpagesize()) {
+			if err != nil || limit != int64(total/2)-4*cacheAllocationUnit(*disk) {
 				t.Fatal(limit, err)
 			}
-			held, err := b.reserve("environments", limit, clock)
+			held, err := b.reserve("environments", limit-3*cacheAllocationUnit(*disk), clock)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -60,7 +60,7 @@ func TestCacheBudgetPhysicalScaleAndSharedReservations(t *testing.T) {
 }
 func TestCacheBudgetPressurePrefersColdDomain(t *testing.T) {
 	clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	b, disk := syntheticCacheBudget(clock, 1<<40, 1<<30)
+	b, disk := syntheticCacheBudget(t, clock, 1<<40, 1<<30)
 	b.touch("hot", "model", 1<<30, clock.Now())
 	clock.Advance(time.Minute)
 	b.touch("hot", "model", 1<<30, clock.Now())
@@ -88,7 +88,7 @@ func TestCacheBudgetPressurePrefersColdDomain(t *testing.T) {
 }
 func TestCacheBudgetExplicitIntentAndReuseLifecycle(t *testing.T) {
 	clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	b, _ := syntheticCacheBudget(clock, 1<<40, 1<<39)
+	b, _ := syntheticCacheBudget(t, clock, 1<<40, 1<<39)
 	if limit, err := b.limit("cache", 0, 12345, clock.Now()); err != nil || limit != 12345 {
 		t.Fatal(limit, err)
 	}

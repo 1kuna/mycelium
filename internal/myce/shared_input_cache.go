@@ -60,7 +60,10 @@ func recordSharedVerification(root, signature string) error {
 }
 
 type sharedEntry struct {
-	Files FileManifest `json:"files"`
+	Files   FileManifest      `json:"files"`
+	Source  *SharedInput      `json:"source,omitempty"`
+	NASRoot string            `json:"nas_root,omitempty"`
+	Sources map[string]string `json:"sources,omitempty"`
 }
 
 func (c *SharedInputCache) nasPathContext(ctx context.Context, root, relative string) (string, error) {
@@ -250,6 +253,11 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		need += s.SizeBytes
 	}
 	err = c.stageInput(ctx, func(ctx context.Context, stage string) error {
+		releaseDemand, e := c.cache.budgets.borrow(ctx, c.cache.Root, need)
+		if e != nil {
+			return e
+		}
+		defer releaseDemand()
 		// The writer owns this random stage's build lock before reserving space.
 		// Matching reservation/partial names reuse existing remaining-byte accounting.
 		gate, e := c.cache.lock(ctx, "admission", syscall.LOCK_EX)
@@ -282,11 +290,12 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 				unlockEnvironment(gate)
 			}
 		}()
-		held, e := c.cache.budgets.reserve(c.cache.Root, need, c.cache.Clock)
+		held, e := c.cache.budgets.reserve(c.cache.Root, need, c.cache.Clock, stage, root)
 		if e != nil {
 			return e
 		}
 		defer held.release()
+		releaseDemand()
 		copyCtx, releaseCopy, e := c.cache.budgets.copy(ctx, c.cache.Root, c.cache.Clock, 0)
 		if e != nil {
 			return e
@@ -359,6 +368,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
+	original := s
 	var err error
 	if s.ManifestFile != "" {
 		manifestPath, e := c.nasPathContext(ctx, nasRoot, s.ManifestFile)
@@ -474,7 +484,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if err = makeSharedReadOnlyContext(ctx, dst); err != nil {
 		return err
 	}
-	b, err := json.Marshal(sharedEntry{files})
+	b, err := json.Marshal(sharedEntry{Files: files, Source: &original, NASRoot: nasRoot, Sources: s.sources})
 	if err != nil {
 		return err
 	}
@@ -716,8 +726,8 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 			continue
 		}
 		info, e := os.Stat(filepath.Join(c.cache.Root, d.Name(), "ready.json"))
-		if e != nil {
-			return e
+		if e != nil || !c.rebuildable(ctx, d.Name()) {
+			continue
 		}
 		victims = append(victims, victim{d.Name(), info.ModTime().UnixNano()})
 	}
@@ -778,6 +788,12 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 			if e != nil {
 				return e
 			}
+			continue
+		}
+		// Recheck provenance after acquiring the victim fence; another process may
+		// have replaced this identity since the inventory. Unknown data stays.
+		if !c.rebuildable(ctx, v.name) {
+			unlockEnvironment(use)
 			continue
 		}
 		e = removeSharedEntry(filepath.Join(c.cache.Root, v.name))
@@ -869,3 +885,65 @@ func unpackSharedArchive(ctx context.Context, source, dest, format string, limit
 }
 
 func digestBytes(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+
+// Deletion authority requires this protocol's manifest, an unchanged verified
+// payload, and a currently verifiable independent source. Legacy/unknown records
+// and unavailable originals retain custody, including after a process restart.
+func (c *SharedInputCache) rebuildable(ctx context.Context, key string) bool {
+	root := filepath.Join(c.cache.Root, key)
+	b, err := os.ReadFile(filepath.Join(root, "ready.json"))
+	var r sharedEntry
+	if err != nil || json.Unmarshal(b, &r) != nil || r.Source == nil || r.Source.validate() != nil || r.Source.key() != key || len(r.Files) == 0 {
+		return false
+	}
+	for name, ref := range r.Files {
+		if name != "." && !safeRelative(name) || ref.validate() != nil {
+			return false
+		}
+	}
+	signature, err := sharedSignature(filepath.Join(root, "data"))
+	verified, e := os.ReadFile(filepath.Join(root, sharedVerifiedRecord))
+	if err != nil || e != nil || string(verified) != signature {
+		return false
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.Name() != "data" && entry.Name() != "ready.json" && entry.Name() != sharedVerifiedRecord {
+			return false
+		}
+	}
+	if verifySharedEntry(ctx, filepath.Join(root, "data"), r.Files) != nil {
+		return false
+	}
+	s := *r.Source
+	if len(s.Manifest) > 0 || s.ManifestFile != "" {
+		if s.ManifestFile != "" {
+			p, e := c.nasPathContext(ctx, r.NASRoot, s.ManifestFile)
+			if e != nil || verifyFile(ctx, p, s.ref()) != nil {
+				return false
+			}
+		}
+		for name, ref := range r.Files {
+			p := r.Sources[name]
+			if p == "" {
+				var e error
+				p, e = c.nasPathContext(ctx, r.NASRoot, filepath.ToSlash(filepath.Join(s.NAS, name)))
+				if e != nil {
+					return false
+				}
+			}
+			if verifyFile(ctx, p, ref) != nil {
+				return false
+			}
+		}
+		return true
+	}
+	if s.NAS == "" {
+		return c.Client.HasFile(ctx, s.ref()) == nil
+	}
+	p, err := c.nasPathContext(ctx, r.NASRoot, s.NAS)
+	return err == nil && verifyFile(ctx, p, s.ref()) == nil
+}
