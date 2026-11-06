@@ -34,10 +34,13 @@ func TestSharedHostMeasuredCPUAdmissionAndResume(t *testing.T) {
 				t.Fatal(err)
 			}
 			clock.Advance(time.Second)
-			sharedCPUReport(t, q, m, run, 1, 1)
+			sharedCPUReport(t, q, m, run, 1, 100)
+			if got := q.s.Machines[m.ID].CPUInUseCores; got != 1 {
+				t.Fatal("first cumulative counter is not an interval rate", got)
+			}
 			clock.Advance(time.Second)
 			// One declared core consumes three during the second interval.
-			sharedCPUReport(t, q, m, run, 2, 4)
+			sharedCPUReport(t, q, m, run, 2, 103)
 			observed := job(t, q, run.ID).CPUObservation
 			if observed == nil || observed.PeakCores != 3 || q.s.Machines[m.ID].CPUInUseCores != 3 {
 				t.Fatalf("actual overuse not charged: %+v %+v", observed, q.s.Machines[m.ID])
@@ -47,7 +50,7 @@ func TestSharedHostMeasuredCPUAdmissionAndResume(t *testing.T) {
 				t.Fatal("admission used declaration instead of measured occupancy")
 			}
 			// Repeated and reordered reports cannot erase demonstrated need.
-			sharedCPUReport(t, q, m, run, 2, 4)
+			sharedCPUReport(t, q, m, run, 2, 103)
 			sharedCPUReport(t, q, m, run, 1, 0)
 			if got := job(t, q, run.ID).CPUObservation.PeakCores; got != 3 {
 				t.Fatal("replay changed learning", got)
