@@ -69,6 +69,7 @@ func NewModelEngine(m Model, dir string, clock Clock) Engine {
 }
 
 type LlamaEngine struct {
+	readinessWorker    *Worker
 	memoryCeilings     *memoryCeilings
 	memoryAttempt      *memoryAttempt
 	memoryMachine      Machine
@@ -225,6 +226,8 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		_ = l.Unload()
 		return e
 	}
+	stopActivity := l.observeReadinessActivity(ctx, progress)
+	defer stopActivity()
 	l.url = "http://127.0.0.1:" + strconv.Itoa(port)
 
 	hc := &http.Client{
@@ -845,6 +848,12 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 			}
 			return checkLaunchGate(parent)
 		})
+	}
+	if owned, ok := m.engine.(*LlamaEngine); ok {
+		owned.readinessWorker = rt.worker
+		if m.bound != nil {
+			owned.readinessWorker = m.bound
+		}
 	}
 	identity := m.model
 	if m.recipe != nil {

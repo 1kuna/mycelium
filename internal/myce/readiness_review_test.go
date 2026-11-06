@@ -278,3 +278,80 @@ func TestAdaptiveReadinessRuntimeUsesResolvedDeviceHistory(t *testing.T) {
 		t.Fatal("unresolved host inherited device load evidence")
 	}
 }
+
+func TestAdaptiveReadinessSharedResourceActivity(t *testing.T) {
+	clock := &manualWorkerClock{now: time.Unix(1, 0)}
+	p := newReadinessProgress(clock, readinessHistory{})
+	cpu, reads, host, device := 0.0, uint64(0), 0.0, 0.0
+	available := true
+	o := &resourceObserver{clock: clock, start: clock.Now(), read: func() *AttemptResources {
+		if !available {
+			return &AttemptResources{}
+		}
+		c, r := cpu, reads
+		return &AttemptResources{CPU: AttemptCPUTime{UsageSeconds: &c}, IO: AttemptIO{ReadBytes: &r}}
+	}}
+	memoryReads := 0
+	p.osObserver = true
+	p.activitySource = readinessActivitySource(o.snapshot, func() (*float64, *float64) {
+		memoryReads++
+		if !available {
+			return nil, nil
+		}
+		h, d := host, device
+		return &h, &d
+	})
+	sample := func() {
+		clock.Advance(time.Hour)
+		o.sample()
+		if _, stalled := p.state(); stalled {
+			t.Fatal("cold shared observation acquired a deadline")
+		}
+	}
+	sample()
+	for _, move := range []func(){func() { cpu++ }, func() { reads++ }, func() { host++ }, func() { device++ }} {
+		sample()
+		if p.coldReason() != coldLoadInactive {
+			t.Fatal("unchanged sample was credited as activity")
+		}
+		move()
+		sample()
+		if p.coldReason() != coldLoadActive {
+			t.Fatal("shared resource growth was ignored")
+		}
+		before := memoryReads
+		p.state()
+		if memoryReads != before || p.coldReason() != coldLoadActive {
+			t.Fatal("repeated status resampled or changed the observed episode")
+		}
+	}
+	available = false
+	sample()
+	if p.coldReason() != coldLoadInactive {
+		t.Fatal("missing counters invented activity")
+	}
+	available = true
+	host = 0
+	sample()
+	host = 0.5
+	sample()
+	if p.coldReason() != coldLoadActive {
+		t.Fatal("memory regrowth below its previous peak was ignored")
+	}
+}
+
+func TestAdaptiveReadinessSharedSensorHorizon(t *testing.T) {
+	clock := &manualWorkerClock{now: time.Unix(1, 0)}
+	p := newReadinessProgress(clock, readinessHistory{Load: readinessLatency{Mean: time.Millisecond}})
+	p.activityPeriod = attemptStorageSamplePeriod
+	clock.Advance(attemptStorageSamplePeriod)
+	if _, stalled := p.state(); stalled {
+		t.Fatal("learned cutoff beat the shared sensor's next observation")
+	}
+	cpu := 1.0
+	p.observeActivity(&cpu)
+	clock.Advance(2 * attemptStorageSamplePeriod)
+	if _, stalled := p.state(); !stalled {
+		t.Fatal("learned silent stall was not caught after the observable horizon")
+	}
+}

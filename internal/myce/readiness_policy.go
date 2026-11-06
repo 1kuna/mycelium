@@ -99,6 +99,7 @@ type readinessHistory struct {
 type readinessProgress struct {
 	activitySource   func() (time.Time, []*float64)
 	activityAt       time.Time
+	activityPeriod   time.Duration
 	osObserver       bool
 	activityValues   []float64
 	activityRevision uint64
@@ -179,7 +180,7 @@ func (p *readinessProgress) state() (time.Duration, bool) {
 	// measurement uncertainty (one more gap). No whole-load wall deadline.
 	budget := p.budget
 	if budget > 0 {
-		budget = max(budget, scaleReadinessDuration(p.gap, 2))
+		budget = max(budget, scaleReadinessDuration(p.gap, 2), scaleReadinessDuration(p.activityPeriod, 2))
 	}
 	return budget, budget > 0 && !p.suspended && max(p.clock.Now().Sub(p.last), RealClock{}.Now().Sub(p.realLast)) >= budget
 }

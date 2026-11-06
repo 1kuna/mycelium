@@ -226,6 +226,9 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 		if engine == nil {
 			return report, errors.New("nil measurement engine")
 		}
+		if owned, ok := engine.(*LlamaEngine); ok {
+			owned.readinessWorker = &o.Worker
+		}
 		engines = append(engines, engine)
 		releases = append(releases, pendingRelease)
 		pendingRelease = nil

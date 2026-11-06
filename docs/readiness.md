@@ -13,7 +13,10 @@ maintainer ruling. Explicit caller deadlines and authored readiness limits bind.
 CPU time, read bytes attributable to the owned model process tree, and observed
 host/device memory growth count as activity. CPU/I/O use #858's shared per-attempt
 resource fields and observer; no duplicate CPU/I/O sampler is introduced. Missing
-OS counters remain unknown. Physical read bytes can exclude cached model reads,
+OS counters remain unknown. Learned silence detection allows at least two existing
+shared-sensor periods (one observation interval plus scheduling uncertainty), so
+it cannot expire before a new CPU/I/O sample can arrive. This observability floor
+does not create a cold-load deadline. Physical read bytes can exclude cached model reads,
 and process reads can include runtime dependencies; they establish activity,
 not completed tensor loading. Process existence alone is not activity.
 
