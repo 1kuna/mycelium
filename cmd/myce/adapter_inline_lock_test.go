@@ -81,6 +81,10 @@ check: [test, -s, marker.txt]
 			t.Fatal(err)
 		}
 		newReport.ObservedAt = oldReport.ObservedAt
+		if oldReport.Portability != nil && newReport.Portability != nil {
+			// Separate read-only requests have separate observation times.
+			newReport.Portability.ObservedAt = oldReport.Portability.ObservedAt
+		}
 		if !reflect.DeepEqual(oldReport, newReport) {
 			t.Fatalf("resolve changed: old=%+v new=%+v", oldReport, newReport)
 		}

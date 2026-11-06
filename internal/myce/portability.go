@@ -282,6 +282,9 @@ func (q *Queue) portabilityWithRecipes(req PortabilityRequest, sets map[string]m
 			targets = append(targets, cpuMachineView(m))
 		}
 		for _, target := range targets {
+			if req.Spec != nil && !req.Spec.extensionJob() && req.Spec.Needs.cpuOnly() && target.GPU != "cpu" {
+				continue
+			}
 			r := row(machineTarget(target))
 			r.Observed = true
 			if req.Spec != nil && slices.ContainsFunc(req.Spec.Targets, func(t ExecutionTarget) bool { return t.matches(machineTarget(target)) }) {
@@ -621,7 +624,11 @@ func WritePortability(dest io.Writer, r PortabilityReport, asJSON bool) error {
 			fmt.Fprintf(&out, "  authored=%s; environment coverage=%s; parity=%s\n", t.AuthoredEligibility, t.EnvironmentCoverage, t.Parity)
 		}
 		if t.Needs != nil {
-			fmt.Fprintf(&out, "  resources: CPU=%d accelerator=%g GiB host=%g GiB automatic_memory=%t\n", t.Needs.CPUCores, t.Needs.MemoryGB, t.Needs.HostMemoryGB, t.Needs.AutomaticMemory)
+			if t.Target.Platform == "cpu" {
+				fmt.Fprintf(&out, "  resources: CPU=%d host=%g GiB automatic_memory=%t\n", t.Needs.CPUCores, t.Needs.HostMemoryGB, t.Needs.AutomaticMemory)
+			} else {
+				fmt.Fprintf(&out, "  resources: CPU=%d accelerator=%g GiB host=%g GiB automatic_memory=%t\n", t.Needs.CPUCores, t.Needs.MemoryGB, t.Needs.HostMemoryGB, t.Needs.AutomaticMemory)
+			}
 		}
 		if t.VariantDigest != "" {
 			fmt.Fprintf(&out, "  variant digest: %s\n", t.VariantDigest)
@@ -633,7 +640,11 @@ func WritePortability(dest io.Writer, r PortabilityReport, asJSON bool) error {
 			}
 		}
 		for _, h := range t.Hosts {
-			fmt.Fprintf(&out, "  %s: %s; CPU=%d free=%d; accelerator=%g GiB free=%g; %s; %s; admission=%s\n", h.Host, h.Freshness, h.LogicalCPUs, h.FreeCPUCores, h.AcceleratorMemoryGB, h.FreeAcceleratorMemoryGB, h.Prepared, h.Qualification, h.Admission)
+			fmt.Fprintf(&out, "  %s: %s; CPU=%d free=%d; ", h.Host, h.Freshness, h.LogicalCPUs, h.FreeCPUCores)
+			if t.Target.Platform != "cpu" {
+				fmt.Fprintf(&out, "accelerator=%g GiB free=%g; ", h.AcceleratorMemoryGB, h.FreeAcceleratorMemoryGB)
+			}
+			fmt.Fprintf(&out, "%s; %s; admission=%s\n", h.Prepared, h.Qualification, h.Admission)
 			if h.SharedHost != nil {
 				fmt.Fprintf(&out, "    shared interactive fallback: reserve=%g GiB; native CPU commands in prepared environments; nice>=10; inspect worker CPU enforcement and pressure status\n", h.SharedHost.InteractiveReserveGB)
 			}
