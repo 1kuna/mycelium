@@ -50,6 +50,12 @@ func newCacheBudgets() *cacheBudgets {
 	return &cacheBudgets{probe: workerDiskProbe, volumes: map[string]*cacheVolume{}, reservations: map[*cacheReservation]struct{}{}, reuse: map[string]cacheReuse{}, copies: map[string]*copyGovernor{}}
 }
 func cacheBytes(n uint64) int64 { return int64(min(n, uint64(math.MaxInt64))) }
+func cacheFloatBytes(n float64) int64 {
+	if n >= float64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(max(0, n))
+}
 func cacheSum(a, b int64) int64 { return a + min(max(0, b), math.MaxInt64-a) }
 func (b *cacheBudgets) touch(root, key string, bytes int64, now time.Time) {
 	b.mu.Lock()
@@ -118,7 +124,7 @@ func (b *cacheBudgets) sampleReading(root string, used int64, now time.Time, dis
 }
 func (b *cacheBudgets) floorLocked(v *cacheVolume) int64 {
 	predicted := v.drain * v.horizon.Seconds()
-	return max(int64(os.Getpagesize()), v.controlGrowth, int64(min(float64(math.MaxInt64-1024), predicted)))
+	return max(int64(os.Getpagesize()), v.controlGrowth, cacheFloatBytes(predicted))
 }
 func (b *cacheBudgets) pendingLocked(volume string) int64 {
 	n := int64(0)
@@ -143,7 +149,7 @@ func (b *cacheBudgets) limitReading(root string, used, explicit int64, now time.
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	v := b.volumes[disk.Volume]
-	spare := v.free - b.floorLocked(v) - b.pendingLocked(disk.Volume)
+	spare := v.free - cacheSum(b.floorLocked(v), b.pendingLocked(disk.Volume))
 	limit := cacheSum(max(0, used), max(0, spare))
 	if spare < 0 {
 		// Reclaim cold bytes across domains before applying pressure to the reused
@@ -179,7 +185,7 @@ func (b *cacheBudgets) reserve(root string, bytes int64, clock Clock) (*cacheRes
 	if v == nil {
 		return nil, errors.New("cache capacity not sampled")
 	}
-	free := cacheBytes(disk.FreeBytes) - b.floorLocked(v) - b.pendingLocked(disk.Volume)
+	free := cacheBytes(disk.FreeBytes) - cacheSum(b.floorLocked(v), b.pendingLocked(disk.Volume))
 	if bytes < 0 || bytes > free {
 		return nil, errors.New("insufficient shared filesystem cache headroom")
 	}
