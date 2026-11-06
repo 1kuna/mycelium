@@ -38,6 +38,12 @@ wrong rule for a healthy job on a host with room. The retained receipt cannot
 establish contemporaneous host pressure or exclusive physical demand, so it
 cannot establish whether that particular execution was healthy or under physical
 pressure. Fake-clock replays exercise both states and retain explicit limits.
+The #389 incident separately recorded 64.07 GiB summed RSS and 2,004 Python
+processes on 16 GiB RAM with critical pressure and about 44.83 GiB swap-out.
+Its timing was not retained. A synthetic fake-clock replay of an accelerating
+fork shape must stop while pressure is still normal and before swap starts;
+its shared-RSS/stable-headroom counterpart retains the learned growth contract.
+This is a stop-decision regression, not historical timing or native stress proof.
 The #850 recovery separately retains the measured 0.560638427734375 GiB overshoot
 as uncertainty without doubling demand beyond every eligible allowance.
 
@@ -53,10 +59,16 @@ RSS is not a unique physical footprint and can omit compressed memory. Summed
 RSS greater than physical RAM alone therefore does not establish exhaustion.
 Darwin receives no anonymous-resident admission credit from this measurement.
 
-Three valid overage/contention observations spanning two seconds stop through
-normal exact-attempt cleanup. A lower or pressure-free sample, missing inventory,
+Three valid overage/contention observations spanning two seconds normally stop
+through exact-attempt cleanup. A rapidly growing owned process tree shortens
+that grace when consecutive valid observations show both RSS/member-count growth
+and actual host headroom loss: if the measured depletion rate would consume the
+remaining room within one observed sampling interval plus the existing grace,
+the guard stops an already-over-limit attempt immediately. This applies to both
+learned and declared thresholds. It uses neither a process-count cap nor summed
+RSS as physical usage; stable host headroom does not earn this early stop. A lower or pressure-free sample, missing inventory,
 changed birth/session identity or gap over two sample periods resets the window.
-This existing grace filters a transient spike without another polling loop;
+The ordinary grace filters a transient spike without another polling loop;
 physical Linux and explicit member ceilings remain kernel-enforced between reads.
 
 The cadence preserves the observer's measured cost budget: 30 original RSS plus
@@ -64,8 +76,9 @@ pressure cycles took 27.0 ms median, 32.1 ms maximum; 20 complete birth-fenced
 session/RSS plus pressure cycles, including member birth checks, took 65.4 ms
 median, 74.0 ms p95, 77.9 ms maximum
 on one development Mac. One new cycle per second uses about 65 ms of serialized probe wall time versus
-54 ms for two old cycles, while retaining a roughly three-second reaction window.
-A two-second cadence would halve probe work but double that reaction window.
+54 ms for two old cycles, while retaining a roughly three-second ordinary reaction window. The growth
+forecast above avoids spending that grace during a measured fork/growth burst.
+A two-second cadence would halve probe work but double that ordinary reaction window.
 Two further observations filter brief
 spikes without a second sampler or an arbitrary memory multiplier. These are
 bounded local overhead measurements, not fleet load qualification.

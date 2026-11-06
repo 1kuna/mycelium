@@ -10,7 +10,7 @@ const learnedMemoryGuardEnforcement = "adaptive native CPU memory guard"
 
 // A learned native CPU reservation is a prediction, not an authored limit.
 // The kernel still contains the attempt within physical RAM and the operator's
-// explicit allowance. Member limits, Docker and declared jobs are unchanged.
+// explicit allowance. Member limits, Docker and declared thresholds are unchanged.
 func learnedMemoryCeilingGB(j *Job, m *Machine) float64 {
 	if j == nil || m == nil || j.Spec.Run.Docker || !j.Spec.Needs.cpuOnly() || j.Spec.Needs.Memory != "auto" || j.MemoryEnvelope == nil || j.MemoryEnvelope.Basis != "learned" || j.MemoryEnvelope.Enforcement != learnedMemoryGuardEnforcement {
 		return 0
@@ -51,6 +51,8 @@ type learnedMemoryGuard struct {
 	previous        *gpuHostState
 	identity        map[int]string
 	lastObservation time.Time
+	lastBytes       uint64
+	lastMembers     int
 }
 
 func (w Worker) learnedGuard(j Job) learnedMemoryGuard {
@@ -65,22 +67,45 @@ func (w Worker) learnedGuard(j Job) learnedMemoryGuard {
 // configured reserve protects the owner's RAM. No workload-size multiplier is
 // used. Missing pressure cannot prove contention; the physical ceiling remains.
 func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, bytes uint64, members int, err error, host *gpuHostState) *RSSLimitEvidence {
-	if g.ceiling <= 0 {
-		return g.observe(now, roots, bytes, members, err)
-	}
 	valid := len(roots) > 0 && members > 0 && err == nil
 	for pid, birth := range roots {
 		valid = valid && pid > 0 && birth != ""
 	}
 	if !valid {
 		g.growth, g.previous = memoryGrowth{}, nil
+		g.lastBytes, g.lastMembers = 0, 0
 		return g.observe(now, roots, bytes, members, err)
 	}
 	if !maps.Equal(roots, g.identity) || now.Before(g.lastObservation) || now.Sub(g.lastObservation) > 2*processMemorySamplePeriod {
 		g.growth, g.previous = memoryGrowth{}, nil
 		g.identity = maps.Clone(roots)
 	}
-	g.lastObservation = now
+	// A fork/growth burst cannot safely spend the ordinary spike-filter grace
+	// when measured physical headroom is disappearing before it can end. RSS
+	// and child growth establish attempt activity; only actual host headroom
+	// loss supplies the consumption rate. Sharing alone cannot trigger this.
+	elapsed := now.Sub(g.lastObservation)
+	urgent := false
+	if before := g.previous; before != nil && host != nil && elapsed > 0 &&
+		validMemoryValue(before.available) && validMemoryValue(host.available) &&
+		host.available < before.available && bytes > g.lastBytes && members > g.lastMembers {
+		lossRate := (before.available - host.available) / elapsed.Seconds()
+		// Budget one observed sampling interval plus the existing grace. These
+		// are the delays this forecast prevents us from waiting through.
+		horizon := elapsed + processMemoryGrace
+		urgent = host.available <= g.reserve+lossRate*horizon.Seconds()
+	}
+	g.lastObservation, g.lastBytes, g.lastMembers = now, bytes, members
+	if g.ceiling <= 0 {
+		g.previous = host
+	}
+	if urgent && !g.exceeded && g.limit > 0 && bytes > uint64(g.limit) {
+		g.exceeded = true
+		return &RSSLimitEvidence{ObservedBytes: bytes, LimitBytes: g.limit, Quality: "owned_session_rss"}
+	}
+	if g.ceiling <= 0 {
+		return g.observe(now, roots, bytes, members, err)
+	}
 	limit := g.limit
 	defer func() { g.limit = limit }()
 	if g.hard > 0 && bytes > uint64(g.hard) {

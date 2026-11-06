@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -265,5 +266,60 @@ func TestLearnedMemoryGuardNegotiatesBeforeWidening(t *testing.T) {
 	current.MemoryEnvelope.Enforcement = "memory ceilings enforced (cgroup v2)"
 	if learnedMemoryCeilingGB(current, &m) > 0 {
 		t.Fatal("old queue authorized wider worker cap")
+	}
+}
+
+// #389 retained only a peak/pressure interval, not a per-second trace. Replay a
+// synthetic accelerating fork shape toward its 2,004 children / 64.07 GiB sum
+// on 16 GiB RAM; do not mislabel this as a reconstruction of historical timing.
+func TestLearnedMemoryGuardForkBurstBeforeCritical(t *testing.T) {
+	for _, declared := range []bool{true, false} {
+		for _, room := range []bool{false, true} {
+			t.Run(fmt.Sprintf("declared=%v/room=%v", declared, room), func(t *testing.T) {
+				clock := &fakeClock{now: time.Unix(100, 0)}
+				w := Worker{Machine: Machine{CapabilityProfile: &CapabilityProfile{SystemMemoryBytes: 16 << 30}}}
+				j := incidentGuardJob()
+				j.Spec.Needs.HostMemoryGB = 2.125
+				if declared {
+					j.Spec.Needs.Memory, j.MemoryEnvelope.Basis = "", "declared"
+				}
+				g := w.learnedGuard(j)
+				trace := []struct {
+					rss, available float64
+					members, level int
+					swapOut        uint64
+				}{
+					{1, 10, 2, 1, 0},
+					{8, 4, 252, 1, 0},
+					{32, .25, 1002, 2, 1 << 20},
+					{64.07, 0, 2004, 4, 45 << 30},
+				}
+				stopped := -1
+				for i, s := range trace {
+					if room {
+						s.available, s.level, s.swapOut = 10, 1, 0
+					}
+					e := g.observeMemory(clock.Now(), map[int]string{7: "birth"}, uint64(s.rss*(1<<30)), s.members, nil,
+						&gpuHostState{available: s.available, level: s.level, swapOut: s.swapOut})
+					if e != nil {
+						stopped = i
+						if safeRSSLimit(e) == nil {
+							t.Fatalf("invalid evidence: %+v", e)
+						}
+						break
+					}
+					clock.Advance(processMemorySamplePeriod)
+				}
+				if !room && stopped != 1 {
+					t.Fatalf("fork burst stopped at sample %d; want 1, before warning/critical pressure or swap", stopped)
+				}
+				if room && !declared && stopped != -1 {
+					t.Fatalf("shared RSS/count growth with stable headroom stopped at %d", stopped)
+				}
+				if room && declared && stopped != 3 {
+					t.Fatalf("declared limit lost ordinary grace: stop=%d", stopped)
+				}
+			})
+		}
 	}
 }
