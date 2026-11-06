@@ -153,3 +153,174 @@ func TestSharedHostCPUFieldsStripForStrictOlderQueue(t *testing.T) {
 		t.Fatal("new pressure fields leaked or stripping mutated local evidence")
 	}
 }
+
+func TestSharedHostColdCPUPressureCannotTrainHealthyBaseline(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedHostFixture(t, q)
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+	for i := 0; i < 4; i++ {
+		clock.Advance(time.Second)
+		m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, CPUKnown: true, CPUPSI: 12}
+		check(t, q, m, nil)
+		stored := q.s.Machines[m.ID]
+		if stored.SharedHostYieldReason != "shared host CPU PSI" || stored.SharedHostPressure.Learning.CPUKnown {
+			t.Fatal("cold contention became healthy", stored.SharedHostPressure)
+		}
+	}
+	m.SharedHostPressure.CPUPSI = 0
+	clock.Advance(time.Second)
+	check(t, q, m, nil)
+	if stored := q.s.Machines[m.ID]; stored.SharedHostYieldReason != "" || !stored.SharedHostPressure.Learning.CPUKnown {
+		t.Fatal("affirmative quiet CPU evidence did not recover/train")
+	}
+}
+
+func TestSharedHostFinalCPUChargesExactPendingRelease(t *testing.T) {
+	q, clock, m, run := sharedRunning(t, true)
+	sharedCPUReport(t, q, m, run, 1, 100)
+	m.SharedHostPressure.MemoryLevel = 2
+	if r := check(t, q, m, run); !r.Stop {
+		t.Fatal("no owner yield")
+	}
+	clock.Advance(time.Second)
+	usage := 104.0
+	r := result(run, false)
+	r.Interrupted, r.ReleasePending = true, true
+	r.Resources = &AttemptResources{ElapsedSeconds: 2, CPU: AttemptCPUTime{Source: "sampled_process_tree", UsageSeconds: &usage}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	key := releaseKey(HostRelease{Job: run.ID, Machine: run.Machine, Session: run.Session, Attempt: run.Attempt})
+	if receipt := q.s.HostReleases[key]; receipt.CPUCores != 4 {
+		t.Fatal("final CPU learning lost at requeue with pending cleanup", receipt)
+	}
+	if q.s.Machines[m.ID].CPUInUseCores != 4 {
+		t.Fatal("unreleased execution advertised free CPU")
+	}
+}
+
+// Replay shape from the maintainer's retained 2026-11-02 incident, relayed on
+// #389 on 2026-11-06: 16 GiB physical RAM, 2 GiB declared (2.125 resolved),
+// 2,004 Python members, 64.07 GiB RSS-sum and 44.83 GiB swap-out activity.
+// Intermediate values/times below are synthetic: the retained record does not
+// establish their chronology. RSS-sum/footprint is not exclusive physical RAM,
+// and swap allocation is not a swap-out counter. No real processes are spawned.
+func TestSharedHostForkGrowthReplayYieldsBeforeCriticalAndArbitratesGuard(t *testing.T) {
+	for _, ending := range []string{"checkpoint", "guard before yield", "guard races yield"} {
+		t.Run(ending, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuMachine("interactive", "interactive", "cpu", 4, 16)
+			m.CapabilityProfile.OS = "darwin"
+			m.CapabilityProfile.SystemMemoryBytes = 16 << 30
+			m.CPUBudgetCores, m.HostMemoryBudgetGB = 2, 12
+			m.MemoryObservation = &HostMemoryObservation{TotalGB: 16, UsedGB: 4}
+			m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
+			check(t, q, m, nil)
+			if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "drain", DrainOwner: "operator"}); err != nil {
+				t.Fatal(err)
+			}
+			m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 1}
+			if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "profile", SharedHost: m.SharedHost}); err != nil {
+				t.Fatal(err)
+			}
+			check(t, q, m, nil)
+			if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
+				t.Fatal(err)
+			}
+			s := cpuSpec(2, 2)
+			s.Resumable = true
+			j := submit(t, q, s)
+			run := check(t, q, m, nil).Job
+			if run == nil || run.ID != j.ID {
+				t.Fatal("incident fixture not admitted")
+			}
+			if err := q.Started(result(run, false)); err != nil {
+				t.Fatal(err)
+			}
+			trace := []struct {
+				level, members   int
+				rssGB, swapOutGB float64
+			}{
+				{1, 2, 2.125, 0},
+				{2, 128, 4, .25},
+				{4, 2004, 64.07, 44.83},
+			}
+			stage := 0
+			probe := processMemoryProbe{OwnedResident: func(map[int]string) (uint64, int, error) {
+				return uint64(trace[stage].rssGB * (1 << 30)), trace[stage].members, nil
+			}}
+			readStage := func() (uint64, int) {
+				t.Helper()
+				bytes, members, err := probe.OwnedResident(map[int]string{1: "synthetic-owned-supervisor"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return bytes, members
+			}
+			readStage() // Origin before growth; summed RSS is not host usage.
+			guardResult := func() Result {
+				stage = 1
+				bytes, _ := readStage()
+				e := &RSSLimitEvidence{ObservedBytes: bytes, LimitBytes: int64(2.125 * (1 << 30)), Quality: "owned_session_rss"}
+				return classifyAttemptOutcome(result(run, false), attemptCause{memberOutcome: memberOutcome{RSSLimit: e}})
+			}
+			if ending == "guard before yield" {
+				if err := q.Complete(guardResult()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The first OS warning, while well below the retained RSS peak,
+			// must act; neither critical level nor swap exhaustion is needed.
+			clock.Advance(time.Second)
+			stage = 1
+			readStage()
+			m.SharedHostPressure.MemoryLevel = trace[stage].level
+			m.MemoryObservation.UsedGB, m.MemoryObservation.MyceliumGB = 10, 4
+			r := check(t, q, m, run)
+			if ending == "guard before yield" {
+				if got := job(t, q, run.ID); got.State != "failed" || priorityStop(got) != nil {
+					t.Fatal("owner pressure reclassified an already stopped guard failure", got)
+				}
+				return
+			}
+			stopping := job(t, q, run.ID)
+			if !r.Stop || r.Kill || stopping.State != "stopping" || priorityStop(stopping) == nil {
+				t.Fatal("no early checkpoint yield at warning before critical", r)
+			}
+			deadline := *stopping.StopAt
+			// If the payload does not exit yet, the later incident peak must
+			// retain the same stop and deadline, not start a competing action.
+			clock.Advance(time.Second)
+			stage = 2
+			bytes, members := readStage()
+			m.SharedHostPressure.MemoryLevel = trace[stage].level
+			// Feed the retained terminal shape through the synthetic sensor;
+			// swap-out remains context, never substituted for swap allocation.
+			if members != 2004 || bytes <= 64*(1<<30) || trace[stage].swapOutGB < 44 {
+				t.Fatal("incident terminal shape lost")
+			}
+			check(t, q, m, run)
+			if stopped := job(t, q, run.ID); !stopped.StopAt.Equal(deadline) || stopped.Attempt != run.Attempt {
+				t.Fatal("critical pressure renewed/duplicated the earlier stop")
+			}
+			if ending == "guard races yield" {
+				if err := q.Complete(guardResult()); err != nil {
+					t.Fatal(err)
+				}
+				got := job(t, q, run.ID)
+				if got.State != "failed" || got.ExecutionCause == nil || got.ExecutionCause.Class != rssLimitExceeded || got.InfrastructureRetries != 0 || got.Losses != 0 {
+					t.Fatal("owner yield hid/double-counted the explicit guard failure", got)
+				}
+				return
+			}
+			finishInterrupted(t, q, run)
+			m.SharedHostPressure.MemoryLevel = 1
+			m.MemoryObservation.UsedGB, m.MemoryObservation.MyceliumGB = 4, 0
+			clock.Advance(time.Second)
+			next := check(t, q, m, nil).Job
+			if next == nil || next.ID != run.ID || next.Attempt != run.Attempt+1 {
+				t.Fatal("early checkpoint yield did not resume same logical job")
+			}
+		})
+	}
+}

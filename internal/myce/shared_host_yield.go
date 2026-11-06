@@ -45,6 +45,13 @@ func (q *Queue) observeSharedCPU(j *Job, r *AttemptResources) {
 		peak = max(peak, min(float64(m.CapabilityProfile.LogicalCPUs), usage/elapsed))
 	}
 	j.CPUObservation = &SharedCPUObservation{j.Attempt, j.Machine, j.Session, r.ElapsedSeconds, *r.CPU.UsageSeconds, peak}
+	// Completion creates cleanup custody before retaining its final counters.
+	// Raise that exact receipt as well, before requeue clears the identity.
+	key := releaseKey(HostRelease{Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt})
+	if release, ok := q.s.HostReleases[key]; ok {
+		release.CPUCores = max(release.CPUCores, jobCPUCharge(j, m))
+		q.s.HostReleases[key] = release
+	}
 }
 
 func jobCPUCharge(j *Job, m *Machine) int {
