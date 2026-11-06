@@ -67,3 +67,14 @@ job to resume, subject to the existing owner-latency recovery hold.
 legacy pressure shape, without mutating local measurements. macOS still has no
 hard aggregate CPU-time or memory containment. This policy reduces new admission
 and cooperatively yields work; it cannot guarantee recovery from an OS freeze.
+
+The fake-clock fork-growth replay uses a retained incident's 16 GiB physical
+host, 2 GiB declaration (2.125 GiB resolved), 2,004 members, 64.07 GiB RSS-sum
+and 44.83 GiB swap-out activity. Intermediate values and timing are synthetic;
+the retained record does not establish that chronology. The first warning
+triggers checkpoint yield before the critical observation. Repeated pressure
+keeps the original stop deadline. An explicit RSS-guard failure before or racing
+that yield remains a resource failure, with one attempt/release accounting path;
+owner-pressure provenance cannot turn it into a successful checkpoint or an
+infrastructure retry. Summed RSS/compressed footprint is not exclusive physical
+RAM, and swap-out activity is not swap allocation.

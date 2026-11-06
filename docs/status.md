@@ -2197,7 +2197,8 @@ current condition without retraining that history with zeros. Job-only captures
 omit the fleet report and its baseline maps.
 Reads reuse the published generation. Sensor coverage and maintenance sampling
 limits are evidence limits, not authorization to release custody or shrink needs.
-### Shared owner yield and measured CPU (#389, next release)
+
+## Shared owner yield and measured CPU (#389, next release)
 
 `cpu_in_use_cores` includes shared-host measured overuse, rounded up and never
 below declared cores. Job `cpu_observation` retains the exact sample identity,

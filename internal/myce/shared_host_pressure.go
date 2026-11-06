@@ -79,7 +79,7 @@ func (q *Queue) acceptSharedPressure(m, old *Machine) {
 		m.SharedHostYieldReason = "shared host memory pressure"
 	} else if psiHigh || first && p.MemoryPSI > 0 {
 		m.SharedHostYieldReason = "shared host memory PSI"
-	} else if p.CPUKnown && learned.CPUKnown && p.CPUPSI > learned.CPU.upper() {
+	} else if p.CPUKnown && (!learned.CPUKnown && p.CPUPSI > 0 || learned.CPUKnown && p.CPUPSI > learned.CPU.upper()) {
 		m.SharedHostYieldReason = "shared host CPU PSI"
 	} else if wakeHigh {
 		m.SharedHostYieldReason = "shared host owner scheduling latency"
