@@ -208,7 +208,7 @@ func TestTierFairnessDecayRestartAndStableNames(t *testing.T) {
 	finish(t, q, run, true)
 	key := q.fairKey(a.Spec)
 	before := q.s.FairUsage[key].Seconds
-	if math.Abs(before-0.5/math.Ln2) > 1e-9 {
+	if math.Abs(before-1) > 1e-9 {
 		t.Fatal(before)
 	}
 	c.Advance(time.Second)
@@ -319,7 +319,7 @@ func TestTierFairnessModelPreparationChargedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := fairUsageKey("experiment", "gpu", "atlas")
-	if got := q.s.FairUsage[key].Seconds; math.Abs(got-0.5/math.Ln2) > 1e-9 {
+	if got := q.s.FairUsage[key].Seconds; math.Abs(got-1) > 1e-9 {
 		t.Fatal("load accounting", got)
 	}
 	// Multiple calls sharing a loaded model are one allocation, including loading.

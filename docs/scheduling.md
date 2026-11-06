@@ -280,14 +280,20 @@ environment readiness, deadlines, front-of-line retries, and waiting time break
 ties within the selected project. Across projects, equal usage favors fewer
 active allocations per weight before warmth. Usage is keyed by stable tier
 name, resource family and project. Its exponential history horizon follows the
-current demand/service cycle: the larger of the sum of oldest waiting ages
-(once per ready, uncapped project) and the longest observed active allocation
-age in that tier/resource family. The sum retains a full round as contenders
-grow; many tiny jobs from one project cannot inflate it by their count. Each
-accounting interval uses that measured horizon for every project in the ledger,
-including absent projects. Idle ledgers keep decaying on their last measured
-cycle. Old persisted usage without a measured horizon is preserved until local
-demand or service supplies one; no daily half-life is guessed.
+current demand/service cycle: the largest of the sum of oldest waiting ages
+(once per ready, uncapped project), the longest covered active allocation age,
+and the latest completed allocation's covered duration in that tier/resource
+family. The sum retains a full round as contenders grow; many tiny jobs from one
+project cannot inflate it by their count. A completed allocation supplies the
+initial measured scale. Until that sample exists, preserve prior history and
+count new covered service without decay; no daily half-life is guessed.
+
+Every project in the ledger, including absent projects, uses the same horizon.
+The queue integrates its continuously changing value analytically, so unrelated
+reads/check-ins cannot change debt by splitting an unchanged service interval.
+Idle ledgers decay on the latest completed service quantum. Active covered ages
+are retained by exact attempt/session identity across reconnects and queue
+restarts; unknown downtime adds neither service nor age.
 
 A fresh short burst can shorten the retained history; sustained service or
 long waits lengthen it. While a project waits and competitors keep receiving
@@ -333,8 +339,9 @@ change an existing policy.
 `transcribe goes first (sim is ahead of its fair share)`. The reason also reports
 retained resource-seconds, the weighted share among fitting competing projects,
 signed debt (positive means ahead, negative means behind), the measured horizon,
-aggregate project wait age and observed service age. A horizon of zero means no
-local cycle has yet been observed. The horizon is shared across a tier/resource
+aggregate project wait age, observed service age and the completed service
+quantum. A zero completed quantum means initial learning, with history preserved
+until an allocation completes. The horizon is shared across a tier/resource
 family; fit/cap filtering still determines the projects used for each target
 comparison. CPU seconds are core-seconds; GPU seconds are device-seconds.
 NAS and machine fit failures

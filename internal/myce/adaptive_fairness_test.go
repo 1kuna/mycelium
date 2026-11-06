@@ -85,6 +85,9 @@ func TestAdaptiveFairnessDemandCyclesAndRestart(t *testing.T) {
 	run = check(t, q, m, nil).Job
 	clock.Advance(10 * time.Millisecond)
 	finish(t, q, run, true)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
 	if u := q.s.FairUsage[key]; math.Abs(u.HorizonSeconds-.01) > 1e-9 {
 		t.Fatal("tiny burst inherited long history", u)
 	}
@@ -171,7 +174,80 @@ func TestAdaptiveFairnessUnknownCoverageAndOldDebt(t *testing.T) {
 		t.Fatal(err)
 	}
 	u = q.s.FairUsage[q.fairKey(waiting.Spec)]
-	if u.WaitSeconds != 7 || u.HorizonSeconds != 7 || math.Abs(u.Seconds-50) > 1e-9 {
-		t.Fatal("old debt not adapted to measured demand", u)
+	if u.WaitSeconds != 7 || u.HorizonSeconds != 7 || u.Seconds != 100 || u.QuantumSeconds != 0 {
+		t.Fatal("legacy debt changed before observed service supplied a scale", u)
+	}
+}
+
+// A queue read/check-in may split an observation interval without changing the
+// demand, service, final debt, or next winner. Exercise both learning and a
+// measured horizon that crosses from constant to linearly growing.
+func TestAdaptiveFairnessAccountingCadenceInvariant(t *testing.T) {
+	t.Parallel()
+	for _, quantum := range []float64{0, 20} {
+		t.Run(fmt.Sprint(quantum), func(t *testing.T) {
+			replay := func(steps int) (float64, float64, string) {
+				q, clock := fixture(t)
+				q.lossTimeouts = [3]time.Duration{time.Hour, time.Hour, time.Hour}
+				m := machine("worker", "fake")
+				submit(t, q, projectSpec("a"))
+				run := check(t, q, m, nil).Job
+				b := submit(t, q, projectSpec("b"))
+				q.s.FairUsage[q.fairKey(b.Spec)] = FairUsage{Seconds: 100, At: clock.Now(), HorizonSeconds: quantum, QuantumSeconds: quantum}
+				for range steps {
+					clock.Advance(time.Minute / time.Duration(steps))
+					check(t, q, m, run)
+				}
+				aUsage := q.s.FairUsage[q.fairKey(run.Spec)].Seconds
+				bUsage := q.s.FairUsage[q.fairKey(b.Spec)].Seconds
+				finish(t, q, run, true)
+				a := submit(t, q, projectSpec("a"))
+				got := check(t, q, m, nil).Job
+				if got == nil {
+					t.Fatal("no next assignment")
+				}
+				if got.ID != a.ID && got.ID != b.ID {
+					t.Fatal("unexpected assignment", got.ID)
+				}
+				return aUsage, bUsage, got.Spec.Project
+			}
+			a, b, winner := replay(1)
+			for _, splits := range []int{2, 60} {
+				x, y, next := replay(splits)
+				if math.Abs(a-x) > 1e-9 || math.Abs(b-y) > 1e-9 || winner != next {
+					t.Fatalf("%d splits changed admission: once=(%.12g, %.12g, %s), split=(%.12g, %.12g, %s)", splits, a, b, winner, x, y, next)
+				}
+			}
+		})
+	}
+}
+
+func TestAdaptiveFairnessReconnectKeepsCoveredAge(t *testing.T) {
+	t.Parallel()
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprint(restart), func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("worker", "fake")
+			submit(t, q, projectSpec("served"))
+			run := check(t, q, m, nil).Job
+			clock.Advance(2 * time.Hour)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if u := q.s.FairUsage[q.fairKey(run.Spec)]; u.ServiceSeconds != 60 {
+				t.Fatal("initial coverage", u)
+			}
+			if restart {
+				q = reopenTierQueue(t, q, clock)
+			}
+			check(t, q, m, run)
+			clock.Advance(time.Second)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if u := q.s.FairUsage[q.fairKey(run.Spec)]; u.ServiceSeconds != 61 || u.HorizonSeconds != 61 {
+				t.Fatal("downtime became observed service", u)
+			}
+		})
 	}
 }

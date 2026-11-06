@@ -36,11 +36,14 @@ type FairUsage struct {
 	HorizonSeconds float64 `json:"horizon_seconds,omitempty"`
 	WaitSeconds    float64 `json:"wait_seconds,omitempty"`
 	ServiceSeconds float64 `json:"service_seconds,omitempty"`
+	QuantumSeconds float64 `json:"quantum_seconds,omitempty"`
+	// Only current allocations; values are covered seconds, never elapsed age.
+	Active map[string]float64 `json:"active,omitempty"`
 }
 
 func decayed(u FairUsage, now time.Time) float64 {
-	if u.HorizonSeconds <= 0 {
-		return u.Seconds // Pre-adaptive history awaits local demand/service evidence.
+	if u.HorizonSeconds <= 0 || u.QuantumSeconds <= 0 {
+		return u.Seconds // Initial learning awaits a completed service observation.
 	}
 	return u.Seconds * math.Exp2(-max(0, now.Sub(u.At).Seconds())/u.HorizonSeconds)
 }

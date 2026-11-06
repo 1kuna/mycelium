@@ -4,27 +4,50 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 )
 
-type fairScope [2]string // stable tier name, resource family
-// wait is the sum of oldest waiting ages, once per demanding project.
-// This retains a full project round as the number of contenders grows.
-type fairCycle struct{ wait, service float64 }
+type fairScope [2]string
+
 type fairInterval struct {
-	key         string
-	scope       fairScope
-	from, until time.Time
-	rate        float64
+	key, allocation    string
+	age, covered, rate float64
 }
 
-// Remember one current demand/service cycle, rather than a fleet's daily rhythm.
-// Long waits retain the service received by competitors; short bursts forget old
-// debt on their own timescale. An active allocation's observed age keeps a long
-// run from being treated as a burst. Idle ledgers reuse their last measured cycle.
-// There is no timer floor, ceiling, or reporting-retention cutoff on fair usage.
+type fairCycle struct {
+	wait, waitRate, quantum float64
+	entries                 map[string]FairUsage
+	intervals               []fairInterval
+}
+
+func fairAllocationKey(m *Machine, work, attempt string) string {
+	key, _ := json.Marshal([5]string{m.ID, m.Session, m.Device, work, attempt})
+	return string(key)
+}
+
+// A cycle spans a complete project round: oldest wait age once per demanding
+// project, the longest covered active allocation age, or the latest completed
+// allocation's covered duration. Completion supplies a measured positive scale;
+// before that first sample, preserve history and account service without decay.
+// Active observations are attempt/session-specific and survive unknown gaps.
 func (q *Queue) accountFairHistory(from, now time.Time) {
-	cycles := map[fairScope]fairCycle{}
+	groups := map[fairScope]*fairCycle{}
+	group := func(scope fairScope) *fairCycle {
+		if groups[scope] == nil {
+			groups[scope] = &fairCycle{entries: map[string]FairUsage{}}
+		}
+		return groups[scope]
+	}
+	for key, u := range q.s.FairUsage {
+		var parts [3]string
+		if json.Unmarshal([]byte(key), &parts) != nil {
+			continue
+		}
+		g := group(fairScope{parts[0], parts[1]})
+		g.entries[key] = u
+		g.quantum = max(g.quantum, u.QuantumSeconds)
+	}
 	waits := map[string]float64{}
 	observeWait := func(j *Job) {
 		if j.State != "queued" || !dependencyReady(j) || cancelled(j) || q.capReason(j) != "" {
@@ -37,15 +60,18 @@ func (q *Queue) accountFairHistory(from, now time.Time) {
 		if since.IsZero() {
 			return
 		}
-		key := fairScope{q.priorityMatch(j.Spec).Tier, fairResourceFamily(j.Spec)}
-		cycle := cycles[key]
-		projectKey := q.fairKey(j.Spec)
-		age := max(0, now.Sub(since).Seconds())
-		cycle.wait += max(0, age-waits[projectKey])
-		waits[projectKey] = max(waits[projectKey], age)
-		cycles[key] = cycle
-		if _, ok := q.s.FairUsage[projectKey]; !ok {
-			q.s.FairUsage[projectKey] = FairUsage{}
+		key := q.fairKey(j.Spec)
+		age := max(0, from.Sub(since).Seconds())
+		g := group(fairScope{q.priorityMatch(j.Spec).Tier, fairResourceFamily(j.Spec)})
+		if old, exists := waits[key]; exists {
+			g.wait += max(0, age-old)
+		} else {
+			g.wait += age
+			g.waitRate++
+		}
+		waits[key] = max(waits[key], age)
+		if _, exists := g.entries[key]; !exists {
+			g.entries[key] = FairUsage{}
 		}
 	}
 	for _, j := range q.liveJobs() {
@@ -58,56 +84,137 @@ func (q *Queue) accountFairHistory(from, now time.Time) {
 			observeWait(j)
 		}
 	}
-	intervals := []fairInterval{}
+	span := now.Sub(from).Seconds()
 	for _, m := range q.plannerMachines() {
-		if m.Gone || q.unreported[m.ID] || m.MemoryError != "" {
-			continue
+		covered := 0.0
+		if !m.Gone && !q.unreported[m.ID] && m.MemoryError == "" {
+			end := minTime(now, m.LastSeen.Add(q.machineLossTimeout(m.ID)))
+			covered = max(0, end.Sub(from).Seconds())
 		}
-		end := minTime(now, m.LastSeen.Add(q.machineLossTimeout(m.ID)))
-		if !end.After(from) {
-			continue
-		}
+		// Retain a still-custodied allocation's covered age even when its
+		// worker is unreported. Unknown time adds neither age nor usage.
 		for _, r := range q.deviceUsage(m) {
 			if r.Fair <= 0 || r.Project == "" {
 				continue
 			}
-			scope := fairScope{r.Tier, r.Family}
-			cycle := cycles[scope]
-			cycle.service = max(cycle.service, end.Sub(from).Seconds())
-			if !r.FairSince.IsZero() {
-				cycle.service = max(cycle.service, end.Sub(r.FairSince).Seconds())
+			key := fairUsageKey(r.Tier, r.Family, r.Project)
+			g := group(fairScope{r.Tier, r.Family})
+			u := g.entries[key]
+			g.entries[key] = u
+			g.intervals = append(g.intervals, fairInterval{key, r.FairAllocation, u.Active[r.FairAllocation], covered, r.Fair})
+		}
+	}
+	for _, g := range groups {
+		active := map[string]map[string]float64{}
+		for _, r := range g.intervals {
+			if active[r.key] == nil {
+				active[r.key] = map[string]float64{}
 			}
-			cycles[scope] = cycle
-			intervals = append(intervals, fairInterval{fairUsageKey(r.Tier, r.Family, r.Project), scope, from, end, r.Fair})
+			active[r.key][r.allocation] = r.age + r.covered
+		}
+		completed := 0.0
+		for key, u := range g.entries {
+			for allocation, age := range u.Active {
+				if _, exists := active[key][allocation]; !exists {
+					completed = max(completed, age)
+				}
+			}
+		}
+		if completed > 0 {
+			g.quantum = completed
+		}
+		// Coverage expiry changes rates and service-age slopes. Between these
+		// boundaries the horizon is the maximum of affine functions of time.
+		boundaries := []float64{0, span}
+		for _, r := range g.intervals {
+			if r.covered > 0 && r.covered < span {
+				boundaries = append(boundaries, r.covered)
+			}
+		}
+		slices.Sort(boundaries)
+		boundaries = slices.Compact(boundaries)
+		for i := 1; i < len(boundaries); i++ {
+			start, end := boundaries[i-1], boundaries[i]
+			lines := []fairLine{{g.quantum, 0}, {g.wait, g.waitRate}}
+			fixed, growing := g.quantum, -1.0
+			rates := map[string]float64{}
+			for _, r := range g.intervals {
+				if r.covered > start {
+					growing = max(growing, r.age)
+					rates[r.key] += r.rate
+				} else {
+					fixed = max(fixed, r.age+r.covered)
+				}
+			}
+			lines[0].base = fixed
+			if growing >= 0 {
+				lines = append(lines, fairLine{growing, 1})
+			}
+			cuts := []float64{start, end}
+			for a := range lines {
+				for b := 0; b < a; b++ {
+					if lines[a].slope == lines[b].slope {
+						continue
+					}
+					at := (lines[b].base - lines[a].base) / (lines[a].slope - lines[b].slope)
+					if at > start && at < end {
+						cuts = append(cuts, at)
+					}
+				}
+			}
+			slices.Sort(cuts)
+			cuts = slices.Compact(cuts)
+			for k := 1; k < len(cuts); k++ {
+				lo, hi := cuts[k-1], cuts[k]
+				chosen := lines[0]
+				for _, line := range lines[1:] {
+					if line.at((lo+hi)/2) > chosen.at((lo+hi)/2) {
+						chosen = line
+					}
+				}
+				factor, service := 1.0, hi-lo
+				if g.quantum > 0 {
+					factor, service = chosen.integral(lo, hi)
+				}
+				for key, u := range g.entries {
+					u.Seconds = u.Seconds*factor + rates[key]*service
+					g.entries[key] = u
+				}
+			}
+		}
+		serviceAge := 0.0
+		for _, r := range g.intervals {
+			serviceAge = max(serviceAge, r.age+r.covered)
+		}
+		for key, u := range g.entries {
+			u.WaitSeconds, u.ServiceSeconds = g.wait+g.waitRate*span, serviceAge
+			u.QuantumSeconds = g.quantum
+			u.HorizonSeconds = max(g.quantum, u.WaitSeconds, serviceAge)
+			if u.HorizonSeconds == 0 {
+				u.HorizonSeconds = q.s.FairUsage[key].HorizonSeconds
+			}
+			u.Active, u.At = active[key], now
+			q.s.FairUsage[key] = u
 		}
 	}
-	// Apply the same horizon to all projects in a tier/family, including absent
-	// projects. Otherwise switching demand could resurrect selectively aged debt.
-	for key, u := range q.s.FairUsage {
-		var parts [3]string
-		if json.Unmarshal([]byte(key), &parts) != nil {
-			continue
-		}
-		cycle := cycles[fairScope{parts[0], parts[1]}]
-		if horizon := max(cycle.wait, cycle.service); horizon > 0 {
-			u.HorizonSeconds = horizon
-		}
-		u.WaitSeconds, u.ServiceSeconds = cycle.wait, cycle.service
-		u.Seconds, u.At = decayed(u, now), now
-		q.s.FairUsage[key] = u
+}
+
+type fairLine struct{ base, slope float64 }
+
+func (l fairLine) at(t float64) float64 { return l.base + l.slope*t }
+
+// Solve dU/dt = rate - ln(2)*U/H(t) analytically. This composes exactly
+// when an unchanged interval is split by incidental reads or check-ins.
+func (l fairLine) integral(from, until float64) (factor, service float64) {
+	h0 := l.at(from)
+	if l.slope == 0 {
+		exponent := -math.Ln2 * (until - from) / h0
+		return math.Exp(exponent), -math.Expm1(exponent) * h0 / math.Ln2
 	}
-	for _, r := range intervals {
-		u := q.s.FairUsage[r.key]
-		cycle := cycles[r.scope]
-		u.HorizonSeconds = max(cycle.wait, cycle.service)
-		u.WaitSeconds, u.ServiceSeconds = cycle.wait, cycle.service
-		k := math.Ln2 / u.HorizonSeconds
-		// Exact constant-horizon integral over covered service, independent of
-		// the minute buckets used by the historical reporting API.
-		u.Seconds += -math.Expm1(-k*r.until.Sub(r.from).Seconds()) / k * math.Exp(-k*now.Sub(r.until).Seconds()) * r.rate
-		u.At = now
-		q.s.FairUsage[r.key] = u
-	}
+	logRatio := math.Log1p(l.slope * (until - from) / h0)
+	factor = math.Exp(-math.Ln2 / l.slope * logRatio)
+	service = (l.slope*(until-from) - h0*math.Expm1(-math.Ln2/l.slope*logRatio)) / (l.slope + math.Ln2)
+	return
 }
 
 func (s *candidateSet) fairExplanation(j *Job) string {
@@ -124,5 +231,5 @@ func (s *candidateSet) fairExplanation(j *Job) string {
 	u := q.s.FairUsage[q.fairKey(j.Spec)]
 	usage := decayed(u, q.clock.Now())
 	share := total * (q.weight(j.Spec.Project) / largest) / weights
-	return fmt.Sprintf("fair share %s/%s: retained %.6gs, weighted share %.6gs, debt %+.6gs (positive ahead); horizon %.6gs, wait %.6gs, observed service age %.6gs; %d competing projects", q.priorityMatch(j.Spec).Tier, fairResourceFamily(j.Spec), usage, share, usage-share, u.HorizonSeconds, u.WaitSeconds, u.ServiceSeconds, len(projects))
+	return fmt.Sprintf("fair share %s/%s: retained %.6gs, weighted share %.6gs, debt %+.6gs (positive ahead); horizon %.6gs, wait %.6gs, observed service age %.6gs, completed service quantum %.6gs; %d competing projects", q.priorityMatch(j.Spec).Tier, fairResourceFamily(j.Spec), usage, share, usage-share, u.HorizonSeconds, u.WaitSeconds, u.ServiceSeconds, u.QuantumSeconds, len(projects))
 }
