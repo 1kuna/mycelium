@@ -85,6 +85,7 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	}
 	q.alertAttemptLoss(j, outcome, false)
 	q.recordLaunchRefusalHealth(j, outcome)
+	q.recordRemainingAttemptHealth(j, outcome)
 	for i, old := range j.AttemptHistory {
 		if old.Attempt == outcome.Attempt && old.Machine == outcome.Machine && old.Session == outcome.Session {
 			j.AttemptHistory[i] = outcome
