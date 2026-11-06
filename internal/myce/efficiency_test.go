@@ -267,6 +267,10 @@ func TestEfficiencyStopSnapshotSurvivesCleanup(t *testing.T) {
 	if o == nil || !o.At.Equal(first) || o.HeadroomGB == nil || *o.HeadroomGB != 13 || o.MemoryPressure == nil || *o.MemoryPressure != 0 {
 		t.Fatalf("cleanup rewrote original stop evidence: %+v", o)
 	}
+	wasted := efficiencyWasted(q.s.Jobs["stopped"])
+	if len(wasted) != 1 || wasted[0].Suspect == nil || !*wasted[0].Suspect {
+		t.Fatalf("fresh host headroom and normal pressure did not explain suspect stop: %+v", wasted)
+	}
 	// A late statistical projection cannot replace a newer committed observation.
 	newer := &efficiencyDiagnostics{report: &EfficiencyReport{At: c.Now().Add(time.Second)}}
 	older := &efficiencyDiagnostics{report: &EfficiencyReport{At: c.Now()}}

@@ -320,15 +320,40 @@ func (q *Queue) refreshEfficiency() {
 	}
 	seen := map[string]bool{}
 	owners := map[string]*Machine{}
+	hostMachines := map[string][]*Machine{}
+	reservedDevices := map[string]float64{}
 	for _, m := range q.s.Machines {
 		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
 			continue
 		}
 		host := hostID(m)
+		hostMachines[host] = append(hostMachines[host], m)
 		old := owners[host]
 		if old == nil || m.LastSeen.After(old.LastSeen) || m.LastSeen.Equal(old.LastSeen) && m.ID < old.ID {
 			owners[host] = m
 		}
+	}
+	// Aggregate each live ledger once; heartbeats must not scan all jobs and
+	// inventory again for every host.
+	for _, j := range q.liveJobs() {
+		if owner := q.s.Machines[j.Machine]; owner != nil && batchReservesCapacity(j) {
+			reservedDevices[hostID(owner)] += j.Spec.Needs.MemoryGB
+		}
+	}
+	for _, slot := range q.s.ModelSlots {
+		if owner := q.s.Machines[slot.Machine]; owner != nil && slotReservesMemory(slot) {
+			reservedDevices[hostID(owner)] += q.slotMemory(slot)
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if r.CPUOnly || r.Preparation {
+			continue
+		}
+		j := q.s.Jobs[r.Job]
+		if j != nil && j.Attempt == r.Attempt && j.Session == r.Session && batchReservesCapacity(j) {
+			continue
+		}
+		reservedDevices[r.Host] += r.MemoryGB * float64(max(1, len(r.Devices)))
 	}
 	for host, m := range owners {
 		seen[host] = true
@@ -355,14 +380,11 @@ func (q *Queue) refreshEfficiency() {
 		}
 		// Device memory is separate on discrete hosts; on unified systems this
 		// remains a diagnostic dimension and is never added to host physical use.
-		var deviceUsed, reservedDevice float64
+		var deviceUsed float64
 		deviceKnown := true
 		deviceCount := 0
 		deviceUntil := time.Time{}
-		for _, owner := range q.s.Machines {
-			if hostID(owner) != host || owner.Replacement != nil {
-				continue
-			}
+		for _, owner := range hostMachines[host] {
 			if until := owner.LastSeen.Add(q.machineLossTimeout(owner.ID)); deviceUntil.IsZero() || until.Before(deviceUntil) {
 				deviceUntil = until
 			}
@@ -378,27 +400,7 @@ func (q *Queue) refreshEfficiency() {
 				deviceUsed += owner.MemoryUsedGB
 			}
 		}
-		for _, j := range q.liveJobs() {
-			if owner := q.s.Machines[j.Machine]; owner != nil && hostID(owner) == host && batchReservesCapacity(j) {
-				reservedDevice += j.Spec.Needs.MemoryGB
-			}
-		}
-		for _, slot := range q.s.ModelSlots {
-			if owner := q.s.Machines[slot.Machine]; owner != nil && hostID(owner) == host && slotReservesMemory(slot) {
-				reservedDevice += q.slotMemory(slot)
-			}
-		}
-		for _, r := range q.s.HostReleases {
-			if r.Host != host || r.CPUOnly || r.Preparation {
-				continue
-			}
-			j := q.s.Jobs[r.Job]
-			if j != nil && j.Attempt == r.Attempt && j.Session == r.Session && batchReservesCapacity(j) {
-				continue
-			}
-			reservedDevice += r.MemoryGB * float64(max(1, len(r.Devices)))
-		}
-		h.Rate.ReservedDeviceGB = reservedDevice
+		h.Rate.ReservedDeviceGB = reservedDevices[host]
 		if deviceCount > 0 && deviceKnown {
 			h.Rate.MeasuredDeviceGB = &deviceUsed
 			h.Rate.DeviceValidUntil = deviceUntil
@@ -706,7 +708,11 @@ func efficiencyPredictions(j *Job) []PredictionError {
 	// Timing can exist without memory telemetry (including older workers).
 	if t := j.Timing; t != nil && t.PredictedSeconds != nil && t.ActualSeconds != nil && !slices.ContainsFunc(rows, func(r PredictionError) bool { return r.Attempt == t.Execution.Attempt }) {
 		delta := *t.PredictedSeconds - *t.ActualSeconds
-		rows = append(rows, PredictionError{JobID: j.ID, Attempt: t.Execution.Attempt, Basis: efficiencyBasis(j), PredictedSeconds: t.PredictedSeconds, ActualSeconds: t.ActualSeconds, DurationErrorSeconds: &delta})
+		work := profileMemoryIdentity(j)
+		if j.Efficiency != nil {
+			work = j.Efficiency.Work
+		}
+		rows = append(rows, PredictionError{JobID: j.ID, Work: work, Attempt: t.Execution.Attempt, Basis: efficiencyBasis(j), PredictedSeconds: t.PredictedSeconds, ActualSeconds: t.ActualSeconds, DurationErrorSeconds: &delta})
 	}
 	return rows
 }
@@ -761,6 +767,12 @@ func efficiencyWasted(j *Job) []WastedAttempt {
 			if adverse {
 				suspect := false
 				row.Suspect = &suspect
+			} else if row.Suspect == nil && observed.HeadroomGB != nil && observed.SwapGrowthBytesPerSecond != nil && (observed.PressureUnit == "memory_psi_some_avg10_percent" || observed.PressureUnit == "memory_pressure_level") {
+				// Zero PSI and Darwin's normal-pressure enum are physical
+				// meanings, not a deployment-tuned efficiency threshold.
+				suspect := *observed.HeadroomGB > 0
+				row.Suspect = &suspect
+				row.HeadroomGB = observed.HeadroomGB
 			}
 		}
 		rows = append(rows, row)
