@@ -70,6 +70,15 @@ filtered and full views and per-job GET. This can repeat observation work during
 completions; ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
 injected queue time at capture, rather than the response completion time.
 
+Every status and inspection response includes additive `freshness` metadata:
+`captured_at` equals `now`; `served_at` is the queue time when the response is
+assembled; `age_seconds` is their nonnegative difference; and `cached` says
+whether this request reused a previously completed default-status generation.
+The age includes projection and observation I/O, even for an uncached response.
+It excludes JSON encoding and network transfer after assembly. Interpret a
+cached or slow observation at its capture time, including worker freshness.
+Old CLIs continue to decode the existing fields.
+
 From s072, machine `shared_input_cache` reports `capacity_bytes`, `free_bytes`
 and `evictable_bytes`. Free space excludes cache allocation and outstanding
 staging reservations; evictable space contains only inactive reproducible entries.
@@ -136,7 +145,13 @@ another host's accepted sample alone never explains its mutation (#620).
 Only the unfiltered default shares the one-second cache. Filtered/full reads are
 fresh. Snapshot capture keeps scheduling inputs and dependency state under the
 queue lock; projection, usage queries, file inventory, encoding the reply and
-compression run after release. No bulk file or network I/O runs under `q.mu`.
+compression run after release. Cold retained jobs have immutable, payload-free
+observation inputs maintained by the existing committed-record journal; reads
+copy those inputs outside the lock. Mutable jobs and worker facts are still
+captured together under the lock. Each detached generation reuses one placement
+scan and memory-evidence catalog across ordering, startup and blocker diagnostics;
+derived capacity views keep their own scans. No bulk file or network I/O runs
+under `q.mu`. No jobs, curves, custody or foreign-load fields are removed.
 
 Jobs with explicitly recovered outputs expose an append-only `recovered_results`
 list in status and job GET. Each record has `kind: recovered`, its own result ID,
