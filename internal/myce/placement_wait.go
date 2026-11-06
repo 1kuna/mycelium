@@ -64,6 +64,19 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 					blocked = append(blocked, why)
 				}
 			}
+			// Permanent capacity above deliberately ignores current occupancy.
+			// Explain occupied cores here, before an otherwise empty target can
+			// discard the other hosts' blockers or the RAM-only fallback skips it.
+			if !cpuFits(candidate, m) {
+				why := m.CPUCapacityReason
+				if why == "" {
+					_, why = cpuCapacity(m)
+				}
+				if why == "" {
+					why = fmt.Sprintf("%d cores needed, %d unreserved of %d admitted (%d reserved; CPU utilization unknown)", candidate.Spec.Needs.cores(), m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
+				}
+				blocked = append(blocked, "CPU capacity: "+why)
+			}
 			specific = specific || len(blocked) > 0
 			if why := hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB); why != "" {
 				n := candidate.Spec.Needs
