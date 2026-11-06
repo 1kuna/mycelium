@@ -210,10 +210,11 @@ The plan lists each job's files, what still protects them and `reclaimable_bytes
 
 ## When a job waits
 
-From the next release, `host_capacity_accumulation` names the ready accelerator
-job whose RAM/cores are being protected from new CPU backfill on one selected
-host. Running attempts finish normally; higher tiers, nonconflicting capacity
-and other hosts remain eligible. Unready environments, occupied GPU cards or
+From the next release, `host_capacity_accumulation` names the ready CPU or
+accelerator job whose RAM/cores are being protected from new backfill on one
+selected host. Running attempts finish normally; earlier fair turns, higher
+tiers, nonconflicting capacity and other hosts remain eligible. Unready
+environments, occupied GPU cards or
 impossible needs do not create this wait. Do not cancel/resubmit to bypass it.
 
 From s072, missing environments can prepare beside unrelated CPU commands on

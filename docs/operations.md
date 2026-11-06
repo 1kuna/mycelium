@@ -2690,6 +2690,60 @@ heartbeats continuing, restore the network, and verify the share mounts and the
 held work is admitted without restarting either service. This native boot check
 is separate from the laptop fixture and requires an authorized test window.
 
+### Worker mount recovery (Linux and macOS)
+
+Workers reuse the host-hygiene mount probe for each configured checkpoint/NAS
+root. Each attempt stats the root and reads at most one directory entry. Access
+re-triggers an existing Linux systemd/autofs or macOS autofs mount through the
+OS; no separate repair daemon or privileged command is installed. Cached mount
+inventory is checked again after access, so an empty local mountpoint cannot
+pretend to be a recovered NAS. Independent local checkpoint roots remain local.
+
+The pending deadline is learned from this host's successful mount observations
+using the hygiene prediction band. Completed successful probes train through
+hygiene warmup before slow-completion classification; a single fast sample
+cannot permanently reject ordinary successful variation. Probe-format upgrades
+invalidate only incompatible mount baseline evidence, preserving other health
+evidence and historical diagnostics. Before any successful observation, one
+existing sampling interval bounds cold/unknown evidence. Three consecutive slow
+or stalled observations confirm degradation; explicit filesystem failures and
+unverified cold probes withhold dependent work immediately. Heartbeat delivery
+never waits for these filesystem calls. A stuck kernel request retains its one
+slot until it returns, including after its deadline; retries cannot multiply it.
+
+Returned failures retry with exponential backoff starting at the larger of the
+sampling interval and measured operation cost. The ceiling is the larger of the
+existing signal-freshness allowance and that measured cost: this limits repeated
+connection pressure while keeping recovery discovery within the host's evidence
+budget. Three newly completed healthy probes clear the hold automatically.
+NAS-dependent work waits with a typed root reason; local/cached work continues
+when its own dependencies are available. Existing operator drains and attempt
+custody are unchanged.
+
+On **Linux**, a surviving automount is retried by access, including a late
+network after boot. Apply the operator-owned boot integration above to prevent
+`mount-start-limit-hit`. When the automount has disappeared, the worker reports
+`mount_linux_operator_required`: an authorized operator must restore the exact
+mount/automount through the existing system configuration. The worker never
+runs root mount helpers, resets system units, or changes credentials.
+
+On **macOS**, access retries an existing autofs path and lets the OS reconnect
+an existing SMB session. If no mount/automount remains, or access is denied,
+`mount_macos_approval_required` asks the owner to restore the configured mount
+and approve Keychain access if macOS requests it. This code identifies the need
+for owner action, not the exact cause of a Keychain refusal. It never launches
+Finder, displays a password dialog, reads Keychain, or reconstructs an SMB URL.
+A dead SMB request that never returns stays `mount_probe_stalled`; inspect the
+OS session through the storage owner rather than force-unmounting active data.
+
+Status exposes these codes in `host_health.history[].mounts[].reason` and
+`unavailable_roots`. The existing #200 wake channel emits a deduplicated
+`host_mount_action_required` event, including escalation after an earlier
+`host_mount_degraded` event. Diagnoses contain root roles and fixed codes only,
+never paths, mount sources, syscall text or credentials. Native late-network
+boot, Wi-Fi/DNS loss and dead-SMB qualification require a separately authorized
+window; laptop fake-filesystem tests do not establish native remount success.
+
 On Linux, missing-runtime refusal applies to NVIDIA display controllers and
 Intel discrete PCIe display endpoints (Intel vendor ID and positive
 [`current_link_width`](https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-bus-pci)
