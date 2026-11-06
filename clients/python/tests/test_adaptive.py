@@ -52,7 +52,8 @@ class AdaptiveTests(unittest.TestCase):
                         return Reply(job, {"X-Myce-Wait": "batch-v1"} if batch else {})
                     client._urlopen = respond
                     self.assertEqual(client.wait("job")["state"], "succeeded")
-                    self.assertGreater(clock.sleeps[3], clock.sleeps[1])
+                    if not batch:
+                        self.assertGreater(clock.sleeps[3], clock.sleeps[1])
                     if batch:
                         self.assertTrue(holds)
                         self.assertGreaterEqual(holds[-1], holds[0])
@@ -161,3 +162,22 @@ class BufferedProgressTests(unittest.TestCase):
                     stop.set()
                     receiver.close()
                     thread.join()
+
+class LongPollCompletionTests(unittest.TestCase):
+    def test_completion_between_long_polls_is_observed_before_owner_timeout(self):
+        clock = Clock()
+        client = Client(token="fixture")
+        client._clock = clock
+        def respond(request, **kwargs):
+            clock.now += .01
+            state = 'succeeded' if clock.now >= 350 else 'running'
+            job = {'id': 'job', 'state': state}
+            if request.selector == '/api/wait':
+                seconds = json.loads(request.data)['seconds']
+                clock.now += min(seconds, max(0, 350 - clock.now))
+                job.update(state='succeeded' if clock.now >= 350 else 'running', revision=1)
+                job = {'jobs': [job]}
+            return Reply(job, {'X-Myce-Wait': 'batch-v1'})
+        client._urlopen = respond
+        self.assertEqual(client.wait('job', timeout=600)['state'], 'succeeded')
+        self.assertLess(clock.now, 371)

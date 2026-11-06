@@ -653,6 +653,7 @@ class Client:
             if remaining is not None:
                 budget = remaining if budget is None else min(budget, remaining)
             failure = None
+            held = False
             batched = self._batch_supported and job is not None
             try:
                 if batched:
@@ -661,6 +662,7 @@ class Client:
                         seconds = min(seconds, int(budget / 2))
                     try:
                         observed = self._wait_batch(job_id, after, seconds, budget)
+                        held = seconds > 0 and observed.get("revision", 0) > 0
                     except APIError as error:
                         if error.status not in {404, 405} or error.code:
                             raise
@@ -703,8 +705,8 @@ class Client:
             if failure is not None:
                 pace.observe(self._clock.monotonic() - started)
             delay = pace.next(self._clock.monotonic(), event, failure)
-            if batched and failure is None:
-                delay = max(0, delay - (self._clock.monotonic() - started))
+            if held and failure is None:
+                delay = 0
             if self.poll_interval is not None:
                 delay = max(self.poll_interval, delay)
             if end is not None:

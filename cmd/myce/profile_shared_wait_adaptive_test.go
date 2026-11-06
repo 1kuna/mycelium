@@ -202,3 +202,36 @@ func TestSharedProfileAdaptiveCompletionRecomputesNextRead(t *testing.T) {
 		t.Fatal("progressing observer did not retire", receipt, err)
 	}
 }
+
+func TestSharedProfileAdaptiveUnknownDoesNotStarveLaterBatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			state := "running"
+			if filepath.Base(r.URL.Path) == "job-256" {
+				state = "succeeded"
+			}
+			adaptiveReply(w, r, state)
+			return
+		}
+		var req myce.WaitRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.IDs[0] == "job-000" {
+			w.WriteHeader(404)
+			_, _ = io.WriteString(w, `{"code":"job_unknown"}`)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(myce.WaitReply{Jobs: []myce.WaitState{{ID: "job-256", State: "succeeded", Revision: 1}}})
+	}))
+	defer server.Close()
+	watches := map[string]*sharedProfileWatch{}
+	entries := []string{}
+	for i := 0; i < 257; i++ {
+		name := fmt.Sprintf("job-%03d", i)
+		entries = append(entries, name)
+		watches[name] = &sharedProfileWatch{registration: sharedProfileRegistration{Observer: profileObserver{Queue: server.URL}, Token: "fixture"}, receipt: profileReceipt{JobID: name}}
+	}
+	result := readSharedProfileAuthority(context.Background(), entries, watches, sharedProfileGroup{after: map[string]uint64{}}, myce.RealClock{})
+	if len(result.finished) != 1 || result.finished[0].entry != "job-256" {
+		t.Fatalf("unknown first batch starved completion: %+v", result.finished)
+	}
+}

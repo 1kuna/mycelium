@@ -181,10 +181,12 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 		var readErr error
 		var batchJobs map[string]*myce.Job
 		var batchErr error
+		held := false
 		for _, id := range ids {
 			if !pending[id] {
 				continue
 			}
+			deadline, event = waitPendingTimes(pending, metadata, ownerDeadline, clock.Now())
 			remaining := deadline.Sub(clock.Now())
 			if !deadline.IsZero() && remaining <= 0 {
 				return waitError(3, "wait timed out; jobs continue")
@@ -210,12 +212,21 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 			}
 			var j *myce.Job
 			var err error
-			if batchSupported {
+			if !observed[id] {
+				// A batch state omits spec metadata. Every job needs its own
+				// diagnostic read before deadlines can constrain observation.
+				var supported bool
+				j, supported, err = c.GetJobWaitCapability(requestCtx, id)
+				// Structured output requires full diagnostics on every observation.
+				batchSupported = (batchSupported || supported) && !jsonOutput
+			} else if batchSupported {
 				if batchJobs == nil {
 					batchJobs = map[string]*myce.Job{}
 					var reply myce.WaitReply
-					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, pace.Seconds(clock.Now(), event))
+					seconds := pace.Seconds(clock.Now(), event)
+					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, seconds)
 					if batchErr == nil {
+						held = seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0
 						for i, state := range reply.Jobs {
 							revisions[state.ID] = state.Revision
 							batchJobs[ids[i]] = &myce.Job{ID: state.ID, State: state.State, Reason: state.Reason}
@@ -223,11 +234,7 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 					}
 				}
 				j, err = batchJobs[id], batchErr
-			} else if !observed[id] {
-				j, batchSupported, err = c.GetJobWaitCapability(requestCtx, id)
-				// Structured output promises full current diagnostics; lightweight
-				// batch/wait projections intentionally omit nonterminal reasons.
-				batchSupported = batchSupported && !jsonOutput
+
 			} else {
 				j, err = read(requestCtx, id)
 			}
@@ -340,8 +347,8 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 		deadline, event = waitPendingTimes(pending, metadata, ownerDeadline, clock.Now())
 		pace.Observe(clock.Now().Sub(started), changed && !unavailable)
 		delay := pace.Delay(clock.Now(), event, readErr, c.Jitter)
-		if !unavailable && batchSupported {
-			delay = max(0, delay-clock.Now().Sub(started))
+		if !unavailable && held {
+			delay = 0
 		}
 		if !deadline.IsZero() {
 			if !clock.Now().Before(deadline) {

@@ -546,6 +546,9 @@ batchLoop:
 					}
 				}
 				group.unknownOffset = (group.unknownOffset + probeCount) % len(batch)
+				// An unknown accepted receipt is local to this batch. Later
+				// batches must still be observed; only overload stops the authority.
+				continue
 			} else if !myce.RetryStatusRead(readErr) {
 				for _, entry := range batch {
 					finish(entry, nil, readErr)

@@ -116,7 +116,7 @@ func TestClientAdaptiveWaitLegacyAndBatch(t *testing.T) {
 			if err != nil || j.State != "succeeded" {
 				t.Fatal(j, err)
 			}
-			if len(sleeps) < 4 || sleeps[3] <= sleeps[1] {
+			if !batch && (len(sleeps) < 4 || sleeps[3] <= sleeps[1]) {
 				t.Fatal("unchanged reads did not back off", latency, batch, sleeps)
 			}
 			if batch && (len(holds) == 0 || holds[len(holds)-1] < holds[0]) {
@@ -243,5 +243,40 @@ func TestClientAdaptiveBufferedSocketProgress(t *testing.T) {
 	}
 	if _, err := progress.Read(buffer); !errors.Is(err, errFileTransferStalled) {
 		t.Fatal("stopped stream was not detected", err)
+	}
+}
+
+func TestClientAdaptiveLongPollCompletion(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
+	completion := clock.Now().Add(350 * time.Second)
+	c := Client{URL: "http://fixture.invalid", Clock: clock, Pause: func(_ context.Context, d time.Duration) error {
+		if clock.Now().After(completion.Add(time.Minute)) {
+			return errors.New("completion hidden by sleep")
+		}
+		clock.Advance(d)
+		return nil
+	}, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		clock.Advance(10 * time.Millisecond)
+		if r.Method == "POST" {
+			var req WaitRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			clock.Advance(min(time.Duration(req.Seconds)*time.Second, max(0, completion.Sub(clock.Now()))))
+		}
+		state := "running"
+		if !clock.Now().Before(completion) {
+			state = "succeeded"
+		}
+		body := `{"id":"job","state":"` + state + `"}`
+		if r.Method == "POST" {
+			body = `{"jobs":[{"id":"job","state":"` + state + `","revision":1}]}`
+		}
+		if clock.Now().After(completion.Add(time.Minute)) {
+			return nil, errors.New("completion hidden by sleep")
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"X-Myce-Wait": {"batch-v1"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}}
+	job, err := c.Wait(context.Background(), "job")
+	if err != nil || job.State != "succeeded" || clock.Now().After(completion.Add(21*time.Second)) {
+		t.Fatal("long-poll completion hidden by sleep", err, clock.Now())
 	}
 }
