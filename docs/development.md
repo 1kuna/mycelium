@@ -108,6 +108,13 @@ ignored `.reports/` folder (for example redirect stdout/stderr there).
 On macOS, the full supervisor holds one of two cross-checkout filesystem locks
 for its entire lifetime, independent of package commands or test expressions. It also
 accounts for older standalone full race commands before entering a slot. The
+slot also has a `mycelium-full-gate-N.custody` record beside its lock in
+`GOCACHE`, containing the run marker and scratch directory. Only verified fixture
+exit removes that record; failed inventory or supervisor death retains occupancy
+after the OS releases the lock. Recovery requires verifying the recorded run's
+fixtures have exited before removing its custody record. Never clear another
+owner's record merely to admit more work.
+The
 two-suite boundary preserves the repository's observed Mac safety rule: more
 concurrent full suites caused false failures. Linux fleet gates rely on the
 queue's CPU and learned-memory admission instead of this Mac-only count; waiting

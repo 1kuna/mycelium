@@ -48,12 +48,12 @@ class GateBudgetTests(unittest.TestCase):
                     with patch.object(budget.time, 'sleep', side_effect=RuntimeError('blocked')):
                         with self.assertRaisesRegex(RuntimeError, 'blocked'):
                             budget.acquire_full_slot()
-                    first.close()
+                    budget.release_full_slot(first, True)
                     replacement = budget.acquire_full_slot()
-                    replacement.close()
+                    budget.release_full_slot(replacement, True)
                 finally:
                     first.close()
-                    second.close()
+                    budget.release_full_slot(second, True)
 
     def test_legacy_and_higher_occupied_slot_block_third_suite(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -69,7 +69,33 @@ class GateBudgetTests(unittest.TestCase):
                 higher.close()
             with patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else legacy):
                 admitted = budget.acquire_full_slot()
-                admitted.close()
+                budget.release_full_slot(admitted, True)
+
+    def test_unconfirmed_cleanup_retains_admission_after_owner_exit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            gate = Path(folder) / 'scripts/gate.sh'
+            processes = '123 go test -race -run .* mycelium/pkg\n'
+            child = unittest.mock.Mock()
+            child.wait.return_value = 0
+            with patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else processes):
+                first = budget.acquire_full_slot()
+                peer = budget.acquire_full_slot()
+                try:
+                    with (patch.object(sys, 'platform', 'darwin'),
+                          patch.object(sys, 'argv', ['gate-budget.py', str(gate), 'full']),
+                          patch.object(budget, 'acquire_full_slot', return_value=first),
+                          patch.object(budget.subprocess, 'Popen', return_value=child),
+                          patch.object(budget, 'stop_fixtures', return_value=False),
+                          contextlib.redirect_stdout(io.StringIO()),
+                          contextlib.redirect_stderr(io.StringIO())):
+                        self.assertEqual(budget.main(), 1)
+                    self.assertTrue(first.closed)
+                    with patch.object(budget.time, 'sleep', side_effect=RuntimeError('blocked')):
+                        with self.assertRaisesRegex(RuntimeError, 'blocked'):
+                            budget.acquire_full_slot()
+                finally:
+                    first.close()
+                    budget.release_full_slot(peer, True)
 
     def test_quick_overlaps_packages_and_collects_failure(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -2,6 +2,7 @@
 """Supervise gate custody and stop fixtures before removing working files."""
 import os
 import fcntl
+import json
 from pathlib import Path
 import shutil
 import re
@@ -162,11 +163,18 @@ def acquire_full_slot():
                     handle = (cache / f'mycelium-full-gate-{index}.lock').open('a')
                     try:
                         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        available.append(handle)
+                        if Path(handle.name).with_suffix('.custody').exists():
+                            handle.close()
+                        else:
+                            available.append(handle)
                     except BlockingIOError:
                         handle.close()
                 occupied = 2 - len(available)
                 if available and occupied + legacy < 2:
+                    handle = available[0]
+                    # Persist occupancy before starting work. A supervisor exit
+                    # releases flock even when its fixtures have not exited.
+                    Path(handle.name).with_suffix('.custody').touch()
                     return available.pop(0)
             finally:
                 for handle in available:
@@ -175,6 +183,14 @@ def acquire_full_slot():
             print('waiting for a full-race slot (two-suite custody boundary)', flush=True)
             announced = True
         time.sleep(.25)  # Local semaphore readiness check, not a work deadline.
+
+
+def release_full_slot(slot, stopped):
+    if stopped:
+        Path(slot.name).with_suffix('.custody').unlink()
+    else:
+        print('gate: full-suite custody unconfirmed; admission slot retained', file=sys.stderr)
+    slot.close()
 
 
 def main():
@@ -190,6 +206,9 @@ def main():
     root.mkdir(exist_ok=True)
     scratch = tempfile.mkdtemp(prefix='run.', dir=root)
     marker = 'GATE_RUN_ID=' + uuid.uuid4().hex
+    if slot is not None:
+        Path(slot.name).with_suffix('.custody').write_text(
+            json.dumps(dict(marker=marker, scratch=scratch)) + '\n')
     child_env = dict(os.environ, MYCE_GATE_BUDGET='1', GATE_SCRATCH=scratch)
     child_env['GATE_RUN_ID'] = marker.split('=', 1)[1]
     child = subprocess.Popen(['bash', *sys.argv[1:]], env=child_env, start_new_session=not bool(os.environ.get('MYCE_PROCESS_SESSION')))
@@ -215,7 +234,7 @@ def main():
             if status == 0:
                 status = 1
         if slot is not None:
-            slot.close()
+            release_full_slot(slot, stopped)
         print(f'gate {mode}: exit={status} wall={int(time.monotonic() - started)}s', flush=True)
     return status
 
