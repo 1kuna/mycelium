@@ -20,9 +20,10 @@ targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolve
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
 From the next release, `host_capacity_accumulation` means new CPU work is waiting
-so ready accelerator work can acquire host RAM/cores as running CPU attempts
-finish. Mycelium chooses one fitting target; higher tiers and spare capacity
-elsewhere remain eligible. See [waiting reasons](advanced.md#when-a-job-waits).
+so ready CPU or accelerator work can acquire host RAM/cores as running CPU
+attempts finish. Mycelium chooses one fitting target; earlier fair turns,
+higher tiers and spare capacity elsewhere remain eligible. See
+[waiting reasons](advanced.md#when-a-job-waits).
 On releases with inventory deltas, status omits full executable inventories. Use
 resolve/placement diagnostics for `needs.tools`; workers automatically refresh
 inventory after queue restart before qualifying tool-dependent work.
@@ -114,8 +115,16 @@ On releases with the mixed-version cache correction, workers without an optional
 shared-input cache-capacity report retain staging-time admission. Reporting workers
 are checked before placement; staging capacity failures give required/available/limit bytes.
 
-If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep full
-`myce status` out of loops. Record a hold with its next owner and continue
+Use `myce status` for a fleet overview and `myce status --history` for all retained
+jobs. **Available from the next release:** status and inspection JSON include
+`freshness.captured_at`, `served_at`, `age_seconds` and `cached`; `now` remains
+capture time. Interpret worker freshness and diagnostics at that time, allowing
+for the response age. Inspection and filtered/full status take a fresh capture;
+default status can reuse a generation for up to one second, with immediate
+terminal/release invalidation.
+
+If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
+repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
@@ -123,6 +132,12 @@ observed behavior; omit credentials, webhook URLs, private paths and host detail
 On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. During measured control pressure, expensive/lower-value nonproduction reads can return 429; honor `Retry-After` and prefer batched waits. Production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
 
 ## Explicit model master downloads (next release)
+
+Declared `model_snapshots` also handle SMB/CIFS `XSym` emulated symlinks from
+the next release: jobs get verified blob bytes, or a `model_snapshot_mismatch`
+or `model_snapshot_escape` refusal. Keep the original hub cache intact; do not
+copy weights or rewrite shared links to work around a refusal. See
+[declared snapshots](advanced.md#submit) for submission and read-only access.
 
 For every declared bundle file, including nested paths, run
 `myce model fetch BUNDLE/FILE --model-root PARENT --url URL --size-bytes BYTES --sha256 HASH`.
@@ -140,7 +155,14 @@ Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium
 resumes after measured recovery; an operator drain remains independent. Running
 attempts retain custody. NAS/checkpoint degradation withholds dependent work;
-independent local work can remain eligible. `host_degraded` and
+independent local work can remain eligible. Existing OS automounts are re-triggered
+with backoff. `mount_linux_operator_required` needs the storage operator to
+restore the configured mount; `mount_macos_approval_required` needs the owner to
+restore it and approve Keychain if requested. `host_mount_action_required` uses
+the existing health wake channel, including escalation after a generic alert.
+`mount_probe_stalled` retains its one request without blocking heartbeats; ask
+the storage owner to inspect the OS session. Workers never prompt for credentials
+or run privileged mount commands. `host_degraded` and
 `host_mount_degraded` use existing health notifications; silent-worker alerts
 carry `host_silent`. Read the job's waiting reason or one needed status snapshot;
 no agent polling or drain/resume loop is needed. Foreign CPU/RSS leaders are

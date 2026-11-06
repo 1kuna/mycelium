@@ -386,12 +386,16 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			if err = sharedInputProgress(ctx); err != nil {
 				return err
 			}
-			source, e := c.nasPathContext(ctx, nasRoot, filepath.ToSlash(filepath.Join(s.NAS, name)))
-			if e != nil {
-				return e
+			source := s.sources[name]
+			if source == "" {
+				var e error
+				source, e = c.nasPathContext(ctx, nasRoot, filepath.ToSlash(filepath.Join(s.NAS, name)))
+				if e != nil {
+					return e
+				}
 			}
 			target := filepath.Join(dst, name)
-			if e = copySharedFile(ctx, source, target, ref); e != nil {
+			if e := copySharedFile(ctx, source, target, ref); e != nil {
 				return e
 			}
 			files[name] = ref

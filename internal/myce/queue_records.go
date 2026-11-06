@@ -12,6 +12,7 @@ import (
 // enter through touchJob/touchSubmission; insertions use putJob/putSubmission.
 // This is an in-memory index, rebuilt from the same SQLite records on startup.
 type queueRecords struct {
+	statusHistory             map[string]statusHistoryEntry
 	encodings                 map[string]catalogEncoding
 	catalog                   map[string]bool
 	removed                   map[string]*Job
@@ -84,6 +85,7 @@ func mutableJob(j *Job) bool {
 }
 func (q *Queue) indexJob(id string, j *Job) {
 	if j == nil {
+		delete(q.records.statusHistory, id)
 		delete(q.records.live, id)
 		q.records.files.set(id, time.Time{})
 		q.records.history.set(id, time.Time{})
@@ -93,8 +95,10 @@ func (q *Queue) indexJob(id string, j *Job) {
 	}
 	if mutableJob(j) {
 		q.records.live[id] = j
+		delete(q.records.statusHistory, id)
 	} else {
 		delete(q.records.live, id)
+		q.indexStatusHistory(id, j)
 	}
 	var at time.Time
 	if terminal(j.State) && hasJobFiles(j) && !j.FilesExpired && !deliveryPending(j) {
@@ -166,6 +170,9 @@ func (q *Queue) rebuildRecords() {
 	_, _, q.records.references = q.fileReferences(false)
 }
 func (q *Queue) liveJobs() map[string]*Job {
+	if q.observationLive != nil {
+		return q.observationLive
+	}
 	if q.records == nil || q.simulation || !q.records.updating {
 		return q.s.Jobs
 	}

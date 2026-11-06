@@ -2,18 +2,19 @@ package myce
 
 import "fmt"
 
-// CPU and accelerator targets share one physical host ledger. A ready GPU job
+// CPU and accelerator targets share one physical host ledger. A ready job
 // must not disappear from CPU admission just because existing CPU reservations
 // currently consume its RAM or cores (#787). This is an admission projection,
 // never a stop plan: running work finishes under its existing contract.
 type hostBackfillDemand struct {
 	job     *Job
 	machine *Machine
+	order   *candidateSet
 }
 
 // Select one currently usable target per demand, preferring immediate capacity
 // and then ordinary placement value. Busy cards, cold environments, missing
-// qualification, pressure and stale workers cannot withhold CPU backfill. Only
+// qualification, pressure and stale workers cannot withhold backfill. Only
 // host capacity released by finite CPU work is projected; device capacity and
 // all other current readiness checks remain unchanged.
 func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfillDemand {
@@ -23,7 +24,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	scan.hostBackfill = map[string]*hostBackfillDemand{}
 	demands := []*Job{}
 	for _, j := range q.liveJobs() {
-		if j.State == "queued" && !j.Spec.Needs.cpuOnly() && finiteYieldJob(j) {
+		if j.State == "queued" && finiteYieldJob(j) {
 			demands = append(demands, j)
 		}
 	}
@@ -33,7 +34,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	live := q.placementLiveness(scan)
 	projections := map[string]*Machine{}
 	for _, m := range scan.machines {
-		if m.GPU == "cpu" || !live[m.ID] || q.preparationActive(m) || q.preparationStopping(m) || m.HostMemoryError != "" || hostHasUnifiedCUDA(m) && !validHostMemoryObservation(m.MemoryObservation) {
+		if !live[m.ID] || q.preparationActive(m) || q.preparationStopping(m) || m.HostMemoryError != "" || hostHasUnifiedCUDA(m) && !validHostMemoryObservation(m.MemoryObservation) {
 			continue
 		}
 		jobs := []*Job{}
@@ -51,6 +52,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		projections[targetKey(m)] = &projected
 	}
 	choices := []*hostBackfillDemand{}
+	orders := map[string]*candidateSet{}
 	for _, j := range demands {
 		var best *hostBackfillDemand
 		for _, m := range scan.machines {
@@ -59,13 +61,18 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				continue
 			}
 			for _, candidate := range q.memoryCandidates(j, m) {
-				if candidate.Spec.Needs.cpuOnly() || !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !q.batchSlotFree(m, candidate) || !fits(candidate, projected, m.FreeMemoryGB) {
+				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !q.batchSlotFree(m, candidate) || !fits(candidate, projected, m.FreeMemoryGB) {
 					continue
 				}
+				key := targetKey(m)
+				if orders[key] == nil {
+					orders[key] = &candidateSet{q: q, scores: map[string]float64{}, actives: map[string]float64{}}
+				}
+				orders[key].jobs = append(orders[key].jobs, candidate)
 				ready := fits(candidate, m, m.FreeMemoryGB)
 				bestReady := best != nil && fits(best.job, best.machine, best.machine.FreeMemoryGB)
 				if best == nil || ready && !bestReady || ready == bestReady && q.targetPlacementBetter(candidate, m, best.machine, scan) {
-					best = &hostBackfillDemand{candidate, m}
+					best = &hostBackfillDemand{job: candidate, machine: m}
 				}
 			}
 		}
@@ -75,15 +82,14 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	}
 	// Use the existing tier/fair-turn comparator without recursively constructing
 	// candidate sets (these demands are precisely the ones ordinary fitting can
-	// omit). All otherwise ready demands participate in the fair-share scores.
-	set := &candidateSet{q: q, scores: map[string]float64{}, actives: map[string]float64{}}
+	// omit). Only projects eligible on that target compete for its fair share;
+	// demand restricted to another host cannot change a local fair turn.
 	for _, choice := range choices {
-		set.jobs = append(set.jobs, choice.job)
-	}
-	for _, choice := range choices {
+		set := orders[targetKey(choice.machine)]
+		choice.order = set
 		host := hostID(choice.machine)
 		previous := scan.hostBackfill[host]
-		if previous == nil || q.beforeWithFair(choice.job, previous.job, choice.machine, set.score, set.active) {
+		if previous == nil || q.beforeWithFair(choice.job, previous.job, q.s.Machines[choice.machine.ID], set.score, set.active) {
 			scan.hostBackfill[host] = choice
 		}
 	}
@@ -91,7 +97,13 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 }
 
 func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand) bool {
-	if fence == nil || !j.Spec.Needs.cpuOnly() || q.comparePriority(j.Spec, fence.job.Spec) < 0 {
+	if fence == nil || j.ID == fence.job.ID {
+		return true
+	}
+	// Keep the existing tier and fair-turn order, including accelerator-first
+	// ordering across CPU/device views of the same worker. A demand protects
+	// capacity only against work behind it, never against its own admission.
+	if q.beforeWithFair(j, fence.job, q.s.Machines[m.ID], fence.order.score, fence.order.active) {
 		return true
 	}
 	d := fence.job.Spec.Needs
@@ -125,7 +137,7 @@ func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {
 		}
 	}
 	if demand != nil {
-		return fmt.Sprintf("host_capacity_accumulation: waiting for accelerator job %s to acquire host RAM/cores; running attempts finish normally", demand.ID)
+		return fmt.Sprintf("host_capacity_accumulation: waiting for job %s to acquire host RAM/cores; running attempts finish normally", demand.ID)
 	}
 	return ""
 }

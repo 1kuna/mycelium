@@ -2412,8 +2412,8 @@ authorized owner, then explicitly rerun `myce fleet upgrade`):
 | Code | Next step |
 | --- | --- |
 | `fleet_slot_unapproved` | Compare running and installed slot identities in worker status and the private receipt. Verify and approve the installed release, or recover through the authorized installation owner; never bypass this refusal. |
-| `fleet_instruction_stale` | Refresh queue status and current operation/session/revision and runtime proof; let exact custody settle. An initial launch authorization refusal is refetched at the next normal worker poll, before any intent is written. After durable intent, inspect the receipt and explicitly rerun; never automatically repeat a helper or restart. |
-| `fleet_ack_stale` | Reconcile the receipt with the current operation/session/revision; an obsolete ack cannot replace current progress. Inspect the earlier failure first: an ack after an operation stopped is expected to be stale. |
+| `fleet_instruction_stale` | Refresh queue status and current operation/session/revision and runtime proof; let exact custody settle. Before helper submission, refetch occurs at the next normal runtime poll. A pending receipt proves submission has not begun. A launched helper refetches its frozen instruction and retries only the refused control message once fresh proof/custody permits; publication and restart are not replayed. |
+| `fleet_ack_stale` | The helper refetches before retrying the same control message. An obsolete operation/session or superseded helper stops locally without reporting a new terminal failure; its receipt retains the last durable phase. An ack after an operation stopped is expected to be stale. |
 | `fleet_maintenance_changed`, `fleet_authorization_refused` | Reconcile maintenance ownership, exact custody, current runtime and queue authorization; never override the operator's drain. |
 | `fleet_ack_failed` | Restore authenticated queue connectivity, then reconcile the durable receipt before rerunning. |
 | `fleet_artifact_download_failed` | Restore authenticated artifact connectivity and queue/publisher availability. |
@@ -2446,9 +2446,25 @@ authorized owner, then explicitly rerun `myce fleet upgrade`):
 An initial authorization can become stale with an unchanged revision: a slow
 instruction request may outlive the queue's runtime-proof freshness window or
 custody may change before authorization. Cancellation/release alone does not
-advance the fleet revision. Refetching before durable intent changes no installed
-bytes and starts no helper; every later attempt still rechecks queue authority.
-Refusals after intent stay durable and require explicit operator recovery.
+advance the fleet revision. Before manager submission, the next normal runtime
+poll refetches and rechecks authority; a pending receipt can resume because no
+helper has been submitted. Once submission begins, that revision cannot launch
+again automatically, even after an ambiguous manager response.
+
+A launched helper also refetches after stale authorization or acknowledgement.
+An empty fenced response waits for fresh proof and exact custody; a matching
+instruction permits retrying only that control request, with its original
+operation, release, session and helper revision. A newer operator revision alone
+does not replace an active helper. A durable replacement claim, changed session,
+stopped operation or maintenance refusal ends recovery without authorizing any
+mutation. Before restart, the helper rechecks the installed target hash, saved
+configuration hash, locally provisioned publisher trust and original manager PID
+after its last control wait. Obsolete control messages do not create failed
+receipts or stop newer progress. Genuine validation/maintenance failures still retain their terminal
+receipt and repair guidance. Durable restarting intent still prevents repeating
+a manager restart after interruption. This recovery requires the updated queue
+and helper binaries; it cannot repair an older helper already stopped by #739's
+post-intent behavior.
 
 A failed worker step on an operator-disabled host is retained as
 per-host `phase: failed` with its failure code and repair guidance; the operation
@@ -2721,6 +2737,60 @@ heartbeats continuing, restore the network, and verify the share mounts and the
 held work is admitted without restarting either service. This native boot check
 is separate from the laptop fixture and requires an authorized test window.
 
+### Worker mount recovery (Linux and macOS)
+
+Workers reuse the host-hygiene mount probe for each configured checkpoint/NAS
+root. Each attempt stats the root and reads at most one directory entry. Access
+re-triggers an existing Linux systemd/autofs or macOS autofs mount through the
+OS; no separate repair daemon or privileged command is installed. Cached mount
+inventory is checked again after access, so an empty local mountpoint cannot
+pretend to be a recovered NAS. Independent local checkpoint roots remain local.
+
+The pending deadline is learned from this host's successful mount observations
+using the hygiene prediction band. Completed successful probes train through
+hygiene warmup before slow-completion classification; a single fast sample
+cannot permanently reject ordinary successful variation. Probe-format upgrades
+invalidate only incompatible mount baseline evidence, preserving other health
+evidence and historical diagnostics. Before any successful observation, one
+existing sampling interval bounds cold/unknown evidence. Three consecutive slow
+or stalled observations confirm degradation; explicit filesystem failures and
+unverified cold probes withhold dependent work immediately. Heartbeat delivery
+never waits for these filesystem calls. A stuck kernel request retains its one
+slot until it returns, including after its deadline; retries cannot multiply it.
+
+Returned failures retry with exponential backoff starting at the larger of the
+sampling interval and measured operation cost. The ceiling is the larger of the
+existing signal-freshness allowance and that measured cost: this limits repeated
+connection pressure while keeping recovery discovery within the host's evidence
+budget. Three newly completed healthy probes clear the hold automatically.
+NAS-dependent work waits with a typed root reason; local/cached work continues
+when its own dependencies are available. Existing operator drains and attempt
+custody are unchanged.
+
+On **Linux**, a surviving automount is retried by access, including a late
+network after boot. Apply the operator-owned boot integration above to prevent
+`mount-start-limit-hit`. When the automount has disappeared, the worker reports
+`mount_linux_operator_required`: an authorized operator must restore the exact
+mount/automount through the existing system configuration. The worker never
+runs root mount helpers, resets system units, or changes credentials.
+
+On **macOS**, access retries an existing autofs path and lets the OS reconnect
+an existing SMB session. If no mount/automount remains, or access is denied,
+`mount_macos_approval_required` asks the owner to restore the configured mount
+and approve Keychain access if macOS requests it. This code identifies the need
+for owner action, not the exact cause of a Keychain refusal. It never launches
+Finder, displays a password dialog, reads Keychain, or reconstructs an SMB URL.
+A dead SMB request that never returns stays `mount_probe_stalled`; inspect the
+OS session through the storage owner rather than force-unmounting active data.
+
+Status exposes these codes in `host_health.history[].mounts[].reason` and
+`unavailable_roots`. The existing #200 wake channel emits a deduplicated
+`host_mount_action_required` event, including escalation after an earlier
+`host_mount_degraded` event. Diagnoses contain root roles and fixed codes only,
+never paths, mount sources, syscall text or credentials. Native late-network
+boot, Wi-Fi/DNS loss and dead-SMB qualification require a separately authorized
+window; laptop fake-filesystem tests do not establish native remount success.
+
 On Linux, missing-runtime refusal applies to NVIDIA display controllers and
 Intel discrete PCIe display endpoints (Intel vendor ID and positive
 [`current_link_width`](https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-bus-pci)
@@ -2929,8 +2999,8 @@ If the Ed25519 publisher key is on this same Mac, append
 `--signing-key PRIVATE_SIGNING_KEY` to `fleet` or `assemble` to generate the
 signed `release.json` through the existing `myce release manifest` command.
 Otherwise transfer the verified assembled directory unchanged to the provisioned
-key host, including Linux, and use a host-native `myce` with these options and Go
-installed for reading build IDs:
+key host, including Linux, and use a host-native `myce` with these options.
+The signing-only publisher needs no Go toolchain:
 
 ```sh
 myce release manifest --dir ASSEMBLED_DIR --version VERSION --commit COMMIT \
@@ -2941,8 +3011,10 @@ myce release manifest --dir ASSEMBLED_DIR --version VERSION --commit COMMIT \
 Use the receipt digest retained independently from native assembly; computing it
 only from the transported receipt (or trusting its adjacent checksum file) does
 not authenticate the recorded native checks. The publisher rechecks manifest,
-artifact and build-receipt hashes, source/version, target/CGO metadata and build
-IDs without executing any candidate artifact. Native Darwin qualification still
+artifact and build-receipt hashes, source/version and target/CGO metadata without
+executing any candidate artifact. Exact build-ID version/commit proof comes from
+the authenticated native assembly receipt, whose artifact hashes must match.
+Native Darwin qualification still
 happens on the Mac during assembly. Missing proof or a mismatch refuses signing.
 The signer parses the newline-terminated unsigned manifest and signs exactly the
 serialized JSON value it embeds in `release.json`; never sign the unsigned file

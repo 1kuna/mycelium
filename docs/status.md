@@ -70,6 +70,15 @@ filtered and full views and per-job GET. This can repeat observation work during
 completions; ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
 injected queue time at capture, rather than the response completion time.
 
+Every status and inspection response includes additive `freshness` metadata:
+`captured_at` equals `now`; `served_at` is the queue time when the response is
+assembled; `age_seconds` is their nonnegative difference; and `cached` says
+whether this request reused a previously completed default-status generation.
+The age includes projection and observation I/O, even for an uncached response.
+It excludes JSON encoding and network transfer after assembly. Interpret a
+cached or slow observation at its capture time, including worker freshness.
+Old CLIs continue to decode the existing fields.
+
 From s072, machine `shared_input_cache` reports `capacity_bytes`, `free_bytes`
 and `evictable_bytes`. Free space excludes cache allocation and outstanding
 staging reservations; evictable space contains only inactive reproducible entries.
@@ -136,7 +145,13 @@ another host's accepted sample alone never explains its mutation (#620).
 Only the unfiltered default shares the one-second cache. Filtered/full reads are
 fresh. Snapshot capture keeps scheduling inputs and dependency state under the
 queue lock; projection, usage queries, file inventory, encoding the reply and
-compression run after release. No bulk file or network I/O runs under `q.mu`.
+compression run after release. Cold retained jobs have immutable, payload-free
+observation inputs maintained by the existing committed-record journal; reads
+copy those inputs outside the lock. Mutable jobs and worker facts are still
+captured together under the lock. Each detached generation reuses one placement
+scan and memory-evidence catalog across ordering, startup and blocker diagnostics;
+derived capacity views keep their own scans. No bulk file or network I/O runs
+under `q.mu`. No jobs, curves, custody or foreign-load fields are removed.
 
 Jobs with explicitly recovered outputs expose an append-only `recovered_results`
 list in status and job GET. Each record has `kind: recovered`, its own result ID,
@@ -441,10 +456,11 @@ envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
 environment is not prepared and that the host never builds environments.
 
-`host_capacity_accumulation` names a ready queued accelerator job whose host RAM
-or cores would otherwise be repeatedly consumed by CPU backfill (#787). New
-CPU work at the same or lower tier waits on the demand's selected host unless
-it fits beside the demand. Existing attempts finish normally. The projection
+`host_capacity_accumulation` names a ready queued job whose host RAM or cores
+would otherwise be repeatedly consumed by smaller backfill (#787). From the
+next release this also covers CPU-only demand. New work behind the demand in
+tier/fair-turn order waits on its selected host unless it fits beside the
+demand. Existing attempts finish normally. The projection
 selects one currently ready target per demand, prefers immediate capacity, and
 otherwise uses ordinary placement value. It retains current device capacity,
 environment, qualification, cache, maintenance and liveness requirements; cold,
@@ -1806,6 +1822,19 @@ transaction receipt, with matching config, updater lock and proven helper absenc
 It never scans or deletes rollback binaries, bootstrap release archives, active
 state, receipts or unknown staging. Foreign processes, services and shared
 personal/project caches are outside this collector.
+
+Worker mount recovery reuses `host_health.history[].mounts` and
+`unavailable_roots`. `mount_probe_pending` is cold/unverified access;
+`mount_probe_slow` and `mount_probe_stalled` use host-relative latency evidence;
+`mount_probe_failed` is returned I/O failure. `mount_inventory_unavailable`
+means the cached mount table could not establish backing storage, and
+`mount_automount_pending` means access has not established the network mount.
+`mount_linux_operator_required` and `mount_macos_approval_required` require
+storage-owner action, with a deduplicated `host_mount_action_required` health
+wake even after a prior generic degradation. The latter includes possible
+Keychain approval; it does not claim to diagnose a specific credential failure.
+Only dependent work is withheld; fresh completed healthy probes resume it.
+See [platform recovery](operations.md#worker-mount-recovery-linux-and-macos).
 
 ### Installed executable versus running image (#824)
 

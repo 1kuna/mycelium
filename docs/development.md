@@ -116,6 +116,17 @@ see [agent offload](adapter.md). Linux runs the Linux builds, vet and full
 race/dev suite. The native Darwin CGO build explicitly skips there and remains
 a separate macOS check; the Linux gate is not proof of that release target.
 
+`myce run --profile wide-reads-benchmark` runs `BenchmarkStatusReadScale` on a
+fleet CPU worker. It measures cold default/full/inspection HTTP reads (including
+JSON) beside real SQLite worker check-ins at the one-second heartbeat cadence.
+The tiny fixture has 16 retained jobs, four queued jobs, 16 curves and three
+workers; the large fixture has 6,500 retained constrained executions, 110 queued
+jobs, 1,400 curves and five workers. All queue decisions use a fixed injected
+Clock. Results report read latency and read/check-in mutex hold separately.
+Six measured reads per endpoint make the reported p99 the sample maximum,
+not a production tail estimate. Compare accepted outputs from identical profile
+versions and CPU placement; natural fleet latency remains release-owner proof.
+
 ### Release upgrade compatibility
 
 Full also runs `python3 scripts/upgrade-compat.py run`. This builds race-instrumented

@@ -74,7 +74,7 @@ func (q *Queue) startupPending(j *Job) bool {
 	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
 }
 
-func (q *Queue) startWaitingReason(j *Job) string {
+func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
 	if reason := q.diskWaitingReason(j, j.ProductionHost); reason != "" {
 		return reason
 	}
@@ -112,7 +112,7 @@ func (q *Queue) startWaitingReason(j *Job) string {
 		}
 		return "waiting for command start on " + m.ID + " (preparing environment or command)"
 	}
-	return q.waitReason(j)
+	return q.waitReason(j, scans...)
 }
 
 // Expire before planning any new reclaim or assignment. Release custody is independent.
@@ -202,8 +202,8 @@ func (q *Queue) startupReleaseDetail(host string) HoldDetail {
 	return detail
 }
 
-func (q *Queue) startStatusReason(j *Job) string {
-	return q.startWaitingReason(j) + fmt.Sprintf("; %.0fs left to start", max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds()))
+func (q *Queue) startStatusReason(j *Job, scans ...*placementScan) string {
+	return q.startWaitingReason(j, scans...) + fmt.Sprintf("; %.0fs left to start", max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds()))
 }
 
 // An unknown fleet may still join; an explicit operator disable is not incoming room.

@@ -1,0 +1,27 @@
+name: mycelium-wide-reads-benchmark
+project: mycelium
+class: test
+source:
+  git: HEAD
+run:
+  command:
+    - bash
+    - -ec
+    - |
+      go mod download
+      go test ./internal/myce -run '^$' -bench '^BenchmarkStatusReadScale$' -benchtime=6x -count=1 > wide-reads-benchmark.txt 2>&1
+      cat wide-reads-benchmark.txt
+  env:
+    GOMAXPROCS: '2'
+needs:
+  network: true
+  cpu_cores: 2
+  memory_gb: 6
+  platform: cpu
+targets:
+  - {os: linux, arch: amd64, platform: cpu}
+  - {os: linux, arch: arm64, platform: cpu}
+environment: mycelium-gate
+outputs:
+  wide-reads-benchmark.txt: results
+check: [grep, -qx, PASS, wide-reads-benchmark.txt]
