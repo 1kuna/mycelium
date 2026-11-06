@@ -966,6 +966,13 @@ func printStatus(s myce.Snapshot, full bool) {
 		} else {
 			fmt.Printf("worker %s release: unknown\n", m.ID)
 		}
+		if p := m.Fleet; p != nil && (p.SlotMismatch || p.SlotError != "") {
+			slot := "unavailable"
+			if p.InstalledSlot != nil {
+				slot = p.InstalledSlot.SHA256
+			}
+			fmt.Printf("worker %s installed slot differs: running=%s/sha256:%s slot=sha256:%s error=%s\n", m.ID, p.Version, p.SHA256, slot, p.SlotError)
+		}
 		state := myce.HyphaAvailability(m)
 		state += "; " + myce.NativeIsolationStatus(*m)
 		if m.LastResort {

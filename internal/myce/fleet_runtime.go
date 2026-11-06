@@ -23,17 +23,20 @@ import (
 // installation path. It is separate from enrollment so missing fleet evidence
 // never prevents an ordinary worker joining or finishing its work.
 type FleetRuntimeProof struct {
-	ObservationAgeSeconds float64   `json:"observation_age_seconds"`
-	Failure               string    `json:"failure,omitempty"`
-	Version               string    `json:"version"`
-	SHA256                string    `json:"sha256"`
-	Session               string    `json:"session"`
-	PID                   int       `json:"pid"`
-	ServiceHealthy        bool      `json:"service_healthy"`
-	StartGate             string    `json:"start_gate"`
-	AttemptProtocol       string    `json:"attempt_protocol"`
-	RunnerSmoke           bool      `json:"runner_smoke"`
-	ObservedAt            time.Time `json:"observed_at"`
+	InstalledSlot         *ReleaseSlotIdentity `json:"installed_slot,omitempty"`
+	SlotMismatch          bool                 `json:"slot_mismatch,omitempty"`
+	SlotError             string               `json:"slot_error,omitempty"`
+	ObservationAgeSeconds float64              `json:"observation_age_seconds"`
+	Failure               string               `json:"failure,omitempty"`
+	Version               string               `json:"version"`
+	SHA256                string               `json:"sha256"`
+	Session               string               `json:"session"`
+	PID                   int                  `json:"pid"`
+	ServiceHealthy        bool                 `json:"service_healthy"`
+	StartGate             string               `json:"start_gate"`
+	AttemptProtocol       string               `json:"attempt_protocol"`
+	RunnerSmoke           bool                 `json:"runner_smoke"`
+	ObservedAt            time.Time            `json:"observed_at"`
 }
 
 // Capture before command dispatch, including before an installed pathname can
@@ -121,6 +124,17 @@ func collectFleetRuntimeAt(ctx context.Context, c ServiceConfig, session string,
 		return nil, errors.New("running executable proof unavailable")
 	}
 	p := &FleetRuntimeProof{Version: BuildVersion, SHA256: hash, Session: session, PID: os.Getpid(), StartGate: startGateProtocol, AttemptProtocol: keyedAttemptProtocol}
+	slot, slotErr := observeReleaseSlot(c.Binary)
+	if slotErr != nil {
+		p.SlotError = "fleet_binary_unavailable"
+	} else {
+		p.InstalledSlot = &slot
+		p.SlotMismatch = slot.SHA256 != hash
+		if !p.SlotMismatch {
+			slot.Version = p.Version
+		}
+	}
+
 	if err := fleetRunnerSmoke(ctx, c.State); err != nil {
 		p.Failure = "runner_smoke_failed"
 		return p, errors.New("fleet runner smoke unavailable")
@@ -392,6 +406,10 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 			return result // The next ordinary poll refetches; never loop here.
 		}
 		code := fleetFailureCode(launchErr.Error())
+		var refusal *HTTPError
+		if errors.As(launchErr, &refusal) {
+			code = fleetFailureCode(refusal.Code)
+		}
 		if code == "fleet_failure_code_unrecognized" {
 			code = "fleet_helper_launch_unclassified"
 		}

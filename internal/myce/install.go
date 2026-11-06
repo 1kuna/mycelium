@@ -426,9 +426,21 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			return err
 		}
 	}
+	var reconciliation *slotReconciliation
+	if existing && !files.machineConversion {
+		reconciliationConfig := installed
+		reconciliationConfig.Queue = c.Queue // Address repair already verified the saved certificate pin.
+		reconciliation, err = preflightInstallSlot(ctx, reconciliationConfig, command)
+		if err != nil {
+			return err
+		}
+	}
 	var extraPaths []string
 	if invitation != nil {
 		extraPaths = append(extraPaths, c.JoiningFile)
+	}
+	if reconciliation != nil {
+		extraPaths = append(extraPaths, filepath.Join(c.State, "slot-reconciliation.json"))
 	}
 	tx, err := snapshotInstall(ctx, c, files, command, extraPaths...)
 	if err != nil {
@@ -455,6 +467,24 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	}
 	for _, path := range []string{filepath.Dir(c.Config), filepath.Dir(c.Service), c.State} {
 		if err = os.MkdirAll(path, 0700); err != nil {
+			return err
+		}
+	}
+	if reconciliation != nil {
+		// The rollback snapshot must contain exactly the qualified slot bytes.
+		original := tx.originals[c.Binary]
+		if fleetBytesHash(original.data) != reconciliation.Slot.SHA256 || int64(len(original.data)) != reconciliation.Slot.Size {
+			return errors.New("fleet_install_changed")
+		}
+		current, err := readReleaseSlot(c.Binary)
+		if err != nil || current.SHA256 != reconciliation.Slot.SHA256 {
+			return errors.New("fleet_install_changed")
+		}
+		receipt, err := json.Marshal(reconciliation)
+		if err != nil {
+			return err
+		}
+		if err = tx.put(filepath.Join(c.State, "slot-reconciliation.json"), receipt, 0600); err != nil {
 			return err
 		}
 	}
