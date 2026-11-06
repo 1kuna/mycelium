@@ -323,3 +323,33 @@ func TestLearnedMemoryGuardForkBurstBeforeCritical(t *testing.T) {
 		}
 	}
 }
+
+func TestLearnedMemoryGuardHardAllowanceHeadroomBaseline(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing=%v", missing), func(t *testing.T) {
+			clock := &fakeClock{now: time.Unix(100, 0)}
+			w := Worker{Machine: Machine{HostMemoryBudgetGB: 12, CapabilityProfile: &CapabilityProfile{SystemMemoryBytes: 16 << 30}}}
+			g := w.learnedGuard(incidentGuardJob())
+			trace := []struct {
+				rss, available float64
+				members        int
+			}{
+				{10, 10, 2}, {13, 8, 3}, {14, 7, 4}, {14, 7, 4},
+			}
+			for i, s := range trace {
+				host := &gpuHostState{available: s.available, level: 1}
+				if missing && i == 1 {
+					host = nil
+				}
+				e := g.observeMemory(clock.Now(), map[int]string{7: "birth"}, uint64(s.rss*(1<<30)), s.members, nil, host)
+				if i < 3 && e != nil {
+					t.Fatalf("sample %d inherited stale headroom: %+v", i, e)
+				}
+				if i == 3 && (e == nil || e.LimitBytes != 12<<30) {
+					t.Fatalf("sustained explicit allowance not enforced: %+v", e)
+				}
+				clock.Advance(processMemorySamplePeriod)
+			}
+		})
+	}
+}

@@ -96,9 +96,10 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 		urgent = host.available <= g.reserve+lossRate*horizon.Seconds()
 	}
 	g.lastObservation, g.lastBytes, g.lastMembers = now, bytes, members
-	if g.ceiling <= 0 {
-		g.previous = host
-	}
+	// Keep pressure and timestamp baselines consecutive even when a hard
+	// allowance bypasses the adaptive pressure branch. A missing read must
+	// clear the baseline rather than bridge an unobserved interval.
+	defer func() { g.previous = host }()
 	if urgent && !g.exceeded && g.limit > 0 && bytes > uint64(g.limit) {
 		g.exceeded = true
 		return &RSSLimitEvidence{ObservedBytes: bytes, LimitBytes: g.limit, Quality: "owned_session_rss"}
@@ -123,7 +124,6 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 		} else {
 			g.growth = memoryGrowth{}
 		}
-		g.previous = host
 		if !pressure {
 			// Reset the sustained-overage window while measured room is ample,
 			// or pressure is unknown. A later pressure sample starts a new window.
