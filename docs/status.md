@@ -1958,3 +1958,16 @@ allocation completes. Unknown reconnect/restart gaps never add service age. See 
 
 These are conditional admission comparisons. Hard eligibility, quotas and tier
 precedence remain binding; active same-tier work is not stopped to repay debt.
+
+
+## Learned native CPU memory growth (next release)
+
+An acknowledged `adaptive native CPU memory guard` treats the learned reservation
+as a prediction. Fresh exact-attempt footprint and growth measurements use the
+same forecast as cold CPU probes, including sample age and measured drift, with
+the learned reservation as a floor. Unknown/stale telemetry and stopping attempts
+retain the complete physical/explicit execution ceiling. Darwin RSS can increase
+the charge but grants no resident-memory credit because shared pages can appear
+in multiple processes. The reported estimate and the execution ceiling therefore
+serve different purposes. Explicit declarations, member limits and Docker keep
+their existing containment contract. See [native isolation](native-isolation.md).

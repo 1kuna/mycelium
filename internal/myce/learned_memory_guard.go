@@ -113,3 +113,16 @@ type processResidentSample struct {
 	at               time.Time
 	observed         bool
 }
+
+// Reuse the probe forecast without granting anonymous-resident credit to RSS.
+// Shared pages may be counted repeatedly: they can increase a charge, never
+// reduce live growth room. The actor ages this sample through the common path.
+func (p *process) currentProcessHostMemory() *CurrentHostMemory {
+	s := p.rssMemory.Load()
+	if s == nil {
+		return nil
+	}
+	gb := s.gb
+	return &CurrentHostMemory{GrowthObserved: s.observed, GrowthRateGB: s.rate,
+		FootprintGB: &gb, GrowthGB: s.growth, sampledAt: s.at}
+}

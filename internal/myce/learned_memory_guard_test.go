@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -199,5 +200,70 @@ func TestLearnedMemoryGuardWorkerIncident(t *testing.T) {
 				t.Fatalf("pressure cause lost: %+v", r)
 			}
 		})
+	}
+}
+
+func TestLearnedMemoryGuardChargeUsesProbeForecast(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	m := Machine{HostMemoryBudgetGB: 12, CapabilityProfile: &CapabilityProfile{SystemMemoryBytes: 16 << 30}}
+	j := incidentGuardJob()
+	j.ID, j.Attempt, j.Session, j.State = "incident", 1, "session", "running"
+	for _, source := range []string{"cgroup", "RSS"} {
+		t.Run(source, func(t *testing.T) {
+			footprint := 4.4857635498046875
+			resident := footprint
+			if source == "RSS" {
+				resident = 0
+			} // Never credit shared/compressed RSS.
+			s := &CurrentHostMemory{FootprintGB: &footprint, NonreclaimableGB: resident, GrowthObserved: true, GrowthGB: .1, GrowthRateGB: .05, AgeSeconds: .5}
+			r := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, CurrentHostMemory: s}
+			sample := currentHostMemorySamples([]AttemptReport{r}, clock.Now())[jobKey(j)]
+			charge, pending := jobHostMemoryCharge(&j, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
+			want := footprint + .1 + .025 + exploratoryDriftMarginGB(&m)
+			if math.Abs(charge-want) > 1e-9 || math.Abs(pending-(charge-resident)) > 1e-9 {
+				t.Fatalf("charge=%g pending=%g want=%g", charge, pending, want)
+			}
+			clock.Advance(hostMemorySampleFreshFor)
+			charge, _ = jobHostMemoryCharge(&j, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
+			if charge != 12 {
+				t.Fatalf("stale grew attempt dropped to estimate: %g", charge)
+			}
+			// A replacement cannot inherit the old sample or its released credit.
+			replacement := j
+			replacement.Attempt++
+			sample = currentHostMemorySamples([]AttemptReport{r}, clock.Now())[jobKey(replacement)]
+			charge, _ = jobHostMemoryCharge(&replacement, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
+			if charge != 12 {
+				t.Fatalf("wrong execution released charge: %g", charge)
+			}
+		})
+	}
+}
+
+func TestLearnedMemoryGuardNegotiatesBeforeWidening(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 8, 16)
+	m.HostMemoryBudgetGB = 12
+	m.CapabilityProfile.SystemMemoryBytes = 16 << 30
+	m.ExtensionFingerprint = "memory-v1"
+	check(t, q, m, nil)
+	s := cpuSpec(1, 0)
+	runMemory(t, q, clock, m, s, 3, func(r *Result) { r.MemoryPeak.Events = &MemoryEventCounts{} })
+	pending := submit(t, q, s)
+	legacy := q.memoryCandidate(pending, &m)
+	if legacy.MemoryEnvelope.Basis != "learned" {
+		t.Fatalf("fixture has no accepted estimate: %+v", legacy.MemoryEnvelope)
+	}
+	if learnedMemoryCeilingGB(legacy, &m) > 0 {
+		t.Fatal("old worker acquired wider ceiling")
+	}
+	m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
+	current := q.memoryCandidate(pending, &m)
+	if cap := learnedMemoryCeilingGB(current, &m); cap != 12 {
+		t.Fatalf("new queue did not acknowledge accounting: %+v cap=%g", current.MemoryEnvelope, cap)
+	}
+	current.MemoryEnvelope.Enforcement = "memory ceilings enforced (cgroup v2)"
+	if learnedMemoryCeilingGB(current, &m) > 0 {
+		t.Fatal("old queue authorized wider worker cap")
 	}
 }
