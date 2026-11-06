@@ -170,3 +170,77 @@ func TestHostMemoryCurrentCreditsOnlyAnonymousResident(t *testing.T) {
 		t.Fatal("stale session credited")
 	}
 }
+
+func TestHostMemoryProbeForecastRequiresCompleteTimedFootprint(t *testing.T) {
+	_, clock := fixture(t)
+	dir := t.TempDir()
+	write := func(name, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := &memoryAttempt{fs: osMemoryFS{}, path: dir}
+	write("memory.current", "8589934592")
+	stats := "kernel 134217728\nshmem 134217728\nunevictable 0\nfile_dirty 67108864\nfile_writeback 0\nfile 6442450944\n"
+	write("memory.stat", "anon 1073741824\n"+stats)
+	first := a.currentHostMemory(clock)
+	if first == nil || first.GrowthObserved || first.FootprintGB == nil || *first.FootprintGB != 1.3125 {
+		t.Fatal("invented first horizon or counted reclaimable cache", first)
+	}
+	clock.Advance(time.Second)
+	write("memory.stat", "anon 2147483648\n"+stats)
+	second := a.currentHostMemory(clock)
+	if second == nil || !second.GrowthObserved || second.GrowthGB != 1 || second.GrowthRateGB != 1 || second.FootprintGB == nil || *second.FootprintGB != 2.3125 || second.NonreclaimableGB != 2 {
+		t.Fatal("missing measured footprint/growth", second)
+	}
+	clock.Advance(time.Second)
+	write("memory.stat", "anon 2147483648\n")
+	missing := a.currentHostMemory(clock)
+	if missing == nil || missing.GrowthObserved || missing.FootprintGB != nil {
+		t.Fatal("partial counters authorize forecast", missing)
+	}
+	clock.Advance(time.Second)
+	write("memory.stat", "anon 2147483648\n"+stats)
+	if a.currentHostMemory(clock).GrowthObserved {
+		t.Fatal("bridged missing observation interval")
+	}
+}
+
+func TestHostMemoryProbeForecastAgesBeforeExpiry(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 16, 16)
+	m.HostMemoryBudgetGB = 16
+	j := Job{State: "running", Spec: cpuSpec(2, 0), MemoryEnvelope: &JobMemoryEnvelope{ProbeFloorGB: minimumHostMemoryGB}}
+	j.Spec.Needs.Memory, j.Spec.Needs.HostMemoryGB = "auto", 16
+	j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+	if err := j.Spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	sample := hostMemorySample{gb: 1, footprintGB: 1, growthGB: .1, rateGB: 1, growthObserved: true, at: clock.Now()}
+	clock.Advance(4 * time.Second)
+	charge, _ := jobHostMemoryCharge(&j, &m, 16, sample, clock.Now())
+	if charge < 5.1 {
+		t.Fatalf("aged forecast charges %g GiB; measured rate predicts at least 5.1", charge)
+	}
+	// The same aged measurement must prevent a 12 GiB neighbor on a 16 GiB
+	// allowance, independently of raw physical availability.
+	q.s.Machines[m.ID] = &m
+	j.ID, j.Attempt, j.Machine, j.Session = "probe", 1, m.ID, m.Session
+	q.s.Jobs[j.ID] = &j
+	q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: {jobKey(j): sample}}
+	q.refreshHostMemory()
+	if q.s.Machines[m.ID].FreeHostMemoryGB >= 12 {
+		t.Fatal("queue admits predictable growth beyond allowance")
+	}
+	w := Worker{Machine: m, Clock: clock, hostMemorySamples: map[attemptKey]hostMemorySample{jobKey(j): sample}, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
+	next := Job{Spec: cpuSpec(2, 12)}
+	next.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+	next.Spec.Needs.HostMemoryGB, next.Spec.Needs.MemoryGB = 12, 0
+	if err := next.Spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := localAttemptAdmission(w, []Job{j}, next, nil); err == nil {
+		t.Fatal("worker admits predictable growth beyond allowance")
+	}
+}

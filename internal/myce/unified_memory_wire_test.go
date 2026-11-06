@@ -65,6 +65,29 @@ func TestUnifiedMemoryWireNegotiationAndDowngrade(t *testing.T) {
 	}
 }
 
+func TestProbeMemoryWireNegotiatesIndependently(t *testing.T) {
+	gb := 1.0
+	c := Checkin{Machine: Machine{ID: "worker", Session: "session"}, Attempts: []AttemptReport{{CurrentHostMemory: &CurrentHostMemory{FootprintGB: &gb, GrowthObserved: true, GrowthRateGB: 1, DeviceSource: "direct", DeviceGB: &gb}}}}
+	w := Worker{unifiedMemoryWire: &workerUnifiedMemoryWire{machine: "worker", session: "session", supported: true}}
+	legacy := w.unifiedMemoryCheckin(c).Attempts[0].CurrentHostMemory
+	if legacy.FootprintGB != nil || legacy.GrowthObserved || legacy.GrowthRateGB != 0 || legacy.DeviceGB == nil || legacy.DeviceSource != "direct" {
+		t.Fatal("probe negotiation changed v1 device evidence", legacy)
+	}
+	w.unifiedMemoryWire.probeSupported = true
+	modern := w.unifiedMemoryCheckin(c).Attempts[0].CurrentHostMemory
+	if modern.FootprintGB == nil || !modern.GrowthObserved || modern.GrowthRateGB != 1 {
+		t.Fatal("negotiated probe evidence omitted", modern)
+	}
+	c.Machine.Session = "replacement"
+	reset := w.unifiedMemoryCheckin(c).Attempts[0].CurrentHostMemory
+	if reset.FootprintGB != nil || reset.GrowthObserved {
+		t.Fatal("replacement inherited negotiation", reset)
+	}
+	if c.Attempts[0].CurrentHostMemory.FootprintGB == nil {
+		t.Fatal("wire downgrade mutated original telemetry")
+	}
+}
+
 func TestUnifiedMemoryWireLegacyWithholdsNewWork(t *testing.T) {
 	q, _ := fixture(t)
 	m := sharedUnifiedMachine()

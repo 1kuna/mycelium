@@ -3,10 +3,12 @@ package myce
 import "slices"
 
 const unifiedMemoryProtocol = "unified-attempt-memory-v1"
+const probeMemoryProtocol = "cpu-probe-memory-v1"
 
 type workerUnifiedMemoryWire struct {
 	machine, session string
 	supported        bool
+	probeSupported   bool
 }
 
 func (w Worker) unifiedMemoryCheckin(c Checkin) Checkin {
@@ -15,7 +17,10 @@ func (w Worker) unifiedMemoryCheckin(c Checkin) Checkin {
 			*r = workerUnifiedMemoryWire{machine: c.Machine.ID, session: c.Machine.Session}
 		}
 		if r.supported {
-			return c
+			if r.probeSupported {
+				return c
+			}
+			return legacyProbeMemoryCheckin(c)
 		}
 	}
 	return legacyUnifiedMemoryCheckin(c)
@@ -26,6 +31,7 @@ func (w Worker) unifiedMemoryCheckin(c Checkin) Checkin {
 // while such evidence is live. Leaving requests stop running jobs, so use the
 // existing device-unavailable admission fields and preserve their custody.
 func legacyUnifiedMemoryCheckin(c Checkin) Checkin {
+	c = legacyProbeMemoryCheckin(c)
 	c.Attempts = slices.Clone(c.Attempts)
 	for i, r := range c.Attempts {
 		if r.CurrentHostMemory == nil {
@@ -59,9 +65,24 @@ func legacyUnifiedMemoryCheckin(c Checkin) Checkin {
 
 func hasUnifiedMemoryWireFields(c Checkin) bool {
 	for _, r := range c.Attempts {
-		if s := r.CurrentHostMemory; s != nil && (s.DeviceSource != "" || s.DeviceExclusive || s.DeviceGrowthRateGB != 0) {
+		if s := r.CurrentHostMemory; s != nil && (s.DeviceSource != "" || s.DeviceExclusive || s.DeviceGrowthRateGB != 0 || s.GrowthObserved || s.GrowthRateGB != 0 || s.FootprintGB != nil) {
 			return true
 		}
 	}
 	return false
+}
+
+// Strict older decoders cannot accept new nested telemetry. Negotiate probe
+// evidence independently so v1 GPU sharing remains available during an upgrade.
+func legacyProbeMemoryCheckin(c Checkin) Checkin {
+	c.Attempts = slices.Clone(c.Attempts)
+	for i, r := range c.Attempts {
+		if r.CurrentHostMemory != nil {
+			s := *r.CurrentHostMemory
+			s.GrowthObserved, s.FootprintGB = false, nil
+			s.GrowthRateGB = 0
+			c.Attempts[i].CurrentHostMemory = &s
+		}
+	}
+	return c
 }

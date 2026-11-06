@@ -147,6 +147,8 @@ func BenchmarkCheckinCandidateCost(b *testing.B) {
 // #806 intentionally changes these envelopes: physical cold headroom, measured
 // local uncertainty and uncalibrated transfers replace universal multipliers.
 // The refreshed digests retain all 402 decisions for each history shape.
+// ProbeFloorGB adds metadata in 180 retained-history envelopes; removing only
+// that field reproduces the prior digest with identical decisions/resources.
 func TestCandidateCostPlacementEquivalence(t *testing.T) {
 	for _, retained := range []bool{true, false} {
 		t.Run(fmt.Sprintf("retained=%v", retained), func(t *testing.T) {
@@ -184,7 +186,7 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 				t.Fatal(err)
 			}
 			digest := fmt.Sprintf("%x", sha256.Sum256(data))
-			want := map[bool]string{true: "e9f4b9d045be93da1e29e78e0df42d8c64e872cf186cc554314316187883fb71", false: "64f5571bc125dc317237aa5b4e477dbfa3646573bb59b9fba02f899bd9ed0b09"}[retained]
+			want := map[bool]string{true: "e7757cb9cf917ba7bbdecdd721a17d064f79593a655fd8cbd5e70d4b96bca280", false: "64f5571bc125dc317237aa5b4e477dbfa3646573bb59b9fba02f899bd9ed0b09"}[retained]
 			if digest != want {
 				t.Fatalf("placement digest %s (%d decisions), want %s", digest, len(decisions), want)
 			}

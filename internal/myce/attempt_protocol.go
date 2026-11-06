@@ -69,6 +69,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		c = legacyUnifiedMemoryCheckin(w.legacyHygieneCheckin(full))
 		if w.unifiedMemoryWire != nil {
 			w.unifiedMemoryWire.supported = false
+			w.unifiedMemoryWire.probeSupported = false
 		}
 		if w.toolReport != nil {
 			w.toolReport.supported = false
@@ -93,6 +94,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	w.acceptHygieneReply(reply)
 	if w.unifiedMemoryWire != nil {
 		w.unifiedMemoryWire.supported = reply.UnifiedMemoryProtocol == unifiedMemoryProtocol
+		w.unifiedMemoryWire.probeSupported = reply.ProbeMemoryProtocol == probeMemoryProtocol
 	}
 	// A lost/discarded assignment leaves no local custody to stop. Validate
 	// the whole reply first, then explicitly release only unheld own-session

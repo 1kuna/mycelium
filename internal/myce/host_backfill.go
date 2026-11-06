@@ -43,7 +43,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 			owner := q.s.Machines[running.Machine]
 			if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && running.Spec.Needs.cpuOnly() && finiteYieldJob(running) && batchReservesCapacity(running) {
 				jobs = append(jobs, running)
-				room += hostNeed(owner, running.Spec.Needs.MemoryGB, running.Spec.Needs.HostMemoryGB)
+				room += q.hostJobCharge(running)
 			}
 		}
 		projected := q.cpuAfterReleases(m, jobs, nil, 0)

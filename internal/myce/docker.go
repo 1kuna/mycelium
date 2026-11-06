@@ -1126,7 +1126,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		output.Close()
 		return nil, err
 	}
-	p := &process{machine: w.Machine.ID, job: j, done: make(chan workerFinish, 1), docker: d, savePriorityStop: s.priorityStopRecorder()}
+	p := &process{stopAdmission: w.stopAdmission, machine: w.Machine.ID, job: j, done: make(chan workerFinish, 1), docker: d, savePriorityStop: s.priorityStopRecorder()}
 	if w.control != nil {
 		w.control.set(p)
 	}
