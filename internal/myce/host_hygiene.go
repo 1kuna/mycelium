@@ -195,7 +195,7 @@ type hostHealthMonitor struct {
 
 // Version the on-disk probe evidence only. The wire shape is unchanged, and
 // other host evidence and historical diagnostics survive an upgraded probe.
-const hostMountProbeVersion = "stat-readdir-v1"
+const hostMountProbeVersion = "checkpoint-access-v2"
 
 type hostHealthDisk struct {
 	HostHealth
@@ -221,7 +221,11 @@ func openHostHealth(dir string, clock Clock) (*hostHealthMonitor, error) {
 	m.health = saved.HostHealth
 	if saved.MountProbeVersion != hostMountProbeVersion {
 		for i := range m.health.Baseline {
-			m.health.Baseline[i].Mounts = nil
+			if saved.MountProbeVersion == "stat-readdir-v1" {
+				m.health.Baseline[i].Mounts = slices.DeleteFunc(slices.Clone(m.health.Baseline[i].Mounts), func(m HostMountHealth) bool { return m.Root == "checkpoint" })
+			} else {
+				m.health.Baseline[i].Mounts = nil
+			}
 		}
 	}
 	if len(m.health.History) > hostHealthHistorySize {

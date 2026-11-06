@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strings"
@@ -12,6 +13,95 @@ import (
 	"testing/fstest"
 	"time"
 )
+
+func TestHostHygieneCheckpointLargeDirectoryDoesNotEnumerate(t *testing.T) {
+	files := fstest.MapFS{"checkpoints": &fstest.MapFile{Mode: fs.ModeDir}}
+	for i := 0; i < 6900; i++ {
+		files[fmt.Sprintf("checkpoints/attempt-%d", i)] = &fstest.MapFile{Mode: fs.ModeDir}
+	}
+	var enumerations, accesses atomic.Int32
+	readProbe, checkpointProbe := workerHealthMountProbe, workerHealthCheckpointProbe
+	t.Cleanup(func() { workerHealthMountProbe, workerHealthCheckpointProbe = readProbe, checkpointProbe })
+	workerHealthMountProbe = func(path string) error {
+		enumerations.Add(1)
+		return errors.New("large-directory stream initialization stalled")
+	}
+	workerHealthCheckpointProbe = func(path string) error {
+		if _, err := fs.Stat(files, path); err != nil {
+			return err
+		}
+		// The same fake root supports tiny exclusive access without enumerating
+		// its busy attempt directories. No payload file is opened.
+		name := path + "/.myce-probe-fake.tmp"
+		if _, exists := files[name]; exists {
+			return fs.ErrExist
+		}
+		files[name] = &fstest.MapFile{}
+		delete(files, name)
+		accesses.Add(1)
+		return nil
+	}
+	m, clock := healthFixture(t, 1)
+	access := healthMountAccess("checkpoint")
+	p := &hostMountProbe{root: "checkpoint", path: "checkpoints", measure: func(path string) hostMountResult {
+		return hostMountResult{latency: time.Millisecond, err: access(path)}
+	}}
+	m.mounts["checkpoint"] = p
+	for i := 0; i < hostHealthWarmup+hostHealthConfirmation+1; i++ {
+		clock.Advance(signalRefresh)
+		if err := m.sample(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		await(t, func() bool { return len(p.pending) == 1 })
+	}
+	got := m.health.History[len(m.health.History)-1].Mounts[0]
+	if enumerations.Load() != 0 || accesses.Load() == 0 || got.Reason != "" || got.Adverse {
+		t.Fatal("directory enumeration withheld responsive checkpoint access", enumerations.Load(), accesses.Load(), got)
+	}
+	await(t, func() bool { return len(p.pending) == 1 })
+	if err := healthMountAccess("nas")("checkpoints"); err == nil || enumerations.Load() != 1 {
+		t.Fatal("NAS root lost its read-only directory check")
+	}
+}
+
+func TestHostHygieneCheckpointAccessHangKeepsSingleRequest(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
+	release := make(chan struct{})
+	var calls atomic.Int32
+	checkpointProbe := workerHealthCheckpointProbe
+	t.Cleanup(func() { workerHealthCheckpointProbe = checkpointProbe })
+	workerHealthCheckpointProbe = func(string) error { calls.Add(1); <-release; return nil }
+	p := &hostMountProbe{root: "checkpoint", path: "fake", probe: healthMountAccess("checkpoint")}
+	p.sample(clock.Now(), nil)
+	await(t, func() bool { return calls.Load() == 1 })
+	for i := 0; i < hostHealthConfirmation; i++ {
+		clock.Advance(signalRefresh)
+		p.sample(clock.Now(), nil)
+	}
+	if p.reason != "mount_probe_stalled" || calls.Load() != 1 {
+		t.Fatal("hung checkpoint access was not caught or multiplied", p.reason, calls.Load())
+	}
+	close(release)
+	await(t, func() bool { return len(p.pending) == 1 })
+}
+
+func TestHostHygieneCheckpointAccessUpgradeKeepsNASBaseline(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
+	dir := t.TempDir()
+	sample := HostHealthSample{Mounts: []HostMountHealth{{Root: "checkpoint", LatencySeconds: 10}, {Root: "nas", LatencySeconds: .001}}}
+	old := hostHealthDisk{MountProbeVersion: "stat-readdir-v1", HostHealth: HostHealth{Baseline: []HostHealthSample{sample}, History: []HostHealthSample{sample}}}
+	if err := saveWorkerJSON(dir, "host-health.json", old); err != nil {
+		t.Fatal(err)
+	}
+	m, err := openHostHealth(dir, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts := m.health.Baseline[0].Mounts
+	if len(mounts) != 1 || mounts[0].Root != "nas" || len(m.health.History[0].Mounts) != 2 {
+		t.Fatal("upgrade reused checkpoint enumeration timings or lost NAS/history", m.health)
+	}
+}
 
 func TestHostHygieneMountSlowHistoryDoesNotWidenBaseline(t *testing.T) {
 	m, c := healthFixture(t, 1)
