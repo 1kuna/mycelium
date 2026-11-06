@@ -129,6 +129,16 @@ independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
 
+On a release containing #813, a projected queued job's waiting reason explains
+retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
+negative behind), the measured history horizon, weighted oldest project-wait
+round, observed active service age and completed service quantum. The horizon follows current demand/service
+cycles; no fixed daily half-life controls when a waiting project recovers a turn.
+A zero completed quantum means initial learning: history stays intact until an
+allocation completes. Unknown reconnect/restart gaps add no observed service.
+Tiers, eligibility and explicit
+caps/quotas still bind; running same-tier work is not stopped to repay debt.
+
 On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. During measured control pressure, expensive/lower-value nonproduction reads can return 429; honor `Retry-After` and prefer batched waits. Production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
 
 ## Explicit model master downloads (next release)

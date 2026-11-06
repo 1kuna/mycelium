@@ -1929,3 +1929,17 @@ observations run outside queue locks and normal heartbeat work. Hashes are reuse
 only while local file identity, size and modification time agree; installation
 rechecks the bytes independently. CLI status displays mismatches before an
 install is attempted. Older workers omit these observations.
+
+## Adaptive fair-share history (#813)
+
+On a release containing #813, queued jobs in the dispatch projection explain
+retained resource-seconds, weighted share, signed debt (positive ahead, negative
+behind), the history horizon, weighted oldest project-wait round, observed active
+service age, latest completed service quantum and the number of fitting competing projects. The horizon is learned
+from the current tier/resource demand and service cycle, rather than a fixed
+daily half-life. CPU and GPU ledgers stay separate. A zero completed quantum means initial learning: history is
+preserved and new covered service is counted without decay until the first
+allocation completes. Unknown reconnect/restart gaps never add service age. See [fair sharing](scheduling.md#sharing-gpus-and-measuring-the-pool).
+
+These are conditional admission comparisons. Hard eligibility, quotas and tier
+precedence remain binding; active same-tier work is not stopped to repay debt.

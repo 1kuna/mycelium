@@ -141,14 +141,19 @@ func (s *candidateSet) score(j *Job, m *Machine) float64 {
 		s.scores[key] = s.q.fairScore(j, m)
 		return s.scores[key]
 	}
+	projects := s.fairProjects(j)
+	s.scores[key] = s.q.fairScoreProjects(j, projects)
+	return s.scores[key]
+}
+
+func (s *candidateSet) fairProjects(j *Job) map[string]bool {
 	projects := map[string]bool{j.Spec.Project: true}
 	for _, r := range s.jobs {
 		if r.State == "queued" && s.q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && s.q.capReason(r) == "" {
 			projects[r.Spec.Project] = true
 		}
 	}
-	s.scores[key] = s.q.fairScoreProjects(j, projects)
-	return s.scores[key]
+	return projects
 }
 
 func (s *candidateSet) active(j *Job) float64 {

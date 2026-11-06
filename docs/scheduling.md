@@ -174,7 +174,7 @@ mapping; its parity semantics require a separate maintainer/consumer decision
 ([#400](https://github.com/1kuna/mycelium/issues/400)).
 
 Within each tier, fitting projects take turns by weighted recent usage before
-model/environment warmth. Usage has a 24-hour half-life and separate stable
+model/environment warmth. Usage has a demand/service-derived horizon and separate stable
 `tier/resource-family/project` keys. GPU work uses normalized allocated device
 seconds; CPU work charges allocated core-seconds in a separate family. Equal usage favors fewer
 active allocations per weight, then the existing affinity/deadline/queue order.
@@ -278,8 +278,33 @@ It totals those projects' recent usage, computes each project's weighted share,
 and selects the project with the largest deficit (share minus usage). Model and
 environment readiness, deadlines, front-of-line retries, and waiting time break
 ties within the selected project. Across projects, equal usage favors fewer
-active allocations per weight before warmth. Usage decays continuously with a
-24-hour half-life and is keyed by stable tier name, resource family and project.
+active allocations per weight before warmth. Usage is keyed by stable tier
+name, resource family and project. Its exponential history horizon follows the
+current demand/service cycle: the largest of the weighted project-wait round,
+the longest covered active allocation age,
+and the latest completed allocation's covered duration in that tier/resource
+family. The wait round sums the oldest waiting age once per ready, uncapped
+project, multiplied by that project's policy weight divided by the smallest
+current demand weight. Thus one turn at the smallest weight retains a complete
+weighted round (3:1 demand retains four units, independent of the first winner).
+Many tiny jobs from one project cannot inflate it by their count. A completed allocation supplies the
+initial measured scale. Until that sample exists, preserve prior history and
+count new covered service without decay; no daily half-life is guessed.
+
+Every project in the ledger, including absent projects, uses the same horizon.
+The queue integrates its continuously changing value analytically, so unrelated
+reads/check-ins cannot change debt by splitting an unchanged service interval.
+Idle ledgers decay on the latest completed service quantum. Active covered ages
+are retained by exact attempt/session identity across reconnects and queue
+restarts; unknown downtime adds neither service nor age.
+
+A fresh short burst can shorten the retained history; sustained service or
+long waits lengthen it. While a project waits and competitors keep receiving
+finite allocations, its old debt decays and their new service accumulates,
+allowing the waiter to regain a turn. No fleet-tuned time floor, ceiling or
+reporting-retention cutoff controls this history. The separately retained
+90-day usage report is unchanged. Historical usage is an admission signal,
+not a promise of capacity on incompatible or occupied resources.
 GPU device-seconds and CPU core-seconds use separate accounting families. Assigned batch preparation and model loading charge their owning
 demand once, as do calls sharing a model allocation. Idle models/pins do not
 consume fair usage. Running work is accounted before each scheduling decision.
@@ -314,7 +339,15 @@ current owner policy, edit its `projects` mapping, and import it with
 change an existing policy.
 
 `myce status` and the page show cap or fairness reasons, for example:
-`transcribe goes first (sim is ahead of its fair share)`. NAS and machine fit failures
+`transcribe goes first (sim is ahead of its fair share)`. The reason also reports
+retained resource-seconds, the weighted share among fitting competing projects,
+signed debt (positive means ahead, negative means behind), the measured horizon,
+weighted project-wait round, observed service age and the completed service
+quantum. A zero completed quantum means initial learning, with history preserved
+until an allocation completes. The horizon is shared across a tier/resource
+family; fit/cap filtering still determines the projects used for each target
+comparison. CPU seconds are core-seconds; GPU seconds are device-seconds.
+NAS and machine fit failures
 remain visible. The page is available at the queue root URL; it uses no external
 assets, frontend build, or fleet token. Like the existing page, it is read-only
 and visible to anyone who can reach that URL. The API remains token-protected.

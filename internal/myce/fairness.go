@@ -32,12 +32,20 @@ type ProjectPolicy struct {
 type FairUsage struct {
 	Seconds float64   `json:"seconds"`
 	At      time.Time `json:"at"`
+	// Measured demand/service cycle, retained across idle time and restart.
+	HorizonSeconds float64 `json:"horizon_seconds,omitempty"`
+	WaitSeconds    float64 `json:"wait_seconds,omitempty"`
+	ServiceSeconds float64 `json:"service_seconds,omitempty"`
+	QuantumSeconds float64 `json:"quantum_seconds,omitempty"`
+	// Only current allocations; values are covered seconds, never elapsed age.
+	Active map[string]float64 `json:"active,omitempty"`
 }
 
-const FairHalfLife = 24 * time.Hour
-
 func decayed(u FairUsage, now time.Time) float64 {
-	return u.Seconds * math.Exp2(-max(0, now.Sub(u.At).Hours())/FairHalfLife.Hours())
+	if u.HorizonSeconds <= 0 || u.QuantumSeconds <= 0 {
+		return u.Seconds // Initial learning awaits a completed service observation.
+	}
+	return u.Seconds * math.Exp2(-max(0, now.Sub(u.At).Seconds())/u.HorizonSeconds)
 }
 func (q *Queue) weight(project string) float64 {
 	if p := q.s.Policies[project]; p.Weight > 0 {
@@ -533,6 +541,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		if strings.HasPrefix(reasons[best.ID], "waiting for software preparation for job ") {
 			base = reasons[best.ID]
 		}
+		base += "; " + selected.fairExplanation(best)
 		if winner.ID == best.ID {
 			reasons[best.ID] = base + "; next in line"
 			continue
