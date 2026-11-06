@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// FleetSupersession is the durable audit record of an operator retiring a
-// stopped fleet operation (#588). Drains that operation owned stay in place.
+// FleetSupersession is the durable audit record of a retired fleet operation.
+// It also retains critical stop evidence when explicit fix-forward replaces it.
 type FleetSupersession struct {
 	Urgency            string            `json:"urgency"`
 	Operation          string            `json:"operation"`
@@ -28,6 +28,17 @@ type FleetSupersession struct {
 type FleetSupersedeRequest struct {
 	Operation string `json:"operation"`
 	Reason    string `json:"reason"`
+}
+
+func (q *Queue) fleetSupersession(u *fleetUpgrade, reason string) FleetSupersession {
+	record := FleetSupersession{Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Reason: reason, SupersededAt: q.clock.Now(), Hosts: []FleetHostStatus{}}
+	for _, h := range u.Hosts {
+		record.Hosts = append(record.Hosts, h.FleetHostStatus)
+		if p := q.s.HostMaintenance[h.Host]; p.Mode == "drained" && p.DrainOwner == u.Operation {
+			record.RetainedDrains = append(record.RetainedDrains, h.Host)
+		}
+	}
+	return record
 }
 
 func fleetAge(d time.Duration) string {
@@ -162,13 +173,7 @@ func (q *Queue) SupersedeFleetUpgrade(request FleetSupersedeRequest, requestCont
 		if u.State != "stopped" {
 			return &HTTPError{Status: 409, Code: "fleet_operation_not_stopped", Message: fmt.Sprintf("operation %s is %s; only a stopped operation can be superseded", u.Operation, u.State)}
 		}
-		record := FleetSupersession{Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Reason: reason, SupersededAt: q.clock.Now(), Hosts: []FleetHostStatus{}}
-		for _, h := range u.Hosts {
-			record.Hosts = append(record.Hosts, h.FleetHostStatus)
-			if p := q.s.HostMaintenance[h.Host]; p.Mode == "drained" && p.DrainOwner == u.Operation {
-				record.RetainedDrains = append(record.RetainedDrains, h.Host)
-			}
-		}
+		record := q.fleetSupersession(u, reason)
 		record.Next = "run myce fleet upgrade to start a new operation"
 		if len(record.RetainedDrains) > 0 {
 			record.Next += "; retained drains stay in place: resume each host with myce host resume HOST once it is healthy"

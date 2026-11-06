@@ -244,6 +244,19 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 				}
 			}
 		}
+		if old := q.s.FleetUpgrade; old != nil {
+			for _, h := range old.Hosts {
+				if len(h.StopRequests) > 0 {
+					// Released obligations cannot regenerate interruption evidence.
+					// Keep every host's records under the original operation, including
+					// completed/failed hosts that do not carry drain custody forward.
+					record := q.fleetSupersession(old, "replaced by explicit fleet upgrade")
+					record.Next = "continue fleet operation " + u.Operation
+					q.s.FleetSuperseded = append(q.s.FleetSuperseded, record)
+					break
+				}
+			}
+		}
 		q.s.FleetUpgrade = u
 		out = q.fleetUpgradeStatus()
 		return nil

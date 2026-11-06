@@ -1,12 +1,92 @@
 package myce
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 )
+
+func TestFleetUpgradeCriticalFixForwardRetainsStopEvidence(t *testing.T) {
+	q, c, _ := fleetFixture(t, "host")
+	pub, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := q.s.EnrollmentRelease.Manifest
+	sign := func() []byte {
+		data, _ := json.Marshal(manifest)
+		envelope, _ := json.Marshal(SignedRelease{Manifest: data, Signature: ed25519.Sign(private, data)})
+		return envelope
+	}
+	if err := q.ConfigureEnrollmentRelease(sign(), pub, "https://publisher.invalid/release"); err != nil {
+		t.Fatal(err)
+	}
+	m := cpuMachine("worker", "host", "cpu", 8, 16)
+	m.Fleet = fleetTestProof(c, m.Session, 200, false)
+	check(t, q, m, nil)
+	s := cpuSpec(1, 1)
+	s.Resumable = true
+	j := submit(t, q, s)
+	run := check(t, q, m, nil).Job
+	if run == nil || run.ID != j.ID {
+		t.Fatal("attempt not assigned")
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Checkin(Checkin{Machine: m, Running: &Execution{ID: run.ID, Attempt: run.Attempt, Progress: 7}, Started: true}); err != nil {
+		t.Fatal(err)
+	}
+	request := FleetUpgradeRequest{Urgency: "critical", QueueOnly: true}
+	first, err := q.StartFleetUpgrade(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	want := append([]FleetStopRequest(nil), q.fleetActiveHost().StopRequests...)
+	if len(want) != 1 || want[0].ProgressBefore != 7 {
+		t.Fatal("missing original stop evidence", want)
+	}
+	completion := result(run, false)
+	completion.Interrupted, completion.ReleasePending = true, true
+	if err := q.Complete(completion); err != nil {
+		t.Fatal(err)
+	}
+	release := result(run, false)
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	i := fleetInstructionFor(t, q)
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "fleet_storage_preflight_failed"}); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Version = "v1.0.2"
+	if err := q.approveEnrollmentRelease(EnrollmentReleaseApproval{SignedRelease: sign(), PublicKey: pub, Origin: "https://publisher.invalid/release"}); err != nil {
+		t.Fatal(err)
+	}
+	request.Release = manifest.Version
+	next, err := q.StartFleetUpgrade(request)
+	if err != nil || next.Operation == first.Operation {
+		t.Fatal("newer release did not replace failed critical operation", next, err)
+	}
+	q = reopenCancellationQueue(t, q, c)
+	if len(q.s.FleetSuperseded) != 1 {
+		t.Fatal("replaced operation's evidence was not durable", q.s.FleetSuperseded)
+	}
+	record := q.s.FleetSuperseded[0]
+	if record.Operation != first.Operation || record.Urgency != "critical" || record.State != "stopped" || len(record.Hosts) != 1 || !reflect.DeepEqual(record.Hosts[0].StopRequests, want) {
+		t.Fatal("fix-forward lost stop identity, timestamp or accepted progress", record)
+	}
+	if policy := q.s.HostMaintenance["host"]; policy.Mode != "drained" || policy.DrainOwner != first.Operation {
+		t.Fatal("archiving interruption evidence changed drain custody", policy)
+	}
+}
 
 func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 	for _, priority := range []string{"experiment", "production"} {
