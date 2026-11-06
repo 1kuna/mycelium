@@ -30,7 +30,11 @@ func TestLearnedMemoryGuardIncidentHeadroom(t *testing.T) {
 			}
 			g := w.learnedGuard(j)
 			var evidence *RSSLimitEvidence
-			for i := 0; i < 4; i++ {
+			samples := 4
+			if mode == "growth headroom" {
+				samples = 5
+			}
+			for i := 0; i < samples; i++ {
 				host := &gpuHostState{available: 8, level: 1, swapOut: 100}
 				bytes := uint64(4816551936) // 4.4857635498046875 GiB.
 				var sampleErr error
@@ -38,7 +42,7 @@ func TestLearnedMemoryGuardIncidentHeadroom(t *testing.T) {
 				case "pressure":
 					host.level = 2
 				case "growth headroom":
-					host.available = .25
+					host.available = max(0, 1.25-float64(i)*.5)
 					bytes += uint64(i) << 29 // Measured .5 GiB/s; no percentage floor.
 				case "swap":
 					host.swapOut += uint64(i)

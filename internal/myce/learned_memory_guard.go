@@ -1,6 +1,9 @@
 package myce
 
-import "time"
+import (
+	"maps"
+	"time"
+)
 
 const learnedMemoryGuardCapability = "learned_cpu_memory_growth_v1"
 const learnedMemoryGuardEnforcement = "adaptive native CPU memory guard"
@@ -26,19 +29,28 @@ func learnedMemoryCeilingGB(j *Job, m *Machine) float64 {
 }
 
 func (w Worker) jobCeilingBytes(j Job) (int64, error) {
+	bytes, err := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	if err != nil {
+		return 0, err
+	}
 	if cap := learnedMemoryCeilingGB(&j, &w.Machine); cap > 0 {
+		if _, err := MemoryCeilingConfig(cap, 0, w.MemorySwapMaxBytes); err != nil {
+			return 0, err
+		}
 		return memoryBytes(cap)
 	}
-	return w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	return bytes, nil
 }
 
 type learnedMemoryGuard struct {
 	rssGuard
-	ceiling  int64
-	hard     int64
-	reserve  float64
-	growth   memoryGrowth
-	previous *gpuHostState
+	ceiling         int64
+	hard            int64
+	reserve         float64
+	growth          memoryGrowth
+	previous        *gpuHostState
+	identity        map[int]string
+	lastObservation time.Time
 }
 
 func (w Worker) learnedGuard(j Job) learnedMemoryGuard {
@@ -56,12 +68,19 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 	if g.ceiling <= 0 {
 		return g.observe(now, roots, bytes, members, err)
 	}
-	if err != nil || members <= 0 {
+	valid := len(roots) > 0 && members > 0 && err == nil
+	for pid, birth := range roots {
+		valid = valid && pid > 0 && birth != ""
+	}
+	if !valid {
 		g.growth, g.previous = memoryGrowth{}, nil
 		return g.observe(now, roots, bytes, members, err)
 	}
-	gb := float64(bytes) / (1 << 30)
-	margin := g.growth.observe(now, gb)
+	if !maps.Equal(roots, g.identity) || now.Before(g.lastObservation) || now.Sub(g.lastObservation) > 2*processMemorySamplePeriod {
+		g.growth, g.previous = memoryGrowth{}, nil
+		g.identity = maps.Clone(roots)
+	}
+	g.lastObservation = now
 	limit := g.limit
 	defer func() { g.limit = limit }()
 	if g.hard > 0 && bytes > uint64(g.hard) {
@@ -69,10 +88,15 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 	} else {
 		pressure := false
 		if host != nil && validMemoryValue(host.available) {
+			// Measure the loss of actual host headroom. RSS growth may be shared
+			// mappings becoming resident in many tasks at once, not physical use.
+			margin := g.growth.observe(now, max(0, float64(g.ceiling)/(1<<30)-host.available))
 			pressure = host.level >= 2 || host.available <= g.reserve+margin
 			if before := g.previous; before != nil {
 				pressure = pressure || host.oom > before.oom || host.swapOut > before.swapOut || host.swap > before.swap || host.psiTotalUS > before.psiTotalUS
 			}
+		} else {
+			g.growth = memoryGrowth{}
 		}
 		g.previous = host
 		if !pressure {

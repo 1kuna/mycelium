@@ -301,6 +301,10 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 			bytes, members, err = probe.Resident(ids)
 		}
 		if err != nil || members == 0 {
+			growth = memoryGrowth{}
+			if attempt != nil {
+				attempt.rssMemory.Store(nil)
+			}
 			return
 		}
 		gb := float64(bytes) / (1 << 30)
