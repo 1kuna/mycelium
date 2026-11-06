@@ -417,7 +417,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Leave(r.PathValue("id"), c.Now, r.Context()), "worker_leave_invalid")
 	})
-	return a.Queue.measureRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return a.Queue.shutdownRequests(a.Queue.measureRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, r.Pattern = mux.Handler(r)
 		if r.URL.Path == "/api/invites/redeem" {
 			a.redeemInvite(w, r, joiningPin)
@@ -457,7 +457,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		defer finishObservation()
 		mux.ServeHTTP(w, r)
-	}), mux.patterns)
+	}), mux.patterns))
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	limit := int64(1 << 20)

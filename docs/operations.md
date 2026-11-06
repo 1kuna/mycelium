@@ -2300,6 +2300,19 @@ are injectable for laptop verification.
 
 ## Rolling fleet upgrades
 
+Queue shutdown fences new requests without waiting for the queue mutex and
+cancels accepted HTTP/HTTPS observations, long polls and socket I/O. An
+uncommitted control transaction retries against the replacement queue; an
+already committing SQLite transaction finishes at its existing atomic boundary.
+The journal reports `event=queue_shutdown` phases `fenced`, `api_draining`,
+`api_closed`, `storage_wait` and `storage_closed`. A prolonged `storage_wait`
+requires transaction/storage evidence, not permission to treat a timeout as
+confirmed release. Both API transports share the existing ten-second HTTP
+stop budget; expiry closes their sockets and reports failure. It does not kill
+the queue or prove storage closure. The installed service-manager timeout is
+unchanged pending measured native shutdown evidence (#889); laptop cancellation
+tests do not qualify a native stop duration.
+
 Tested fixes deploy without a separate task, bundled one release at a time; roll
 back if the queue is not healthy. Do not patch during a successful production
 run. Fixing a run failing because of Mycelium is allowed and expected. Keep the

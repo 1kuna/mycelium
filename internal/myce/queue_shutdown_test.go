@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -99,5 +100,89 @@ func TestQueueShutdownPreservesRunningAttempt(t *testing.T) {
 	got := q.s.Jobs[j.ID]
 	if got.State != "queued" || got.Losses != 1 || got.InfrastructureRetries != 1 || !q.s.Machines[runner.ID].Gone {
 		t.Fatalf("normal worker loss detection changed: %+v", got)
+	}
+}
+
+// #889: shutdown used to queue behind every observation/control mutex waiter
+// before its HTTP deadline even began. No queue time or client timeout can be
+// mistaken for permission to change the running attempt.
+func TestQueueShutdownShedsBlockedObservations(t *testing.T) {
+	q, clock := fixture(t)
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	joining := httptest.NewTLSServer(API{Queue: q, Token: "test"}.Handler())
+	defer joining.Close()
+
+	// One accepted observation owns a cache refresh, another waits for its
+	// mutex, and a third waits for the read-only SQL connection. All are
+	// independent of the transaction we hold while setting the shutdown fence.
+	conn, err := q.usageReader.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var requests sync.WaitGroup
+	start := func(client Client, path string) {
+		requests.Add(1)
+		go func() {
+			defer requests.Done()
+			_ = client.Call(context.Background(), "GET", path, nil, nil)
+		}()
+	}
+	client := Client{URL: server.URL, Token: "test"}
+	start(client, "/api/status")
+	await(t, func() bool { return q.usageReader.Stats().InUse == 1 && q.usageReader.Stats().WaitCount > 0 })
+	start(client, "/api/status")
+	start(Client{URL: joining.URL, Token: "test", HTTP: joining.Client()}, "/api/inspection")
+
+	q.mu.Lock()
+	fenced := make(chan struct{})
+	go func() { q.BeginShutdown(); close(fenced) }()
+	select {
+	case <-fenced:
+	case <-time.After(time.Second):
+		q.mu.Unlock()
+		<-fenced
+		t.Fatal("shutdown waited for the queue mutex before cancelling requests")
+	}
+	clock.Advance(RestartGrace + LossAfter)
+	// New mutations must refuse even while q.mu and the SQL reader are busy.
+	if err := q.Tick(); err == nil {
+		q.mu.Unlock()
+		t.Fatal("shutdown admitted a maintenance transaction")
+	}
+	q.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := q.ShutdownServers(ctx, server.Config, joining.Config); err != nil {
+		t.Fatal(err)
+	}
+	requests.Wait()
+	// The SQL connection is deliberately still held: cancellation, not release
+	// of the bottleneck, must let every handler and both transports finish.
+}
+
+func TestQueueShutdownRollsBackUncommittedControl(t *testing.T) {
+	q, _ := fixture(t)
+	j := submit(t, q, spec("experiment"))
+	entered, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- q.update(func() error {
+			q.s.Jobs[j.ID].State = "failed"
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	q.BeginShutdown()
+	close(release)
+	var unavailable *HTTPError
+	if err := <-done; !errors.As(err, &unavailable) || unavailable.Code != "queue_stopping" {
+		t.Fatalf("uncommitted request did not retry: %v", err)
+	}
+	if q.s.Jobs[j.ID].State != "queued" {
+		t.Fatal("uncommitted control state survived shutdown")
 	}
 }

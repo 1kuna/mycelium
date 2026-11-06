@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -174,7 +175,10 @@ type Queue struct {
 	calls            map[string]*ModelCall
 	lock             *os.File
 	mu               queueMutex
-	stopping         bool // q.mu; inhibit mutations before either API listener closes.
+	stopping         atomic.Bool // Fence before waiting for a queue transaction or either listener.
+	shutdownOnce     sync.Once
+	shutdownContext  context.Context
+	shutdownCancel   context.CancelFunc
 	contactMu        sync.Mutex
 	contacts         map[string]*workerContact
 	holdClock        Clock // Optional observational clock; never used for queue decisions.
@@ -469,12 +473,18 @@ func checkpointAvailable(root string, progress func()) bool {
 // BeginShutdown fences maintenance and in-flight mutations before API shutdown.
 // Workers retry rejected reports against the replacement queue.
 func (q *Queue) BeginShutdown() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.stopping = true
+	first := !q.stopping.Swap(true)
+	q.initShutdown()
+	q.shutdownCancel()
+	if first {
+		log.Printf("event=queue_shutdown phase=fenced")
+	}
 }
 
 func (q *Queue) Close() error {
+	if q.stopping.Load() {
+		log.Printf("event=queue_shutdown phase=storage_wait")
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var err error
@@ -489,6 +499,9 @@ func (q *Queue) Close() error {
 	if q.lock != nil {
 		err = errors.Join(err, syscall.Flock(int(q.lock.Fd()), syscall.LOCK_UN), q.lock.Close())
 		q.lock = nil
+	}
+	if q.stopping.Load() {
+		log.Printf("event=queue_shutdown phase=storage_closed clean=%t", err == nil)
 	}
 	return err
 }
@@ -513,6 +526,9 @@ func (q *Queue) updateUploadRequest(ctx context.Context, fn func() error, timing
 }
 
 func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool) error {
+	if q.stopping.Load() {
+		return queueStopping()
+	}
 	available := true
 	if !q.simulation {
 		if q.checkpointProbe != nil {
@@ -541,8 +557,8 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn, &hold)
 	}()
-	if q.stopping {
-		return &HTTPError{Status: 503, Code: "queue_stopping", Message: "queue is shutting down; retry the request"}
+	if q.stopping.Load() {
+		return queueStopping()
 	}
 	if q.simulation {
 		hold.next(holdUsage)
@@ -575,6 +591,11 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 	q.accountUsage(q.clock.Now())
 	hold.next(holdBody)
 	err = fn()
+	// A request that loses the shutdown race retries from durable worker state.
+	// Do not publish its speculative loss/maintenance decisions after the fence.
+	if err == nil && q.stopping.Load() {
+		err = queueStopping()
+	}
 	if err == nil {
 		q.observeModelIntervals()
 	}
@@ -1027,7 +1048,7 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 }
 
 func (q *Queue) maintain() {
-	if q.stopping {
+	if q.stopping.Load() {
 		return
 	}
 	q.maintainWallTimeLimits()
@@ -1154,6 +1175,9 @@ func (q *Queue) maintain() {
 func (q *Queue) Tick() error { return q.TickContext(context.Background()) }
 
 func (q *Queue) TickContext(requestContexts ...context.Context) error {
+	if q.stopping.Load() {
+		return queueStopping()
+	}
 	requestCtx := requestContext(requestContexts)
 	traffic := q.requestHealth.snapshot(q.clock.Now())
 
