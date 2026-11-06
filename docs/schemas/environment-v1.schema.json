@@ -32,8 +32,35 @@
         "platforms"
       ]
     },
+    "EnvironmentLockCoverage": {
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": "array"
+        },
+        "unmapped_platforms": {
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "required": [
+        "state",
+        "targets"
+      ]
+    },
     "EnvironmentPlatform": {
       "properties": {
+        "lock_coverage": {
+          "$ref": "#/$defs/EnvironmentLockCoverage"
+        },
         "worker_reads": {
           "items": {
             "$ref": "#/$defs/EnvironmentReadObservation"
@@ -80,6 +107,25 @@
       "required": [
         "worker",
         "state"
+      ]
+    },
+    "ExecutionTarget": {
+      "properties": {
+        "os": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "os",
+        "arch",
+        "platform"
       ]
     },
     "PathDiagnostic": {

@@ -82,6 +82,16 @@ separately. Keep private receipts ignored and retained for recovery.
 
 Resolve read-only, then submit once:
 
+From the next release, resolve and `myce portability --adapter
+.mycelium/adapter.yaml --entry NAME` also expose lost platform breadth: authored
+target exclusions, additional selected-lock dependency candidates, every member's
+coverage, native preparation and current admission remain separate. Run this
+before choosing targets and after inventory or recipe changes. A dependency
+candidate is not application compatibility or owner-accepted production parity.
+Plain-command `require_target` checks admission, not native qualification.
+Explicit targets remain binding; reusable entries still require them, and
+`portable: true` does not infer additional operating systems.
+
 ```sh
 myce version
 myce spec check --resolve --entry ease-audit .mycelium/adapter.yaml
