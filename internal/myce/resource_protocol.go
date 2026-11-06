@@ -10,7 +10,10 @@ const resourceProtocolHeader = "X-Myce-Resource-Telemetry"
 
 // Shared by every worker lane, including saved-result delivery. A new session
 // starts without support; headers negotiate without unknown JSON on old queues.
-type resourceWire struct{ supported atomic.Bool }
+type resourceWire struct {
+	supported atomic.Bool
+	processes atomic.Bool
+}
 
 func resourceWireInput(in any, supported bool) (any, bool) {
 	if supported {

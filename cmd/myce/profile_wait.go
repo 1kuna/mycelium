@@ -137,6 +137,7 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 }
 
 type profileNotification struct {
+	Findings         []myce.JobFinding `json:"findings,omitempty"`
 	ObservationError string            `json:"observation_error,omitempty"`
 	DeliveryID       string            `json:"delivery_id"`
 	JobID            string            `json:"job_id"`
@@ -212,6 +213,7 @@ func finishProfileObservation(ctx context.Context, dir string, r profileReceipt,
 		r.Status, r.ResultReference = j.State, j.OutputRefs
 		r.FilesExpired = j.FilesExpired
 		notification.Status, notification.ResultReference = r.Status, r.ResultReference
+		notification.Findings = j.Findings
 	}
 	notification.DeliveryID = profileHash([]string{r.Nonce, r.Project, r.Key, r.JobID, notification.Status, notification.ObservationError})
 	if waitErr != nil {

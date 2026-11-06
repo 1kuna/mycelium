@@ -67,9 +67,6 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		// (for example, a queue replaced with an older inventory-capable binary).
 		// Retry once with the full legacy inventory; attempt protocol is unchanged.
 		c = legacyUnifiedMemoryCheckin(w.legacyHygieneCheckin(full))
-		if w.Client.resourceWire != nil {
-			w.Client.resourceWire.supported.Store(false)
-		}
 		if w.unifiedMemoryWire != nil {
 			w.unifiedMemoryWire.supported = false
 			w.unifiedMemoryWire.probeSupported = false

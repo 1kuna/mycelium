@@ -204,6 +204,11 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 			} else {
 				j, err = read(requestCtx, id)
 			}
+			// Scalar batch waits intentionally carry no diagnostics. Fetch a full
+			// receipt once on finish, through the existing retry/backoff path.
+			if batchJobs != nil && j != nil && (j.State == "succeeded" || j.State == "failed" || j.State == "cancelled") {
+				j, err = c.GetJob(requestCtx, j.ID)
+			}
 			deadlineExpired := requestCtx.Err() == context.DeadlineExceeded
 			cancel()
 			if ctx.Err() != nil {
@@ -263,6 +268,7 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 			if _, err := fmt.Fprintf(out, "%s %s%s\n", j.ID, j.State, reason); err != nil {
 				return &exitError{2, err}
 			}
+			printJobFindings(errOut, j.Findings)
 			failed = failed || j.State != "succeeded"
 		}
 		if unavailable {

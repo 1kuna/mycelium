@@ -14,6 +14,7 @@ const attemptHistoryLimit = max(3, DefaultProductionInfrastructureRetries+1) + 1
 // taxonomy. State is the queue decision after this attempt (queued or terminal).
 // It is diagnostic evidence, never release proof or a retry/accounting input.
 type AttemptOutcome struct {
+	Findings       []JobFinding        `json:"findings,omitempty"`
 	inputsStaged   bool                // transient positive staging evidence; not part of the wire/history shape.
 	Placement      *PlacementDecision  `json:"placement,omitempty"`
 	Diagnostics    *AttemptDiagnostics `json:"diagnostics,omitempty"`

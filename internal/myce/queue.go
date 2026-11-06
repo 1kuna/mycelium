@@ -2370,6 +2370,7 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 				j.DiagnosticCode = "no_matching_device"
 			}
 		}
+		q.projectJobFindings(j)
 		key := j.Spec.SubmissionKey
 		// Status projection owns a fully detached view. Redaction can reuse
 		// its fields without another JSON round-trip for every job.

@@ -449,6 +449,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		if workerProtocolEndpoint(r.URL.Path) {
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
+			w.Header().Set(processTelemetryHeader, processTelemetryProtocol)
 		}
 		finishObservation, admitted := observationLimit.admit(w, r)
 		if !admitted {
@@ -600,15 +601,16 @@ type Client struct {
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
 	in, resourceFields := resourceWireInput(in, supported)
+	in = processTelemetryInput(in, c.resourceWire != nil && c.resourceWire.processes.Load())
 	err := c.callOnce(ctx, method, path, in, out)
 	var api *HTTPError
 	if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
 		// Strict JSON rejection occurs before mutation. Retry only once, with
 		// additive telemetry removed; retain the original durable local result.
-		if c.resourceWire != nil {
-			c.resourceWire.supported.Store(false)
-		}
-		legacy, _ := resourceWireInput(in, false)
+		// The rejection headers describe the downgraded queue. Keep CPU/I/O
+		// when resource-v1 is still advertised and only process fields are new.
+		legacy, _ := resourceWireInput(in, c.resourceWire != nil && c.resourceWire.supported.Load())
+		legacy = processTelemetryInput(legacy, c.resourceWire != nil && c.resourceWire.processes.Load())
 		return c.callOnce(ctx, method, path, legacy, out)
 	}
 	// Ordinary idempotent reads get one refill retry. Wait loops own repeated
@@ -652,6 +654,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	defer res.Body.Close()
 	if c.resourceWire != nil && workerProtocolEndpoint(path) {
 		c.resourceWire.supported.Store(res.Header.Get(resourceProtocolHeader) == resourceProtocol)
+		c.resourceWire.processes.Store(res.Header.Get(processTelemetryHeader) == processTelemetryProtocol)
 	}
 	if support, ok := ctx.Value(waitCapabilityKey{}).(*bool); ok {
 		*support = res.Header.Get("X-Myce-Wait") == "batch-v1"
