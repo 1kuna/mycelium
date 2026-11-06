@@ -14,6 +14,7 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 	q, c := fixture(t)
 	m := cpuMachine("large", "large", "cpu", 64, 121)
 	m.HostMemoryBudgetGB = 121
+	m.CapabilityProfile.SystemMemoryBytes = 121 << 30
 	m.MemoryObservation = &HostMemoryObservation{TotalGB: 121, UsedGB: 12, MyceliumGB: 10}
 	check(t, q, m, nil)
 	idle := cpuMachine("idle", "idle", "cpu", 16, 64)
@@ -23,13 +24,15 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 	if err := q.update(func() error {
 		m := q.s.Machines["large"]
 		s := cpuSpec(4, 84)
-		s.Needs.MemoryGB = 0
-		s.Needs.HostMemoryGB = 84
+		if err := normalizeResources(&s); err != nil {
+			return err
+		}
 		running = &Job{ID: "running", Spec: s, State: "running", Machine: m.ID, Session: m.Session, Attempt: 1, Queued: c.Now(), StartedAt: timePointer(c.Now()), MemoryEnvelope: &JobMemoryEnvelope{Basis: "exploratory", HostGB: 84}}
 		q.putJob(running.ID, running)
 		s = cpuSpec(4, 40)
-		s.Needs.MemoryGB = 0
-		s.Needs.HostMemoryGB = 40
+		if err := normalizeResources(&s); err != nil {
+			return err
+		}
 		s.Targets = []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cpu"}}
 		waiting = &Job{ID: "waiting", Spec: s, State: "queued", Queued: c.Now()}
 		q.putJob(waiting.ID, waiting)
