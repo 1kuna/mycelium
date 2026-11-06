@@ -3,10 +3,14 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"math"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -100,6 +104,89 @@ func (c Client) apiContext(ctx context.Context) (context.Context, context.Cancel
 // WithoutRetries lets an observation loop own pacing and overall timeouts,
 // avoiding nested retries that conceal overload or consume its whole deadline.
 func (c Client) WithoutRetries() Client { c.singleAttempt = true; return c }
+
+// RetryTransient runs a replay-safe operation under one owner deadline. The
+// operation must reconcile uploads/accepted results rather than replaying a
+// mutation blindly. No retry count or installation-specific timeout is imposed.
+// report receives each transient cause before the learned, Retry-After-aware
+// pause. The operation's client disables nested retry loops.
+func (c Client) RetryTransient(ctx context.Context, operation func(context.Context, Client) error, report func(error, time.Duration)) error {
+	ctx, cancel := c.apiContext(ctx)
+	defer cancel()
+	pace := ClientPace{}
+	one := c.WithoutRetries()
+	var last error
+	ownerError := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// A pause timer and owner timer can become ready together. Do not
+		// start another attempt before context cancellation is scheduled.
+		if end, ok := ctx.Deadline(); ok && !c.clock().Now().Before(end) {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	for {
+		if err := ownerError(); err != nil {
+			if last != nil {
+				return &clientRetryStopped{last, err}
+			}
+			return err
+		}
+		started := c.clock().Now()
+		err := operation(ctx, one)
+		if err == nil || !retryTransient(err) && !errors.Is(err, ctx.Err()) {
+			return err
+		}
+		if retryTransient(err) {
+			last = err
+		}
+		if stopped := ownerError(); stopped != nil {
+			if last != nil {
+				return &clientRetryStopped{last, stopped}
+			}
+			return err
+		}
+		pace.Observe(c.clock().Now().Sub(started), false)
+		delay := pace.Delay(c.clock().Now(), time.Time{}, err, c.Jitter)
+		if report != nil {
+			report(err, delay)
+		}
+		if stopped := c.pause(ctx, delay); stopped != nil {
+			return &clientRetryStopped{err, stopped}
+		}
+	}
+}
+
+type clientRetryStopped struct{ last, stop error }
+
+func (e *clientRetryStopped) Error() string {
+	return fmt.Sprintf("%v; latest transient cause: %v", e.stop, e.last)
+}
+func (e *clientRetryStopped) Unwrap() []error { return []error{e.last, e.stop} }
+
+func retryTransient(err error) bool {
+	if err == nil || IsTLSIdentityError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var api *HTTPError
+	if errors.As(err, &api) {
+		// Typed storage, integrity and configuration refusals need owner repair.
+		if api.Code != "" && api.Code != "request_failed" && api.Code != "queue_stopping" && api.Code != "client_rate_limited" {
+			return false
+		}
+		return api.Status == 408 || api.Status == 429 || api.Status == 500 || api.Status == 502 || api.Status == 503 || api.Status == 504
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) && !dns.Timeout() && !dns.Temporary() {
+		return false
+	}
+	var network net.Error
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, errFileTransferStalled) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.ETIMEDOUT) || errors.As(err, &network) && (network.Timeout() || network.Temporary())
+}
 
 // ClientJobEvent is advisory. It carries metadata across scalar wait replies.
 // A duration is meaningful only after execution starts; an overrun is unknown.

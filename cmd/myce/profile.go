@@ -581,13 +581,37 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			return profileFailure(out, &r, 69, "queue_unavailable: input storage unconfirmed; "+detail+"; intent retained; rerunning the same command resumes from the receipt without duplicating anything")
 		}
 		ctx = myce.WithFileStoreSubmission(ctx, r.Spec)
-		if err = c.PreflightFileStore(ctx, r.Spec.StoredInputFiles()); err != nil {
-			return capacityFailure("preflight", profileInputNames(r, p, itemInputs), err)
-		}
-		for name, file := range r.Uploads {
-			if err = c.UploadJobInput(ctx, filepath.Join(dir, file), profileUploadRef(r.Spec, name)); err != nil {
-				return capacityFailure("upload", profileStorageInputName(name, p, itemInputs), err)
+		operation, input := "preflight", profileInputNames(r, p, itemInputs)
+		preflightDone := false
+		uploaded := map[string]bool{}
+		err = c.RetryTransient(ctx, func(attempt context.Context, one myce.Client) error {
+			if !preflightDone {
+				operation, input = "preflight", profileInputNames(r, p, itemInputs)
+				if e := one.PreflightFileStore(attempt, r.Spec.StoredInputFiles()); e != nil {
+					return e
+				}
+				preflightDone = true
 			}
+			for name, file := range r.Uploads {
+				if uploaded[name] {
+					continue
+				}
+				operation, input = "upload", profileStorageInputName(name, p, itemInputs)
+				// Each retry rechecks the content hash and durable server offset.
+				if e := one.UploadJobInput(attempt, filepath.Join(dir, file), profileUploadRef(r.Spec, name)); e != nil {
+					return e
+				}
+				uploaded[name] = true
+			}
+			return nil
+		}, func(cause error, delay time.Duration) {
+			if c.Token != "" {
+				input = strings.ReplaceAll(input, c.Token, "[redacted]")
+			}
+			fmt.Fprintf(errOut, "run: retrying input storage operation=%s input=%q %s; next attempt in %s; same intent retained\n", operation, input, myce.ClientErrorCause(cause), delay)
+		})
+		if err != nil {
+			return capacityFailure(operation, input, err)
 		}
 		if r.Spec.Extension != "" {
 			var e myce.Extension

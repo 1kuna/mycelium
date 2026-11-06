@@ -280,3 +280,59 @@ func TestClientAdaptiveLongPollCompletion(t *testing.T) {
 		t.Fatal("long-poll completion hidden by sleep", err, clock.Now())
 	}
 }
+
+func TestClientAdaptiveTransientOwnerSpan(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		calls, reports := 0, 0
+		c := Client{URL: "http://fixture.invalid", Jitter: func() float64 { return 0 }, HTTP: &http.Client{Timeout: 10 * time.Second, Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if strings.HasSuffix(r.URL.Path, "preflight") {
+				time.Sleep(3 * time.Second)
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+			}
+			return &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"7"}}, Body: io.NopCloser(strings.NewReader(`{"code":"queue_stopping"}`))}, nil
+		})}}
+		started := time.Now()
+		err := c.RetryTransient(context.Background(), func(ctx context.Context, one Client) error {
+			if err := one.PreflightFileStore(ctx, nil); err != nil {
+				return err
+			}
+			res, err := one.fileRequest(ctx, "POST", "/api/files/uploads/", nil, nil)
+			if err != nil {
+				return err
+			}
+			return fileResponse(res, 201)
+		}, func(err error, d time.Duration) {
+			reports++
+			var api *HTTPError
+			if !errors.As(err, &api) || api.RetryAfter != 7*time.Second || d < 7*time.Second {
+				t.Fatal(err, d)
+			}
+		})
+		if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) != 10*time.Second || calls != 2 || reports != 1 {
+			t.Fatal("owner span restarted or nested retries hid cause", err, time.Since(started), calls, reports)
+		}
+	})
+}
+
+func TestClientAdaptiveTransientStopsPermanent(t *testing.T) {
+	for _, failure := range []error{&HTTPError{Status: 401}, &HTTPError{Status: 503, Code: "file_blob_unavailable"}, &HTTPError{Status: 507, Code: "file_store_capacity"}, errors.New("download hash mismatch"), errJoiningIdentity} {
+		calls := 0
+		c := Client{Pause: func(context.Context, time.Duration) error { t.Fatal("permanent failure slept"); return nil }}
+		err := c.RetryTransient(context.Background(), func(context.Context, Client) error { calls++; return failure }, func(error, time.Duration) { t.Fatal("permanent failure reported as retry") })
+		if err != failure || calls != 1 {
+			t.Fatal(err, calls)
+		}
+	}
+}
+
+func TestClientAdaptiveTransientFileRetryAfter(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	for _, value := range []string{"7", now.Add(7 * time.Second).Format(http.TimeFormat)} {
+		err := fileTransferError(&http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {value}}, Body: io.NopCloser(strings.NewReader(`{"code":"queue_stopping"}`))}, "transfer failed", now)
+		var api *HTTPError
+		if !errors.As(err, &api) || api.RetryAfter != 7*time.Second || !strings.Contains(ClientErrorCause(err), "retry_after=7s") {
+			t.Fatal(value, err)
+		}
+	}
+}
