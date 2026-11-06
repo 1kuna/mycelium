@@ -50,6 +50,7 @@ type EfficiencyAllocation struct {
 	ResourceIntegral
 }
 type efficiencyRate struct {
+	Release          string    `json:"release,omitempty"`
 	ReservedDeviceGB float64   `json:"reserved_device_gb"`
 	MeasuredDeviceGB *float64  `json:"measured_device_gb" jsonschema:"nullable"`
 	DeviceValidUntil time.Time `json:"device_valid_until"`
@@ -61,13 +62,14 @@ type efficiencyRate struct {
 	ValidUntil       time.Time `json:"valid_until"`
 }
 type JobEfficiency struct {
-	Since       time.Time              `json:"since"`
-	At          time.Time              `json:"at"`
-	Work        string                 `json:"work"`
-	Blocker     string                 `json:"blocker,omitempty"`
-	WaitSeconds map[string]float64     `json:"wait_seconds"`
-	Allocations []EfficiencyAllocation `json:"allocations,omitempty"`
-	Rate        efficiencyRate         `json:"rate"`
+	RetainedRates []efficiencyRate       `json:"retained_rates,omitempty"`
+	Since         time.Time              `json:"since"`
+	At            time.Time              `json:"at"`
+	Work          string                 `json:"work"`
+	Blocker       string                 `json:"blocker,omitempty"`
+	WaitSeconds   map[string]float64     `json:"wait_seconds"`
+	Allocations   []EfficiencyAllocation `json:"allocations,omitempty"`
+	Rate          efficiencyRate         `json:"rate"`
 }
 type EfficiencyHost struct {
 	Identity string    `json:"identity"`
@@ -201,19 +203,26 @@ func (e *JobEfficiency) advance(now time.Time) {
 		}
 		e.WaitSeconds[e.Blocker] += seconds
 	}
-	if e.Rate.Host != "" {
-		row := EfficiencyAllocation{Host: e.Rate.Host, Work: e.Work, Basis: e.Rate.Basis}
-		row.Seconds, row.ReservedMemoryGBSeconds, row.ReservedCPUSeconds = seconds, seconds*e.Rate.ReservedMemoryGB, seconds*e.Rate.ReservedCPUCores
-		covered := max(0, min(now.Sub(e.At), e.Rate.ValidUntil.Sub(e.At)).Seconds())
-		if e.Rate.MeasuredMemoryGB != nil {
-			row.MemoryCoveredSeconds, row.MeasuredMemoryGBSeconds = covered, covered**e.Rate.MeasuredMemoryGB
-			row.ReservedCoveredMemoryGBSeconds = covered * e.Rate.ReservedMemoryGB
+	e.addRate(e.Rate, now, seconds)
+	for _, rate := range e.RetainedRates {
+		e.addRate(rate, now, seconds)
+	}
+	e.At = now
+}
+func (e *JobEfficiency) addRate(rate efficiencyRate, now time.Time, seconds float64) {
+	if rate.Host != "" {
+		row := EfficiencyAllocation{Host: rate.Host, Work: e.Work, Basis: rate.Basis}
+		row.Seconds, row.ReservedMemoryGBSeconds, row.ReservedCPUSeconds = seconds, seconds*rate.ReservedMemoryGB, seconds*rate.ReservedCPUCores
+		covered := max(0, min(now.Sub(e.At), rate.ValidUntil.Sub(e.At)).Seconds())
+		if rate.MeasuredMemoryGB != nil {
+			row.MemoryCoveredSeconds, row.MeasuredMemoryGBSeconds = covered, covered**rate.MeasuredMemoryGB
+			row.ReservedCoveredMemoryGBSeconds = covered * rate.ReservedMemoryGB
 		}
-		row.ReservedDeviceGBSeconds = seconds * e.Rate.ReservedDeviceGB
-		deviceCovered := max(0, min(now.Sub(e.At), e.Rate.DeviceValidUntil.Sub(e.At)).Seconds())
-		if e.Rate.MeasuredDeviceGB != nil {
+		row.ReservedDeviceGBSeconds = seconds * rate.ReservedDeviceGB
+		deviceCovered := max(0, min(now.Sub(e.At), rate.DeviceValidUntil.Sub(e.At)).Seconds())
+		if rate.MeasuredDeviceGB != nil {
 			row.DeviceCoveredSeconds = deviceCovered
-			row.MeasuredDeviceGBSeconds = deviceCovered * *e.Rate.MeasuredDeviceGB
+			row.MeasuredDeviceGBSeconds = deviceCovered * *rate.MeasuredDeviceGB
 		}
 		i := slices.IndexFunc(e.Allocations, func(a EfficiencyAllocation) bool { return a.Host == row.Host && a.Basis == row.Basis })
 		if i < 0 {
@@ -222,8 +231,8 @@ func (e *JobEfficiency) advance(now time.Time) {
 			e.Allocations[i].ResourceIntegral.add(row.ResourceIntegral)
 		}
 	}
-	e.At = now
 }
+
 func (h *EfficiencyHost) advance(now time.Time) {
 	if !now.After(h.At) {
 		return
@@ -268,10 +277,10 @@ func efficiencyBasis(j *Job) string {
 }
 func (q *Queue) refreshEfficiency() {
 	now := q.clock.Now()
-	releases := map[attemptKey]HostRelease{}
+	releases := map[string][]HostRelease{}
 	for _, r := range q.s.HostReleases {
 		if !r.Preparation {
-			releases[attemptKey{r.Job, r.Attempt, r.Session}] = r
+			releases[r.Job] = append(releases[r.Job], r)
 		}
 	}
 	for _, j := range q.liveJobs() {
@@ -290,8 +299,28 @@ func (q *Queue) refreshEfficiency() {
 		} else {
 			e.Blocker = ""
 		}
-		release, hasRelease := releases[jobKey(*j)]
-		if !batchReservesCapacity(j) && (!hasRelease || release.Machine != j.Machine) {
+		oldRetained := e.RetainedRates
+		e.RetainedRates = nil
+		for _, release := range releases[j.ID] {
+			if batchReservesCapacity(j) && release.Machine == j.Machine && release.Session == j.Session && release.Attempt == j.Attempt {
+				continue // The current execution already carries this charge.
+			}
+			basis := previousBasis
+			for _, old := range oldRetained {
+				if old.Release == releaseKey(release) {
+					basis = old.Basis
+					break
+				}
+			}
+			if basis == "" {
+				basis = efficiencyBasis(j)
+			}
+			rate := efficiencyRate{Release: releaseKey(release), Host: release.Host, Basis: basis, ReservedMemoryGB: release.HostChargeGB, ReservedCPUCores: float64(max(1, release.CPUCores)), ReservedDeviceGB: release.MemoryGB * float64(max(1, len(release.Devices)))}
+			q.efficiencySample(&rate, release.Machine, attemptKey{release.Job, release.Attempt, release.Session}, now)
+			e.RetainedRates = append(e.RetainedRates, rate)
+		}
+		slices.SortFunc(e.RetainedRates, func(a, b efficiencyRate) int { return strings.Compare(a.Release, b.Release) })
+		if !batchReservesCapacity(j) {
 			continue
 		}
 		m := q.s.Machines[j.Machine]
@@ -299,20 +328,7 @@ func (q *Queue) refreshEfficiency() {
 			continue
 		}
 		e.Rate = efficiencyRate{Host: hostID(m), Basis: efficiencyBasis(j), ReservedMemoryGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), ReservedCPUCores: float64(j.Spec.Needs.cores()), ReservedDeviceGB: j.Spec.Needs.MemoryGB}
-		if !batchReservesCapacity(j) {
-			e.Rate = efficiencyRate{Host: release.Host, Basis: previousBasis, ReservedMemoryGB: release.HostChargeGB, ReservedCPUCores: float64(max(1, release.CPUCores)), ReservedDeviceGB: release.MemoryGB * float64(max(1, len(release.Devices)))}
-		}
-		sample := q.hostMemorySamples[j.Machine][jobKey(*j)]
-		if !sample.deviceAt.IsZero() && now.Before(sample.deviceAt.Add(deviceMemorySampleFreshFor)) {
-			gb := sample.deviceGB
-			e.Rate.MeasuredDeviceGB = &gb
-			e.Rate.DeviceValidUntil = sample.deviceAt.Add(deviceMemorySampleFreshFor)
-		}
-		if !sample.at.IsZero() && now.Before(sample.at.Add(hostMemorySampleFreshFor)) {
-			gb := sample.gb
-			e.Rate.MeasuredMemoryGB = &gb
-			e.Rate.ValidUntil = sample.at.Add(hostMemorySampleFreshFor)
-		}
+		q.efficiencySample(&e.Rate, j.Machine, jobKey(*j), now)
 	}
 	if q.s.EfficiencyHosts == nil {
 		q.s.EfficiencyHosts = map[string]EfficiencyHost{}
@@ -356,11 +372,7 @@ func (q *Queue) refreshEfficiency() {
 	}
 	for host, m := range owners {
 		seen[host] = true
-		identity := identityHash(struct {
-			Hardware, CPU string
-			Cores         int
-			RAM           float64
-		}{m.ExtensionFingerprint, m.CPUExtensionFingerprint, m.EffectiveCPUCores, m.EffectiveHostMemoryBudgetGB})
+		identity := efficiencyHostIdentity(hostMachines[host])
 		h, ok := q.s.EfficiencyHosts[host]
 		if !ok || h.Identity != identity {
 			h = EfficiencyHost{Host: host, Since: now, At: now, Identity: identity}
@@ -413,6 +425,34 @@ func (q *Queue) refreshEfficiency() {
 	}
 }
 
+func (q *Queue) efficiencySample(rate *efficiencyRate, machine string, key attemptKey, now time.Time) {
+	sample := q.hostMemorySamples[machine][key]
+	if !sample.deviceAt.IsZero() && now.Before(sample.deviceAt.Add(deviceMemorySampleFreshFor)) {
+		gb := sample.deviceGB
+		rate.MeasuredDeviceGB, rate.DeviceValidUntil = &gb, sample.deviceAt.Add(deviceMemorySampleFreshFor)
+	}
+	if !sample.at.IsZero() && now.Before(sample.at.Add(hostMemorySampleFreshFor)) {
+		gb := sample.gb
+		rate.MeasuredMemoryGB, rate.ValidUntil = &gb, sample.at.Add(hostMemorySampleFreshFor)
+	}
+}
+
+func efficiencyHostIdentity(machines []*Machine) string {
+	// Reporter recency is not a hardware change. CPU/GPU siblings contribute
+	// their stable inventory identities in a deterministic order.
+	type member struct {
+		ID, Hardware, CPU string
+		Cores             int
+		RAM               float64
+	}
+	inventory := make([]member, 0, len(machines))
+	for _, m := range machines {
+		inventory = append(inventory, member{m.ID, m.ExtensionFingerprint, m.CPUExtensionFingerprint, m.EffectiveCPUCores, m.EffectiveHostMemoryBudgetGB})
+	}
+	slices.SortFunc(inventory, func(a, b member) int { return strings.Compare(a.ID, b.ID) })
+	return identityHash(inventory)
+}
+
 // Only the sampled reason's category is retained, never worker text. The
 // authoritative planner runs on a detached observation, not under q.mu.
 func efficiencyBlocker(reason string) string {
@@ -443,9 +483,23 @@ func efficiencyBlocker(reason string) string {
 // are author intent; this report neither changes them nor asserts output parity.
 func (q *Queue) strandedDemand(j *Job) []StrandedDemand {
 	var rows []StrandedDemand
+	// Called on a detached maintenance observation. Replace only this map;
+	// restore it before returning, and never mutate its shared policy values.
+	policies := q.s.Policies
+	q.s.Policies = maps.Clone(policies)
+	if policy, ok := policies[j.Spec.Project]; ok {
+		policy.AllowedMachines = nil
+		q.s.Policies[j.Spec.Project] = policy
+	}
+	defer func() { q.s.Policies = policies }()
+	scan := q.placementScan()
+	fences := q.hostBackfillFences(scan)
 	seenHosts := map[string]bool{}
 	for _, m := range q.plannerMachines() {
-		if seenHosts[hostID(m)] {
+		if seenHosts[hostID(m)] || !q.inventoryFresh(q.s.Machines[m.ID]) {
+			continue
+		}
+		if fence := q.groupDemandFence(m); fence != nil && j.ID != fence.ID && q.comparePriority(j.Spec, fence.Spec) >= 0 {
 			continue
 		}
 		fields := []string{}
@@ -455,7 +509,7 @@ func (q *Queue) strandedDemand(j *Job) []StrandedDemand {
 		if contains(j.Spec.ExcludedMachines, m.ID) {
 			fields = append(fields, "excluded_machines")
 		}
-		if !q.projectAllows(j.Spec.Project, m.ID) {
+		if !machineAllowed(policies[j.Spec.Project].AllowedMachines, m.ID) {
 			fields = append(fields, "policy.projects.allowed_machines")
 		}
 		targetProbe := *j
@@ -468,17 +522,12 @@ func (q *Queue) strandedDemand(j *Job) []StrandedDemand {
 		}
 		probe := *j
 		probe.Spec.AllowedMachines, probe.Spec.ExcludedMachines, probe.Spec.Targets = nil, nil, nil
-		if q.maintenanceBlocked(hostID(m)) || q.held(hostID(m)) || q.machineLimitReason(m) != "" || q.reservationReasonOnTarget(&probe, m) != "" {
+		candidate := q.batchCandidateWithResources(&probe, m, nil)
+		if candidate == nil || q.immediateCandidate(candidate, m) == nil || !hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) || !q.batchSlotFreeForEfficiency(candidate, m) || !q.hostBackfillAllows(candidate, m, fences[hostID(m)]) {
 			continue
 		}
-		for _, candidate := range q.memoryCandidates(&probe, m) {
-			if !fitsResources(candidate, m, m.FreeMemoryGB) || !hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) || q.variantParityReason(candidate, m) != "" || !environmentReady(candidate, m) || !q.batchSlotFreeForEfficiency(candidate, m) {
-				continue
-			}
-			seenHosts[hostID(m)] = true
-			rows = append(rows, StrandedDemand{JobID: j.ID, Project: j.Spec.Project, Host: hostID(m), Fields: fields, MemoryGB: hostNeed(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB), CPUCores: candidate.Spec.Needs.cores()})
-			break
-		}
+		seenHosts[hostID(m)] = true
+		rows = append(rows, StrandedDemand{JobID: j.ID, Project: j.Spec.Project, Host: hostID(m), Fields: fields, MemoryGB: hostNeed(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB), CPUCores: candidate.Spec.Needs.cores()})
 	}
 	slices.SortFunc(rows, func(a, b StrandedDemand) int { return strings.Compare(a.JobID+a.Host, b.JobID+b.Host) })
 	return rows
@@ -808,11 +857,12 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 		}
 	}
 	for _, p := range r.Jobs {
-		if !p.Active {
-			continue
-		}
 		for _, category := range []string{"memory_reservation", "authored_platform_targets", "environment", "priority_fairness", "preparation", "capacity", "holds", "dependency", "unknown"} {
 			key := "project:" + p.Project + "/wait_" + category + "_seconds"
+			identities[key] = ""
+			if !p.Active {
+				continue
+			}
 			if p.Blocker == category {
 				values[key] = max(values[key], p.Seconds[category])
 			} else if _, ok := values[key]; !ok {
@@ -900,6 +950,12 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 		identity, present := identities[key]
 		if present && identity == b.Identity {
 			b.Observed = false
+			if strings.HasPrefix(key, "project:") {
+				// No live demand resolves the condition without teaching idle
+				// zeros over the learned history of actual queue episodes.
+				b.Observed, b.Active, b.Value = true, false, 0
+				b.Adverse, b.Recovering = 0, 0
+			}
 			next[key] = b
 			signals = append(signals, b.signal(key))
 		}

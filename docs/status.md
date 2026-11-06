@@ -2080,6 +2080,8 @@ admission, placement, authored intent or retry decisions.
   independent physical used/total RAM. `programs` groups reservation-time and
   measured-use integrals by host, opaque work identity and sizing basis. These
   include assigned/startup/stopping custody until release, not just execution.
+  Retained rates keep the original host/work/basis after requeue clears the
+  current assignment, and end only when exact release settles that obligation.
   Host attribution includes the worker and managed descendants. Per-program
   memory is the existing nonreclaimable attempt attribution, not historical peak
   RSS. Coverage seconds distinguish missing samples from zero use. Reservation
@@ -2131,5 +2133,10 @@ sample log. Host aggregates follow inventory, and baseline subjects follow the
 retained evidence. Bulk projection, sorting and baseline statistics run outside
 `q.mu`; the existing maintenance commit applies monotonic observations and exact-job
 fences. Unrelated heartbeats do not starve diagnostic publication.
+Host identity uses sorted sibling inventory, so CPU/GPU heartbeat order cannot
+reset accounting or alert warmup. Project wait history survives gaps between
+queue episodes while its owning jobs remain retained; idle gaps resolve the
+current condition without retraining that history with zeros. Job-only captures
+omit the fleet report and its baseline maps.
 Reads reuse the published generation. Sensor coverage and maintenance sampling
 limits are evidence limits, not authorization to release custody or shrink needs.

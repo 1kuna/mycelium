@@ -106,6 +106,13 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 			t.Fatalf("%s omitted the maintenance report", path)
 		}
 	}
+	jobView, _, err := q.captureObservation(waiting.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jobView.efficiencyView != nil || jobView.s.EfficiencyHosts != nil || jobView.s.EfficiencyHealth != nil || jobView.s.StrandedDemand != nil {
+		t.Fatal("job-only capture retained fleet diagnostics")
+	}
 	// Capability failure is not authored stranding, even when targets exclude it.
 	q.s.Machines["idle"].FreeCPUCores = 0
 	if len(q.strandedDemand(waiting)) != 0 {
@@ -292,5 +299,147 @@ func TestEfficiencyStopSnapshotSurvivesCleanup(t *testing.T) {
 	q.applyEfficiencyDiagnostics(older)
 	if older.applied {
 		t.Fatal("out-of-order capture was committed")
+	}
+}
+
+func TestEfficiencyStrandingRetainsAdmissionFences(t *testing.T) {
+	q, c := fixture(t)
+	m := cpuMachine("peer", "peer", "cpu", 8, 16)
+	check(t, q, m, nil)
+	s := cpuSpec(1, 2)
+	if err := normalizeResources(&s); err != nil {
+		t.Fatal(err)
+	}
+	s.Targets = []ExecutionTarget{{OS: "darwin", Arch: "arm64", Platform: "cpu"}}
+	j := &Job{ID: "waiting", Spec: s, State: "queued", Queued: c.Now()}
+	if err := q.update(func() error { q.putJob(j.ID, j); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.strandedDemand(j)) != 1 {
+		t.Fatal("fixture has no authored-only exclusion")
+	}
+	j.Spec.After = &PieceDependency{Job: "producer"}
+	if len(q.strandedDemand(j)) != 0 {
+		t.Fatal("unresolved dependency reported as authored-only stranding")
+	}
+	j.Spec.After = nil
+	q.s.Machines[m.ID].UnavailableRoots = []UnavailableRoot{{Root: "data", Reason: "unavailable"}}
+	if len(q.strandedDemand(j)) != 0 {
+		t.Fatal("unavailable storage reported as authored-only stranding")
+	}
+	q.s.Machines[m.ID].UnavailableRoots = nil
+	q.s.PreparationPlans = map[string]HostLaunch{"build": {Kind: "environment", Machine: m.ID, Session: m.Session, Started: true}}
+	if len(q.strandedDemand(j)) != 0 {
+		t.Fatal("active preparation reported as authored-only stranding")
+	}
+	q.s.PreparationPlans = nil
+	deadline := c.Now()
+	q.s.Jobs["startup"] = &Job{ID: "startup", State: "failed", Spec: Spec{StartBy: &deadline}}
+	q.s.HostReleases = map[string]HostRelease{"startup": {Host: m.HostID, Job: "startup", Machine: m.ID, Session: m.Session}}
+	if len(q.strandedDemand(j)) != 0 {
+		t.Fatal("unreleased startup reported as authored-only stranding")
+	}
+	q.s.HostReleases = nil
+	q.s.Policies = map[string]ProjectPolicy{j.Spec.Project: {AllowedMachines: []string{"elsewhere"}, MaxConcurrent: 1}}
+	j.Spec.Targets = nil
+	rows := q.strandedDemand(j)
+	if len(rows) != 1 || strings.Join(rows[0].Fields, ",") != "policy.projects.allowed_machines" || len(q.s.Policies[j.Spec.Project].AllowedMachines) != 1 {
+		t.Fatalf("policy-only exclusion not isolated/restored: %+v", rows)
+	}
+}
+
+func TestEfficiencyRequeuedCustodyRemainsCharged(t *testing.T) {
+	q, c := fixture(t)
+	m := cpuMachine("host", "host", "cpu", 8, 16)
+	check(t, q, m, nil)
+	s := cpuSpec(2, 8)
+	if err := normalizeResources(&s); err != nil {
+		t.Fatal(err)
+	}
+	j := &Job{ID: "work", Spec: s, State: "running", Machine: m.ID, Session: m.Session, Attempt: 1, MemoryEnvelope: &JobMemoryEnvelope{Basis: "exploratory"}}
+	if err := q.update(func() error { q.putJob(j.ID, j); q.refreshHostMemory(); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(5 * time.Second)
+	if err := q.update(func() error { q.retainRelease(j); q.requeue(j, "lost", false); q.refreshHostMemory(); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if j.Machine != "" || len(j.Efficiency.RetainedRates) != 1 {
+		t.Fatal("fixture did not retain old execution custody")
+	}
+	c.Advance(5 * time.Second)
+	if err := q.update(func() error {
+		q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: 1}, Machine: m.ID, Session: m.Session}, true)
+		q.refreshHostMemory()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(5 * time.Second)
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(j.Efficiency.Allocations) != 1 {
+		t.Fatal(j.Efficiency.Allocations)
+	}
+	a := j.Efficiency.Allocations[0]
+	if a.Host != "host" || a.Basis != "exploratory" || a.ReservedMemoryGBSeconds != 80 || a.ReservedCPUSeconds != 20 {
+		t.Fatalf("custody charge ended before exact release or continued afterward: %+v", a)
+	}
+}
+
+func TestEfficiencySiblingReportsKeepHostIdentity(t *testing.T) {
+	q, c := fixture(t)
+	cpu := cpuMachine("cpu", "host", "cpu", 8, 16)
+	gpu := cpuMachine("gpu", "host", "cuda", 8, 16)
+	cpu.ExtensionFingerprint, gpu.ExtensionFingerprint = "cpu-hardware", "gpu-hardware"
+	cpu.CPUExtensionFingerprint, gpu.CPUExtensionFingerprint = "host-cpu", "host-cpu"
+	check(t, q, cpu, nil)
+	check(t, q, gpu, nil)
+	first := q.s.EfficiencyHosts["host"]
+	c.Advance(5 * time.Second)
+	if err := q.update(func() error { q.s.Machines[cpu.ID].LastSeen = c.Now(); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	second := q.s.EfficiencyHosts["host"]
+	c.Advance(5 * time.Second)
+	if err := q.update(func() error { q.s.Machines[gpu.ID].LastSeen = c.Now(); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	third := q.s.EfficiencyHosts["host"]
+	if first.Identity != second.Identity || first.Identity != third.Identity || !first.Since.Equal(third.Since) || third.Seconds != 10 {
+		t.Fatalf("sibling recency reset host evidence: first=%+v second=%+v third=%+v", first, second, third)
+	}
+}
+
+func TestEfficiencyProjectWaitBaselineSurvivesQueueEpisodes(t *testing.T) {
+	now := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
+	r := &EfficiencyReport{Jobs: []EfficiencyWait{{Project: "project", Active: true, Blocker: "memory_reservation", Seconds: map[string]float64{"memory_reservation": 10}}}}
+	var baseline map[string]efficiencyBaseline
+	step := func() { now = now.Add(time.Second); r.At = now; baseline, _ = efficiencySignals(r, baseline) }
+	for range alertWarmup {
+		step()
+	}
+	key := "project:project/wait_memory_reservation_seconds"
+	count := len(baseline[key].History)
+	r.Jobs[0].Active = false
+	for range alertHistorySize {
+		step()
+	}
+	if len(baseline[key].History) != count || baseline[key].Active {
+		t.Fatal("idle episode erased or retrained wait evidence")
+	}
+	r.Jobs[0].Active = true
+	r.Jobs[0].Seconds["memory_reservation"] = 100
+	for range alertConfirmation {
+		step()
+	}
+	if !baseline[key].Active {
+		t.Fatal("new wait episode lost its learned comparison")
+	}
+	r.Jobs = nil
+	step()
+	if _, ok := baseline[key]; ok {
+		t.Fatal("removed owning wait records retained a baseline")
 	}
 }

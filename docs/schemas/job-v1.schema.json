@@ -2577,6 +2577,15 @@
         "rate": {
           "$ref": "#/$defs/efficiencyRate"
         },
+        "retained_rates": {
+          "items": {
+            "$ref": "#/$defs/efficiencyRate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "since": {
           "format": "date-time",
           "type": "string"
@@ -5068,6 +5077,9 @@
               "type": "null"
             }
           ]
+        },
+        "release": {
+          "type": "string"
         },
         "reserved_cpu_cores": {
           "type": "number"

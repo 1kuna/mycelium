@@ -237,7 +237,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	locked := readWallStart(q.observeRead)
 	hold := q.statusHolds.start()
 	var files fileStoreObservation
-	v := &Queue{efficiencyView: q.efficiencyView, clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
+	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root}
@@ -248,6 +248,12 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now())}
 	}
 	s := q.s
+	if id == "" {
+		v.efficiencyView = q.efficiencyView
+	} else {
+		// Job-only reads never return fleet diagnostics or their baselines.
+		s.EfficiencyHosts, s.EfficiencyHealth, s.StrandedDemand = nil, nil, nil
+	}
 	s.Jobs, s.Submissions = map[string]*Job{}, map[string]*submissionRecord{}
 	frozen := map[string]*Job{}
 	var selected *Job
