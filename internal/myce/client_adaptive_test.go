@@ -195,6 +195,30 @@ func TestClientAdaptiveTransferProgressClock(t *testing.T) {
 	}
 }
 
+func TestClientAdaptiveTransferIncludesServicePeriod(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
+	source := &adaptiveTransferConn{clock: clock, next: time.Microsecond}
+	conn := &fileTransferConn{Conn: source, clock: clock}
+	data := make([]byte, 256)
+	if _, err := conn.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	// The consumer drains buffered bytes and does local work before the next
+	// readiness edge. A near-ready socket poll alone omits that service cost.
+	clock.Advance(time.Second)
+	if _, err := conn.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	source.next = 50 * time.Millisecond
+	if _, err := conn.Read(data); err != nil {
+		t.Fatal("brief readiness waits hid the measured service period", err)
+	}
+	source.stalled = true
+	if _, err := conn.Read(data); !errors.Is(err, errFileTransferStalled) {
+		t.Fatal("actual absence of progress did not stop", err)
+	}
+}
+
 func TestClientAdaptiveBufferedSocketProgress(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
