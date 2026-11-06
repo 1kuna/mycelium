@@ -42,6 +42,8 @@ type MachineProbe struct {
 	CommandEnv func(context.Context, map[string]string, string, ...string) ([]byte, error)
 	Glob       func(string) ([]string, error)
 	ReadFile   func(string) ([]byte, error)
+	// XeActivity reads every enumerated hardware engine without changing GPU settings.
+	XeActivity func(context.Context, string) (float64, error)
 }
 
 func LocalMachineProbe() MachineProbe {
@@ -79,7 +81,7 @@ func LocalMachineProbe() MachineProbe {
 		}
 		return stdout.Bytes(), err
 	}
-	return MachineProbe{Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Files: guardedProbeFS{os.DirFS("/")}, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+	return MachineProbe{XeActivity: nativeXeActivity, Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Files: guardedProbeFS{os.DirFS("/")}, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		return run(ctx, nil, n, args...)
 	}}
 }
