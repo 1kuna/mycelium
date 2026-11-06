@@ -2751,6 +2751,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
 	q.claimMemoryExploration(j, m)
+	q.recordColdProbeAssignment(j, m)
 	j.StorageEnvelope = q.storageEnvelope(j, m)
 	j.Reason = ""
 	if measured {

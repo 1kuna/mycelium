@@ -5,10 +5,16 @@ import "time"
 // Keep the same bounded sensor history as host health. This is a storage bound,
 // not a memory allowance: the reserve is the largest measured adjacent drop.
 type hostLaunchMemory struct {
-	Machine   string               `json:"machine"`
-	Session   string               `json:"session"`
-	Samples   []hostHeadroomSample `json:"samples"`
-	RefusalGB float64              `json:"refusal_gb,omitempty"`
+	Machine   string                       `json:"machine"`
+	Session   string                       `json:"session"`
+	Samples   []hostHeadroomSample         `json:"samples"`
+	RefusalGB float64                      `json:"refusal_gb,omitempty"`
+	Assigned  map[string]probeLaunchMargin `json:"assigned,omitempty"`
+}
+
+type probeLaunchMargin struct {
+	Attempt int     `json:"attempt"`
+	GB      float64 `json:"gb"`
 }
 
 type hostHeadroomSample struct {
@@ -34,6 +40,12 @@ func (q *Queue) recordHostLaunchMemory(m, old *Machine) {
 			h.Samples = append(h.Samples, hostHeadroomSample{old.LastSeen, old.HostAvailableMemoryGB})
 		}
 	}
+	for id, offer := range h.Assigned {
+		j := q.s.Jobs[id]
+		if j == nil || j.Machine != m.ID || j.Session != m.Session || j.Attempt != offer.Attempt || !batchReservesCapacity(j) {
+			delete(h.Assigned, id)
+		}
+	}
 	now := q.clock.Now()
 	if n := len(h.Samples); n > 0 && !now.After(h.Samples[n-1].At) {
 		return // Repeated/future timestamps cannot establish a sampling interval.
@@ -42,6 +54,21 @@ func (q *Queue) recordHostLaunchMemory(m, old *Machine) {
 	if len(h.Samples) > hostHealthHistorySize {
 		h.Samples = append([]hostHeadroomSample(nil), h.Samples[len(h.Samples)-hostHealthHistorySize:]...)
 	}
+}
+
+func (q *Queue) recordColdProbeAssignment(j *Job, m *Machine) {
+	if j.MemoryEnvelope == nil || j.MemoryEnvelope.Basis != "exploratory" {
+		return
+	}
+	q.recordHostLaunchMemory(m, nil)
+	h := q.s.HostLaunchMemory[hostID(m)]
+	if h == nil {
+		return
+	}
+	if h.Assigned == nil {
+		h.Assigned = map[string]probeLaunchMargin{}
+	}
+	h.Assigned[j.ID] = probeLaunchMargin{Attempt: j.Attempt, GB: q.coldProbeDriftMarginGB(m)}
 }
 
 func (q *Queue) coldProbeDriftMarginGB(m *Machine) float64 {
@@ -74,12 +101,17 @@ func (q *Queue) recordColdProbeRefusal(j *Job, r Result) {
 	if d.Unit != "GiB" || (d.Subcheck != "live_host_ram" && d.Subcheck != "live_host_growth") || d.Unavailable || d.Available == nil || d.Required <= *d.Available || d.EnvelopeHostGB != j.MemoryEnvelope.HostGB || d.EnvelopeDeviceGB != j.MemoryEnvelope.DeviceGB || d.EnvelopeSource != j.MemoryEnvelope.Source {
 		return
 	}
-	q.recordHostLaunchMemory(m, nil)
 	h := q.s.HostLaunchMemory[hostID(m)]
 	if h != nil {
-		margin := q.coldProbeDriftMarginGB(m) + d.Required - *d.Available + minimumHostMemoryGB
+		// Old in-flight offers used the pre-upgrade page/configured margin.
+		// New offers retain their actual reserve through later check-ins.
+		assigned := exploratoryDriftMarginGB(m)
+		if offer, ok := h.Assigned[j.ID]; ok && offer.Attempt == j.Attempt {
+			assigned = offer.GB
+		}
+		margin := assigned + d.Required - *d.Available + minimumHostMemoryGB
 		if validMemoryValue(margin) {
-			h.RefusalGB = margin
+			h.RefusalGB = max(h.RefusalGB, margin)
 		}
 	}
 }
