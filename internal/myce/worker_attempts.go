@@ -83,6 +83,40 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	}
 	return r, a.diagnostics, a.finished, a.err
 }
+
+func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Job, reports []AttemptReport, actors map[attemptKey]*attemptSupervisor) {
+	for i := range reports {
+		// Inventory probes can outlast the original report while the actor
+		// keeps sampling. Read its latest exact-attempt memory snapshot, with
+		// no process or sensor I/O, before applying the original sample age.
+		memory := (*CurrentHostMemory)(nil)
+		key := attemptKey{reports[i].ID, reports[i].Attempt, reports[i].Session}
+		if a := actors[key]; a != nil && reports[i].Started {
+			a.mu.Lock()
+			latest := a.report
+			if latest.Started && latest.ID == key.job && latest.Attempt == key.attempt && latest.Session == key.session {
+				memory = latest.CurrentHostMemory
+			}
+			a.mu.Unlock()
+		}
+		reports[i].CurrentHostMemory = memory
+	}
+	// Sample physical headroom after the attempt counters. Crediting newer
+	// resident memory against older availability would spend its growth twice.
+	hostFree, rawAvailable, err := w.sampleHostMemory(ctx)
+	m.HostAvailableMemoryGB = hostFree
+	if err != nil || !validMemoryValue(hostFree) {
+		m.HostAvailableMemoryGB = 0
+		m.HostMemoryError = "host RAM probe failed"
+	}
+	m.MemoryObservation = w.hostMemoryObservation(ctx, *m, rawAvailable, err)
+	for i := range reports {
+		reports[i].Liveness = reports[i].Liveness.aged(w.Clock.Now())
+		reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
+		reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
+	}
+	m.MemoryObservation = creditDockerObservation(m.MemoryObservation, jobs, reports, w.Clock.Now())
+}
 func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
 	// Scarce-host yield is provisional until its delivery authorization. It
 	// may be withdrawn while the exact process continues running normally.
@@ -1061,14 +1095,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					}
 				}
 			}
-			hostFree, rawAvailable, err := w.sampleHostMemory(ctx)
-			m.HostAvailableMemoryGB = hostFree
-			if err != nil || !validMemoryValue(hostFree) {
-				m.HostAvailableMemoryGB = 0
-				m.HostMemoryError = "host RAM probe failed"
-			}
-			m.MemoryObservation = w.hostMemoryObservation(ctx, m, rawAvailable, err)
-			m.MemoryObservation = creditDockerObservation(m.MemoryObservation, jobs, reports, w.Clock.Now())
 			m.SharedHostPressure = nil
 			if w.Machine.SharedHost != nil {
 				m.SharedHostPressure = pressureProbe.snapshot(true)
@@ -1180,12 +1206,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.batchSupervisors = maps.Clone(actors)
 			rt.mu.Unlock()
 
-			// Age the actor snapshot at send time, including any intervening probes.
-			for i := range reports {
-				reports[i].Liveness = reports[i].Liveness.aged(w.Clock.Now())
-				reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
-				reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
-			}
+			// Refresh memory together after inventory, then age through the reads.
+			w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
 			rt.mu.Lock()
 			// Replaced, never mutated: model loads share this exact-attempt
