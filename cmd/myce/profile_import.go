@@ -67,6 +67,16 @@ func (p *profileImportProgress) failure(out io.Writer, r *profileReceipt, dir st
 		next = "retain the saved key and receipt for recovery; reconcile that key before replacing an uncertain submission; " + next
 	}
 	reason := myce.ClientErrorCause(cause)
+	// Capacity refusals already expose actionable required/free-byte details.
+	// Keep that established diagnostic alongside the classified import cause.
+	capacity := ""
+	var refusal *myce.HTTPError
+	if errors.As(cause, &refusal) && (refusal.Code == "file_store_capacity" || refusal.Code == "project_file_store_quota") {
+		capacity = "; " + refusal.Code + ": " + refusal.Message
+		if token != "" {
+			capacity = strings.ReplaceAll(capacity, token, "[redacted]")
+		}
+	}
 	var exited *exec.ExitError
 	if p.phase == "arming" && errors.As(cause, &exited) {
 		reason = "notifier_check_failed"
@@ -99,7 +109,7 @@ func (p *profileImportProgress) failure(out io.Writer, r *profileReceipt, dir st
 			}
 		}
 	}
-	return profileFailure(out, r, code, fmt.Sprintf("%s: phase=%s input=%q cause=%s progress=%d/%d bytes (%s) elapsed=%.3fs; %s", f.Code, f.Phase, f.Input, f.Cause, f.ProgressBytes, f.SizeBytes, f.ProgressKind, f.ElapsedSeconds, f.NextStep))
+	return profileFailure(out, r, code, fmt.Sprintf("%s: phase=%s input=%q cause=%s progress=%d/%d bytes (%s) elapsed=%.3fs%s; %s", f.Code, f.Phase, f.Input, f.Cause, f.ProgressBytes, f.SizeBytes, f.ProgressKind, f.ElapsedSeconds, capacity, f.NextStep))
 }
 
 func profileImportContext(ctx context.Context, p *profileImportProgress) context.Context {
