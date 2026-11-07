@@ -31,3 +31,16 @@ func TestFirstRunMessages(t *testing.T) {
 		t.Fatal("human formatting changed the JSON observation")
 	}
 }
+
+func TestFirstRunMessagesExtensionAdvice(t *testing.T) {
+	j := &myce.Job{State: "running", Isolation: "unsandboxed: legacy extension registration", Spec: myce.Spec{Kind: "sample"}}
+	before, _ := json.Marshal(j)
+	text := jobReasonText(j)
+	if !strings.Contains(text, "publish a new extension version") || strings.Contains(text, "job YAML") {
+		t.Fatalf("unusable extension advice: %s", text)
+	}
+	after, _ := json.Marshal(j)
+	if string(before) != string(after) {
+		t.Fatal("extension formatting changed JSON")
+	}
+}

@@ -17,3 +17,14 @@ func TestFirstRunMessages(t *testing.T) {
 		t.Fatalf("enforced notice changed: %s", got)
 	}
 }
+
+func TestFirstRunMessagesExtensionAdvice(t *testing.T) {
+	j := &Job{Spec: Spec{Name: "sample", Project: "test", Kind: "sample", Isolation: "sandboxed"}}
+	if err := j.Spec.Validate(); err == nil || !strings.Contains(err.Error(), "extension registration owns isolation") {
+		t.Fatalf("extension job override unexpectedly accepted: %v", err)
+	}
+	advice := NativeIsolationAdvice(j)
+	if !strings.Contains(advice, "publish a new extension version") || !strings.Contains(advice, "existing jobs keep their frozen policy") || strings.Contains(advice, "job YAML") {
+		t.Fatalf("unusable extension sandboxing advice: %s", advice)
+	}
+}

@@ -16,7 +16,7 @@ func jobReasonText(j *myce.Job) string {
 	}
 	if strings.Contains(j.Isolation, "unsandboxed:") {
 		text = strings.Replace(text, "unsandboxed: plain native job defaults to unsandboxed in v1; set isolation: sandboxed to opt in", "plain commands run without sandbox protection", 1)
-		text += "; this job can access the worker account's files; run only trusted code, or set isolation: sandboxed in job YAML (see docs/native-isolation.md)"
+		text += "; this job can access the worker account's files. " + myce.NativeIsolationAdvice(j)
 	}
 	return statusSafetyText(text)
 }

@@ -190,13 +190,11 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 			if route == "GET /api/fleet/instruction" {
 				phases = fmt.Sprintf(" writer_wait_ms=%.3f work_ms=%.3f", float64(writerWait)/float64(time.Millisecond), float64(max(0, hold-writerWait))/float64(time.Millisecond))
 			}
-			if status < 400 && (route == "GET /api/workers/{id}/events" || route == "POST /api/wait") && wait <= requestSlowThreshold && hold <= requestSlowThreshold {
-				// Successful long polls intentionally wait for changes. Their
-				// durations remain in status JSON's request_latencies; retain
-				// stderr diagnostics for errors or slow queue lock work.
-				return
+			if route == "GET /api/workers/{id}/events" || route == "POST /api/wait" {
+				phases += " note=\"polls may intentionally wait for changes; if jobs stall, run myce status and ask the queue owner to inspect these timings\""
+			} else {
+				phases += " note=\"slow API request; if commands stall, run myce status and ask the queue owner to inspect these timings\""
 			}
-			phases += " note=\"slow API request; if commands stall, run myce status and ask the queue owner to inspect these timings\""
 			log.Printf("event=slow_request route=%q status=%d duration_ms=%.3f mutex_measured=%t mutex_wait_ms=%.3f mutex_hold_ms=%.3f after_unlock_ms=%.3f%s", route, status, float64(duration)/float64(time.Millisecond), measured, float64(wait)/float64(time.Millisecond), float64(hold)/float64(time.Millisecond), float64(after)/float64(time.Millisecond), phases)
 		}()
 		next.ServeHTTP(response, r)

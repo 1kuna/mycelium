@@ -91,7 +91,7 @@ func (s *workerStore) warnNativeIsolation(j *Job) error {
 		s.state.IsolationWarning = previous
 		return err
 	}
-	log.Printf("WARNING job %s attempt %d runs without sandbox protection and can access the worker account's files. Run only trusted code, or set isolation: sandboxed in job YAML; see docs/native-isolation.md. (%s)", j.ID, j.Attempt, status)
+	log.Printf("WARNING job %s attempt %d runs without sandbox protection and can access the worker account's files. %s (%s)", j.ID, j.Attempt, NativeIsolationAdvice(j), status)
 	return nil
 }
 
