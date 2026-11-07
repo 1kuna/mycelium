@@ -101,7 +101,7 @@ func TestAttemptHistoryRequeueThenExit(t *testing.T) {
 	}
 }
 
-func TestAttemptHistoryBoundedRequeues(t *testing.T) {
+func TestAttemptHistoryOpenRequeuesRetainEvidence(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("one", "fake")
 	submit(t, q, spec("experiment"))
@@ -123,11 +123,11 @@ func TestAttemptHistoryBoundedRequeues(t *testing.T) {
 		}
 	}
 	got := job(t, q, current.ID)
-	if got.Losses != 0 || got.InfrastructureRetries != 0 || len(got.AttemptHistory) != attemptHistoryLimit {
-		t.Fatal("unbounded history or changed charging", got)
+	if got.Losses != 0 || got.InfrastructureRetries != 0 || len(got.AttemptHistory) != attemptHistoryLimit+2 {
+		t.Fatal("lost open evidence or changed charging", got)
 	}
 	for i, a := range got.AttemptHistory {
-		if a.Attempt != i+3 || a.State != "queued" || !a.PoliteStop || a.ExecutionCause == nil || a.ExecutionCause.Class != launchRefused {
+		if a.Attempt != i+1 || a.State != "queued" || !a.PoliteStop || a.ExecutionCause == nil || a.ExecutionCause.Class != launchRefused {
 			t.Fatal("wrong retained cause", a)
 		}
 	}

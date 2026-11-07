@@ -54,6 +54,8 @@ type Dev struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	errors    chan error
+	workers   map[string]time.Time // Last accepted check-ins before these workers start.
+	stopped   <-chan struct{}
 }
 
 func StartDev(c DevConfig) (*Dev, error) {
@@ -154,7 +156,7 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	d := &Dev{Queue: q, URL: "http://" + listener.Addr().String(), cancel: cancel, errors: make(chan error, c.Workers+2)}
+	d := &Dev{Queue: q, URL: "http://" + listener.Addr().String(), cancel: cancel, errors: make(chan error, c.Workers+2), workers: make(map[string]time.Time), stopped: ctx.Done()}
 	d.client = Client{URL: d.URL, Token: c.Token}
 	targets := []ExtensionCheckTarget{}
 	for i := 0; i < c.Workers; i++ {
@@ -201,6 +203,13 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 			w.Machine.Devices = devices
 			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return append([]MachineDevice(nil), devices...), nil }
 		}
+		q.mu.Lock()
+		var previous time.Time
+		if m := q.s.Machines[w.Machine.ID]; m != nil {
+			previous = m.LastSeen
+		}
+		q.mu.Unlock()
+		d.workers[w.Machine.ID] = previous
 		d.workerWG.Add(1)
 		go func() {
 			defer d.workerWG.Done()
@@ -212,6 +221,41 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	}
 	return d, nil
 }
+
+// WaitReady waits until every worker from this dev runtime has advertised its
+// inventory in a committed check-in. Persisted inventory alone is not readiness.
+// Queue commits wake the wait; caller cancellation and runtime errors bound it.
+func (d *Dev) WaitReady(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		d.Queue.mu.Lock()
+		ready := true
+		for id, previous := range d.workers {
+			m := d.Queue.s.Machines[id]
+			if m == nil || m.Gone || m.Session == "" || m.LastSeen.Equal(previous) {
+				ready = false
+				break
+			}
+		}
+		wake := d.Queue.wake
+		d.Queue.mu.Unlock()
+		if ready {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-d.errors:
+			return err
+		case <-d.stopped:
+			return context.Canceled
+		case <-wake:
+		}
+	}
+}
+
 func (d *Dev) Client() Client       { return d.client }
 func (d *Dev) Errors() <-chan error { return d.errors }
 func (d *Dev) Close() error {

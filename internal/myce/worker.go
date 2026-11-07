@@ -162,6 +162,7 @@ type process struct {
 	docker     *dockerAttempt
 	native     *nativeGroup
 	memory     *memoryAttempt // Plain command cgroup; carries live device samples.
+	rssMemory  atomic.Pointer[processResidentSample]
 	mu         sync.Mutex
 	job        Job
 	cmd        *exec.Cmd
@@ -502,6 +503,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 
 	executionWork := j.Spec.Run.Workdir
+	if !j.Spec.Run.Docker {
+		if err := checkPayloadMachOLinkage(ctx, machineTarget(&w.Machine), executionWork); err != nil {
+			return nil, err
+		}
+	}
 	executionWorkdir, extensionErr = privateNativeExtension(&j, extensionEnv, executionWork, executionWorkdir)
 	if extensionErr != nil {
 		return nil, extensionErr
@@ -512,7 +518,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err := os.MkdirAll(filepath.Dir(applicationProgressFile(s.dir, j)), 0700); err != nil {
 		return nil, err
 	}
-	ceilingBytes, ceilingErr := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	ceilingBytes, ceilingErr := w.jobCeilingBytes(j)
 	if ceilingErr != nil {
 		return nil, ceilingErr
 	}

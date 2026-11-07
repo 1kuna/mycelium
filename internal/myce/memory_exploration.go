@@ -119,7 +119,7 @@ func (q *Queue) memoryConstraintEvidenceFrom(key ObservationKey, configuration s
 		}
 		age := q.clock.Now().Sub(ended)
 		k := *j.Timing.Key
-		if k.Work != key.Work || age < 0 || age > workCurveMaxAge || k.Target.OS != key.Target.OS {
+		if k.Work != key.Work || age < 0 || k.Target.OS != key.Target.OS {
 			continue // Cheap identity filter before hashing the configuration.
 		}
 		point := WorkObservation{Key: k, MemoryConfiguration: memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)}

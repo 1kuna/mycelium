@@ -64,6 +64,9 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 			return err
 		}
 		// An OS lock, not a PID file, proves there is exactly one live observer.
+		if err := requestAdoptedObserverUpgrade(ctx); err != nil {
+			return err
+		}
 		fmt.Fprintln(errOut, "adopted existing watcher for receipt:", dir)
 		if err := readProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 			return err

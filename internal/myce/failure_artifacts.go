@@ -10,15 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
-
-// Limits bound post-failure transfer and parsing, independently of job output size.
-// 64 KiB preserves startup errors; 1 MiB per report allows targeted test suites.
-const diagnosticTailBytes = 64 << 10
-const diagnosticReportBytes = 1 << 20
-const diagnosticReportLimit = 8
 
 type DiagnosticSpec struct {
 	Reports []DiagnosticReport `json:"reports,omitempty" yaml:"reports,omitempty"`
@@ -53,9 +48,6 @@ func validateDiagnosticSpec(s Spec) error {
 	}
 	if len(s.Files) == 0 || s.Run.Docker || s.Execution != nil || s.extensionJob() {
 		return errors.New("diagnostics require a plain command with stored input files")
-	}
-	if len(s.Diagnostics.Reports) > diagnosticReportLimit {
-		return errors.New("diagnostics allow at most eight reports")
 	}
 	for _, r := range s.Diagnostics.Reports {
 		if !safeRelative(r.Path) || (r.Format != "pytest-junit" && r.Format != "vitest-junit") {
@@ -191,27 +183,34 @@ func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath s
 	defer os.RemoveAll(stage)
 	summary := FailureSummary{Execution: result.Execution, Machine: result.Machine, Session: result.Session, Error: result.Error,
 		ExecutionCause: result.ExecutionCause, CleanupCause: result.CleanupCause, FailedTests: []FailedTest{}}
+	remaining, releaseBudget := reserveDiagnosticBytes(parent, ^uint64(0))
+	defer releaseBudget()
+	if remaining == 0 {
+		return result, nil
+	}
 	files := map[string][]byte{}
 	tail := []byte{}
 	if j.Spec.Logs != "none" && logPath != "" {
-		tail, err = readDiagnostic(logPath, diagnosticTailBytes, true)
+		tail, err = readDiagnostic(logPath, remaining, true)
 		if err != nil {
 			summary.ReportErrors = append(summary.ReportErrors, "log tail unavailable")
 			tail = nil
 		}
 	}
 	files["log-tail.txt"] = tail
+	remaining -= int64(len(tail))
 	for i, report := range j.Spec.Diagnostics.Reports {
 		path, e := confinedPath(j.Spec.Run.Workdir, report.Path)
 		var data []byte
 		if e == nil {
-			data, e = readDiagnostic(path, diagnosticReportBytes, false)
+			data, e = readDiagnostic(path, remaining, false)
 		}
 		if e != nil {
 			summary.ReportErrors = append(summary.ReportErrors, fmt.Sprintf("report %d unavailable or oversized", i))
 			continue
 		}
 		files[fmt.Sprintf("reports/%d.xml", i)] = data
+		remaining -= int64(len(data))
 		tests, e := junitFailures(data, report.Format)
 		if e != nil {
 			summary.ReportErrors = append(summary.ReportErrors, fmt.Sprintf("report %d invalid or lacks exact identifiers", i))
@@ -223,7 +222,7 @@ func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath s
 	if err != nil {
 		return result, err
 	}
-	if len(files["summary.json"]) > diagnosticReportBytes {
+	if int64(len(files["summary.json"])) > remaining {
 		summary.FailedTests = []FailedTest{}
 		summary.ReportErrors = append(summary.ReportErrors, "structured identifiers exceed summary byte limit; see raw reports")
 		files["summary.json"], err = json.MarshalIndent(summary, "", "  ")
@@ -263,29 +262,22 @@ func validateDiagnosticManifest(d *AttemptDiagnostics) error {
 	if err := d.Files.validate(); err != nil {
 		return err
 	}
-	if len(d.Files) < 2 || len(d.Files) > diagnosticReportLimit+2 {
+	if len(d.Files) < 2 {
 		return errors.New("invalid diagnostic manifest")
 	}
-	for name, ref := range d.Files {
-		limit := int64(diagnosticReportBytes)
+	for name := range d.Files {
 		switch name {
-		case "log-tail.txt":
-			limit = diagnosticTailBytes
-		case "summary.json": // Bounded by report input, plus structured identities.
-			limit = diagnosticReportBytes
+		case "log-tail.txt", "summary.json":
 		default:
-			valid := false
-			for i := 0; i < diagnosticReportLimit; i++ {
-				valid = valid || name == fmt.Sprintf("reports/%d.xml", i)
-			}
-			if !valid {
+			index, ok := strings.CutPrefix(name, "reports/")
+			index, suffix := strings.CutSuffix(index, ".xml")
+			n, err := strconv.Atoi(index)
+			if !ok || !suffix || err != nil || n < 0 || strconv.Itoa(n) != index {
 				return errors.New("invalid diagnostic filename")
 			}
 		}
-		if ref.SizeBytes > limit {
-			return errors.New("diagnostic exceeds byte limit")
-		}
 	}
+
 	if _, ok := d.Files["summary.json"]; !ok {
 		return errors.New("diagnostic summary required")
 	}

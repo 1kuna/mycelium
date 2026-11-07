@@ -184,7 +184,7 @@ func TestDevProbeQueueRestart(t *testing.T) {
 	if effect, err := os.ReadFile(marker); err != nil || string(effect) != "x" {
 		t.Fatal("completed command duplicated or missing", err)
 	}
-	// Expire only an unbound reservation; retained cancelled jobs remain bound.
+	// Unbound cancellation intent survives elapsed time and prevents execution.
 	if ack, err = d.Client().CancelSubmission(ctx, s.Project, "expires"); err != nil || ack.State != "absent" {
 		t.Fatal(ack, err)
 	}
@@ -194,10 +194,10 @@ func TestDevProbeQueueRestart(t *testing.T) {
 	expired := s
 	expired.SubmissionKey = "expires"
 	err = d.Client().Call(ctx, "POST", "/api/jobs", expired, nil)
-	if !errors.As(err, &apiError) || apiError.Status != 410 || apiError.Code != "submission_key_expired" {
-		t.Fatal("reservation did not expire", err)
+	if err != nil {
+		t.Fatal("aged cancellation could not bind", err)
 	}
-	if ack, err = d.Client().CancelSubmission(ctx, s.Project, "expires"); err != nil || ack.State != "unknown" || ack.Release != nil {
+	if ack, err = d.Client().CancelSubmission(ctx, s.Project, "expires"); err != nil || ack.State != "cancelled" || !ack.WillNotRun {
 		t.Fatal(ack, err)
 	}
 	if ack, err = d.Client().CancelSubmission(ctx, s.Project, "unseen"); err != nil || ack.State != "absent" {

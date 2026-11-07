@@ -17,7 +17,7 @@ spec.loader.exec_module(progress)
 
 
 class ProgressTests(unittest.TestCase):
-    def execute(self, root, times, expected=None, command=None, status=0):
+    def execute(self, root, times, expected=None, command=None, status=0, start=True):
         cache, report = root / 'cache', root / 'report'
         now = [0.0]
         child = Mock()
@@ -33,7 +33,7 @@ class ProgressTests(unittest.TestCase):
         selector = Mock()
         selector.__enter__ = Mock(return_value=selector)
         selector.__exit__ = Mock(return_value=False)
-        events = iter([(0, b'{"Action":"start"}\n'), *times])
+        events = iter(([(0, b'{"Action":"start"}\n')] if start else []) + times)
         chunks = []
 
         def select(timeout):
@@ -56,7 +56,9 @@ class ProgressTests(unittest.TestCase):
     def test_slow_progressing_run_outlives_old_wall_budget(self):
         with tempfile.TemporaryDirectory() as folder:
             code, command, record = self.execute(Path(folder),
-                [(100, b'output'), (200, b'output'), (300, b'output'), (400, b'')], expected=100)
+                [(100, b'{"Action":"run","Test":"TestA"}\n'),
+                 (200, b'{"Action":"pass","Test":"TestA"}\n'),
+                 (300, b'{"Action":"run","Test":"TestB"}\n'), (400, b'')], expected=100)
         self.assertEqual(code, 0)
         self.assertEqual(record['elapsed_seconds'], 400)
         self.assertIn('-timeout=0', command)
@@ -66,6 +68,28 @@ class ProgressTests(unittest.TestCase):
             code, _, record = self.execute(Path(folder), [(30, None)], expected=10)
         self.assertEqual(code, 124)
         self.assertEqual(record['elapsed_seconds'], 30)
+
+    def test_reconnect_output_cannot_keep_a_stuck_test_alive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code, _, record = self.execute(Path(folder), [
+                (0, b'{"Action":"run","Test":"TestBlockedCompletion"}\n'),
+                (10, b'{"Action":"output","Test":"TestBlockedCompletion","Output":"reconnect"}\n'),
+                (20, b'{"Action":"output","Output":"reconnect"}\n'),
+                (30, b'{"Action":"output","Output":"reconnect"}\n')], expected=10)
+        self.assertEqual(code, 124)
+        self.assertEqual(record['elapsed_seconds'], 30)
+        self.assertEqual(record['active_tests'], ['TestBlockedCompletion'])
+        self.assertEqual(record['longest_gap_seconds'], 30)
+
+    def test_split_json_progress_is_recognized_after_compilation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code, _, record = self.execute(Path(folder), [
+                (100, b'{"Action":"sta'),
+                (110, b'rt"}\n{"Action":"run","Test":"TestA"}\n'),
+                (130, b'{"Action":"pass","Test":"TestA"}\n'),
+                (150, b'')], expected=10, start=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(record['active_tests'], [])
 
     def test_fast_host_gets_its_own_short_deadline(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -108,10 +132,13 @@ class ProgressTests(unittest.TestCase):
             root = Path(folder)
             tool = root / 'go'
             tool.write_text('#!' + sys.executable + '\n'
-                            'import json, os, pathlib, signal\n'
+                            'import json, os, pathlib, time\n'
                             'pathlib.Path(os.environ["FIXTURE_PID"]).write_text(str(os.getpid()))\n'
                             'print(json.dumps({"Action": "start"}), flush=True)\n'
-                            'signal.pause()\n')
+                            'print(json.dumps({"Action": "run", "Test": "TestChattyHang"}), flush=True)\n'
+                            'while True:\n'
+                            ' print(json.dumps({"Action": "output", "Output": "reconnect"}), flush=True)\n'
+                            ' time.sleep(.01)\n')
             tool.chmod(0o755)
             cache = root / 'cache'
             cache.mkdir()
@@ -127,6 +154,7 @@ class ProgressTests(unittest.TestCase):
                 run = subprocess.run([sys.executable, str(Path(progress.__file__)), 'hung', 'go', 'test'],
                                      env=env, capture_output=True, text=True, timeout=15)
                 self.assertEqual(run.returncode, 124, run.stdout + run.stderr)
+                self.assertIn('gate stalled test: TestChattyHang', run.stderr)
                 pid = int((root / 'pid').read_text())
                 state = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)
                 self.assertTrue(not state.stdout.strip() or state.stdout.strip().startswith('Z'), state.stdout)

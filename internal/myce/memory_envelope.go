@@ -95,10 +95,6 @@ func (p *AttemptMemoryPeak) constrained() bool {
 
 const processGroupMemorySource = "process-group RSS samples; unenforced"
 
-// Bound snapshot/persistence cost while preserving the first observation and
-// the latest 31. Intermediate facts can be lost; the dropped count exposes it.
-const memoryAttemptsLimit = 32
-
 // AttemptMemoryFacts keeps observed telemetry independently of learning and the
 // bounded diagnostic history. Missing peaks/counters mean unavailable, not zero.
 type AttemptMemoryFacts struct {
@@ -150,12 +146,7 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 		}
 	}
 	j.MemoryAttempts = append(j.MemoryAttempts, facts)
-	if dropped := len(j.MemoryAttempts) - memoryAttemptsLimit; dropped > 0 {
-		kept := make([]AttemptMemoryFacts, 1, memoryAttemptsLimit)
-		kept[0] = j.MemoryAttempts[0]
-		j.MemoryAttempts = append(kept, j.MemoryAttempts[1+dropped:]...)
-		j.MemoryAttemptsDropped += dropped
-	}
+
 }
 
 func mergeMemoryEvents(old, next *MemoryEventCounts) *MemoryEventCounts {
@@ -479,6 +470,14 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	if probeFloor > 0 {
 		copy.MemoryEnvelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
 	}
+	// The envelope acknowledgement keeps new workers on the old stop contract
+	// with older queues, and older workers on their existing kernel ceilings.
+	if contains(m.Capabilities, learnedMemoryGuardCapability) {
+		copy.MemoryEnvelope.Enforcement = learnedMemoryGuardEnforcement
+		if adaptiveMemoryCeilingGB(&copy, m) <= 0 {
+			copy.MemoryEnvelope.Enforcement = enforcement
+		}
+	}
 	return &copy
 }
 
@@ -692,7 +691,7 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 				constrainedGB = max(constrainedGB, hostMemoryPeakGB(p))
 			}
 		}
-		if !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(hostMemoryPeakGB(p)) {
+		if !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || age < 0 || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(hostMemoryPeakGB(p)) {
 			continue
 		}
 		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {

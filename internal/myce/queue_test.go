@@ -14,6 +14,26 @@ import (
 // Queue fixtures therefore need the same synchronized clock as worker fixtures.
 type fakeClock = workerFakeClock
 
+// Explicit policies and historical spans used by regression fixtures. These
+// are intentionally not production retention defaults.
+const AttemptFilesGrace = 24 * time.Hour
+const testContainerRetention = 24 * time.Hour
+const diagnosticTailBytes = 64 << 10
+
+const statusCacheLifetime = time.Second
+const jobSnapshotLifetime = 2 * time.Second
+
+const externalBucketWidth = 15 * time.Minute
+const externalBucketCount = 7*24*4 + 1
+
+const jobHistoryRetention = 7 * 24 * time.Hour
+const submissionRetention = 30 * 24 * time.Hour
+const workCurveMaxAge = 30 * 24 * time.Hour
+const attemptHistoryLimit = 4
+
+const testFileRetention = 7 * 24 * time.Hour
+const testLogRetention = 7 * 24 * time.Hour
+
 func fixture(t *testing.T) (*Queue, *fakeClock) {
 	t.Helper()
 	c := &fakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
@@ -23,6 +43,8 @@ func fixture(t *testing.T) (*Queue, *fakeClock) {
 	}
 	t.Cleanup(func() { q.Close() })
 	fakeCheckpointAvailability(t, q, true)
+	q.fileRetention, q.logRetention = testFileRetention, testLogRetention
+	q.s.PublicationHorizon = filePublicationGrace
 	return q, c
 }
 
@@ -743,3 +765,8 @@ func TestRestartProductionPreemptionAfterReport(t *testing.T) {
 		t.Fatalf("unreported worker lost restart protection: %+v", got)
 	}
 }
+
+// Operator-authored publication window used only by lifecycle fixtures.
+const filePublicationGrace = 6 * time.Hour
+
+const dockerStderrTailBytes = 64 * 1024 // injected diagnostic allowance in tests

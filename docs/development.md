@@ -52,7 +52,7 @@ afterwards, and fix forward if full finds a problem. This workflow does not gran
 fleet/deployment authorization.
 
 Quick and full have no overall wall deadline. Each Go package runs under its
-own output-progress watchdog, keyed by package, exact selected test expression,
+own test-progress watchdog, keyed by package, exact selected test expression,
 OS/architecture, Go version and available/assigned CPU count. Timings live beside
 Go's execution-host build cache (`mycelium-gate-timings`), shared across checkouts
 on that host, and every invocation appends a sanitized record to
@@ -61,12 +61,14 @@ A new selection/toolchain/CPU configuration learns independently; a small quick
 selection cannot shorten a full-package deadline.
 
 A learned package stalls after **three times its expected package duration with
-no output**. Expected duration is the latest completed successful observation
+no test lifecycle progress**. Expected duration is the latest completed successful observation
 for that host/configuration/selection. Three intervals allow the normal expected
 completion plus two missed completions for transient contention; the cost is up
-to three expected durations to detect a silent hang. This is an operational
-tolerance, not a statistical confidence claim or a wall-time limit. Every output
-chunk resets only that package's silence clock. A run can exceed any previous
+to three expected durations to detect a test that stops advancing. This is an operational
+tolerance, not a statistical confidence claim or a wall-time limit. Go JSON lifecycle events (`start`, `run`, `pause`, `cont`, `pass`, `fail`,
+`skip`) reset only that package's progress clock. Diagnostic `output` events,
+including reconnect warnings, do not renew it; a stalled report names unfinished
+tests. Non-test commands retain output-based observation without learned deadlines. A run can exceed any previous
 wall duration while progressing, and sibling output cannot hide its hang.
 The watchdog starts at Go's JSON package-start event, after compilation: a warm
 cache measurement must not kill cold compilation. Build/vet/compatibility steps
@@ -78,7 +80,7 @@ package; one hour allows over twice that observed duration for first-run learnin
 This cold backstop can still reject an unprecedented, longer silent test; it is
 an explicit bootstrap tradeoff, not a learned throughput claim. Subsequent runs
 use `-timeout=0` and measured progress deadlines. All runs record elapsed time,
-longest output gap and status, including failed/stalled runs; only successful,
+longest progress gap, unfinished tests and status, including failed/stalled runs; only successful,
 uncensored observations train the cache. Regressions with fake time run via
 `python3 scripts/test-gate-progress.py`; custody regressions run via
 `python3 scripts/test-gate-budget.py`.
@@ -954,6 +956,13 @@ immediately previous-session cleanup rule is still required. Durable worker
 spools and queue restart retain the same key for buffered results. An exact
 non-pending native release-only acknowledgement advances its recorded stop to
 requeue or cancellation, without waiting for an omitted attempt in a heartbeat.
+
+A stale diagnostic log or publication reply is not a release acknowledgement.
+The attempt actor sends an exact release-only completion and retains its durable
+Job/Result until that request succeeds, even if replay or an earlier completion
+was stale. Failed release delivery retries through the same actor.
+An acknowledged Stop+Kill completion already proves release; its synthetic stale
+publication status does not trigger another completion.
 
 Compatibility and refusal:
 
