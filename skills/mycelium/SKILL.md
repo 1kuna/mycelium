@@ -29,6 +29,12 @@ Follow returned page cursors and retain the same submission key after a refusal.
 Custom peers can negotiate `capacity-v1` through HTTP headers without changing
 legacy JSON. See [request budgets](https://github.com/1kuna/mycelium/blob/main/docs/request-budgets.md).
 
+From the next release (#891), extension reports distinguish “not yet checked
+on this device” from a changed hardware/driver fingerprint, changed extension
+fingerprint (digest), or unavailable fingerprint. Run the extension check for
+unchecked versions; a missing fingerprint is unknown identity, not evidence of
+a change. Qualification still requires a successful check.
+
 ## First run: adapter to verified result
 
 Mycelium runs CPU and GPU work through one queue. Describe needs and verified
