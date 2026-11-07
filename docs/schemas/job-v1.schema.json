@@ -554,6 +554,9 @@
     },
     "CPUDemandEvidence": {
       "properties": {
+        "accepted_samples": {
+          "type": "integer"
+        },
         "coverage_seconds": {
           "type": "number"
         },
@@ -580,6 +583,7 @@
         }
       },
       "required": [
+        "accepted_samples",
         "samples",
         "lower_bound_samples",
         "peak_cores",

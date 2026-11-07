@@ -12,6 +12,7 @@ import (
 // Whole-core rounding is the existing ledger's physical accounting unit, not
 // fleet headroom. No sampler, capacity multiplier or CPU enforcement is added.
 type CPUDemandEvidence struct {
+	AcceptedSamples   int     `json:"accepted_samples"`
 	Samples           int     `json:"samples"`
 	LowerBoundSamples int     `json:"lower_bound_samples"`
 	PeakCores         float64 `json:"peak_cores"`
@@ -84,6 +85,9 @@ func (q *Queue) cpuDemandFor(j *Job, m *Machine) *JobCPUDemand {
 		e.Basis = "learned"
 	}
 	e.Reason = "accepted sustained CPU/elapsed; bursts and future demand uncertain; CPU time not enforced by this estimate"
+	if evidence.LowerBoundSamples > 0 {
+		e.Reason += "; separate observed CPU lower bounds also apply"
+	}
 	if evidence.Samples == 0 {
 		e.Reason = "accepted CPU lower bound only; complete uncontended demand unknown"
 	}
@@ -129,8 +133,11 @@ func (q *Queue) recordCPUDemand(j *Job, r Result) {
 	if a.CPU.Source != "cgroup_v2" || a.CPU.LowerBound {
 		completeReason = "sampled CPU misses unobserved descendants; lower bound"
 	}
-	if o := j.CPUObservation; o != nil && o.Attempt == j.Attempt && o.Machine == j.Machine && o.Session == j.Session {
-		need = max(need, o.PeakCores) // #870's same-job facts remain authoritative.
+	// #870's interval peaks are authoritative lower bounds, not complete
+	// lifetime averages. One accepted attempt can provide both kinds of fact.
+	lowerBound := 0.0
+	if o := j.CPUObservation; o != nil && o.Attempt == j.Attempt && o.Machine == j.Machine && o.Session == j.Session && validMemoryValue(o.PeakCores) {
+		lowerBound = o.PeakCores
 	}
 	id := identityHash(key)
 	old, exists := q.s.WorkObservations[id]
@@ -138,12 +145,24 @@ func (q *Queue) recordCPUDemand(j *Job, r Result) {
 	if old.CPU != nil {
 		p = *old.CPU
 	}
-	if completeReason == "" {
+	if p.AcceptedSamples == 0 {
+		// Earlier CPU records had disjoint complete/lower-bound classes.
+		p.AcceptedSamples = p.Samples + p.LowerBoundSamples
+	}
+	p.AcceptedSamples++
+	incomplete := completeReason != ""
+	if !incomplete {
 		p.Samples++
 		p.PeakCores = max(p.PeakCores, need)
 	} else {
+		lowerBound = max(lowerBound, need)
+	}
+	if incomplete || lowerBound > 0 {
 		p.LowerBoundSamples++
-		p.LowerBoundCores = max(p.LowerBoundCores, need)
+		p.LowerBoundCores = max(p.LowerBoundCores, lowerBound)
+		if !incomplete {
+			completeReason = "shared-host interval CPU peak; lower bound separate from complete lifetime average"
+		}
 	}
 	p.CoverageSeconds += a.ElapsedSeconds
 	p.UsageSeconds += *a.CPU.UsageSeconds
@@ -161,9 +180,12 @@ func cpuDemandBasis(j *Job, cpu *ResourceBasis) {
 		cpu.Basis, cpu.Note = e.Basis, e.Reason
 		if p := e.Learned; p != nil {
 			cpu.Learned = cpuValue(max(p.PeakCores, p.LowerBoundCores))
-			cpu.Evidence = p.Samples + p.LowerBoundSamples
-			cpu.Note += fmt.Sprintf("; %d complete, %d lower-bound accepted samples; %.3fs observed CPU over %.3fs elapsed", p.Samples, p.LowerBoundSamples, p.UsageSeconds, p.CoverageSeconds)
-			if p.Samples > 0 && p.LowerBoundSamples == 0 && p.PeakCores < float64(j.Spec.Needs.CPUCores) {
+			cpu.Evidence = p.AcceptedSamples
+			if cpu.Evidence == 0 {
+				cpu.Evidence = p.Samples + p.LowerBoundSamples
+			}
+			cpu.Note += fmt.Sprintf("; %d accepted attempts: %d complete lifetime averages, %d lower-bound observations; %.3fs observed CPU over %.3fs elapsed", cpu.Evidence, p.Samples, p.LowerBoundSamples, p.UsageSeconds, p.CoverageSeconds)
+			if p.Samples > 0 && max(p.PeakCores, p.LowerBoundCores) < float64(j.Spec.Needs.CPUCores) {
 				cpu.Note += "; observed demand below explicit reservation: owner may lower cpu_cores; admission preserves caller intent"
 			}
 		}

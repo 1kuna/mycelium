@@ -2112,10 +2112,12 @@ qualification remain separate from these diagnostics and synthetic tests.
 Ordinary CPU jobs expose `cpu_demand`: the exact comparable key, frozen admission
 `charge_cores`, `basis` (`declared`, `default` or `learned`), history time and
 unknown/coverage reason. Its `learned` evidence reports complete accepted
-`samples`, `lower_bound_samples`, largest complete sustained `peak_cores`,
+`accepted_samples`, complete lifetime-average `samples`, `lower_bound_samples`, largest complete sustained `peak_cores`,
 `lower_bound_cores`, observed `usage_seconds` and `coverage_seconds`, counter
-source and the latest incomplete-evidence reason. Coverage totals include both
-labelled classes; complete sample counts never include lower-bound observations.
+source and the latest incomplete-evidence reason. Coverage totals count each accepted attempt once. A complete lifetime average
+and a separately labelled shared-host interval peak may come from the same
+attempt, so the two observation counts can overlap; `accepted_samples` counts
+unique attempts. Interval peaks never enter complete `peak_cores`.
 One sample provides no estimate of future variability. `peak_cores` is the
 largest lifetime CPU/elapsed rate, not instantaneous parallelism.
 

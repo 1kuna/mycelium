@@ -223,3 +223,34 @@ func TestCPUDemandTierAndUnknownDoNotReduceCharge(t *testing.T) {
 		t.Fatal("unknown counters shrank demand", candidate.CPUDemand)
 	}
 }
+
+func TestCPUDemandIntervalPeakRemainsSeparateLowerBound(t *testing.T) {
+	q, clock, m, s := cpuDemandFixture(t)
+	j := cpuDemandStart(t, q, m, s)
+	if err := q.update(func() error {
+		current := q.touchJob(j.ID)
+		current.CPUObservation = &SharedCPUObservation{Attempt: j.Attempt, Machine: j.Machine, Session: j.Session, ElapsedSeconds: .5, UsageSeconds: 2, PeakCores: 4}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	if err := q.Complete(cpuDemandResult(j, 1, 1)); err != nil {
+		t.Fatal(err)
+	}
+	next := q.memoryCandidate(&Job{Spec: j.Spec, State: "queued"}, cpuMachineView(q.s.Machines[m.ID]))
+	if next.CPUDemand == nil || next.CPUDemand.Learned == nil {
+		t.Fatal("accepted evidence missing")
+	}
+	evidence := next.CPUDemand.Learned
+	if evidence.PeakCores != 1 || evidence.LowerBoundCores != 4 || evidence.Samples != 1 || evidence.LowerBoundSamples != 1 {
+		t.Fatalf("interval peak relabelled as complete sustained demand: %+v", evidence)
+	}
+	if next.CPUDemand.ChargeCores != 4 {
+		t.Fatal("authoritative interval floor lost", next.CPUDemand)
+	}
+	cpu := jobResources(next)[1]
+	if cpu.Evidence != 1 || cpu.Learned == nil || *cpu.Learned != 4 || !strings.Contains(cpu.Note, "lower-bound") {
+		t.Fatalf("coverage or unique evidence misleading: %+v", cpu)
+	}
+}
