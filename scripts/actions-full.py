@@ -4,11 +4,30 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 
 PLATFORMS = ('darwin', 'linux')
 TERMINAL = {'succeeded', 'failed', 'cancelled'}
+# GitHub's six-hour job limit is external, not a gate performance deadline.
+# Reserve five minutes for cleanup and five for Actions/checkout overhead.
+WORK_SECONDS = 350 * 60
+CANCEL_SECONDS = 150  # Two keys share the five-minute cleanup reserve.
+
+
+class SubmitterStopped(Exception):
+    pass
+
+
+def stop_submitter(signum, frame):
+    raise SubmitterStopped()
+
+
+def submission_key(sha, platform, owner):
+    return f'main-ci:{sha}:{platform}:{owner}'
 
 
 def frozen_profile(text, sha):
@@ -19,13 +38,33 @@ def frozen_profile(text, sha):
     return text
 
 
-def command(*args):
+def command(*args, timeout=None):
     # Authority is reopened from the host's private installed configuration.
     # No GitHub credentials, MYCE_TOKEN, notifier or other caller settings cross
     # into myce or its observers. Never relay raw receipts/errors to public logs.
     env = {key: value for key, value in os.environ.items()
            if key in ('HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'RUNNER_TRACKING_ID')}
-    return subprocess.run(['myce', *args], env=env, capture_output=True, text=True)
+    return subprocess.run(['myce', *args], env=env, capture_output=True, text=True, timeout=timeout)
+
+
+def cleanup(sha, owner):
+    """Fence both intended submissions, even if no receipt reached the runner."""
+    confirmed = True
+    for platform in PLATFORMS:
+        try:
+            reply = command('cancel', '--project', 'mycelium', '--key',
+                            submission_key(sha, platform, owner), timeout=CANCEL_SECONDS)
+            ack = json.loads(reply.stdout)
+            ok = (reply.returncode == 0 and ack.get('will_not_run') is True
+                  and ack.get('state') != 'unknown')
+        except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
+            ok = False
+        confirmed = confirmed and ok
+        print(f'{platform}: cleanup {"confirmed" if ok else "unconfirmed"}', flush=True)
+    if not confirmed:
+        print('::error title=CI cleanup unconfirmed::Inspect private runner/queue state; '
+              'repeat this attempt\'s cleanup before releasing ownership.', flush=True)
+    return confirmed
 
 
 def submission_failure(reply):
@@ -55,7 +94,7 @@ def failure_state(job):
     return 'failed'
 
 
-def run(root, sha, scratch):
+def run(root, sha, scratch, owner):
     jobs, states, refusals = {}, {}, {}
     failed = False
     # Submit both before waiting. An error on one platform must not skip the other.
@@ -64,7 +103,7 @@ def run(root, sha, scratch):
         profile = (root / f'.mycelium/profiles/{name}.yaml').read_text()
         path = scratch / f'{platform}.yaml'
         path.write_text(frozen_profile(profile, sha))
-        reply = command('run', '--profile', str(path), '--key', f'main-ci:{sha}:{platform}')
+        reply = command('run', '--profile', str(path), '--key', submission_key(sha, platform, owner))
         try:
             receipt = json.loads(reply.stdout)
             job = receipt['job_id']
@@ -115,18 +154,47 @@ def run(root, sha, scratch):
     if refusals:
         print('::error title=CI infrastructure failure::At least one platform submission is unconfirmed; '
               'no suite result was verified for that platform. Rerun this workflow to recover '
-              'the same merge jobs.', flush=True)
+              'the merge with fresh attempt keys.', flush=True)
     return int(failed)
 
 
-def main():
+def main(work_seconds=WORK_SECONDS):
     sha = os.environ['GITHUB_SHA']
     if not re.fullmatch(r'[0-9a-f]{40}', sha):
         raise ValueError('invalid main SHA')
+    run_id, attempt = os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']
+    if not all(re.fullmatch(r'[1-9][0-9]*', value) for value in (run_id, attempt)):
+        raise ValueError('invalid workflow attempt')
+    owner = f'{run_id}:{attempt}'
+    if sys.argv[1:] == ['--cleanup-only']:
+        return int(not cleanup(sha, owner))
+    if sys.argv[1:]:
+        raise ValueError('unexpected arguments')
     root = Path.cwd()
-    # Only generated profiles and verified small result markers live here.
-    with tempfile.TemporaryDirectory(prefix='mycelium-ci-', dir=os.environ['RUNNER_TEMP']) as scratch:
-        return run(root, sha, Path(scratch))
+    watched = (signal.SIGINT, signal.SIGTERM, signal.SIGALRM)
+    previous = {sig: signal.signal(sig, stop_submitter) for sig in watched}
+    status = 1
+    try:
+        # Actions starts this budget before checkout, so slow checkout cannot
+        # consume the cleanup reserve. Never arm zero (which disables the alarm).
+        deadline = float(os.environ.get('MYCELIUM_CI_DEADLINE', time.monotonic() + work_seconds))
+        remaining = min(work_seconds, deadline - time.monotonic())
+        signal.setitimer(signal.ITIMER_REAL, max(0.001, remaining))
+        # Only generated profiles and verified small result markers live here.
+        with tempfile.TemporaryDirectory(prefix='mycelium-ci-', dir=os.environ['RUNNER_TEMP']) as scratch:
+            status = run(root, sha, Path(scratch), owner)
+    except SubmitterStopped:
+        print('CI submitter interrupted or timed out; cancelling owned gates', flush=True)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        for sig in watched:
+            signal.signal(sig, signal.SIG_IGN)
+        try:
+            cleaned = cleanup(sha, owner)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+    return int(bool(status) or not cleaned)
 
 
 if __name__ == '__main__':

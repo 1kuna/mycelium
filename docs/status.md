@@ -140,6 +140,16 @@ Machine `cpu_extension_fingerprint` identifies the CPU qualification identity;
 device entries carry their own extension fingerprints and reports. The scalar
 `extension_fingerprint` and reports retain a first-device compatibility view.
 
+From the next release (#891), extension report `reason` and status displays
+say `not yet checked on this device; run the extension check` when no matching
+work/device record exists for the installed version. Existing records distinguish
+`hardware/driver fingerprint changed`, `extension fingerprint (digest) changed`,
+and `hardware/driver fingerprint unavailable` (current or recorded identity is
+missing); these require setup and check. `fingerprint` is the hardware/driver/OS
+qualification hash; `digest` identifies the extension contents. The text is a
+human diagnostic, not a machine code; `setup` and `qualified` remain the stable
+boolean verdicts. No record does not establish a hardware change.
+
 Default status keeps the existing JSON fields and job shape, but includes all
 nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
 100 other terminal jobs by submission time. Work curves remain included for
@@ -545,6 +555,18 @@ use the worker's existing permissions; no settings, driver or privileges change.
 An unsupported, multiplexed, incomplete or nonadvancing counter remains unknown.
 Sensor ages are rebased onto queue time; cached inventory cannot refresh them.
 Strict older queues receive the existing inventory shape after negotiation.
+
+Fan-out execution may share a discrete XPU card only when every tenant opts in
+with `fan_out.share_xpu: true`; omission or `false` preserves existing admission.
+The declaration is frozen as `batch.share_xpu` on each executing child, including
+retries, after its `spec.fan_out` is stripped. Sharing also needs fresh host/card
+memory and activity evidence, unsaturated engines, and fresh exact-attempt host
+and device samples for every started holder. Missing evidence keeps new work
+exclusive. This adds no host allowance or numeric concurrency cap; declared or
+accepted learned memory, same-tier isolation, physical headroom and exact
+release still bind. The existing growth guard also projects fan-out device
+growth through the observation horizon and stop grace. Native throughput and
+output parity require separate matched measurement before production opt-in.
 
 A RAM figure on another target cannot hide that card contention. A RAM wait gives the resolved
 envelope and that target's free host memory; an unrelated target's reservation
@@ -1358,6 +1380,32 @@ have explicit `runtime.reason` values. Plain commands still show elapsed time
 and explain their missing workload/reference metadata. These observations do not
 change placement or measurement qualification.
 
+From the next release (#879), exact repeated-command and comparable extension
+forecasts correct service time using accepted raw prediction error. Job timing
+`service_estimate` exposes `raw_seconds`, signed `correction_seconds`, `samples`
+(the number of accepted prediction/outcome pairs), `estimator`, `uncertainty` and
+an optional fallback `reason`. `predicted_seconds` is raw plus correction; the
+placement reason and CLI/HTML explain the same calculation alongside unchanged
+setup and transfer costs. The correction is the mean actual-minus-raw seconds
+per work unit, scaled to the requested units (one job for repeated commands).
+Corrected predictions never train their own correction. The first accepted run
+has no prior prediction and cannot supply a pair.
+
+Evidence shares the exact work/target/component/runtime/configuration key and
+SQLite observation row. Failed, interrupted, stale, mixed, constrained and
+incompatible attempts cannot train it. Missing, invalidated or changed estimator
+evidence retains the raw estimate with an explicit reason; if raw evidence is
+unknown, calibration cannot make it known. Calibration shares the existing
+history-validity fence. One pair has unknown variability; multiple pairs show
+the observed raw error range, not a confidence bound. Nonpositive or nonfinite
+corrected durations retain raw service. No additional sample threshold, clipping
+constant, expiry window or fleet-tuned gain is introduced. Preparation and
+transfer remain uncalibrated because their separate paired outcomes are not
+available in Started-to-accepted timing. Status reads never train or persist.
+These forecasts rank only eligible, currently admissible alternatives after
+qualification, parity, tiers, fairness, disruption cost and scarcity. They grant
+no capacity, reserve no future slot and do not move running work.
+
 Native commands and extensions can atomically replace the local JSON file named
 by `MYCE_PROGRESS_FILE` (also mounted for managed Docker commands):
 
@@ -1811,7 +1859,9 @@ request cost determines the order. Requests spanning contention cannot teach a
 healthy cost, even if pressure clears before they complete. Unknown cost cannot
 claim to be cheaper.
 Only a higher-value read crosses that frontier; equal/lower-value reads receive
-HTTP 429 `client_rate_limited` before projection work. If no observation remains
+HTTP 429 `client_rate_limited` before projection work. Supporting queues add
+`code_alias: observation_shed_control_pressure` while keeping the legacy code.
+This is fleet-wide control pressure, not a per-client quota. If no observation remains
 in flight, one request can measure recovery. As soon as live lock wait clears,
 all reads are admitted again, even if previous observations are still active.
 This is progress-based admission, not a fixed concurrency allowance.
@@ -1829,6 +1879,16 @@ and environment-reference dependencies remain exempt. Existing clients and the
 429 code remain compatible. `Retry-After` rounds the measured live wait up to a
 positive integer number of seconds, the HTTP header's granularity. It does not
 promise the queue will have recovered by then.
+
+The CLI's idempotent GET recovery already honors Retry-After with positive
+jitter (#819). Retry bounds belong to caller cancellation or an explicit owner
+deadline; no fixed retry count or fleet-tuned timeout is added. From #960,
+interruption retains the last HTTP error and prints its Retry-After interval.
+Follow the seconds-scale server signal rather than guessing minutes of backoff.
+From #959, `myce logs JOB --after SEQ` resumes strictly after a log sequence.
+An interrupted read prints the continuation command on stderr; stdout remains
+ordered raw log text. The cursor advances after each successfully written chunk,
+so resuming skips completed pages. Add `--follow` to continue following.
 
 Measurements and active-request bookkeeping are process-local. A first concurrent
 wave can arrive before pressure is measurable, and production observations remain
@@ -2072,6 +2132,20 @@ allocation completes. Unknown reconnect/restart gaps never add service age. See 
 
 These are conditional admission comparisons. Hard eligibility, quotas and tier
 precedence remain binding; active same-tier work is not stopped to repay debt.
+
+
+## Learned native CPU memory growth (next release)
+
+An acknowledged `adaptive native CPU memory guard` treats learned and bounded
+exploratory reservations as predictions. Fresh exact-attempt footprint and growth measurements use the
+same forecast as cold CPU probes, including sample age and measured drift, with
+the resolved estimate as a floor. Cold physical probes retain their initial
+execution ceiling. Unknown/stale telemetry and stopping attempts
+retain the complete physical/explicit execution ceiling. Darwin RSS can increase
+the charge but grants no resident-memory credit because shared pages can appear
+in multiple processes. The reported estimate and the execution ceiling therefore
+serve different purposes. Explicit declarations, member limits and Docker keep
+their existing containment contract. See [native isolation](native-isolation.md).
 
 ## Live view (`myce view`)
 

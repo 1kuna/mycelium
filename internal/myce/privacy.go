@@ -55,7 +55,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 			a.Reason = safeAvailabilityReason(a.Reason)
 		}
 		for i := range m.ExtensionReports {
-			m.ExtensionReports[i].Reason = diagnostic(m.ExtensionReports[i].Reason, "setup and check required")
+			m.ExtensionReports[i].Reason = extensionReportDiagnostic(m.ExtensionReports[i].Reason)
 		}
 		for i, name := range m.Environments {
 			m.Environments[i] = statusEnvironmentName(name)

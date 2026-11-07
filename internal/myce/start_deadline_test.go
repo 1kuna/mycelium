@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -514,7 +515,11 @@ func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 	}
 	store.close()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Failure teardown must release handlers before joining the gracefully
+	// stopping worker, and keep the server alive until that join completes.
+	teardown := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	blockCompletion := os.Getenv("MYCE_TEST_BLOCK_DEADLINE_COMPLETION") == "1"
 	completed := make(chan Result, 1)
 	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		switch req.URL.Path {
@@ -541,18 +546,52 @@ func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 		case "/api/workers/complete":
 			var got Result
 			json.NewDecoder(req.Body).Decode(&got)
-			completed <- got
+			if blockCompletion {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				<-teardown
+			}
+			select {
+			case completed <- got:
+			default:
+				t.Error("unexpected duplicate cleanup completion")
+			}
 			rw.Write([]byte(`{}`))
 		default:
 			rw.Write([]byte(`{}`))
 		}
 	}))
-	defer server.Close()
 	w.Client.URL = server.URL
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
+	done := make(chan struct{})
+	var runErr error
+	t.Cleanup(func() {
+		cancel()
+		close(teardown)
+		<-done
+		server.Close()
+		if blockCompletion {
+			fmt.Println("blocked-completion teardown joined")
+		}
+	})
+	go func() {
+		defer close(done)
+		runErr = w.Run(ctx)
+	}()
+	if blockCompletion {
+		select {
+		case <-entered:
+			t.Fatal("intentional failure with completion handler blocked")
+		case <-done:
+			t.Fatalf("worker exited before blocked completion: %v", runErr)
+		case <-time.After(testWaitTimeout):
+			t.Fatal("completion handler was not reached")
+		}
+	}
 	select {
-	case err = <-done:
+	case <-done:
+		err = runErr
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -566,6 +605,27 @@ func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 		}
 	default:
 		t.Fatal("verified cleanup was discarded with the stale result")
+	}
+}
+
+// #991: a fatal assertion must not wait forever in Server.Close while the
+// worker retries a blocked completion. Use the real fixture in a subprocess so
+// its intentional assertion failure can be checked without failing this test.
+func TestProductionStartDeadlineBlockedCompletionTeardown(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, executable, "-test.run=^TestProductionStartDeadlineWorkerSendsRejectedResultCleanup$", "-test.v")
+	command.Env = append(os.Environ(), "MYCE_TEST_BLOCK_DEADLINE_COMPLETION=1")
+	output, err := command.CombinedOutput()
+	var exit *exec.ExitError
+	if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 1 ||
+		!bytes.Contains(output, []byte("intentional failure with completion handler blocked")) ||
+		!bytes.Contains(output, []byte("blocked-completion teardown joined")) {
+		t.Fatalf("blocked-handler failure did not join teardown: %v\n%s", err, output)
 	}
 }
 

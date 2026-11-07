@@ -155,6 +155,9 @@
         "periods": {
           "type": "integer"
         },
+        "pressure": {
+          "$ref": "#/$defs/IOPressure"
+        },
         "source": {
           "type": "string"
         },
@@ -659,6 +662,9 @@
         },
         "seconds": {
           "type": "number"
+        },
+        "share_xpu": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -1817,6 +1823,9 @@
             "array",
             "null"
           ]
+        },
+        "share_xpu": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -3213,6 +3222,9 @@
         "reference": {
           "$ref": "#/$defs/WorkReference"
         },
+        "repeated_work": {
+          "type": "string"
+        },
         "server_digest": {
           "type": "string"
         },
@@ -4372,6 +4384,36 @@
       ],
       "type": "object"
     },
+    "ServiceEstimate": {
+      "properties": {
+        "correction_seconds": {
+          "type": "number"
+        },
+        "estimator": {
+          "type": "string"
+        },
+        "raw_seconds": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "uncertainty": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "estimator",
+        "raw_seconds",
+        "correction_seconds",
+        "samples",
+        "uncertainty"
+      ],
+      "type": "object"
+    },
     "SharedHostBackoff": {
       "properties": {
         "last_observation": {
@@ -5131,6 +5173,9 @@
         "actual_seconds": {
           "type": "number"
         },
+        "comparability": {
+          "type": "string"
+        },
         "execution": {
           "$ref": "#/$defs/Execution"
         },
@@ -5159,10 +5204,19 @@
         "reason": {
           "type": "string"
         },
+        "repeated_key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
         "samples": {
           "type": "integer"
         },
+        "service_estimate": {
+          "$ref": "#/$defs/ServiceEstimate"
+        },
         "session": {
+          "type": "string"
+        },
+        "uncertainty": {
           "type": "string"
         }
       },

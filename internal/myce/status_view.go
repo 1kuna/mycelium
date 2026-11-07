@@ -183,6 +183,9 @@ func ExtensionStatus(r ExtensionReport) string {
 		if r.CheckState != "" {
 			state = "not qualified; native check " + r.CheckState
 		}
+		if reason := extensionReportDiagnostic(r.Reason); reason != "" && (r.CheckState == "" || reason != "setup and check required") {
+			state = "not qualified; " + reason
+		}
 	}
 	return fmt.Sprintf("%s@%s · %s %s · %s", r.Name, r.Version, work, name, state)
 }
