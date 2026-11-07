@@ -323,7 +323,7 @@ func resourceKey(j *Job) batchResourceKey {
 	if len(j.Spec.RequirementReasons) > 0 || len(j.Extensions) > 0 {
 		id = j.ID
 	}
-	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j)}
+	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, jobCPUCharge(j, &Machine{}), sharesDevice(j)}
 }
 
 func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
@@ -374,7 +374,7 @@ func (q *Queue) batchResourceProjectionWithPlan(j *Job, m *Machine, plan *placem
 	} else {
 		// Future queue order still includes work behind an occupied command
 		// slot. Only roomPlan authorizes stops; this estimate cannot admit it.
-		jobs, slots, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, j.Spec)
+		jobs, slots, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, cpuAdmissionSpec(j, m))
 		if !ok {
 			return batchResourceRoom{}
 		}

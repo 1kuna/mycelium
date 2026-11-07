@@ -2713,6 +2713,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j = q.touchJob(selected.ID)
 	j.PreemptionPlacement = nil
 	j.Spec.Needs = selected.Spec.Needs
+	j.CPUDemand = selected.CPUDemand
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
 	q.recordLearnedMemory(j, m)
 	if selected.Batch != nil {

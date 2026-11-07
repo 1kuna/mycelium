@@ -1008,7 +1008,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		if a := rt.batchSupervisors[jobKey(j)]; a != nil {
 			j = a.admissionJob()
 		}
-		cores += j.Spec.Needs.cores()
+		cores += jobCPUCharge(&j, &rt.memoryMachine)
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
 		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], now)
 		ram += charge

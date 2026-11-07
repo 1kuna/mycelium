@@ -104,6 +104,9 @@
     },
     "ObservationKey": {
       "properties": {
+        "cpu": {
+          "type": "boolean"
+        },
         "repeated_work": {
           "type": "string"
         },

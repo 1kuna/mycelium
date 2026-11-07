@@ -239,7 +239,7 @@ func (q *Queue) yieldAlternative(v *Job, scarce string, loads map[string][]*Job)
 		}
 		projected := *m
 		for _, load := range loads[hostID(m)] {
-			projected.CPUInUseCores += load.Spec.Needs.cores()
+			projected.CPUInUseCores += jobCPUCharge(load, m)
 			projected.FreeCPUCores = max(0, projected.EffectiveCPUCores-projected.CPUInUseCores)
 			projected.FreeHostMemoryGB -= hostNeed(m, load.Spec.Needs.MemoryGB, load.Spec.Needs.HostMemoryGB)
 			if !load.Spec.Needs.cpuOnly() {

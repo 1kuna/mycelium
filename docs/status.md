@@ -2106,3 +2106,23 @@ checkpoint/requeue provenance. Production tier and non-resumable running jobs
 report a reason naming the pressure and retained work. Owner pressure alone
 does not authorize stopping those jobs. Native containment and stress
 qualification remain separate from these diagnostics and synthetic tests.
+
+## Comparable CPU evidence (#880, next release)
+
+Ordinary CPU jobs expose `cpu_demand`: the exact comparable key, frozen admission
+`charge_cores`, `basis` (`declared`, `default` or `learned`), history time and
+unknown/coverage reason. Its `learned` evidence reports complete accepted
+`samples`, `lower_bound_samples`, largest complete sustained `peak_cores`,
+`lower_bound_cores`, observed `usage_seconds` and `coverage_seconds`, counter
+source and the latest incomplete-evidence reason. Coverage totals include both
+labelled classes; complete sample counts never include lower-bound observations.
+One sample provides no estimate of future variability. `peak_cores` is the
+largest lifetime CPU/elapsed rate, not instantaneous parallelism.
+
+The CPU `resources` entry reports `declared`, `learned`, `used`, evidence count
+and the coverage basis. Below-declaration complete evidence gives owner advice;
+it never changes the explicit reservation. Same-job `cpu_observation` remains
+an authoritative shared-host lower bound. Missing or stale counters remain
+unknown, rather than zero CPU demand. Admission accounting is not a promise of
+OS CPU-time enforcement; see [CPU scheduling](scheduling.md#comparable-cpu-demand-880-next-release)
+for Linux/macOS coverage and enforcement limits.

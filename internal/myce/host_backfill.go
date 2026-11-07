@@ -156,7 +156,7 @@ func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand
 	// Backfill can use only capacity in excess of the demand. While a dimension
 	// is short, new work cannot deepen that deficit; other hosts remain free.
 	return hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) <= max(0, m.FreeHostMemoryGB-m.hostReservationDebtGB-hostNeed(fence.machine, d.MemoryGB, d.HostMemoryGB)) &&
-		j.Spec.Needs.cores() <= max(0, m.FreeCPUCores-d.cores())
+		jobCPUCharge(j, m) <= max(0, m.FreeCPUCores-jobCPUCharge(fence.job, fence.machine))
 }
 
 func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {

@@ -268,7 +268,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 	}
 	// Measured over-use counts only up to the signed (debt-inclusive) shortfall.
 	projected.FreeHostMemoryGB += min(overuse, max(0, hostNeed(&projected, need, host)-projected.FreeHostMemoryGB))
-	hostJobs, hostSlots, ok := q.hostReleasesWithVictims(&projected, need, host, j.Spec, releasedJobs, releasedSlots, p.preparationCores > 0, func(v *Job) bool { return q.batchPreemptible(v, j.Spec) || p.yields[v.ID] != nil })
+	hostJobs, hostSlots, ok := q.hostReleasesWithVictims(&projected, need, host, cpuAdmissionSpec(j, m), releasedJobs, releasedSlots, p.preparationCores > 0, func(v *Job) bool { return q.batchPreemptible(v, j.Spec) || p.yields[v.ID] != nil })
 	if !ok {
 		return nil
 	}

@@ -698,7 +698,7 @@ func localEnvironmentPreparationFits(w Worker, jobs []Job, models []ModelSlot, c
 		if !j.Spec.Needs.cpuOnly() && !cpuOnly {
 			return false
 		}
-		used += j.Spec.Needs.cores()
+		used += jobCPUCharge(&j, &w.Machine)
 	}
 	for _, s := range models {
 		if s.State == "loading" || s.InFlight > 0 {
@@ -722,13 +722,13 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		return fmt.Errorf("shared host requires a native CPU command with a prepared environment")
 	}
 	cores, why := cpuCapacity(&w.Machine)
-	usedCores, usedRAM := next.Spec.Needs.cores(), localJobHostNeed(w, next)
+	usedCores, usedRAM := jobCPUCharge(&next, &w.Machine), localJobHostNeed(w, next)
 	for _, n := range preparationCores {
 		usedCores += n
 	}
 	growth := usedRAM
 	for _, j := range jobs {
-		usedCores += j.Spec.Needs.cores()
+		usedCores += jobCPUCharge(&j, &w.Machine)
 		need := localJobHostNeed(w, j)
 		charge, pending := jobHostMemoryCharge(&j, allocationMachine(&w.Machine, j.AllocatedDevices), need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 		usedRAM += charge

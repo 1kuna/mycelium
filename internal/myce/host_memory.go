@@ -173,7 +173,7 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		clear(selected)
 		freed := 0
 		for _, j := range jobs {
-			freed += j.Spec.Needs.cores()
+			freed += jobCPUCharge(j, m)
 			if builds[j.Machine] > 0 {
 				selected[j.Machine]++
 			}

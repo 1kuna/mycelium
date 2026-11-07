@@ -104,6 +104,7 @@ func (q *Queue) memoryLearningSample(j *Job, r Result) (*eligibleMemorySample, s
 // One dispatch for all successful-attempt learners. Throughput can still learn
 // from a rejected memory sample, but gets no token to change memory evidence.
 func (q *Queue) recordAttemptLearning(j *Job, r Result) {
+	q.recordCPUDemand(j, r)
 	sample, _ := q.memoryLearningSample(j, r)
 	q.recordWorkObservation(j, r, sample)
 	if sample != nil {

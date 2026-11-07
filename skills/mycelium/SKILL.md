@@ -182,8 +182,8 @@ From the next collector release, job GET/status `resource_attempts` reports
 cumulative CPU time, block I/O and latest attempt PSI; machine `io_pressure`
 reports host PSI. Read the exact attempt/session, source, age and unavailable
 reason. Missing means unknown. macOS sampled CPU is a lower bound and I/O PSI
-is explicitly unavailable. These observations do not grant capacity or change
-admission. See [CPU and I/O fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
+is explicitly unavailable. Raw observations do not grant capacity. On releases with #880, accepted
+comparable CPU evidence can raise admission charges as described below. See [CPU and I/O fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
 
 From the next release, repeated native plain commands can learn seconds/job
 without `workload` units. Status work curves and attempt timing explain the exact
@@ -347,3 +347,18 @@ and non-resumable work continue, with the job reason naming pressure and retaine
 work. No owner-pressure kill policy is implied. macOS containment remains
 cooperative. Read one `myce status JOB_ID` or the normal wait result; no agent
 pressure polling or manual resume is required.
+
+
+## Learned CPU demand (next release)
+
+Ordinary native CPU jobs reuse accepted evidence for the exact recipe, immutable
+inputs, environment, target and host configuration. Status `cpu_demand` and the
+CPU `resources` entry compare declared, learned and used cores, complete versus
+lower-bound sample counts and observed CPU/elapsed coverage. Undeclared CPU uses
+this evidence; explicit `cpu_cores` remains a reservation floor. Complete evidence
+below an explicit reservation gives advice for the caller to lower it, never an
+automatic reduction. There is no new CPU `auto` field. Overuse can raise future
+charges; same-job shared-host lower bounds remain authoritative. macOS sampled
+CPU and throttled/contended evidence cannot claim complete demand. These are
+sustained-demand estimates, not physical capacity or per-job CPU-time enforcement.
+See [CPU evidence](https://github.com/1kuna/mycelium/blob/main/docs/status.md#comparable-cpu-evidence-880-next-release).

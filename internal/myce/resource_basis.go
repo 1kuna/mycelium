@@ -81,15 +81,11 @@ func jobResources(j *Job) []ResourceBasis {
 			}
 		}
 	}
-	cpu := ResourceBasis{Dimension: "cpu_cores", Used: value(float64(n.cores())), Basis: "default", Note: "CPU demand is not learned yet"}
+	cpu := ResourceBasis{Dimension: "cpu_cores", Used: value(float64(n.cores())), Basis: "default", Note: "comparable CPU demand unknown; CPU time is not enforced by admission"}
 	if n.CPUCores > 0 {
 		cpu.Declared, cpu.Basis = value(float64(n.CPUCores)), "declared"
 	}
-	if o := j.CPUObservation; o != nil && o.PeakCores > 0 {
-		cpu.Learned = value(o.PeakCores)
-		cpu.Note = "observed logical-job peak CPU need; shared-host admission rounds up and never charges below declaration"
-		cpu.Evidence = 1
-	}
+	cpuDemandBasis(j, &cpu)
 	storage := ResourceBasis{Dimension: "storage_bytes", Used: value(float64(projectedDiskNeed(j))), Basis: "manifest", Note: "learned storage is observation only (#504)"}
 	if d := j.Spec.Disk; d != nil {
 		storage.Declared = value(float64(addDiskBytes(addDiskBytes(d.InputBytes, d.OutputBytes), d.CheckpointBytes)))

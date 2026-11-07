@@ -641,3 +641,41 @@ inventory-driven guidance, not native accelerator execution or qualification.
 Host/device-pin advisories are described above. Automatic live-coverage warnings
 at registration and scarce-host yield remain later phases of
 [#324](https://github.com/1kuna/mycelium/issues/324); advice does not implement yield.
+
+## Comparable CPU demand (#880, next release)
+
+Ordinary native CPU commands reuse the exact repeated-command identity: project,
+command/source and immutable inputs, frozen environment, target, physical CPU
+fingerprint, allowances and configuration. A changed recipe, target or
+configuration starts without that estimate. Dynamic inputs, external workdirs,
+containers, sidecars, waves and resumed attempts remain unknown in this slice.
+The existing CPU/I/O collector and SQLite work-observation store supply evidence;
+there is no second sampler or per-host capacity multiplier.
+
+Accepted results with exact cleanup and complete uncontended cgroup counters
+teach sustained CPU seconds per elapsed second. Admission uses the largest
+accepted rate, rounded up to the existing whole-core ledger. This is a lifetime
+average, not a bound on runnable threads, short bursts or future data-dependent
+work. Missing, stale, failed or interrupted observations cannot teach a smaller
+charge. Throttled/contended results and macOS process-tree counters teach only
+labelled lower bounds. Those bounds can raise, never lower, admission. Existing
+same-logical-job shared-host peaks remain authoritative through requeue.
+
+Explicit `cpu_cores` remains the caller's reservation floor and runtime setting.
+Evidence below it appears as owner advice to lower the declaration; the queue
+does not lower it. Undeclared CPU starts with the existing one-core default and
+uses comparable evidence when available. No new CPU `auto` submission syntax is
+introduced. The selected charge flows through physical-host admission, fair
+core-seconds, backfill, release planning and worker launch checks. Running and
+pending-release custody keep that charge until exact cleanup; a forecast grants
+no resources. Operator budgets, tiers, project caps and fairness still bind.
+
+A final counter older than its existing collector sampling period is excluded:
+it could omit the final execution interval. The cost is lost learning from that
+attempt. There is no new timing constant. Observations retain the existing work
+history freshness policy; a changed host budget or runtime has a different key.
+Linux shared hosts may enforce their existing aggregate delegated CPU quota;
+this learned per-job estimate adds no CPU-time enforcement. macOS thread hints
+remain cooperative and its missed short-lived descendants prevent complete CPU
+coverage. Loaded native-host throughput and owner-interaction qualification are
+separate from laptop policy proof.

@@ -27,6 +27,7 @@ func (r WorkReference) valid() bool {
 // ObservationKey contains no private input paths or application-specific data.
 // Configuration is a digest of resource reservations, allowances and power mode.
 type ObservationKey struct {
+	CPU bool `json:"cpu,omitempty"`
 	// RepeatedWork binds exact plain-command bytes, independently of the broader
 	// memory Work identity. Memory readers deliberately group across this field.
 	RepeatedWork    string          `json:"repeated_work,omitempty"`
@@ -61,6 +62,7 @@ type MemoryEscalationPrior struct {
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
+	CPU                 *CPUDemandEvidence     `json:"cpu,omitempty"`
 	Repeated            *RepeatedWorkTiming    `json:"repeated,omitempty"`
 	MemoryEscalation    *MemoryEscalationPrior `json:"memory_escalation,omitempty"`
 	GPUHostRange        *MemoryPeakRange       `json:"gpu_host_range,omitempty"`
@@ -420,7 +422,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 
 // Shared by the CLI and HTML status. A missing old field is explicitly unknown.
 func JobTiming(j *Job) string {
-	envelope := ""
+	envelope := cpuDemandText(j)
 	if j.StorageEnvelope != nil {
 		envelope += "; " + j.StorageEnvelope.Summary()
 	}

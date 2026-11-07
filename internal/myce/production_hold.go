@@ -554,7 +554,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 			slot := q.s.ModelSlots[targetSlotKey(m, candidate.Spec.Needs.Model)]
 			// Calls reuse a ready/loading model's existing host-memory reservation.
 			if call == nil || slot == nil || slot.State != "ready" && slot.State != "loading" {
-				if _, _, ok := q.hostReleases(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB, "production", candidate.Spec); !ok {
+				if _, _, ok := q.hostReleases(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB, "production", cpuAdmissionSpec(candidate, m)); !ok {
 					continue
 				}
 			}

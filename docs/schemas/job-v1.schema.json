@@ -552,6 +552,44 @@
       ],
       "type": "object"
     },
+    "CPUDemandEvidence": {
+      "properties": {
+        "coverage_seconds": {
+          "type": "number"
+        },
+        "lower_bound_cores": {
+          "type": "number"
+        },
+        "lower_bound_samples": {
+          "type": "integer"
+        },
+        "peak_cores": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "usage_seconds": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "samples",
+        "lower_bound_samples",
+        "peak_cores",
+        "lower_bound_cores",
+        "coverage_seconds",
+        "usage_seconds",
+        "source"
+      ],
+      "type": "object"
+    },
     "Cancellation": {
       "properties": {
         "acknowledged_at": {
@@ -1859,6 +1897,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "cpu_demand": {
+          "$ref": "#/$defs/JobCPUDemand",
+          "x-contract": "diagnostic"
+        },
         "cpu_observation": {
           "$ref": "#/$defs/SharedCPUObservation",
           "x-contract": "diagnostic"
@@ -2412,6 +2454,37 @@
       ],
       "type": "object"
     },
+    "JobCPUDemand": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "charge_cores": {
+          "type": "integer"
+        },
+        "key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
+        "learned": {
+          "$ref": "#/$defs/CPUDemandEvidence"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "shared_host": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "charge_cores",
+        "basis"
+      ],
+      "type": "object"
+    },
     "JobLedgerInfo": {
       "properties": {
         "complete": {
@@ -2862,6 +2935,9 @@
         },
         "configuration": {
           "type": "string"
+        },
+        "cpu": {
+          "type": "boolean"
         },
         "environment": {
           "type": "string"

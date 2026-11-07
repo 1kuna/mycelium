@@ -478,6 +478,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	if probeFloor > 0 {
 		copy.MemoryEnvelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
 	}
+	copy.CPUDemand = q.cpuDemandFor(&copy, m)
 	return &copy
 }
 

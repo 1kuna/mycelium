@@ -56,6 +56,9 @@ func (q *Queue) observeSharedCPU(j *Job, r *AttemptResources) {
 
 func jobCPUCharge(j *Job, m *Machine) int {
 	declared := j.Spec.Needs.cores()
+	if learned := j.CPUDemand; learned != nil {
+		declared = max(declared, learned.ChargeCores)
+	}
 	if m.SharedHost == nil || j.CPUObservation == nil || !validMemoryValue(j.CPUObservation.PeakCores) {
 		return declared
 	}

@@ -73,7 +73,7 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 					_, why = cpuCapacity(m)
 				}
 				if why == "" {
-					why = fmt.Sprintf("%d cores needed; %d cores unreserved of %d admitted (%d reserved; CPU utilization unknown)", candidate.Spec.Needs.cores(), m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
+					why = fmt.Sprintf("%d cores needed; %d cores unreserved of %d admitted (%d reserved; CPU utilization unknown)", jobCPUCharge(candidate, m), m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
 				}
 				blocked = append(blocked, "CPU capacity: "+why)
 			}

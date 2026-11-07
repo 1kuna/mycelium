@@ -1308,3 +1308,21 @@ cgroup/proc data and an injected clock. The initial implementation ran that nati
 check on macOS (CPU readings and explicit unsupported I/O); native Linux delegated
 cgroup CPU/stat/PSI and Linux host PSI were not run. No daemon, GPU, I/O isolation
 or loaded queue-latency qualification follows from these measurements.
+
+## Comparable CPU demand proof (#880)
+
+`TestCPUDemand*` uses the injected queue clock and complete/censored counter
+fixtures to cover cross-submission sizing, whole-core co-scheduling within one
+physical allowance, fair core-second charges, higher tiers, exact cleanup,
+overuse, same-job shared-host floors, recipe/configuration/target separation,
+restart and accepted-sample preservation ledgers. Missing, throttled, stale,
+interrupted and macOS lower-bound evidence cannot reduce admission.
+
+The implementation's macOS `myce dev -- COMMAND` proof submitted the same CPU
+profile twice through the real HTTP API and command runner, fetched verified
+outputs, compared their exact bytes and inspected per-job status. Both completed;
+the second reused the first's sampled process-tree CPU as a labelled lower bound
+with complete-demand count zero. Explicit one-core reservations stayed unchanged.
+No synthetic cgroup counters were inserted into that command run. This proves
+laptop submission/result/status plumbing, not native Linux cgroup completeness,
+loaded-host throughput, shared-owner stress or per-attempt CPU-time containment.
