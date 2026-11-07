@@ -24,7 +24,7 @@ type RSSLimitEvidence struct {
 }
 
 func safeRSSLimit(e *RSSLimitEvidence) *RSSLimitEvidence {
-	if e == nil || e.LimitBytes <= 0 || e.ObservedBytes <= uint64(e.LimitBytes) || e.Quality != "owned_session_rss" {
+	if e == nil || e.LimitBytes <= 0 || e.ObservedBytes <= uint64(e.LimitBytes) || e.Quality != "owned_session_rss" && e.Quality != "cgroup_current" {
 		return nil
 	}
 	copy := *e
@@ -32,6 +32,9 @@ func safeRSSLimit(e *RSSLimitEvidence) *RSSLimitEvidence {
 }
 
 func (e *RSSLimitEvidence) String() string {
+	if e.Quality == "cgroup_current" {
+		return fmt.Sprintf("sampled cgroup memory %d bytes exceeded resolved limit %d bytes (%s)", e.ObservedBytes, e.LimitBytes, e.Quality)
+	}
 	return fmt.Sprintf("sampled RSS %d bytes exceeded resolved limit %d bytes (%s)", e.ObservedBytes, e.LimitBytes, e.Quality)
 }
 

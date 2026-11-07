@@ -157,7 +157,7 @@ func startFailureOutcome(owner Result, err error) Result {
 		owner.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("start_authorization", err))
 	}
 	owner = classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
-	if errors.As(err, &staging) && staging.diagnostic.Class == "tools_missing" {
+	if errors.As(err, &staging) && (staging.diagnostic.Class == "tools_missing" || staging.diagnostic.Class == machoLibraryMissing) {
 		owner.ExecutionCause = runtimeDiagnostic(staging)
 	}
 	if execFormatFailure(err) && !owner.OutOfMemory {

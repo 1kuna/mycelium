@@ -437,6 +437,11 @@ only before the first policy is stored. After first boot, the persisted SQLite
 policy is authoritative. Editing the config and restarting or reinstalling the
 queue no longer changes live policy or advances its revision.
 
+From the release containing #890, read-only `myce policy get` resolves installed
+worker authority, then queue authority, as `myce status` does. No `MYCE_TOKEN`
+environment setting is needed and no credential is printed; `--config` selects
+an explicit installed configuration. Policy writes retain owner-token requirements.
+
 For a deliberate change, export the current policy, edit its `projects` mapping,
 and import it using the revision printed by the export:
 
