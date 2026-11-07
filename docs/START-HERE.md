@@ -114,7 +114,8 @@ its own saved settings):
 ./myce run --cpu 2 --detach -- sh -c 'sleep 20; echo done'
 ```
 
-The first command waits, prints each state change, then the command's output.
+The first command waits, printing state changes and streaming the command's
+output.
 Mycelium picks the machine; `myce status` shows which one ran each job.
 `--detach` prints only the job ID and returns at once. Follow that job with:
 
@@ -190,7 +191,11 @@ and profiles.
 A job can run more than once: when a machine disappears, or when more important
 work needs its machine. Set `resumable: true` only for commands that save
 [checkpoints](files.md#resumable-jobs) and can pick up from them. Cancelling
-asks the job to stop; `myce wait` shows when it has. For programs that submit
+asks the job to stop. `cancelled` means it won't run again, but it doesn't mean
+the machine has confirmed its processes are gone; if a machine dropped out, it
+may not have. `myce status JOB_ID` shows the release as `confirmed` once it
+has; see [abort and wait for release](jobs.md#abort-and-wait-for-release).
+For programs that submit
 work and must survive their own restarts, see
 [keyed submission and cancellation](jobs.md#keyed-submission-and-cancellation).
 
