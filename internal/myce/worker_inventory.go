@@ -14,6 +14,7 @@ import (
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
 type MachineDevice struct {
+	Telemetry             *DeviceTelemetry   `json:"telemetry,omitempty"`
 	pciFact               *pciAccelerator    // Physical facts from the shared probe.
 	pciAddress            string             // Local probe fact; never part of the queue protocol.
 	Attempts              []Execution        `json:"attempts,omitempty"`
@@ -61,6 +62,9 @@ func validateInventory(devices []MachineDevice) error {
 			if !validMemoryValue(value) {
 				return currentProtocolError("invalid device memory evidence")
 			}
+		}
+		if !validDeviceTelemetry(d.Telemetry) {
+			return currentProtocolError("invalid device telemetry")
 		}
 		ids[d.ID], identities[d.Platform+":"+d.Identity] = true, true
 	}
@@ -546,6 +550,7 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 		if d.UnifiedMemory && configured.Machine.FreeMemoryGB == 0 {
 			d.BudgetGB = d.FreeMemoryGB
 		}
+		w.sampleXPUTelemetry(ctx, probe, d)
 	}
 	return physical, err
 }

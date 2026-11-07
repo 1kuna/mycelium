@@ -11,9 +11,10 @@ import (
 func memoryRefusalReviewWorker(t *testing.T) Worker {
 	t.Helper()
 	p := familyProbe(t, "0x030000")
-	p.Command = func(_ context.Context, name string, args ...string) ([]byte, error) {
+	inventoryCommand := p.Command
+	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if name != "nvidia-smi" {
-			t.Fatalf("unexpected command %s", name)
+			return inventoryCommand(ctx, name, args...)
 		}
 		if len(args) > 0 && strings.Contains(args[0], "uuid,driver_version") {
 			return []byte("GPU-card, driver"), nil

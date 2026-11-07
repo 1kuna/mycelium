@@ -310,6 +310,7 @@ still withholds dependent jobs under the unchanged measured thresholds.
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
+- **Benchmark host telemetry:** [bounded local capture and receipt schema](advanced.md#benchmark-telemetry-receipts) for queue/worker RSS, external RAM and per-card memory/activity; missing samples remain unknown.
 - **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
 - **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits.

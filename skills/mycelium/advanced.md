@@ -277,6 +277,16 @@ its recipe error: fix immutable inputs rather than retrying unchanged bytes.
 work moving on a hold. CPU resolve shows CPU views, and successful waits omit
 urgency tutorials. Source placeholders marked `needs-staging` are uploaded by run.
 
+## Benchmark telemetry receipts
+
+For benchmark memory/activity receipts, candidate builds with
+`myce telemetry capture` provide a bounded host-local sampler with no queue
+requests. Attach its versioned JSONL beside retained exact-attempt memory and
+CPU/I/O facts; [benchmark telemetry](https://github.com/1kuna/mycelium/blob/main/docs/benchmark-telemetry.md)
+defines timestamps, coverage, units, missing readings and attribution. Earlier
+installed releases do not imply this command exists. Native replay permission
+and output-parity requirements still apply.
+
 ## Diagnostic reference: project doctor
 
 On a supporting release, run `myce doctor --project` from the project root for

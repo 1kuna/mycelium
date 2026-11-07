@@ -532,6 +532,20 @@ From the next release, queued reasons explain network, environment preparation,
 GPU card contention and RAM envelope blockers per compatible target. Card waits
 say `device N shared with K attempts` or `card busy: waiting for GPU batch slot`,
 and name the holding jobs and tiers (or retained custody awaiting exact release).
+
+With `device-activity-v1` support, discrete XPU inventory includes optional
+`devices[].telemetry`: `free_gb`, `active_percent`, `at`, `age_seconds`, and
+`source`. Missing counters mean **unknown**, including `xpu-smi` N/A. Memory
+comes from a PCI-identified `xpu-smi --query-gpu=pci.bus_id,memory.free` CSV
+query. Xe activity is the busiest hardware engine's active/total PMU tick
+ratio across the complete `DRM_XE_DEVICE_QUERY_ENGINES` inventory, sampled over
+the existing memory-sensor interval. It includes foreign engine activity but
+does not attribute that activity to jobs or predict a sharing speedup. Reads
+use the worker's existing permissions; no settings, driver or privileges change.
+An unsupported, multiplexed, incomplete or nonadvancing counter remains unknown.
+Sensor ages are rebased onto queue time; cached inventory cannot refresh them.
+Strict older queues receive the existing inventory shape after negotiation.
+
 A RAM figure on another target cannot hide that card contention. A RAM wait gives the resolved
 envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
@@ -1190,6 +1204,10 @@ request paths, query strings, tokens or bodies. Long-lived streams are recorded
 when their handler ends.
 
 ### Non-Mycelium RAM history
+
+For a replay-window artifact with queue/worker RSS and card observations, see
+[benchmark telemetry receipts](benchmark-telemetry.md). Terminal job facts and
+the bucketed history below cannot reconstruct missing host snapshots.
 
 Each host's `external_memory` status field (also returned by host maintenance
 status) contains `24h` and `7d` summaries: `p50_gb`, `p95_gb`, exact observed

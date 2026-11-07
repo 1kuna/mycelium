@@ -42,6 +42,8 @@ type MachineProbe struct {
 	CommandEnv func(context.Context, map[string]string, string, ...string) ([]byte, error)
 	Glob       func(string) ([]string, error)
 	ReadFile   func(string) ([]byte, error)
+	// XeActivity reads every enumerated hardware engine without changing GPU settings.
+	XeActivity func(context.Context, string) (float64, error)
 }
 
 func LocalMachineProbe() MachineProbe {
@@ -58,6 +60,20 @@ func LocalMachineProbe() MachineProbe {
 			return cachedMountInventory(ctx)
 		}
 		cmd := exec.CommandContext(ctx, n, args...)
+		// A probe owns its process group. Killing only the tool can leave
+		// descendants holding stdout/stderr and defeat the caller's deadline.
+		cmd.SysProcAttr = commandProcessAttributes()
+		killGroup := func() error {
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		cmd.Cancel = killGroup
+		// Match the existing OS inventory drain allowance: shorter drains
+		// falsely failed under contention. This also bounds inherited pipes.
+		cmd.WaitDelay = time.Second
 		cmd.Env = withoutMyceToken(os.Environ())
 		for key, value := range env {
 			if key == "MYCE_TOKEN" {
@@ -69,6 +85,11 @@ func LocalMachineProbe() MachineProbe {
 		stdout.limit, stderr.limit = 1<<20, 4096
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		err := cmd.Run()
+		if errors.Is(err, exec.ErrWaitDelay) {
+			if cleanupErr := killGroup(); !errors.Is(cleanupErr, os.ErrProcessDone) {
+				err = errors.Join(err, cleanupErr)
+			}
+		}
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
 			exit.Stderr = stderr.Bytes()
@@ -79,7 +100,7 @@ func LocalMachineProbe() MachineProbe {
 		}
 		return stdout.Bytes(), err
 	}
-	return MachineProbe{Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Files: guardedProbeFS{os.DirFS("/")}, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+	return MachineProbe{XeActivity: nativeXeActivity, Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Files: guardedProbeFS{os.DirFS("/")}, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		return run(ctx, nil, n, args...)
 	}}
 }
