@@ -16,6 +16,8 @@ connection settings, submits a real CPU command and a fake-GPU command, waits
 and fetches verified output. No installed fleet or token setup is needed.
 The queue and workers stop automatically; `quickstart-result/result.txt` remains.
 Plain `myce dev` retains its existing persistent, foreground behavior.
+From the next release, command-scoped dev waits for both local workers to check
+in before starting your command, so a target-required profile can run first.
 
 From the next release, a worker fleet proof may report `slot_mismatch` with
 separate running and `installed_slot` hashes after a failed update. This does not
