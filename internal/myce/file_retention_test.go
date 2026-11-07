@@ -16,6 +16,96 @@ import (
 	"time"
 )
 
+// Err is checked outside q.mu after the publication snapshot and before unlink.
+// Interleave a real rejected transaction there without timing a goroutine race.
+type retentionInterleaveContext struct {
+	context.Context
+	once func()
+}
+
+func (c *retentionInterleaveContext) Err() error {
+	if f := c.once; f != nil {
+		c.once = nil
+		f()
+	}
+	return c.Context.Err()
+}
+
+func TestFileRetentionRollbackTimestampFences(t *testing.T) {
+	for _, phase := range []string{"publication", "bookkeeping"} {
+		for _, kind := range []string{"input", "attempt-output", "bundle"} {
+			t.Run(phase+"/"+kind, func(t *testing.T) {
+				q, clock := fixture(t)
+				// JSON preserves this instant but normalizes the named location.
+				clock.now = time.Date(2026, 11, 7, 4, 15, 0, 0, time.FixedZone("fixture-local", -5*60*60))
+				c := retentionClient(t, q)
+				_, ref := retentionUpload(t, c, "rollback retention")
+				marker := func() map[string]time.Time {
+					switch kind {
+					case "input":
+						return q.s.JobInputUploads
+					case "attempt-output":
+						return q.s.AttemptOutputUploads
+					default:
+						return q.s.BundleUploads
+					}
+				}
+				published := clock.Now()
+				if err := q.update(func() error {
+					q.s.JobInputUploads = map[string]time.Time{}
+					q.s.AttemptOutputUploads = map[string]time.Time{}
+					q.s.BundleUploads = map[string]time.Time{}
+					marker()[ref.SHA256] = published
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				clock.Advance(testFileRetention)
+				entered := false
+				rollback := func() {
+					entered = true
+					if phase == "bookkeeping" {
+						if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
+							t.Fatal("bookkeeping interleave did not follow unlink", err)
+						}
+					}
+					sentinel := errors.New("unrelated rejected mutation")
+					if err := q.update(func() error { return sentinel }); !errors.Is(err, sentinel) {
+						t.Fatal(err)
+					}
+					current, exists := marker()[ref.SHA256]
+					if !exists || !current.Equal(published) || current == published {
+						t.Fatal("rollback did not normalize the unchanged marker", current, published)
+					}
+				}
+				ctx := context.Background()
+				if phase == "publication" {
+					ctx = &retentionInterleaveContext{Context: ctx, once: rollback}
+				} else {
+					q.checkpointProbe = func() bool {
+						// Disarm before the nested rejected transaction probes again.
+						q.checkpointProbe = func() bool { return true }
+						rollback()
+						return true
+					}
+				}
+				if err := q.reclaimPublishedFilesContext(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if !entered {
+					t.Fatal("rollback interleave was not exercised")
+				}
+				if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
+					t.Error("unchanged publication was not reclaimed", err)
+				}
+				if _, exists := marker()[ref.SHA256]; exists {
+					t.Error("unlinked publication retained its marker")
+				}
+			})
+		}
+	}
+}
+
 func TestFileRetention(t *testing.T) {
 	q, clock := fixture(t)
 	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "store"), 1<<20, true); err != nil {
