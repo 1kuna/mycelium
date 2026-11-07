@@ -310,19 +310,44 @@ func TestDiagnosticStreamsShareActualBytes(t *testing.T) {
 }
 func TestEvidenceRetentionLearntKeyAndUniqueWaitRemain(t *testing.T) {
 	q, clock := fixture(t)
+	q.evidenceMaintenance.capacity = func(context.Context) (RetentionCapacity, error) {
+		return RetentionCapacity{MemoryAvailableBytes: 1, DiskAvailableBytes: 1}, nil
+	}
 	key := ObservationKey{Work: "learned"}
+	peak, predicted, actual := 2.0, 20.0, 10.0
 	err := q.update(func() error {
 		q.putWorkObservation(identityHash(key), WorkObservation{Key: key, StaleReason: "hardware changed"})
-		q.putJob("decision", &Job{ID: "decision", Attempt: 1, State: "succeeded", ReleaseConfirmed: true, LedgerEntries: []JobLedgerEntry{{WorkLearning: &WorkLearningChange{Key: key}}}})
+		job := &Job{ID: "decision", Attempt: 1, State: "succeeded", ReleaseConfirmed: true,
+			LedgerEntries: []JobLedgerEntry{{WorkLearning: &WorkLearningChange{Key: key}}},
+			Efficiency:    &JobEfficiency{WaitSeconds: map[string]float64{"memory_reservation": 42}},
+			MemoryAttempts: []AttemptMemoryFacts{{Attempt: 1, Machine: "synthetic", Session: "session", LearningReason: "eligible",
+				MemoryEnvelope: &JobMemoryEnvelope{Basis: "exploratory", HostGB: 12}, MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}}},
+			Timing: &WorkTiming{Execution: Execution{ID: "decision", Attempt: 1}, PredictedSeconds: &predicted, ActualSeconds: &actual}}
+		for range 100 {
+			job.AttemptHistory = append(job.AttemptHistory, AttemptOutcome{Attempt: 1, Machine: "synthetic", Session: "session", Reason: "same diagnosis"})
+		}
+		q.putJob(job.ID, job)
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	before := efficiencyPredictions(q.s.Jobs["decision"])
+	if len(before) != 1 {
+		t.Fatal("missing prediction fixture", before)
+	}
 	clock.Advance(10000 * 24 * time.Hour)
 	drainEvidence(t, q)
 	if _, ok := q.s.WorkObservations[identityHash(key)]; !ok {
 		t.Fatal("learned decision lost its input")
+	}
+	job := q.s.Jobs["decision"]
+	if job.Efficiency.WaitSeconds["memory_reservation"] != 42 || !reflect.DeepEqual(before, efficiencyPredictions(job)) {
+		t.Fatal("capacity maintenance lost wait or prediction-error readers")
+	}
+	// First/latest provenance survives even for otherwise identical rows.
+	if len(job.AttemptHistory) != 2 {
+		t.Fatal("fixture did not exercise redundant-history compaction")
 	}
 }
 
