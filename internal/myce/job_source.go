@@ -48,6 +48,7 @@ func extractJobSource(archive, root string) error {
 	return extractJobSourceContext(context.Background(), archive, root)
 }
 func extractJobSourceContext(ctx context.Context, archive, root string) error {
+	defer trackBulkIO(ctx)()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -90,7 +91,7 @@ func extractJobSourceContext(ctx context.Context, archive, root string) error {
 			if err != nil {
 				return err
 			}
-			_, copyErr := io.CopyN(out, tr, h.Size)
+			_, copyErr := io.CopyN(bulkWriter(ctx, out), tr, h.Size)
 			if err = errors.Join(copyErr, out.Close()); err != nil {
 				return err
 			}

@@ -153,6 +153,7 @@ type ServiceConfig struct {
 	MemoryMax             string         `json:"memory_max"`
 	TasksMax              string         `json:"tasks_max"`
 
+	PaceQueueIO           bool    `json:"pace_queue_io,omitempty"`
 	RequireMemoryCeilings bool    `json:"require_memory_ceilings"`
 	RequireMountedNAS     bool    `json:"require_mounted_nas"`
 	Force                 bool    `json:"-"`
@@ -908,6 +909,9 @@ func (c ServiceConfig) Args() []string {
 			args = append(args, "--queue", c.Queue)
 		}
 		args = append(args, "--host-id", c.HostID, "--reserve-host-memory-gb", strconv.FormatFloat(c.ReserveHostMemoryGB, 'f', -1, 64), "--heartbeat", c.Heartbeat.String())
+		if c.PaceQueueIO {
+			args = append(args, "--pace-queue-io")
+		}
 		if c.RequireMemoryCeilings {
 			args = append(args, "--require-memory-ceilings")
 		}

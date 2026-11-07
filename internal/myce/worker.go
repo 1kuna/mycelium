@@ -26,6 +26,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	PaceQueueIO          bool // Opt-in, Linux queue-host owned bulk-write pacing.
 	hygieneCollector     *workerHygieneCollector
 	hygieneWire          *workerHygieneWire
 	unifiedMemoryWire    *workerUnifiedMemoryWire
@@ -403,6 +404,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
+	ctx = w.Client.bulkIO.context(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1106,6 +1108,9 @@ func (w Worker) Run(stop context.Context) error {
 	}
 	if w.Clock == nil {
 		w.Clock = RealClock{}
+	}
+	if w.PaceQueueIO && w.Client.bulkIO == nil {
+		w.Client.bulkIO = localWorkerBulkIO(stop, w.Clock, w.Client.URL)
 	}
 	if w.Machine.MaxJobs < 0 {
 		return errors.New("max-jobs must be nonnegative")

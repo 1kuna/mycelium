@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -36,7 +35,8 @@ type ModelCache struct {
 	progress      sync.Map
 	speed         float64
 	speedMu       sync.Mutex
-	beforeChunk   func(context.Context) // deterministic interruption hook for tests
+	beforeChunk   func(context.Context)      // deterministic interruption hook for tests
+	trashRename   func(string, string) error // Cross-device recovery fault seam.
 
 	localCheckMu        sync.Mutex
 	localApprovalRound  uint64
@@ -76,10 +76,11 @@ func (c *ModelCache) init() error {
 
 // Move evictions to NAS Trash when a NAS root is configured. This preserves
 // recoverability while releasing local blocks on a separate filesystem.
-func (c *ModelCache) discard(path string) error {
-	return c.discardContext(context.Background(), path)
-}
 func (c *ModelCache) discardContext(ctx context.Context, path string) error {
+	if c.FileClient != nil {
+		ctx = c.FileClient.bulkIO.context(ctx)
+	}
+	defer trackBulkIO(ctx)()
 	if e := ctx.Err(); e != nil {
 		return e
 	}
@@ -110,43 +111,79 @@ func (c *ModelCache) discardContext(ctx context.Context, path string) error {
 		return e
 	}
 	dest := filepath.Join(trash, ID()+"-"+filepath.Base(path))
-	if e = os.Rename(path, dest); e == nil {
+	rename := c.trashRename
+	if rename == nil {
+		rename = os.Rename
+	}
+	if e = rename(path, dest); e == nil {
 		return nil
 	} else if !errors.Is(e, syscall.EXDEV) {
 		return e
 	}
-	// Save and verify a recovery copy before asking mv to finish the Trash move.
+	// Save and verify a recovery copy before finishing the cross-device move.
 	if st, err := os.Lstat(path); err != nil {
 		return err
 	} else if st.IsDir() {
 		if err = c.recoverModelDirectory(ctx, path, dest); err != nil {
 			return err
 		}
-		return exec.CommandContext(ctx, "mv", path, dest+"-original").Run()
+		return c.finishTrashMove(ctx, path, dest+"-original")
 	}
-	in, e := os.Open(path)
-	if e != nil {
+	if e = recoverModelFile(ctx, path, dest); e != nil {
 		return e
+	}
+	return c.finishTrashMove(ctx, path, dest+"-original")
+}
+
+// Preserve the original recovery-copy policy without an unpaced mv subprocess.
+// Cancellation or failed verification keeps the source. Both Trash generations
+// are durable before the original is removed, as in the existing two-copy move.
+func (c *ModelCache) finishTrashMove(ctx context.Context, source, dest string) error {
+	if c.FileClient != nil {
+		ctx = c.FileClient.bulkIO.context(ctx)
+	}
+	st, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if st.IsDir() {
+		err = c.recoverModelDirectory(ctx, source, dest)
+	} else if st.Mode().IsRegular() {
+		err = recoverModelFile(ctx, source, dest)
+	} else {
+		return errors.New("nonregular evicted cache entry")
+	}
+	if err != nil {
+		return err
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	return os.RemoveAll(source)
+}
+
+func recoverModelFile(ctx context.Context, source, dest string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
 	}
 	defer in.Close()
-	out, e := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if e != nil {
-		return e
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
 	}
 	hash := sha256.New()
-	n, e := io.Copy(io.MultiWriter(out, hash), contextReader{ctx, in})
-	if e == nil {
-		e = out.Sync()
+	n, err := io.Copy(io.MultiWriter(bulkWriter(ctx, out), hash), contextReader{ctx, in})
+	if err == nil {
+		err = out.Sync()
 	}
-	e = errors.Join(e, out.Close())
-	if e != nil {
-		return e
+	if err = errors.Join(err, out.Close()); err != nil {
+		return err
 	}
-	if e = verifyModelContext(ctx, dest, Model{Name: "evicted cache copy", SizeBytes: n, SHA256: hex.EncodeToString(hash.Sum(nil))}); e != nil {
-		return e
+	if err = verifyModelContext(ctx, dest, Model{Name: "evicted cache copy", SizeBytes: n, SHA256: hex.EncodeToString(hash.Sum(nil))}); err != nil {
+		return err
 	}
-	// mv performs a recoverable cross-filesystem move; keep the verified backup.
-	return exec.CommandContext(ctx, "mv", path, dest+"-original").Run()
+	return syncWorkerDir(filepath.Dir(dest))
 }
 func cacheKey(m Model) string {
 	h := sha256.Sum256([]byte(m.Name))
@@ -227,6 +264,10 @@ func (c *ModelCache) Precopy(ctx context.Context, m Model, score int) (string, e
 	return c.prepare(ctx, m, true, score)
 }
 func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, score int) (string, error) {
+	if c.FileClient != nil {
+		ctx = c.FileClient.bulkIO.context(ctx)
+	}
+	defer trackBulkIO(ctx)()
 	if m.LocalSource != "" {
 		return c.prepareLocal(ctx, m)
 	}
@@ -482,7 +523,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			r.Error = e.Error()
 			if errors.Is(e, errInvalidBundleCopy) {
 				r.State = "failed"
-				discardErr := c.discard(temp)
+				discardErr := c.discardContext(ctx, temp)
 				e = errors.Join(e, discardErr)
 				if discardErr == nil {
 					r.Bytes = 0
@@ -546,7 +587,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 				e = errors.New("NAS model exceeds declared size")
 				break
 			}
-			written, writeErr := io.MultiWriter(out, h).Write(buf[:count])
+			written, writeErr := io.MultiWriter(bulkWriter(ctx, out), h).Write(buf[:count])
 			n += int64(written)
 			copied += int64(written)
 			r.Bytes = n
@@ -574,8 +615,11 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		r.Error = e.Error()
 		if mismatch || oversize {
 			r.State = "failed"
-			e = errors.Join(e, c.discard(temp))
-			r.Bytes = 0
+			discardErr := c.discardContext(ctx, temp)
+			e = errors.Join(e, discardErr)
+			if discardErr == nil {
+				r.Bytes = 0
+			}
 		}
 		c.progress.Store(key, r)
 		return "", e

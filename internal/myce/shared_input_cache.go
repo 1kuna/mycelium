@@ -120,6 +120,8 @@ func removeSharedEntry(path string) error {
 	return os.RemoveAll(path)
 }
 func (c *SharedInputCache) Acquire(ctx context.Context, s SharedInput, nasRoot string) (string, func(), error) {
+	ctx = c.Client.bulkIO.context(ctx)
+	defer trackBulkIO(ctx)()
 	defer c.refreshCapacityIfTracked()
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
@@ -467,6 +469,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 }
 
 func copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
+	defer trackBulkIO(ctx)()
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
@@ -506,7 +509,7 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) err
 			return err
 		}
 		// A changing NAS original cannot consume more than its admitted bytes.
-		_, err = io.CopyN(struct{ io.Writer }{out}, contextReader{ctx, in}, ref.SizeBytes)
+		_, err = io.CopyN(bulkWriter(ctx, out), contextReader{ctx, in}, ref.SizeBytes)
 		err = errors.Join(err, out.Sync(), out.Close())
 		if err != nil {
 			return err
@@ -774,6 +777,7 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 	return nil
 }
 func unpackSharedArchive(ctx context.Context, source, dest, format string, limit int64) error {
+	defer trackBulkIO(ctx)()
 	f, err := os.Open(source)
 	if err != nil {
 		return err
@@ -829,7 +833,7 @@ func unpackSharedArchive(ctx context.Context, source, dest, format string, limit
 			if e != nil {
 				return e
 			}
-			_, e = io.CopyN(out, tr, h.Size)
+			_, e = io.CopyN(bulkWriter(ctx, out), tr, h.Size)
 			e = errors.Join(e, out.Sync(), out.Close())
 			if e != nil {
 				return e

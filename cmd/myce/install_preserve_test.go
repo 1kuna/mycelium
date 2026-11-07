@@ -163,6 +163,9 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	// Chassis declarations are exclusive; preserve both true and false policy
 	// values without constructing an invalid laptop+desktop fixture.
 	c.Desktop = false
+	// Bulk pacing is valid only for workers; retain nondefault coverage there
+	// without constructing an unsupported queue configuration.
+	c.PaceQueueIO = role == "worker"
 	if role == "worker" {
 		c.RequireMemoryCeilings = true
 

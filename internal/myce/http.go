@@ -593,6 +593,7 @@ func (q *Queue) Run(ctx context.Context) error {
 var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 type Client struct {
+	bulkIO       *workerBulkIO // Shared only by one worker; never serialized.
 	resourceWire *resourceWire
 	URL          string
 	Token        string
@@ -605,9 +606,13 @@ type Client struct {
 	singleAttempt bool
 }
 
-func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
+func (c Client) Call(ctx context.Context, method, path string, in, out any) (callErr error) {
 	ctx, cancel := c.apiContext(ctx)
 	defer cancel()
+	if c.bulkIO != nil && method == "POST" && path == "/api/workers/checkin" {
+		c.bulkIO.begin()
+		defer func() { c.bulkIO.end(callErr) }()
+	}
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
 	in, resourceFields := resourceWireInput(in, supported)
 	clock := c.clock()
