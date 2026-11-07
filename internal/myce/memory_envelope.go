@@ -823,12 +823,19 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 // Telemetry already excludes the operator/driver reserve. Use the shared ledger
 // and release predicates; the normal planner alone can authorize stops.
 func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
+	room, why, _ := q.exploratoryMemoryStatus(j, m)
+	return room, why
+}
+
+// The boolean identifies temporary physical contention, not unknown telemetry or
+// a structural inability to run. Startup waiting uses this same sizing evidence.
+func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bool) {
 	allowance := m.EffectiveHostMemoryBudgetGB
 	if allowance <= 0 && m.CapabilityProfile != nil {
 		allowance = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
 	}
 	if allowance <= 0 || !m.HostMemoryMeasured || m.HostMemoryError != "" || m.HostMemoryPolicyMismatch {
-		return 0, "exploratory first run needs measured host memory and a known allowance or physical capacity"
+		return 0, "exploratory first run needs measured host memory and a known allowance or physical capacity", false
 	}
 	room := m.FreeHostMemoryGB - m.hostReservationDebtGB
 	for _, release := range q.s.HostReleases {
@@ -837,7 +844,7 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 		}
 		live := q.s.Jobs[release.Job]
 		if live == nil || live.Machine != release.Machine || live.Session != release.Session || live.Attempt != release.Attempt || (live.State != "running" && live.State != "stopping") {
-			return 0, "exploratory first run blocked by an unconfirmed memory-heavy release"
+			return 0, "exploratory first run blocked by an unconfirmed memory-heavy release", true
 		}
 	}
 	for _, running := range q.liveJobs() {
@@ -867,9 +874,9 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 	// between the inventory snapshot and the strict launch check.
 	slack := m.MemoryCeilingSlackGB + q.coldProbeDriftMarginGB(m)
 	if room <= slack {
-		return 0, fmt.Sprintf("exploratory first run needs physical headroom above launch slack (%.1f GiB available; %.1f GiB allowance)", room, allowance)
+		return 0, fmt.Sprintf("exploratory first run needs physical headroom above launch slack (%.1f GiB available; %.1f GiB allowance)", room, allowance), true
 	}
-	return room - slack, ""
+	return room - slack, "", false
 }
 
 // Use the same candidates, policy and telemetry as dispatch. This diagnostic

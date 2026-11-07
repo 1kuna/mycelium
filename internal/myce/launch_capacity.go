@@ -125,10 +125,23 @@ func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
 		room := *m
 		room.FreeCPUCores, room.CPUInUseCores = room.EffectiveCPUCores, 0
 		for _, c := range q.memoryCandidates(j, m) {
+			temporary := false
+			if c.MemoryEnvelope != nil && c.MemoryEnvelope.Refusal != "" {
+				_, why, capacity := q.exploratoryMemoryStatus(j, m)
+				if capacity && c.MemoryEnvelope.Refusal == why {
+					// Keep resolved demand and every structural fit check. Only
+					// this known physical wait is ignored for route eligibility.
+					copy := *c
+					envelope := *c.MemoryEnvelope
+					envelope.Refusal = ""
+					copy.MemoryEnvelope = &envelope
+					c, temporary = &copy, true
+				}
+			}
 			if !fitsResources(c, &room, room.TotalMemoryGB) {
 				continue
 			}
-			if !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB {
+			if temporary || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB {
 				waiting = true
 			} else {
 				ready = true

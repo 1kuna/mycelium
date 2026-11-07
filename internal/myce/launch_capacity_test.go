@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -628,5 +629,107 @@ func TestLaunchCapacityInitialLearnedMemory(t *testing.T) {
 			}
 			finish(t, q, next, true)
 		})
+	}
+}
+
+// A cold qualified job has no learned prior. Temporary exploration refusals
+// must wait just like learned demand, including exact custody of an old helper.
+func TestLaunchCapacityInitialColdMemory(t *testing.T) {
+	for _, shortage := range []string{"physical", "release"} {
+		for _, caller := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/caller=%v", shortage, caller), func(t *testing.T) {
+				q, clock, m, s := observationFixture(t)
+				var old *Job
+				if shortage == "release" {
+					other := cpuSpec(1, 4)
+					other.Priority = "production"
+					submit(t, q, other)
+					old = check(t, q, m, nil).Job
+					if old == nil {
+						t.Fatal("missing retained owner")
+					}
+					r := result(old, true)
+					r.ReleasePending = true
+					if err := q.Complete(r); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					m.HostAvailableMemoryGB = 0
+					check(t, q, m, nil)
+				}
+				s.Priority, s.Needs.Memory = "production", "auto"
+				if caller {
+					s.StartWindow = "1s"
+				}
+				j := submit(t, q, s)
+				if next := check(t, q, m, nil).Job; next != nil {
+					t.Fatal("cold demand bypassed shortage", next)
+				}
+				clock.Advance(ProductionStartTimeout + time.Second)
+				if err := q.Tick(); err != nil {
+					t.Fatal(err)
+				}
+				got := job(t, q, j.ID)
+				if caller {
+					if got.State != "failed" {
+						t.Fatal("caller deadline ignored", got.State)
+					}
+					return
+				}
+				if got.State != "queued" || !got.StartCapacityWaiting || got.InfrastructureRetries != 0 || got.Losses != 0 {
+					t.Fatal("cold capacity wait expired or charged", got.State, got.Reason)
+				}
+				if old != nil {
+					r := result(old, false)
+					r.ReleaseOnly = true
+					if err := q.Complete(r); err != nil {
+						t.Fatal(err)
+					}
+				}
+				m.HostAvailableMemoryGB = 32
+				next := check(t, q, m, nil).Job
+				if next == nil || next.ID != j.ID || !next.Spec.StartBy.After(clock.Now()) {
+					t.Fatal("cold wait did not resume after release", next)
+				}
+				finish(t, q, next, true)
+			})
+		}
+	}
+}
+
+func TestLaunchCapacityKnownRefusalQuarantine(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	j := submit(t, q, spec("production"))
+	offer := assignedJob(machineCheck(t, q, m))
+	if offer == nil || offer.ID != j.ID {
+		t.Fatal("missing offer")
+	}
+	r := capacityResult(offer, true)
+	// This is the persisted, identity-validated state while unlocked diagnostic
+	// verification is in progress. A device check-in can race that verification.
+	if err := q.update(func() error { q.recordLaunchCapacityWait(q.s.Jobs[j.ID], r); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	m.Devices[0].Reason, m.Devices[0].FreeMemoryGB = "device_fault_xe", 0
+	machineCheck(t, q, m, offer)
+	got := job(t, q, j.ID)
+	if got.State != "running" || got.Losses != 0 || got.InfrastructureRetries != 0 {
+		t.Fatal("quarantine charged known refusal", got.State, got.Losses, got.InfrastructureRetries)
+	}
+	if err := q.Complete(r); err != nil {
+		t.Fatal("quarantine fenced valid refusal completion", err)
+	}
+	if next := assignedJob(machineCheck(t, q, m)); next != nil {
+		t.Fatal("reused unreleased helper on healthy card", next)
+	}
+	release := result(offer, false)
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	got = job(t, q, j.ID)
+	if got.Losses != 0 || got.InfrastructureRetries != 0 {
+		t.Fatal("release charged known refusal", got.Losses, got.InfrastructureRetries)
 	}
 }
