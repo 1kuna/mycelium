@@ -90,11 +90,15 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 // failure, regardless of whether the waiter wins the refusal-classification race.
 func TestNativeAdmissionIndependentFailureRequiresExec(t *testing.T) {
 	for _, released := range []bool{false, true} {
-		done := make(chan struct{})
-		close(done)
-		g := &nativeGroup{p: &process{}, members: []*nativeMember{{Name: "helper", done: done, execReleased: released, memberOutcome: memberOutcome{Exit: &memberExit{Status: 125}}}}}
-		if got := g.independentMemberFailure(); got != released {
-			t.Fatalf("independent failure=%v, exec gate opened=%v", got, released)
+		for _, reaped := range []bool{false, true} {
+			done := make(chan struct{})
+			if reaped {
+				close(done)
+			}
+			g := &nativeGroup{p: &process{}, members: []*nativeMember{{Name: "helper", done: done, execReleased: released, memberOutcome: memberOutcome{Exit: &memberExit{Status: 125}}}}}
+			if got := g.independentMemberFailure(); got != released {
+				t.Fatalf("independent failure=%v, exec gate opened=%v, waiter done=%v", got, released, reaped)
+			}
 		}
 	}
 }
