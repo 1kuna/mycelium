@@ -144,6 +144,12 @@ func TestJourneyRecorderFailureDumps(t *testing.T) {
 		{"TestDockerReleasedStageFailureDoesNotRequeue/main-nonzero", "^TestDockerReleasedStageFailureDoesNotRequeue$/^main-nonzero$", []string{"rpc_history", "rpc_command_return", "network.disconnect", "docker_custody"}},
 		{"TestOutcomeRuntimeTable/docker/priority-oom", "^TestOutcomeRuntimeTable$/^docker$/^priority-oom$", []string{"rpc_history", "rpc_command_return", "network.disconnect", "docker_custody"}},
 		{"TestDockerRestartMainFailures/oom", "^TestDockerRestartMainFailures$/^oom$", []string{"rpc_history", "rpc_command_return", "worker_start_result", "docker_custody"}},
+		{"TestDockerReleasedStageFailureDoesNotRequeue/main-oom", "^TestDockerReleasedStageFailureDoesNotRequeue$/^main-oom$", []string{"rpc_history", "rpc_context", "rpc_command_return", "worker_start_result", "docker_custody"}},
+		{"TestDockerRestartGracefulSidecarEvidence", "^TestDockerRestartGracefulSidecarEvidence$", []string{"rpc_history", "rpc_context", "rpc_command_return", "worker_start_result", "docker_custody"}},
+		{"TestDockerRestartReleasedWithoutResultStaysLoss/crash", "^TestDockerRestartReleasedWithoutResultStaysLoss$/^crash$", []string{"rpc_history", "rpc_context", "rpc_command_return", "network.disconnect", "docker_custody"}},
+		{"TestDockerRestartReleasedWithoutResultStaysLoss/output-sync-close", "^TestDockerRestartReleasedWithoutResultStaysLoss$/^output-sync-close$", []string{"rpc_history", "rpc_context", "rpc_command_return", "network.disconnect", "docker_custody"}},
+		{"TestOutcomeRuntimeTable/docker/observation-loss", "^TestOutcomeRuntimeTable$/^docker$/^observation-loss$", []string{"rpc_history", "rpc_context", "rpc_command_return", "worker_start_result", "docker_custody"}},
+		{"TestOutcomeRuntimeTable/docker/exit-143-without-signal", "^TestOutcomeRuntimeTable$/^docker$/^exit-143-without-signal$", []string{"rpc_history", "rpc_context", "rpc_command_return", "network.disconnect", "docker_custody"}},
 	}
 	exe, err := os.Executable()
 	if err != nil {

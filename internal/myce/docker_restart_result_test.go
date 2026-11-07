@@ -16,7 +16,16 @@ func restartResultFixture(t *testing.T) (Worker, *workerStore, *dockerAttempt, *
 	t.Helper()
 	w, s, c, root := dockerFixture(t)
 	j := dockerGroupJob(t)
-	if t.Name() == "TestDockerRestartMainFailures/oom" || t.Name() == "TestDockerReleasedStageFailureDoesNotRequeue/main-nonzero" || t.Name() == "TestOutcomeRuntimeTable/docker/priority-oom" {
+	switch t.Name() {
+	case "TestDockerRestartMainFailures/oom",
+		"TestDockerReleasedStageFailureDoesNotRequeue/main-nonzero",
+		"TestDockerReleasedStageFailureDoesNotRequeue/main-oom",
+		"TestDockerRestartGracefulSidecarEvidence",
+		"TestDockerRestartReleasedWithoutResultStaysLoss/crash",
+		"TestDockerRestartReleasedWithoutResultStaysLoss/output-sync-close",
+		"TestOutcomeRuntimeTable/docker/priority-oom",
+		"TestOutcomeRuntimeTable/docker/observation-loss",
+		"TestOutcomeRuntimeTable/docker/exit-143-without-signal":
 		w.journey = journeyNew(t, int64(j.Spec.Needs.HostMemoryGB*(1<<30)))
 	}
 	p, err := startDockerFixture(w, s, j)
@@ -422,7 +431,7 @@ func TestDockerRestartReleasedWithoutResultStaysLoss(t *testing.T) {
 					t.Fatal(err)
 				}
 				p := &process{machine: w.Machine.ID, done: make(chan workerFinish, 1)}
-				finalizer := &dockerAttempt{state: d.state, dir: d.dir, binary: d.binary, env: d.env, clock: d.clock, timeout: d.timeout, closed: make(chan struct{}), halt: make(chan struct{})}
+				finalizer := &dockerAttempt{state: d.state, dir: d.dir, binary: d.binary, env: d.env, clock: d.clock, timeout: d.timeout, closed: make(chan struct{}), halt: make(chan struct{}), journey: w.journey}
 				finalizer.run(p, *s.state.Job, s.state.Session, output, nil, func() error { return nil })
 				f := <-p.done
 				if f.err == nil || f.result.Success || f.result.Error != "persist Docker output failed" {
