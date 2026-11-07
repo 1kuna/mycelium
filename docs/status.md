@@ -64,6 +64,14 @@ recovery. Adverse samples never teach a new healthy baseline. Load requires
 increased wake latency; heartbeat delay also requires local wake latency, so
 ordinary useful CPU work or a slow queue alone does not drain a host. Memory
 pressure, swap growth with wake latency, and low free disk use the host's bands.
+On Linux, pressure is host-wide memory PSI `some avg10` (percent). With the
+zero-baseline correction, an all-zero idle pressure band requires corroborating
+swap-growth or local wake-latency deterioration before pressure
+alone is classified as adverse. Otherwise healthy observations can establish a
+positive workload reference through the normal baseline path, including the
+three-sample recovery of a retained zero-baseline drain. Once that reference is
+positive, pressure outliers trigger independently again. The reference and its
+adjacent-sample resolution come from this host; there is no absolute PSI cutoff.
 Disk pressure also requires exhaustion against measured consumption over the
 confirmation horizon. `disk_recovery` retains that measured reserve until space
 actually recovers; aging history alone cannot clear it. Pending adverse mount
