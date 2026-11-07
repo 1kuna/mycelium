@@ -139,8 +139,10 @@ func specRejection(err error) error {
 }
 
 // RuntimeCause retains safe operation/class information, never daemon stderr,
-// command arguments, environment values, endpoint URLs, or filesystem paths.
+// command arguments, environment values, endpoint URLs, or worker filesystem paths.
+// Linkage explicitly retains install names from payload load commands.
 type RuntimeCause struct {
+	Linkage          *MachOLinkage     `json:"linkage,omitempty"`
 	RSSLimit         *RSSLimitEvidence `json:"rss_limit,omitempty"`
 	MissingTools     []string          `json:"missing_tools,omitempty"`
 	Host             string            `json:"host,omitempty"`
@@ -157,6 +159,11 @@ type RuntimeCause struct {
 
 func (c RuntimeCause) String() string {
 	text := c.Operation + ": " + c.Class
+	if c.Class == machoLibraryMissing {
+		if d := safeMachOLinkage(c.Linkage); d != nil {
+			text += "; " + d.String()
+		}
+	}
 	if c.Class == rssLimitExceeded {
 		if e := safeRSSLimit(c.RSSLimit); e != nil {
 			text += "; " + e.String()
@@ -307,6 +314,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
 	operations["execution"], classes[wallTimeLimit] = true, true
 	classes["tools_missing"] = true
+	classes[machoLibraryMissing] = true
 	classes[diskLimitExceeded] = true
 	classes[rssLimitExceeded] = true
 	classes["input_unavailable"], classes["invalid_input"] = true, true
@@ -319,6 +327,10 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		}
 	}
 	out := *c
+	out.Linkage = nil
+	if c.Operation == "launch" && c.Class == machoLibraryMissing {
+		out.Linkage = safeMachOLinkage(c.Linkage)
+	}
 	out.RSSLimit = nil
 	if c.Class == rssLimitExceeded {
 		out.RSSLimit = safeRSSLimit(c.RSSLimit)

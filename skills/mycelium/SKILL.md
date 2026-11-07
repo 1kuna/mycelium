@@ -128,6 +128,17 @@ key="ease-audit-$(date -u +%Y%m%dT%H%M%SZ)"
 myce run --entry ease-audit --key "$key"
 ```
 
+From the release containing #866, resolve and adapter portability reports warn
+about missing absolute non-system Mach-O dylib install names in directory-source
+runtime candidates, naming the packaged binary and library. This is submitter-local
+evidence; Git/snapshot source inspection stays unknown until worker staging.
+Darwin prelaunch checks the staged payload again. `payload_library_missing` is a
+payload/environment failure with `execution_cause.linkage.binary` and `.library`,
+not an infrastructure loss/retry. Bundle and relink the dependency or choose a
+compatible environment, then resubmit changed intent. System/loader-relative
+imports and present libraries do not warn. This check does not prove dynamic
+loader resolution or application compatibility. See [packaged Darwin libraries](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#packaged-darwin-library-dependencies-next-release-866).
+
 Resolve uploads nothing; `needs-staging` for the source archive is expected:
 `run` stages it automatically. Fix actual input/environment/eligibility blockers
 before submitting. Save the receipt's `key` and `job_id`. After a lost reply,

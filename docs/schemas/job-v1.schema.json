@@ -2987,6 +2987,21 @@
       ],
       "type": "object"
     },
+    "MachOLinkage": {
+      "properties": {
+        "binary": {
+          "type": "string"
+        },
+        "library": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "binary",
+        "library"
+      ],
+      "type": "object"
+    },
     "MemoryEventCounts": {
       "properties": {
         "high": {
@@ -4250,6 +4265,9 @@
         },
         "host": {
           "type": "string"
+        },
+        "linkage": {
+          "$ref": "#/$defs/MachOLinkage"
         },
         "missing_tools": {
           "items": {
