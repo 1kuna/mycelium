@@ -94,7 +94,14 @@ than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
-and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
+and incomplete counters remain conservative. From the next release, a discrete
+GPU's one-shot cross-family probe uses the largest eligible target's measured
+usable headroom, capped by its allowance, rather than waiting for that whole
+allowance to become free. Source total-cgroup peaks, constrained observations,
+member caps and host hints remain floors. This is exploratory containment, not
+a calibrated cross-runtime estimate; a ceiling hit can fail the sole probe,
+and driver allocations outside cgroup accounting remain a separate limitation.
+From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
 Plain native commands default to **unsandboxed** under MY-25; explicitly set
 `isolation: sandboxed` to opt in. New native extension registrations default to
 sandboxing; retained registrations keep their frozen policy.
