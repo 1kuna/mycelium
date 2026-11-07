@@ -56,8 +56,8 @@ everything down. The last line is the downloaded result.
 One machine that stays on runs the queue: one Go binary and one SQLite file.
 Every other machine runs a worker that reports its CPU, memory and GPUs and
 pulls the most important job it can run. Jobs say what they need, not where to
-run. If the queue restarts, queued and running jobs survive and workers
-reconnect. There's no peer network or cluster database to manage.
+run. If the queue restarts, queued and running batch jobs survive and workers
+reconnect; in-flight model calls fail and are retried by the caller. There's no peer network or cluster database to manage.
 
 Every feature has to work on a laptop with no GPU. `myce dev`, used in the
 quick start, runs the real queue and command runner with pretend GPUs, and the
@@ -65,8 +65,8 @@ test suite uses it the same way.
 
 ## Watch it live
 
-`myce view` opens a read-only live picture of your cluster in the browser, the
-one in the GIF above ([MP4](docs/media/fleet-view.mp4)). To see it with the
+`myce view` serves a read-only live picture of your cluster and prints a local
+address to open in your browser. It's the picture in the GIF above ([MP4](docs/media/fleet-view.mp4)). To see it with the
 pretend cluster:
 
 ```sh
