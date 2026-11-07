@@ -610,7 +610,18 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 					return response(page)
 				case req.URL.Path == "/api/jobs/"+submitted.ID:
 					if strings.HasPrefix(mode, "never admitted") {
+						if got := job(t, q, submitted.ID); extensionCheckAdmissionReason(got.Reason) != "waiting for host RAM" {
+							t.Fatal("lost original capacity diagnostic before route loss", got.Reason)
+						}
 						clock.Advance(time.Hour)
+						// #1011 waits through capacity contention on an eligible
+						// route. Loss of that route restores startup expiry.
+						if err := q.update(func() error {
+							q.s.Machines[m.ID].Gone = true
+							return nil
+						}); err != nil {
+							t.Fatal(err)
+						}
 						if err := q.Tick(); err != nil {
 							t.Fatal(err)
 						}
@@ -681,7 +692,7 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 				if err == nil || !strings.HasPrefix(err.Error(), "never started: ") || got.StartedAt != nil || reports[0].Qualified || len(saved) != 1 || saved[0].Reason != "never started: "+extensionCheckAdmissionReason(strings.TrimPrefix(got.Reason, "never started: ")) || strings.Contains(saved[0].Reason, "check failed") {
 					t.Fatalf("waiting expiry misreported: report=%+v job=%+v err=%v", reports, got, err)
 				}
-				want := "waiting for host RAM"
+				want := "waiting for admission or command preparation"
 				if mode == "preparation never starts" {
 					want = "waiting for environment or command preparation"
 				}

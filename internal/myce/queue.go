@@ -1022,7 +1022,9 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 			j.FinishedAt = &now
 			return
 		}
-		q.renewRecoveryStartWindow(j)
+		if why != launchCapacityWaitReason {
+			q.renewRecoveryStartWindow(j)
+		}
 		if chargeInfrastructure {
 			j.InfrastructureRetries++
 		}
@@ -1800,6 +1802,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 			}
 		}
 		if verify {
+			q.retainLaunchCapacityRefusal(r)
 			q.maintainStartDeadlines()
 			j, err := q.wallTimeVerificationJob(r)
 			m := q.s.Machines[r.Machine]
@@ -1828,7 +1831,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	return rejected
 }
-func (q *Queue) complete(r Result, filesVerified bool) error {
+func (q *Queue) retainLaunchCapacityRefusal(r Result) {
 	// A refusal can race the generated startup cutoff. Validate identity before
 	// retaining it, then let caller deadlines/cancellation and custody run normally.
 	if launchCapacityRefusal(r) && !r.ReleaseOnly {
@@ -1836,6 +1839,10 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 			q.recordLaunchCapacityWait(j, r)
 		}
 	}
+}
+
+func (q *Queue) complete(r Result, filesVerified bool) error {
+	q.retainLaunchCapacityRefusal(r)
 	q.maintainWallTimeLimits()
 	if r.MemoryPeak.constrained() && !r.MemoryPeak.Constrained {
 		peak := *r.MemoryPeak
@@ -2003,7 +2010,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 			}
 		}
 	}
-	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) {
+	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) {
 		if cancelled(j) {
 			q.finishCancellation(j)
 		} else {
@@ -2792,7 +2799,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		j.ModelEnvironmentKey = recipe.Key
 		j.ModelEnvironmentNeedsSource = recipe.Binary != "" || recipe.BinaryRelative != ""
 	}
-	if (j.StartCapacityWaiting || len(j.LaunchCapacityWait) > 0) && !callerStartDeadline(j) && j.Spec.StartBy != nil {
+	if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !callerStartDeadline(j) && j.Spec.StartBy != nil {
 		deadline := q.clock.Now().Add(j.StartWindow)
 		j.Spec.StartBy = &deadline
 	}

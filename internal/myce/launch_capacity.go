@@ -58,6 +58,9 @@ func (q *Queue) launchCapacityEvidence(j *Job, m *Machine) string {
 
 func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+	if m != nil && j.Spec.Needs.cpuOnly() {
+		m = cpuMachineView(m)
+	}
 	if j.LaunchCapacityWait == nil {
 		j.LaunchCapacityWait = map[string]LaunchCapacityWait{}
 	}
@@ -96,11 +99,8 @@ func (q *Queue) launchCapacityPending(j *Job) bool {
 	if len(j.LaunchCapacityWait) == 0 {
 		return false
 	}
-	if j.State == "queued" {
-		return true
-	}
 	for _, hold := range j.LaunchCapacityWait {
-		if hold.Machine == j.Machine && hold.Session == j.Session && hold.Attempt == j.Attempt {
+		if hold.Attempt == j.Attempt && (j.State == "queued" || hold.Machine == j.Machine && hold.Session == j.Session) {
 			return true
 		}
 	}
@@ -110,9 +110,9 @@ func (q *Queue) launchCapacityPending(j *Job) bool {
 // A qualified route with occupied resources is capacity waiting even before its
 // first offer. Missing/incompatible/disabled hosts retain their existing startup
 // diagnosis. This uses the existing fit checks with only resources released.
-func (q *Queue) queuedCapacityWait(j *Job) bool {
+func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
 	if !dependencyReady(j) || cancelled(j) {
-		return false
+		return false, false
 	}
 	for _, m := range q.plannerMachines() {
 		if m.Gone || m.Leaving || q.maintenanceBlocked(hostID(m)) || !q.jobAllowsMachine(j, m.ID) {
@@ -125,11 +125,13 @@ func (q *Queue) queuedCapacityWait(j *Job) bool {
 				continue
 			}
 			if !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB {
-				return true
+				waiting = true
+			} else {
+				ready = true
 			}
 		}
 	}
-	return false
+	return waiting && !ready, ready
 }
 
 // Feed the worker's measured deficit into ordinary release planning only.

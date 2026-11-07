@@ -31,8 +31,11 @@ func initializeStartDeadline(j *Job, since time.Time) {
 		// One hour bounds unavailable-capacity/preparation waits at the existing
 		// maximum start window, independently of the execution budget.
 		if j.Spec.StartBy == nil {
-			deadline := since.Add(MaxProductionStartWindow)
+			j.StartWindow = MaxProductionStartWindow
+			deadline := since.Add(j.StartWindow)
 			j.Spec.StartBy = &deadline
+		} else if j.StartWindow == 0 {
+			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
 		}
 		return
 	}
@@ -125,8 +128,15 @@ func (q *Queue) maintainStartDeadlines() {
 		if j.Spec.Priority == "production" && !terminal(j.State) && (j.Spec.StartBy != nil || dependencyReady(j)) {
 			initializeStartDeadline(j, j.Queued)
 		}
-		if j.State == "queued" && !callerStartDeadline(j) && q.queuedCapacityWait(j) {
-			j.StartCapacityWaiting = true
+		if j.State == "queued" && !callerStartDeadline(j) {
+			waiting, ready := q.queuedCapacityStatus(j)
+			if j.StartCapacityWaiting && ready && j.Spec.StartBy != nil {
+				// Capacity recovered before dispatch. Restore startup time without
+				// hiding a later unavailable/disabled-route diagnosis.
+				deadline := now.Add(j.StartWindow)
+				j.Spec.StartBy = &deadline
+			}
+			j.StartCapacityWaiting = waiting
 		}
 		// Disabled-host rejection is an admission decision, independent of the
 		// relative timeout exemption for logical fan-out capacity waits.
