@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -85,12 +84,11 @@ func TestDevClockSubmissionExpiryEndToEnd(t *testing.T) {
 			t.Fatalf("reply: %s %v", output, err)
 		}
 	}
-	_, err = submit("expires")
-	var apiError *myce.HTTPError
-	if !errors.As(err, &apiError) || apiError.Status != 410 || apiError.Code != "submission_key_expired" {
-		t.Fatalf("expired submit: %v", err)
+	retained, err := submit("expires")
+	if err != nil || retained.State != "cancelled" || retained.Attempt != 0 {
+		t.Fatalf("aged cancellation lost: %+v %v", retained, err)
 	}
-	if ack := cancelKey("expires"); ack.State != "unknown" || ack.JobID != nil || ack.Release != nil || ack.AcknowledgedAt != nil {
+	if ack := cancelKey("expires"); ack.State != "cancelled" || ack.JobID == nil || *ack.JobID != retained.ID {
 		t.Fatal(ack)
 	}
 	if ack := cancelKey("never-seen"); ack.State != "absent" || ack.JobID != nil {
@@ -106,9 +104,9 @@ func TestDevClockSubmissionExpiryEndToEnd(t *testing.T) {
 	if err := c.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	// Replay answers survive by key while the old terminal job rows retire.
-	if len(snapshot.Jobs) != 0 {
-		t.Fatalf("expired/unseen key created a job after history retirement: %d", len(snapshot.Jobs))
+	// Unique cancellation/intent history survives along with replay answers.
+	if len(snapshot.Jobs) != 3 {
+		t.Fatalf("cancelled intent history lost: %d", len(snapshot.Jobs))
 	}
 }
 

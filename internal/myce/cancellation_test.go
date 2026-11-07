@@ -143,15 +143,17 @@ func TestCancellationKeyRecords(t *testing.T) {
 	}
 	c.Advance(submissionRetention)
 	a, err = q.CancelSubmission(s.Project, s.SubmissionKey)
-	if err != nil || a.State != "unknown" || a.JobID != nil || !a.WillNotRun {
-		t.Fatalf("expired: %+v %v", a, err)
+	if err != nil || a.State != "removed" || a.JobID == nil || *a.JobID != j.ID || !a.WillNotRun {
+		t.Fatalf("aged cancellation lost: %+v %v", a, err)
 	}
-	_, err = q.CancelJob(j.ID)
-	submissionError(t, err, 404, "job_unknown")
+	if a, err = q.CancelJob(j.ID); err != nil || a.State != "removed" || !a.WillNotRun {
+		t.Fatal("retained job cancellation lost", a, err)
+	}
 	_, err = q.CancelJob("missing")
 	submissionError(t, err, 404, "job_unknown")
-	_, err = q.Submit(s)
-	submissionError(t, err, 410, "submission_key_expired")
+	if replay, err := q.Submit(s); err != nil || replay.ID != j.ID || replay.State != "cancelled" {
+		t.Fatal("retained cancellation replay lost", replay, err)
+	}
 	for _, pair := range [][2]string{{"", "key"}, {"project", ""}} {
 		if _, err = q.CancelSubmission(pair[0], pair[1]); err == nil {
 			t.Fatal("empty identity accepted")
@@ -529,13 +531,13 @@ func TestCancellationDurabilityAndRollback(t *testing.T) {
 	}
 	c.Advance(time.Nanosecond)
 	a, err = q.CancelSubmission(s.Project, "reserved")
-	if err != nil || a.State != "unknown" {
-		t.Fatal("reservation expiry", a, err)
+	if err != nil || a.State != "absent" {
+		t.Fatal("cancellation reservation lost on age", a, err)
 	}
 	q = reopenCancellationQueue(t, q, c)
 	a, err = q.CancelSubmission(s.Project, "reserved")
-	if err != nil || a.State != "unknown" {
-		t.Fatal("marker lost", a, err)
+	if err != nil || a.State != "absent" {
+		t.Fatal("cancellation reservation lost on restart", a, err)
 	}
 }
 

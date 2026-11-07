@@ -1054,9 +1054,8 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) (err error
 		if m.ExitCode != nil {
 			continue
 		}
-		limit, releaseBudget := reserveDiagnosticBytes(d.dir, ^uint64(0))
-		tail := &dockerTail{limit: int(limit)}
-		defer releaseBudget()
+		tail := &diagnosticTail{dir: d.dir}
+		defer tail.release()
 		if !logsNone {
 			ctx, cancel := context.WithTimeout(context.Background(), d.rpcBudget("logs"))
 			cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", c.ID)

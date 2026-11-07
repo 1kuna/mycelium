@@ -364,8 +364,8 @@ func TestPrivacyConfiguredRetentionProtectsActiveBatch(t *testing.T) {
 	if err := q.ConfigureLogRetention(time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.ConfigureLogRetention(0); err == nil {
-		t.Fatal("unbounded retention accepted")
+	if err := q.ConfigureLogRetention(-time.Second); err == nil {
+		t.Fatal("negative retention accepted")
 	}
 	j := submit(t, q, spec("production"))
 	m := machine("one", "fake")

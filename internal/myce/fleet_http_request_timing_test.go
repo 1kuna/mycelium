@@ -171,6 +171,7 @@ func TestFleetInstructionPruneAndQueueWrite(t *testing.T) {
 func TestFleetInstructionSlowSpanWriterPhases(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		q, c, _ := fleetFixture(t, "host", "host")
+		q.requestLatencies.record("GET /api/fleet/instruction", time.Millisecond)
 		if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 			t.Fatal(err)
 		}

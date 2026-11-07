@@ -215,6 +215,11 @@ func TestOutputDeliveryRestartRetentionAndReceiptReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	verified := awaitDeliveryState(t, q, j.ID, "verified")
+	// Exercise an explicit operator payload policy after restart; omission
+	// protects the only queue copy until release.
+	if err := q.ConfigureFileRetention(testFileRetention); err != nil {
+		t.Fatal(err)
+	}
 	dest := filepath.Join(root, outputRelative(*j, "out.txt", "results"))
 	bytes, err := os.ReadFile(dest)
 	if err != nil || string(bytes) != "restart result" {
