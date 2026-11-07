@@ -655,7 +655,6 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	if err != nil {
 		return Snapshot{}, err
 	}
-	ctx := requestContext(contexts)
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
