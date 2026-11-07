@@ -1776,6 +1776,24 @@ uninterrupted coverage period; a rollback through an older binary can create
 a gap even though older events remain readable. Unknown legacy times remain absent.
 A status snapshot's `loaded_models` alone cannot rule out transient arrivals.
 
+## Local completion observer diagnostics (next release)
+
+`myce wait --observer-status` reads the user registry's `observer.status` and
+reports `owner_locked` from the lifetime lock. A record alone does not prove a
+live owner; the lock alone does not prove progress. Compare `captured_at`,
+`phase`, `last_read_at` and `last_delivery_at` with job completion timestamps.
+Phases identify discovery, authority resolution, batch/terminal reads, notifier
+execution, waiting, handoff and stopped state. Version, commit, PID, start time,
+registration/delivery/failure counts and typed last-error cause support diagnosis.
+Stale metadata identifies the last recorded boundary, not the current Go frame.
+
+The private registry retains `observer.log` and one rotated `.1` file, each at
+most 1 MiB, mode 0600. Structured lifecycle, delivery and failure events exclude
+authority, raw transport errors, notifier paths/targets and environment values.
+The last-error timestamp distinguishes an old refusal from present progress.
+Legacy observers have no diagnostic record; absence cannot establish a cause.
+See [supported recovery](operations.md#completion-observer-upgrade-and-recovery-next-release).
+
 ## Batched waits and consumer flood protection
 
 `POST /api/wait` accepts `{"ids":["JOB_A","JOB_B"],"after":{"JOB_A":1},"seconds":20}`.
