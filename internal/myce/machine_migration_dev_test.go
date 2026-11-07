@@ -151,7 +151,7 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 	if _, err := d.Queue.ConvertMachines(mapping, d.Queue.models, false); err != nil {
 		t.Fatal(err)
 	}
-	// Queue-first interval: the old Spark session reconnects before its upgrade.
+	// Queue-first interval: the legacy single-card session reconnects before its upgrade.
 	checkAPI(spark)
 	if err := client.Call(ctx, "POST", "/api/workers/spark/leave", map[string]bool{"now": true}, nil); err != nil {
 		t.Fatal(err)

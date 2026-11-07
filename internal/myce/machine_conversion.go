@@ -463,7 +463,7 @@ func (q *Queue) machineMigrationReady(host string) bool {
 	return true
 }
 
-// A queue-first catalog rewrite must still receive the exact legacy Spark
+// A queue-first catalog rewrite must still receive the exact legacy single-card
 // session under maintenance. It contributes no model endpoint or admission.
 func (q *Queue) migrationLegacyCatalog(m *Machine) bool {
 	p := q.s.MachineConversion
