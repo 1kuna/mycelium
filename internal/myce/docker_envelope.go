@@ -40,7 +40,7 @@ func (w Worker) dockerEnvelopeSupported() bool {
 	if err != nil || root == ".." || strings.HasPrefix(root, "../") {
 		return false
 	}
-	d := dockerAttempt{binary: "docker", state: dockerExecution{Endpoint: w.DockerEndpoint}, timeout: w.dockerCallTimeout, command: w.dockerCommand, env: dockerClientEnvironment()}
+	d := dockerAttempt{binary: "docker", state: dockerExecution{Endpoint: w.DockerEndpoint}, timeout: w.dockerCallTimeout, command: w.dockerCommand, journey: w.journey, env: dockerClientEnvironment()}
 
 	b, err := d.call("info", "--format", "{{json .}}")
 	if err != nil {

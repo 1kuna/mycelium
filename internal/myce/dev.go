@@ -14,6 +14,7 @@ import (
 )
 
 type DevConfig struct {
+	journey                         journeyObserver             // Optional passive test observer; nil in ordinary builds.
 	EnvironmentCacheLimit           int64                       // Optional explicit limit for isolated dev workers.
 	environmentSizeLimit            func(string) (int64, error) // Test seam for worker cache headroom.
 	SharedPressureSource            func(context.Context) (SharedHostPressure, error)
@@ -172,7 +173,11 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 		}
 	}
 	clock.targets = targets
-	d.server = &http.Server{Handler: API{Queue: q, Token: c.Token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	handler := API{Queue: q, Token: c.Token}.Handler()
+	if c.journey != nil {
+		handler = c.journey.handler(handler)
+	}
+	d.server = &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	queueCtx, stopQueue := context.WithCancel(context.Background())
 	d.stopQueue = stopQueue
 	d.wg.Add(2)
@@ -189,7 +194,7 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 		}
 	}()
 	for i := 0; i < c.Workers; i++ {
-		w := Worker{EnvironmentLimit: c.EnvironmentCacheLimit, environmentSizeLimit: c.environmentSizeLimit, sharedCPUDev: true, SharedPressureSource: c.SharedPressureSource, CPUIsolationProbe: func(context.Context) error { return nil }, ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelRoot: c.ModelRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{CPUReserveCores: c.CPUReserveCores, CPUBudgetCores: c.CPUBudgetCores, HostMemoryMeasured: true, HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		w := Worker{journey: c.journey, EnvironmentLimit: c.EnvironmentCacheLimit, environmentSizeLimit: c.environmentSizeLimit, sharedCPUDev: true, SharedPressureSource: c.SharedPressureSource, CPUIsolationProbe: func(context.Context) error { return nil }, ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelRoot: c.ModelRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{CPUReserveCores: c.CPUReserveCores, CPUBudgetCores: c.CPUBudgetCores, HostMemoryMeasured: true, HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
 		if c.NASCheckpoints {
 			w.CheckpointRoot = c.Checkpoints
 		}

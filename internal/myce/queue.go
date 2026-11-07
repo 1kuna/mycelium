@@ -119,6 +119,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	journey              journeyObserver // Optional passive test observer; nil in ordinary builds.
 	requestBudgets       requestBudgets
 	evidencePending      map[string]bool
 	evidenceRows         []string
@@ -1714,6 +1715,9 @@ func (q *Queue) Complete(r Result) error {
 // Only current success outputs or opt-in failure diagnostics need verification;
 // release acknowledgements and retransmissions retain their normal handling.
 func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
+	if q.journey != nil {
+		q.journey.result("queue_complete_input", Job{}, r, nil)
+	}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	quotaFailure := attemptDiskLimitFailure(r)
@@ -1961,6 +1965,10 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	}
 	r = withStopProvenance(r, priorityStop(j))
 	q.retainYieldFinal(j, r)
+
+	if q.journey != nil {
+		q.journey.result("queue_complete_canonical", *j, r, nil)
+	}
 	outcome := attemptOutcome(j, r)
 	q.recordAttemptStorage(j, r)
 	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.

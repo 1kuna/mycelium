@@ -26,6 +26,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	journey              journeyObserver // Optional passive test observer; nil in ordinary builds.
 	hygieneCollector     *workerHygieneCollector
 	hygieneWire          *workerHygieneWire
 	unifiedMemoryWire    *workerUnifiedMemoryWire
@@ -403,7 +404,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	return w.startContext(context.Background(), s, j)
 }
 
-func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
+func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (startedProcess *process, startErr error) {
+	if w.journey != nil {
+		defer func() { w.journey.startResult(startedProcess, j, startErr) }()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

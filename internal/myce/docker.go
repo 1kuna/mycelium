@@ -151,6 +151,7 @@ type dockerExecution struct {
 	ExitCode             int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
+	journey           journeyObserver // Optional passive test observer; nil in ordinary builds.
 	latencyMu         sync.Mutex
 	initializations   map[string]string
 	latency           map[string]readinessLatency
@@ -179,6 +180,9 @@ type dockerAttempt struct {
 }
 
 func (d *dockerAttempt) saveLocked() error {
+	if d.journey != nil {
+		d.journey.dockerLocked(d, "docker_custody")
+	}
 	err := runtimeErrorFor("persist", d.saveState(d.state))
 	d.dirty = err != nil
 	return err
@@ -411,9 +415,15 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	if timeout > 0 {
 		progress.budget = timeout
 	}
+	if d.journey != nil {
+		d.journey.rpcStart(operation, progress, history, timeout)
+	}
 	ctx, cancel := context.WithCancelCause(parent)
 	ctx = context.WithValue(ctx, ioProgressKey{}, func() { progress.advance() })
 	defer cancel(context.Canceled)
+	if d.journey != nil {
+		defer func() { d.journey.rpcReturn(d, operation, progress, err, context.Cause(ctx), parent.Err()) }()
+	}
 	done := make(chan struct{})
 	supervised := make(chan struct{})
 	halt := d.rpcHalt()
@@ -427,6 +437,9 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 		for {
 			budget, stalled := progress.state()
 			if stalled {
+				if d.journey != nil {
+					d.journey.rpc("rpc_stalled", operation, progress, context.DeadlineExceeded)
+				}
 				cancel(context.DeadlineExceeded)
 				return
 			}
@@ -499,6 +512,9 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	cmd.Stdout = stdoutProgress
 	cmd.Stderr = stderrProgress
 	err = cmd.Run()
+	if d.journey != nil {
+		d.journey.commandReturn(operation, cmd, err, context.Cause(ctx), stdout.Len(), len(stderr.data))
+	}
 	out = stdout.Bytes()
 	if exit := new(exec.ExitError); errors.As(err, &exit) {
 		exit.Stderr = stderr.data
@@ -1200,6 +1216,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	d.state.Accelerator = !j.Spec.Needs.cpuOnly()
 	d.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	d.journey = w.journey
 	d.command = w.dockerCommand
 	d.state.LogsNone = j.Spec.Logs == "none"
 	if dockerFileJob(j.Spec) {
@@ -1670,7 +1687,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	} // Retry a missing CLI without declaring release.
 	state.Accelerator = !s.state.Job.Spec.Needs.cpuOnly()
 	state.LogsNone = state.LogsNone || s.state.Job.Spec.Logs == "none"
-	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), state: state, dir: s.dir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout}
+	d := &dockerAttempt{journey: w.journey, closed: make(chan struct{}), halt: make(chan struct{}), state: state, dir: s.dir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout}
 
 	for _, v := range os.Environ() {
 		k, _, _ := strings.Cut(v, "=")

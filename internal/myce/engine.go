@@ -496,6 +496,7 @@ type workerModel struct {
 	drainRequested     bool
 }
 type modelRuntime struct {
+	journey                journeyObserver // Optional passive test observer; nil in ordinary builds.
 	worker                 *Worker
 	batchJobs              []Job
 	batchSupervisors       map[attemptKey]*attemptSupervisor
@@ -555,6 +556,10 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 		return nil, e
 	}
 	rt := &modelRuntime{copyResults: map[string]CopyReport{}, availability: w.availability, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	rt.journey = w.journey
+	if w.journey != nil {
+		w.journey.attachRuntime(rt)
+	}
 	root := w.CacheRoot
 	if root == "" {
 		root = filepath.Join(dir, "model-cache")
@@ -620,7 +625,11 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if w.ModelAdvertise != "" {
 		rt.url = w.ModelAdvertise
 	}
-	rt.server = &http.Server{Handler: http.HandlerFunc(rt.serve), ReadHeaderTimeout: 5 * time.Second}
+	var handler http.Handler = http.HandlerFunc(rt.serve)
+	if rt.journey != nil {
+		handler = rt.journey.handler(handler)
+	}
+	rt.server = &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	rt.wg.Add(1)
 	go func() {
 		defer rt.wg.Done()
@@ -687,6 +696,10 @@ func (rt *modelRuntime) checkEngineHealth(m *workerModel) {
 func (rt *modelRuntime) sync(plan []ModelSlot) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.journey != nil {
+		rt.journey.runtimeLocked(rt, "runtime_sync_before")
+		defer rt.journey.runtimeLocked(rt, "runtime_sync_after")
+	}
 	desired := map[string]ModelSlot{}
 	for _, s := range plan {
 		desired[engineKey(s.Model, s.Device)] = s
@@ -1256,6 +1269,9 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt.checkEngineHealth(m)
+	if rt.journey != nil {
+		rt.journey.runtimeLocked(rt, "runtime_route")
+	}
 	if m == nil || m.runtimeFailed || !(rt.localApprovalAvailable(m.model) || rt.localApprovalStates[m.model.LocalSource] == approvalUnknown) || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
 		w.Header().Set("X-Myce-Engine-Rejected", r.Header.Get("X-Myce-Engine-Attempt"))
 		rt.mu.Unlock()

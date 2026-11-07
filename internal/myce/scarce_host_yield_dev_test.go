@@ -21,14 +21,17 @@ import (
 func TestScarceHostYieldDev(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "files"), Token: "local-fixture", Workers: 1, Devices: 2, HostID: "scarce", CPUBudgetCores: 2, MemoryGB: 8, Interval: 20 * time.Millisecond})
+	d, err := journeyStartDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "files"), Token: "local-fixture", Workers: 1, Devices: 2, HostID: "scarce", CPUBudgetCores: 2, MemoryGB: 8, Interval: 20 * time.Millisecond})
 	if err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	defer func() {
+		if t.Failed() {
+			journeyGet(t).failure()
+		}
 		if err := d.Close(); err != nil {
 			t.Error(err)
 		}
@@ -40,7 +43,7 @@ func TestScarceHostYieldDev(t *testing.T) {
 		t.Helper()
 		var j Job
 		if e := c.Call(ctx, "GET", "/api/jobs/"+id, nil, &j); e != nil {
-			t.Fatal(e)
+			journeyFatal(t, e)
 		}
 		return &j
 	}
@@ -75,14 +78,14 @@ while True:time.sleep(.01)
 	s.ResumeCompatibility = &ResumeCompatibility{CheckpointFormat: "counter-v1", ResultContract: "counter-result-v1", Targets: []ResumeTarget{{Target: target, Environment: "none", ResultCheck: "counter-resume-test"}}}
 	sourceFile := filepath.Join(root, "counter.py")
 	if err := os.WriteFile(sourceFile, []byte(source), 0600); err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	ref, err := IdentifyFile(sourceFile)
 	if err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	if err := c.UploadFile(ctx, sourceFile, ref); err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	s.Files = FileManifest{"counter.py": ref}
 	s.Run.Command = []string{python, "-u", "counter.py"}
@@ -91,22 +94,22 @@ while True:time.sleep(.01)
 	s.Outputs = map[string]string{"answer.json": "results"}
 	j, err := c.Submit(ctx, s)
 	if err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	await(t, func() bool { j = get(j.ID); return j.StartedAt != nil && len(j.FileCheckpoints) > 0 })
 	first := *j
 	if first.Machine != "scarce" || first.Attempt != 1 {
-		t.Fatal("initial placement", first.Machine, first.Attempt)
+		journeyFatal(t, "initial placement", first.Machine, first.Attempt)
 	}
 	oldPIDs := []int{}
 	for _, name := range []string{"main.pid", "helper.pid"} {
 		data, e := os.ReadFile(filepath.Join(root, "workers", "fake-1", "job-files", j.ID, "1", name))
 		if e != nil {
-			t.Fatal(e)
+			journeyFatal(t, e)
 		}
 		pid, e := strconv.Atoi(strings.TrimSpace(string(data)))
 		if e != nil {
-			t.Fatal(e)
+			journeyFatal(t, e)
 		}
 		oldPIDs = append(oldPIDs, pid)
 	}
@@ -117,7 +120,7 @@ while True:time.sleep(.01)
 	general.Devices = []MachineDevice{}
 	general.CapabilityProfile.OS = runtime.GOOS
 	general.CapabilityProfile.Arch = runtime.GOARCH
-	w := Worker{EnvironmentLimit: 1 << 20, sharedCPUDev: true, CPUIsolationProbe: func(context.Context) error { return nil }, Machine: general, StateDir: filepath.Join(root, "general"), Client: c, ModelConfig: d.Queue.models, Clock: d.Queue.clock, Interval: 20 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 8, nil }}
+	w := Worker{journey: journeyGet(t), EnvironmentLimit: 1 << 20, sharedCPUDev: true, CPUIsolationProbe: func(context.Context) error { return nil }, Machine: general, StateDir: filepath.Join(root, "general"), Client: c, ModelConfig: d.Queue.models, Clock: d.Queue.clock, Interval: 20 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 8, nil }}
 	go func() { done <- w.Run(workerCtx) }()
 	defer func() {
 		stopWorker()
@@ -145,7 +148,7 @@ while True:time.sleep(.01)
 	hard.Run.Command = []string{"sh", "-c", "sleep .2"}
 	demand, err := c.Submit(ctx, hard)
 	if err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	await(t, func() bool {
 		j = get(j.ID)
@@ -153,21 +156,21 @@ while True:time.sleep(.01)
 		if h.StartedAt != nil {
 			for _, pid := range oldPIDs {
 				if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-					t.Fatalf("demand started before exact process/sidecar release: %d %v", pid, err)
+					journeyFatalf(t, "demand started before exact process/sidecar release: %d %v", pid, err)
 				}
 			}
 		}
 		return j.State == "succeeded" && h.State == "succeeded"
 	})
 	if j.Machine != "general" || j.Attempt != 2 || j.Spec.SubmissionKey != s.SubmissionKey || j.InfrastructureRetries != 0 || j.Losses != 0 || j.PreemptionCount != 1 || len(j.OutputRefs) != 1 {
-		t.Fatal("yield identity/result/accounting", j)
+		journeyFatal(t, "yield identity/result/accounting", j)
 	}
 	if j.ScarceHostYield == nil || j.ScarceHostYield.Generation < 2 || len(j.FileCheckpoints) < 2 {
-		t.Fatal("durable generations not preserved", j.ScarceHostYield, j.FileCheckpoints)
+		journeyFatal(t, "durable generations not preserved", j.ScarceHostYield, j.FileCheckpoints)
 	}
 	out := filepath.Join(root, "accepted.json")
 	if err := c.DownloadFile(ctx, j.OutputRefs["answer.json"], out); err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	var answer struct {
 		Job      string `json:"job"`
@@ -176,10 +179,10 @@ while True:time.sleep(.01)
 	}
 	bytes, err := os.ReadFile(out)
 	if err != nil || json.Unmarshal(bytes, &answer) != nil || answer.Job != j.ID || answer.Attempt != 2 || answer.Restored != 2 {
-		t.Fatal("accepted artifact does not prove resume", string(bytes), err)
+		journeyFatal(t, "accepted artifact does not prove resume", string(bytes), err)
 	}
 	replay, err := c.Submit(ctx, s)
 	if err != nil || replay.ID != j.ID || replay.Attempt != 2 || replay.State != "succeeded" {
-		t.Fatal("same-key identity changed", replay, err)
+		journeyFatal(t, "same-key identity changed", replay, err)
 	}
 }

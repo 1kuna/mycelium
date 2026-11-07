@@ -172,54 +172,59 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 
 func TestM3DevModelEnginesPerDevice(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "model-machine", MemoryGB: 8, Interval: 10 * time.Millisecond})
+	d, err := journeyStartDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "model-machine", MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
-	defer d.Close()
+	defer func() {
+		if t.Failed() {
+			journeyGet(t).failure()
+		}
+		d.Close()
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	c := d.Client()
 	await(t, func() bool {
 		var snap Snapshot
 		if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 		return len(snap.Machines) > 0
 	})
 	for i, project := range []string{"first", "second"} {
 		if err := c.Call(ctx, "POST", "/api/models/pin", ModelPin{Project: project, Model: "dev-model", Machine: "model-machine", Device: strconv.Itoa(i)}, nil); err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 	}
 	var slots []ModelSlot
 	await(t, func() bool {
 		var snap Snapshot
 		if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 		slots = snap.LoadedModels
 		return len(slots) == 2 && slots[0].State == "ready" && slots[1].State == "ready"
 	})
 	if slots[0].Device == slots[1].Device || slots[0].Attempt == slots[1].Attempt {
-		t.Fatal("shared engine custody", slots)
+		journeyFatal(t, "shared engine custody", slots)
 	}
 	for _, slot := range slots {
 		req, err := http.NewRequestWithContext(ctx, "POST", slotURL(d.Queue, slot)+"/v1/completions", strings.NewReader(`{"model":"dev-model","prompt":"hello"}`))
 		if err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 		req.Header.Set("Authorization", "Bearer local-test")
 		req.Header.Set("X-Myce-Engine-Attempt", slot.Attempt)
 		req.Header.Set("X-Myce-Session", slot.Session)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != 200 {
-			t.Fatalf("exact device route %s: %d %s", slot.Device, resp.StatusCode, body)
+			journeyFatalf(t, "exact device route %s: %d %s", slot.Device, resp.StatusCode, body)
 		}
 	}
 }

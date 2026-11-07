@@ -238,6 +238,9 @@ func (g *nativeGroup) recordSignalLocked(member *nativeMember, signal syscall.Si
 			m.Signals = signals
 		}
 	}
+	if g.worker.journey != nil {
+		g.worker.journey.nativeLocked(g, "signal_delivery_finished")
+	}
 }
 
 // Snapshot the member that ended execution before cleanup signals any sibling.
@@ -370,6 +373,12 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		forced, polite := p.killed, p.polite
 		stage = stage || g.stageFailure
 		facts := g.outcomeLocked(runErr, stage)
+		if w.journey != nil {
+			w.journey.nativeLocked(g, "outcome_before_cleanup")
+		}
+		if w.journey != nil {
+			w.journey.nativeFacts("selected_outcome", "selected", j.ID, facts)
+		}
 		priorityStop := p.priorityStop
 		p.mu.Unlock()
 		groupErr := g.cleanupProcesses(writer, false)
@@ -423,6 +432,9 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			}
 		}
 		r = classifyAttemptOutcome(r, attemptCause{PriorityStop: priorityStop, memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
+		if w.journey != nil {
+			w.journey.result("native_classified", j, r, nil)
+		}
 		r.StoragePeak = w.storageObserver.finish()
 		if r.Success {
 			if e := w.publishExtensionFiles(j, filepath.Join(g.dir, "job-files", j.ID, strconv.Itoa(j.Attempt))); e != nil {
@@ -755,6 +767,9 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		g.p.mu.Lock()
 		m.err = waitErr
 		m.Exit = observed
+		if g.worker.journey != nil {
+			g.worker.journey.nativeLocked(g, "exit_observed")
+		}
 		saveErr := g.saveLocked()
 		if saveErr != nil {
 			m.err = errors.Join(waitErr, saveErr)

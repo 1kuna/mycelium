@@ -239,7 +239,7 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 			w.Client = d5DeniedLaunchClient(t)
 		} else {
 			if err := os.WriteFile(filepath.Join(root, "mode"), []byte("refuse-create"), 0600); err != nil {
-				t.Fatal(err)
+				journeyFatal(t, err)
 			}
 		}
 		job := dockerGroupJob(t)
@@ -249,7 +249,7 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 		}
 		p, err := startDockerFixture(w, s, job)
 		if err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 		t.Cleanup(p.docker.close)
 		return d5Finish(t, p)
@@ -261,7 +261,7 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 		err := d.saveLocked()
 		d.mu.Unlock()
 		if err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 	}
 	if tc.portProbe {
@@ -270,34 +270,34 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 		anchor := exec.Command("sleep", "600")
 		anchor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if err := anchor.Start(); err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 		defer func() { _ = anchor.Process.Kill(); _ = anchor.Wait() }()
 		if err := d.recordInfrastructure(d5ForeignPortProbe(t, anchor.Process.Pid), nil); err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "mode"), []byte(fmt.Sprintf("main-exit-%d", tc.code)), 0600); err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	if tc.oom {
 		// The fake daemon supplies OOMKilled through the real inspection adapter.
 		if err := os.WriteFile(filepath.Join(root, "table-oom"), nil, 0600); err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 	}
 	if tc.lost {
 		if err := os.WriteFile(filepath.Join(root, "mode"), []byte("down"), 0600); err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 		if _, err := d.reconcile(); err == nil {
-			t.Fatal("lost daemon was observed")
+			journeyFatal(t, "lost daemon was observed")
 		}
 		if !restartRead(t, s).ObservationLost {
-			t.Fatal("observation loss was not persisted")
+			journeyFatal(t, "observation loss was not persisted")
 		}
 		if err := os.WriteFile(filepath.Join(root, "mode"), []byte(fmt.Sprintf("main-exit-%d", tc.code)), 0600); err != nil {
-			t.Fatal(err)
+			journeyFatal(t, err)
 		}
 	}
 	if tc.intent {
@@ -308,7 +308,7 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 		restartTick(t, d) // persist confirmed delivery while main is live
 	}
 	if err := os.Rename(filepath.Join(root, "running"), filepath.Join(root, "natural-exit")); err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	if tc.late {
 		d.stop(c.Now(), StopGrace, false)
@@ -319,7 +319,7 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 		restartTick(t, d)
 	}
 	if !d.state.Released {
-		t.Fatal("adapter did not release custody")
+		journeyFatal(t, "adapter did not release custody")
 	}
 	state := restartRead(t, s)
 	var recoveryErr error

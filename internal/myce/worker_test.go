@@ -88,7 +88,7 @@ func await(t *testing.T, f func() bool) {
 		}
 		select {
 		case <-timeout:
-			t.Fatalf("%s: worker condition not met within %s", t.Name(), testWaitTimeout)
+			journeyFatalf(t, "%s: worker condition not met within %s", t.Name(), testWaitTimeout)
 		case <-time.After(5 * time.Millisecond):
 		}
 	}

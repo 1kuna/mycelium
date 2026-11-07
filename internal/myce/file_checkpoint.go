@@ -296,6 +296,12 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 	return dest, syncWorkerDir(j.Checkpoint)
 }
 func (w Worker) finishFileResult(j Job, result Result, parent string, metadata ...string) (finished Result, err error) {
+	if w.journey != nil {
+		w.journey.result("file_finish_input", j, result, nil)
+	}
+	if w.journey != nil {
+		defer func() { w.journey.result("file_finish_output", j, finished, err) }()
+	}
 	// Docker mount writers must be proven stopped before any checkpoint/output I/O.
 	if j.Spec.Run.Docker && result.ReleasePending {
 		return result, nil

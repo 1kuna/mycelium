@@ -15,9 +15,13 @@ import (
 func restartResultFixture(t *testing.T) (Worker, *workerStore, *dockerAttempt, *dockerTestClock, string) {
 	t.Helper()
 	w, s, c, root := dockerFixture(t)
-	p, err := startDockerFixture(w, s, dockerGroupJob(t))
+	j := dockerGroupJob(t)
+	if t.Name() == "TestDockerRestartMainFailures/oom" || t.Name() == "TestDockerReleasedStageFailureDoesNotRequeue/main-nonzero" || t.Name() == "TestOutcomeRuntimeTable/docker/priority-oom" {
+		w.journey = journeyNew(t, int64(j.Spec.Needs.HostMemoryGB*(1<<30)))
+	}
+	p, err := startDockerFixture(w, s, j)
 	if err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
 	p.docker.close()
@@ -39,25 +43,25 @@ func restartTick(t *testing.T, d *dockerAttempt) bool {
 	t.Helper()
 	done, e := d.reconcile()
 	if e != nil {
-		t.Fatal(e)
+		journeyFatal(t, e)
 	}
 	return done
 }
 func restartMainExit(t *testing.T, d *dockerAttempt, root string) {
 	t.Helper()
 	if e := os.Remove(filepath.Join(root, "running")); e != nil {
-		t.Fatal(e)
+		journeyFatal(t, e)
 	}
 	restartTick(t, d)
 	if !d.state.MainFinished {
-		t.Fatal("main result not observed")
+		journeyFatal(t, "main result not observed")
 	}
 }
 func restartOnce(t *testing.T, w Worker, s *workerStore) {
 	t.Helper()
 	p, e := w.restoreDocker(s)
 	if e != nil {
-		t.Fatal(e)
+		journeyFatal(t, e)
 	}
 	if p != nil {
 		p.docker.close()
@@ -88,7 +92,7 @@ func restartSavedResult(t *testing.T, w Worker, s *workerStore) Result {
 	t.Helper()
 	p, err := w.restoreDocker(s)
 	if err != nil {
-		t.Fatal(err)
+		journeyFatal(t, err)
 	}
 	if p != nil {
 		defer p.docker.close()
@@ -96,15 +100,15 @@ func restartSavedResult(t *testing.T, w Worker, s *workerStore) Result {
 		select {
 		case f := <-p.done:
 			if f.err != nil {
-				t.Fatal(f.err)
+				journeyFatal(t, f.err)
 			}
 		case <-time.After(5 * time.Second):
-			t.Fatal("recovery did not finish")
+			journeyFatal(t, "recovery did not finish")
 		}
 	}
 	s.state.Result = nil
 	if err := s.recoverResult(w.Machine.ID); err != nil || s.state.Result == nil {
-		t.Fatalf("missing finalized result: %v", err)
+		journeyFatalf(t, "missing finalized result: %v", err)
 	}
 	return *s.state.Result
 }
