@@ -21,10 +21,13 @@ myce run --cpu 2 --mem 8G --detach -- python task.py
 
 `run` uses the ordinary submission API and waits with transient status-read
 retry. It sends command arguments literally; use `sh -c` explicitly for shell
-syntax. Defaults are CPU-only, one logical core, 1 GiB host RAM, project
-`default`, class `experiment`, and non-resumable execution. With `--gpu
+syntax. Defaults are CPU-only, one logical core, project `default`, class
+`experiment`, and non-resumable execution. Without `--mem`, the job's memory is
+`auto`: the queue learns it from measured runs (see
+[measured job envelopes](#measured-job-envelopes)). With `--gpu
 cuda|xpu|metal`, `--mem` means accelerator RAM and `--host-mem` is additional
-host RAM (default 1 GiB). `G`/`GiB` and `M`/`MiB` use binary units; a bare
+host RAM (default 1 GiB when `--mem` or `--host-mem` is given; otherwise
+learned). `G`/`GiB` and `M`/`MiB` use binary units; a bare
 number is GiB. `--name`, `--class`, legacy `--priority` and RFC3339 `--deadline`
 cover common scheduling declarations. Deadline priority requires a deadline.
 
@@ -375,7 +378,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `join --gpu` | Auto-detected | Override with `cuda`, `xpu`, `metal`, or `fake`; same detection as `install worker` |
 | `join --memory-gb` | Detected budget; `0` with explicit `--gpu` | Positive budget required for fixed/XPU; fake permits zero; live CUDA/Metal optional positive cap before reserve |
 | `join --memory-mode` | Detected mode; `auto` with explicit `--gpu` | `auto`: CUDA marker detection, Metal unified; `unified`: OS probe; `dedicated`: numeric CUDA; `fixed`: explicit positive budget without probes |
-| `join --reserve-memory-gb` | Detected reserve; `0` with explicit `--gpu` | GiB withheld from live dedicated/unified memory or fixed budget; suggested Spark reserve: 16 |
+| `join --reserve-memory-gb` | Detected reserve; `0` with explicit `--gpu` | GiB withheld from live dedicated/unified memory or fixed budget; suggested reserve for a large unified-memory CUDA worker: 16 |
 | `join --heartbeat` | `1s` | Worker check-in interval |
 | `join --checkpoint-root` | `MYCE_CHECKPOINT_ROOT`, otherwise queue-provided root | Local mount of the same shared NAS root; may differ from queue path |
 | `join --state-dir` | Per-queue/per-machine user cache directory | Durable local spool; explicitly set for services |
@@ -422,7 +425,37 @@ submitted IDs; unknown IDs and other HTTP client errors fail immediately.
 Exit codes: `0` all succeeded (also help), `1` any failed/cancelled, `2`
 usage/auth/API error, `3` timeout, `4` interrupted. `--timeout` must be positive;
 omit it to wait indefinitely. Timeout/interruption leaves the jobs running.
-Run one wait detached for long jobs; see [the agent workflow](jobs.md#cli-flags-and-defaults).
+Keep foreground waits owned by their agent session. Profile/adapter commands
+with a notifier use one managed completion observer per user; do not launch
+`wait --observer-dir ... --detached` yourself.
+
+### Managed completion observers (next release)
+
+An ordinary same-key profile/adapter replay starts an observer when its lifetime
+lock is free. It discovers every durable armed registration in the user registry,
+including registrations written by other processes and worktrees. A completed
+receipt is marked `not_armed` with `delivery_status: delivered` after its notifier
+returns successfully; repeating the keyed command does not send it again.
+The notifier must deduplicate its stable `delivery_id`: a crash between the
+external side effect and durable acknowledgement can require replay.
+
+`myce wait --observer-status` reads local diagnostic metadata without queue access
+or notifier execution. See [observer status](status.md#local-completion-observer-diagnostics-next-release)
+and [upgrade/recovery](operations.md#completion-observer-upgrade-and-recovery-next-release).
+Newer versioned clients request a cooperative handoff from supporting older
+observers at a delivery boundary, preserving all registrations and the lifetime
+lock. Legacy observers without this protocol require explicit operator recovery.
+
+Terminal jobs that predate observer startup are paced by notifier executable
+binding: the first is eligible immediately, then its measured mean delivery
+service time times remaining binding demand separates subsequent deliveries.
+Other bindings and fresh completions remain eligible. This reduces consecutive
+backlog wakes; it measures notifier cost, not the duration of the awakened agent.
+Bindings must use a distinct executable path per receiving thread.
+
+Inside a worker attempt or a dev session, managed observers retain that session
+so attempt cleanup can stop them. CLI test owners stop their exact observer
+executables before deleting fixture state; failed teardown retains the fixture.
 
 ## HTTP and models
 
@@ -835,8 +868,8 @@ myce sim --fleet examples/sim/production-hold/fleet.yaml \
   --json /tmp/production-hold-sim.json
 ```
 
-Two B70 experiments run for 600 seconds each; a 60-second production command
-arrives at second 60. Both experiments are displaced, one continues on Spark,
+Two experiments on a discrete-GPU Linux host run for 600 seconds each; a 60-second production command
+arrives at second 60. Both experiments are displaced, one continues on a unified-memory Linux worker,
 and the other returns after production and cleanup settle. Speeds, admission budgets and checkpoint
 behavior are synthetic; this is not a native throughput/latency qualification.
 
@@ -968,7 +1001,7 @@ parent with a cgroupfs Docker daemon and delegated worker memory. Its aggregate
 parent limit includes all members and forbids swap; omitted member caps inherit
 that envelope. Unsupported daemons refuse explicitly with the native/capped
 alternatives. Existing capped groups retain **member-only** enforcement and
-their existing swap settings. The B70 Docker driver remains unverified until
+their existing swap settings. The native XPU Docker driver remains unverified until
 the separately authorized deployment check.
 
 Main's `run.docker_memory_swap` and sidecar `memory_swap` are optional GiB values
@@ -1160,7 +1193,7 @@ readings cannot be reconstructed. Go `Client.GetJob` returns
 GPU counters are process-scoped sampled lower bounds, using NVIDIA compute-process
 accounting or XPU DRM resident VRAM deduplicated by device/client on Linux.
 Unavailable counters remain unknown, including unsupported Metal per-attempt
-counters. Until Spark accounting is qualified, measured unified host/GPU peaks
+counters. Until unified-memory CUDA accounting is qualified, measured unified host/GPU peaks
 are added with 25% headroom; an unknown device peak prevents an exact estimate.
 GPU queries run every five seconds; empty rows and transient timeouts retry,
 while unsupported or unparseable accounting stops sampling. When only host

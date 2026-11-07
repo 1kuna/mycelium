@@ -14,14 +14,8 @@ import (
 	"time"
 )
 
-const statusCacheLifetime = time.Second
-
-// At four polls/second this bounds diagnostic work to one in eight reads.
-// Job commits invalidate immediately; fleet-dependent diagnostics and elapsed
-// times can lag by at most this window, measured from the start of capture.
-const jobSnapshotLifetime = 2 * time.Second
-
 type jobSnapshotCache struct {
+	hitCost       time.Duration
 	mu            sync.Mutex // Never acquired by a queue writer.
 	data          string     // Immutable public JSON; each caller decodes its own copy.
 	expires       time.Time
@@ -69,6 +63,7 @@ func (c Client) inspectionSnapshot(ctx context.Context) (Snapshot, error) {
 // the queue itself. Encoded JSON is immutable; callers that need a struct decode
 // a private copy, so even an HTML renderer cannot mutate the cached generation.
 type statusCache struct {
+	hitCost          time.Duration
 	mu               sync.Mutex
 	data             string
 	expires          time.Time
@@ -128,8 +123,11 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 		return string(encoded), err
 	}
 	c := &q.statusCache
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	unlock, err := requestObservationLock(requestContext(contexts), &c.mu)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	for {
 		revision := c.terminalRevision.Load()
 		if c.data != "" && c.generation == revision && q.clock.Now().Before(c.expires) {
@@ -137,7 +135,10 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 			if int64(len(c.data)) > (allocation.limit-allocation.held)/6 || !allocation.charge(6*int64(len(c.data))) {
 				return "", projectionRefusal(allocation.limit - allocation.held)
 			}
-			return q.statusJSONFreshness(c.data, c.capturedAt, true)
+			started := q.clock.Now()
+			data, err := q.statusJSONFreshness(c.data, c.capturedAt, true)
+			c.hitCost = q.clock.Now().Sub(started)
+			return data, err
 		}
 		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent"}, contexts...)
 		if err != nil {
@@ -154,7 +155,7 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 			}
 			continue
 		}
-		c.data, c.expires, c.generation = string(data), s.Now.Add(statusCacheLifetime), revision
+		c.data, c.expires, c.generation = string(data), q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(s.Now), c.hitCost)), revision
 		c.capturedAt = s.Now
 		return q.statusJSONFreshness(c.data, c.capturedAt, false)
 	}
@@ -233,12 +234,15 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	// Serialize just the memory copy. Parallel read-locked captures can all
 	// consume CPU while a waiting heartbeat writer must wait for every one.
 	// Projection/encoding below remain concurrent outside the queue lock.
-	unlockRequest := requestLock(requestContext(contexts), &q.mu)
+	unlockRequest, lockErr := requestObservationLock(requestContext(contexts), &q.mu)
+	if lockErr != nil {
+		return nil, fileStoreObservation{}, lockErr
+	}
 	locked := readWallStart(q.observeRead)
 	hold := q.statusHolds.start()
 	var files fileStoreObservation
 	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
-		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
+		evidenceRetention: q.evidenceRetention, simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root}
 	// Freeze session contact at capture time just like the queue clock. Without
@@ -248,6 +252,14 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now())}
 	}
 	s := q.s
+	if id == "" {
+		v.efficiencyView = q.efficiencyView
+	} else {
+		// Job-only reads never return fleet diagnostics or their baselines.
+		s.EfficiencyHosts, s.EfficiencyHealth, s.StrandedDemand = nil, nil, nil
+	}
+	healthEvents, externalMemory := s.Health.Events, maps.Clone(s.ExternalMemory)
+	s.Health.Events, s.ExternalMemory = nil, nil
 	s.Jobs, s.Submissions = map[string]*Job{}, map[string]*submissionRecord{}
 	frozen := map[string]*Job{}
 	var selected *Job
@@ -371,6 +383,10 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 			s.Submissions[key] = &copy
 		}
 	}
+	// These diagnostic generations are replaced, never mutated in place.
+	// Their retained-fleet-sized copies do not belong under the queue mutex.
+	efficiencyHealth, strandedDemand := s.EfficiencyHealth, s.StrandedDemand
+	s.EfficiencyHealth, s.StrandedDemand = nil, nil
 	inputs := observationState{State: s, Models: q.models, Environments: q.environments, Calls: q.calls, Unreported: q.unreported}
 	if minimal {
 		inputs.Models, inputs.Environments, inputs.Calls, inputs.Unreported = ModelConfig{}, EnvironmentCatalog{}, nil, nil
@@ -405,10 +421,27 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	}
 	duration := queueHoldDuration(hold)
 	unlockRequest()
+	if efficiencyHealth != nil {
+		detached.State.EfficiencyHealth = copyObservationValue(reflect.ValueOf(efficiencyHealth)).Interface().(map[string]efficiencyBaseline)
+	}
+	if strandedDemand != nil {
+		detached.State.StrandedDemand = copyObservationValue(reflect.ValueOf(strandedDemand)).Interface().([]StrandedDemand)
+	}
+	if v.efficiencyView != nil {
+		v.efficiencyView = copyObservationValue(reflect.ValueOf(v.efficiencyView)).Interface().(*EfficiencyReport)
+	}
 	observeRead(q.observeRead, id, started, locked)
 	logQueueHold(duration, "captureObservation", nil)
+	if err == nil {
+		err = requestContext(contexts).Err()
+	}
 	if err != nil {
 		return nil, files, err
+	}
+	detached.State.Health.Events = append([]HealthAlert(nil), healthEvents...)
+	detached.State.ExternalMemory = make(map[string]*externalMemoryRing, len(externalMemory))
+	for key, ring := range externalMemory {
+		detached.State.ExternalMemory[key] = ring
 	}
 	for key, input := range frozen {
 		if err = chargeProjectionValue(requestContext(contexts), input); err != nil {
@@ -523,7 +556,7 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 			valid = q.jobSnapshots[key] == entry
 			if valid && captureErr == nil {
 				data = string(encoded)
-				entry.data, entry.expires = data, now.Add(jobSnapshotLifetime)
+				entry.data, entry.expires = data, q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(now), entry.hitCost))
 			}
 			unlock()
 			entry.mu.Unlock()
@@ -548,8 +581,14 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 			}
 		}
 
+		started := q.clock.Now()
 		var out Job
 		err = json.Unmarshal([]byte(data), &out)
+		if hit {
+			entry.mu.Lock()
+			entry.hitCost = q.clock.Now().Sub(started)
+			entry.mu.Unlock()
+		}
 		return &out, err
 	}
 }
@@ -627,6 +666,9 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
+	}
 	// One detached generation is one immutable planning pass. Without this,
 	// each queued job/target diagnostic rebuilds the retained-evidence catalog.
 	v.memoryPlanning = newMemoryPlanningCache()
@@ -635,9 +677,10 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	v.observationScan.memory = v.memoryPlanning
 	out := v.projectSnapshot(true)
 	out.RequestLatencies = q.requestLatencies.snapshot()
-	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour))
+	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
 	if err == nil {
-		out.FileStore = files.status(context.Background())
+		out.FileStore = files.status(ctx)
+		err = ctx.Err()
 	}
 	out.Freshness = q.snapshotFreshness(out.Now, false)
 	if err == nil {

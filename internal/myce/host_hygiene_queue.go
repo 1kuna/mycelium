@@ -3,7 +3,7 @@ package myce
 import "slices"
 
 func validHostDrainReason(reason string) bool {
-	return slices.Contains([]string{"", "host_memory_pressure", "host_swap_growth", "host_load_latency", "host_heartbeat_latency", "host_disk_pressure"}, reason)
+	return slices.Contains([]string{"", "host_memory_pressure", "host_swap_growth", "host_load_latency", "host_heartbeat_latency", "host_disk_pressure", "host_probe_unknown"}, reason)
 }
 
 func acceptHostHygiene(m *Machine) {
@@ -26,7 +26,7 @@ func (q *Queue) detectHostHygiene() {
 		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
 			continue
 		}
-		reason := hostHygieneReason(m)
+		reason := hostHygieneReasonAt(m, q.clock.Now())
 		q.observeHealth("hygiene/"+m.ID, reason != "", 0, HealthAlert{Kind: "host_degraded", Host: hostID(m), Reason: reason})
 		if m.HostHealth == nil || len(m.HostHealth.History) == 0 {
 			continue

@@ -130,6 +130,9 @@
     },
     "ObservationKey": {
       "properties": {
+        "repeated_work": {
+          "type": "string"
+        },
         "server_digest": {
           "type": "string"
         },

@@ -12,8 +12,7 @@ import (
 	"time"
 )
 
-// Sample one in sixteen holds (including the first), independently of queue
-// time. Fast, unsampled operations do no clock reads or stack inspection.
+// Measure each hold; the local service distribution controls diagnostic logging.
 type queueHoldSampler struct{ count atomic.Uint64 }
 
 func readWallStart(observer func(string, time.Duration, time.Duration)) time.Time {
@@ -37,10 +36,8 @@ func observeRead(observer func(string, time.Duration, time.Duration), id string,
 func (s *queueHoldSampler) start() time.Time { return s.startClock(nil) }
 
 func (s *queueHoldSampler) startClock(clock Clock) time.Time {
-	if (s.count.Add(1)-1)%16 == 0 {
-		return holdNow(clock)
-	}
-	return time.Time{}
+	s.count.Add(1)
+	return holdNow(clock)
 }
 
 func queueHoldDuration(started time.Time) time.Duration {
@@ -53,18 +50,21 @@ func queueHoldDuration(started time.Time) time.Duration {
 // Call only after unlocking. fn names a transaction's operation without logging
 // job, host, path or other request data. Resolve its name only for slow holds.
 func logQueueHold(duration time.Duration, operation string, fn func() error, phases ...*queueHoldPhases) {
-	if duration < 250*time.Millisecond {
-		return
-	}
 	if fn != nil {
 		operation = runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	}
+	budget := holdTelemetry(operation)
+	if !budget.admit(duration) {
+		return
+	}
+	started := time.Now()
+	defer func() { budget.spent(time.Since(started)) }()
 	detail := ""
 	if len(phases) != 0 {
 		p := phases[0]
 		detail = fmt.Sprintf(" records_snapshot_ms=%.3f fn_body_ms=%.3f persist_commit_ms=%.3f usage_accounting_ms=%.3f notify_ms=%.3f", holdMS(p.phases[holdRecords]), holdMS(p.phases[holdBody]), holdMS(p.phases[holdPersist]), holdMS(p.phases[holdUsage]), holdMS(p.phases[holdNotify]))
 	}
-	log.Printf("event=slow_queue_mutex_hold operation=%s duration_ms=%.3f sample_every=16%s", operation, holdMS(duration), detail)
+	log.Printf("event=slow_queue_mutex_hold operation=%s duration_ms=%.3f sample_every=1%s", operation, holdMS(duration), detail)
 }
 
 // Timing is observational only: queue decisions still use q.clock.
@@ -131,9 +131,11 @@ func (t *queueUpdateTiming) commit(tx *sql.Tx) error {
 
 func (t *queueUpdateTiming) logLaunch(ok bool) {
 	duration := time.Since(t.started)
-	// Half the default heartbeat period is material control-plane delay. Keep
-	// fast requests silent; a slow one costs one small journal line after unlock.
-	if duration >= defaultWorkerInterval/2 {
+	// Compare with locally observed authorization cost, after releasing control.
+	budget := holdTelemetry("launch")
+	if budget.admit(duration) {
+		started := time.Now()
+		defer func() { budget.spent(time.Since(started)) }()
 		log.Printf("event=slow_launch_authorization path=/api/workers/launch duration_ms=%.3f mutex_wait_ms=%.3f sqlite_commit_ms=%.3f ok=%t",
 			float64(duration)/float64(time.Millisecond), float64(t.mutexWait)/float64(time.Millisecond), float64(t.sqlCommit)/float64(time.Millisecond), ok)
 	}

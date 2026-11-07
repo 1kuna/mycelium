@@ -12,7 +12,7 @@ For an existing installation use [maintenance](#queue-maintenance),
 [polite participation](#polite-part-time-hyphae) or [shared-host sizing](#shared-interactive-hosts).
 Detailed [status fields](status.md), [native qualification](development.md#native-acceptance-checklist)
 and [isolation limits](native-isolation.md) distinguish readiness from enforcement.
-Agent skill/harness installation lives [beside the skill](../skills/mycelium-offload/setup-project.md).
+Agent skill/harness installation lives [beside the skill](../skills/mycelium/setup-project.md).
 
 You are a coding agent setting up Mycelium on a user's own computers. Follow
 these steps in order. Commands are written for a POSIX shell. Text in CAPITALS
@@ -436,6 +436,11 @@ reserved fake device and proves it runs after the bound validation releases;
 only before the first policy is stored. After first boot, the persisted SQLite
 policy is authoritative. Editing the config and restarting or reinstalling the
 queue no longer changes live policy or advances its revision.
+
+From the release containing #890, read-only `myce policy get` resolves installed
+worker authority, then queue authority, as `myce status` does. No `MYCE_TOKEN`
+environment setting is needed and no credential is printed; `--config` selects
+an explicit installed configuration. Policy writes retain owner-token requirements.
 
 For a deliberate change, export the current policy, edit its `projects` mapping,
 and import it using the revision printed by the export:
@@ -2300,6 +2305,19 @@ are injectable for laptop verification.
 
 ## Rolling fleet upgrades
 
+Queue shutdown fences new requests without waiting for the queue mutex and
+cancels accepted HTTP/HTTPS observations, long polls and socket I/O. An
+uncommitted control transaction retries against the replacement queue; an
+already committing SQLite transaction finishes at its existing atomic boundary.
+The journal reports `event=queue_shutdown` phases `fenced`, `api_draining`,
+`api_closed`, `storage_wait` and `storage_closed`. A prolonged `storage_wait`
+requires transaction/storage evidence, not permission to treat a timeout as
+confirmed release. Both API transports share the existing ten-second HTTP
+stop budget; expiry closes their sockets and reports failure. It does not kill
+the queue or prove storage closure. The installed service-manager timeout is
+unchanged pending measured native shutdown evidence (#889); laptop cancellation
+tests do not qualify a native stop duration.
+
 Tested fixes deploy without a separate task, bundled one release at a time; roll
 back if the queue is not healthy. Do not patch during a successful production
 run. Fixing a run failing because of Mycelium is allowed and expected. Keep the
@@ -2371,10 +2389,23 @@ operation for the workers without restarting the already-current queue.
 These options require a queue version that implements them; they cannot change
 restart behavior inside an older installed queue or helper.
 
-Hosts update sequentially: enabled/drained hosts first (production hosts last
-within that group), then operator-disabled hosts. Started commands finish
-naturally before their host restarts. At queue cutover new model calls pause and
-existing calls/streams finish; batch attempts on other hosts reconnect unchanged.
+From the release containing #900's idle-moment slice, normal updates leave busy
+enabled hosts `pending`, with admission open. An hours-long command does not hold
+the host's spare capacity for maintenance. Other idle compatible hosts can
+progress. Fresh exact custody selects the next natural idle moment and acquires
+the upgrade drain atomically before placement refills it. Unreleased attempts,
+preparations, loading models, calls and unknown cleanup do not establish idle;
+a ready idle model can enter drain but must confirm unload before restart.
+After queue restart, each retained engine needs a fresh exact zero-call report
+before it can count as idle, regardless of the host's production-hold policy.
+Pending operations persist across queue restart without acquiring a drain.
+Earlier releases drain a selected host while waiting for its work to finish.
+
+Hosts update sequentially: eligible enabled/drained hosts first (production hosts
+last within that group), then operator-disabled hosts. Started commands finish
+naturally before their host restarts; there is no time-triggered cancellation.
+Queue cutover waits for calls/streams while admission remains open, then pauses
+new model calls at the idle selection. Batch attempts on other hosts reconnect unchanged.
 The queue precedes its colocated worker. This implementation accepts the current
 worker protocols only, so incompatible protocol migrations need a separate plan.
 
@@ -3253,7 +3284,7 @@ No GPU, power, fan, sleep or screen settings are changed. No input is recorded.
 myce join --daily-use --max-jobs 1
 ```
 
-Daily-use hyphae take work after **five idle minutes**, on confirmed external
+From the next release, daily-use hyphae take work after **locally measured owner idle recovery**, on confirmed external
 power when battery-equipped, with a known safe heat signal. Batteryless desktops
 need a confirmed batteryless power report. Plugging in never overrides owner
 activity. An unknown required signal means waiting with a reason in CLI/HTML
@@ -3267,9 +3298,10 @@ The battery-equipped classification is retained throughout a worker session
 if a subsequent power read fails. Daily-use flags are available on foreground `join`; installed services can
 pass them through `service ... -- join`. Installation alone is not an opt-in.
 
-Signals refresh every five seconds independently of queue connectivity.
-Required readings older than 15 seconds withhold work. A sampling gap, including
-sleep, starts a fresh five-minute awake window; the worker never prevents sleep.
+Signals refresh independently of queue connectivity using the host's measured
+probe cost and signal-change cadence. Required readings expire at their frozen
+observation horizon. A sampling gap, including sleep, requires fresh awake
+evidence; the worker never prevents sleep. See [adaptive probes](host-probes.md).
 Owner return, battery use, unsafe heat or unknown required signals stop admission
 locally and through the queue. Resumable commands get SIGTERM and up to ten
 seconds to checkpoint, then are killed if needed. Non-resumable commands stop
@@ -3296,13 +3328,13 @@ concurrency, not watts, GPU percentage, fan speed or noise.
 - **macOS:** the binary links CoreGraphics' combined-session aggregate event age,
   IOKit's power-source snapshot, and Foundation's process thermal state. It needs
   no event tap, keylogging, screen capture or sensor permission. Daily work
-  withholds at fair/serious/critical; nominal must persist for 60 seconds after
+  withholds at fair/serious/critical; nominal must persist for the measured cooling/reheat recovery span after
   a heat hold. Building on macOS needs cgo and the usual Xcode command-line SDK.
   A macOS binary built without cgo reports unknown signals and waits in daily mode.
   The aggregate query covers the worker's login session; fast user switching
   and coverage of other logged-in users remain unverified.
 - **Linux:** logind, queried through `loginctl`, covers every listed user session.
-  Work waits five minutes after every user session's idle hint, which is more
+  Work waits for locally measured idle recovery after every user session's idle hint, which is more
   conservative than claiming it is a last-input timer. Hint age uses the same
   OS monotonic clock as logind, rather than boot uptime that includes sleep. No user session, an
   uncovered session, denied access or missing desktop idle hints means waiting.
@@ -3311,7 +3343,7 @@ concurrency, not watts, GPU percentage, fan speed or noise.
   All discovered relevant sensors must be usable. A max alarm/limit holds work;
   a critical-only sensor uses critical minus 10°C. Recovery needs readings at
   least 5°C below the guard (or a more conservative supplied hysteresis) for
-  60 seconds. Unknown heat holds work. The recognized sensor list is intentionally
+  the measured thermal recovery span. Unknown heat holds work. The recognized sensor list is intentionally
   small; unsensed accelerators and these margins are not hardware-qualified.
 - **WSL2:** owner activity, power and physical heat must come from the **Windows
   host**, never the Linux guest. The [per-user Windows host bridge](operations.md)
@@ -3496,42 +3528,19 @@ does not repair storage or authorize clearing maintenance.
 
 ## Pressure response
 
-Only shared-profile workers collect pressure samples. A bounded background lane
-reads `kern.memorystatus_vm_pressure_level` (the macOS memory-pressure notification
-level) or Linux `/proc/pressure/memory` `some avg10`, then measures twenty normal-
-priority 5 ms timer wakes. The maximum lateness measures scheduling interference,
-including competing owner/agent work, without recording apps or owner input.
-It cannot attribute contention to a particular process. Probes never run under
-the queue mutex or synchronously block heartbeat delivery for their full duration.
+Only shared-profile workers collect pressure samples. An independent lane reads
+the OS memory-pressure level or memory PSI, then performs one OS timer wake
+proportional to measured probe cost and CPU capacity. Each host learns its own
+wake/PSI prediction band; adverse samples freeze the healthy baseline and fresh
+readings back at its mean recover it. OS memory warnings remain immediate.
 
-Thresholds and recovery bands:
-
-| Signal | Yield | Recover |
-| --- | --- | --- |
-| macOS memory level | warning (2) or critical (4) | normal (1) |
-| Linux memory PSI `some avg10` | >= 1% | <= 0.1% |
-| Foreground-class wake lateness | >= 20 ms | <= 5 ms |
-
-macOS uses the OS's pressure warning rather than inventing a free-RAM percentage.
-The PSI bands represent 100 ms / 10 ms of stalled time per ten seconds. They are
-conservative latency budgets; native Linux interference calibration remains
-unverified. The wake bands use a 5 ms recovery allowance and a 20 ms yield threshold;
-20 ms exceeds a 60 Hz interaction frame. A short local canary observed no
-foreground starvation, but cannot establish a universal latency guarantee.
-Native pressure-stress calibration and representative owner qualification remain
-outstanding; repeat the probe for the intended workload before enablement.
-
-Samples refresh in an independent worker lane at the existing 5-second
-owner-signal cadence, including while a check-in is waiting for its response.
-The queue requires reported sample age below 15 seconds, discounts bounded
-matching-session check-in contact between reports, and caps total observation
-age at 45 seconds. See [pressure freshness](shared-hosts.md) for the rule and its
-safety bounds. Worker-local age is translated to queue receipt time; worker wall
-timestamps cannot renew evidence. Missing, malformed, failed or
-stale observations remain **unknown** and withhold new work. Unknown alone does
-not stop running work or clear a pressure latch. A fresh low sample for every
-signal clears the latch; middling samples retain it. There is no extra recovery
-sleep. This amplitude hysteresis avoids stopping/restarting at one threshold.
+Probe cadence and freshness follow this host's cost, variation and signal changes.
+Missing, failed or stale observations remain unknown and withhold new admission.
+Negotiated observations include queue processing delay; queue contact cannot
+renew them. The first latency interruption
+starts a job/host hold that requires a measured quiet recovery span. See
+[adaptive host observations](host-probes.md) for timing, protocol compatibility,
+remaining inventory and native qualification limits.
 
 On measured pressure, the queue withholds new work on the physical host and
 attaches `shared_host_pressure` planned-stop provenance to each exact running
@@ -3897,3 +3906,54 @@ backfill. Missing assignment, load-start or release evidence cannot pass a
 complete interval proof. Join events by attempt/machine/session/device and use
 class-change event times to split tier occupancy. For batch copies, continue to
 use job GET times and the paginated job ledger described in [status](status.md).
+
+## Completion observer upgrade and recovery (next release)
+
+Managed observers adopt all armed registrations in their private user registry.
+An ordinary keyed profile/adapter command starts one when the lifetime lock is
+free. Updating a CLI symlink does not change the image of an existing process.
+Supporting newer clients write a versioned upgrade request when arming or
+adopting a receipt. The owner verifies the requesting image and handles it
+between deliveries: it cancels and joins outstanding authority readers, releases
+receipt locks, passes its lifetime lock to the new image and waits for readiness.
+Socket cleanup holds the startup lock across its identity check and unlink, so
+the old owner cannot race replacement startup. On startup failure it retains ownership and
+reloads durable arms. A paused/stalled loop cannot perform that handoff; the
+request itself is not proof of replacement. Unversioned development images do
+not request automatic replacement.
+
+Use `myce wait --observer-status` first. Privately preserve its safe metadata,
+bounded `observer.log` files, a native process sample, exact process birth/image,
+and receipt field names, states, job IDs and timestamps. Never print or publish
+notifier targets, environment/authority values or private paths. Count bindings
+without exposing values. Establish job terminal states with the installed CLI,
+not the queue database. A stale phase is the last boundary reached; an unavailable
+live frame remains unknown.
+
+A legacy owner has neither upgrade support nor diagnostics. Recovery of a shared
+owner requires the owner's authorization and consideration of the wake volume:
+
+1. Refresh the private receipt/registration snapshot and process identities.
+2. Send SIGTERM to that exact observer. Verify its identity and descendants have
+   exited and lifetime/receipt locks are free. Stop if a survivor or lock remains;
+   do not substitute force-kill or edit registration state.
+3. Compare every receipt against the snapshot. Older cancellation paths can
+   disarm pending observations; report the exact affected job set before replay.
+4. From the original consumer workspace, repeat its ordinary supported command,
+   for example `myce run --profile PROFILE --key SAVED_KEY`. Keep the original
+   arguments and notifier binding; omission inherits the saved binding. The
+   replay starts a fresh owner and adopts registrations made by other callers.
+   A new agent's arm would also start it, triggering the same backlog.
+5. Verify a sample of terminal receipts has `delivery_status: delivered` and
+   `observation: not_armed`, receiver delivery IDs are unique, same-key replay
+   does not resend, and a new arm works. A receiver success does not prove useful
+   agent work or accepted job results.
+
+Delivery is serial. Supporting replacements pace stale terminal backlog per
+binding using mean observed delivery service cost times remaining binding demand;
+the first delivery per binding is immediately eligible. There is no legacy pacing
+option. Distinct bindings and fresh completions can still wake together; the
+measurement is notifier runtime, not downstream agent-turn runtime. Use a distinct
+notifier executable path per thread, as required by the binding contract.
+Receipt acknowledgement prevents ordinary replay duplicates; exactly-once
+external effects across crashes require receiver deduplication by `delivery_id`.

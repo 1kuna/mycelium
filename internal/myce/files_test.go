@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -674,5 +675,126 @@ func TestStoredExtensionInputAndOutput(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("extension worker stuck")
+	}
+}
+
+func TestFilesTransientInputRetryReconcilesAcceptedOffset(t *testing.T) {
+	q, _ := fixture(t)
+	if err := q.ConfigureFileStore(t.TempDir(), 16<<20, false); err != nil {
+		t.Fatal(err)
+	}
+	backend := API{Queue: q, Token: "fixture"}.Handler()
+	var offsets []string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PATCH" {
+			offsets = append(offsets, r.Header.Get("Upload-Offset"))
+			if len(offsets) == 1 {
+				accepted := httptest.NewRecorder()
+				backend.ServeHTTP(accepted, r)
+				if accepted.Code != 204 {
+					t.Error("fixture PATCH failed", accepted.Code)
+				}
+				w.Header().Set("Retry-After", "7")
+				w.WriteHeader(503)
+				_, _ = io.WriteString(w, `{"code":"queue_stopping"}`)
+				return
+			}
+		}
+		backend.ServeHTTP(w, r)
+	}))
+	defer api.Close()
+	path := filepath.Join(t.TempDir(), "input")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), (4<<20)+1024), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := IdentifyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &fakeClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
+	reports := 0
+	c := Client{URL: api.URL, Token: "fixture", Clock: clock, Jitter: func() float64 { return 0 }, Pause: func(_ context.Context, d time.Duration) error {
+		if d < 7*time.Second {
+			t.Fatal("lost upload Retry-After", d)
+		}
+		clock.Advance(d)
+		return nil
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = c.RetryTransient(ctx, func(ctx context.Context, one Client) error {
+		if err := one.PreflightFileStore(ctx, FileManifest{"input": ref}); err != nil {
+			return err
+		}
+		return one.UploadJobInput(ctx, path, ref)
+	}, func(error, time.Duration) { reports++ })
+	if err != nil || reports != 1 || len(offsets) != 2 || offsets[0] != "0" || offsets[1] != "4194304" {
+		t.Fatal("upload did not reconcile", err, reports, offsets)
+	}
+	if err := c.HasFile(ctx, ref); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFilesTransientPostCreateProbe(t *testing.T) {
+	for _, status := range []int{503, 401} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			q, _ := fixture(t)
+			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, false); err != nil {
+				t.Fatal(err)
+			}
+			backend := API{Queue: q, Token: "fixture"}.Handler()
+			var created, injected, paused, bypassed atomic.Bool
+			var offsetReads atomic.Int32
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "POST" && r.URL.Path == "/api/files/uploads/" {
+					created.Store(true)
+				}
+				if r.Method == "HEAD" && strings.HasPrefix(r.URL.Path, "/api/files/blobs/") && created.Load() && injected.CompareAndSwap(false, true) {
+					w.Header().Set("Retry-After", "7")
+					w.WriteHeader(status)
+					return
+				}
+				if r.Method == "HEAD" && strings.HasPrefix(r.URL.Path, "/api/files/uploads/") {
+					offsetReads.Add(1)
+					if !paused.Load() {
+						bypassed.Store(true)
+					}
+				}
+				backend.ServeHTTP(w, r)
+			}))
+			defer api.Close()
+			path := filepath.Join(t.TempDir(), "input")
+			if err := os.WriteFile(path, []byte("input bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ref, err := IdentifyFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock := &fakeClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
+			reports := 0
+			c := Client{URL: api.URL, Token: "fixture", Clock: clock, Jitter: func() float64 { return 0 }, Pause: func(_ context.Context, d time.Duration) error {
+				if d < 7*time.Second {
+					t.Fatal("probe Retry-After discarded", d)
+				}
+				paused.Store(true)
+				clock.Advance(d)
+				return nil
+			}}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err = c.RetryTransient(ctx, func(ctx context.Context, one Client) error { return one.UploadJobInput(ctx, path, ref) }, func(error, time.Duration) { reports++ })
+			if status == 503 {
+				if err != nil || reports != 1 || !paused.Load() || bypassed.Load() || offsetReads.Load() != 1 {
+					t.Fatal("transient probe bypassed retry owner", err, reports, offsetReads.Load(), bypassed.Load())
+				}
+			} else {
+				var failure *HTTPError
+				if !errors.As(err, &failure) || failure.Status != status || reports != 0 || offsetReads.Load() != 0 {
+					t.Fatal("permanent probe ignored", err, reports, offsetReads.Load())
+				}
+			}
+		})
 	}
 }

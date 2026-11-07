@@ -46,6 +46,15 @@ type resolveNASCache struct {
 	budgets *requestBudgets
 }
 
+func (q *Queue) resolveNASInspections() *resolveNASCache {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.nasInspections == nil {
+		q.nasInspections = newResolveNASCache(q.clock, &q.requestBudgets)
+	}
+	return q.nasInspections
+}
+
 func newResolveNASCache(clock Clock, budgets ...*requestBudgets) *resolveNASCache {
 	b := &requestBudgets{}
 	if len(budgets) > 0 {
@@ -99,7 +108,7 @@ func (c *resolveNASCache) resolve(req ResolveRequest, report *ResolveReport) {
 		}
 	}
 	if req.InspectNAS {
-		report.Notes = append(report.Notes, "NAS inspection is optional, authenticated, metadata-only and cached until the worker session freshness fence; pending/unverified is unknown. Repeat after worker heartbeats. Only declared shared_inputs.nas paths are inspected under the worker checkpoint root. No bytes, hashes or runtime readiness are verified; submission and staging revalidate. Workers need the inspection-capable release.")
+		report.Notes = append(report.Notes, "NAS inspection is optional, authenticated, metadata-only and cached until the worker session freshness fence; pending/unverified is unknown. For one path, repeat after two successful worker heartbeats: the first delivers the check and the next returns its observation. More paths or slow metadata can require further heartbeats. Only declared shared_inputs.nas paths are inspected under the worker checkpoint root. No bytes, hashes or runtime readiness are verified; submission and staging revalidate. Workers need the inspection-capable release.")
 	}
 }
 func (c *resolveNASCache) checkin(in Checkin) []NASPathCheck {

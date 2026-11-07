@@ -94,6 +94,32 @@ func waitMeasurementSafety(ctx context.Context, clock Clock, budget, interval ti
 	if wait == nil {
 		wait = waitStatusPause
 	}
+	if budget == 0 {
+		// Omitted maintenance deadlines follow caller cancellation. Only a
+		// timeout can retry; a safety refusal still stops immediately.
+		allowance := readinessInitialRTT
+		for {
+			probe, cancel := context.WithTimeout(ctx, allowance)
+			started := RealClock{}.Now()
+			err := check(probe)
+			cancel()
+			if err == nil {
+				return ctx.Err()
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			var network net.Error
+			if !errors.Is(err, context.DeadlineExceeded) && !(errors.As(err, &network) && network.Timeout()) {
+				return err
+			}
+			elapsed := max(time.Nanosecond, RealClock{}.Now().Sub(started))
+			if err := wait(ctx, elapsed); err != nil {
+				return err
+			}
+			allowance = scaleReadinessDuration(allowance, 2)
+		}
+	}
 	deadline := clock.Now().Add(budget)
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()

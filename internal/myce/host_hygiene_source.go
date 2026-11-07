@@ -21,6 +21,7 @@ var workerForeignConsumers = localForeignConsumers
 
 func localHostHealth(ctx context.Context) (HostHealthReading, error) {
 	probeguard.Check()
+	probeStart := time.Now()
 	r := HostHealthReading{}
 	if runtime.GOOS == "linux" {
 		b, err := os.ReadFile("/proc/loadavg")
@@ -104,14 +105,15 @@ func localHostHealth(ctx context.Context) (HostHealthReading, error) {
 	// Timer lateness measures scheduler latency without spinning. The OS wait
 	// measures elapsed sensor time; decisions use injected-clock samples.
 	started := time.Now()
-	timer := time.NewTimer(time.Millisecond)
+	quantum := max(time.Nanosecond, time.Since(probeStart)/time.Duration(runtime.NumCPU()))
+	timer := time.NewTimer(quantum)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return r, ctx.Err()
 	case <-timer.C:
 	}
-	r.WakeSeconds = max(0, time.Since(started).Seconds()-time.Millisecond.Seconds())
+	r.WakeSeconds = max(0, time.Since(started).Seconds()-quantum.Seconds())
 	return r, nil
 }
 

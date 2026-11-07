@@ -36,6 +36,59 @@
       ],
       "type": "object"
     },
+    "AlertRecovery": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "episode": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "next_step": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "episode",
+        "action",
+        "state",
+        "cause",
+        "summary",
+        "machine",
+        "job_id",
+        "attempt",
+        "at"
+      ],
+      "type": "object"
+    },
     "ApplicationProgress": {
       "properties": {
         "age_seconds": {
@@ -43,6 +96,9 @@
         },
         "attempt": {
           "type": "integer"
+        },
+        "cadence_seconds": {
+          "type": "number"
         },
         "completed": {
           "type": "number"
@@ -101,6 +157,9 @@
         },
         "periods": {
           "type": "integer"
+        },
+        "pressure": {
+          "$ref": "#/$defs/IOPressure"
         },
         "source": {
           "type": "string"
@@ -307,6 +366,9 @@
         "execution_cause": {
           "$ref": "#/$defs/RuntimeCause"
         },
+        "forced": {
+          "type": "boolean"
+        },
         "interrupted": {
           "type": "boolean"
         },
@@ -336,6 +398,9 @@
         },
         "state": {
           "type": "string"
+        },
+        "stop_observation": {
+          "$ref": "#/$defs/AttemptStopObservation"
         }
       },
       "required": [
@@ -399,6 +464,92 @@
         "sampled_at",
         "age_seconds",
         "elapsed_seconds"
+      ],
+      "type": "object"
+    },
+    "AttemptStopObservation": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "headroom_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host_sample_age_seconds": {
+          "type": "number"
+        },
+        "io_pressure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IOPressure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory_pressure": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "physical_used_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pressure_age_seconds": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pressure_unit": {
+          "type": "string"
+        },
+        "swap_growth_bytes_per_second": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "io_pressure",
+        "at",
+        "host_sample_age_seconds",
+        "headroom_gb",
+        "physical_used_gb",
+        "memory_pressure",
+        "pressure_unit",
+        "pressure_age_seconds",
+        "swap_growth_bytes_per_second"
       ],
       "type": "object"
     },
@@ -514,6 +665,9 @@
         },
         "seconds": {
           "type": "number"
+        },
+        "share_xpu": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -928,6 +1082,136 @@
       "required": [
         "name",
         "command"
+      ],
+      "type": "object"
+    },
+    "EfficiencyAllocation": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "cpu_lower_bound": {
+          "type": "boolean"
+        },
+        "cpu_observed_attempts": {
+          "type": "integer"
+        },
+        "cpu_observed_elapsed_seconds": {
+          "type": "number"
+        },
+        "device_covered_seconds": {
+          "type": "number"
+        },
+        "host": {
+          "type": "string"
+        },
+        "io_lower_bound": {
+          "type": "boolean"
+        },
+        "io_observed_attempts": {
+          "type": "integer"
+        },
+        "measured_cpu_seconds": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measured_device_gb_seconds": {
+          "type": "number"
+        },
+        "measured_memory_gb_seconds": {
+          "type": "number"
+        },
+        "memory_covered_seconds": {
+          "type": "number"
+        },
+        "read_bytes": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "read_ops": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reserved_covered_memory_gb_seconds": {
+          "type": "number"
+        },
+        "reserved_cpu_seconds": {
+          "type": "number"
+        },
+        "reserved_device_gb_seconds": {
+          "type": "number"
+        },
+        "reserved_memory_gb_seconds": {
+          "type": "number"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "work": {
+          "type": "string"
+        },
+        "write_bytes": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "write_ops": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "host",
+        "work",
+        "basis",
+        "reserved_covered_memory_gb_seconds",
+        "reserved_device_gb_seconds",
+        "measured_device_gb_seconds",
+        "device_covered_seconds",
+        "reserved_memory_gb_seconds",
+        "measured_memory_gb_seconds",
+        "memory_covered_seconds",
+        "reserved_cpu_seconds",
+        "measured_cpu_seconds",
+        "cpu_observed_elapsed_seconds",
+        "cpu_observed_attempts",
+        "cpu_lower_bound",
+        "read_bytes",
+        "write_bytes",
+        "read_ops",
+        "write_ops",
+        "io_observed_attempts",
+        "io_lower_bound",
+        "seconds"
       ],
       "type": "object"
     },
@@ -1542,6 +1826,9 @@
             "array",
             "null"
           ]
+        },
+        "share_xpu": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -1800,11 +2087,10 @@
           "x-contract": "stable"
         },
         "attempt_history": {
-          "description": "Latest four ended attempts, persisted with the job. Existing classifier facts and queue decisions, not release proof or retry charges. Older planned requeues roll off; historical causes are not reconstructed.",
+          "description": "Ended-attempt diagnostic evidence. Open work is pinned; capacity-aware maintenance may compact redundant closed-attempt diagnoses. Immutable custody/learning ledgers remain separate. Historical causes are not reconstructed.",
           "items": {
             "$ref": "#/$defs/AttemptOutcome"
           },
-          "maxItems": 4,
           "type": [
             "array",
             "null"
@@ -1874,6 +2160,10 @@
         },
         "diagnostic_code": {
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "efficiency": {
+          "$ref": "#/$defs/JobEfficiency",
           "x-contract": "diagnostic"
         },
         "eligible_hosts": {
@@ -1968,6 +2258,10 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "health_recovery": {
+          "$ref": "#/$defs/AlertRecovery",
+          "x-contract": "diagnostic"
+        },
         "id": {
           "minLength": 1,
           "type": "string",
@@ -2025,11 +2319,10 @@
           "x-contract": "diagnostic"
         },
         "memory_attempts": {
-          "description": "Persisted memory facts, independent of learning and the four-entry diagnostic history. Retains the first and latest 31 rows; memory_attempts_dropped counts evicted rows. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
+          "description": "Persisted memory facts, independent of learning and diagnostic history. Retention follows local capacity and evidence dependencies; open attempts and distinct measurements are preserved. memory_attempts_dropped counts historical evictions. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
           "items": {
             "$ref": "#/$defs/AttemptMemoryFacts"
           },
-          "maxItems": 32,
           "type": [
             "array",
             "null"
@@ -2037,7 +2330,7 @@
           "x-contract": "diagnostic"
         },
         "memory_attempts_dropped": {
-          "description": "Number of memory attempt rows evicted by the 32-row limit. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count.",
+          "description": "Number of historical memory attempt rows evicted by earlier releases. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count.",
           "minimum": 0,
           "type": "integer",
           "x-contract": "diagnostic"
@@ -2199,11 +2492,10 @@
           "x-contract": "diagnostic"
         },
         "resource_attempts": {
-          "description": "Per-attempt cumulative CPU and block I/O counters, with latest I/O PSI. Exact attempt/machine/session fenced. Retains first and latest 31 rows, matching memory facts; resource_attempts_dropped counts evictions. Missing counters are unknown. Process-tree CPU is a sampled lower bound. Observational only.",
+          "description": "Per-attempt cumulative CPU and block I/O counters with latest I/O PSI, retaining every distinct attempt. resource_attempts_dropped reports historical evictions. Exact attempt/machine/session fenced; missing counters unknown; process-tree CPU a sampled lower bound. Observational only.",
           "items": {
             "$ref": "#/$defs/AttemptResourceFacts"
           },
-          "maxItems": 32,
           "type": [
             "array",
             "null"
@@ -2402,6 +2694,62 @@
         "queued",
         "front",
         "checkpoint"
+      ],
+      "type": "object"
+    },
+    "JobEfficiency": {
+      "properties": {
+        "allocations": {
+          "items": {
+            "$ref": "#/$defs/EfficiencyAllocation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "blocker": {
+          "type": "string"
+        },
+        "rate": {
+          "$ref": "#/$defs/efficiencyRate"
+        },
+        "retained_rates": {
+          "items": {
+            "$ref": "#/$defs/efficiencyRate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "wait_seconds": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "at",
+        "work",
+        "wait_seconds",
+        "rate"
       ],
       "type": "object"
     },
@@ -2642,6 +2990,21 @@
       ],
       "type": "object"
     },
+    "MachOLinkage": {
+      "properties": {
+        "binary": {
+          "type": "string"
+        },
+        "library": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "binary",
+        "library"
+      ],
+      "type": "object"
+    },
     "MemoryEventCounts": {
       "properties": {
         "high": {
@@ -2873,6 +3236,9 @@
         },
         "reference": {
           "$ref": "#/$defs/WorkReference"
+        },
+        "repeated_work": {
+          "type": "string"
         },
         "server_digest": {
           "type": "string"
@@ -3906,6 +4272,9 @@
         "host": {
           "type": "string"
         },
+        "linkage": {
+          "$ref": "#/$defs/MachOLinkage"
+        },
         "missing_tools": {
           "items": {
             "type": "string"
@@ -4033,8 +4402,49 @@
       ],
       "type": "object"
     },
+    "ServiceEstimate": {
+      "properties": {
+        "correction_seconds": {
+          "type": "number"
+        },
+        "estimator": {
+          "type": "string"
+        },
+        "raw_seconds": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "uncertainty": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "estimator",
+        "raw_seconds",
+        "correction_seconds",
+        "samples",
+        "uncertainty"
+      ],
+      "type": "object"
+    },
     "SharedHostBackoff": {
       "properties": {
+        "last_observation": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "quiet_since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "recovery_seconds": {
+          "type": "number"
+        },
         "stops": {
           "items": {
             "format": "date-time",
@@ -4781,6 +5191,9 @@
         "actual_seconds": {
           "type": "number"
         },
+        "comparability": {
+          "type": "string"
+        },
         "execution": {
           "$ref": "#/$defs/Execution"
         },
@@ -4809,10 +5222,19 @@
         "reason": {
           "type": "string"
         },
+        "repeated_key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
         "samples": {
           "type": "integer"
         },
+        "service_estimate": {
+          "$ref": "#/$defs/ServiceEstimate"
+        },
         "session": {
+          "type": "string"
+        },
+        "uncertainty": {
           "type": "string"
         }
       },
@@ -4836,6 +5258,66 @@
       "required": [
         "input_shape",
         "units"
+      ],
+      "type": "object"
+    },
+    "efficiencyRate": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "device_valid_until": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "measured_device_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measured_memory_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "release": {
+          "type": "string"
+        },
+        "reserved_cpu_cores": {
+          "type": "number"
+        },
+        "reserved_device_gb": {
+          "type": "number"
+        },
+        "reserved_memory_gb": {
+          "type": "number"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reserved_device_gb",
+        "measured_device_gb",
+        "device_valid_until",
+        "reserved_memory_gb",
+        "reserved_cpu_cores",
+        "measured_memory_gb",
+        "valid_until"
       ],
       "type": "object"
     }

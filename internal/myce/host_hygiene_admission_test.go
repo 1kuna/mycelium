@@ -44,7 +44,42 @@ func mountAdmissionFixture(t *testing.T, role string) (*Queue, *fakeClock, []Hos
 		m.HostHealth = &HostHealth{History: []HostHealthSample{{At: clock.Now(), Mounts: []HostMountHealth{mount}}}}
 		applyHostMountHealth(w, &m)
 		check(t, q, m, nil)
+		// This is the same predicate the production deploy health gate reads.
+		if status := q.hostMaintenanceStatus(m.HostID); status.Healthy == mountHealthWithholds(mount.Reason) {
+			t.Fatal("mount classification did not reach host health", mount, status)
+		}
 		return storageRootReason(dependent, q.s.Machines[m.ID])
+	}
+}
+
+// #948 captured these completed NAS outliers latching mount_probe_slow,
+// unavailable dependent roots, then healthy:false for a production deploy gate.
+func TestHostHygieneMountCompletedOutliersKeepProductionHealth(t *testing.T) {
+	q, clock, baseline, publish := mountAdmissionFixture(t, "nas")
+	for i := range baseline {
+		baseline[i].Mounts[0].LatencySeconds = .1
+	}
+	returns := make(chan hostMountResult)
+	p := &hostMountProbe{root: "nas", clock: clock, last: HostMountHealth{Root: "nas", LatencySeconds: .1}, measure: func(string, func()) hostMountResult { return <-returns }}
+	t.Cleanup(func() {
+		close(returns)
+		await(t, func() bool { return len(p.pending) == 1 })
+	})
+	p.sample(clock.Now(), baseline)
+	for i, latency := range []time.Duration{645 * time.Millisecond, 1608 * time.Millisecond, 457 * time.Millisecond, 38 * time.Millisecond, 69 * time.Millisecond, 15 * time.Millisecond} {
+		returns <- hostMountResult{latency: latency}
+		await(t, func() bool { return len(p.pending) == 1 })
+		clock.Advance(5 * time.Second) // Captured observation spacing, not a production bound.
+		got := p.sample(clock.Now(), baseline)
+		if reason := publish(got); reason != "" {
+			t.Fatal("completed outlier blocked dependent production work", got, reason)
+		}
+		if i == 2 && got.Reason != "mount_probe_slow" {
+			t.Fatal("three completed outliers lost their advisory", got)
+		}
+	}
+	if len(alertsOf(q, "host_mount_degraded")) != 1 || len(alertsOf(q, "host_mount_unavailable")) != 0 {
+		t.Fatal("advisory alert was lost or became an availability failure")
 	}
 }
 

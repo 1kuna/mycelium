@@ -183,6 +183,9 @@ func ExtensionStatus(r ExtensionReport) string {
 		if r.CheckState != "" {
 			state = "not qualified; native check " + r.CheckState
 		}
+		if reason := extensionReportDiagnostic(r.Reason); reason != "" && (r.CheckState == "" || reason != "setup and check required") {
+			state = "not qualified; " + reason
+		}
 	}
 	return fmt.Sprintf("%s@%s · %s %s · %s", r.Name, r.Version, work, name, state)
 }
@@ -205,6 +208,15 @@ func JobReason(j *Job) string {
 			reason = "running now"
 		case "stopping":
 			reason = "waiting for this attempt to stop"
+		}
+	}
+	if j.HealthRecovery != nil {
+		if reason != "" {
+			reason += "; "
+		}
+		reason += j.HealthRecovery.Summary
+		if j.HealthRecovery.NextStep != "" {
+			reason += "; " + j.HealthRecovery.NextStep
 		}
 	}
 	if isolation := jobNativeIsolationStatus(j); isolation != "" {

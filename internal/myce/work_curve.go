@@ -208,7 +208,7 @@ func (q *Queue) acceptCurveReports(c Checkin, m *Machine) {
 				if p.SampleID == "" || p.SampleID == old.SampleID {
 					continue
 				}
-				if old.StaleReason != "" || q.clock.Now().Sub(old.RecordedAt) > 30*24*time.Hour {
+				if old.StaleReason != "" {
 					old.Rate, old.LatencySeconds = 0, 0
 				}
 				p.Samples = old.Samples
@@ -222,6 +222,8 @@ func (q *Queue) acceptCurveReports(c Checkin, m *Machine) {
 				p.DeviceMemoryGB = max(old.DeviceMemoryGB, p.DeviceMemoryGB)
 				p.IncrementalHostMemoryGB = max(old.IncrementalHostMemoryGB, p.IncrementalHostMemoryGB)
 				p.IncrementalDeviceMemoryGB = max(old.IncrementalDeviceMemoryGB, p.IncrementalDeviceMemoryGB)
+				// Raw benchmark reports cannot introduce or replace accepted paired errors.
+				p.Calibration, _ = q.calibrationPrior(old)
 				// Memory evidence comes only from accepted attempts, never a report.
 				p.MemoryPeak, p.MemoryRecordedAt, p.MemoryConfiguration, p.MemoryLayout = old.MemoryPeak, old.MemoryRecordedAt, old.MemoryConfiguration, old.MemoryLayout
 				p.MemoryEscalation = old.MemoryEscalation
@@ -250,7 +252,7 @@ func (p WorkObservation) Summary() string { return p.summary("measured") }
 // SummaryAt labels throughput past its reader age as expired for display only;
 // stored StaleReason still records identity changes alone.
 func (p WorkObservation) SummaryAt(now time.Time) string {
-	if now.Before(p.RecordedAt) || now.Sub(p.RecordedAt) > workCurveMaxAge {
+	if now.Before(p.RecordedAt) {
 		return p.summary("throughput expired")
 	}
 	return p.Summary()
@@ -269,6 +271,9 @@ func (p WorkObservation) summary(state string) string {
 	rate := "unknown"
 	if state == "measured" && validRate(p.Rate) {
 		rate = fmt.Sprintf("%.2f %s/s", p.Rate, p.Key.Reference.Unit)
+	}
+	if p.Key.RepeatedWork != "" && p.Repeated != nil && state == "measured" {
+		rate = fmt.Sprintf("%.2fs/job (%d clean samples; exact repeated command; %s)", p.Repeated.Seconds, p.Repeated.Samples, p.Repeated.uncertainty())
 	}
 	// Accepted memory_peak covers memory-only observations; legacy usage maxima stay the fallback.
 	hostPeak, devicePeak := p.HostMemoryGB, p.DeviceMemoryGB

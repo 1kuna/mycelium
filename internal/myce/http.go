@@ -39,7 +39,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	observationLimit := newObservationLimit(observationClock, a.Queue)
 	a.registerWait(mux)
 	waitStates := a.Queue.waitIndex()
-	nas := newResolveNASCache(a.Queue.clock, &a.Queue.requestBudgets)
+	nas := a.Queue.resolveNASInspections()
 	// Joining needs authenticated identity/version only, never the growing status
 	// snapshot. Transport pinning authenticates this identity to joining clients.
 	mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +66,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		respond(w, map[string]bool{"referenced": a.Queue.environmentReferenced(r.Context(), key)}, nil)
 	})
 	mux.HandleFunc("GET /api/portability", func(w http.ResponseWriter, r *http.Request) {
-		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")})
+		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")}, r.Context())
 		respondOperation(w, report, err, "portability_invalid")
 	})
 	mux.HandleFunc("POST /api/portability", func(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +74,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		if !decode(w, r, &request) {
 			return
 		}
-		report, err := a.Queue.Portability(request)
+		report, err := a.Queue.Portability(request, r.Context())
 		respondOperation(w, report, err, "portability_invalid")
 	})
 	mux.HandleFunc("POST /api/resolve", func(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +112,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			respondOperation(w, nil, err, "extension_invalid")
 			return
 		}
-		respond(w, ExtensionRegistration{OK: true, Warnings: a.Queue.extensionRegistrationWarnings(e)}, nil)
+		respond(w, ExtensionRegistration{OK: true, Warnings: a.Queue.extensionRegistrationWarnings(e, r.Context())}, nil)
 	})
 	mux.HandleFunc("GET /api/extensions/{digest}", func(w http.ResponseWriter, r *http.Request) {
 		e, err := a.Queue.extensionByDigest(r.PathValue("digest"), r.Context())
@@ -204,6 +204,12 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	})
 	// Administrative inspection must remain fresh for migration custody and
 	// measurement safety. It never consumes the observational status cache.
+	mux.HandleFunc("GET /api/efficiency", func(w http.ResponseWriter, r *http.Request) {
+		a.Queue.mu.RLock()
+		report := a.Queue.efficiencyView
+		a.Queue.mu.RUnlock()
+		respond(w, report, nil) // immutable projection; encoding stays outside q.mu.
+	})
 	mux.HandleFunc("GET /api/inspection", func(w http.ResponseWriter, r *http.Request) {
 		s, err := a.Queue.publicSnapshot(r.Context())
 		respondOperation(w, s, err, "status_unavailable")
@@ -417,7 +423,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Leave(r.PathValue("id"), c.Now, r.Context()), "worker_leave_invalid")
 	})
-	return a.Queue.measureRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return a.Queue.shutdownRequests(a.Queue.measureRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, r.Pattern = mux.Handler(r)
 		if r.URL.Path == "/api/invites/redeem" {
 			a.redeemInvite(w, r, joiningPin)
@@ -449,6 +455,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		if workerProtocolEndpoint(r.URL.Path) {
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
+			w.Header().Set(cpuPressureProtocolHeader, cpuPressureProtocol)
 		}
 		var finishBudget func()
 		var budgetErr error
@@ -465,7 +472,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		defer finishObservation()
 		mux.ServeHTTP(w, r)
-	}), mux.patterns)
+	}), mux.patterns))
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	err := decodeBudget(w, r, v)
@@ -540,6 +547,9 @@ func respond(w http.ResponseWriter, v any, err error) {
 				message = rejectionMessages[apiError.Code]
 			}
 			body = map[string]any{"error": message, "code": apiError.Code}
+			if apiError.Code == "client_rate_limited" {
+				body["code_alias"] = "observation_shed_control_pressure"
+			}
 			if apiError.PathDiagnostic != nil {
 				body["path_diagnostic"] = apiError.PathDiagnostic
 			}
@@ -582,39 +592,61 @@ func (q *Queue) Run(ctx context.Context) error {
 	}
 }
 
+// No installation-specific dial/handshake/request deadline. The operating
+// system handles transport liveness; the caller owns the operation deadline.
+var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+
 type Client struct {
 	resourceWire *resourceWire
 	URL          string
 	Token        string
 	HTTP         *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
-	transferIdle time.Duration
+	transferIdle  time.Duration
+	Clock         Clock // Optional observation clock.
+	Pause         func(context.Context, time.Duration) error
+	Jitter        func() float64
+	singleAttempt bool
 }
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
+	ctx, cancel := c.apiContext(ctx)
+	defer cancel()
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
-	in, resourceFields := resourceWireInput(in, supported)
-	err := c.callOnce(ctx, method, path, in, out)
-	var api *HTTPError
-	if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
-		// Strict JSON rejection occurs before mutation. Retry only once, with
-		// additive telemetry removed; retain the original durable local result.
-		if c.resourceWire != nil {
-			c.resourceWire.supported.Store(false)
+	cpuPressure := c.resourceWire != nil && c.resourceWire.cpuPressure.Load()
+	in, resourceFields := resourceWireInput(in, supported, cpuPressure)
+	clock := c.clock()
+	pace := ClientPace{}
+	var last error
+	for {
+		started := clock.Now()
+		err := c.callOnce(ctx, method, path, in, out)
+		var api *HTTPError
+		if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
+			// Strict JSON rejection occurs before mutation. Retry only once, with
+			// additive telemetry removed; retain the original durable local result.
+			if c.resourceWire != nil {
+				c.resourceWire.supported.Store(false)
+				c.resourceWire.cpuPressure.Store(false)
+			}
+			legacy, _ := resourceWireInput(in, false)
+			return c.callOnce(ctx, method, path, legacy, out)
 		}
-		legacy, _ := resourceWireInput(in, false)
-		return c.callOnce(ctx, method, path, legacy, out)
-	}
-	// Ordinary idempotent reads get one refill retry. Wait loops own repeated
-	// backoff; worker control and mutations never silently replay.
-	if (method == "GET" || method == "HEAD") && errors.As(err, &api) && api.Status == 429 && api.Code == "client_rate_limited" {
-		if pauseErr := waitStatusPause(ctx, time.Second); pauseErr != nil {
-			return pauseErr
+		safe := method == "GET" || method == "HEAD"
+		if c.singleAttempt || !safe || !errors.As(err, &api) || (api.Status != 429 && api.Status != 503) {
+			if last != nil && ctx.Err() != nil {
+				return &clientRetryStopped{last, ctx.Err()}
+			}
+			return err
 		}
-		return c.callOnce(ctx, method, path, in, out)
+		last = err
+		pace.Observe(clock.Now().Sub(started), false)
+		if stopped := c.pause(ctx, pace.Delay(clock.Now(), time.Time{}, err, c.Jitter)); stopped != nil {
+			return &clientRetryStopped{err, stopped}
+		}
 	}
-	return err
 }
+
 func (c Client) callOnce(ctx context.Context, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -637,7 +669,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	}
 	hc := c.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: 10 * time.Second}
+		hc = &http.Client{Transport: clientTransport}
 	}
 	res, err := hc.Do(req)
 	if err != nil {
@@ -646,12 +678,13 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	defer res.Body.Close()
 	if c.resourceWire != nil && workerProtocolEndpoint(path) {
 		c.resourceWire.supported.Store(res.Header.Get(resourceProtocolHeader) == resourceProtocol)
+		c.resourceWire.cpuPressure.Store(res.Header.Get(cpuPressureProtocolHeader) == cpuPressureProtocol)
 	}
 	if support, ok := ctx.Value(waitCapabilityKey{}).(*bool); ok {
 		*support = res.Header.Get("X-Myce-Wait") == "batch-v1"
 	}
 	if res.StatusCode >= 300 {
-		e := &HTTPError{Status: res.StatusCode, Message: "request failed"}
+		e := &HTTPError{Status: res.StatusCode, RetryAfter: retryAfter(res.Header.Get("Retry-After"), c.clock().Now()), Message: "request failed"}
 		var body struct {
 			PathDiagnostic  *PathDiagnostic `json:"path_diagnostic"`
 			Code            string          `json:"code"`
@@ -681,6 +714,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 }
 
 type HTTPError struct {
+	RetryAfter      time.Duration // Server not-before delay, including HTTP-date form.
 	PathDiagnostic  *PathDiagnostic
 	CurrentRevision *uint64
 	JobID           string // Requested or failed job identity, when applicable.
@@ -690,13 +724,17 @@ type HTTPError struct {
 }
 
 func (e *HTTPError) Error() string {
+	interval := ""
+	if e.RetryAfter > 0 {
+		interval = fmt.Sprintf("; retry after %s (Retry-After)", e.RetryAfter)
+	}
 	if e.Code == "job_failed" || e.Code == "job_cancelled" {
 		return e.Code + ": " + e.Message
 	}
 	if e.Code != "" {
-		return fmt.Sprintf("queue: HTTP %d: %s: %s", e.Status, e.Code, e.Message)
+		return fmt.Sprintf("queue: HTTP %d: %s: %s", e.Status, e.Code, e.Message) + interval
 	}
-	return fmt.Sprintf("queue: HTTP %d: %s", e.Status, e.Message)
+	return fmt.Sprintf("queue: HTTP %d: %s", e.Status, e.Message) + interval
 }
 func stale(err error) bool {
 	var e *HTTPError

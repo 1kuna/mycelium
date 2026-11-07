@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +41,11 @@ type batchRelease struct {
 }
 
 type state struct {
+	EfficiencyAt           time.Time                     `json:"efficiency_at,omitempty"`
+	EfficiencyHosts        map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
+	EfficiencyHealth       map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
+	StrandedDemand         []StrandedDemand              `json:"stranded_demand,omitempty"`
+	PublicationHorizon     time.Duration                 `json:"publication_horizon,omitempty"`
 	ToolInventories        map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
 	FileInputClaims        map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
 	ModelIntervalSince     *time.Time                    `json:"model_interval_since,omitempty"`
@@ -52,6 +58,7 @@ type state struct {
 	MemoryExplorations     map[string]memoryExploration   `json:"memory_explorations,omitempty"`
 	StorageObservations    map[string]StorageObservation  `json:"storage_observations,omitempty"`
 	ExternalMemory         map[string]*externalMemoryRing `json:"external_memory,omitempty"`
+	HostLaunchMemory       map[string]*hostLaunchMemory   `json:"host_launch_memory,omitempty"`
 	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
 	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
 	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
@@ -112,9 +119,22 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	requestBudgets      requestBudgets
-	waitStates          *waitStateIndex // scalar committed wait observations; separate reader mutex.
-	modelIntervalWrites []ModelIntervalEvent
+	requestBudgets       requestBudgets
+	evidencePending      map[string]bool
+	evidenceRows         []string
+	evidenceBytes        uint64
+	evidenceDeferred     map[string]bool
+	evidenceLearned      map[string]bool
+	evidenceLedgerCounts map[string]int
+
+	observationCacheBudget observationCacheBudget
+	evidenceGeneration     uint64
+	evidenceMaintenance    evidenceMaintenance
+	evidenceRetention      *EvidenceRetention
+	waitStates             *waitStateIndex // scalar committed wait observations; separate reader mutex.
+	modelIntervalWrites    []ModelIntervalEvent
+	efficiencyView         *EfficiencyReport // immutable maintenance projection; published only after commit.
+	nasInspections         *resolveNASCache  // ephemeral evidence shared by every listener for this queue.
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin *Queue
 	// Only detached observation views set this page selection.
@@ -175,7 +195,10 @@ type Queue struct {
 	calls            map[string]*ModelCall
 	lock             *os.File
 	mu               queueMutex
-	stopping         bool // q.mu; inhibit mutations before either API listener closes.
+	stopping         atomic.Bool // Fence before waiting for a queue transaction or either listener.
+	shutdownOnce     sync.Once
+	shutdownContext  context.Context
+	shutdownCancel   context.CancelFunc
 	contactMu        sync.Mutex
 	contacts         map[string]*workerContact
 	holdClock        Clock // Optional observational clock; never used for queue decisions.
@@ -470,12 +493,18 @@ func checkpointAvailable(root string, progress func()) bool {
 // BeginShutdown fences maintenance and in-flight mutations before API shutdown.
 // Workers retry rejected reports against the replacement queue.
 func (q *Queue) BeginShutdown() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.stopping = true
+	first := !q.stopping.Swap(true)
+	q.initShutdown()
+	q.shutdownCancel()
+	if first {
+		log.Printf("event=queue_shutdown phase=fenced")
+	}
 }
 
 func (q *Queue) Close() error {
+	if q.stopping.Load() {
+		log.Printf("event=queue_shutdown phase=storage_wait")
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var err error
@@ -490,6 +519,9 @@ func (q *Queue) Close() error {
 	if q.lock != nil {
 		err = errors.Join(err, syscall.Flock(int(q.lock.Fd()), syscall.LOCK_UN), q.lock.Close())
 		q.lock = nil
+	}
+	if q.stopping.Load() {
+		log.Printf("event=queue_shutdown phase=storage_closed clean=%t", err == nil)
 	}
 	return err
 }
@@ -514,6 +546,9 @@ func (q *Queue) updateUploadRequest(ctx context.Context, fn func() error, timing
 }
 
 func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool) error {
+	if q.stopping.Load() {
+		return queueStopping()
+	}
 	available := true
 	if !q.simulation {
 		if q.checkpointProbe != nil {
@@ -542,8 +577,8 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn, &hold)
 	}()
-	if q.stopping {
-		return &HTTPError{Status: 503, Code: "queue_stopping", Message: "queue is shutting down; retry the request"}
+	if q.stopping.Load() {
+		return queueStopping()
 	}
 	if q.simulation {
 		hold.next(holdUsage)
@@ -575,7 +610,16 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 	q.modelIntervalWrites = nil
 	q.accountUsage(q.clock.Now())
 	hold.next(holdBody)
+	q.accountEfficiency(q.clock.Now())
 	err = fn()
+	// A request that loses the shutdown race retries from durable worker state.
+	// Do not publish its speculative loss/maintenance decisions after the fence.
+	if err == nil && q.stopping.Load() {
+		err = queueStopping()
+	}
+	if err == nil {
+		q.refreshEfficiency()
+	}
 	if err == nil {
 		q.observeModelIntervals()
 	}
@@ -592,6 +636,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 	}
 	if err == nil {
 		q.fileReferenceRevision++
+		q.observationCacheBudget.mutation(q.clock.Now())
 	}
 	hold.next(holdNotify)
 	if err == nil && q.wake != nil {
@@ -1033,7 +1078,7 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 }
 
 func (q *Queue) maintain() {
-	if q.stopping {
+	if q.stopping.Load() {
 		return
 	}
 	q.maintainWallTimeLimits()
@@ -1058,7 +1103,7 @@ func (q *Queue) maintain() {
 		}
 	}
 	for _, m := range q.s.Machines {
-		if a := machineAvailability(m); a != nil && a.Available && (a.Mode == "daily" || a.Signals.Laptop) && now.Sub(m.LastSeen) > signalMaxAge {
+		if a := machineAvailability(m); a != nil && a.Available && (a.Mode == "daily" || a.Signals.Laptop) && !hostAvailabilityFresh(m, now) {
 			a.Available = false
 			a.Reason = "owner signals stale"
 		}
@@ -1160,8 +1205,15 @@ func (q *Queue) maintain() {
 func (q *Queue) Tick() error { return q.TickContext(context.Background()) }
 
 func (q *Queue) TickContext(requestContexts ...context.Context) error {
+	if q.stopping.Load() {
+		return queueStopping()
+	}
 	requestCtx := requestContext(requestContexts)
 	traffic := q.requestHealth.snapshot(q.clock.Now())
+	diagnostics, err := q.prepareEfficiencyDiagnostics(requestCtx)
+	if err != nil {
+		return err
+	}
 
 	// File-store health belongs to existing maintenance, not every control
 	// transaction. Snapshot under the lock, then perform bounded I/O outside it.
@@ -1178,13 +1230,15 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 			delay = DefaultHealthStorageDelay
 		}
 		q.applyRequestHealth(traffic)
+		q.applyEfficiencyDiagnostics(diagnostics)
 		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
 		q.maintain()
 		return nil
 	}, nil); err != nil {
 		return err
 	}
-	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
+	q.publishEfficiencyDiagnostics(diagnostics)
+	return errors.Join(q.maintainEvidence(requestCtx), q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)
@@ -1212,8 +1266,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		return Reply{}, err
 	}
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
+	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{HostMountProgressProtocol: hostMountProgressProtocol, ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
 		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
@@ -1401,6 +1456,8 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			return err
 		}
 		q.acceptExtensionQualifications(&m)
+		ageHostObservations(&m, memoryReceivedAt, q.clock.Now())
+		acceptHostAvailability(&m, q.clock.Now())
 		q.acceptSharedPressure(&m, old)
 		m.IOPressure = safeIOPressure(m.IOPressure)
 		if m.IOPressure != nil {
@@ -1422,6 +1479,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptEnvironmentFailures(&m, old)
 		q.s.Machines[m.ID] = &m
+		q.recordHostLaunchMemory(&m, old)
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
 			cause := report.DockerCause
@@ -1882,6 +1940,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		r.ExecutionCause, r.Error = wallTimeCause(), wallTimeLimit
 	}
 	r.ExecutionCause = safeAttemptRuntimeCause(j, r.ExecutionCause)
+	q.recordColdProbeRefusal(j, r)
 	if r.ExecutionCause != nil && r.ExecutionCause.Operation == "input_staging" {
 		// Keep the durable reason as safe as the structured cause; Error may
 		// contain the original worker-supplied diagnostic name or private text.
@@ -2065,7 +2124,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	for _, s := range q.s.ModelSlots {
 		copy := *s
@@ -2766,6 +2825,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
 	q.claimMemoryExploration(j, m)
+	q.recordColdProbeAssignment(j, m)
 	j.StorageEnvelope = q.storageEnvelope(j, m)
 	j.Reason = ""
 	if measured {

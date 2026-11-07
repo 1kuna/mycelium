@@ -45,7 +45,7 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 		// No instruction can be issued without a running upgrade. Ordinary
 		// maintenance belongs to Tick, not these otherwise read-only polls.
 		inactive := a.Queue.s.FleetUpgrade == nil || a.Queue.s.FleetUpgrade.State != "running"
-		stopping := a.Queue.stopping
+		stopping := a.Queue.stopping.Load()
 		unlock()
 		w.Header().Set("Cache-Control", "no-store")
 		if inactive && !stopping && v.Get("operation") == "" {

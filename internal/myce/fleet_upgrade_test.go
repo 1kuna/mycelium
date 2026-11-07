@@ -217,10 +217,10 @@ func TestFleetUpgradeFreshQueueWithoutWorkers(t *testing.T) {
 		Host: "queue", Job: "job", Machine: "former-worker", Session: "old", Attempt: 1,
 	}}
 	fleetTick(t, q)
-	h := q.fleetActiveHost()
+	h := q.s.FleetUpgrade.Hosts[0]
 	policy := q.s.HostMaintenance["queue"]
-	if h == nil || h.Phase != "draining" || !h.Owned || policy.Mode != "drained" || policy.DrainOwner != upgrade.Operation {
-		t.Fatalf("queue did not acquire its upgrade drain: %+v %+v", h, policy)
+	if h.Phase != "pending" || h.Owned || policy.Mode == "drained" || h.Wait == "" {
+		t.Fatalf("unreleased custody acquired a drain: %+v %+v", h, policy)
 	}
 	if i, err := q.fleetInstruction("queue", "@queue", "queue-old"); err != nil || i.Operation != "" {
 		t.Fatalf("unreleased custody allowed cutover: %+v %v", i, err)
@@ -228,7 +228,8 @@ func TestFleetUpgradeFreshQueueWithoutWorkers(t *testing.T) {
 	delete(q.s.HostReleases, "retained")
 	c.Advance(time.Second)
 	fleetTick(t, q)
-	if h.Phase != "queue_update" {
+	policy = q.s.HostMaintenance["queue"]
+	if h.Phase != "queue_update" || !h.Owned || policy.Mode != "drained" || policy.DrainOwner != upgrade.Operation {
 		t.Fatalf("queue did not progress after custody cleared: %+v", h)
 	}
 	if i := fleetInstructionFor(t, q); i.Machine != "@queue" || i.Operation != upgrade.Operation {
@@ -276,8 +277,8 @@ func TestFleetUpgradeSequentialProductionLastAndNaturalCompletion(t *testing.T) 
 		t.Fatal(got)
 	}
 	fleetTick(t, q)
-	h := q.fleetActiveHost()
-	if h.Host != "z" || h.Phase != "draining" || h.Wait == "" {
+	h := q.s.FleetUpgrade.Hosts[2]
+	if h.Host != "z" || h.Phase != "pending" || h.Wait == "" || q.maintenanceBlocked("z") {
 		t.Fatalf("production must wait: %+v", h)
 	}
 	// No completion deadline. Fresh exact custody still blocks cutover hours later.
@@ -315,23 +316,31 @@ func TestFleetUpgradeSequentialProductionLastAndNaturalCompletion(t *testing.T) 
 	}
 }
 
-func TestFleetUpgradeQueueBeforeWorkersAndCallsWait(t *testing.T) {
-	q, _, _ := fleetFixture(t, "queue", "a", "b")
+func TestFleetUpgradeIdleWorkersProceedWhileQueueCallsWait(t *testing.T) {
+	q, c, _ := fleetFixture(t, "queue", "a", "b")
 	q.calls = map[string]*ModelCall{"stream": {ID: "stream", Priority: "production", Machine: "worker-a"}}
 	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	fleetTick(t, q)
-	if h := q.fleetActiveHost(); h.Host != "queue" || h.Phase != "draining" || !strings.Contains(h.Wait, "model calls") {
-		t.Fatalf("queue call cutover: %+v", h)
+	if h := q.fleetActiveHost(); h == nil || h.Host != "b" || h.Phase != "worker_update" {
+		t.Fatalf("idle compatible worker blocked behind stream: %+v", h)
 	}
-	if !q.fleetPausesCalls() {
-		t.Fatal("new model-call admission not paused")
+	if q.fleetPausesCalls() || q.maintenanceBlocked("a") || q.maintenanceBlocked("queue") {
+		t.Fatal("pending upgrade interrupted call admission")
+	}
+	fleetActivate(t, q, c)
+	fleetTick(t, q)
+	if q.fleetActiveHost() != nil || q.calls["stream"] == nil {
+		t.Fatal("busy hosts should remain pending with their stream")
 	}
 	delete(q.calls, "stream")
 	fleetTick(t, q)
 	if i := fleetInstructionFor(t, q); i.Machine != "@queue" {
-		t.Fatal("queue must precede compatible worker activation")
+		t.Fatal("idle queue should precede remaining worker activation")
+	}
+	if !q.fleetPausesCalls() {
+		t.Fatal("queue cutover must fence new model calls")
 	}
 }
 
@@ -711,8 +720,8 @@ func TestFleetUpgradeProductionIdleWaitsAcrossFleet(t *testing.T) {
 		t.Fatal(err)
 	}
 	fleetTick(t, q)
-	h := q.fleetActiveHost()
-	if h.Phase != "draining" || !strings.Contains(h.Wait, "production attempts") {
+	h := q.s.FleetUpgrade.Hosts[0]
+	if h.Phase != "pending" || !strings.Contains(h.Wait, "production attempts") || q.maintenanceBlocked("queue") {
 		t.Fatalf("remote production not waited: %+v", h)
 	}
 	queued := submit(t, q, s)

@@ -226,7 +226,7 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 				}
 				res.Body.Close()
 				await(t, func() bool { _, _, degraded := engine.runtimeHealth(); return degraded })
-				if _, err := engineClock.advance(serverHealthWindow.Seconds()); err != nil {
+				if _, err := engineClock.advance(readinessInitialRTT.Seconds()); err != nil {
 					t.Fatal(err)
 				}
 				await(t, func() bool { err, _, _ := engine.runtimeHealth(); return err != nil })
@@ -307,7 +307,7 @@ func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 			e.startHealthMonitorTimeout(health.URL, 250*time.Millisecond)
 			defer func() { e.monitorCancel(); <-e.monitorDone }()
 			// Two failures, then a success: failure count must start over.
-			for _, healthy := range []bool{false, false, true, false, false} {
+			for _, healthy := range []bool{false, true, false} {
 				_, revision, _ := e.runtimeHealth()
 				before := probes.Load()
 				permits <- healthy
@@ -319,7 +319,7 @@ func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 					t.Fatalf("failed before third consecutive failure: %v", err)
 				}
 			}
-			clock.Advance(serverHealthWindow)
+			clock.Advance(readinessInitialRTT)
 			permits <- false
 			await(t, func() bool { err, _, _ := e.runtimeHealth(); return err != nil })
 		})

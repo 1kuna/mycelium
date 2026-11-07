@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -675,58 +676,86 @@ func (a API) registerFiles(mux *requestMux) {
 	mux.HandleFunc("POST /api/files/checkpoint", a.checkpointHandler)
 }
 
-// File transfers have no whole-request timeout (#218). Each network operation
-// renews one idle budget: at least 60 s (past TCP retransmission backoffs), or
-// 30 s plus two full-blob hash passes at a conservative disk rate of 100 MiB/s.
-// The queue hashes before sending headers and twice when publishing an upload.
-const (
-	fileResponseBudget       = 30 * time.Second
-	fileVerifyBytesPerSecond = 100 << 20
-	fileTransferIdle         = 60 * time.Second
-)
-
+// File transfers have no whole-request deadline. Each direction learns its
+// own byte service time; queue verification before headers is bounded only by
+// the owner, since socket throughput cannot estimate server disk/hash work.
 var errFileTransferStalled = errors.New("file transfer stalled")
 
-func (c Client) fileTimeout(size int64) time.Duration {
-	if c.transferIdle != 0 {
-		return c.transferIdle
-	}
-	return max(fileTransferIdle, fileResponseBudget+time.Duration(2*float64(max(size, 0))/fileVerifyBytesPerSecond*float64(time.Second)))
-}
+func (c Client) fileTimeout(_ int64) time.Duration { return c.transferIdle }
 
-// Network deadlines use real time, outside queue/scheduling Clock decisions.
-// Refresh both directions: net/http can already be waiting for the response
-// while an upload is still progressing on the same connection.
 type fileTransferConn struct {
 	net.Conn
-	idle time.Duration
+	idle                        time.Duration // Explicit test/owner override; zero learns from progress.
+	clock                       Clock
+	readProgress, writeProgress transferProgress
+	reading, writing            *atomic.Bool
 }
 
-func (c fileTransferConn) Read(p []byte) (int, error) {
-	if err := c.SetDeadline(time.Now().Add(c.idle)); err != nil {
+func (c *fileTransferConn) deadline(read bool, bytes int) error {
+	idle := c.idle
+	if idle == 0 {
+		if read && (c.reading == nil || c.reading.Load()) {
+			idle = c.readProgress.window(bytes)
+		} else if !read && (c.writing == nil || c.writing.Load()) {
+			idle = c.writeProgress.window(bytes)
+		}
+	}
+	end := time.Time{}
+	if idle > 0 {
+		clock := c.clock
+		if clock == nil {
+			clock = RealClock{}
+		}
+		end = clock.Now().Add(idle)
+	}
+	if c.idle > 0 {
+		return c.SetDeadline(end)
+	}
+	if read {
+		return c.SetReadDeadline(end)
+	}
+	return c.SetWriteDeadline(end)
+}
+func (c *fileTransferConn) Read(p []byte) (int, error) {
+	if err := c.deadline(true, len(p)); err != nil {
 		return 0, err
 	}
-	n, err := c.Conn.Read(p)
-	return n, fileTransferTimeout(err, c.idle)
+	clock := c.clock
+	if clock == nil {
+		clock = RealClock{}
+	}
+	started := clock.Now()
+	n, err, waited := fileSocketSome(c.Conn, p, false)
+	if c.reading == nil || c.reading.Load() {
+		now := clock.Now()
+		c.readProgress.record(now, now.Sub(started), n, waited)
+	}
+	return n, fileTransferTimeout(err, max(c.idle, c.readProgress.window(len(p))))
 }
-func (c fileTransferConn) Write(p []byte) (int, error) {
-	// Observe partial socket writes, including progress within one TLS record.
+func (c *fileTransferConn) Write(p []byte) (int, error) {
 	total := 0
 	for len(p) > 0 {
-		if err := c.SetDeadline(time.Now().Add(c.idle)); err != nil {
+		if err := c.deadline(false, len(p)); err != nil {
 			return total, err
 		}
-		n, err := fileWriteSome(c.Conn, p)
+		clock := c.clock
+		if clock == nil {
+			clock = RealClock{}
+		}
+		started := clock.Now()
+		n, err, waited := fileSocketSome(c.Conn, p, true)
+		if c.writing == nil || c.writing.Load() {
+			now := clock.Now()
+			c.writeProgress.record(now, now.Sub(started), n, waited)
+		}
 		total += n
 		p = p[n:]
 		if err != nil {
-			// Some injected in-memory connections expose partial progress only
-			// with a timeout, as handled by x/net/http2's WriteByteTimeout.
 			var timeout net.Error
 			if n > 0 && errors.As(err, &timeout) && timeout.Timeout() {
 				continue
 			}
-			return total, fileTransferTimeout(err, c.idle)
+			return total, fileTransferTimeout(err, max(c.idle, c.writeProgress.window(len(p))))
 		}
 		if n == 0 {
 			return total, io.ErrNoProgress
@@ -747,8 +776,11 @@ func fileTransferTimeout(err error, idle time.Duration) error {
 // Bound setup separately from transfer progress. A legacy hook cannot be
 // cancelled, so close its late result; its goroutine lasts until it returns.
 func fileTransferDial(ctx context.Context, idle time.Duration, dial func(context.Context) (net.Conn, error)) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(ctx, idle)
-	defer cancel()
+	if idle > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, idle)
+		defer cancel()
+	}
 	type result struct {
 		conn net.Conn
 		err  error
@@ -773,7 +805,26 @@ func fileTransferDial(ctx context.Context, idle time.Duration, dial func(context
 }
 
 // size is the full blob the queue may verify before replying; 0 when none.
+// Retry reads only: PATCH offsets and arbitrary mutations require their
+// caller's reconciliation protocol, never an implicit replay.
 func (c Client) fileRequest(ctx context.Context, method, path string, body io.Reader, headers map[string]string, sizes ...int64) (*http.Response, error) {
+	pace := ClientPace{}
+	for {
+		started := c.clock().Now()
+		response, err := c.fileRequestOnce(ctx, method, path, body, headers, sizes...)
+		if c.singleAttempt || err != nil || method != "GET" && method != "HEAD" || response.StatusCode != 429 && response.StatusCode != 503 || response.Header.Get("X-Myce-Error-Code") != "" {
+			return response, err
+		}
+		failure := &HTTPError{Status: response.StatusCode, RetryAfter: retryAfter(response.Header.Get("Retry-After"), c.clock().Now())}
+		response.Body.Close()
+		pace.Observe(c.clock().Now().Sub(started), false)
+		if err := c.pause(ctx, pace.Delay(c.clock().Now(), time.Time{}, failure, c.Jitter)); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (c Client) fileRequestOnce(ctx context.Context, method, path string, body io.Reader, headers map[string]string, sizes ...int64) (*http.Response, error) {
 	var size int64
 	if len(sizes) != 0 {
 		size = sizes[0]
@@ -782,6 +833,8 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 	if err != nil {
 		return nil, err
 	}
+	var reading, writing atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{WroteHeaders: func() { writing.Store(true) }}))
 	fileStoreSubmissionHeaders(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	for k, v := range headers {
@@ -819,7 +872,7 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 			if err != nil {
 				return nil, fileTransferTimeout(err, idle)
 			}
-			return fileTransferConn{conn, idle}, nil
+			return &fileTransferConn{Conn: conn, idle: idle, clock: c.clock(), reading: &reading, writing: &writing}, nil
 		}
 		// TLS normally runs over the wrapped TCP connection. An injected TLS
 		// dialer owns its handshake and authority checks; retain that path too.
@@ -873,18 +926,16 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 	}
 	res, err := local.Do(req)
 	if err != nil {
-		if errors.Is(err, errFileTransferStalled) {
-			return nil, fmt.Errorf("%w: no network progress for %s", errFileTransferStalled, c.fileTimeout(size))
-		}
 		return nil, fmt.Errorf("file transfer connection failed: %w", err)
 	}
+	reading.Store(true)
 	return res, nil
 }
 
-func fileResponse(res *http.Response, want int) error {
+func fileResponse(res *http.Response, want int, now ...time.Time) error {
 	defer res.Body.Close()
 	if res.StatusCode != want {
-		return fileTransferError(res, "file transfer failed")
+		return fileTransferError(res, "file transfer failed", now...)
 	}
 	_, err := io.Copy(io.Discard, res.Body)
 	return err
@@ -911,7 +962,7 @@ func (c Client) hasFile(ctx context.Context, ref FileRef, purpose string) error 
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
-		return fileTransferError(res, "file unavailable")
+		return fileTransferError(res, "file unavailable", c.clock().Now())
 	}
 	if res.ContentLength != ref.SizeBytes || res.Header.Get("ETag") != `"`+ref.SHA256+`"` {
 		return errors.New("stored file identity mismatch")
@@ -982,11 +1033,16 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 	if err != nil {
 		return err
 	}
-	if err = fileResponse(res, 201); err != nil {
+	if err = fileResponse(res, 201, c.clock().Now()); err != nil {
 		return err
 	}
 	if err = c.hasFile(ctx, ref, headPurpose); err == nil {
 		return nil
+	} else {
+		var he *HTTPError
+		if !errors.As(err, &he) || (he.Status != 404 && he.Status != 410) {
+			return err
+		}
 	}
 	endpoint := "/api/files/uploads/" + ref.SHA256
 	res, err = c.fileRequest(ctx, "HEAD", endpoint, nil, map[string]string{"Tus-Resumable": "1.0.0"}, 0)
@@ -995,7 +1051,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 	}
 	offset, e := strconv.ParseInt(res.Header.Get("Upload-Offset"), 10, 64)
 	size, se := strconv.ParseInt(res.Header.Get("Upload-Length"), 10, 64)
-	err = fileResponse(res, 200)
+	err = fileResponse(res, 200, c.clock().Now())
 	if err != nil {
 		return err
 	}
@@ -1013,7 +1069,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 			return err
 		}
 		next, e := strconv.ParseInt(res.Header.Get("Upload-Offset"), 10, 64)
-		if err = fileResponse(res, 204); err != nil {
+		if err = fileResponse(res, 204, c.clock().Now()); err != nil {
 			return err
 		}
 		if e != nil || next != offset+n {
@@ -1079,7 +1135,7 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 && res.StatusCode != 206 {
-		return fileTransferError(res, "download failed")
+		return fileTransferError(res, "download failed", c.clock().Now())
 	}
 	if res.Header.Get("ETag") != `"`+ref.SHA256+`"` {
 		return errors.New("download identity mismatch")
@@ -1114,11 +1170,16 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	return verifyFile(ctx, dest, ref)
 }
 
-func fileTransferError(res *http.Response, message string) error {
+func fileTransferError(res *http.Response, message string, observed ...time.Time) error {
+	now := (RealClock{}).Now()
+	if len(observed) > 0 {
+		now = observed[0]
+	}
+	delay := retryAfter(res.Header.Get("Retry-After"), now)
 	if res.Header.Get("X-Myce-Error-Code") == "file_blob_unavailable" {
 		d := safeStagingCause(&StagingCause{Operation: res.Header.Get("X-Myce-Storage-Operation"), Error: res.Header.Get("X-Myce-Storage-Error"), Status: res.StatusCode})
 		if d != nil {
-			return &stagingError{*d, &HTTPError{Status: res.StatusCode, Code: "file_blob_unavailable", Message: "queue blob read failed"}}
+			return &stagingError{*d, &HTTPError{Status: res.StatusCode, Code: "file_blob_unavailable", Message: "queue blob read failed", RetryAfter: delay}}
 		}
 	}
 	var body struct {
@@ -1127,15 +1188,15 @@ func fileTransferError(res *http.Response, message string) error {
 	}
 	if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil {
 		if fileStoreRefusalCode(body.Code) {
-			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error}
+			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error, RetryAfter: delay}
 		}
 		if publicErrorCode(body.Code) || body.Code == "request_failed" {
-			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: message}
+			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: message, RetryAfter: delay}
 		}
 	}
 
 	if res.StatusCode == 410 && res.Header.Get("X-Myce-Error-Code") == "result_expired" {
 		return resultExpired()
 	}
-	return &HTTPError{Status: res.StatusCode, Message: message}
+	return &HTTPError{Status: res.StatusCode, Message: message, RetryAfter: delay}
 }

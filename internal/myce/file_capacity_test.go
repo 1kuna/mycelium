@@ -44,13 +44,86 @@ func capacityPartial(t *testing.T, c Client, content, purpose string) FileRef {
 	return ref
 }
 
+func TestFileCapacityUnsubmittedClaimsProtectCollection(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		t.Run(strconv.FormatBool(interrupted), func(t *testing.T) {
+			q, clock := fixture(t)
+			c := retentionClient(t, q)
+			q.fileRetention = testFileRetention
+			const content = "claimed input without any job reference"
+			path, ref := policyInput(t, content)
+			if interrupted {
+				ref = capacityPartial(t, c, content, jobInputUploadPurpose)
+			} else if err := c.UploadJobInput(context.Background(), path, ref); err != nil {
+				t.Fatal(err)
+			}
+			owner := WithFileStoreSubmission(context.Background(), Spec{Project: "owner"})
+			claim, err := q.claimFileInput(owner, Spec{Project: "owner"}, ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.WithValue(owner, fileInputClaimKey{}, claim.ID)
+			clock.Advance(testFileRetention + filePublicationGrace + time.Second)
+			// Collect before HEAD can refresh the upload's modification time.
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if status := q.fileStoreStatus(context.Background()); status.ReclaimableBytes != 0 {
+				t.Fatal("claimed bytes reported reclaimable", status)
+			}
+			if interrupted {
+				res, err := c.fileRequest(ctx, "HEAD", "/api/files/uploads/"+ref.SHA256, nil, map[string]string{"Tus-Resumable": "1.0.0"}, ref.SizeBytes)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := fileResponse(res, 200); err != nil {
+					t.Fatal("claimed resumable upload collected", err)
+				}
+			} else if err := c.hasFile(ctx, ref, jobInputUploadPurpose); err != nil {
+				t.Fatal("claimed published input collected", err)
+			}
+			if err := c.UploadJobInput(owner, path, ref); err != nil {
+				t.Fatal("claimed input cannot finish publication", err)
+			}
+			s := spec("experiment")
+			s.Project = "owner"
+			s.Files = FileManifest{"input": ref}
+			submit(t, q, s)
+		})
+	}
+}
+
+func TestFileCapacityAutomaticOrphansAreNotReclaimable(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	q.fileRetention = 0
+	_, complete := retentionJobInput(t, c, "unsubmitted published input")
+	partial := capacityPartial(t, c, "unsubmitted interrupted input", jobInputUploadPurpose)
+	clock.Advance(testFileRetention + filePublicationGrace + time.Second)
+	if status := q.fileStoreStatus(context.Background()); status.ReclaimableBytes != 0 {
+		t.Errorf("automatic retention overstates reclaimable bytes: %d", status.ReclaimableBytes)
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{q.files.blob(complete), filepath.Join(q.files.root, "uploads", partial.SHA256)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal("automatic mode collected unique input", err)
+		}
+	}
+	q.fileRetention = testFileRetention
+	if status := q.fileStoreStatus(context.Background()); status.ReclaimableBytes != uint64(complete.SizeBytes+2) {
+		t.Fatal("explicit expiry policy lost reclaimable bytes", status)
+	}
+}
+
 func TestFileCapacityAbandonedUploadSweep(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
 	abandoned := capacityPartial(t, c, "abandoned input", jobInputUploadPurpose)
 	recent := capacityPartial(t, c, "resumed input", jobInputUploadPurpose)
 	imported := capacityPartial(t, c, "unmarked import", "")
-	clock.Advance(DefaultFileRetention - time.Nanosecond)
+	clock.Advance(testFileRetention - time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +212,7 @@ func TestFileCapacityProtectedReferencesSurvive(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + filePublicationGrace)
+	clock.Advance(testFileRetention + filePublicationGrace)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +245,7 @@ func TestFileCapacityStatus(t *testing.T) {
 	_, expired := retentionJobInput(t, c, "expired")
 	partial := capacityPartial(t, c, "partial input", jobInputUploadPurpose)
 	_, kept := retentionUpload(t, c, "kept")
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	q.files.diskProbe = func(string) (DiskReading, error) {
 		// A filesystem probe must never execute inside the queue lock (#80).
 		if !q.mu.TryLock() {
@@ -256,7 +329,7 @@ func TestFileCapacityDataOnlyRetryDoesNotRefresh(t *testing.T) {
 	if err := os.Remove(path + ".info"); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	for _, method := range []string{"HEAD", "PATCH"} {
 		res, err := c.fileRequest(context.Background(), method, "/api/files/uploads/"+ref.SHA256, nil, map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "2", "Content-Type": "application/offset+octet-stream"})
 		if err != nil {
@@ -286,7 +359,7 @@ func TestFileCapacityUnpublishedBlobRecoversMarker(t *testing.T) {
 	if err := q.files.publish(context.Background(), ref); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention - time.Nanosecond)
+	clock.Advance(testFileRetention - time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}

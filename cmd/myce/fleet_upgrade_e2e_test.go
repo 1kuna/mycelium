@@ -384,9 +384,11 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			}
 		}
 	}
+	// Deliberately paginate completed work: aggregate status is not receipt
+	// custody and may omit either command after it finishes.
 	status := func() bool {
 		snapshot = myce.Snapshot{}
-		lastErr = client.Call(ctx, "GET", "/api/status", nil, &snapshot)
+		lastErr = client.Call(ctx, "GET", "/api/status?limit=1", nil, &snapshot)
 		return lastErr == nil
 	}
 	poll("queue startup", func() bool {
@@ -564,14 +566,9 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	assertAttempts := func() {
 		t.Helper()
 		for id, initial := range jobs {
-			var observed *myce.Job
-			for _, j := range snapshot.Jobs {
-				if j.ID == id {
-					observed = j
-				}
-			}
-			if observed == nil {
-				t.Errorf("job %s lost", id)
+			observed, readErr := client.GetJob(ctx, id)
+			if readErr != nil {
+				t.Errorf("read exact job %s: %v", id, readErr)
 				continue
 			}
 			if observed.Attempt != initial.Attempt || observed.Starts != 1 || observed.Losses != 0 || observed.InfrastructureRetries != 0 || observed.Session != initial.Session || observed.Machine != initial.Machine || observed.StartedAt == nil || !observed.StartedAt.Equal(*initial.StartedAt) {
@@ -614,19 +611,21 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			return false
 		}
 		for id := range jobs {
-			found := false
-			for _, j := range snapshot.Jobs {
-				if j.ID == id && j.State == "succeeded" {
-					found = true
-				}
+			observed, readErr := client.GetJob(ctx, id)
+			if readErr != nil {
+				lastErr = readErr
+				return false
 			}
-			if !found {
+			if observed.State != "succeeded" {
 				return false
 			}
 		}
 		return true
 	})
 	assertAttempts()
+	if snapshot.JobsPage == nil || snapshot.JobsPage.Returned != 1 || snapshot.JobsPage.NextBefore == "" {
+		t.Fatalf("fixture did not exercise paginated completed jobs: %+v", snapshot.JobsPage)
+	}
 	for _, m := range snapshot.Machines {
 		old := before[m.ID]
 		if m.Fleet == nil || m.Fleet.SHA256 != target.hash || m.Fleet.Version != newVersion || m.Fleet.PID == old.Fleet.PID || m.Session == old.Session || m.Fleet.Session != m.Session || !m.Fleet.ServiceHealthy || !m.Fleet.RunnerSmoke {

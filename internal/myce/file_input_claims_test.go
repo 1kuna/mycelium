@@ -242,6 +242,11 @@ func TestProjectFileStoreSettlementKeepsConcurrentClaimValid(t *testing.T) {
 	s.Project = "owner"
 	s.Files = FileManifest{"input": ref}
 	submit(t, q, s)
+	// A separate transfer starts after settlement while a sibling still holds
+	// the shared original receipt. Creating its claim must not revoke that HEAD.
+	if _, err := q.claimFileInput(context.Background(), Spec{Project: "another"}, ref); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.WithValue(owner, fileInputClaimKey{}, claim.ID)
 	if err = c.hasFile(ctx, ref, jobInputUploadPurpose); err != nil {
 		t.Fatal("sibling submission invalidated transfer", err)
@@ -250,8 +255,8 @@ func TestProjectFileStoreSettlementKeepsConcurrentClaimValid(t *testing.T) {
 		t.Fatal("settlement double charged", u)
 	}
 	clock.Advance(filePublicationGrace + time.Second)
-	if _, err = q.inputClaimContext(ctx, ref, false); err == nil {
-		t.Fatal("settled validation receipt never expired")
+	if _, err = q.inputClaimContext(ctx, ref, false); err != nil {
+		t.Fatal("elapsed time invalidated a concurrent transfer receipt", err)
 	}
 }
 
@@ -368,4 +373,30 @@ func TestProjectFileStoreRecoveryAndFailureDiagnosticsRemainPublishable(t *testi
 			t.Fatal("diagnostic publication did not finish")
 		}
 	})
+}
+
+func TestProjectFileStoreClaimAllocationSurvivesUnrelatedRollback(t *testing.T) {
+	q, clock := fixture(t)
+	// A named zone makes JSON normalization observable without a wall clock.
+	clock.now = time.Date(2026, 11, 7, 4, 15, 0, 0, time.FixedZone("fixture-local", -5*60*60))
+	_, ref := policyInput(t, "input")
+	claim, err := q.claimFileInput(context.Background(), Spec{Project: "claim-repro", Class: "deadline"}, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := false
+	q.checkpointProbe = func() bool {
+		if !entered {
+			entered = true
+			sentinel := errors.New("unrelated rejected mutation")
+			if err := q.update(func() error { return sentinel }); !errors.Is(err, sentinel) {
+				t.Fatal(err)
+			}
+		}
+		return true
+	}
+	ctx := context.WithValue(context.Background(), fileInputClaimKey{}, claim.ID)
+	if _, err = q.inputClaimContext(ctx, ref, true); err != nil {
+		t.Fatal("valid claim refused after unrelated rollback", err)
+	}
 }

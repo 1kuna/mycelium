@@ -250,14 +250,21 @@ func TestEnvironmentActiveSidecarRetained(t *testing.T) {
 	s.Run.Sidecars[0].Environment = "helper-tools"
 	r := nativeStart(t, s, "fake", EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"helper-tools": {"fake": recipe}}})
 	nativeFile(t, r.dir, "main-ready")
+	// The payload's readiness file does not synchronize Go memory with the
+	// sidecar's lazy cache initialization. Join it before reading the root.
+	if err := r.w.environmentCache.init(); err != nil {
+		t.Fatal(err)
+	}
 	root := filepath.Join(r.w.environmentCache.Root, recipe.Key)
 	size, err := environmentDiskUsage(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	other := binaryRecipe(t, "fake")
-	r.w.environmentCache.Limit = size + 1
-	if _, release, err := r.w.environmentCache.Acquire(context.Background(), other); err == nil {
+	// Exercise shared use-lock protection without editing the active worker's
+	// cache settings while its sidecar can still be acquiring the environment.
+	pressure := &EnvironmentCache{Root: r.w.environmentCache.Root, Limit: size + 1, Clock: RealClock{}}
+	if _, release, err := pressure.Acquire(context.Background(), other); err == nil {
 		release()
 		t.Fatal("evicted active sidecar environment")
 	}

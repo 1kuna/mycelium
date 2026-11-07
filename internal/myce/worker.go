@@ -162,6 +162,7 @@ type process struct {
 	docker     *dockerAttempt
 	native     *nativeGroup
 	memory     *memoryAttempt // Plain command cgroup; carries live device samples.
+	rssMemory  atomic.Pointer[processResidentSample]
 	mu         sync.Mutex
 	job        Job
 	cmd        *exec.Cmd
@@ -502,6 +503,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 
 	executionWork := j.Spec.Run.Workdir
+	if !j.Spec.Run.Docker {
+		if err := checkPayloadMachOLinkage(ctx, machineTarget(&w.Machine), executionWork); err != nil {
+			return nil, err
+		}
+	}
 	executionWorkdir, extensionErr = privateNativeExtension(&j, extensionEnv, executionWork, executionWorkdir)
 	if extensionErr != nil {
 		return nil, extensionErr
@@ -512,7 +518,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err := os.MkdirAll(filepath.Dir(applicationProgressFile(s.dir, j)), 0700); err != nil {
 		return nil, err
 	}
-	ceilingBytes, ceilingErr := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	ceilingBytes, ceilingErr := w.jobCeilingBytes(j)
 	if ceilingErr != nil {
 		return nil, ceilingErr
 	}
@@ -1188,12 +1194,6 @@ func (w Worker) Run(stop context.Context) error {
 	w.fleet = w.newFleetRuntime()
 	// Startup may rotate an idle session after exact orphan recovery. The first
 	// queue checkin binds the recovered session before admission.
-	if w.ModelConfig.Idle <= 0 {
-		w.ModelConfig.Idle = 10 * time.Minute
-	}
-	if w.ModelConfig.Wait <= 0 {
-		w.ModelConfig.Wait = 5 * time.Minute
-	}
 	if err = validateModels(w.ModelConfig); err != nil {
 		return err
 	}
@@ -1283,9 +1283,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.OwnerSignals == nil {
 		w.OwnerSignals = workerOwnerSignals
 	}
-	probeCtx, probeCancel := context.WithTimeout(availabilityCtx, 2*time.Second)
-	w.availability.sample(w.OwnerSignals(probeCtx))
-	probeCancel()
+	w.availability.lane.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go func() {
 		defer close(availabilityDone)
 		w.availability.run(availabilityCtx, w.OwnerSignals, availabilityWake)

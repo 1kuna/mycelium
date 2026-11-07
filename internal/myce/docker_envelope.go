@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const dockerEnvelopeUnavailable = "envelope-only Docker needs a shared cgroup parent; declare per-member caps or use a native recipe"
@@ -42,9 +41,7 @@ func (w Worker) dockerEnvelopeSupported() bool {
 		return false
 	}
 	d := dockerAttempt{binary: "docker", state: dockerExecution{Endpoint: w.DockerEndpoint}, timeout: w.dockerCallTimeout, command: w.dockerCommand, env: dockerClientEnvironment()}
-	if d.timeout <= 0 {
-		d.timeout = 2 * time.Second
-	}
+
 	b, err := d.call("info", "--format", "{{json .}}")
 	if err != nil {
 		return false

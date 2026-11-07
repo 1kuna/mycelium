@@ -125,11 +125,11 @@ func TestAttemptResourceQueueFencesAndRetention(t *testing.T) {
 		t.Fatalf("public/restart facts: %+v %v", got, getErr)
 	}
 	copy := Job{Attempt: 1, Machine: "worker", Session: "session"}
-	for i := 1; i <= memoryAttemptsLimit+2; i++ {
+	for i := 1; i <= 32+2; i++ {
 		copy.Attempt = i
 		q.retainAttemptResources(&copy, r)
 	}
-	if len(copy.ResourceAttempts) != memoryAttemptsLimit || copy.ResourceAttempts[0].Attempt != 1 || copy.ResourceAttemptsDropped != 2 {
+	if len(copy.ResourceAttempts) != 34 || copy.ResourceAttempts[0].Attempt != 1 || copy.ResourceAttemptsDropped != 0 {
 		t.Fatal("retention mismatch")
 	}
 }

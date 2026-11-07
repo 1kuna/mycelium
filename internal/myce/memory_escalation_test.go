@@ -46,13 +46,12 @@ func TestMemoryEscalationMeasuredIncidentRange(t *testing.T) {
 	if e := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope; e.HostGB != 45 {
 		t.Fatalf("floor lost: %+v", e)
 	}
-	// A prior keeps its original measurement clock, so invalidation cannot renew
-	// old evidence indefinitely. No accepted history means normal cold sizing.
+	// Elapsed time cannot discard a measured OOM lower bound.
 	candidate.MemoryOOMFloor = nil
 	clock.Advance(workCurveMaxAge + time.Second)
 	e := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope
-	if e.Source == acceptedMemoryEscalation {
-		t.Fatalf("expired prior reused: %+v", e)
+	if e.Source != acceptedMemoryEscalation || e.HostGB < peak {
+		t.Fatalf("age discarded constrained evidence: %+v", e)
 	}
 }
 

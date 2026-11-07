@@ -9,6 +9,8 @@ entries:
                 - gate-result.txt
         class: test
         environment: mycelium-gate
+        inputs:
+            .mycelium/adapter.yaml: .mycelium/adapter.yaml
         name: mycelium-gate-full
         needs:
             cpu_cores: 2
@@ -42,6 +44,8 @@ entries:
                 - gate-result.txt
         class: test
         environment: mycelium-gate
+        inputs:
+            .mycelium/adapter.yaml: .mycelium/adapter.yaml
         name: mycelium-gate-full-darwin
         needs:
             cpu_cores: 2
@@ -72,6 +76,8 @@ entries:
                 - gate-result.txt
         class: test
         environment: mycelium-gate
+        inputs:
+            .mycelium/adapter.yaml: .mycelium/adapter.yaml
         memory_class: per_item
         name: mycelium-gate-quick
         needs:
@@ -106,6 +112,8 @@ entries:
                 - go-test-result.txt
         class: test
         environment: mycelium-gate
+        inputs:
+            .mycelium/adapter.yaml: .mycelium/adapter.yaml
         name: mycelium-go-test
         needs:
             cpu_cores: 2
