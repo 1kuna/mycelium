@@ -57,7 +57,7 @@ func sharedHostRefusal(j *Job, m *Machine) string {
 	}
 	for _, side := range j.Spec.Run.Sidecars {
 		if side.Environment != "" {
-			r, ok := j.SidecarEnvironmentRecipes[side.Name][m.GPU]
+			r, ok := commandEnvironmentRecipe(j, j.SidecarEnvironmentRecipes[side.Name], m)
 			if !ok || !slices.Contains(m.Environments, r.Key) {
 				return "sidecar " + side.Name + " environment" + unprepared
 			}

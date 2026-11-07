@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,14 +99,15 @@ type PortabilityHost struct {
 
 // Portability captures the ordinary detached read view. File hydration, hashing,
 // lock parsing, qualification and planner checks all happen after q.mu releases.
-func (q *Queue) Portability(req PortabilityRequest) (PortabilityReport, error) {
+func (q *Queue) Portability(req PortabilityRequest, contexts ...context.Context) (PortabilityReport, error) {
+	ctx := requestContext(contexts)
 	if req.RequirementReasons == nil && req.Spec != nil {
 		req.RequirementReasons = req.Spec.RequirementReasons
 	}
 	if req.Extension != "" && (req.Recipe != nil || req.Spec != nil) || req.Recipe != nil && req.Spec != nil {
 		return PortabilityReport{}, errors.New("choose extension, recipe or spec")
 	}
-	view, _, err := q.captureObservation("")
+	view, _, err := q.captureObservation("", ctx)
 	if err != nil {
 		return PortabilityReport{}, err
 	}
@@ -115,7 +117,9 @@ func (q *Queue) Portability(req PortabilityRequest) (PortabilityReport, error) {
 			return PortabilityReport{}, errors.New("extension requires a registered name@version")
 		}
 		// Hydrate the exact captured registration, not a later queue generation.
-		q.fileLifecycle.RLock()
+		if err := lockUploadContext(ctx, q.fileLifecycle.RLock, q.fileLifecycle.RUnlock); err != nil {
+			return PortabilityReport{}, err
+		}
 		err = q.files.hydrateExtension(&e)
 		q.fileLifecycle.RUnlock()
 		if err != nil {
@@ -134,6 +138,9 @@ func (q *Queue) Portability(req PortabilityRequest) (PortabilityReport, error) {
 		if len(req.RequirementReasons) == 0 {
 			req.RequirementReasons = copy.RequirementReasons
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return PortabilityReport{}, err
 	}
 	return view.portability(req), nil
 }
@@ -201,6 +208,20 @@ func (q *Queue) portabilityWithRecipes(req PortabilityRequest, sets map[string]m
 			rows[t] = &PortabilityTarget{Target: t, Runtime: portabilityRuntime(t), Environments: []PortabilityEnvironment{}, Hosts: []PortabilityHost{}, Actions: []string{}}
 		}
 		return rows[t]
+	}
+	var discovery *CommandDiscovery
+	var discoveryError error
+	if req.Spec != nil && WantsCommandDiscovery(*req.Spec) {
+		sides := map[string]map[string]EnvironmentRecipe{}
+		for name, recipes := range sets {
+			if name != "main" {
+				sides[name] = recipes
+			}
+		}
+		discovery, discoveryError = deriveCommandDiscovery(*req.Spec, sets["main"], sides)
+		if discoveryError != nil {
+			discovery = &CommandDiscovery{}
+		}
 	}
 	e := req.Recipe
 	if e != nil && e.Digest == "" {
@@ -381,7 +402,7 @@ func (q *Queue) portabilityWithRecipes(req PortabilityRequest, sets map[string]m
 				}
 			} else if req.Spec != nil {
 				s := *req.Spec
-				j = &Job{ID: "portability", State: "queued", Spec: s}
+				j = &Job{ID: "portability", State: "queued", Spec: s, CommandDiscovery: discovery}
 				h.Qualification = "plain command: native qualification not applicable; result acceptance is separate"
 				j.EnvironmentRecipes = sets["main"]
 				j.SidecarEnvironmentRecipes = map[string]map[string]EnvironmentRecipe{}
@@ -392,7 +413,7 @@ func (q *Queue) portabilityWithRecipes(req PortabilityRequest, sets map[string]m
 						j.SidecarEnvironmentRecipes[name] = recipes
 					}
 					state := "unknown: recipe unavailable"
-					if recipe, ok := recipes[target.GPU]; ok {
+					if recipe, ok := commandEnvironmentRecipe(j, recipes, target); ok {
 						state = "prepare-needed"
 						if slices.Contains(target.Environments, recipe.Key) && recipe.Key != "" {
 							state = "ready"
@@ -480,6 +501,19 @@ func (q *Queue) portabilityWithRecipes(req PortabilityRequest, sets map[string]m
 	for _, r := range rows {
 		if req.Spec != nil && !req.Spec.extensionJob() {
 			commandPortabilityTarget(r, *req.Spec, sets)
+			if discovery != nil {
+				r.AuthoredEligibility = "excluded: outside discovered member-lock/runtime intersection"
+				if slices.Contains(discovery.Targets, r.Target) {
+					r.AuthoredEligibility = "discovered candidate: fresh inventory and admission required"
+				}
+				if discoveryError != nil {
+					r.Actions = append(r.Actions, discoveryError.Error())
+				}
+				if q.commandDiscoveryProduction(&Job{Spec: *req.Spec, CommandDiscovery: discovery}) {
+					r.Parity = "held: exact target/recipe parity required"
+					r.Actions = append(r.Actions, commandDiscoveryParityAction)
+				}
+			}
 		}
 		if !r.Observed {
 			r.Actions = append(r.Actions, "Target absent from inventory; add a native worker before claiming cluster support.")

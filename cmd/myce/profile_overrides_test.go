@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,9 +37,11 @@ check: [true]
 	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
 		t.Fatal(err)
 	}
+	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
+	defer server.Close()
 	invoke := func(extra ...string) (profileReceipt, error) {
 		var out bytes.Buffer
-		args := append([]string{"--profile", path, "--queue", "http://127.0.0.1:1", "--token", "fixture"}, extra...)
+		args := append([]string{"--profile", path, "--queue", server.URL, "--token", "fixture"}, extra...)
 		err := runCommand(context.Background(), args, &out, io.Discard)
 		var receipt profileReceipt
 		if out.Len() > 0 {

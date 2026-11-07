@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -37,8 +38,8 @@ func portabilityWarnings(report PortabilityReport) []string {
 	return warnings
 }
 
-func (q *Queue) extensionRegistrationWarnings(e Extension) []string {
-	report, err := q.Portability(PortabilityRequest{Extension: extensionKey(e)})
+func (q *Queue) extensionRegistrationWarnings(e Extension, contexts ...context.Context) []string {
+	report, err := q.Portability(PortabilityRequest{Extension: extensionKey(e)}, contexts...)
 	if err != nil {
 		return []string{"Live portability coverage unknown; run myce portability --extension NAME@VERSION after repairing inventory or frozen inputs. Registration remains accepted."}
 	}
@@ -48,6 +49,9 @@ func (q *Queue) extensionRegistrationWarnings(e Extension) []string {
 // Registration metadata is server-owned and frozen with accepted jobs. Older
 // registrations retain their admission contract, including on identical replay.
 func (q *Queue) variantParityReason(j *Job, m *Machine) string {
+	if q.commandDiscoveryProduction(j) {
+		return commandDiscoveryParityAction
+	}
 	if j.Spec.ExtensionCheck != nil {
 		return ""
 	}
@@ -87,6 +91,9 @@ func jobHasVariants(j *Job) bool {
 }
 
 func (q *Queue) variantParityWaitingReason(j *Job) string {
+	if q.commandDiscoveryProduction(j) {
+		return commandDiscoveryParityAction
+	}
 	if !jobHasVariants(j) {
 		return ""
 	}

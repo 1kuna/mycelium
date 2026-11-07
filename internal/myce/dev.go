@@ -119,12 +119,6 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 			return nil, err
 		}
 	}
-	if c.ModelConfig.Idle <= 0 {
-		c.ModelConfig.Idle = 10 * time.Minute
-	}
-	if c.ModelConfig.Wait <= 0 {
-		c.ModelConfig.Wait = 5 * time.Minute
-	}
 	if len(c.ModelConfig.Models) == 0 {
 		c.ModelConfig.Models = []Model{{Name: "dev-model", Engine: "fake", Path: "fake", MemoryGB: 1, Platforms: []string{c.GPU}}}
 	}

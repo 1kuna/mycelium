@@ -4,6 +4,9 @@ project: mycelium
 class: test
 source:
   git: HEAD
+# Adapter source excludes its instruction file; dogfood tests need it explicitly.
+inputs:
+  .mycelium/adapter.yaml: .mycelium/adapter.yaml
 run:
   command: [bash, scripts/go-test-profile.sh]
   env:

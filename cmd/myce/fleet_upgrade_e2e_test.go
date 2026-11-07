@@ -384,9 +384,11 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			}
 		}
 	}
+	// Deliberately paginate completed work: aggregate status is not receipt
+	// custody and may omit either command after it finishes.
 	status := func() bool {
 		snapshot = myce.Snapshot{}
-		lastErr = client.Call(ctx, "GET", "/api/status", nil, &snapshot)
+		lastErr = client.Call(ctx, "GET", "/api/status?limit=1", nil, &snapshot)
 		return lastErr == nil
 	}
 	poll("queue startup", func() bool {
@@ -564,12 +566,9 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	assertAttempts := func() {
 		t.Helper()
 		for id, initial := range jobs {
-			// Aggregate status pages completed history according to measured
-			// capacity. Exact identity assertions must inspect the known job,
-			// rather than interpret omission from that page as data loss.
-			var observed myce.Job
-			if err := client.Call(ctx, "GET", "/api/jobs/"+id, nil, &observed); err != nil {
-				t.Errorf("inspect rollout job %s: %v", id, err)
+			observed, readErr := client.GetJob(ctx, id)
+			if readErr != nil {
+				t.Errorf("read exact job %s: %v", id, readErr)
 				continue
 			}
 			if observed.Attempt != initial.Attempt || observed.Starts != 1 || observed.Losses != 0 || observed.InfrastructureRetries != 0 || observed.Session != initial.Session || observed.Machine != initial.Machine || observed.StartedAt == nil || !observed.StartedAt.Equal(*initial.StartedAt) {
@@ -612,15 +611,21 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			return false
 		}
 		for id := range jobs {
-			var observed myce.Job
-			lastErr = client.Call(ctx, "GET", "/api/jobs/"+id, nil, &observed)
-			if lastErr != nil || observed.State != "succeeded" {
+			observed, readErr := client.GetJob(ctx, id)
+			if readErr != nil {
+				lastErr = readErr
+				return false
+			}
+			if observed.State != "succeeded" {
 				return false
 			}
 		}
 		return true
 	})
 	assertAttempts()
+	if snapshot.JobsPage == nil || snapshot.JobsPage.Returned != 1 || snapshot.JobsPage.NextBefore == "" {
+		t.Fatalf("fixture did not exercise paginated completed jobs: %+v", snapshot.JobsPage)
+	}
 	for _, m := range snapshot.Machines {
 		old := before[m.ID]
 		if m.Fleet == nil || m.Fleet.SHA256 != target.hash || m.Fleet.Version != newVersion || m.Fleet.PID == old.Fleet.PID || m.Session == old.Session || m.Fleet.Session != m.Session || !m.Fleet.ServiceHealthy || !m.Fleet.RunnerSmoke {

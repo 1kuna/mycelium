@@ -1311,7 +1311,7 @@ placement changes require their later amendments.
 
 ## Safe sparse curves (slice 2, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the maintainer's delegated design authority,
 following the [research build plan](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/research/benchmark-batch-placement.md#incremental-build-plan).
 Placement and ordinary admission/concurrency limits remain unchanged.
 
@@ -1325,7 +1325,7 @@ load generation. Prepared exact variants and native baselines must qualify first
 
 Reuse host-wide benchmark preparation custody, command supervision and cleanup.
 Busy/recovering hosts cannot start; components run serially. Daily-use hosts need
-fresh five-minute idle, external-power and safe-heat evidence. Owner return or
+fresh locally measured idle recovery, external-power and safe-heat evidence. Owner return or
 unsafe/unknown signals cancels the command, retaining custody until cleanup.
 A sweep has a 60-second Clock budget, and each command a ten-second bound.
 Stop on non-increasing aggregate throughput, memory exhaustion or failure.
@@ -1353,7 +1353,7 @@ Native mixed-load curves and fleet acceptance require separate authorization.
 
 ## Completion-aware placement (slice 3, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the maintainer's delegated design authority,
 following the [research build plan](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/research/benchmark-batch-placement.md#incremental-build-plan).
 Rank qualified extension commands using a common completion estimate: declared
 workload units divided by the exact comparable serial measured rate, plus cold
@@ -1384,7 +1384,7 @@ eligibility boundary, before completion ranking; no quality policy is added here
 
 ## Amendment: job memory envelopes (#146)
 
-Approved by the orchestrator under Zach's delegated design authority, 2026-10-24.
+Approved by the orchestrator under the maintainer's delegated design authority, 2026-10-24.
 Explicit `needs.host_memory_gb` and GPU `needs.memory_gb` retain their current
 admission meanings and defaults, including production. Optional `needs.memory:
 auto` first selects fresh accepted slice-1 whole-attempt peaks for the same
@@ -1671,7 +1671,7 @@ field in a policy update keeps the saved switch.
 
 ## Declared fan-out and batch planning (slice 4, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the maintainer's delegated design authority,
 following the [research build plan](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/research/benchmark-batch-placement.md#incremental-build-plan).
 This approval covers explicit homogeneous independent pieces, measured discrete
 horizon planning, and the model-measurement binding deferred from slice 3.
@@ -1895,6 +1895,15 @@ Recheck production demand before selecting each remaining host and put productio
 hosts last. Upgrade the queue before workers needing its new protocol and before
 its colocated worker. If that conflicts with production-last ordering, refuse
 incompatible workers before mutation; protocol migrations need a separate plan.
+Normal updates leave an enabled busy host pending with ordinary admission open
+until its next fresh natural idle moment (MY-35, #900). Skip busy hosts so an
+idle compatible host can progress. Select idle and acquire the existing drain
+in the same queue transaction before placement can refill the gap. Unreleased
+attempts, preparations, cleanup and calls remain busy regardless of elapsed time;
+a ready idle model may enter drain, but must unload with exact confirmed custody
+before restart. Pending intent survives queue restart without owning a drain.
+Freeze current validated runtime identities when selecting that idle host;
+already-issued helpers and operator maintenance keep their original fences.
 Drain withdraws unstarted assignments and blocks admission. All Started work
 finishes naturally: exact attempt, preparation, engine, model-call and release
 custody must settle before restart. Offline or uncertain custody means a visible

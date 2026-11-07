@@ -17,6 +17,13 @@ import (
 	"time"
 )
 
+type storageRetryReport func([]byte)
+
+func (report storageRetryReport) Write(p []byte) (int, error) {
+	report(p)
+	return len(p), nil
+}
+
 func TestProfileStorageFailureCause(t *testing.T) {
 	for _, adapter := range []bool{false, true} {
 		for _, operation := range []string{"preflight", "upload"} {
@@ -101,12 +108,36 @@ func TestProfileStorageFailureCause(t *testing.T) {
 						ctx, cancel = context.WithTimeout(t.Context(), 150*time.Millisecond)
 					}
 					defer cancel()
+					want := map[string]string{"503": "HTTP 503 code=request_failed", "429": "HTTP 429 code=request_failed", "401": "HTTP 401 code=request_failed", "timeout": "timeout", "refused": "ECONNREFUSED", "reset": "ECONNRESET"}[failure]
+					reports := 0
+					report := storageRetryReport(func(p []byte) {
+						reports++
+						diagnostic := string(p)
+						for _, part := range []string{"operation=" + operation, `input="source"`, want, "same intent retained"} {
+							if !strings.Contains(diagnostic, part) {
+								t.Errorf("retry report missing %q: %s", part, diagnostic)
+							}
+						}
+						for _, bad := range []string{secret, "private.invalid", root, server.URL} {
+							if strings.Contains(diagnostic, bad) {
+								t.Errorf("unsafe retry report: %s", diagnostic)
+							}
+						}
+						// This fixture inspects a transient cause, not recovery. Its
+						// owner interrupts when informed, before any retry pause.
+						// Without that owner action, generic outages correctly retry
+						// indefinitely; an HTTP status is not a permanent refusal.
+						cancel()
+					})
 					var out bytes.Buffer
-					err = runPreparedProfile(ctx, root, p, []byte("fixture"), nil, nil, "storage-cause", "", "", "", server.URL, secret, &out, io.Discard)
+					err = runPreparedProfile(ctx, root, p, []byte("fixture"), nil, nil, "storage-cause", "", "", "", server.URL, secret, &out, report)
 					if exitCode(err) != 69 {
 						t.Fatalf("exit=%d err=%v", exitCode(err), err)
 					}
-					want := map[string]string{"503": "HTTP 503 code=request_failed", "429": "HTTP 429 code=request_failed", "401": "HTTP 401 code=request_failed", "timeout": "timeout", "refused": "ECONNREFUSED", "reset": "ECONNRESET"}[failure]
+					transient := failure != "401" && failure != "timeout"
+					if transient && reports == 0 || !transient && reports != 0 {
+						t.Fatalf("transient=%v, retry reports=%d", transient, reports)
+					}
 					for _, part := range []string{"operation=" + operation, `input="source"`, want, "intent retained", "rerunning the same command resumes from the receipt without duplicating anything"} {
 						if !strings.Contains(err.Error(), part) {
 							t.Errorf("missing %q: %v", part, err)

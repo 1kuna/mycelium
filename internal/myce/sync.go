@@ -28,8 +28,9 @@ type SyncRequest struct {
 	Cancel bool   `json:"cancel,omitempty"`
 }
 type ModelUse struct {
-	Count int       `json:"count"`
-	At    time.Time `json:"at"`
+	Demand map[string]modelDemandHistory `json:"demand,omitempty"`
+	Count  int                           `json:"count"`
+	At     time.Time                     `json:"at"`
 }
 
 func targetMatches(to string, m *Machine) bool { return to == "all" || to == m.ID || to == m.GPU }

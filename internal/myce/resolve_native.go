@@ -1,11 +1,14 @@
 package myce
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // Reuse the bounded metadata-only portability reader. An authored recipe has
 // no frozen registration, so never infer launch eligibility from local bytes.
-func (q *Queue) resolveNative(req ResolveRequest) (ResolveReport, error) {
-	p, err := q.Portability(PortabilityRequest{SourceUnverified: req.SourceUnverified, Recipe: req.Recipe, Project: req.Spec.Project, RequirementReasons: req.RequirementReasons})
+func (q *Queue) resolveNative(req ResolveRequest, ctx context.Context) (ResolveReport, error) {
+	p, err := q.Portability(PortabilityRequest{SourceUnverified: req.SourceUnverified, Recipe: req.Recipe, Project: req.Spec.Project, RequirementReasons: req.RequirementReasons}, ctx)
 	if err != nil {
 		return ResolveReport{}, err
 	}

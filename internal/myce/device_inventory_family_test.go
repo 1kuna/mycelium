@@ -27,10 +27,15 @@ func familyProbe(t *testing.T, nvidiaClass string) MachineProbe {
 	}
 	return MachineProbe{OS: "linux", Arch: "amd64", Files: files,
 		Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			// Optional card telemetry is unavailable in this inventory fixture;
+			// it must not hide healthy devices or the other family's refusal.
+			if name == "xpu-smi" {
+				return nil, exec.ErrNotFound
+			}
 			if name != "nvidia-smi" {
 				t.Fatalf("unexpected command: %s", name)
 			}
-			// A local shell exits with the same status as the B70's installed nvidia-smi.
+			// A local shell exits with the same status as a discrete-GPU Linux host's installed nvidia-smi.
 			return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 9").Output()
 		},
 		CommandEnv: func(_ context.Context, env map[string]string, name string, args ...string) ([]byte, error) {
@@ -108,6 +113,11 @@ func TestAcceleratorPartialInventoryWorker(t *testing.T) {
 		t.Fatalf("local inventory lost partial results: %+v %v", devices, probeErr)
 	}
 	w.Machine.Devices = devices
+	for _, d := range devices {
+		if d.Telemetry == nil || d.Telemetry.FreeGB != nil || d.Telemetry.ActivePercent != nil {
+			t.Fatalf("unavailable optional telemetry became measured: %+v", d.Telemetry)
+		}
+	}
 	if _, err := w.forAttempt(Job{AllocatedDevices: []string{"0"}}); err != nil {
 		t.Fatalf("healthy XPU launch blocked by CUDA: %v", err)
 	}

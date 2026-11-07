@@ -9,10 +9,9 @@ import (
 	"time"
 )
 
-const ownerIdleWait = 5 * time.Minute
+// Legacy observation protocol: retained only for workers without timing evidence.
 const signalRefresh = 5 * time.Second
 const signalMaxAge = 15 * time.Second
-const coolingWait = time.Minute
 
 // OwnerSignals contains only aggregate OS state, never input or screen contents.
 // Power is desktop (no battery), ac, battery, or unknown. Heat is nominal, fair,
@@ -29,11 +28,13 @@ type OwnerSignals struct {
 type OwnerSignalSource func(context.Context) OwnerSignals
 
 type Availability struct {
-	Mode      string       `json:"mode"`
-	Available bool         `json:"available"`
-	Reason    string       `json:"reason,omitempty"`
-	CheckedAt time.Time    `json:"checked_at"`
-	Signals   OwnerSignals `json:"signals"`
+	AgeSeconds float64           `json:"age_seconds,omitempty"`
+	Probe      *ProbeObservation `json:"probe,omitempty"`
+	Mode       string            `json:"mode"`
+	Available  bool              `json:"available"`
+	Reason     string            `json:"reason,omitempty"`
+	CheckedAt  time.Time         `json:"checked_at"`
+	Signals    OwnerSignals      `json:"signals"`
 }
 
 func (a Availability) Summary() string {
@@ -47,14 +48,19 @@ func (a Availability) Summary() string {
 // availabilityPolicy is driven only by the injected Clock. A missing reading
 // breaks the cooling dwell; a sampling gap after sleep breaks the idle window.
 type availabilityPolicy struct {
-	clock      Clock
-	daily      bool
-	laptop     bool
-	desktop    bool
-	last       time.Time
-	awakeSince time.Time
-	hot        bool
-	coolSince  time.Time
+	clock        Clock
+	daily        bool
+	laptop       bool
+	desktop      bool
+	last         time.Time
+	awakeSince   time.Time
+	hot          bool
+	coolSince    time.Time
+	heatRecovery time.Duration
+	heatBounces  probeEstimate
+	inputAt      time.Time
+	inputPauses  probeEstimate
+	probe        *ProbeObservation
 }
 
 func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
@@ -65,12 +71,18 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 	p.laptop = p.laptop || s.Laptop
 	s.Laptop = p.laptop
 	now := p.clock.Now()
-	a := Availability{Mode: "dedicated", Available: true, CheckedAt: now, Signals: s}
+	a := Availability{Mode: "dedicated", Available: true, CheckedAt: now, Signals: s, Probe: p.probe}
+	resolution := time.Second
+	if p.probe.valid() {
+		resolution = time.Duration(p.probe.PeriodSeconds * float64(time.Second))
+	}
+	freshFor := p.probe.freshness()
 	if p.daily {
 		a.Mode = "daily"
 	}
-	if !p.last.IsZero() && (now.UnixNano()-p.last.UnixNano() > int64(signalMaxAge) || now.Before(p.last)) {
+	if !p.last.IsZero() && (now.UnixNano()-p.last.UnixNano() > int64(freshFor) || now.Before(p.last)) {
 		p.awakeSince = now
+		p.inputAt = time.Time{}
 		p.coolSince = time.Time{}
 	}
 	p.last = now
@@ -86,6 +98,9 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 	if p.daily {
 		switch heat {
 		case "fair", "serious", "critical":
+			if p.hot && !p.coolSince.IsZero() && now.After(p.coolSince) {
+				p.heatBounces.observe(now.Sub(p.coolSince).Seconds())
+			}
 			p.hot = true
 			p.coolSince = time.Time{}
 			heatReason = "cooling down"
@@ -93,11 +108,13 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 			if p.hot {
 				if p.coolSince.IsZero() {
 					p.coolSince = now
+					p.heatRecovery = max(resolution, time.Duration(p.heatBounces.upper()*float64(time.Second)))
 				}
-				if now.Sub(p.coolSince) < coolingWait {
+				if now.Sub(p.coolSince) < p.heatRecovery {
 					heatReason = "cooling down"
 				} else {
 					p.hot = false
+					p.coolSince = time.Time{}
 				}
 			}
 		default:
@@ -127,8 +144,19 @@ func (p *availabilityPolicy) evaluate(s OwnerSignals) Availability {
 	if !s.IdleKnown || math.IsNaN(s.IdleSeconds) || math.IsInf(s.IdleSeconds, 0) || s.IdleSeconds < 0 {
 		return wait("owner activity unavailable")
 	}
-	if s.IdleSeconds < ownerIdleWait.Seconds() || !p.awakeSince.IsZero() && now.Sub(p.awakeSince) < ownerIdleWait {
-		return wait("waiting for 5 idle minutes")
+	// Input timestamps reveal pauses in this owner's active session. Do not
+	// teach an overnight idle interval as the next within-session pause.
+	inputAt := now.Add(-time.Duration(s.IdleSeconds * float64(time.Second)))
+	idleWait := max(resolution, time.Duration(p.inputPauses.upper()*float64(time.Second)))
+	if !p.inputAt.IsZero() && inputAt.After(p.inputAt) && inputAt.Sub(p.inputAt) <= idleWait {
+		p.inputPauses.observe(inputAt.Sub(p.inputAt).Seconds())
+	}
+	if p.inputAt.IsZero() || inputAt.After(p.inputAt) {
+		p.inputAt = inputAt
+	}
+	idleWait = max(resolution, time.Duration(p.inputPauses.upper()*float64(time.Second)))
+	if s.IdleSeconds < idleWait.Seconds() || !p.awakeSince.IsZero() && now.Sub(p.awakeSince) < idleWait {
+		return wait("waiting for owner idle recovery")
 	}
 	if heatReason != "" {
 		return wait(heatReason)
@@ -146,6 +174,7 @@ type availabilityMonitor struct {
 	current Availability
 	work    context.Context
 	cancel  context.CancelFunc
+	lane    hostProbeLane[OwnerSignals]
 }
 
 func newAvailabilityMonitor(clock Clock, daily, laptop, desktop bool) *availabilityMonitor {
@@ -171,9 +200,10 @@ func (m *availabilityMonitor) snapshot() Availability {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a := m.current
+	a.AgeSeconds = m.policy.clock.Now().Sub(a.CheckedAt).Seconds()
 	if m.policy.daily || m.policy.laptop || a.Signals.Laptop || a.Signals.Power == "battery" {
 		now := m.policy.clock.Now()
-		if now.Before(a.CheckedAt) || now.UnixNano()-a.CheckedAt.UnixNano() > int64(signalMaxAge) {
+		if !validMemoryValue(a.AgeSeconds) || now.Before(a.CheckedAt) || now.UnixNano()-a.CheckedAt.UnixNano() >= int64(a.Probe.freshness()) {
 			a.Available = false
 			a.Reason = "owner signals stale"
 		}
@@ -189,27 +219,51 @@ func (m *availabilityMonitor) workContext() context.Context {
 	defer m.mu.Unlock()
 	return m.work
 }
-func (m *availabilityMonitor) run(ctx context.Context, source OwnerSignalSource, wake chan<- struct{}) {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	next := m.policy.clock.Now()
-	for {
-		now := m.policy.clock.Now()
-		if !now.Before(next) {
-			probe, cancel := context.WithTimeout(ctx, 2*time.Second)
-			m.sample(source(probe))
-			cancel()
-			next = now.Add(signalRefresh)
-			select {
-			case wake <- struct{}{}:
-			default:
-			}
+
+// refresh never waits for the OS; the original probe start stamps the fact.
+func (m *availabilityMonitor) refresh(ctx context.Context, source OwnerSignalSource) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lane.clock == nil {
+		m.lane.clock = m.policy.clock
+	}
+	completed, err := m.lane.step(ctx, func(ctx context.Context) (OwnerSignals, error) {
+		return source(ctx), ctx.Err()
+	})
+	if completed {
+		m.policy.probe = m.lane.observation
+		signals := m.lane.value
+		if err != nil {
+			signals = OwnerSignals{Power: "unknown", Heat: "unknown"}
 		}
+		m.current = m.policy.evaluate(signals)
+		m.current.CheckedAt = m.lane.at
+		if !m.current.Available {
+			m.cancel()
+		} else if m.work.Err() != nil {
+			m.work, m.cancel = context.WithCancel(context.Background())
+		}
+	}
+}
+
+func (m *availabilityMonitor) run(ctx context.Context, source OwnerSignalSource, wake chan<- struct{}) {
+	m.lane.clock = m.policy.clock
+	for {
+		m.refresh(ctx, source)
+		m.snapshot() // stale facts cancel offline work even while a probe is stuck
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+		timer := time.NewTimer(m.lane.waitDuration())
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
+		case <-m.lane.done:
 		}
+		timer.Stop()
 	}
 }
 
@@ -318,4 +372,32 @@ func (q *Queue) withdrawUnavailable(m *Machine) {
 			slot.InFlight = 0
 		}
 	}
+}
+
+// Queue-clock origin replaces worker wall time. Report age must describe the
+// original observation; successful contact cannot erase it.
+func acceptHostAvailability(m *Machine, now time.Time) {
+	a := machineAvailability(m)
+	if a == nil {
+		return
+	}
+	// Dedicated hosts do not depend on owner observations. Sensor age must not
+	// turn their affirmative dedicated policy into an owner-activity withdrawal.
+	if a.Mode != "daily" && !a.Signals.Laptop && a.Signals.Power != "battery" {
+		return
+	}
+	if a.Probe == nil {
+		a.CheckedAt = now
+		return
+	} // Legacy worker protocol.
+	if !a.Probe.valid() || !validMemoryValue(a.AgeSeconds) || a.AgeSeconds >= a.Probe.freshness().Seconds() {
+		a.Available = false
+		a.Reason = "owner signals stale"
+		return
+	}
+	a.CheckedAt = now.Add(-time.Duration(a.AgeSeconds * float64(time.Second)))
+}
+func hostAvailabilityFresh(m *Machine, now time.Time) bool {
+	a := machineAvailability(m)
+	return a != nil && (a.Probe == nil || a.Probe.valid()) && !now.Before(a.CheckedAt) && now.Sub(a.CheckedAt) < a.Probe.freshness()
 }

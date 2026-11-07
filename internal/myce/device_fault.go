@@ -24,8 +24,9 @@ type KernelLogLine struct {
 	At          time.Time
 }
 type KernelLogSnapshot struct {
-	BootID string
-	Lines  []KernelLogLine
+	BootID             string
+	Lines              []KernelLogLine
+	started, completed time.Time
 }
 
 // Without a cursor of its own, a source reads records from since onward.
@@ -79,10 +80,10 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	if w.DeviceFaultSource == nil {
 		w.DeviceFaultSource = workerDeviceFaultSource()
 	}
-	// Finish the initial boot scan before offering inventory. Later scans use
-	// the short heartbeat I/O budget and retain late completion.
+	// Establish the first cursor before offering inventory. Cancellation owns
+	// startup; no fixed deadline assumes how long this host's journal takes.
 	previousBudget := root.deviceFaults.timeout
-	root.deviceFaults.timeout = 2100 * time.Millisecond
+	root.deviceFaults.timeout = -1
 	defer func() { root.deviceFaults.timeout = previousBudget }()
 	return w.refreshDeviceFaults(ctx, root)
 }
@@ -111,12 +112,27 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 	if w.DeviceFaultSource == nil {
 		return nil
 	} // Apple has no cheap qualified source.
-	source, since := w.DeviceFaultSource, w.faultSince
-	snapshot, err := root.deviceFaults.run("kernel", func() (KernelLogSnapshot, error) {
-		readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		return source(readCtx, since)
-	})
+	root.faultTiming.base, root.faultTiming.cores = w.Interval, w.Machine.EffectiveCPUCores
+	source, since, clock := w.DeviceFaultSource, w.faultSince, w.Clock
+	read := func() (KernelLogSnapshot, error) {
+		started := clock.Now()
+		snapshot, err := source(ctx, since)
+		snapshot.started, snapshot.completed = started, clock.Now()
+		return snapshot, err
+	}
+	var snapshot KernelLogSnapshot
+	var err error
+	if root.deviceFaults.timeout < 0 {
+		snapshot, err = root.deviceFaults.runContext(ctx, "kernel", read)
+	} else {
+		snapshot, err = root.deviceFaults.run("kernel", read)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if !errors.Is(err, errCheckpointIOPending) && !snapshot.started.IsZero() {
+		root.faultTiming.observe(snapshot.started, snapshot.completed, err != nil || len(snapshot.Lines) > 0)
+	}
 	if errors.Is(err, errCheckpointIOPending) {
 		return nil
 	}

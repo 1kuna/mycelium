@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // runMeasure runs only on the selected worker; it never dispatches remote work.
@@ -33,14 +32,14 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	output := f.String("output", "plain", "plain or json report to stdout")
 	warmup := f.String("warmup", "", "JSON file mapping model name to method/path/body/headers")
 	parallel := f.Int("warmup-parallel", 1, "maximum concurrent warm-ups (greater than one warms after all models load)")
-	loadTimeout := f.Duration("load-timeout", 5*time.Minute, "per-model measurement load timeout")
+	loadTimeout := f.Duration("load-timeout", 0, "optional per-model measurement wall deadline (default follows load progress)")
 	force := f.Bool("force", false, "bypass production refusal during approved maintenance; never bypass spool lock")
 	authority := installedClientFlags(f)
 	if e := f.Parse(args); e != nil {
 		return e
 	}
-	if *parallel <= 0 || *loadTimeout <= 0 {
-		return errors.New("--warmup-parallel and --load-timeout must be positive")
+	if *parallel <= 0 || *loadTimeout < 0 {
+		return errors.New("--warmup-parallel must be positive and --load-timeout nonnegative")
 	}
 	if f.NArg() != 0 || *config == "" || *models == "" || *worker == "" || *device == "" || *platform == "" || *budget <= 0 {
 		return errors.New("measure requires --model-config --models --worker --device --platform --memory-gb; run locally with join stopped and its exact --queue/--state-dir")

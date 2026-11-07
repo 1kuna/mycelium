@@ -20,6 +20,14 @@ var workerHealthMountProbe = func(path string) error {
 	return readHealthMount(path, os.Stat, func(path string) (fs.ReadDirFile, error) { return os.Open(path) })
 }
 
+// Reuse checkpoint admission's exclusive create/close/remove access check.
+// ReadDir(1) can enumerate a large SMB directory while opening its stream on
+// macOS; health sampling must not repeatedly scan active checkpoint entries.
+var workerHealthCheckpointProbe = func(path string) error {
+	probeguard.Check()
+	return workerCheckpointAvailable(path, func() {})
+}
+
 func readHealthMount(path string, stat func(string) (os.FileInfo, error), open func(string) (fs.ReadDirFile, error)) error {
 	info, err := stat(path)
 	if err != nil {
@@ -93,7 +101,15 @@ func probeRecoveryMount(path, required, osname string, probe func(string) error,
 	return err
 }
 
+func healthMountAccess(role string) func(string) error {
+	if role == "checkpoint" {
+		return workerHealthCheckpointProbe
+	}
+	return workerHealthMountProbe
+}
+
 func recoveryMountProbe(w Worker, role, path string) func(string) error {
+	probe := healthMountAccess(role)
 	required := ""
 	if w.ServiceConfig != nil && withinNAS(w.ServiceConfig.NAS, path) && w.ServiceConfig.NAS != "" {
 		required = w.ServiceConfig.NAS
@@ -113,7 +129,7 @@ func recoveryMountProbe(w Worker, role, path string) func(string) error {
 			}
 			w.rootMonitor.mu.Unlock()
 		}
-		return probeRecoveryMount(path, required, runtime.GOOS, workerHealthMountProbe, func() ([]nasMount, error) {
+		return probeRecoveryMount(path, required, runtime.GOOS, probe, func() ([]nasMount, error) {
 			probeguard.Check()
 			return mountedNASInventory(context.Background(), runtime.GOOS, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
 				if runtime.GOOS == "linux" {
@@ -140,6 +156,7 @@ type hostMountProbe struct {
 	consecutive int
 	reason      string
 	nextProbe   time.Time
+	timing      probeTiming
 	retryDelay  time.Duration
 }
 
@@ -165,7 +182,7 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 	// Cold start gets one observation cadence. Measured samples can detect a
 	// pending stall immediately, but completed successes train through warmup:
 	// one unusually fast read must not freeze all later successful evidence.
-	limit := signalRefresh
+	limit := p.timing.controlPeriod()
 	if len(base) > 0 {
 		_, hi := healthBand(base, func(s HostHealthSample) float64 {
 			for _, m := range s.Mounts {
@@ -189,10 +206,9 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 				if errors.As(r.err, &recovery) {
 					p.last.Reason = string(recovery)
 				}
-				// Backoff starts at the existing observation cadence or measured cost.
-				// Its ceiling is the existing signal freshness allowance (or a slower
-				// host's observed cost), bounding recovery delay without a fleet constant.
-				p.retryDelay = min(max(signalMaxAge, limit), max(max(signalRefresh, limit), p.retryDelay*2))
+				// Failed attempts spread retries by their observed cost and repeated
+				// failure spacing. No universal mount-recovery deadline is assumed.
+				p.retryDelay = max(limit, max(r.latency, p.retryDelay*2))
 				p.nextProbe = now.Add(p.retryDelay)
 			} else {
 				p.retryDelay, p.nextProbe = 0, time.Time{}

@@ -80,6 +80,9 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 	case "tools":
 		return missingToolsReason(m.ID, missingTools(j, m))
 	case "production parity":
+		if j.CommandDiscovery != nil {
+			return commandDiscoveryParityAction
+		}
 		return variantParityAction
 	case "native network isolation":
 		if !j.Spec.Needs.Network {

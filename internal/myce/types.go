@@ -419,8 +419,11 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	HealthRecovery *AlertRecovery `json:"health_recovery,omitempty"`
+
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
+	Efficiency              *JobEfficiency         `json:"efficiency,omitempty"`
 	Blocker                 *Blocker               `json:"blocker,omitempty"`
 	WallTime                *WallTimeStatus        `json:"wall_time,omitempty"`
 	YieldPlan               *ScarceYieldProjection `json:"yield_plan,omitempty"`
@@ -498,6 +501,7 @@ type Job struct {
 	ModelEnvironmentKey         string `json:"model_environment_key,omitempty"`
 	ModelEnvironmentNeedsSource bool   `json:"model_environment_needs_source,omitempty"`
 
+	CommandDiscovery          *CommandDiscovery                       `json:"command_discovery,omitempty"`
 	SidecarEnvironmentRecipes map[string]map[string]EnvironmentRecipe `json:"sidecar_environment_recipes,omitempty"`
 
 	FileTransport         bool                   `json:"file_transport,omitempty"`
@@ -690,9 +694,11 @@ type Checkin struct {
 	Running              *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	DeviceTelemetryProtocol    string                       `json:"device_telemetry_protocol,omitempty"`
 	UnifiedMemoryProtocol      string                       `json:"unified_memory_protocol,omitempty"`
 	ProbeMemoryProtocol        string                       `json:"probe_memory_protocol,omitempty"`
 	HostCollectionProtocol     string                       `json:"hygiene_collection_protocol,omitempty"`
+	HostProbeProtocol          string                       `json:"host_probe_protocol,omitempty"`
 	HostHygieneProtocol        string                       `json:"host_hygiene_protocol,omitempty"`
 	ToolInventoryProtocol      string                       `json:"tool_inventory_protocol,omitempty"`
 	ToolInventoryRequired      bool                         `json:"tool_inventory_required,omitempty"`
@@ -801,6 +807,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	Efficiency          *EfficiencyReport    `json:"efficiency,omitempty"`
 	Freshness           *SnapshotFreshness   `json:"freshness,omitempty"`
 	StorageObservations []StorageObservation `json:"storage_observations,omitempty"`
 	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`

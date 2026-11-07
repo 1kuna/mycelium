@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -152,16 +153,32 @@ func (q *Queue) environmentFailureBlocked(j *Job, m *Machine) bool {
 	if environmentReady(j, m) {
 		return false
 	}
+	keys := environmentFailureKeys(j, m)
+	for _, r := range m.EnvironmentReports {
+		if slices.Contains(keys, r.Key) && q.environmentReportBlocked(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// A known failed sidecar still blocks this target when an earlier member has
+// been evicted. Do not rebuild unrelated missing members of a failed candidate.
+func environmentFailureKeys(j *Job, m *Machine) []string {
+	if j.CommandDiscovery != nil {
+		keys := []string{}
+		for _, r := range commandEnvironmentRecipes(j, m) {
+			if !slices.Contains(m.Environments, r.Key) {
+				keys = append(keys, r.Key)
+			}
+		}
+		return keys
+	}
 	key := environmentKey(j, m)
 	if e := qualifiedExtension(j, m); e != nil {
 		key = extensionPreparationKey(*e, m)
 	}
-	for _, r := range m.EnvironmentReports {
-		if r.Key == key && (r.State == "failed" || r.State == "uploading") {
-			return q.environmentReportBlocked(r)
-		}
-	}
-	return false
+	return []string{key}
 }
 
 func (q *Queue) environmentReportBlocked(r EnvironmentReport) bool {
@@ -177,12 +194,9 @@ func (q *Queue) environmentFailureWaitingReason(j *Job, machines map[string]*Mac
 		if !q.environmentFailureBlocked(j, m) {
 			return ""
 		}
-		key := environmentKey(j, m)
-		if e := qualifiedExtension(j, m); e != nil {
-			key = extensionPreparationKey(*e, m)
-		}
+		keys := environmentFailureKeys(j, m)
 		for _, r := range m.EnvironmentReports {
-			if r.Key == key && (r.State == "failed" || r.State == "uploading") {
+			if slices.Contains(keys, r.Key) && q.environmentReportBlocked(r) {
 				reason = environmentFailureReason(r, j.Spec.Logs != "none")
 			}
 		}

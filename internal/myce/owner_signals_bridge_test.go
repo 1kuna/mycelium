@@ -45,7 +45,7 @@ func TestWSLHostBridgeEndToEnd(t *testing.T) {
 	}{
 		{"undeclared GPU-only", func() {}, false, "host CPU thermal coverage unavailable"},
 		{"desktop GPU-only", func() {}, true, "CPU thermal coverage waived for desktop"},
-		{"owner returns", func() { signals.IdleSeconds = 0 }, false, "waiting for 5 idle minutes"},
+		{"owner returns", func() { signals.IdleSeconds = 0 }, false, "waiting for owner idle recovery"},
 		{"session coverage lost", func() { signals.IdleKnown = false }, false, "owner activity unavailable"},
 		{"battery", func() { signals.Laptop = true; signals.Power = "battery" }, false, "on battery"},
 		{"detected laptop", func() { signals.Laptop = true }, false, "host CPU thermal coverage unavailable"},

@@ -35,7 +35,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 	s, err := q.statusSnapshotOptions(options, contexts...)
 	for i := range s.LoadedModels {
 		s.LoadedModels[i].EnvironmentRecipe = nil
-		s.LoadedModels[i].Error = ceilingDiagnostic(s.LoadedModels[i].Error, "model load or unload failed")
+		s.LoadedModels[i].Error = modelReadinessDiagnostic(s.LoadedModels[i].Error)
 	}
 	unsafeDockerHolds := map[string]string{}
 	for _, m := range s.Machines {
@@ -210,6 +210,14 @@ func statusJobValue(job *Job) Job {
 	}
 	if j.State == "failed" {
 		switch {
+		case strings.HasPrefix(j.Reason, "failed after 3 infrastructure losses:"):
+			// Queue-owned exhaustion must precede the last attempt's diagnostic.
+			// Never retain its suffix, which may contain private worker errors.
+			j.Reason = "stopped after 3 infrastructure interruptions (Mycelium-side, not a command failure)"
+			if j.ExecutionCause != nil {
+				j.Reason += "; last: " + j.ExecutionCause.String()
+			}
+			j.Reason += "; next: check saved progress and resubmit"
 		case j.Spec.ExtensionCheck != nil && strings.HasPrefix(j.Reason, "never started: "):
 			j.Reason = "never started: " + extensionCheckAdmissionReason(strings.TrimPrefix(j.Reason, "never started: "))
 		case j.Spec.ExtensionCheck != nil && j.Reason == "check execution timeout exceeded":

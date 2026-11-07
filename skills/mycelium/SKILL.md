@@ -85,7 +85,10 @@ YAML
 
 The tiny declared memory bounds this fixture; real work can omit memory to learn
 it. From the next release, cold auto-memory work reserves measured physical
-headroom on one host. A running CPU probe can share after fresh complete cgroup
+headroom on one host.
+Cold ceilings leave the host's measured check-in/launch drift unused; strict
+worker launch checks still refuse a larger unseen drop and teach the next probe.
+A running CPU probe can share after fresh complete cgroup
 measurements establish its live footprint and growth over a sampling horizon,
 extended by the measured growth rate through the sample's age;
 its containment ceiling stays fixed. Missing/stale measurements retain the full
@@ -114,8 +117,17 @@ coverage, native preparation and current admission remain separate. Run this
 before choosing targets and after inventory or recipe changes. A dependency
 candidate is not application compatibility or owner-accepted production parity.
 Plain-command `require_target` checks admission, not native qualification.
-Explicit targets remain binding; reusable entries still require them, and
-`portable: true` does not infer additional operating systems.
+Explicit targets remain binding. From the next release, a native CPU entry or
+profile may set `portable: true` and omit targets to discover candidates from
+all members' selected immutable managed Pixi locks and fresh worker inventory.
+This declares the whole payload portable, including binaries, shell commands,
+archives and runtime downloads. Unknown coverage grants no candidate. Failed
+preparation excludes only its exact target/recipe candidate; keep the same job
+while a viable alternative runs. Fix a deterministic recipe failure with changed
+immutable inputs and a new key. Automatic plain-command discovery is for
+non-production tiers: production needs the existing native variant/baseline and
+MY-19 parity workflow, or an explicit owner-accepted target list. Preparation,
+exit-zero checks and `portable: true` never constitute parity acceptance.
 
 ```sh
 myce version
@@ -130,6 +142,14 @@ Resolve uploads nothing; `needs-staging` for the source archive is expected:
 before submitting. Save the receipt's `key` and `job_id`. After a lost reply,
 repeat the same command with the saved key to recover that job; changed intent
 or an intentional repeat needs a new key.
+
+For optional NAS existence checks, add `--inspect-nas` to resolve. For one path,
+repeat after two successful worker heartbeats: the first delivers the request,
+the next returns metadata. More paths or slow metadata can take further
+heartbeats. `pending` remains unknown; `present` proves neither size nor hash.
+From the next queue release, all queue listeners share these observations;
+completed samples expire with worker-session freshness rather than a fixed
+minute. Staging still verifies the declared bytes before execution.
 
 If a profile or entry exits 69 with `input storage unconfirmed`, its intent and
 frozen inputs remain in the receipt. The diagnostic names preflight or upload,
@@ -170,6 +190,11 @@ for the response age. Inspection and filtered/full status take a fresh capture;
 default status can reuse a generation for up to one second, with immediate
 terminal/release invalidation.
 
+From the next release, mixed CPU/RAM waits name occupied cores on eligible
+hosts alongside the other hosts' RAM shortages. Reserved cores are admission
+accounting, not measured CPU utilization; a RAM figure alone does not explain
+why every eligible host is waiting.
+
 From the next collector release, job GET/status `resource_attempts` reports
 cumulative CPU time, block I/O and latest attempt PSI; machine `io_pressure`
 reports host PSI. Read the exact attempt/session, source, age and unavailable
@@ -183,6 +208,16 @@ independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
 
+From the next release (#881), job `health_recovery` retains an `owner_required`
+decision after repeated infrastructure failures: `action: none` means Mycelium
+performed no automatic repair and left capacity unchanged. The summary names
+what happened and `next_step` names the owner's action. For `live_host_growth`,
+the Mycelium maintenance owner inspects forecast bounds and paired queue/worker
+snapshots; the comparison alone does not prove stale free RAM. Keep the same job
+ID and submission key. Do not raise shared budgets, clear custody or resubmit to
+bypass the finding. It uses the existing health notification channel; no new
+notifier setup is needed. Later progress does not establish a causal repair.
+
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
 negative behind), the measured history horizon, weighted oldest project-wait
@@ -194,6 +229,30 @@ Tiers, eligibility and explicit
 caps/quotas still bind; running same-tier work is not stopped to repay debt.
 
 On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. During measured control pressure, expensive/lower-value nonproduction reads can return 429; honor `Retry-After` and prefer batched waits. Production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
+
+**Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; each CLI job gets an initial diagnostic read to retain its deadline. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
+
+**Input and accepted-result recovery (next release, #831/#751):** profile/adapter input storage retries span preflight and reconciled uploads under the caller's one context deadline; each retry reports its sanitized cause and honours `Retry-After`. `myce result` uses the same transient recovery for accepted retrieval, including CI. Permanent authentication, TLS, capacity, integrity and configuration errors stop immediately. No retry count or new default deadline is imposed; without an owner deadline, interrupt to stop observation/recovery and resume the saved intent later.
+
+## Adaptive model readiness (next release)
+
+Omitted model `max_wait` follows caller cancellation and actual load failures;
+omitted `idle_timeout` follows measured model demand and reload cost. A healthy
+load with advancing copy/load/health signals has no automatic total load
+cutoff. Keep the same request while it progresses. Learned loads detect silent
+stalls; an unknown cold load retains custody without a guessed deadline. Observable
+CPU time, reads and memory growth from shared per-attempt observations count as
+activity; unavailable counters remain unknown. Learned stall checks allow the
+shared sensor time to deliver its next observation. A cold load with no observed
+activity while eligible demand waits exposes an owner-attention reason and raises
+`model_load_needs_attention` through the existing health channel; the alert does
+not stop it. Explicit caller, `max_wait`, `ready_timeout`
+and measurement `--load-timeout` deadlines still apply where configured. For
+custom servers, report monotonic `MYCE_LOAD_PROGRESS` records as described in
+[adaptive readiness](https://github.com/1kuna/mycelium/blob/main/docs/readiness.md).
+Stdout progress records require captured logs; `logs: none` preserves null output
+descriptors and uses health/OS activity instead.
+Managed Docker still uses local digest-pinned images with `--pull=never`.
 
 ## Explicit model master downloads (next release)
 
@@ -212,6 +271,15 @@ concurrent-fetch error after its cause clears; repeating a completed fetch
 verifies the master without replacing it. Keep staging while a fetch is active.
 Verify the whole manifest before use; loading never downloads weights. See
 [explicit master downloads](https://github.com/1kuna/mycelium/blob/main/docs/services.md#explicit-master-download-and-pins).
+
+## Normal fleet updates (next release)
+
+On releases containing #900's idle-moment upgrade slice, a normal fleet update
+keeps busy enabled hosts `pending` and available for new work until a fresh
+natural idle moment. Other idle hosts can update first. Keep using the queue;
+do not cancel experiments to finish a drain. Started attempts finish naturally,
+and exact release custody still gates restart. The separately requested
+`--wait-production-idle` policy continues to hold new production assignments.
 
 ## Automatic host hygiene (next release)
 
@@ -241,11 +309,17 @@ no agent polling or drain/resume loop is needed. Foreign CPU/RSS leaders are
 context for the host owner: never stop their processes or services. See
 [host-health fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#automatic-host-health-834-next-release).
 Older queues omit the new status fields; workers retain local history and use
-the existing leaving signal for a confirmed local drain until support is negotiated.
+reversible availability withholding for unknown health or a confirmed local drain
+until support is negotiated.
+From the checkpoint-probe correction, checkpoint health uses the existing tiny
+exclusive create/close/remove check instead of enumerating the checkpoint root.
+This removes unnecessary directory work; genuinely slow checkpoint metadata
+still withholds dependent jobs under the unchanged measured thresholds.
 
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
+- **Benchmark host telemetry:** [bounded local capture and receipt schema](advanced.md#benchmark-telemetry-receipts) for queue/worker RSS, external RAM and per-card memory/activity; missing samples remain unknown.
 - **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
 - **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits.
@@ -270,3 +344,28 @@ their supported request shape while local collection continues.
 Installed/rollback images, active state, receipts and unknown data are retained;
 foreign services/processes and other projects' shared caches are owner context
 only. See [worker cleanup](https://github.com/1kuna/mycelium/blob/main/docs/status.md#worker-cleanup-834-next-release).
+
+## Queue efficiency (next release)
+
+Use `myce efficiency` for one concise read of reservation versus measured use,
+blocker wait totals, authored exclusions stranding fitting work, prediction
+errors and wasted/suspect attempts. `myce efficiency --json` reads the immutable
+maintenance report without fetching job payloads; status/inspection JSON also
+include `efficiency`. Read its `at` and coverage: nullable CPU/I/O counters,
+lower-bound flags, elapsed attempt windows and dropped-attempt count distinguish
+observed use from unknown. CPU/I/O counter windows can differ from the
+reservation horizon; they are not a utilization ratio. Missing memory samples
+are not zero use. `efficiency_regression` wakes use the existing
+health notification path and this installation's learned baselines. Investigate
+an offender with its per-job status; keep authored hard requirements and parity
+checks. See [queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/status.md#queue-efficiency-next-release-857).
+
+## Adaptive host observations (next release)
+
+On negotiated `host-probe-v1` workers, owner/pressure status includes measured
+probe period, cost and frozen validity. Read age against that observation's
+validity; a successful check-in cannot renew a failed probe. Owner-latency holds
+now require fresh healthy evidence spanning the attempt's measured interference
+interval, rather than a fixed retry delay. Other eligible hosts remain available.
+Older workers retain legacy fields and age rules. See
+[host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).

@@ -243,3 +243,51 @@ func TestCancelInstalledAuthority(t *testing.T) {
 		t.Fatalf("pin refusal changed job: %+v %v", job, err)
 	}
 }
+
+func TestResultTransientRecoveryUsesAcceptedVerification(t *testing.T) {
+	data := []byte("accepted gate result\n")
+	hash := sha256.Sum256(data)
+	ref := myce.FileRef{SHA256: hex.EncodeToString(hash[:]), SizeBytes: int64(len(data))}
+	reads, downloads := 0, 0
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/jobs/") {
+			reads++
+			if reads == 1 {
+				w.WriteHeader(503)
+				_, _ = io.WriteString(w, `{"code":"queue_stopping"}`)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(myce.Job{ID: "job", State: "succeeded", OutputRefs: myce.FileManifest{"gate-result.txt": ref}})
+			return
+		}
+		downloads++
+		w.Header().Set("ETag", `"`+ref.SHA256+`"`)
+		w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+		if downloads == 1 {
+			_, _ = w.Write(data[:5])
+			return
+		}
+		_, _ = w.Write(data)
+	}))
+	defer api.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out := t.TempDir()
+	var diagnostics strings.Builder
+	err := resultCommand(ctx, []string{"job", "--queue", api.URL, "--token", "fixture", "--out", out}, &diagnostics)
+	if err != nil || downloads != 2 {
+		t.Fatal(err, downloads, diagnostics.String())
+	}
+	got, err := os.ReadFile(filepath.Join(out, "gate-result.txt"))
+	if err != nil || string(got) != string(data) {
+		t.Fatal(string(got), err)
+	}
+	for _, cause := range []string{"HTTP 503", "unexpected_EOF"} {
+		if !strings.Contains(diagnostics.String(), cause) {
+			t.Fatal("missing retry cause", cause, diagnostics.String())
+		}
+	}
+	if strings.Contains(diagnostics.String(), "fixture") {
+		t.Fatal("credential printed")
+	}
+}

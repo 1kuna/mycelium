@@ -36,6 +36,59 @@
       ],
       "type": "object"
     },
+    "AlertRecovery": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "episode": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "next_step": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "episode",
+        "action",
+        "state",
+        "cause",
+        "summary",
+        "machine",
+        "job_id",
+        "attempt",
+        "at"
+      ],
+      "type": "object"
+    },
     "ApplicationProgress": {
       "properties": {
         "age_seconds": {
@@ -307,6 +360,9 @@
         "execution_cause": {
           "$ref": "#/$defs/RuntimeCause"
         },
+        "forced": {
+          "type": "boolean"
+        },
         "interrupted": {
           "type": "boolean"
         },
@@ -336,6 +392,9 @@
         },
         "state": {
           "type": "string"
+        },
+        "stop_observation": {
+          "$ref": "#/$defs/AttemptStopObservation"
         }
       },
       "required": [
@@ -399,6 +458,92 @@
         "sampled_at",
         "age_seconds",
         "elapsed_seconds"
+      ],
+      "type": "object"
+    },
+    "AttemptStopObservation": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "headroom_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host_sample_age_seconds": {
+          "type": "number"
+        },
+        "io_pressure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IOPressure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory_pressure": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "physical_used_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pressure_age_seconds": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pressure_unit": {
+          "type": "string"
+        },
+        "swap_growth_bytes_per_second": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "io_pressure",
+        "at",
+        "host_sample_age_seconds",
+        "headroom_gb",
+        "physical_used_gb",
+        "memory_pressure",
+        "pressure_unit",
+        "pressure_age_seconds",
+        "swap_growth_bytes_per_second"
       ],
       "type": "object"
     },
@@ -697,6 +842,23 @@
       ],
       "type": "object"
     },
+    "CommandDiscovery": {
+      "properties": {
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "targets"
+      ],
+      "type": "object"
+    },
     "Copy": {
       "properties": {
         "allocated_devices": {
@@ -911,6 +1073,136 @@
       "required": [
         "name",
         "command"
+      ],
+      "type": "object"
+    },
+    "EfficiencyAllocation": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "cpu_lower_bound": {
+          "type": "boolean"
+        },
+        "cpu_observed_attempts": {
+          "type": "integer"
+        },
+        "cpu_observed_elapsed_seconds": {
+          "type": "number"
+        },
+        "device_covered_seconds": {
+          "type": "number"
+        },
+        "host": {
+          "type": "string"
+        },
+        "io_lower_bound": {
+          "type": "boolean"
+        },
+        "io_observed_attempts": {
+          "type": "integer"
+        },
+        "measured_cpu_seconds": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measured_device_gb_seconds": {
+          "type": "number"
+        },
+        "measured_memory_gb_seconds": {
+          "type": "number"
+        },
+        "memory_covered_seconds": {
+          "type": "number"
+        },
+        "read_bytes": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "read_ops": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reserved_covered_memory_gb_seconds": {
+          "type": "number"
+        },
+        "reserved_cpu_seconds": {
+          "type": "number"
+        },
+        "reserved_device_gb_seconds": {
+          "type": "number"
+        },
+        "reserved_memory_gb_seconds": {
+          "type": "number"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "work": {
+          "type": "string"
+        },
+        "write_bytes": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "write_ops": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "host",
+        "work",
+        "basis",
+        "reserved_covered_memory_gb_seconds",
+        "reserved_device_gb_seconds",
+        "measured_device_gb_seconds",
+        "device_covered_seconds",
+        "reserved_memory_gb_seconds",
+        "measured_memory_gb_seconds",
+        "memory_covered_seconds",
+        "reserved_cpu_seconds",
+        "measured_cpu_seconds",
+        "cpu_observed_elapsed_seconds",
+        "cpu_observed_attempts",
+        "cpu_lower_bound",
+        "read_bytes",
+        "write_bytes",
+        "read_ops",
+        "write_ops",
+        "io_observed_attempts",
+        "io_lower_bound",
+        "seconds"
       ],
       "type": "object"
     },
@@ -1825,6 +2117,10 @@
           "$ref": "#/$defs/RuntimeCause",
           "x-contract": "diagnostic"
         },
+        "command_discovery": {
+          "$ref": "#/$defs/CommandDiscovery",
+          "x-contract": "diagnostic"
+        },
         "copies": {
           "items": {
             "$ref": "#/$defs/Copy"
@@ -1853,6 +2149,10 @@
         },
         "diagnostic_code": {
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "efficiency": {
+          "$ref": "#/$defs/JobEfficiency",
           "x-contract": "diagnostic"
         },
         "eligible_hosts": {
@@ -1945,6 +2245,10 @@
         },
         "front": {
           "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "health_recovery": {
+          "$ref": "#/$defs/AlertRecovery",
           "x-contract": "diagnostic"
         },
         "id": {
@@ -2381,6 +2685,62 @@
         "queued",
         "front",
         "checkpoint"
+      ],
+      "type": "object"
+    },
+    "JobEfficiency": {
+      "properties": {
+        "allocations": {
+          "items": {
+            "$ref": "#/$defs/EfficiencyAllocation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "blocker": {
+          "type": "string"
+        },
+        "rate": {
+          "$ref": "#/$defs/efficiencyRate"
+        },
+        "retained_rates": {
+          "items": {
+            "$ref": "#/$defs/efficiencyRate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "wait_seconds": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "at",
+        "work",
+        "wait_seconds",
+        "rate"
       ],
       "type": "object"
     },
@@ -4014,6 +4374,17 @@
     },
     "SharedHostBackoff": {
       "properties": {
+        "last_observation": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "quiet_since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "recovery_seconds": {
+          "type": "number"
+        },
         "stops": {
           "items": {
             "format": "date-time",
@@ -4815,6 +5186,66 @@
       "required": [
         "input_shape",
         "units"
+      ],
+      "type": "object"
+    },
+    "efficiencyRate": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "device_valid_until": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "measured_device_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measured_memory_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "release": {
+          "type": "string"
+        },
+        "reserved_cpu_cores": {
+          "type": "number"
+        },
+        "reserved_device_gb": {
+          "type": "number"
+        },
+        "reserved_memory_gb": {
+          "type": "number"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reserved_device_gb",
+        "measured_device_gb",
+        "device_valid_until",
+        "reserved_memory_gb",
+        "reserved_cpu_cores",
+        "measured_memory_gb",
+        "valid_until"
       ],
       "type": "object"
     }

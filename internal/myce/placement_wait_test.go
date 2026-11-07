@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -34,6 +35,87 @@ func TestQueuedReasonIgnoresIneligibleReservation(t *testing.T) {
 		if strings.Contains(reason, "unrelated validation") || strings.Contains(reason, wrong.ID) || !strings.Contains(reason, "4.0 GiB needed") || !strings.Contains(reason, "0.5 GiB available") {
 			t.Fatal("reason did not name the job's eligible RAM blocker", reason)
 		}
+	}
+}
+
+// Mixed shortages must describe both eligible hosts, regardless of whether
+// the CPU-busy host also lacks RAM. The RAM fallback used to skip busy CPUs.
+func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
+	for _, busyRAM := range []float64{32, 2} {
+		t.Run(fmt.Sprint(busyRAM), func(t *testing.T) {
+			q, clock := fixture(t)
+			busy := cpuMachine("arm-host", "arm-host", "cpu", 8, busyRAM)
+			busy.CapabilityProfile.Arch = "arm64"
+			check(t, q, busy, nil)
+			holderSpec := cpuSpec(8, 1)
+			holderSpec.AllowedMachines = []string{busy.ID}
+			holder := submit(t, q, holderSpec)
+			if got := check(t, q, busy, nil).Job; got == nil || got.ID != holder.ID {
+				t.Fatal("fixture did not reserve all cores", got)
+			} else {
+				holder = got
+			}
+			ram := cpuMachine("amd-host", "amd-host", "cpu", 8, 0.5)
+			check(t, q, ram, nil)
+			wrong := cpuMachine("unrelated", "unrelated", "cpu", 8, 0.5)
+			wrong.CapabilityProfile.OS = "darwin"
+			check(t, q, wrong, nil)
+			s := cpuSpec(2, 4)
+			s.Targets = []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cpu"}, {OS: "linux", Arch: "arm64", Platform: "cpu"}}
+			j := submit(t, q, s)
+			clock.Advance(time.Second)
+			check(t, q, busy, holder)
+			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			defer server.Close()
+			receipt, err := (Client{URL: server.URL, Token: "test"}).GetJob(context.Background(), j.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, reason := range []string{q.waitReason(q.s.Jobs[j.ID]), job(t, q, j.ID).Reason, receipt.Reason} {
+				for _, want := range []string{"arm-host: CPU capacity: 2 cores needed; 0 cores unreserved of 8 admitted", "amd-host: RAM envelope: 4.0 GiB needed, 0.5 GiB available"} {
+					if !strings.Contains(reason, want) {
+						t.Errorf("missing %q: %s", want, reason)
+					}
+				}
+				if strings.Contains(reason, wrong.ID) {
+					t.Errorf("unrelated target in reason: %s", reason)
+				}
+				if busyRAM == 2 && !strings.Contains(reason, "RAM envelope: 4.0 GiB needed, 1.0 GiB available") {
+					t.Errorf("CPU shortage hid same-host RAM shortage: %s", reason)
+				}
+			}
+			// A newly fitting target restores normal admission; diagnostics do
+			// not turn another host's shortage into a scheduling restriction.
+			ram.HostAvailableMemoryGB = 32
+			if got := check(t, q, ram, nil).Job; got == nil || got.ID != j.ID {
+				t.Fatal("fitting peer did not admit queued work", got)
+			}
+		})
+	}
+}
+
+func TestQueuedReasonUnavailablePeerAndRAMShortage(t *testing.T) {
+	q, clock := fixture(t)
+	owner := cpuMachine("owner-host", "owner-host", "cpu", 8, 32)
+	owner.CapabilityProfile.Availability = &Availability{Mode: "daily", Available: false, Reason: "on battery", CheckedAt: clock.Now(), Signals: idleSignals()}
+	check(t, q, owner, nil)
+	ram := cpuMachine("ram-host", "ram-host", "cpu", 8, 0.5)
+	check(t, q, ram, nil)
+	j := submit(t, q, cpuSpec(2, 4))
+	clock.Advance(time.Second)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for _, reason := range []string{q.waitReason(q.s.Jobs[j.ID]), job(t, q, j.ID).Reason, q.statusWaitingReason(job(t, q, j.ID))} {
+		for _, want := range []string{"owner-host: hypha on battery", "ram-host: RAM envelope: 4.0 GiB needed, 0.5 GiB available"} {
+			if !strings.Contains(reason, want) {
+				t.Errorf("missing %q: %s", want, reason)
+			}
+		}
+	}
+	owner.CapabilityProfile.Availability.Available = true
+	if got := check(t, q, owner, nil).Job; got == nil || got.ID != j.ID {
+		t.Fatal("available peer did not admit queued work", got)
 	}
 }
 

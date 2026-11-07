@@ -91,7 +91,9 @@ func TestPrivacyControlErrorDoesNotEchoBody(t *testing.T) {
 		w.Write([]byte(strings.Repeat("synthetic-secret", 1000)))
 	}))
 	defer upstream.Close()
-	err := (Client{URL: upstream.URL}).Call(context.Background(), "GET", "/", nil, nil)
+	// Inspect one refused response, not the overload recovery loop. A persistent
+	// 503 is now retried until the owner's deadline by the ordinary client.
+	err := (Client{URL: upstream.URL}).WithoutRetries().Call(context.Background(), "GET", "/", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "503") || strings.Contains(err.Error(), "synthetic-secret") || len(err.Error()) > 128 {
 		t.Fatal("unsafe control error")
 	}
