@@ -133,3 +133,14 @@ func TestProgramMemoryForecastValidityAndFloors(t *testing.T) {
 		t.Fatal("unknown hardware spent credit", changed.Spec.Needs)
 	}
 }
+
+func TestProgramMemoryQualificationKeepsLearnedDemand(t *testing.T) {
+	q, clock, e, m, s := programMemoryFixture(t)
+	finishProgramMemory(t, q, clock, startProgramMemory(t, q, m, s), SizeHint{MemoryGB: 40, HostMemoryGB: 4}, nil)
+	small := placementMachine("small", "separate", 64, 24, e)
+	check(t, q, small, nil)
+	s.RequireTarget, s.AllowedMachines = true, []string{small.ID}
+	if _, err := q.Submit(s); err == nil {
+		t.Fatal("qualified a 40 GiB learned program on a 24 GiB accelerator")
+	}
+}

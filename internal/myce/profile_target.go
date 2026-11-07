@@ -311,6 +311,7 @@ func (q *Queue) evaluateTargetsMemory(j *Job, sizeMemory bool, visit func(fit ta
 			}
 			for _, candidate := range candidates {
 				if sizeMemory {
+					capacity.applyLearnedNeeds(candidate)
 					candidate = capacity.memoryCandidate(candidate, &copy)
 				} else {
 					candidate = memoryIntent(candidate)
