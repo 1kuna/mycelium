@@ -113,35 +113,8 @@ func TestDevCommandQuickstart(t *testing.T) {
 	}
 	assertClean()
 	// A real controlling terminal must remain readable by the helper group.
-	run(filepath.Join(root, "mycelium"), env, "python3", "-c", `
-import os, pty, select, time
-pid, fd = pty.fork()
-if pid == 0:
-    os.execv('./myce', ['./myce', 'dev', '--', 'sh', '-c', 'test -t 0 && read line && test "$line" = terminal-input && echo terminal-ok'])
-try:
-    os.write(fd, b'terminal-input\n')
-    data = b''
-    until = time.monotonic() + 15
-    while time.monotonic() < until:
-        ready, _, _ = select.select([fd], [], [], 0.1)
-        if ready:
-            try:
-                chunk = os.read(fd, 4096)
-            except OSError:
-                break
-            if not chunk:
-                break
-            data += chunk
-    done, status = os.waitpid(pid, os.WNOHANG)
-    assert done == pid and os.waitstatus_to_exitcode(status) == 0 and b'terminal-ok' in data, data
-finally:
-    try:
-        os.kill(pid, 15)
-        os.waitpid(pid, 0)
-    except ProcessLookupError:
-        pass
-    os.close(fd)
-`)
+	run(filepath.Join(root, "mycelium"), env, "python3", "-c", devCommandPTYProbe,
+		"./myce", "dev", "--", "sh", "-c", `test -t 0 && read line && test "$line" = terminal-input && echo terminal-ok`)
 	assertClean()
 	// Interrupt a real command tree, then prove its child and listener are gone.
 	profilePath := filepath.Join(root, "mycelium", ".mycelium", "profiles", "quickstart.yaml")
