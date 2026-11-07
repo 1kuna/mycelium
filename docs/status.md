@@ -1329,8 +1329,11 @@ The ledger has its own `captured_at`, oldest worker `observed_at`,
 `allowance_gb` means no explicit static allowance, not zero physical capacity.
 Each owner identifies an attempt, retained release or model execution, with
 its actual `charge_gb` and remaining `growth_gb`. A live attempt and its nominal
-release receipt appear once. Reservation entries preserve ID, bound job, state
-and pending custody at comparison time. Reservations add no RAM charge and
+release receipt appear once. Reservation entries preserve ID, bound job, ready
+time and lifecycle state. Pending custody reuses existing reservation accounting,
+with `pending_known` and `pending_observed_at`; if that pass did not evaluate it,
+pending state is explicitly unknown. Capturing a comparison adds no reservation
+or backlog scan. Reservations add no RAM charge and
 do not exempt their bound jobs from physical capacity or cleanup requirements.
 
 This is one replaceable diagnostic per job, retained with ordinary job history,
