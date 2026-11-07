@@ -44,16 +44,18 @@ func (q *Queue) outputReservationsFor(payloads map[string]storedPayload, exclude
 }
 
 func (q *Queue) reservedOutputBytes(payloads map[string]storedPayload, contexts ...context.Context) uint64 {
-	if lockUploadContext(requestContext(contexts), q.mu.RLock, q.mu.RUnlock) != nil {
+	controlMu := q.mu.named("reservedOutputBytes", requestContext(contexts))
+	if lockUploadContext(requestContext(contexts), controlMu.RLock, controlMu.RUnlock) != nil {
 		return 0
 	}
-	defer q.mu.RUnlock()
+	defer controlMu.RUnlock()
 	return q.outputReservations(payloads, "")
 }
 
 // Reservation is attempt-specific and replayable. No blob is accepted here;
 // CompleteContext still hashes and syncs all bytes before success.
 func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error) {
+	controlMu := q.mu.named("reserveDeliveryResult", ctx)
 	var pressureStatus FileStoreStatus
 	var pressurePayloads map[string]storedPayload
 	var pressureGrowth uint64
@@ -70,13 +72,13 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 	}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
-	q.mu.RLock()
+	controlMu.RLock()
 	store := q.files
 	// Lost completion acknowledgements replay acceptance rather than treating
 	// the already accepted current attempt as a stale reservation.
 	accepted := q.s.Jobs[r.ID]
 	replayed := accepted != nil && accepted.State == "succeeded" && accepted.ID == r.ID && accepted.Attempt == r.Attempt && accepted.Machine == r.Machine && accepted.Session == r.Session && accepted.Spec.OutputDelivery == asyncNAS && maps.Equal(accepted.OutputRefs, r.OutputRefs)
-	q.mu.RUnlock()
+	controlMu.RUnlock()
 	if replayed {
 		return nil
 	}
@@ -161,9 +163,10 @@ const outputRetryHold = "file_store_capacity: waiting to reacquire output reserv
 // Requeue never conjures a fresh estimate. Tick reacquires the retry's budget
 // through the same serialized file-store admission used for new tasks/uploads.
 func (q *Queue) admitOutputRetries(ctx context.Context) error {
+	controlMu := q.mu.named("admitOutputRetries", ctx)
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
-	q.mu.RLock()
+	controlMu.RLock()
 	store := q.files
 	pending := false
 	for _, j := range q.liveJobs() {
@@ -171,7 +174,7 @@ func (q *Queue) admitOutputRetries(ctx context.Context) error {
 			pending = true
 		}
 	}
-	q.mu.RUnlock()
+	controlMu.RUnlock()
 	if !pending || store == nil {
 		return nil
 	}
@@ -213,12 +216,13 @@ func (q *Queue) admitOutputRetries(ctx context.Context) error {
 // Unlike input markers, this marker survives the provisional manifest reference:
 // it remains the cleanup owner if a failed/lost attempt discards that manifest.
 func (q *Queue) recordAttemptOutputUpload(hash string, created bool, ctx context.Context) error {
-	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	controlMu := q.mu.named("recordAttemptOutputUpload", ctx)
+	if err := lockUploadContext(ctx, controlMu.RLock, controlMu.RUnlock); err != nil {
 		return err
 	}
 	_, input := q.s.JobInputUploads[hash]
 	_, output := q.s.AttemptOutputUploads[hash]
-	q.mu.RUnlock()
+	controlMu.RUnlock()
 	if output || !created && !input {
 		return nil
 	}

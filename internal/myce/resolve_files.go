@@ -15,6 +15,7 @@ type ResolveFileInput struct {
 }
 
 func (q *Queue) resolveFileInputs(parent context.Context, req ResolveRequest, report *ResolveReport) {
+	controlMu := q.mu.named("resolveFileInputs", parent)
 	manifest := submissionFiles(req.Spec)
 	if len(manifest) == 0 {
 		return
@@ -42,13 +43,13 @@ func (q *Queue) resolveFileInputs(parent context.Context, req ResolveRequest, re
 	// Cancellation bounds hash reads; a stuck syscall keeps its slot until return.
 	ctx, cancel := context.WithTimeout(parent, localObservationBudget)
 	defer cancel()
-	q.mu.Lock()
+	controlMu.Lock()
 	store := q.files
 	if q.submitVerificationSlot == nil {
 		q.submitVerificationSlot = make(chan struct{}, 1)
 	}
 	slot := q.submitVerificationSlot
-	q.mu.Unlock()
+	controlMu.Unlock()
 	select {
 	case slot <- struct{}{}:
 	case <-ctx.Done():

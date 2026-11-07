@@ -71,6 +71,7 @@ func logQueueHold(duration time.Duration, operation string, fn func() error, pha
 // Launch requests and instruction polls opt into detailed request/commit
 // timing; mutex holds are sampled independently above.
 type queueUpdateTiming struct {
+	control   *controlLock
 	started   time.Time
 	lockedAt  time.Time
 	mutexWait time.Duration
@@ -120,6 +121,10 @@ func (t *queueUpdateTiming) lockContext(ctx context.Context, mu sync.Locker) err
 }
 
 func (t *queueUpdateTiming) commit(tx *sql.Tx) error {
+	if t != nil && t.control != nil {
+		t.control.next(controlCommit)
+		defer t.control.next(controlOther)
+	}
 	if t == nil {
 		return tx.Commit()
 	}
@@ -149,6 +154,7 @@ func (t *queueUpdateTiming) observe(fn func(time.Duration, time.Duration)) {
 // Sampled timestamps only; queue decisions always use q.clock. The optional
 // telemetry clock permits deterministic slow-update tests without sleeping.
 type queueHoldPhases struct {
+	control       *controlLock
 	clock         Clock
 	started, last time.Time
 	active        int
@@ -175,6 +181,23 @@ func newQueueHoldPhases(started time.Time, clock Clock) queueHoldPhases {
 	return queueHoldPhases{started: started, last: started, clock: clock, active: holdRecords}
 }
 func (p *queueHoldPhases) next(active int) {
+	if p.control != nil {
+		p.control.coarse(active)
+		phase := controlOther
+		switch active {
+		case holdRecords:
+			phase = controlRecords
+		case holdUsage:
+			phase = controlUsage
+		case holdBody:
+			phase = controlBody
+		case holdPersist:
+			phase = controlOther
+		case holdNotify:
+			phase = controlNotify
+		}
+		p.control.next(phase)
+	}
 	if p.started.IsZero() {
 		return
 	}

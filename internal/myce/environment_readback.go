@@ -32,8 +32,9 @@ type EnvironmentPlatform struct {
 }
 
 func (q *Queue) EnvironmentEntries() []EnvironmentEntry {
+	controlMu := q.mu.named("EnvironmentEntries", nil)
 	// The configured catalog is immutable. Hash its detached snapshot outside q.mu.
-	q.mu.Lock()
+	controlMu.Lock()
 	catalog := q.environments
 	// Capture only actual reported read failures. Ready cache evidence says
 	// nothing about whether a worker can still read the original library.
@@ -60,7 +61,7 @@ func (q *Queue) EnvironmentEntries() []EnvironmentEntry {
 			observations[report.Key] = append(observations[report.Key], observation)
 		}
 	}
-	q.mu.Unlock()
+	controlMu.Unlock()
 	entries := make([]EnvironmentEntry, 0, len(catalog.Environments))
 	for name, recipes := range catalog.Environments {
 		entry := EnvironmentEntry{Library: "environment-library", ReadingSide: "queue", ResolutionBase: "environment-library", Name: name, Platforms: []EnvironmentPlatform{}}

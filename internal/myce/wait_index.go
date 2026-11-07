@@ -49,8 +49,9 @@ type waitStateIndex struct {
 }
 
 func (q *Queue) waitIndex() *waitStateIndex {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu := q.mu.named("waitIndex", nil)
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	if q.waitStates == nil {
 		q.waitStates = &waitStateIndex{jobs: map[string]WaitState{}, changed: make(chan struct{})}
 		q.waitStates.policy = q.effectivePriorityPolicy()

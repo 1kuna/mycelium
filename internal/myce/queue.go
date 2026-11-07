@@ -183,6 +183,8 @@ type Queue struct {
 	calls            map[string]*ModelCall
 	lock             *os.File
 	mu               queueMutex
+	control          *controlRecorder
+	controlHold      *controlLock
 	stopping         atomic.Bool // Fence before waiting for a queue transaction or either listener.
 	shutdownOnce     sync.Once
 	shutdownContext  context.Context
@@ -274,6 +276,12 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	}
 	db.SetMaxOpenConns(1)
 	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q.control = newControlRecorder(clock)
+	if err = q.control.initialize(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	q.mu.control = q.control
 	q.healthStoreProbe.timeout = heartbeatFilesystemBudget
 	q.nasProbe.timeout = heartbeatFilesystemBudget
 	q.nasProgress.timeout = heartbeatFilesystemBudget
@@ -391,8 +399,9 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 
 // SetRestartGrace configures the recovery window from this queue's startup.
 func (q *Queue) SetRestartGrace(d time.Duration) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu := q.mu.named("SetRestartGrace", nil)
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	if len(q.unreported) > 0 {
 		q.restartUntil = q.clock.Now().Add(d)
 	}
@@ -404,22 +413,24 @@ const DefaultProductionInfrastructureRetries = 2
 // Zero disables retries; values above two are clamped to the agreed maximum.
 // Stage failures never use this budget.
 func (q *Queue) SetProductionInfrastructureRetries(n int) error {
+	controlMu := q.mu.named("SetProductionInfrastructureRetries", nil)
 	if n < 0 {
 		return errors.New("production infrastructure retries must be nonnegative")
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	q.productionInfrastructureRetries = min(n, 2)
 	return nil
 }
 
 // SetLossTimeouts sets the quiet-worker thresholds by workload priority.
 func (q *Queue) SetLossTimeouts(production, deadline, experiment time.Duration) error {
+	controlMu := q.mu.named("SetLossTimeouts", nil)
 	if production <= 0 || deadline <= 0 || experiment <= 0 {
 		return errors.New("loss timeouts must be positive")
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	q.lossTimeouts = [3]time.Duration{production, deadline, experiment}
 	return nil
 }
@@ -490,16 +501,18 @@ func (q *Queue) BeginShutdown() {
 }
 
 func (q *Queue) Close() error {
+	controlErr := q.control.flushClose(q.db)
+	controlMu := q.mu.named("Close", nil)
 	if q.stopping.Load() {
 		log.Printf("event=queue_shutdown phase=storage_wait")
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	var err error
 	if q.usageReader != nil {
 		err = q.usageReader.Close()
 	}
-	err = errors.Join(err, q.db.Close())
+	err = errors.Join(controlErr, err, q.db.Close())
 	if q.uploadSpool.lock != nil {
 		err = errors.Join(err, q.uploadSpool.lock.Close())
 		q.uploadSpool.lock = nil
@@ -547,22 +560,38 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 			})
 		}
 	}
-	if timing == nil && (q.observeUpdate != nil || spanFrom(ctx) != nil) {
+	if timing == nil && (q.control != nil || q.observeUpdate != nil || spanFrom(ctx) != nil) {
 		timing = &queueUpdateTiming{}
 	}
+	operation := "update"
+	if q.control != nil {
+		operation = controlOperation(fn)
+	}
+	controlMu := q.mu.named(operation, ctx)
+	if q.control != nil {
+		controlMu.event.Transaction = &ControlTransaction{}
+	}
+	if timing != nil {
+		timing.control = controlMu
+	}
 	if cancelWait {
-		if err := timing.lockContext(ctx, &q.mu); err != nil {
+		if err := timing.lockContext(ctx, controlMu); err != nil {
 			return err
 		}
 	} else {
-		timing.lock(&q.mu)
+		timing.lock(controlMu)
 	}
+	q.controlHold = controlMu
+	controlMu.next(controlRecords)
+	controlMu.coarse(holdRecords)
 	hold := newQueueHoldPhases(q.updateHolds.startClock(q.holdClock), q.holdClock)
+	hold.control = controlMu
 	q.nasAvailable = available
 	defer func() {
 		duration := hold.finish()
 		timing.observe(q.observeUpdate)
-		unlockTimedRequest(ctx, &q.mu, timing)
+		q.controlHold = nil
+		unlockTimedRequest(ctx, controlMu, timing)
 		logQueueHold(duration, "update", fn, &hold)
 	}()
 	if q.stopping.Load() {
@@ -1225,13 +1254,37 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 		return err
 	}
 	q.publishEfficiencyDiagnostics(diagnostics)
+	_ = q.control.flush(q.db) // Diagnostic failure is reported, never an admission failure.
 	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)
 }
 
-func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
+func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resultErr error) {
+	if q.control != nil {
+		e := ControlEvent{ID: q.control.id(), Kind: "checkin", Operation: "worker_checkin", Enqueued: q.clock.Now(), Worker: q.control.anonymous(c.Machine.ID), Session: q.control.anonymous(c.Machine.Session)}
+		if span := spanFrom(ctx); span != nil {
+			e.Request = span.id
+			e.Handler = span.handler
+		}
+		defer func() {
+			e.Finished = q.clock.Now()
+			e.HoldNS = max(0, e.Finished.Sub(e.Enqueued))
+			e.Accepted = resultErr == nil
+			e.Cancelled = ctx.Err() != nil
+			q.control.append(e)
+			if resultErr == nil {
+				for _, p := range c.PressureProbes {
+					copy := p
+					q.control.append(ControlEvent{ID: q.control.id(), Kind: "pressure_probe", Operation: "shared_pressure", Request: e.Request, Worker: e.Worker, Session: e.Session, Probe: &copy})
+				}
+			}
+		}()
+	}
+	if !validPressureProbeSpans(c.PressureProbes) {
+		return Reply{}, &HTTPError{Status: 400, Code: "pressure_spans_invalid", Message: "invalid pressure probe spans"}
+	}
 	memoryReceivedAt := q.clock.Now()
 	if err := ctx.Err(); err != nil {
 		return Reply{}, err
@@ -1255,7 +1308,10 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{ControlTelemetryProtocol: controlTelemetryProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	if len(c.PressureProbes) > 0 {
+		reply.PressureProbeSequence = c.PressureProbes[len(c.PressureProbes)-1].Sequence
+	}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
 		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}

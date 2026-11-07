@@ -175,6 +175,7 @@ func (j Job) storedFileResults() bool {
 }
 
 func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
+	controlMu := q.mu.named("ConfigureFileStore", nil)
 	if q.fileStoreProductionReserve < 0 || q.fileStoreProductionReserve > limit {
 		return errors.New("file store production reserve must be between zero and the store limit")
 	}
@@ -251,8 +252,8 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	s.handler = http.StripPrefix("/api/files/uploads/", h)
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	if q.files != nil && q.files.root != root && len(q.bundleReferences()) > 0 {
 		return errors.New("bundle storage already bound; select the file store with WithFileStore when opening the queue")
 	}

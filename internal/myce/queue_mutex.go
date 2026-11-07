@@ -11,6 +11,7 @@ import (
 // hold callback it delegates without clock reads or additional synchronization.
 type queueMutex struct {
 	mu       sync.RWMutex
+	control  *controlRecorder
 	pressure atomic.Pointer[queuePressure]
 
 	// Configure only while the queue is idle. The callback must not reenter
@@ -24,6 +25,12 @@ type queueMutex struct {
 
 func (m *queueMutex) Lock() {
 	p, w := m.waitPressure()
+	m.lockPressure(p, w)
+}
+
+// Named control acquisitions start pressure observation before reserving the
+// SQLite writer, so that reservation never hides control-path queueing.
+func (m *queueMutex) lockPressure(p *queuePressure, w *queuePressureWait) {
 	m.mu.Lock()
 	m.acquirePressure(p, w)
 	m.enter()

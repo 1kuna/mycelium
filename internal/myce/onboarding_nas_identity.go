@@ -74,13 +74,14 @@ func DiscoverNASIdentity(ctx context.Context, osname, checkpoints string, comman
 }
 
 func (q *Queue) ConfigureOnboardingNAS(ctx context.Context, osname string, command func(context.Context, string, ...string) ([]byte, error)) error {
+	controlMu := q.mu.named("ConfigureOnboardingNAS", ctx)
 	identity, err := DiscoverNASIdentity(ctx, osname, q.root, command)
 	if err != nil {
 		return err
 	}
-	q.mu.Lock()
+	controlMu.Lock()
 	q.onboardingNAS = identity
-	q.mu.Unlock()
+	controlMu.Unlock()
 	return nil
 }
 

@@ -49,6 +49,7 @@ func (q *Queue) inputClaimsRequired() bool {
 }
 
 func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileInputClaim, error) {
+	controlMu := q.mu.named("claimFileInput", ctx)
 	var out FileInputClaim
 	if strings.TrimSpace(s.Project) == "" || strings.ContainsAny(s.Project, "\r\n\x00") {
 		return out, errors.New("input claim requires project")
@@ -57,17 +58,17 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 		return out, err
 	}
 	if s.Class == "" {
-		if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		if err := lockUploadContext(ctx, controlMu.RLock, controlMu.RUnlock); err != nil {
 			return out, err
 		}
 		s.Class = q.s.Policies[s.Project].DefaultCallPriority
-		q.mu.RUnlock()
+		controlMu.RUnlock()
 	}
 	if err := normalizeJobClass(&s); err != nil {
 		return out, err
 	}
 	// Failed creation can leave only a claim. Inventory remains outside q.mu.
-	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	if err := lockUploadContext(ctx, controlMu.RLock, controlMu.RUnlock); err != nil {
 		return out, err
 	}
 	store := q.files
@@ -77,7 +78,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 			stale[id] = claim
 		}
 	}
-	q.mu.RUnlock()
+	controlMu.RUnlock()
 	var view *fileCapacitySnapshot
 	if len(stale) > 0 && store != nil {
 		store.lifecycle.RLock()
@@ -134,8 +135,9 @@ func (q *Queue) forgetFileInputClaims(hash string, before time.Time) {
 // No disk work: the immutable server record, never a mutable project header,
 // controls quota attribution and resume. Call before opening a transfer.
 func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate bool) (context.Context, error) {
+	controlMu := q.mu.named("inputClaimContext", ctx)
 	id, _ := ctx.Value(fileInputClaimKey{}).(string)
-	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	if err := lockUploadContext(ctx, controlMu.RLock, controlMu.RUnlock); err != nil {
 		return ctx, err
 	}
 	claim, found := q.s.FileInputClaims[id]
@@ -163,7 +165,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 			}
 		}
 	}
-	q.mu.RUnlock()
+	controlMu.RUnlock()
 	if id == "" {
 		if required {
 			return ctx, inputClaimError()

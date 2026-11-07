@@ -47,8 +47,9 @@ type resolveNASCache struct {
 }
 
 func (q *Queue) resolveNASInspections() *resolveNASCache {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu := q.mu.named("resolveNASInspections", nil)
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	if q.nasInspections == nil {
 		q.nasInspections = newResolveNASCache(q.clock, &q.requestBudgets)
 	}

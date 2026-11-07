@@ -124,11 +124,17 @@ func (q *Queue) observeModelIntervals() {
 
 func (q *Queue) persistModelIntervals(tx *sql.Tx) error {
 	for _, event := range q.modelIntervalWrites {
+		if q.controlHold != nil {
+			q.controlHold.next(controlSerialize)
+		}
 		data, err := json.Marshal(event)
+		if q.controlHold != nil {
+			q.controlHold.next(controlOther)
+		}
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec("INSERT INTO model_intervals(seq,data) VALUES(?,?)", event.Sequence, data); err != nil {
+		if _, err = q.persistenceExec(tx, "INSERT INTO model_intervals(seq,data) VALUES(?,?)", event.Sequence, data); err != nil {
 			return err
 		}
 	}

@@ -240,16 +240,25 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 			return err
 		}
 		defer conn.Close()
+		if q.controlHold != nil {
+			q.controlHold.next(controlSQL)
+		}
 		tx, e = conn.BeginTx(context.Background(), nil)
 	} else {
+		if q.controlHold != nil {
+			q.controlHold.next(controlSQL)
+		}
 		tx, e = q.db.Begin()
+	}
+	if q.controlHold != nil {
+		q.controlHold.next(controlOther)
 	}
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
 	for _, r := range q.usageWrites {
-		_, e = tx.Exec(`INSERT INTO usage_samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(at,span,machine,device,project,job,model) DO UPDATE SET busy=busy+excluded.busy,idle=idle+excluded.idle,pinned=pinned+excluded.pinned,memory_seconds=memory_seconds+excluded.memory_seconds,observed=observed+excluded.observed`, r.At, r.Span, r.Machine, r.Device, r.Project, r.Job, r.Model, r.Busy, r.Idle, r.Pinned, r.Memory, r.Observed)
+		_, e = q.persistenceExec(tx, `INSERT INTO usage_samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(at,span,machine,device,project,job,model) DO UPDATE SET busy=busy+excluded.busy,idle=idle+excluded.idle,pinned=pinned+excluded.pinned,memory_seconds=memory_seconds+excluded.memory_seconds,observed=observed+excluded.observed`, r.At, r.Span, r.Machine, r.Device, r.Project, r.Job, r.Model, r.Busy, r.Idle, r.Pinned, r.Memory, r.Observed)
 		if e != nil {
 			return e
 		}
@@ -258,11 +267,11 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	// After seven days retain hourly dimensions/totals, rather than minute rows.
 	if q.usageMaintenance {
 		cutoff := now.Add(-7 * 24 * time.Hour).Truncate(time.Hour).Unix()
-		_, e = tx.Exec(`INSERT INTO usage_samples SELECT (at/3600)*3600,3600,machine,device,project,job,model,SUM(busy),SUM(idle),SUM(pinned),SUM(memory_seconds),SUM(observed) FROM usage_samples WHERE span=60 AND at<? GROUP BY (at/3600),machine,device,project,job,model ON CONFLICT(at,span,machine,device,project,job,model) DO UPDATE SET busy=busy+excluded.busy,idle=idle+excluded.idle,pinned=pinned+excluded.pinned,memory_seconds=memory_seconds+excluded.memory_seconds,observed=observed+excluded.observed`, cutoff)
+		_, e = q.persistenceExec(tx, `INSERT INTO usage_samples SELECT (at/3600)*3600,3600,machine,device,project,job,model,SUM(busy),SUM(idle),SUM(pinned),SUM(memory_seconds),SUM(observed) FROM usage_samples WHERE span=60 AND at<? GROUP BY (at/3600),machine,device,project,job,model ON CONFLICT(at,span,machine,device,project,job,model) DO UPDATE SET busy=busy+excluded.busy,idle=idle+excluded.idle,pinned=pinned+excluded.pinned,memory_seconds=memory_seconds+excluded.memory_seconds,observed=observed+excluded.observed`, cutoff)
 		if e != nil {
 			return e
 		}
-		if _, e = tx.Exec(`DELETE FROM usage_samples WHERE (span=60 AND at<?) OR at+span<=?`, cutoff, now.Add(-90*24*time.Hour).Unix()); e != nil {
+		if _, e = q.persistenceExec(tx, `DELETE FROM usage_samples WHERE (span=60 AND at<?) OR at+span<=?`, cutoff, now.Add(-90*24*time.Hour).Unix()); e != nil {
 			return e
 		}
 	}

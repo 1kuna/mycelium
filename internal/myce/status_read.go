@@ -666,6 +666,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	v.observationScan.memory = v.memoryPlanning
 	out := v.projectSnapshot(true)
 	out.RequestLatencies = q.requestLatencies.snapshot()
+	out.ControlTelemetry = q.control.snapshot()
 	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
 	if err == nil {
 		out.FileStore = files.status(ctx)

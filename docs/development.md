@@ -153,6 +153,47 @@ Six measured reads per endpoint make the reported p99 the sample maximum,
 not a production tail estimate. Compare accepted outputs from identical profile
 versions and CPU placement; natural fleet latency remains release-owner proof.
 
+### Control telemetry overhead
+
+Measured on 2026-11-07 on an arm64 laptop (Apple M5 Pro), with Go's real
+injected clock, `GOMAXPROCS=2` and `-p 2`. Baseline source was
+`8c6df03d38e0ba9638dff74b5f1e44bef5411fe7`, with the identical benchmark file
+copied into its source archive. Baseline/candidate/baseline/candidate rounds
+each contain five measurements; these are medians over all ten per version:
+
+- An uncontended request-backed lock acquisition/release: 187.85 ns baseline,
+  719.05 ns candidate; +531.20 ns (+282.8%). Allocations rise from 2 to 6 and
+  25 to 1,080 bytes per acquisition. Both include the existing pressure sensor.
+- A small authenticated HTTP request: 3,160.5 ns baseline, 3,120.5 ns candidate
+  (-1.3%, within measurement noise). Allocations rise from 45 to 53 and
+  8,641 to 9,256 bytes. The observed ranges overlap (2,932–5,250 ns versus
+  2,739–3,462 ns); this does not establish an improvement.
+- A SQLite worker check-in, including one maintenance/drain per 100 requests:
+  418.419 µs baseline, 601.099 µs candidate; +182.680 µs (+43.7%). Shared-disk
+  variability is substantial: baseline 346–875 µs, candidate 487–3,036 µs.
+  This includes amortized durable telemetry; the difference is an observed
+  pair of distributions, not an isolated CPU or fsync cost.
+
+The lock/request fixtures stop below the pending envelope; they measure append
+cost rather than an overflowing recorder. Request-budget memory headroom is
+injected identically on both sides to exclude native inventory subprocesses.
+The check-in uses real SQLite commits and bounded maintenance. These synthetic
+laptop costs do not predict a contended fleet's latency tail. Retained/drop
+coverage must accompany incident conclusions.
+
+Reproduce using `internal/myce/control_telemetry_bench_test.go` on both source
+versions, serially on the same laptop:
+
+```sh
+GOMAXPROCS=2 go test -p 2 ./internal/myce -run '^$' \
+  -bench '^BenchmarkControlTelemetry(Lock|Request)$' -benchtime=10000x -count=5
+GOMAXPROCS=2 go test -p 2 ./internal/myce -run '^$' \
+  -bench '^BenchmarkControlTelemetryCheckin$' -benchtime=200x -count=5
+```
+
+The quick selector rejects a benchmark-only file with no mapped tests and
+requires full; do not bypass that refusal with a handwritten selection.
+
 ### Release upgrade compatibility
 
 Full also runs `python3 scripts/upgrade-compat.py run`. This builds race-instrumented

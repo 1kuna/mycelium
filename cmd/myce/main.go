@@ -58,7 +58,7 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 
-const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|telemetry|gpu-telemetry-client|usage|view\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|control|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|telemetry|gpu-telemetry-client|usage|view\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_native-exec" {
@@ -229,7 +229,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		return modelCommand(args[1:])
 	}
 	switch args[0] {
-	case "dev", "queue", "join", "submit", "usage", "status", "efficiency", "cancel", "leave", "ledger", "logs":
+	case "dev", "queue", "join", "submit", "usage", "status", "control", "efficiency", "cancel", "leave", "ledger", "logs":
 	default:
 		return &exitError{2, fmt.Errorf("unknown command %q\n%s", args[0], topLevelUsage)}
 	}
@@ -243,7 +243,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		f.StringVar(&cancelProject, "project", "", "project owning the submission key")
 		f.StringVar(&cancelKey, "key", "", "submission key to cancel (requires --project, no job ID)")
 	}
-	if args[0] == "status" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" || args[0] == "submit" {
+	if args[0] == "status" || args[0] == "control" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" || args[0] == "submit" {
 		f.StringVar(&clientConfig, "config", "", "installed config (default: installed worker, then queue)")
 	}
 	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
@@ -403,7 +403,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	defer stop()
 	var client myce.Client
 	var invitation *myce.Invitation
-	if args[0] == "status" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" || args[0] == "submit" {
+	if args[0] == "status" || args[0] == "control" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" || args[0] == "submit" {
 		// An omitted endpoint must not mask the installed queue address.
 		endpoint := os.Getenv("MYCE_QUEUE")
 		f.Visit(func(v *flag.Flag) {
@@ -797,6 +797,19 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return e
 		}
 		return printUsage(os.Stdout, report, *by)
+	case "control":
+		if f.NArg() != 0 || *ledgerAfter < 0 {
+			return errors.New("usage: myce control [--json] [--after SEQUENCE]")
+		}
+		var page myce.ControlPage
+		if err := client.Call(ctx, "GET", fmt.Sprintf("/api/control?after=%d", *ledgerAfter), nil, &page); err != nil {
+			return err
+		}
+		if *statusJSON {
+			return json.NewEncoder(os.Stdout).Encode(page)
+		}
+		printControl(page)
+		return nil
 	case "efficiency":
 		if f.NArg() != 0 {
 			return errors.New("usage: myce efficiency [--json]")
@@ -949,6 +962,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	if s.ControlTelemetry != nil {
+		fmt.Println(s.ControlTelemetry.Summary())
+	}
 	if s.HealthAlertDelivery != nil {
 		fmt.Println(s.HealthAlertDelivery.Summary())
 	}

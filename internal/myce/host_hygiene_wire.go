@@ -8,6 +8,7 @@ const hostCollectionProtocol = "worker-collection-v1"
 type workerHygieneWire struct {
 	machine, session    string
 	probeSupported      bool
+	controlSupported    bool
 	supported           bool
 	collectionSupported bool
 }
@@ -16,6 +17,9 @@ func (w Worker) hygieneCheckin(c Checkin) Checkin {
 	if r := w.hygieneWire; r != nil {
 		if r.machine != c.Machine.ID || r.session != c.Machine.Session {
 			*r = workerHygieneWire{machine: c.Machine.ID, session: c.Machine.Session}
+		}
+		if !r.controlSupported {
+			c.PressureProbes = nil
 		}
 		if !r.probeSupported {
 			c = legacyHostProbeCheckin(c)
@@ -31,6 +35,7 @@ func (w Worker) hygieneCheckin(c Checkin) Checkin {
 }
 
 func (w Worker) legacyHygieneCheckin(c Checkin) Checkin {
+	c.PressureProbes = nil
 	c = legacyHostProbeCheckin(c)
 	if c.Machine.HostHealth != nil && c.Machine.HostHealth.DrainReason != "" {
 		// Availability is reversible; Leaving is a terminal worker lifecycle signal.
@@ -43,6 +48,7 @@ func (w Worker) legacyHygieneCheckin(c Checkin) Checkin {
 
 func (w Worker) acceptHygieneReply(reply Reply) {
 	if w.hygieneWire != nil {
+		w.hygieneWire.controlSupported = reply.ControlTelemetryProtocol == controlTelemetryProtocol
 		w.hygieneWire.probeSupported = reply.HostProbeProtocol == hostProbeProtocol
 		w.hygieneWire.supported = reply.HostHygieneProtocol == hostHygieneProtocol
 		w.hygieneWire.collectionSupported = reply.HostCollectionProtocol == hostCollectionProtocol
@@ -50,7 +56,7 @@ func (w Worker) acceptHygieneReply(reply Reply) {
 }
 
 func hasHygieneWireFields(c Checkin) bool {
-	return c.Machine.HostHealth != nil || c.Machine.HygieneCollection != nil || hasHostProbeFields(c)
+	return len(c.PressureProbes) != 0 || c.Machine.HostHealth != nil || c.Machine.HygieneCollection != nil || hasHostProbeFields(c)
 }
 
 // Copy the nested records before stripping negotiated fields. Local freshness

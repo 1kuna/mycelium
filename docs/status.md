@@ -1178,6 +1178,85 @@ Plain native jobs without an isolation declaration remain unsandboxed in v1.
 Their `isolation` status explains the compatibility default and the one-line
 `isolation: sandboxed` opt-in. New extension registrations default sandboxed.
 
+### Retained control-path attribution (next release)
+
+`myce control` prints acquisition/request/rejection totals, maximum control wait
+and hold, retention coverage, the oldest in-flight acquisition and the latest
+429's route/source/frontier. `myce control --json` reads the same independent
+view. It uses installed authority and remains available during observation
+shedding; it does not take `q.mu` or project jobs. Status and inspection JSON
+also include `control_telemetry`; a cached status generation can lag this view.
+
+`GET /api/control?after=SEQUENCE` (CLI `myce control --json --after SEQUENCE`)
+returns at most the existing 256-sample request window, with `first`,
+`high_water`, `next` and `entries`. Continue from `next` while it is below
+`high_water`. An older cursor than `first` indicates overwritten history.
+`telemetry.recent` contains the latest window, while `totals` retain lifetime
+counts, duration sums, maxima and phase sums across queue restarts. `pending`,
+`dropped`, `overwritten`, `durable_at` and `storage_error` distinguish buffered,
+missing, aged-out and successfully committed evidence. A snapshot's `at` is its
+own injected queue time. Pending records can be lost on a crash.
+
+Join by `(epoch, id)` for individual acquisitions and `(epoch, request)` for
+request-associated work; `handler` distinguishes listeners. A lock record gives
+its source operation, read/write mode, enqueue/acquire/finish times and separate
+wait/hold durations. `blockers` names holders or queued writers observed at
+arrival; compare their actual spans to distinguish an overlapping holder from
+a queued dependency. Reader holders needed by a writer are retained too.
+`blocker` and `phase` preserve the writer and phase observed at enqueue.
+`in_flight` exposes waiting and active acquisitions independently of queue
+progress. `writer_wait_ns` separates the shared SQLite-writer reservation from
+acquiring the underlying mutex; that reservation is acquired **before** `q.mu`.
+
+Update acquisitions contain ordered `transaction.spans` for records, usage,
+body, persistence and notification. `phase_ns`, indexed by `phase_names`, splits
+serialization, SQL statement work and `commit_sync`. Serialization and statements
+can alternate, so these are accumulated costs rather than one continuous span.
+Commit timing covers SQLite `Commit` with the existing FULL synchronization
+policy, including any work SQLite performs there. It does not isolate an fsync
+syscall, file, device, kernel wait or another workload's causal I/O.
+
+Every rejection retains its finite route class, anonymous source, client family,
+request/handler IDs, pressure wait, baseline/sample count/epoch, active count,
+priority/scope and the best active frontier with learned costs/sample counts.
+`admission_scope: handler_frontier_queue_pressure` is explicit: pressure is shared
+by the queue, while each handler owns its active frontier; there is no per-client
+or installed-authority token bucket. Anonymous sources are keyed digests of the
+transport source, excluding its ephemeral port, stable across queue restarts.
+A proxy/NAT can combine sources; this does not identify an individual agent or
+prove that several agents share one installed authority. No token, raw peer,
+user-agent, path, query, host name or request body is retained.
+
+Check-in records carry anonymous worker/session identities and queue-clock
+arrival/finish, acceptance and cancellation. Negotiated `control-telemetry-v1`
+workers send pressure-probe `started_at`, `ready_at`, `consumed_at`, fixed failure
+codes and dropped-history counts, including failures that remove current
+pressure evidence. These timestamps use the **worker's** clock; never subtract
+them from queue timestamps. Deduplicate replay by worker/session plus probe
+`producer`/`sequence`. A reply acknowledges only the sequence actually received;
+initial negotiation and a strict-queue downgrade preserve unsent local history.
+The worker reuses the existing bounded host-health history envelope. Existing
+contact credit, pressure freshness and missing/failed-evidence admission rules
+are unchanged.
+
+Recording appends fixed metadata; aggregation, JSON, retention and SQL diagnostic
+writes run outside `q.mu`. Every acquisition/request contributes to aggregates;
+contended acquisitions, their blocking holders, every rejection/check-in/probe,
+and measured duration outliers enter the durable event ring. Outliers use the
+existing four-deviation estimator, rather than a deployment-specific slow limit.
+The recorder reuses the existing request telemetry envelope (128 route windows
+of 256 records) for each of its two buffers and retained events; overflow reports
+lost records and never blocks control for diagnostic space. This bounds memory
+and SQLite growth at the cost of older event detail; #811 owns resizing the
+shared retention envelope. Lifetime finite-operation aggregates remain durable.
+Diagnostic transactions serialize first, then write one SQLite page of prepared
+data per turn (or one indivisible larger event); waiting control writers take
+priority between turns. This prevents a bulk diagnostic drain from holding the
+queue mutex behind its own database writer.
+
+Laptop overhead and reproducible baseline comparisons are documented in
+[development](development.md#control-telemetry-overhead).
+
 ### API request latency
 
 Authenticated status JSON includes `request_latencies`: one entry per HTTP route

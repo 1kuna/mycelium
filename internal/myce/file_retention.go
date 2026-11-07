@@ -35,14 +35,15 @@ const fileImportUploadPurpose = "import"
 // and crashes before the reference commit still have a cleanup owner. Existing
 // unmarked imports are never enrolled merely because a recipe reuses them.
 func (q *Queue) recordBundleUpload(hash string, created bool, requestContexts ...context.Context) error {
+	controlMu := q.mu.named("recordBundleUpload", requestContext(requestContexts))
 	requestCtx := requestContext(requestContexts)
 	if !created {
 		return nil
 	}
-	if err := lockUploadContext(requestCtx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	if err := lockUploadContext(requestCtx, controlMu.RLock, controlMu.RUnlock); err != nil {
 		return err
 	}
-	unlockRequest := q.mu.RUnlock
+	unlockRequest := controlMu.RUnlock
 	_, marked := q.s.BundleUploads[hash]
 	unlockRequest()
 	if marked {
@@ -62,14 +63,15 @@ func (q *Queue) markBundleUpload(hash string) {
 // created job-input identities acquire eligibility; reusing an unmarked import
 // never makes it collectible. A generic import permanently releases the marker.
 func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestContexts ...context.Context) error {
+	controlMu := q.mu.named("recordFileUpload", requestContext(requestContexts))
 	requestCtx := requestContext(requestContexts)
 	if purpose == attemptOutputUploadPurpose {
 		return q.recordAttemptOutputUpload(hash, created, requestCtx)
 	}
-	if err := lockUploadContext(requestCtx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	if err := lockUploadContext(requestCtx, controlMu.RLock, controlMu.RUnlock); err != nil {
 		return err
 	}
-	unlockRequest := q.mu.RUnlock
+	unlockRequest := controlMu.RUnlock
 	_, output := q.s.AttemptOutputUploads[hash]
 	_, marked := q.s.JobInputUploads[hash]
 	_, bundle := q.s.BundleUploads[hash]
@@ -95,11 +97,12 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestCont
 }
 
 func (q *Queue) publishFileUpload(hash string, requestContexts ...context.Context) error {
+	controlMu := q.mu.named("publishFileUpload", requestContext(requestContexts))
 	requestCtx := requestContext(requestContexts)
-	if err := lockUploadContext(requestCtx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	if err := lockUploadContext(requestCtx, controlMu.RLock, controlMu.RUnlock); err != nil {
 		return err
 	}
-	unlockRequest := q.mu.RUnlock
+	unlockRequest := controlMu.RUnlock
 	published, marked := q.jobUploadMarker(hash)
 	unchanged := !marked || published.Equal(q.clock.Now())
 	unlockRequest()
@@ -133,11 +136,12 @@ func (q *Queue) releaseFileUploadMarkers() {
 }
 
 func (q *Queue) ConfigureFileRetention(age time.Duration) error {
+	controlMu := q.mu.named("ConfigureFileRetention", nil)
 	if age <= 0 {
 		return errors.New("file-retention must be positive")
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	q.fileRetention = age
 	if q.records != nil {
 		q.rebuildRecords()

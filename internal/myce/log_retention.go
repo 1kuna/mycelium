@@ -18,10 +18,11 @@ const DefaultLogRetention = 7 * 24 * time.Hour
 // ConfigureLogRetention bounds completed batch output. Active work and pending
 // worker replay are protected; retention is logical deletion, not secure erasure.
 func (q *Queue) ConfigureLogRetention(age time.Duration) error {
+	controlMu := q.mu.named("ConfigureLogRetention", nil)
 	if age <= 0 {
 		return errors.New("log-retention must be positive")
 	}
-	q.mu.Lock()
+	controlMu.Lock()
 	q.logRetention = age
 	if q.records != nil {
 		q.records.logsDone = map[string]bool{}
@@ -31,7 +32,7 @@ func (q *Queue) ConfigureLogRetention(age time.Duration) error {
 			q.indexJob(id, j)
 		}
 	}
-	q.mu.Unlock()
+	controlMu.Unlock()
 	return q.pruneBatchLogs()
 }
 

@@ -63,34 +63,43 @@ func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
 // Compare canonical JSON in memory; SQLite sees only changed logical records.
 func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 	next := map[string][]byte{}
+	phase := func(p int) {
+		if q.controlHold != nil {
+			q.controlHold.next(p)
+		}
+	}
 	putData := func(key string, data []byte) error {
 		next[key] = data
 		if bytes.Equal(data, q.persisted[key]) {
 			next[key] = q.persisted[key]
 			return nil
 		}
-		_, err := tx.Exec("INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data", key, data)
+		_, err := q.persistenceExec(tx, "INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data", key, data)
 		return err
 	}
 	put := func(key string, value any) error {
+		phase(controlSerialize)
 		data, err := json.Marshal(value)
+		phase(controlOther)
 		if err != nil {
 			return err
 		}
 		return putData(key, data)
 	}
 	putCatalog := func(key string, value any) error {
+		phase(controlSerialize)
 		entry, err := q.encodeCatalog(key, value)
+		phase(controlOther)
 		if err != nil {
 			return err
 		}
 		return putData(key, entry.data)
 	}
 	if q.persisted == nil {
-		if _, err := tx.Exec("CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL)"); err != nil {
+		if _, err := q.persistenceExec(tx, "CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL)"); err != nil {
 			return nil, err
 		}
-		if _, err := tx.Exec("DELETE FROM queue_state"); err != nil {
+		if _, err := q.persistenceExec(tx, "DELETE FROM queue_state"); err != nil {
 			return nil, err
 		}
 	}
@@ -113,7 +122,7 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 	for key, value := range jobs {
 		if value == nil {
 			next["jobs/"+key] = nil
-			if _, err := tx.Exec("DELETE FROM queue_state WHERE key=?", "jobs/"+key); err != nil {
+			if _, err := q.persistenceExec(tx, "DELETE FROM queue_state WHERE key=?", "jobs/"+key); err != nil {
 				return nil, err
 			}
 			continue
@@ -152,13 +161,13 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 	for key := range q.records.catalog {
 		if _, ok := next[key]; !ok {
 			next[key] = nil
-			if _, err := tx.Exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
+			if _, err := q.persistenceExec(tx, "DELETE FROM queue_state WHERE key=?", key); err != nil {
 				return nil, err
 			}
 		}
 	}
 	if q.persisted == nil {
-		if _, err := tx.Exec("INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", normalizedQueueMarker); err != nil {
+		if _, err := q.persistenceExec(tx, "INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", normalizedQueueMarker); err != nil {
 			return nil, err
 		}
 	}
@@ -197,4 +206,14 @@ func (q *Queue) loadPersistedState() error {
 	}
 	q.rebuildRecords()
 	return nil
+}
+
+// Existing small queue-state SQL stays in its transaction. Observational phase
+// transitions bracket only the actual statement, not post-commit bookkeeping.
+func (q *Queue) persistenceExec(tx *sql.Tx, statement string, args ...any) (sql.Result, error) {
+	if q.controlHold != nil {
+		q.controlHold.next(controlSQL)
+		defer q.controlHold.next(controlOther)
+	}
+	return tx.Exec(statement, args...)
 }

@@ -16,6 +16,7 @@ type observationLimit struct {
 	mu       sync.Mutex
 	clock    Clock
 	pressure *queuePressure
+	control  *controlRecorder
 	index    *waitStateIndex
 	active   map[*observationRead]struct{}
 	costs    map[string]observationCost
@@ -34,7 +35,7 @@ type observationRead struct {
 
 func newObservationLimit(clock Clock, q *Queue) *observationLimit {
 	return &observationLimit{clock: clock, pressure: q.mu.enablePressure(clock),
-		index: q.waitIndex(), active: make(map[*observationRead]struct{}), costs: make(map[string]observationCost)}
+		control: q.control, index: q.waitIndex(), active: make(map[*observationRead]struct{}), costs: make(map[string]observationCost)}
 }
 func observationRequest(r *http.Request) bool {
 	return observationRouteClass(r) != ""
@@ -65,6 +66,8 @@ func observationRouteClass(r *http.Request) string {
 		return "status"
 	case "/api/efficiency":
 		return "efficiency"
+	case "/api/control":
+		return "control"
 	case "/api/inspection":
 		return "inspection"
 	case "/api/usage":
@@ -112,9 +115,10 @@ func (l *observationLimit) better(a, b *observationRead) bool {
 
 func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func(), bool) {
 	route := observationRouteClass(r)
-	// Batch waits use the independent scalar index, never the queue mutex.
+	// Batch waits use the independent scalar index; control inspection uses
+	// diagnostic metadata and the WAL reader. Neither takes the queue mutex.
 	// Shedding these would push compatible clients back to expensive polling.
-	if route == "" || route == "batch_wait" {
+	if route == "" || route == "batch_wait" || route == "control" {
 		return func() {}, true
 	}
 	tier, production := l.index.observationPriority("")
@@ -127,7 +131,7 @@ func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func()
 	}
 	read := &observationRead{route: route, tier: tier, scope: observationScope(route), started: l.clock.Now()}
 	l.mu.Lock()
-	pressure, delay, epoch := l.pressure.measurement()
+	pressure, delay, epoch, baseline, samples := l.pressure.facts()
 	var best *observationRead
 	for active := range l.active {
 		if best == nil || l.better(active, best) {
@@ -138,7 +142,14 @@ func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func()
 	// Equal/lower-value reads wait for actual work to finish. With no observation
 	// in flight allow a probe: progress, not a fixed timer, restores admission.
 	if pressure && best != nil && !l.better(read, best) {
+		e := ControlEvent{ID: l.control.id(), Kind: "rejection", Operation: route, Enqueued: l.clock.Now(), Finished: l.clock.Now(), Status: 429, PressureNS: delay, BaselineNS: baseline, PressureSamples: samples, PressureEpoch: epoch, Active: len(l.active), Tier: read.tier, Scope: read.scope, Frontier: best.route, FrontierTier: best.tier, FrontierScope: best.scope, CostSamples: l.costs[route].samples, FrontierCostSamples: l.costs[best.route].samples, CostNS: l.costs[route].mean, FrontierCostNS: l.costs[best.route].mean, Family: jobGetClient(r.UserAgent()).Kind}
+		if span := spanFrom(r.Context()); span != nil {
+			e.Request = span.id
+			e.Handler = span.handler
+			e.Client = span.client
+		}
 		l.mu.Unlock()
+		l.control.append(e)
 		// Retry-After is integer seconds; round the measured live wait up to
 		// the protocol's smallest positive unit, rather than a refill schedule.
 		seconds := max(int64(1), int64(math.Ceil(delay.Seconds())))

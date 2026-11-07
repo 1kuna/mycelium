@@ -150,14 +150,16 @@ func (q *Queue) componentExclusions() []ComponentExclusion {
 }
 
 func (q *Queue) ComponentExclusions() []ComponentExclusion {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu := q.mu.named("ComponentExclusions", nil)
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	return q.componentExclusions()
 }
 
 func (q *Queue) ResolveComponentSelector(selector string) (ComponentExclusion, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu := q.mu.named("ResolveComponentSelector", nil)
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	p, err := q.resolveComponentSelector(selector)
 	if old, ok := q.s.ComponentExclusions[p.Selector]; err == nil && ok {
 		old.Devices = slices.Clone(old.Devices)

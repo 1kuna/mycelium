@@ -659,11 +659,12 @@ func (q *Queue) applyEfficiencyDiagnostics(d *efficiencyDiagnostics) {
 	}
 }
 func (q *Queue) publishEfficiencyDiagnostics(d *efficiencyDiagnostics) {
+	controlMu := q.mu.named("publishEfficiencyDiagnostics", nil)
 	if d == nil || !d.applied {
 		return
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	controlMu.Lock()
+	defer controlMu.Unlock()
 	if q.efficiencyView == nil || !d.report.At.Before(q.efficiencyView.At) {
 		q.efficiencyView = d.report
 	}

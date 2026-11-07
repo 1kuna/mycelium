@@ -223,13 +223,17 @@ func sharedMemoryPSI(b []byte) (float64, error) {
 // consumption of a completed probe or the next refresh. A stuck source retains
 // its original sample age; a completed failure immediately removes the sample.
 type sharedPressureMonitor struct {
-	mu       sync.Mutex
-	clock    Clock
-	source   func(context.Context) (SharedHostPressure, error)
-	enabled  bool
-	current  *SharedHostPressure
-	lane     hostProbeLane[SharedHostPressure]
-	reported time.Time
+	mu         sync.Mutex
+	clock      Clock
+	source     func(context.Context) (SharedHostPressure, error)
+	enabled    bool
+	current    *SharedHostPressure
+	lane       hostProbeLane[SharedHostPressure]
+	reported   time.Time
+	spans      []PressureProbeSpan
+	sequence   uint64
+	probeEpoch string
+	dropped    uint64
 }
 
 func (m *sharedPressureMonitor) snapshot(enabled bool) *SharedHostPressure {
@@ -269,6 +273,27 @@ func (m *sharedPressureMonitor) sample(ctx context.Context) {
 		m.lane.clock = m.clock
 	}
 	if completed, err := m.lane.step(ctx, m.source); completed {
+		m.sequence++
+		if m.probeEpoch == "" {
+			m.probeEpoch = ID()
+		}
+		span := PressureProbeSpan{Producer: m.probeEpoch, Sequence: m.sequence, Started: m.lane.completed.start, Ready: m.lane.completed.end, Consumed: m.clock.Now()}
+		if span.Ready.Before(span.Started) || span.Consumed.Before(span.Ready) {
+			span.Failure = "clock_regressed"
+		} else if err != nil {
+			span.Failure = "probe_failed"
+			if errors.Is(err, context.Canceled) {
+				span.Failure = "cancelled"
+			}
+		} else if !m.lane.value.MemoryKnown || !m.lane.value.WakeKnown {
+			span.Failure = "pressure_unknown"
+		}
+		if len(m.spans) == hostHealthHistorySize {
+			m.spans = m.spans[1:]
+			m.dropped++
+		}
+		span.Dropped = m.dropped
+		m.spans = append(m.spans, span)
 		m.current = nil
 		if err == nil {
 			p := m.lane.value
@@ -299,4 +324,31 @@ func (m *sharedPressureMonitor) run(ctx context.Context) {
 		}
 		timer.Stop()
 	}
+}
+
+// PressureProbeSpan is worker-clock evidence. Ready precedes lane consumption;
+// it is never interpreted as queue-clock freshness or an admission grant.
+type PressureProbeSpan struct {
+	Producer string    `json:"producer,omitempty"`
+	Sequence uint64    `json:"sequence"`
+	Started  time.Time `json:"started_at"`
+	Ready    time.Time `json:"ready_at"`
+	Consumed time.Time `json:"consumed_at"`
+	Failure  string    `json:"failure,omitempty"`
+	Dropped  uint64    `json:"dropped,omitempty"`
+}
+
+func (m *sharedPressureMonitor) probeSpans() []PressureProbeSpan {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]PressureProbeSpan(nil), m.spans...)
+}
+func (m *sharedPressureMonitor) acknowledge(sequence uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for n < len(m.spans) && m.spans[n].Sequence <= sequence {
+		n++
+	}
+	m.spans = append([]PressureProbeSpan(nil), m.spans[n:]...)
 }

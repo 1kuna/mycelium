@@ -234,11 +234,12 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
-	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	controlMu := q.mu.named("fileStoreStatus", ctx)
+	if err := lockUploadContext(ctx, controlMu.RLock, controlMu.RUnlock); err != nil {
 		return &FileStoreStatus{Error: "file store capacity unavailable"}
 	}
 	view := q.captureFileStoreStatus()
-	q.mu.RUnlock()
+	controlMu.RUnlock()
 	return view.status(ctx)
 }
 

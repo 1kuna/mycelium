@@ -20,13 +20,16 @@ type requestSpanKey struct{}
 // Wall time here is strictly observational, never used for queue decisions.
 // A span belongs to one synchronous handler, not the queue or a goroutine ID.
 type requestSpan struct {
-	mu         sync.Mutex
-	finished   bool
-	started    time.Time
-	wait, hold time.Duration
-	writerWait time.Duration
-	lastUnlock time.Time
-	measured   bool
+	id, handler uint64
+	client      string
+	arrived     time.Time
+	mu          sync.Mutex
+	finished    bool
+	started     time.Time
+	wait, hold  time.Duration
+	writerWait  time.Duration
+	lastUnlock  time.Time
+	measured    bool
 }
 
 func spanFrom(ctx context.Context) *requestSpan {
@@ -35,6 +38,9 @@ func spanFrom(ctx context.Context) *requestSpan {
 }
 
 func requestLock(ctx context.Context, mu sync.Locker) func() {
+	if m, ok := mu.(*queueMutex); ok {
+		mu = m.named(controlCaller(), ctx)
+	}
 	s := spanFrom(ctx)
 	if s == nil {
 		mu.Lock()
@@ -52,6 +58,9 @@ func requestLock(ctx context.Context, mu sync.Locker) func() {
 
 // Observations own no cleanup transaction and can abandon a queued lock wait.
 func requestObservationLock(ctx context.Context, mu sync.Locker) (func(), error) {
+	if m, ok := mu.(*queueMutex); ok {
+		mu = m.named(controlCaller(), ctx)
+	}
 	timing := &queueUpdateTiming{}
 	if err := timing.lockContext(ctx, mu); err != nil {
 		return nil, err
@@ -150,8 +159,12 @@ func (w *requestResponse) Flush() {
 }
 
 func (q *Queue) measureRequests(next http.Handler, registered ...map[string]struct{}) http.Handler {
+	handler := q.control.id()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s := &requestSpan{started: time.Now()}
+		s := &requestSpan{started: time.Now(), id: q.control.id(), handler: handler, arrived: q.clock.Now()}
+		if q.control != nil {
+			s.client = q.control.client(r)
+		}
 		r = r.WithContext(context.WithValue(r.Context(), requestSpanKey{}, s))
 		response := &requestResponse{ResponseWriter: w}
 		defer func() {
@@ -173,14 +186,15 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 				// mutex acquisition. Slow peers cannot redefine queue latency.
 				q.requestBudgets.recordControl(max(0, hold-writerWait))
 			}
+			status := response.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			q.control.append(ControlEvent{ID: s.id, Kind: "request", Operation: route, Request: s.id, Handler: handler, Client: s.client, Family: jobGetClient(r.UserAgent()).Kind, Enqueued: s.arrived, Finished: q.clock.Now(), WaitNS: wait, HoldNS: hold, Status: status})
 			q.requestLatencies.record(route, duration)
 			q.requestHealth.recordRequest(q.clock.Now(), route, duration, wait)
 			if duration <= requestSlowThreshold {
 				return
-			}
-			status := response.status
-			if status == 0 {
-				status = http.StatusOK
 			}
 			after := time.Duration(0)
 			if !lastUnlock.IsZero() {
@@ -225,6 +239,9 @@ func requestReadLock(ctx context.Context, mu interface {
 	RLock()
 	RUnlock()
 }) func() {
+	if m, ok := mu.(*queueMutex); ok {
+		mu = m.named(controlCaller(), ctx)
+	}
 	s := spanFrom(ctx)
 	if s == nil {
 		mu.RLock()

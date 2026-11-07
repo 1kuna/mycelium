@@ -196,6 +196,7 @@ func (q *Queue) ConvertMachines(mapping []MachineRename, models ModelConfig, dry
 	return q.convertMachines(mapping, models, dry, false)
 }
 func (q *Queue) convertMachines(mapping []MachineRename, models ModelConfig, dry, publicationPending bool, evidence ...[]VerifiedEmptyDrainReceipt) (*MachineConversion, error) {
+	controlMu := q.mu.named("convertMachines", nil)
 	var drains []VerifiedEmptyDrainReceipt
 	if len(evidence) > 0 {
 		drains = evidence[0]
@@ -290,9 +291,9 @@ func (q *Queue) convertMachines(mapping []MachineRename, models ModelConfig, dry
 	}
 	var err error
 	if dry {
-		q.mu.Lock()
+		controlMu.Lock()
 		err = operation()
-		q.mu.Unlock()
+		controlMu.Unlock()
 	} else {
 		err = q.update(operation)
 	}
@@ -302,6 +303,7 @@ func (q *Queue) RollbackMachines(dry bool) error {
 	return q.rollbackMachines(dry, false)
 }
 func (q *Queue) rollbackMachines(dry, publicationPending bool) error {
+	controlMu := q.mu.named("rollbackMachines", nil)
 	operation := func() error {
 		plan := q.s.MachineConversion
 		if plan == nil {
@@ -396,8 +398,8 @@ func (q *Queue) rollbackMachines(dry, publicationPending bool) error {
 		return nil
 	}
 	if dry {
-		q.mu.Lock()
-		defer q.mu.Unlock()
+		controlMu.Lock()
+		defer controlMu.Unlock()
 		return operation()
 	}
 	return q.update(operation)

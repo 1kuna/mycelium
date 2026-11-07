@@ -37,6 +37,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		observationClock = observationClocks[0]
 	}
 	observationLimit := newObservationLimit(observationClock, a.Queue)
+	a.registerControlTelemetry(mux)
 	a.registerWait(mux)
 	waitStates := a.Queue.waitIndex()
 	nas := a.Queue.resolveNASInspections()

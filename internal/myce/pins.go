@@ -214,12 +214,13 @@ func (q *Queue) SetProductionGrace(d time.Duration) error {
 	return q.SetPreemptionGrace(d)
 }
 func (q *Queue) SetPreemptionGrace(d time.Duration) error {
+	controlMu := q.mu.named("SetPreemptionGrace", nil)
 	if d <= 0 {
 		return errors.New("preemption grace must be positive")
 	}
-	q.mu.Lock()
+	controlMu.Lock()
 	q.productionGrace = d
-	q.mu.Unlock()
+	controlMu.Unlock()
 	return nil
 }
 func (q *Queue) stopFor(j *Job, priority, kind string) {

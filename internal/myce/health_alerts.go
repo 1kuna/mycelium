@@ -198,10 +198,11 @@ func (q *Queue) alertAttemptLoss(j *Job, outcome AttemptOutcome, quiet bool) {
 // ConfigureHealthNotifier validates the operator's local executable. It reuses
 // completion notification's --check/JSON contract, but is queue-scoped.
 func (q *Queue) ConfigureHealthNotifier(ctx context.Context, hook string) error {
+	controlMu := q.mu.named("ConfigureHealthNotifier", ctx)
 	if hook == "" {
-		q.mu.Lock()
+		controlMu.Lock()
 		q.healthNotifier = ""
-		q.mu.Unlock()
+		controlMu.Unlock()
 		return q.update(func() error {
 			q.s.Health.DeliveryConfigured = false
 			q.pruneHealthEvents()
@@ -219,17 +220,18 @@ func (q *Queue) ConfigureHealthNotifier(ctx context.Context, hook string) error 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("health notifier check failed: %w", err)
 	}
-	q.mu.Lock()
+	controlMu.Lock()
 	q.healthNotifier = resolved
-	q.mu.Unlock()
+	controlMu.Unlock()
 	return q.update(func() error { q.s.Health.DeliveryConfigured = true; return nil })
 }
 func healthNotifierEnv() []string {
 	return slices.DeleteFunc(os.Environ(), func(s string) bool { return strings.HasPrefix(s, "MYCE_TOKEN=") })
 }
 func (q *Queue) runHealthNotifier(ctx context.Context) {
+	controlMu := q.mu.named("runHealthNotifier", ctx)
 	for {
-		q.mu.RLock()
+		controlMu.RLock()
 		hook, wake := q.healthNotifier, q.wake
 		var pending []HealthAlert
 		if hook != "" {
@@ -239,7 +241,7 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 				}
 			}
 		}
-		q.mu.RUnlock()
+		controlMu.RUnlock()
 		if hook == "" {
 			return
 		}

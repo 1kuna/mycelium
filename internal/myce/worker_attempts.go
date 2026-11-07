@@ -1232,9 +1232,13 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
 			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()
-			reply, err := w.checkin(ctx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
+			pressureSpans := pressureProbe.probeSpans()
+			reply, err := w.checkin(ctx, Checkin{PressureProbes: pressureSpans, NASPathReports: w.nasPathReports(), Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			health.noteHeartbeat(w.Clock.Now().Sub(heartbeatStarted))
 			if err == nil {
+				if reply.ControlTelemetryProtocol == controlTelemetryProtocol {
+					pressureProbe.acknowledge(reply.PressureProbeSequence)
+				}
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {
 					// Enrollment is an observer, never authority to terminate live work.
 					// Retry next successful check-in; no filesystem paths or errors in logs.

@@ -72,6 +72,10 @@ func (p *queuePressure) pressure() (bool, time.Duration) {
 	return pressure, delay
 }
 func (p *queuePressure) measurement() (bool, time.Duration, uint64) {
+	pressure, wait, epoch, _, _ := p.facts()
+	return pressure, wait, epoch
+}
+func (p *queuePressure) facts() (bool, time.Duration, uint64, float64, uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var wait time.Duration
@@ -79,5 +83,5 @@ func (p *queuePressure) measurement() (bool, time.Duration, uint64) {
 	for _, started := range p.waiting {
 		wait = max(wait, now.Sub(started))
 	}
-	return p.samples != 0 && float64(wait) > p.baseline, wait, p.epoch
+	return p.samples != 0 && float64(wait) > p.baseline, wait, p.epoch, p.baseline, p.samples
 }

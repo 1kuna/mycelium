@@ -132,9 +132,10 @@ func sameDelivery(current *Job, snapshot Job) bool {
 // Tick only starts/observes background work. NAS I/O never owns a queue lock,
 // nor the file-lifecycle lock: pending references already pin its source blobs.
 func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
+	controlMu := q.mu.named("advanceOutputDelivery", ctx)
 	q.deliveryMu.Lock()
 	defer q.deliveryMu.Unlock()
-	q.mu.RLock()
+	controlMu.RLock()
 	active := q.deliveryActive
 	eligible := active != nil
 	if !eligible {
@@ -145,7 +146,7 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 			}
 		}
 	}
-	q.mu.RUnlock()
+	controlMu.RUnlock()
 	if !eligible {
 		return nil
 	}
@@ -174,9 +175,9 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 				active.done <- publishErr
 				return err
 			}
-			q.mu.Lock()
+			controlMu.Lock()
 			q.deliveryActive = nil
-			q.mu.Unlock()
+			controlMu.Unlock()
 		default:
 			progress := active.progress.Load()
 			err := q.updateRequest(ctx, func() error {
@@ -237,10 +238,10 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 	if err != nil || next == nil {
 		return err
 	}
-	q.mu.Lock()
+	controlMu.Lock()
 	q.deliveryActive = next
 	store, root, publish := q.files, q.deliveryRoot, q.deliveryPublish
-	q.mu.Unlock()
+	controlMu.Unlock()
 	if publish == nil {
 		publish = func(j Job, s *FileStore, root string, progress func()) error {
 			return publishOutputDelivery(j, s, root, progress)

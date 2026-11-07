@@ -108,6 +108,7 @@ type hostProbeResult[T any] struct {
 // control, grows a goroutine backlog, or renews the previous observation.
 // The lane owner serializes step; source work holds no queue/snapshot mutex.
 type hostProbeLane[T any] struct {
+	completed   hostProbeResult[T]
 	clock       Clock
 	timing      probeTiming
 	discard     bool
@@ -129,6 +130,7 @@ func (p *hostProbeLane[T]) step(ctx context.Context, source func(context.Context
 	if p.pending != nil {
 		select {
 		case r := <-p.pending:
+			p.completed = r
 			p.pending, p.done, completed, err = nil, nil, true, r.err
 			if p.discard {
 				p.discard = false

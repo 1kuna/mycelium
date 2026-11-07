@@ -94,13 +94,14 @@ func (q *Queue) fileStoreAttemptJob(ctx context.Context, allocating bool) (*Job,
 	return j, nil
 }
 func (q *Queue) checkFileStoreAttempt(ctx context.Context) error {
+	controlMu := q.mu.named("checkFileStoreAttempt", ctx)
 	if ctx.Value(fileStoreAttemptKey{}) == nil {
 		return nil
 	}
-	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	if err := lockUploadContext(ctx, controlMu.RLock, controlMu.RUnlock); err != nil {
 		return err
 	}
-	defer q.mu.RUnlock()
+	defer controlMu.RUnlock()
 	_, err := q.fileStoreAttemptJob(ctx, false)
 	return err
 }
@@ -181,11 +182,12 @@ func (q *Queue) fileStoreWriteClass(ctx context.Context, files FileManifest, gro
 // can claim its tier, and unidentified legacy writes can also use the reserve.
 // Attempt checks fence stale executions; they do not bind bytes to their owner.
 func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, projected map[string]storedPayload, files FileManifest, need, growth uint64) (uint64, error) {
-	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	controlMu := q.mu.named("admitFileUpload", ctx)
+	if err := lockUploadContext(ctx, controlMu.RLock, controlMu.RUnlock); err != nil {
 		return 0, err
 	}
 	ordinary, err := q.fileUploadAdmission(ctx, status, projected, files, need, growth)
-	q.mu.RUnlock()
+	controlMu.RUnlock()
 	if err == nil {
 		q.recordStorageWritePressure(ctx, status, projected, files, growth, false, "")
 	}
@@ -220,7 +222,8 @@ func (q *Queue) fileUploadAdmission(ctx context.Context, status FileStoreStatus,
 }
 
 func (q *Queue) admitFileCreation(ctx context.Context, view *fileCapacitySnapshot, ref FileRef) (uint64, error) {
-	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+	controlMu := q.mu.named("admitFileCreation", ctx)
+	if err := lockUploadContext(ctx, controlMu.RLock, controlMu.RUnlock); err != nil {
 		return 0, err
 	}
 	s := view.store
@@ -235,7 +238,7 @@ func (q *Queue) admitFileCreation(ctx context.Context, view *fileCapacitySnapsho
 		s.creations[ref.SHA256].length = uint64(ref.SizeBytes)
 	}
 	s.mu.Unlock()
-	q.mu.RUnlock()
+	controlMu.RUnlock()
 	if err == nil {
 		q.recordStorageWritePressure(ctx, status, payloads, files, growth, false, "")
 	}
