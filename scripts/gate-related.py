@@ -24,6 +24,11 @@ for source in ('shared_clone_darwin', 'shared_clone_linux', 'shared_clone_other'
 SUPPLEMENTAL_CONSUMERS['internal/myce/engine_health.go'] = (
     'engine_recovery_test.go', 'engine_recovery_round3_test.go')
 
+# Platform socket helpers implement transfer progress underneath file clients.
+for source in ('file_socket_unix', 'file_socket_other'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
+        'client_adaptive_test.go', 'file_transfer_test.go')
+
 
 def changed_symbols(diff):
     symbols = set()

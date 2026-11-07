@@ -97,6 +97,9 @@ def run(root, sha, scratch):
             state = failure_state(job)
         if state == 'succeeded':
             destination = scratch / f'{platform}-result'
+            # myce result owns transient recovery through Client.RetryTransient:
+            # shared adaptive pacing, Retry-After and permanent-error handling.
+            # Retain one accepted-result/marker check here, not a second backoff.
             reply = command('result', job, '--out', str(destination))
             marker = destination / 'gate-result.txt'
             if reply.returncode or not marker.is_file() or marker.read_text() != 'gate full: exit=0\n':
