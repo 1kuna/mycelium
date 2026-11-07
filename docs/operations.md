@@ -3891,8 +3891,9 @@ An ordinary keyed profile/adapter command starts one when the lifetime lock is
 free. Updating a CLI symlink does not change the image of an existing process.
 Supporting newer clients write a versioned upgrade request when arming or
 adopting a receipt. The owner verifies the requesting image and handles it
-between deliveries: it releases receipt locks, passes its lifetime lock to the
-new image and waits for readiness. On startup failure it retains ownership and
+between deliveries: it cancels and joins outstanding authority readers, releases
+receipt locks, passes its lifetime lock to the new image and waits for readiness.
+Socket cleanup checks identity so the old owner cannot unlink its replacement. On startup failure it retains ownership and
 reloads durable arms. A paused/stalled loop cannot perform that handoff; the
 request itself is not proof of replacement. Unversioned development images do
 not request automatic replacement.
