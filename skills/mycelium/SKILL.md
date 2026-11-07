@@ -191,6 +191,16 @@ independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
 
+From the next release (#881), job `health_recovery` retains an `owner_required`
+decision after repeated infrastructure failures: `action: none` means Mycelium
+performed no automatic repair and left capacity unchanged. The summary names
+what happened and `next_step` names the owner's action. For `live_host_growth`,
+the Mycelium maintenance owner inspects forecast bounds and paired queue/worker
+snapshots; the comparison alone does not prove stale free RAM. Keep the same job
+ID and submission key. Do not raise shared budgets, clear custody or resubmit to
+bypass the finding. It uses the existing health notification channel; no new
+notifier setup is needed. Later progress does not establish a causal repair.
+
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
 negative behind), the measured history horizon, weighted oldest project-wait

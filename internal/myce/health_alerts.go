@@ -18,20 +18,22 @@ const DefaultHealthStorageDelay = 5 * time.Minute
 // HealthAlert contains identities and fixed diagnostic codes, never worker text.
 // Receivers deduplicate DeliveryID, including after an ambiguous hook exit.
 type HealthAlert struct {
-	ClientKind  string    `json:"client_kind,omitempty"`
-	Project     string    `json:"project,omitempty"`
-	Reason      string    `json:"reason,omitempty"`
-	Recipients  []string  `json:"recipients,omitempty"`
-	DeliveryID  string    `json:"delivery_id"`
-	Kind        string    `json:"kind"`
-	Store       string    `json:"store,omitempty"`
-	Host        string    `json:"host,omitempty"`
-	Device      string    `json:"device,omitempty"`
-	Reservation string    `json:"reservation,omitempty"`
-	JobID       string    `json:"job_id,omitempty"`
-	Attempt     int       `json:"attempt,omitempty"`
-	At          time.Time `json:"at"`
-	Delivered   bool      `json:"delivered"`
+	Recovery    *AlertRecovery `json:"recovery,omitempty"`
+	Machine     string         `json:"machine,omitempty"`
+	ClientKind  string         `json:"client_kind,omitempty"`
+	Project     string         `json:"project,omitempty"`
+	Reason      string         `json:"reason,omitempty"`
+	Recipients  []string       `json:"recipients,omitempty"`
+	DeliveryID  string         `json:"delivery_id"`
+	Kind        string         `json:"kind"`
+	Store       string         `json:"store,omitempty"`
+	Host        string         `json:"host,omitempty"`
+	Device      string         `json:"device,omitempty"`
+	Reservation string         `json:"reservation,omitempty"`
+	JobID       string         `json:"job_id,omitempty"`
+	Attempt     int            `json:"attempt,omitempty"`
+	At          time.Time      `json:"at"`
+	Delivered   bool           `json:"delivered"`
 }
 type healthCondition struct {
 	Endings     []healthEnding `json:"endings,omitempty"`
@@ -105,6 +107,7 @@ func (q *Queue) observeHealth(key string, bad bool, delay time.Duration, e Healt
 }
 func (q *Queue) appendHealthAlert(e HealthAlert) {
 	e.DeliveryID, e.At = ID(), q.clock.Now()
+	e.Recovery = q.recoverHealthAlert(e)
 	q.s.Health.Events = append(q.s.Health.Events, e)
 	// Keep pending deliveries. Delivered history is a diagnostic window, not an
 	// unbounded second job history. No configured notifier keeps the latest 256.
@@ -112,7 +115,9 @@ func (q *Queue) appendHealthAlert(e HealthAlert) {
 }
 func (q *Queue) pruneHealthEvents() {
 	for len(q.s.Health.Events) > 256 {
-		i := slices.IndexFunc(q.s.Health.Events, func(e HealthAlert) bool { return e.Delivered || !q.s.Health.DeliveryConfigured })
+		i := slices.IndexFunc(q.s.Health.Events, func(e HealthAlert) bool {
+			return (e.Delivered || !q.s.Health.DeliveryConfigured)
+		})
 		if i < 0 {
 			return
 		}

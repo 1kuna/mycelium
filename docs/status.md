@@ -1668,6 +1668,23 @@ cost evidence and its actual duration, never an assumed complete minute.
   Replays cannot increment it; planned stops are excluded. Successful
   or workload-caused endings break the streak. Historical failures interrupted
   by successful work do not fire. It preserves all existing attempt fences.
+  From the next release (#881), the episode and affected job retain an
+  `owner_required` decision receipt in `health_alerts[].recovery` and
+  `health_recovery`. It records the episode, exact execution/session, time,
+  retained cause, sanitized admission comparison when available, plain-language
+  summary and next owner action. `action: none` means no automatic repair was
+  performed. No alert changes capacity, configured allowances, reservations,
+  learned sizes, retry budgets, checkpoints or release obligations.
+  Both direct-RAM and `live_host_growth` refusals need diagnosis. A growth
+  comparison cannot distinguish stale availability from an inflated forecast
+  (#868/#909); the maintenance owner needs forecast bounds and paired
+  queue/worker memory snapshots. A subsequent successful start does not rewrite
+  the receipt or claim a repair. Delivery, restart and repeated handling retain
+  the original decision; newer executions cannot be changed by old evidence.
+  No remediation timer or retry is added; normal scheduling and owner policy
+  still apply. Plain CLI/page job reasons include the summary and next step.
+  Automatic action remains deferred until a recorded incident establishes an
+  existing supported reversible remedy and its fresh evidence prerequisites.
 - `staging_cache_refused`: accepted worker transfer/cache/copy failure reports or
   an exact attempt's typed input-staging refusal. Cold caches, successful copies
   and planned stops do not fire. A repaired report or later successful staging

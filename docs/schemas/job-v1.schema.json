@@ -36,6 +36,59 @@
       ],
       "type": "object"
     },
+    "AlertRecovery": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "episode": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "next_step": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "episode",
+        "action",
+        "state",
+        "cause",
+        "summary",
+        "machine",
+        "job_id",
+        "attempt",
+        "at"
+      ],
+      "type": "object"
+    },
     "ApplicationProgress": {
       "properties": {
         "age_seconds": {
@@ -1966,6 +2019,10 @@
         },
         "front": {
           "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "health_recovery": {
+          "$ref": "#/$defs/AlertRecovery",
           "x-contract": "diagnostic"
         },
         "id": {

@@ -419,6 +419,8 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	HealthRecovery *AlertRecovery `json:"health_recovery,omitempty"`
+
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
 	Blocker                 *Blocker               `json:"blocker,omitempty"`
