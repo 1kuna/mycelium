@@ -5,6 +5,14 @@ machine. Eligibility and owner tiers precede weighted fairness, available capaci
 victim disruption and least-valuable fit. Same-tier indefinite work has no bounded
 wait guarantee. Advice and estimates are snapshots, never reservations.
 
+CPU backfill also accounts for queued fan-out waves and wave retries. The
+ordinary wave planner selects their measured resource vector and destination;
+finite CPU executions, including running waves, can supply projected RAM/cores
+as they finish. New work behind that demand's tier/fair turn may use only the
+remaining capacity. An immediately usable production destination takes precedence
+over a different host's projected releases. Projections never authorize an early
+start or release existing custody; withdrawal removes the admission fence.
+
 - [Placement and memory](#placement-without-hardware-requirements-v3)
 - [Owner priority policy](#owner-priority-policy)
 - [Fair sharing and usage](#sharing-gpus-and-measuring-the-pool)
@@ -412,6 +420,25 @@ use the queue clock. A resumed job shows time since its latest return to the que
 Finished durations appear when start and finish are known.
 
 ## Live portability advice
+
+From the next release, plain-command reports include `authored_eligibility`,
+`environment_coverage` and `parity` per target. Resolve includes the same report
+under `portability`. Rows come from observed inventory, authored exact targets
+and the selected immutable Pixi lock's package keys, including absent targets.
+All member environments intersect; unknown uv/binary/installed-tool metadata
+does not imply universal compatibility. Unsupported runtime ports and stale
+inventory remain explicit. Member `builds` distinguish ready, prepare-needed and
+reported failure; host `admission` is the current planner snapshot as authored,
+separate from permanent eligibility and dependency candidates. Read-only advice
+never prepares, reserves, probes or rewrites targets. A lock covers dependencies,
+not application binaries, shell assumptions, runtime downloads or output parity.
+
+`require_target` on a plain command requests admission checking, not native
+baseline qualification. Native extensions retain exact qualification. Existing
+accepted placement records remain historical; no stored labels or intent are
+rewritten. Reusable commands still require explicit targets, and `portable: true`
+only permits architecture omission within a declared OS. Automatic omitted-target
+semantics and failure-isolated discovery remain a separate #853 follow-up.
 
 ## Declare requirements, let Mycelium place
 

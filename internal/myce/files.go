@@ -1033,6 +1033,13 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
 		return err
 	}
+	// EvalSymlinks preserves relative paths. Make the user-selected parent
+	// absolute first so logical cwd ancestors (e.g. macOS /tmp) resolve too.
+	// Keep the leaf unresolved: noModelSymlinks must still reject a link there.
+	dest, err := filepath.Abs(dest)
+	if err != nil {
+		return err
+	}
 	parent, err := filepath.EvalSymlinks(filepath.Dir(dest))
 	if err != nil {
 		return err

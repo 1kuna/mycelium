@@ -302,6 +302,44 @@ version and commit from its check-in. Missing worker releases mean unknown
 embed the source commit even with Go VCS stamping disabled. Development builds
 use Go's VCS revision when available, otherwise `unknown`.
 
+Worker CPU and I/O telemetry (next release) appears on job GET and status in
+`resource_attempts`: exact attempt, machine, session and `resources`. This retains
+the first and latest 31 attempts like memory facts; `resource_attempts_dropped`
+counts evictions. Running heartbeats and final results update the same row, so
+lost attempts retain the last observation. Missing rows/counters mean unknown.
+These observations do not change CPU or I/O admission.
+
+`resources.cpu` reports cumulative `usage_seconds`, and Linux cgroup v2 also
+reports `user_seconds`, `system_seconds`, `periods`, `throttled_periods` and
+`throttled_seconds` where the controller exposes them. The parent includes all
+member cgroups once. macOS uses custody-fenced process-tree CPU inventories,
+retains exited observed lifetimes and supplements the root with exit rusage.
+`source: sampled_process_tree` and `lower_bound: true` identify its limits:
+short-lived unseen children and CPU between observations can be missed. Missing
+user/system or throttling counters on this path remain unknown.
+
+`resources.io` reports summed cgroup `read_bytes`, `write_bytes`, `read_ops`,
+`write_ops`, and `pressure.some` / `pressure.full` PSI (`avg10`, `avg60`, `avg300`
+percent and cumulative `total_usec`). Device identities are omitted. An empty
+Linux `io.stat` is a measured zero; absent/incomplete files are unavailable.
+Machine `io_pressure` reads host `/proc/pressure/io` on every heartbeat. No
+comparable host/attempt PSI or cgroup block-I/O attribution is implemented on
+macOS: it explicitly reports `unavailable: unsupported_os`. Other unavailable
+reasons distinguish missing local cgroups, failed reads and invalid counters.
+
+Worker `sampled_at`, worker `age_seconds`, and queue `received_at` distinguish
+sample time from receipt without assuming synchronized clocks. Host status ages
+the reading after receipt. Attempt `elapsed_seconds` spans its observer lifetime,
+including teardown; its counters include wrapper/preparation work in the attempt
+boundary. The final result is sampled before the cgroup disappears. An unavailable
+final CPU read retains its last observed value as an explicit lower bound.
+
+The `X-Myce-Resource-Telemetry: attempt-resources-v1` response header negotiates
+support. New workers initially omit additive telemetry JSON; after negotiation
+they send it on check-in and result. Strict old queues, including a downgrade,
+receive the old shape, with local buffered results preserved. Old workers keep
+working with new queues; their missing telemetry remains unknown.
+
 Each hypha shows its capability profile: CPU count, system memory, accelerator
 memory, shared or separate memory, and local storage. Missing measurements say
 unknown. Extension reports say which kind of work or program is qualified on
@@ -1490,8 +1528,10 @@ These are live observations, separate from immutable submission intent and job
 holds. They do not change the accepted class or submission key.
 
 `myce submit` writes this advice to stderr and keeps the job ID on stdout.
-`myce wait` writes advice when it changes to stderr, preserving final-state
-lines on stdout; `myce status JOB` shows it alongside job details.
+`myce wait` prints one short line per state change: progress on stderr and
+terminal states on stdout. `myce wait --json JOB` emits JSON lines on state or
+reason changes, retaining full reasons and initial placement/deadline diagnostics;
+`myce status JOB` shows the current details.
 
 For deadline work, author a **new submission** with, for example:
 
@@ -1535,6 +1575,20 @@ eligible hosts can admit it immediately. Status names the latency backoff and it
 expiry; ordinary pressure recovery alone does not erase the cooldown.
 
 ## Incident health alerts
+
+From the next release, `health_alert_delivery` reports `configured` and `pending`
+in status/inspection JSON; CLI and page status explain the same state. No hook
+is a supported diagnostic-only mode: retained alerts stay `delivered: false`.
+`pending` counts retained events without a durable hook acknowledgement, including
+events recorded before a hook was configured. It does not prove an attempt or
+distinguish hook failures from queue acknowledgement failures. Older releases
+omit configuration and attempt evidence, so `delivered: false` alone cannot
+establish why delivery has not been acknowledged. The queue owner must verify
+the running hook configuration and sanitized delivery/commit evidence.
+Successful hook exit does not itself prove downstream thread execution.
+Restarting without a hook clears its historical configuration flag and restores
+the existing 256-event diagnostic retention window. Job completion observers
+and their thread-bound notifiers are independent of this queue-level channel.
 
 `health_alerts` retains diagnostic events delivered by the existing optional
 queue `--health-notify` executable. Detectors run on queue mutations and ticks,
@@ -1971,3 +2025,54 @@ the charge but grants no resident-memory credit because shared pages can appear
 in multiple processes. The reported estimate and the execution ceiling therefore
 serve different purposes. Explicit declarations, member limits and Docker keep
 their existing containment contract. See [native isolation](native-isolation.md).
+
+## Live view (`myce view`)
+
+`myce view` serves a live, read-only picture of the cluster on this computer:
+waiting jobs gather in the middle, a thread runs to each machine, and each
+machine fills from the bottom as it gets busier. Running jobs sit inside their
+machine, beads travel the threads as work is placed or returned, a machine that
+drops out drains and shows a dashed ×, and production work is gold. One line
+counts running, waiting, done and offline work; one line below names the latest
+event. Machine size follows its memory capacity. "How busy" is the most-held of
+CPU cores, host memory and GPU memory reserved by running work; status reports
+memory held, not GPU utilisation.
+
+```sh
+myce view                      # installed config, or --queue URL with MYCE_TOKEN
+myce view --anonymize          # generic labels for recordings and screenshots
+```
+
+It prints a local address and runs only on the computer where you start it,
+never in the queue process. It listens on loopback by default and then refuses
+requests that name any other host. The page has no sign-in: if you choose a
+non-loopback `--listen` address, anyone who can reach it can watch the stream
+(names included, unless `--anonymize`), though never the token or any write. It
+is an ordinary status client:
+
+- It reads only the default `GET /api/status`, the shared one-second snapshot.
+  It never asks for `detail=full`, history or filtered views, and it never
+  writes to the queue. The page cannot send anything to the queue.
+- It reads only while at least one page is open, one read at a time, and every
+  open page shares that read.
+- It waits at least a second between reads (the snapshot's sharing period) and
+  at least nine times the last read's duration, so a slow queue is read less
+  often; this holds for failed reads too. Failures add a backoff doubling to
+  30 s; a 429's `Retry-After` is always honoured, even beyond that. Redirects
+  are never followed.
+- Silence is learned from each machine's own heartbeat cadence; a machine
+  already gone when the view opened is not drawn.
+
+`--anonymize` replaces machine, project, job, tier and device names with labels
+such as `hypha-1`, `project-a` and `job-07`, assigned in order of first
+appearance and stable while the view runs. Other text is dropped or reduced to
+fixed words, and errors on the page are fixed codes, so a recording shows no
+host names, addresses or project names. Assets are embedded in the binary; the
+page loads nothing from the network.
+
+To try it without a cluster, run `./myce dev --workers 5`, then
+`./myce view --queue http://127.0.0.1:7331 --token dev-token --anonymize`, and
+`examples/fleet-view-demo.sh` for a varied stream of small jobs, one machine
+leaving, and a production job. `scripts/view-smoke.sh` loads the page in
+headless Chrome or Chromium against `myce dev` and checks for live frames and
+no script errors.

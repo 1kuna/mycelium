@@ -39,6 +39,7 @@ func TestEnrollmentPreflightRefusalLeavesHostUnchanged(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.EnvironmentFile, c.JoiningFile, c.Enrollment = "", filepath.Join(home, "joining.json"), true
+			c.EnvironmentCacheBytes = 1 << 20
 			c.HostID = "hypha"
 			if err = myce.WriteInvitation(c.JoiningFile, myce.Invitation{Version: 1, Address: server.URL, Fingerprint: fmt.Sprintf("%x", sha256.Sum256(server.Certificate().Raw)), Token: "test"}); err != nil {
 				t.Fatal(err)

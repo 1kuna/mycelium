@@ -13,7 +13,7 @@ import (
 
 func TestComponentExclusionDev(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", Workers: 1, Devices: 3, HostID: "fake-host", MemoryGB: 8, Interval: 20 * time.Millisecond})
+	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", Workers: 1, Devices: 3, HostID: "fake-host", MemoryGB: 8, Interval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

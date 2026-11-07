@@ -110,6 +110,7 @@ type Worker struct {
 	EnvironmentRoot       string
 	EnvironmentLimit      int64
 	environmentCache      *EnvironmentCache
+	environmentSizeLimit  func(string) (int64, error) // Test seam for cache filesystem headroom.
 	environmentRun        func(context.Context, []string, string, []string, io.Writer, io.Writer) error
 	// Test seams for deterministic filesystem faults and audited fake engines.
 	beforeModelCopy      func(context.Context)
@@ -148,6 +149,7 @@ type workerFinish struct {
 }
 type process struct {
 	stopAdmission    func()
+	resources        *resourceObserver
 	saveStopIntent   func(*time.Time, bool) error
 	savePriorityStop func(*PriorityPreemption) error
 	priorityStop     *PriorityPreemption
@@ -931,7 +933,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		launchErr = s.startFailure(j, launchRefused, launchErr)
 		var recorded *recordedStartError
 		if errors.As(launchErr, &recorded) {
+			p.mu.Lock()
 			p.outcome.Infrastructure = recorded.facts.Infrastructure
+			p.mu.Unlock()
 		}
 	}
 	result := Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
@@ -939,6 +943,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	extensionStarted = true
 	sharedStarted = true
 	started = true
+	p.resources = w.observeResources(p, memoryAttempt)
 	finishMemory := w.observeAttemptMemory(memoryAttempt, j, func() []int { return []int{cmd.Process.Pid} }, p)
 	go func() {
 		if extensionRelease != nil {
@@ -966,6 +971,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		p.mu.Unlock()
 		groupErr := errors.Join(custodyErr, signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL), waitWorkerGroup(cmd.Process.Pid, w.Clock))
 		peak := withExitMaxRSS(finishMemory(), cmd.ProcessState)
+		result.Resources = p.resources.finish()
+		result.Resources = withExitCPU(result.Resources, cmd.ProcessState)
 		oomErr := memoryAttempt.failure()
 		groupErr = errors.Join(groupErr, memoryAttempt.cleanup(w.Clock))
 		result.MemoryPeak = peak
@@ -1079,6 +1086,7 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	w.Client.resourceWire = &resourceWire{}
 	w.hygieneWire = &workerHygieneWire{}
 	w.unifiedMemoryWire = &workerUnifiedMemoryWire{}
 	w.toolReport = &workerToolReport{}
@@ -1138,7 +1146,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.EnvironmentRoot == "" {
 		w.EnvironmentRoot = filepath.Join(s.dir, "environment-cache")
 	}
-	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
+	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun, sizeLimit: w.environmentSizeLimit}
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}

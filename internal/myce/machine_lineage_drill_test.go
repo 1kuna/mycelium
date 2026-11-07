@@ -346,7 +346,7 @@ func TestM4ProductionLineageDrill(t *testing.T) {
 	if err := ConvertWorkerInstall(ctx, c, binary, false, run); err != nil {
 		t.Fatal("worker conversion", err)
 	}
-	w := Worker{StateDir: c.State, Machine: machine("b70", "fake", "b70"), Client: client, Clock: RealClock{}, Interval: 10 * time.Millisecond, CheckpointRoot: checkpoints, ModelConfig: q.models, HostMemorySource: func(context.Context) (float64, error) { return 128, nil }, InventoryProbe: func(context.Context) ([]MachineDevice, error) {
+	w := Worker{EnvironmentLimit: 1 << 30, StateDir: c.State, Machine: machine("b70", "fake", "b70"), Client: client, Clock: RealClock{}, Interval: 10 * time.Millisecond, CheckpointRoot: checkpoints, ModelConfig: q.models, HostMemorySource: func(context.Context) (float64, error) { return 128, nil }, InventoryProbe: func(context.Context) ([]MachineDevice, error) {
 		return []MachineDevice{{ID: "0", Platform: "fake", Identity: "fake-0", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}, {ID: "1", Platform: "fake", Identity: "fake-1", Selector: "1", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}, nil
 	}}
 	workerCtx, stopWorker := context.WithCancel(ctx)

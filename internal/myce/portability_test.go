@@ -196,6 +196,10 @@ func TestPortabilityLocksAndCPUChecks(t *testing.T) {
 	if row.Needs.CPUCores != 3 || row.Needs.MemoryGB != 2 || !strings.Contains(strings.Join(row.Actions, " "), "own resource needs and CPU checks") {
 		t.Fatal(row)
 	}
+	var text strings.Builder
+	if err := WritePortability(&text, r, false); err != nil || !strings.Contains(text.String(), "resources: CPU=3 host=2 GiB") || strings.Contains(text.String(), "accelerator=") {
+		t.Fatalf("CPU variant RAM lost or mislabelled: %s %v", text.String(), err)
+	}
 	if r.Inventory != "unknown" || len(row.Hosts) != 0 {
 		t.Fatal("empty inventory implies support")
 	}
@@ -239,7 +243,7 @@ func TestPortabilityAPIReadOnlyAndPrivate(t *testing.T) {
 // Recovering prevents these metadata-only fixtures from accepting payloads.
 func TestPortabilityDevMixedInventory(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-test-token", Interval: 10 * time.Millisecond})
+	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-test-token", Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +290,7 @@ func TestPortabilityPlainCatalogPreparation(t *testing.T) {
 	}
 	row := portabilityRow(t, report, s.Targets[0])
 	h := row.Hosts[0]
-	if h.Prepared != "prepared" || h.Builds["catalog"] != "prepared" || len(row.Environments) != 1 || row.Environments[0].Inputs != "present" {
+	if h.Prepared != "prepared" || h.Builds["main"] != "ready" || len(row.Environments) != 1 || row.Environments[0].Inputs != "present" {
 		t.Fatalf("plain catalog projection: %+v", row)
 	}
 	if h.Admission != "can admit now" {

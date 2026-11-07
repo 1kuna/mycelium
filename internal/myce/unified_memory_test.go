@@ -167,7 +167,7 @@ func TestUnifiedProbeFailureStatusAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	w := Worker{StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Machine: machine("unified", "fake"), MemorySource: source, MemoryMeasured: true, Interval: time.Millisecond}
+	w := Worker{EnvironmentLimit: 1 << 30, StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Machine: machine("unified", "fake"), MemorySource: source, MemoryMeasured: true, Interval: time.Millisecond}
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	t.Cleanup(func() {

@@ -213,7 +213,7 @@ func TestModelConfigAndOpenAIValidation(t *testing.T) {
 func TestDevModelHTTPFormats(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	d, e := StartDev(DevConfig{Address: "127.0.0.1:0", Database: dir + "/db", Checkpoints: dir + "/checkpoints", Token: "test", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+	d, e := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: dir + "/db", Checkpoints: dir + "/checkpoints", Token: "test", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if e != nil {
 		t.Fatal(e)
 	}

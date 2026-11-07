@@ -52,6 +52,9 @@ printf 'go test: exit=0\n' > go-test-result.txt
 	if got := adapterDogfoodResult(t, ctx, d, job.ID, "go-test-result.txt"); string(got) != "go test: exit=0\n" {
 		t.Fatalf("adapter result=%q", got)
 	}
+	t.Run("synthetic-resource-probes", func(t *testing.T) {
+		assertSyntheticResourceTelemetry(t, ctx, d.Client(), job.ID)
+	})
 }
 
 // The actual starter is deliberately unchanged: pinned uv environment, native
@@ -216,7 +219,7 @@ func adapterDogfoodJSON(t *testing.T, value any) []byte {
 func adapterDogfoodDev(t *testing.T, gpu string) (*myce.Dev, context.Context, string) {
 	t.Helper()
 	state := t.TempDir()
-	d, err := myce.StartDev(myce.DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), ExtensionRoot: filepath.Join(state, "extensions"), Token: adapterDogfoodToken, GPU: gpu, MemoryGB: 4, Workers: 1, Interval: 10 * time.Millisecond})
+	d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), ExtensionRoot: filepath.Join(state, "extensions"), Token: adapterDogfoodToken, GPU: gpu, MemoryGB: 4, Workers: 1, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

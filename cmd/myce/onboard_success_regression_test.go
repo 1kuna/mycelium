@@ -25,6 +25,7 @@ func TestInstallSuccessOutputRequiresSuccessfulInstall(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			args = append(args, "--environment-cache-bytes", "1048576")
 			if mode == "dry-run" {
 				args = append(args, "--dry-run")
 			}

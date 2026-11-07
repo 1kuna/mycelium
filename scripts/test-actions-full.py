@@ -41,6 +41,7 @@ class ActionsFullTest(unittest.TestCase):
                     self.assertIn('  - {os: linux, arch: amd64, platform: cpu}\n', profile)
                     self.assertIn('  memory_gb: 6\n', profile)
                     self.assertNotIn('memory: auto', profile)
+
                 self.assertIn('check: [grep, -qx,', profile)
                 if submission_failure and platform == 'darwin':
                     code, output = ((78, json.dumps(refusal)) if refusal is not None

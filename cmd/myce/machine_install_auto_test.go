@@ -23,6 +23,7 @@ func TestMachineInstallAutomaticSparkPreview(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.HostID = "spark"
+	c.EnvironmentCacheBytes = 1 << 20
 	c.HostMemoryBudgetGB = 105
 	c.EnvironmentFile = filepath.Join(home, "unread-secret-reference")
 	if err = os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {

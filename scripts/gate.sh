@@ -18,7 +18,7 @@ if [[ $mode == quick && $base == --selection ]]; then
 fi
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
-if [[ $mode == quick && ${MYCE_GATE_BUDGET:-} != 1 ]]; then
+if [[ ${MYCE_GATE_BUDGET:-} != 1 ]]; then
   exec python3 "$repo/scripts/gate-budget.py" "$repo/scripts/gate.sh" "$@"
 fi
 export GOTOOLCHAIN=local GOTELEMETRY=off
@@ -27,8 +27,12 @@ export GOTOOLCHAIN=local GOTELEMETRY=off
 shared_build=$(go env GOCACHE)
 shared_modules=$(go env GOMODCACHE)
 mkdir -p "$repo/.gate"
+export GATE_TIMING_CACHE="$shared_build/mycelium-gate-timings"
+export GATE_TIMING_REPORT="$repo/gate-timings.jsonl"
+export GOVERSION=$(go env GOVERSION)
+cores=$(python3 scripts/gate-progress.py --cpus)
 supervised=
-if [[ $mode == quick && $budgeted == 1 && -n ${GATE_SCRATCH:-} ]]; then
+if [[ $budgeted == 1 && -n ${GATE_SCRATCH:-} ]]; then
   scratch=$GATE_SCRATCH
   supervised=1
 else
@@ -80,24 +84,17 @@ done
 # Go's race runtime otherwise sleeps one second on EVERY helper-process exit.
 # Tests join workers explicitly; keep instrumentation, omit that artificial wait.
 export GORACE=atexit_sleep_ms=0
-# Two packages bound compiler/RAM contention on the shared laptop. TestMain
-# fixtures have private HOME/temp roots and use fake inventory/daemons.
-export GOFLAGS=-p=2
+# Compile parallelism follows affinity/quota and any GOMAXPROCS contract.
+# TestMain fixtures retain private HOME/temp roots and fake inventory/daemons.
+export GOFLAGS=-p=$cores
 step() {
   local name=$1
   shift
   local begin=$SECONDS
-  "$@"
+  python3 scripts/gate-progress.py "$name" "$@"
   echo "$name: $((SECONDS-begin))s"
 }
-wait_for_race_slot() {
-  # Existing workers also run the older pair/full commands. Count go processes,
-  # not their Python/shell supervisors; targeted -run commands aren't full runs.
-  while [[ $({ pgrep -fl 'go test' || true; } | awk '/^[0-9]+ (.*\/)?go test / && /-race/ && !/-run/ { n++ } END { print n+0 }') -ge 2 ]]; do
-    echo 'waiting for a full-race slot (two other runs active)' >&2
-    sleep 15
-  done
-}
+step gate-progress-regressions python3 scripts/test-gate-progress.py
 step build go build -o "$scratch/bin/myce" ./cmd/myce
 step vet go vet ./...
 # Same matrix as ReleaseTargets; darwin/arm64 is the native CGO build.
@@ -115,45 +112,38 @@ if [[ $mode == full ]]; then
   step upgrade-compat python3 scripts/upgrade-compat.py run
   # Includes the real CLI dev/checkpoint/model/onboarding e2e. A separate dev
   # pair would repeat the same tests and builds.
-  wait_for_race_slot
-  # The s050 two-core Linux core suite took 896.644s of a 900s budget.
-  # Observe JSON log growth instead of killing healthy package progress;
-  # the release owner stops a run stalled for 20m.
-  step race-and-dev go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 0 ./...
-else
-  # Leave ten seconds before supervisor TERM for Go's timeout stack dump.
-  # Recompute for each invocation so packages share the remaining work budget.
-  quick_timeout() {
-    python3 - <<'PYTIME'
-import os
-import time
-remaining = float(os.environ['GATE_TEST_DEADLINE']) - time.monotonic()
-if remaining <= 0:
-    raise SystemExit('quick: diagnostic test budget exhausted; run ./scripts/gate.sh full')
-print(f'{remaining:.3f}s')
-PYTIME
-  }
+  go list ./... | while read -r package; do
+    printf '%s\t.*\n' "$package"
+  done > "$scratch/selection"
+fi
+# One watchdog per package: output from a sibling cannot hide a stalled test.
+# Concurrency follows the execution host's available/assigned CPU count.
+{
   # Each selected package has its own expression, so run separate go test
-  # commands. Overlap at most two packages, as the full gate already does;
-  # limit each command to one build slot to retain the same total bound.
-  pending_pid=
+  # commands. Each takes one build slot; overlap no more than assigned cores.
+  pending_pids=()
   related_status=0
   wait_related() {
-    if wait "$1"; then :; else related_status=1; fi
+    local result=0
+    wait "$1" || result=$?
+    if (( result == 125 )); then exit 125; fi
+    if (( result == 124 )); then related_status=124
+    elif (( result != 0 && related_status != 124 )); then related_status=1; fi
   }
-  while IFS=$'\t' read -r dir names; do
-    package=$(go list "./$dir")
-    echo "quick $package: $names"
-    timeout=$(quick_timeout)
-    step race-related go test -race -vet=off -json -p 1 -parallel 4 -count=1 -timeout "$timeout" "$package" -run "$names" &
-    current_pid=$!
-    if [[ -n $pending_pid ]]; then wait_related "$pending_pid"; fi
-    pending_pid=$current_pid
-  done < "$scratch/selection"
-  if [[ -n $pending_pid ]]; then wait_related "$pending_pid"; fi
-  if (( related_status )); then exit "$related_status"; fi
   if [[ ! -s $scratch/selection ]]; then
-    timeout=$(quick_timeout)
-    step race-dev-smoke go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout "$timeout" ./cmd/myce -run '^TestDevStandaloneSmoke$'
+    printf 'cmd/myce\t^TestDevStandaloneSmoke$\n' > "$scratch/selection"
   fi
-fi
+  while IFS=$'\t' read -r dir names; do
+    if [[ $mode == full ]]; then package=$dir
+    else package=$(go list "./${dir#./}"); fi
+    echo "$mode $package: $names"
+    step "test:$package:$names" go test -race -vet=off -json -p 1 -parallel "$cores" -count=1 "$package" -run "$names" &
+    pending_pids+=("$!")
+    if (( ${#pending_pids[@]} >= cores )); then
+      wait_related "${pending_pids[0]}"
+      pending_pids=("${pending_pids[@]:1}")
+    fi
+  done < "$scratch/selection"
+  for pid in "${pending_pids[@]}"; do wait_related "$pid"; done
+  exit "$related_status"
+}

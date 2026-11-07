@@ -24,7 +24,7 @@ func TestRunDevEndToEnd(t *testing.T) {
 	defer cancel()
 	const token = "run-dev-fixture-token"
 	environment := []string{"PATH=/usr/bin:/bin", "HOME=" + root, "TMPDIR=" + root, "MYCE_TOKEN=" + token}
-	dev := exec.Command(binary, "dev", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--file-store", filepath.Join(root, "files"), "--workers", "1", "--gpu", "cpu")
+	dev := exec.Command(binary, "dev", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--file-store", filepath.Join(root, "files"), "--workers", "1", "--gpu", "cpu")
 	dev.Dir, dev.Env = root, environment
 	stdout, err := dev.StdoutPipe()
 	if err != nil {
@@ -92,6 +92,9 @@ func TestRunDevEndToEnd(t *testing.T) {
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "done" {
 		t.Fatal("real command effect missing")
 	}
+	t.Run("tagged-synthetic-resource-probes", func(t *testing.T) {
+		assertSyntheticResourceTelemetry(t, ctx, client, strings.Fields(string(output))[0])
+	})
 	// Profiles upload a frozen source and explicit inputs even with NAS checkpoints.
 	profileDir := filepath.Join(root, ".mycelium", "profiles")
 	if err := os.MkdirAll(profileDir, 0700); err != nil {

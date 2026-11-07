@@ -69,7 +69,7 @@ func TestPreDeployFullSystem(t *testing.T) {
 		}
 		workerCtx, stop := context.WithCancel(ctx)
 		done := make(chan error, 1)
-		w := Worker{checkpointPrepare: prepareCheckpoint, CheckpointRoot: alias,
+		w := Worker{EnvironmentLimit: 1 << 30, checkpointPrepare: prepareCheckpoint, CheckpointRoot: alias,
 			StateDir: filepath.Join(base, id+"-state"), Clock: RealClock{}, Interval: 5 * time.Millisecond,
 			Machine: machine(id, "fake"), Client: client}
 		go func() { done <- w.Run(workerCtx); close(done) }()
@@ -267,7 +267,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 	transport := &partitionTransport{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	w := Worker{Client: Client{URL: server.URL, Token: client.Token, HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}},
+	w := Worker{EnvironmentLimit: 1 << 30, Client: Client{URL: server.URL, Token: client.Token, HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}},
 		Machine: machine("copy-worker", "fake"), CheckpointRoot: checkpoints, ModelRoot: nas, StateDir: state,
 		CacheLimit: 4 * 1024 * 1024, Clock: RealClock{}, Interval: 5 * time.Millisecond, ModelConfig: cfg,
 		beforeModelCopy: hook, modelEngine: func(Model) Engine { return &auditedModelEngine{root: cache, loads: &loads, invalid: &invalid} }}
@@ -503,7 +503,7 @@ func TestPreDeployEnvironmentBuildRestart(t *testing.T) {
 		t.Fatal(e)
 	}
 	state := filepath.Join(base, "worker")
-	w := Worker{StateDir: state, Clock: RealClock{}, Interval: 5 * time.Millisecond, Client: Client{URL: server.URL, Token: "test"}, Machine: Machine{ID: "restart-worker", GPU: "fake", FreeMemoryGB: 64}}
+	w := Worker{EnvironmentLimit: 1 << 30, StateDir: state, Clock: RealClock{}, Interval: 5 * time.Millisecond, Client: Client{URL: server.URL, Token: "test"}, Machine: Machine{ID: "restart-worker", GPU: "fake", FreeMemoryGB: 64}}
 	run := func() (context.CancelFunc, chan error) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)

@@ -7,6 +7,16 @@ description: "Use when work needs fleet compute (heavy tests, builds, sims, trai
 
 # Mycelium
 
+## Try locally without a fleet
+
+On macOS or Linux with Git, Go 1.25.6+ and a Unix shell, follow the five
+[quick-start commands](../../docs/START-HERE.md#five-minute-start).
+`./myce dev -- sh examples/quickstart.sh` supplies private temporary local
+connection settings, submits a real CPU command and a fake-GPU command, waits
+and fetches verified output. No installed fleet or token setup is needed.
+The queue and workers stop automatically; `quickstart-result/result.txt` remains.
+Plain `myce dev` retains its existing persistent, foreground behavior.
+
 From the next release, a worker fleet proof may report `slot_mismatch` with
 separate running and `installed_slot` hashes after a failed update. This does not
 prove activation. Report it to the Mycelium maintenance owner; an unapproved
@@ -91,6 +101,16 @@ separately. Keep private receipts ignored and retained for recovery.
 
 Resolve read-only, then submit once:
 
+From the next release, resolve and `myce portability --adapter
+.mycelium/adapter.yaml --entry NAME` also expose lost platform breadth: authored
+target exclusions, additional selected-lock dependency candidates, every member's
+coverage, native preparation and current admission remain separate. Run this
+before choosing targets and after inventory or recipe changes. A dependency
+candidate is not application compatibility or owner-accepted production parity.
+Plain-command `require_target` checks admission, not native qualification.
+Explicit targets remain binding; reusable entries still require them, and
+`portable: true` does not infer additional operating systems.
+
 ```sh
 myce version
 myce spec check --resolve --entry ease-audit .mycelium/adapter.yaml
@@ -122,6 +142,12 @@ printf 'mycelium-ease-audit-ok\n' > expected.txt
 cmp expected.txt accepted/result.txt
 ```
 
+From the next release, `wait` prints one short line per state change (progress
+on stderr, terminal states on stdout). Use `myce wait --json JOB_ID` for full
+reasons and initial diagnostics, or `myce status JOB_ID` for current details.
+Relative result directories also work under symlinked working-directory ancestors;
+symlinks below the chosen output directory remain refused.
+
 Success means `result` verified output hashes and sizes **and** `cmp` exited 0:
 the exact result is 23 bytes including newline. A wake or command exit alone is
 insufficient. Download within retention (default seven days).
@@ -137,6 +163,13 @@ capture time. Interpret worker freshness and diagnostics at that time, allowing
 for the response age. Inspection and filtered/full status take a fresh capture;
 default status can reuse a generation for up to one second, with immediate
 terminal/release invalidation.
+
+From the next collector release, job GET/status `resource_attempts` reports
+cumulative CPU time, block I/O and latest attempt PSI; machine `io_pressure`
+reports host PSI. Read the exact attempt/session, source, age and unavailable
+reason. Missing means unknown. macOS sampled CPU is a lower bound and I/O PSI
+is explicitly unavailable. These observations do not grant capacity or change
+admission. See [CPU and I/O fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
 
 If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
 repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
@@ -175,6 +208,14 @@ Verify the whole manifest before use; loading never downloads weights. See
 [explicit master downloads](https://github.com/1kuna/mycelium/blob/main/docs/services.md#explicit-master-download-and-pins).
 
 ## Automatic host hygiene (next release)
+
+On releases exposing `health_alert_delivery`, status explains whether the
+queue health notifier is configured and counts retained unacknowledged alerts.
+Without a configured hook, `delivered: false` is diagnostic-only history by
+design. With a hook, false alone cannot establish whether delivery was attempted
+or failed; the queue owner checks sanitized hook and commit evidence. This
+channel is separate from your job completion notifier and does not prove a
+thread wake. Older releases omit configuration; do not infer a cause from false.
 
 Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium

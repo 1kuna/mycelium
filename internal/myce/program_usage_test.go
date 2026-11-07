@@ -73,7 +73,7 @@ printf useful-result > output
 	s.Run.Env = map[string]string{"MYCE_USAGE_FILE": "payload-must-not-choose-report"}
 	j := submit(t, q, s)
 	ctx, cancel := context.WithCancel(context.Background())
-	w := Worker{Client: Client{URL: server.URL, Token: "throwaway"}, Machine: machine("fake-hypha", "fake"), ExtensionRoot: root, JobFileRoot: shared, StateDir: newTestStateRoot(t), Interval: 5 * time.Millisecond}
+	w := Worker{EnvironmentLimit: 1 << 30, Client: Client{URL: server.URL, Token: "throwaway"}, Machine: machine("fake-hypha", "fake"), ExtensionRoot: root, JobFileRoot: shared, StateDir: newTestStateRoot(t), Interval: 5 * time.Millisecond}
 	w.processMemory = programUsageMemoryProbe()
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
@@ -160,7 +160,7 @@ printf useful-result > output
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := Worker{Client: c, Machine: machine("relative-state", "fake"), ExtensionRoot: root, StateDir: state, Interval: 5 * time.Millisecond}
+	w := Worker{EnvironmentLimit: 1 << 30, Client: c, Machine: machine("relative-state", "fake"), ExtensionRoot: root, StateDir: state, Interval: 5 * time.Millisecond}
 	w.processMemory = programUsageMemoryProbe()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

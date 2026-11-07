@@ -1,0 +1,18 @@
+name: quickstart
+project: quickstart
+class: experiment
+# Shell commands and this text input are architecture-independent.
+portable: true
+source: {directory: examples/quickstart-input}
+run:
+  command: [sh, -c, 'test -z "${MYCE_TOKEN:-}" && cat hello.txt > result.txt']
+needs:
+  cpu_cores: 1
+  memory_gb: 0.125
+  platform: fake
+outputs:
+  result.txt: results
+targets:
+  - {os: darwin, platform: fake}
+  - {os: linux, platform: fake}
+check: [grep, -qx, hello from Mycelium, result.txt]

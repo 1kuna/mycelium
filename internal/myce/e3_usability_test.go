@@ -103,7 +103,7 @@ func TestExtensionBaselineFailureIsFailedAttempt(t *testing.T) {
 	if err := InstallExtension(ext, e); err != nil {
 		t.Fatal(err)
 	}
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "state", "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: ext, Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "state", "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: ext, Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

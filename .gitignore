@@ -25,6 +25,7 @@ ops/private/
 /checkpoints/
 /job.yaml
 /resume.py
+/quickstart-result/
 
 /workers/
 
@@ -38,3 +39,5 @@ clients/python/src/*.egg-info/
 # Private memory evidence and unpublished outboxes
 /docs/history/
 /.mycelium/receipts/
+
+/gate-timings.jsonl

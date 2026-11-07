@@ -26,7 +26,7 @@ func TestDevFanOutBurst62RealTime(t *testing.T) {
 		t.Skip("real-time dev burst acceptance")
 	}
 	root := newTestStateRoot(t)
-	c := DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: filepath.Join(root, "extensions"), JobFileRoot: filepath.Join(root, "nas"), Token: "burst-test", GPU: "cpu", Workers: 2, CPUBudgetCores: 4, Interval: 100 * time.Millisecond}
+	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: filepath.Join(root, "extensions"), JobFileRoot: filepath.Join(root, "nas"), Token: "burst-test", GPU: "cpu", Workers: 2, CPUBudgetCores: 4, Interval: 100 * time.Millisecond}
 	if err := os.MkdirAll(c.JobFileRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestDevFanOutBurst62RealTime(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	probeWait(t, ctx, func() bool { s, err := d.Queue.Snapshot(); return err == nil && len(s.Machines) == 2 })
-	cache := &EnvironmentCache{Root: filepath.Join(root, "workers", "fake-1", "environment-cache")}
+	cache := &EnvironmentCache{Root: filepath.Join(root, "workers", "fake-1", "environment-cache"), Limit: 1 << 30}
 	if _, err := CheckExtension(ctx, c.ExtensionRoot, e, "cpu", "", "dev-host", io.Discard, cache, d.Client()); err != nil {
 		t.Fatal(err)
 	}
