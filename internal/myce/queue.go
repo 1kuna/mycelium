@@ -277,6 +277,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	db.SetMaxOpenConns(1)
 	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	q.control = newControlRecorder(clock)
+	q.control.storageProbe = controlStorageProbe(path)
 	if err = q.control.initialize(db); err != nil {
 		db.Close()
 		return nil, err
@@ -1253,7 +1254,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	}, nil); err != nil {
 		return err
 	}
-	q.publishEfficiencyDiagnostics(diagnostics)
+	q.publishEfficiencyDiagnostics(diagnostics, requestCtx)
 	_ = q.control.flush(q.db) // Diagnostic failure is reported, never an admission failure.
 	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
 }

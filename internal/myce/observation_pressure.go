@@ -2,6 +2,7 @@ package myce
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,15 +15,16 @@ import (
 // Waiting longer than one such interval means work is queued beyond an ordinary
 // control turn. There is no rate, fleet-calibrated latency, or recovery timer.
 type queuePressure struct {
-	mu       sync.Mutex
-	clock    Clock
-	waiting  map[*queuePressureWait]time.Time
-	holders  int
-	since    time.Time
-	quiet    bool
-	samples  uint64
-	epoch    uint64  // invalidates read-cost samples across contention, including recovered waits
-	baseline float64 // nanoseconds, incremental mean; fixed space
+	observedPressure atomic.Bool // Last measured result; diagnostics must not rescan waiters.
+	mu               sync.Mutex
+	clock            Clock
+	waiting          map[*queuePressureWait]time.Time
+	holders          int
+	since            time.Time
+	quiet            bool
+	samples          uint64
+	epoch            uint64  // invalidates read-cost samples across contention, including recovered waits
+	baseline         float64 // nanoseconds, incremental mean; fixed space
 }
 
 type queuePressureWait struct{ contended bool }
@@ -46,6 +48,9 @@ func (p *queuePressure) acquired(w *queuePressureWait) {
 		p.epoch++
 	}
 	delete(p.waiting, w)
+	if len(p.waiting) == 0 {
+		p.observedPressure.Store(false)
+	}
 	if p.holders == 0 {
 		p.since = p.clock.Now()
 		p.quiet = len(p.waiting) == 0 && (w == nil || !w.contended)
@@ -83,5 +88,7 @@ func (p *queuePressure) facts() (bool, time.Duration, uint64, float64, uint64) {
 	for _, started := range p.waiting {
 		wait = max(wait, now.Sub(started))
 	}
-	return p.samples != 0 && float64(wait) > p.baseline, wait, p.epoch, p.baseline, p.samples
+	pressured := p.samples != 0 && float64(wait) > p.baseline
+	p.observedPressure.Store(pressured)
+	return pressured, wait, p.epoch, p.baseline, p.samples
 }

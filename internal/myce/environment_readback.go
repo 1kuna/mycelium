@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -31,8 +32,8 @@ type EnvironmentPlatform struct {
 	InputDigests map[string]string            `json:"input_digests"`
 }
 
-func (q *Queue) EnvironmentEntries() []EnvironmentEntry {
-	controlMu := q.mu.named("EnvironmentEntries", nil)
+func (q *Queue) EnvironmentEntries(contexts ...context.Context) []EnvironmentEntry {
+	controlMu := q.mu.named("EnvironmentEntries", requestContext(contexts))
 	// The configured catalog is immutable. Hash its detached snapshot outside q.mu.
 	controlMu.Lock()
 	catalog := q.environments

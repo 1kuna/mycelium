@@ -1195,17 +1195,26 @@ returns at most the existing 256-sample request window, with `first`,
 counts, duration sums, maxima and phase sums across queue restarts. `pending`,
 `dropped`, `overwritten`, `durable_at` and `storage_error` distinguish buffered,
 missing, aged-out and successfully committed evidence. A snapshot's `at` is its
-own injected queue time. Pending records can be lost on a crash.
+own injected queue time. Pending records can be lost on a crash or a shutdown
+while diagnostic persistence is deferred.
 
 Join by `(epoch, id)` for individual acquisitions and `(epoch, request)` for
 request-associated work; `handler` distinguishes listeners. A lock record gives
 its source operation, read/write mode, enqueue/acquire/finish times and separate
-wait/hold durations. `blockers` names holders or queued writers observed at
-arrival; compare their actual spans to distinguish an overlapping holder from
-a queued dependency. Reader holders needed by a writer are retained too.
+wait/hold durations. `blockers` contains at most the current writer and the
+last queued writer observed at arrival. Follow predecessor links and compare
+actual spans; these are observed dependencies, not a FIFO ordering promise.
+Readers carry a `reader_group`; a writer's inclusive `reader_groups` range joins
+reader cohorts that could overlap its wait. Compare timestamps to identify the
+actual blocking readers. Contended holders remain retained. This uses constant
+bookkeeping per acquisition, rather than copying the waiting population.
 `blocker` and `phase` preserve the writer and phase observed at enqueue.
-`in_flight` exposes waiting and active acquisitions independently of queue
-progress. `writer_wait_ns` separates the shared SQLite-writer reservation from
+`in_flight` exposes up to the existing 256-record window of waiting/active detail,
+independently of queue progress. `in_flight_total`, `flight_details_dropped` and
+event `flight_detail_omitted` make truncation explicit. These omissions affect
+live detail, not the acquisition's buffered completion. Hold timing includes
+recorder contention through the actual queue unlock; `release_recorder_wait_ns`
+separately identifies release-side recorder wait. `writer_wait_ns` separates the shared SQLite-writer reservation from
 acquiring the underlying mutex; that reservation is acquired **before** `q.mu`.
 
 Update acquisitions contain ordered `transaction.spans` for records, usage,
@@ -1240,7 +1249,7 @@ contact credit, pressure freshness and missing/failed-evidence admission rules
 are unchanged.
 
 Recording appends fixed metadata; aggregation, JSON, retention and SQL diagnostic
-writes run outside `q.mu`. Every acquisition/request contributes to aggregates;
+writes run outside `q.mu`. Recorded acquisitions/requests contribute to aggregates;
 contended acquisitions, their blocking holders, every rejection/check-in/probe,
 and measured duration outliers enter the durable event ring. Outliers use the
 existing four-deviation estimator, rather than a deployment-specific slow limit.
@@ -1249,10 +1258,33 @@ of 256 records) for each of its two buffers and retained events; overflow report
 lost records and never blocks control for diagnostic space. This bounds memory
 and SQLite growth at the cost of older event detail; #811 owns resizing the
 shared retention envelope. Lifetime finite-operation aggregates remain durable.
-Diagnostic transactions serialize first, then write one SQLite page of prepared
-data per turn (or one indivisible larger event); waiting control writers take
+Diagnostic transactions serialize first, then write approximately one SQLite page
+of prepared data per turn (or one indivisible larger event); this is not a bound
+on dirty SQLite pages or physical I/O. Waiting control writers take
 priority between turns. This prevents a bulk diagnostic drain from holding the
 queue mutex behind its own database writer.
+
+Persistence defers on measured observation pressure, control/diagnostic commit
+cost above the healthy prediction band for that operation (diagnostic commits
+learn their own band; read-only commits do not train storage cost), or insufficient free
+space for the live WAL's possible checkpoint growth plus the next prepared turn
+or observed shared-WAL growth. The free-space/WAL probe runs outside `q.mu`;
+unavailable capacity also defers. Commit-cost recovery requires an actual healthy
+control commit; pressure and capacity recovery follow new observations, without
+a retry timer. A cold queue must observe its first commit cost before detecting a
+cost regression; an already executing SQLite commit cannot be interrupted.
+Concurrent external writes and unobserved I/O amplification remain limits.
+
+`storage_deferred` and finite `storage_reason` explain deferral. During deferral,
+ordinary uncontended lock/request appends increment `storage_dropped` and
+`dropped` immediately, before buffers fill. Contention, rejection, check-in and
+probe detail keeps its bounded buffer priority; prolonged pressure can exhaust
+that buffer too. Aggregates exclude dropped records. Counters become durable on
+the next successful diagnostic commit. `diagnostic_transactions` and
+`serialized_bytes` retain successful diagnostic transaction count and serialized
+event/aggregate bytes across restart. The byte counter excludes metadata, indexes,
+WAL/checkpoint amplification and physical device I/O; use it alongside transactions
+and coverage when estimating recorder cost.
 
 Laptop overhead and reproducible baseline comparisons are documented in
 [development](development.md#control-telemetry-overhead).

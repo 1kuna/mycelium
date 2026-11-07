@@ -212,6 +212,7 @@ func (q *Queue) loadPersistedState() error {
 // transitions bracket only the actual statement, not post-commit bookkeeping.
 func (q *Queue) persistenceExec(tx *sql.Tx, statement string, args ...any) (sql.Result, error) {
 	if q.controlHold != nil {
+		q.controlHold.dirty = true
 		q.controlHold.next(controlSQL)
 		defer q.controlHold.next(controlOther)
 	}

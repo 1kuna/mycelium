@@ -658,8 +658,8 @@ func (q *Queue) applyEfficiencyDiagnostics(d *efficiencyDiagnostics) {
 		}
 	}
 }
-func (q *Queue) publishEfficiencyDiagnostics(d *efficiencyDiagnostics) {
-	controlMu := q.mu.named("publishEfficiencyDiagnostics", nil)
+func (q *Queue) publishEfficiencyDiagnostics(d *efficiencyDiagnostics, contexts ...context.Context) {
+	controlMu := q.mu.named("publishEfficiencyDiagnostics", requestContext(contexts))
 	if d == nil || !d.applied {
 		return
 	}
@@ -678,7 +678,7 @@ func (q *Queue) updateEfficiencyDiagnostics(ctx context.Context) error {
 	}
 	err = q.updateRequest(ctx, func() error { q.applyEfficiencyDiagnostics(d); return nil }, nil)
 	if err == nil {
-		q.publishEfficiencyDiagnostics(d)
+		q.publishEfficiencyDiagnostics(d, ctx)
 	}
 	return err
 }

@@ -34,7 +34,13 @@ type observationRead struct {
 }
 
 func newObservationLimit(clock Clock, q *Queue) *observationLimit {
-	return &observationLimit{clock: clock, pressure: q.mu.enablePressure(clock),
+	pressure := q.mu.enablePressure(clock)
+	if q.control != nil {
+		q.control.mu.Lock()
+		q.control.pressure = pressure
+		q.control.mu.Unlock()
+	}
+	return &observationLimit{clock: clock, pressure: pressure,
 		control: q.control, index: q.waitIndex(), active: make(map[*observationRead]struct{}), costs: make(map[string]observationCost)}
 }
 func observationRequest(r *http.Request) bool {

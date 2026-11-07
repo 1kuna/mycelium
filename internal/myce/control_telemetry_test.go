@@ -48,7 +48,7 @@ func TestControlTelemetryHolderWaiters(t *testing.T) {
 	var waits int
 	for _, e := range page.Entries {
 		if e.Operation == "synthetic_holder" {
-			if e.Phases[controlSerialize] != 2*time.Second || e.HoldNS != 2*time.Second {
+			if !e.Contended || e.Phases[controlSerialize] != 2*time.Second || e.HoldNS != 2*time.Second {
 				t.Fatal("wrong holder phases", e)
 			}
 		}
@@ -80,7 +80,7 @@ func TestControlTelemetryRejectionBurst(t *testing.T) {
 	active, _ := observationAdmit(l, "/api/jobs/selected-experiment?view=wait")
 	defer active()
 	release := observationPressure(l, clock, time.Millisecond)
-	defer release()
+	defer func() { release() }()
 	seen := map[string]string{}
 	for _, test := range []struct{ path, peer, family string }{{"/api/status", "192.0.2.1:1234", "myce/development"}, {"/api/status", "192.0.2.1:9876", "myce/development"}, {"/api/jobs/selected-experiment", "192.0.2.2:2345", "mycelium-python/development"}} {
 		r := httptest.NewRequest("GET", test.path, nil)
@@ -102,6 +102,9 @@ func TestControlTelemetryRejectionBurst(t *testing.T) {
 	if seen["192.0.2.1"] == seen["192.0.2.2"] {
 		t.Fatal("sources conflated")
 	}
+	// Storage defers during measured control pressure; inspect after recovery.
+	release()
+	release = func() {}
 	if err := q.control.flush(q.db); err != nil {
 		t.Fatal(err)
 	}
@@ -317,9 +320,7 @@ func TestControlTelemetryReaderDependencies(t *testing.T) {
 			retainedReader = e.Contended
 		}
 		if e.ID == writer.event.ID && e.Epoch == q.control.epoch {
-			for _, id := range e.Blockers {
-				joined = joined || id == reader.event.ID
-			}
+			joined = e.ReaderGroups[0] <= reader.event.ReaderGroup && reader.event.ReaderGroup <= e.ReaderGroups[1]
 		}
 	}
 	if !retainedReader || !joined {

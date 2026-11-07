@@ -57,6 +57,10 @@ type ControlEvent struct {
 	Contended           bool                             `json:"contended,omitempty"`
 	Transaction         *ControlTransaction              `json:"transaction,omitempty"`
 	Blockers            []uint64                         `json:"blockers,omitempty"`
+	ReaderGroup         uint64                           `json:"reader_group,omitempty"`
+	ReaderGroups        [2]uint64                        `json:"reader_groups,omitempty"`
+	FlightDetailOmitted bool                             `json:"flight_detail_omitted,omitempty"`
+	ReleaseRecorderWait time.Duration                    `json:"release_recorder_wait_ns,omitempty"`
 	Blocker             uint64                           `json:"blocker,omitempty"`
 	Phase               string                           `json:"phase,omitempty"`
 	Phases              [controlPhaseCount]time.Duration `json:"phase_ns,omitempty"`
@@ -120,18 +124,25 @@ type ControlFlight struct {
 	PhaseAt   time.Time `json:"phase_at"`
 }
 type ControlTelemetry struct {
-	Epoch          string          `json:"epoch"`
-	At             time.Time       `json:"at"`
-	DurableAt      time.Time       `json:"durable_at"`
-	Dropped        uint64          `json:"dropped"`
-	Overwritten    uint64          `json:"overwritten"`
-	StorageError   bool            `json:"storage_error"`
-	PhaseNames     []string        `json:"phase_names"`
-	Totals         []ControlTotal  `json:"totals"`
-	Recent         []ControlEvent  `json:"recent"`
-	InFlight       []ControlFlight `json:"in_flight"`
-	Pending        int             `json:"pending"`
-	AdmissionScope string          `json:"admission_scope"`
+	Epoch                  string          `json:"epoch"`
+	At                     time.Time       `json:"at"`
+	DurableAt              time.Time       `json:"durable_at"`
+	Dropped                uint64          `json:"dropped"`
+	Overwritten            uint64          `json:"overwritten"`
+	StorageError           bool            `json:"storage_error"`
+	PhaseNames             []string        `json:"phase_names"`
+	Totals                 []ControlTotal  `json:"totals"`
+	Recent                 []ControlEvent  `json:"recent"`
+	InFlight               []ControlFlight `json:"in_flight"`
+	Pending                int             `json:"pending"`
+	AdmissionScope         string          `json:"admission_scope"`
+	InFlightTotal          int             `json:"in_flight_total"`
+	FlightDetailsDropped   uint64          `json:"flight_details_dropped"`
+	StorageDeferred        bool            `json:"storage_deferred"`
+	StorageDropped         uint64          `json:"storage_dropped"`
+	StorageReason          string          `json:"storage_reason,omitempty"`
+	DiagnosticTransactions uint64          `json:"diagnostic_transactions"`
+	SerializedBytes        uint64          `json:"serialized_bytes"`
 }
 
 func (c *ControlTelemetry) Summary() string {
@@ -152,40 +163,56 @@ func (c *ControlTelemetry) Summary() string {
 			rejects += t.Count
 		}
 	}
-	return fmt.Sprintf("control: locks=%d requests=%d rejected=%d max_wait=%.1fms max_hold=%.1fms dropped=%d storage_error=%t", locks, requests, rejects, holdMS(wait), holdMS(hold), c.Dropped, c.StorageError)
+	return fmt.Sprintf("control: locks=%d requests=%d rejected=%d max_wait=%.1fms max_hold=%.1fms dropped=%d storage_error=%t deferred=%t flight_details_dropped=%d", locks, requests, rejects, holdMS(wait), holdMS(hold), c.Dropped, c.StorageError, c.StorageDeferred, c.FlightDetailsDropped)
 }
 
 type controlRecorder struct {
-	writeGate      sync.Mutex
-	controlWriters atomic.Int64
-	backlog        []ControlEvent
-	drainBuffer    []ControlEvent
-	backlogPending int
-	pageBytes      int
-	retainedRows   uint64
-	mu             sync.Mutex
-	flushMu        sync.Mutex // Never taken under q.mu.
-	clock          Clock
-	epoch          string
-	salt           [32]byte
-	next           uint64
-	pending        []ControlEvent
-	spare          []ControlEvent
-	dropped        uint64
-	overwritten    uint64
-	durableAt      time.Time
-	storageError   bool
-	totals         map[string]ControlTotal
-	recent         []ControlEvent
-	flights        map[uint64]ControlFlight
-	retainHolders  map[uint64]bool
-	writer         uint64
-	writerPhase    string
-	waitingWriters int
+	writeGate                               sync.Mutex
+	controlWriters                          atomic.Int64
+	backlog                                 []ControlEvent
+	drainBuffer                             []ControlEvent
+	backlogPending                          int
+	pageBytes                               int
+	retainedRows                            uint64
+	mu                                      sync.Mutex
+	flushMu                                 sync.Mutex // Never taken under q.mu.
+	clock                                   Clock
+	epoch                                   string
+	salt                                    [32]byte
+	next                                    uint64
+	pending                                 []ControlEvent
+	spare                                   []ControlEvent
+	dropped                                 uint64
+	overwritten                             uint64
+	durableAt                               time.Time
+	storageError                            bool
+	totals                                  map[string]ControlTotal
+	recent                                  []ControlEvent
+	flights                                 map[uint64]ControlFlight
+	flightDetailsDropped                    uint64
+	inFlightTotal                           int
+	readers                                 int
+	readerGeneration                        uint64
+	writerGeneration                        uint64
+	writerTail                              *controlLock
+	writer                                  uint64
+	writerPhase                             string
+	waitingWriters                          int
+	pressure                                *queuePressure
+	storageProbe                            func() (controlDiskBudget, error)
+	storageDeferred                         bool
+	storageDropped                          uint64
+	storageReason                           string
+	commitPressure                          bool
+	controlCommitCosts                      map[string]probeEstimate
+	diagnosticCommitCost                    probeEstimate
+	pressureOperation                       string
+	diagnosticTransactions, serializedBytes uint64
+	lastWALBytes, observedGrowth            uint64 // flushMu-owned, conservative shared WAL growth.
 }
 
 func newControlRecorder(clock Clock) *controlRecorder {
-	c := &controlRecorder{clock: clock, epoch: ID(), pending: make([]ControlEvent, 0, controlEventCapacity), spare: make([]ControlEvent, 0, controlEventCapacity), totals: map[string]ControlTotal{}, flights: map[uint64]ControlFlight{}, retainHolders: map[uint64]bool{}}
+	c := &controlRecorder{clock: clock, epoch: ID(), pending: make([]ControlEvent, 0, controlEventCapacity), spare: make([]ControlEvent, 0, controlEventCapacity), totals: map[string]ControlTotal{}, flights: make(map[uint64]ControlFlight, requestLatencyWindow)}
 	if _, err := rand.Read(c.salt[:]); err != nil {
 		panic(err)
 	}
@@ -214,6 +241,14 @@ func (c *controlRecorder) append(e ControlEvent) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.appendLocked(e)
+}
+func (c *controlRecorder) appendLocked(e ControlEvent) {
+	if c.storageDeferred && (e.Kind == "request" || e.Kind == "lock") && !e.Contended {
+		c.dropped++
+		c.storageDropped++
+		return
+	}
 	if len(c.pending) == cap(c.pending) {
 		c.dropped++
 		return
@@ -234,9 +269,11 @@ func (c *controlRecorder) initialize(db *sql.DB) error {
 	var raw []byte
 	if err := db.QueryRow(`SELECT data FROM control_metadata WHERE id=1`).Scan(&raw); err == nil {
 		var prior struct {
-			Salt                 [32]byte
-			Dropped, Overwritten uint64
-			DurableAt            time.Time
+			Salt                                    [32]byte
+			Dropped, Overwritten                    uint64
+			StorageDropped, FlightDetailsDropped    uint64
+			DiagnosticTransactions, SerializedBytes uint64
+			DurableAt                               time.Time
 		}
 		if err = json.Unmarshal(raw, &prior); err != nil {
 			return err
@@ -245,6 +282,8 @@ func (c *controlRecorder) initialize(db *sql.DB) error {
 		c.dropped = prior.Dropped
 		c.overwritten = prior.Overwritten
 		c.durableAt = prior.DurableAt
+		c.storageDropped, c.flightDetailsDropped = prior.StorageDropped, prior.FlightDetailsDropped
+		c.diagnosticTransactions, c.serializedBytes = prior.DiagnosticTransactions, prior.SerializedBytes
 	} else if err != sql.ErrNoRows {
 		return err
 	}
@@ -295,7 +334,7 @@ func errorsControl(errs ...error) error { return errors.Join(errs...) }
 func (c *controlRecorder) flush(db *sql.DB) error      { return c.flushMode(db, false) }
 func (c *controlRecorder) flushClose(db *sql.DB) error { return c.flushMode(db, true) }
 
-// A diagnostic transaction contains at most one SQLite page of prepared event
+// A diagnostic transaction contains approximately one SQLite page of prepared event
 // and aggregate data (or one indivisible larger event). JSON and aggregation
 // finish before the writer reservation. Named control writers announce before
 // q.mu and take this same reservation FIRST, so diagnostic I/O cannot make a
@@ -319,11 +358,18 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 			c.spare = nil
 		}
 		c.backlogPending = len(c.backlog)
+		c.mu.Unlock()
+		if !c.storagePermit(c.pageBytes) {
+			return nil
+		}
+		c.mu.Lock()
 		totals := make(map[string]ControlTotal, len(c.totals))
 		for k, v := range c.totals {
 			totals[k] = v
 		}
 		dropped, overwritten := c.dropped, c.overwritten
+		storageDropped, flightDropped := c.storageDropped, c.flightDetailsDropped
+		transactions, written := c.diagnosticTransactions, c.serializedBytes
 		c.mu.Unlock()
 		keep := []ControlEvent{}
 		rawEvents := [][]byte{}
@@ -373,11 +419,20 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 		removed := max(int64(0), int64(c.retainedRows)+int64(len(keep))-controlEventCapacity)
 		overwritten += uint64(removed)
 		at := c.clock.Now()
+		var payloadBytes uint64
+		for _, raw := range rawEvents {
+			payloadBytes += uint64(len(raw))
+		}
+		for _, raw := range rawTotals {
+			payloadBytes += uint64(len(raw))
+		}
 		metadata, _ := json.Marshal(struct {
-			Salt                 [32]byte
-			Dropped, Overwritten uint64
-			DurableAt            time.Time
-		}{c.salt, dropped, overwritten, at})
+			Salt                                    [32]byte
+			Dropped, Overwritten                    uint64
+			StorageDropped, FlightDetailsDropped    uint64
+			DiagnosticTransactions, SerializedBytes uint64
+			DurableAt                               time.Time
+		}{c.salt, dropped, overwritten, storageDropped, flightDropped, transactions + 1, written + payloadBytes, at})
 		if closing {
 			c.writeGate.Lock()
 		} else {
@@ -414,7 +469,10 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 			if _, err = tx.Exec(`INSERT INTO control_metadata VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data`, metadata); err != nil {
 				return err
 			}
-			return tx.Commit()
+			started := c.clock.Now()
+			err = tx.Commit()
+			c.observeCommit(c.clock.Now().Sub(started), true)
+			return err
 		}()
 		c.mu.Lock()
 		c.storageError = err != nil
@@ -423,6 +481,8 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 			return err
 		}
 		c.totals = totals
+		c.diagnosticTransactions++
+		c.serializedBytes += payloadBytes
 		c.overwritten = overwritten
 		c.durableAt = at
 		c.retainedRows = c.retainedRows + uint64(len(keep)) - uint64(removed)
@@ -441,7 +501,7 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 		if empty && !closing {
 			return nil
 		}
-		// Yield between physical-page turns; any announced control writer wins the
+		// Yield between prepared-page turns; any announced control writer wins the
 		// next reservation. No timer or installation-dependent rate is introduced.
 		runtime.Gosched()
 	}
@@ -458,6 +518,11 @@ func (c *controlRecorder) snapshot() *ControlTelemetry {
 	for _, v := range c.flights {
 		out.InFlight = append(out.InFlight, v)
 	}
+	out.InFlightTotal = c.inFlightTotal
+	out.FlightDetailsDropped = c.flightDetailsDropped
+	out.StorageDeferred, out.StorageDropped = c.storageDeferred, c.storageDropped
+	out.StorageReason = c.storageReason
+	out.DiagnosticTransactions, out.SerializedBytes = c.diagnosticTransactions, c.serializedBytes
 	out.Pending = len(c.pending) + c.backlogPending
 	out.AdmissionScope = "handler_frontier_queue_pressure"
 	c.mu.Unlock()
@@ -471,12 +536,15 @@ func (c *controlRecorder) snapshot() *ControlTelemetry {
 // An explicit acquisition object makes concurrent read holders independently
 // identifiable without goroutine IDs. Its labels are source-code constants.
 type controlLock struct {
-	mu          *queueMutex
-	recorder    *controlRecorder
-	event       ControlEvent
-	last        time.Time
-	phase       int
-	coarsePhase int
+	mu                         *queueMutex
+	recorder                   *controlRecorder
+	event                      ControlEvent
+	last                       time.Time
+	phase                      int
+	coarsePhase                int
+	writerGeneration           uint64
+	previousWriter, nextWriter *controlLock
+	dirty                      bool
 }
 
 func (m *queueMutex) named(operation string, ctx context.Context) *controlLock {
@@ -505,6 +573,7 @@ func (l *controlLock) acquire(read bool) {
 	c := l.recorder
 	l.event.Phases = [controlPhaseCount]time.Duration{}
 	l.event.WriterWaitNS = 0
+	l.event.ReaderGroup, l.event.ReaderGroups = 0, [2]uint64{}
 	l.phase = controlOther
 	if c != nil {
 		l.event.Enqueued = c.clock.Now()
@@ -513,23 +582,38 @@ func (l *controlLock) acquire(read bool) {
 		l.event.ID = c.next
 		l.event.Blocker, l.event.Phase = c.writer, c.writerPhase
 		l.event.Blockers = nil
-		for id, f := range c.flights {
-			if f.Mode == "write" || !read && !f.Acquired.IsZero() {
-				l.event.Blockers = append(l.event.Blockers, id)
-				if !f.Acquired.IsZero() {
-					c.retainHolders[id] = true
-				}
-			}
+		if c.writer != 0 {
+			l.event.Blockers = append(l.event.Blockers, c.writer)
 		}
-		l.event.Contended = c.writer != 0 || c.waitingWriters > 0 || !read && len(c.flights) > 0
+		if c.writerTail != nil && c.writerTail.event.ID != c.writer {
+			l.event.Blockers = append(l.event.Blockers, c.writerTail.event.ID)
+		}
+		l.event.Contended = c.writer != 0 || c.waitingWriters > 0 || !read && c.readers > 0
 		if !read {
 			c.waitingWriters++
+			c.writerGeneration++
+			l.previousWriter = c.writerTail
+			if c.writerTail != nil {
+				c.writerTail.nextWriter = l
+			}
+			c.writerTail = l
+			first := c.readerGeneration
+			if c.readers == 0 {
+				first++
+			}
+			l.event.ReaderGroups = [2]uint64{first, 0}
 		}
 		mode := "write"
 		if read {
 			mode = "read"
 		}
-		c.flights[l.event.ID] = ControlFlight{ID: l.event.ID, Operation: l.event.Operation, Request: l.event.Request, Client: l.event.Client, Mode: mode, Enqueued: l.event.Enqueued, Phase: "waiting", PhaseAt: l.event.Enqueued}
+		c.inFlightTotal++
+		l.event.FlightDetailOmitted = len(c.flights) >= requestLatencyWindow
+		if l.event.FlightDetailOmitted {
+			c.flightDetailsDropped++
+		} else {
+			c.flights[l.event.ID] = ControlFlight{ID: l.event.ID, Operation: l.event.Operation, Request: l.event.Request, Client: l.event.Client, Mode: mode, Enqueued: l.event.Enqueued, Phase: "waiting", PhaseAt: l.event.Enqueued}
+		}
 		c.mu.Unlock()
 	}
 	var pressure *queuePressure
@@ -554,12 +638,27 @@ func (l *controlLock) acquire(read bool) {
 		l.event.Acquired = c.clock.Now()
 		l.last = l.event.Acquired
 		c.mu.Lock()
-		flight := c.flights[l.event.ID]
-		flight.Acquired = l.event.Acquired
-		flight.Phase = "other"
-		flight.PhaseAt = l.event.Acquired
-		c.flights[l.event.ID] = flight
-		if !read {
+		if !l.event.FlightDetailOmitted {
+			flight := c.flights[l.event.ID]
+			flight.Acquired = l.event.Acquired
+			flight.Phase = "other"
+			flight.PhaseAt = l.event.Acquired
+			c.flights[l.event.ID] = flight
+		}
+		if read {
+			if c.readers == 0 {
+				c.readerGeneration++
+			}
+			c.readers++
+			l.event.ReaderGroup = c.readerGeneration
+			l.writerGeneration = c.writerGeneration
+			l.event.Contended = l.event.Contended || c.waitingWriters > 0
+		} else {
+			if c.readerGeneration >= l.event.ReaderGroups[0] {
+				l.event.ReaderGroups[1] = c.readerGeneration
+			} else {
+				l.event.ReaderGroups = [2]uint64{}
+			}
 			c.waitingWriters--
 			c.writer = l.event.ID
 			c.writerPhase = "other"
@@ -581,15 +680,45 @@ func (l *controlLock) next(phase int) {
 	if l.event.Mode == "write" {
 		l.recorder.writerPhase = controlPhaseNames[phase]
 	}
-	flight := l.recorder.flights[l.event.ID]
-	flight.Phase = controlPhaseNames[phase]
-	flight.PhaseAt = now
-	l.recorder.flights[l.event.ID] = flight
+	if !l.event.FlightDetailOmitted {
+		flight := l.recorder.flights[l.event.ID]
+		flight.Phase = controlPhaseNames[phase]
+		flight.PhaseAt = now
+		l.recorder.flights[l.event.ID] = flight
+	}
 	l.recorder.mu.Unlock()
 }
 func (l *controlLock) release(read bool) {
 	c := l.recorder
 	if c != nil {
+		started := c.clock.Now()
+		c.mu.Lock()
+		l.event.ReleaseRecorderWait = max(0, c.clock.Now().Sub(started))
+		if !read {
+			l.event.Contended = l.event.Contended || c.inFlightTotal > 1
+		}
+		delete(c.flights, l.event.ID)
+		c.inFlightTotal--
+		if read {
+			l.event.Contended = l.event.Contended || l.writerGeneration != c.writerGeneration
+			c.readers--
+			l.mu.RUnlock()
+		} else {
+			if l.previousWriter != nil {
+				l.previousWriter.nextWriter = l.nextWriter
+			}
+			if l.nextWriter != nil {
+				l.nextWriter.previousWriter = l.previousWriter
+			}
+			if c.writerTail == l {
+				c.writerTail = l.previousWriter
+			}
+			l.previousWriter, l.nextWriter = nil, nil
+			c.writer, c.writerPhase = 0, ""
+			l.mu.Unlock()
+		}
+		// Timestamp after the actual queue unlock, including recorder contention
+		// and the pressure sensor's release bookkeeping in the holder span.
 		now := c.clock.Now()
 		if l.event.Transaction != nil {
 			l.event.Transaction.Spans[l.coarsePhase].Finished = now
@@ -599,29 +728,18 @@ func (l *controlLock) release(read bool) {
 		l.event.WaitNS = max(0, l.event.Acquired.Sub(l.event.Enqueued))
 		l.event.HoldNS = max(0, now.Sub(l.event.Acquired))
 		l.event.Epoch = c.epoch
-		c.mu.Lock()
-		l.event.Contended = l.event.Contended || c.retainHolders[l.event.ID]
-		delete(c.retainHolders, l.event.ID)
-		delete(c.flights, l.event.ID)
-		if !read {
-			c.writer = 0
-			c.writerPhase = ""
-		}
-		if len(c.pending) < cap(c.pending) {
-			c.pending = append(c.pending, l.event)
-		} else {
-			c.dropped++
-		}
+		c.appendLocked(l.event)
 		c.mu.Unlock()
+		if !read {
+			c.controlWriters.Add(-1)
+			c.writeGate.Unlock()
+		}
+		return
 	}
 	if read {
 		l.mu.RUnlock()
 	} else {
 		l.mu.Unlock()
-		if c != nil {
-			c.controlWriters.Add(-1)
-			c.writeGate.Unlock()
-		}
 	}
 }
 func (l *controlLock) Unlock()  { l.release(false) }

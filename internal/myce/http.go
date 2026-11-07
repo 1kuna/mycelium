@@ -47,10 +47,10 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		respond(w, map[string]any{"version": 1, "fingerprint": joiningPin}, nil)
 	})
 	mux.HandleFunc("GET /api/environments", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, a.Queue.EnvironmentEntries(), nil)
+		respond(w, a.Queue.EnvironmentEntries(r.Context()), nil)
 	})
 	mux.HandleFunc("GET /api/environments/{name}", func(w http.ResponseWriter, r *http.Request) {
-		for _, entry := range a.Queue.EnvironmentEntries() {
+		for _, entry := range a.Queue.EnvironmentEntries(r.Context()) {
 			if entry.Name == r.PathValue("name") {
 				respond(w, entry, nil)
 				return

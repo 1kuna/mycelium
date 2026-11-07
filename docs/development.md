@@ -155,34 +155,41 @@ versions and CPU placement; natural fleet latency remains release-owner proof.
 
 ### Control telemetry overhead
 
-Measured on 2026-11-07 on an arm64 laptop (Apple M5 Pro), with Go's real
+Measured on 2026-11-07 on an arm64 laptop (Apple M5 Pro), with the real
 injected clock, `GOMAXPROCS=2` and `-p 2`. Baseline source was
-`8c6df03d38e0ba9638dff74b5f1e44bef5411fe7`, with the identical benchmark file
-copied into its source archive. Baseline/candidate/baseline/candidate rounds
-each contain five measurements; these are medians over all ten per version:
+`8c6df03d38e0ba9638dff74b5f1e44bef5411fe7`, with the identical standalone
+benchmark file copied into its source archive. Baseline/candidate/baseline/candidate
+rounds each contain five measurements; medians below include all ten per version:
 
-- An uncontended request-backed lock acquisition/release: 187.85 ns baseline,
-  719.05 ns candidate; +531.20 ns (+282.8%). Allocations rise from 2 to 6 and
-  25 to 1,080 bytes per acquisition. Both include the existing pressure sensor.
-- A small authenticated HTTP request: 3,160.5 ns baseline, 3,120.5 ns candidate
-  (-1.3%, within measurement noise). Allocations rise from 45 to 53 and
-  8,641 to 9,256 bytes. The observed ranges overlap (2,932–5,250 ns versus
-  2,739–3,462 ns); this does not establish an improvement.
+- An uncontended request-backed lock acquisition/release: 189.45 ns baseline,
+  862.20 ns candidate; +672.75 ns (+355.1%). Allocations rise from 2 to 6 and
+  25 to 1,144 bytes per acquisition. Both include the existing pressure sensor.
+- A small authenticated HTTP request: 3,332.5 ns baseline, 3,452.5 ns candidate;
+  +120 ns (+3.6%). Allocations rise from 45 to 53 and 8,641 to 9,256 bytes.
+  Ranges overlap: 2,880–4,298 ns versus 3,158–3,893 ns.
 - A SQLite worker check-in, including one maintenance/drain per 100 requests:
-  418.419 µs baseline, 601.099 µs candidate; +182.680 µs (+43.7%). Shared-disk
-  variability is substantial: baseline 346–875 µs, candidate 487–3,036 µs.
-  This includes amortized durable telemetry; the difference is an observed
-  pair of distributions, not an isolated CPU or fsync cost.
+  401.527 µs baseline, 401.546 µs candidate (+0.005%, within noise). Ranges are
+  348–433 µs versus 375–502 µs. **This guarded result is not an equal-durability
+  cost comparison:** candidate rounds retained 3–601 pending events and dropped
+  0–2.6 ordinary spans/check-in during measured cost deferral. Successfully
+  committed diagnostic payload ranged 326–848 bytes/check-in and transactions
+  0.09–0.235/check-in. These include cold startup records and this artificial
+  maintenance cadence; do not extrapolate them directly to a real queue.
 
-The lock/request fixtures stop below the pending envelope; they measure append
-cost rather than an overflowing recorder. Request-budget memory headroom is
-injected identically on both sides to exclude native inventory subprocesses.
-The check-in uses real SQLite commits and bounded maintenance. These synthetic
-laptop costs do not predict a contended fleet's latency tail. Retained/drop
-coverage must accompany incident conclusions.
+Before storage-pressure shedding was added, a separate ten-measurement comparison
+observed +183 µs/check-in (+43.7%), with substantial disk variability (baseline
+346–875 µs, candidate 487–3,036 µs). That describes the earlier implementation,
+not the final guard's cost. Two revised rounds with zero storage drops measured
+429 and 502 µs, still with eight pending events; this small subset is insufficient
+for a reliable isolated durable-cost estimate. Always report coverage with latency.
 
-Reproduce using `internal/myce/control_telemetry_bench_test.go` on both source
-versions, serially on the same laptop:
+The lock/request fixtures stop below the pending envelope and measure append cost.
+Memory headroom is injected identically to exclude native inventory subprocesses;
+test disk capacity is synthetic, while SQLite and WAL metadata are real. The
+check-in uses real SQLite commits. Recorder-mutex, disk-tail and fleet contention
+are separate risks; these laptop medians do not establish their production bounds.
+
+Reproduce on both source versions, serially on the same laptop:
 
 ```sh
 GOMAXPROCS=2 go test -p 2 ./internal/myce -run '^$' \
@@ -191,8 +198,34 @@ GOMAXPROCS=2 go test -p 2 ./internal/myce -run '^$' \
   -bench '^BenchmarkControlTelemetryCheckin$' -benchtime=200x -count=5
 ```
 
-The quick selector rejects a benchmark-only file with no mapped tests and
+The quick selector rejects the benchmark-only file with no mapped tests and
 requires full; do not bypass that refusal with a handwritten selection.
+
+#### Diagnostic write volume
+
+A read-only review estimated a workload of 2.64 check-ins/second and 18.44 listed
+requests/second (about 9,492 check-ins and 66,391 requests/hour). Mandatory
+check-in JSON alone is approximately 3.6 MiB/hour; one probe/check-in adds about
+5 MiB/hour, with actual probe frequency unknown. Under illustrative assumptions
+of one successful drain/second, 12–20 changed aggregate keys/second, 250–350
+bytes/key, few outliers and zero-to-one probes/check-in, approximately 15–40
+MiB/hour of serialized diagnostic writes and 7,200–14,400 transactions/hour are
+plausible. These are static estimates, not measured SQLite throughput.
+
+Prepared payload size does not bound dirty SQLite pages. At an assumed 3–8 dirty
+4 KiB pages/transaction, that scenario adds approximately 85–453 MiB/hour of WAL
+frames, plus checkpoint writes. Under contention, retaining requests and roughly
+90,000 acquisitions/hour can produce 60–100 MiB/hour of event JSON before
+aggregates. Compact predecessor/cohort joins keep dependency size constant;
+live detail uses the existing 256-record window, with omission counters.
+
+Physical write amplification is unmeasured. Event-count retention does not cap
+sustained write bandwidth or a WAL pinned by readers. The runtime now reports
+successful transaction and event/aggregate payload counters, defers on measured
+pressure/cost/headroom, and sheds ordinary spans before buffer exhaustion (see
+[control attribution](status.md#retained-control-path-attribution-next-release)).
+This reduces diagnostic competition but cannot interrupt an already executing
+SQLite commit, predict a first cold latency outlier, or exclude external writers.
 
 ### Release upgrade compatibility
 

@@ -78,4 +78,28 @@ func BenchmarkControlTelemetryCheckin(b *testing.B) {
 			}
 		}
 	}
+	b.StopTimer()
+	// Optional endpoint keeps this identical benchmark source baseline-compatible.
+	request := httptest.NewRequest("GET", "/api/control", nil)
+	request.Header.Set("Authorization", "Bearer benchmark-only")
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code == 200 {
+		var page struct {
+			Telemetry struct {
+				Pending                int    `json:"pending"`
+				StorageDropped         uint64 `json:"storage_dropped"`
+				DiagnosticTransactions uint64 `json:"diagnostic_transactions"`
+				SerializedBytes        uint64 `json:"serialized_bytes"`
+			} `json:"telemetry"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+			b.Fatal(err)
+		}
+		b.ReportMetric(float64(page.Telemetry.DiagnosticTransactions)/float64(b.N), "diag-tx/op")
+		b.ReportMetric(float64(page.Telemetry.SerializedBytes)/float64(b.N), "diag-json-B/op")
+		b.ReportMetric(float64(page.Telemetry.StorageDropped)/float64(b.N), "diag-drops/op")
+		b.ReportMetric(float64(page.Telemetry.Pending), "pending-events")
+	}
+
 }

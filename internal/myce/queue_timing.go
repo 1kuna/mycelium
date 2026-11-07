@@ -123,14 +123,24 @@ func (t *queueUpdateTiming) lockContext(ctx context.Context, mu sync.Locker) err
 func (t *queueUpdateTiming) commit(tx *sql.Tx) error {
 	if t != nil && t.control != nil {
 		t.control.next(controlCommit)
-		defer t.control.next(controlOther)
 	}
 	if t == nil {
 		return tx.Commit()
 	}
 	started := time.Now()
+	var controlStarted time.Time
+	if t.control != nil && t.control.recorder != nil {
+		controlStarted = t.control.recorder.clock.Now()
+	}
 	err := tx.Commit()
 	t.sqlCommit = time.Since(started)
+	if !controlStarted.IsZero() {
+		finished := t.control.recorder.clock.Now()
+		t.control.next(controlOther)
+		if t.control.dirty {
+			t.control.recorder.observeCommit(finished.Sub(controlStarted), false, t.control.event.Operation)
+		}
+	}
 	return err
 }
 

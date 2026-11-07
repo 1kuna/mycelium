@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"slices"
@@ -149,15 +150,15 @@ func (q *Queue) componentExclusions() []ComponentExclusion {
 	return out
 }
 
-func (q *Queue) ComponentExclusions() []ComponentExclusion {
-	controlMu := q.mu.named("ComponentExclusions", nil)
+func (q *Queue) ComponentExclusions(contexts ...context.Context) []ComponentExclusion {
+	controlMu := q.mu.named("ComponentExclusions", requestContext(contexts))
 	controlMu.Lock()
 	defer controlMu.Unlock()
 	return q.componentExclusions()
 }
 
-func (q *Queue) ResolveComponentSelector(selector string) (ComponentExclusion, error) {
-	controlMu := q.mu.named("ResolveComponentSelector", nil)
+func (q *Queue) ResolveComponentSelector(selector string, contexts ...context.Context) (ComponentExclusion, error) {
+	controlMu := q.mu.named("ResolveComponentSelector", requestContext(contexts))
 	controlMu.Lock()
 	defer controlMu.Unlock()
 	p, err := q.resolveComponentSelector(selector)
@@ -241,10 +242,10 @@ func (p ComponentExclusion) matchesComponent(host, platform, identity string) bo
 
 func (a API) registerComponentExclusions(mux *requestMux) {
 	mux.HandleFunc("GET /api/exclusions", func(w http.ResponseWriter, r *http.Request) {
-		respondOperation(w, a.Queue.ComponentExclusions(), nil, "exclusion_invalid")
+		respondOperation(w, a.Queue.ComponentExclusions(r.Context()), nil, "exclusion_invalid")
 	})
 	mux.HandleFunc("GET /api/exclusions/resolve", func(w http.ResponseWriter, r *http.Request) {
-		p, err := a.Queue.ResolveComponentSelector(r.URL.Query().Get("selector"))
+		p, err := a.Queue.ResolveComponentSelector(r.URL.Query().Get("selector"), r.Context())
 		respondOperation(w, p, err, "exclusion_invalid")
 	})
 	mux.HandleFunc("POST /api/exclusions", func(w http.ResponseWriter, r *http.Request) {
