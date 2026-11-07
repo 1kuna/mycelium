@@ -19,6 +19,8 @@ func HyphaAvailability(m *Machine) string {
 		return "offline; waiting for this hypha to return"
 	case m.Leaving:
 		return "leaving; no new work"
+	case m.HostMemoryPolicyMismatch:
+		return "host allowance policy mismatch; no new work"
 	case m.Recovering:
 		state := "recovering saved attempts; no new work"
 		if m.RecoveringSince != nil {
@@ -303,13 +305,13 @@ func (q *Queue) statusWaitingReasonDetail(j *Job) string {
 			if q.maintenanceBlocked(hostID(m)) {
 				state = "planned host maintenance"
 			}
-			if state == "available for work" && q.machineLimitReason(m) != "" {
+			if strings.HasPrefix(state, "available for work") && q.machineLimitReason(m) != "" {
 				state = admissionWords(q.machineLimitReason(m))
 			}
-			if state == "available for work" && m.CheckpointUnavailable && needsCheckpoint(j) {
+			if strings.HasPrefix(state, "available for work") && m.CheckpointUnavailable && needsCheckpoint(j) {
 				state = "waiting for saved progress storage"
 			}
-			if state != "available for work" {
+			if !strings.HasPrefix(state, "available for work") {
 				blocked = append(blocked, m.ID+": "+state)
 			}
 		}

@@ -9,6 +9,7 @@ import (
 // Prefer eligible targets, then the fewest failed checks, then the smallest
 // proportional resource shortfall. Machine/device names break equal-fit ties.
 type targetFit struct {
+	stopFirst  bool // Decision receipts observe dispatch without changing short-circuiting.
 	excluded   bool
 	first      string
 	failures   int
@@ -33,7 +34,10 @@ func (f *targetFit) check(ok bool, dimension string) bool {
 			f.ineligible++
 		}
 	}
-	return true // Collect all failures in this evaluation.
+	if f.stopFirst {
+		return ok
+	}
+	return true // Qualification collects all failures.
 }
 
 func (f targetFit) better(other targetFit) bool {

@@ -2341,3 +2341,70 @@ current condition without retraining that history with zeros. Job-only captures
 omit the fleet report and its baseline maps.
 Reads reuse the published generation. Sensor coverage and maintenance sampling
 limits are evidence limits, not authorization to release custody or shrink needs.
+
+## Queued decision receipts (#884, next queue release)
+
+Read `GET /api/jobs/JOB_ID/decisions` with the ordinary authenticated client and
+an exact job ID. This is a targeted WAL/diagnostic read; it does not build or
+require a full status snapshot. `receipts` contains the latest retained decision
+per target and check-in worker for jobs observed queued at attempt zero. Empty evidence is unknown,
+not proof that a worker considered the job. Recording never changes admission,
+fairness, placement or an attempt identity.
+
+Each receipt pairs the assignment pass with its completed check-in reply:
+
+- `epoch`, `revision`, `at` and `checkin` identify the queue process and successful
+  transaction. Revisions are process-local committed queue revisions. `worker`,
+  `session`, `target`, `checkin_worker`, `checkin_session`, `preparation` and
+  `release_fence` are stable salted correlation
+  identities from the shared control recorder, never deployment identities or
+  environment paths. `preparation` names the first exact attempt (lexicographic
+  identity order); `preparation_count` reports multiplicity. `release_fence`
+  fingerprints the exact release identities; `release_count` reports their
+  cardinality. `policy_revision` identifies the evaluated policy. `request`
+  joins the HTTP request/lock events in the shared control recorder.
+- `admission` is the first failed predicate's fixed reason code, or `admitted`.
+  Examples include `project_cap`, `host_memory_policy`, `reservation`, `tools`,
+  `checkpoint_storage`, `preemption_placement`, `release_plan` and
+  `host_capacity_accumulation`. A failure in a projected release plan is named
+  `release_plan`; it does not claim that current RAM is the cause.
+- `winner` and `winner_class` name the target's selected competitor; `fairness`
+  records whether that winner precedes this job and which existing comparator
+  decided (`priority_tier`, `release_turn`, `accelerator_demand`, `fair_score`,
+  `fair_active`, or `within_tier_order`). `global_winner` is the target's final
+  global-plan choice. No winner means no retained selection, not a dispatch offer.
+- `immediate` reports the existing readiness evaluation, including preparation,
+  release, batch-slot and live-resource fences. `not_evaluated` means that this
+  stage was never reached for this job; a competing winner can explain that.
+  `early_return` distinguishes recovery, cleanup, leaving, benchmarking, legacy
+  attempt reports and an existing attempt from the ordinary planning path.
+- `reply` records assignment/stop/kill/hold counts, whether this job, its target
+  winner and its global winner were offered and at which attempts, legacy
+  control flags, leave and preparation/copy/model-plan presence. Its anonymized
+  `identity` fingerprints the safe execution/directive summary of the matching
+  reply, keeping retained size independent of the number of running attempts.
+  `reply_ready` means queue processing and hydration completed. It cannot prove
+  HTTP delivery or worker receipt; `reply_failed` retains a post-commit reply
+  failure without copying error prose.
+
+Unchanged decisions retain their original matching reply and increment in-memory
+`checkins`, `observed_through` and `through_revision`; time alone adds no durable
+writes. Changed evidence enters the existing control recorder's guarded storage,
+which serializes and writes outside `q.mu`. Its pressure, measured commit cost,
+WAL/checkpoint headroom and existing ring retention apply. The latest-view cache
+and each capture fit one existing observation-memory share derived from current
+OS/process headroom and runnable concurrency. Unexplained dispatch gaps and rejected/competing decisions take precedence
+over ordinary offers; oldest equal-value detail yields when capacity shrinks. There is no new fixed row cap, heartbeat sampling rate or expiry timer.
+`omitted`, `control_dropped`, `control_overwritten`, `storage_deferred` and
+`durable_at` describe incomplete coverage. In-memory repeat counts can be lost
+on restart; retained durable decisions remain readable until shared-ring eviction.
+Receipts contain no commands, paths, addresses, credentials or authored prose.
+
+On recurrence—an accepted job remains at attempt zero through successful fresh
+check-ins while status names no real blocker—save this per-job read alongside
+fresh job status and the original submission's resolve result. Compare the same
+revision's predicate, competitor, global winner and reply before attributing a
+cause. Preserve #884 until a captured occurrence is explained and fixed. Current
+status also names a host allowance policy mismatch that already withholds
+admission; a generic availability advisory cannot hide the simultaneous-work or
+checkpoint-storage fence.

@@ -256,30 +256,38 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 }
 
 func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
-	if q.environmentFailureBlocked(j, m) {
+	check := func(ok bool, code string) bool { return q.decisionCheck(j, m, ok, code) }
+	if !check(!q.environmentFailureBlocked(j, m), "environment_failure") {
 		return nil
 	}
-	if !q.preemptionPlacementAllows(j, m) || !q.yieldPlacementAllows(j, m) {
+	if !check(q.preemptionPlacementAllows(j, m), "preemption_placement") || !check(q.yieldPlacementAllows(j, m), "yield_placement") {
 		return nil
 	}
 	if j.Spec.FanOut != nil {
-		return q.fanOutCandidateWithResources(j, m, resources)
+		candidate := q.fanOutCandidateWithResources(j, m, resources)
+		check(candidate != nil, "fan_out_plan")
+		return candidate
 	}
-	if j.State != "queued" || len(m.groupMembers) > 0 && !q.mayNeedCards(j, m) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
+	if !check(j.State == "queued", "job_state") || !check(len(m.groupMembers) == 0 || q.mayNeedCards(j, m), "card_group") || !q.placementAllowed(j, m) || !check(q.checkpointReady(j, m), "checkpoint_storage") {
 		return nil
 	}
+	found := false
 	for _, candidate := range extensionJobs(j, m, true) {
+		found = true
 		if j.Batch != nil && j.Batch.Run {
 			candidate = q.retryWaveCandidate(candidate, m)
-			if candidate == nil {
+			if !check(candidate != nil, "retry_wave") {
 				continue
 			}
 		}
 		q.applyLearnedNeeds(candidate)
 		candidate = q.memoryCandidate(candidate, m)
-		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
+		if check(q.capReasonFor(candidate, m) == "", "project_cap") && q.batchResourcesFitWithScan(candidate, m, resources) {
 			return candidate
 		}
+	}
+	if !found {
+		check(false, "extension_candidate")
 	}
 	return nil
 }
@@ -330,7 +338,7 @@ func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 	return q.batchResourcesFitWithScan(j, m, nil)
 }
 func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {
-	if q.variantParityReason(j, m) != "" {
+	if !q.decisionCheck(j, m, q.variantParityReason(j, m) == "", "variant_parity") {
 		return false
 	}
 	key := resourceKey(j)
@@ -358,7 +366,15 @@ func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batc
 			resources[key] = room
 		}
 	}
-	return room.ok && fitsResources(j, &room.machine, room.memory)
+	if !q.decisionCheck(j, m, room.ok, "release_plan") {
+		return false
+	}
+	if q.decisionCapture == nil {
+		return fitsResources(j, &room.machine, room.memory)
+	}
+	report := targetFit{stopFirst: true}
+	ok := fitsResourcesChecked(j, &room.machine, room.memory, &report)
+	return q.decisionCheck(j, m, ok, decisionFitCode(report.first))
 }
 func (q *Queue) batchResourceProjection(j *Job, m *Machine) batchResourceRoom {
 	plan, yield := q.ordinaryRoomPlan(j, m, true)
@@ -431,11 +447,40 @@ func (q *Queue) pick(m *Machine, scans ...*placementScan) *Job {
 }
 
 func (q *Queue) plannedPick(m *Machine, scan *placementScan) *Job {
-	return q.immediateCandidate(q.assignmentPlan(scan)[targetKey(m)], m)
+	best := q.assignmentPlan(scan)[targetKey(m)]
+	if q.decisionCapture != nil {
+		for key, r := range q.decisionCapture.rows {
+			if key.target == targetKey(m) && best != nil {
+				r.GlobalWinner = best.ID
+			}
+		}
+	}
+	return q.immediateCandidate(best, m)
 }
 
 func (q *Queue) immediateCandidate(best *Job, m *Machine) *Job {
-	if best != nil && (q.preemptionReleasesPending(best) || q.preparationActive(m) || q.preparationStopping(m) || q.calls[best.ID] != nil || !fits(best, m, m.FreeMemoryGB) || !environmentReady(best, m)) {
+	if best == nil {
+		return nil
+	}
+	code := "ready"
+	switch {
+	case q.preemptionReleasesPending(best):
+		code = "preemption_release"
+	case q.preparationActive(m):
+		code = "preparation_active"
+	case q.preparationStopping(m):
+		code = "preparation_stopping"
+	case q.calls[best.ID] != nil:
+		code = "model_call"
+	case !fits(best, m, m.FreeMemoryGB):
+		code = "immediate_resources"
+	case !environmentReady(best, m):
+		code = "environment_ready"
+	}
+	if r := q.decisionCapture.row(best, m); r != nil {
+		r.Immediate = code
+	}
+	if code != "ready" {
 		return nil
 	}
 	return best

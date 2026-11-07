@@ -118,6 +118,8 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	decisionCapture     *decisionCapture // q.mu; only the actual check-in assignment pass.
+	decisions           decisionStore    // separate mutex; never held under q.mu.
 	requestBudgets      requestBudgets
 	efficiencyView      *EfficiencyReport // immutable maintenance projection; published only after commit.
 	waitStates          *waitStateIndex   // scalar committed wait observations; separate reader mutex.
@@ -1344,6 +1346,8 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resul
 		}
 	}
 	identities := q.snapshotCheckinMemoryIdentities(ctx)
+	decisionBudget := q.decisionBudget(ctx)
+	var decisions *decisionCapture
 	err = q.updateRequest(ctx, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1627,7 +1631,24 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resul
 			q.cancelUnofferedPreparations(&m, reply)
 		}()
 		reply.Leave = m.Leaving
+		decisions = &decisionCapture{worker: m.ID, session: m.Session, rows: map[decisionKey]*DecisionReceipt{}, remaining: decisionBudget, revision: q.fileReferenceRevision + 1, at: q.clock.Now(), early: "none"}
+		if span := spanFrom(ctx); span != nil {
+			decisions.request = span.id
+		}
+		q.decisionCapture = decisions
+		defer func() { q.snapshotDecisionFences(decisions); q.decisionCapture = nil }()
+		// Early-return evidence does not run a speculative placement pass.
+		defer func() {
+			if decisions.early != "none" {
+				for _, j := range q.liveJobs() {
+					for _, target := range q.placementTargets(&m) {
+						decisions.row(j, target)
+					}
+				}
+			}
+		}()
 		if m.BenchmarkPending || c.BenchmarkDone != "" {
+			decisions.early = "benchmark"
 			return nil
 		}
 		if m.Leaving {
@@ -1639,11 +1660,14 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resul
 		}
 		if c.AttemptProtocol != "" && m.Devices != nil {
 			q.checkinMachineAttempts(&m, reports, progresses, c.Recovering, &reply)
+			q.snapshotDecisionFences(decisions)
+			q.decisionCapture = nil
 			q.maintain()
 			return nil
 		}
 
 		if len(reports) != 0 {
+			decisions.early = "attempt_reports"
 			seen := map[attemptKey]bool{}
 			for i := range reports {
 				a := q.reconcileAttemptReport(&m, &reports[i], progresses[i])
@@ -1670,12 +1694,19 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resul
 			}
 			return nil
 		}
+		if c.Recovering {
+			decisions.early = "recovering"
+		}
+		if m.Leaving {
+			decisions.early = "leaving"
+		}
 		// Re-deliver an assignment if its HTTP response was lost before startup.
 		for _, j := range q.liveJobs() {
 			if j.State == "running" && j.ReleaseConfirmed {
 				continue // Final result publication is not an execution offer.
 			}
 			if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
+				decisions.early = "existing_attempt"
 				if j.State == "stopping" {
 					// Omission only finishes a keyed stop after an exact release ack.
 					if c.AttemptProtocol != "" && !j.ReleaseConfirmed {
@@ -1710,6 +1741,8 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resul
 				reply.Job = &out
 			}
 		}
+		q.snapshotDecisionFences(decisions)
+		q.decisionCapture = nil
 		if m.Leaving && reply.Job == nil && len(q.modelPlan(m.ID)) == 0 {
 			m.Gone = true
 			m.Models = nil
@@ -1717,7 +1750,16 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resul
 		q.maintain()
 		return nil
 	}, nil)
+	if err != nil {
+		decisions = nil
+	}
 	settle(err == nil)
+	decisionOutcome := "reply_failed"
+	defer func() {
+		if decisions != nil {
+			q.publishDecisions(decisions, reply, decisionOutcome, decisionBudget)
+		}
+	}()
 	if reply.Job != nil {
 		relative, e := filepath.Rel(q.root, reply.Job.Checkpoint)
 		if e != nil {
@@ -1737,6 +1779,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resul
 	reply = attemptReply(c, reply)
 	if err == nil {
 		err = q.hydrateReply(&reply, ctx)
+	}
+	if err == nil {
+		decisionOutcome = "reply_ready"
 	}
 	return reply, err
 }

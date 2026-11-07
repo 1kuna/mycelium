@@ -44,7 +44,11 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 	s.resources = map[batchResourceKey]batchResourceRoom{}
 	fence := q.groupDemandFence(m)
 	for _, j := range q.liveJobs() {
-		if fence != nil && j.ID != fence.ID && q.comparePriority(j.Spec, fence.Spec) >= 0 {
+		if q.decisionCapture != nil {
+			q.decisionCapture.current = decisionKey{j.ID, targetKey(m)}
+		}
+		q.decisionCapture.row(j, m)
+		if !q.decisionCheck(j, m, !(fence != nil && j.ID != fence.ID && q.comparePriority(j.Spec, fence.Spec) >= 0), "group_demand") {
 			continue
 		}
 		if j.State == "queued" && plainMemoryWork(j.Spec) && j.Spec.FanOut == nil {
@@ -62,9 +66,23 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 		}
 		// A host fence can only withhold an otherwise fitting candidate. Fully
 		// occupied targets need no global backlog/target memory-sizing pass.
-		if candidate := q.batchCandidateWithResources(j, m, s.resources); candidate != nil && q.hostBackfillAllows(candidate, m, q.hostBackfillFences(scan)[hostID(m)]) {
+		candidate := q.batchCandidateWithResources(j, m, s.resources)
+		if candidate == nil {
+			continue
+		}
+		// Accumulation probes hypothetical releases; they are not this candidate's
+		// admission evaluation and must not contaminate its first failed predicate.
+		capture := q.decisionCapture
+		q.decisionCapture = nil
+		fences := q.hostBackfillFences(scan)
+		q.decisionCapture = capture
+		if q.decisionCheck(j, m, q.hostBackfillAllows(candidate, m, fences[hostID(m)]), "host_capacity_accumulation") {
+			q.decisionAdmitted(j, m, true)
 			s.jobs = append(s.jobs, candidate)
 		}
+	}
+	if q.decisionCapture != nil {
+		q.decisionCapture.current = decisionKey{}
 	}
 	for _, c := range q.calls {
 		if !q.callCanUse(m, c) {
@@ -181,6 +199,7 @@ func (s *candidateSet) pick(excluded map[string]bool) *Job {
 				best = j
 			}
 		}
+		s.q.decisionWinner(s, best)
 		return best
 	}
 	if s.ordered == nil {

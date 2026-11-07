@@ -271,6 +271,9 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 		// scan's candidate eligibility checks; stale custody alone cannot
 		// withhold capacity. Other cold winners leave room for ready work.
 		if !environmentReady(j, selected.m) && !preparationOwnsTurn(j) {
+			if r := q.decisionCapture.row(j, selected.m); r != nil {
+				r.Immediate = "environment_ready"
+			}
 			continue
 		}
 		scan.assignments[targetKey(selected.m)] = j
@@ -282,6 +285,13 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 			}
 		}
 		sets = remaining
+	}
+	if q.decisionCapture != nil {
+		for key, r := range q.decisionCapture.rows {
+			if winner := scan.assignments[key.target]; winner != nil {
+				r.GlobalWinner = winner.ID
+			}
+		}
 	}
 	return scan.assignments
 }
@@ -305,8 +315,30 @@ func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, s
 		}
 		// Background copies yield to foreground commands in the existing worker.
 		// Builds and stopping preparations still fence admission.
-		if immediate && (q.preemptionReleasesPending(winner) || !scan.live[set.m.ID] || !q.batchSlotFree(set.m, winner) || q.preparationActive(set.m) || q.preparationStopping(set.m) || q.calls[winner.ID] != nil || !fits(winner, set.m, set.m.FreeMemoryGB)) {
-			continue
+		if immediate {
+			code := "ready"
+			switch {
+			case q.preemptionReleasesPending(winner):
+				code = "preemption_release"
+			case !scan.live[set.m.ID]:
+				code = "worker_liveness"
+			case !q.batchSlotFree(set.m, winner):
+				code = "batch_slot"
+			case q.preparationActive(set.m):
+				code = "preparation_active"
+			case q.preparationStopping(set.m):
+				code = "preparation_stopping"
+			case q.calls[winner.ID] != nil:
+				code = "model_call"
+			case !fits(winner, set.m, set.m.FreeMemoryGB):
+				code = "immediate_resources"
+			}
+			if r := q.decisionCapture.row(winner, set.m); r != nil {
+				r.Immediate = code
+			}
+			if code != "ready" {
+				continue
+			}
 		}
 		if best == nil || winner.ID != best.ID && set.before(winner, best) || winner.ID == best.ID && q.projectionTargetBetter(winner, set.m, selected.m, scan, immediate) {
 			best, selected = winner, set

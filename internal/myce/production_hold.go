@@ -228,53 +228,56 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
-	return (j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID])) && q.yieldPlacementAllows(j, m) && (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.placementPolicyAllowed(j, m, resident)
+	return q.decisionCheck(j, m, j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID]), "inventory_freshness") &&
+		q.decisionCheck(j, m, q.yieldPlacementAllows(j, m), "yield_placement") &&
+		q.decisionCheck(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), "device_maintenance") &&
+		q.decisionCheck(j, m, q.diskHeadroomReason(j, m) == "", "disk_headroom") && q.placementPolicyAllowed(j, m, resident)
 }
 
 // Recovery retains existing execution custody. Admission-time disk estimates
 // apply only to new work: its writes may already be reflected in observed free.
 func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
-	return q.reservationAllows(j, m) && q.placementPolicyWithoutReservation(j, m, resident)
+	return q.decisionCheck(j, m, q.reservationAllows(j, m), "reservation") && q.placementPolicyWithoutReservation(j, m, resident)
 }
 
 func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident bool) bool {
-	if q.variantParityReason(j, m) != "" {
+	if !q.decisionCheck(j, m, q.variantParityReason(j, m) == "", "variant_parity") {
 		return false
 	}
-	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
+	if !q.decisionCheck(j, m, !(j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction()), "release_production_pause") {
 		return false
 	}
-	if (j.StartedAt == nil || j.State == "queued") && (q.sharedHostBackoffReason(j, m) != "" || q.storageRootReason(j, m) != "") {
+	if (j.StartedAt == nil || j.State == "queued") && (!q.decisionCheck(j, m, q.sharedHostBackoffReason(j, m) == "", "shared_host_backoff") || !q.decisionCheck(j, m, q.storageRootReason(j, m) == "", "storage_root")) {
 		return false
 	}
-	if !dependencyReady(j) || m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
+	if !q.decisionCheck(j, m, dependencyReady(j), "dependency") || !q.decisionCheck(j, m, !m.Recovering, "recovering") || !q.decisionCheck(j, m, !cancelled(j), "cancelled") || !q.decisionCheck(j, m, dockerRuntimeFits(j, m), "docker_runtime") || !q.decisionCheck(j, m, !q.maintenanceBlocked(hostID(m)), "host_maintenance") || !q.decisionCheck(j, m, !m.HostMemoryPolicyMismatch, "host_memory_policy") || !q.decisionCheck(j, m, logPolicyFits(j.Spec.Logs, m), "log_policy") {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {
 		if resident {
 			model = q.residentModel(model, m)
 		}
-		if !logPolicyFits(model.Logs, m) || !modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID) {
+		if !q.decisionCheck(j, m, logPolicyFits(model.Logs, m), "model_log_policy") || !q.decisionCheck(j, m, modelFenceAllows(model, m), "model_fence") || !q.decisionCheck(j, m, q.projectAllows(model.Project, m.ID), "model_project_policy") {
 			return false
 		}
 	}
 
-	if availabilityBlocked(m) || (q.machineLimitReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || !q.jobAllowsMachine(j, m.ID) {
+	if !q.decisionCheck(j, m, !availabilityBlocked(m), "availability") || !q.decisionCheck(j, m, !(q.machineLimitReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), "machine_limit") || !q.decisionCheck(j, m, q.startupReleaseBlocker(hostID(m)) == "", "startup_release") || !q.decisionCheck(j, m, q.dockerBlocker(hostID(m)) == "", "docker_cleanup") || !q.decisionCheck(j, m, q.jobAllowsMachine(j, m.ID), "machine_policy") {
 		return false
 	}
-	if j.ProductionHost != "" && j.ProductionHost != hostID(m) {
+	if !q.decisionCheck(j, m, !(j.ProductionHost != "" && j.ProductionHost != hostID(m)), "production_binding") {
 		return false
 	}
-	if q.productionAdmissionReason(j, m) != "" {
+	if !q.decisionCheck(j, m, q.productionAdmissionReason(j, m) == "", "production_admission") {
 		return false
 	}
 	if !q.held(hostID(m)) {
 		return true
 	}
-	if j.Spec.Priority != "production" {
+	if !q.decisionCheck(j, m, j.Spec.Priority == "production", "production_hold") {
 		return false
 	}
-	return q.hostBlockers(hostID(m)) == ""
+	return q.decisionCheck(j, m, q.hostBlockers(hostID(m)) == "", "host_release")
 }
 func (q *Queue) hostBlockers(host string) string {
 	text, _ := q.hostBlockerState(host)

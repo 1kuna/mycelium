@@ -191,29 +191,43 @@ func (q *Queue) before(a, b *Job, m *Machine) bool {
 }
 
 func (q *Queue) beforeWithFair(a, b *Job, m *Machine, score func(*Job, *Machine) float64, active func(*Job) float64) bool {
+	return q.beforeWithFairDecision(a, b, m, score, active, nil)
+}
+func (q *Queue) beforeWithFairDecision(a, b *Job, m *Machine, score func(*Job, *Machine) float64, active func(*Job) float64, reason *string) bool {
+	record := func(code string) {
+		if reason != nil {
+			*reason = code
+		}
+	}
 	if n := q.comparePriority(a.Spec, b.Spec); n != 0 {
+		record("priority_tier")
 		return n < 0
 	}
 	// Settle an already selected release before another same-tier demand can
 	// borrow it. Its target is retained, so borrowing strands both demands on
 	// one target instead of planning a separate release for the newcomer.
 	if (a.PreemptionPlacement != nil) != (b.PreemptionPlacement != nil) {
+		record("release_turn")
 		return a.PreemptionPlacement != nil
 	}
 	// CPU commands backfill accelerator workers after same-tier GPU demand.
 	if m.GPU != "cpu" && a.Spec.Needs.cpuOnly() != b.Spec.Needs.cpuOnly() {
+		record("accelerator_demand")
 		return !a.Spec.Needs.cpuOnly()
 	}
 	if a.Spec.Project != b.Spec.Project && fairResourceFamily(a.Spec) == fairResourceFamily(b.Spec) {
 		x, y := score(a, m), score(b, m)
 		if math.Abs(x-y) > 1e-6 {
+			record("fair_score")
 			return x < y
 		}
 		x, y = active(a), active(b)
 		if math.Abs(x-y) > 1e-6 {
+			record("fair_active")
 			return x < y
 		}
 	}
+	record("within_tier_order")
 	return beforeWithinTier(a, b, m)
 }
 func (q *Queue) PriorityPolicy(requestContexts ...context.Context) PriorityPolicyRecord {

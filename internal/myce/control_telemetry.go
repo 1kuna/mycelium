@@ -40,6 +40,7 @@ type ControlTransaction struct {
 	Spans [5]ControlPhaseSpan `json:"spans"`
 }
 type ControlEvent struct {
+	Decision            *DecisionReceipt                 `json:"decision,omitempty"`
 	Epoch               string                           `json:"epoch"`
 	ID                  uint64                           `json:"id"`
 	Kind                string                           `json:"kind"`

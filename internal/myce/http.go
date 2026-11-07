@@ -39,6 +39,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	observationLimit := newObservationLimit(observationClock, a.Queue)
 	a.registerControlTelemetry(mux)
 	a.registerWait(mux)
+	a.registerDecisions(mux)
 	waitStates := a.Queue.waitIndex()
 	nas := a.Queue.resolveNASInspections()
 	// Joining needs authenticated identity/version only, never the growing status

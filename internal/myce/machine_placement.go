@@ -420,6 +420,9 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 	// Otherwise startup recovery can keep accepting and refusing replacements,
 	// never reaching its empty collection and fresh-session handoff.
 	if m.Leaving {
+		if q.decisionCapture != nil {
+			q.decisionCapture.early = "leaving"
+		}
 		active := len(reports) > 0
 		for _, j := range q.liveJobs() {
 			active = active || j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") && !j.ReleaseConfirmed
@@ -433,6 +436,12 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 	// Refuse admission before assign creates an attempt or history. Refunding
 	// an offered identity would allow stale results to match a reused attempt.
 	if recovering || cleanup {
+		if q.decisionCapture != nil {
+			q.decisionCapture.early = "recovering"
+			if cleanup {
+				q.decisionCapture.early = "cleanup"
+			}
+		}
 		return
 	}
 	var best *Job
