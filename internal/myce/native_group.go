@@ -279,7 +279,7 @@ func (g *nativeGroup) recordInfrastructureLocked(kind, member, port string, caus
 		group = g.supervisor.Process.Pid
 	}
 	prior := g.p.outcome.Infrastructure
-	g.p.outcome.Infrastructure = append(append([]infrastructureFact(nil), prior...), infrastructureFact{Kind: kind, At: time.Now().UTC(), Member: member, Port: port, Group: group, Predicate: launchFailurePredicate(kind, cause)})
+	g.p.outcome.Infrastructure = append(append([]infrastructureFact(nil), prior...), infrastructureFact{Kind: kind, At: time.Now().UTC(), Member: member, Port: port, Group: group, Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, g.p.job)})
 	if err := g.saveLocked(); err != nil {
 		g.p.outcome.Infrastructure = prior
 		return errors.Join(cause, err)
@@ -365,11 +365,15 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 				release()
 			}
 		}()
+		independentFailure := g.independentMemberFailure()
 		p.waitStopGrace(w.Clock, g.supervisor.Process.Pid, g.supervisor.Process.Pid)
 		p.mu.Lock()
 		forced, polite := p.killed, p.polite
 		stage = stage || g.stageFailure
 		facts := g.outcomeLocked(runErr, stage)
+		if independentFailure && errors.Is(runErr, errWorkerMemory) {
+			facts.Infrastructure = slices.DeleteFunc(facts.Infrastructure, func(f infrastructureFact) bool { return f.Kind == launchRefused && f.Predicate == "memory_capacity" })
+		}
 		priorityStop := p.priorityStop
 		p.mu.Unlock()
 		groupErr := g.cleanupProcesses(writer, false)
@@ -395,7 +399,9 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		if runErr != nil {
 			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
-			if stage && r.ExecutionCause.Class == "io_error" {
+			if errors.Is(runErr, errWorkerMemory) && !independentFailure {
+				r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit"}
+			} else if stage && r.ExecutionCause.Class == "io_error" {
 				r.ExecutionCause.Class = "stage_failed"
 			}
 		}

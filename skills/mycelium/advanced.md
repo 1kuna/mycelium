@@ -319,3 +319,13 @@ explicit storage-owner verification hold; doctor does not inspect worker NAS.
 An unsupported queue or missing installed authority is an owner hold, never a
 reason to find credentials or run heavy work locally. Ordinary `myce doctor`
 continues to diagnose an installation.
+
+## Native member admission diagnostics (#1011, next worker release)
+
+A worker-owned native member capacity refusal retains
+`launch/resource_limit/memory_capacity` and its safe numeric admission comparison,
+including after a helper became ready. Helper custody does not imply that main
+ran, and such a refusal does not claim whole-attempt `prelaunch_refused` proof.
+The complete capacity wait, unchanged-offer hold and generated-deadline behavior
+requires the matching queue update in #1013; the worker classification slice
+alone does not cover older queues' Started race or startup expiry.
