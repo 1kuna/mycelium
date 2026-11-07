@@ -14,6 +14,7 @@ import (
 // The operation is part of the queue state transaction, never a second queue.
 // Public status deliberately excludes publisher locations and signed envelopes.
 type FleetUpgradeStatus struct {
+	Urgency            string            `json:"urgency"`
 	QueueOnly          bool              `json:"queue_only"`
 	WaitProductionIdle bool              `json:"wait_production_idle"`
 	Operation          string            `json:"operation"`
@@ -22,14 +23,16 @@ type FleetUpgradeStatus struct {
 	Hosts              []FleetHostStatus `json:"hosts"`
 }
 type FleetHostStatus struct {
-	Host        string    `json:"host"`
-	Phase       string    `json:"phase"`
-	Wait        string    `json:"wait,omitempty"`
-	Failure     string    `json:"failure,omitempty"`
-	FailureCode string    `json:"failure_code,omitempty"`
-	ProgressAt  time.Time `json:"progress_at"`
+	StopRequests []FleetStopRequest `json:"stop_requests,omitempty"`
+	Host         string             `json:"host"`
+	Phase        string             `json:"phase"`
+	Wait         string             `json:"wait,omitempty"`
+	Failure      string             `json:"failure,omitempty"`
+	FailureCode  string             `json:"failure_code,omitempty"`
+	ProgressAt   time.Time          `json:"progress_at"`
 }
 type fleetUpgrade struct {
+	Urgency            string              `json:"urgency,omitempty"`
 	QueueOnly          bool                `json:"queue_only,omitempty"`
 	WaitProductionIdle bool                `json:"wait_production_idle,omitempty"`
 	Revision           int                 `json:"revision"`
@@ -41,10 +44,11 @@ type fleetUpgrade struct {
 	CreatedAt          time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
-	RetryPhase     string    `json:"retry_phase,omitempty"`
-	HealthSince    time.Time `json:"health_since,omitempty"`
-	HealthIdentity string    `json:"health_identity,omitempty"`
-	HelperRevision int       `json:"helper_revision,omitempty"`
+	CriticalStopAt *time.Time `json:"critical_stop_at,omitempty"`
+	RetryPhase     string     `json:"retry_phase,omitempty"`
+	HealthSince    time.Time  `json:"health_since,omitempty"`
+	HealthIdentity string     `json:"health_identity,omitempty"`
+	HelperRevision int        `json:"helper_revision,omitempty"`
 	FleetHostStatus
 	Queue       bool               `json:"queue"`
 	QueueDone   bool               `json:"queue_done"`
@@ -64,6 +68,7 @@ type fleetQueueRuntime struct {
 	ObservedAt time.Time
 }
 type FleetUpgradeRequest struct {
+	Urgency            string `json:"urgency,omitempty"`
 	QueueOnly          bool   `json:"queue_only,omitempty"`
 	WaitProductionIdle bool   `json:"wait_production_idle,omitempty"`
 	Release            string `json:"release,omitempty"`
@@ -86,7 +91,7 @@ func (q *Queue) fleetUpgradeStatus() *FleetUpgradeStatus {
 	if u == nil {
 		return nil
 	}
-	out := &FleetUpgradeStatus{Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Hosts: []FleetHostStatus{}}
+	out := &FleetUpgradeStatus{Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Hosts: []FleetHostStatus{}}
 	for _, h := range u.Hosts {
 		out.Hosts = append(out.Hosts, h.FleetHostStatus)
 	}
@@ -97,6 +102,10 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 	requestCtx := requestContext(requestContexts)
 
 	var out *FleetUpgradeStatus
+	request.Urgency = fleetUrgency(request.Urgency)
+	if request.Urgency != "normal" && request.Urgency != "critical" {
+		return nil, &HTTPError{Status: 400, Code: "fleet_urgency_invalid", Message: "fleet urgency must be normal or critical"}
+	}
 	err := q.updateRequest(requestCtx, func() error {
 		approved := q.s.EnrollmentRelease
 		if approved == nil || len(approved.SignedRelease) == 0 {
@@ -109,7 +118,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 			return fleetError("fleet_publisher_changed")
 		}
 		if previous := q.s.FleetUpgrade; previous != nil {
-			samePolicy := previous.QueueOnly == request.QueueOnly && previous.WaitProductionIdle == request.WaitProductionIdle
+			samePolicy := previous.QueueOnly == request.QueueOnly && previous.WaitProductionIdle == request.WaitProductionIdle && fleetUrgency(previous.Urgency) == request.Urgency
 			if !samePolicy && previous.State != "complete" {
 				return q.fleetOperationRefusal("fleet_upgrade_policy_conflict", request)
 			}
@@ -167,7 +176,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 		if q.fleetQueue == nil || !q.fleetProofFresh(q.fleetQueue.Proof) {
 			return q.fleetProofRefusal("fleet_queue_unmanaged", request)
 		}
-		u := &fleetUpgrade{Operation: ID(), Revision: 1, Release: *approved, PublisherKey: bytes.Clone(q.s.EnrollmentReleaseKey), State: "running", QueueOnly: request.QueueOnly, WaitProductionIdle: request.WaitProductionIdle, CreatedAt: q.clock.Now()}
+		u := &fleetUpgrade{Urgency: request.Urgency, Operation: ID(), Revision: 1, Release: *approved, PublisherKey: bytes.Clone(q.s.EnrollmentReleaseKey), State: "running", QueueOnly: request.QueueOnly, WaitProductionIdle: request.WaitProductionIdle, CreatedAt: q.clock.Now()}
 		queue := q.fleetQueue
 		a, err := approved.Manifest.Select(queue.OS, queue.Arch)
 		if err != nil {
@@ -231,6 +240,19 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 						}
 						h.Phase = "draining"
 					}
+				}
+			}
+		}
+		if old := q.s.FleetUpgrade; old != nil {
+			for _, h := range old.Hosts {
+				if len(h.StopRequests) > 0 {
+					// Released obligations cannot regenerate interruption evidence.
+					// Keep every host's records under the original operation, including
+					// completed/failed hosts that do not carry drain custody forward.
+					record := q.fleetSupersession(old, "replaced by explicit fleet upgrade")
+					record.Next = "continue fleet operation " + u.Operation
+					q.s.FleetSuperseded = append(q.s.FleetSuperseded, record)
+					break
 				}
 			}
 		}
@@ -359,6 +381,7 @@ func (q *Queue) fleetHostQuiet(h *fleetUpgradeHost) bool {
 // placement can refill the gap. Existing operator drains/recovery keep their
 // original fences; no deadline or empty stale report proves idle custody.
 func (q *Queue) fleetPendingWait(h *fleetUpgradeHost) string {
+	critical := fleetUrgency(q.s.FleetUpgrade.Urgency) == "critical"
 	if h.RetryPhase != "" || h.Policy.Mode == "disabled" {
 		return ""
 	}
@@ -373,7 +396,7 @@ func (q *Queue) fleetPendingWait(h *fleetUpgradeHost) string {
 		if q.s.FleetUpgrade.WaitProductionIdle && !q.fleetProductionIdle() {
 			return "waiting for production attempts and release custody across the fleet; host admission remains enabled"
 		}
-		if len(q.calls) > 0 {
+		if !critical && len(q.calls) > 0 {
 			return "waiting for model calls and streams to finish; host admission remains enabled"
 		}
 	}
@@ -395,6 +418,9 @@ func (q *Queue) fleetPendingWait(h *fleetUpgradeHost) string {
 			}
 		}
 		for _, obligation := range q.hostObligations(h.Host) {
+			if critical {
+				break
+			}
 			if engine := obligation.Engine; engine != nil {
 				// A ready idle model can unload through the existing drain. It
 				// has custody, but no work is interrupted. Loading, live calls
@@ -579,6 +605,9 @@ func (q *Queue) maintainFleetUpgrade() {
 			before := cloneMachine(m)
 			h.Before = &before
 			h.Failure = ""
+		}
+		if fleetUrgency(u.Urgency) == "critical" && !q.maintainFleetCriticalStops(h) {
+			return
 		}
 		if !q.fleetHostQuiet(h) {
 			h.Wait = "waiting for fresh exact execution and release custody"

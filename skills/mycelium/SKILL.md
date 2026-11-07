@@ -260,6 +260,13 @@ do not cancel experiments to finish a drain. Started attempts finish naturally,
 and exact release custody still gates restart. The separately requested
 `--wait-production-idle` policy continues to hold new production assignments.
 
+An explicit `--urgency critical` update may request checkpoint/stop/requeue on
+each selected host. Keep the original job ID and wait on it; resumable work uses
+the existing accepted checkpoint contract. Queue-only critical updates also stop
+model streams but leave batch work on other hosts running. Rollout `stop_requests`
+are intent; the job's checkpoint and exact attempt outcome carry the actual save,
+interruption and release evidence. Consumers do not cancel work to assist updates.
+
 ## Automatic host hygiene (next release)
 
 On releases exposing `health_alert_delivery`, status explains whether the

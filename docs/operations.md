@@ -2338,6 +2338,31 @@ operation ID. It can exit immediately: the queue owns progress. Watch phases,
 wait reasons and failures with `myce status`. An approval from before signed
 envelope retention needs identical verified reapproval first.
 
+From the release containing #900's critical slice, `--urgency normal|critical`
+is persisted with the operation; omitted urgency is `normal`. Normal waits for
+idle. Critical requests the existing maintenance checkpoint/stop/requeue as soon
+as each host is selected, retaining sequential cutover and the established
+per-work-kind signal/checkpoint grace. It does not invent a new retry classifier.
+Queue cutover also stops model streams, including those served by remote engines.
+With `--queue-only`, batch work on other hosts keeps running. Critical does not
+override MY-33's successful production-run rule.
+
+Status lists exact `stop_requests` and accepted `progress_before`; these record
+intent, not successful signal delivery, a final save or physical release. Read
+the same job's accepted checkpoints and attempt outcome for that evidence.
+Resumable attempts use their existing accepted progress on requeue; work without
+a usable checkpoint restarts from its existing supported starting point. Failed
+checkpoint publication stays pending under the existing worker protocol. Expired
+grace, missing heartbeat and empty local inventory never permit restart without
+exact release. Repeat `--urgency critical` when resuming or fixing forward; an
+unfinished operation refuses an urgency change. Existing operator drains and
+disable policies remain owned by the operator.
+Replacing an operation that recorded critical stops retains those records under
+its original operation in `fleet_superseded`, including after newer-release
+fix-forward and queue restart; released work need not recreate the evidence.
+Queued jobs retain their authored start/give-up deadlines during critical
+maintenance, as with the existing idle policy; urgency does not extend them.
+
 For a queue hotfix, use
 `myce fleet upgrade --release vX.Y.Z --queue-only --wait-production-idle`.
 `--queue-only` selects only the queue service, including when workers share its

@@ -956,9 +956,26 @@ func printStatus(s myce.Snapshot, full bool) {
 		fmt.Printf("queue release: %s (%s)\n", s.QueueRelease.Version, s.QueueRelease.Commit)
 	}
 	if u := s.FleetUpgrade; u != nil {
-		fmt.Printf("fleet upgrade %s: release=%s state=%s queue_only=%t wait_production_idle=%t\n", u.Operation, u.Release, u.State, u.QueueOnly, u.WaitProductionIdle)
+		urgency := u.Urgency
+		if urgency == "" {
+			urgency = "normal"
+		}
+		fmt.Printf("fleet upgrade %s: release=%s state=%s urgency=%s queue_only=%t wait_production_idle=%t\n", u.Operation, u.Release, u.State, urgency, u.QueueOnly, u.WaitProductionIdle)
 		for _, h := range u.Hosts {
 			fmt.Printf("  host %s: phase=%s wait=%s failure=%s verified_progress=%s\n", h.Host, h.Phase, h.Wait, h.Failure, h.ProgressAt.UTC().Format(time.RFC3339))
+			for _, request := range h.StopRequests {
+				r := request.Obligation
+				switch {
+				case r.Call != nil:
+					fmt.Printf("    critical stop requested: model call %s\n", r.Call.ID)
+				case r.Engine != nil:
+					fmt.Printf("    critical stop requested: model %s engine %s\n", r.Engine.Model, r.Engine.Attempt)
+				case r.Launch != nil || r.Preparation:
+					fmt.Println("    critical stop requested: preparation")
+				default:
+					fmt.Printf("    critical stop requested: job %s attempt=%d resumable=%t progress_before=%d\n", r.Result.ID, r.Result.Attempt, request.Resumable, request.ProgressBefore)
+				}
+			}
 		}
 	}
 
