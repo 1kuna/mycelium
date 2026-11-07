@@ -137,6 +137,14 @@ before submitting. Save the receipt's `key` and `job_id`. After a lost reply,
 repeat the same command with the saved key to recover that job; changed intent
 or an intentional repeat needs a new key.
 
+For optional NAS existence checks, add `--inspect-nas` to resolve. For one path,
+repeat after two successful worker heartbeats: the first delivers the request,
+the next returns metadata. More paths or slow metadata can take further
+heartbeats. `pending` remains unknown; `present` proves neither size nor hash.
+From the next queue release, all queue listeners share these observations;
+completed samples expire with worker-session freshness rather than a fixed
+minute. Staging still verifies the declared bytes before execution.
+
 If a profile or entry exits 69 with `input storage unconfirmed`, its intent and
 frozen inputs remain in the receipt. The diagnostic names preflight or upload,
 the input, and a sanitized HTTP status/code or transport class. Rerunning the
@@ -216,6 +224,10 @@ caps/quotas still bind; running same-tier work is not stopped to repay debt.
 
 On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. During measured control pressure, expensive/lower-value nonproduction reads can return 429; honor `Retry-After` and prefer batched waits. Production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
 
+**Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; each CLI job gets an initial diagnostic read to retain its deadline. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
+
+**Input and accepted-result recovery (next release, #831/#751):** profile/adapter input storage retries span preflight and reconciled uploads under the caller's one context deadline; each retry reports its sanitized cause and honours `Retry-After`. `myce result` uses the same transient recovery for accepted retrieval, including CI. Permanent authentication, TLS, capacity, integrity and configuration errors stop immediately. No retry count or new default deadline is imposed; without an owner deadline, interrupt to stop observation/recovery and resume the saved intent later.
+
 ## Adaptive model readiness (next release)
 
 Omitted model `max_wait` follows caller cancellation and actual load failures;
@@ -291,7 +303,8 @@ no agent polling or drain/resume loop is needed. Foreign CPU/RSS leaders are
 context for the host owner: never stop their processes or services. See
 [host-health fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#automatic-host-health-834-next-release).
 Older queues omit the new status fields; workers retain local history and use
-the existing leaving signal for a confirmed local drain until support is negotiated.
+reversible availability withholding for unknown health or a confirmed local drain
+until support is negotiated.
 From the checkpoint-probe correction, checkpoint health uses the existing tiny
 exclusive create/close/remove check instead of enumerating the checkpoint root.
 This removes unnecessary directory work; genuinely slow checkpoint metadata
@@ -300,6 +313,7 @@ still withholds dependent jobs under the unchanged measured thresholds.
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
+- **Benchmark host telemetry:** [bounded local capture and receipt schema](advanced.md#benchmark-telemetry-receipts) for queue/worker RSS, external RAM and per-card memory/activity; missing samples remain unknown.
 - **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
 - **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits.
@@ -339,3 +353,13 @@ are not zero use. `efficiency_regression` wakes use the existing
 health notification path and this installation's learned baselines. Investigate
 an offender with its per-job status; keep authored hard requirements and parity
 checks. See [queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/status.md#queue-efficiency-next-release-857).
+
+## Adaptive host observations (next release)
+
+On negotiated `host-probe-v1` workers, owner/pressure status includes measured
+probe period, cost and frozen validity. Read age against that observation's
+validity; a successful check-in cannot renew a failed probe. Owner-latency holds
+now require fresh healthy evidence spanning the attempt's measured interference
+interval, rather than a fixed retry delay. Other eligible hosts remain available.
+Older workers retain legacy fields and age rules. See
+[host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).

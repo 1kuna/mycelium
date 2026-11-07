@@ -13,13 +13,15 @@ import (
 // reply's revisions; nil returns immediately. Older queues fall back to their
 // wait-view GETs. It never fetches full diagnostic/terminal payloads.
 func (c Client) WaitBatch(ctx context.Context, ids []string, after map[string]uint64, seconds int) (WaitReply, error) {
-	// Stay below the caller transport timeout; an intentional long-poll must
-	// not look like a queue outage to a legacy ten-second HTTP client.
-	transportBudget := 10 * time.Second
+	// batch-v1 defines a maximum 20-second hold. Caller budgets reserve a
+	// proportional share for transit rather than a fixed one-second margin.
+	seconds = min(20, max(0, seconds))
 	if c.HTTP != nil && c.HTTP.Timeout > 0 {
-		transportBudget = c.HTTP.Timeout
+		seconds = min(seconds, int(c.HTTP.Timeout/2/time.Second))
 	}
-	seconds = min(seconds, int(max(0, transportBudget-time.Second)/time.Second))
+	if end, ok := ctx.Deadline(); ok {
+		seconds = min(seconds, int(max(0, end.Sub(c.clock().Now()))/2/time.Second))
+	}
 	var reply WaitReply
 	err := c.Call(ctx, "POST", "/api/wait", WaitRequest{IDs: ids, After: after, Seconds: seconds}, &reply)
 	var api *HTTPError
@@ -58,11 +60,6 @@ func (c Client) WaitBatch(ctx context.Context, ids []string, after map[string]ui
 func invalidWaitReply() error {
 	return &HTTPError{Status: 502, Code: "job_reply_invalid", Message: "queue returned an invalid wait reply"}
 }
-
-// DefaultWaitTimeout bounds abandoned synchronous observers even during an
-// indefinite transient outage. Long jobs can be observed again by saved ID;
-// an earlier caller deadline always wins. This does not cancel queued work.
-const DefaultWaitTimeout = 24 * time.Hour
 
 // GetJobWaitCapability preserves one initial diagnostic read while negotiating
 // batch waits through a response header ignored by old clients/queues.

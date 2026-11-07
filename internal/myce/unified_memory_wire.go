@@ -6,9 +6,10 @@ const unifiedMemoryProtocol = "unified-attempt-memory-v1"
 const probeMemoryProtocol = "cpu-probe-memory-v1"
 
 type workerUnifiedMemoryWire struct {
-	machine, session string
-	supported        bool
-	probeSupported   bool
+	machine, session   string
+	supported          bool
+	probeSupported     bool
+	telemetrySupported bool
 }
 
 func (w Worker) unifiedMemoryCheckin(c Checkin) Checkin {

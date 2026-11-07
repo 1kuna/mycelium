@@ -1,0 +1,207 @@
+{
+  "$defs": {
+    "HostTelemetrySample": {
+      "properties": {
+        "capture_id": {
+          "type": "string"
+        },
+        "capture_window": {
+          "$ref": "#/$defs/TelemetryWindow"
+        },
+        "cards": {
+          "items": {
+            "$ref": "#/$defs/TelemetryCard"
+          },
+          "type": "array"
+        },
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "external_memory": {
+          "$ref": "#/$defs/TelemetryReading"
+        },
+        "host_ref": {
+          "type": "string"
+        },
+        "host_used": {
+          "$ref": "#/$defs/TelemetryReading"
+        },
+        "interval_seconds": {
+          "type": "number"
+        },
+        "queue": {
+          "$ref": "#/$defs/TelemetryProcess"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "schema": {
+          "const": "mycelium-host-telemetry-v1"
+        },
+        "sequence": {
+          "type": "integer"
+        },
+        "window": {
+          "$ref": "#/$defs/TelemetryWindow"
+        },
+        "worker": {
+          "$ref": "#/$defs/TelemetryProcess"
+        },
+        "worker_tree_rss": {
+          "$ref": "#/$defs/TelemetryReading"
+        }
+      },
+      "required": [
+        "schema",
+        "run_id",
+        "host_ref",
+        "capture_id",
+        "sequence",
+        "capture_window",
+        "interval_seconds",
+        "window",
+        "elapsed_seconds",
+        "queue",
+        "worker",
+        "worker_tree_rss",
+        "host_used",
+        "external_memory",
+        "cards"
+      ],
+      "type": "object"
+    },
+    "TelemetryCard": {
+      "properties": {
+        "activity": {
+          "$ref": "#/$defs/TelemetryReading"
+        },
+        "card_ref": {
+          "type": "string"
+        },
+        "memory_free": {
+          "$ref": "#/$defs/TelemetryReading"
+        },
+        "memory_total": {
+          "$ref": "#/$defs/TelemetryReading"
+        },
+        "memory_used": {
+          "$ref": "#/$defs/TelemetryReading"
+        }
+      },
+      "required": [
+        "card_ref",
+        "memory_total",
+        "memory_used",
+        "memory_free",
+        "activity"
+      ],
+      "type": "object"
+    },
+    "TelemetryProcess": {
+      "properties": {
+        "birth_id": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "rss": {
+          "$ref": "#/$defs/TelemetryReading"
+        }
+      },
+      "required": [
+        "pid",
+        "rss"
+      ],
+      "type": "object"
+    },
+    "TelemetryReading": {
+      "oneOf": [
+        {
+          "not": {
+            "required": [
+              "missing"
+            ]
+          },
+          "required": [
+            "value",
+            "sampled_at"
+          ]
+        },
+        {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "required": [
+                  "sampled_at"
+                ]
+              }
+            ]
+          },
+          "required": [
+            "missing"
+          ]
+        }
+      ],
+      "properties": {
+        "missing": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sampled_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "unit": {
+          "enum": [
+            "bytes",
+            "percent"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "window": {
+          "$ref": "#/$defs/TelemetryWindow"
+        }
+      },
+      "required": [
+        "unit",
+        "source",
+        "window"
+      ],
+      "type": "object"
+    },
+    "TelemetryWindow": {
+      "properties": {
+        "end": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "start": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/HostTelemetrySample",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One local host sample per line. A reading has either an observed value and sample time, or a missing reason. Windows bound sensor reads, not continuous coverage. Host/card readings are not per-attempt allocations; retained job facts carry exact attempt bindings.",
+  "title": "Mycelium benchmark host telemetry JSONL record v1"
+}

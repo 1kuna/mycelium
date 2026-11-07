@@ -121,6 +121,7 @@ type Queue struct {
 	requestBudgets      requestBudgets
 	efficiencyView      *EfficiencyReport // immutable maintenance projection; published only after commit.
 	waitStates          *waitStateIndex   // scalar committed wait observations; separate reader mutex.
+	nasInspections      *resolveNASCache  // ephemeral evidence shared by every listener for this queue.
 	modelIntervalWrites []ModelIntervalEvent
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin *Queue
@@ -1089,7 +1090,7 @@ func (q *Queue) maintain() {
 		}
 	}
 	for _, m := range q.s.Machines {
-		if a := machineAvailability(m); a != nil && a.Available && (a.Mode == "daily" || a.Signals.Laptop) && now.Sub(m.LastSeen) > signalMaxAge {
+		if a := machineAvailability(m); a != nil && a.Available && (a.Mode == "daily" || a.Signals.Laptop) && !hostAvailabilityFresh(m, now) {
 			a.Available = false
 			a.Reason = "owner signals stale"
 		}
@@ -1252,8 +1253,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		return Reply{}, err
 	}
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
+	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
 		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
@@ -1441,6 +1443,8 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			return err
 		}
 		q.acceptExtensionQualifications(&m)
+		ageHostObservations(&m, memoryReceivedAt, q.clock.Now())
+		acceptHostAvailability(&m, q.clock.Now())
 		q.acceptSharedPressure(&m, old)
 		m.IOPressure = safeIOPressure(m.IOPressure)
 		if m.IOPressure != nil {

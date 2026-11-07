@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"mycelium/internal/myce"
 )
@@ -56,6 +57,14 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 	if c.HTTP != nil {
 		defer c.HTTP.CloseIdleConnections()
 	}
+	return c.RetryTransient(ctx, func(attemptCtx context.Context, one myce.Client) error {
+		return fetchResult(attemptCtx, one, f.Arg(0), *out, *attempt, *recovered, errOut)
+	}, func(cause error, delay time.Duration) {
+		fmt.Fprintf(errOut, "result: retrying accepted retrieval %s; next attempt in %s\n", myce.ClientErrorCause(cause), delay)
+	})
+}
+
+func fetchResult(ctx context.Context, c myce.Client, id, out string, attempt int, recovered string, errOut io.Writer) error {
 	failure := func(err error) error {
 		code := "result_download_failed"
 		var api *myce.HTTPError
@@ -70,20 +79,20 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 		}
 		return &ResultError{Code: code, Err: err, token: c.Token}
 	}
-	j, err := c.GetJob(ctx, f.Arg(0))
+	j, err := c.GetJob(ctx, id)
 	if err != nil {
 		return failure(err)
 	}
 	refs := j.OutputRefs
-	if *recovered != "" {
-		r, e := c.GetRecoveredResult(ctx, j.ID, *recovered)
+	if recovered != "" {
+		r, e := c.GetRecoveredResult(ctx, j.ID, recovered)
 		if e != nil {
 			return failure(e)
 		}
 		refs = r.Files
 		fmt.Fprintf(errOut, "recovered result %s; original job state: %s\n", r.ResultID, j.State)
-	} else if *attempt != 0 {
-		refs, err = myce.DiagnosticFiles(j, *attempt)
+	} else if attempt != 0 {
+		refs, err = myce.DiagnosticFiles(j, attempt)
 		if err != nil {
 			return failure(err)
 		}
@@ -97,9 +106,9 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 		}
 	}
 	for name := range refs {
-		dest := filepath.Join(*out, filepath.FromSlash(name))
+		dest := filepath.Join(out, filepath.FromSlash(name))
 		// Existing parent symlinks must not redirect automatic result placement.
-		root, err := filepath.Abs(*out)
+		root, err := filepath.Abs(out)
 		if err != nil {
 			return failure(err)
 		}
@@ -116,10 +125,10 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 				return &ResultError{Code: "result_invalid", Err: errors.New("result parent must be a directory")}
 			}
 		}
-		if *recovered != "" {
-			err = c.DownloadRecoveredResult(ctx, j.ID, *recovered, name, dest)
-		} else if *attempt != 0 {
-			err = c.DownloadDiagnostic(ctx, j.ID, *attempt, name, dest)
+		if recovered != "" {
+			err = c.DownloadRecoveredResult(ctx, j.ID, recovered, name, dest)
+		} else if attempt != 0 {
+			err = c.DownloadDiagnostic(ctx, j.ID, attempt, name, dest)
 		} else {
 			err = c.DownloadResult(ctx, j.ID, name, dest)
 		}

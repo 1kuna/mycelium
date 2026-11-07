@@ -72,8 +72,8 @@ History serialization/fsync runs outside the mutex used by heartbeat snapshots.
 
 Workers send the additive health fields only after the queue advertises
 `host_hygiene_protocol: host-hygiene-v1`. A strict older queue receives the
-legacy shape; local evidence still persists and a confirmed local drain uses
-the existing leaving signal. A queue downgrade retries the legacy shape once
+legacy shape; local evidence still persists and unknown health or a confirmed
+local drain uses reversible availability withholding. A queue downgrade retries the legacy shape once
 after a strict-decoder rejection, preserving session and attempt custody.
 
 Drains withhold new command, model and preparation launches without changing
@@ -532,6 +532,20 @@ From the next release, queued reasons explain network, environment preparation,
 GPU card contention and RAM envelope blockers per compatible target. Card waits
 say `device N shared with K attempts` or `card busy: waiting for GPU batch slot`,
 and name the holding jobs and tiers (or retained custody awaiting exact release).
+
+With `device-activity-v1` support, discrete XPU inventory includes optional
+`devices[].telemetry`: `free_gb`, `active_percent`, `at`, `age_seconds`, and
+`source`. Missing counters mean **unknown**, including `xpu-smi` N/A. Memory
+comes from a PCI-identified `xpu-smi --query-gpu=pci.bus_id,memory.free` CSV
+query. Xe activity is the busiest hardware engine's active/total PMU tick
+ratio across the complete `DRM_XE_DEVICE_QUERY_ENGINES` inventory, sampled over
+the existing memory-sensor interval. It includes foreign engine activity but
+does not attribute that activity to jobs or predict a sharing speedup. Reads
+use the worker's existing permissions; no settings, driver or privileges change.
+An unsupported, multiplexed, incomplete or nonadvancing counter remains unknown.
+Sensor ages are rebased onto queue time; cached inventory cannot refresh them.
+Strict older queues receive the existing inventory shape after negotiation.
+
 A RAM figure on another target cannot hide that card contention. A RAM wait gives the resolved
 envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
@@ -1191,6 +1205,10 @@ when their handler ends.
 
 ### Non-Mycelium RAM history
 
+For a replay-window artifact with queue/worker RSS and card observations, see
+[benchmark telemetry receipts](benchmark-telemetry.md). Terminal job facts and
+the bucketed history below cannot reconstruct missing host snapshots.
+
 Each host's `external_memory` status field (also returned by host maintenance
 status) contains `24h` and `7d` summaries: `p50_gb`, `p95_gb`, exact observed
 `max_gb`, queue-clock `peak_at`, sample count, occupied bucket count and first/last
@@ -1293,16 +1311,18 @@ foreground wake lateness, local age and queue receipt time),
 attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
 observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
-Pressure sampling continues every five seconds independently of HTTP check-ins.
-The queue requires a worker-reported sample age below 15 seconds. Between
-reports, it discounts time covered by the existing matching-session check-in
-contact, including a request delayed in the queue for at most 30 seconds.
-One observation still expires at 45 seconds of total age, even if further
-requests arrive. A worker that stops reporting loses this credit; a stuck probe
-keeps aging and a completed probe failure reports no sample.
+On negotiated `host-probe-v1` workers, `shared_host_pressure.probe` reports
+measured period/cost and frozen validity in seconds. Local sample age must remain
+below that validity, including time waiting behind queue transactions.
+Matching-session contact cannot renew a negotiated observation. `availability.probe` and
+`availability.age_seconds` similarly preserve owner observation age across clock
+skew. `host_health.probe` applies the same frozen validity to health evidence;
+`host_probe_unknown` withholds admission when it expires or the source fails.
+Older workers retain legacy age rules until upgraded. See
+[adaptive host observations](host-probes.md).
 
 Host maintenance `healthy`/`state` and fleet `host_states` use the same pressure
-and bounded contact facts. Normal owner-pressure yield remains temporary
+and freshness facts (legacy workers retain bounded contact credit). Normal owner-pressure yield remains temporary
 occupancy, without an infrastructure-failure alert; missing/stale evidence is
 unhealthy even with a yield latch set. Detached fleet snapshots freeze contact at snapshot
 `now`; the ordinary one-second status cache can still show an older observation
@@ -1588,11 +1608,12 @@ still requires an explicit resume. Independently configured network roots are
 remembered after being observed mounted; installed NAS is checked even at cold
 startup. Root roles, never local paths or mount source addresses, cross the API.
 
-Job `shared_host_backoff` persists per-host latency-stop timestamps and cooldown
-expiry. Three interrupted owner-scheduling-latency attempts within ten minutes
-exclude that job from that host for fifteen minutes, using the queue clock. Other
-eligible hosts can admit it immediately. Status names the latency backoff and its
-expiry; ordinary pressure recovery alone does not erase the cooldown.
+Job `shared_host_backoff` persists each host's measured `recovery_seconds`,
+`quiet_since` and `last_observation`. The first owner-latency interruption holds
+that job on that host until distinct fresh healthy observations span its measured
+time to interference. Gaps/failures restart recovery; elapsed time alone cannot
+clear it. Other eligible hosts remain available. Old timestamp/expiry records
+remain readable for compatibility. See [owner recovery](host-probes.md).
 
 ## Incident health alerts
 

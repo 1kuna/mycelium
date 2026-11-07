@@ -230,7 +230,7 @@ func TestAdapterSharedInputUploadNamespaces(t *testing.T) {
 			handler := myce.API{Queue: q, Token: token}.Handler()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if !online.Load() {
-					w.WriteHeader(http.StatusServiceUnavailable)
+					refuseProfilePreparation(w, r)
 					return
 				}
 				handler.ServeHTTP(w, r)
@@ -516,7 +516,7 @@ func TestAdapterComposedMemoryIdentity(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(source, "input"), []byte("fixture"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
 	defer server.Close()
 	base := executionProfile{Adapter: true, Source: profileSource{Directory: source}, Spec: myce.Spec{Name: "composed", Project: "fixture", Class: "test", Needs: myce.ResourceNeeds{CPUCores: 1, Memory: "auto", Platform: myce.Platform{Required: []string{"cpu"}}}, Targets: []myce.ExecutionTarget{{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "cpu"}}}}
 	var previous string

@@ -1277,9 +1277,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.OwnerSignals == nil {
 		w.OwnerSignals = workerOwnerSignals
 	}
-	probeCtx, probeCancel := context.WithTimeout(availabilityCtx, 2*time.Second)
-	w.availability.sample(w.OwnerSignals(probeCtx))
-	probeCancel()
+	w.availability.lane.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go func() {
 		defer close(availabilityDone)
 		w.availability.run(availabilityCtx, w.OwnerSignals, availabilityWake)

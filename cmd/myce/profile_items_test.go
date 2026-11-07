@@ -304,10 +304,12 @@ check: [true]
 			t.Errorf("overlap %q: %v", name, err)
 		}
 	}
-	// On an uncertain submission the new file has its own durable frozen copy;
+	// On a permanent storage refusal the input has its own durable frozen copy;
 	// source edits after preparation cannot mutate the saved bytes.
 	var out bytes.Buffer
-	err := runProfile(context.Background(), path, []string{"literal"}, map[string]string{"item": "file"}, "frozen", "", "", "", "http://127.0.0.1:1", "fixture", &out, io.Discard)
+	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
+	defer server.Close()
+	err := runProfile(context.Background(), path, []string{"literal"}, map[string]string{"item": "file"}, "frozen", "", "", "", server.URL, "fixture", &out, io.Discard)
 	if exitCode(err) != 69 {
 		t.Fatal(err)
 	}

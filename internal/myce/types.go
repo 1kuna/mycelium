@@ -694,9 +694,11 @@ type Checkin struct {
 	Running              *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	DeviceTelemetryProtocol    string                       `json:"device_telemetry_protocol,omitempty"`
 	UnifiedMemoryProtocol      string                       `json:"unified_memory_protocol,omitempty"`
 	ProbeMemoryProtocol        string                       `json:"probe_memory_protocol,omitempty"`
 	HostCollectionProtocol     string                       `json:"hygiene_collection_protocol,omitempty"`
+	HostProbeProtocol          string                       `json:"host_probe_protocol,omitempty"`
 	HostHygieneProtocol        string                       `json:"host_hygiene_protocol,omitempty"`
 	ToolInventoryProtocol      string                       `json:"tool_inventory_protocol,omitempty"`
 	ToolInventoryRequired      bool                         `json:"tool_inventory_required,omitempty"`

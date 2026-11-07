@@ -39,7 +39,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	observationLimit := newObservationLimit(observationClock, a.Queue)
 	a.registerWait(mux)
 	waitStates := a.Queue.waitIndex()
-	nas := newResolveNASCache(a.Queue.clock, &a.Queue.requestBudgets)
+	nas := a.Queue.resolveNASInspections()
 	// Joining needs authenticated identity/version only, never the growing status
 	// snapshot. Transport pinning authenticates this identity to joining clients.
 	mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
@@ -588,39 +588,54 @@ func (q *Queue) Run(ctx context.Context) error {
 	}
 }
 
+// No installation-specific dial/handshake/request deadline. The operating
+// system handles transport liveness; the caller owns the operation deadline.
+var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+
 type Client struct {
 	resourceWire *resourceWire
 	URL          string
 	Token        string
 	HTTP         *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
-	transferIdle time.Duration
+	transferIdle  time.Duration
+	Clock         Clock // Optional observation clock.
+	Pause         func(context.Context, time.Duration) error
+	Jitter        func() float64
+	singleAttempt bool
 }
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
+	ctx, cancel := c.apiContext(ctx)
+	defer cancel()
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
 	in, resourceFields := resourceWireInput(in, supported)
-	err := c.callOnce(ctx, method, path, in, out)
-	var api *HTTPError
-	if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
-		// Strict JSON rejection occurs before mutation. Retry only once, with
-		// additive telemetry removed; retain the original durable local result.
-		if c.resourceWire != nil {
-			c.resourceWire.supported.Store(false)
+	clock := c.clock()
+	pace := ClientPace{}
+	for {
+		started := clock.Now()
+		err := c.callOnce(ctx, method, path, in, out)
+		var api *HTTPError
+		if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
+			// Strict JSON rejection occurs before mutation. Retry only once, with
+			// additive telemetry removed; retain the original durable local result.
+			if c.resourceWire != nil {
+				c.resourceWire.supported.Store(false)
+			}
+			legacy, _ := resourceWireInput(in, false)
+			return c.callOnce(ctx, method, path, legacy, out)
 		}
-		legacy, _ := resourceWireInput(in, false)
-		return c.callOnce(ctx, method, path, legacy, out)
-	}
-	// Ordinary idempotent reads get one refill retry. Wait loops own repeated
-	// backoff; worker control and mutations never silently replay.
-	if (method == "GET" || method == "HEAD") && errors.As(err, &api) && api.Status == 429 && api.Code == "client_rate_limited" {
-		if pauseErr := waitStatusPause(ctx, time.Second); pauseErr != nil {
-			return pauseErr
+		safe := method == "GET" || method == "HEAD"
+		if c.singleAttempt || !safe || !errors.As(err, &api) || (api.Status != 429 && api.Status != 503) {
+			return err
 		}
-		return c.callOnce(ctx, method, path, in, out)
+		pace.Observe(clock.Now().Sub(started), false)
+		if err := c.pause(ctx, pace.Delay(clock.Now(), time.Time{}, err, c.Jitter)); err != nil {
+			return err
+		}
 	}
-	return err
 }
+
 func (c Client) callOnce(ctx context.Context, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -643,7 +658,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	}
 	hc := c.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: 10 * time.Second}
+		hc = &http.Client{Transport: clientTransport}
 	}
 	res, err := hc.Do(req)
 	if err != nil {
@@ -657,7 +672,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		*support = res.Header.Get("X-Myce-Wait") == "batch-v1"
 	}
 	if res.StatusCode >= 300 {
-		e := &HTTPError{Status: res.StatusCode, Message: "request failed"}
+		e := &HTTPError{Status: res.StatusCode, RetryAfter: retryAfter(res.Header.Get("Retry-After"), c.clock().Now()), Message: "request failed"}
 		var body struct {
 			PathDiagnostic  *PathDiagnostic `json:"path_diagnostic"`
 			Code            string          `json:"code"`
@@ -687,6 +702,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 }
 
 type HTTPError struct {
+	RetryAfter      time.Duration // Server not-before delay, including HTTP-date form.
 	PathDiagnostic  *PathDiagnostic
 	CurrentRevision *uint64
 	JobID           string // Requested or failed job identity, when applicable.

@@ -229,8 +229,12 @@ beside it after interruption. Rerunning resumes it. A bad range response, byte
 count or hash is refused; a server ignoring Range causes a safe complete restart.
 Upload creation/HEAD/PATCH follow tus 1.0; retries use its acknowledged offset.
 File transfers use per-socket-operation deadlines, with no whole-request timeout.
-The idle budget is the greater of 60 seconds and 30 seconds plus two full-blob
-hash passes at 100 MiB/s. API calls retain their ordinary 10-second budget.
+From #810, the no-progress window is learned from observed byte service time
+and gaps, independently of total duration or a presumed disk/network rate.
+Before throughput evidence, and during queue verification before headers, only
+the owner bounds the operation. Go callers use a context deadline; Python
+callers may set `transfer_timeout`. API calls have no default whole-request
+deadline; explicit caller HTTP/socket timeouts retain their meaning.
 Default and installed pinned TLS clients use this progress policy. An injected
 Go `DialTLSContext`, `DialTLS`, or custom `http.RoundTripper` retains its authority
 and protocol handling and owns its I/O deadlines; custom dial setup is bounded.
@@ -607,8 +611,10 @@ entry before retrying. Stored shared inputs use the ordinary queue retention
 window; NAS originals remain owned by their project.
 
 Input downloads renew their socket deadlines on progress instead of timing out
-a whole file after 30 seconds. The idle budget is at least 60 seconds and scales
-with two hash passes at 100 MiB/s. API control calls keep their normal timeout.
+a whole file after 30 seconds. From #810, each direction learns its no-progress window from observed
+throughput and gaps. Queue verification before headers cannot be estimated
+from network throughput and is bounded by the owner; there is no fixed
+whole-transfer or default API deadline.
 
 ## Declared model snapshots (#553)
 
@@ -941,3 +947,21 @@ rejected on main. Retained fields remain readable; historical custody remains
 protected from collection. Use ordinary accepted file-store outputs or async NAS
 publication above. See [operations](operations.md#parked-native-storage-integration-564)
 and [#504](https://github.com/1kuna/mycelium/issues/504) for future backend work.
+
+### Client recovery ownership
+
+Profile/adapter input storage retries span preflight and reconciled uploads in
+one caller-owned context. `Client.RetryTransient` uses the shared `ClientPace`
+and server seconds/date `Retry-After`, disables nested retries, and reports each
+transient cause before pausing. A retry rechecks content identity and the durable
+upload offset; it never blindly replays a PATCH. Permanent authentication, TLS,
+capacity, integrity and configuration errors return immediately. The context
+deadline (including an explicitly configured Go HTTP timeout) bounds the whole
+operation; there is no retry-count limit or new default timeout. Without an owner
+deadline, the caller can interrupt and resume its retained intent later.
+
+`myce result` uses the same helper for accepted-result retrieval, including the
+CI submitter. Each attempt resolves accepted custody and verifies size/SHA-256
+before publishing the local result. CI still requires each platform's exact
+accepted gate marker; transient recovery adds neither submissions nor a second
+backoff loop. These changes require the supporting client release.

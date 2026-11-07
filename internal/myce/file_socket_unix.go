@@ -3,35 +3,73 @@
 package myce
 
 import (
+	"errors"
+	"io"
 	"net"
 	"syscall"
 )
 
-// RawConn uses the standard runtime poller, but returns after one successful
-// nonblocking write. net.Conn.Write itself loops until the entire buffer has
-// been sent and hides the progress needed to renew the transfer idle deadline.
-func fileWriteSome(conn net.Conn, p []byte) (int, error) {
+// Only an operation that actually waited for socket readiness measures wire
+// service time. A successful nonblocking copy measures a kernel buffer, not
+// network throughput, and must never teach an idle deadline.
+func fileSocketSome(conn net.Conn, p []byte, write bool) (int, error, bool) {
 	socket, ok := conn.(syscall.Conn)
 	if !ok {
-		return conn.Write(p[:min(len(p), 8192)])
+		if write {
+			n, e := conn.Write(p[:min(len(p), 8192)])
+			return n, e, true
+		}
+		n, e := conn.Read(p)
+		return n, e, true
 	}
 	raw, err := socket.SyscallConn()
 	if err != nil {
-		return 0, err
+		return 0, err, false
 	}
 	var n int
-	var writeErr error
-	err = raw.Write(func(fd uintptr) bool {
+	var operationErr error
+	waited := false
+	operation := func(fd uintptr) bool {
 		for {
-			n, writeErr = syscall.Write(int(fd), p)
-			if writeErr == syscall.EINTR {
+			if write {
+				n, operationErr = syscall.Write(int(fd), p)
+			} else {
+				n, operationErr = syscall.Read(int(fd), p)
+			}
+			if operationErr == syscall.EINTR {
 				continue
 			}
-			return writeErr != syscall.EAGAIN && writeErr != syscall.EWOULDBLOCK
+			if operationErr == syscall.EAGAIN || operationErr == syscall.EWOULDBLOCK {
+				waited = true
+				return false
+			}
+			return true
 		}
-	})
-	if err != nil {
-		return 0, err
 	}
-	return max(n, 0), writeErr
+	if write {
+		err = raw.Write(operation)
+	} else {
+		err = raw.Read(operation)
+	}
+	var timeout net.Error
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		// The runtime checks its deadline before invoking the callback. If
+		// this goroutine was descheduled, that can hide actual peer progress.
+		// Check once without blocking before declaring a network stall. This
+		// buffered copy must not teach a new wire rate from the expired wait.
+		ready := false
+		if checkErr := raw.Control(func(fd uintptr) { ready = operation(fd) }); checkErr != nil {
+			return 0, checkErr, waited
+		}
+		if ready {
+			err, waited = nil, false
+		}
+	}
+	if err != nil {
+		return 0, err, waited
+	}
+	if !write && n == 0 && operationErr == nil {
+		operationErr = io.EOF
+	}
+	return max(n, 0), operationErr, waited
 }

@@ -11,20 +11,24 @@ import (
 	"time"
 )
 
-func TestWaitSubmittedDefaultDeadlineAndBackoff(t *testing.T) {
+// #810 retires the arbitrary 24-hour observer lifetime; the owner supplies it.
+func TestWaitSubmittedOwnerDeadlineAndBackoff(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		reads := 0
-		c := Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		c := Client{URL: "http://fixture.invalid", Jitter: func() float64 { return 0 }, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
 			reads++
+			time.Sleep(time.Millisecond)
 			return &http.Response{StatusCode: 503, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":"queue_stopping"}`))}, nil
 		})}}
-		start := time.Now()
-		_, err := c.WaitSubmitted(context.Background(), &Job{ID: "job", State: "queued"})
-		if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) != DefaultWaitTimeout {
-			t.Fatal("unbounded submitted wait", err, time.Since(start))
+		ctx, cancel := context.WithTimeout(context.Background(), 48*time.Hour)
+		defer cancel()
+		started := time.Now()
+		_, err := c.WaitSubmitted(ctx, &Job{ID: "job", State: "queued"})
+		if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) != 48*time.Hour {
+			t.Fatal(err, time.Since(started))
 		}
-		if reads > int(DefaultWaitTimeout/(10*time.Second))+10 {
-			t.Fatal("outage did not back off", reads)
+		if reads > 32 {
+			t.Fatal("no adaptive backoff", reads)
 		}
 	})
 }

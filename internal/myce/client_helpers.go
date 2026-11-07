@@ -27,20 +27,30 @@ func (c Client) SubmitAndWait(ctx context.Context, spec Spec) (*Job, error) {
 	return c.WaitSubmitted(ctx, j)
 }
 
-// Submit uses the ordinary jobs API. A keyed submission can safely retry one
-// uncertain transport response without creating another job.
+// Submit retries only identical keyed intent after an ambiguous transport
+// failure or explicit overload, paced by observations until owner cancellation.
 func (c Client) Submit(ctx context.Context, spec Spec) (*Job, error) {
+	ctx, cancel := c.apiContext(ctx)
+	defer cancel()
 	var j Job
-	if err := c.Call(ctx, "POST", "/api/jobs", spec, &j); err != nil {
+	pace := ClientPace{}
+	for {
+		started := c.clock().Now()
+		err := c.callOnce(ctx, "POST", "/api/jobs", spec, &j)
+		if err == nil {
+			return &j, nil
+		}
 		var transport *url.Error
-		if spec.SubmissionKey == "" || !errors.As(err, &transport) || ctx.Err() != nil {
+		var api *HTTPError
+		retry := errors.As(err, &transport) && !IsTLSIdentityError(err) || errors.As(err, &api) && (api.Status == 429 || api.Status == 503)
+		if spec.SubmissionKey == "" || !retry || ctx.Err() != nil {
 			return nil, err
 		}
-		if err = c.Call(ctx, "POST", "/api/jobs", spec, &j); err != nil {
+		pace.Observe(c.clock().Now().Sub(started), false)
+		if err := c.pause(ctx, pace.Delay(c.clock().Now(), time.Time{}, err, c.Jitter)); err != nil {
 			return nil, err
 		}
 	}
-	return &j, nil
 }
 
 // GetJob reads one Job, including MemoryAttempts with each ended attempt's
@@ -87,18 +97,12 @@ func (c Client) Wait(ctx context.Context, id string, updates ...func(*Job) error
 	return c.wait(ctx, id, nil, updates)
 }
 
-// WaitSubmitted waits using an accepted submission receipt. Until the first
-// successful GET, job_unknown is retried for at most five seconds to tolerate
-// transient visibility failures across several one-second cache generations.
-// This adds at most five retry reads/seconds of polling for a missing receipt
-// (individual reads retain their transport timeout), and never resubmits it.
-// Caller cancellation/deadlines and permanent authentication errors still win.
+// WaitSubmitted uses the accepted receipt to tolerate transient visibility
+// failures until the owner deadline. It never resubmits or cancels the job.
 func (c Client) WaitSubmitted(ctx context.Context, receipt *Job, updates ...func(*Job) error) (*Job, error) {
 	if receipt == nil || receipt.ID == "" {
 		return nil, errors.New("wait-submitted requires an accepted job receipt")
 	}
-	ctx, cancel := context.WithTimeout(ctx, DefaultWaitTimeout)
-	defer cancel()
 	return c.wait(ctx, receipt.ID, receipt, updates)
 }
 
@@ -146,8 +150,8 @@ func RetryStatusRead(err error) bool {
 }
 
 func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []func(*Job) error) (*Job, error) {
-	const poll = time.Second
-	delay := poll
+	pace := ClientPace{}
+	c = c.WithoutRetries()
 	last := receipt
 	batchSupported := false
 	revisions := map[string]uint64{}
@@ -159,52 +163,74 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 		}
 		return err
 	}
-	clock := RealClock{}
-	var unknownUntil time.Time
+	clock := c.clock()
+	var jobDeadline *time.Time
 	if receipt != nil {
-		unknownUntil = clock.Now().Add(5 * time.Second)
+		jobDeadline = receipt.Spec.Deadline
 	}
 	for {
 		if ctx.Err() != nil {
 			return last, waitError(ctx.Err())
 		}
+		if jobDeadline != nil && !clock.Now().Before(*jobDeadline) {
+			return last, waitError(context.DeadlineExceeded)
+		}
+		requestCtx, cancel := context.WithCancel(ctx)
+		if jobDeadline != nil {
+			cancel()
+			requestCtx, cancel = context.WithTimeout(ctx, jobDeadline.Sub(clock.Now()))
+		}
+		started := clock.Now()
 		read := c.GetJobForWait
 		if initial == nil {
 			read = c.GetJob
 		}
 		var j *Job
 		var err error
+		held := false
 		if batchSupported {
 			var reply WaitReply
-			reply, err = c.WaitBatch(ctx, []string{id}, revisions, 5)
+			seconds := pace.Seconds(clock.Now(), ClientJobEvent(initial, clock.Now()))
+			reply, err = c.WaitBatch(requestCtx, []string{id}, revisions, seconds)
 			if err == nil {
 				state := reply.Jobs[0]
+				held = seconds > 0 && state.Revision > 0
 				revisions[state.ID] = state.Revision
 				j = &Job{ID: state.ID, State: state.State, Reason: state.Reason}
 				if terminal(j.State) {
-					j, err = c.GetJobForWait(ctx, state.ID)
+					j, err = c.GetJobForWait(requestCtx, state.ID)
 				}
 			}
 		} else if initial == nil {
-			j, batchSupported, err = c.GetJobWaitCapability(ctx, id)
+			j, batchSupported, err = c.GetJobWaitCapability(requestCtx, id)
 		} else {
-			j, err = read(ctx, id)
+			j, err = read(requestCtx, id)
 		}
+		cancel()
 		if ctx.Err() != nil {
 			return last, waitError(ctx.Err())
 		}
 		if err != nil {
 			var api *HTTPError
-			if errors.As(err, &api) && api.Status == 404 && api.Code == "job_unknown" && clock.Now().Before(unknownUntil) {
-				delay = min(poll, unknownUntil.Sub(clock.Now()))
+			if errors.As(err, &api) && api.Status == 404 && api.Code == "job_unknown" && receipt != nil && initial == nil {
+				// The accepted keyed receipt is evidence that this job exists.
+				// Retry visibility until the owner deadline, without resubmission.
 			} else if !RetryStatusRead(err) {
 				return last, err
 			} else {
-				delay = min(delay*2, 10*time.Second)
+				// Retry spacing is learned below.
 			}
 		} else {
-			unknownUntil = time.Time{}
+			changed := last == nil || last.State != j.State || last.Reason != j.Reason
+			pace.Observe(clock.Now().Sub(started), changed)
 			last = j
+			if j.Spec.Deadline != nil {
+				jobDeadline = j.Spec.Deadline
+			}
+			if initial != nil && initial.StartedAt == nil && j.State == "running" {
+				now := clock.Now()
+				initial.StartedAt = &now
+			}
 			if initial == nil {
 				initial = j
 			}
@@ -223,12 +249,21 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 			if err == nil && terminal(j.State) {
 				return j, nil
 			}
-			delay = poll
-			if err != nil {
-				delay = 2 * poll
-			}
+
 		}
-		if err := waitStatusPause(ctx, delay); err != nil {
+		if err != nil {
+			pace.Observe(clock.Now().Sub(started), false)
+		}
+		delay := pace.Delay(clock.Now(), ClientJobEvent(initial, clock.Now()), err, c.Jitter)
+		if err == nil && held {
+			// The negotiated hold paces reads and wakes on changes. Sleeping
+			// between holds would leave completion unobserved as pacing grows.
+			delay = 0
+		}
+		if jobDeadline != nil {
+			delay = min(delay, max(0, jobDeadline.Sub(clock.Now())))
+		}
+		if err := c.pause(ctx, delay); err != nil {
 			return last, waitError(err)
 		}
 	}

@@ -361,7 +361,10 @@ func measureResource(ctx context.Context, c BenchmarkConfig, extensions []Extens
 		}
 		h := sha256.New()
 		n, err = io.Copy(h, io.LimitReader(res.Body, ref.SizeBytes+1))
-		if err != nil || n != ref.SizeBytes || hex.EncodeToString(h.Sum(nil)) != ref.SHA256 {
+		if err != nil {
+			return nil, fmt.Errorf("file store download after %d bytes: %w", n, err)
+		}
+		if n != ref.SizeBytes || hex.EncodeToString(h.Sum(nil)) != ref.SHA256 {
 			return nil, errors.New("file store hash mismatch")
 		}
 	default:

@@ -1023,11 +1023,14 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		}
 	}
 	capacity, reason := cpuCapacity(&rt.memoryMachine)
-	if reason == "" && cores > capacity || rt.memoryMachine.HostMemoryBudgetGB > 0 && ram > rt.memoryMachine.HostMemoryBudgetGB {
-		return fmt.Errorf("%w: aggregate engine CPU/RAM allowance", errWorkerMemory)
+	if reason == "" && cores > capacity {
+		return fmt.Errorf("aggregate engine CPU/RAM allowance: %w", refuseAdmission("aggregate_cpu_allowance", "cores", float64(cores), float64(capacity), false))
+	}
+	if rt.memoryMachine.HostMemoryBudgetGB > 0 && ram > rt.memoryMachine.HostMemoryBudgetGB {
+		return fmt.Errorf("aggregate engine CPU/RAM allowance: %w", refuseAdmission("aggregate_host_allowance", "GiB", ram, rt.memoryMachine.HostMemoryBudgetGB, false))
 	}
 	if hostMeasured && hostFree < growth {
-		return fmt.Errorf("%w: insufficient host RAM for launch and pending growth: need %.3f GiB, available %.3f GiB", errWorkerMemory, growth, hostFree)
+		return fmt.Errorf("insufficient host RAM for launch and pending growth: %w", refuseAdmission("live_host_growth", "GiB", growth, hostFree, false))
 	}
 	return nil
 }
