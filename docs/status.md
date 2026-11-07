@@ -140,6 +140,16 @@ Machine `cpu_extension_fingerprint` identifies the CPU qualification identity;
 device entries carry their own extension fingerprints and reports. The scalar
 `extension_fingerprint` and reports retain a first-device compatibility view.
 
+From the next release (#891), extension report `reason` and status displays
+say `not yet checked on this device; run the extension check` when no matching
+work/device record exists for the installed version. Existing records distinguish
+`hardware/driver fingerprint changed`, `extension fingerprint (digest) changed`,
+and `hardware/driver fingerprint unavailable` (current or recorded identity is
+missing); these require setup and check. `fingerprint` is the hardware/driver/OS
+qualification hash; `digest` identifies the extension contents. The text is a
+human diagnostic, not a machine code; `setup` and `qualified` remain the stable
+boolean verdicts. No record does not establish a hardware change.
+
 Default status keeps the existing JSON fields and job shape, but includes all
 nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
 100 other terminal jobs by submission time. Work curves remain included for
