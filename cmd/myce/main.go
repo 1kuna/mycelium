@@ -621,6 +621,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		defer listener.Close()
+		var queueServers []*http.Server
 		if *discovery {
 			dir := *identityDir
 			if dir == "" {
@@ -645,6 +646,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return e
 			}
 			defer joiningServer.Close()
+			queueServers = append(queueServers, joiningServer)
 			defer q.BeginShutdown()
 			withdraw, e := myce.AdvertiseJoining(tlsListener.Addr(), identity.Fingerprint())
 			if e != nil {
@@ -655,6 +657,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			fmt.Printf("Mycelium joining: https://%s\n", tlsListener.Addr())
 		}
 		server := &http.Server{Handler: myce.API{Queue: q, Token: *token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		queueServers = append(queueServers, server)
 		errs := make(chan error, 3)
 		if debugListener != nil {
 			go func() { errs <- debugServer.Serve(debugListener) }()
@@ -671,7 +674,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		stop()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return errors.Join(err, server.Shutdown(shutdown))
+		return errors.Join(err, q.ShutdownServers(shutdown, queueServers...))
 	case "join":
 		if *cpuReserve < 0 || *cpuBudget < 0 {
 			return errors.New("CPU reserve and allowance must be nonnegative")

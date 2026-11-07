@@ -128,8 +128,11 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 		return string(encoded), err
 	}
 	c := &q.statusCache
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	unlock, err := requestObservationLock(requestContext(contexts), &c.mu)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	for {
 		revision := c.terminalRevision.Load()
 		if c.data != "" && c.generation == revision && q.clock.Now().Before(c.expires) {
@@ -233,7 +236,10 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	// Serialize just the memory copy. Parallel read-locked captures can all
 	// consume CPU while a waiting heartbeat writer must wait for every one.
 	// Projection/encoding below remain concurrent outside the queue lock.
-	unlockRequest := requestLock(requestContext(contexts), &q.mu)
+	unlockRequest, lockErr := requestObservationLock(requestContext(contexts), &q.mu)
+	if lockErr != nil {
+		return nil, fileStoreObservation{}, lockErr
+	}
 	locked := readWallStart(q.observeRead)
 	hold := q.statusHolds.start()
 	var files fileStoreObservation
@@ -426,6 +432,9 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	}
 	observeRead(q.observeRead, id, started, locked)
 	logQueueHold(duration, "captureObservation", nil)
+	if err == nil {
+		err = requestContext(contexts).Err()
+	}
 	if err != nil {
 		return nil, files, err
 	}
@@ -646,6 +655,10 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	if err != nil {
 		return Snapshot{}, err
 	}
+	ctx := requestContext(contexts)
+	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
+	}
 	// One detached generation is one immutable planning pass. Without this,
 	// each queued job/target diagnostic rebuilds the retained-evidence catalog.
 	v.memoryPlanning = newMemoryPlanningCache()
@@ -654,9 +667,10 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	v.observationScan.memory = v.memoryPlanning
 	out := v.projectSnapshot(true)
 	out.RequestLatencies = q.requestLatencies.snapshot()
-	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour))
+	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
 	if err == nil {
-		out.FileStore = files.status(context.Background())
+		out.FileStore = files.status(ctx)
+		err = ctx.Err()
 	}
 	out.Freshness = q.snapshotFreshness(out.Now, false)
 	if err == nil {

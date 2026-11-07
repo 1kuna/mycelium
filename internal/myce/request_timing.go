@@ -50,6 +50,15 @@ func requestLock(ctx context.Context, mu sync.Locker) func() {
 	}
 }
 
+// Observations own no cleanup transaction and can abandon a queued lock wait.
+func requestObservationLock(ctx context.Context, mu sync.Locker) (func(), error) {
+	timing := &queueUpdateTiming{}
+	if err := timing.lockContext(ctx, mu); err != nil {
+		return nil, err
+	}
+	return func() { unlockTimedRequest(ctx, mu, timing) }, nil
+}
+
 // Fixed samples and a fixed route cap bound memory even for unmatched requests.
 // Only ServeMux patterns enter this map; paths, queries and bodies never do.
 type requestLatencies struct {
