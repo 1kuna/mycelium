@@ -229,6 +229,9 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 			// Carry unresolved drain custody into explicit fix-forward intent.
 			for _, h := range u.Hosts {
 				for _, p := range old.Hosts {
+					if h.Host == p.Host && h.Machine == p.Machine {
+						h.CheckpointProbeRecovered = p.CheckpointProbeRecovered
+					}
 					if h.Host == p.Host && p.Phase != "pending" && p.Phase != "complete" && p.Phase != "failed" {
 						h.Policy = p.Policy
 						h.Owned = p.Owned
@@ -683,9 +686,6 @@ func (q *Queue) maintainFleetUpgrade() {
 			h.HealthIdentity = ""
 			h.Wait = "waiting for worker runtime proof"
 			return
-		}
-		if !m.CheckpointUnavailable {
-			h.CheckpointProbeRecovered = true
 		}
 		a, _ := u.Release.Manifest.Select(h.Before.CapabilityProfile.OS, h.Before.CapabilityProfile.Arch)
 		if m.Fleet.Version == u.Release.Manifest.Version && m.Fleet.SHA256 == a.SHA256 {

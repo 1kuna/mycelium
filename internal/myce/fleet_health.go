@@ -1,7 +1,5 @@
 package myce
 
-import "slices"
-
 // FleetCheck classifies accepted queue observations, not external probe output.
 // Waiting/blocked checks never grant custody or replace installer preflight.
 type FleetCheck struct {
@@ -9,6 +7,39 @@ type FleetCheck struct {
 	State      string `json:"state"`
 	Code       string `json:"code,omitempty"`
 	Capability string `json:"capability,omitempty"`
+}
+
+// Accepted exact worker reports own recovery evidence, even while the operation
+// is stopped, the queue is updating, or fleet runtime proof is unavailable.
+func (q *Queue) observeFleetCheckpointReport(m *Machine) {
+	if m.CheckpointUnavailable || q.s.FleetUpgrade == nil {
+		return
+	}
+	for _, h := range q.s.FleetUpgrade.Hosts {
+		if h.Machine == m.ID && h.Host == hostID(m) && h.Before != nil && h.Before.CheckpointUnavailable {
+			h.CheckpointProbeRecovered = true
+		}
+	}
+}
+
+func (q *Queue) fleetCheckpointDependent(j *Job, m *Machine) bool {
+	if terminal(j.State) || cancelled(j) || j.FileTransport || !needsCheckpoint(j) {
+		return false
+	}
+	if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
+		return true // Existing custody still needs its checkpoint despite policy edits.
+	}
+	dependent := false
+	// Share qualification's permanent-capacity/device/variant evaluation. It
+	// ignores temporary occupancy, checkpoint flags and maintenance restrictions.
+	// Placement attaches transient claims to scalar targets. Own that view here
+	// because status can classify health while holding only the queue read lock.
+	view := *m
+	q.evaluateTargetsOnMachines(j, false, map[string]*Machine{m.ID: &view}, func(fit targetFit, _ *Job, _ *Machine) bool {
+		dependent = fit.failures == 0
+		return !dependent
+	})
+	return dependent
 }
 
 // The legacy NAS probe flag is only advisory when it predates this worker's
@@ -20,7 +51,7 @@ func (q *Queue) fleetCheckpointAdvisory(h *fleetUpgradeHost, m *Machine) bool {
 		return false
 	}
 	for _, j := range q.liveJobs() {
-		if !terminal(j.State) && !cancelled(j) && !j.FileTransport && needsCheckpoint(j) && q.jobAllowsMachine(j, m.ID) && executionTargetMatches(j.Spec, m) {
+		if q.fleetCheckpointDependent(j, m) {
 			return false
 		}
 	}
@@ -69,16 +100,28 @@ func (q *Queue) fleetHostChecks(h *fleetUpgradeHost) []FleetCheck {
 		} else {
 			add("checkpoint_probe", "ready", "", "nas_checkpoint")
 		}
-		if m.HostMemoryPolicyMismatch || m.HostMemoryError != "" || m.MemoryError != "" || m.CPUCapacityReason != "" || m.InventoryReason != "" || m.DockerCleanup != "" || slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" }) {
-			add("worker_components", "blocked", "worker_component_unavailable", "worker")
-		} else if m.CapabilityProfile == nil || m.CapabilityProfile.LogicalCPUs <= 0 || m.CapabilityProfile.SystemMemoryBytes == 0 || !m.HostMemoryMeasured || m.HostAvailableMemoryGB <= 0 {
-			add("worker_components", "waiting", "worker_reports_missing", "worker")
-		} else {
-			add("worker_components", "ready", "", "worker")
-		}
+		state, code := q.fleetComponentCheck(h, m)
+		add("worker_components", state, code, "worker")
 	}
 	if h.Failure != "" {
 		add("installation", "blocked", h.FailureCode, "")
 	}
 	return checks
+}
+
+func (q *Queue) fleetComponentCheck(h *fleetUpgradeHost, m *Machine) (string, string) {
+	if h.Before == nil || h.Before.CapabilityProfile == nil {
+		return "waiting", "worker_baseline_missing"
+	}
+	profile := h.Before.CapabilityProfile
+	receipt := EnrollmentReceipt{Devices: h.Before.Devices, LogicalCPUs: profile.LogicalCPUs, SystemMemoryBytes: profile.SystemMemoryBytes}
+	observed := *m
+	if q.fleetCheckpointAdvisory(h, m) {
+		observed.CheckpointUnavailable = false
+	}
+	code, _ := enrollmentComponentIssue(receipt, EnrollmentObservation{Machine: observed, Policy: q.s.HostMaintenance[h.Host]})
+	if code != "" {
+		return "blocked", code
+	}
+	return "ready", ""
 }

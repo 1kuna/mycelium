@@ -274,6 +274,10 @@ func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job
 }
 
 func (q *Queue) evaluateTargetsMemory(j *Job, sizeMemory bool, visit func(fit targetFit, candidate *Job, m *Machine) bool) {
+	q.evaluateTargetsOnMachines(j, sizeMemory, q.s.Machines, visit)
+}
+
+func (q *Queue) evaluateTargetsOnMachines(j *Job, sizeMemory bool, machines map[string]*Machine, visit func(fit targetFit, candidate *Job, m *Machine) bool) {
 	// Resolve envelopes with the planner's code, but without temporary
 	// occupancy or release holds. Retain observations for learned needs.
 	capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: newMemoryPlanningCache()}
@@ -283,7 +287,7 @@ func (q *Queue) evaluateTargetsMemory(j *Job, sizeMemory bool, visit func(fit ta
 		capacity.memoryPlanning.history = q.memoryPlanning.history
 	}
 	capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
-	for _, m := range q.s.Machines {
+	for _, m := range machines {
 		if !q.jobAllowsMachine(j, m.ID) {
 			fit := targetFit{excluded: true, key: targetKey(m)}
 			if contains(j.Spec.ExcludedMachines, m.ID) {
