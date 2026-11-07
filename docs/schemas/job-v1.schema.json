@@ -2853,6 +2853,9 @@
         "reference": {
           "$ref": "#/$defs/WorkReference"
         },
+        "repeated_work": {
+          "type": "string"
+        },
         "server_digest": {
           "type": "string"
         },
@@ -4760,6 +4763,9 @@
         "actual_seconds": {
           "type": "number"
         },
+        "comparability": {
+          "type": "string"
+        },
         "execution": {
           "$ref": "#/$defs/Execution"
         },
@@ -4788,10 +4794,16 @@
         "reason": {
           "type": "string"
         },
+        "repeated_key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
         "samples": {
           "type": "integer"
         },
         "session": {
+          "type": "string"
+        },
+        "uncertainty": {
           "type": "string"
         }
       },
