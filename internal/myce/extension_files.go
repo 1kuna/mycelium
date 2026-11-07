@@ -86,7 +86,7 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 }
 func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateDir string) (stageErr error) {
 	ctx = w.storageIOContext(ctx)
-	defer func() { observeStorageMetadata(ctx, stageErr) }()
+	defer func() { observeStorageContext(ctx, stageErr) }()
 	operation, input, ref := "prepare", "", (FileRef{})
 	defer func() { stageErr = withStagingCause(input, ref, operation, stageErr) }()
 	if err := ctx.Err(); err != nil {

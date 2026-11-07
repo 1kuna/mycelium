@@ -158,23 +158,24 @@ type hostMountResult struct {
 	dataVerified bool
 }
 type hostMountProbe struct {
-	root, path     string
-	clock          Clock
-	progressed     atomic.Pointer[time.Time]
-	probe          func(string, func()) error
-	measure        func(string, func()) hostMountResult
-	pending        chan hostMountResult
-	started        time.Time
-	last           HostMountHealth
-	candidate      string
-	consecutive    int
-	reason         string
-	nextProbe      time.Time
-	retryDelay     time.Duration
-	fault          *StorageFault
-	recoverySource string
-	dataProbe      func(string, uint64, func()) error
-	recoveryCycle  uint64
+	root, path      string
+	clock           Clock
+	progressed      atomic.Pointer[time.Time]
+	probe           func(string, func()) error
+	measure         func(string, func()) hostMountResult
+	pending         chan hostMountResult
+	started         time.Time
+	last            HostMountHealth
+	candidate       string
+	consecutive     int
+	reason          string
+	nextProbe       time.Time
+	retryDelay      time.Duration
+	fault           *StorageFault
+	recoverySource  string
+	recoveryBacking string
+	dataProbe       func(string, uint64, func()) error
+	recoveryCycle   uint64
 }
 
 func workerHealthMounts(w Worker) map[string]string {
@@ -231,9 +232,11 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 				}
 			}
 			if r.err != nil {
-				if e, number, ok := storageIOFault(r.err); ok {
-					p.recordStorageFault(e, number, now)
-				}
+				storageErrorLeaves(r.err, func(leaf error) {
+					if e, number, ok := storageIOFault(leaf); ok {
+						p.recordStorageFault(e, number, now)
+					}
+				})
 				p.last.Reason = "mount_probe_failed"
 				var recovery mountRecoveryError
 				if errors.As(r.err, &recovery) {

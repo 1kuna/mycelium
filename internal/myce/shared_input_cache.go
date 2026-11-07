@@ -335,7 +335,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 // Only the calling attempt may publish. This detached work writes exclusively
 // into its unique unpublished directory and cannot touch another build's data.
 func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nasRoot, stage string) (err error) {
-	defer func() { observeStorageMetadata(ctx, err) }()
+	defer func() { observeStorageContext(ctx, err) }()
 	if c.beforeStage != nil {
 		c.beforeStage(ctx)
 	}

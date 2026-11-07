@@ -86,7 +86,9 @@ require three fresh read/reopen completions after the latest fault. Metadata,
 cached probe results and incomplete requests cannot recover data access.
 The worker retains path-free typed operation/errno/time/generation evidence in
 its private health file; recovery source custody is private and never sent in
-status. No consumer process or kernel log is inspected.
+status. Learned backing attribution survives restart, with recovery custody
+validated against the current configured roots. Storage faults do not recount
+cached host-pressure measurements. No consumer process or kernel log is inspected.
 
 Foreign CPU/RSS leaders (up to five of each) refresh once per minute to keep
 enumeration out of the heartbeat path. Only executable basenames and available

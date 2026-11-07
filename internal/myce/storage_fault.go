@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -16,7 +17,25 @@ import (
 type storageFaultContextKey struct{}
 
 func (w Worker) storageIOContext(ctx context.Context) context.Context {
-	return context.WithValue(ctx, storageFaultContextKey{}, w.observeStorageError)
+	// Nested readers and staging wrappers can return the same OS error again.
+	// Keep syscall identity while visiting every sibling of a joined error.
+	var mu sync.Mutex
+	seen := map[error]bool{}
+	observe := func(err error) {
+		storageErrorLeaves(err, func(leaf error) {
+			if _, _, ok := storageIOFault(leaf); !ok {
+				return
+			}
+			mu.Lock()
+			duplicate := seen[leaf]
+			seen[leaf] = true
+			mu.Unlock()
+			if !duplicate {
+				w.observeStorageError(leaf)
+			}
+		})
+	}
+	return context.WithValue(ctx, storageFaultContextKey{}, observe)
 }
 
 func observeStorageContext(ctx context.Context, err error) {
@@ -25,14 +44,25 @@ func observeStorageContext(ctx context.Context, err error) {
 	}
 }
 
-func observeStorageMetadata(ctx context.Context, err error) {
-	var p *os.PathError
-	// contextReader observes read errors before cancellation and before the
-	// same error unwinds through verification/staging wrappers.
-	if errors.As(err, &p) && p.Op == "read" {
+// Preserve the path/operation wrapper as a leaf. Unwrap aggregation and
+// contextual wrappers without letting the first ordinary error hide a sibling.
+func storageErrorLeaves(err error, visit func(error)) {
+	if err == nil {
 		return
 	}
-	observeStorageContext(ctx, err)
+	switch err.(type) {
+	case *os.PathError, *os.LinkError:
+		visit(err)
+		return
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, child := range e.Unwrap() {
+			storageErrorLeaves(child, visit)
+		}
+	case interface{ Unwrap() error }:
+		storageErrorLeaves(e.Unwrap(), visit)
+	}
 }
 
 // StorageFault is private worker evidence. It contains no path, payload or
@@ -53,11 +83,11 @@ type StorageFault struct {
 // errors are not evidence that a mounted NAS has failed. In particular, a bad
 // authored digest must not quarantine other jobs' storage.
 func storageIOFault(err error) (*os.PathError, syscall.Errno, bool) {
-	var p *os.PathError
+	p, ok := err.(*os.PathError)
 	var number syscall.Errno
-	if !errors.As(err, &p) {
-		var link *os.LinkError
-		if !errors.As(err, &link) || link.Op != "rename" {
+	if !ok {
+		link, ok := err.(*os.LinkError)
+		if !ok || link.Op != "rename" {
 			return nil, 0, false
 		}
 		p = &os.PathError{Op: link.Op, Path: link.New, Err: link.Err}
@@ -87,8 +117,15 @@ func (w Worker) observeStorageError(err error) {
 	if w.storageHealth == nil {
 		return
 	}
-	p, number, ok := storageIOFault(err)
-	if !ok || !filepath.IsAbs(p.Path) {
+	storageErrorLeaves(err, func(leaf error) {
+		if p, number, ok := storageIOFault(leaf); ok && filepath.IsAbs(p.Path) {
+			w.observeStoragePath(p, number)
+		}
+	})
+}
+
+func (w Worker) observeStoragePath(p *os.PathError, number syscall.Errno) {
+	if !filepath.IsAbs(p.Path) {
 		return
 	}
 	roots := map[string]string{"checkpoint": w.CheckpointRoot, "job-files": w.JobFileRoot}
@@ -139,24 +176,15 @@ func (m *hostHealthMonitor) observeStorageFault(e *os.PathError, number syscall.
 			p = &hostMountProbe{root: role, path: path, clock: m.clock, probe: healthMountAccess("nas")}
 			m.mounts[role] = p
 		}
+		p.recoveryBacking = backing
 		p.recordStorageFault(e, number, at)
 	}
 	if p := m.mounts["nas"]; p != nil && withinNAS(backing, p.path) {
+		p.recoveryBacking = backing
 		p.recordStorageFault(e, number, at)
 	}
-	// Publish to the same history immediately, before another local admission.
-	s := HostHealthSample{At: at}
-	if n := len(m.health.History); n > 0 {
-		s = m.health.History[n-1]
-		s.At = at
-	}
-	s.Mounts = nil
-	for _, p := range m.mounts {
-		v := p.last
-		v.Root, v.Reason, v.Adverse = p.root, p.reason, p.reason != ""
-		s.Mounts = append(s.Mounts, v)
-	}
-	m.health.observe(s)
+	// snapshot overlays active mount latches immediately. Only the sampler
+	// may count a fresh host-pressure reading toward a whole-host drain.
 }
 
 // Called only with the health monitor mutex held (or by its single sampler).
@@ -256,25 +284,47 @@ var workerStorageReopen = func(path string, cycle uint64, progress func()) error
 }
 
 // Snapshot private typed evidence separately from the versioned wire history.
-func (m *hostHealthMonitor) storageFaultDisk() (map[string]StorageFault, map[string]string) {
+type storageRecoverySource struct {
+	Path    string `json:"path"`
+	Backing string `json:"backing"`
+}
+
+func (m *hostHealthMonitor) storageFaultDisk() (map[string]StorageFault, map[string]storageRecoverySource) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	faults, sources := map[string]StorageFault{}, map[string]string{}
+	faults, sources := map[string]StorageFault{}, map[string]storageRecoverySource{}
 	for role, p := range m.mounts {
 		if p.fault != nil {
 			faults[role] = *p.fault
-			sources[role] = p.recoverySource
+			sources[role] = storageRecoverySource{Path: p.recoverySource, Backing: p.recoveryBacking}
 		}
 	}
 	return faults, sources
 }
 
-func restoreStorageFault(p *hostMountProbe, f StorageFault, source string) {
-	p.fault, p.recoverySource = &f, source
+func restoreStorageFault(p *hostMountProbe, f StorageFault, source storageRecoverySource) {
+	p.fault, p.recoverySource, p.recoveryBacking = &f, source.Path, source.Backing
 	if f.Active {
 		p.reason = "mount_probe_failed"
 		p.last = HostMountHealth{Root: p.root, Reason: p.reason, Adverse: true}
 	}
+}
+
+func storageRecoveryInScope(w Worker, root string, source storageRecoverySource) bool {
+	if source.Path == "" || withinNAS(root, source.Path) {
+		return true
+	}
+	// A learned backing remains private custody across restart. Both the new
+	// configured role and the source's still-configured sibling must be on it.
+	if source.Backing == "" || !withinNAS(source.Backing, root) {
+		return false
+	}
+	for _, sibling := range []string{w.CheckpointRoot, w.JobFileRoot} {
+		if sibling != "" && withinNAS(source.Backing, sibling) && withinNAS(sibling, source.Path) {
+			return true
+		}
+	}
+	return false
 }
 
 // Keep direct role projection in the existing dependency resolver.

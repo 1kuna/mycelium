@@ -2799,6 +2799,9 @@ requests bypass client data caching where supported; success does not attest
 server cache behavior or the producer's complete declared digest. Full staging
 still verifies that digest. Unsupported/refused bypass records
 `cache_bypass: unavailable` in private evidence and keeps the data-fault hold.
+Private recovery custody retains the observed backing across restart and is
+validated against the current configured roots, including sibling roots on that
+backing. Storage events never recount a cached host-pressure sensor reading.
 No sentinel write is required, including on read-only layouts. The failed
 source must remain readable; a removed or empty source cannot prove recovery.
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -286,5 +287,125 @@ func TestStorageFaultCheckpointPreparationPublishesExactFault(t *testing.T) {
 	f := m.mounts["checkpoint"].fault
 	if f == nil || f.Errno != int(syscall.EIO) || f.Operation != "read" || f.Generation != 1 {
 		t.Fatal("preparation lost exact owned syscall", f)
+	}
+}
+
+func TestStorageFaultDoesNotRecountHostPressure(t *testing.T) {
+	w, m, clock := storageFaultFixture(t)
+	// One real transient pressure sample must remain one observation even
+	// when multiple storage syscalls fail before the next sensor sample.
+	clock.Advance(signalRefresh)
+	m.health.observe(HostHealthSample{At: clock.Now(), HostHealthReading: HostHealthReading{Pressure: 4, Load: 1, WakeSeconds: .001}})
+	if m.health.Consecutive != 1 || m.health.DrainReason != "" {
+		t.Fatal("fixture lacks one unconfirmed pressure sample", m.health)
+	}
+	history, baseline := len(m.health.History), len(m.health.Baseline)
+	for i := 0; i < hostHealthConfirmation; i++ {
+		clock.Advance(time.Second)
+		w.observeStorageError(&os.PathError{Op: "read", Path: "/share/inputs/source", Err: syscall.EIO})
+	}
+	machine := Machine{HostHealth: m.snapshot(nil)}
+	applyHostMountHealth(w, &machine)
+	if len(m.health.History) != history || len(m.health.Baseline) != baseline || m.health.Consecutive != 1 || hostHygieneReason(&machine) != "" {
+		t.Fatal("storage faults recounted a cached pressure reading", m.health)
+	}
+	if storageRootReason(&Job{Spec: Spec{Priority: "experiment"}}, &machine) == "" || storageRootReason(&Job{Spec: Spec{Priority: "production"}}, &machine) != "" {
+		t.Fatal("mount latch lost dependency-only admission", machine.UnavailableRoots)
+	}
+}
+
+func TestStorageFaultJoinedErrorsObserveEverySyscallOnce(t *testing.T) {
+	w, m, _ := storageFaultFixture(t)
+	ctx := w.storageIOContext(context.Background())
+	read := &os.PathError{Op: "read", Path: "/share/inputs/read", Err: syscall.EIO}
+	if _, err := (contextReader{ctx: ctx, reader: storageFaultReader{err: read}}).Read(make([]byte, 1)); !errors.Is(err, read) {
+		t.Fatal(err)
+	}
+	missing := &os.PathError{Op: "open", Path: "/share/inputs/missing", Err: os.ErrNotExist}
+	metadata := &os.PathError{Op: "stat", Path: "/share/inputs/other", Err: syscall.EIO}
+	joined := errors.Join(missing, errors.Join(read, metadata))
+	observeStorageContext(ctx, joined)
+	observeStorageContext(ctx, joined) // Another wrapper must not count it again.
+	f := m.mounts["checkpoint"].fault
+	if f == nil || f.Generation != 2 || f.Operation != "stat" || !f.Data {
+		t.Fatal("joined ordinary/read error hid a sibling fault or duplicated reads", f)
+	}
+	w, m, _ = storageFaultFixture(t)
+	w.observeStorageError(errors.Join(missing, metadata))
+	if f := m.mounts["checkpoint"].fault; f == nil || f.Operation != "stat" || f.Generation != 1 {
+		t.Fatal("direct owned-I/O aggregation hid a qualifying sibling", f)
+	}
+}
+
+func TestStorageFaultStartupRetainsLearnedSiblingCustody(t *testing.T) {
+	oldForeign := workerForeignConsumers
+	workerForeignConsumers = func(context.Context, string) ([]ForeignConsumer, error) { return nil, nil }
+	t.Cleanup(func() { workerForeignConsumers = oldForeign })
+	for _, reconfigured := range []bool{false, true} {
+		t.Run(map[bool]string{false: "same_backing", true: "source_root_removed"}[reconfigured], func(t *testing.T) {
+			w, m, clock := storageFaultFixture(t)
+			backing := t.TempDir()
+			w.CheckpointRoot, w.JobFileRoot = filepath.Join(backing, "checkpoints"), filepath.Join(backing, "inputs")
+			m.mounts["checkpoint"].path = w.CheckpointRoot
+			w.ServiceConfig = nil
+			w.rootMonitor = &workerRootMonitor{expected: map[string]string{"checkpoint": backing, "job-files": backing}}
+			source := filepath.Join(w.JobFileRoot, "source")
+			w.observeStorageError(&os.PathError{Op: "read", Path: source, Err: syscall.EIO})
+			if err := m.persist(*m.snapshot(nil)); err != nil {
+				t.Fatal(err)
+			}
+			if reconfigured {
+				w.JobFileRoot = t.TempDir()
+			}
+			w.HostHealthSource = func(ctx context.Context) (HostHealthReading, error) {
+				<-ctx.Done()
+				return HostHealthReading{}, ctx.Err()
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			root := &workerStore{dir: m.dir}
+			root.state.CheckpointRoot = w.CheckpointRoot
+			restarted, err := startWorkerHealth(ctx, w, root)
+			if err != nil {
+				cancel()
+				t.Fatal(err)
+			}
+			defer func() { cancel(); restarted.wait() }()
+			restarted.mu.Lock()
+			defer restarted.mu.Unlock()
+			for _, probe := range restarted.mounts {
+				probe.probe = func(string, func()) error { return nil }
+				probe.dataProbe = func(string, uint64, func()) error { return nil }
+			}
+			p := restarted.mounts["checkpoint"]
+			if p.fault == nil || !p.fault.Active || p.consecutive != 0 || p.recoveryBacking != backing {
+				t.Fatal("startup lost learned backing/latch", p)
+			}
+			if reconfigured {
+				if p.recoverySource != "" {
+					t.Fatal("startup retained a source outside configured roots", p.recoverySource)
+				}
+				return
+			}
+			if p.recoverySource != source {
+				t.Fatal("startup stranded sibling recovery source", p.recoverySource)
+			}
+			p.dataProbe = func(path string, _ uint64, _ func()) error {
+				if path != source {
+					return errors.New("wrong source custody")
+				}
+				return nil
+			}
+			clock.Advance(time.Second)
+			p.sample(clock.Now(), nil)
+			for i := 0; i < hostHealthConfirmation; i++ {
+				await(t, func() bool { return len(p.pending) == 1 })
+				clock.Advance(time.Second)
+				p.sample(clock.Now(), nil)
+			}
+			if p.fault.Active {
+				t.Fatal("restored sibling custody could not recover")
+			}
+			await(t, func() bool { return len(p.pending) == 1 })
+		})
 	}
 }

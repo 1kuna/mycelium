@@ -195,7 +195,7 @@ type hostHealthMonitor struct {
 	done            chan struct{}
 	persist         func(HostHealth) error
 	restoredFaults  map[string]StorageFault
-	restoredSources map[string]string
+	restoredSources map[string]storageRecoverySource
 }
 
 // Version the on-disk probe evidence only. The wire shape is unchanged, and
@@ -207,7 +207,7 @@ type hostHealthDisk struct {
 	MountProbeVersion string                  `json:"mount_probe_version,omitempty"`
 	StorageFaults     map[string]StorageFault `json:"storage_faults,omitempty"`
 	// Private recovery custody, deliberately outside the path-free fault/wire.
-	RecoverySources map[string]string `json:"recovery_sources,omitempty"`
+	RecoverySources map[string]storageRecoverySource `json:"recovery_sources,omitempty"`
 }
 
 func openHostHealth(dir string, clock Clock) (*hostHealthMonitor, error) {
@@ -383,10 +383,10 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 		}
 		if p != nil {
 			source := m.restoredSources[role]
-			if source != "" && !withinNAS(p.path, source) && (w.ServiceConfig == nil || w.ServiceConfig.NAS == "" || !withinNAS(w.ServiceConfig.NAS, source)) {
+			if !storageRecoveryInScope(w, p.path, source) {
 				// Preserve the hold across a restart, but never read an old
 				// source outside the newly configured storage scope.
-				source = ""
+				source.Path = ""
 			}
 			restoreStorageFault(p, fault, source)
 		}
