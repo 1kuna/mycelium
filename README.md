@@ -63,6 +63,28 @@ MYCE_QUEUE=http://127.0.0.1:7331 MYCE_TOKEN=dev-token ./myce run -- echo hello
 
 If you see "queued waiting for a hypha", the job is waiting for a worker machine.
 
+## Watch it live
+
+![Live view: jobs flow from the queue in the middle to five machines that fill as they get busy; one machine drops out and its jobs return, then a gold production job jumps the queue](docs/media/fleet-view.gif)
+
+`myce view` opens a read-only live picture of your cluster in the browser
+([MP4](docs/media/fleet-view.mp4)). Waiting jobs gather in the middle, each
+machine fills as it gets busier, a machine that drops out drains, and production
+work is gold. To see it with the pretend cluster:
+
+```sh
+./myce dev --workers 5
+# second terminal:
+./myce view --queue http://127.0.0.1:7331 --token dev-token --anonymize
+# third terminal, for a varied stream of demo jobs:
+examples/fleet-view-demo.sh
+```
+
+On a real cluster, `myce view` uses your installed config. It reads the same
+shared status as `myce status`, only while a page is open, and slows down when
+the queue does; `--anonymize` hides machine, project and job names for
+recordings. See [Live view](docs/status.md#live-view-myce-view).
+
 ## More
 
 [Start here](docs/START-HERE.md) · [Author reusable work](docs/adapter.md) ·
