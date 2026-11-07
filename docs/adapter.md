@@ -1290,6 +1290,11 @@ install name when that path is missing on the submitter. This is local evidence,
 not a claim about any remote worker. Selected Git/snapshot sources are explicitly
 uninspected locally; unrelated working-tree bytes never substitute for them.
 
+New profile submissions now use the same worker-side source extraction and explicit
+input replacement as adapters, before any command or check starts. Existing saved
+receipts retain their frozen submission format; use a new intent/key to adopt this
+preparation path.
+
 Darwin workers repeat this read-only check on staged payload runtime candidates,
 including script-launched helpers, before starting any member. They inspect the
 worker architecture's slice in universal binaries. A confirmed missing absolute

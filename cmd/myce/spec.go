@@ -241,7 +241,7 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 	}
 	found.unstaged = append(found.unstaged, "files/.myce-source.tar")
 	p.Files[".myce-source.tar"] = placeholderRef(".myce-source.tar", max(1, size))
-	p.PrepareSource = p.Adapter
+	p.PrepareSource = true
 	return myce.ResolveRequest{Spec: p.Spec, RequirementReasons: p.RequirementReasons, UnstagedInputs: found.unstaged}, found, nil
 }
 

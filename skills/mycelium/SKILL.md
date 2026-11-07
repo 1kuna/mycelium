@@ -132,7 +132,10 @@ From the release containing #866, resolve and adapter portability reports warn
 about missing absolute non-system Mach-O dylib install names in directory-source
 runtime candidates, naming the packaged binary and library. This is submitter-local
 evidence; Git/snapshot source inspection stays unknown until worker staging.
-Darwin prelaunch checks the staged payload again. `payload_library_missing` is a
+New profile submissions extract source and apply explicit inputs during worker
+staging, as adapters do, so Darwin prelaunch can inspect packaged helpers before
+launch. Existing saved receipts retain their original intent; use a new key for
+changed intent. Darwin prelaunch checks the staged payload again. `payload_library_missing` is a
 payload/environment failure with `execution_cause.linkage.binary` and `.library`,
 not an infrastructure loss/retry. Bundle and relink the dependency or choose a
 compatible environment, then resubmit changed intent. System/loader-relative

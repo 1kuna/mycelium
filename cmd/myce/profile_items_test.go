@@ -192,7 +192,7 @@ check: [test, -s, result]
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for _, ref := range []myce.FileRef{first.Spec.Files[".myce-source.tar"], first.Spec.Files[".myce-inputs/"+profileHash("common")]} {
+	for _, ref := range []myce.FileRef{first.Spec.Files[".myce-source.tar"], first.Spec.Files["common"]} {
 		if patches[ref.SHA256] != 1 {
 			t.Errorf("common blob uploaded %d times", patches[ref.SHA256])
 		}

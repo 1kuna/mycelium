@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"debug/macho"
@@ -205,15 +206,36 @@ func TestMachOLinkageWorkerRefusesBeforePayload(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "started")
 	j := recoveryJob(t, []string{"sh", "-c", "touch \"$MARKER\""})
 	j.Spec.Run.Env = map[string]string{"MARKER": marker}
-	// Model the atomically published staging directory, before launch is allowed.
-	staged := filepath.Join(store.dir, "job-files", j.ID, "1")
-	if err := os.MkdirAll(staged, 0700); err != nil {
-		t.Fatal(err)
-	}
+	// Stage the real frozen source through the same cache/extractor used by
+	// newly lowered profiles, rather than creating an already-extracted tree.
 	missing := filepath.ToSlash(filepath.Join(t.TempDir(), "missing.dylib"))
-	if err := os.WriteFile(filepath.Join(staged, "helper"), linkedFixture(missing), 0700); err != nil {
+	data := linkedFixture(missing)
+	var archive bytes.Buffer
+	tw := tar.NewWriter(&archive)
+	if err := tw.WriteHeader(&tar.Header{Name: "helper", Mode: 0700, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := tw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cache := newTestStateRoot(t)
+	file := filepath.Join(t.TempDir(), "source.tar")
+	if err := os.WriteFile(file, archive.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := IdentifyFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, ref.SHA256), archive.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w.fileCache = &FileCache{Root: cache, Limit: 1 << 20, Clock: w.Clock}
+	j.Spec.Files = FileManifest{".myce-source.tar": ref}
+	j.Spec.PrepareSource = true
 	p, err := startAfterFixtureInputs(t, w, store, j)
 	var typed *runtimeError
 	if p != nil || !errors.As(err, &typed) || typed.diagnostic.Class != machoLibraryMissing || !strings.Contains(err.Error(), missing) {
