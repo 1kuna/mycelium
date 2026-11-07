@@ -2439,6 +2439,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "program_memory_applied": {
+          "$ref": "#/$defs/ProgramMemoryApplied",
+          "x-contract": "diagnostic"
+        },
         "progress": {
           "type": "integer",
           "x-contract": "diagnostic"
@@ -3836,6 +3840,21 @@
       "required": [
         "type",
         "file"
+      ],
+      "type": "object"
+    },
+    "ProgramMemoryApplied": {
+      "properties": {
+        "applied": {
+          "$ref": "#/$defs/SizeHint"
+        },
+        "base": {
+          "$ref": "#/$defs/SizeHint"
+        }
+      },
+      "required": [
+        "base",
+        "applied"
       ],
       "type": "object"
     },
