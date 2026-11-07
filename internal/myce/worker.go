@@ -503,6 +503,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 
 	executionWork := j.Spec.Run.Workdir
+	if !j.Spec.Run.Docker {
+		if err := checkPayloadMachOLinkage(ctx, machineTarget(&w.Machine), executionWork); err != nil {
+			return nil, err
+		}
+	}
 	executionWorkdir, extensionErr = privateNativeExtension(&j, extensionEnv, executionWork, executionWorkdir)
 	if extensionErr != nil {
 		return nil, extensionErr
