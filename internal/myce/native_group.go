@@ -28,6 +28,7 @@ const nativeBindAttempts = 3 // Whole-group preparation attempts, including the 
 type nativeMember struct {
 	memberOutcome
 	exitObservation *nativeExitObservation
+	execReleased    bool   // guarded by p.mu; true only after the payload gate opened
 	Name            string `json:"name"`
 	PID             int    `json:"pid,omitempty"`
 	Birth           string `json:"birth,omitempty"`
@@ -791,6 +792,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if err = g.releaseMember(m, writer); err != nil {
 		return err
 	}
+	m.execReleased = true
 	if m.Name == "main" {
 		g.main = m
 	}
@@ -820,9 +822,10 @@ func (g *nativeGroup) independentMemberFailure() bool {
 		select {
 		case <-m.done:
 			g.p.mu.Lock()
+			released := m.execReleased
 			r := classifyAttemptOutcome(Result{}, attemptCause{memberOutcome: m.memberOutcome})
 			g.p.mu.Unlock()
-			if r.Interrupted {
+			if !released || r.Interrupted {
 				continue
 			}
 			return true

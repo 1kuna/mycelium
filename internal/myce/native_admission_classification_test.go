@@ -12,8 +12,8 @@ import (
 // A real ready helper has custody before either final main launch gate. A local
 // capacity refusal remains typed even if durable Started authorization won.
 func TestNativeMemberAdmissionClassification(t *testing.T) {
-	for _, refuseAt := range []int{4, 5} {
-		t.Run(map[int]string{4: "before-started", 5: "after-started"}[refuseAt], func(t *testing.T) {
+	for _, refuseAt := range []int{3, 4, 5} {
+		t.Run(map[int]string{3: "helper-final-gate", 4: "before-started", 5: "after-started"}[refuseAt], func(t *testing.T) {
 			q, clock := fixture(t)
 			s := nativeSpec(t)
 			s.Priority = "production"
@@ -69,8 +69,13 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 				if _, err := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "main.json")); !os.IsNotExist(err) {
 					t.Fatal("main ran after refusal", err)
 				}
-				if _, err := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "side.json")); err != nil {
-					t.Fatal("helper custody was not exercised", err)
+				_, helperErr := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "side.json"))
+				if refuseAt == 3 {
+					if !os.IsNotExist(helperErr) {
+						t.Fatal("helper payload ran through closed gate", helperErr)
+					}
+				} else if helperErr != nil {
+					t.Fatal("helper custody was not exercised", helperErr)
 				}
 				nativeNoSurvivors(t, &nativeTestRun{p: p, dir: p.job.Spec.Run.Workdir})
 			case <-time.After(testWaitTimeout):
@@ -78,5 +83,18 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 				t.Fatal("native refusal did not finish exact cleanup")
 			}
 		})
+	}
+}
+
+// Reaping an unopened shell wrapper must not turn its exit 125 into a payload
+// failure, regardless of whether the waiter wins the refusal-classification race.
+func TestNativeAdmissionIndependentFailureRequiresExec(t *testing.T) {
+	for _, released := range []bool{false, true} {
+		done := make(chan struct{})
+		close(done)
+		g := &nativeGroup{p: &process{}, members: []*nativeMember{{Name: "helper", done: done, execReleased: released, memberOutcome: memberOutcome{Exit: &memberExit{Status: 125}}}}}
+		if got := g.independentMemberFailure(); got != released {
+			t.Fatalf("independent failure=%v, exec gate opened=%v", got, released)
+		}
 	}
 }
