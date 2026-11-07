@@ -443,6 +443,11 @@ admission; gate resources, test coverage and result acceptance stay the same.
 review**, then inspect main's workflow records and latest *completed* `main-full`
 run, including its head SHA. For a docs-only change, a passing exact-head fleet
 quick gate is sufficient in place of full.
+The [2026-11-07 orchestrator default](DECISIONS.md#current-rulings) permits
+unrelated merges despite known, owned test failures or known six-hour main-run
+capacity cancellations when every other test passes without race or panic; the
+PR must name the known failure, its owning issue and the failing job ID.
+Any new or unexplained failure still blocks.
 
 ```sh
 gh api repos/1kuna/mycelium/commits/main --jq .sha
