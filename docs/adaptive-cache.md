@@ -27,7 +27,13 @@ records with a second recovery copy. Release failures retain explicit retry
 ownership in idle maintenance. External loss is the remaining
 physical free-space decline. Its response horizon follows the latest completed sampling interval;
 admission waits and long transfers do not become control-response deadlines. Demands make cold capacity reclaimable across cache kinds;
-collection never creates authority to delete a protected or unknown entry.
+collection never creates authority to delete a protected or unknown entry. Shared-input capacity
+also refreshes without local cache mutation, so a snapshot taken during another
+writer's custody cannot strand waiting work after that custody ends. Heartbeats
+request one asynchronous refresh; scans stay off control transactions. Refreshes
+use the existing hygiene policy's tenfold measured-cost spacing (under 10% duty)
+to avoid continuous full inventories; stalled storage retains one outstanding
+refresh. Admission still independently checks physical write authority.
 
 Retired numerical assumptions:
 

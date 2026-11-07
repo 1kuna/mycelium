@@ -18,24 +18,27 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Reuse the environment cache's OS locking and state-root initialization. Data
 // entries have their own integrity records and no environment/catalog lifecycle.
 type SharedInputCache struct {
-	cache         EnvironmentCache
-	Client        Client
-	mu            sync.Mutex
-	verified      map[string]string
-	staging       map[*sharedInputStaging]struct{}
-	beforeStage   func(context.Context)
-	resolveNAS    func(root, relative string) (string, error)
-	beforePublish func()
-	beforeVerify  func() // Test hook: a full re-hash of a cached entry starts.
-	hits          uint64
-	misses        uint64
-	nasBytes      uint64
-	capacity      *SharedInputCapacity
+	cache              EnvironmentCache
+	Client             Client
+	mu                 sync.Mutex
+	verified           map[string]string
+	staging            map[*sharedInputStaging]struct{}
+	beforeStage        func(context.Context)
+	resolveNAS         func(root, relative string) (string, error)
+	beforePublish      func()
+	beforeVerify       func() // Test hook: a full re-hash of a cached entry starts.
+	hits               uint64
+	misses             uint64
+	nasBytes           uint64
+	capacity           *SharedInputCapacity
+	capacityRefreshing bool
+	capacityNextAt     time.Time
 }
 
 // sharedVerifiedRecord holds the metadata signature (size, mode, mtime, inode

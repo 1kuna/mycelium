@@ -360,3 +360,30 @@ func TestSharedInputCapacityUsesCPUExtensionVariant(t *testing.T) {
 		t.Fatal("did not place CPU variant", job(t, q, j.ID).Reason)
 	}
 }
+
+// A snapshot taken during another cache's exploration must not strand the work
+// whose staging would otherwise refresh it. Both ledgers see the same volume.
+func TestSharedInputCapacityRecoversWithoutCacheMutation(t *testing.T) {
+	clock := &workerFakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	budgets, disk := syntheticCacheBudget(t, clock, 1<<40, 1<<39)
+	other := newCacheBudgets()
+	other.hostRoot, other.probe = budgets.hostRoot, budgets.probe
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Clock: clock, budgets: budgets}}
+	held, err := other.explore("environment", clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.release()
+	cache.refreshCapacity()
+	if got := cache.capacityReport(); got.CapacityBytes != 0 {
+		t.Fatal("active exploration advertised space", got)
+	}
+	held.release()
+	// No Acquire or cache mutation intervenes; only the heartbeat observation
+	// request may refresh the evidence. It never grants a write reservation.
+	cache.observeCapacity(clock.Now())
+	await(t, func() bool { return cache.capacityReport().FreeBytes > disk.FreeBytes/2 })
+	if _, err := budgets.reserve("files", int64(disk.FreeBytes), clock); err == nil {
+		t.Fatal("capacity evidence bypassed write admission")
+	}
+}
