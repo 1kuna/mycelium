@@ -97,9 +97,6 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 		return nil, err
 	}
 	limit := c.FileStoreLimit
-	if limit == 0 {
-		limit = 100 << 30
-	}
 	q, err := Open(c.Database, c.Checkpoints, clock, WithFileStoreProductionReserve(c.FileStoreProductionReserve), WithOutputDeliveryRoot(c.OutputDeliveryRoot), WithFileStore(c.FileStore, limit, c.FileStore != "" && !c.NASCheckpoints))
 	if err != nil {
 		return nil, err

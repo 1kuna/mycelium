@@ -47,7 +47,6 @@ const (
 	modelSnapshotsCapability = "model_snapshots_v1"
 	modelHubDirectory        = "hub"
 	dockerModelRoot          = "/myce/models"
-	defaultModelCacheBytes   = 100 << 30
 )
 
 var (

@@ -554,26 +554,41 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if e != nil {
 		return nil, e
 	}
-	rt := &modelRuntime{copyResults: map[string]CopyReport{}, availability: w.availability, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	rt := &modelRuntime{copyResults: map[string]CopyReport{}, availability: w.availability, copies: map[string]*workerCopy{}, copyParallel: w.CopyParallel, models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
 	root := w.CacheRoot
 	if root == "" {
 		root = filepath.Join(dir, "model-cache")
 	}
 	limit := w.CacheLimit
-	if limit == 0 {
-		limit = defaultModelCacheBytes
-	}
 	rt.worker = &w
 	rt.secretRoot = w.SecretRoot
 	rt.cache = &ModelCache{ApprovalRoot: w.ModelApprovalRoot, FileClient: &w.Client, Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
 	rt.engineFactory = w.modelEngine
 	rt.cache.beforeChunk = w.beforeModelCopy
-	rt.cache.Parallel = max(1, w.CopyParallel)
+	rt.cache.Parallel = w.CopyParallel
+	if w.fileCache != nil {
+		rt.cache.budgets = w.fileCache.budgets
+		if w.environmentCache != nil {
+			w.environmentCache.budgets = w.fileCache.budgets
+		}
+	}
 	rt.cache.Protected = rt.cacheProtected
 	rt.cache.Usage = rt.cachePopularity
 	if e = rt.cache.init(); e != nil {
 		ln.Close()
 		return nil, e
+	}
+	rt.cache.budgets.register(rt.cache.Root, rt.cache.collectAdaptive)
+	if w.environmentCache != nil {
+		rt.cache.budgets.register(w.environmentCache.Root, func(ctx context.Context) {
+			w.environmentCache.collectBudget(ctx, func(ctx context.Context, key string) (bool, error) {
+				var state struct {
+					Referenced bool `json:"referenced"`
+				}
+				err := w.Client.Call(ctx, "GET", "/api/environments/"+key+"/reference", nil, &state)
+				return state.Referenced, err
+			})
+		})
 	}
 	rt.cache.ValidateInventory(w.ModelConfig.Models)
 	if data, e := os.ReadFile(filepath.Join(dir, "copy-speed.json")); e == nil {

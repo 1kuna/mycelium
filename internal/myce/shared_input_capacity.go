@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // SharedInputCapacity is a worker-local cache snapshot. Heartbeats only copy
@@ -32,6 +33,29 @@ func (c *SharedInputCache) capacityReport() *SharedInputCapacity {
 	report := *c.capacity
 	report.Protected = maps.Clone(report.Protected)
 	return &report
+}
+
+// Refresh evidence independently of cache mutations: another cache/process can
+// release volume custody while this cache has no admitted work. One outstanding
+// refresh keeps stalled storage off heartbeats; measured sweep cost uses the
+// existing hygiene lane's tenfold spacing rather than a fixed refresh period.
+func (c *SharedInputCache) observeCapacity(now time.Time) {
+	c.mu.Lock()
+	if c.capacityRefreshing || now.Before(c.capacityNextAt) {
+		c.mu.Unlock()
+		return
+	}
+	c.capacityRefreshing = true
+	c.mu.Unlock()
+	go func() {
+		started := c.cache.Clock.Now()
+		c.refreshCapacity()
+		finished := c.cache.Clock.Now()
+		c.mu.Lock()
+		c.capacityNextAt = finished.Add(max(0, finished.Sub(started)) * 10)
+		c.capacityRefreshing = false
+		c.mu.Unlock()
+	}()
 }
 
 func (c *SharedInputCache) refreshCapacityIfTracked() {
@@ -67,12 +91,17 @@ func (c *SharedInputCache) refreshCapacity() {
 // The existing cache admission lock serializes accounting with reservations and
 // eviction. A failed inventory withholds space; it never invents free capacity.
 func (c *SharedInputCache) refreshCapacityLocked() {
-	report := &SharedInputCapacity{CapacityBytes: uint64(max(0, c.cache.Limit)), Protected: map[string]uint64{}}
+	report := &SharedInputCapacity{Protected: map[string]uint64{}}
 	defer func() { c.mu.Lock(); c.capacity = report; c.mu.Unlock() }()
 	used, err := c.cache.DiskUsage()
 	if err != nil {
 		return
 	}
+	limit, err := c.cache.budget(used)
+	if err != nil {
+		return
+	}
+	report.CapacityBytes = uint64(limit)
 	entries, err := os.ReadDir(c.cache.Root)
 	if err != nil {
 		return

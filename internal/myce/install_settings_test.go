@@ -93,7 +93,7 @@ func TestInstallQueueFileStoreDefaults(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, got := range []ServiceConfig{c, saved} {
-				if got.FileStoreBytes != 100<<30 || got.FileStoreProductionReserve != 0 {
+				if got.FileStoreBytes != 0 || got.FileStoreProductionReserve != 0 {
 					t.Fatal("fresh/legacy install changed file-store defaults")
 				}
 			}
@@ -118,7 +118,7 @@ func TestInstallQueueFileStoreDefaults(t *testing.T) {
 					t.Errorf("generated unit omitted %v", pair)
 				}
 			}
-			for _, limits := range [][2]int64{{0, 0}, {-1, 0}, {12, -1}, {12, 13}} {
+			for _, limits := range [][2]int64{{-1, 0}, {12, -1}, {12, 13}} {
 				invalid := configured
 				invalid.FileStoreBytes, invalid.FileStoreProductionReserve = limits[0], limits[1]
 				if invalid.ValidateInstall() == nil {
@@ -346,6 +346,49 @@ func TestInstallFileCacheOmittedAutomatic(t *testing.T) {
 	i := slices.Index(args, "--file-cache-bytes")
 	if i >= 0 {
 		t.Fatal("automatic cache limit must be resolved at worker startup")
+	}
+}
+
+func TestInstallAutomaticCacheRollbackEncoding(t *testing.T) {
+	for _, limit := range []int64{0, 32 << 30} {
+		c := ServiceConfig{Role: "worker", ModelCacheBytes: limit, EnvironmentCacheBytes: limit, FileStoreBytes: limit}
+		data, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The old validator requires every model/environment/store ceiling to
+		// be positive, even in a worker config. File-cache zero is omitted;
+		// upload-spool bytes remain positive. The real downgrade journey also
+		// exercises the unmodified previous installer and worker.
+		var legacy struct {
+			ModelCacheBytes       int64 `json:"model_cache_bytes"`
+			EnvironmentCacheBytes int64 `json:"environment_cache_bytes"`
+			FileStoreBytes        int64 `json:"file_store_bytes"`
+		}
+		if err := json.Unmarshal(data, &legacy); err != nil || legacy.ModelCacheBytes <= 0 || legacy.EnvironmentCacheBytes <= 0 || legacy.FileStoreBytes <= 0 {
+			t.Fatalf("rollback reader cannot accept automatic ceiling: %v", err)
+		}
+		if limit == 0 && (legacy.ModelCacheBytes != automaticCacheWireLimit || legacy.EnvironmentCacheBytes != automaticCacheWireLimit || legacy.FileStoreBytes != automaticCacheWireLimit) {
+			t.Fatal("automatic ceiling was serialized as a finite default")
+		}
+		// Installation conversion uses generic JSON objects. The automatic marker
+		// must survive their float64 numeric representation without overflow.
+		var generic map[string]any
+		if err := json.Unmarshal(data, &generic); err != nil {
+			t.Fatal(err)
+		}
+		data, err = json.Marshal(generic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		saved, err := ReadServiceConfig(path)
+		if err != nil || saved.ModelCacheBytes != limit || saved.EnvironmentCacheBytes != limit || saved.FileStoreBytes != limit {
+			t.Fatalf("cache intent changed after reload: %d, %v", saved.ModelCacheBytes, err)
+		}
 	}
 }
 

@@ -80,6 +80,12 @@ func TestFileCapacityAbandonedUploadSweep(t *testing.T) {
 			}
 		}
 	}
+	q.files.hostMu.Lock()
+	_, pending := q.files.hostPending[abandoned.SHA256]
+	q.files.hostMu.Unlock()
+	if pending {
+		t.Error("reclaimed upload retained its host reservation")
+	}
 	if _, marked := q.s.JobInputUploads[abandoned.SHA256]; marked {
 		t.Error("reclaimed marker retained")
 	}
@@ -98,13 +104,17 @@ func TestFileCapacityTypedRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assert := func(err error) {
+	assert := func(err error, exactCap bool) {
 		t.Helper()
 		var he *HTTPError
 		if !errors.As(err, &he) || he.Status != 507 || he.Code != "file_store_capacity" {
 			t.Fatalf("untyped refusal: %v", err)
 		}
-		for _, part := range []string{"queue-file-store", "need=5 bytes", "free=4 bytes", "shortfall=1 bytes", "--file-store-bytes"} {
+		parts := []string{"queue-file-store", "need=5 bytes", "free=", "shortfall=", "--file-store-bytes"}
+		if exactCap {
+			parts = append(parts, "free=4 bytes", "shortfall=1 bytes")
+		}
+		for _, part := range parts {
 			if !strings.Contains(he.Message, part) {
 				t.Errorf("missing %q: %s", part, he.Message)
 			}
@@ -113,17 +123,17 @@ func TestFileCapacityTypedRefusal(t *testing.T) {
 			t.Error("private store path exposed")
 		}
 	}
-	assert(c.PreflightFileStore(context.Background(), FileManifest{"input": ref}))
-	assert(c.UploadJobInput(context.Background(), path, ref))
+	assert(c.PreflightFileStore(context.Background(), FileManifest{"input": ref}), true)
+	assert(c.UploadJobInput(context.Background(), path, ref), true)
 	if _, err := os.Stat(filepath.Join(q.files.root, "uploads", ref.SHA256)); !os.IsNotExist(err) {
 		t.Error("refused upload wrote payload", err)
 	}
-	// Reuse #158's per-volume floor even when the configured store has room.
+	// Physical headroom still refuses even when the authored store cap has room.
 	q.files.limit = 1 << 20
 	q.files.diskProbe = func(string) (DiskReading, error) {
-		return DiskReading{TotalBytes: 1 << 30, FreeBytes: (256 << 20) + 4}, nil
+		return DiskReading{TotalBytes: 1 << 30, FreeBytes: 1}, nil
 	}
-	assert(c.PreflightFileStore(context.Background(), FileManifest{"input": ref}))
+	assert(c.PreflightFileStore(context.Background(), FileManifest{"input": ref}), false)
 }
 
 func TestFileCapacityProtectedReferencesSurvive(t *testing.T) {
@@ -187,7 +197,7 @@ func TestFileCapacityStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	fs := snap.FileStore
-	if fs == nil || fs.Store != "queue-file-store" || fs.UsedBytes != 13 || fs.FreeBytes != 40 || fs.ReclaimableBytes != 9 || fs.DiskFreeBytes != 1<<30 || fs.FloorBytes != 256<<20 {
+	if fs == nil || fs.Store != "queue-file-store" || fs.UsedBytes != 13 || fs.FreeBytes != 40 || fs.ReclaimableBytes != 9 || fs.DiskFreeBytes != 1<<30 || fs.FloorBytes < 4*uint64(cacheAllocationUnit(DiskReading{})) || fs.FloorBytes >= fs.DiskFreeBytes {
 		t.Fatalf("incorrect byte status: %+v", fs)
 	}
 	// Read-only status must leave even collectible data alone.

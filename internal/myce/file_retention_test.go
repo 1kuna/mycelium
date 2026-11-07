@@ -507,11 +507,12 @@ func TestFileRetentionMarkedUploadRestart(t *testing.T) {
 	}
 }
 
-func TestFileCacheEvictsExpiredVictims(t *testing.T) {
+func TestFileCacheRetainsExpiredLastCopy(t *testing.T) {
 	for _, partial := range []bool{false, true} {
 		t.Run(fmt.Sprint("partial=", partial), func(t *testing.T) {
 			q, clock := fixture(t)
-			// Keep expiry metadata while testing eviction of expired cache bytes.
+			// #805 strengthens #720: expired originals do not authorize deleting
+			// the last local bytes, including an unverified partial.
 			if err := q.ConfigureLogRetention(2 * DefaultFileRetention); err != nil {
 				t.Fatal(err)
 			}
@@ -542,11 +543,11 @@ func TestFileCacheEvictsExpiredVictims(t *testing.T) {
 				t.Fatal("victim did not expire", err)
 			}
 			_, b := retentionUpload(t, c, "bbbbbbbbbbbbbbbb")
-			if err := cache.copyTo(context.Background(), b, filepath.Join(t.TempDir(), "b")); err != nil {
-				t.Fatal("expired victim wedged cache", err)
+			if err := cache.copyTo(context.Background(), b, filepath.Join(t.TempDir(), "b")); err == nil {
+				t.Fatal("admitted new bytes by discarding the unavailable original's last copy")
 			}
-			if _, err := os.Stat(victim); !os.IsNotExist(err) {
-				t.Fatal("expired victim retained", err)
+			if _, err := os.Stat(victim); err != nil {
+				t.Fatal("last copy lost", err)
 			}
 		})
 	}

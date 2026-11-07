@@ -95,6 +95,9 @@ func (s creationDataStore) NewUpload(ctx context.Context, info tus.FileInfo) (tu
 		return nil, err
 	}
 	defer s.mu.Unlock()
+	if err := s.store.reserveUploadMetadata(info); err != nil {
+		return nil, err
+	}
 	upload, err := s.DataStore.NewUpload(ctx, info)
 	if err == nil {
 		s.store.noteAllocation(info.ID, uint64(info.Size))

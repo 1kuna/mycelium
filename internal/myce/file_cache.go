@@ -13,11 +13,12 @@ import (
 // FileCache contains only reproducible store copies. Attempt folders hold private
 // copies, so commands cannot mutate shared blobs and cache eviction cannot race use.
 type FileCache struct {
-	Root   string
-	Limit  int64
-	Clock  Clock
-	Client Client
-	mu     sync.Mutex
+	budgets *cacheBudgets
+	Root    string
+	Limit   int64
+	Clock   Clock
+	Client  Client
+	mu      sync.Mutex
 }
 
 func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stageErr error) {
@@ -28,7 +29,13 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err := ref.validate(); err != nil {
 		return err
 	}
-	if c.Limit <= 0 || ref.SizeBytes > c.Limit {
+	if c.Clock == nil {
+		c.Clock = RealClock{}
+	}
+	if c.budgets == nil {
+		c.budgets = newCacheBudgets()
+	}
+	if c.Limit < 0 || c.Limit > 0 && ref.SizeBytes > c.Limit {
 		return errors.New("file exceeds local cache limit")
 	}
 	if err := PrepareStateRoots(c.Root); err != nil {
@@ -45,12 +52,13 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	}
 	p := filepath.Join(root, ref.SHA256)
 	if verifyFile(ctx, p, ref) == nil {
+		c.budgets.touch(c.Root, ref.SHA256, ref.SizeBytes, c.Clock.Now())
 		now := c.Clock.Now()
 		if err = os.Chtimes(p, now, now); err != nil {
 			return err
 		}
 		operation = "copy"
-		return copyJobFileContext(ctx, p, dest)
+		return c.materialize(ctx, p, dest, ref.SizeBytes)
 	}
 	// Never replace corrupt cache bytes as if they were complete. They are disposable
 	// only after the durable authoritative copy has been checked.
@@ -103,28 +111,43 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 		return err
 	}
 	need := ref.SizeBytes - prefix
+	releaseDemand, err := c.budgets.borrow(ctx, c.Root, need)
+	if err != nil {
+		return err
+	}
+	defer releaseDemand()
+	limit, err := c.budgets.limit(c.Root, used, c.Limit, c.Clock.Now())
+	if err != nil {
+		return err
+	}
 	sort.Slice(victims, func(i, j int) bool {
+		hi, hj := c.budgets.recent(c.Root, victims[i].name, c.Clock.Now()), c.budgets.recent(c.Root, victims[j].name, c.Clock.Now())
+		if hi != hj {
+			return !hi
+		}
 		if victims[i].used == victims[j].used {
 			return victims[i].name < victims[j].name
 		}
 		return victims[i].used < victims[j].used
 	})
 	for _, v := range victims {
-		if used+need <= c.Limit && free >= need {
+		if used+need <= limit && free >= need {
 			break
 		}
 		hash := strings.TrimSuffix(v.name, ".partial")
 		if (FileRef{SHA256: hash}).validate() != nil {
 			return errors.New("unknown file in cache; refusing eviction")
 		}
-		// These are disposable cache copies, never checkpoint/result custody.
-		// Each attempt owns a private materialization. Queue expiry or a
-		// transient HEAD failure for an unrelated victim must not block new
-		// inputs. The requested blob was verified above before any eviction.
+		// A hash-shaped pathname alone is not deletion authority. Preserve
+		// malformed, partial and last-copy bytes when their original is unavailable.
+		if !c.rebuildable(ctx, filepath.Join(root, v.name), v.size) {
+			continue
+		}
 		operation = "cache_evict"
 		if err = os.Remove(filepath.Join(root, v.name)); err != nil {
 			return err
 		}
+		c.budgets.forget(c.Root, v.name)
 		used -= v.size
 		free, err = diskFree(root)
 		if err != nil {
@@ -132,9 +155,21 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 		}
 	}
 	operation = "cache_admission"
-	if used+need > c.Limit || free < need {
+	if used+need > limit || free < need {
 		return errors.New("insufficient local file cache space")
 	}
+	reservation, err := c.budgets.reserve(c.Root, need, c.Clock, partial, p)
+	if err != nil {
+		return err
+	}
+	defer reservation.release()
+	releaseDemand()
+	copyCtx, releaseCopy, err := c.budgets.copy(ctx, c.Root, c.Clock, 0)
+	if err != nil {
+		return err
+	}
+	defer releaseCopy()
+	ctx = copyCtx
 	operation = "cache_download"
 	if err = c.Client.DownloadFile(ctx, ref, partial); err != nil {
 		return err
@@ -146,12 +181,42 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err = syncWorkerDir(root); err != nil {
 		return err
 	}
+	c.budgets.touch(c.Root, ref.SHA256, ref.SizeBytes, c.Clock.Now())
 	now := c.Clock.Now()
 	if err = os.Chtimes(p, now, now); err != nil {
 		return err
 	}
 	operation = "copy"
-	return copyJobFileContext(ctx, p, dest)
+	releaseCopy()
+	reservation.release()
+	return c.materialize(ctx, p, dest, ref.SizeBytes)
+}
+
+// A private attempt copy can live on a different volume from its cache. Charge
+// its destination separately; the cache's completed download no longer owns a
+// copy slot, so a single-stream volume cannot deadlock on nested acquisition.
+func (c *FileCache) materialize(ctx context.Context, source, dest string, size int64) error {
+	root := filepath.Dir(dest)
+	releaseDemand, err := c.budgets.borrow(ctx, root, size)
+	if err != nil {
+		return err
+	}
+	defer releaseDemand()
+	if _, err := c.budgets.limit(root, 0, 0, c.Clock.Now()); err != nil {
+		return err
+	}
+	held, err := c.budgets.reserve(root, size, c.Clock, dest)
+	if err != nil {
+		return err
+	}
+	defer held.release()
+	releaseDemand()
+	copyCtx, release, err := c.budgets.copy(ctx, root, c.Clock, 0)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return copyJobFileContext(copyCtx, source, dest)
 }
 
 func validateJobFiles(s Spec) error {
@@ -184,4 +249,12 @@ func validateJobFiles(s Spec) error {
 		all[n] = FileRef{SHA256: strings.Repeat("0", 64)}
 	}
 	return all.validate()
+}
+
+func (c *FileCache) rebuildable(ctx context.Context, path string, size int64) bool {
+	ref := FileRef{SHA256: filepath.Base(path), SizeBytes: size}
+	if ref.validate() != nil {
+		return false
+	}
+	return verifyFile(ctx, path, ref) == nil && c.Client.HasFile(ctx, ref) == nil
 }

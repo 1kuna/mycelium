@@ -516,9 +516,20 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 	if err := owner.cleanupOrphan(clock, fakeMemoryFS{}); err != nil {
 		t.Fatal(err)
 	}
+	// Touching the active payload invalidated its verification evidence. Pin
+	// release alone cannot make changed bytes reproducible deletion candidates.
+	_ = cache.admit(context.Background(), "other", 10)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("changed snapshot removed without verification", err)
+	}
+	if _, release, err := cache.Acquire(context.Background(), input, repo); err != nil {
+		t.Fatal("released snapshot could not be reverified", err)
+	} else {
+		release()
+	}
 	_ = cache.admit(context.Background(), "other", 10)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("cleaned snapshot not evicted", err)
+		t.Fatal("cleaned verified snapshot not evicted", err)
 	}
 }
 

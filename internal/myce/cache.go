@@ -19,8 +19,10 @@ import (
 
 // ModelCache reserves complete copy sizes under one admission lock.
 type ModelCache struct {
+	budgets       *cacheBudgets
 	ApprovalRoot  string
 	storedModels  sync.Map
+	knownModels   sync.Map
 	FileClient    *Client
 	mu            sync.Mutex
 	Root, NASRoot string
@@ -61,8 +63,11 @@ func (c *ModelCache) init() error {
 	if c.Free == nil {
 		c.Free = diskFree
 	}
-	if c.Limit <= 0 {
-		return errors.New("model cache size limit must be positive")
+	if c.budgets == nil {
+		c.budgets = newCacheBudgets()
+	}
+	if c.Limit < 0 {
+		return errors.New("model cache size limit must be nonnegative")
 	}
 	if err := PrepareStateRoots(c.Root); err != nil {
 		return err
@@ -190,6 +195,9 @@ func (r contextReader) Read(p []byte) (int, error) {
 	}
 	n, err := r.reader.Read(p)
 	if n > 0 {
+		if progress, ok := r.ctx.Value(cacheCopyProgressKey{}).(func(int64)); ok {
+			progress(int64(n))
+		}
 		if progress, ok := r.ctx.Value(ioProgressKey{}).(func()); ok {
 			progress()
 		}
@@ -200,6 +208,7 @@ func (r contextReader) Read(p []byte) (int, error) {
 	return n, err
 }
 func verifyModelContext(ctx context.Context, path string, m Model) error {
+	ctx = withoutCopyProgress(ctx)
 	if len(m.Files) > 0 {
 		return verifyModelFiles(ctx, path, m)
 	}
@@ -240,6 +249,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		}
 	}
 	key := cacheKey(m)
+	c.knownModels.Store(key, m)
 	if m.FileStore {
 		c.storedModels.Store(key, m)
 	}
@@ -250,9 +260,9 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		if c.active == nil {
 			c.active = map[string]chan struct{}{}
 		}
-		parallel := max(1, c.Parallel)
+		parallel := c.Parallel
 		wait := c.active[key]
-		if wait == nil && len(c.active) >= parallel {
+		if wait == nil && parallel > 0 && len(c.active) >= parallel {
 			for _, ch := range c.active {
 				wait = ch
 				break
@@ -274,10 +284,24 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	}
 	done := make(chan struct{})
 	c.active[key] = done
+
+	defer func() { c.mu.Lock(); delete(c.active, key); c.reservations.Delete(key); close(done); c.mu.Unlock() }()
+	c.mu.Unlock()
+	copyCtx, releaseCopy, err := c.budgets.copy(ctx, c.Root, c.Clock, c.Parallel)
+	if err != nil {
+		return "", err
+	}
+	defer releaseCopy()
+	ctx = copyCtx
 	if !m.DirectNAS {
 		c.reservations.Store(key, m.SizeBytes)
 	}
-	defer func() { c.mu.Lock(); delete(c.active, key); c.reservations.Delete(key); close(done); c.mu.Unlock() }()
+	releaseDemand, err := c.budgets.borrow(ctx, c.Root, m.SizeBytes)
+	if err != nil {
+		return "", err
+	}
+	defer releaseDemand()
+	c.mu.Lock()
 	source, e := c.source(m)
 	if e != nil {
 		c.mu.Unlock()
@@ -287,7 +311,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		c.mu.Unlock()
 		return source, verifyModelContext(ctx, source, m)
 	}
-	if m.SizeBytes <= 0 || m.SizeBytes > c.Limit {
+	if m.SizeBytes <= 0 || c.Limit > 0 && m.SizeBytes > c.Limit {
 		c.mu.Unlock()
 		return "", fmt.Errorf("model %s exceeds cache size limit or has no verified size", m.Name)
 	}
@@ -356,7 +380,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			return "", err
 		}
 		used += entrySize
-		if k == key || c.active[k] != nil || c.Protected != nil && c.Protected(k) {
+		if strings.HasSuffix(ent.Name(), ".partial") || k == key || c.active[k] != nil || c.Protected != nil && c.Protected(k) {
 			continue
 		}
 		if background && c.Usage != nil && c.Usage(k) > score {
@@ -377,11 +401,20 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		c.mu.Unlock()
 		return "", e
 	}
+	limit, e := c.budgets.limit(c.Root, used, c.Limit, c.Clock.Now())
+	if e != nil {
+		c.mu.Unlock()
+		return "", e
+	}
 	need := m.SizeBytes - offset
 	if cached {
 		need = 0
 	}
 	sort.Slice(victims, func(i, j int) bool {
+		hi, hj := c.budgets.recent(c.Root, victims[i].key, c.Clock.Now()), c.budgets.recent(c.Root, victims[j].key, c.Clock.Now())
+		if hi != hj {
+			return !hi
+		}
 		if victims[i].used == victims[j].used {
 			return victims[i].path < victims[j].path
 		}
@@ -391,12 +424,12 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	for _, v := range victims {
 		reclaim += v.size
 	}
-	if used+reserved+need-reclaim > c.Limit {
+	if used+reserved+need-reclaim > limit {
 		c.mu.Unlock()
 		return "", errors.New("insufficient local model cache space (protected or more-used copies)")
 	}
 	for _, v := range victims {
-		if used+reserved+need <= c.Limit && free-reserved >= need {
+		if used+reserved+need <= limit && free-reserved >= need {
 			break
 		}
 		if e = ctx.Err(); e != nil {
@@ -410,12 +443,16 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		if background && c.Usage != nil && c.Usage(v.key) > score {
 			continue
 		}
+		if !c.rebuildable(ctx, v.key) {
+			continue
+		}
 		if e = c.discardContext(ctx, v.path); e != nil {
 			c.mu.Unlock()
 			return "", e
 		}
 		c.verified.Delete(v.key)
 		c.progress.Delete(v.key)
+		c.budgets.forget(c.Root, v.key)
 		used -= v.size
 		free, e = c.Free(c.Root)
 		if e != nil {
@@ -423,11 +460,12 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			return "", e
 		}
 	}
-	if used+reserved+need > c.Limit || free-reserved < need {
+	if used+reserved+need > limit || free-reserved < need {
 		c.mu.Unlock()
 		return "", errors.New("insufficient local model cache space")
 	}
 	if cached {
+		c.budgets.touch(c.Root, key, m.SizeBytes, c.Clock.Now())
 		c.mu.Unlock()
 		c.verified.Store(key, true)
 		now := c.Clock.Now()
@@ -441,6 +479,30 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		c.progress.Store(key, r)
 		return "", err
 	}
+	reservation, err := c.budgets.reserve(c.Root, need, c.Clock, dest, temp)
+	if err != nil {
+		return "", err
+	}
+	defer reservation.release()
+	if len(m.Files) > 0 {
+		files := FileManifest{}
+		for _, f := range m.Files {
+			files[f.Path] = FileRef{SHA256: f.SHA256, SizeBytes: f.SizeBytes}
+		}
+		disk, probeErr := c.budgets.probe(c.Root)
+		if probeErr != nil {
+			return "", probeErr
+		}
+		existing, allocationErr := cacheFootprint([]string{temp})
+		if allocationErr != nil {
+			return "", allocationErr
+		}
+		charge := max(0, cacheManifestCharge(disk, files)-existing)
+		if err := reservation.ensureCharge(c.Root, charge); err != nil {
+			return "", err
+		}
+	}
+	releaseDemand()
 	started := c.Clock.Now()
 	copied := int64(0)
 	defer func() {
@@ -468,6 +530,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			return "", e
 		}
 		c.verified.Store(key, true)
+		c.budgets.touch(c.Root, key, m.SizeBytes, c.Clock.Now())
 		r.State = "ready"
 		r.Error = ""
 		r.Bytes = m.SizeBytes
@@ -502,6 +565,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			return "", e
 		}
 		c.verified.Store(key, true)
+		c.budgets.touch(c.Root, key, m.SizeBytes, c.Clock.Now())
 		r.State = "ready"
 		r.Error = ""
 		c.progress.Store(key, r)
@@ -525,7 +589,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	}
 	h := sha256.New()
 	// Rehash durable prefix after restart; only a full final hash permits publication.
-	_, e = io.CopyN(h, contextReader{ctx, out}, offset)
+	_, e = io.CopyN(h, contextReader{withoutCopyProgress(ctx), out}, offset)
 	if e == nil {
 		_, e = in.Seek(offset, io.SeekStart)
 	}
@@ -549,6 +613,9 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			written, writeErr := io.MultiWriter(out, h).Write(buf[:count])
 			n += int64(written)
 			copied += int64(written)
+			if progress, ok := ctx.Value(cacheCopyProgressKey{}).(func(int64)); ok {
+				progress(int64(written))
+			}
 			r.Bytes = n
 			c.progress.Store(key, r)
 			if writeErr != nil {
@@ -592,6 +659,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		return "", e
 	}
 	c.verified.Store(key, true)
+	c.budgets.touch(c.Root, key, m.SizeBytes, c.Clock.Now())
 	r.State = "ready"
 	r.Error = ""
 	c.progress.Store(key, r)
@@ -606,6 +674,7 @@ func (c *ModelCache) ValidateInventory(models []Model) {
 		if m.LocalSource != "" {
 			continue
 		}
+		c.knownModels.Store(cacheKey(m), m)
 		if m.FileStore {
 			c.storedModels.Store(cacheKey(m), m)
 		}
@@ -670,7 +739,11 @@ func (c *ModelCache) report(models []Model, approved map[string]string) ([]strin
 		return true
 	})
 	sort.Strings(names)
-	return names, max(0, min(free-pending, c.Limit-used-pending)), e
+	limit, err := c.budgets.limit(c.Root, used, c.Limit, c.Clock.Now())
+	if err != nil {
+		return names, 0, err
+	}
+	return names, max(0, min(free-pending, limit-used-pending)), e
 }
 func (c *ModelCache) CopyReports() ([]CopyReport, float64) {
 	out := []CopyReport{}
@@ -694,3 +767,27 @@ func (c *ModelCache) noteCopyError(m Model, err error) {
 
 // Initialize prepares a standalone cache, as used by local measurement.
 func (c *ModelCache) Initialize() error { return c.init() }
+
+func (c *ModelCache) rebuildable(ctx context.Context, key string) bool {
+	value, ok := c.knownModels.Load(key)
+	if !ok {
+		return false
+	}
+	m := value.(Model)
+	if m.FileStore {
+		if c.FileClient == nil {
+			return false
+		}
+		if len(m.Files) == 0 {
+			return c.FileClient.HasFile(ctx, FileRef{SHA256: m.SHA256, SizeBytes: m.SizeBytes}) == nil
+		}
+		for _, f := range m.Files {
+			if c.FileClient.HasFile(ctx, FileRef{SHA256: f.SHA256, SizeBytes: f.SizeBytes}) != nil {
+				return false
+			}
+		}
+		return true
+	}
+	source, err := c.source(m)
+	return err == nil && verifyModelContext(ctx, source, m) == nil
+}

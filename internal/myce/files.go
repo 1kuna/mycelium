@@ -63,6 +63,7 @@ func IdentifyFile(path string) (FileRef, error) {
 }
 
 func identifyFileContext(ctx context.Context, path string) (FileRef, error) {
+	ctx = withoutCopyProgress(ctx)
 	if err := ctx.Err(); err != nil {
 		return FileRef{}, err
 	}
@@ -122,12 +123,16 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
+	hostControl                 *cacheReservation
+	hostMu                      sync.Mutex
+	hostPending                 map[string]*cacheReservation
 	inputClaim                  func(context.Context, FileRef, bool) (context.Context, error)
 	unidentifiedReserveAdmitted atomic.Uint64
 	checkAttempt                func(context.Context) error
 	productionReserve           uint64
 	admit                       func(context.Context, FileStoreStatus, map[string]storedPayload, FileManifest, uint64, uint64) (uint64, error)
 	reservedOutputs             func(map[string]storedPayload, ...context.Context) uint64
+	budgets                     *cacheBudgets
 	diskProbe                   func(string) (DiskReading, error)
 	controlFiles                controlStorageFiles
 	root                        string
@@ -174,11 +179,11 @@ func (j Job) storedFileResults() bool {
 }
 
 func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
-	if q.fileStoreProductionReserve < 0 || q.fileStoreProductionReserve > limit {
+	if q.fileStoreProductionReserve < 0 || limit > 0 && q.fileStoreProductionReserve > limit {
 		return errors.New("file store production reserve must be between zero and the store limit")
 	}
-	if limit <= 0 {
-		return errors.New("file store limit must be positive")
+	if limit < 0 {
+		return errors.New("file store limit must be nonnegative")
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -199,11 +204,36 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s := &FileStore{budgets: newCacheBudgets(), inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s.budgets.probe = func(path string) (DiskReading, error) {
+		probe := s.diskProbe
+		if probe == nil {
+			probe = workerDiskProbe
+		}
+		return probe(path)
+	}
 	if q.lock != nil {
 		database := strings.TrimSuffix(q.lock.Name(), ".lock")
 		s.controlFiles = controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
 	}
+	if s.controlFiles.database != "" {
+		s.hostControl, err = s.budgets.trackControl(s.controlFiles.database, s.clock, s.controlFiles.database, s.controlFiles.wal, s.controlFiles.shared)
+		if err != nil {
+			return err
+		}
+	}
+	configured := false
+	var previous *FileStore
+	defer func() {
+		if !configured {
+			s.closeHostClaims()
+			s.hostControl.release()
+		}
+		if configured && previous != nil {
+			previous.closeHostClaims()
+			previous.hostControl.release()
+		}
+	}()
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -236,6 +266,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			if err := s.publish(ctx, ref); err != nil {
 				return tus.HTTPResponse{}, err
 			}
+			defer s.releaseUpload(ref.SHA256)
 			// An internal writer may have created the same blob after this
 			// upload's POST. Publication must still honor the import's custody.
 			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], false, ctx); err != nil {
@@ -248,6 +279,9 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 		return err
 	}
 	s.handler = http.StripPrefix("/api/files/uploads/", h)
+	if err := s.restoreUploadClaims(); err != nil {
+		return err
+	}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()
@@ -262,7 +296,10 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			}
 		}
 	}
+
+	previous = q.files
 	q.files = s
+	configured = true
 	q.fileCheckpoints = checkpoints
 	return nil
 }
@@ -309,6 +346,9 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 		return err
 	}
 	if err = s.syncDir(filepath.Join(s.root, "blobs")); err != nil {
+		return err
+	}
+	if err = s.trackUploadPublication(ref.SHA256, source, s.blob(ref)); err != nil {
 		return err
 	}
 	// Keep only the authoritative link after publication. A later tus creation
@@ -469,6 +509,16 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		return
 	}
+	if err := s.reserveUpload(hash, length); err != nil {
+		respond(w, nil, &HTTPError{Status: 507, Code: "file_store_capacity", Message: "shared filesystem headroom unavailable"})
+		return
+	}
+	created := false
+	defer func() {
+		if !created {
+			s.releaseUpload(hash)
+		}
+	}()
 	// Disk work happens before queue acquisition. The queue admission checks
 	// current in-memory allocations and commits this reservation atomically.
 	view := s.snapshotCapacity(r.Context())
@@ -495,6 +545,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	response := &uploadResponse{ResponseWriter: w}
 	s.handler.ServeHTTP(response, r)
 	if response.status == http.StatusCreated {
+		created = true
 		s.unidentifiedReserveAdmitted.Add(unidentified)
 	}
 	if err := s.refreshUpload(hash); err != nil {

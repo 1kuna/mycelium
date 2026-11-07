@@ -173,6 +173,28 @@ type ServiceConfig struct {
 	Config                 string    `json:"config"`
 }
 
+// The largest interoperable JSON integer survives generic float64 decoders.
+// It is a rollback representation sentinel, never a runtime cache budget.
+const automaticCacheWireLimit int64 = 1<<53 - 1
+
+// s071's strict saved-config reader requires positive cache ceilings. Encode
+// automatic modes as a positive compatibility sentinel for rollback; the
+// current reader restores zero before any cache admission uses this value.
+// This is wire compatibility, never an automatically chosen storage budget.
+func (c ServiceConfig) MarshalJSON() ([]byte, error) {
+	type wire ServiceConfig
+	if c.ModelCacheBytes == 0 {
+		c.ModelCacheBytes = automaticCacheWireLimit
+	}
+	if c.EnvironmentCacheBytes == 0 {
+		c.EnvironmentCacheBytes = automaticCacheWireLimit
+	}
+	if c.FileStoreBytes == 0 {
+		c.FileStoreBytes = automaticCacheWireLimit
+	}
+	return json.Marshal(wire(c))
+}
+
 // PlanInstall is pure. The command boundary supplies the OS account; omitted
 // accounts support synthetic plans without consulting the host account database.
 func PlanInstall(role, home, root, nas, queue, name string, d Detection, account ...WorkerAccount) (ServiceConfig, error) {
@@ -213,8 +235,8 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.ModelCache = filepath.Join(c.State, "model-cache")
 	c.EnvironmentCache = filepath.Join(c.State, "environment-cache")
 	c.FileCacheBytes = 0
-	c.ModelCacheBytes = 100 * 1024 * 1024 * 1024
-	c.EnvironmentCacheBytes = 20 * 1024 * 1024 * 1024
+	c.ModelCacheBytes = 0
+	c.EnvironmentCacheBytes = 0
 	c.Checkpoints = filepath.Join(nas, "mycelium", "checkpoints")
 	c.ModelRoot = filepath.Join(nas, "mycelium", "models")
 	c.DB = filepath.Join(c.State, "myce.db")
@@ -228,7 +250,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.Heartbeat = time.Second
 	c.LogRetention = DefaultLogRetention
 	c.FileRetention = DefaultFileRetention
-	c.FileStoreBytes = 100 << 30
+	c.FileStoreBytes = 0
 	c.RestartGrace = RestartGrace
 	c.ProductionInfrastructureRetries = DefaultProductionInfrastructureRetries
 	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
@@ -573,7 +595,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 }
 
 func ReadServiceConfig(path string) (ServiceConfig, error) {
-	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention, FileStoreBytes: 100 << 30, FileCacheBytes: 0}
+	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention, FileStoreBytes: 0, FileCacheBytes: 0}
 	b, e := os.ReadFile(path)
 	if e != nil {
 		return c, e
@@ -592,6 +614,15 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 		RequiredWorkers json.RawMessage `json:"required_workers"`
 	}{ServiceConfig: &c}
 	e = decoder.Decode(&legacy)
+	if e == nil && c.ModelCacheBytes == automaticCacheWireLimit {
+		c.ModelCacheBytes = 0
+	}
+	if e == nil && c.EnvironmentCacheBytes == automaticCacheWireLimit {
+		c.EnvironmentCacheBytes = 0
+	}
+	if e == nil && c.FileStoreBytes == automaticCacheWireLimit {
+		c.FileStoreBytes = 0
+	}
 	// Like environment sizing, retire only the exact old default. Earlier
 	// configurations did not distinguish an explicit 10 GiB from the default.
 	// New explicit values record intent, including an explicit 10 GiB.

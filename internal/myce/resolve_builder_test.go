@@ -156,7 +156,10 @@ func TestResolveOldInterpreterBuilderJourney(t *testing.T) {
 					for run := range 2 {
 						got, err := client.Wait(wait, submitted.ID)
 						if err != nil || got.State != "succeeded" || !got.ReleaseConfirmed {
-							t.Fatalf("builder job: %+v %v", got, err)
+							current := job(t, q, submitted.ID)
+							cacheRoot := filepath.Join(w.StateDir, "file-cache", "shared-inputs")
+							liveLimit, limitErr := q.files.budgets.limit(cacheRoot, 0, 0, RealClock{}.Now())
+							t.Fatalf("builder job: %+v %v; current state=%s reason=%s; fresh shared capacity=%d error=%v", got, err, current.State, current.Reason, liveLimit, limitErr)
 						}
 						logs, err := q.Logs(got.ID, 0)
 						if err != nil {

@@ -479,6 +479,7 @@ func environmentSeconds(j *Job, m *Machine) float64 {
 // EnvironmentCache uses OS file locks, atomic publication and shared use leases.
 // Partial builds and evictions are retired, then purged once use/build locks allow it.
 type EnvironmentCache struct {
+	budgets     *cacheBudgets
 	Tools       *EnvironmentToolSource
 	once        sync.Once
 	initErr     error
@@ -494,11 +495,16 @@ type EnvironmentCache struct {
 	DownloadLimit int64
 }
 
-const environmentRecentWindow = 24 * time.Hour
-
 func (c *EnvironmentCache) recent(path string) bool {
-	st, err := os.Stat(filepath.Join(path, "ready.json"))
-	return err == nil && c.Clock.Now().Sub(st.ModTime()) < environmentRecentWindow
+	key := filepath.Base(path)
+	if filepath.Base(filepath.Dir(path)) == ".Trash" {
+		_, key, _ = strings.Cut(key, "-")
+		key = strings.TrimSuffix(key, ".partial")
+	}
+	return c.budgets != nil && c.budgets.recent(c.Root, key, c.Clock.Now())
+}
+func (c *EnvironmentCache) budget(used int64) (int64, error) {
+	return c.budgets.limit(c.Root, used, c.Limit, c.Clock.Now())
 }
 
 func (c *EnvironmentCache) init() error {
@@ -506,20 +512,13 @@ func (c *EnvironmentCache) init() error {
 		return err
 	}
 	c.once.Do(func() {
-		if c.Limit == 0 && c.Root != "" {
-			size := c.sizeLimit
-			if size == nil {
-				size = AutoEnvironmentCacheLimit
-			}
-			c.Limit, c.initErr = size(c.Root)
-			if c.initErr != nil {
-				return
-			}
+		if c.Limit == 0 && c.sizeLimit != nil {
+			c.Limit, c.initErr = c.sizeLimit(c.Root)
 		}
-		if c.Limit <= 0 {
-			c.initErr = errors.New("environment-cache-bytes must be positive")
-			return
+		if c.Limit < 0 {
+			c.initErr = errors.New("environment-cache-bytes must be nonnegative")
 		}
+
 	})
 	return c.initErr
 }
@@ -528,6 +527,9 @@ func (c *EnvironmentCache) init() error {
 // but no capacity admission or free-space floor.
 func (c *EnvironmentCache) initStorage() error {
 	c.storageOnce.Do(func() {
+		if c.budgets == nil {
+			c.budgets = newCacheBudgets()
+		}
 		if c.Clock == nil {
 			c.Clock = RealClock{}
 		}
@@ -550,9 +552,6 @@ func (c *EnvironmentCache) initStorage() error {
 			return
 		}
 		c.Root = root
-		if c.DownloadLimit == 0 {
-			c.DownloadLimit = 16 << 30
-		}
 		for _, p := range []string{filepath.Join(c.Root, "locks"), filepath.Join(c.Root, ".Trash")} {
 			if e := os.MkdirAll(p, 0700); e != nil {
 				c.storageErr = e
@@ -808,9 +807,13 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 	if e != nil {
 		return e
 	}
-	total += size
+	limit, e := c.budget(total)
+	if e != nil {
+		return e
+	}
+	total = cacheSum(total, size)
 	for _, v := range candidates {
-		if total <= c.Limit {
+		if total <= limit {
 			break
 		}
 		removed, e := c.evict(v.Key, "cache_limit", nil)
@@ -829,8 +832,8 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 			total += size
 		}
 	}
-	if total > c.Limit {
-		return fmt.Errorf("environment cache needs %d bytes; limit %d (in-use entries protected)", total, c.Limit)
+	if total > limit {
+		return fmt.Errorf("environment cache needs %d bytes; limit %d (in-use entries protected)", total, limit)
 	}
 	return nil
 }
@@ -856,7 +859,11 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 	release := func() {
 		released.Do(func() {
 			at := c.Clock.Now()
-			_ = os.Chtimes(filepath.Join(c.Root, r.Key, "ready.json"), at, at)
+			if c.ready(r.Key) {
+				bytes, _ := environmentDiskUsage(filepath.Join(c.Root, r.Key))
+				c.budgets.touch(c.Root, r.Key, bytes, at)
+				_ = os.Chtimes(filepath.Join(c.Root, r.Key, "ready.json"), at, at)
+			}
 			unlockEnvironment(use)
 			c.purgeReleased()
 		})
@@ -882,6 +889,8 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 		return "", nil, e
 	}
 	path := filepath.Join(c.Root, r.Key)
+	bytes, _ := environmentDiskUsage(path)
+	c.budgets.touch(c.Root, r.Key, bytes, c.Clock.Now())
 	at := c.Clock.Now()
 	if e = os.Chtimes(filepath.Join(path, "ready.json"), at, at); e != nil {
 		release()
@@ -895,6 +904,17 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		return e
 	}
 	defer unlockEnvironment(build)
+	var buildReservation *cacheReservation
+	var releaseBuildCopy func()
+	storageSafe := false
+	defer func() {
+		if storageSafe {
+			buildReservation.release()
+			if releaseBuildCopy != nil {
+				releaseBuildCopy()
+			}
+		}
+	}()
 	if c.ready(r.Key) {
 		return nil
 	}
@@ -910,6 +930,9 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 	defer func() {
 		if !c.ready(r.Key) {
 			if err := c.cleanupBuild(partial); err != nil {
+				if buildReservation != nil {
+					c.retainBuildStorage(partial, buildReservation, releaseBuildCopy)
+				}
 				// Transfer unconfirmed helper custody while .build still fences
 				// this receipt. An attempt must not release merely because its
 				// cancelled builder returned an ordinary command error.
@@ -918,6 +941,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 				}
 				return
 			}
+			storageSafe = true
 			if errors.Is(e, errEnvironmentBuildStalled) {
 				// Only this just-created, never-published build is disposable.
 				// Its recorded process has been reaped and .build is still held;
@@ -926,6 +950,8 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 			} else {
 				_ = c.trash(partial)
 			}
+		} else {
+			storageSafe = true
 		}
 	}()
 	if e = os.MkdirAll(filepath.Join(partial, "bin"), 0700); e != nil {
@@ -953,6 +979,31 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 			return custom(ctx, argv, dir, env, stdout, stderr)
 		}
 	}
+
+	for name, ref := range r.Assets {
+		if !safeRelative(name) || c.Fetch == nil {
+			return errors.New("asset transport unavailable or invalid asset name")
+		}
+		if e = checkLaunchGate(ctx); e != nil {
+			return e
+		}
+		if e = c.Fetch(ctx, ref, filepath.Join(partial, "assets", name)); e != nil {
+			return e
+		}
+	}
+	// Assets have declared sizes and finish their individually charged transfers
+	// before the unknown native build claims the remaining volume exploration.
+	held, err := c.budgets.explore(c.Root, c.Clock, partial, filepath.Join(c.Root, ".downloads"), output.Name())
+	if err != nil {
+		return err
+	}
+	buildReservation = held
+	copyCtx, releaseCopy, err := c.budgets.copy(ctx, c.Root, c.Clock, 0)
+	if err != nil {
+		return err
+	}
+	releaseBuildCopy = releaseCopy
+	ctx = context.WithValue(copyCtx, cacheBuildClaimKey{}, held)
 	if e = c.pruneDownloads(ctx, partial, env, output, run); e != nil {
 		return e
 	}
@@ -973,6 +1024,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		logSize = st.Size()
 	}
 	cacheSize, _ = environmentSize(filepath.Join(c.Root, ".downloads"))
+	buildAllocation, _ := cacheFootprint([]string{partial, filepath.Join(c.Root, ".downloads")})
 	go func() {
 		defer close(monitorDone)
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -1018,8 +1070,33 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 				if e == nil {
 					var free int64
 					free, e = diskFree(c.Root)
-					if e == nil && free < 64*1024*1024 {
-						e = errors.New("environment build disk space below 64 MiB")
+					if e == nil {
+						disk, probeErr := c.budgets.probe(c.Root)
+						if probeErr != nil {
+							e = probeErr
+						} else {
+							host, hostErr := c.budgets.hostView(disk.Volume)
+							if hostErr != nil {
+								e = hostErr
+							} else {
+								floor := host.floor(disk)
+								host.close()
+								if free < floor {
+									e = errors.New("environment build reached measured filesystem control headroom")
+								}
+							}
+						}
+					}
+				}
+				if e == nil {
+					allocated, allocationErr := cacheFootprint([]string{partial, filepath.Join(c.Root, ".downloads")})
+					if allocationErr != nil {
+						e = allocationErr
+					} else {
+						if progress, ok := buildCtx.Value(cacheCopyProgressKey{}).(func(int64)); ok {
+							progress(max(0, allocated-buildAllocation))
+						}
+						buildAllocation = allocated
 					}
 				}
 				if e != nil {
@@ -1040,17 +1117,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		cancelBuild()
 	}
 	defer stopMonitor()
-	for name, ref := range r.Assets {
-		if !safeRelative(name) || c.Fetch == nil {
-			return errors.New("asset transport unavailable or invalid asset name")
-		}
-		if e = checkLaunchGate(buildCtx); e != nil {
-			return e
-		}
-		if e = c.Fetch(buildCtx, ref, filepath.Join(partial, "assets", name)); e != nil {
-			return e
-		}
-	}
+
 	{
 		for n, b := range r.Files {
 			if r.Binary != "" {
@@ -1182,6 +1249,23 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 		}
 		argv = append([]string(nil), argv...)
 		argv[0] = tool
+	}
+	if held, ok := ctx.Value(cacheBuildClaimKey{}).(*cacheReservation); ok {
+		parent := ctx
+		ctx = withLaunchGate(parent, func() error {
+			if err := checkLaunchGate(parent); err != nil {
+				return err
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "build-state.json"))
+			if err != nil {
+				return err
+			}
+			var state workerState
+			if err := json.Unmarshal(data, &state); err != nil {
+				return err
+			}
+			return held.recordHelper(state.PID)
+		})
 	}
 	return runRecordedCommand(ctx, argv, dir, env, stdout, commandScope{StateDir: dir, Clock: c.Clock, Stderr: stderr}, "build-state.json")
 }

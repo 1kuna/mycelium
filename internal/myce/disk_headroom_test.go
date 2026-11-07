@@ -38,7 +38,7 @@ func TestDiskHeadroomHoldsAndRecovers(t *testing.T) {
 	if held.State != "queued" || held.DiagnosticCode != "disk_headroom" {
 		t.Fatalf("not a temporary typed hold: %+v", held)
 	}
-	for _, part := range []string{"disk-host", "free=2147483648", "floor=1073741824", "need=2147483648"} {
+	for _, part := range []string{"disk-host", "free=2147483648", "floor=512", "need=2147483648"} {
 		if !strings.Contains(held.Reason, part) {
 			t.Fatalf("missing %q: %s", part, held.Reason)
 		}
@@ -50,7 +50,7 @@ func TestDiskHeadroomHoldsAndRecovers(t *testing.T) {
 	}
 	// Need was admitted at dispatch; the start fence refuses only a current
 	// reading below the free floor (s029).
-	setFree(512 << 20)
+	setFree(diskFreeFloor(100<<30) - 1)
 	check(t, q, m, admitted)
 	if err := q.Started(result(admitted, true)); err != ErrStale {
 		t.Fatalf("launch ignored disk drift: %v", err)

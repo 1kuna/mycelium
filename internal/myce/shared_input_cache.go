@@ -18,24 +18,27 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Reuse the environment cache's OS locking and state-root initialization. Data
 // entries have their own integrity records and no environment/catalog lifecycle.
 type SharedInputCache struct {
-	cache         EnvironmentCache
-	Client        Client
-	mu            sync.Mutex
-	verified      map[string]string
-	staging       map[*sharedInputStaging]struct{}
-	beforeStage   func(context.Context)
-	resolveNAS    func(root, relative string) (string, error)
-	beforePublish func()
-	beforeVerify  func() // Test hook: a full re-hash of a cached entry starts.
-	hits          uint64
-	misses        uint64
-	nasBytes      uint64
-	capacity      *SharedInputCapacity
+	cache              EnvironmentCache
+	Client             Client
+	mu                 sync.Mutex
+	verified           map[string]string
+	staging            map[*sharedInputStaging]struct{}
+	beforeStage        func(context.Context)
+	resolveNAS         func(root, relative string) (string, error)
+	beforePublish      func()
+	beforeVerify       func() // Test hook: a full re-hash of a cached entry starts.
+	hits               uint64
+	misses             uint64
+	nasBytes           uint64
+	capacity           *SharedInputCapacity
+	capacityRefreshing bool
+	capacityNextAt     time.Time
 }
 
 // sharedVerifiedRecord holds the metadata signature (size, mode, mtime, inode
@@ -60,7 +63,10 @@ func recordSharedVerification(root, signature string) error {
 }
 
 type sharedEntry struct {
-	Files FileManifest `json:"files"`
+	Files   FileManifest      `json:"files"`
+	Source  *SharedInput      `json:"source,omitempty"`
+	NASRoot string            `json:"nas_root,omitempty"`
+	Sources map[string]string `json:"sources,omitempty"`
 }
 
 func (c *SharedInputCache) nasPathContext(ctx context.Context, root, relative string) (string, error) {
@@ -214,7 +220,13 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 			if c.beforeVerify != nil {
 				c.beforeVerify()
 			}
-			if e = verifySharedEntry(ctx, payload, record.Files); e != nil {
+			verifyCtx, releaseVerify, copyErr := c.cache.budgets.copy(ctx, c.cache.Root, c.cache.Clock, 0)
+			if copyErr != nil {
+				return "", copyErr
+			}
+			e = verifySharedEntry(verifyCtx, payload, record.Files)
+			releaseVerify()
+			if e != nil {
 				return "", e
 			}
 			if e = recordSharedVerification(root, signature); e != nil {
@@ -228,6 +240,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		c.verified[key] = signature
 		c.mu.Unlock()
 		valid = true
+		c.cache.budgets.touch(c.cache.Root, key, s.bytes(), c.cache.Clock.Now())
 		c.mu.Lock()
 		c.hits++
 		c.mu.Unlock()
@@ -243,15 +256,20 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		need += s.SizeBytes
 	}
 	err = c.stageInput(ctx, func(ctx context.Context, stage string) error {
+		doneWaiting := cacheWait(ctx)
+		defer doneWaiting()
+		releaseDemand, e := c.cache.budgets.borrow(ctx, c.cache.Root, need)
+		if e != nil {
+			return e
+		}
+		defer releaseDemand()
 		// The writer owns this random stage's build lock before reserving space.
 		// Matching reservation/partial names reuse existing remaining-byte accounting.
 		gate, e := c.cache.lock(ctx, "admission", syscall.LOCK_EX)
 		if e != nil {
 			return e
 		}
-		if e = removeSharedEntry(root + ".partial"); e == nil {
-			e = c.admit(ctx, key, need)
-		}
+		e = c.admit(ctx, key, need)
 		reservation := strings.TrimSuffix(stage, ".partial") + ".reservation"
 		if e == nil {
 			e = os.WriteFile(reservation, []byte(strconv.FormatInt(need, 10)), 0600)
@@ -275,7 +293,14 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 				unlockEnvironment(gate)
 			}
 		}()
-		if e = c.populateInput(ctx, s, nasRoot, stage); e != nil {
+		held, e := c.cache.budgets.reserve(c.cache.Root, need, c.cache.Clock, stage, root)
+		if e != nil {
+			return e
+		}
+		defer held.release()
+		releaseDemand()
+		doneWaiting()
+		if e = c.populateInput(context.WithValue(ctx, cacheReservationKey{}, held), s, nasRoot, stage); e != nil {
 			return e
 		}
 		if c.beforePublish != nil {
@@ -299,6 +324,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 	if err != nil {
 		return "", err
 	}
+	c.cache.budgets.touch(c.cache.Root, key, s.bytes(), c.cache.Clock.Now())
 	if err = syncWorkerDir(c.cache.Root); err != nil {
 		return "", err
 	}
@@ -341,21 +367,25 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
+	original := s
 	var err error
 	if s.ManifestFile != "" {
 		manifestPath, e := c.nasPathContext(ctx, nasRoot, s.ManifestFile)
 		if e != nil {
 			return e
 		}
-		if e = verifyFile(ctx, manifestPath, s.ref()); e != nil {
-			return e
-		}
-		f, e := os.Open(manifestPath)
-		if e != nil {
-			return e
-		}
-		b, e := io.ReadAll(io.LimitReader(contextReader{ctx, f}, s.SizeBytes+1))
-		e = errors.Join(e, f.Close())
+		var b []byte
+		e = c.copyInput(ctx, func(ctx context.Context) error {
+			if err := verifyFile(ctx, manifestPath, s.ref()); err != nil {
+				return err
+			}
+			f, err := os.Open(manifestPath)
+			if err != nil {
+				return err
+			}
+			b, err = io.ReadAll(io.LimitReader(contextReader{ctx, f}, s.SizeBytes+1))
+			return errors.Join(err, f.Close())
+		})
 		if e != nil {
 			return e
 		}
@@ -374,6 +404,11 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 		}
 		if s.bytes() > s.UnpackedBytes {
 			return errors.New("shared manifest exceeds unpacked_bytes")
+		}
+	}
+	if len(s.Manifest) > 0 {
+		if err = c.chargeManifest(ctx, original.key(), s.Manifest, 0); err != nil {
+			return err
 		}
 	}
 	dst := filepath.Join(stage, "data")
@@ -395,7 +430,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 				}
 			}
 			target := filepath.Join(dst, name)
-			if e := copySharedFile(ctx, source, target, ref); e != nil {
+			if e := c.copySharedFile(ctx, source, target, ref); e != nil {
 				return e
 			}
 			files[name] = ref
@@ -410,17 +445,28 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			if e != nil {
 				return e
 			}
-			if err = copySharedFile(ctx, source, target, s.ref()); err != nil {
+			if err = c.copySharedFile(ctx, source, target, s.ref()); err != nil {
 				return err
 			}
 		} else {
-			err = c.Client.DownloadFile(ctx, s.ref(), target)
+			err = c.copyInput(ctx, func(ctx context.Context) error {
+				return c.Client.DownloadFile(ctx, s.ref(), target)
+			})
 			if err != nil {
 				return err
 			}
 		}
 		if s.Archive != "" {
-			if err = unpackSharedArchive(ctx, target, dst, s.Archive, s.UnpackedBytes); err != nil {
+			planned, err := sharedArchiveManifest(withoutCopyProgress(ctx), target, s.Archive, s.UnpackedBytes)
+			if err != nil {
+				return err
+			}
+			if err = c.chargeManifest(ctx, original.key(), planned, s.SizeBytes); err != nil {
+				return err
+			}
+			if err = c.copyInput(ctx, func(ctx context.Context) error {
+				return unpackSharedArchive(ctx, target, dst, s.Archive, s.UnpackedBytes)
+			}); err != nil {
 				return err
 			}
 			if err = os.Remove(target); err != nil {
@@ -456,9 +502,14 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if err = makeSharedReadOnlyContext(ctx, dst); err != nil {
 		return err
 	}
-	b, err := json.Marshal(sharedEntry{files})
+	b, err := json.Marshal(sharedEntry{Files: files, Source: &original, NASRoot: nasRoot, Sources: s.sources})
 	if err != nil {
 		return err
+	}
+	if held, ok := ctx.Value(cacheReservationKey{}).(*cacheReservation); ok {
+		if err = held.ensureMetadata(c.cache.Root, int64(len(b))); err != nil {
+			return err
+		}
 	}
 	if err = os.WriteFile(filepath.Join(stage, "ready.json"), b, 0400); err != nil {
 		return err
@@ -466,7 +517,19 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	return syncModelDirectoryContext(ctx, stage)
 }
 
-func copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
+// Copy admission covers data I/O, not source discovery or publication fences.
+// Short copies release their slots without needing a clock-driven throughput
+// epoch; fake-clock callers and paused publishers cannot retain a phantom load.
+func (c *SharedInputCache) copyInput(ctx context.Context, copy func(context.Context) error) error {
+	ctx, release, err := c.cache.budgets.copy(ctx, c.cache.Root, c.cache.Clock, 0)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return copy(ctx)
+}
+
+func (c *SharedInputCache) copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
@@ -494,6 +557,13 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) err
 	if !info.Mode().IsRegular() || info.Size() != ref.SizeBytes {
 		return errors.New("shared NAS file size/type differs from manifest")
 	}
+	// Resolve and open the source before taking a destination I/O slot. A
+	// blocked mount lookup must not serialize unrelated healthy inputs.
+	ctx, releaseCopy, err := c.cache.budgets.copy(ctx, c.cache.Root, c.cache.Clock, 0)
+	if err != nil {
+		return err
+	}
+	defer releaseCopy()
 	if err = os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
 	}
@@ -626,6 +696,9 @@ func sharedSignature(root string) (string, error) {
 	return identityHash(entries), err
 }
 func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) error {
+	if err := c.cache.init(); err != nil {
+		return err
+	}
 	type victim struct {
 		name string
 		used int64
@@ -676,22 +749,9 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 			reserved += max(0, n-written)
 			continue
 		}
+		// A hash-shaped partial has no durable proof of scratch ownership.
+		// Only stageInput removes the random scratch directory it created.
 		if strings.HasSuffix(d.Name(), ".partial") {
-			k := strings.TrimSuffix(d.Name(), ".partial")
-			if (FileRef{SHA256: k}).validate() != nil {
-				continue
-			}
-			lock, e := c.cache.tryLock(k + ".build")
-			if e != nil {
-				return e
-			}
-			if lock != nil {
-				e = removeSharedEntry(filepath.Join(c.cache.Root, d.Name()))
-				unlockEnvironment(lock)
-				if e != nil {
-					return e
-				}
-			}
 			continue
 		}
 		if !d.IsDir() || (FileRef{SHA256: d.Name()}).validate() != nil || d.Name() == key {
@@ -699,11 +759,17 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		}
 		info, e := os.Stat(filepath.Join(c.cache.Root, d.Name(), "ready.json"))
 		if e != nil {
-			return e
+			continue
 		}
 		victims = append(victims, victim{d.Name(), info.ModTime().UnixNano()})
 	}
-	sort.Slice(victims, func(i, j int) bool { return victims[i].used < victims[j].used })
+	sort.Slice(victims, func(i, j int) bool {
+		hi, hj := c.cache.budgets.recent(c.cache.Root, victims[i].name, c.cache.Clock.Now()), c.cache.budgets.recent(c.cache.Root, victims[j].name, c.cache.Clock.Now())
+		if hi != hj {
+			return !hi
+		}
+		return victims[i].used < victims[j].used
+	})
 	var cacheAvailable, diskAvailable int64
 	enough := func() (bool, error) {
 		used, e := c.cache.DiskUsage()
@@ -714,17 +780,21 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		if e != nil {
 			return false, e
 		}
-		floor := diskFreeFloor(disk.TotalBytes)
+		limit, e := c.cache.budget(used)
+		if e != nil {
+			return false, e
+		}
+		floor := uint64(cacheAllocationUnit(disk))
 		if reserved > int64(^uint64(0)>>1)-need {
 			return false, nil
 		}
 		projected := need + reserved
-		cacheAvailable = max(0, c.cache.Limit-used-reserved)
+		cacheAvailable = max(0, limit-used-reserved)
 		diskAvailable = 0
 		if disk.FreeBytes >= floor {
 			diskAvailable = int64(min(uint64(^uint64(0)>>1), disk.FreeBytes-floor))
 		}
-		return projected <= c.cache.Limit-used && disk.FreeBytes >= floor && uint64(projected) <= disk.FreeBytes-floor, nil
+		return projected <= limit-used && disk.FreeBytes >= floor && uint64(projected) <= disk.FreeBytes-floor, nil
 	}
 	for _, v := range victims {
 		ok, e := enough()
@@ -752,6 +822,12 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 			}
 			continue
 		}
+		// Recheck provenance after acquiring the victim fence; another process may
+		// have replaced this identity since the inventory. Unknown data stays.
+		if !c.rebuildable(ctx, v.name) {
+			unlockEnvironment(use)
+			continue
+		}
 		e = removeSharedEntry(filepath.Join(c.cache.Root, v.name))
 		unlockEnvironment(use)
 		if e != nil {
@@ -760,6 +836,7 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		c.mu.Lock()
 		delete(c.verified, v.name)
 		c.mu.Unlock()
+		c.cache.budgets.forget(c.cache.Root, v.name)
 	}
 	ok, err := enough()
 	if err != nil {
@@ -841,3 +918,146 @@ func unpackSharedArchive(ctx context.Context, source, dest, format string, limit
 }
 
 func digestBytes(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+
+// Deletion authority requires this protocol's manifest, an unchanged verified
+// payload, and a currently verifiable independent source. Legacy/unknown records
+// and unavailable originals retain custody, including after a process restart.
+func (c *SharedInputCache) rebuildable(ctx context.Context, key string) bool {
+	root := filepath.Join(c.cache.Root, key)
+	b, err := os.ReadFile(filepath.Join(root, "ready.json"))
+	var r sharedEntry
+	if err != nil || json.Unmarshal(b, &r) != nil || r.Source == nil || r.Source.validate() != nil || r.Source.key() != key || len(r.Files) == 0 {
+		return false
+	}
+	for name, ref := range r.Files {
+		if name != "." && !safeRelative(name) || ref.validate() != nil {
+			return false
+		}
+	}
+	signature, err := sharedSignature(filepath.Join(root, "data"))
+	verified, e := os.ReadFile(filepath.Join(root, sharedVerifiedRecord))
+	if err != nil || e != nil || string(verified) != signature {
+		return false
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.Name() != "data" && entry.Name() != "ready.json" && entry.Name() != sharedVerifiedRecord {
+			return false
+		}
+	}
+	if verifySharedEntry(ctx, filepath.Join(root, "data"), r.Files) != nil {
+		return false
+	}
+	s := *r.Source
+	if len(s.Manifest) > 0 || s.ManifestFile != "" {
+		if s.ManifestFile != "" {
+			p, e := c.nasPathContext(ctx, r.NASRoot, s.ManifestFile)
+			if e != nil || verifyFile(ctx, p, s.ref()) != nil {
+				return false
+			}
+		}
+		for name, ref := range r.Files {
+			p := r.Sources[name]
+			if p == "" {
+				var e error
+				p, e = c.nasPathContext(ctx, r.NASRoot, filepath.ToSlash(filepath.Join(s.NAS, name)))
+				if e != nil {
+					return false
+				}
+			}
+			if verifyFile(ctx, p, ref) != nil {
+				return false
+			}
+		}
+		return true
+	}
+	if s.NAS == "" {
+		return c.Client.HasFile(ctx, s.ref()) == nil
+	}
+	p, err := c.nasPathContext(ctx, r.NASRoot, s.NAS)
+	return err == nil && verifyFile(ctx, p, s.ref()) == nil
+}
+
+func (c *SharedInputCache) chargeManifest(ctx context.Context, key string, files FileManifest, archiveBytes int64) error {
+	held, ok := ctx.Value(cacheReservationKey{}).(*cacheReservation)
+	if !ok {
+		return nil
+	} // Direct fixture helpers do not own publication admission.
+	disk, err := c.cache.budgets.probe(c.cache.Root)
+	if err != nil {
+		return err
+	}
+	charge := cacheManifestCharge(disk, files)
+	if archiveBytes > 0 {
+		charge = cacheSum(charge, cacheWriteCharge(disk, archiveBytes))
+	}
+	if charge <= held.bytes {
+		return nil
+	}
+	extra := charge - held.bytes
+	demand, err := c.cache.budgets.borrow(ctx, c.cache.Root, extra)
+	if err != nil {
+		return err
+	}
+	defer demand()
+	gate, err := c.cache.lock(ctx, "admission", syscall.LOCK_EX)
+	if err != nil {
+		return err
+	}
+	defer unlockEnvironment(gate)
+	if err = c.admit(ctx, key, extra); err != nil {
+		return err
+	}
+	return held.ensureCharge(c.cache.Root, charge)
+}
+func sharedArchiveManifest(ctx context.Context, path, format string, limit int64) (FileManifest, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var reader io.Reader = contextReader{ctx, f}
+	if format == "tar.gz" {
+		z, err := gzip.NewReader(reader)
+		if err != nil {
+			return nil, err
+		}
+		defer z.Close()
+		reader = z
+	}
+	files := FileManifest{}
+	tr := tar.NewReader(reader)
+	var used int64
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return files, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(h.Name, "./"), "/")
+		if name == "" && h.Typeflag == tar.TypeDir {
+			continue
+		}
+		if !safeRelative(name) {
+			return nil, errors.New("unsafe shared archive path")
+		}
+		switch h.Typeflag {
+		case tar.TypeDir:
+			// A zero-byte synthetic child charges even an otherwise empty directory.
+			files[name+"/.directory-allocation"] = FileRef{}
+		case tar.TypeReg, tar.TypeRegA:
+			if h.Size < 0 || h.Size > limit-used {
+				return nil, errors.New("shared archive exceeds unpacked_bytes")
+			}
+			used += h.Size
+			files[name] = FileRef{SizeBytes: h.Size}
+		default:
+			return nil, errors.New("shared archives require regular files and directories")
+		}
+	}
+}

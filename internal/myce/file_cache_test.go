@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,9 +30,9 @@ func TestFileCacheLargeInputUsesProgressBudget(t *testing.T) {
 	}
 }
 
-// #720: an unrelated victim must never require queue availability. Its accepted
-// retention may have ended, or its HEAD may fail while the new blob is healthy.
-func TestFileCacheEvictionIndependentOfVictimStorage(t *testing.T) {
+// #805 requires preservation of the last verifiable copy. Unlike #720,
+// expired or unavailable originals cannot authorize deletion to admit new work.
+func TestFileCacheEvictionRetainsUnavailableOriginal(t *testing.T) {
 	for _, status := range []int{404, 410, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			q, clock := fixture(t)
@@ -63,19 +62,22 @@ func TestFileCacheEvictionIndependentOfVictimStorage(t *testing.T) {
 				} else {
 					cache.Client.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
 						if strings.Contains(r.URL.Path, old.SHA256) {
-							t.Errorf("eviction contacted victim storage")
 							return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
 						}
 						return http.DefaultTransport.RoundTrip(r)
 					})}
 				}
 				clock.Advance(time.Second)
-				if err := cache.copyTo(context.Background(), ref, filepath.Join(t.TempDir(), "private")); err != nil {
+				err = cache.copyTo(context.Background(), ref, filepath.Join(t.TempDir(), "private"))
+				if i == 0 && err != nil {
 					t.Fatal(err)
 				}
+				if i == 1 && err == nil {
+					t.Fatal("new copy evicted an entry whose original is unavailable")
+				}
 			}
-			if _, err := os.Stat(filepath.Join(root, old.SHA256)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("victim not evicted", err)
+			if _, err := os.Stat(filepath.Join(root, old.SHA256)); err != nil {
+				t.Fatal("last copy lost", err)
 			}
 		})
 	}

@@ -272,7 +272,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	healthStorageDelay := f.Duration("health-storage-delay", myce.DefaultHealthStorageDelay, "storage unavailability duration before health alert")
 	fileRetention := f.Duration("file-retention", myce.DefaultFileRetention, "terminal job input/result retention (default 168h)")
 	fileStoreProductionReserve := f.Int64("file-store-production-reserve", 0, "file-store bytes reserved for production-tier submissions")
-	fileStoreLimit := f.Int64("file-store-bytes", 100<<30, "authoritative files plus upload reservations limit")
+	fileStoreLimit := f.Int64("file-store-bytes", 0, "authoritative files plus reservations limit (0: adaptive disk headroom)")
 	fileCache := f.String("file-cache", "", "local reproducible file cache folder")
 	fileCacheLimit := f.Int64("file-cache-bytes", 0, "local file/shared-input cache bytes each (0: automatic from disk headroom)")
 	filesFrom := f.String("files-from", "", "upload explicitly mapped inputs from this local folder")
@@ -287,8 +287,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	var nativeReadRoots, nativeExecuteRoots myce.NativeRootPaths
 	f.Var(&nativeReadRoots, "native-read-root", "operator-granted native read-only root (absolute; repeat; empty clears)")
 	f.Var(&nativeExecuteRoots, "native-exec-root", "operator-granted native read/execute root (absolute; repeat; empty clears)")
-	copyParallel := f.Int("model-copy-parallel", 1, "maximum concurrent NAS copies per worker")
-	cacheLimit := f.Int64("model-cache-bytes", 100*1024*1024*1024, "maximum active model cache bytes; also the model snapshot cache budget")
+	copyParallel := f.Int("model-copy-parallel", 0, "maximum concurrent model copies (0: measured throughput)")
+	cacheLimit := f.Int64("model-cache-bytes", 0, "model and snapshot cache byte ceiling (0: adaptive disk headroom)")
 	productionGrace := f.Duration("preemption-stop-grace", 10*time.Second, "checkpoint grace and repeated-preemption minimum runtime; worker accelerator stop grace (capped at 15s)")
 	f.DurationVar(productionGrace, "production-stop-grace", 10*time.Second, "legacy alias for preemption-stop-grace")
 	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
@@ -701,8 +701,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *heartbeat <= 0 {
 			return errors.New("heartbeat must be positive")
 		}
-		if *copyParallel < 1 {
-			return errors.New("model-copy-parallel must be positive")
+		if *copyParallel < 0 {
+			return errors.New("model-copy-parallel must be nonnegative")
 		}
 		ramReserve := *hostReserve
 		if unified {

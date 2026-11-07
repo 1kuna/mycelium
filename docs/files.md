@@ -29,7 +29,7 @@ copy; a cache is not a promised second copy.
 `myce queue` uses file-store checkpoints by default, with files beside the
 SQLite database in `DB.files`. `--file-store DIR` chooses that local disk folder;
 `--file-store-bytes` bounds complete files plus reserved interrupted uploads
-(default 100 GiB). Keep the database and file store on durable local storage.
+(0/default: adaptive physical headroom). Keep the database and file store on durable local storage.
 Existing queue `--checkpoints` and hypha `--checkpoint-root` NAS configurations
 keep their original checkpoint behavior. Supplying queue `--checkpoints` selects
 NAS checkpoints; uploaded job inputs and their verified results still use the
@@ -397,8 +397,8 @@ Worker-side admission remains authoritative against disk changes between samples
 A staging failure reports `resource_limit`, operation `shared_input_admission`,
 error `cache_space`, and `capacity` (`shared_input_cache` or `disk_free_floor`),
 with required/available/limit bytes. Inputs stage before source/plan blobs.
-Omitting `--file-cache-bytes` now sizes both separate cache ceilings automatically
-from disk headroom; see [cache policy](operations.md#file-and-shared-input-cache-capacity).
+Omitting `--file-cache-bytes` keeps both caches adaptive on their shared
+filesystem; see [cache policy](operations.md#file-and-shared-input-cache-capacity).
 An explicit saved positive limit still wins. Split work whose simultaneous inputs
 exceed all eligible cache capacities; re-uploading identical bytes cannot help.
 
@@ -425,7 +425,9 @@ cache limits retain their behavior. Extensions can receive models as job inputs.
 
 `--file-cache` and `--file-cache-bytes` configure each hypha's reproducible cache
 (automatic from disk headroom by default, under its state folder). It counts complete and partial bytes,
-evicts least-recently-used entries, and refuses a file larger than its allowance.
+prefers cold verified entries with an independently verifiable original, and
+refuses a file larger than its allowance. Unavailable originals retain their last
+cached copies.
 A private materialization keeps active jobs independent of eviction. Model
 loading/pre-copy uses the existing `--model-cache-bytes` admission and pin/loaded
 protection. Stored model eviction verifies that authoritative files remain before
@@ -503,7 +505,8 @@ the complete input set, counting shared hashes once and reusing existing blobs a
 tus lengths. Upload creation repeats the check. This is advisory, with no reservation.
 `myce status` and `/api/status.file_store` expose payload used bytes, effective free
 bytes and reclaimable bytes. Effective free space respects `--file-store-bytes`,
-existing tus lengths, and #158's physical disk floor (1%, minimum 256 MiB).
+existing tus lengths, pending outputs and measured free-space loss. The former
+1%/256 MiB floor is replaced by the shared adaptive headroom mechanism.
 
 Capacity exhaustion returns HTTP 507 `file_store_capacity`, naming
 `queue-file-store`, required/free/shortfall bytes and the recovery action. Profiles
@@ -644,7 +647,7 @@ cache (`model-snapshots` under the file cache folder), reused by identical
 snapshots, protected by use locks and durable attempt pins until exact process
 or container cleanup, and evicted only when
 inactive. That cache has its own budget, `--model-cache-bytes` (default
-100 GiB), plus the usual free-space floor; `--file-cache-bytes` does not apply.
+automatic), plus shared filesystem headroom; `--file-cache-bytes` does not apply.
 When the cache folder and the hub share a copy-on-write volume (APFS, or Linux
 Btrfs/XFS with reflinks), each file is cloned instead of copied, so it shares
 blocks with the hub until either side writes. A later write to a hub blob cannot

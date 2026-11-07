@@ -39,7 +39,7 @@ func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy b
 		return
 	}
 	for _, task := range plan {
-		if len(rt.copies) >= rt.copyParallel {
+		if rt.copyParallel > 0 && len(rt.copies) >= rt.copyParallel {
 			break
 		}
 		if rt.copies[task.Model] != nil {

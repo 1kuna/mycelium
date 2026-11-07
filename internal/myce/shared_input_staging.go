@@ -14,6 +14,7 @@ type sharedInputStaging struct {
 	ctx       context.Context
 	withdrawn bool
 	progress  atomic.Int64
+	admission atomic.Int64
 }
 
 func sharedInputProgress(ctx context.Context) error {
@@ -76,8 +77,16 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 	progress := func() { b.progress.Store(c.cache.Clock.Now().UnixNano()) }
 	progress()
 	ctx = context.WithValue(ctx, ioProgressKey{}, progress)
-	// A random build key uses the existing orphan-partial cleanup protocol.
-	// Its lock protects only disposable scratch, never execution admission.
+	ctx = context.WithValue(ctx, cacheAdmissionKey{}, func(waiting bool) {
+		progress()
+		if waiting {
+			b.admission.Add(1)
+		} else {
+			b.admission.Add(-1)
+		}
+	})
+	// A random build key identifies scratch this writer alone created. Unknown
+	// orphan partials are retained; a hash-shaped name is no deletion authority.
 	stageKey := identityHash(ID())
 	stage := filepath.Join(c.cache.Root, stageKey+".partial")
 	result, consumed := make(chan error), make(chan struct{})
@@ -129,7 +138,7 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 			}
 			return publish(stage)
 		case <-tick.C:
-			if c.cache.Clock.Now().Sub(time.Unix(0, b.progress.Load())) >= checkpointAvailabilityStallBudget {
+			if b.admission.Load() == 0 && c.cache.Clock.Now().Sub(time.Unix(0, b.progress.Load())) >= checkpointAvailabilityStallBudget {
 				return errCheckpointIOTimeout
 			}
 		}

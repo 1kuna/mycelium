@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -11,10 +12,10 @@ import (
 )
 
 func TestExplicitFixtureCacheLimitUnderLowHeadroom(t *testing.T) {
-	lowHeadroom := func(string) (int64, error) { return environmentCacheSize(23 << 30) }
+	lowHeadroom := func(string) (int64, error) { return 0, errors.New("fixture disk evidence unavailable") }
 	auto := EnvironmentCache{Root: t.TempDir(), sizeLimit: lowHeadroom}
 	if err := auto.init(); err == nil {
-		t.Fatal("automatic sizing accepted less than 24 GiB free")
+		t.Fatal("automatic fixture ignored unavailable disk evidence")
 	}
 	explicit := EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, sizeLimit: lowHeadroom}
 	if err := explicit.init(); err != nil {
@@ -29,16 +30,16 @@ func TestExplicitFixtureCacheLimitUnderLowHeadroom(t *testing.T) {
 // Exercise the installer sizing seam and pass its explicit fixture limit to a
 // real worker check-in under the same simulated low cache headroom.
 func TestFixtureWorkerCheckinAfterLowHeadroomSizing(t *testing.T) {
-	lowHeadroom := func(string) (int64, error) { return environmentCacheSize(23 << 30) }
+	lowHeadroom := func(string) (int64, error) { return 0, errors.New("fixture disk evidence unavailable") }
 	config := ServiceConfig{Role: "worker", EnvironmentCache: t.TempDir()}
-	if err := resolveEnvironmentCacheSizing(&config, false, lowHeadroom); err == nil {
-		t.Fatal("automatic installer sizing accepted low headroom")
+	if err := resolveEnvironmentCacheSizing(&config, false, lowHeadroom); err != nil || config.EnvironmentCacheBytes != 0 {
+		t.Fatal("automatic installer must retain adaptive intent without saving startup headroom", err)
 	}
 	autoWorker := recoveryWorker(t)
 	autoWorker.EnvironmentLimit = 0
 	autoWorker.environmentSizeLimit = lowHeadroom
-	if err := autoWorker.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "24 GiB") {
-		t.Fatalf("automatic worker sizing did not refuse low headroom: %v", err)
+	if err := autoWorker.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "fixture disk evidence unavailable") {
+		t.Fatalf("automatic fixture ignored unavailable disk evidence: %v", err)
 	}
 	config.EnvironmentCacheBytes = 1 << 20
 	if err := resolveEnvironmentCacheSizing(&config, true, lowHeadroom); err != nil {

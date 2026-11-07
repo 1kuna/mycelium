@@ -160,7 +160,17 @@ func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[stri
 	if disk.TotalBytes == 0 {
 		return status, payloads, errors.New("disk capacity unavailable")
 	}
-	status.DiskFreeBytes, status.FloorBytes = disk.FreeBytes, diskFreeFloor(disk.TotalBytes)
+	// Automatic store growth follows physical capacity; authoritative bytes are
+	// never candidates for cache eviction. Existing upload/output ledgers bind.
+	limit, err := s.budgets.limitReading(s.root, cacheBytes(status.UsedBytes), s.limit, s.clock.Now(), disk)
+	if err != nil {
+		return status, payloads, err
+	}
+	status.LimitBytes = uint64(limit)
+	status.DiskFreeBytes = disk.FreeBytes
+	s.budgets.mu.Lock()
+	status.FloorBytes = uint64(s.budgets.floorLocked(s.budgets.volumes[disk.Volume]))
+	s.budgets.mu.Unlock()
 	storeFree := status.LimitBytes - min(status.LimitBytes, allocated)
 	unavailable := addDiskBytes(status.FloorBytes, remaining)
 	status.FreeBytes = min(storeFree, disk.FreeBytes-min(disk.FreeBytes, unavailable))
@@ -421,6 +431,8 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			if err := store.syncDir(filepath.Join(store.root, "uploads")); err != nil {
 				return err
 			}
+			// The lifecycle fence still excludes resumed PATCH/publication.
+			store.releaseUpload(hash)
 			return q.updateRequest(requestCtx, func() error {
 				if published.IsZero() {
 					q.forgetFileInputClaims(hash, cutoff)

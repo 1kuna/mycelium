@@ -164,7 +164,7 @@ func TestDiskHeadroomHTTPRefusesImpossibleSubmission(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	const reason = "disk_headroom: host a data free=107374182400 bytes floor=1073741824 bytes need=107374182400 bytes total=107374182400 bytes"
+	const reason = "disk_headroom: host a data free=107374182400 bytes floor=512 bytes need=107374182400 bytes total=107374182400 bytes"
 	if response.Code != http.StatusConflict || body.Code != "disk_headroom" || body.Error != reason {
 		t.Errorf("expected sanitized disk capacity refusal, got HTTP %d: %s", response.Code, response.Body.String())
 	}
@@ -568,7 +568,7 @@ func TestDiskHeadroomStartFenceRefusalIsNotLoss(t *testing.T) {
 	}
 	if err := q.update(func() error {
 		owner := q.s.Machines[a.Machine]
-		owner.DiskVolumes[0].FreeBytes, owner.DiskVolumes[0].SampledAt, owner.DiskReceivedAt = 512<<20, c.Now(), c.Now()
+		owner.DiskVolumes[0].FreeBytes, owner.DiskVolumes[0].SampledAt, owner.DiskReceivedAt = diskFreeFloor(100<<30)-1, c.Now(), c.Now()
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -606,7 +606,7 @@ func TestDiskHeadroomStartFenceUsesCurrentFloor(t *testing.T) {
 		want     error
 	}{
 		{"above floor below need", 2 << 30, false, nil},
-		{"retained below floor", 512 << 20, true, ErrStale},
+		{"retained below floor", diskFreeFloor(100<<30) - 1, true, ErrStale},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, c := fixture(t)

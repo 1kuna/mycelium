@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,13 +18,19 @@ func TestWorkerHygieneCollectionFileBudgetAndLocks(t *testing.T) {
 	for _, count := range []int{2, 100} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			clock := &fakeClock{now: time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)}
-			cache := &FileCache{Root: t.TempDir(), Limit: 16, Clock: clock}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("ETag", fmt.Sprintf("%q", filepath.Base(r.URL.Path)))
+				w.Header().Set("Content-Length", "16")
+			}))
+			defer server.Close()
+			cache := &FileCache{Root: t.TempDir(), Limit: 16, Clock: clock, Client: Client{URL: server.URL}}
 			if err := PrepareStateRoots(cache.Root); err != nil {
 				t.Fatal(err)
 			}
 			for i := 0; i < count; i++ {
-				path := filepath.Join(cache.Root, fmt.Sprintf("%064x", i))
-				if err := os.WriteFile(path, []byte(strings.Repeat("x", 16)), 0600); err != nil {
+				data := fmt.Sprintf("%016x", i)
+				path := filepath.Join(cache.Root, digestBytes([]byte(data)))
+				if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 					t.Fatal(err)
 				}
 				at := clock.Now().Add(time.Duration(i) * time.Second)
@@ -43,7 +51,7 @@ func TestWorkerHygieneCollectionFileBudgetAndLocks(t *testing.T) {
 			if r.Error != "" || r.Bytes != 16 || r.Reclaimed != int64(count-1)*16 {
 				t.Fatal(r)
 			}
-			if _, err := os.Stat(filepath.Join(cache.Root, fmt.Sprintf("%064x", count-1))); err != nil {
+			if _, err := os.Stat(filepath.Join(cache.Root, digestBytes([]byte(fmt.Sprintf("%016x", count-1))))); err != nil {
 				t.Fatal("did not retain newest cache entry", err)
 			}
 			unknown := filepath.Join(cache.Root, "unknown-data")
@@ -76,6 +84,12 @@ func TestWorkerHygieneCollectionEnvironmentBudgetReferencesAndCustody(t *testing
 	referenced := pruneFixture(t, cache, 2, 48*time.Hour)
 	active := pruneFixture(t, cache, 3, 48*time.Hour)
 	recent := pruneFixture(t, cache, 4, time.Hour)
+	size, err := environmentDiskUsage(filepath.Join(cache.Root, recent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.budgets.touch(cache.Root, recent, size, clock.Now().Add(-4*time.Hour))
+	cache.budgets.touch(cache.Root, recent, size, clock.Now().Add(-time.Hour))
 	lock, err := cache.lock(context.Background(), active+".use", syscall.LOCK_SH)
 	if err != nil {
 		t.Fatal(err)

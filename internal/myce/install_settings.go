@@ -122,6 +122,12 @@ func installNonnegative(v float64) error {
 	}
 	return nil
 }
+func installCacheBytes(v int64) error {
+	if v < 0 {
+		return errors.New("byte limit must be nonnegative")
+	}
+	return nil
+}
 func installBytes(v int64) error {
 	if v <= 0 {
 		return errors.New("byte limit must be positive")
@@ -227,9 +233,9 @@ func InstallSettings() []InstallSetting {
 			return nil
 		}),
 		installPath("model-cache", "ModelCache", "local model cache", func(c *ServiceConfig) *string { return &c.ModelCache }, false),
-		installSetting("model-cache-bytes", "ModelCacheBytes", "local model cache bytes", func(c *ServiceConfig) *int64 { return &c.ModelCacheBytes }, installBytes),
+		installSetting("model-cache-bytes", "ModelCacheBytes", "local model cache bytes", func(c *ServiceConfig) *int64 { return &c.ModelCacheBytes }, installCacheBytes),
 		installPath("environment-cache", "EnvironmentCache", "local environment cache", func(c *ServiceConfig) *string { return &c.EnvironmentCache }, false),
-		installSetting("environment-cache-bytes", "EnvironmentCacheBytes", "local environment cache bytes", func(c *ServiceConfig) *int64 { return &c.EnvironmentCacheBytes }, installBytes),
+		installSetting("environment-cache-bytes", "EnvironmentCacheBytes", "local environment cache bytes", func(c *ServiceConfig) *int64 { return &c.EnvironmentCacheBytes }, installCacheBytes),
 		installSetting("heartbeat", "Heartbeat", "worker check-in interval", func(c *ServiceConfig) *time.Duration { return &c.Heartbeat }, installPositiveDuration),
 
 		installContext(installSetting("require-memory-ceilings", "RequireMemoryCeilings", "require tested cgroup v2 ceilings", func(c *ServiceConfig) *bool { return &c.RequireMemoryCeilings }, installAny[bool]), func(c ServiceConfig) error {
@@ -249,9 +255,9 @@ func InstallSettings() []InstallSetting {
 			return nil
 		}),
 		installSetting("file-retention", "FileRetention", "terminal job input/result retention", func(c *ServiceConfig) *time.Duration { return &c.FileRetention }, installPositiveDuration),
-		installSetting("file-store-bytes", "FileStoreBytes", "authoritative files plus upload reservations limit", func(c *ServiceConfig) *int64 { return &c.FileStoreBytes }, installBytes),
+		installSetting("file-store-bytes", "FileStoreBytes", "authoritative files plus upload reservations limit", func(c *ServiceConfig) *int64 { return &c.FileStoreBytes }, installCacheBytes),
 		installContext(installSetting("file-store-production-reserve", "FileStoreProductionReserve", "file-store bytes reserved for production-tier submissions (zero disables)", func(c *ServiceConfig) *int64 { return &c.FileStoreProductionReserve }, installAny[int64]), func(c ServiceConfig) error {
-			if c.FileStoreProductionReserve < 0 || c.FileStoreProductionReserve > c.FileStoreBytes {
+			if c.FileStoreProductionReserve < 0 || c.FileStoreBytes > 0 && c.FileStoreProductionReserve > c.FileStoreBytes {
 				return errors.New("must be between zero and the file-store byte limit")
 			}
 			return nil
