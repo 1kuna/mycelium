@@ -110,8 +110,17 @@ func WithRetentionCapacity(read func(context.Context) (RetentionCapacity, error)
 	return func(q *Queue) { q.evidenceMaintenance.capacity = read }
 }
 
+var queueHostMemorySource = NewHostMemorySource
+
+// SetQueueHostMemorySource supplies the queue process's own host-memory probe
+// during embedded process setup. It must not run concurrently with queue reads.
+// Worker inventory overrides do not change this source.
+func SetQueueHostMemorySource(source func(float64) (MemorySource, error)) {
+	queueHostMemorySource = source
+}
+
 func queueRetentionCapacity(ctx context.Context, dir string) (RetentionCapacity, error) {
-	source, err := workerHostMemorySource(0)
+	source, err := queueHostMemorySource(0)
 	if err != nil {
 		return RetentionCapacity{}, err
 	}
