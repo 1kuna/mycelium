@@ -1307,6 +1307,14 @@ func (w Worker) Run(stop context.Context) error {
 			return err
 		}
 	}
+	// All worker copies, including the model runtime and launch closures, must
+	// capture the same live health owner before any model plan can be accepted.
+	health, err := startWorkerHealth(availabilityCtx, w, s)
+	if err != nil {
+		return err
+	}
+	w.storageHealth = health
+	defer func() { availabilityCancel(); health.wait() }()
 	rt, err := startModels(w, s.dir)
 	if err != nil {
 		return err

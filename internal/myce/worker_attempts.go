@@ -844,12 +844,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	w.batchAdmission = rt.checkBatchLaunchMemory
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	health, err := startWorkerHealth(ctx, w, root)
-	if err != nil {
-		return err
-	}
-	w.storageHealth = health
-	defer func() { cancel(); health.wait() }()
+	health := w.storageHealth
+	var err error
 	var qualification checkpointIO[bool]
 	var ioProbe checkpointIO[*IOPressure]
 	source := w.SharedPressureSource

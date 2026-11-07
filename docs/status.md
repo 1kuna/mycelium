@@ -87,8 +87,10 @@ faults reset that record. An older in-flight completion cannot clear it. Data fa
 require three fresh read/reopen completions after the latest fault. Metadata,
 cached probe results and incomplete requests cannot recover data access.
 The worker dependency resolver reads the live latch before placement/start
-checks and at the final start hand-off, including after the queue reply. An
+checks. Batch starts also check at the final hand-off after the queue reply. An
 earlier healthy heartbeat or successful preparation retry cannot bypass it.
+Models use the same resolver at their existing pre-authorization engine gate;
+their Worker captures the shared health owner before model runtime creation.
 Separate learned backing mounts remain independent even when one mountpoint
 is nested beneath another.
 Typed operation/errno/time/generation evidence and recovery source custody stay

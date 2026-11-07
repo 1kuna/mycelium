@@ -478,6 +478,71 @@ func TestStorageFaultFencesFinalStartAuthorization(t *testing.T) {
 	}
 }
 
+type storageFaultEngine struct {
+	FakeEngine
+	loads atomic.Int32
+}
+
+func (e *storageFaultEngine) Load(ctx context.Context, m Model) error {
+	e.loads.Add(1)
+	return e.FakeEngine.Load(ctx, m)
+}
+
+func TestStorageFaultModelLaunchUsesSharedResolver(t *testing.T) {
+	w, m, clock := storageFaultFixture(t)
+	w.ModelRoot = "/share/models"
+	w.Machine = machine("model-worker", "fake", "model-host")
+	w.Machine.Session = "session"
+	w.MemorySource = func(context.Context) (float64, error) { return 32, nil }
+	w.ModelConfig = ModelConfig{Wait: time.Minute, Models: []Model{{Name: "test", Engine: "fake", DirectNAS: true, MemoryGB: 1}}}
+	engine := &storageFaultEngine{}
+	w.modelEngine = func(Model) Engine { return engine }
+	w.MountRoots = func(context.Context) ([]string, error) { return []string{"/share"}, nil }
+	rt, err := startModels(w, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := rt.close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	rt.authorize = func(HostLaunch) error { return nil }
+	// The engine captured its Worker already; the subsequently observed fault
+	// must remain live through that shared owner despite healthy mount inventory.
+	w.observeStorageError(&os.PathError{Op: "read", Path: "/share/inputs/source", Err: syscall.EIO})
+	p := m.mounts["checkpoint"]
+	files := fstest.MapFS{"source": &fstest.MapFile{Mode: 0444, Data: []byte("verified data")}}
+	p.dataProbe = func(path string, cycle uint64, progress func()) error {
+		return verifyStorageReopen(path, cycle, progress, storageTestOpen(files, "source"), storageTestBypass)
+	}
+	for i, attempt := range []string{"before", "proof-one", "proof-two", "recovered"} {
+		if i > 0 {
+			await(t, func() bool { return len(p.pending) == 1 })
+			clock.Advance(time.Second)
+			p.sample(clock.Now(), nil)
+		}
+		rt.sync([]ModelSlot{{Model: "test", Session: "session", Attempt: attempt, State: "loading"}})
+		await(t, func() bool {
+			reports, _ := rt.report()
+			return len(reports) == 1 && reports[0].State != "loading"
+		})
+		reports, _ := rt.report()
+		if i < hostHealthConfirmation {
+			if reports[0].State != "failed" || engine.loads.Load() != 0 {
+				t.Fatal("model bypassed shared data fault", i, reports, engine.loads.Load())
+			}
+		} else if reports[0].State != "ready" || engine.loads.Load() != 1 {
+			t.Fatal("three fresh proofs did not release model launch", reports, engine.loads.Load())
+		}
+		if i == 0 {
+			clock.Advance(time.Second)
+			p.sample(clock.Now(), nil)
+		}
+	}
+	await(t, func() bool { return len(p.pending) == 1 })
+}
+
 func TestStorageFaultKeepsNestedBackingIndependent(t *testing.T) {
 	w, m, clock := storageFaultFixture(t)
 	w.JobFileRoot = "/share/nested/inputs"

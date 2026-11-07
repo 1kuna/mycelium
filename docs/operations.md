@@ -2789,9 +2789,12 @@ missing files, permissions, cancellation, a bad declared digest and local cache
 errors do not quarantine a mount. This is automatic worker behavior, with no
 opt-in switch and no consumer syscall or kernel-log sensor.
 
-Worker start checks use the live latch through the existing dependency resolver,
+Batch start checks use the live latch through the existing dependency resolver,
 including before and after the final queue authorization. A fault between
-heartbeats therefore fences a retry or an older healthy queue reply. Faults
+heartbeats therefore fences a retry or an older healthy queue reply. Model
+launches ask the same worker resolver in their existing pre-authorization engine
+gate. The health owner is initialized before the runtime captures its Worker,
+so subsequent faults remain live in that copy. Faults
 propagate only to roles with the same known backing; a separately mounted
 nested root stays independent. Checkpoint preparation uses explicit userspace
 read/write streaming so Linux fast-copy errors cannot mislabel source data
