@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +41,10 @@ type batchRelease struct {
 }
 
 type state struct {
+	EfficiencyAt           time.Time                     `json:"efficiency_at,omitempty"`
+	EfficiencyHosts        map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
+	EfficiencyHealth       map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
+	StrandedDemand         []StrandedDemand              `json:"stranded_demand,omitempty"`
 	ToolInventories        map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
 	FileInputClaims        map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
 	ModelIntervalSince     *time.Time                    `json:"model_interval_since,omitempty"`
@@ -114,8 +119,9 @@ type state struct {
 }
 type Queue struct {
 	requestBudgets      requestBudgets
-	preservationPath    string          // Local handoff certificate; never a database backup.
-	waitStates          *waitStateIndex // scalar committed wait observations; separate reader mutex.
+	preservationPath    string            // Local handoff certificate; never a database backup.
+	efficiencyView      *EfficiencyReport // immutable maintenance projection; published only after commit.
+	waitStates          *waitStateIndex   // scalar committed wait observations; separate reader mutex.
 	modelIntervalWrites []ModelIntervalEvent
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin *Queue
@@ -177,7 +183,10 @@ type Queue struct {
 	calls            map[string]*ModelCall
 	lock             *os.File
 	mu               queueMutex
-	stopping         bool // q.mu; inhibit mutations before either API listener closes.
+	stopping         atomic.Bool // Fence before waiting for a queue transaction or either listener.
+	shutdownOnce     sync.Once
+	shutdownContext  context.Context
+	shutdownCancel   context.CancelFunc
 	contactMu        sync.Mutex
 	contacts         map[string]*workerContact
 	holdClock        Clock // Optional observational clock; never used for queue decisions.
@@ -479,13 +488,19 @@ func checkpointAvailable(root string, progress func()) bool {
 // BeginShutdown fences maintenance and in-flight mutations before API shutdown.
 // Workers retry rejected reports against the replacement queue.
 func (q *Queue) BeginShutdown() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.stopping = true
+	first := !q.stopping.Swap(true)
+	q.initShutdown()
+	q.shutdownCancel()
+	if first {
+		log.Printf("event=queue_shutdown phase=fenced")
+	}
 }
 
 func (q *Queue) Close() error {
 	q.BeginShutdown()
+	if q.stopping.Load() {
+		log.Printf("event=queue_shutdown phase=storage_wait")
+	}
 	q.mu.Lock()
 	seal := q.fleetQueueSeal()
 	var err error
@@ -508,6 +523,9 @@ func (q *Queue) Close() error {
 			err = q.writeFleetQueueSeal(seal)
 		}
 		err = errors.Join(err, syscall.Flock(int(lock.Fd()), syscall.LOCK_UN), lock.Close())
+	}
+	if q.stopping.Load() {
+		log.Printf("event=queue_shutdown phase=storage_closed clean=%t", err == nil)
 	}
 	return err
 }
@@ -532,6 +550,9 @@ func (q *Queue) updateUploadRequest(ctx context.Context, fn func() error, timing
 }
 
 func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool) error {
+	if q.stopping.Load() {
+		return queueStopping()
+	}
 	available := true
 	if !q.simulation {
 		if q.checkpointProbe != nil {
@@ -560,8 +581,8 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn, &hold)
 	}()
-	if q.stopping {
-		return &HTTPError{Status: 503, Code: "queue_stopping", Message: "queue is shutting down; retry the request"}
+	if q.stopping.Load() {
+		return queueStopping()
 	}
 	if q.simulation {
 		hold.next(holdUsage)
@@ -593,7 +614,16 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 	q.modelIntervalWrites = nil
 	q.accountUsage(q.clock.Now())
 	hold.next(holdBody)
+	q.accountEfficiency(q.clock.Now())
 	err = fn()
+	// A request that loses the shutdown race retries from durable worker state.
+	// Do not publish its speculative loss/maintenance decisions after the fence.
+	if err == nil && q.stopping.Load() {
+		err = queueStopping()
+	}
+	if err == nil {
+		q.refreshEfficiency()
+	}
 	if err == nil {
 		q.observeModelIntervals()
 	}
@@ -1051,7 +1081,7 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 }
 
 func (q *Queue) maintain() {
-	if q.stopping {
+	if q.stopping.Load() {
 		return
 	}
 	q.maintainWallTimeLimits()
@@ -1178,8 +1208,15 @@ func (q *Queue) maintain() {
 func (q *Queue) Tick() error { return q.TickContext(context.Background()) }
 
 func (q *Queue) TickContext(requestContexts ...context.Context) error {
+	if q.stopping.Load() {
+		return queueStopping()
+	}
 	requestCtx := requestContext(requestContexts)
 	traffic := q.requestHealth.snapshot(q.clock.Now())
+	diagnostics, err := q.prepareEfficiencyDiagnostics(requestCtx)
+	if err != nil {
+		return err
+	}
 
 	// File-store health belongs to existing maintenance, not every control
 	// transaction. Snapshot under the lock, then perform bounded I/O outside it.
@@ -1196,12 +1233,14 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 			delay = DefaultHealthStorageDelay
 		}
 		q.applyRequestHealth(traffic)
+		q.applyEfficiencyDiagnostics(diagnostics)
 		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
 		q.maintain()
 		return nil
 	}, nil); err != nil {
 		return err
 	}
+	q.publishEfficiencyDiagnostics(diagnostics)
 	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
@@ -2086,7 +2125,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	for _, s := range q.s.ModelSlots {
 		copy := *s

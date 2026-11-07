@@ -22,7 +22,8 @@ class SupervisorTests(unittest.TestCase):
             root = Path(tmp)
             pidfile = root / 'child-pid'
             child_code = ('import os, pathlib, time; '
-                          f'pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(60)')
+                          f'p=pathlib.Path({str(pidfile)!r}); staging=p.with_suffix(".tmp"); '
+                          'staging.write_text(str(os.getpid())); staging.replace(p); time.sleep(60)')
             supervisor_code = (
                 'import importlib.util, sys; '
                 f's=importlib.util.spec_from_file_location("compat", {str(MODULE_PATH)!r}); '

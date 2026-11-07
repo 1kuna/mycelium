@@ -96,7 +96,7 @@ func TestPublishedAttemptFilesRequiresAcceptedResult(t *testing.T) {
 	confirm(false)
 }
 
-// #201: B70 kept every finished attempt's job-files folder (13 GB in four days).
+// #201: A worker kept every finished attempt's job-files folder (13 GB in four days).
 func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}

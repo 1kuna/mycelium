@@ -160,7 +160,21 @@ func TestFleetQueuePreservationCommittedHandoff(t *testing.T) {
 	}
 	releases := maps.Clone(q.s.HostReleases)
 	root, path, config := q.root, strings.TrimSuffix(q.preservationPath, ".fleet-preservation"), *q.fleetService
-	if err := q.Close(); err != nil {
+	// Close must fence/cancel requests before waiting for a transaction, then
+	// seal those committed records while still holding the process file lock.
+	q.initShutdown()
+	q.mu.Lock()
+	closed := make(chan error, 1)
+	go func() { closed <- q.Close() }()
+	select {
+	case <-q.shutdownContext.Done():
+	case <-time.After(time.Second):
+		q.mu.Unlock()
+		<-closed
+		t.Fatal("managed Close waited for the queue mutex before its shutdown fence")
+	}
+	q.mu.Unlock()
+	if err := <-closed; err != nil {
 		t.Fatal(err)
 	}
 	clock.Advance(time.Second)

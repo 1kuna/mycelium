@@ -128,8 +128,11 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 		return string(encoded), err
 	}
 	c := &q.statusCache
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	unlock, err := requestObservationLock(requestContext(contexts), &c.mu)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	for {
 		revision := c.terminalRevision.Load()
 		if c.data != "" && c.generation == revision && q.clock.Now().Before(c.expires) {
@@ -233,7 +236,10 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	// Serialize just the memory copy. Parallel read-locked captures can all
 	// consume CPU while a waiting heartbeat writer must wait for every one.
 	// Projection/encoding below remain concurrent outside the queue lock.
-	unlockRequest := requestLock(requestContext(contexts), &q.mu)
+	unlockRequest, lockErr := requestObservationLock(requestContext(contexts), &q.mu)
+	if lockErr != nil {
+		return nil, fileStoreObservation{}, lockErr
+	}
 	locked := readWallStart(q.observeRead)
 	hold := q.statusHolds.start()
 	var files fileStoreObservation
@@ -248,6 +254,12 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now())}
 	}
 	s := q.s
+	if id == "" {
+		v.efficiencyView = q.efficiencyView
+	} else {
+		// Job-only reads never return fleet diagnostics or their baselines.
+		s.EfficiencyHosts, s.EfficiencyHealth, s.StrandedDemand = nil, nil, nil
+	}
 	s.Jobs, s.Submissions = map[string]*Job{}, map[string]*submissionRecord{}
 	frozen := map[string]*Job{}
 	var selected *Job
@@ -371,6 +383,10 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 			s.Submissions[key] = &copy
 		}
 	}
+	// These diagnostic generations are replaced, never mutated in place.
+	// Their retained-fleet-sized copies do not belong under the queue mutex.
+	efficiencyHealth, strandedDemand := s.EfficiencyHealth, s.StrandedDemand
+	s.EfficiencyHealth, s.StrandedDemand = nil, nil
 	inputs := observationState{State: s, Models: q.models, Environments: q.environments, Calls: q.calls, Unreported: q.unreported}
 	if minimal {
 		inputs.Models, inputs.Environments, inputs.Calls, inputs.Unreported = ModelConfig{}, EnvironmentCatalog{}, nil, nil
@@ -405,8 +421,20 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	}
 	duration := queueHoldDuration(hold)
 	unlockRequest()
+	if efficiencyHealth != nil {
+		detached.State.EfficiencyHealth = copyObservationValue(reflect.ValueOf(efficiencyHealth)).Interface().(map[string]efficiencyBaseline)
+	}
+	if strandedDemand != nil {
+		detached.State.StrandedDemand = copyObservationValue(reflect.ValueOf(strandedDemand)).Interface().([]StrandedDemand)
+	}
+	if v.efficiencyView != nil {
+		v.efficiencyView = copyObservationValue(reflect.ValueOf(v.efficiencyView)).Interface().(*EfficiencyReport)
+	}
 	observeRead(q.observeRead, id, started, locked)
 	logQueueHold(duration, "captureObservation", nil)
+	if err == nil {
+		err = requestContext(contexts).Err()
+	}
 	if err != nil {
 		return nil, files, err
 	}
@@ -627,6 +655,9 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
+	}
 	// One detached generation is one immutable planning pass. Without this,
 	// each queued job/target diagnostic rebuilds the retained-evidence catalog.
 	v.memoryPlanning = newMemoryPlanningCache()
@@ -635,9 +666,10 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	v.observationScan.memory = v.memoryPlanning
 	out := v.projectSnapshot(true)
 	out.RequestLatencies = q.requestLatencies.snapshot()
-	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour))
+	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
 	if err == nil {
-		out.FileStore = files.status(context.Background())
+		out.FileStore = files.status(ctx)
+		err = ctx.Err()
 	}
 	out.Freshness = q.snapshotFreshness(out.Now, false)
 	if err == nil {

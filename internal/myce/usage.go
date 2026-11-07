@@ -324,16 +324,16 @@ func (q *Queue) usageSnapshot(since time.Time, requestContexts ...context.Contex
 		ProductionStarts: append([]ProductionStart(nil), q.s.ProductionStarts...),
 	}}
 	requestUnlock1()
-	return v.readUsage(q.usageReader, since)
+	return v.readUsage(q.usageReader, since, requestCtx)
 }
 
-func (q *Queue) readUsage(db *sql.DB, since time.Time) (UsageReport, error) {
+func (q *Queue) readUsage(db *sql.DB, since time.Time, contexts ...context.Context) (UsageReport, error) {
 	now := q.clock.Now()
 	out := UsageReport{Since: since, Until: now, Projects: []UsageSummary{}, Machines: []UsageSummary{}, Daily: []DailyUsage{}, Preemptions: []Preemption{}, ProductionStarts: []ProductionStart{}}
 	if since.After(now) {
 		return out, fmt.Errorf("since must precede current time")
 	}
-	rows, e := db.Query(`SELECT at,span,machine,device,project,job,model,busy,idle,pinned,memory_seconds,observed FROM usage_samples WHERE at+span>? AND at<?`, since.Unix(), now.Unix()+1)
+	rows, e := db.QueryContext(requestContext(contexts), `SELECT at,span,machine,device,project,job,model,busy,idle,pinned,memory_seconds,observed FROM usage_samples WHERE at+span>? AND at<?`, since.Unix(), now.Unix()+1)
 	if e != nil {
 		return out, e
 	}

@@ -233,9 +233,9 @@ deadline, and waiting-age ordering; competing experiment projects first share
 by weighted recent usage. An already loaded eligible model is preferred. Otherwise
 all fitting free workers are considered before making room. CUDA workers report
 live dedicated GPU memory from `nvidia-smi`, or Linux `MemAvailable` when
-CUDA memory fields are unsupported (`[N/A]` on Spark). Metal uses macOS
+CUDA memory fields are unsupported (`[N/A]` on GB10 systems). Metal uses macOS
 `vm_stat` free + inactive pages. Both are optionally capped with `--memory-gb`,
-then reduced by `--reserve-memory-gb` (start with 16 GiB on Spark). Resident models and
+then reduced by `--reserve-memory-gb` (start with 16 GiB on a large unified-memory CUDA worker). Resident models and
 running commands are
 already reflected in that reading; only not-yet-reflected loading reservations
 are subtracted by the queue. XPU/fake and explicit `--memory-mode fixed` use
@@ -625,7 +625,7 @@ Trusted custom commands must respect the no-download contract too.
 See the [placeholder server catalog](../examples/sim-judge-vllm.example.yaml):
 two generic servers for a roughly 35B chat model and an OCR model, both vLLM
 0.27.1. Use exact approved argv, not the vLLM preset. CPU FastEmbed stays outside
-the GPU queue. This is not deployable or Spark qualification. Read official model and
+the GPU queue. This is not deployable or native unified-memory CUDA qualification. Read official model and
 runtime guidance and record the effective contract before a hardware run.
 
 ## Immutable multi-file weights

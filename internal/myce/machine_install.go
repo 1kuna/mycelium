@@ -462,7 +462,7 @@ func convertWorkerInstall(ctx context.Context, c ServiceConfig, executable strin
 	if err = settledMigrationSpool(c.State, snapshot); err != nil {
 		return err
 	}
-	// A same-name single-card source (Spark) must have completed its normal
+	// A same-name single-card source must have completed its normal
 	// leave handshake. Never invent a previous-session chain for a fresh spool.
 	for _, source := range sources {
 		if source.Name != c.Name {
