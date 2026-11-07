@@ -124,6 +124,18 @@ func (q *Queue) slotPinned(s *ModelSlot) bool {
 	}
 	return false
 }
+
+// Unknown free memory withholds new placement, not protection of an already
+// healthy resident attempt. Keep this exception tied to the assigned device
+// and worker session; all policy, availability and stop checks still apply.
+func (q *Queue) residentPinMemoryUnknown(p *ModelPin, m *Machine) bool {
+	if m.MemoryError != "device_probe_unavailable" || p.Assigned != m.ID || p.AssignedDevice != targetDevice(m) {
+		return false
+	}
+	s := q.s.ModelSlots[targetSlotKey(m, p.Model)]
+	return s != nil && s.Session == m.Session && s.State == "ready" && s.HealthySince != nil && s.Error == "" && !s.RuntimeFailed && s.PriorityStop == nil && s.StopAt == nil
+}
+
 func (q *Queue) maintainPins() {
 	now := q.clock.Now()
 	for i := range q.s.Pins {
@@ -142,7 +154,7 @@ func (q *Queue) maintainPins() {
 					continue
 				}
 			}
-			if (p.Device == "" || p.Device == m.Device) && !availabilityBlocked(m) && q.projectAllows(p.Project, m.ID) && !m.Gone && !m.Leaving && m.MemoryError == "" && m.ModelURL != "" && !q.unreported[m.ID] && q.modelUsableMachine(model, m) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) {
+			if (p.Device == "" || p.Device == m.Device) && !availabilityBlocked(m) && q.projectAllows(p.Project, m.ID) && !m.Gone && !m.Leaving && (m.MemoryError == "" || q.residentPinMemoryUnknown(p, m)) && m.ModelURL != "" && !q.unreported[m.ID] && q.modelUsableMachine(model, m) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) {
 				candidates = append(candidates, m)
 			}
 		}
