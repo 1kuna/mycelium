@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -82,50 +81,55 @@ func TestResolveStoredInputBytesAndStaging(t *testing.T) {
 	}
 }
 
-// Both a busy submission slot and a slow first check can exceed the old
-// observation budget. Neither should silently erase readiness evidence.
+// Hold the real queue entry point beyond the former real-time observation
+// deadline. Advancing the injected queue clock cannot exercise context timers.
 func TestResolveStoredInputsWaitForVerification(t *testing.T) {
-	for _, contention := range []bool{true, false} {
-		t.Run(fmt.Sprint("slot-contention=", contention), func(t *testing.T) {
-			_, clock := fixture(t)
-			slot := make(chan struct{}, 1)
-			if contention {
-				slot <- struct{}{}
-			}
-			inputs := []ResolveFileInput{{State: "verifying"}, {State: "verifying"}}
-			started := make(chan struct{})
-			release := make(chan struct{})
-			done := make(chan struct{})
-			calls := 0
-			check := func(context.Context, FileRef) error {
-				calls++
-				if calls == 1 && !contention {
-					close(started)
-					<-release
-				}
-				return nil
-			}
-			go func() {
-				if contention {
-					close(started)
-				}
-				resolveFileChecks(context.Background(), inputs, []int{0, 1}, check, slot)
-				close(done)
-			}()
-			<-started
-			clock.Advance(time.Hour)
-			if contention {
-				<-slot
-			} else {
-				close(release)
-			}
-			<-done
-			for _, input := range inputs {
-				if input.State != "ready" {
-					t.Fatalf("verified input = %s", input.State)
-				}
-			}
-		})
+	q, _ := fixture(t)
+	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, false); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "input")
+	if err := os.WriteFile(source, []byte("small verified input"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := IdentifyFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := Client{URL: testServerForEnvironments(t, q), Token: "test"}
+	if err := client.UploadJobInput(context.Background(), source, ref); err != nil {
+		t.Fatal(err)
+	}
+	q.mu.Lock()
+	q.submitVerificationSlot = make(chan struct{}, 1)
+	slot := q.submitVerificationSlot
+	slot <- struct{}{}
+	q.mu.Unlock()
+	req := ResolveRequest{Spec: cpuResolveSpec()}
+	req.Spec.Files = FileManifest{"input": ref}
+	var report ResolveReport
+	done := make(chan struct{})
+	go func() {
+		q.resolveFileInputs(context.Background(), req, &report)
+		close(done)
+	}()
+	// Twice the removed budget distinguishes useful waiting from the old
+	// silent timeout; this is regression timing, not a product deadline.
+	timer := time.NewTimer(2 * localObservationBudget)
+	defer timer.Stop()
+	select {
+	case <-done:
+		<-slot
+		t.Fatalf("verification returned before contention cleared: %+v", report)
+	case <-timer.C:
+	}
+	// Taking q.mu while verification waits also proves the wait is outside it.
+	q.mu.Lock()
+	q.mu.Unlock()
+	<-slot
+	<-done
+	if len(report.FileInputs) != 1 || report.FileInputs[0].State != "ready" {
+		t.Fatalf("verified input not ready after contention: %+v", report)
 	}
 }
 
