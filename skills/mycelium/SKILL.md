@@ -128,6 +128,13 @@ key="ease-audit-$(date -u +%Y%m%dT%H%M%SZ)"
 myce run --entry ease-audit --key "$key"
 ```
 
+From the next queue release, stored `file_inputs` wait for SHA-256/size
+verification within the caller's lifetime, including time waiting for the shared
+verification slot. Completed results are retained. `verifying` means the caller
+cancelled before that check finished; repeat resolve to obtain readiness. It is
+not evidence of missing or intact bytes. `ready` remains advisory: submission
+independently verifies bytes again.
+
 Resolve uploads nothing; `needs-staging` for the source archive is expected:
 `run` stages it automatically. Fix actual input/environment/eligibility blockers
 before submitting. Save the receipt's `key` and `job_id`. After a lost reply,

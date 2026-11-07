@@ -263,7 +263,7 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 		}
 	}
 	for _, input := range report.FileInputs {
-		if input.State == "unknown" {
+		if input.State == "unknown" || input.State == "verifying" {
 			add("dependencies: "+input.Field, "blocked", "queue owner", "restore a complete read-only file-store observation, then repeat doctor")
 		}
 	}

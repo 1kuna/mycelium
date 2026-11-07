@@ -2,9 +2,11 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestResolveStoredInputBytesAndStaging(t *testing.T) {
@@ -78,4 +80,99 @@ func TestResolveStoredInputBytesAndStaging(t *testing.T) {
 	if resolveFinding(report, "files.input.txt") == nil {
 		t.Fatal("missing stored file appeared ready")
 	}
+}
+
+// Both a busy submission slot and a slow first check can exceed the old
+// observation budget. Neither should silently erase readiness evidence.
+func TestResolveStoredInputsWaitForVerification(t *testing.T) {
+	for _, contention := range []bool{true, false} {
+		t.Run(fmt.Sprint("slot-contention=", contention), func(t *testing.T) {
+			_, clock := fixture(t)
+			slot := make(chan struct{}, 1)
+			if contention {
+				slot <- struct{}{}
+			}
+			inputs := []ResolveFileInput{{State: "verifying"}, {State: "verifying"}}
+			started := make(chan struct{})
+			release := make(chan struct{})
+			done := make(chan struct{})
+			calls := 0
+			check := func(context.Context, FileRef) error {
+				calls++
+				if calls == 1 && !contention {
+					close(started)
+					<-release
+				}
+				return nil
+			}
+			go func() {
+				if contention {
+					close(started)
+				}
+				resolveFileChecks(context.Background(), inputs, []int{0, 1}, check, slot)
+				close(done)
+			}()
+			<-started
+			clock.Advance(time.Hour)
+			if contention {
+				<-slot
+			} else {
+				close(release)
+			}
+			<-done
+			for _, input := range inputs {
+				if input.State != "ready" {
+					t.Fatalf("verified input = %s", input.State)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveStoredInputsPreservePartialChecks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	slot := make(chan struct{}, 1)
+	inputs := []ResolveFileInput{{State: "verifying"}, {State: "verifying"}, {State: "verifying"}}
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	calls := 0
+	check := func(context.Context, FileRef) error {
+		calls++
+		if calls == 1 {
+			return nil
+		}
+		close(blocked)
+		<-release // model a syscall that does not obey cancellation
+		close(returned)
+		return ctx.Err()
+	}
+	done := make(chan struct{})
+	go func() {
+		resolveFileChecks(ctx, inputs, []int{0, 1, 2}, check, slot)
+		close(done)
+	}()
+	<-blocked // first result has been published, second is still in I/O
+	cancel()
+	<-done
+	if inputs[0].State != "ready" || inputs[1].State != "verifying" || inputs[2].State != "verifying" {
+		t.Fatalf("partial observations lost: %+v", inputs)
+	}
+	// Cancellation must not free the slot while the fake syscall is blocked.
+	select {
+	case slot <- struct{}{}:
+		t.Fatal("cancelled syscall lost its charged slot")
+	default:
+	}
+	pending := []ResolveFileInput{{State: "verifying"}}
+	resolveFileChecks(ctx, pending, []int{0}, check, slot)
+	if pending[0].State != "verifying" {
+		t.Fatal(pending)
+	}
+	close(release)
+	<-returned
+	// Joining via slot acquisition proves the verifier has released custody.
+	slot <- struct{}{}
+	<-slot
 }

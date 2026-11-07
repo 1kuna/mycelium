@@ -94,6 +94,12 @@ job's `output_refs` maps output names to identities; retrieve an output with:
 myce file get --size-bytes BYTE_COUNT SHA256 ./answer.json
 ```
 
+`myce spec check --resolve` verifies stored inputs read-only, outside the queue
+lock. Checks wait for the shared verification slot and follow caller cancellation,
+without a fixed hashing deadline. Completed checks remain `ready` or
+`needs-staging`; unfinished checks report `verifying`. Repeat resolve after an
+incomplete observation. Submission independently revalidates bytes and durability.
+
 ### Managed Docker files
 
 A plain `run.docker: true` batch with `files` or `outputs` requires a Linux
