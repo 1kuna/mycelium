@@ -238,7 +238,6 @@ context for the host owner: never stop their processes or services. See
 Older queues omit the new status fields; workers retain local history and use
 the existing leaving signal for a confirmed local drain until support is negotiated.
 
-
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.

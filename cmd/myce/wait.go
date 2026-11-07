@@ -234,7 +234,6 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 					}
 				}
 				j, err = batchJobs[id], batchErr
-
 			} else {
 				j, err = read(requestCtx, id)
 			}
@@ -315,7 +314,6 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				continue
 			}
 			completed[j.ID] = true
-
 			failed = failed || j.State != "succeeded"
 		}
 		if unavailable {
