@@ -21,7 +21,7 @@ var workerForeignConsumers = localForeignConsumers
 
 func localHostHealth(ctx context.Context) (HostHealthReading, error) {
 	probeguard.Check()
-	r := HostHealthReading{}
+	r := HostHealthReading{pressurePSI: runtime.GOOS == "linux"}
 	if runtime.GOOS == "linux" {
 		b, err := os.ReadFile("/proc/loadavg")
 		if err != nil {
