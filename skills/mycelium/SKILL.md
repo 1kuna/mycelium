@@ -112,7 +112,10 @@ overshoot margin with that run's peak. A different constrained run contributes
 its peak as a lower bound, without inheriting that margin. Replaceable uncertainty
 uses the candidate target's allowance and measured usable headroom, leaving launch
 slack and measured drift unused. Measured peaks, authored/member requirements,
-job-local OOM floors and release custody still bind. A smaller recovery attempt
+job-local OOM floors and release custody still bind. A newer accepted same-host
+completion can replace an older constrained class prior; it cannot erase a later
+constrained peak or a job-local OOM floor. Retained matching evidence does not
+expire merely with elapsed age. A smaller recovery attempt
 remains guarded and can fail on unseen growth; sampled Darwin RSS cannot contain
 a burst between observations. Keep the same queued job rather than resubmitting.
 

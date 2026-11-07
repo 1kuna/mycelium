@@ -38,6 +38,10 @@ func TestMemoryRecoveryTargetPairedEvidence(t *testing.T) {
 			runMemory(t, q, clock, m, s, constrainedPeak, func(r *Result) {
 				r.MemoryPeak.Constrained = true
 			})
+			// Retained matching evidence remains valid through a long idle
+			// interval; elapsed age alone cannot erase the paired lower bound.
+			clock.Advance(365 * 24 * time.Hour)
+			check(t, q, m, nil)
 			queued := submit(t, q, s)
 			candidate := q.memoryCandidate(queued, q.s.Machines[m.ID])
 			room, why := q.exploratoryMemory(queued, q.s.Machines[m.ID])
@@ -126,6 +130,8 @@ func TestMemoryRecoveryTargetAcceptedHistoryRetainsLower(t *testing.T) {
 	runMemory(t, q, clock, m, s, 8, func(r *Result) {
 		r.MemoryPeak.Constrained = true
 	})
+	clock.Advance(365 * 24 * time.Hour)
+	check(t, q, m, nil)
 	queued := submit(t, q, s)
 	physical := *q.s.Machines[m.ID]
 	physical.FreeHostMemoryGB = 6
