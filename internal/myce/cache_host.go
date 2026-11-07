@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -107,11 +108,24 @@ func cacheFootprint(paths []string) (int64, error) {
 // Two independently published copies recover a damaged publication without
 // confusing JSON truncation with an empty/released obligation.
 func writeCacheRecord(f *os.File, v any) error {
-	dir, name := filepath.Dir(f.Name()), filepath.Base(f.Name())
-	if err := saveWorkerJSON(dir, name+".previous", v); err != nil {
+	data, err := json.Marshal(v)
+	if err != nil {
 		return err
 	}
-	return saveWorkerJSON(dir, name+".json", v)
+	dir, name := filepath.Dir(f.Name()), filepath.Base(f.Name())
+	for _, suffix := range []string{".previous", ".json"} {
+		// Admission repeatedly observes inactive slots and unchanged custody.
+		// Already durable identical records need no new publication or fsync.
+		// Compare both copies independently so a damaged one is still repaired.
+		previous, err := os.ReadFile(f.Name() + suffix)
+		if err == nil && bytes.Equal(previous, data) {
+			continue
+		}
+		if err := saveWorkerJSON(dir, name+suffix, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func readCacheRecord(f *os.File, v any) error {
 	var failures []error
