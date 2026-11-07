@@ -282,11 +282,11 @@ func TestAttemptMemoryFactsRetentionGET(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Starts counts dispatched offers, including the initial prelaunch refusal.
-	if len(got.MemoryAttempts) != 32 || got.MemoryAttemptsDropped != 4 || got.Starts != launched+1 || got.Losses != 0 {
+	if len(got.MemoryAttempts) != launched || got.MemoryAttemptsDropped != 0 || got.Starts != launched+1 || got.Losses != 0 {
 		t.Fatalf("incorrect retention count or changed retry charging: rows=%d dropped=%d starts=%d losses=%d", len(got.MemoryAttempts), got.MemoryAttemptsDropped, got.Starts, got.Losses)
 	}
 	for i, facts := range got.MemoryAttempts {
-		wantAttempt := launched - 32 + i + 2
+		wantAttempt := i + 2
 		if i == 0 {
 			wantAttempt = 2 // First launched attempt, even without a reading.
 		}

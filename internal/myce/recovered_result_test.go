@@ -63,7 +63,7 @@ func TestRecoveredResultFailedAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Kind != "recovered" || r.RecoveredBy != "operator" || r.RequestedBy != p.RequestedBy || r.Source != p.Source || r.Reason != p.Reason || r.RecoveredAt != clock.Now() || r.ExpiresAt != clock.Now().Add(DefaultFileRetention) || len(r.ResultID) != 64 || len(r.ManifestSHA256) != 64 || !maps.Equal(r.Files, p.Files) {
+	if r.Kind != "recovered" || r.RecoveredBy != "operator" || r.RequestedBy != p.RequestedBy || r.Source != p.Source || r.Reason != p.Reason || r.RecoveredAt != clock.Now() || r.ExpiresAt != clock.Now().Add(testFileRetention) || len(r.ResultID) != 64 || len(r.ManifestSHA256) != 64 || !maps.Equal(r.Files, p.Files) {
 		t.Fatalf("recovery provenance: %+v", r)
 	}
 	after := cloneJob(q.s.Jobs[p.ID])
@@ -209,7 +209,7 @@ func TestRecoveredResultVerificationFence(t *testing.T) {
 func TestRecoveredResultRestartAndRetention(t *testing.T) {
 	q, clock, c, p := recoveryFixture(t)
 	// Ordinary result expiry must not prevent importing retained source bytes.
-	clock.Advance(DefaultFileRetention + time.Hour)
+	clock.Advance(testFileRetention + time.Hour)
 	if err := q.update(func() error { q.maintainFileExpiry(); return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestRecoveredResultRestartAndRetention(t *testing.T) {
 	if err = reopened.files.verify(context.Background(), p.Files["out.txt"]); err != nil {
 		t.Fatal("recovery bytes were reclaimed early", err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	if err = reopened.reclaimPublishedFiles(); err != nil {
 		t.Fatal(err)
 	}

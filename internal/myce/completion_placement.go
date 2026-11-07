@@ -2,10 +2,7 @@ package myce
 
 import (
 	"fmt"
-	"time"
 )
-
-const workCurveMaxAge = 30 * 24 * time.Hour
 
 // A forecast ranks already eligible placements. It grants no resources or slots.
 type completionEstimate struct {
@@ -63,7 +60,7 @@ func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool
 			continue
 		}
 		point, ok := q.s.WorkObservations[identityHash(key)]
-		if !ok || point.Key != *key || point.Samples <= 0 || point.Forbidden || point.StaleReason != "" || q.clock.Now().Before(point.RecordedAt) || q.clock.Now().Sub(point.RecordedAt) > workCurveMaxAge {
+		if !ok || point.Key != *key || point.Samples <= 0 || point.Forbidden || point.StaleReason != "" || q.clock.Now().Before(point.RecordedAt) {
 			continue
 		}
 		rate := point.Rate

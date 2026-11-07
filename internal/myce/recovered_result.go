@@ -135,7 +135,11 @@ func (q *Queue) recoverResult(ctx context.Context, p RecoveryRequest) (*Recovere
 			return err
 		}
 		now := q.clock.Now()
-		r := RecoveredResult{RecoveryRequest: p, ResultID: hex.EncodeToString(id[:]), Kind: "recovered", RecoveredBy: "operator", RecoveredAt: now, ExpiresAt: now.Add(q.fileRetention), ManifestSHA256: hex.EncodeToString(digest[:])}
+		expires := time.Time{}
+		if q.fileRetention > 0 {
+			expires = now.Add(q.fileRetention)
+		}
+		r := RecoveredResult{RecoveryRequest: p, ResultID: hex.EncodeToString(id[:]), Kind: "recovered", RecoveredBy: "operator", RecoveredAt: now, ExpiresAt: expires, ManifestSHA256: hex.EncodeToString(digest[:])}
 		j.RecoveredResults = append(j.RecoveredResults, r)
 		r.Files = maps.Clone(r.Files)
 		out = &r
@@ -189,7 +193,7 @@ func (a API) registerRecoveredResults(mux *requestMux) {
 		}
 		for _, result := range j.RecoveredResults {
 			if result.ResultID == r.PathValue("result") {
-				if r.URL.Query().Get("require_files") == "true" && !a.Queue.clock.Now().Before(result.ExpiresAt) {
+				if r.URL.Query().Get("require_files") == "true" && !result.ExpiresAt.IsZero() && !a.Queue.clock.Now().Before(result.ExpiresAt) {
 					respond(w, nil, resultExpired())
 					return
 				}

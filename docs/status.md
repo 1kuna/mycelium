@@ -102,8 +102,9 @@ shows full job IDs. Open the queue address in a browser for the same information
 sign in as `myce`, using the token as the password. The page is read-only and
 refreshes every five seconds. Keep tokens in private configuration, not URLs.
 
-The page and `GET /api/status` share a snapshot for up to one second. Job receipt
-polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
+The page and `GET /api/status` share a snapshot for a lease learned from local
+capture/hit costs and mutation intervals. Job receipts use the same cost-based
+policy with their own generations. Status snapshots do
 not drive start authorization, cancellation or result publication.
 Terminal job commits and their release acknowledgements invalidate the shared
 snapshot immediately. If one commits while status is projecting or waiting for
@@ -787,11 +788,9 @@ running attempts, `recent` over every retained assigned job, and
 `declared_with_evidence` for explicit figures with a learned comparison.
 These facts persist with the job
 independently of learning, including a constrained first run with no comparable
-learned point. Retention is bounded to 32 rows: the first and the most recent
-31. Optional `memory_attempts_dropped` counts evicted rows (omitted zero), so
-missing intermediate facts are visible. Attempts that never launched and have
-no peak do not create rows or increment the dropped count. The four-entry
-`attempt_history` window is independent. Old jobs cannot reconstruct missing
+learned point. Unique attempt facts are retained. Historical `memory_attempts_dropped`
+counts remain readable; they describe earlier discarded rows. Attempts that never launched and have
+no peak do not create rows or increment the dropped count. `attempt_history` also retains distinct attempt evidence. Old jobs cannot reconstruct missing
 telemetry. Launched attempts ending without a worker reading retain the
 envelope and omit the peak. Release-only kill-time acknowledgements retain
 their measured facts too.
@@ -1202,19 +1201,12 @@ Their `isolation` status explains the compatibility default and the one-line
 
 ### API request latency
 
-Authenticated status JSON includes `request_latencies`: one entry per HTTP route
-pattern with lifetime `count`, retained `samples`, and nearest-rank `p50_ms`,
-`p95_ms`, and `p99_ms` handler durations. Each route retains its latest 256
-completed requests, with a hard cap of 128 routes. Samples reset on queue restart;
-the ordinary one-second status cache also applies to this summary. These are
-server handler times, not client transport or process-budget times.
-
-The queue emits one `event=slow_request` line for each handler taking more than
-one second. It records the route pattern, response status, `duration_ms`,
-`mutex_wait_ms`, `mutex_hold_ms`, and `after_unlock_ms`. Wait and hold accumulate
-across the request's measured queue acquisitions; after-unlock measures the tail
-from the final measured unlock through response completion, including hydration
-and response writes. Work before/between acquisitions is included in total time.
+Authenticated status JSON includes `request_latencies`: finite registered route
+patterns, lifetime counts and conservative histogram percentiles. Duration-bit
+bins replace raw sample rings and route caps. Locally measured service cost and
+adjacent variation select unusual `slow_request` lines; measured logging cost
+gates further lines. No universal one-second threshold applies. Lines retain
+route/status and mutex wait/hold/after-unlock durations.
 
 Mutex attribution follows request contexts through queue-backed routes, including
 hydration recovery, file-store callbacks, and model forwarding. A
@@ -1257,13 +1249,12 @@ pages, reparented processes, or short spikes. Docker daemon children and other
 Mycelium processes outside the worker tree remain in the residual, conservatively
 reducing suggested budgets. Device-only GPU RAM is not host RAM.
 
-Storage is bounded to 673 fifteen-minute bucket slots per host. Each bucket has
-a fixed 64-bin logarithmic histogram, stored sparsely, plus exact maximum and its
-time. Percentiles weight heartbeat samples and use bin upper edges (up to 20%
-rounding, minimum positive bin 0.125 GiB), capped at the exact maximum. The
-boundary bucket is included, so a window can include up to fifteen extra minutes.
-Offline gaps have no invented samples. These are observations, not proof of a
-future peak or a complete week: inspect counts and first/last bucket times.
+Capacity and measured serialization cost determine aligned time subdivisions.
+They retain counts, byte-bit distribution summaries and exact observed maxima.
+The boundary subdivision can extend the requested window; first/last bucket and
+peak times expose that coverage. Offline gaps create no samples. Histories use
+separate durable records and expire only beyond every public reader window.
+See [adaptive retention](retention.md) for budgets and dependency protection.
 
 ### Suggesting a host allowance
 
@@ -1280,11 +1271,10 @@ history are required. The suggested GiB allowance is:
 max(0, physical RAM - seven-day external max - headroom - extra queue reserve)
 ```
 
-It rounds down to 0.25 GiB. Headroom is the greater of `--headroom-gb` (default
-4 GiB for interactive use/new workloads) and 25% of the external maximum (the
-existing guard against external growth). This deliberate reserve costs admitted
-capacity to leave room for unsampled or future external peaks. Max, rather than
-p99, preserves observed bursts. No suggested value changes the configured budget.
+There is no quarter-GiB rounding. Headroom is the greater of authored
+`--headroom-gb` (omitted: no extra authored reserve) and observed peak-to-typical
+variation. Unknown/single-sample variability cannot invent a reserve. This is a
+dry-run observation, never a guarantee against unseen future peaks.
 
 A queue already running on the host is included in the residual: its overhead
 is already subtracted once. `--queue-overhead-gb` defaults to zero and is an
@@ -1579,8 +1569,7 @@ Each dimension predicts its largest accepted complete peak plus
 `max(observed range, positive prediction error)`, rounding allocated bytes to the
 observed filesystem allocation unit. `evidence` exposes samples/minimum/peak/error;
 `margin` and `multiplier` explain the managed-byte prediction. A single complete
-4-unit sample with no error predicts exactly 4 units. Evidence expires for reuse
-after 30 days according to the queue's injected clock. `spec.disk.output_bytes`
+4-unit sample with no error predicts exactly 4 units. Evidence reuse depends on comparable identity, not elapsed age. `spec.disk.output_bytes`
 is only a cold output prior: scratch, total need and file counts remain unknown
 until measured. Output hints never seed scratch or silently become hard limits.
 
@@ -1675,8 +1664,10 @@ omit configuration and attempt evidence, so `delivered: false` alone cannot
 establish why delivery has not been acknowledged. The queue owner must verify
 the running hook configuration and sanitized delivery/commit evidence.
 Successful hook exit does not itself prove downstream thread execution.
-Restarting without a hook clears its historical configuration flag and restores
-the existing 256-event diagnostic retention window. Job completion observers
+Restarting without a hook clears its historical configuration flag. On releases
+containing #811, all unique alert and delivery history remains protected, including
+events recorded without a hook; disabling delivery never reinstates a count cap.
+Job completion observers
 and their thread-bound notifiers are independent of this queue-level channel.
 
 `health_alerts` retains diagnostic events delivered by the existing optional
@@ -1899,8 +1890,8 @@ includes #800; earlier deployed releases may still use the fixed-rate stopgap.
 
 ## Job GET request attribution
 
-The API emits `event=job_get_totals totals=[...]` at most once per minute,
-triggered by job GET traffic or refused observations. Each row has `kind` (`cli`, `python` or `unknown`),
+The API emits `event=job_get_totals totals=[...]` when cumulative traffic reaches a new binary magnitude,
+subject to measured sink cost and one in-flight summary. Each row has `kind` (`cli`, `python` or `unknown`),
 `version`, and cumulative `full` and `wait` counts since that API handler started.
 `wait` counts requests with `?view=wait`, including terminal replies that return
 full Jobs; other views count as `full`. Counts include failed job lookups.
@@ -1915,7 +1906,7 @@ Go/CLI requests identify as `myce/BUILD_VERSION`; Python uses
 `mycelium-python/PACKAGE_VERSION` (or `development` from an unpackaged source
 checkout). Older clients with no first-party identity, including stock Go/Python
 User-Agents, count as `unknown`. These are self-reported identities, not access
-controls. Storage is bounded to 64 client/version identities plus per-kind
+controls. Distinct sanitized versions share measured local diagnostic headroom plus per-kind
 `other` overflow buckets; all requests remain counted. Raw User-Agents and job
 IDs and peer addresses are never retained in these counters or summaries.
 Counting, summary encoding and logging run outside the
@@ -2289,3 +2280,10 @@ current condition without retraining that history with zeros. Job-only captures
 omit the fleet report and its baseline maps.
 Reads reuse the published generation. Sensor coverage and maintenance sampling
 limits are evidence limits, not authorization to release custody or shrink needs.
+
+## Adaptive evidence budgets (#811)
+
+`evidence_retention` is an immutable maintenance summary of queue-host capacity,
+soft budget, retained/protected bytes, reclamation and unavailable/over-budget
+state. Status does no measurement or collection. See [retention rules and the
+complete replacement inventory](retention.md).

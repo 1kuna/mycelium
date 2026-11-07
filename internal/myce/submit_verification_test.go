@@ -399,10 +399,12 @@ func TestSubmitVerificationKeyAtomicity(t *testing.T) {
 			got := submitVerificationWait(t, "key recheck", done)
 			switch outcome {
 			case "expiry":
-				submissionError(t, got.err, 410, "submission_key_expired")
+				if got.err != nil || got.job == nil || got.job.State != "cancelled" {
+					t.Fatal("aged cancellation became executable", got)
+				}
 				ack, err := q.CancelSubmission(s.Project, s.SubmissionKey)
-				if err != nil || ack.State != "unknown" || ack.Release != nil || len(q.s.Jobs) != 0 {
-					t.Fatal("expired reservation created work", ack, err)
+				if err != nil || ack.State != "cancelled" || !ack.WillNotRun || len(q.s.Jobs) != 1 {
+					t.Fatal("aged reservation lost cancellation", ack, err)
 				}
 			case "duplicate-conflict":
 				submissionError(t, got.err, 409, "submission_key_conflict")

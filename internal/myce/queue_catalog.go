@@ -27,6 +27,11 @@ func (q *Queue) encodeCatalog(key string, value any) (catalogEncoding, error) {
 		}
 		value = point
 	}
+	if ring, ok := value.(*externalMemoryRing); ok {
+		if old, exists := q.records.encodings[key]; exists && old.value == ring {
+			return old, nil
+		}
+	}
 	if old, ok := q.records.encodings[key]; ok && reflect.DeepEqual(value, old.value) {
 		return old, nil
 	}
@@ -37,7 +42,10 @@ func (q *Queue) encodeCatalog(key string, value any) (catalogEncoding, error) {
 	// Preserve in-memory timestamp representation (including monotonic data)
 	// and empty containers for comparison. A JSON round trip would make an
 	// unchanged live record compare unequal on every subsequent transaction.
-	copy := copyObservationValue(reflect.ValueOf(value)).Interface()
+	copy := value
+	if _, immutable := value.(*externalMemoryRing); !immutable {
+		copy = copyObservationValue(reflect.ValueOf(value)).Interface()
+	}
 	entry := catalogEncoding{value: copy, data: data}
 	if q.records.encodings == nil {
 		q.records.encodings = map[string]catalogEncoding{}
@@ -89,10 +97,17 @@ func (q *Queue) snapshotCatalogs() (state, error) {
 			out.StorageObservations[id] = entry.value.(StorageObservation)
 		}
 	}
+	if q.s.ExternalMemory != nil {
+		out.ExternalMemory = make(map[string]*externalMemoryRing, len(q.s.ExternalMemory))
+		for id, value := range q.s.ExternalMemory {
+			out.ExternalMemory[id] = value
+		}
+	}
 	return out, nil
 }
 
 type recordUndo struct {
+	health      []HealthAlert
 	inventories map[string]*toolInventory
 	base        []byte
 	catalogs    state

@@ -193,7 +193,11 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 	}
 	// Reload the actual persisted record rather than trusting the in-memory flag.
 	var persisted state
-	if err := json.Unmarshal(q.persisted["state"], &persisted); err != nil {
+	data, err = readQueueState(q.db, normalizedQueueMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &persisted); err != nil {
 		t.Fatal(err)
 	}
 	if len(persisted.Health.Events) != 1 || !persisted.Health.Events[0].Delivered {
@@ -296,8 +300,8 @@ func TestHealthAlertAttemptDedupOutlivesEventWindow(t *testing.T) {
 	if len(alertsOf(q, "production_attempt_lost")) != 1 {
 		t.Fatal("missing initial alert")
 	}
-	// Other incidents legitimately evict the old delivered event. Exact custody
-	// survives, so the job's alerted-attempt fact must survive as well.
+	// A burst preserves exact incident custody and must not duplicate an old
+	// attempt alert. Delivered history has no count-based eviction.
 	if err := q.update(func() error {
 		for i := 0; i < 257; i++ {
 			q.appendHealthAlert(HealthAlert{Kind: "disk_below_guard"})
@@ -306,14 +310,14 @@ func TestHealthAlertAttemptDedupOutlivesEventWindow(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(alertsOf(q, "production_attempt_lost")) != 0 {
-		t.Fatal("fixture did not evict the old event")
+	if len(alertsOf(q, "production_attempt_lost")) != 1 {
+		t.Fatal("burst evicted unique incident history")
 	}
 	c.Advance(time.Second)
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	if len(alertsOf(q, "production_attempt_lost")) != 0 || q.s.Jobs[assigned.ID].LastHealthAlertAttempt != assigned.Attempt {
+	if len(alertsOf(q, "production_attempt_lost")) != 1 || q.s.Jobs[assigned.ID].LastHealthAlertAttempt != assigned.Attempt {
 		t.Fatal("same retained attempt alerted after event pruning")
 	}
 	data, err := json.Marshal(q.s.Jobs[assigned.ID])

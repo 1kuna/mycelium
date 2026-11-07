@@ -157,8 +157,8 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 				clock.Advance(5 * 24 * time.Hour)
 				check(t, q, m, nil)
 				next := submit(t, q, s)
-				if estimate, ok := q.estimateCompletion(q.s.Jobs[next.ID], q.s.Machines[m.ID]); ok {
-					t.Errorf("expired throughput used for placement: %+v", estimate)
+				if estimate, ok := q.estimateCompletion(q.s.Jobs[next.ID], q.s.Machines[m.ID]); !ok || estimate.samples != 1 {
+					t.Errorf("unchanged throughput lost on age: %+v", estimate)
 				}
 				reply := check(t, q, m, nil)
 				if reply.Job == nil || reply.Job.ID != next.ID {
@@ -167,8 +167,8 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 				if err := q.Started(result(reply.Job, true)); err != nil {
 					t.Fatal(err)
 				}
-				if timing := q.s.Jobs[next.ID].Timing; timing == nil || timing.Key == nil || timing.PredictedSeconds != nil {
-					t.Errorf("expired throughput used for prediction: %+v", timing)
+				if timing := q.s.Jobs[next.ID].Timing; timing == nil || timing.Key == nil || timing.PredictedSeconds == nil {
+					t.Errorf("unchanged throughput lost for prediction: %+v", timing)
 				}
 				// The day-29 check memory is fresh on its own clock and seeds
 				// work that has no memory evidence of its own (#186).

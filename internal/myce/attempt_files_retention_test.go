@@ -33,7 +33,7 @@ func TestWorkerRetentionRemovesPublishedAttemptFiles(t *testing.T) {
 		}
 	}
 	// Reading saved records simulates a restart between acknowledgement and cleanup.
-	if err := workerRetention(dir, now, DefaultLogRetention); err != nil {
+	if err := workerRetention(dir, now, testLogRetention); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "job-files", "published")); !errors.Is(err, os.ErrNotExist) {
@@ -43,16 +43,12 @@ func TestWorkerRetentionRemovesPublishedAttemptFiles(t *testing.T) {
 		t.Fatal("small diagnostic record removed", err)
 	}
 	for _, at := range []time.Time{now.Add(23 * time.Hour), now.Add(24 * time.Hour)} {
-		if err := workerRetention(dir, at, DefaultLogRetention); err != nil {
+		if err := workerRetention(dir, at, testLogRetention); err != nil {
 			t.Fatal(err)
 		}
 		for _, name := range []string{"failed", "live", "pending"} {
 			_, err := os.Stat(filepath.Join(dir, "job-files", name, "1", ".venv"))
-			if name == "failed" && at.Equal(now.Add(24*time.Hour)) {
-				if !errors.Is(err, os.ErrNotExist) {
-					t.Fatal("failed scratch retained after grace", err)
-				}
-			} else if err != nil {
+			if err != nil {
 				t.Fatalf("%s removed before eligible: %v", name, err)
 			}
 		}
@@ -123,7 +119,7 @@ func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 
 	pass := func() {
 		t.Helper()
-		if err := workerRetention(dir, clock.Now(), DefaultLogRetention); err != nil {
+		if err := workerRetention(dir, clock.Now(), testLogRetention); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -135,7 +131,8 @@ func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 		return err == nil
 	}
 
-	// Unclaimed folders keep failed runs' files for diagnosis for a day.
+	// Unknown/unpublished contents have no verified replacement; age alone
+	// cannot authorize their removal.
 	pass()
 	clock.Advance(23 * time.Hour)
 	pass()
@@ -146,9 +143,9 @@ func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 	}
 	clock.Advance(time.Hour)
 	pass()
-	for _, gone := range []string{"accepted", "crashed", "live/2", "orphan"} {
-		if exists(gone) {
-			t.Fatalf("unclaimed attempt files %s retained after the grace", gone)
+	for _, kept := range []string{"accepted", "crashed", "live/2", "orphan"} {
+		if !exists(kept) {
+			t.Fatalf("unpublished attempt files %s lost on age", kept)
 		}
 	}
 	for _, kept := range []string{"live/3/.venv", "live/.inputs-1"} {
@@ -217,19 +214,14 @@ func TestAttemptFilesRetentionRetriesStuckFolderDaily(t *testing.T) {
 	if err := pruneAttemptFiles(dir, now); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(AttemptFilesGrace)
-	if err := pruneAttemptFiles(dir, now); err == nil {
-		t.Fatal("stuck removal not reported")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "job-files", "done")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("stuck folder blocked other cleanup")
-	}
-	now = now.Add(time.Minute)
-	if err := pruneAttemptFiles(dir, now); err != nil {
-		t.Fatalf("stuck folder reported again a minute later: %v", err)
-	}
-	now = now.Add(AttemptFilesGrace)
-	if err := pruneAttemptFiles(dir, now); err == nil {
-		t.Fatal("stuck folder not retried after a day")
+	for _, age := range []time.Duration{AttemptFilesGrace, 2 * AttemptFilesGrace} {
+		if err := pruneAttemptFiles(dir, now.Add(age)); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"stuck", "done"} {
+			if _, err := os.Stat(filepath.Join(dir, "job-files", name, "1")); err != nil {
+				t.Fatal("unknown data retired on age", name, err)
+			}
+		}
 	}
 }
