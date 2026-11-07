@@ -637,6 +637,11 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	if !bounded {
 		charge = max(floor, sample.hostForecast(now)+exploratoryDriftMarginGB(m))
 	}
+	if m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
+		// Adaptive guards use their physical execution ceiling, not the
+		// admission estimate. Retain measured footprint and known floors.
+		charge = max(floor, sample.footprintGB, min(charge, max(ceiling, adaptiveCeiling)))
+	}
 	charge = boundedProcessMemoryCharge(m, floor, sample.footprintGB, charge)
 	growth = max(0, charge-sample.gb)
 	return

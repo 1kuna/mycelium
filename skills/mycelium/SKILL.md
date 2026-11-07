@@ -66,6 +66,10 @@ resources, targets or isolation. Plain native commands default to unsandboxed
 under MY-25; new native extension registrations have their separate sandbox
 policy. Declare `isolation: sandboxed` when that boundary is needed.
 
+On releases with the contained-forecast correction, CPU forecast reservations
+stay within their actual hard cgroup ceiling; measured demand and probe floors
+remain protected. See [memory sizing](advanced.md#submit).
+
 Prepare directory source deliberately: ignored files are included except `.git`
 and `.mycelium/receipts`; links are refused. A Git source such as
 `source: {git: HEAD, paths: [scripts/]}` sends committed selected bytes; commit

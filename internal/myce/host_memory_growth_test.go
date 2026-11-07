@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -242,5 +243,63 @@ func TestHostMemoryProbeForecastAgesBeforeExpiry(t *testing.T) {
 	}
 	if err := localAttemptAdmission(w, []Job{j}, next, nil); err == nil {
 		t.Fatal("worker admits predictable growth beyond allowance")
+	}
+}
+
+// Replay a small contained CPU probe blocking a declared neighbor despite
+// ample live RAM: an aged burst forecast must not exceed memory.max.
+func TestHostMemoryProbeForecastCannotExceedEnforcedCeiling(t *testing.T) {
+	for _, enforced := range []bool{true, false} {
+		t.Run(fmt.Sprint(enforced), func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuMachine("worker", "host", "cpu", 16, 18.8)
+			m.HostMemoryBudgetGB = 24
+			m.Devices = []MachineDevice{}
+			if enforced {
+				m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+			}
+			machineCheck(t, q, m)
+			const ceiling = 2.6227991325787627
+			j := Job{ID: "probe", State: "running", Attempt: 1, Machine: m.ID, Session: m.Session, Spec: cpuSpec(2, ceiling), MemoryEnvelope: &JobMemoryEnvelope{HostGB: ceiling, ProbeFloorGB: minimumHostMemoryGB, Source: "exploratory first run", Basis: "exploratory", Enforcement: m.MemoryEnforcement}}
+			j.Spec.Needs.Memory = "auto"
+			j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB = 0, ceiling
+			j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+			sample := hostMemorySample{gb: .3, footprintGB: .5, growthGB: 6, rateGB: 2, growthObserved: true, at: clock.Now()}
+			clock.Advance(4 * time.Second)
+			q.s.Jobs[j.ID] = &j
+			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: {jobKey(j): sample}}
+			q.refreshHostMemory()
+			charge, growth := jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+			if enforced && (charge != ceiling || math.Abs(growth-(ceiling-.3)) > 1e-10) {
+				t.Fatalf("contained probe charged forecast above ceiling: charge=%g growth=%g ceiling=%g", charge, growth, ceiling)
+			}
+			if !enforced && charge <= ceiling {
+				t.Fatal("unenforced forecast lost overrun protection")
+			}
+			if got := hostFits(q.s.Machines[m.ID], 0, 6); got != enforced {
+				t.Fatalf("queue neighbor fits=%v, want %v (charge %g)", got, enforced, charge)
+			}
+			w := Worker{Machine: m, Clock: clock, hostMemorySamples: map[attemptKey]hostMemorySample{jobKey(j): sample}, HostMemorySource: func(context.Context) (float64, error) { return 18.8, nil }}
+			next := Job{Spec: cpuSpec(2, 6)}
+			next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB = 0, 6
+			next.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+			if err := localAttemptAdmission(w, []Job{j}, next, nil); (err == nil) != enforced {
+				t.Fatalf("strict worker neighbor admission=%v, enforced=%v", err, enforced)
+			}
+			if enforced {
+				over := sample
+				over.footprintGB = ceiling + 1
+				actual, _ := jobHostMemoryCharge(&j, &m, ceiling, over, clock.Now())
+				if actual < over.footprintGB {
+					t.Fatal("forecast bound hid measured overuse", actual)
+				}
+			}
+			// Cancellation cannot discard custody or acquire reduced probe credit.
+			j.State = "stopping"
+			stopped, _ := jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+			if stopped != ceiling {
+				t.Fatal("stopping probe lost full charge", stopped)
+			}
+		})
 	}
 }
