@@ -116,7 +116,7 @@ func TestObservationLimitCostClassPressureAndRecovery(t *testing.T) {
 				}
 				var api map[string]any
 				_ = json.Unmarshal(w.Body.Bytes(), &api)
-				if w.Code != 429 || api["code"] != "client_rate_limited" || w.Header().Get("Retry-After") == "" {
+				if w.Code != 429 || api["code"] != "client_rate_limited" || api["code_alias"] != "observation_shed_control_pressure" || w.Header().Get("Retry-After") == "" {
 					t.Fatal(path, w.Code, api, w.Header())
 				}
 			}

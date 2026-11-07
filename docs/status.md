@@ -1823,7 +1823,9 @@ request cost determines the order. Requests spanning contention cannot teach a
 healthy cost, even if pressure clears before they complete. Unknown cost cannot
 claim to be cheaper.
 Only a higher-value read crosses that frontier; equal/lower-value reads receive
-HTTP 429 `client_rate_limited` before projection work. If no observation remains
+HTTP 429 `client_rate_limited` before projection work. Supporting queues add
+`code_alias: observation_shed_control_pressure` while keeping the legacy code.
+This is fleet-wide control pressure, not a per-client quota. If no observation remains
 in flight, one request can measure recovery. As soon as live lock wait clears,
 all reads are admitted again, even if previous observations are still active.
 This is progress-based admission, not a fixed concurrency allowance.
@@ -1841,6 +1843,16 @@ and environment-reference dependencies remain exempt. Existing clients and the
 429 code remain compatible. `Retry-After` rounds the measured live wait up to a
 positive integer number of seconds, the HTTP header's granularity. It does not
 promise the queue will have recovered by then.
+
+The CLI's idempotent GET recovery already honors Retry-After with positive
+jitter (#819). Retry bounds belong to caller cancellation or an explicit owner
+deadline; no fixed retry count or fleet-tuned timeout is added. From #960,
+interruption retains the last HTTP error and prints its Retry-After interval.
+Follow the seconds-scale server signal rather than guessing minutes of backoff.
+From #959, `myce logs JOB --after SEQ` resumes strictly after a log sequence.
+An interrupted read prints the continuation command on stderr; stdout remains
+ordered raw log text. The cursor advances after each successfully written chunk,
+so resuming skips completed pages. Add `--follow` to continue following.
 
 Measurements and active-request bookkeeping are process-local. A first concurrent
 wave can arrive before pressure is measurable, and production observations remain

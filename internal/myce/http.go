@@ -546,6 +546,9 @@ func respond(w http.ResponseWriter, v any, err error) {
 				message = rejectionMessages[apiError.Code]
 			}
 			body = map[string]any{"error": message, "code": apiError.Code}
+			if apiError.Code == "client_rate_limited" {
+				body["code_alias"] = "observation_shed_control_pressure"
+			}
 			if apiError.PathDiagnostic != nil {
 				body["path_diagnostic"] = apiError.PathDiagnostic
 			}
@@ -612,6 +615,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	in, resourceFields := resourceWireInput(in, supported)
 	clock := c.clock()
 	pace := ClientPace{}
+	var last error
 	for {
 		started := clock.Now()
 		err := c.callOnce(ctx, method, path, in, out)
@@ -627,11 +631,15 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		}
 		safe := method == "GET" || method == "HEAD"
 		if c.singleAttempt || !safe || !errors.As(err, &api) || (api.Status != 429 && api.Status != 503) {
+			if last != nil && ctx.Err() != nil {
+				return &clientRetryStopped{last, ctx.Err()}
+			}
 			return err
 		}
+		last = err
 		pace.Observe(clock.Now().Sub(started), false)
-		if err := c.pause(ctx, pace.Delay(clock.Now(), time.Time{}, err, c.Jitter)); err != nil {
-			return err
+		if stopped := c.pause(ctx, pace.Delay(clock.Now(), time.Time{}, err, c.Jitter)); stopped != nil {
+			return &clientRetryStopped{err, stopped}
 		}
 	}
 }
@@ -712,13 +720,17 @@ type HTTPError struct {
 }
 
 func (e *HTTPError) Error() string {
+	interval := ""
+	if e.RetryAfter > 0 {
+		interval = fmt.Sprintf("; retry after %s (Retry-After)", e.RetryAfter)
+	}
 	if e.Code == "job_failed" || e.Code == "job_cancelled" {
 		return e.Code + ": " + e.Message
 	}
 	if e.Code != "" {
-		return fmt.Sprintf("queue: HTTP %d: %s: %s", e.Status, e.Code, e.Message)
+		return fmt.Sprintf("queue: HTTP %d: %s: %s", e.Status, e.Code, e.Message) + interval
 	}
-	return fmt.Sprintf("queue: HTTP %d: %s", e.Status, e.Message)
+	return fmt.Sprintf("queue: HTTP %d: %s", e.Status, e.Message) + interval
 }
 func stale(err error) bool {
 	var e *HTTPError
