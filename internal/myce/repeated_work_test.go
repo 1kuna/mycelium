@@ -121,9 +121,22 @@ func TestRepeatedWorkEvidenceFencesAndPersistence(t *testing.T) {
 	if e, ok := reopened.estimateCompletion(base, reopened.s.Machines[m.ID]); !ok || e.samples != 1 || e.service != 2 {
 		t.Fatal("speed did not survive restart", e, ok)
 	}
-	clock.Advance(workCurveMaxAge + time.Second)
+	clock.Advance(365 * 24 * time.Hour)
+	check(t, reopened, m, nil)
+	if e, ok := reopened.estimateCompletion(base, reopened.s.Machines[m.ID]); !ok || e.service != 2 {
+		t.Fatal("elapsed time discarded retained speed", e, ok)
+	}
+	if err := reopened.update(func() error {
+		id := identityHash(reopened.s.Jobs[first.ID].Timing.RepeatedKey)
+		point := reopened.s.WorkObservations[id]
+		point.StaleReason = "runtime identity changed"
+		reopened.putWorkObservation(id, point)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := reopened.estimateCompletion(base, reopened.s.Machines[m.ID]); ok {
-		t.Fatal("expired evidence reused")
+		t.Fatal("invalidated evidence reused")
 	}
 }
 
