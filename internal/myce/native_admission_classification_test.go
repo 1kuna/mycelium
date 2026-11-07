@@ -102,3 +102,20 @@ func TestNativeAdmissionIndependentFailureRequiresExec(t *testing.T) {
 		}
 	}
 }
+
+// Wait has recorded the exit while its publication is blocked behind p.mu.
+// That observation must participate even when m.Exit and done still lag it.
+func TestNativeAdmissionPendingExitObservation(t *testing.T) {
+	for _, released := range []bool{false, true} {
+		exit := &memberExit{Status: 125}
+		m := &nativeMember{Name: "helper", execReleased: released, done: make(chan struct{}), exitObservation: &nativeExitObservation{exit: exit}}
+		g := &nativeGroup{p: &process{}, members: []*nativeMember{m}}
+		g.p.mu.Lock()
+		independent := g.independentMemberFailureLocked()
+		facts := g.outcomeLocked(errWorkerMemory, true)
+		g.p.mu.Unlock()
+		if independent != released || m.Exit != exit || facts.Exit != exit {
+			t.Fatalf("pending exit not in consistent snapshot: independent=%v released=%v exit=%+v facts=%+v", independent, released, m.Exit, facts)
+		}
+	}
+}

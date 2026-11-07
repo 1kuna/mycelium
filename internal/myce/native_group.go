@@ -823,6 +823,19 @@ func (g *nativeGroup) independentMemberFailure() bool {
 // Observe the same recorded exit snapshot as outcomeLocked. A waiter publishes
 // Exit before closing done; that channel is cleanup completion, not outcome proof.
 func (g *nativeGroup) independentMemberFailureLocked() bool {
+	// Control and persistence can hold p.mu after Wait observes an exit. Import
+	// the existing observation arbiter before deriving either outcome decision,
+	// using the same p.mu -> observation.mu order as signalLockedUsing.
+	for _, m := range g.members {
+		if m.exitObservation == nil {
+			continue
+		}
+		m.exitObservation.mu.Lock()
+		if m.exitObservation.exit != nil {
+			m.Exit = m.exitObservation.exit
+		}
+		m.exitObservation.mu.Unlock()
+	}
 	for _, m := range g.members {
 		if m.Name == "main" || !m.execReleased || m.Exit == nil {
 			continue
