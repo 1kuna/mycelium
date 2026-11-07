@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// Synthetic old-release observations replay custody/hysteresis incidents.
+const sharedWakeHighMS = 20.0
+const sharedWakeLowMS = 0.0
+const sharedPSIHigh = 1.0
+const sharedPSILow = 0.0
+
 func sharedRunning(t *testing.T, resumable bool) (*Queue, *fakeClock, Machine, *Job) {
 	t.Helper()
 	q, clock := fixture(t)
@@ -80,6 +86,20 @@ func TestSharedHostPressureYieldHysteresisAndExactRelease(t *testing.T) {
 			p.MemoryPSI = sharedPSILow
 			p.WakeDelayMS = sharedWakeLowMS
 			r = check(t, q, m, nil)
+			if sensor == "owner latency" {
+				// The first latency interruption now requires affirmative quiet
+				// observations covering this attempt's measured interference span.
+				if r.Job != nil {
+					t.Fatal("latency cooldown skipped")
+				}
+				for i := 0; i < 16; i++ {
+					clock.Advance(time.Second)
+					r = check(t, q, m, nil)
+					if r.Job != nil {
+						break
+					}
+				}
+			}
 			if r.Job == nil || r.Job.ID != run.ID || r.Job.Attempt <= run.Attempt {
 				t.Fatal("fresh recovery did not requeue same job", r)
 			}
@@ -129,11 +149,11 @@ func TestSharedHostPressureUnknownAndStale(t *testing.T) {
 func TestSharedHostPressureFailureAndCancellationPrecedence(t *testing.T) {
 	for _, ending := range []string{"independent failure", "cancellation", "completed before signal"} {
 		t.Run(ending, func(t *testing.T) {
-			q, _, m, run := sharedRunning(t, false)
+			q, _, m, run := sharedRunning(t, true)
 			m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 2}
 			r := check(t, q, m, run)
-			if !r.Kill || r.GraceSeconds != 0 {
-				t.Fatal("nonresumable work got checkpoint delay")
+			if !r.Stop || r.Kill || r.GraceSeconds <= 0 {
+				t.Fatal("resumable work did not receive checkpoint grace")
 			}
 			out := result(run, false)
 			want := "failed"

@@ -1856,6 +1856,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "cpu_observation": {
+          "$ref": "#/$defs/SharedCPUObservation",
+          "x-contract": "diagnostic"
+        },
         "deadline_guidance": {
           "$ref": "#/$defs/DeadlineGuidance",
           "x-contract": "diagnostic"
@@ -4033,8 +4037,50 @@
       ],
       "type": "object"
     },
+    "SharedCPUObservation": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "peak_cores": {
+          "type": "number"
+        },
+        "session": {
+          "type": "string"
+        },
+        "usage_seconds": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "attempt",
+        "machine",
+        "session",
+        "elapsed_seconds",
+        "usage_seconds",
+        "peak_cores"
+      ],
+      "type": "object"
+    },
     "SharedHostBackoff": {
       "properties": {
+        "last_observation": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "quiet_since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "recovery_seconds": {
+          "type": "number"
+        },
         "stops": {
           "items": {
             "format": "date-time",

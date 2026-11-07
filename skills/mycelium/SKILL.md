@@ -278,7 +278,8 @@ no agent polling or drain/resume loop is needed. Foreign CPU/RSS leaders are
 context for the host owner: never stop their processes or services. See
 [host-health fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#automatic-host-health-834-next-release).
 Older queues omit the new status fields; workers retain local history and use
-the existing leaving signal for a confirmed local drain until support is negotiated.
+reversible availability withholding for unknown health or a confirmed local drain
+until support is negotiated.
 From the checkpoint-probe correction, checkpoint health uses the existing tiny
 exclusive create/close/remove check instead of enumerating the checkpoint root.
 This removes unnecessary directory work; genuinely slow checkpoint metadata
@@ -311,3 +312,26 @@ their supported request shape while local collection continues.
 Installed/rollback images, active state, receipts and unknown data are retained;
 foreign services/processes and other projects' shared caches are owner context
 only. See [worker cleanup](https://github.com/1kuna/mycelium/blob/main/docs/status.md#worker-cleanup-834-next-release).
+
+## Adaptive host observations (next release)
+
+On negotiated `host-probe-v1` workers, owner/pressure status includes measured
+probe period, cost and frozen validity. Read age against that observation's
+validity; a successful check-in cannot renew a failed probe. Owner-latency holds
+now require fresh healthy evidence spanning the attempt's measured interference
+interval, rather than a fixed retry delay. Other eligible hosts remain available.
+Older workers retain legacy fields and age rules. See
+[host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).
+
+## Shared owner pressure (next release)
+
+Shared hosts charge measured CPU overuse from per-attempt telemetry, retaining
+the logical job's learned need across checkpoint/requeue. `resources` on job
+status shows the observed CPU need. Linux memory/CPU PSI, macOS memory warnings,
+owner scheduling latency and confirmed host-relative swap-growth pressure
+withhold new work. Resumable lower-tier jobs checkpoint and requeue without an
+infrastructure retry; wait on the same job and submission key. Production tier
+and non-resumable work continue, with the job reason naming pressure and retained
+work. No owner-pressure kill policy is implied. macOS containment remains
+cooperative. Read one `myce status JOB_ID` or the normal wait result; no agent
+pressure polling or manual resume is required.

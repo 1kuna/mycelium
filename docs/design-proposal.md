@@ -1325,7 +1325,7 @@ load generation. Prepared exact variants and native baselines must qualify first
 
 Reuse host-wide benchmark preparation custody, command supervision and cleanup.
 Busy/recovering hosts cannot start; components run serially. Daily-use hosts need
-fresh five-minute idle, external-power and safe-heat evidence. Owner return or
+fresh locally measured idle recovery, external-power and safe-heat evidence. Owner return or
 unsafe/unknown signals cancels the command, retaining custody until cleanup.
 A sweep has a 60-second Clock budget, and each command a ten-second bound.
 Stop on non-increasing aggregate throughput, memory exhaustion or failure.

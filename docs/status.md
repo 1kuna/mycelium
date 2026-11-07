@@ -72,8 +72,8 @@ History serialization/fsync runs outside the mutex used by heartbeat snapshots.
 
 Workers send the additive health fields only after the queue advertises
 `host_hygiene_protocol: host-hygiene-v1`. A strict older queue receives the
-legacy shape; local evidence still persists and a confirmed local drain uses
-the existing leaving signal. A queue downgrade retries the legacy shape once
+legacy shape; local evidence still persists and unknown health or a confirmed
+local drain uses reversible availability withholding. A queue downgrade retries the legacy shape once
 after a strict-decoder rejection, preserving session and attempt custody.
 
 Drains withhold new command, model and preparation launches without changing
@@ -1293,16 +1293,18 @@ foreground wake lateness, local age and queue receipt time),
 attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
 observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
-Pressure sampling continues every five seconds independently of HTTP check-ins.
-The queue requires a worker-reported sample age below 15 seconds. Between
-reports, it discounts time covered by the existing matching-session check-in
-contact, including a request delayed in the queue for at most 30 seconds.
-One observation still expires at 45 seconds of total age, even if further
-requests arrive. A worker that stops reporting loses this credit; a stuck probe
-keeps aging and a completed probe failure reports no sample.
+On negotiated `host-probe-v2` workers, `shared_host_pressure.probe` reports
+measured period/cost and frozen validity in seconds. Local sample age must remain
+below that validity, including time waiting behind queue transactions.
+Matching-session contact cannot renew a negotiated observation. `availability.probe` and
+`availability.age_seconds` similarly preserve owner observation age across clock
+skew. `host_health.probe` applies the same frozen validity to health evidence;
+`host_probe_unknown` withholds admission when it expires or the source fails.
+Older workers retain legacy age rules until upgraded. See
+[adaptive host observations](host-probes.md).
 
 Host maintenance `healthy`/`state` and fleet `host_states` use the same pressure
-and bounded contact facts. Normal owner-pressure yield remains temporary
+and freshness facts (legacy workers retain bounded contact credit). Normal owner-pressure yield remains temporary
 occupancy, without an infrastructure-failure alert; missing/stale evidence is
 unhealthy even with a yield latch set. Detached fleet snapshots freeze contact at snapshot
 `now`; the ordinary one-second status cache can still show an older observation
@@ -1588,11 +1590,12 @@ still requires an explicit resume. Independently configured network roots are
 remembered after being observed mounted; installed NAS is checked even at cold
 startup. Root roles, never local paths or mount source addresses, cross the API.
 
-Job `shared_host_backoff` persists per-host latency-stop timestamps and cooldown
-expiry. Three interrupted owner-scheduling-latency attempts within ten minutes
-exclude that job from that host for fifteen minutes, using the queue clock. Other
-eligible hosts can admit it immediately. Status names the latency backoff and its
-expiry; ordinary pressure recovery alone does not erase the cooldown.
+Job `shared_host_backoff` persists each host's measured `recovery_seconds`,
+`quiet_since` and `last_observation`. The first owner-latency interruption holds
+that job on that host until distinct fresh healthy observations span its measured
+time to interference. Gaps/failures restart recovery; elapsed time alone cannot
+clear it. Other eligible hosts remain available. Old timestamp/expiry records
+remain readable for compatibility. See [owner recovery](host-probes.md).
 
 ## Incident health alerts
 
@@ -2085,3 +2088,21 @@ To try it without a cluster, run `./myce dev --workers 5`, then
 leaving, and a production job. `scripts/view-smoke.sh` loads the page in
 headless Chrome or Chromium against `myce dev` and checks for live frames and
 no script errors.
+### Shared owner yield and measured CPU (#389, next release)
+
+`cpu_in_use_cores` includes shared-host measured overuse, rounded up and never
+below declared cores. Job `cpu_observation` retains the exact sample identity,
+previous elapsed/usage counters and logical-job `peak_cores` lower bound. The
+first reading establishes a counter origin; subsequent adjacent readings raise
+the learned rate. The CPU `resources` entry exposes this learned need. It remains
+valid through checkpoint/requeue, including missing or quieter later telemetry;
+it does not predict a different submission.
+
+`shared_host_pressure` additionally reports `cpu_known` and `cpu_psi` on Linux.
+Memory/CPU PSI and owner latency use this host's learned healthy bands; macOS
+memory warnings and existing host-relative swap-growth/latency health also
+withhold admission. Resumable lower-tier work receives `shared_host_pressure`
+checkpoint/requeue provenance. Production tier and non-resumable running jobs
+report a reason naming the pressure and retained work. Owner pressure alone
+does not authorize stopping those jobs. Native containment and stress
+qualification remain separate from these diagnostics and synthetic tests.
