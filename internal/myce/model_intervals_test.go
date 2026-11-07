@@ -127,8 +127,8 @@ func TestModelIntervalsTransientLoadUnloadDurablePagination(t *testing.T) {
 	if err := client.Call(t.Context(), "GET", "/api/models/intervals?limit=1", nil, &apiPage); err != nil || len(apiPage.Entries) != 1 || !apiPage.HasMore {
 		t.Fatal(apiPage, err)
 	}
-	if err := client.Call(t.Context(), "GET", "/api/models/intervals?limit=257", nil, nil); err == nil {
-		t.Fatal("unbounded page accepted")
+	if err := client.Call(t.Context(), "GET", "/api/models/intervals?limit=-1", nil, nil); err == nil {
+		t.Fatal("invalid page accepted")
 	}
 }
 

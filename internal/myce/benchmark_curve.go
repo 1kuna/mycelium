@@ -267,9 +267,9 @@ func measureCurveReference(ctx context.Context, c BenchmarkConfig, e Extension, 
 		if err != nil {
 			return CurveMeasurement{}, err
 		}
-		data, err = io.ReadAll(io.LimitReader(output, extensionMaxBytes+1))
+		data, err = io.ReadAll(io.LimitReader(output, int64(extensionByteLimit())+1))
 		output.Close()
-		if err != nil || len(data) > extensionMaxBytes {
+		if err != nil || len(data) > extensionByteLimit() {
 			return CurveMeasurement{}, errors.New("reference output unavailable")
 		}
 		if err = compareExtensionOutput(data, e.Files[baseline.Output], baseline); err != nil {

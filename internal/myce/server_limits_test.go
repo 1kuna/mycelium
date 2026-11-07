@@ -270,7 +270,7 @@ func TestUploadSpoolBudgetHTTPAdmissionAndCleanup(t *testing.T) {
 	for _, length := range []int64{1, -1} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, request(strings.NewReader("x"), length))
-		if w.Code != 507 || !strings.Contains(w.Body.String(), "upload spool byte budget") {
+		if w.Code != 507 || !strings.Contains(w.Body.String(), "fitting bytes=0") {
 			t.Fatalf("full spool: %d %s", w.Code, w.Body.String())
 		}
 	}
@@ -294,13 +294,11 @@ func TestUploadSpoolBudgetHTTPAdmissionAndCleanup(t *testing.T) {
 		}
 	}
 	assertEmpty()
-	for _, length := range []int64{9, -1, maxGenericRequestBytes + 1} {
+	for _, length := range []int64{9, -1, 9 << 30} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, request(strings.NewReader("123456789"), length))
 		want := 507
-		if length > maxGenericRequestBytes {
-			want = 413
-		}
+
 		if w.Code != want {
 			t.Fatalf("oversize length %d: %d %s", length, w.Code, w.Body.String())
 		}
@@ -363,7 +361,7 @@ func TestModelLimitRejectsNegative(t *testing.T) {
 
 func TestUploadSpoolRejectsInvalidConfiguration(t *testing.T) {
 	q, _, _ := modelFixture(t)
-	for _, budget := range []int64{0, -1} {
+	for _, budget := range []int64{0, -2} {
 		if err := q.ConfigureUploadSpool(t.TempDir(), budget); err == nil {
 			t.Fatal("nonpositive upload budget accepted")
 		}

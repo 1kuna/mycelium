@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"reflect"
 	"slices"
 	"time"
 )
@@ -78,9 +79,31 @@ func ledgerAttempt(j *Job, kind, reason string) JobLedgerEntry {
 // outside it. highWater == -1 begins a snapshot (including an empty snapshot).
 func (q *Queue) JobLedger(id string, after, highWater, limit int, requestContexts ...context.Context) (JobLedgerPage, error) {
 	requestCtx := requestContext(requestContexts)
+	requestCtx, finishBudget, budgetErr := q.requestBudgets.projectionContext(requestCtx)
+	if budgetErr != nil {
+		return JobLedgerPage{}, budgetErr
+	}
+	defer finishBudget()
+	if limit < 0 {
+		return JobLedgerPage{}, &HTTPError{Status: 400, Code: "job_ledger_cursor_invalid", Message: "limit must be nonnegative"}
+	}
+	capacity, err := q.requestBudgets.pageLimit(requestCtx, reflect.TypeFor[JobLedgerEntry]())
+	if err != nil {
+		return JobLedgerPage{}, err
+	}
+	if limit == 0 {
+		limit = capacity
+	} else {
+		limit = min(limit, capacity)
+	}
 
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
-	defer requestUnlock1()
+	locked := true
+	defer func() {
+		if locked {
+			requestUnlock1()
+		}
+	}()
 	j := q.s.Jobs[id]
 	if j == nil && q.records != nil {
 		if r := q.s.Submissions[q.records.bindings[id]]; r != nil {
@@ -95,12 +118,29 @@ func (q *Queue) JobLedger(id string, after, highWater, limit int, requestContext
 		highWater = n
 	}
 
-	if after < 0 || highWater < 0 || highWater > n || after > highWater || limit < 1 || limit > 256 {
-		return JobLedgerPage{}, &HTTPError{Status: 400, Code: "job_ledger_cursor_invalid", Message: "require 0 <= after <= high_water and limit 1..256"}
+	if after < 0 || highWater < 0 || highWater > n || after > highWater || limit < 1 {
+		return JobLedgerPage{}, &HTTPError{Status: 400, Code: "job_ledger_cursor_invalid", Message: "require 0 <= after <= high_water and positive limit fitting queue capacity"}
 	}
-	end := min(after+limit, highWater)
-	entries := make([]JobLedgerEntry, end-after)
-	copy(entries, j.LedgerEntries[after:end])
+	end := after + min(limit, highWater-after)
+	source := j.LedgerEntries[after:end]
+	complete := j.Ledger != nil && j.Ledger.Complete
+	requestUnlock1()
+	locked = false
+	// Entries are immutable. Size pointed-to placement data and strings outside
+	// the queue lock before allocating the page, preserving the next cursor.
+	count := 0
+	for i := range source {
+		if err := chargeProjectionValue(requestCtx, source[i]); err != nil {
+			if count == 0 {
+				return JobLedgerPage{}, err
+			}
+			break
+		}
+		count++
+	}
+	end = after + count
+	entries := make([]JobLedgerEntry, count)
+	copy(entries, source[:count])
 	// Timestamp pointers belong to immutable entries and are copied for callers.
 	for i := range entries {
 		if entries[i].WorkLearning != nil {
@@ -122,7 +162,7 @@ func (q *Queue) JobLedger(id string, after, highWater, limit int, requestContext
 			entries[i].CustodyEnd = &at
 		}
 	}
-	return JobLedgerPage{JobID: id, Complete: j.Ledger != nil && j.Ledger.Complete, HighWater: highWater, Next: end, HasMore: end < highWater, Entries: entries}, nil
+	return JobLedgerPage{JobID: id, Complete: complete, HighWater: highWater, Next: end, HasMore: end < highWater, Entries: entries}, nil
 }
 
 func (c Client) JobLedger(ctx context.Context, id string, after, highWater, limit int) (JobLedgerPage, error) {
