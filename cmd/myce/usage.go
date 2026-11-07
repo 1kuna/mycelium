@@ -14,14 +14,14 @@ import (
 func usageDuration(s string) (time.Duration, error) {
 	if strings.HasSuffix(s, "d") {
 		days, e := strconv.ParseFloat(strings.TrimSuffix(s, "d"), 64)
-		if e != nil || math.IsNaN(days) || math.IsInf(days, 0) || days <= 0 || days > 90 {
-			return 0, fmt.Errorf("since must be between 0 and 90 days")
+		if e != nil || math.IsNaN(days) || math.IsInf(days, 0) || days <= 0 || days > float64(math.MaxInt64)/float64(24*time.Hour) {
+			return 0, fmt.Errorf("since must be a positive representable duration")
 		}
 		return time.Duration(days * float64(24*time.Hour)), nil
 	}
 	d, e := time.ParseDuration(s)
-	if e != nil || d <= 0 || d > 90*24*time.Hour {
-		return 0, fmt.Errorf("since must be a positive duration up to 90d")
+	if e != nil || d <= 0 {
+		return 0, fmt.Errorf("since must be a positive duration")
 	}
 	return d, nil
 }

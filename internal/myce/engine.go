@@ -175,7 +175,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	if e != nil {
 		return e
 	}
-	output := &modelReadinessOutput{output: l.log, progress: progress}
+	output := &modelReadinessOutput{output: l.log, progress: progress, line: diagnosticLine{tail: diagnosticTail{dir: l.Dir}}}
 	if m.Logs == "none" {
 		// Preserve null OS descriptors. OS activity still supplies progress;
 		// stdout progress records require captured output.
@@ -214,7 +214,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		l.custody.Cgroup = l.memoryAttempt.path
 	}
 	l.exited = make(chan struct{})
-	go func() { l.waitErr = l.cmd.Wait(); close(l.exited) }()
+	go func() { l.waitErr = l.cmd.Wait(); output.close(); close(l.exited) }()
 	if e = l.memoryAttempt.attach(l.cmd.Process.Pid); e != nil {
 		_ = l.Unload()
 		return fmt.Errorf("memory ceiling attach: %w", e)
