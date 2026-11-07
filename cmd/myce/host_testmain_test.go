@@ -91,6 +91,7 @@ func cliTestMain(m *testing.M) int {
 func installSyntheticHost() {
 	myce.SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
 	myce.SetWorkerProbeDefaults(syntheticWorkerProbes())
+	myce.SetQueueHostMemorySource(syntheticWorkerProbes().HostMemory)
 }
 
 func syntheticWorkerProbes() myce.WorkerProbeDefaults {

@@ -38,6 +38,7 @@ func init() {
 	workerHostMemorySource = func(reserve float64) (MemorySource, error) {
 		return func(context.Context) (float64, error) { return max(0, 128-reserve), nil }, nil
 	}
+	queueHostMemorySource = workerHostMemorySource
 	workerOwnerSignals = func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} }
 	workerProcessMemory = nil
 	workerMemoryRSS = nil

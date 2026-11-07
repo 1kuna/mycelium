@@ -255,7 +255,7 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 	probe := w.processMemory
 	var mu sync.Mutex
 	var peak *AttemptMemoryPeak
-	var growth memoryGrowth
+	var growth processMemoryGrowth
 	readPressure := func() (*gpuHostState, error) {
 		if probe.Pressure == nil {
 			return nil, errAttemptMemoryUnsupported
@@ -289,9 +289,11 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 		}
 		var bytes uint64
 		var members int
+		var sampleAt time.Time
 		if probe.OwnedResident != nil && attempt != nil {
 			roots := attempt.rssRoots()
 			bytes, members, err = probe.OwnedResident(roots)
+			sampleAt = clock.Now()
 			if enforce {
 				if evidence := guard.observeMemory(clock.Now(), roots, bytes, members, err, host); evidence != nil {
 					guard.exceeded = attempt.stopRSS(clock.Now(), roots, evidence)
@@ -299,18 +301,19 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 			}
 		} else if probe.Resident != nil {
 			bytes, members, err = probe.Resident(ids)
+			sampleAt = clock.Now()
 		}
 		if err != nil || members == 0 {
-			growth = memoryGrowth{}
+			growth = processMemoryGrowth{}
 			if attempt != nil {
 				attempt.rssMemory.Store(nil)
 			}
 			return
 		}
 		gb := float64(bytes) / (1 << 30)
-		margin := growth.observe(clock.Now(), gb)
+		margin := growth.observe(sampleAt, gb)
 		if attempt != nil {
-			attempt.rssMemory.Store(&processResidentSample{gb: gb, growth: margin, rate: growth.rate, at: clock.Now(), observed: growth.horizon > 0})
+			attempt.rssMemory.Store(&processResidentSample{gb: gb, growth: margin, rate: growth.rate, at: sampleAt, observed: growth.horizon > 0})
 		}
 		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource, GrowthGB: &margin}
 		mu.Lock()
