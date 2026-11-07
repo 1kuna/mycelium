@@ -697,6 +697,23 @@
       ],
       "type": "object"
     },
+    "CommandDiscovery": {
+      "properties": {
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "targets"
+      ],
+      "type": "object"
+    },
     "Copy": {
       "properties": {
         "allocated_devices": {
@@ -1823,6 +1840,10 @@
         },
         "cleanup_cause": {
           "$ref": "#/$defs/RuntimeCause",
+          "x-contract": "diagnostic"
+        },
+        "command_discovery": {
+          "$ref": "#/$defs/CommandDiscovery",
           "x-contract": "diagnostic"
         },
         "copies": {

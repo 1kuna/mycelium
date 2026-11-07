@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -146,6 +147,15 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			return nil
 		}
 		m := q.s.Machines[l.Machine]
+		if j := q.s.Jobs[p.Demand]; p.Kind == "environment" && j != nil && j.CommandDiscovery != nil {
+			target := allocationMachine(m, []string{p.Device})
+			// A delayed offer must retain live demand for this exact frozen
+			// target/recipe, even before another heartbeat withdraws it.
+			if j.State != "queued" || cancelled(j) || j.Pause != nil || !q.placementAllowed(j, target) || !commandDiscoveryAllows(j, target) || !slices.ContainsFunc(commandEnvironmentRecipes(j, target), func(r EnvironmentRecipe) bool { return r.Key == p.Key }) {
+				reject("discovery_demand")
+				return nil
+			}
+		}
 		if !p.Started {
 			if j := q.s.Jobs[p.Demand]; j != nil && q.productionAdmissionReason(j, allocationMachine(m, []string{p.Device})) != "" {
 				reject("production_admission")

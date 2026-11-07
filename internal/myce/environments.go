@@ -253,6 +253,9 @@ func environmentPlatformsMatch(needs ResourceNeeds, recipes map[string]Environme
 	return false
 }
 func environmentKey(j *Job, m *Machine) string {
+	if j.CommandDiscovery != nil {
+		return commandPreparationRecipe(j, m).Key
+	}
 	if j.Spec.extensionJob() {
 		if e := qualifiedExtension(j, m); e != nil {
 			if r, ok := extensionRecipe(*e, m); ok {
@@ -292,6 +295,17 @@ func extensionEnvironmentRecipes(j *Job, m *Machine) []EnvironmentRecipe {
 	return out
 }
 func environmentReady(j *Job, m *Machine) bool {
+	if j.CommandDiscovery != nil {
+		if !commandDiscoveryAllows(j, m) {
+			return false
+		}
+		for _, r := range commandEnvironmentRecipes(j, m) {
+			if !slices.Contains(m.Environments, r.Key) {
+				return false
+			}
+		}
+		return len(commandEnvironmentRecipes(j, m)) > 0
+	}
 	// Checks can run before qualification, but never before worker preparation.
 	// A no-environment/no-setup variant still needs its installed frozen files.
 	if e := qualifiedExtension(j, m); e != nil && j.Spec.ExtensionCheck != nil {
@@ -315,6 +329,9 @@ func environmentReady(j *Job, m *Machine) bool {
 	return k == "" && j.Spec.Environment.Key() == "" || k != "" && slices.Contains(m.Environments, k)
 }
 func environmentCanRun(j *Job, m *Machine) bool {
+	if j.CommandDiscovery != nil {
+		return commandDiscoveryAllows(j, m) && (environmentReady(j, m) || m.EnvironmentBuilder)
+	}
 	if j.Spec.Environment.Key() == "" && environmentKey(j, m) == "" {
 		return true
 	}
@@ -395,6 +412,14 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 				return q.extensionPreparationOffer(*e, m)
 			}
 			r := j.EnvironmentRecipes[m.GPU]
+			if j.CommandDiscovery != nil {
+				for _, recipe := range commandEnvironmentRecipes(j, m) {
+					if recipe.Key == l.Key {
+						r = recipe
+						break
+					}
+				}
+			}
 			if r.Key == l.Key {
 				copy := l
 				r.Launch = &copy
@@ -423,6 +448,9 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		}
 	}
 	r := j.EnvironmentRecipes[m.GPU]
+	if j.CommandDiscovery != nil {
+		r = commandPreparationRecipe(j, m)
+	}
 	l := q.issuePreparation(m, "environment", r.Key)
 	r.Launch = &l
 	return []EnvironmentRecipe{r}
@@ -1332,7 +1360,9 @@ func (q *Queue) reconcileEnvironments(m *Machine) error {
 			continue
 		}
 		for _, j := range q.liveJobs() {
-			if j.State != "queued" {
+			// Discovery failures are cached by exact target/recipe on this worker.
+			// Admission excludes that candidate; other useful work stays queued.
+			if j.State != "queued" || j.CommandDiscovery != nil {
 				continue
 			}
 			for _, target := range q.machineTargets(m) {

@@ -1,7 +1,7 @@
 # Set up project offload
 
 For new reusable work, follow [the adapter reference](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md):
-one `.mycelium/adapter.yaml`, explicit targets, deliberately selected source, result checks,
+one `.mycelium/adapter.yaml`, verified targets or managed CPU discovery, deliberately selected source, result checks,
 and submit/wait/verified retrieval. Keep this package's [SKILL.md](SKILL.md) and
 supporting files together when installing it.
 
@@ -15,13 +15,37 @@ current admission separately. uv/installed-tool/binary coverage stays unknown
 without matching native evidence. A Pixi lock's platform keys are dependency
 metadata, not proof that payload binaries, downloads or shell commands work.
 
-Keep explicit targets for now. `portable: true` permits architecture omission
-within a declared OS; it does not expand existing lists or enable omitted
-targets in reusable entries. Plain-command admission needs no native baseline,
-but widening production work still needs owner-accepted MY-19 output parity.
-Preparation and exit-zero smoke checks do not supply it. Automatic omitted-target
-discovery and its isolated failures remain pending #853; the project-carried
-recipe decision hold in #251/#252 is unchanged.
+From the next release, non-production native CPU entries/profiles may declare
+`portable: true` and omit targets when their main environment is a managed Pixi
+recipe with machine-readable selected-lock coverage. All sidecar environments
+must cover the same target; sidecars without an environment inherit main's.
+Mycelium intersects those immutable locks with supported runtimes, fresh observed
+inventory and ordinary resource, tool, maintenance and custody gates. Missing or
+unknown coverage is a hold, never universal support. No platform list is derived
+from the submitter's OS or the installation's machine names.
+
+```yaml
+portable: true # Whole payload, including binaries/downloads/shell, is portable.
+needs: {platform: cpu, cpu_cores: 1, memory_gb: 0.25}
+environment: cpu-tools # Existing managed recipe; inspect `myce env get cpu-tools`.
+# Omit targets for discovery; keep the entry's source/run/checks/outputs.
+```
+
+An explicit nonempty target list always binds, including with `portable: true`;
+existing Linux-only jobs and accepted keyed intent never widen. A failed native
+preparation excludes its exact target/recipe candidate without failing useful
+alternatives or retrying idle deterministic failures. Warm exact identities are
+reused. A changed immutable recipe and new submission key can reopen discovery;
+replaying the old key keeps the old recipe and targets. If all candidates failed,
+inspect the retained preparation reason, fix the recipe, then submit new intent.
+
+Production discovery remains held until exact target/recipe output parity is
+accepted under MY-19. Use existing native variants with recorded baselines and
+production parity acceptance, or declare an explicit owner-accepted target list.
+Plain-command admission is not native qualification, and preparation or exit-zero
+smoke checks do not establish parity. This is the orchestrator default under
+existing MY-19 recorded in #853; the project-carried recipe hold in #251/#252 is
+unchanged.
 
 ## Existing profile compatibility
 

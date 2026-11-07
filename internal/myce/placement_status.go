@@ -125,6 +125,10 @@ func submissionPlacementIntent(s Spec, j *Job) *PlacementIntent {
 		}
 		p.Environment.Platforms = placementStrings(p.Environment.Platforms)
 	}
+	if j.CommandDiscovery != nil {
+		p.Environment = PlacementCoverage{Origin: "selected_immutable_member_locks", State: "targets", Targets: placementTargets(j.CommandDiscovery.Targets), Platforms: []string{"cpu"}}
+		p.Parity = "not_accepted_for_automatic_production"
+	}
 	if s.extensionJob() {
 		p.Environment = PlacementCoverage{Origin: "extension_snapshot", State: "unknown"}
 		for _, e := range j.Extensions {

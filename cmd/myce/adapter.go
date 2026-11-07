@@ -163,8 +163,8 @@ func validateAdapterEntry(e adapterEntry) error {
 		if len(command) == 0 || command[0] == "" {
 			return errors.New("declare application argv before result checks or appended arguments")
 		}
-		if len(s.Targets) == 0 || reflect.ValueOf(s.Needs).IsZero() {
-			return errors.New("declare exact targets and resource needs")
+		if len(s.Targets) == 0 && !myce.WantsCommandDiscovery(s) || reflect.ValueOf(s.Needs).IsZero() {
+			return errors.New("declare resource needs and targets, or portable: true for managed CPU discovery")
 		}
 	}
 	if !reflect.ValueOf(s.Environment).IsZero() && len(e.Environments) > 0 {

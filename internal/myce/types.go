@@ -498,6 +498,7 @@ type Job struct {
 	ModelEnvironmentKey         string `json:"model_environment_key,omitempty"`
 	ModelEnvironmentNeedsSource bool   `json:"model_environment_needs_source,omitempty"`
 
+	CommandDiscovery          *CommandDiscovery                       `json:"command_discovery,omitempty"`
 	SidecarEnvironmentRecipes map[string]map[string]EnvironmentRecipe `json:"sidecar_environment_recipes,omitempty"`
 
 	FileTransport         bool                   `json:"file_transport,omitempty"`

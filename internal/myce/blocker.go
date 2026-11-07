@@ -162,6 +162,15 @@ func (q *Queue) environmentBlocker(j *Job, m *Machine) *Blocker {
 		return nil
 	}
 	key := environmentKey(j, m)
+	if j.CommandDiscovery != nil {
+		keys := environmentFailureKeys(j, m)
+		for _, r := range m.EnvironmentReports {
+			if slices.Contains(keys, r.Key) && q.environmentReportBlocked(r) {
+				key = r.Key
+				break
+			}
+		}
+	}
 	if e := qualifiedExtension(j, m); e != nil {
 		key = extensionPreparationKey(*e, m)
 	}
