@@ -2325,6 +2325,20 @@ operation ID. It can exit immediately: the queue owns progress. Watch phases,
 wait reasons and failures with `myce status`. An approval from before signed
 envelope retention needs identical verified reapproval first.
 
+From the release containing #900's health slice, each host's `checks` classifies
+runtime proof, exact custody, storage roots, checkpoint probes and worker
+components as ready, waiting, blocked or advisory, with fixed capability codes.
+A checkpoint probe flag may be advisory only if it predates that worker's
+cutover, no live NAS-checkpoint work or model custody needs that host, and no
+root is reported unavailable. It remains visible and continues to restrict
+ordinary admission. New probe degradation and positive root failures still
+block health verification. Installer storage preflight always runs separately;
+an advisory observation never bypasses its refusal.
+Accepted worker reports latch positive checkpoint recovery across stopped
+operations, queue cutover, missing runtime proof and queue restart. Dependency
+classification shares submission's device/variant qualification; component
+checks share enrollment's inventory baseline and acknowledged CPU/RAM budgets.
+
 From the release containing #900's critical slice, `--urgency normal|critical`
 is persisted with the operation; omitted urgency is `normal`. Normal waits for
 idle. Critical requests the existing maintenance checkpoint/stop/requeue as soon

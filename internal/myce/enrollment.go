@@ -144,34 +144,10 @@ func evaluateEnrollmentVersion(receipt EnrollmentReceipt, o EnrollmentObservatio
 	if !p.RunnerSmoke {
 		return incomplete("runner smoke missing")
 	}
-	if len(m.UnavailableRoots) > 0 || m.InventoryReason != "" || m.MemoryError != "" || m.CPUCapacityReason != "" || m.HostMemoryError != "" || m.CheckpointUnavailable || m.HostMemoryPolicyMismatch || m.DockerCleanup != "" {
-		return incomplete("components, storage, cleanup or host policy are unavailable")
-	}
-	if len(m.Devices) != len(receipt.Devices) {
-		return incomplete("expected device inventory missing")
-	}
-	for _, expected := range receipt.Devices {
-		found := false
-		for _, device := range m.Devices {
-			if device.ID == expected.ID && device.Identity == expected.Identity && device.Platform == expected.Platform {
-				// Unified devices use the measured host RAM checked below;
-				// automatic inventory has no separate device-memory total.
-				memoryKnown := device.TotalMemoryGB > 0 || device.UnifiedMemory && device.MemoryMeasured
-				found = device.Reason == "" && device.BudgetGB > 0 && memoryKnown
-				break
-			}
-		}
-		if !found {
-			return incomplete("expected device unavailable")
-		}
+	if _, reason := enrollmentComponentIssue(receipt, o); reason != "" {
+		return incomplete(reason)
 	}
 	profile := m.CapabilityProfile
-	if profile == nil || receipt.LogicalCPUs <= 0 || receipt.SystemMemoryBytes == 0 || profile.LogicalCPUs != receipt.LogicalCPUs || profile.SystemMemoryBytes != receipt.SystemMemoryBytes || profile.OS == "" || profile.Arch == "" || !m.HostMemoryMeasured || m.HostAvailableMemoryGB <= 0 {
-		return incomplete("CPU or RAM facts unavailable")
-	}
-	if o.Policy.CPUBudgetCores == nil || o.Policy.MemoryBudget == nil || m.CPUBudgetCores != *o.Policy.CPUBudgetCores || m.HostMemoryBudgetGB != o.Policy.MemoryBudget.GiB {
-		return incomplete("CPU or RAM policy unacknowledged")
-	}
 	switch o.Policy.Mode {
 	case "disabled", "drained":
 		return o.Policy.Mode, nil
@@ -189,6 +165,41 @@ func evaluateEnrollmentVersion(receipt EnrollmentReceipt, o EnrollmentObservatio
 		return incomplete("admission withheld")
 	}
 	return "ready", nil
+}
+
+// Shared by enrollment activation and fleet capability diagnostics so a positive
+// but changed inventory or unacknowledged budget cannot report ready.
+func enrollmentComponentIssue(receipt EnrollmentReceipt, o EnrollmentObservation) (code, reason string) {
+	m := o.Machine
+	if len(m.UnavailableRoots) > 0 || m.InventoryReason != "" || m.MemoryError != "" || m.CPUCapacityReason != "" || m.HostMemoryError != "" || m.CheckpointUnavailable || m.HostMemoryPolicyMismatch || m.DockerCleanup != "" {
+		return "worker_component_unavailable", "components, storage, cleanup or host policy are unavailable"
+	}
+	if len(m.Devices) != len(receipt.Devices) {
+		return "worker_device_inventory_mismatch", "expected device inventory missing"
+	}
+	for _, expected := range receipt.Devices {
+		found := false
+		for _, device := range m.Devices {
+			if device.ID == expected.ID && device.Identity == expected.Identity && device.Platform == expected.Platform {
+				// Unified devices use the measured host RAM checked below;
+				// automatic inventory has no separate device-memory total.
+				memoryKnown := device.TotalMemoryGB > 0 || device.UnifiedMemory && device.MemoryMeasured
+				found = device.Reason == "" && device.BudgetGB > 0 && memoryKnown
+				break
+			}
+		}
+		if !found {
+			return "worker_device_unavailable", "expected device unavailable"
+		}
+	}
+	profile := m.CapabilityProfile
+	if profile == nil || receipt.LogicalCPUs <= 0 || receipt.SystemMemoryBytes == 0 || profile.LogicalCPUs != receipt.LogicalCPUs || profile.SystemMemoryBytes != receipt.SystemMemoryBytes || profile.OS == "" || profile.Arch == "" || !m.HostMemoryMeasured || m.HostAvailableMemoryGB <= 0 {
+		return "worker_capacity_mismatch", "CPU or RAM facts unavailable"
+	}
+	if o.Policy.CPUBudgetCores == nil || o.Policy.MemoryBudget == nil || m.CPUBudgetCores != *o.Policy.CPUBudgetCores || m.HostMemoryBudgetGB != o.Policy.MemoryBudget.GiB {
+		return "worker_policy_unacknowledged", "CPU or RAM policy unacknowledged"
+	}
+	return "", ""
 }
 
 // EnrollmentServiceHealth returns a stable process/restart identity, never

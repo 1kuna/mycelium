@@ -165,7 +165,14 @@ func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 			}
 			fleetActivate(t, q, c)
 			fleetTick(t, q)
-			resumed := check(t, q, m, nil).Job
+			// Planned requeue must use current placement health: a worker
+			// reporting an unavailable checkpoint root cannot take the retry.
+			m.CheckpointUnavailable = true
+			if reply := check(t, q, m, nil); reply.Job != nil {
+				t.Fatal("requeued checkpoint work assigned to an unhealthy worker")
+			}
+			healthy := cpuMachine("healthy-worker", "healthy-host", "cpu", 8, 16)
+			resumed := check(t, q, healthy, nil).Job
 			if resumed == nil || resumed.ID != j.ID || resumed.Attempt != 2 || q.s.FleetUpgrade.State != "complete" {
 				t.Fatal("updated queue did not resume the same job", q.fleetUpgradeStatus())
 			}

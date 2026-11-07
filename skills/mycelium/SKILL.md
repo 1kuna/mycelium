@@ -256,6 +256,10 @@ the existing accepted checkpoint contract. Queue-only critical updates also stop
 model streams but leave batch work on other hosts running. Rollout `stop_requests`
 are intent; the job's checkpoint and exact attempt outcome carry the actual save,
 interruption and release evidence. Consumers do not cancel work to assist updates.
+From the next release, rollout host `checks` distinguish ready, waiting, blocked
+and advisory capability evidence. A pre-existing checkpoint probe may be advisory
+when no live NAS-dependent work needs that worker; it remains an admission
+restriction. Do not clear health flags or bypass installer storage refusals.
 
 ## Automatic host hygiene (next release)
 

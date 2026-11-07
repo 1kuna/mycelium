@@ -1423,6 +1423,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptEnvironmentFailures(&m, old)
 		q.s.Machines[m.ID] = &m
+		q.observeFleetCheckpointReport(&m)
 		q.recordHostLaunchMemory(&m, old)
 		q.recordExternalMemory(&m)
 		for _, report := range reports {

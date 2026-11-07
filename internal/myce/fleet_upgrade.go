@@ -23,6 +23,7 @@ type FleetUpgradeStatus struct {
 	Hosts              []FleetHostStatus `json:"hosts"`
 }
 type FleetHostStatus struct {
+	Checks       []FleetCheck       `json:"checks,omitempty"`
 	StopRequests []FleetStopRequest `json:"stop_requests,omitempty"`
 	Host         string             `json:"host"`
 	Phase        string             `json:"phase"`
@@ -44,11 +45,12 @@ type fleetUpgrade struct {
 	CreatedAt          time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
-	CriticalStopAt *time.Time `json:"critical_stop_at,omitempty"`
-	RetryPhase     string     `json:"retry_phase,omitempty"`
-	HealthSince    time.Time  `json:"health_since,omitempty"`
-	HealthIdentity string     `json:"health_identity,omitempty"`
-	HelperRevision int        `json:"helper_revision,omitempty"`
+	CheckpointProbeRecovered bool       `json:"checkpoint_probe_recovered,omitempty"`
+	CriticalStopAt           *time.Time `json:"critical_stop_at,omitempty"`
+	RetryPhase               string     `json:"retry_phase,omitempty"`
+	HealthSince              time.Time  `json:"health_since,omitempty"`
+	HealthIdentity           string     `json:"health_identity,omitempty"`
+	HelperRevision           int        `json:"helper_revision,omitempty"`
 	FleetHostStatus
 	Queue       bool               `json:"queue"`
 	QueueDone   bool               `json:"queue_done"`
@@ -93,7 +95,9 @@ func (q *Queue) fleetUpgradeStatus() *FleetUpgradeStatus {
 	}
 	out := &FleetUpgradeStatus{Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Hosts: []FleetHostStatus{}}
 	for _, h := range u.Hosts {
-		out.Hosts = append(out.Hosts, h.FleetHostStatus)
+		status := h.FleetHostStatus
+		status.Checks = q.fleetHostChecks(h)
+		out.Hosts = append(out.Hosts, status)
 	}
 	return out
 }
@@ -225,6 +229,9 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 			// Carry unresolved drain custody into explicit fix-forward intent.
 			for _, h := range u.Hosts {
 				for _, p := range old.Hosts {
+					if h.Host == p.Host && h.Machine == p.Machine {
+						h.CheckpointProbeRecovered = p.CheckpointProbeRecovered
+					}
 					if h.Host == p.Host && p.Phase != "pending" && p.Phase != "complete" && p.Phase != "failed" {
 						h.Policy = p.Policy
 						h.Owned = p.Owned
@@ -696,6 +703,11 @@ func (q *Queue) maintainFleetUpgrade() {
 				}
 			}
 			observed := cloneMachine(m)
+			if q.fleetCheckpointAdvisory(h, m) {
+				// Classify the retained probe flag without changing admission or
+				// hiding it from status. Every other enrollment check still binds.
+				observed.CheckpointUnavailable = false
+			}
 			if observed.Enrollment == nil {
 				p := m.Fleet
 				observed.Enrollment = &EnrollmentProof{Version: p.Version, StartGate: p.StartGate, AttemptProtocol: p.AttemptProtocol, RunnerSmoke: p.RunnerSmoke}
