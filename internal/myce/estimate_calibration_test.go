@@ -382,3 +382,19 @@ func TestEstimateCalibrationBenchmarkCannotTrainOrReplacePairs(t *testing.T) {
 		t.Fatal("benchmark replaced accepted calibration", got, prior)
 	}
 }
+
+func TestEstimateCalibrationProgressIsNotAttemptIdentity(t *testing.T) {
+	q, clock, m, _, s := repeatedFixture(t)
+	teachRepeated(t, q, clock, m, s, time.Second)
+	j := startObservation(t, q, m, s)
+	clock.Advance(2 * time.Second)
+	r := cleanRepeatedResult(&j)
+	r.Progress = 7
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	key := q.s.Jobs[j.ID].Timing.RepeatedKey
+	if c := q.s.WorkObservations[identityHash(key)].Calibration; c == nil || c.Samples != 1 || c.MeanError != 1 {
+		t.Fatal("accepted progress report mistaken for a different attempt", c)
+	}
+}

@@ -102,7 +102,7 @@ func (q *Queue) recordServiceCalibration(j *Job, r Result, old WorkObservation, 
 	t := j.Timing
 	if t == nil || t.ServiceEstimate == nil || t.ServiceEstimate.Estimator != serviceEstimator || t.Reason != "" || t.ActualSeconds == nil ||
 		!r.Success || r.Interrupted || r.Forced || r.OutOfMemory || r.ReleasePending ||
-		t.Execution != r.Execution || t.Machine != r.Machine || t.Session != r.Session ||
+		t.Execution.ID != r.ID || t.Execution.Attempt != r.Attempt || t.Machine != r.Machine || t.Session != r.Session ||
 		old.Forbidden || old.StaleReason != "" || point.Key.Check ||
 		t.HistoryRecordedAt == nil || q.clock.Now().Before(*t.HistoryRecordedAt) || q.clock.Now().Sub(*t.HistoryRecordedAt) > workCurveMaxAge ||
 		r.MemoryPeak != nil && r.MemoryPeak.constrained() {
