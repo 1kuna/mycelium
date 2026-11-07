@@ -68,7 +68,7 @@ func TestMemoryRecoveryIncident(t *testing.T) {
 				t.Fatal(err)
 			}
 			failed := job(t, q, stopped.ID)
-			if failed.MemoryOOMFloor == nil || math.Abs(failed.MemoryOOMFloor.HostMemoryGB-4.750156402587891*scale) > 1e-9 || failed.ReleaseConfirmed {
+			if failed.MemoryOOMFloor == nil || math.Abs(failed.MemoryOOMFloor.HostMemoryGB-(peak+(peak-limit))) > 1e-9 || failed.ReleaseConfirmed {
 				t.Fatal("retry floor or custody lost", failed)
 			}
 			clock.now = time.Date(2026, 11, 6, 6, 38, 36, 0, time.UTC)

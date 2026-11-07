@@ -157,6 +157,47 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 	}
 }
 
+// Exact-attempt OOM telemetry is durable job-local evidence, independent of
+// successful learning and target comparability. With no peak, advance past the
+// failed host vector by one supported kernel page: it cannot authorize another
+// identical ceiling. Sampling growth and observed guard overshoot replace the
+// old fixed 1.25/2 multipliers. An RSS stop may retain a larger observation than
+// the final sample, so consume its fenced cause as well.
+func memoryStopFloor(j *Job) float64 {
+	lower := j.Spec.Needs.HostMemoryGB
+	if f := j.MemoryOOMFloor; f != nil {
+		lower = max(lower, f.HostMemoryGB)
+	}
+	peak, margin := 0.0, minimumHostMemoryGB
+	for _, facts := range j.MemoryAttempts {
+		if facts.Attempt != j.Attempt || facts.Machine != j.Machine || facts.Session != j.Session {
+			continue
+		}
+		p := facts.MemoryPeak
+		if p != nil {
+			margin = max(margin, memoryGrowthGB(p))
+			for _, value := range []*float64{p.HostGB, p.CgroupGB, p.NonreclaimableGB} {
+				if value != nil && validMemoryValue(*value) {
+					peak = max(peak, *value)
+				}
+			}
+			if combined, complete := p.gpuHostPeakGB(); complete {
+				peak = max(peak, combined)
+			}
+		}
+	}
+	if c := j.ExecutionCause; c != nil && c.Class == rssLimitExceeded && c.RSSLimit != nil {
+		peak = max(peak, float64(c.RSSLimit.ObservedBytes)/(1<<30))
+	}
+	if e := j.MemoryEnvelope; e != nil {
+		if j.Spec.Needs.cpuOnly() {
+			lower = max(lower, e.HostGB)
+		}
+		margin = max(margin, peak-e.HostGB)
+	}
+	return max(lower+minimumHostMemoryGB, peak+margin)
+}
+
 func mergeMemoryEvents(old, next *MemoryEventCounts) *MemoryEventCounts {
 	if next == nil {
 		next = old

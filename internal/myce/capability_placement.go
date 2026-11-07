@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 // Memory needs name accelerator-reachable memory and additional system memory.
@@ -158,19 +157,13 @@ func (q *Queue) retryOOM(j *Job) {
 		return
 	}
 	if j.Spec.Needs.Memory == "auto" {
-		// A bounded first run doubles without spending the one retry; at half
-		// the allowance, host-wide exploration and that retry take over.
-		bounded := j.MemoryEnvelope != nil && strings.Contains(j.MemoryEnvelope.Source, boundedFirstRun)
-		if j.OOMRetries > 0 && !bounded {
-			j.State, j.Reason = "failed", "out of memory after one retry above the OOM envelope"
-			return
-		}
-		growth := 2.0
-		if !bounded {
-			j.OOMRetries++
-			growth = 1.25
-		}
-		j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB * growth}
+		// A stopped probe is a lower bound, not an upper estimate. Retain the
+		// measured peak/error even when retry timing becomes non-comparable or
+		// the next attempt moves to a different target. Increasing the durable
+		// floor makes physical capacity, rather than an attempt count, bound
+		// auto recovery; each attempt still uses the unchanged worker guard.
+		j.OOMRetries++
+		j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: memoryStopFloor(j)}
 		j.OOMCapacity = nil
 		probe := cloneJob(j)
 		probe.State, probe.MemoryEnvelope = "queued", nil
@@ -183,7 +176,7 @@ func (q *Queue) retryOOM(j *Job) {
 			j.State, j.Reason = "failed", fmt.Sprintf("needs more memory than any eligible host allows (%.1f GiB)", need)
 			return
 		}
-		q.requeue(j, "out of memory; waiting for room above the previous envelope", false)
+		q.requeue(j, "out of memory; waiting for room above the measured memory stop", false)
 		return
 	}
 	if j.OOMRetries > 0 {
