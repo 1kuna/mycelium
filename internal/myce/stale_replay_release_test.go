@@ -146,3 +146,65 @@ func TestStaleStagingReplayRetainsSenderUntilReleaseAcknowledged(t *testing.T) {
 		t.Fatal("failed staging reached payload preparation", err)
 	}
 }
+
+func TestStopKillAcknowledgementSendsOneCompletion(t *testing.T) {
+	w := recoveryWorker(t)
+	w.control = &processControl{clock: w.Clock}
+	root, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+	j := recoveryJob(t, []string{"echo", "done"})
+	j.Spec.Priority, j.Spec.Resumable = "production", false
+	j.Machine, j.Session = w.Machine.ID, "old-session"
+	store, err := newAttemptStore(root, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := result(&j, true)
+	store.state.Result = &finished
+	if err := store.save(); err != nil {
+		t.Fatal(err)
+	}
+	var completions []Result // Read only after the actor has joined.
+	w.Client.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/api/workers/complete" {
+			return nil, errors.New("unexpected request: " + r.URL.Path)
+		}
+		var got Result
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			return nil, err
+		}
+		completions = append(completions, got)
+		recorder := httptest.NewRecorder()
+		recorder.Write([]byte(`{}`))
+		return recorder.Result(), nil
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	a := &attemptSupervisor{store: store, job: j, worker: w, connected: true, directive: AttemptDirective{Stop: true, Kill: true}, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	go a.run(ctx)
+	defer func() {
+		cancel()
+		select {
+		case <-a.done:
+		case <-time.After(testWaitTimeout):
+			t.Error("actor did not stop")
+		}
+	}()
+	select {
+	case <-a.done:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("acknowledged stop did not retire")
+	}
+	if len(completions) != 1 {
+		t.Fatalf("acknowledged stop sent %d completions, want one", len(completions))
+	}
+	got := completions[0]
+	if got.Execution != (Execution{ID: j.ID, Attempt: j.Attempt}) || got.Machine != j.Machine || got.Session != j.Session || !got.ReleaseOnly || got.ReleasePending {
+		t.Fatalf("not the exact confirmed release: %+v", got)
+	}
+	if store.state.Job != nil || store.state.Result != nil {
+		t.Fatal("acknowledged stop retained custody")
+	}
+}

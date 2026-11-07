@@ -927,6 +927,8 @@ A stale diagnostic log or publication reply is not a release acknowledgement.
 The attempt actor sends an exact release-only completion and retains its durable
 Job/Result until that request succeeds, even if replay or an earlier completion
 was stale. Failed release delivery retries through the same actor.
+An acknowledged Stop+Kill completion already proves release; its synthetic stale
+publication status does not trigger another completion.
 
 Compatibility and refusal:
 

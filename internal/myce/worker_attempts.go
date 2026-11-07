@@ -390,12 +390,16 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		a.mu.Unlock()
 		if connected && !d.Hold {
 			var err error
+			releaseAcknowledged := false
 			if d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop) {
 				if s.state.Result != nil && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 					released := *s.state.Result
 					released.ReleaseOnly = !released.ReleasePending
 					err = w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
 					if err == nil {
+						releaseAcknowledged = true
+						// Skip obsolete publication without losing the successful
+						// release acknowledgement or sending another completion.
 						err = &HTTPError{Status: 409}
 					}
 				}
@@ -454,8 +458,8 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			if err == nil && s.state.Result != nil {
 				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 			}
-			releaseAcknowledged := err == nil
-			if stale(err) && s.state.Result != nil && !s.state.Result.ReleasePending {
+			releaseAcknowledged = releaseAcknowledged || err == nil
+			if !releaseAcknowledged && stale(err) && s.state.Result != nil && !s.state.Result.ReleasePending {
 				// A stale log/publication reply says nothing about release. The
 				// queue may have lost this copy while staging was still running.
 				// Retain its only sender until an exact release is acknowledged.
