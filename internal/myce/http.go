@@ -39,7 +39,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	observationLimit := newObservationLimit(observationClock, a.Queue)
 	a.registerWait(mux)
 	waitStates := a.Queue.waitIndex()
-	nas := newResolveNASCache(a.Queue.clock, &a.Queue.requestBudgets)
+	nas := a.Queue.resolveNASInspections()
 	// Joining needs authenticated identity/version only, never the growing status
 	// snapshot. Transport pinning authenticates this identity to joining clients.
 	mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
