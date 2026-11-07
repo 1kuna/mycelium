@@ -22,6 +22,8 @@ type HostHealthReading struct {
 	Pressure    float64 `json:"pressure"`
 	SwapBytes   float64 `json:"swap_bytes"`
 	WakeSeconds float64 `json:"wake_seconds"`
+	// Local source semantics; persisted/wire pressure keeps its raw OS units.
+	pressurePSI bool
 }
 
 type HostHealthSample struct {
@@ -113,7 +115,10 @@ func (h *HostHealth) observe(s HostHealthSample) {
 		// Queue-only heartbeat delay is not local memory-pressure evidence.
 		// A learned decay tail must not hide later positive PSI accompanied
 		// by a swap-growth outlier, even if that tail widened the PSI band.
-		pressure := s.Pressure > pressureLimit && (pressureLimit > 0 || latency) || s.Pressure > 0 && swap
+		pressure := s.Pressure > pressureLimit
+		if s.pressurePSI {
+			pressure = pressure && (pressureLimit > 0 || latency) || s.Pressure > 0 && swap
+		}
 		switch {
 		case pressure:
 			reason = "host_memory_pressure"

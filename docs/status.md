@@ -74,6 +74,9 @@ positive, pressure outliers trigger independently again. The reference and its
 adjacent-sample resolution come from this host; there is no absolute PSI cutoff.
 Positive PSI with a swap-growth outlier remains adverse even within the learned
 pressure band, so a widened decay-tail reference cannot hide renewed swapping.
+These calibration/corroboration rules apply to Linux PSI. Darwin retains raw OS
+pressure levels (`1` is normal) and its learned pressure-outlier rule; normal
+pressure plus swap growth alone does not drain it. Persisted units are unchanged.
 Disk pressure also requires exhaustion against measured consumption over the
 confirmation horizon. `disk_recovery` retains that measured reserve until space
 actually recovers; aging history alone cannot clear it. Pending adverse mount
