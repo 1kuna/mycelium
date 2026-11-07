@@ -320,7 +320,7 @@ check: [true]
 	if err = os.WriteFile(filepath.Join(root, "file"), []byte("changed"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	frozen := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", r.Key}), r.Uploads[".myce-inputs/"+profileHash("item")])
+	frozen := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", r.Key}), r.Uploads["files/item"])
 	got, err := os.ReadFile(frozen)
 	if err != nil || string(got) != "original" {
 		t.Fatalf("frozen item: %q %v", got, err)
