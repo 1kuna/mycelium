@@ -478,6 +478,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	if probeFloor > 0 {
 		copy.MemoryEnvelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
 	}
+	q.observeMemoryAdmission(&copy, m)
 	return &copy
 }
 
@@ -867,6 +868,7 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 	// hostNeed adds ceiling slack back. Leave the named drift margin unused
 	// between the inventory snapshot and the strict launch check.
 	slack := m.MemoryCeilingSlackGB + q.coldProbeDriftMarginGB(m)
+	q.observeMemoryAdmissionDrift(j, m, slack-m.MemoryCeilingSlackGB)
 	if room <= slack {
 		return 0, fmt.Sprintf("exploratory first run needs physical headroom above launch slack (%.1f GiB available; %.1f GiB allowance)", room, allowance)
 	}

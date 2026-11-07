@@ -35,6 +35,11 @@ Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
+From the next release, per-job JSON includes `last_memory_admission` when the
+queue retained a blocked RAM comparison. It preserves the target envelope,
+drift reserve, signed headroom and exact charge/growth owners through startup
+failure and restart. Its timestamp belongs to that comparison; it is not live
+usage or proof of the job's only blocker. A retry starts a new wait episode.
 From the next release, `host_capacity_accumulation` means new CPU work is waiting
 so ready CPU or accelerator work can acquire host RAM/cores as running CPU
 attempts finish. Mycelium chooses one fitting target; earlier fair turns,
@@ -82,7 +87,13 @@ worker launch checks still refuse a larger unseen drop and teach the next probe.
 A running CPU probe can share after fresh complete cgroup
 measurements establish its live footprint and growth over a sampling horizon,
 extended by the measured growth rate through the sample's age;
-its containment ceiling stays fixed. Missing/stale measurements retain the full
+its containment ceiling stays fixed. On releases with the contained-forecast fix,
+the forecast cannot reserve beyond a hard Linux cgroup ceiling; measured overuse
+and workers without hard containment remain conservative.
+Hard-contained CPU attempts also bound their remaining-growth forecast by their
+full ceiling, including declared and learned work; raw live RAM and allowance
+checks still apply.
+Missing/stale measurements retain the full
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.

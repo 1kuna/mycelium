@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -242,5 +243,132 @@ func TestHostMemoryProbeForecastAgesBeforeExpiry(t *testing.T) {
 	}
 	if err := localAttemptAdmission(w, []Job{j}, next, nil); err == nil {
 		t.Fatal("worker admits predictable growth beyond allowance")
+	}
+}
+
+// Replay a small contained CPU probe blocking a declared neighbor despite
+// ample live RAM: an aged burst forecast must not exceed memory.max.
+func TestHostMemoryProbeForecastCannotExceedEnforcedCeiling(t *testing.T) {
+	for _, enforced := range []bool{true, false} {
+		t.Run(fmt.Sprint(enforced), func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuMachine("worker", "host", "cpu", 16, 18.8)
+			m.HostMemoryBudgetGB = 24
+			m.Devices = []MachineDevice{}
+			if enforced {
+				m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+			}
+			machineCheck(t, q, m)
+			const ceiling = 2.6227991325787627
+			j := Job{ID: "probe", State: "running", Attempt: 1, Machine: m.ID, Session: m.Session, Spec: cpuSpec(2, ceiling), MemoryEnvelope: &JobMemoryEnvelope{HostGB: ceiling, ProbeFloorGB: minimumHostMemoryGB, Source: "exploratory first run", Basis: "exploratory", Enforcement: m.MemoryEnforcement}}
+			j.Spec.Needs.Memory = "auto"
+			j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB = 0, ceiling
+			j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+			sample := hostMemorySample{gb: .3, footprintGB: .5, growthGB: 6, rateGB: 2, growthObserved: true, at: clock.Now()}
+			clock.Advance(4 * time.Second)
+			q.s.Jobs[j.ID] = &j
+			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: {jobKey(j): sample}}
+			q.refreshHostMemory()
+			charge, growth := jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+			if enforced && (charge != ceiling || math.Abs(growth-(ceiling-.3)) > 1e-10) {
+				t.Fatalf("contained probe charged forecast above ceiling: charge=%g growth=%g ceiling=%g", charge, growth, ceiling)
+			}
+			if !enforced && charge <= ceiling {
+				t.Fatal("unenforced forecast lost overrun protection")
+			}
+			if got := hostFits(q.s.Machines[m.ID], 0, 6); got != enforced {
+				t.Fatalf("queue neighbor fits=%v, want %v (charge %g)", got, enforced, charge)
+			}
+			w := Worker{Machine: m, Clock: clock, hostMemorySamples: map[attemptKey]hostMemorySample{jobKey(j): sample}, HostMemorySource: func(context.Context) (float64, error) { return 18.8, nil }}
+			next := Job{Spec: cpuSpec(2, 6)}
+			next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB = 0, 6
+			next.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+			if err := localAttemptAdmission(w, []Job{j}, next, nil); (err == nil) != enforced {
+				t.Fatalf("strict worker neighbor admission=%v, enforced=%v", err, enforced)
+			}
+			if enforced {
+				over := sample
+				over.footprintGB = ceiling + 1
+				actual, _ := jobHostMemoryCharge(&j, &m, ceiling, over, clock.Now())
+				if actual < over.footprintGB {
+					t.Fatal("forecast bound hid measured overuse", actual)
+				}
+			}
+			// Cancellation cannot discard custody or acquire reduced probe credit.
+			j.State = "stopping"
+			stopped, _ := jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+			if stopped != ceiling {
+				t.Fatal("stopping probe lost full charge", stopped)
+			}
+		})
+	}
+}
+
+// Two declared CPU attempts reserve 9 GiB while burst margins predict more
+// growth than their combined memory.max. Replay the observed aggregate room;
+// the sensor split below is synthetic, since legacy status omitted it.
+func TestHostMemoryDeclaredGrowthBoundedByHardContainment(t *testing.T) {
+	for _, enforced := range []bool{true, false} {
+		t.Run(fmt.Sprint(enforced), func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuMachine("worker", "host", "cpu", 16, 24)
+			m.HostMemoryBudgetGB = 24
+			m.Devices = []MachineDevice{}
+			if enforced {
+				m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+			}
+			machineCheck(t, q, m)
+			submit(t, q, cpuSpec(2, 3))
+			first := assignedJob(machineCheck(t, q, m))
+			if first == nil {
+				t.Fatal("first holder missing")
+			}
+			submit(t, q, cpuSpec(2, 6))
+			second := assignedJob(machineCheck(t, q, m, first))
+			if second == nil || second.ID == first.ID {
+				t.Fatal("second holder missing")
+			}
+			clock.Advance(time.Second)
+			m.HostAvailableMemoryGB = 18.939971923828125
+			reports := []AttemptReport{
+				{Execution: Execution{ID: first.ID, Attempt: first.Attempt}, Session: first.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: .4, GrowthGB: 5}},
+				{Execution: Execution{ID: second.ID, Attempt: second.Attempt}, Session: second.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: .6, GrowthGB: 6.57686468878034}},
+			}
+			if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports}); err != nil {
+				t.Fatal(err)
+			}
+			next := submit(t, q, cpuSpec(2, 1.1))
+			ledger := q.s.Machines[m.ID]
+			if ledger.HostMemoryInUseGB != 9 {
+				t.Fatal("forecast changed the declared charge", ledger.HostMemoryInUseGB)
+			}
+			if enforced {
+				if ledger.FreeHostMemoryGB < 9.9 || ledger.hostReservationDebtGB != 0 {
+					t.Fatalf("hard ceilings left phantom debt: room=%g debt=%g", ledger.FreeHostMemoryGB, ledger.hostReservationDebtGB)
+				}
+			} else if math.Abs(ledger.hostReservationDebtGB-.6368927649522149) > 1e-10 {
+				t.Fatal("unenforced forecast lost its protection", ledger.hostReservationDebtGB)
+			}
+			w := Worker{Machine: m, Clock: clock, hostMemorySamples: currentHostMemorySamples(reports, clock.Now()), HostMemorySource: func(context.Context) (float64, error) { return m.HostAvailableMemoryGB, nil }}
+			if err := localAttemptAdmission(w, []Job{*first, *second}, *job(t, q, next.ID), nil); (err == nil) != enforced {
+				t.Fatalf("strict worker admission=%v, containment=%v", err, enforced)
+			}
+			reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports})
+			if err != nil {
+				t.Fatal(err)
+			}
+			placed := assignedJob(reply)
+			if (placed != nil && placed.ID == next.ID) != enforced {
+				t.Fatalf("queue placement=%v, containment=%v", placed, enforced)
+			}
+			// The physical bound cannot grant missing-sample credit or ignore
+			// real pressure. Full 9 GiB custody still binds after expiry.
+			clock.Advance(hostMemorySampleFreshFor)
+			w.Machine.HostAvailableMemoryGB = .5
+			w.HostMemorySource = func(context.Context) (float64, error) { return .5, nil }
+			if err := localAttemptAdmission(w, []Job{*first, *second}, *job(t, q, next.ID), nil); err == nil {
+				t.Fatal("bound bypassed stale samples and physical pressure")
+			}
+		})
 	}
 }

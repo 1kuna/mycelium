@@ -131,7 +131,10 @@ type Queue struct {
 	deliveryActive       *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
 	deliveryPublish      func(Job, *FileStore, string, func()) error // Test seam; set before use.
 	// Ephemeral exact-attempt samples: restart cannot renew a cached credit.
-	hostMemorySamples map[string]map[attemptKey]hostMemorySample
+	hostMemorySamples      map[string]map[attemptKey]hostMemorySample
+	hostMemoryLedgers      map[string]*HostMemoryLedger // Immutable after each refresh; shared by diagnostics.
+	memoryLedgerGeneration uint64
+	memoryAdmissionCapture *memoryAdmissionCapture // Only a writer's existing planning pass records comparisons.
 
 	// Built once on a read-only cancellation projection, never on the live queue.
 	cancellationMembersByParent map[string][]*Job
@@ -636,6 +639,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.unreported = oldUnreported
 		q.networkQuiet = oldQuiet
 		q.rollbackRecords(old)
+		q.hostMemoryLedgers = nil // Never retain diagnostic inputs from an aborted writer.
 	}
 
 	if err == nil {
@@ -1027,6 +1031,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		j.Reason = "failed after 3 infrastructure losses: " + why
 		return
 	}
+	j.LastMemoryAdmission = nil // Only an actual new wait episode clears the previous decision.
 	j.WaitingSince = q.clock.Now()
 	q.s.Front++
 	j.Front = q.s.Front
@@ -1067,6 +1072,12 @@ func (q *Queue) maintain() {
 	if q.stopping.Load() {
 		return
 	}
+	previousCapture := q.memoryAdmissionCapture
+	q.memoryAdmissionCapture = &memoryAdmissionCapture{decisions: map[string]memoryAdmissionDecision{}, drift: map[string]float64{}}
+	defer func() {
+		q.retainMemoryAdmissions()
+		q.memoryAdmissionCapture = previousCapture
+	}()
 	q.maintainWallTimeLimits()
 	q.maintainJobPauses()
 	q.maintainFleetUpgrade()
