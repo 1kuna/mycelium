@@ -659,6 +659,9 @@
         },
         "seconds": {
           "type": "number"
+        },
+        "share_xpu": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -1817,6 +1820,9 @@
             "array",
             "null"
           ]
+        },
+        "share_xpu": {
+          "type": "boolean"
         }
       },
       "required": [

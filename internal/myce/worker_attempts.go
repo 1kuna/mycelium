@@ -737,7 +737,10 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		if sharedCard && unifiedCUDA(allocationMachine(&w.Machine, j.AllocatedDevices)) && !sharedDeviceSampleReady(w.hostMemorySamples[jobKey(j)], w.Clock.Now()) {
 			return errors.New(deviceUnifiedUncertain)
 		}
-		if sharedCard && (fanOutDeviceAttempt(&next) || fanOutDeviceAttempt(&j)) {
+		if sharedCard && fanOutDeviceSharing(&next) != fanOutDeviceSharing(&j) {
+			return errors.New("XPU fan-out sharing requires every tenant to opt in")
+		}
+		if sharedCard && (fanOutDeviceSharing(&next) || fanOutDeviceSharing(&j)) {
 			card := allocationMachine(&w.Machine, j.AllocatedDevices)
 			sample, telemetry := w.hostMemorySamples[jobKey(j)], cardTelemetry(card)
 			if card.GPU != "xpu" || card.UnifiedMemory || !deviceTelemetryReady(telemetry, w.Clock.Now()) || *telemetry.ActivePercent >= 100 ||
@@ -771,13 +774,13 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 			continue
 		}
 		usedGPU := deviceShareGB(&next)
-		fanOut, deviceGrowth := fanOutDeviceAttempt(&next), deviceShareGB(&next)
+		fanOut, deviceGrowth := fanOutDeviceSharing(&next), deviceShareGB(&next)
 		for _, j := range jobs {
 			if !j.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, id) {
 				card := d.machine(w.Machine)
 				charge := sampledDeviceCharge(&j, &card, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 				usedGPU += charge // A co-tenant sharing this card (#538).
-				fanOut = fanOut || fanOutDeviceAttempt(&j)
+				fanOut = fanOut || fanOutDeviceSharing(&j)
 				s := w.hostMemorySamples[jobKey(j)]
 				deviceGrowth += max(0, deviceShareGB(&j)-s.deviceGB) + s.deviceGrowthGB + s.deviceRateGB*w.Clock.Now().Sub(s.deviceAt).Seconds()
 			}

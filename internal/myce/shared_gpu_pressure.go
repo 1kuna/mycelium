@@ -40,7 +40,7 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 		}
 		fanOut := false
 		for _, j := range tenants {
-			fanOut = fanOut || fanOutDeviceAttempt(j)
+			fanOut = fanOut || fanOutDeviceSharing(j)
 		}
 		used, over := 0.0, map[string]float64{}
 		growth := false

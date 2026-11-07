@@ -215,7 +215,7 @@ func dockerSharesDevice(j *Job) bool {
 
 // A single-card batch attempt with a declared or learned memory vector may share
 // its card when memory fits (MY-30/31, #538). Model-server,
-// extension-check, exploratory and multi-card work keeps the card, as
+// extension-check, default fan-out, exploratory and multi-card work keeps the card, as
 // does a hint naming no device memory: its device figure is only a default.
 func sharesDevice(j *Job) bool {
 	n, e := j.Spec.Needs, j.MemoryEnvelope
@@ -223,7 +223,7 @@ func sharesDevice(j *Job) bool {
 	// Host-only learning can retain a recipe default for device memory. Native
 	// and Docker attempts both keep the card until that vector is measured.
 	unstated = unstated || e != nil && e.Basis == "learned" && strings.Contains(e.Source, "GPU recipe default")
-	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && dockerSharesDevice(j) && j.Spec.ExtensionCheck == nil && (j.Spec.FanOut == nil || fanOutDeviceAttempt(j)) && len(j.AllocatedDevices) <= 1 && !unstated
+	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && dockerSharesDevice(j) && j.Spec.ExtensionCheck == nil && (j.Spec.FanOut == nil || fanOutDeviceSharing(j)) && len(j.AllocatedDevices) <= 1 && !unstated
 }
 
 // XPU teardown can reset shared engines (#652). CUDA co-tenants can grow past
@@ -243,7 +243,7 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		return 0, false
 	}
 	n := 0
-	fanOut := fanOutDeviceAttempt(demand)
+	fanOut := fanOutDeviceSharing(demand)
 	var holders []*Job
 	for _, j := range q.liveJobs() {
 		if j.ID == demand.ID || !batchOnTarget(j, m) || !batchReservesCapacity(j) {
@@ -253,18 +253,21 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		if !sharesDevice(j) || joining && (tier < 0 || isolatesDeviceTiers(m) && tier != 0) {
 			return 0, false
 		}
+		if joining && fanOutDeviceSharing(demand) != fanOutDeviceSharing(j) {
+			return 0, false // Opt-in work cannot enlist an ordinary or default-off tenant.
+		}
 		if joining && unifiedCUDA(m) && !sharedDeviceSampleReady(q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now()) {
 			return 0, false
 		}
 		n++
-		fanOut = fanOut || fanOutDeviceAttempt(j)
+		fanOut = fanOut || fanOutDeviceSharing(j)
 		holders = append(holders, j)
 	}
 	for _, r := range q.s.HostReleases {
 		if !q.batchReleaseOnTarget(r, m) {
 			continue
 		}
-		if j := q.s.Jobs[r.Job]; j == nil || r.Device == "" || len(r.Devices) > 1 || !sharesDevice(j) {
+		if j := q.s.Jobs[r.Job]; j == nil || r.Device == "" || len(r.Devices) > 1 || !sharesDevice(j) || joining && fanOutDeviceSharing(demand) != fanOutDeviceSharing(j) {
 			return 0, false
 		}
 	}

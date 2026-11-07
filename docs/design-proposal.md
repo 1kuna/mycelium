@@ -1690,6 +1690,18 @@ one per device. A failed/lost wave retries only its own fixed membership, with
 existing cleanup and stale-attempt fences. Accepted outputs gather by piece key
 on the parent; the application owns semantic reduction of the gathered results.
 
+**Explicit discrete-XPU sharing (#886, maintainer relay 2026-11-07).**
+`fan_out.share_xpu: true` opts a declaration and its materialized/retried waves
+into measured same-card sharing only with other opted-in waves. Default omission
+or `false` retains the existing admission and frozen bytes; ordinary/default-off
+work is not enlisted. Single-card discrete XPU, equal tiers, fresh card activity
+and memory, measured host/attempt headroom, declared or accepted learned vectors,
+growth guard and exact release all remain required. Supporting queue/worker/CLI
+code can ship with this off. Production opt-in requires owner-accepted matched
+replay benefit and unchanged output parity; baseline and candidate use the same
+release, workload and extension digest, changing only this flag. This permission
+does not change host allowances, qualification or worker configuration.
+
 Only declared groups use the new planner. Enumerate safe measured counts and
 integer waves over a completion horizon, including measured smaller tails.
 Filter through existing qualification, owner availability, placement, tier,

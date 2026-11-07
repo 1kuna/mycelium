@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func discreteFanOutFixture(t *testing.T) (*Queue, *fakeClock, Machine, Spec) {
 	m.Devices[0].ExtensionReports = []ExtensionReport{r}
 	s := Spec{Name: "piece", Project: "synthetic", Priority: "production", Extension: extensionKey(e),
 		Targets: []ExecutionTarget{v.Target}, Workload: &Workload{InputShape: "small-v1", Units: 10},
-		FanOut: &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "piece"}}}}
+		FanOut: &FanOut{ShareXPU: true, MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "piece"}}}}
 	return q, clock, m, s
 }
 
@@ -48,6 +49,82 @@ func discreteFanOutCheck(t *testing.T, q *Queue, m Machine, runs ...*Job) Reply 
 		t.Fatal(err)
 	}
 	return r
+}
+
+func TestDiscreteFanOutSharingDefaultOff(t *testing.T) {
+	q, clock, m, s := discreteFanOutFixture(t)
+	s.FanOut.ShareXPU = false
+	submit(t, q, s)
+	a := assignedJob(discreteFanOutCheck(t, q, m))
+	if a == nil {
+		t.Fatal("first exclusive piece missing")
+	}
+	if err := q.Started(result(a, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	other := submit(t, q, s)
+	if b := assignedJob(discreteFanOutCheck(t, q, m, a)); b != nil {
+		t.Fatal("default fan-out shared the occupied card", b.ID)
+	}
+	requireState(t, q, other.ID, "queued")
+}
+
+func TestDiscreteFanOutSharingDefaultWire(t *testing.T) {
+	// These are the pre-option declaration/assignment bytes used by submission
+	// identity and persistence. A default-off release must not add a wire field.
+	for _, tc := range []struct {
+		value any
+		want  string
+	}{
+		{FanOut{Pieces: []FanOutPiece{{Key: "piece"}}, MaxConcurrency: 1}, `{"pieces":[{"key":"piece"}],"max_concurrency":1}`},
+		{BatchWork{Parent: "parent", Pieces: []FanOutPiece{{Key: "piece"}}, Concurrency: 1}, `{"parent":"parent","pieces":[{"key":"piece"}],"concurrency":1}`},
+	} {
+		got, err := json.Marshal(tc.value)
+		if err != nil || string(got) != tc.want {
+			t.Fatalf("default wire changed: %s, %v", got, err)
+		}
+	}
+}
+
+func TestDiscreteFanOutSharingRequiresBothOptIns(t *testing.T) {
+	for _, firstEnabled := range []bool{false, true} {
+		name := "default incumbent"
+		if firstEnabled {
+			name = "default newcomer"
+		}
+		t.Run(name, func(t *testing.T) {
+			q, clock, m, s := discreteFanOutFixture(t)
+			s.FanOut.ShareXPU = firstEnabled
+			submit(t, q, s)
+			a := assignedJob(discreteFanOutCheck(t, q, m))
+			if a == nil || a.Batch.ShareXPU != firstEnabled {
+				t.Fatal("first assignment lost the authored sharing policy", a)
+			}
+			if err := q.Started(result(a, false)); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			declaration := *s.FanOut
+			declaration.ShareXPU = !firstEnabled
+			s.FanOut = &declaration
+			other := submit(t, q, s)
+			if b := assignedJob(discreteFanOutCheck(t, q, m, a)); b != nil {
+				t.Fatal("sharing enlisted a tenant without opt-in", b.ID)
+			}
+			requireState(t, q, other.ID, "queued")
+			next := *a
+			next.ID = other.ID
+			batch := *a.Batch
+			batch.ShareXPU = !firstEnabled
+			next.Batch = &batch
+			w := Worker{Machine: m, Clock: clock, hostMemorySamples: q.hostMemorySamples[m.ID],
+				HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
+			if err := localAttemptAdmission(w, []Job{*a}, next, nil); err == nil || !strings.Contains(err.Error(), "every tenant to opt in") {
+				t.Fatal("worker did not enforce both opt-ins", err)
+			}
+		})
+	}
 }
 
 func TestDiscreteFanOutSharingHeadroom(t *testing.T) {
@@ -151,7 +228,7 @@ func TestDiscreteFanOutMeasuredOveruse(t *testing.T) {
 		}
 	}
 	next := *a
-	next.ID, next.Batch = parent.ID, &BatchWork{Parent: parent.ID}
+	next.ID, next.Batch = parent.ID, &BatchWork{Parent: parent.ID, ShareXPU: true}
 	w := Worker{Machine: m, Clock: clock, hostMemorySamples: q.hostMemorySamples[m.ID],
 		HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
 	actor := attemptSupervisor{job: *a}

@@ -2,8 +2,8 @@ package myce
 
 import "time"
 
-func fanOutDeviceAttempt(j *Job) bool {
-	return j.Batch != nil && j.Batch.Parent != ""
+func fanOutDeviceSharing(j *Job) bool {
+	return j.Batch != nil && j.Batch.Parent != "" && j.Batch.ShareXPU
 }
 
 func cardTelemetry(m *Machine) *DeviceTelemetry {
@@ -28,7 +28,7 @@ func sampledDeviceCharge(j *Job, m *Machine, s hostMemorySample, now time.Time) 
 	if sharedDeviceSampleReady(s, now) {
 		if unifiedCUDA(m) {
 			charge = max(charge, s.deviceGB+s.deviceGrowthGB)
-		} else if m.GPU == "xpu" && !m.UnifiedMemory {
+		} else if fanOutDeviceSharing(j) && m.GPU == "xpu" && !m.UnifiedMemory {
 			charge = max(charge, s.deviceGB+s.deviceGrowthGB+s.deviceRateGB*now.Sub(s.deviceAt).Seconds())
 		}
 	}
