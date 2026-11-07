@@ -134,6 +134,14 @@ before submitting. Save the receipt's `key` and `job_id`. After a lost reply,
 repeat the same command with the saved key to recover that job; changed intent
 or an intentional repeat needs a new key.
 
+For optional NAS existence checks, add `--inspect-nas` to resolve. For one path,
+repeat after two successful worker heartbeats: the first delivers the request,
+the next returns metadata. More paths or slow metadata can take further
+heartbeats. `pending` remains unknown; `present` proves neither size nor hash.
+From the next queue release, all queue listeners share these observations;
+completed samples expire with worker-session freshness rather than a fixed
+minute. Staging still verifies the declared bytes before execution.
+
 If a profile or entry exits 69 with `input storage unconfirmed`, its intent and
 frozen inputs remain in the receipt. The diagnostic names preflight or upload,
 the input, and a sanitized HTTP status/code or transport class. Rerunning the

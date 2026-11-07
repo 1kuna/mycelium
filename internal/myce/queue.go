@@ -121,6 +121,7 @@ type Queue struct {
 	requestBudgets      requestBudgets
 	efficiencyView      *EfficiencyReport // immutable maintenance projection; published only after commit.
 	waitStates          *waitStateIndex   // scalar committed wait observations; separate reader mutex.
+	nasInspections      *resolveNASCache  // ephemeral evidence shared by every listener for this queue.
 	modelIntervalWrites []ModelIntervalEvent
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin *Queue
