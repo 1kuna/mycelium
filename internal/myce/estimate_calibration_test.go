@@ -398,3 +398,53 @@ func TestEstimateCalibrationProgressIsNotAttemptIdentity(t *testing.T) {
 		t.Fatal("accepted progress report mistaken for a different attempt", c)
 	}
 }
+
+func TestEstimateCalibrationInvalidationCannotRevivePairs(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	var last Job
+	for _, duration := range []time.Duration{time.Second, 2 * time.Second} {
+		last = startObservation(t, q, m, s)
+		clock.Advance(duration)
+		if err := q.Complete(cleanRepeatedResult(&last)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := q.s.Jobs[last.ID].Timing.Key
+	id := identityHash(key)
+	if c := q.s.WorkObservations[id].Calibration; c == nil || c.Samples != 1 || c.MeanError != .1 {
+		t.Fatal("fixture lacks accepted paired error", c)
+	}
+	originalFingerprint := m.ExtensionFingerprint
+	m.ExtensionFingerprint = "changed-runtime"
+	check(t, q, m, nil)
+	m.ExtensionFingerprint = originalFingerprint
+	check(t, q, m, nil)
+	if p := q.s.WorkObservations[id]; p.StaleReason == "" || p.Calibration == nil {
+		t.Fatal("fixture must retain invalidated history after identity restoration", p)
+	}
+	// The first accepted completion re-establishes raw speed, without a prior
+	// forecast. It cannot rehabilitate the old error aggregate as a side effect.
+	unpaired := startObservation(t, q, m, s)
+	if timing := q.s.Jobs[unpaired.ID].Timing; timing.PredictedSeconds != nil || timing.ServiceEstimate != nil {
+		t.Fatal("invalidated history predicted the first restored run", timing)
+	}
+	clock.Advance(4 * time.Second)
+	if err := q.Complete(cleanRepeatedResult(&unpaired)); err != nil {
+		t.Fatal(err)
+	}
+	if p := q.s.WorkObservations[id]; p.StaleReason != "" || p.Calibration != nil {
+		t.Fatal("unpaired completion revived invalidated correction", p.Calibration, p.StaleReason)
+	}
+	next := startObservation(t, q, m, s)
+	e := q.s.Jobs[next.ID].Timing.ServiceEstimate
+	if e == nil || e.RawSeconds != 4 || e.CorrectionSeconds != 0 || e.Samples != 0 || e.Reason != "no accepted matching prediction/outcome pairs" {
+		t.Fatal("new raw speed reused invalidated correction", e)
+	}
+	clock.Advance(4 * time.Second)
+	if err := q.Complete(cleanRepeatedResult(&next)); err != nil {
+		t.Fatal(err)
+	}
+	if c := q.s.WorkObservations[id].Calibration; c == nil || c.Samples != 1 || c.MeanError != 0 {
+		t.Fatal("restored calibration did not start with the new accepted pair", c)
+	}
+}

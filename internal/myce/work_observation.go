@@ -406,7 +406,8 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 	point.HostMemoryGB, point.DeviceMemoryGB = old.HostMemoryGB, old.DeviceMemoryGB
 	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB
 	point.Forbidden = old.Forbidden
-	point.Calibration = old.Calibration
+	// A fresh raw sample cannot rehabilitate invalidated paired errors.
+	point.Calibration, _ = q.calibrationPrior(old)
 	if throughput {
 		q.recordServiceCalibration(j, r, original, &point)
 	}
