@@ -404,8 +404,8 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
-	// This is a new live observation, never inherited from an earlier attempt.
-	j.ExecutionEvidence = unstartedExecution(j.Attempt)
+	// Start preparation can pause and retry without advancing the attempt.
+	j.ExecutionEvidence = s.startExecutionEvidence(j)
 	defer func() {
 		if startErr != nil {
 			startErr = &executionEvidenceError{startErr, safeExecutionEvidence(j.ExecutionEvidence, j.Attempt)}
