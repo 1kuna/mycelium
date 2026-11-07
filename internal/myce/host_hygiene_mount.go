@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"mycelium/internal/probeguard"
@@ -15,21 +16,22 @@ import (
 
 // Read one directory entry, including EOF for an empty directory. Metadata alone
 // can succeed from cache while a dead SMB connection cannot serve reads.
-var workerHealthMountProbe = func(path string) error {
+var workerHealthMountProbe = func(path string, progress func()) error {
 	probeguard.Check()
-	return readHealthMount(path, os.Stat, func(path string) (fs.ReadDirFile, error) { return os.Open(path) })
+	return readHealthMount(path, os.Stat, func(path string) (fs.ReadDirFile, error) { return os.Open(path) }, progress)
 }
 
 // Reuse checkpoint admission's exclusive create/close/remove access check.
 // ReadDir(1) can enumerate a large SMB directory while opening its stream on
 // macOS; health sampling must not repeatedly scan active checkpoint entries.
-var workerHealthCheckpointProbe = func(path string) error {
+var workerHealthCheckpointProbe = func(path string, progress func()) error {
 	probeguard.Check()
-	return workerCheckpointAvailable(path, func() {})
+	return workerCheckpointAvailable(path, progress)
 }
 
-func readHealthMount(path string, stat func(string) (os.FileInfo, error), open func(string) (fs.ReadDirFile, error)) error {
+func readHealthMount(path string, stat func(string) (os.FileInfo, error), open func(string) (fs.ReadDirFile, error), progress func()) (err error) {
 	info, err := stat(path)
+	progress()
 	if err != nil {
 		return err
 	}
@@ -37,11 +39,18 @@ func readHealthMount(path string, stat func(string) (os.FileInfo, error), open f
 		return errors.New("mount root is not a directory")
 	}
 	f, err := open(path)
+	progress()
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		progress()
+	}()
 	_, err = f.ReadDir(1)
+	progress()
 	if errors.Is(err, io.EOF) {
 		return nil
 	}
@@ -101,14 +110,14 @@ func probeRecoveryMount(path, required, osname string, probe func(string) error,
 	return err
 }
 
-func healthMountAccess(role string) func(string) error {
+func healthMountAccess(role string) func(string, func()) error {
 	if role == "checkpoint" {
 		return workerHealthCheckpointProbe
 	}
 	return workerHealthMountProbe
 }
 
-func recoveryMountProbe(w Worker, role, path string) func(string) error {
+func recoveryMountProbe(w Worker, role, path string) func(string, func()) error {
 	probe := healthMountAccess(role)
 	required := ""
 	if w.ServiceConfig != nil && withinNAS(w.ServiceConfig.NAS, path) && w.ServiceConfig.NAS != "" {
@@ -121,7 +130,7 @@ func recoveryMountProbe(w Worker, role, path string) func(string) error {
 		}
 		w.rootMonitor.mu.Unlock()
 	}
-	return func(string) error {
+	return func(_ string, progress func()) error {
 		if w.rootMonitor != nil {
 			w.rootMonitor.mu.Lock()
 			if expected := w.rootMonitor.expected[role]; expected != "" {
@@ -129,8 +138,9 @@ func recoveryMountProbe(w Worker, role, path string) func(string) error {
 			}
 			w.rootMonitor.mu.Unlock()
 		}
-		return probeRecoveryMount(path, required, runtime.GOOS, probe, func() ([]nasMount, error) {
+		return probeRecoveryMount(path, required, runtime.GOOS, func(path string) error { return probe(path, progress) }, func() ([]nasMount, error) {
 			probeguard.Check()
+			defer progress()
 			return mountedNASInventory(context.Background(), runtime.GOOS, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
 				if runtime.GOOS == "linux" {
 					return os.ReadFile("/proc/mounts")
@@ -147,8 +157,10 @@ type hostMountResult struct {
 }
 type hostMountProbe struct {
 	root, path  string
-	probe       func(string) error
-	measure     func(string) hostMountResult
+	clock       Clock
+	progressed  atomic.Pointer[time.Time]
+	probe       func(string, func()) error
+	measure     func(string, func()) hostMountResult
 	pending     chan hostMountResult
 	started     time.Time
 	last        HostMountHealth
@@ -178,9 +190,8 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 			return m.Root == p.root && m.LatencySeconds > 0 && m.PendingSeconds == 0 && m.Reason == "" && !m.Adverse
 		})
 	})
-	// Cold start gets one observation cadence. Measured samples can detect a
-	// pending stall immediately, but completed successes train through warmup:
-	// one unusually fast read must not freeze all later successful evidence.
+	// This learned whole-sequence band is advisory. Admission instead uses the
+	// existing #234 per-operation no-progress allowance, including during warmup.
 	limit := signalRefresh
 	if len(base) > 0 {
 		_, hi := healthBand(base, func(s HostHealthSample) float64 {
@@ -218,17 +229,34 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 	}
 	result := p.last
 	result.Root = p.root
+	result.SlowThresholdSeconds = limit.Seconds()
+	result.StallAllowanceSeconds = checkpointAvailabilityStallBudget.Seconds()
 	if p.pending != nil {
 		result.PendingSeconds = max(0, now.Sub(p.started).Seconds())
-		if result.PendingSeconds > limit.Seconds() {
-			result.Reason = "mount_probe_stalled"
-		} else if result.LatencySeconds == 0 && result.Reason == "" {
-			result.Reason = "mount_probe_pending"
+		progressed := p.started
+		if at := p.progressed.Load(); at != nil {
+			progressed = *at
 		}
-		if result.Reason == "" {
+		result.OperationAgeSeconds = max(0, now.Sub(progressed).Seconds())
+		if result.OperationAgeSeconds >= result.StallAllowanceSeconds {
+			result.Reason = "mount_probe_stalled"
+			return p.confirm(result)
+		}
+		// An unfinished read, even with progress, cannot clear a failed/stalled
+		// episode. Recovery still requires fresh successful completions.
+		if mountHealthWithholds(p.reason) {
+			result.Reason, result.Adverse = p.reason, true
+			return result
+		}
+		if result.LatencySeconds == 0 {
+			result.Reason = "mount_probe_pending"
+			return p.confirm(result)
+		}
+		if len(base) < hostHealthWarmup || result.PendingSeconds <= limit.Seconds() {
 			result.Reason = p.reason
 			return result
 		}
+		result.Reason = "mount_probe_slow"
 		return p.confirm(result)
 	}
 	if completed && len(base) >= hostHealthWarmup && result.LatencySeconds > limit.Seconds() && result.Reason == "" {
@@ -236,14 +264,23 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 	}
 	if !now.Before(p.nextProbe) {
 		p.pending, p.started = make(chan hostMountResult, 1), now
+		p.progressed.Store(&now)
 		done, path, probe, measure := p.pending, p.path, p.probe, p.measure
+		clock := p.clock
+		if clock == nil {
+			clock = RealClock{}
+		}
 		go func() {
+			progress := func() {
+				at := clock.Now()
+				p.progressed.Store(&at)
+			}
 			if measure != nil {
-				done <- measure(path)
+				done <- measure(path, progress)
 				return
 			}
 			started := time.Now() // OS elapsed I/O measurement, never a scheduling clock.
-			err := probe(path)
+			err := probe(path, progress)
 			done <- hostMountResult{time.Since(started), err}
 		}()
 	}
@@ -256,6 +293,10 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		return result
 	}
 	return p.confirm(result)
+}
+
+func mountHealthWithholds(reason string) bool {
+	return reason != "" && reason != "mount_probe_slow"
 }
 
 func (p *hostMountProbe) confirm(result HostMountHealth) HostMountHealth {
@@ -291,7 +332,7 @@ func applyHostMountHealth(w Worker, m *Machine) {
 		m.UnavailableRoots = append(m.UnavailableRoots, UnavailableRoot{Root: role, Reason: reason})
 	}
 	for _, probe := range s.Mounts {
-		if probe.Reason == "" {
+		if !mountHealthWithholds(probe.Reason) {
 			continue
 		}
 		if probe.Root == "checkpoint" {

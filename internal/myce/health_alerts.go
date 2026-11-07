@@ -32,6 +32,8 @@ type HealthAlert struct {
 	Attempt     int       `json:"attempt,omitempty"`
 	At          time.Time `json:"at"`
 	Delivered   bool      `json:"delivered"`
+
+	Mount *HostMountHealth `json:"mount,omitempty"`
 }
 type healthCondition struct {
 	Endings     []healthEnding `json:"endings,omitempty"`

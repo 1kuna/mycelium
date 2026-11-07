@@ -65,9 +65,13 @@ apply. Operator drains still require their owner's resume.
 
 Mount probes inspect configured root metadata without traversing or remounting
 it. A blocked syscall remains the single owned outstanding operation for that
-root, off the heartbeat path. Pending age and completion latency are compared
-with successful history, with repeated degradation using existing root-specific
-admission. Independent local work stays eligible. Cold roots retain existing
+root, off the heartbeat path. Pending age and completion latency above the
+host's learned band are advisory (`mount_probe_slow`), with a deduplicated alert
+and measured evidence; successful slow operations do not withhold admission.
+`operation_age_seconds` measures time since the last completed filesystem or
+inventory operation. No progress for the existing measured per-operation
+allowance (`stall_allowance_seconds`, #234) confirms a stall and withholds only
+dependent work. Samples also retain `slow_threshold_seconds`. Independent local work stays eligible. Cold roots retain existing
 checkpoint and mount-inventory availability rules. No filesystem I/O runs in a
 queue transaction. Missing pre-hang evidence cannot establish an earlier hang's
 cause; native OS/mount qualification is separate from fake-clock proof.
@@ -1979,7 +1983,9 @@ personal/project caches are outside this collector.
 
 Worker mount recovery reuses `host_health.history[].mounts` and
 `unavailable_roots`. `mount_probe_pending` is cold/unverified access;
-`mount_probe_slow` and `mount_probe_stalled` use host-relative latency evidence;
+`mount_probe_slow` is a host-relative advisory and does not hold admission;
+`mount_probe_stalled` means no operation progress within the existing measured
+#234 allowance;
 `mount_probe_failed` is returned I/O failure. `mount_inventory_unavailable`
 means the cached mount table could not establish backing storage, and
 `mount_automount_pending` means access has not established the network mount.
@@ -1987,7 +1993,10 @@ means the cached mount table could not establish backing storage, and
 storage-owner action, with a deduplicated `host_mount_action_required` health
 wake even after a prior generic degradation. The latter includes possible
 Keychain approval; it does not claim to diagnose a specific credential failure.
-Only dependent work is withheld; fresh completed healthy probes resume it.
+Failures and confirmed stalls withhold only dependent work; three fresh
+successful completions resume it, including slow successes. Pending observations
+cannot prove recovery. `host_mount_degraded` alerts include typed `mount` evidence;
+`host_mount_unavailable` separately wakes on a stall/failure after an advisory.
 See [platform recovery](operations.md#worker-mount-recovery-linux-and-macos).
 
 ### Installed executable versus running image (#824)
