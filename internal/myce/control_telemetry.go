@@ -206,9 +206,8 @@ type controlRecorder struct {
 	commitPressure                          bool
 	controlCommitCosts                      map[string]probeEstimate
 	diagnosticCommitCost                    probeEstimate
-	pressureOperation                       string
+	recoveryRemaining                       float64
 	diagnosticTransactions, serializedBytes uint64
-	lastWALBytes, observedGrowth            uint64 // flushMu-owned, conservative shared WAL growth.
 }
 
 func newControlRecorder(clock Clock) *controlRecorder {
@@ -359,7 +358,7 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 		}
 		c.backlogPending = len(c.backlog)
 		c.mu.Unlock()
-		if !c.storagePermit(c.pageBytes) {
+		if !c.storagePermit(0) {
 			return nil
 		}
 		c.mu.Lock()
@@ -433,6 +432,13 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 			DiagnosticTransactions, SerializedBytes uint64
 			DurableAt                               time.Time
 		}{c.salt, dropped, overwritten, storageDropped, flightDropped, transactions + 1, written + payloadBytes, at})
+		// Count each affected table/index entry, including AUTOINCREMENT and
+		// retention deletions, and include metadata/keys in physical admission.
+		mutations := uint64(2*len(rawEvents)+2*len(rawTotals)+1) + uint64(removed)
+		physicalPayload := payloadBytes + uint64(len(metadata))
+		for key := range rawTotals {
+			physicalPayload += uint64(len(key))
+		}
 		if closing {
 			c.writeGate.Lock()
 		} else {
@@ -443,6 +449,12 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 				c.writeGate.Unlock()
 				return nil
 			}
+		}
+		// Re-probe after reserving the writer so an intervening queue commit
+		// cannot make the capacity observation stale before this transaction.
+		if !c.storagePermit(c.transactionGrowth(physicalPayload, mutations)) {
+			c.writeGate.Unlock()
+			return nil
 		}
 		err := func() error {
 			defer c.writeGate.Unlock()
@@ -471,7 +483,9 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 			}
 			started := c.clock.Now()
 			err = tx.Commit()
-			c.observeCommit(c.clock.Now().Sub(started), true)
+			if err == nil {
+				c.observeCommit(c.clock.Now().Sub(started), true)
+			}
 			return err
 		}()
 		c.mu.Lock()

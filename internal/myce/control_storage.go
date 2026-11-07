@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// Reserve room for the live WAL's worst-case checkpoint growth plus the next
-// prepared turn or recently observed shared-WAL extent growth. This physical
-// byte budget has no fixed disk percentage or GiB cap. Probe outside q.mu.
+// Reserve live WAL checkpoint space plus the prepared transaction's WAL and
+// possible database growth. Probe outside q.mu; no historical growth latch.
 type controlDiskBudget struct{ Available, WALBytes uint64 }
 
 func controlStorageProbe(path string) func() (controlDiskBudget, error) {
@@ -29,7 +28,24 @@ func controlStorageProbe(path string) func() (controlDiskBudget, error) {
 		return out, nil
 	}
 }
-func (c *controlRecorder) storagePermit(nextBytes int) bool {
+
+// Bootstrap physical growth from the actual prepared mutations, not JSON bytes
+// alone. SQLite's B-tree cursor depth is bounded at 20 (BTCURSOR_MAX_DEPTH).
+// Allow four pages per level per mutated tree entry for the path, splits,
+// freelist/pointer-map bookkeeping, plus overflow payload pages. Events and
+// totals count both their table and sequence/index mutations. This intentionally
+// generous allowance is checked against real WAL growth in the SQLite regression;
+// it is not a guarantee against concurrent foreign writes or filesystem overhead.
+func (c *controlRecorder) transactionGrowth(payload uint64, mutations uint64) uint64 {
+	page := uint64(c.pageBytes)
+	if page == 0 {
+		page = 4096
+	} // SQLite's default, before initialization only.
+	pages := addDiskBytes(payload/page+1, mutations*4*20)
+	// WAL frame header is 24 bytes; the file header is 32 bytes.
+	return addDiskBytes(32, pages*(page+24))
+}
+func (c *controlRecorder) storagePermit(growth uint64) bool {
 	var disk controlDiskBudget
 	var err error
 	if c.storageProbe != nil {
@@ -42,11 +58,8 @@ func (c *controlRecorder) storagePermit(nextBytes int) bool {
 	if pressure != nil {
 		pressured = pressure.observedPressure.Load()
 	}
-	if disk.WALBytes > c.lastWALBytes {
-		c.observedGrowth = max(c.observedGrowth, disk.WALBytes-c.lastWALBytes)
-	}
-	c.lastWALBytes = disk.WALBytes
-	reserve := addDiskBytes(disk.WALBytes, max(uint64(max(0, nextBytes)), c.observedGrowth))
+	// New WAL frames also reserve space for their possible checkpoint growth.
+	reserve := addDiskBytes(disk.WALBytes, addDiskBytes(growth, growth))
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	reason := ""
@@ -64,9 +77,11 @@ func (c *controlRecorder) storagePermit(nextBytes int) bool {
 	return !c.storageDeferred
 }
 
-// Only healthy control commits train the prediction band. A slow diagnostic
-// commit defers diagnostic writes until actual control commits show recovery.
-// No diagnostic retry timer or installation-specific delay is introduced.
+// Learn each write class, including outliers, so sustained latency changes adapt.
+// Recovery accumulates actual healthy control-commit service time, across classes,
+// up to the baseline service cost that triggered deferral. A tiny unrelated write
+// cannot immediately erase a larger stall; recurring healthy writes can recover
+// without repeating an administrative operation. Read-only commits never call here.
 func (c *controlRecorder) observeCommit(d time.Duration, diagnostic bool, operations ...string) {
 	if c == nil || d <= 0 {
 		return
@@ -74,29 +89,35 @@ func (c *controlRecorder) observeCommit(d time.Duration, diagnostic bool, operat
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cost := float64(d)
-	if diagnostic {
-		if c.diagnosticCommitCost.Mean == 0 || cost <= c.diagnosticCommitCost.upper() {
-			c.diagnosticCommitCost.observe(cost)
-		} else {
-			c.commitPressure, c.pressureOperation = true, "diagnostic"
-		}
-		return
-	}
+	var estimate probeEstimate
 	operation := "control"
-	if len(operations) > 0 {
-		operation = operations[0]
-	}
-	if c.controlCommitCosts == nil {
-		c.controlCommitCosts = map[string]probeEstimate{}
-	}
-	estimate := c.controlCommitCosts[operation]
-	if estimate.Mean == 0 || cost <= estimate.upper() {
-		estimate.observe(cost)
-		c.controlCommitCosts[operation] = estimate
-		if c.pressureOperation == "" || c.pressureOperation == "diagnostic" || c.pressureOperation == operation {
-			c.commitPressure, c.pressureOperation = false, ""
-		}
+	if diagnostic {
+		estimate = c.diagnosticCommitCost
 	} else {
-		c.commitPressure, c.pressureOperation = true, operation
+		if len(operations) > 0 {
+			operation = operations[0]
+		}
+		if c.controlCommitCosts == nil {
+			c.controlCommitCosts = map[string]probeEstimate{}
+		}
+		estimate = c.controlCommitCosts[operation]
+	}
+	learned := estimate.Mean > 0
+	slow := learned && cost > estimate.upper()
+	if slow {
+		c.commitPressure = true
+		c.recoveryRemaining = max(c.recoveryRemaining, estimate.Mean)
+	} else if !diagnostic && learned && c.commitPressure {
+		c.recoveryRemaining -= cost
+		if c.recoveryRemaining <= 0 {
+			c.commitPressure = false
+			c.recoveryRemaining = 0
+		}
+	}
+	estimate.observe(cost)
+	if diagnostic {
+		c.diagnosticCommitCost = estimate
+	} else {
+		c.controlCommitCosts[operation] = estimate
 	}
 }

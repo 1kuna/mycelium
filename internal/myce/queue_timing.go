@@ -137,7 +137,7 @@ func (t *queueUpdateTiming) commit(tx *sql.Tx) error {
 	if !controlStarted.IsZero() {
 		finished := t.control.recorder.clock.Now()
 		t.control.next(controlOther)
-		if t.control.dirty {
+		if err == nil && t.control.dirty {
 			t.control.recorder.observeCommit(finished.Sub(controlStarted), false, t.control.event.Operation)
 		}
 	}

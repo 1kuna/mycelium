@@ -1267,11 +1267,25 @@ queue mutex behind its own database writer.
 Persistence defers on measured observation pressure, control/diagnostic commit
 cost above the healthy prediction band for that operation (diagnostic commits
 learn their own band; read-only commits do not train storage cost), or insufficient free
-space for the live WAL's possible checkpoint growth plus the next prepared turn
-or observed shared-WAL growth. The free-space/WAL probe runs outside `q.mu`;
-unavailable capacity also defers. Commit-cost recovery requires an actual healthy
-control commit; pressure and capacity recovery follow new observations, without
-a retry timer. A cold queue must observe its first commit cost before detecting a
+space for the live WAL's possible checkpoint growth plus the prepared turn's
+physical WAL and checkpoint allowance. The bootstrap uses the actual prepared
+payload and mutated table/index/sequence/deletion entries, allowing four pages
+per SQLite B-tree level (maximum depth 20) per entry plus overflow pages and WAL
+headers. It intentionally over-reserves structural work; it is not a physical
+I/O measurement or a guarantee against external writers/filesystem overhead.
+Each probe uses the current WAL extent; checkpoint/truncation removes historical
+growth from the reserve. The free-space/WAL probe runs outside `q.mu`;
+unavailable capacity also defers. Prepared capacity is rechecked with the writer
+reserved, before beginning SQL. Commit-cost recovery accumulates successful
+healthy write-commit service
+across operation classes until it covers the baseline service cost that triggered
+deferral. A cheap unrelated write cannot erase a larger stall immediately;
+recurring healthy check-ins can recover without repeating an infrequent admin
+operation. Read-only and failed commits cannot renew that evidence. Every
+successful write cost, including outliers, updates its operation estimator so
+sustained latency changes adapt. Pressure and capacity recovery follow new
+observations, without a retry timer. A cold queue must observe its first commit
+cost before detecting a
 cost regression; an already executing SQLite commit cannot be interrupted.
 Concurrent external writes and unobserved I/O amplification remain limits.
 

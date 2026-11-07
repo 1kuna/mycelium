@@ -161,27 +161,28 @@ injected clock, `GOMAXPROCS=2` and `-p 2`. Baseline source was
 benchmark file copied into its source archive. Baseline/candidate/baseline/candidate
 rounds each contain five measurements; medians below include all ten per version:
 
-- An uncontended request-backed lock acquisition/release: 189.45 ns baseline,
-  862.20 ns candidate; +672.75 ns (+355.1%). Allocations rise from 2 to 6 and
+- An uncontended request-backed lock acquisition/release: 222.25 ns baseline,
+  833.10 ns candidate; +610.85 ns (+274.8%). Allocations rise from 2 to 6 and
   25 to 1,144 bytes per acquisition. Both include the existing pressure sensor.
-- A small authenticated HTTP request: 3,332.5 ns baseline, 3,452.5 ns candidate;
-  +120 ns (+3.6%). Allocations rise from 45 to 53 and 8,641 to 9,256 bytes.
-  Ranges overlap: 2,880–4,298 ns versus 3,158–3,893 ns.
+- A small authenticated HTTP request: 3,565 ns baseline, 3,277 ns candidate;
+  -288 ns (-8.1%). Allocations rise from 45 to 53 and 8,641 to 9,256 bytes.
+  Ranges overlap: 3,303–5,020 ns versus 2,801–3,605 ns; this does not establish
+  a speedup. The previous corrected-head comparison measured +120 ns (+3.6%).
 - A SQLite worker check-in, including one maintenance/drain per 100 requests:
-  401.527 µs baseline, 401.546 µs candidate (+0.005%, within noise). Ranges are
-  348–433 µs versus 375–502 µs. **This guarded result is not an equal-durability
-  cost comparison:** candidate rounds retained 3–601 pending events and dropped
-  0–2.6 ordinary spans/check-in during measured cost deferral. Successfully
-  committed diagnostic payload ranged 326–848 bytes/check-in and transactions
-  0.09–0.235/check-in. These include cold startup records and this artificial
+  503.254 µs baseline, 467.255 µs candidate (-36 µs, -7.2%). Ranges are
+  374–1,068 µs versus 387–591 µs. **This guarded result is not an equal-durability
+  cost comparison:** candidate rounds retained 8–159 pending events and dropped
+  0–2.56 ordinary spans/check-in during measured cost deferral. Successfully
+  committed diagnostic payload ranged 404–840 bytes/check-in and transactions
+  0.115–0.235/check-in. These include cold startup records and this artificial
   maintenance cadence; do not extrapolate them directly to a real queue.
 
 Before storage-pressure shedding was added, a separate ten-measurement comparison
 observed +183 µs/check-in (+43.7%), with substantial disk variability (baseline
 346–875 µs, candidate 487–3,036 µs). That describes the earlier implementation,
-not the final guard's cost. Two revised rounds with zero storage drops measured
-429 and 502 µs, still with eight pending events; this small subset is insufficient
-for a reliable isolated durable-cost estimate. Always report coverage with latency.
+not the final guard's cost. Neither the guarded medians nor the overlapping
+ranges establish a reliable isolated durable-cost estimate. Always report
+coverage with latency.
 
 The lock/request fixtures stop below the pending envelope and measure append cost.
 Memory headroom is injected identically to exclude native inventory subprocesses;
@@ -222,7 +223,17 @@ live detail uses the existing 256-record window, with omission counters.
 Physical write amplification is unmeasured. Event-count retention does not cap
 sustained write bandwidth or a WAL pinned by readers. The runtime now reports
 successful transaction and event/aggregate payload counters, defers on measured
-pressure/cost/headroom, and sheds ordinary spans before buffer exhaustion (see
+pressure/cost/headroom, and sheds ordinary spans before buffer exhaustion.
+Headroom uses the current WAL plus a conservative physical allowance derived
+from the prepared mutations and payload, reserving both new WAL frames and
+possible checkpoint growth. It has no lifetime WAL-growth high-water mark.
+A focused real-SQLite regression measured cold/overflow/retention transactions
+at 20,632 / 127,752 / 24,752 WAL bytes, with conservative bootstrap allowances
+of 1,652,152 / 1,693,352 / 1,981,752 bytes. An 8 KiB free-space fixture refused
+all three before writing any WAL frame. These examples validate those cases;
+they are not production physical-write measurements or exhaustive growth proof.
+Successful write samples adapt per-operation costs; healthy write service across
+operations can restore recording after an infrequent administrative stall (see
 [control attribution](status.md#retained-control-path-attribution-next-release)).
 This reduces diagnostic competition but cannot interrupt an already executing
 SQLite commit, predict a first cold latency outlier, or exclude external writers.

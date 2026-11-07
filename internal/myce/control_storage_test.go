@@ -1,6 +1,8 @@
 package myce
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -107,5 +109,106 @@ func TestControlStorageCommitClasses(t *testing.T) {
 	c.observeCommit(time.Millisecond, false, "checkin")
 	if c.commitPressure {
 		t.Fatal("same operation did not demonstrate recovery")
+	}
+}
+
+// Exercise real table/index/sequence, overflow and retention writes with a fresh
+// WAL. A JSON-sized allowance accepts the 8KiB fixture, despite the transaction
+// writing several SQLite pages. Physical admission must refuse before any write.
+func TestControlStoragePhysicalTransactions(t *testing.T) {
+	for _, scenario := range []string{"cold", "overflow", "retention"} {
+		t.Run(scenario, func(t *testing.T) {
+			q, _ := fixture(t)
+			c := q.control
+			var path string
+			if err := q.db.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&path); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "retention" {
+				_, err := q.db.Exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?) INSERT INTO control_events(data) SELECT '{}' FROM n`, controlEventCapacity)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.retainedRows = controlEventCapacity
+			}
+			if _, err := q.db.Exec(`PRAGMA wal_autocheckpoint=0; PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+				t.Fatal(err)
+			}
+			operation := "physical"
+			if scenario == "overflow" {
+				operation += strings.Repeat("x", 20000)
+			}
+			c.append(ControlEvent{Kind: "checkin", Operation: operation})
+			c.storageProbe = func() (controlDiskBudget, error) { return controlDiskBudget{Available: 8192}, nil }
+			if err := c.flush(q.db); err != nil {
+				t.Fatal(err)
+			}
+			if !c.snapshot().StorageDeferred || c.snapshot().DiagnosticTransactions != 0 {
+				t.Fatal("JSON-size admission wrote diagnostic data")
+			}
+			st, err := os.Stat(path + "-wal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Size() != 0 {
+				t.Fatal("refusal wrote WAL frames", st.Size())
+			}
+			// Capture the allowance at actual preparation, without assuming the number
+			// of dirty SQLite pages from serialized payload alone.
+			c.storageProbe = func() (controlDiskBudget, error) { return controlDiskBudget{Available: 1 << 30}, nil }
+			if err := c.flush(q.db); err != nil {
+				t.Fatal(err)
+			}
+			st, err = os.Stat(path + "-wal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap := c.snapshot()
+			mutations := uint64(5)
+			if scenario == "retention" {
+				mutations++
+			}
+			growth := c.transactionGrowth(snap.SerializedBytes+1024, mutations)
+			if st.Size() <= 8192 || uint64(st.Size()) > growth {
+				t.Fatal("physical allowance did not cover SQLite evidence", st.Size(), growth)
+			}
+			t.Logf("%s: payload=%d WAL=%d allowance=%d", scenario, snap.SerializedBytes, st.Size(), growth)
+		})
+	}
+}
+
+func TestControlStorageCheckpointRebasesHeadroom(t *testing.T) {
+	c := newControlRecorder(&fakeClock{now: time.Unix(1000, 0)})
+	budget := controlDiskBudget{Available: 1 << 30, WALBytes: 1 << 28}
+	c.storageProbe = func() (controlDiskBudget, error) { return budget, nil }
+	if !c.storagePermit(4096) {
+		t.Fatal("initial capacity")
+	}
+	budget = controlDiskBudget{Available: 1 << 20, WALBytes: 4096}
+	if !c.storagePermit(4096) {
+		t.Fatal("checkpoint left historical growth latched")
+	}
+}
+
+func TestControlStorageCrossOperationRecovery(t *testing.T) {
+	c := newControlRecorder(&fakeClock{now: time.Unix(1000, 0)})
+	c.observeCommit(10*time.Millisecond, false, "administration")
+	c.observeCommit(time.Millisecond, false, "checkin")
+	c.observeCommit(time.Second, false, "administration")
+	if !c.commitPressure {
+		t.Fatal("missing initial pressure")
+	}
+	for i := 0; i < 10; i++ {
+		c.observeCommit(time.Millisecond, false, "checkin")
+	}
+	if c.commitPressure {
+		t.Fatal("healthy checkins could not recover an infrequent administrative stall")
+	}
+	// Persistent change must adapt rather than exclude every slower observation.
+	for i := 0; i < 100; i++ {
+		c.observeCommit(100*time.Millisecond, false, "checkin")
+	}
+	if c.commitPressure {
+		t.Fatal("persistent latency change never adapted")
 	}
 }
