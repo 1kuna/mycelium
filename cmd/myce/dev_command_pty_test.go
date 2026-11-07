@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,11 +38,20 @@ try:
 finally:
     try:
         if done != pid:
-            os.kill(pid, 15)
-            os.waitpid(pid, 0)
-    except ProcessLookupError:
-        pass
-    os.close(fd)
+            # An interrupt may land after waitpid reaps but before assignment.
+            # Only a successful non-reaping check still owns this PID.
+            try:
+                owned, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                owned = pid
+            if owned == 0:
+                try:
+                    os.kill(pid, 15)
+                    os.waitpid(pid, 0)
+                except ProcessLookupError:
+                    pass
+    finally:
+        os.close(fd)
 `
 
 func TestDevCommandPTYEOFBeforeExit(t *testing.T) {
@@ -56,5 +66,32 @@ time.sleep(0.25) # Keep the child alive after its terminal descriptors close.
 	out, err := exec.CommandContext(ctx, "python3", "-c", devCommandPTYProbe, "python3", "-c", child).CombinedOutput()
 	if err != nil {
 		t.Fatalf("terminal EOF preceded child exit: %v\n%s", err, out)
+	}
+}
+
+func TestDevCommandPTYInterruptedReap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	// Raise after the OS reaps the child but before the collector can assign
+	// its return value. Intercept the forbidden signal without sending it.
+	prefix := `import os
+real_waitpid, real_kill = os.waitpid, os.kill
+reaped = set()
+def interrupted_waitpid(pid, options):
+    done, status = real_waitpid(pid, options)
+    if done == pid:
+        reaped.add(pid)
+        raise KeyboardInterrupt
+    return done, status
+def checked_kill(pid, signal):
+    if pid in reaped:
+        raise RuntimeError('signal-of-reaped-child')
+    return real_kill(pid, signal)
+os.waitpid, os.kill = interrupted_waitpid, checked_kill
+`
+	child := `import sys; sys.stdin.readline(); print("terminal-ok", flush=True)`
+	out, err := exec.CommandContext(ctx, "python3", "-c", prefix+devCommandPTYProbe, "python3", "-c", child).CombinedOutput()
+	if ctx.Err() != nil || err == nil || !strings.Contains(string(out), "KeyboardInterrupt") || strings.Contains(string(out), "signal-of-reaped-child") {
+		t.Fatalf("interrupted reap signalled a released PID or lost the exception: %v\n%s", err, out)
 	}
 }
