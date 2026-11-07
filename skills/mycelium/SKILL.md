@@ -34,6 +34,11 @@ For an existing project, use its reviewed adapter entry or compatibility profile
 [setup](setup-project.md) covers authoring and installation. For an empty project,
 this dependency-free CPU fixture uses only worker PATH tools:
 
+From the release containing #909, per-job JSON retains `last_memory_admission`
+for a blocked RAM comparison: envelope, drift, signed headroom and charge/growth
+owners. It survives startup failure and restart. Read its timestamp as historical
+evidence, not live usage or the job's only blocker; a retry starts a new episode.
+
 ```sh
 mkdir -p source .mycelium
 printf 'First-run source fixture\n' > source/README.txt

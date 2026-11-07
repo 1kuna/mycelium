@@ -65,10 +65,16 @@ func (q *Queue) refreshHostMemory() {
 		}
 	}
 	q.refreshHostCPU()
+	q.memoryLedgerGeneration++
+	q.hostMemoryLedgers = make(map[string]*HostMemoryLedger, len(q.s.Machines))
+	charges := map[string]*HostMemoryLedger{}
 	for _, m := range q.s.Machines {
 		available := m.HostAvailableMemoryGB
+		observedAt, availableKnown := m.LastSeen, m.HostMemoryMeasured && m.HostMemoryError == ""
 		for _, other := range q.s.Machines {
 			if hostID(other) == hostID(m) && !other.Gone {
+				observedAt = minTime(observedAt, other.LastSeen)
+				availableKnown = availableKnown && other.HostMemoryMeasured && other.HostMemoryError == ""
 				if !other.HostMemoryMeasured || other.HostMemoryError != "" {
 					available = 0
 				} else {
@@ -113,36 +119,16 @@ func (q *Queue) refreshHostMemory() {
 			m.HostMemoryQualification = "UNQUALIFIED"
 		}
 		m.EffectiveHostMemoryBudgetGB = m.hostBudgetGB
-		reserved, growth := 0.0, 0.0
-		for _, j := range q.liveJobs() {
-			owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-			if !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
-				need := hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-				charge, pending := jobHostMemoryCharge(j, owner, need, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
-				reserved += charge
-				growth += pending
-			}
+		owners := charges[hostID(m)]
+		if owners == nil {
+			owners = q.hostMemoryLedger(m)
+			charges[hostID(m)] = owners
 		}
-		for _, r := range q.s.HostReleases {
-			if r.Host != hostID(m) {
-				continue
-			}
-			j := q.s.Jobs[r.Job]
-			if j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && batchReservesCapacity(j) {
-				continue
-			}
-			reserved += r.HostChargeGB
-			growth += r.HostChargeGB
-		}
-		for _, s := range q.s.ModelSlots {
-			owner := slotMachine(q.s.Machines[s.Machine], s)
-			if owner != nil && slotReservesMemory(s) && hostID(owner) == hostID(m) {
-				model, _ := q.model(s.Model)
-				need := hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
-				reserved += need
-				growth += need
-			}
-		}
+		// Sibling targets share immutable owner facts; each target retains its
+		// own physical/unified-memory admission calculation below.
+		copy := *owners
+		ledger := &copy
+		reserved, growth := ledger.ReservedGB, ledger.GrowthGB
 		m.HostMemoryInUseGB = reserved
 		// Availability already has the operator reserve removed. Full envelopes
 		// still consume the static budget; only unused growth consumes live RAM.
@@ -159,6 +145,10 @@ func (q *Queue) refreshHostMemory() {
 		room = q.sharedHostRoom(m, room, reserved, growth)
 		m.hostReservationDebtGB = max(0, -room)
 		m.FreeHostMemoryGB = max(0, room)
+		ledger.AvailableGB, ledger.AllowanceGB = available, m.hostBudgetGB
+		ledger.ObservedAt, ledger.AvailableKnown = observedAt, availableKnown
+		ledger.SignedRoomGB, ledger.DebtGB, ledger.FreeGB = room, m.hostReservationDebtGB, m.FreeHostMemoryGB
+		q.hostMemoryLedgers[m.ID] = ledger
 	}
 }
 

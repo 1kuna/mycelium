@@ -1309,6 +1309,34 @@ Every host command uses queue evidence; there is no local envelope or rest verdi
 
 ### Live headroom and reservations
 
+From the next release, per-job JSON retains `last_memory_admission`: the last
+changed blocking host-memory comparison in its current wait episode. It is
+retained through a start-deadline failure and queue restart; a retry starts a
+new episode. It records a target comparison, not a claim that RAM is the only
+blocker or that the target will be selected. Absence means no retained comparison,
+not zero usage. Unchanged comparisons reuse their original capture timestamp.
+
+The snapshot has `captured_at`, `waiting_since`, `attempt`, target machine/session,
+host/device and execution target, `envelope` (including basis and source), the
+`drift_reserve_gb` used by physical exploratory sizing, `reason`, `ledger` and
+`reservations`. No exploratory sizing means no exploratory drift reserve.
+The ledger has its own `captured_at`, oldest worker `observed_at`,
+`available_known`, `available_gb`, `allowance_gb`,
+`reserved_gb`, `growth_gb`, `signed_room_gb`, `debt_gb`, `free_gb` and exact
+`owners`. `signed_room_gb` is admission headroom before clamping at zero;
+`debt_gb` is `max(0, -signed_room_gb)`, recalculated rather than accumulated.
+`available_known: false` means the available-memory value is unknown; zero
+`allowance_gb` means no explicit static allowance, not zero physical capacity.
+Each owner identifies an attempt, retained release or model execution, with
+its actual `charge_gb` and remaining `growth_gb`. A live attempt and its nominal
+release receipt appear once. Reservation entries preserve ID, bound job, state
+and pending custody at comparison time. Reservations add no RAM charge and
+do not exempt their bound jobs from physical capacity or cleanup requirements.
+
+This is one replaceable diagnostic per job, retained with ordinary job history,
+not an event log. It complements #857/#859's integrated wait attribution; it
+does not change admission, containment, retry floors or the worker protocol.
+
 `myce status --json` returns the status snapshot as JSON; with a job ID it
 returns that job's status view. `host_available_memory_gb` is worker-observed
 available RAM after its configured host reserve. `host_memory_in_use_gb` is
