@@ -118,7 +118,9 @@ func TestLearnedMemoryGuardExploratoryIncident(t *testing.T) {
 	const observedGrowth = 2.1867791904561273
 	for _, pressure := range []bool{false, true} {
 		t.Run(fmt.Sprintf("pressure=%v", pressure), func(t *testing.T) {
-			q, clock, m := learnedMemoryFixture(t)
+			q, clock := fixture(t)
+			m := cpuMachine("worker", "worker-host", "cpu", 8, 16)
+			m.ExtensionFingerprint = "cpu-v1"
 			m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 12, .125
 			m.CapabilityProfile.OS, m.CapabilityProfile.Arch = "darwin", "arm64"
 			m.CapabilityProfile.SystemMemoryBytes = 16 << 30
@@ -144,6 +146,7 @@ func TestLearnedMemoryGuardExploratoryIncident(t *testing.T) {
 			if err := q.Started(result(run, false)); err != nil {
 				t.Fatal(err)
 			}
+			run = job(t, q, run.ID) // Start records the exact attempt's timing key.
 			w := Worker{Machine: m, HostMemoryReserveGB: 3}
 			guard := w.learnedGuard(*run)
 			var stop *RSSLimitEvidence
