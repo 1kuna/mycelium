@@ -32,25 +32,26 @@ type executionProfile struct {
 }
 
 type profileReceipt struct {
-	PathDiagnostic   *myce.PathDiagnostic `json:"path_diagnostic,omitempty"`
-	SubmissionReused bool                 `json:"submission_reused"`
-	Nonce            string               `json:"nonce"`
-	ArmNonce         string               `json:"arm_nonce,omitempty"`
-	Key              string               `json:"key"`
-	Project          string               `json:"project"`
-	Intent           string               `json:"intent"`
-	JobID            string               `json:"job_id,omitempty"`
-	Status           string               `json:"status"`
-	Observation      string               `json:"observation"`
-	Delivery         string               `json:"delivery"`
-	ObservationError string               `json:"observation_error,omitempty"`
-	DeliveryStatus   string               `json:"delivery_status,omitempty"`
-	FilesExpired     bool                 `json:"files_expired,omitempty"`
-	RefusalCode      string               `json:"refusal_code,omitempty"`
-	RefusalReason    string               `json:"refusal_reason,omitempty"`
-	ResultReference  myce.FileManifest    `json:"result_reference,omitempty"`
-	Spec             myce.Spec            `json:"spec"`
-	Uploads          map[string]string    `json:"uploads"`
+	ImportFailure    *profileImportFailure `json:"import_failure,omitempty"`
+	PathDiagnostic   *myce.PathDiagnostic  `json:"path_diagnostic,omitempty"`
+	SubmissionReused bool                  `json:"submission_reused"`
+	Nonce            string                `json:"nonce"`
+	ArmNonce         string                `json:"arm_nonce,omitempty"`
+	Key              string                `json:"key"`
+	Project          string                `json:"project"`
+	Intent           string                `json:"intent"`
+	JobID            string                `json:"job_id,omitempty"`
+	Status           string                `json:"status"`
+	Observation      string                `json:"observation"`
+	Delivery         string                `json:"delivery"`
+	ObservationError string                `json:"observation_error,omitempty"`
+	DeliveryStatus   string                `json:"delivery_status,omitempty"`
+	FilesExpired     bool                  `json:"files_expired,omitempty"`
+	RefusalCode      string                `json:"refusal_code,omitempty"`
+	RefusalReason    string                `json:"refusal_reason,omitempty"`
+	ResultReference  myce.FileManifest     `json:"result_reference,omitempty"`
+	Spec             myce.Spec             `json:"spec"`
+	Uploads          map[string]string     `json:"uploads"`
 }
 
 type profileObserver struct {
@@ -287,6 +288,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 	}
 	var r profileReceipt
 	var dir string
+	importProgress := &profileImportProgress{}
 	if key != "" {
 		if !regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`).MatchString(key) {
 			return waitError(64, "profile_invalid: invalid submission key")
@@ -348,9 +350,10 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 				if !filepath.IsAbs(local) {
 					local = filepath.Join(root, local)
 				}
-				ref, e := myce.IdentifyFile(local)
+				importProgress.begin("hashing", "shared_inputs."+name+".local", 0, 0)
+				ref, e := myce.IdentifyFileContext(profileImportContext(ctx, importProgress), local)
 				if e != nil {
-					return waitError(64, "profile_input_invalid: cannot identify shared input")
+					return importProgress.failure(out, &r, "", 64, e, token)
 				}
 				if input.SHA256 != "" && input.SHA256 != ref.SHA256 {
 					return waitError(64, "profile_input_invalid: shared input "+name+": sha256 differs")
@@ -438,11 +441,17 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 				local = filepath.Join(root, local)
 			}
 			frozen := filepath.Join(stage, "shared-"+profileHash(name))
-			if e := copyProfileInput(local, frozen); e != nil {
-				return e
+			importProgress.begin("freezing", "shared_inputs."+name+".local", 0, sharedRefs[name].SizeBytes)
+			importCtx := profileImportContext(ctx, importProgress)
+			if e := copyProfileInputContext(importCtx, local, frozen, func(n int64) { importProgress.bytes = n }); e != nil {
+				return importProgress.failure(out, &r, "", 65, e, token)
 			}
-			actual, e := myce.IdentifyFile(frozen)
-			if e != nil || actual != sharedRefs[name] {
+			importProgress.begin("hashing", "shared_inputs."+name+".local", 0, sharedRefs[name].SizeBytes)
+			actual, e := myce.IdentifyFileContext(importCtx, frozen)
+			if e != nil {
+				return importProgress.failure(out, &r, "", 65, e, token)
+			}
+			if actual != sharedRefs[name] {
 				return waitError(65, "profile_input_changed: shared input changed while freezing")
 			}
 			input.Local = ""
@@ -558,7 +567,10 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 				if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 					return err
 				}
-				return profileFailure(out, &r, 75, h.Code+": "+h.Message)
+				return importProgress.failure(out, &r, dir, 75, cause, c.Token)
+			}
+			if len(r.Spec.SharedInputs) > 0 {
+				return importProgress.failure(out, &r, dir, 69, cause, c.Token)
 			}
 			if c.Token != "" {
 				input = strings.ReplaceAll(input, c.Token, "[redacted]")
@@ -571,6 +583,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		}
 		ctx = myce.WithFileStoreSubmission(ctx, r.Spec)
 		operation, input := "preflight", profileInputNames(r, p, itemInputs)
+		importProgress.begin("preflight", input, 0, 0)
 		preflightDone := false
 		uploaded := map[string]bool{}
 		err = c.RetryTransient(ctx, func(attempt context.Context, one myce.Client) error {
@@ -586,8 +599,10 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 					continue
 				}
 				operation, input = "upload", profileStorageInputName(name, p, itemInputs)
+				ref := profileUploadRef(r.Spec, name)
+				importProgress.begin("hashing", input, 0, ref.SizeBytes)
 				// Each retry rechecks the content hash and durable server offset.
-				if e := one.UploadJobInput(attempt, filepath.Join(dir, file), profileUploadRef(r.Spec, name)); e != nil {
+				if e := one.UploadJobInput(profileImportContext(attempt, importProgress), filepath.Join(dir, file), ref); e != nil {
 					return e
 				}
 				uploaded[name] = true
@@ -615,6 +630,11 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 				fmt.Fprintln(errOut, "portability advisory: "+warning)
 			}
 		}
+		var importedBytes int64
+		for _, ref := range r.Spec.StoredInputFiles() {
+			importedBytes += ref.SizeBytes
+		}
+		importProgress.begin("commit", profileInputNames(r, p, itemInputs), importedBytes, importedBytes)
 		j, e := c.Submit(ctx, r.Spec)
 		if e != nil {
 			var h *myce.HTTPError
@@ -630,14 +650,15 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 					}
 					return profileFailure(out, &r, 78, h.Code+": "+h.Message)
 				}
-				return profileFailure(out, &r, 65, "submission_rejected: queue rejected the saved intent")
+				return importProgress.failure(out, &r, dir, 65, e, c.Token)
 			}
-			return profileFailure(out, &r, 69, "queue_unavailable: submission unconfirmed; retry the saved key")
+			return importProgress.failure(out, &r, dir, 69, e, c.Token)
 		}
 		r.JobID, r.Status = j.ID, j.State
 		r.SubmissionReused = j.SubmissionReused
 		r.RefusalCode, r.RefusalReason = "", ""
 		r.PathDiagnostic = nil
+		r.ImportFailure = nil
 		if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 			return err
 		}
@@ -680,13 +701,23 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		// Direct credentials cannot be reopened from an installed authority.
 		observerToken = c.Token
 	}
+	r.ImportFailure = nil
+	var importedBytes int64
+	for _, ref := range r.Spec.StoredInputFiles() {
+		importedBytes += ref.SizeBytes
+	}
+	importProgress.begin("arming", profileInputNames(r, p, itemInputs), importedBytes, importedBytes)
 	if err = armProfileObserver(ctx, dir, &r, observer, observerToken, errOut); err != nil {
-		return profileFailure(out, &r, 74, "wakeup_not_armed: job retained; check notifier configuration and retry")
+		return importProgress.failure(out, &r, dir, 74, err, c.Token)
 	}
 	return json.NewEncoder(out).Encode(r)
 }
 
 func copyProfileInput(src, dest string) error {
+	return copyProfileInputContext(context.Background(), src, dest, nil)
+}
+
+func copyProfileInputContext(ctx context.Context, src, dest string, progress func(int64)) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -696,8 +727,27 @@ func copyProfileInput(src, dest string) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(out, in)
+	_, err = io.Copy(out, &profileInputReader{ctx: ctx, in: in, progress: progress})
 	return errors.Join(err, out.Sync(), out.Close())
+}
+
+type profileInputReader struct {
+	ctx      context.Context
+	in       io.Reader
+	bytes    int64
+	progress func(int64)
+}
+
+func (r *profileInputReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.in.Read(p)
+	r.bytes += int64(n)
+	if r.progress != nil {
+		r.progress(r.bytes)
+	}
+	return n, err
 }
 
 func profileUploadRef(s myce.Spec, name string) myce.FileRef {

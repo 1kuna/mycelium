@@ -180,6 +180,24 @@ the input, and a sanitized HTTP status/code or transport class. Rerunning the
 same command resumes from that receipt without
 duplicating anything. Keep its key and receipt rather than making a new submission.
 
+From the release containing #986, `input_import_failed` and the receipt's
+`import_failure` identify hashing, upload, commit or observer arming (or local
+freezing and capacity preflight), sanitized cause, bytes and elapsed time for
+the current phase attempt. Freezing counts bytes read for copying. Upload bytes are
+server-acknowledged; commit/arming bytes mean uploaded, not queue verification
+progress. A complete upload can still leave no committed job; a lost reply can
+hide one. Reconcile the same key before replacing uncertain intent. Arming
+failures retain the job ID: fix notifier configuration and retry the same command.
+Hashing before intent creation has no durable receipt yet.
+
+For shared data on a NAS, prefer a verified immutable copy under
+`<checkpoint-root>/shared/<project>/...` and declare
+`shared_inputs.NAME.nas: shared/<project>/...`, `sha256` and `size_bytes`.
+This bypasses queue upload and submission hashing. Keep original data until the
+copy is verified. Choose this route from measured transfer/verification cost and
+observed queue I/O pressure, with the caller's available time; there is no fixed
+size cutoff or guessed pre-upload transfer rate. See [large read-only inputs](https://github.com/1kuna/mycelium/blob/main/docs/files.md#large-read-only-inputs).
+
 Replace `JOB_ID` below with the receipt's ID. No notifier or harness setup is
 required. Wait once in the foreground; exit 0 means the job succeeded. A timeout
 or interrupted wait leaves the job alive; resume waiting on the same ID.

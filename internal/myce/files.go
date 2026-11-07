@@ -63,6 +63,11 @@ func IdentifyFile(path string) (FileRef, error) {
 	return identifyFileContext(context.Background(), path)
 }
 
+// IdentifyFileContext identifies a local input under its owner's lifetime.
+func IdentifyFileContext(ctx context.Context, path string) (FileRef, error) {
+	return identifyFileContext(ctx, path)
+}
+
 func identifyFileContext(ctx context.Context, path string) (FileRef, error) {
 	if err := ctx.Err(); err != nil {
 		return FileRef{}, err
@@ -98,7 +103,8 @@ func IdentifyOpenFile(ctx context.Context, f *os.File) (FileRef, error) {
 		return FileRef{}, errors.New("file must be regular")
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, contextReader{ctx, f})
+	reportFileProgress(ctx, "hashing", 0, st.Size())
+	n, err := io.Copy(h, &fileHashProgress{ctx: ctx, in: contextReader{ctx, f}, total: st.Size()})
 	if err != nil {
 		return FileRef{}, err
 	}
@@ -993,8 +999,15 @@ func (c Client) UploadJobInputFile(ctx context.Context, f *os.File, ref FileRef)
 }
 
 func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpose string) error {
-	if err := verifyFile(ctx, path, ref); err != nil {
+	if err := ref.validate(); err != nil {
 		return err
+	}
+	actual, err := identifyFileContext(ctx, path)
+	if err != nil {
+		return err
+	}
+	if actual != ref {
+		return errors.New("stored file identity mismatch")
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -1005,6 +1018,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 }
 
 func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileRef, purpose string) error {
+	reportFileProgress(ctx, "upload", 0, ref.SizeBytes)
 	if s, ok := ctx.Value(fileStoreSubmissionKey{}).(Spec); ok && ctx.Value(fileStoreAttemptKey{}) == nil {
 		var claim FileInputClaim
 		err := c.Call(ctx, "POST", "/api/files/input-claims", map[string]any{"project": s.Project, "class": s.Class, "file": ref}, &claim)
@@ -1018,6 +1032,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 		headPurpose = fileImportUploadPurpose
 	}
 	if err := c.hasFile(ctx, ref, headPurpose); err == nil {
+		reportFileProgress(ctx, "upload", ref.SizeBytes, ref.SizeBytes)
 		return nil
 	} else {
 		var he *HTTPError
@@ -1037,6 +1052,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 		return err
 	}
 	if err = c.hasFile(ctx, ref, headPurpose); err == nil {
+		reportFileProgress(ctx, "upload", ref.SizeBytes, ref.SizeBytes)
 		return nil
 	} else {
 		var he *HTTPError
@@ -1061,6 +1077,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
+	reportFileProgress(ctx, "upload", offset, size)
 	// Bounded PATCH bodies let a slow connection progress without one huge request.
 	for {
 		n := min(int64(4<<20), size-offset)
@@ -1076,6 +1093,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 			return errors.New("invalid upload acknowledgement")
 		}
 		offset = next
+		reportFileProgress(ctx, "upload", offset, size)
 		if offset == size {
 			break
 		}

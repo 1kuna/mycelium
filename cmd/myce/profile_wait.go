@@ -116,6 +116,7 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 		return err
 	}
 	r.Observation, r.ObservationError = "armed", ""
+	r.ImportFailure = nil
 	r.ArmNonce = rand.Text()
 	r.DeliveryStatus = ""
 	r.Delivery = "not_configured"

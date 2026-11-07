@@ -519,6 +519,32 @@ paths, for example `python "$MYCE_INPUT_RUNTIME/run.py" "$MYCE_INPUT_ORIGINAL"`.
 Extension commands receive the same environment variables; their NAS output and
 checkpoint contracts are unchanged. Extension execution must be native.
 
+From the release containing #986, an interrupted local import prints
+`input_import_failed` and saves `import_failure` in its receipt once the intent
+exists. The diagnostic names `hashing`, `upload`, `commit` or `arming` (or local
+`freezing` and capacity `preflight`), a sanitized cause, byte progress and elapsed
+time for the current phase attempt. Freezing counts bytes read for copying.
+Upload progress counts server-acknowledged bytes, including a reconciled resume
+offset; commit/arming progress counts completed uploads, **not** queue hash or
+commit progress. A complete upload does not mean a job exists: submission still
+verifies stored inputs before committing. A cancelled commit can leave no job;
+a lost reply can also hide an accepted job. Keep the receipt and reconcile the
+same key before replacing the submission. An arming failure retains its job ID;
+correct the notifier and retry the same command.
+
+For shared data already on a NAS, use an immutable, size/SHA-256-verified copy
+under `<checkpoint-root>/shared/<project>/...` and declare
+`shared_inputs.NAME.nas: shared/<project>/...`, with `sha256` and `size_bytes`.
+Workers stage and verify it without sending it through the queue. Keep original
+data until verified. This is especially useful when measured transfer/verification
+time is unsuitable for the caller's available time or the queue's observed I/O
+pressure. There is no byte cutoff: size alone cannot establish a slow transfer,
+and a new connection has no measured rate on which to base a pre-upload refusal.
+The diagnostic recommends the NAS route on failure rather than inventing a cap.
+Before a saved intent exists, a hashing failure prints the diagnostic but cannot
+offer a durable submission receipt. Local hashes and copies honor cancellation;
+an in-flight filesystem syscall must still return before cleanup can finish.
+
 `spec check --resolve` evaluates target eligibility and labels worker NAS reads
 as unverified. From the next release, optional `--inspect-nas` requests cached,
 authenticated worker existence evidence; repeat after worker heartbeats.
