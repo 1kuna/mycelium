@@ -339,7 +339,7 @@ func TestPrivacyWorkerLogRetentionProtectsLiveAndReplay(t *testing.T) {
 	if err := saveWorkerJSON(dir, strings.TrimSuffix(live, ".log")+".json", workerState{PID: 123}); err != nil {
 		t.Fatal(err)
 	}
-	if err := pruneWorkerLogs(dir, pending, clock.Now(), DefaultLogRetention); err != nil {
+	if err := pruneWorkerLogs(dir, pending, clock.Now(), testLogRetention); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, expired)); !errors.Is(err, os.ErrNotExist) {
@@ -353,7 +353,7 @@ func TestPrivacyWorkerLogRetentionProtectsLiveAndReplay(t *testing.T) {
 	if err := saveWorkerJSON(dir, strings.TrimSuffix(live, ".log")+".json", workerState{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := pruneWorkerLogs(dir, "", clock.Now(), DefaultLogRetention); err != nil {
+	if err := pruneWorkerLogs(dir, "", clock.Now(), testLogRetention); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, live)); !errors.Is(err, os.ErrNotExist) {
@@ -366,8 +366,8 @@ func TestPrivacyConfiguredRetentionProtectsActiveBatch(t *testing.T) {
 	if err := q.ConfigureLogRetention(time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.ConfigureLogRetention(0); err == nil {
-		t.Fatal("unbounded retention accepted")
+	if err := q.ConfigureLogRetention(-time.Second); err == nil {
+		t.Fatal("negative retention accepted")
 	}
 	j := submit(t, q, spec("production"))
 	m := machine("one", "fake")

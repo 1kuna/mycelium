@@ -43,9 +43,15 @@ func devCommandSession(ctx context.Context, args []string, in io.Reader, out, er
 			result = errors.Join(result, os.RemoveAll(root))
 		}
 	}()
-	fmt.Fprintln(out, "Mycelium dev: temporary local queue · 2 fake workers · stops when the command exits")
 	commandCtx, cancel := waitParentContext(ctx, os.Getppid(), time.Second, os.Getppid)
 	defer cancel()
+	if err := d.WaitReady(commandCtx); err != nil {
+		if commandCtx.Err() != nil {
+			return &exitError{130, err}
+		}
+		return fmt.Errorf("dev workers did not become ready: %w", err)
+	}
+	fmt.Fprintln(out, "Mycelium dev: temporary local queue · 2 fake workers · stops when the command exits")
 	cmd := exec.CommandContext(commandCtx, args[0], args[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = in, out, errOut
 	// Never pass ambient fleet authority, callbacks or job context to this demo.

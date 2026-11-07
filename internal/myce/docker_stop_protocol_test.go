@@ -153,7 +153,7 @@ func TestDockerSidecarStopRecoveryAndEvidence(t *testing.T) {
 }
 
 func TestDockerStderrByteBound(t *testing.T) {
-	b := &dockerTail{}
+	b := &dockerTail{limit: dockerStderrTailBytes}
 	_, _ = b.Write([]byte(strings.Repeat("x", dockerStderrTailBytes*2)))
 	_, _ = b.Write([]byte("final stderr\n"))
 	if len(b.data) != dockerStderrTailBytes || !strings.HasSuffix(string(b.data), "final stderr\n") {

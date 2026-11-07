@@ -152,7 +152,7 @@ func (q *Queue) retryWaveCandidate(j *Job, m *Machine) *Job {
 }
 
 func (q *Queue) usableCurve(p WorkObservation, key ObservationKey) bool {
-	return p.Key == key && p.Samples > 0 && !p.Forbidden && p.StaleReason == "" && validRate(p.Rate) && !q.clock.Now().Before(p.RecordedAt) && q.clock.Now().Sub(p.RecordedAt) <= workCurveMaxAge
+	return p.Key == key && p.Samples > 0 && !p.Forbidden && p.StaleReason == "" && validRate(p.Rate) && !q.clock.Now().Before(p.RecordedAt)
 }
 
 // Keep exact occupancy for OOM invalidation, without treating a whole wave as

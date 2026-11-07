@@ -26,7 +26,7 @@ func (q *Queue) projectRuntime(j *Job) {
 			j.ApplicationProgress = nil
 		} else {
 			p.AgeSeconds += max(0, q.clock.Now().Sub(p.ReceivedAt).Seconds())
-			p.Stale = p.AgeSeconds > applicationProgressMaxAge.Seconds()
+			p.Stale = p.CadenceSeconds > 0 && p.AgeSeconds > p.CadenceSeconds
 			j.ApplicationProgress = &p
 		}
 	}
@@ -67,10 +67,6 @@ func (q *Queue) projectRuntime(j *Job) {
 	}
 	age := max(0, q.clock.Now().Sub(*t.HistoryRecordedAt).Seconds())
 	r.HistoryAgeSeconds, r.Samples, r.Source = &age, t.Samples, t.HistorySource
-	if age > workCurveMaxAge.Seconds() {
-		r.Reason = "no comparable history: measurement older than 30 days"
-		return
-	}
 	if !validRate(*t.PredictedSeconds) {
 		return
 	}

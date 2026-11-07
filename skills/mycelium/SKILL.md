@@ -16,6 +16,8 @@ connection settings, submits a real CPU command and a fake-GPU command, waits
 and fetches verified output. No installed fleet or token setup is needed.
 The queue and workers stop automatically; `quickstart-result/result.txt` remains.
 Plain `myce dev` retains its existing persistent, foreground behavior.
+From the next release, command-scoped dev waits for both local workers to check
+in before starting your command, so a target-required profile can run first.
 
 From the next release, a worker fleet proof may report `slot_mismatch` with
 separate running and `installed_slot` hashes after a failed update. This does not
@@ -41,6 +43,16 @@ Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
+After upgrading both queue and worker, learned and bounded exploratory native
+CPU `memory: auto` jobs can grow their charge from fresh measurements while the host has room. OS
+pressure, exhausted measured headroom, the configured host allowance and
+explicit limits still stop growth. Linux retains a physical/allowance kernel
+ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
+shared-page credit. Missing/stale telemetry protects the execution ceiling.
+`memory_envelope.enforcement` names the acknowledged behavior; older queues or
+workers retain the previous estimate-sized ceiling. Cold physical probes keep
+their initial execution ceilings. Declared numeric limits,
+explicit member caps and Docker behavior are unchanged.
 From the next release, `host_capacity_accumulation` means new CPU work is waiting
 so ready CPU or accelerator work can acquire host RAM/cores as running CPU
 attempts finish. Mycelium chooses one fitting target; earlier fair turns,
@@ -134,6 +146,20 @@ key="ease-audit-$(date -u +%Y%m%dT%H%M%SZ)"
 myce run --entry ease-audit --key "$key"
 ```
 
+From the release containing #866, resolve and adapter portability reports warn
+about missing absolute non-system Mach-O dylib install names in directory-source
+runtime candidates, naming the packaged binary and library. This is submitter-local
+evidence; Git/snapshot source inspection stays unknown until worker staging.
+New profile submissions extract source and apply explicit inputs during worker
+staging, as adapters do, so Darwin prelaunch can inspect packaged helpers before
+launch. Existing saved receipts retain their original intent; use a new key for
+changed intent. Darwin prelaunch checks the staged payload again. `payload_library_missing` is a
+payload/environment failure with `execution_cause.linkage.binary` and `.library`,
+not an infrastructure loss/retry. Bundle and relink the dependency or choose a
+compatible environment, then resubmit changed intent. System/loader-relative
+imports and present libraries do not warn. This check does not prove dynamic
+loader resolution or application compatibility. See [packaged Darwin libraries](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#packaged-darwin-library-dependencies-next-release-866).
+
 Resolve uploads nothing; `needs-staging` for the source archive is expected:
 `run` stages it automatically. Fix actual input/environment/eligibility blockers
 before submitting. Save the receipt's `key` and `job_id`. After a lost reply,
@@ -173,7 +199,7 @@ symlinks below the chosen output directory remain refused.
 
 Success means `result` verified output hashes and sizes **and** `cmp` exited 0:
 the exact result is 23 bytes including newline. A wake or command exit alone is
-insufficient. Download within retention (default seven days).
+insufficient. On a release containing #811, omitted retention protects results until explicit release; saved positive operator windows still apply.
 
 On releases with the mixed-version cache correction, workers without an optional
 shared-input cache-capacity report retain staging-time admission. Reporting workers
@@ -184,7 +210,7 @@ jobs. **Available from the next release:** status and inspection JSON include
 `freshness.captured_at`, `served_at`, `age_seconds` and `cached`; `now` remains
 capture time. Interpret worker freshness and diagnostics at that time, allowing
 for the response age. Inspection and filtered/full status take a fresh capture;
-default status can reuse a generation for up to one second, with immediate
+default status learns its cache lease from local capture/read/write costs, with immediate
 terminal/release invalidation.
 
 From the next release, mixed CPU/RAM waits name occupied cores on eligible
@@ -343,7 +369,7 @@ still withholds dependent jobs under the unchanged measured thresholds.
 - **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
 - **Discrete XPU fan-out sharing (next supporting release, default off):** explicitly set `fan_out.share_xpu: true`; every co-tenant must opt in and have fresh card/host/attempt headroom. Compare off/on at experiment class on the same release before owner-accepted production use. No allowance increase is implied. See [sharing and growth rules](advanced.md#submit).
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
-- **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits.
+- **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits. From the next release, `myce wait --observer-status` reports local observer progress; newer clients request cooperative upgrades. Legacy shared-observer recovery belongs to its operator.
 - **Large outputs, diagnostics, quotas or early release:** [results and custody](advanced.md#results). Release only your own terminal results after all downstream uses and verified copies are complete.
 - **Reservation confirmation (#979, next release):** `reserve add` fails on rejected or unconfirmed writes instead of printing an empty record. Keep an explicit `--id`, inspect `reserve list` after uncertain confirmation, and retry the same binding.
 - **Urgency, reservations or pausing:** [class and validation rules](advanced.md#urgency-and-pausing). Class is the only urgency lever; shared policy changes belong to the queue owner.

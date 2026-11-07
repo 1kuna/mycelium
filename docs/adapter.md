@@ -1280,3 +1280,37 @@ and retains cleanup/partial-output custody. Ordinary command-failure policy
 applies (no automatic retry or infrastructure-loss charge). Reconnect and worker
 or queue restart cannot renew the allowance. Job status exposes the limit,
 expiry and remaining seconds. See [the full contract](jobs.md#per-attempt-wall-time).
+
+### Packaged Darwin library dependencies (next release, #866)
+
+`spec check --resolve` and `portability --adapter` inspect executable files and
+`.dylib`/`.so` library candidates in a selected directory source. Their `linkage`
+warnings name the payload-relative binary and its absolute non-system dylib
+install name when that path is missing on the submitter. This is local evidence,
+not a claim about any remote worker. Selected Git/snapshot sources are explicitly
+uninspected locally; unrelated working-tree bytes never substitute for them.
+
+New profile submissions now use the same worker-side source extraction and explicit
+input replacement as adapters, before any command or check starts. Existing saved
+receipts retain their frozen submission format; use a new intent/key to adopt this
+preparation path.
+
+Darwin workers repeat this read-only check on staged payload runtime candidates,
+including script-launched helpers, before starting any member. They inspect the
+worker architecture's slice in universal binaries. A confirmed missing absolute
+library produces `execution_cause.class: payload_library_missing`, with
+`linkage.binary` and `linkage.library`, and fails the payload without charging
+infrastructure retries or losses. Bundle/relink the library or choose a compatible
+environment before resubmitting. The library name comes from payload bytes;
+Mycelium never adds its private staging prefix to this diagnostic.
+
+This is a packaging check, not a dynamic-loader emulator or complete compatibility
+proof: Apple `/usr/lib/` and `/System/Library/` paths can live in the dyld shared
+cache and are exempt; relative and `@rpath`/`@loader_path`/`@executable_path` names,
+optional weak imports, and present libraries do not warn. Runtime downloads,
+nested archives, undeclared plugin loads and prepared environment contents are
+not enumerated. The candidate filter avoids reading data/weights and catches
+runtime libraries even without executable bits; it may include an unused packaged
+helper. Header/load-command reads do not read symbols or binary sections and add
+no file-size cap, subprocess, network request or queue-lock I/O. Unreadable or
+malformed candidates are unknown, not proof of a missing library.

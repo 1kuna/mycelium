@@ -82,7 +82,7 @@ func TestUsageDownsamplingAndRetention(t *testing.T) {
 	var minutes, hours int
 	q.db.QueryRow("SELECT COUNT(*) FROM usage_samples WHERE span=60").Scan(&minutes)
 	q.db.QueryRow("SELECT COUNT(*) FROM usage_samples WHERE span=3600").Scan(&hours)
-	if minutes != 0 || hours != 1 {
+	if minutes != 3 || hours != 0 {
 		t.Fatal(minutes, hours)
 	}
 	r, e := q.Usage(start)
@@ -95,8 +95,8 @@ func TestUsageDownsamplingAndRetention(t *testing.T) {
 	}
 	var count int
 	q.db.QueryRow("SELECT COUNT(*) FROM usage_samples").Scan(&count)
-	if count != 0 {
-		t.Fatal("old usage retained", count)
+	if count != minutes {
+		t.Fatal("unique accounting evidence lost", count)
 	}
 }
 func TestUsageSimultaneousProjectsNotDoubleCounted(t *testing.T) {

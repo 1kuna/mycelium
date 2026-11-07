@@ -310,8 +310,7 @@ myce result JOB_ID --recovered RESULT_ID --out ./recovered
 ```
 
 This labels the download as recovered. Unqualified `myce result JOB_ID` continues
-to refuse the failed job. Bytes have a fresh `--file-retention` window (default
-seven days) beginning at recovery, even if original job files expired. Each
+to refuse the failed job. Bytes have a fresh `--file-retention` window (protected until release unless explicitly configured) beginning at recovery, even if original job files expired. Each
 `expires_at` is fixed at acceptance; changing retention does not revive expired
 bytes. Expired downloads return `410 result_expired`. Metadata and original job
 provenance remain indefinitely, exempt from history pruning. Keep unique source
@@ -435,65 +434,25 @@ loading/pre-copy uses the existing `--model-cache-bytes` admission and pin/loade
 protection. Stored model eviction verifies that authoritative files remain before
 removing disposable copies. The original NAS cache Trash behavior is unchanged.
 
-The queue reclaims stored inputs and results **7 days after a job becomes
-terminal**, configured with `queue --file-retention DURATION` (positive, default
-`168h`). Queue maintenance uses the queue clock; no separate cleanup timer runs.
-Job records, keyed answers and file identities remain, with `files_expired: true`.
-Increasing the window cannot restore files that already expired.
+From the release containing #811, omitted `--file-retention` is zero: retain
+unique bytes until explicit owner release or a verified authored delivery policy.
+Saved positive operator durations still expire their named payloads. An expired
+result still returns `result_expired`; increasing a window cannot restore already
+removed bytes. Logs follow the same omitted/explicit distinction. Neither policy
+deletes intent, custody ledgers, wait/error facts or keyed replay answers.
 
-Publishing a blob or successfully HEAD-verifying it refreshes its on-disk mtime.
-Collection gives those bytes a six-hour publication grace, covering the gap from
-the first file's refresh through later multi-GB uploads, slow NAS, or a queue
-outage/deploy before submit/complete establishes a new reference.
-That grace survives queue restarts; it does not extend an expired job's result
-recovery contract. Expired reusable worker-cache copies remain evictable. Private-file cache eviction removes only inactive reproducible
-copies and does not HEAD unrelated victims: missing/expired victims or a transient
-queue read failure cannot wedge admission of a healthy new input. Stored model
-cache eviction keeps its separate authoritative-copy verification contract.
+Unsettled input claims protect exact bytes across upload/HEAD/submission requests.
+Lifecycle locks and dependency revisions fence collection; measured claim-to-submit
+delays supply publication protection. There is no six-hour or one-day default.
+Open work, checkpoints, catalogs, recovered results without a deadline and retained
+replay bundles keep their references.
 
-A blob remains while another job within its window or any non-terminal job needs
-it, or any checkpoint generation, catalog model, extension or environment refers
-to it. Checkpoints and catalog storage are outside this collector. Open downloads
-finish through their existing file handles; disconnected callers must download
-within the retention window. An expired result download returns typed HTTP 410
-`result_expired`. Raw file fetches return that code when expired bytes have been
-reclaimed, rather than reporting an unknown file. Accepted result helpers also
-check the job's expiry marker, even if another reference keeps shared bytes.
-
-Only uploads explicitly created for job inputs can be reclaimed before submission.
-CLI/profile input uploads, Go `UploadJobInput` and Python `upload_file` send tus
-metadata `purpose=job-input`; the queue persists an eligibility marker and publish
-time in its existing SQLite state. Collection requires both the publish time and
-blob's mtime to be older than `--file-retention` (default `168h`), the six-hour
-publication grace to have elapsed, and no job (including retained expired records
-and fan-out results), keyed answer, checkpoint, model, extension, environment or
-pending file-reclamation list to reference the blob. All times use the queue Clock.
-Publishing or successful HEAD verification refreshes the mtime. Job admission clears
-the marker in the same transaction; normal terminal-job retention then governs it.
-Model and environment catalog registration also clears and persists eligibility
-immediately, without waiting for a maintenance tick.
-
-Unmarked imports, including `myce file put`, Go `UploadFile`, models and existing
-uploads from older clients, are never orphan-swept, even with an empty or edited
-model catalog. Reusing an unmarked import as a job input does not mark it; a generic
-import of marked bytes clears the marker. The collector shares its bounded per-tick
-budget between terminal reclamation and eligible marked uploads, rechecking purpose,
-custody and mtime before unlink. It does not scan the blob directory for orphans.
-
-Internally created recipe and extension bundle blobs also have durable eligibility
-recorded before creation, so rejected submissions and subsequently pruned history
-do not leak bytes. The same bounded collector requires no remaining reference,
-an eligibility time and blob mtime older than retention, and publication grace.
-Retained jobs and keyed answers protect these blobs independently of result expiry.
-A generic import clears this eligibility too. Existing unmarked bytes are not
-retroactively classified by their contents or swept by scanning the blob directory.
-
-Marked interrupted tus uploads are also collected after an idle retention window
-and publication grace. Successful POST/HEAD/PATCH refresh their durable idle
-timestamps; error replies do not. Collection excludes active requests and rechecks
-all protected references. A crash after blob creation recovers the publication
-marker from the blob's mtime and cleans up expired upload remnants. Unmarked
-imports and unknown files remain for explicit operator inspection and recovery.
+Automatic mode does not sweep orphan/interrupted uploads, unknown imports or
+unclaimed attempt directories. Positive authored retention applies to positively
+identified disposable uploads/bundles after active claims/references are gone.
+Collection releases control between objects and yields under measured contention.
+Pressure never authorizes deleting unique data. See [adaptive retention](retention.md)
+for every replacement and [owner release](operations.md#project-owner-early-file-release-465).
 
 If assignment recipe or bundle bytes become unreadable after a check-in commits,
 the queue sends an exact stop and retains attempt custody until release is

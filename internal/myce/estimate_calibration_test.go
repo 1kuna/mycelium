@@ -120,14 +120,32 @@ func TestEstimateCalibrationPairsAndRestart(t *testing.T) {
 	if writesAfter != writesBefore {
 		t.Fatal("status trained or persisted calibration")
 	}
-	clock.Advance(workCurveMaxAge + time.Second)
+	// Retention preserves matching evidence at any elapsed age.
+	clock.Advance(365 * 24 * time.Hour)
+	check(t, reopened, m, nil)
+	if retained, ok := reopened.estimateCompletion(base, reopened.s.Machines[m.ID]); !ok || retained.seconds() != after.seconds() {
+		t.Fatal("elapsed time discarded retained calibration", retained, ok)
+	}
+	priorPairs := reopened.s.WorkObservations[identityHash(key)].Calibration.Samples
+	teachRepeated(t, reopened, clock, m, s, 3*time.Second)
+	if c := reopened.s.WorkObservations[identityHash(key)].Calibration; c == nil || c.Samples != priorPairs+1 {
+		t.Fatal("retained prediction could not train its accepted outcome", c)
+	}
+	if err := reopened.update(func() error {
+		p := reopened.s.WorkObservations[identityHash(key)]
+		p.StaleReason = "runtime identity changed"
+		reopened.putWorkObservation(identityHash(key), p)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := reopened.estimateCompletion(base, reopened.s.Machines[m.ID]); ok {
-		t.Fatal("expired forecast ranked")
+		t.Fatal("invalidated forecast ranked")
 	}
 }
 
 func TestEstimateCalibrationRejectsIneligiblePairs(t *testing.T) {
-	for _, scenario := range []string{"failed", "interrupted", "stale attempt", "stale session", "changed runtime", "changed command", "mixed occupancy", "constrained", "unknown pressure", "expired prediction"} {
+	for _, scenario := range []string{"failed", "interrupted", "stale attempt", "stale session", "changed runtime", "changed command", "mixed occupancy", "constrained", "unknown pressure", "invalidated history"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, clock, m, _, s := repeatedFixture(t)
 			teachRepeated(t, q, clock, m, s, time.Second)
@@ -165,8 +183,15 @@ func TestEstimateCalibrationRejectsIneligiblePairs(t *testing.T) {
 				r.MemoryPeak.Constrained = true
 			case "unknown pressure":
 				r.MemoryPeak = nil
-			case "expired prediction":
-				clock.Advance(workCurveMaxAge + time.Second)
+			case "invalidated history":
+				if err := q.update(func() error {
+					p := q.s.WorkObservations[identityHash(key)]
+					p.StaleReason = "runtime identity changed"
+					q.putWorkObservation(identityHash(key), p)
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			clock.Advance(time.Second)
 			err := q.Complete(r)
@@ -190,7 +215,7 @@ func TestEstimateCalibrationUnknownAndPhysicalFallback(t *testing.T) {
 	j := teachRepeated(t, q, clock, m, s, time.Second)
 	key := q.s.Jobs[j.ID].Timing.RepeatedKey
 	id := identityHash(key)
-	for _, scenario := range []string{"missing", "changed estimator", "future", "stale", "forbidden", "invalidated", "negative duration"} {
+	for _, scenario := range []string{"missing", "changed estimator", "future", "retired history", "forbidden", "invalidated", "negative duration"} {
 		p := q.s.WorkObservations[id]
 		p.Calibration = &ServiceCalibration{Estimator: serviceEstimator, Samples: 2, MeanError: 1, MinError: 0, MaxError: 2, RecordedAt: clock.Now()}
 		switch scenario {
@@ -200,8 +225,6 @@ func TestEstimateCalibrationUnknownAndPhysicalFallback(t *testing.T) {
 			p.Calibration.Estimator = "different-raw-estimator"
 		case "future":
 			p.Calibration.RecordedAt = clock.Now().Add(time.Second)
-		case "stale":
-			p.Calibration.RecordedAt = clock.Now().Add(-workCurveMaxAge - time.Second)
 		case "forbidden":
 			p.Forbidden = true
 		case "invalidated":
@@ -210,6 +233,9 @@ func TestEstimateCalibrationUnknownAndPhysicalFallback(t *testing.T) {
 			p.Calibration.MeanError = -2
 		}
 		q.s.WorkObservations[id] = p
+		if scenario == "retired history" {
+			delete(q.s.WorkObservations, id)
+		}
 		seconds, e := q.calibratedService(key, 1, 1)
 		if seconds != 1 || e.CorrectionSeconds != 0 || e.Reason == "" {
 			t.Fatal("unsafe correction or unexplained fallback", scenario, seconds, e)

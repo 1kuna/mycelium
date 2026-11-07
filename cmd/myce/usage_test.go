@@ -27,12 +27,12 @@ func TestUsageOutput(t *testing.T) {
 	}
 }
 func TestUsageSince(t *testing.T) {
-	for _, s := range []string{"7d", "24h", "90d"} {
+	for _, s := range []string{"7d", "24h", "90d", "91d"} {
 		if _, e := usageDuration(s); e != nil {
 			t.Fatal(s, e)
 		}
 	}
-	for _, s := range []string{"NaNd", "0d", "91d", "-1h", "bad"} {
+	for _, s := range []string{"NaNd", "0d", "-1h", "bad"} {
 		if _, e := usageDuration(s); e == nil {
 			t.Fatal(s)
 		}
