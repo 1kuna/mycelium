@@ -60,10 +60,16 @@ YAML
 
 The tiny declared memory bounds this fixture; real work can omit memory to learn
 it. From the next release, cold auto-memory work reserves measured physical
-headroom on one host. A running CPU probe can share after fresh complete cgroup
+headroom on one host.
+Cold ceilings leave the host's measured check-in/launch drift unused; strict
+worker launch checks still refuse a larger unseen drop and teach the next probe.
+A running CPU probe can share after fresh complete cgroup
 measurements establish its live footprint and growth over a sampling horizon,
 extended by the measured growth rate through the sample's age;
-its containment ceiling stays fixed. Missing/stale measurements retain the full
+its containment ceiling stays fixed. On releases with the contained-forecast fix,
+the forecast cannot reserve beyond a hard Linux cgroup ceiling; measured overuse
+and workers without hard containment remain conservative.
+Missing/stale measurements retain the full
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.
