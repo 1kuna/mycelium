@@ -99,7 +99,6 @@ func (h *HostHealth) observe(s HostHealthSample) {
 	if s.Error == "" && len(h.Baseline) >= hostHealthWarmup {
 		high := func(f func(HostHealthSample) float64) bool { _, hi := healthBand(h.Baseline, f); return f(s) > hi }
 		_, pressureLimit := healthBand(h.Baseline, func(s HostHealthSample) float64 { return s.Pressure })
-		pressure := s.Pressure > pressureLimit
 		swap := high(func(s HostHealthSample) float64 { return s.SwapGrowth })
 		latency := high(func(s HostHealthSample) float64 { return s.WakeSeconds })
 		heartbeat := s.HeartbeatSeconds > 0 && high(func(s HostHealthSample) float64 { return s.HeartbeatSeconds })
@@ -112,9 +111,9 @@ func (h *HostHealth) observe(s HostHealthSample) {
 		// Corroborated pressure is adverse immediately and never trains the
 		// baseline; the existing confirmation rule still filters brief spikes.
 		// Queue-only heartbeat delay is not local memory-pressure evidence.
-		if pressureLimit == 0 && !swap && !latency {
-			pressure = false
-		}
+		// A learned decay tail must not hide later positive PSI accompanied
+		// by a swap-growth outlier, even if that tail widened the PSI band.
+		pressure := s.Pressure > pressureLimit && (pressureLimit > 0 || latency) || s.Pressure > 0 && swap
 		switch {
 		case pressure:
 			reason = "host_memory_pressure"

@@ -152,18 +152,27 @@ func TestHostHygieneZeroPressureBaseline(t *testing.T) {
 }
 
 func TestHostHygieneColdPressureWithSwapGrowth(t *testing.T) {
-	c := &fakeClock{now: time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)}
-	h := HostHealth{}
-	for range hostHealthWarmup {
-		c.Advance(signalRefresh)
-		h.observe(HostHealthSample{At: c.Now()})
-	}
-	for i := range hostHealthConfirmation {
-		c.Advance(signalRefresh)
-		h.observe(HostHealthSample{At: c.Now(), HostHealthReading: HostHealthReading{Pressure: 6, SwapBytes: float64(i+1) * (1 << 20)}})
-	}
-	if h.DrainReason != "host_memory_pressure" || len(h.Baseline) != hostHealthWarmup {
-		t.Fatal("corroborated cold pressure was accepted into the healthy baseline", h)
+	for _, learnedTail := range []bool{false, true} {
+		t.Run(fmt.Sprint("learned_tail=", learnedTail), func(t *testing.T) {
+			c := &fakeClock{now: time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)}
+			h := HostHealth{}
+			for range hostHealthWarmup {
+				c.Advance(signalRefresh)
+				h.observe(HostHealthSample{At: c.Now()})
+			}
+			if learnedTail {
+				c.Advance(signalRefresh)
+				h.observe(HostHealthSample{At: c.Now(), HostHealthReading: HostHealthReading{Pressure: 2.16}})
+			}
+			baseline := len(h.Baseline)
+			for i := range hostHealthConfirmation {
+				c.Advance(signalRefresh)
+				h.observe(HostHealthSample{At: c.Now(), HostHealthReading: HostHealthReading{Pressure: 6.17, SwapBytes: float64(i+1) * 38e6}})
+			}
+			if h.DrainReason != "host_memory_pressure" || len(h.Baseline) != baseline {
+				t.Fatal("corroborated pressure was accepted into the healthy baseline", h.DrainReason, len(h.Baseline), baseline)
+			}
+		})
 	}
 }
 

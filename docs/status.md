@@ -72,6 +72,8 @@ positive workload reference through the normal baseline path, including the
 three-sample recovery of a retained zero-baseline drain. Once that reference is
 positive, pressure outliers trigger independently again. The reference and its
 adjacent-sample resolution come from this host; there is no absolute PSI cutoff.
+Positive PSI with a swap-growth outlier remains adverse even within the learned
+pressure band, so a widened decay-tail reference cannot hide renewed swapping.
 Disk pressure also requires exhaustion against measured consumption over the
 confirmation horizon. `disk_recovery` retains that measured reserve until space
 actually recovers; aging history alone cannot clear it. Pending adverse mount
