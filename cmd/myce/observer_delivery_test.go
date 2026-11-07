@@ -69,8 +69,15 @@ func TestObserverRecoveryPacesEachBinding(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	pauses := 0
-	err = runSharedProfileLoop(ctx, root, lock, myce.RealClock{}, func(ctx context.Context, _ time.Duration) error {
+	err = runSharedProfileLoop(ctx, root, lock, myce.RealClock{}, func(ctx context.Context, delay time.Duration) error {
 		pauses++
+		var state observerDiagnostic
+		if err := readProfileJSON(filepath.Join(root, "observer.status"), &state); err != nil {
+			t.Fatal(err)
+		}
+		if delay <= time.Nanosecond && state.NextDeliveryAt.After(time.Now()) {
+			t.Fatal("paced delivery kept an expired read timer and would busy-poll")
+		}
 		if pauses == 1 {
 			data, e := os.ReadFile(events)
 			if e != nil {

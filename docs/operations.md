@@ -3893,7 +3893,8 @@ Supporting newer clients write a versioned upgrade request when arming or
 adopting a receipt. The owner verifies the requesting image and handles it
 between deliveries: it cancels and joins outstanding authority readers, releases
 receipt locks, passes its lifetime lock to the new image and waits for readiness.
-Socket cleanup checks identity so the old owner cannot unlink its replacement. On startup failure it retains ownership and
+Socket cleanup holds the startup lock across its identity check and unlink, so
+the old owner cannot race replacement startup. On startup failure it retains ownership and
 reloads durable arms. A paused/stalled loop cannot perform that handoff; the
 request itself is not proof of replacement. Unversioned development images do
 not request automatic replacement.
