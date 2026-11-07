@@ -190,14 +190,14 @@ func TestSubmitVerificationCancellationAndRecheck(t *testing.T) {
 		// Later completion of the old I/O can never create its job.
 		requireNoSubmission(t, q)
 	})
-	for _, deadline := range []string{"request-deadline", "default-bound"} {
+	for _, deadline := range []string{"request-deadline"} {
 		t.Run(deadline, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				q, _ := fixture(t)
 				s := submitVerificationInput(t, q)
 				entered, unblock := gateSubmitVerification(t, q, nil)
 				ctx := context.Background()
-				budget := submitVerificationTimeout
+				budget := time.Second
 				if deadline == "request-deadline" {
 					var cancel context.CancelFunc
 					budget = time.Second
@@ -466,5 +466,29 @@ func TestSubmitVerificationKeyAtomicity(t *testing.T) {
 			t.Fatal("corrupt input accepted")
 		}
 		requireNoSubmission(t, q)
+	})
+}
+
+// Slow but live storage must not lose a legitimate submission at the former
+// 30-second default. The existing cancellation/retained-slot tests prove a stuck
+// syscall cannot publish late work or spawn more verification I/O.
+func TestSubmitVerificationUsesCallerLifetime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q, _ := fixture(t)
+		spec := submitVerificationInput(t, q)
+		entered, unblock := gateSubmitVerification(t, q, nil)
+		done := startSubmitVerification(q, context.Background(), spec)
+		submitVerificationWait(t, "durability barrier", entered)
+		time.Sleep(31 * time.Second)
+		select {
+		case got := <-done:
+			t.Fatal("submission expired independently of caller", got)
+		default:
+		}
+		unblock()
+		got := <-done
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
 	})
 }

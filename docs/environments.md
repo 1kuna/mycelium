@@ -127,6 +127,22 @@ recipe. Status describes missing platform/environment capacity.
 
 ## CPU tools with pixi
 
+From the next release, non-production native CPU commands can use `portable: true`
+with omitted targets and a named managed recipe. Candidate coverage comes from
+that recipe's selected immutable Pixi lock environment, intersected with every
+member environment, supported runtime and fresh worker inventory. `portable`
+asserts the entire payload, including native binaries, downloads and shell code;
+lock coverage alone proves dependencies only. Unknown uv/binary/installed-tool
+coverage needs explicit verified targets. Explicit lists always bind.
+
+Discovery preparation uses a cache identity containing the exact target and
+frozen recipe. A failed candidate is excluded without failing other useful
+candidates; changed recipe identity reopens it, with no idle deterministic retry.
+Read-only resolve/portability never builds or reserves. Plain-command automatic
+production discovery is held: use existing native variants and exact MY-19
+parity acceptance, or explicit owner-accepted targets. Neither a prepared cache
+nor a successful smoke check is semantic parity.
+
 A `cpu` recipe supports CPU work on Linux and Darwin, including the CPU target
 of a GPU host. Python (`requirements.txt` or `uv.lock`), pixi, and binary/build
 recipes all accept `cpu`. The recipe must support the target's OS/architecture;

@@ -33,6 +33,7 @@ type VLLMPreset struct {
 	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
 }
 type Model struct {
+	readinessRecipe string
 	Measurement     *ModelMeasurementBinding `yaml:"measurement,omitempty" json:"measurement,omitempty"`
 	Project         string                   `yaml:"project,omitempty" json:"project,omitempty"`
 	AllowedMachines []string                 `yaml:"allowed_machines,omitempty" json:"allowed_machines,omitempty"`
@@ -77,7 +78,7 @@ type ModelConfig struct {
 }
 
 func ReadModels(path string) (ModelConfig, error) {
-	c := ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}
+	c := ModelConfig{}
 	if path == "" {
 		return c, nil
 	}
@@ -98,8 +99,8 @@ func ReadModels(path string) (ModelConfig, error) {
 	return c, validateModels(c)
 }
 func validateModels(c ModelConfig) error {
-	if c.Idle <= 0 || c.Wait <= 0 {
-		return errors.New("model timeouts must be positive")
+	if c.Idle < 0 || c.Wait < 0 {
+		return errors.New("model timeouts must be nonnegative (zero learns residency and waits for caller cancellation)")
 	}
 	seen := map[string]bool{}
 	for _, m := range c.Models {
@@ -217,6 +218,7 @@ type ModelSlot struct {
 	RetryDelay        time.Duration      `json:"retry_delay,omitempty"`
 	ReleasingCalls    bool               `json:"releasing_calls,omitempty"`
 	Recovering        bool               `json:"recovering,omitempty"`
+	CallsUnconfirmed  bool               `json:"calls_unconfirmed,omitempty"`
 	ProductionUsed    bool               `json:"production_used,omitempty"`
 	StopAt            *time.Time         `json:"stop_at,omitempty"`
 	EnvironmentRecipe *EnvironmentRecipe `json:"environment_recipe,omitempty"`
@@ -327,6 +329,9 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 		}
 		// HTTP requests do not survive queue restart. Reconnected workers reconcile slots.
 		for _, s := range q.s.ModelSlots {
+			// Reset accounting is not evidence of idle. Retain this uncertainty
+			// until this exact engine reports zero calls, on every host policy.
+			s.CallsUnconfirmed = true
 			m := q.s.Machines[s.Machine]
 			if m != nil {
 				if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.ProductionHold {
@@ -401,6 +406,7 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 				}
 				if r.CallsMeasured && r.InFlight == 0 {
 					s.ReleasingCalls = false
+					s.CallsUnconfirmed = false
 				}
 				if s.Recovering {
 					if !r.CallsMeasured {
@@ -452,7 +458,7 @@ func (q *Queue) maintainModels() {
 			q.maintainEngineRetry(k, s, m, model)
 			continue
 		}
-		if s.State != "unloading" && s.State != "unload_failed" && ((!exists || !q.modelUsableMachine(model, m)) || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle) {
+		if s.State != "unloading" && s.State != "unload_failed" && ((!exists || !q.modelUsableMachine(model, m)) || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && q.modelIdleExpired(s)) {
 			s.State = "draining"
 		}
 	}
@@ -558,6 +564,7 @@ func (q *Queue) maintainModels() {
 			if s.InFlight == 0 || q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}) < 0 {
 				s.Priority, s.Class, s.Project = c.Priority, c.Class, c.Project
 			}
+			q.noteModelDemand(c.Model, m.ID)
 			s.InFlight++
 			s.LastUsed = now
 			continue
@@ -578,7 +585,7 @@ func (q *Queue) maintainModels() {
 			q.beginEngineAttempt(s, c.Priority)
 			s.Class, s.Project = c.Class, c.Project
 		} else {
-			s = &ModelSlot{Project: c.Project, Model: c.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
+			s = &ModelSlot{Project: c.Project, Model: c.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
 			q.s.ModelSlots[targetSlotKey(m, c.Model)] = s
 		}
 		q.initEnginePreemption(s)
@@ -818,7 +825,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" {
 			endpoint += "?" + r.URL.RawQuery
 		}
-		spool, bodySize, e = a.Queue.uploadSpool.request(r.Context(), r.Body, maxGenericRequestBytes, r.ContentLength)
+		spool, bodySize, e = a.Queue.uploadSpool.request(r.Context(), r.Body, 0, r.ContentLength)
 		if e != nil {
 			status := 400
 			if errors.Is(e, errModelRequestTooLarge) {
@@ -832,7 +839,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				message = "model request too large"
 			}
 			if errors.Is(e, errUploadSpoolFull) {
-				message = errUploadSpoolFull.Error()
+				message = e.Error()
 			}
 			http.Error(w, message, status)
 			return
@@ -843,9 +850,10 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	} else {
-		data, e = io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
+		var shape map[string]json.RawMessage
+		data, e = readBudgetJSON(r, &shape)
 		if e != nil {
-			modelError(w, 400, "invalid model request")
+			respond(w, nil, e)
 			return
 		}
 		if e = json.Unmarshal(data, &body); e != nil {
@@ -887,7 +895,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		e = a.Queue.updateRequest(r.Context(), func() error {
 			a.Queue.maintain()
 			call = *a.Queue.calls[c.ID]
-			timedOut = a.Queue.clock.Now().Sub(call.Queued) >= a.Queue.models.Wait
+			timedOut = a.Queue.models.Wait > 0 && a.Queue.clock.Now().Sub(call.Queued) >= a.Queue.models.Wait
 			requestExpired = !requestUntil.IsZero() && !a.Queue.clock.Now().Before(requestUntil)
 			engineLost = a.Queue.engineAttemptLost(&call)
 			if m := a.Queue.s.Machines[call.Machine]; m != nil && !m.Gone && m.Session == call.Session && a.Queue.callAttemptLive(&call) {

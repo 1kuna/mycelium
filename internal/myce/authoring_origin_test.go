@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -81,8 +82,28 @@ func TestAuthoringOriginRetentionReplayAndPrivacy(t *testing.T) {
 	}
 	for _, query := range []string{"?jobs=all", "?jobs=all&detail=full"} {
 		var got Snapshot
-		if err := json.Unmarshal(read("/api/status"+query), &got); err != nil || len(got.Jobs) != len(ids) {
-			t.Fatalf("status count changed: %d %v", len(got.Jobs), err)
+		seen := map[string]bool{}
+		// Page sizes follow host capacity; the cursor, rather than a single
+		// response's row count, promises complete retained-history coverage.
+		for before := ""; ; {
+			var page Snapshot
+			if err := json.Unmarshal(read("/api/status"+query+before), &page); err != nil {
+				t.Fatal(err)
+			}
+			for _, j := range page.Jobs {
+				if seen[j.ID] {
+					t.Fatal("duplicate status origin", j.ID)
+				}
+				seen[j.ID] = true
+			}
+			got.Jobs = append(got.Jobs, page.Jobs...)
+			if page.JobsPage.NextBefore == "" {
+				break
+			}
+			before = "&before=" + url.QueryEscape(page.JobsPage.NextBefore)
+		}
+		if len(got.Jobs) != len(ids) {
+			t.Fatalf("status count changed: %d", len(got.Jobs))
 		}
 		for _, j := range got.Jobs {
 			if j.Spec.AuthoringOrigin != ids[j.ID] {

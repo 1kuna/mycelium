@@ -34,6 +34,7 @@ func retainedStatusQueue(t testing.TB) *Queue {
 
 func TestQueueStatusReadsDoNotWriteRetainedHistory(t *testing.T) {
 	q := retainedStatusQueue(t)
+	setStatusTestCapacity(q)
 	before, _ := json.Marshal(q.s)
 	// Any persistence attempt now fails; status still has to work.
 	if _, err := q.db.Exec("PRAGMA query_only=ON"); err != nil {

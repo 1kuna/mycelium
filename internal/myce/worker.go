@@ -110,6 +110,7 @@ type Worker struct {
 	EnvironmentRoot       string
 	EnvironmentLimit      int64
 	environmentCache      *EnvironmentCache
+	environmentSizeLimit  func(string) (int64, error) // Test seam for cache filesystem headroom.
 	environmentRun        func(context.Context, []string, string, []string, io.Writer, io.Writer) error
 	// Test seams for deterministic filesystem faults and audited fake engines.
 	beforeModelCopy      func(context.Context)
@@ -567,14 +568,14 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			release()
 		}
 	}()
-	if r, ok := j.EnvironmentRecipes[w.Machine.GPU]; ok {
+	if r, ok := commandEnvironmentRecipe(&j, j.EnvironmentRecipes, &w.Machine); ok {
 		if r.BinaryRelative != "" && w.EnvironmentSourceRoot != "" {
 			r.Binary = filepath.Join(w.EnvironmentSourceRoot, r.BinaryRelative)
 		}
 		if w.environmentCache == nil {
 			return nil, s.startFailure(j, environmentFailed, errors.New("environment builder unavailable"))
 		}
-		r.readyOnly = j.Spec.extensionJob() || w.Machine.SharedHost != nil
+		r.readyOnly = j.CommandDiscovery != nil || j.Spec.extensionJob() || w.Machine.SharedHost != nil
 		buildCtx := context.WithValue(ctx, preparationCustodyKey{}, s.retainPreparation)
 		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(buildCtx, func() error {
 			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
@@ -1157,7 +1158,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.EnvironmentRoot == "" {
 		w.EnvironmentRoot = filepath.Join(s.dir, "environment-cache")
 	}
-	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
+	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun, sizeLimit: w.environmentSizeLimit}
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}
@@ -1200,12 +1201,6 @@ func (w Worker) Run(stop context.Context) error {
 	w.fleet = w.newFleetRuntime()
 	// Startup may rotate an idle session after exact orphan recovery. The first
 	// queue checkin binds the recovered session before admission.
-	if w.ModelConfig.Idle <= 0 {
-		w.ModelConfig.Idle = 10 * time.Minute
-	}
-	if w.ModelConfig.Wait <= 0 {
-		w.ModelConfig.Wait = 5 * time.Minute
-	}
 	if err = validateModels(w.ModelConfig); err != nil {
 		return err
 	}

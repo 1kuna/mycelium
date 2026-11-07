@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -44,10 +45,11 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 	observerDir := f.String("observer-dir", "", "private shared profile observer registry")
 	detached := f.Bool("detached", false, "continue after parent exit (explicit managed use only)")
 	receipt := f.String("receipt", "", "private profile receipt directory (managed detached observer)")
+	jsonOutput := f.Bool("json", false, "print state/reason changes as JSON with full diagnostics")
 	timeout := f.Duration("timeout", 0, "maximum wait duration; does not cancel jobs (default: unlimited)")
 	f.Usage = func() {
 		fmt.Fprintln(errOut, "Usage: myce wait <job-id> [<job-id>...] [--timeout DURATION]")
-		fmt.Fprintln(errOut, "Wait for every job, retrying network/queue outages. Prints each final state and reason once.")
+		fmt.Fprintln(errOut, "Wait for every job, retrying network/queue outages. Prints one short line per state change. Use --json or status for full reasons.")
 		fmt.Fprintln(errOut, "Exit codes: 0 all succeeded (or help); 1 any failed/cancelled; 2 usage/auth/API error; 3 timeout (jobs continue); 4 interrupted.")
 		f.PrintDefaults()
 	}
@@ -108,7 +110,7 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 	}
 	// Re-resolving installed authority lets a long wait follow a queue restart
 	// or a worker upgrade that replaced the config mid-wait (#607).
-	return waitJobsReconnecting(ctx, client, authority.client, ids, *timeout, out, errOut, myce.RealClock{}, waitPause)
+	return waitJobsReporting(ctx, client, authority.client, ids, *timeout, out, errOut, myce.RealClock{}, waitPause, *jsonOutput)
 }
 
 // A wait with no successful status read for waitNoProgress logs its blocking
@@ -134,9 +136,14 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 }
 
 func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (myce.Client, error), ids []string, timeout time.Duration, out, errOut io.Writer, clock myce.Clock, pause func(context.Context, time.Duration) error) error {
+	return waitJobsReporting(ctx, c, reconnect, ids, timeout, out, errOut, clock, pause, false)
+}
+
+func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myce.Client, error), ids []string, timeout time.Duration, out, errOut io.Writer, clock myce.Clock, pause func(context.Context, time.Duration) error, jsonOutput bool) error {
 	pending := map[string]bool{}
 	completed := map[string]bool{}
-	lastGuidance := map[string]string{}
+	lastState := map[string]string{}
+	lastDetail := map[string]string{}
 	observed := map[string]bool{}
 	revisions := map[string]uint64{}
 	batchSupported := false
@@ -181,7 +188,7 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 			read := c.GetJobForWait
 			// Preserve the initial placement/deadline advisory; steady-state
 			// polls need only state, and terminal replies are full Jobs.
-			if !observed[id] {
+			if !observed[id] || jsonOutput {
 				read = c.GetJob
 			}
 			var j *myce.Job
@@ -201,6 +208,9 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 				j, err = batchJobs[id], batchErr
 			} else if !observed[id] {
 				j, batchSupported, err = c.GetJobWaitCapability(requestCtx, id)
+				// Structured output promises full current diagnostics; lightweight
+				// batch/wait projections intentionally omit nonterminal reasons.
+				batchSupported = batchSupported && !jsonOutput
 			} else {
 				j, err = read(requestCtx, id)
 			}
@@ -241,9 +251,26 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 			}
 			lastProgress = clock.Now()
 			observed[j.ID] = true
-			if guidance := waitBlockerText(j); guidance != "" && guidance != lastGuidance[j.ID] {
-				fmt.Fprintf(errOut, "wait: %s %s\n", j.ID, guidance)
-				lastGuidance[j.ID] = guidance
+			terminal := j.State == "succeeded" || j.State == "failed" || j.State == "cancelled"
+			if jsonOutput {
+				detail := j.State + "\x00" + j.Reason
+				if detail != lastDetail[j.ID] {
+					if err := json.NewEncoder(out).Encode(j); err != nil {
+						return &exitError{2, err}
+					}
+					lastDetail[j.ID] = detail
+				}
+			} else if j.State != lastState[j.ID] {
+				// Preserve stdout's terminal-state shell contract; progress goes
+				// to stderr. Scheduler explanations remain in JSON and status.
+				destination := errOut
+				if terminal {
+					destination = out
+				}
+				if _, err := fmt.Fprintf(destination, "%s %s\n", j.ID, j.State); err != nil {
+					return &exitError{2, err}
+				}
+				lastState[j.ID] = j.State
 			}
 			delete(pending, id)
 			if j.State != "succeeded" && j.State != "failed" && j.State != "cancelled" {
@@ -255,14 +282,7 @@ func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (
 				continue
 			}
 			completed[j.ID] = true
-			// A reason can contain line breaks; keep one physical line per job.
-			reason := strings.Join(strings.Fields(j.Reason), " ")
-			if reason != "" {
-				reason = " " + reason
-			}
-			if _, err := fmt.Fprintf(out, "%s %s%s\n", j.ID, j.State, reason); err != nil {
-				return &exitError{2, err}
-			}
+
 			failed = failed || j.State != "succeeded"
 		}
 		if unavailable {
@@ -318,11 +338,4 @@ func waitReadCause(err error) string {
 		return "response_incomplete"
 	}
 	return "read_error"
-}
-
-func waitBlockerText(j *myce.Job) string {
-	if j.Blocker != nil {
-		return j.Blocker.Text() + ". " + myce.DeadlineGuidanceText(j)
-	}
-	return myce.DeadlineGuidanceText(j)
 }

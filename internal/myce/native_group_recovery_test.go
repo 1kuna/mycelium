@@ -23,7 +23,7 @@ func TestNativeGroupWorkerCrashHelper(t *testing.T) {
 	if os.Getenv("NATIVE_CRASH_WORKER") != "1" {
 		return
 	}
-	w := Worker{Clock: RealClock{}, StateDir: os.Getenv("NATIVE_CRASH_STATE"), Client: Client{URL: os.Getenv("NATIVE_CRASH_URL"), Token: "review-synthetic"}, Machine: machine("review-worker", "fake"), Interval: 5 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w := Worker{EnvironmentLimit: 1 << 30, Clock: RealClock{}, StateDir: os.Getenv("NATIVE_CRASH_STATE"), Client: Client{URL: os.Getenv("NATIVE_CRASH_URL"), Token: "review-synthetic"}, Machine: machine("review-worker", "fake"), Interval: 5 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 	if err := w.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestNativeGroupSIGKILLRestart(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
-			w := Worker{Clock: RealClock{}, StateDir: stateDir, Client: Client{URL: server.URL, Token: "review-synthetic"}, Machine: machine("review-worker", "fake"), Interval: 5 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+			w := Worker{EnvironmentLimit: 1 << 30, Clock: RealClock{}, StateDir: stateDir, Client: Client{URL: server.URL, Token: "review-synthetic"}, Machine: machine("review-worker", "fake"), Interval: 5 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 			go func() { done <- w.Run(ctx) }()
 			defer func() {
 				cancel()

@@ -47,6 +47,7 @@ func runInventoryReviewWorker(t *testing.T, q *Queue, w Worker) Client {
 		w.StateDir = newTestStateRoot(t)
 	}
 	w.Clock, w.Interval = RealClock{}, time.Millisecond
+	w.EnvironmentLimit = 1 << 20
 	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 	w.CPUIsolationProbe = func(context.Context) error { return nil }
 	ctx, cancel := context.WithCancel(context.Background())
@@ -376,7 +377,7 @@ func TestInventoryReviewSplitWorkerDiagnostic(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	w := Worker{Machine: m, Clock: RealClock{}, StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return inventoryReviewDevices(), nil }}
+	w := Worker{EnvironmentLimit: 1 << 20, Machine: m, Clock: RealClock{}, StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return inventoryReviewDevices(), nil }}
 	err = w.Run(ctx)
 	if !errors.As(err, &httpErr) || httpErr.Code != "machine_worker_conflict" {
 		t.Fatalf("worker did not stop on split configuration: %v", err)

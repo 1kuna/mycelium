@@ -38,7 +38,7 @@ func TestJoiningExtensionEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	w := Worker{Client: client, StateDir: state, ExtensionRoot: root, JobFileRoot: shared, Machine: machine("joined", "fake"), Interval: 5 * time.Millisecond}
+	w := Worker{EnvironmentLimit: 1 << 30, Client: client, StateDir: state, ExtensionRoot: root, JobFileRoot: shared, Machine: machine("joined", "fake"), Interval: 5 * time.Millisecond}
 	// Exercise ordinary startup detection rather than the scheduler fixture profile.
 	w.Machine.CapabilityProfile = nil
 	done := make(chan error, 1)

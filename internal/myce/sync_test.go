@@ -390,7 +390,7 @@ func TestSyncUsesRealAPIAndWorker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	w := Worker{Client: client, Machine: machine("sync-worker", "fake"), Clock: RealClock{}, Interval: 20 * time.Millisecond, StateDir: filepath.Join(dir, "worker"), ModelRoot: nas, CacheLimit: 1024, ModelConfig: cfg}
+	w := Worker{EnvironmentLimit: 1 << 30, Client: client, Machine: machine("sync-worker", "fake"), Clock: RealClock{}, Interval: 20 * time.Millisecond, StateDir: filepath.Join(dir, "worker"), ModelRoot: nas, CacheLimit: 1024, ModelConfig: cfg}
 	go func() { done <- w.Run(ctx) }()
 	deadline := time.After(testWaitTimeout)
 	tick := time.NewTicker(10 * time.Millisecond)

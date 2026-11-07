@@ -48,7 +48,7 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 				}
 			}()
 			var calls atomic.Int32
-			w := Worker{InventoryProbe: benchmarkTestInventory, CPUIsolationProbe: func(context.Context) error { return nil }, OnboardingBenchmark: mode == "enabled", StateDir: root, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("dedicated", "xpu"), Interval: time.Millisecond,
+			w := Worker{EnvironmentLimit: 1 << 30, InventoryProbe: benchmarkTestInventory, CPUIsolationProbe: func(context.Context) error { return nil }, OnboardingBenchmark: mode == "enabled", StateDir: root, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("dedicated", "xpu"), Interval: time.Millisecond,
 				OwnerSignals: func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} },
 				Benchmark: func(_ context.Context, _ BenchmarkConfig, p *CapabilityProfile) error {
 					calls.Add(1)

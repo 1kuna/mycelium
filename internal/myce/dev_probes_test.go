@@ -18,7 +18,8 @@ import (
 func devProbe(t *testing.T) (*Dev, DevConfig, context.Context) {
 	t.Helper()
 	root := newTestStateRoot(t)
-	c := DevConfig{Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "probe-token", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}
+	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "probe-token", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}
+	c.environmentSizeLimit = func(string) (int64, error) { return environmentCacheSize(23 << 30) }
 	t.Setenv("MYCE_TOKEN", c.Token)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -241,7 +242,7 @@ func (c probeConsumer) publish(execution Execution) bool {
 // the restarted worker restore health without a local registry or rest proof.
 func TestDevProbeRebootResume(t *testing.T) {
 	root := newTestStateRoot(t)
-	c := DevConfig{Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "reboot-fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}
+	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "reboot-fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	d, err := StartDev(c)

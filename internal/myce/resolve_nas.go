@@ -1,22 +1,22 @@
 package myce
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
-// These are diagnostic metadata only, never an input identity or launch permit.
-// A minute bounds stale presence claims. 256 entries bound API memory; eight
-// checks per heartbeat and one outstanding worker syscall bound NAS pressure.
-const resolveNASLimit = 256
-const resolveNASBatch = 8
-const resolveNASLifetime = time.Minute
+// Diagnostic evidence expires with the worker's existing session freshness
+// fence, never a universal cache minute. Pending work is bounded by measured
+// queue memory. One check per heartbeat matches the worker's one syscall slot;
+// sending larger batches cannot increase its physical processing concurrency.
 
 type NASPathCheck struct {
 	ID   string `json:"id"`
@@ -37,15 +37,21 @@ type resolveNASEntry struct {
 	machine, session  string
 	expires, observed time.Time
 	state             string
+	lifetime          time.Duration
 }
 type resolveNASCache struct {
 	mu      sync.Mutex
 	clock   Clock
 	entries map[string]*resolveNASEntry
+	budgets *requestBudgets
 }
 
-func newResolveNASCache(clock Clock) *resolveNASCache {
-	return &resolveNASCache{clock: clock, entries: map[string]*resolveNASEntry{}}
+func newResolveNASCache(clock Clock, budgets ...*requestBudgets) *resolveNASCache {
+	b := &requestBudgets{}
+	if len(budgets) > 0 {
+		b = budgets[0]
+	}
+	return &resolveNASCache{clock: clock, budgets: b, entries: map[string]*resolveNASEntry{}}
 }
 func (c *resolveNASCache) expire(now time.Time) {
 	for key, entry := range c.entries {
@@ -55,10 +61,15 @@ func (c *resolveNASCache) expire(now time.Time) {
 	}
 }
 func (c *resolveNASCache) resolve(req ResolveRequest, report *ResolveReport) {
+	capacity, _ := c.budgets.capacity(context.Background())
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
 	c.expire(now)
+	var used int64
+	for key, entry := range c.entries {
+		used += int64(len(key)+len(entry.check.ID)+len(entry.check.Path)) + int64(reflect.TypeFor[resolveNASEntry]().Size())
+	}
 	for i := range report.Targets {
 		target := &report.Targets[i]
 		for _, name := range sortedPortabilityKeys(req.Spec.SharedInputs) {
@@ -69,9 +80,10 @@ func (c *resolveNASCache) resolve(req ResolveRequest, report *ResolveReport) {
 			evidence := ResolveNASInput{Name: name, State: "unverified"}
 			key := identityHash([]string{target.Machine, target.session, input.NAS})
 			entry := c.entries[key]
-			if req.InspectNAS && target.nasInspection && target.Freshness == "fresh" && entry == nil && len(c.entries) < resolveNASLimit {
-				entry = &resolveNASEntry{check: NASPathCheck{ID: ID(), Path: input.NAS}, machine: target.Machine, session: target.session, expires: now.Add(resolveNASLifetime), state: "pending"}
+			if req.InspectNAS && target.nasInspection && target.Freshness == "fresh" && entry == nil && used+int64(len(key)+len(input.NAS))+int64(reflect.TypeFor[resolveNASEntry]().Size()) < capacity {
+				entry = &resolveNASEntry{check: NASPathCheck{ID: ID(), Path: input.NAS}, machine: target.Machine, session: target.session, expires: target.freshUntil, lifetime: target.freshUntil.Sub(now), state: "pending"}
 				c.entries[key] = entry
+				used += int64(len(key)+len(entry.check.ID)+len(entry.check.Path)) + int64(reflect.TypeFor[resolveNASEntry]().Size())
 			}
 			if entry != nil && target.Freshness == "fresh" {
 				evidence.State, evidence.ObservedAt = entry.state, entry.observed
@@ -87,7 +99,7 @@ func (c *resolveNASCache) resolve(req ResolveRequest, report *ResolveReport) {
 		}
 	}
 	if req.InspectNAS {
-		report.Notes = append(report.Notes, "NAS inspection is optional, authenticated, metadata-only and cached for one minute; pending/unverified is unknown. Repeat after worker heartbeats. Only declared shared_inputs.nas paths are inspected under the worker checkpoint root. No bytes, hashes or runtime readiness are verified; submission and staging revalidate. Workers need the inspection-capable release.")
+		report.Notes = append(report.Notes, "NAS inspection is optional, authenticated, metadata-only and cached until the worker session freshness fence; pending/unverified is unknown. Repeat after worker heartbeats. Only declared shared_inputs.nas paths are inspected under the worker checkpoint root. No bytes, hashes or runtime readiness are verified; submission and staging revalidate. Workers need the inspection-capable release.")
 	}
 }
 func (c *resolveNASCache) checkin(in Checkin) []NASPathCheck {
@@ -97,7 +109,7 @@ func (c *resolveNASCache) checkin(in Checkin) []NASPathCheck {
 	c.expire(now)
 	reports := map[string]NASPathReport{}
 	for _, r := range in.NASPathReports {
-		if !math.IsNaN(r.AgeSeconds) && !math.IsInf(r.AgeSeconds, 0) && r.AgeSeconds >= 0 && r.AgeSeconds < resolveNASLifetime.Seconds() && (r.State == "present" || r.State == "missing" || r.State == "unverified") {
+		if !math.IsNaN(r.AgeSeconds) && !math.IsInf(r.AgeSeconds, 0) && r.AgeSeconds >= 0 && r.AgeSeconds <= float64(math.MaxInt64)/float64(time.Second) && (r.State == "present" || r.State == "missing" || r.State == "unverified") {
 			reports[r.ID] = r
 		}
 	}
@@ -110,8 +122,8 @@ func (c *resolveNASCache) checkin(in Checkin) []NASPathCheck {
 		if entry.state == "pending" {
 			if state, ok := reports[entry.check.ID]; ok {
 				entry.state, entry.observed = state.State, now.Add(-time.Duration(state.AgeSeconds*float64(time.Second)))
-				entry.expires = entry.observed.Add(resolveNASLifetime)
-			} else if len(checks) < resolveNASBatch {
+				entry.expires = entry.observed.Add(entry.lifetime)
+			} else if len(checks) == 0 {
 				checks = append(checks, entry.check)
 			}
 		}
@@ -142,7 +154,7 @@ func (w *Worker) inspectNASPaths(checks []NASPathCheck, root string) {
 	}
 	s.sampled = sampled
 	s.root = root
-	s.checks = slices.Clone(checks[:min(len(checks), resolveNASBatch)])
+	s.checks = slices.Clone(checks)
 }
 func (w *Worker) nasPathReports() []NASPathReport {
 	s := w.nasInspection

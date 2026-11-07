@@ -418,7 +418,7 @@ func d5NativeWorkerLoss(t *testing.T, group bool) Result {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := Worker{Clock: RealClock{}, StateDir: stateDir, Client: Client{URL: server.URL, Token: "review-synthetic"}, Machine: machine("review-worker", "fake"), Interval: 5 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w := Worker{EnvironmentLimit: 1 << 30, Clock: RealClock{}, StateDir: stateDir, Client: Client{URL: server.URL, Token: "review-synthetic"}, Machine: machine("review-worker", "fake"), Interval: 5 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	defer func() {

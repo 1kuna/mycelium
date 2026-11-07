@@ -258,7 +258,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 	var active atomic.Bool
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	w := Worker{DailyUse: true, OwnerSignals: func(context.Context) OwnerSignals {
+	w := Worker{EnvironmentLimit: 1 << 20, DailyUse: true, OwnerSignals: func(context.Context) OwnerSignals {
 		s := idleSignals()
 		if active.Load() {
 			s.IdleSeconds = 0
@@ -389,7 +389,7 @@ func TestPoliteOwnerStopDuringBlockedCheckin(t *testing.T) {
 	state := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	worker := Worker{Clock: clock, DailyUse: true, OwnerSignals: func(context.Context) OwnerSignals {
+	worker := Worker{EnvironmentLimit: 1 << 20, Clock: clock, DailyUse: true, OwnerSignals: func(context.Context) OwnerSignals {
 		s := idleSignals()
 		if active.Load() {
 			s.IdleSeconds = 0

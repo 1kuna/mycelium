@@ -35,7 +35,7 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 	const token = "agent-journey-test-token"
 	t.Setenv("MYCE_TOKEN", token)
 	extensionRoot := filepath.Join(root, "extensions")
-	cmd := exec.CommandContext(ctx, binary, "dev", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--file-store", filepath.Join(root, "files"), "--extension-root", extensionRoot, "--host-id", "dev-host", "--workers", "1", "--memory-gb", "8")
+	cmd := exec.CommandContext(ctx, binary, "dev", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--file-store", filepath.Join(root, "files"), "--extension-root", extensionRoot, "--host-id", "dev-host", "--workers", "1", "--memory-gb", "8")
 	cmd.Env = os.Environ()
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = time.Second
@@ -160,7 +160,7 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 			t.Fatalf("worker enrollment: %v; last machines: %+v", err, snapshot.Machines)
 		}
 	}
-	run("extension", "check", "--reserve", "--owner", "dev-agent", "--reason", "runtime qualification", "--root", extensionRoot, "http-stage@1")
+	run("extension", "check", "--environment-cache-bytes", "1073741824", "--reserve", "--owner", "dev-agent", "--reason", "runtime qualification", "--root", extensionRoot, "http-stage@1")
 	var reservations []myce.Reservation
 	if err := (myce.Client{URL: queue, Token: token}).Call(ctx, "GET", "/api/reservations", nil, &reservations); err != nil {
 		t.Fatal(err)
@@ -253,7 +253,7 @@ print(j["id"])
 		t.Fatal(err)
 	}
 	run("extension", "add", "--root", extensionRoot, folder)
-	smokeCommand := exec.CommandContext(ctx, binary, "extension", "check", "--root", extensionRoot, "http-stage@2")
+	smokeCommand := exec.CommandContext(ctx, binary, "extension", "check", "--environment-cache-bytes", "1073741824", "--root", extensionRoot, "http-stage@2")
 	smokeCommand.Env = os.Environ()
 	smokeOutput, smokeErr := smokeCommand.CombinedOutput()
 	t.Logf("smoke check exit: %v\n%s", smokeErr, smokeOutput)

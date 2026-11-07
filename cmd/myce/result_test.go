@@ -32,7 +32,7 @@ func TestInstalledClientDevResult(t *testing.T) {
 	const token = "installed-dev-fixture-token"
 	t.Setenv("MYCE_TOKEN", token) // The real command runner must strip this.
 	// StartDev is the runtime behind myce dev: real API, queue and CPU runner.
-	d, err := myce.StartDev(myce.DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), FileStore: filepath.Join(root, "files"), Checkpoints: filepath.Join(root, "checkpoints"), Token: token, GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
+	d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), FileStore: filepath.Join(root, "files"), Checkpoints: filepath.Join(root, "checkpoints"), Token: token, GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

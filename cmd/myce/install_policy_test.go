@@ -41,7 +41,11 @@ func TestInstallCLIPolicyDryRun(t *testing.T) {
 				return nil, nil
 			}}
 			probe = cudaPCIFixture(probe, false)
-			err := setupCommandWithProbe([]string{"install", tc.role, "--dry-run", "--nas", home, flag, path}, probe, home)
+			args := []string{"install", tc.role, "--dry-run", "--nas", home, flag, path}
+			if tc.role == "worker" {
+				args = append(args, "--environment-cache-bytes", "1048576")
+			}
+			err := setupCommandWithProbe(args, probe, home)
 			if tc.reason == "" {
 				if err != nil {
 					t.Fatal(err)

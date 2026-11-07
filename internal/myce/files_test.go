@@ -151,7 +151,7 @@ func TestFilesResumableAndHashRefusal(t *testing.T) {
 func TestFilesNASInputs(t *testing.T) {
 	root := t.TempDir()
 	checkpoints := filepath.Join(root, "checkpoints")
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: checkpoints, FileStore: filepath.Join(root, "files"), FileStoreLimit: 1 << 20, NASCheckpoints: true, Token: "nas-input-fixture", GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
+	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: checkpoints, FileStore: filepath.Join(root, "files"), FileStoreLimit: 1 << 20, NASCheckpoints: true, Token: "nas-input-fixture", GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 		if err := os.Symlink(python, filepath.Join(bin, "python3")); err != nil {
 			t.Fatal(err)
 		}
-		worker := Worker{Client: c, StateDir: root, Interval: 20 * time.Millisecond, Clock: RealClock{}, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: name, HostID: name, Session: name, GPU: "fake", FreeMemoryGB: 8}, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
+		worker := Worker{EnvironmentLimit: 1 << 30, Client: c, StateDir: root, Interval: 20 * time.Millisecond, Clock: RealClock{}, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: name, HostID: name, Session: name, GPU: "fake", FreeMemoryGB: 8}, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
 		go func() { done <- worker.Run(ctx) }()
 		return cancel, done, root
 	}
@@ -643,7 +643,7 @@ func TestStoredExtensionInputAndOutput(t *testing.T) {
 	done := make(chan error, 1)
 	defer cancel()
 	state := newTestStateRoot(t)
-	w := Worker{Client: c, ExtensionRoot: root, StateDir: state, Clock: RealClock{}, Interval: 20 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "extension", HostID: "extension", GPU: "fake", FreeMemoryGB: 8, ExtensionReports: reports}}
+	w := Worker{EnvironmentLimit: 1 << 30, Client: c, ExtensionRoot: root, StateDir: state, Clock: RealClock{}, Interval: 20 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "extension", HostID: "extension", GPU: "fake", FreeMemoryGB: 8, ExtensionReports: reports}}
 	go func() { done <- w.Run(ctx) }()
 	await(t, func() bool {
 		snap, _ := q.Snapshot()

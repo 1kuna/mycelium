@@ -35,7 +35,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 	s, err := q.statusSnapshotOptions(options, contexts...)
 	for i := range s.LoadedModels {
 		s.LoadedModels[i].EnvironmentRecipe = nil
-		s.LoadedModels[i].Error = ceilingDiagnostic(s.LoadedModels[i].Error, "model load or unload failed")
+		s.LoadedModels[i].Error = modelReadinessDiagnostic(s.LoadedModels[i].Error)
 	}
 	unsafeDockerHolds := map[string]string{}
 	for _, m := range s.Machines {

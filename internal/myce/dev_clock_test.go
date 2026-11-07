@@ -114,7 +114,7 @@ func TestDevClockOrdinaryElapsedTime(t *testing.T) {
 
 func TestDevClockRestartReset(t *testing.T) {
 	root := t.TempDir()
-	config := DevConfig{Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "test", Workers: 1, MemoryGB: 8}
+	config := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "test", Workers: 1, MemoryGB: 8}
 	d, err := StartDev(config)
 	if err != nil {
 		t.Fatal(err)

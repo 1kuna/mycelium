@@ -92,9 +92,20 @@ func (q *Queue) invalidateTerminalStatus() {
 }
 
 func (q *Queue) cachedPublicSnapshot(contexts ...context.Context) (Snapshot, error) {
+	ctx, finishBudget, budgetErr := q.requestBudgets.projectionContext(requestContext(contexts))
+	if budgetErr != nil {
+		return Snapshot{}, budgetErr
+	}
+	defer finishBudget()
+	contexts = []context.Context{ctx}
 	data, err := q.cachedStatusJSON(contexts...)
 	if err != nil {
 		return Snapshot{}, err
+	}
+	allocation := projectionAllocation(ctx)
+	cost, err := jsonAllocationCost([]byte(data), reflect.TypeFor[*Snapshot](), allocation.limit-allocation.held)
+	if err != nil || !allocation.charge(cost) {
+		return Snapshot{}, projectionRefusal(allocation.limit - allocation.held)
 	}
 	var out Snapshot
 	err = json.Unmarshal([]byte(data), &out)
@@ -102,15 +113,33 @@ func (q *Queue) cachedPublicSnapshot(contexts ...context.Context) (Snapshot, err
 }
 
 func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
+	ctx, finishBudget, budgetErr := q.requestBudgets.projectionContext(requestContext(contexts))
+	if budgetErr != nil {
+		return "", budgetErr
+	}
+	defer finishBudget()
+	contexts = []context.Context{ctx}
+	if _, negotiated := ctx.Value(peerResponseBudgetKey{}).(int64); negotiated {
+		snapshot, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent"}, ctx)
+		if err != nil {
+			return "", err
+		}
+		encoded, err := json.Marshal(snapshot)
+		return string(encoded), err
+	}
 	c := &q.statusCache
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for {
 		revision := c.terminalRevision.Load()
 		if c.data != "" && c.generation == revision && q.clock.Now().Before(c.expires) {
+			allocation := projectionAllocation(ctx)
+			if int64(len(c.data)) > (allocation.limit-allocation.held)/6 || !allocation.charge(6*int64(len(c.data))) {
+				return "", projectionRefusal(allocation.limit - allocation.held)
+			}
 			return q.statusJSONFreshness(c.data, c.capturedAt, true)
 		}
-		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent", limit: defaultStatusJobs}, contexts...)
+		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent"}, contexts...)
 		if err != nil {
 			return "", err
 		}
@@ -369,7 +398,10 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		for key := range frozen {
 			delete(inputs.State.Jobs, key)
 		}
-		detached = copyObservation(inputs)
+		err = chargeProjectionValue(requestContext(contexts), inputs)
+		if err == nil {
+			detached = copyObservation(inputs)
+		}
 	}
 	duration := queueHoldDuration(hold)
 	unlockRequest()
@@ -379,6 +411,9 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		return nil, files, err
 	}
 	for key, input := range frozen {
+		if err = chargeProjectionValue(requestContext(contexts), input); err != nil {
+			return nil, files, err
+		}
 		detached.State.Jobs[key] = copyObservationValue(reflect.ValueOf(input)).Interface().(*Job)
 	}
 	custody := &Queue{s: state{Jobs: map[string]*Job{}, Submissions: map[string]*submissionRecord{}, HostReleases: cancellationReleases}}
@@ -501,6 +536,18 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 		} else {
 			entry.mu.Unlock()
 		}
+		if allocation := projectionAllocation(requestContext(contexts)); allocation != nil {
+			// Cached receipts still decode a variable-sized Job and encode a
+			// public reply; keep their capacity charged through the handler.
+			if int64(len(data)) > (allocation.limit-allocation.held)/6 || !allocation.charge(6*int64(len(data))) {
+				return nil, projectionRefusal(allocation.limit - allocation.held)
+			}
+			cost, costErr := jsonAllocationCost([]byte(data), reflect.TypeFor[*Job](), allocation.limit-allocation.held)
+			if costErr != nil || !allocation.charge(cost) {
+				return nil, projectionRefusal(allocation.limit - allocation.held)
+			}
+		}
+
 		var out Job
 		err = json.Unmarshal([]byte(data), &out)
 		return &out, err
@@ -556,6 +603,26 @@ func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...contex
 }
 
 func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
+	ctx, finishBudget, budgetErr := q.requestBudgets.projectionContext(requestContext(contexts))
+	if budgetErr != nil {
+		return Snapshot{}, budgetErr
+	}
+	defer finishBudget()
+	contexts = []context.Context{ctx}
+	started := q.clock.Now()
+	if options != nil {
+		owned := *options
+		limit, err := q.requestBudgets.pageLimit(requestContext(contexts), reflect.TypeFor[Job]())
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if owned.limit == 0 {
+			owned.limit = limit
+		} else {
+			owned.limit = min(owned.limit, limit)
+		}
+		options = &owned
+	}
 	v, files, err := q.captureStatusObservation("", options, contexts...)
 	if err != nil {
 		return Snapshot{}, err
@@ -573,6 +640,12 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 		out.FileStore = files.status(context.Background())
 	}
 	out.Freshness = q.snapshotFreshness(out.Now, false)
+	if err == nil {
+		data, encodeErr := json.Marshal(out)
+		if encodeErr == nil {
+			q.requestBudgets.recordProjection(len(out.Jobs), len(data), q.clock.Now().Sub(started))
+		}
+	}
 	return out, err
 }
 

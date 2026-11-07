@@ -55,6 +55,7 @@ type state struct {
 	MemoryExplorations     map[string]memoryExploration   `json:"memory_explorations,omitempty"`
 	StorageObservations    map[string]StorageObservation  `json:"storage_observations,omitempty"`
 	ExternalMemory         map[string]*externalMemoryRing `json:"external_memory,omitempty"`
+	HostLaunchMemory       map[string]*hostLaunchMemory   `json:"host_launch_memory,omitempty"`
 	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
 	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
 	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
@@ -115,6 +116,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	requestBudgets      requestBudgets
 	waitStates          *waitStateIndex // scalar committed wait observations; separate reader mutex.
 	modelIntervalWrites []ModelIntervalEvent
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
@@ -659,8 +661,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		log.Printf("submission rejected code=%s reason=%q", code, reason)
 	}()
-	ctx, cancel := context.WithTimeout(ctx, submitVerificationTimeout)
-	defer cancel()
 	if s.SubmissionKey != "" {
 		if err := validateSubmissionKey(s.SubmissionKey); err != nil {
 			return nil, err
@@ -670,9 +670,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	if err != nil {
 		return nil, err
 	}
-	unlockRequest := requestLock(ctx, &q.mu)
-	// Own all client maps/slices across the unlocked verification interval.
+	// Own all client maps/slices before the lock and across verification.
 	s = cloneJob(&Job{Spec: s}).Spec
+	unlockRequest := requestLock(ctx, &q.mu)
 	store := q.files
 	catalog := q.environments
 	environmentRevision := q.environmentRevision
@@ -697,10 +697,17 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	var recipes map[string]EnvironmentRecipe
 	var sidecarRecipes map[string]map[string]EnvironmentRecipe
 	var recipeErr error
+	var discovery *CommandDiscovery
 	if !replay {
 		recipes, recipeErr = catalog.resolveEnvironment(prepared.Environment)
 		if recipeErr == nil {
 			sidecarRecipes, recipeErr = catalog.resolveSidecarEnvironments(prepared)
+		}
+		if recipeErr == nil {
+			discovery, recipeErr = deriveCommandDiscovery(prepared, recipes, sidecarRecipes)
+			if recipeErr != nil {
+				recipeErr = rejectFieldRule("job_environment_invalid", recipeErr)
+			}
 		}
 		if recipeErr == nil && !q.simulation {
 			verified := map[FileRef]bool{}
@@ -840,7 +847,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		} else {
 			id = ID()
 		}
-		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j := &Job{CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		j.ModelLimits = modelLimits
 		j.PlacementIntent = submissionPlacementIntent(submitted, j)
 		explicitStartBy := s.StartBy != nil
@@ -1419,6 +1426,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptEnvironmentFailures(&m, old)
 		q.s.Machines[m.ID] = &m
+		q.recordHostLaunchMemory(&m, old)
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
 			cause := report.DockerCause
@@ -1879,6 +1887,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		r.ExecutionCause, r.Error = wallTimeCause(), wallTimeLimit
 	}
 	r.ExecutionCause = safeAttemptRuntimeCause(j, r.ExecutionCause)
+	q.recordColdProbeRefusal(j, r)
 	if r.ExecutionCause != nil && r.ExecutionCause.Operation == "input_staging" {
 		// Keep the durable reason as safe as the structured cause; Error may
 		// contain the original worker-supplied diagnostic name or private text.
@@ -2769,6 +2778,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
 	q.claimMemoryExploration(j, m)
+	q.recordColdProbeAssignment(j, m)
 	j.StorageEnvelope = q.storageEnvelope(j, m)
 	j.Reason = ""
 	if measured {

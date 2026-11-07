@@ -58,7 +58,7 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 
-const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage|view\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_native-exec" {
@@ -212,6 +212,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 
 		return waitCommand(ctx, args[1:], os.Stdout, os.Stderr)
 	}
+	if args[0] == "view" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return viewCommand(ctx, args[1:], os.Stdout, os.Stderr)
+	}
 	if args[0] == "measure" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -260,7 +265,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	dockerHost := f.String("docker-host", "", "opt in to managed Docker at this endpoint (empty disables Docker)")
 	containerRetention := f.Duration("container-retention", myce.DefaultContainerRetention, "acknowledged stopped Docker container retention (0 removes immediately)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
-	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")
+	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total model-upload bytes (-1: measured free disk capacity)")
 	outputDeliveryRoot := f.String("output-delivery-root", "", "queue NAS destination root for opt-in async_nas outputs")
 	fileStore := f.String("file-store", "", "authoritative file storage folder (default beside database)")
 	healthNotify := f.String("health-notify", os.Getenv("MYCE_HEALTH_NOTIFY"), "queue health notifier executable (--check and JSON stdin)")
@@ -481,7 +486,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{OutputDeliveryRoot: *outputDeliveryRoot, Devices: *fakeGPUs, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, FileStoreProductionReserve: *fileStoreProductionReserve, FileRetention: *fileRetention, NASCheckpoints: nasConfigured, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: *environmentLimit, OutputDeliveryRoot: *outputDeliveryRoot, Devices: *fakeGPUs, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, FileStoreProductionReserve: *fileStoreProductionReserve, FileRetention: *fileRetention, NASCheckpoints: nasConfigured, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}

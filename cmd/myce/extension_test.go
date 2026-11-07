@@ -47,7 +47,7 @@ variants:
 		}
 	}
 	devRoot := t.TempDir()
-	d, err := myce.StartDev(myce.DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(devRoot, "queue.db"), Checkpoints: filepath.Join(devRoot, "checkpoints"), HostID: "cli-host", Token: "fixture-not-inherited", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+	d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(devRoot, "queue.db"), Checkpoints: filepath.Join(devRoot, "checkpoints"), HostID: "cli-host", Token: "fixture-not-inherited", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

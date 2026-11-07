@@ -32,7 +32,7 @@ func TestEnvironmentPreparesBesideRunningCPUCommand(t *testing.T) {
 	}
 	started, release := make(chan struct{}, 1), make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
-	w := Worker{StateDir: newTestStateRoot(t), Client: Client{URL: testServerForEnvironments(t, q), Token: "test"}, Machine: m, Clock: clock, Interval: time.Millisecond,
+	w := Worker{EnvironmentLimit: 1 << 20, StateDir: newTestStateRoot(t), Client: Client{URL: testServerForEnvironments(t, q), Token: "test"}, Machine: m, Clock: clock, Interval: time.Millisecond,
 		CPUIsolationProbe: func(context.Context) error { return nil },
 		InventoryProbe:    func(context.Context) ([]MachineDevice, error) { return slices.Clone(m.Devices), nil },
 		environmentRun: func(ctx context.Context, _ []string, _ string, _ []string, _, _ io.Writer) error {

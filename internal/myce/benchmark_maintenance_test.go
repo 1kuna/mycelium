@@ -60,7 +60,7 @@ func TestS6ReviewOnboardingWhileDrained(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	w := Worker{InventoryProbe: benchmarkTestInventory, CPUIsolationProbe: func(context.Context) error { return nil }, OnboardingBenchmark: true, StateDir: root, ExtensionRoot: extRoot, Machine: m, Client: Client{URL: server.URL, Token: "test"}, Interval: time.Millisecond,
+	w := Worker{EnvironmentLimit: 1 << 20, InventoryProbe: benchmarkTestInventory, CPUIsolationProbe: func(context.Context) error { return nil }, OnboardingBenchmark: true, StateDir: root, ExtensionRoot: extRoot, Machine: m, Client: Client{URL: server.URL, Token: "test"}, Interval: time.Millisecond,
 		OwnerSignals: func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} },
 		Benchmark: func(ctx context.Context, c BenchmarkConfig, p *CapabilityProfile) error {
 			// Simulate accelerator inventory only; execute the product's real benchmark
@@ -116,7 +116,7 @@ func maintenanceBenchmarkWorker(t *testing.T, m Machine) (Worker, string, string
 		t.Fatal(err)
 	}
 	installQualified(t, extRoot, e, "")
-	w := Worker{InventoryProbe: benchmarkTestInventory, CPUIsolationProbe: func(context.Context) error { return nil }, OnboardingBenchmark: true, StateDir: root, ExtensionRoot: extRoot, Machine: m, Interval: time.Millisecond,
+	w := Worker{EnvironmentLimit: 1 << 20, InventoryProbe: benchmarkTestInventory, CPUIsolationProbe: func(context.Context) error { return nil }, OnboardingBenchmark: true, StateDir: root, ExtensionRoot: extRoot, Machine: m, Interval: time.Millisecond,
 		OwnerSignals: func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} },
 		Benchmark: func(ctx context.Context, c BenchmarkConfig, p *CapabilityProfile) error {
 			c.Machine.GPU = "fake"

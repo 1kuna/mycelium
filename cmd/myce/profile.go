@@ -178,8 +178,8 @@ func readProfile(name string) (executionProfile, string, []byte, error) {
 	if d.Decode(&extra) != io.EOF {
 		return p, "", nil, waitError(64, "profile_invalid: expected one YAML profile")
 	}
-	if len(p.Check) == 0 || p.Check[0] == "" || len(p.Run.Command) == 0 || p.Project == "" || p.Class == "" || len(p.Targets) == 0 {
-		return p, "", nil, waitError(64, "profile_invalid: declare run.command, project, class, targets and check")
+	if len(p.Check) == 0 || p.Check[0] == "" || len(p.Run.Command) == 0 || p.Project == "" || p.Class == "" || len(p.Targets) == 0 && !myce.WantsCommandDiscovery(p.Spec) {
+		return p, "", nil, waitError(64, "profile_invalid: declare run.command, project, class, check and targets (or portable: true for managed CPU discovery)")
 	}
 	if p.Extension != "" || p.Kind != "" || p.Program != nil || p.Execution != nil || p.Run.Workdir != "" || p.Run.Docker || len(p.Run.Sidecars) > 0 || len(p.Run.DockerSidecars) > 0 || len(p.Files) > 0 || p.SubmissionKey != "" {
 		return p, "", nil, waitError(64, "profile_invalid: profile uses plain commands in an isolated source folder")

@@ -33,7 +33,7 @@ func TestFailureArtifactsWorker(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "q.db"), FileStore: filepath.Join(root, "files"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
+			d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "q.db"), FileStore: filepath.Join(root, "files"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
 			if err != nil {
 				t.Fatal(err)
 			}

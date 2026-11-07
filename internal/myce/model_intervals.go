@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strconv"
 	"time"
 )
@@ -137,6 +138,23 @@ func (q *Queue) persistModelIntervals(tx *sql.Tx) error {
 // Snapshot only metadata under q.mu. The indexed, bounded SQLite read and JSON
 // decoding run outside the queue lock; history is never copied into queue state.
 func (q *Queue) ModelIntervals(ctx context.Context, after, highWater, limit int) (ModelIntervalPage, error) {
+	ctx, finishBudget, budgetErr := q.requestBudgets.projectionContext(ctx)
+	if budgetErr != nil {
+		return ModelIntervalPage{}, budgetErr
+	}
+	defer finishBudget()
+	if limit < 0 {
+		return ModelIntervalPage{}, &HTTPError{Status: 400, Code: "model_interval_cursor_invalid", Message: "limit must be nonnegative"}
+	}
+	capacity, capacityErr := q.requestBudgets.pageLimit(ctx, reflect.TypeFor[ModelIntervalEvent]())
+	if capacityErr != nil {
+		return ModelIntervalPage{}, capacityErr
+	}
+	if limit == 0 {
+		limit = capacity
+	} else {
+		limit = min(limit, capacity)
+	}
 	unlock := requestReadLock(ctx, &q.mu)
 	maxSequence := q.s.ModelIntervalHighWater
 	var since time.Time
@@ -147,19 +165,34 @@ func (q *Queue) ModelIntervals(ctx context.Context, after, highWater, limit int)
 	if highWater == -1 {
 		highWater = maxSequence
 	}
-	if after < 0 || highWater < 0 || highWater > maxSequence || after > highWater || limit < 1 || limit > 256 {
-		return ModelIntervalPage{}, &HTTPError{Status: 400, Code: "model_interval_cursor_invalid", Message: "require 0 <= after <= high_water and limit 1..256"}
+	if after < 0 || highWater < 0 || highWater > maxSequence || after > highWater || limit < 1 {
+		return ModelIntervalPage{}, &HTTPError{Status: 400, Code: "model_interval_cursor_invalid", Message: "require 0 <= after <= high_water and positive limit fitting queue capacity"}
 	}
 	page := ModelIntervalPage{CoverageSince: since, HighWater: highWater, Next: after, Entries: []ModelIntervalEvent{}}
-	rows, err := q.db.QueryContext(ctx, "SELECT data FROM model_intervals WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?", after, highWater, limit)
+	rows, err := q.db.QueryContext(ctx, "SELECT length(data), CASE WHEN length(data)<=? THEN data ELSE NULL END FROM model_intervals WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?", projectionAllocation(ctx).limit/6, after, highWater, limit)
 	if err != nil {
 		return page, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var data []byte
-		if err = rows.Scan(&data); err != nil {
+		var length int64
+		if err = rows.Scan(&length, &data); err != nil {
 			return page, err
+		}
+		allocation := projectionAllocation(ctx)
+		if data == nil || length > (allocation.limit-allocation.held)/6 || !allocation.charge(6*length) {
+			if len(page.Entries) == 0 {
+				return page, projectionRefusal(allocation.limit - allocation.held)
+			}
+			break
+		}
+		cost, costErr := jsonAllocationCost(data, reflect.TypeFor[*ModelIntervalEvent](), allocation.limit-allocation.held)
+		if costErr != nil || !allocation.charge(cost) {
+			if len(page.Entries) == 0 {
+				return page, projectionRefusal(allocation.limit - allocation.held)
+			}
+			break
 		}
 		var event ModelIntervalEvent
 		if err = json.Unmarshal(data, &event); err != nil {
@@ -174,7 +207,7 @@ func (q *Queue) ModelIntervals(ctx context.Context, after, highWater, limit int)
 
 func (a API) registerModelIntervals(mux *requestMux) {
 	mux.HandleFunc("GET /api/models/intervals", func(w http.ResponseWriter, r *http.Request) {
-		values := []int{0, -1, 100}
+		values := []int{0, -1, 0}
 		for i, key := range []string{"after", "high_water", "limit"} {
 			if r.URL.Query().Has(key) {
 				v, err := strconv.Atoi(r.URL.Query().Get(key))

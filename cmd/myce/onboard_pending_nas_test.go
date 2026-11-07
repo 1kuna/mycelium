@@ -66,7 +66,7 @@ func TestEnrollmentResumesPendingAuthorityWithCurrentNAS(t *testing.T) {
 	}
 	var result error
 	output := captureJoiningOutput(t, func() error {
-		result = enrollmentCommand([]string{"install", "worker", "--enroll", "--queue", server.URL, "--pin", authority.Fingerprint, "--gpu", "cpu"}, probe, home, func(string) (myce.WorkerAccount, error) { return myce.WorkerAccount{}, myce.ErrHostIdentity })
+		result = enrollmentCommand([]string{"install", "worker", "--enroll", "--queue", server.URL, "--pin", authority.Fingerprint, "--gpu", "cpu", "--environment-cache-bytes", "1048576"}, probe, home, func(string) (myce.WorkerAccount, error) { return myce.WorkerAccount{}, myce.ErrHostIdentity })
 		return nil
 	})
 	if result == nil || !strings.Contains(result.Error(), "service_environment_invalid") {

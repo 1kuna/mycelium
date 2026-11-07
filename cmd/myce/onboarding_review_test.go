@@ -52,7 +52,7 @@ func TestReviewOfflineInstallDoesNotDownloadTools(t *testing.T) {
 		}
 		return nil, exec.ErrNotFound
 	}
-	err := setupCommandWithAccountLookup([]string{"install", "worker", "--nas", home, "--gpu", "cpu", "--environment-file", credentials}, p, home, func(string) (myce.WorkerAccount, error) { return myce.WorkerAccount{}, myce.ErrHostIdentity })
+	err := setupCommandWithAccountLookup([]string{"install", "worker", "--nas", home, "--gpu", "cpu", "--environment-file", credentials, "--environment-cache-bytes", "1048576"}, p, home, func(string) (myce.WorkerAccount, error) { return myce.WorkerAccount{}, myce.ErrHostIdentity })
 	if err != nil || downloads != 0 {
 		t.Fatalf("offline/no-recipe onboarding: downloads=%d err=%v", downloads, err)
 	}

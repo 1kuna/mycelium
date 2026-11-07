@@ -84,7 +84,6 @@ func TestExtensionFormatFrozenAndMissingBaseline(t *testing.T) {
 			f["extension.yaml"] = append(f["extension.yaml"], []byte("unknown: true\n")...)
 		},
 		func(f map[string][]byte) { delete(f, "baseline/output") },
-		func(f map[string][]byte) { f["large"] = make([]byte, extensionMaxBytes) },
 	} {
 		files := map[string][]byte{}
 		for n, b := range e.Files {
@@ -295,7 +294,7 @@ chmod +x "$MYCE_EXTENSION_CACHE/bin/extension-test-runtime"
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(dir, "queue.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "throwaway", Workers: 1, MemoryGB: 8, ExtensionRoot: root, JobFileRoot: shared, Interval: 10 * time.Millisecond})
+	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "queue.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "throwaway", Workers: 1, MemoryGB: 8, ExtensionRoot: root, JobFileRoot: shared, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,4 +599,13 @@ func registeredExtension(t *testing.T, q *Queue, key string) Extension {
 		t.Fatal(err)
 	}
 	return e
+}
+
+func TestExtensionSourceGrowsPastFormerCeiling(t *testing.T) {
+	e := fakeExtension(t)
+	e.Files["source.dat"] = make([]byte, (1<<20)+1)
+	actual, err := extensionFromFiles(e.Files)
+	if err != nil || len(actual.Files["source.dat"]) <= 1<<20 {
+		t.Fatal("fixed source ceiling remains", err)
+	}
 }

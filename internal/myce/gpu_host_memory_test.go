@@ -89,7 +89,7 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			a.pageSize = 4096 // b70 kernel pages, independent of the test host.
+			a.pageSize = 4096 // Fixture kernel pages, independent of the test host.
 			proc := t.TempDir()
 			put := func(p, v string) {
 				t.Helper()

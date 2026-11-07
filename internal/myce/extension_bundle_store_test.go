@@ -248,7 +248,7 @@ cat "$MYCE_CHECK_INPUT" > "$MYCE_CHECK_OUTPUT"
 	if err := InstallExtension(extensionRoot, e); err != nil {
 		t.Fatal(err)
 	}
-	d, err := startDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: extensionRoot, HostID: "bundle-check-host", Token: "bundle-fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) {
+	d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: extensionRoot, HostID: "bundle-check-host", Token: "bundle-fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) {
 		bundleHistory(t, q, 32<<10)
 		if err := q.migrateBundleFiles(); err != nil {
 			t.Fatal(err)

@@ -561,7 +561,8 @@ as unverified. From the next release, optional `--inspect-nas` requests cached,
 authenticated worker existence evidence; repeat after worker heartbeats.
 `pending` or `unverified` remains unknown. `present` does not verify bytes,
 and `missing` flags a wrong checkpoint-root-relative path before submission.
-Samples expire after one minute, and require upgraded workers. A path relative to the NAS mount can therefore
+From the next release, samples expire with their worker session freshness fence
+([request budgets](request-budgets.md)); upgraded workers are required. A path relative to the NAS mount can therefore
 resolve successfully and still be missing beneath `--checkpoint-root`. Import
 such a file with profile `local:` or `myce file put`, then omit `nas` and use its
 verified hash and size. This needs no worker root change or cache clearing.

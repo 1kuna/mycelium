@@ -250,7 +250,7 @@ func TestJobLedgerRequeuesCustodyPaginationRestart(t *testing.T) {
 	if err != nil || got.Ledger == nil || !got.Ledger.Complete || got.Ledger.HighWater <= high || len(got.LedgerEntries) != 0 {
 		t.Fatal("GET summary", got, err)
 	}
-	for _, args := range [][3]int{{-1, high, 1}, {0, high + 100, 1}, {0, high, 257}, {high + 1, high, 1}} {
+	for _, args := range [][3]int{{-1, high, 1}, {0, high + 100, 1}, {0, high, -1}, {high + 1, high, 1}} {
 		if _, err := client.JobLedger(context.Background(), receipt.ID, args[0], args[1], args[2]); err == nil {
 			t.Fatal("invalid cursor accepted", args)
 		}

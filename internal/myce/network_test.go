@@ -121,7 +121,7 @@ func TestWorkerNetworkPartitionFakeClock(t *testing.T) {
 	transport := &partitionTransport{}
 	wc := &manualWorkerClock{now: qc.Now()}
 	dir := t.TempDir()
-	w := Worker{StateDir: dir, Clock: wc, Interval: 5 * time.Millisecond, Machine: machine("partition-worker", "fake"), Client: Client{URL: server.URL, Token: "test", HTTP: &http.Client{Transport: transport}}}
+	w := Worker{EnvironmentLimit: 1 << 30, StateDir: dir, Clock: wc, Interval: 5 * time.Millisecond, Machine: machine("partition-worker", "fake"), Client: Client{URL: server.URL, Token: "test", HTTP: &http.Client{Transport: transport}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)

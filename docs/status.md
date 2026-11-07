@@ -1,5 +1,24 @@
 # Seeing your mycelium
 
+## Reading `myce status`
+
+`myce status` prints the queue's health, each machine and recent jobs. Add
+`--full` for full job IDs, `--history` for every retained job, or `--json` for
+the same data as JSON. For one job, `myce wait JOB_ID` prints each state change
+and `myce logs JOB_ID` prints its output.
+
+- **Machines:** each worker has a `hypha NAME:` line (a hypha is one machine)
+  with its hardware and free memory. It says `available for work` when it can
+  take jobs; otherwise it says why not, for example that its owner is using it,
+  it is on battery, an operator disabled it, or it is offline.
+- **Jobs:** each job line shows a short ID, its name, `[project/class]`, its
+  state and the machine that ran it (`hypha=`). The main states are `queued`,
+  `running`, `stopping`, `succeeded`, `failed`, `cancelled` and `paused`. A
+  queued job carries a reason naming what it is waiting for and who needs to act.
+
+The rest of this page is a field-by-field reference, including
+[live view](#live-view-myce-view).
+
 From the next release, cold CPU probes retain their initial containment ceiling
 in `memory_envelope.host_gb`, with known need and member/retry floors in
 `probe_floor_gb`. A running probe's host admission charge can follow its fresh
@@ -132,7 +151,8 @@ filtered `total`, `returned`, `mode`, and optional `next_before` job ID.
 - `GET /api/status?jobs=active` returns all active/cleanup-pending jobs.
 - `?jobs=all&limit=100` pages all history, newest submission first; append
   `&before=NEXT_BEFORE` from each reply until that field is absent. `limit` is
-  1–1000 and defaults to 100. The normal status presentation order is retained
+  positive and bounded by current queue memory and measured projection cost from
+  the next release; omission chooses an adaptive page. See [request budgets](request-budgets.md). The normal status presentation order is retained
   within each page; use the returned cursor rather than the last displayed ID.
 - `?project=example&since=2026-10-30T00:00:00Z` filters jobs by project and
   inclusive submission timestamp. Filters do not alter fleet health, eligibility
@@ -1528,8 +1548,10 @@ These are live observations, separate from immutable submission intent and job
 holds. They do not change the accepted class or submission key.
 
 `myce submit` writes this advice to stderr and keeps the job ID on stdout.
-`myce wait` writes advice when it changes to stderr, preserving final-state
-lines on stdout; `myce status JOB` shows it alongside job details.
+`myce wait` prints one short line per state change: progress on stderr and
+terminal states on stdout. `myce wait --json JOB` emits JSON lines on state or
+reason changes, retaining full reasons and initial placement/deadline diagnostics;
+`myce status JOB` shows the current details.
 
 For deadline work, author a **new submission** with, for example:
 
@@ -1646,6 +1668,23 @@ cost evidence and its actual duration, never an assumed complete minute.
   Replays cannot increment it; planned stops are excluded. Successful
   or workload-caused endings break the streak. Historical failures interrupted
   by successful work do not fire. It preserves all existing attempt fences.
+  From the next release (#881), the episode and affected job retain an
+  `owner_required` decision receipt in `health_alerts[].recovery` and
+  `health_recovery`. It records the episode, exact execution/session, time,
+  retained cause, sanitized admission comparison when available, plain-language
+  summary and next owner action. `action: none` means no automatic repair was
+  performed. No alert changes capacity, configured allowances, reservations,
+  learned sizes, retry budgets, checkpoints or release obligations.
+  Both direct-RAM and `live_host_growth` refusals need diagnosis. A growth
+  comparison cannot distinguish stale availability from an inflated forecast
+  (#868/#909); the maintenance owner needs forecast bounds and paired
+  queue/worker memory snapshots. A subsequent successful start does not rewrite
+  the receipt or claim a repair. Delivery, restart and repeated handling retain
+  the original decision; newer executions cannot be changed by old evidence.
+  No remediation timer or retry is added; normal scheduling and owner policy
+  still apply. Plain CLI/page job reasons include the summary and next step.
+  Automatic action remains deferred until a recorded incident establishes an
+  existing supported reversible remedy and its fresh evidence prerequisites.
 - `staging_cache_refused`: accepted worker transfer/cache/copy failure reports or
   an exact attempt's typed input-staging refusal. Cold caches, successful copies
   and planned stops do not fire. A repaired report or later successful staging
@@ -1723,8 +1762,10 @@ The first request may omit `after` and returns immediately. Replies contain
 `jobs`, an ordered array of scalar `id`, `state`, sanitized `reason` and
 `revision` records. Send the returned revisions on the next request; it waits
 until a selected record changes, becomes terminal, or the transport timeout
-expires. Use exact IDs after initial prefix resolution. The maximum is 256 IDs
-and 20 seconds; malformed/empty requests receive `wait_invalid`. Unknown and
+expires. Use exact IDs after initial prefix resolution. From the next release, fitting ID count follows current memory capacity and
+wait duration follows caller intent and negotiated transport deadlines; see
+[request budgets](request-budgets.md). Malformed requests receive `wait_invalid`;
+capacity refusals name the fitting ID count. Unknown and
 ambiguous IDs retain typed errors. Cancellation releases the transport wait.
 The committed scalar index uses its own mutex; waiting never takes the queue
 control mutex. Rollbacks cannot publish or wake consumers. HTTP job GET replies
@@ -2010,3 +2051,54 @@ allocation completes. Unknown reconnect/restart gaps never add service age. See 
 
 These are conditional admission comparisons. Hard eligibility, quotas and tier
 precedence remain binding; active same-tier work is not stopped to repay debt.
+
+## Live view (`myce view`)
+
+`myce view` serves a live, read-only picture of the cluster on this computer:
+waiting jobs gather in the middle, a thread runs to each machine, and each
+machine fills from the bottom as it gets busier. Running jobs sit inside their
+machine, beads travel the threads as work is placed or returned, a machine that
+drops out drains and shows a dashed ×, and production work is gold. One line
+counts running, waiting, done and offline work; one line below names the latest
+event. Machine size follows its memory capacity. "How busy" is the most-held of
+CPU cores, host memory and GPU memory reserved by running work; status reports
+memory held, not GPU utilisation.
+
+```sh
+myce view                      # installed config, or --queue URL with MYCE_TOKEN
+myce view --anonymize          # generic labels for recordings and screenshots
+```
+
+It prints a local address and runs only on the computer where you start it,
+never in the queue process. It listens on loopback by default and then refuses
+requests that name any other host. The page has no sign-in: if you choose a
+non-loopback `--listen` address, anyone who can reach it can watch the stream
+(names included, unless `--anonymize`), though never the token or any write. It
+is an ordinary status client:
+
+- It reads only the default `GET /api/status`, the shared one-second snapshot.
+  It never asks for `detail=full`, history or filtered views, and it never
+  writes to the queue. The page cannot send anything to the queue.
+- It reads only while at least one page is open, one read at a time, and every
+  open page shares that read.
+- It waits at least a second between reads (the snapshot's sharing period) and
+  at least nine times the last read's duration, so a slow queue is read less
+  often; this holds for failed reads too. Failures add a backoff doubling to
+  30 s; a 429's `Retry-After` is always honoured, even beyond that. Redirects
+  are never followed.
+- Silence is learned from each machine's own heartbeat cadence; a machine
+  already gone when the view opened is not drawn.
+
+`--anonymize` replaces machine, project, job, tier and device names with labels
+such as `hypha-1`, `project-a` and `job-07`, assigned in order of first
+appearance and stable while the view runs. Other text is dropped or reduced to
+fixed words, and errors on the page are fixed codes, so a recording shows no
+host names, addresses or project names. Assets are embedded in the binary; the
+page loads nothing from the network.
+
+To try it without a cluster, run `./myce dev --workers 5`, then
+`./myce view --queue http://127.0.0.1:7331 --token dev-token --anonymize`, and
+`examples/fleet-view-demo.sh` for a varied stream of small jobs, one machine
+leaving, and a production job. `scripts/view-smoke.sh` loads the page in
+headless Chrome or Chromium against `myce dev` and checks for live frames and
+no script errors.

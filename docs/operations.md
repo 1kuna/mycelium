@@ -12,7 +12,7 @@ For an existing installation use [maintenance](#queue-maintenance),
 [polite participation](#polite-part-time-hyphae) or [shared-host sizing](#shared-interactive-hosts).
 Detailed [status fields](status.md), [native qualification](development.md#native-acceptance-checklist)
 and [isolation limits](native-isolation.md) distinguish readiness from enforcement.
-Agent skill/harness installation lives [beside the skill](../skills/mycelium-offload/setup-project.md).
+Agent skill/harness installation lives [beside the skill](../skills/mycelium/setup-project.md).
 
 You are a coding agent setting up Mycelium on a user's own computers. Follow
 these steps in order. Commands are written for a POSIX shell. Text in CAPITALS
@@ -2371,10 +2371,23 @@ operation for the workers without restarting the already-current queue.
 These options require a queue version that implements them; they cannot change
 restart behavior inside an older installed queue or helper.
 
-Hosts update sequentially: enabled/drained hosts first (production hosts last
-within that group), then operator-disabled hosts. Started commands finish
-naturally before their host restarts. At queue cutover new model calls pause and
-existing calls/streams finish; batch attempts on other hosts reconnect unchanged.
+From the release containing #900's idle-moment slice, normal updates leave busy
+enabled hosts `pending`, with admission open. An hours-long command does not hold
+the host's spare capacity for maintenance. Other idle compatible hosts can
+progress. Fresh exact custody selects the next natural idle moment and acquires
+the upgrade drain atomically before placement refills it. Unreleased attempts,
+preparations, loading models, calls and unknown cleanup do not establish idle;
+a ready idle model can enter drain but must confirm unload before restart.
+After queue restart, each retained engine needs a fresh exact zero-call report
+before it can count as idle, regardless of the host's production-hold policy.
+Pending operations persist across queue restart without acquiring a drain.
+Earlier releases drain a selected host while waiting for its work to finish.
+
+Hosts update sequentially: eligible enabled/drained hosts first (production hosts
+last within that group), then operator-disabled hosts. Started commands finish
+naturally before their host restarts; there is no time-triggered cancellation.
+Queue cutover waits for calls/streams while admission remains open, then pauses
+new model calls at the idle selection. Batch attempts on other hosts reconnect unchanged.
 The queue precedes its colocated worker. This implementation accepts the current
 worker protocols only, so incompatible protocol migrations need a separate plan.
 
@@ -2740,7 +2753,15 @@ is separate from the laptop fixture and requires an authorized test window.
 ### Worker mount recovery (Linux and macOS)
 
 Workers reuse the host-hygiene mount probe for each configured checkpoint/NAS
-root. Each attempt stats the root and reads at most one directory entry. Access
+root. Checkpoint health reuses the existing admission access check: stat the
+root, exclusively create one empty `.myce-probe-*.tmp` file, close it and remove
+it. It does not enumerate checkpoint entries or retain a directory stream.
+NAS-root health stats the root and reads one directory entry, preserving
+read-only access checks. On macOS SMB, opening a directory stream can enumerate
+the directory even when the caller requests one entry. Avoiding that work
+removes unnecessary load and long directory-handle lifetimes; it does not make
+slow checkpoint create/remove operations healthy. Their measured latency still
+uses the unchanged host-relative thresholds. Access
 re-triggers an existing Linux systemd/autofs or macOS autofs mount through the
 OS; no separate repair daemon or privileged command is installed. Cached mount
 inventory is checked again after access, so an empty local mountpoint cannot

@@ -258,7 +258,12 @@ func InstallSettings() []InstallSetting {
 		}),
 		installSetting("log-retention", "LogRetention", "completed log retention", func(c *ServiceConfig) *time.Duration { return &c.LogRetention }, installPositiveDuration),
 		installPath("upload-spool-dir", "UploadSpoolDir", "local upload spool", func(c *ServiceConfig) *string { return &c.UploadSpoolDir }, false),
-		installSetting("upload-spool-bytes", "UploadSpoolBytes", "total upload spool bytes", func(c *ServiceConfig) *int64 { return &c.UploadSpoolBytes }, installBytes),
+		installSetting("upload-spool-bytes", "UploadSpoolBytes", "total upload spool bytes (-1: measured free disk capacity)", func(c *ServiceConfig) *int64 { return &c.UploadSpoolBytes }, func(v int64) error {
+			if v == -1 {
+				return nil
+			}
+			return installBytes(v)
+		}),
 		installSetting("restart-grace", "RestartGrace", "queue restart recovery grace", func(c *ServiceConfig) *time.Duration { return &c.RestartGrace }, installNonnegativeDuration),
 		installSetting("production-infrastructure-retries", "ProductionInfrastructureRetries", "maximum infrastructure requeues per production job", func(c *ServiceConfig) *int { return &c.ProductionInfrastructureRetries }, func(n int) error {
 			if n < -1 {

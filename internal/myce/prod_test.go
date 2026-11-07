@@ -152,7 +152,7 @@ func TestDevProductionStartsUnder15SecondsRealTime(t *testing.T) {
 		t.Skip("real-time production start measurement (HTTP, subprocesses, 10s grace)")
 	}
 	dir := t.TempDir()
-	d, e := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(dir, "queue.db"), Checkpoints: filepath.Join(dir, "nas"), Token: "test", Workers: 1, MemoryGB: 8, Interval: time.Second})
+	d, e := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "queue.db"), Checkpoints: filepath.Join(dir, "nas"), Token: "test", Workers: 1, MemoryGB: 8, Interval: time.Second})
 	if e != nil {
 		t.Fatal(e)
 	}

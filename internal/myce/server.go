@@ -14,9 +14,7 @@ import (
 	"strings"
 )
 
-const maxGenericRequestBytes int64 = 8 << 30
-
-var errModelRequestTooLarge = errors.New("generic model request exceeds 8 GiB disk-spool limit")
+var errModelRequestTooLarge = errors.New("generic model request exceeds representable streaming length")
 
 // PrepareModelEnvironment holds the cache use lock for the complete server life.
 func PrepareModelEnvironment(ctx context.Context, m Model, platform string, catalog EnvironmentCatalog, cache *EnvironmentCache) (Model, func(), error) {
@@ -32,6 +30,7 @@ func PrepareModelEnvironment(ctx context.Context, m Model, platform string, cata
 		return m, nil, err
 	}
 	m.EnvironmentPath = root
+	m.readinessRecipe = r.Key
 	return m, release, nil
 }
 

@@ -159,6 +159,11 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 					route = r.Pattern
 				}
 			}
+			if route == "POST /api/workers/checkin" && response.status < 400 && measured {
+				// Occupied queue work excludes body reads, reply writes and
+				// mutex acquisition. Slow peers cannot redefine queue latency.
+				q.requestBudgets.recordControl(max(0, hold-writerWait))
+			}
 			q.requestLatencies.record(route, duration)
 			q.requestHealth.recordRequest(q.clock.Now(), route, duration, wait)
 			if duration <= requestSlowThreshold {

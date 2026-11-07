@@ -3,31 +3,39 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 )
 
-// DefaultUploadSpoolBytes bounds the queue's held media to two maximum uploads.
-const DefaultUploadSpoolBytes int64 = 16 << 30
+// DefaultUploadSpoolBytes leaves physical-disk admission as the binding limit.
+// Saved configs must remain positive for older installers. The largest integer
+// exactly interoperable through JSON float64 readers satisfies that schema
+// without imposing a workload-sized ceiling; measured free disk and unwritten commitments always bind first.
+// New peers also accept -1 as an explicit automatic-mode alias.
+const DefaultUploadSpoolBytes int64 = 1<<53 - 1
 
-var errUploadSpoolFull = errors.New("upload spool byte budget exhausted; retry after outstanding calls finish or increase --upload-spool-bytes")
+var errUploadSpoolFull = errors.New("upload spool capacity exhausted")
 
 type uploadSpool struct {
-	mu          sync.Mutex
-	dir         string
-	lock        *os.File
-	defaultDir  string
-	limit, used int64
+	mu                   sync.Mutex
+	dir                  string
+	lock                 *os.File
+	defaultDir           string
+	limit, used, written int64
+	free                 func(string) (int64, error) // injected local filesystem capacity
 }
 
 // ConfigureUploadSpool configures queue-local storage before serving requests.
-// An empty directory uses a private directory beside the queue DB. The budget must be positive.
+// An empty directory uses a private directory beside the queue DB. Use -1 for measured disk capacity or a positive explicit byte budget.
 func (q *Queue) ConfigureUploadSpool(dir string, budget int64) error {
-	if budget <= 0 {
-		return errors.New("upload-spool-bytes must be positive")
+	if budget == 0 || budget < -1 {
+		return errors.New("upload-spool-bytes must be positive or -1 for automatic capacity")
 	}
 	q.uploadSpool.mu.Lock()
 	defer q.uploadSpool.mu.Unlock()
@@ -78,20 +86,46 @@ func (q *Queue) ConfigureUploadSpool(dir string, budget int64) error {
 	return nil
 }
 
+// Statfs and control-file metadata are local observations outside q.mu. Only
+// unwritten reservations are deducted from free disk; written bytes already
+// reduced it. One current control working set remains free for WAL/DB growth.
 func (s *uploadSpool) reserve(n int64) error {
+	// Serialize the local measurement with written-accounting publication.
+	// In-flight writes remain unwritten commitments until this lock releases,
+	// so a stale free-space sample cannot be combined with newer write credit.
+	// This mutex is independent of q.mu; filesystem I/O never holds q.mu.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if n > s.limit-s.used {
-		return errUploadSpoolFull
+	probe := s.free
+	if probe == nil {
+		probe = diskFree
+	}
+	dir := s.dir
+	if dir == "" {
+		dir = os.TempDir() // Same filesystem selected by os.CreateTemp below.
+	}
+	free, err := probe(dir)
+	if err != nil {
+		return fmt.Errorf("%w: disk measurement unavailable; fitting bytes=0", errUploadSpoolFull)
+	}
+	var control int64
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		info, err := os.Stat(strings.TrimSuffix(s.defaultDir, ".uploads") + suffix)
+		if err == nil {
+			control += info.Size()
+		}
+	}
+	available := max(0, free-control-(s.used-s.written))
+	if s.limit > 0 {
+		available = min(available, max(0, s.limit-s.used))
+	}
+	if n < 0 || n > available {
+		return fmt.Errorf("%w: required bytes=%d; fitting bytes=%d", errUploadSpoolFull, n, available)
 	}
 	s.used += n
 	return nil
 }
-func (s *uploadSpool) release(n int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.used -= n
-}
+func (s *uploadSpool) release(n int64) { s.mu.Lock(); s.used -= n; s.mu.Unlock() }
 
 type spooledModelRequest struct {
 	*os.File
@@ -112,6 +146,9 @@ func (f *spooledModelRequest) Write(p []byte) (int, error) {
 	}
 	n, err := f.File.Write(p)
 	f.written += int64(n)
+	f.spool.mu.Lock()
+	f.spool.written += int64(n)
+	f.spool.mu.Unlock()
 	return n, err
 }
 
@@ -121,7 +158,10 @@ func (f *spooledModelRequest) Close() error {
 	closeErr := f.File.Close()
 	removeErr := os.Remove(f.Name())
 	if removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
-		f.spool.release(f.held)
+		f.spool.mu.Lock()
+		f.spool.used -= f.held
+		f.spool.written -= f.written
+		f.spool.mu.Unlock()
 		f.held = 0
 		removeErr = nil
 	}
@@ -131,6 +171,9 @@ func (f *spooledModelRequest) Close() error {
 // Known lengths reserve before reading; unknown/chunked bodies reserve before
 // each write. Both keep their charge through placement, inference and retry.
 func (s *uploadSpool) request(ctx context.Context, body io.Reader, perRequest, length int64) (*spooledModelRequest, int64, error) {
+	if perRequest <= 0 {
+		perRequest = math.MaxInt64 - 1
+	} // io.LimitReader needs one sentinel byte
 	if length > perRequest {
 		return nil, 0, errModelRequestTooLarge
 	}

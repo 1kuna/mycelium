@@ -25,7 +25,7 @@ func TestExtensionFirstDemandFrozenRecoveryDev(t *testing.T) {
 
 func extensionFrozenRecoveryDev(t *testing.T, legacy bool) {
 	root := newTestStateRoot(t)
-	c := DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"),
+	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"),
 		FileStore: filepath.Join(root, "files"), ExtensionRoot: filepath.Join(root, "extensions"), Token: "frozen-recovery-fixture",
 		Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}
 	t.Setenv("MYCE_TOKEN", c.Token)
