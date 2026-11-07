@@ -18,7 +18,7 @@ go build -o myce ./cmd/myce
 cat quickstart-result/result.txt
 ```
 
-You should see this (job IDs, state changes, warnings and timestamps vary):
+You should see this (job IDs, state changes and timestamps vary):
 
 ```text
 Mycelium dev: temporary local queue · 2 fake workers · stops when the command exits
@@ -28,6 +28,13 @@ Submitted fake-GPU job <job-id>
 Verified quickstart-result/result.txt
 hello from Mycelium
 ```
+
+The demo also explains its safety limits: plain commands can access the worker
+account's files, and on macOS memory protection samples usage rather than enforcing
+a kernel limit. Run only trusted code here. For sandboxing or enforced Linux memory
+limits, follow [isolation limits](docs/native-isolation.md). A brief wait for worker
+information is normal at startup; if it persists, run `./myce status` while the queue
+is running and check that a worker is connected.
 
 The script started a temporary queue with two pretend machines, ran a CPU job,
 ran a "GPU" job, downloaded its output and checked the bytes, then shut

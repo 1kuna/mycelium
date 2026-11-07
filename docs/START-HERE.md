@@ -87,6 +87,13 @@ set -a; . ./mycelium.env; set +a
 ./myce join --name second-machine
 ```
 
+Startup messages explain the safety limits. Plain commands run with the worker
+account's file access; run only trusted code, or set `isolation: sandboxed` in job
+YAML ([limits and setup](native-isolation.md)). Foreground workers do not enforce
+Linux kernel memory limits; macOS checks sampled process usage. For enforced
+limits, use a Linux worker service with delegated cgroup v2 memory and
+`--require-memory-ceilings` ([setup](operations.md)).
+
 `join` connects to the queue named in `MYCE_QUEUE` and waits for work. Add
 `--daily-use` on a computer someone uses, so it only takes work after five idle
 minutes on external power. To have the hub run jobs too, start another

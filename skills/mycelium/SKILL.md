@@ -16,6 +16,13 @@ connection settings, submits a real CPU command and a fake-GPU command, waits
 and fetches verified output. No installed fleet or token setup is needed.
 The queue and workers stop automatically; `quickstart-result/result.txt` remains.
 Plain `myce dev` retains its existing persistent, foreground behavior.
+From the next release, command help lists only that command's flags. Human
+`run`/`status` output explains missing worker observations and isolation risks;
+JSON reason, blocker, isolation and memory-enforcement fields are unchanged.
+A startup wait for worker information can clear on the first check-in. If it
+persists, run `myce status` and ask the queue owner to check worker connections.
+Plain commands can access the worker account's files: run only trusted code,
+or set `isolation: sandboxed` in job YAML and read the isolation limits.
 
 From the next release, a worker fleet proof may report `slot_mismatch` with
 separate running and `installed_slot` hashes after a failed update. This does not

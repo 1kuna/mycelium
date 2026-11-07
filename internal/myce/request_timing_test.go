@@ -118,6 +118,52 @@ func TestRequestTimingRollingStatusAndFastSilence(t *testing.T) {
 	}
 }
 
+func TestRequestTimingIdlePoll(t *testing.T) {
+	q, _ := fixture(t)
+	var logs bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(old)
+	mux := newRequestMux()
+	mux.HandleFunc("GET /api/workers/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		<-time.After(1100 * time.Millisecond)
+	})
+	r := httptest.NewRequest("GET", "/api/workers/demo/events", nil)
+	q.measureRequests(mux, mux.patterns).ServeHTTP(httptest.NewRecorder(), r)
+	if !strings.Contains(logs.String(), "event=slow_request") || !strings.Contains(logs.String(), "polls may intentionally wait for changes") || !strings.Contains(logs.String(), "run myce status") {
+		t.Fatalf("poll timing lost its diagnostic, explanation or next step: %s", logs.String())
+	}
+	summary := q.requestLatencies.snapshot()
+	if len(summary) != 1 || summary[0].Route != "GET /api/workers/{id}/events" || summary[0].Count != 1 || summary[0].P99MS < 1000 {
+		t.Fatalf("poll timing missing from status JSON metrics: %+v", summary)
+	}
+}
+
+type delayedPollWriter struct{ *httptest.ResponseRecorder }
+
+func (w delayedPollWriter) Write(b []byte) (int, error) {
+	<-time.After(1100 * time.Millisecond)
+	return w.ResponseRecorder.Write(b)
+}
+
+func TestRequestTimingPollResponseStall(t *testing.T) {
+	q, _ := fixture(t)
+	var logs bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(old)
+	mux := newRequestMux()
+	mux.HandleFunc("POST /api/wait", func(w http.ResponseWriter, r *http.Request) {
+		// No intentional polling wait: only the response writer stalls.
+		fmt.Fprint(w, `{}`)
+	})
+	r := httptest.NewRequest("POST", "/api/wait", strings.NewReader(`{"timeout_ms":0}`))
+	q.measureRequests(mux, mux.patterns).ServeHTTP(delayedPollWriter{httptest.NewRecorder()}, r)
+	if !strings.Contains(logs.String(), `event=slow_request route="POST /api/wait" status=200`) {
+		t.Fatalf("response stall was hidden as intentional polling: %s", logs.String())
+	}
+}
+
 func TestRequestTimingHydrationRecovery(t *testing.T) {
 	q, _ := fixture(t)
 	s := &requestSpan{started: time.Now()}

@@ -35,6 +35,9 @@ func main() {
 		os.Exit(exitCode(err))
 	}
 	if err := run(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		var resultErr *ResultError
 		if errors.As(err, &resultErr) {
 			fmt.Fprintln(os.Stderr, err)
@@ -343,38 +346,17 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	ledgerHigh := f.Int("high-water", -1, "ledger snapshot high water (-1 starts a snapshot)")
 	ledgerLimit := f.Int("limit", 100, "ledger page size (1..256)")
 	follow := f.Bool("follow", false, "follow logs until the job is terminal")
-	if args[0] == "status" || args[0] == "logs" {
-		f.Usage = func() {
-			help := flag.NewFlagSet("myce "+args[0], flag.ContinueOnError)
-			help.SetOutput(f.Output())
-			option := "full"
-			if args[0] == "logs" {
-				option = "follow"
-			}
-			names := []string{"queue", "token", "config", "joining-file", option}
-			if args[0] == "status" {
-				names = append(names, "history", "json")
-			}
-			for _, name := range names {
-				v := f.Lookup(name)
-				help.Var(v.Value, v.Name, v.Usage)
-				help.Lookup(name).DefValue = v.DefValue
-			}
-			fmt.Fprintf(f.Output(), "Usage of myce %s", args[0])
-			if args[0] == "logs" {
-				fmt.Fprint(f.Output(), " <id>")
-			}
-			fmt.Fprintln(f.Output(), " [flags]:")
-			help.PrintDefaults()
-		}
-	}
+	catalog := f
+	f = commandFlagSet(args[0], catalog)
 	// Accept conventional 'logs ID --follow' and 'leave --now'.
 	flags := args[1:]
 	if (args[0] == "logs" || args[0] == "ledger" || args[0] == "submit" || args[0] == "cancel") && len(flags) > 0 && !strings.HasPrefix(flags[0], "-") {
 		flags = append(append([]string{}, flags[1:]...), flags[0])
 	}
-	if err := f.Parse(flags); err != nil {
-		return err
+	var parseErr error
+	f, parseErr = parseCommandFlags(f, catalog, flags)
+	if parseErr != nil {
+		return parseErr
 	}
 	if *desktop && *laptop {
 		return errors.New("--desktop and --laptop are mutually exclusive")
@@ -948,6 +930,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 func printStatus(s myce.Snapshot, full bool) {
 	if s.HealthAlertDelivery != nil {
 		fmt.Println(s.HealthAlertDelivery.Summary())
+		if !s.HealthAlertDelivery.Configured {
+			fmt.Println("To receive health alerts, ask the queue owner to configure --health-notify (docs/operations.md). Local demos need no notifier.")
+		}
 	}
 	for _, line := range s.Efficiency.Lines() {
 		fmt.Println(line)
@@ -1011,7 +996,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			}
 			fmt.Printf("worker %s installed slot differs: running=%s/sha256:%s slot=sha256:%s error=%s\n", m.ID, p.Version, p.SHA256, slot, p.SlotError)
 		}
-		state := myce.HyphaAvailability(m)
+		state := statusSafetyText(myce.HyphaAvailability(m))
 		state += "; " + myce.NativeIsolationStatus(*m)
 		if m.LastResort {
 			state += "; last-resort placement"
@@ -1026,7 +1011,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			state += "; host RAM unavailable: " + m.HostMemoryError
 		}
 		if m.MemoryEnforcement != "" {
-			state += "; " + m.MemoryEnforcement
+			state += "; " + myce.MemoryProtectionNotice(m.MemoryEnforcement)
 		}
 		if m.SharedHost != nil {
 			state += fmt.Sprintf("; shared interactive host (reserve %g GiB; native nice>=10; %s)", m.SharedHost.InteractiveReserveGB, m.SharedCPUEnforcement)
@@ -1143,7 +1128,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			policy = "keep"
 		}
 		fmt.Printf("tier=%s selector=%s policy_revision=%d ", j.PriorityPolicy.Tier, j.PriorityPolicy.Selector, j.PriorityPolicy.Revision)
-		fmt.Printf("%s %s [%s/%s] %s hypha=%s logs=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Project, j.Spec.Class, myce.JobState(j), j.Machine, policy, myce.JobReason(j), myce.JobAge(j, s.Now), myce.JobWork(j)+"; "+myce.JobTiming(j))
+		fmt.Printf("%s %s [%s/%s] %s hypha=%s logs=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Project, j.Spec.Class, myce.JobState(j), j.Machine, policy, jobReasonText(j), myce.JobAge(j, s.Now), myce.JobWork(j)+"; "+myce.JobTiming(j))
 		fmt.Printf("  authoring origin: %s\n", j.Spec.Origin())
 		for _, variant := range j.VariantEligibility {
 			fmt.Printf("  variant: %s\n", variant.Summary())
