@@ -192,7 +192,7 @@ check: [test, -s, result]
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for _, ref := range []myce.FileRef{first.Spec.Files[".myce-source.tar"], first.Spec.Files[".myce-inputs/"+profileHash("common")]} {
+	for _, ref := range []myce.FileRef{first.Spec.Files[".myce-source.tar"], first.Spec.Files["common"]} {
 		if patches[ref.SHA256] != 1 {
 			t.Errorf("common blob uploaded %d times", patches[ref.SHA256])
 		}
@@ -304,10 +304,12 @@ check: [true]
 			t.Errorf("overlap %q: %v", name, err)
 		}
 	}
-	// On an uncertain submission the new file has its own durable frozen copy;
+	// On a permanent storage refusal the input has its own durable frozen copy;
 	// source edits after preparation cannot mutate the saved bytes.
 	var out bytes.Buffer
-	err := runProfile(context.Background(), path, []string{"literal"}, map[string]string{"item": "file"}, "frozen", "", "", "", "http://127.0.0.1:1", "fixture", &out, io.Discard)
+	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
+	defer server.Close()
+	err := runProfile(context.Background(), path, []string{"literal"}, map[string]string{"item": "file"}, "frozen", "", "", "", server.URL, "fixture", &out, io.Discard)
 	if exitCode(err) != 69 {
 		t.Fatal(err)
 	}
@@ -318,7 +320,7 @@ check: [true]
 	if err = os.WriteFile(filepath.Join(root, "file"), []byte("changed"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	frozen := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", r.Key}), r.Uploads[".myce-inputs/"+profileHash("item")])
+	frozen := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", r.Key}), r.Uploads["files/item"])
 	got, err := os.ReadFile(frozen)
 	if err != nil || string(got) != "original" {
 		t.Fatalf("frozen item: %q %v", got, err)

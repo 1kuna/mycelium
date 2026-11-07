@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -22,7 +23,7 @@ func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
 	}
 	defer rows.Close()
 	var base map[string]json.RawMessage
-	groups := map[string]map[string]json.RawMessage{"jobs": {}, "submissions": {}, "extensions": {}, "work_observations": {}, "storage_observations": {}}
+	groups := map[string]map[string]json.RawMessage{"jobs": {}, "submissions": {}, "extensions": {}, "work_observations": {}, "storage_observations": {}, "external_memory": {}, "health_events": {}}
 	for rows.Next() {
 		var key string
 		var value []byte
@@ -47,6 +48,29 @@ func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
 	if base == nil {
 		return nil, fmt.Errorf("queue state fragment missing")
 	}
+	if events := groups["health_events"]; len(events) > 0 {
+		var health map[string]json.RawMessage
+		if err := json.Unmarshal(base["health_alerts"], &health); err != nil {
+			return nil, err
+		}
+		ordered := make([]json.RawMessage, len(events))
+		for key, value := range events {
+			index, e := strconv.Atoi(key)
+			if e != nil || index < 0 || index >= len(ordered) {
+				return nil, fmt.Errorf("invalid health evidence index")
+			}
+			ordered[index] = value
+		}
+		health["events"], err = json.Marshal(ordered)
+		if err != nil {
+			return nil, err
+		}
+		base["health_alerts"], err = json.Marshal(health)
+		if err != nil {
+			return nil, err
+		}
+	}
+	delete(groups, "health_events")
 	for key, group := range groups {
 		if len(group) == 0 && key != "jobs" {
 			continue
@@ -100,6 +124,8 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 	base.Extensions = nil
 	base.WorkObservations = nil
 	base.StorageObservations = nil
+	base.ExternalMemory = nil
+	base.Health.Events = nil
 	if err := put("state", base); err != nil {
 		return nil, err
 	}
@@ -149,6 +175,21 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 			return nil, err
 		}
 	}
+	for key, value := range q.s.ExternalMemory {
+		if err := putCatalog("external_memory/"+key, value); err != nil {
+			return nil, err
+		}
+	}
+	for index := q.records.healthCount; index < len(q.s.Health.Events); index++ {
+		if err := put("health_events/"+strconv.Itoa(index), q.s.Health.Events[index]); err != nil {
+			return nil, err
+		}
+	}
+	for index := range q.records.healthChanged {
+		if err := put("health_events/"+strconv.Itoa(index), q.s.Health.Events[index]); err != nil {
+			return nil, err
+		}
+	}
 	for key := range q.records.catalog {
 		if _, ok := next[key]; !ok {
 			next[key] = nil
@@ -194,6 +235,10 @@ func (q *Queue) loadPersistedState() error {
 	}
 	if err := rows.Close(); err != nil {
 		return err
+	}
+	q.evidenceBytes = 0
+	for key, data := range q.persisted {
+		q.noteEvidenceRecord(key, nil, data)
 	}
 	q.rebuildRecords()
 	return nil

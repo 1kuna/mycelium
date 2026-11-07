@@ -1,5 +1,24 @@
 # Seeing your mycelium
 
+## Reading `myce status`
+
+`myce status` prints the queue's health, each machine and recent jobs. Add
+`--full` for full job IDs, `--history` for every retained job, or `--json` for
+the same data as JSON. For one job, `myce wait JOB_ID` prints each state change
+and `myce logs JOB_ID` prints its output.
+
+- **Machines:** each worker has a `hypha NAME:` line (a hypha is one machine)
+  with its hardware and free memory. It says `available for work` when it can
+  take jobs; otherwise it says why not, for example that its owner is using it,
+  it is on battery, an operator disabled it, or it is offline.
+- **Jobs:** each job line shows a short ID, its name, `[project/class]`, its
+  state and the machine that ran it (`hypha=`). The main states are `queued`,
+  `running`, `stopping`, `succeeded`, `failed`, `cancelled` and `paused`. A
+  queued job carries a reason naming what it is waiting for and who needs to act.
+
+The rest of this page is a field-by-field reference, including
+[live view](#live-view-myce-view).
+
 From the next release, cold CPU probes retain their initial containment ceiling
 in `memory_envelope.host_gb`, with known need and member/retry floors in
 `probe_floor_gb`. A running probe's host admission charge can follow its fresh
@@ -55,8 +74,8 @@ Workers send the additive health fields only after the queue advertises
 `host_hygiene_protocol: host-hygiene-v1`. The additive operation evidence also
 requires `host_mount_progress_protocol: mount-progress-v1`; v1-only queues still
 receive the original health and collection payloads. A strict older queue receives the
-legacy shape; local evidence still persists and a confirmed local drain uses
-the existing leaving signal. A queue downgrade retries the legacy shape once
+legacy shape; local evidence still persists and unknown health or a confirmed
+local drain uses reversible availability withholding. A queue downgrade retries the legacy shape once
 after a strict-decoder rejection, preserving session and attempt custody.
 
 Drains withhold new command, model and preparation launches without changing
@@ -112,8 +131,9 @@ shows full job IDs. Open the queue address in a browser for the same information
 sign in as `myce`, using the token as the password. The page is read-only and
 refreshes every five seconds. Keep tokens in private configuration, not URLs.
 
-The page and `GET /api/status` share a snapshot for up to one second. Job receipt
-polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
+The page and `GET /api/status` share a snapshot for a lease learned from local
+capture/hit costs and mutation intervals. Job receipts use the same cost-based
+policy with their own generations. Status snapshots do
 not drive start authorization, cancellation or result publication.
 Terminal job commits and their release acknowledgements invalidate the shared
 snapshot immediately. If one commits while status is projecting or waiting for
@@ -149,6 +169,16 @@ capacity when staging.
 Machine `cpu_extension_fingerprint` identifies the CPU qualification identity;
 device entries carry their own extension fingerprints and reports. The scalar
 `extension_fingerprint` and reports retain a first-device compatibility view.
+
+From the next release (#891), extension report `reason` and status displays
+say `not yet checked on this device; run the extension check` when no matching
+work/device record exists for the installed version. Existing records distinguish
+`hardware/driver fingerprint changed`, `extension fingerprint (digest) changed`,
+and `hardware/driver fingerprint unavailable` (current or recorded identity is
+missing); these require setup and check. `fingerprint` is the hardware/driver/OS
+qualification hash; `digest` identifies the extension contents. The text is a
+human diagnostic, not a machine code; `setup` and `qualified` remain the stable
+boolean verdicts. No record does not establish a hardware change.
 
 Default status keeps the existing JSON fields and job shape, but includes all
 nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
@@ -542,6 +572,32 @@ From the next release, queued reasons explain network, environment preparation,
 GPU card contention and RAM envelope blockers per compatible target. Card waits
 say `device N shared with K attempts` or `card busy: waiting for GPU batch slot`,
 and name the holding jobs and tiers (or retained custody awaiting exact release).
+
+With `device-activity-v1` support, discrete XPU inventory includes optional
+`devices[].telemetry`: `free_gb`, `active_percent`, `at`, `age_seconds`, and
+`source`. Missing counters mean **unknown**, including `xpu-smi` N/A. Memory
+comes from a PCI-identified `xpu-smi --query-gpu=pci.bus_id,memory.free` CSV
+query. Xe activity is the busiest hardware engine's active/total PMU tick
+ratio across the complete `DRM_XE_DEVICE_QUERY_ENGINES` inventory, sampled over
+the existing memory-sensor interval. It includes foreign engine activity but
+does not attribute that activity to jobs or predict a sharing speedup. Reads
+use the worker's existing permissions; no settings, driver or privileges change.
+An unsupported, multiplexed, incomplete or nonadvancing counter remains unknown.
+Sensor ages are rebased onto queue time; cached inventory cannot refresh them.
+Strict older queues receive the existing inventory shape after negotiation.
+
+Fan-out execution may share a discrete XPU card only when every tenant opts in
+with `fan_out.share_xpu: true`; omission or `false` preserves existing admission.
+The declaration is frozen as `batch.share_xpu` on each executing child, including
+retries, after its `spec.fan_out` is stripped. Sharing also needs fresh host/card
+memory and activity evidence, unsaturated engines, and fresh exact-attempt host
+and device samples for every started holder. Missing evidence keeps new work
+exclusive. This adds no host allowance or numeric concurrency cap; declared or
+accepted learned memory, same-tier isolation, physical headroom and exact
+release still bind. The existing growth guard also projects fan-out device
+growth through the observation horizon and stop grace. Native throughput and
+output parity require separate matched measurement before production opt-in.
+
 A RAM figure on another target cannot hide that card contention. A RAM wait gives the resolved
 envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
@@ -761,11 +817,9 @@ running attempts, `recent` over every retained assigned job, and
 `declared_with_evidence` for explicit figures with a learned comparison.
 These facts persist with the job
 independently of learning, including a constrained first run with no comparable
-learned point. Retention is bounded to 32 rows: the first and the most recent
-31. Optional `memory_attempts_dropped` counts evicted rows (omitted zero), so
-missing intermediate facts are visible. Attempts that never launched and have
-no peak do not create rows or increment the dropped count. The four-entry
-`attempt_history` window is independent. Old jobs cannot reconstruct missing
+learned point. Unique attempt facts are retained. Historical `memory_attempts_dropped`
+counts remain readable; they describe earlier discarded rows. Attempts that never launched and have
+no peak do not create rows or increment the dropped count. `attempt_history` also retains distinct attempt evidence. Old jobs cannot reconstruct missing
 telemetry. Launched attempts ending without a worker reading retain the
 envelope and omit the peak. Release-only kill-time acknowledgements retain
 their measured facts too.
@@ -1176,19 +1230,12 @@ Their `isolation` status explains the compatibility default and the one-line
 
 ### API request latency
 
-Authenticated status JSON includes `request_latencies`: one entry per HTTP route
-pattern with lifetime `count`, retained `samples`, and nearest-rank `p50_ms`,
-`p95_ms`, and `p99_ms` handler durations. Each route retains its latest 256
-completed requests, with a hard cap of 128 routes. Samples reset on queue restart;
-the ordinary one-second status cache also applies to this summary. These are
-server handler times, not client transport or process-budget times.
-
-The queue emits one `event=slow_request` line for each handler taking more than
-one second. It records the route pattern, response status, `duration_ms`,
-`mutex_wait_ms`, `mutex_hold_ms`, and `after_unlock_ms`. Wait and hold accumulate
-across the request's measured queue acquisitions; after-unlock measures the tail
-from the final measured unlock through response completion, including hydration
-and response writes. Work before/between acquisitions is included in total time.
+Authenticated status JSON includes `request_latencies`: finite registered route
+patterns, lifetime counts and conservative histogram percentiles. Duration-bit
+bins replace raw sample rings and route caps. Locally measured service cost and
+adjacent variation select unusual `slow_request` lines; measured logging cost
+gates further lines. No universal one-second threshold applies. Lines retain
+route/status and mutex wait/hold/after-unlock durations.
 
 Mutex attribution follows request contexts through queue-backed routes, including
 hydration recovery, file-store callbacks, and model forwarding. A
@@ -1200,6 +1247,10 @@ request paths, query strings, tokens or bodies. Long-lived streams are recorded
 when their handler ends.
 
 ### Non-Mycelium RAM history
+
+For a replay-window artifact with queue/worker RSS and card observations, see
+[benchmark telemetry receipts](benchmark-telemetry.md). Terminal job facts and
+the bucketed history below cannot reconstruct missing host snapshots.
 
 Each host's `external_memory` status field (also returned by host maintenance
 status) contains `24h` and `7d` summaries: `p50_gb`, `p95_gb`, exact observed
@@ -1227,13 +1278,12 @@ pages, reparented processes, or short spikes. Docker daemon children and other
 Mycelium processes outside the worker tree remain in the residual, conservatively
 reducing suggested budgets. Device-only GPU RAM is not host RAM.
 
-Storage is bounded to 673 fifteen-minute bucket slots per host. Each bucket has
-a fixed 64-bin logarithmic histogram, stored sparsely, plus exact maximum and its
-time. Percentiles weight heartbeat samples and use bin upper edges (up to 20%
-rounding, minimum positive bin 0.125 GiB), capped at the exact maximum. The
-boundary bucket is included, so a window can include up to fifteen extra minutes.
-Offline gaps have no invented samples. These are observations, not proof of a
-future peak or a complete week: inspect counts and first/last bucket times.
+Capacity and measured serialization cost determine aligned time subdivisions.
+They retain counts, byte-bit distribution summaries and exact observed maxima.
+The boundary subdivision can extend the requested window; first/last bucket and
+peak times expose that coverage. Offline gaps create no samples. Histories use
+separate durable records and expire only beyond every public reader window.
+See [adaptive retention](retention.md) for budgets and dependency protection.
 
 ### Suggesting a host allowance
 
@@ -1250,11 +1300,10 @@ history are required. The suggested GiB allowance is:
 max(0, physical RAM - seven-day external max - headroom - extra queue reserve)
 ```
 
-It rounds down to 0.25 GiB. Headroom is the greater of `--headroom-gb` (default
-4 GiB for interactive use/new workloads) and 25% of the external maximum (the
-existing guard against external growth). This deliberate reserve costs admitted
-capacity to leave room for unsampled or future external peaks. Max, rather than
-p99, preserves observed bursts. No suggested value changes the configured budget.
+There is no quarter-GiB rounding. Headroom is the greater of authored
+`--headroom-gb` (omitted: no extra authored reserve) and observed peak-to-typical
+variation. Unknown/single-sample variability cannot invent a reserve. This is a
+dry-run observation, never a guarantee against unseen future peaks.
 
 A queue already running on the host is included in the residual: its overhead
 is already subtracted once. `--queue-overhead-gb` defaults to zero and is an
@@ -1303,16 +1352,18 @@ foreground wake lateness, local age and queue receipt time),
 attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
 observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
-Pressure sampling continues every five seconds independently of HTTP check-ins.
-The queue requires a worker-reported sample age below 15 seconds. Between
-reports, it discounts time covered by the existing matching-session check-in
-contact, including a request delayed in the queue for at most 30 seconds.
-One observation still expires at 45 seconds of total age, even if further
-requests arrive. A worker that stops reporting loses this credit; a stuck probe
-keeps aging and a completed probe failure reports no sample.
+On negotiated `host-probe-v1` workers, `shared_host_pressure.probe` reports
+measured period/cost and frozen validity in seconds. Local sample age must remain
+below that validity, including time waiting behind queue transactions.
+Matching-session contact cannot renew a negotiated observation. `availability.probe` and
+`availability.age_seconds` similarly preserve owner observation age across clock
+skew. `host_health.probe` applies the same frozen validity to health evidence;
+`host_probe_unknown` withholds admission when it expires or the source fails.
+Older workers retain legacy age rules until upgraded. See
+[adaptive host observations](host-probes.md).
 
 Host maintenance `healthy`/`state` and fleet `host_states` use the same pressure
-and bounded contact facts. Normal owner-pressure yield remains temporary
+and freshness facts (legacy workers retain bounded contact credit). Normal owner-pressure yield remains temporary
 occupancy, without an infrastructure-failure alert; missing/stale evidence is
 unhealthy even with a yield latch set. Detached fleet snapshots freeze contact at snapshot
 `now`; the ordinary one-second status cache can still show an older observation
@@ -1347,6 +1398,32 @@ of completion. Missing, invalidated, older-than-30-day and noncomparable history
 have explicit `runtime.reason` values. Plain commands still show elapsed time
 and explain their missing workload/reference metadata. These observations do not
 change placement or measurement qualification.
+
+From the next release (#879), exact repeated-command and comparable extension
+forecasts correct service time using accepted raw prediction error. Job timing
+`service_estimate` exposes `raw_seconds`, signed `correction_seconds`, `samples`
+(the number of accepted prediction/outcome pairs), `estimator`, `uncertainty` and
+an optional fallback `reason`. `predicted_seconds` is raw plus correction; the
+placement reason and CLI/HTML explain the same calculation alongside unchanged
+setup and transfer costs. The correction is the mean actual-minus-raw seconds
+per work unit, scaled to the requested units (one job for repeated commands).
+Corrected predictions never train their own correction. The first accepted run
+has no prior prediction and cannot supply a pair.
+
+Evidence shares the exact work/target/component/runtime/configuration key and
+SQLite observation row. Failed, interrupted, stale, mixed, constrained and
+incompatible attempts cannot train it. Missing, invalidated or changed estimator
+evidence retains the raw estimate with an explicit reason; if raw evidence is
+unknown, calibration cannot make it known. Calibration shares the existing
+history-validity fence. One pair has unknown variability; multiple pairs show
+the observed raw error range, not a confidence bound. Nonpositive or nonfinite
+corrected durations retain raw service. No additional sample threshold, clipping
+constant, expiry window or fleet-tuned gain is introduced. Preparation and
+transfer remain uncalibrated because their separate paired outcomes are not
+available in Started-to-accepted timing. Status reads never train or persist.
+These forecasts rank only eligible, currently admissible alternatives after
+qualification, parity, tiers, fairness, disruption cost and scarcity. They grant
+no capacity, reserve no future slot and do not move running work.
 
 Native commands and extensions can atomically replace the local JSON file named
 by `MYCE_PROGRESS_FILE` (also mounted for managed Docker commands):
@@ -1521,8 +1598,7 @@ Each dimension predicts its largest accepted complete peak plus
 `max(observed range, positive prediction error)`, rounding allocated bytes to the
 observed filesystem allocation unit. `evidence` exposes samples/minimum/peak/error;
 `margin` and `multiplier` explain the managed-byte prediction. A single complete
-4-unit sample with no error predicts exactly 4 units. Evidence expires for reuse
-after 30 days according to the queue's injected clock. `spec.disk.output_bytes`
+4-unit sample with no error predicts exactly 4 units. Evidence reuse depends on comparable identity, not elapsed age. `spec.disk.output_bytes`
 is only a cold output prior: scratch, total need and file counts remain unknown
 until measured. Output hints never seed scratch or silently become hard limits.
 
@@ -1598,11 +1674,12 @@ still requires an explicit resume. Independently configured network roots are
 remembered after being observed mounted; installed NAS is checked even at cold
 startup. Root roles, never local paths or mount source addresses, cross the API.
 
-Job `shared_host_backoff` persists per-host latency-stop timestamps and cooldown
-expiry. Three interrupted owner-scheduling-latency attempts within ten minutes
-exclude that job from that host for fifteen minutes, using the queue clock. Other
-eligible hosts can admit it immediately. Status names the latency backoff and its
-expiry; ordinary pressure recovery alone does not erase the cooldown.
+Job `shared_host_backoff` persists each host's measured `recovery_seconds`,
+`quiet_since` and `last_observation`. The first owner-latency interruption holds
+that job on that host until distinct fresh healthy observations span its measured
+time to interference. Gaps/failures restart recovery; elapsed time alone cannot
+clear it. Other eligible hosts remain available. Old timestamp/expiry records
+remain readable for compatibility. See [owner recovery](host-probes.md).
 
 ## Incident health alerts
 
@@ -1616,8 +1693,10 @@ omit configuration and attempt evidence, so `delivered: false` alone cannot
 establish why delivery has not been acknowledged. The queue owner must verify
 the running hook configuration and sanitized delivery/commit evidence.
 Successful hook exit does not itself prove downstream thread execution.
-Restarting without a hook clears its historical configuration flag and restores
-the existing 256-event diagnostic retention window. Job completion observers
+Restarting without a hook clears its historical configuration flag. On releases
+containing #811, all unique alert and delivery history remains protected, including
+events recorded without a hook; disabling delivery never reinstates a count cap.
+Job completion observers
 and their thread-bound notifiers are independent of this queue-level channel.
 
 `health_alerts` retains diagnostic events delivered by the existing optional
@@ -1678,6 +1757,23 @@ cost evidence and its actual duration, never an assumed complete minute.
   Replays cannot increment it; planned stops are excluded. Successful
   or workload-caused endings break the streak. Historical failures interrupted
   by successful work do not fire. It preserves all existing attempt fences.
+  From the next release (#881), the episode and affected job retain an
+  `owner_required` decision receipt in `health_alerts[].recovery` and
+  `health_recovery`. It records the episode, exact execution/session, time,
+  retained cause, sanitized admission comparison when available, plain-language
+  summary and next owner action. `action: none` means no automatic repair was
+  performed. No alert changes capacity, configured allowances, reservations,
+  learned sizes, retry budgets, checkpoints or release obligations.
+  Both direct-RAM and `live_host_growth` refusals need diagnosis. A growth
+  comparison cannot distinguish stale availability from an inflated forecast
+  (#868/#909); the maintenance owner needs forecast bounds and paired
+  queue/worker memory snapshots. A subsequent successful start does not rewrite
+  the receipt or claim a repair. Delivery, restart and repeated handling retain
+  the original decision; newer executions cannot be changed by old evidence.
+  No remediation timer or retry is added; normal scheduling and owner policy
+  still apply. Plain CLI/page job reasons include the summary and next step.
+  Automatic action remains deferred until a recorded incident establishes an
+  existing supported reversible remedy and its fresh evidence prerequisites.
 - `staging_cache_refused`: accepted worker transfer/cache/copy failure reports or
   an exact attempt's typed input-staging refusal. Cold caches, successful copies
   and planned stops do not fire. A repaired report or later successful staging
@@ -1748,6 +1844,24 @@ uninterrupted coverage period; a rollback through an older binary can create
 a gap even though older events remain readable. Unknown legacy times remain absent.
 A status snapshot's `loaded_models` alone cannot rule out transient arrivals.
 
+## Local completion observer diagnostics (next release)
+
+`myce wait --observer-status` reads the user registry's `observer.status` and
+reports `owner_locked` from the lifetime lock. A record alone does not prove a
+live owner; the lock alone does not prove progress. Compare `captured_at`,
+`phase`, `last_read_at` and `last_delivery_at` with job completion timestamps.
+Phases identify discovery, authority resolution, batch/terminal reads, notifier
+execution, waiting, handoff and stopped state. Version, commit, PID, start time,
+registration/delivery/failure counts and typed last-error cause support diagnosis.
+The `readers` map retains each in-flight operation's phase, job count and start/capture times independently, so one responsive authority does not hide another stalled read. `next_read_at` and `next_delivery_at` identify recorded backoff/pacing. Stale metadata identifies the last recorded boundary, not the current Go frame.
+
+The private registry retains `observer.log` and one rotated `.1` file, each at
+most 1 MiB, mode 0600. Structured lifecycle, delivery and failure events exclude
+authority, raw transport errors, notifier paths/targets and environment values.
+The last-error timestamp distinguishes an old refusal from present progress.
+Legacy observers have no diagnostic record; absence cannot establish a cause.
+See [supported recovery](operations.md#completion-observer-upgrade-and-recovery-next-release).
+
 ## Batched waits and consumer flood protection
 
 `POST /api/wait` accepts `{"ids":["JOB_A","JOB_B"],"after":{"JOB_A":1},"seconds":20}`.
@@ -1783,7 +1897,9 @@ request cost determines the order. Requests spanning contention cannot teach a
 healthy cost, even if pressure clears before they complete. Unknown cost cannot
 claim to be cheaper.
 Only a higher-value read crosses that frontier; equal/lower-value reads receive
-HTTP 429 `client_rate_limited` before projection work. If no observation remains
+HTTP 429 `client_rate_limited` before projection work. Supporting queues add
+`code_alias: observation_shed_control_pressure` while keeping the legacy code.
+This is fleet-wide control pressure, not a per-client quota. If no observation remains
 in flight, one request can measure recovery. As soon as live lock wait clears,
 all reads are admitted again, even if previous observations are still active.
 This is progress-based admission, not a fixed concurrency allowance.
@@ -1802,6 +1918,16 @@ and environment-reference dependencies remain exempt. Existing clients and the
 positive integer number of seconds, the HTTP header's granularity. It does not
 promise the queue will have recovered by then.
 
+The CLI's idempotent GET recovery already honors Retry-After with positive
+jitter (#819). Retry bounds belong to caller cancellation or an explicit owner
+deadline; no fixed retry count or fleet-tuned timeout is added. From #960,
+interruption retains the last HTTP error and prints its Retry-After interval.
+Follow the seconds-scale server signal rather than guessing minutes of backoff.
+From #959, `myce logs JOB --after SEQ` resumes strictly after a log sequence.
+An interrupted read prints the continuation command on stderr; stdout remains
+ordered raw log text. The cursor advances after each successfully written chunk,
+so resuming skips completed pages. Add `--follow` to continue following.
+
 Measurements and active-request bookkeeping are process-local. A first concurrent
 wave can arrive before pressure is measurable, and production observations remain
 exempt even during overload. This protects control from continued nonproduction
@@ -1811,8 +1937,8 @@ includes #800; earlier deployed releases may still use the fixed-rate stopgap.
 
 ## Job GET request attribution
 
-The API emits `event=job_get_totals totals=[...]` at most once per minute,
-triggered by job GET traffic or refused observations. Each row has `kind` (`cli`, `python` or `unknown`),
+The API emits `event=job_get_totals totals=[...]` when cumulative traffic reaches a new binary magnitude,
+subject to measured sink cost and one in-flight summary. Each row has `kind` (`cli`, `python` or `unknown`),
 `version`, and cumulative `full` and `wait` counts since that API handler started.
 `wait` counts requests with `?view=wait`, including terminal replies that return
 full Jobs; other views count as `full`. Counts include failed job lookups.
@@ -1827,7 +1953,7 @@ Go/CLI requests identify as `myce/BUILD_VERSION`; Python uses
 `mycelium-python/PACKAGE_VERSION` (or `development` from an unpackaged source
 checkout). Older clients with no first-party identity, including stock Go/Python
 User-Agents, count as `unknown`. These are self-reported identities, not access
-controls. Storage is bounded to 64 client/version identities plus per-kind
+controls. Distinct sanitized versions share measured local diagnostic headroom plus per-kind
 `other` overflow buckets; all requests remain counted. Raw User-Agents and job
 IDs and peer addresses are never retained in these counters or summaries.
 Counting, summary encoding and logging run outside the
@@ -2050,6 +2176,20 @@ allocation completes. Unknown reconnect/restart gaps never add service age. See 
 These are conditional admission comparisons. Hard eligibility, quotas and tier
 precedence remain binding; active same-tier work is not stopped to repay debt.
 
+
+## Learned native CPU memory growth (next release)
+
+An acknowledged `adaptive native CPU memory guard` treats learned and bounded
+exploratory reservations as predictions. Fresh exact-attempt footprint and growth measurements use the
+same forecast as cold CPU probes, including sample age and measured drift, with
+the resolved estimate as a floor. Cold physical probes retain their initial
+execution ceiling. Unknown/stale telemetry and stopping attempts
+retain the complete physical/explicit execution ceiling. Darwin RSS can increase
+the charge but grants no resident-memory credit because shared pages can appear
+in multiple processes. The reported estimate and the execution ceiling therefore
+serve different purposes. Explicit declarations, member limits and Docker keep
+their existing containment contract. See [native isolation](native-isolation.md).
+
 ## Live view (`myce view`)
 
 `myce view` serves a live, read-only picture of the cluster on this computer:
@@ -2100,3 +2240,102 @@ To try it without a cluster, run `./myce dev --workers 5`, then
 leaving, and a production job. `scripts/view-smoke.sh` loads the page in
 headless Chrome or Chromium against `myce dev` and checks for live frames and
 no script errors.
+
+## Queue efficiency (next release, #857)
+
+`myce efficiency` is the concise diagnosis; `myce efficiency --json` reads
+`GET /api/efficiency`. Status and inspection JSON also include `efficiency`.
+The dedicated read returns an immutable maintenance projection without planning,
+job history scans or storage work. `at` is its observation time; a new queue
+returns `null` until its first maintenance observation. It does not change
+admission, placement, authored intent or retry decisions.
+
+- `hosts` compares instantaneous reservations with measured Mycelium RAM and
+  independent physical used/total RAM. `programs` groups reservation-time and
+  measured-use integrals by host, opaque work identity and sizing basis. These
+  include assigned/startup/stopping custody until release, not just execution.
+  Current program reservations use the admission ledger's charge, including
+  fresh measured CPU-probe growth credit; the fixed execution ceiling remains
+  the separate prediction-envelope comparison.
+  Retained rates keep the original host/work/basis after requeue clears the
+  current assignment, and end only when exact release settles that obligation.
+  Host attribution includes the worker and managed descendants. Per-program
+  memory is the existing nonreclaimable attempt attribution, not historical peak
+  RSS. Coverage seconds distinguish missing samples from zero use. Reservation
+  integrals span custody; use integrals stop at the existing sensor freshness
+  boundary. `reserved_covered_memory_gb_seconds` supports like-for-like gap
+  comparisons over measured coverage. Worst program comparisons rank measured
+  gaps; unknown coverage cannot establish wasted memory.
+- Job `efficiency.wait_seconds` and report `jobs`/`projects` retain queue-clock
+  time by sampled blocker: `memory_reservation`, `authored_platform_targets`,
+  `environment`, `priority_fairness`, `preparation`, `capacity`, `holds`,
+  `dependency`, or `unknown`. The existing waiting-reason planner supplies each
+  category on maintenance. A category starts when observed, without assigning
+  earlier unknown time to today's reason. Paused time is separately attributed
+  to holds. Report jobs identify the current blocker and whether demand is live.
+- `stranded` means the resource need fits **current** available capacity after
+  removing only the named authored/policy exclusions (`targets`,
+  `allowed_machines`, `excluded_machines`, or project policy allowed machines).
+  Capability, software/qualification, parity, preparation, resource, reservation
+  and custody checks still apply. It names every excluding field. This is the
+  shared definition for resolve advice; it grants no portability or parity.
+- `predictions` shows signed reservation-minus-accepted-peak and
+  predicted-minus-actual-duration errors, with sizing basis and exact attempt.
+  Memory comparisons require the existing accepted-learning classifier;
+  constrained, failed and pressure-unknown peaks are excluded.
+- `wasted_attempts` reports lost, killed, guard-stopped and OOM endings, excluding
+  explicit operator and priority stops. The exact attempt's pressure window and
+  minimum headroom accompany it. The first outcome also preserves fresh host
+  headroom, pressure and swap observations across cleanup replays. `suspect: true`
+  requires positive headroom with complete zero-stall/swap/OOM attempt evidence,
+  or fresh first-outcome host evidence showing normal OS memory pressure and no
+  swap growth. Adverse host evidence overrides an apparently healthy attempt
+  window. Unavailable evidence is `null`, not healthy. Suspect is a diagnosis to investigate, not proof the
+  stop was erroneous. Exact retained `resources` add CPU and I/O counters to each
+  ending; the first stop observation also freezes host I/O pressure when available.
+  Missing counters remain unknown; reservation cores are not utilization.
+
+Host/program `measured_cpu_seconds`, `cpu_observed_elapsed_seconds` and
+`cpu_observed_attempts` sum the collector's one cumulative record per exact
+retained attempt, never successive heartbeat totals. `cpu_lower_bound` marks
+sampled or incomplete/live counters. Nullable `read_bytes`, `write_bytes`,
+`read_ops` and `write_ops` preserve measured zero versus unknown;
+`io_observed_attempts` and `io_lower_bound` describe their coverage. The report's
+`resource_attempts_dropped` names the owning history's first-plus-latest retention
+loss. These full observed attempt windows can differ from the reservation
+integrals' horizon; do not divide them to infer utilization over a common period.
+Historical sizing basis is unknown if its matching memory record is gone.
+Host `io_pressure` retains nullable PSI dimensions and source age; unavailable or
+stale evidence cannot train a healthy zero. Fresh I/O pressure compares against
+its own learned local baseline. No extra telemetry retention is introduced.
+
+`efficiency_regression` uses the existing adaptive health notification path.
+Reservation gaps, live blocker waits, stranded demand, accepted prediction errors
+and wasted/suspect endings compare with their own local histories. It reuses the
+host/request statistical model's bounded observation history, warmup, robust
+quartile/observed-resolution band and consecutive confirmations. There are no
+fleet-size, GiB, utilization-percent or hours-waiting alert thresholds. Adverse
+samples cannot normalize a regression; healthy confirmations rearm delivery.
+Cold or absent evidence is unknown. Alerts carry fixed metric codes and safe
+identities through the existing episode/delivery-ID machinery.
+
+Accounting is compact and stored with its owning job, so job removal also removes
+its diagnostic contribution; there is no new age-based history policy or raw
+sample log. Host aggregates follow inventory, and baseline subjects follow the
+retained evidence. Bulk projection, sorting and baseline statistics run outside
+`q.mu`; the existing maintenance commit applies monotonic observations and exact-job
+fences. Unrelated heartbeats do not starve diagnostic publication.
+Host identity uses sorted sibling inventory, so CPU/GPU heartbeat order cannot
+reset accounting or alert warmup. Project wait history survives gaps between
+queue episodes while its owning jobs remain retained; idle gaps resolve the
+current condition without retraining that history with zeros. Job-only captures
+omit the fleet report and its baseline maps.
+Reads reuse the published generation. Sensor coverage and maintenance sampling
+limits are evidence limits, not authorization to release custody or shrink needs.
+
+## Adaptive evidence budgets (#811)
+
+`evidence_retention` is an immutable maintenance summary of queue-host capacity,
+soft budget, retained/protected bytes, reclamation and unavailable/over-budget
+state. Status does no measurement or collection. See [retention rules and the
+complete replacement inventory](retention.md).

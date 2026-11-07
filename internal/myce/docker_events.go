@@ -2,6 +2,7 @@ package myce
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -16,10 +17,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 )
-
-const dockerEventLimit = 256
-const dockerEventLineLimit = 64 * 1024
 
 // Diagnostic observations never supply successful Mycelium signal receipts.
 type dockerLifecycleEvent struct {
@@ -42,12 +41,50 @@ type dockerEventArchive struct {
 type dockerEventWriter struct {
 	archive       dockerEventArchive
 	identity, dir string
+	capacity      int64
+	reserve       func(uint64) (int64, func())
+	releases      []func()
+}
+
+// A physical page is only the read quantum, never a record-size limit. Longer
+// records reserve each additional chunk before retaining it for JSON decoding.
+func diagnosticLines(input io.Reader, reserve func(uint64) (int64, func()), consume func([]byte) error) error {
+	r := bufio.NewReaderSize(input, os.Getpagesize())
+	for {
+		line := &diagnosticTail{reserve: reserve}
+		read := func() error {
+			defer line.release()
+			for {
+				chunk, err := r.ReadSlice('\n')
+				want := len(line.data) + len(chunk)
+				_, _ = line.Write(chunk)
+				if len(line.data) != want {
+					return errors.New("Docker event input capacity exhausted")
+				}
+				if err == bufio.ErrBufferFull {
+					continue
+				}
+				if len(line.data) > 0 {
+					if e := consume(bytes.TrimSuffix(bytes.TrimSuffix(line.data, []byte("\n")), []byte("\r"))); e != nil {
+						return e
+					}
+				}
+				return err
+			}
+		}()
+		if read == io.EOF {
+			return nil
+		}
+		if read != nil {
+			return read
+		}
+	}
 }
 
 func (w *dockerEventWriter) save() error {
 	return saveWorkerJSON(w.dir, w.identity+".docker-events.json", w.archive)
 }
-func (w *dockerEventWriter) event(line []byte) {
+func (w *dockerEventWriter) event(line []byte) error {
 	var raw struct {
 		Type     string
 		Action   string
@@ -59,21 +96,21 @@ func (w *dockerEventWriter) event(line []byte) {
 	}
 	if json.Unmarshal(line, &raw) != nil {
 		w.archive.Rejected++
-		return
+		return nil
 	}
 	if raw.Type != "container" || raw.Actor.Attributes["myce.attempt"] != w.identity {
 		w.archive.Rejected++
-		return
+		return nil
 	}
 	switch raw.Action {
 	case "create", "start", "kill", "die", "oom", "stop", "destroy":
 	default:
 		w.archive.Rejected++
-		return
+		return nil
 	}
 	if _, err := hex.DecodeString(raw.Actor.ID); err != nil || len(raw.Actor.ID) != 64 || raw.TimeNano <= 0 {
 		w.archive.Rejected++
-		return
+		return nil
 	}
 	e := dockerLifecycleEvent{Container: raw.Actor.ID, Action: raw.Action, At: time.Unix(0, raw.TimeNano).UTC()}
 	if signal, err := strconv.Atoi(raw.Actor.Attributes["signal"]); err == nil && signal > 0 && signal <= 64 {
@@ -82,12 +119,26 @@ func (w *dockerEventWriter) event(line []byte) {
 	if code, err := strconv.Atoi(raw.Actor.Attributes["exitCode"]); err == nil && code >= 0 && code <= 255 {
 		e.ExitCode = &code
 	}
-	if len(w.archive.Events) == dockerEventLimit {
-		copy(w.archive.Events, w.archive.Events[1:])
-		w.archive.Events = w.archive.Events[:dockerEventLimit-1]
-		w.archive.Dropped++
+	// Accepted events are unique attempt evidence. Exhaustion stops optional
+	// capture, never discards earlier custody diagnostics to make room.
+	if w.reserve != nil {
+		// The input/parser reservation is transient. Archive only the sanitized
+		// event's measured encoding, not discarded private labels/attributes.
+		encoded, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		grant, release := w.reserve(uint64(len(encoded)))
+		if grant < int64(len(encoded)) {
+			release()
+			return errors.New("Docker event evidence capacity exhausted")
+		}
+		w.releases = append(w.releases, release)
+	} else if w.capacity > 0 && int64(len(w.archive.Events)+1)*int64(unsafe.Sizeof(e)+64) > w.capacity {
+		return errors.New("Docker event evidence capacity exhausted")
 	}
 	w.archive.Events = append(w.archive.Events, e)
+	return nil
 }
 
 // record keeps intake independent of disk latency. Notifications coalesce, not
@@ -98,20 +149,39 @@ func (w *dockerEventWriter) record(stdout io.ReadCloser, readDone chan<- struct{
 	dirty := make(chan struct{}, 1)
 	finished := make(chan error, 1)
 	go func() {
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 4096), dockerEventLineLimit)
-		for scanner.Scan() {
+		consume := func(line []byte) error {
 			mu.Lock()
-			w.event(scanner.Bytes())
+			captureErr := w.event(line)
 			w.archive.Status = "recording"
 			mu.Unlock()
+			if captureErr != nil {
+				return captureErr
+			}
 			select {
 			case dirty <- struct{}{}:
 			default:
 			}
+			return nil
+		}
+		var captureErr error
+		if w.reserve != nil {
+			captureErr = diagnosticLines(stdout, w.reserve, consume)
+		} else {
+			scanner := bufio.NewScanner(stdout)
+			limit := w.capacity
+			if limit <= 0 {
+				limit = diagnosticCapacityBytes(w.dir)
+			}
+			scanner.Buffer(make([]byte, min(4096, limit)), int(max(1, limit)))
+			for scanner.Scan() {
+				if captureErr = consume(scanner.Bytes()); captureErr != nil {
+					break
+				}
+			}
+			captureErr = errors.Join(captureErr, scanner.Err())
 		}
 		close(readDone)
-		finished <- scanner.Err()
+		finished <- captureErr
 	}()
 	persist := func() error {
 		mu.Lock()
@@ -138,18 +208,48 @@ func (w *dockerEventWriter) record(stdout io.ReadCloser, readDone chan<- struct{
 func (d *dockerAttempt) observeDockerEvents() func() {
 	d.mu.Lock()
 	w := &dockerEventWriter{identity: d.state.Identity, dir: d.dir}
+	// One physical page covers the scanner/parser's live input. Archived events
+	// acquire their own measured reservations only when received.
+	capacity, releaseBudget := reserveDiagnosticBytes(w.dir, uint64(os.Getpagesize()))
+	w.capacity = capacity
+	w.reserve = func(n uint64) (int64, func()) { return reserveDiagnosticBytes(w.dir, n) }
+	if w.capacity < int64(os.Getpagesize()) {
+		releaseBudget()
+		d.mu.Unlock()
+		log.Print("Docker event capacity unavailable; capture withheld")
+		return func() {}
+	}
 	endpoint := d.state.Endpoint
 	d.mu.Unlock()
 	path := filepath.Join(d.dir, w.identity+".docker-events.json")
 	if f, err := os.Open(path); err == nil {
-		data, readErr := io.ReadAll(io.LimitReader(f, 128*1024+1))
+		info, statErr := f.Stat()
+		var data []byte
+		readErr := statErr
+		if statErr == nil {
+			grant, release := w.reserve(uint64(info.Size()))
+			w.releases = append(w.releases, release)
+			if grant < info.Size() {
+				readErr = errors.New("Docker archive capacity unavailable")
+			} else {
+				data, readErr = io.ReadAll(io.LimitReader(f, info.Size()+1))
+				if int64(len(data)) != info.Size() {
+					readErr = errors.New("Docker archive changed while reading")
+				}
+			}
+		}
 		f.Close()
-		if readErr != nil || len(data) > 128*1024 || json.Unmarshal(data, &w.archive) != nil || len(w.archive.Events) > dockerEventLimit {
+		if readErr != nil || json.Unmarshal(data, &w.archive) != nil {
 			// Preserve damaged evidence rather than overwriting it on recovery.
+			for _, release := range w.releases {
+				release()
+			}
+			releaseBudget()
 			log.Print("Docker events archive unreadable; capture unavailable")
 			return func() {}
 		}
 	} else if !os.IsNotExist(err) {
+		releaseBudget()
 		log.Print("Docker events archive unavailable")
 		return func() {}
 	}
@@ -173,6 +273,12 @@ func (d *dockerAttempt) observeDockerEvents() func() {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer releaseBudget()
+		defer func() {
+			for _, release := range w.releases {
+				release()
+			}
+		}()
 		err := w.save()
 		if err == nil {
 			var stdout io.ReadCloser

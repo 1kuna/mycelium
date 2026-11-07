@@ -149,6 +149,16 @@ class PartialUploadTests(unittest.TestCase):
                     def makefile(self, *args):
                         return io.BytesIO(b"HTTP/1.1 302 Found\r\nLocation: https://elsewhere.invalid/\r\nContent-Length: 0\r\n\r\n")
 
+                    def settimeout(self, timeout):
+                        self.timeout = timeout
+
+                    def recv_into(self, buffer, nbytes=0, flags=0):
+                        if not hasattr(self, "reply"):
+                            self.reply = io.BytesIO(b"HTTP/1.1 302 Found\r\nLocation: https://elsewhere.invalid/\r\nContent-Length: 0\r\n\r\n")
+                        data = self.reply.read(nbytes or len(buffer))
+                        buffer[:len(data)] = data
+                        return len(data)
+
                     def close(self):
                         pass
 

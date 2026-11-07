@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ type PortabilityRequest struct {
 }
 
 type PortabilityReport struct {
+	Linkage      []MachOLinkage           `json:"linkage,omitempty"`
 	ObservedAt   time.Time                `json:"observed_at"`
 	Inventory    string                   `json:"inventory"`
 	Requirements []PortabilityRequirement `json:"requirements"`
@@ -98,14 +100,15 @@ type PortabilityHost struct {
 
 // Portability captures the ordinary detached read view. File hydration, hashing,
 // lock parsing, qualification and planner checks all happen after q.mu releases.
-func (q *Queue) Portability(req PortabilityRequest) (PortabilityReport, error) {
+func (q *Queue) Portability(req PortabilityRequest, contexts ...context.Context) (PortabilityReport, error) {
+	ctx := requestContext(contexts)
 	if req.RequirementReasons == nil && req.Spec != nil {
 		req.RequirementReasons = req.Spec.RequirementReasons
 	}
 	if req.Extension != "" && (req.Recipe != nil || req.Spec != nil) || req.Recipe != nil && req.Spec != nil {
 		return PortabilityReport{}, errors.New("choose extension, recipe or spec")
 	}
-	view, _, err := q.captureObservation("")
+	view, _, err := q.captureObservation("", ctx)
 	if err != nil {
 		return PortabilityReport{}, err
 	}
@@ -115,7 +118,9 @@ func (q *Queue) Portability(req PortabilityRequest) (PortabilityReport, error) {
 			return PortabilityReport{}, errors.New("extension requires a registered name@version")
 		}
 		// Hydrate the exact captured registration, not a later queue generation.
-		q.fileLifecycle.RLock()
+		if err := lockUploadContext(ctx, q.fileLifecycle.RLock, q.fileLifecycle.RUnlock); err != nil {
+			return PortabilityReport{}, err
+		}
 		err = q.files.hydrateExtension(&e)
 		q.fileLifecycle.RUnlock()
 		if err != nil {
@@ -134,6 +139,9 @@ func (q *Queue) Portability(req PortabilityRequest) (PortabilityReport, error) {
 		if len(req.RequirementReasons) == 0 {
 			req.RequirementReasons = copy.RequirementReasons
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return PortabilityReport{}, err
 	}
 	return view.portability(req), nil
 }
@@ -639,6 +647,9 @@ func WritePortability(dest io.Writer, r PortabilityReport, asJSON bool) error {
 		return e.Encode(r)
 	}
 	var out strings.Builder
+	for _, d := range r.Linkage {
+		fmt.Fprintln(&out, "Warning: "+d.String())
+	}
 	if _, err := fmt.Fprintf(&out, "Inventory: %s (observed %s)\n", r.Inventory, r.ObservedAt.Format(time.RFC3339)); err != nil {
 		return err
 	}

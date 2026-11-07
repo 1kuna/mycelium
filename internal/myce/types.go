@@ -419,8 +419,11 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	HealthRecovery *AlertRecovery `json:"health_recovery,omitempty"`
+
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
+	Efficiency              *JobEfficiency         `json:"efficiency,omitempty"`
 	Blocker                 *Blocker               `json:"blocker,omitempty"`
 	WallTime                *WallTimeStatus        `json:"wall_time,omitempty"`
 	YieldPlan               *ScarceYieldProjection `json:"yield_plan,omitempty"`
@@ -691,9 +694,11 @@ type Checkin struct {
 	Running              *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	DeviceTelemetryProtocol    string                       `json:"device_telemetry_protocol,omitempty"`
 	UnifiedMemoryProtocol      string                       `json:"unified_memory_protocol,omitempty"`
 	ProbeMemoryProtocol        string                       `json:"probe_memory_protocol,omitempty"`
 	HostCollectionProtocol     string                       `json:"hygiene_collection_protocol,omitempty"`
+	HostProbeProtocol          string                       `json:"host_probe_protocol,omitempty"`
 	HostHygieneProtocol        string                       `json:"host_hygiene_protocol,omitempty"`
 	HostMountProgressProtocol  string                       `json:"host_mount_progress_protocol,omitempty"`
 	ToolInventoryProtocol      string                       `json:"tool_inventory_protocol,omitempty"`
@@ -803,6 +808,8 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	Efficiency          *EfficiencyReport    `json:"efficiency,omitempty"`
+	EvidenceRetention   *EvidenceRetention   `json:"evidence_retention,omitempty"`
 	Freshness           *SnapshotFreshness   `json:"freshness,omitempty"`
 	StorageObservations []StorageObservation `json:"storage_observations,omitempty"`
 	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`

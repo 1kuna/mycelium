@@ -104,6 +104,11 @@ func specCommand(args []string, out, errOut io.Writer) error {
 		}
 		return err
 	}
+	report.Linkage = findings.linkage
+	report.Notes = append(report.Notes, findings.notes...)
+	if report.Portability != nil {
+		report.Portability.Linkage = findings.linkage
+	}
 	report.Resolved = append(findings.resolved, report.Resolved...)
 	report.Findings = append(findings.findings, report.Findings...)
 	if b := myce.ResolveFindingBlocker(report.Findings); b != nil {
@@ -122,6 +127,8 @@ func specCommand(args []string, out, errOut io.Writer) error {
 }
 
 type submitterFindings struct {
+	linkage  []myce.MachOLinkage
+	notes    []string
 	unstaged []string
 	resolved []string
 	findings []myce.ResolveFinding
@@ -176,6 +183,7 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 			return myce.ResolveRequest{}, found, err
 		}
 	}
+	inspectSourceLinkage(root, p.Source, &found)
 	if p.Native != nil {
 		sourceUnverified := !bundleNativeMetadata(p.Native, p.Source, root)
 		finding, _ := sourceBundleFinding(root, p.Source)
@@ -233,7 +241,7 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 	}
 	found.unstaged = append(found.unstaged, "files/.myce-source.tar")
 	p.Files[".myce-source.tar"] = placeholderRef(".myce-source.tar", max(1, size))
-	p.PrepareSource = p.Adapter
+	p.PrepareSource = true
 	return myce.ResolveRequest{Spec: p.Spec, RequirementReasons: p.RequirementReasons, UnstagedInputs: found.unstaged}, found, nil
 }
 

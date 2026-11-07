@@ -64,6 +64,9 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 			return err
 		}
 		// An OS lock, not a PID file, proves there is exactly one live observer.
+		if err := requestAdoptedObserverUpgrade(ctx); err != nil {
+			return err
+		}
 		fmt.Fprintln(errOut, "adopted existing watcher for receipt:", dir)
 		if err := readProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 			return err
@@ -187,7 +190,7 @@ func waitProfileReceipt(ctx context.Context, dir string, timeout time.Duration) 
 }
 
 func observeProfile(ctx context.Context, c myce.Client, dir string, r profileReceipt, cfg profileObserver) error {
-	j, waitErr := c.WaitSubmitted(ctx, &myce.Job{ID: r.JobID, State: r.Status})
+	j, waitErr := c.WaitSubmitted(ctx, &myce.Job{ID: r.JobID, State: r.Status, Spec: r.Spec})
 	return finishProfileObservation(ctx, dir, r, cfg, j, waitErr)
 }
 

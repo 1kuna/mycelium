@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"net"
@@ -58,7 +59,7 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 
-const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage|view\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|telemetry|gpu-telemetry-client|usage|view\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_native-exec" {
@@ -88,6 +89,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
 		return versionCommand(args[1:])
+	}
+	if args[0] == "telemetry" {
+		return hostTelemetryCommand(context.Background(), args[1:], probe, os.Stdout)
 	}
 	if args[0] == "gpu-telemetry-client" {
 		return gpuTelemetryClientCommand(context.Background(), args[1:], os.Stdout)
@@ -226,7 +230,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		return modelCommand(args[1:])
 	}
 	switch args[0] {
-	case "dev", "queue", "join", "submit", "usage", "status", "cancel", "leave", "ledger", "logs":
+	case "dev", "queue", "join", "submit", "usage", "status", "efficiency", "cancel", "leave", "ledger", "logs":
 	default:
 		return &exitError{2, fmt.Errorf("unknown command %q\n%s", args[0], topLevelUsage)}
 	}
@@ -263,14 +267,14 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	db := f.String("db", "myce-state/myce.db", "SQLite database file")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
 	dockerHost := f.String("docker-host", "", "opt in to managed Docker at this endpoint (empty disables Docker)")
-	containerRetention := f.Duration("container-retention", myce.DefaultContainerRetention, "acknowledged stopped Docker container retention (0 removes immediately)")
+	containerRetention := f.Duration("container-retention", myce.DefaultContainerRetention, "acknowledged stopped Docker container retention (default protected; explicit 0 removes immediately)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total model-upload bytes (-1: measured free disk capacity)")
 	outputDeliveryRoot := f.String("output-delivery-root", "", "queue NAS destination root for opt-in async_nas outputs")
 	fileStore := f.String("file-store", "", "authoritative file storage folder (default beside database)")
 	healthNotify := f.String("health-notify", os.Getenv("MYCE_HEALTH_NOTIFY"), "queue health notifier executable (--check and JSON stdin)")
 	healthStorageDelay := f.Duration("health-storage-delay", myce.DefaultHealthStorageDelay, "storage unavailability duration before health alert")
-	fileRetention := f.Duration("file-retention", myce.DefaultFileRetention, "terminal job input/result retention (default 168h)")
+	fileRetention := f.Duration("file-retention", myce.DefaultFileRetention, "terminal job input/result retention (0 retains until explicit release)")
 	fileStoreProductionReserve := f.Int64("file-store-production-reserve", 0, "file-store bytes reserved for production-tier submissions")
 	fileStoreLimit := f.Int64("file-store-bytes", 100<<30, "authoritative files plus upload reservations limit")
 	fileCache := f.String("file-cache", "", "local reproducible file cache folder")
@@ -339,9 +343,16 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	full := f.Bool("full", false, "show full job IDs in status")
 	statusJSON := f.Bool("json", false, "show status as JSON")
 	statusHistory := f.Bool("history", false, "include all retained jobs and work curves in status")
-	ledgerAfter := f.Int("after", 0, "ledger sequence cursor")
+	ledgerAfter := new(int)
+	if args[0] != "logs" {
+		f.IntVar(ledgerAfter, "after", 0, "ledger sequence cursor")
+	}
 	ledgerHigh := f.Int("high-water", -1, "ledger snapshot high water (-1 starts a snapshot)")
 	ledgerLimit := f.Int("limit", 100, "ledger page size (1..256)")
+	logAfter := new(int64)
+	if args[0] == "logs" {
+		f.Int64Var(logAfter, "after", 0, "resume logs after this sequence cursor")
+	}
 	follow := f.Bool("follow", false, "follow logs until the job is terminal")
 	if args[0] == "status" || args[0] == "logs" {
 		f.Usage = func() {
@@ -352,6 +363,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				option = "follow"
 			}
 			names := []string{"queue", "token", "config", "joining-file", option}
+			if args[0] == "logs" {
+				names = append(names, "after")
+			}
 			if args[0] == "status" {
 				names = append(names, "history", "json")
 			}
@@ -473,8 +487,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	})
 	switch args[0] {
 	case "dev":
-		if *fileRetention <= 0 {
-			return errors.New("file-retention must be positive")
+		if *fileRetention < 0 {
+			return errors.New("file-retention must be nonnegative")
 		}
 		if f.NArg() != 0 {
 			return errors.New("unexpected dev arguments; use myce dev clock advance <duration>")
@@ -621,6 +635,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		defer listener.Close()
+		var queueServers []*http.Server
 		if *discovery {
 			dir := *identityDir
 			if dir == "" {
@@ -645,6 +660,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return e
 			}
 			defer joiningServer.Close()
+			queueServers = append(queueServers, joiningServer)
 			defer q.BeginShutdown()
 			withdraw, e := myce.AdvertiseJoining(tlsListener.Addr(), identity.Fingerprint())
 			if e != nil {
@@ -655,6 +671,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			fmt.Printf("Mycelium joining: https://%s\n", tlsListener.Addr())
 		}
 		server := &http.Server{Handler: myce.API{Queue: q, Token: *token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		queueServers = append(queueServers, server)
 		errs := make(chan error, 3)
 		if debugListener != nil {
 			go func() { errs <- debugServer.Serve(debugListener) }()
@@ -671,7 +688,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		stop()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return errors.Join(err, server.Shutdown(shutdown))
+		return errors.Join(err, q.ShutdownServers(shutdown, queueServers...))
 	case "join":
 		if *cpuReserve < 0 || *cpuBudget < 0 {
 			return errors.New("CPU reserve and allowance must be nonnegative")
@@ -791,6 +808,25 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return e
 		}
 		return printUsage(os.Stdout, report, *by)
+	case "efficiency":
+		if f.NArg() != 0 {
+			return errors.New("usage: myce efficiency [--json]")
+		}
+		var report *myce.EfficiencyReport
+		if err := client.Call(ctx, "GET", "/api/efficiency", nil, &report); err != nil {
+			return err
+		}
+		if *statusJSON {
+			return json.NewEncoder(os.Stdout).Encode(report)
+		}
+		if report == nil {
+			fmt.Println("efficiency: unknown (awaiting maintenance observation)")
+			return nil
+		}
+		for _, line := range report.Lines() {
+			fmt.Println(line)
+		}
+		return nil
 	case "status":
 		if f.NArg() > 1 {
 			return errors.New("usage: myce status [job]")
@@ -901,9 +937,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		return json.NewEncoder(os.Stdout).Encode(page)
 	case "logs":
 		if f.NArg() != 1 {
-			return errors.New("usage: myce logs <id> [--follow]")
+			return errors.New("usage: myce logs <id> [--follow] [--after SEQ]")
 		}
-		return logs(ctx, client, f.Arg(0), *follow)
+		return logsAfter(ctx, client, f.Arg(0), *follow, *logAfter, os.Stdout)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -926,6 +962,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 func printStatus(s myce.Snapshot, full bool) {
 	if s.HealthAlertDelivery != nil {
 		fmt.Println(s.HealthAlertDelivery.Summary())
+	}
+	for _, line := range s.Efficiency.Lines() {
+		fmt.Println(line)
 	}
 	if s.QueueRelease.Version != "" {
 		fmt.Printf("queue release: %s (%s)\n", s.QueueRelease.Version, s.QueueRelease.Commit)
@@ -1135,18 +1174,29 @@ func printStatus(s myce.Snapshot, full bool) {
 	}
 }
 func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
+	return logsAfter(ctx, c, id, follow, 0, os.Stdout)
+}
+
+func logsAfter(ctx context.Context, c myce.Client, id string, follow bool, after int64, out io.Writer) (err error) {
+	if after < 0 {
+		return errors.New("logs --after must be nonnegative")
+	}
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%w; resume with: myce logs %s --after %d", err, id, after)
+		}
+	}()
 	resolved, err := c.GetJob(ctx, id)
 	if err != nil {
 		return err
 	}
 	id = resolved.ID
 	if resolved.Spec.Logs == "none" {
-		fmt.Println("logs are disabled for this job (logs: none)")
+		fmt.Fprintln(out, "logs are disabled for this job (logs: none)")
 		return nil
 	}
-	var after int64
 	for {
-		if err := drainJobLogs(ctx, c, id, &after, os.Stdout); err != nil {
+		if err := drainJobLogs(ctx, c, id, &after, out); err != nil {
 			return err
 		}
 		if !follow {
@@ -1159,11 +1209,11 @@ func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
 		if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
 			// Drain once more after observing completion, including the last
 			// worker log page published before its terminal result.
-			return drainJobLogs(ctx, c, id, &after, os.Stdout)
+			return drainJobLogs(ctx, c, id, &after, out)
 		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		case <-time.After(300 * time.Millisecond):
 		}
 	}

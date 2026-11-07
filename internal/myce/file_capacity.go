@@ -136,7 +136,9 @@ func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[stri
 	// Keep physical free space and the inventory on the same side of a bundle
 	// write. Otherwise its bytes can be deducted by both disk-free and the
 	// completion ledger. No queue callbacks run under this filesystem fence.
-	s.uploadFilesMu.RLock()
+	if err := lockUploadContext(ctx, s.uploadFilesMu.RLock, s.uploadFilesMu.RUnlock); err != nil {
+		return FileStoreStatus{}, nil, err
+	}
 	defer s.uploadFilesMu.RUnlock()
 	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve, UnidentifiedWritesMayUseReserve: s.productionReserve > 0, UnidentifiedReserveAdmittedBytes: s.unidentifiedReserveAdmitted.Load()}
 	payloads, err := s.inventoryUnlocked(ctx)
@@ -197,6 +199,7 @@ type fileStoreObservation struct {
 	bundles                   map[string]time.Time
 	now                       time.Time
 	retention                 time.Duration
+	publicationHorizon        time.Duration
 	projects                  projectFileFacts
 }
 
@@ -228,11 +231,13 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			markers[hash] = at
 		}
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, projects}
+	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, q.s.PublicationHorizon, projects}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
-	q.mu.RLock()
+	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return &FileStoreStatus{Error: "file store capacity unavailable"}
+	}
 	view := q.captureFileStoreStatus()
 	q.mu.RUnlock()
 	return view.status(ctx)
@@ -245,7 +250,9 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	if store == nil {
 		return nil
 	}
-	store.lifecycle.RLock()
+	if err := lockUploadContext(ctx, store.lifecycle.RLock, store.lifecycle.RUnlock); err != nil {
+		return &FileStoreStatus{Error: "file store capacity unavailable"}
+	}
 	defer store.lifecycle.RUnlock()
 	status, payloads, err := store.capacity(ctx)
 	status.Projects = v.projects.usage(now)
@@ -255,21 +262,21 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		return &status
 	}
 	for hash, p := range payloads {
-		if keep[hash] || p.modified.After(now.Add(-filePublicationGrace)) {
+		if keep[hash] || p.modified.After(now.Add(-v.publicationHorizon)) {
 			continue
 		}
 		if at, tracked := v.bundles[hash]; tracked && (at.After(now.Add(-retention)) || p.modified.After(now.Add(-retention))) {
 			continue
 		}
 		reclaimable := !p.upload && expired[hash]
-		if at, marked := markers[hash]; marked && !referenced[hash] && !p.modified.After(now.Add(-retention)) {
+		if at, marked := markers[hash]; retention > 0 && marked && !referenced[hash] && !p.modified.After(now.Add(-retention)) {
 			reclaimable = p.upload || !at.IsZero() && !at.After(now.Add(-retention))
 		}
 		if reclaimable {
 			status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
 		}
 	}
-	status.ReservedOutputBytes = store.reservedOutputs(payloads)
+	status.ReservedOutputBytes = store.reservedOutputs(payloads, ctx)
 	status.FreeBytes -= min(status.FreeBytes, status.ReservedOutputBytes)
 	status.Physical = store.physicalStorageStatus(ctx, status, payloads, now)
 	return &status
@@ -358,20 +365,22 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			markers[hash] = at
 		}
 	}
-	cutoff := q.clock.Now().Add(-max(q.fileRetention, filePublicationGrace))
+	if q.fileRetention == 0 {
+		requestUnlock1()
+		return nil
+	}
+	cutoff := q.clock.Now().Add(-max(q.fileRetention, q.s.PublicationHorizon))
 	requestUnlock1()
 	if store == nil || len(markers) == 0 {
 		return nil
 	}
-	checked := 0
 	for hash, at := range markers {
 		if (FileRef{SHA256: hash}).validate() != nil {
 			continue
 		}
-		if checked == fileReclaimBatch {
+		if requestCtx.Err() != nil || q.fileReclaimUnderPressure() {
 			break
 		}
-		checked++
 		if !q.fileLifecycle.TryLock() {
 			return nil
 		}

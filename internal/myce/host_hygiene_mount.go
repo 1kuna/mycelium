@@ -171,6 +171,7 @@ type hostMountProbe struct {
 	consecutive int
 	reason      string
 	nextProbe   time.Time
+	timing      probeTiming
 	retryDelay  time.Duration
 	storage     *hostHealthMonitor
 	dataProbe   func(string, uint64, func()) error
@@ -197,7 +198,7 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 	})
 	// This learned whole-sequence band is advisory. Admission instead uses the
 	// existing #234 per-operation no-progress allowance, including during warmup.
-	limit := signalRefresh
+	limit := p.timing.controlPeriod()
 	if len(base) > 0 {
 		_, hi := healthBand(base, func(s HostHealthSample) float64 {
 			for _, m := range s.Mounts {
@@ -225,10 +226,9 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 				if errors.As(r.err, &recovery) {
 					p.last.Reason = string(recovery)
 				}
-				// Backoff starts at the existing observation cadence or measured cost.
-				// Its ceiling is the existing signal freshness allowance (or a slower
-				// host's observed cost), bounding recovery delay without a fleet constant.
-				p.retryDelay = min(max(signalMaxAge, limit), max(max(signalRefresh, limit), p.retryDelay*2))
+				// Failed attempts spread retries by their observed cost and repeated
+				// failure spacing. No universal mount-recovery deadline is assumed.
+				p.retryDelay = max(limit, max(r.latency, p.retryDelay*2))
 				p.nextProbe = now.Add(p.retryDelay)
 			} else {
 				p.retryDelay, p.nextProbe = 0, time.Time{}

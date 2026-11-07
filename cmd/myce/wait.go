@@ -42,6 +42,7 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 	f := flag.NewFlagSet("wait", flag.ContinueOnError)
 	f.SetOutput(errOut)
 	authority := installedClientFlags(f)
+	observerStatus := f.Bool("observer-status", false, "show private local completion-observer diagnostics")
 	observerDir := f.String("observer-dir", "", "private shared profile observer registry")
 	detached := f.Bool("detached", false, "continue after parent exit (explicit managed use only)")
 	receipt := f.String("receipt", "", "private profile receipt directory (managed detached observer)")
@@ -78,6 +79,17 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 		}
 		return &exitError{2, err}
 	}
+	if *observerStatus {
+		root := *observerDir
+		if root == "" {
+			var err error
+			root, err = sharedProfileRoot()
+			if err != nil {
+				return err
+			}
+		}
+		return observerStatusCommand(root, out)
+	}
 	if !*detached {
 		var cancel context.CancelFunc
 		ctx, cancel = waitParentContext(ctx, os.Getppid(), time.Second, os.Getppid)
@@ -113,11 +125,9 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 	return waitJobsReporting(ctx, client, authority.client, ids, *timeout, out, errOut, myce.RealClock{}, waitPause, *jsonOutput)
 }
 
-// A wait with no successful status read for waitNoProgress logs its blocking
-// point and reconnects instead of waiting silently (#607). Each read is also
-// bounded by waitReadBudget so a half-open connection after a queue restart
-// cannot block forever when the HTTP client has no timeout of its own.
-var waitNoProgress, waitReadBudget = 2 * time.Minute, 30 * time.Second
+// Observation uses the owner deadline. A failed read refreshes installed
+// authority (#607); there is no fixed read or total-observer deadline.
+var waitReadBudget time.Duration // Optional test override; owner deadlines bound reads.
 
 func waitPause(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
@@ -153,38 +163,59 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 	if len(pending) > 256 {
 		return waitError(2, "wait accepts at most 256 job IDs; use one wait per batch")
 	}
-	deadline := clock.Now().Add(timeout)
-	delay := 3 * time.Second
+	var ownerDeadline time.Time
+	if timeout > 0 {
+		ownerDeadline = clock.Now().Add(timeout)
+	}
+	deadline := ownerDeadline
+	pace := myce.ClientPace{}
+	c = c.WithoutRetries()
+	c.Clock = clock
 	failed, retrying := false, false
 	var outageSince, nextRetryLog time.Time
 	outageAttempts := 0
-	lastProgress := clock.Now()
+	last := map[string]string{}
+	metadata := map[string]*myce.Job{}
+	var event time.Time
 	for len(pending) > 0 {
 		if ctx.Err() != nil {
 			return waitError(4, "wait interrupted; jobs continue")
 		}
+		deadline, event = waitPendingTimes(pending, metadata, ownerDeadline, clock.Now())
 		// Iterate a fixed set: prefixes are replaced with exact IDs as they resolve.
 		ids := make([]string, 0, len(pending))
 		for id := range pending {
 			ids = append(ids, id)
 		}
+		started := clock.Now()
+		changed := false
 		unavailable := false
 		var readErr error
 		var batchJobs map[string]*myce.Job
 		var batchErr error
+		held := false
 		for _, id := range ids {
 			if !pending[id] {
 				continue
 			}
+			deadline, event = waitPendingTimes(pending, metadata, ownerDeadline, clock.Now())
 			remaining := deadline.Sub(clock.Now())
-			if timeout > 0 && remaining <= 0 {
+			if !deadline.IsZero() && remaining <= 0 {
 				return waitError(3, "wait timed out; jobs continue")
 			}
 			budget := waitReadBudget
-			if timeout > 0 {
-				budget = min(budget, remaining)
+			if !deadline.IsZero() {
+				if budget == 0 {
+					budget = remaining
+				} else {
+					budget = min(budget, remaining)
+				}
 			}
-			requestCtx, cancel := context.WithTimeout(ctx, budget)
+			requestCtx, cancel := context.WithCancel(ctx)
+			if budget > 0 {
+				cancel()
+				requestCtx, cancel = context.WithTimeout(ctx, budget)
+			}
 			read := c.GetJobForWait
 			// Preserve the initial placement/deadline advisory; steady-state
 			// polls need only state, and terminal replies are full Jobs.
@@ -193,12 +224,21 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 			}
 			var j *myce.Job
 			var err error
-			if batchSupported {
+			if !observed[id] {
+				// A batch state omits spec metadata. Every job needs its own
+				// diagnostic read before deadlines can constrain observation.
+				var supported bool
+				j, supported, err = c.GetJobWaitCapability(requestCtx, id)
+				// Structured output requires full diagnostics on every observation.
+				batchSupported = (batchSupported || supported) && !jsonOutput
+			} else if batchSupported {
 				if batchJobs == nil {
 					batchJobs = map[string]*myce.Job{}
 					var reply myce.WaitReply
-					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, min(20, int(max(0, budget-time.Second)/time.Second)))
+					seconds := pace.Seconds(clock.Now(), event)
+					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, seconds)
 					if batchErr == nil {
+						held = seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0
 						for i, state := range reply.Jobs {
 							revisions[state.ID] = state.Revision
 							batchJobs[ids[i]] = &myce.Job{ID: state.ID, State: state.State, Reason: state.Reason}
@@ -206,11 +246,6 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 					}
 				}
 				j, err = batchJobs[id], batchErr
-			} else if !observed[id] {
-				j, batchSupported, err = c.GetJobWaitCapability(requestCtx, id)
-				// Structured output promises full current diagnostics; lightweight
-				// batch/wait projections intentionally omit nonterminal reasons.
-				batchSupported = batchSupported && !jsonOutput
 			} else {
 				j, err = read(requestCtx, id)
 			}
@@ -219,7 +254,7 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 			if ctx.Err() != nil {
 				return waitError(4, "wait interrupted; jobs continue")
 			}
-			if timeout > 0 && (!clock.Now().Before(deadline) || deadlineExpired && budget == remaining) {
+			if !deadline.IsZero() && (!clock.Now().Before(deadline) || deadlineExpired && budget == remaining) {
 				return waitError(3, "wait timed out; jobs continue")
 			}
 			if err != nil {
@@ -233,15 +268,15 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				}
 				unavailable = true
 				readErr = err
-				if stalled := clock.Now().Sub(lastProgress); stalled >= waitNoProgress {
-					fmt.Fprintf(errOut, "wait: no progress for %s; blocked reading job %s (cause=%s); reconnecting\n", stalled.Truncate(time.Second), id, waitReadCause(err))
-					lastProgress = clock.Now()
+				if reconnect != nil {
+					fmt.Fprintf(errOut, "wait: blocked reading job %s (cause=%s); reconnecting\n", id, waitReadCause(err))
 					if c.HTTP != nil {
 						c.HTTP.CloseIdleConnections()
 					}
 					if reconnect != nil {
 						if fresh, e := reconnect(); e == nil {
-							c = fresh
+							c = fresh.WithoutRetries()
+							c.Clock = clock
 						} else {
 							fmt.Fprintln(errOut, "wait: reconnect could not resolve queue authority; retrying with the previous one")
 						}
@@ -249,7 +284,16 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				}
 				break
 			}
-			lastProgress = clock.Now()
+			if !observed[j.ID] {
+				metadata[j.ID] = j
+			}
+			if known := metadata[j.ID]; known != nil && known.StartedAt == nil && j.State == "running" {
+				now := clock.Now()
+				known.StartedAt = &now
+			}
+			signature := j.State + "\x00" + j.Reason
+			changed = changed || last[j.ID] != signature
+			last[j.ID] = signature
 			observed[j.ID] = true
 			terminal := j.State == "succeeded" || j.State == "failed" || j.State == "cancelled"
 			if jsonOutput {
@@ -282,7 +326,6 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				continue
 			}
 			completed[j.ID] = true
-
 			failed = failed || j.State != "succeeded"
 		}
 		if unavailable {
@@ -300,18 +343,27 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				fmt.Fprintf(errOut, "wait: queue unavailable; retrying (cause=%s attempts=%d elapsed=%s)\n", waitReadCause(readErr), outageAttempts, clock.Now().Sub(outageSince).Truncate(time.Second))
 				nextRetryLog = clock.Now().Add(time.Minute)
 			}
-			delay = min(delay*2, 10*time.Second)
+
 		} else {
 			if retrying {
 				fmt.Fprintln(errOut, "wait: queue connection restored")
 				retrying = false
 			}
-			delay = 3 * time.Second
+
 		}
 		if len(pending) == 0 {
 			break
 		}
-		if timeout > 0 {
+		deadline, event = waitPendingTimes(pending, metadata, ownerDeadline, clock.Now())
+		pace.Observe(clock.Now().Sub(started), changed && !unavailable)
+		delay := pace.Delay(clock.Now(), event, readErr, c.Jitter)
+		if !unavailable && held {
+			delay = 0
+		}
+		if !deadline.IsZero() {
+			if !clock.Now().Before(deadline) {
+				return waitError(3, "wait timed out; jobs continue")
+			}
 			delay = min(delay, deadline.Sub(clock.Now()))
 		}
 		if err := pause(ctx, delay); err != nil {
@@ -338,4 +390,24 @@ func waitReadCause(err error) string {
 		return "response_incomplete"
 	}
 	return "read_error"
+}
+
+// Only pending jobs contribute deadlines/events. Recompute after every reply:
+// a completed job or a passed start event cannot constrain a later completion.
+func waitPendingTimes(pending map[string]bool, metadata map[string]*myce.Job, owner time.Time, now time.Time) (time.Time, time.Time) {
+	deadline := owner
+	var event time.Time
+	for id := range pending {
+		j := metadata[id]
+		if j == nil {
+			continue
+		}
+		if end := j.Spec.Deadline; end != nil && (deadline.IsZero() || end.Before(deadline)) {
+			deadline = *end
+		}
+		if next := myce.ClientJobEvent(j, now); !next.IsZero() && (event.IsZero() || next.Before(event)) {
+			event = next
+		}
+	}
+	return deadline, event
 }

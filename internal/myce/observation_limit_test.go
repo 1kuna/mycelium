@@ -116,7 +116,7 @@ func TestObservationLimitCostClassPressureAndRecovery(t *testing.T) {
 				}
 				var api map[string]any
 				_ = json.Unmarshal(w.Body.Bytes(), &api)
-				if w.Code != 429 || api["code"] != "client_rate_limited" || w.Header().Get("Retry-After") == "" {
+				if w.Code != 429 || api["code"] != "client_rate_limited" || api["code_alias"] != "observation_shed_control_pressure" || w.Header().Get("Retry-After") == "" {
 					t.Fatal(path, w.Code, api, w.Header())
 				}
 			}
@@ -342,8 +342,8 @@ func TestObservationLimitRetainedProductionLedger(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if q.s.Jobs[j.ID] != nil {
-		t.Fatal("fixture was not pruned")
+	if q.s.Jobs[j.ID] == nil {
+		t.Fatal("unique production history was pruned")
 	}
 	for _, restart := range []bool{false, true} {
 		if restart {
@@ -369,8 +369,8 @@ func TestObservationLimitRetainedProductionLedger(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if _, protected := l.index.observationPriority(j.ID); protected {
-		t.Fatal("expired intent retained")
+	if _, protected := l.index.observationPriority(j.ID); !protected {
+		t.Fatal("unique production intent lost on age")
 	}
 }
 

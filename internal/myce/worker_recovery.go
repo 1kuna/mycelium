@@ -82,6 +82,7 @@ type workerStore struct {
 	storageObserver       *storageObserver // Exact attempt; shared with its publication callbacks.
 	inputStaging          *atomic.Bool     // Shared by all attempt stores; bounds detached ordinary staging.
 	sharedRelease         func()           // Idempotent; retained until exact process cleanup.
+	faultTiming           probeTiming
 	deviceFaults          checkpointIO[KernelLogSnapshot]
 	stateName             string
 	environmentLogs       checkpointIO[bool]

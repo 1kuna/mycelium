@@ -77,7 +77,11 @@ func cliTestMain(m *testing.M) int {
 		code = m.Run()
 	}
 
-	if err := testenv.Cleanup(dir); err != nil { // All tests and children have joined.
+	if err := stopCLIObserverFixtures(dir); err != nil {
+		fmt.Fprintln(os.Stderr, "retain active observer fixture:", err)
+		return 1
+	}
+	if err := testenv.Cleanup(dir); err != nil { // All tests and observers have joined.
 		code = 1
 	}
 	return code
@@ -86,7 +90,12 @@ func cliTestMain(m *testing.M) int {
 // In-process dev workers need the same synthetic host as tagged CLI children.
 func installSyntheticHost() {
 	myce.SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
-	myce.SetWorkerProbeDefaults(myce.WorkerProbeDefaults{
+	myce.SetWorkerProbeDefaults(syntheticWorkerProbes())
+	myce.SetQueueHostMemorySource(syntheticWorkerProbes().HostMemory)
+}
+
+func syntheticWorkerProbes() myce.WorkerProbeDefaults {
+	return myce.WorkerProbeDefaults{
 		IOPressure: func(clock myce.Clock) *myce.IOPressure {
 			return &myce.IOPressure{SampledAt: clock.Now(), Some: &myce.PressureStall{TotalUS: 1234}, Full: &myce.PressureStall{}}
 		},
@@ -113,5 +122,5 @@ func installSyntheticHost() {
 				return []byte("synthetic hardware identity"), nil
 			}}
 		},
-	})
+	}
 }

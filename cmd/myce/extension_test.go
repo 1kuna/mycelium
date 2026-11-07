@@ -286,7 +286,8 @@ func TestExtensionCLIInstalledPinnedAuthority(t *testing.T) {
 			return
 		}
 		// Check must reach the target resolver with the same pinned authority.
-		http.Error(w, "fixture-target-stop", http.StatusServiceUnavailable)
+		// This deliberately ends resolution; 503 instead requests adaptive retry.
+		http.Error(w, "fixture-target-stop", http.StatusUnprocessableEntity)
 	}))
 	defer server.Close()
 	hash := sha256.Sum256(server.Certificate().Raw)

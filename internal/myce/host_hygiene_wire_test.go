@@ -55,7 +55,7 @@ func TestHostHygieneWireNegotiationAndStrictDowngrade(t *testing.T) {
 		}
 	}
 	send()
-	if reports[0].Machine.HostHealth != nil || !reports[0].Machine.Leaving {
+	if reports[0].Machine.HostHealth != nil || reports[0].Machine.Leaving || !availabilityBlocked(&reports[0].Machine) {
 		t.Fatal("initial request did not preserve legacy admission drain", reports[0])
 	}
 	send()
@@ -69,7 +69,7 @@ func TestHostHygieneWireNegotiationAndStrictDowngrade(t *testing.T) {
 		t.Fatal("downgrade did not use a single legacy fallback", statuses)
 	}
 	for _, c := range reports[3:] {
-		if c.Machine.HostHealth != nil || c.ToolInventoryHash != "" || !c.Machine.Leaving || c.Machine.Session != m.Session || c.AttemptProtocol != keyedAttemptProtocol {
+		if c.Machine.HostHealth != nil || c.ToolInventoryHash != "" || c.Machine.Leaving || !availabilityBlocked(&c.Machine) || c.Machine.Session != m.Session || c.AttemptProtocol != keyedAttemptProtocol {
 			t.Fatal("fallback changed custody or lost drain", c)
 		}
 	}

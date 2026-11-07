@@ -24,6 +24,24 @@ for source in ('shared_clone_darwin', 'shared_clone_linux', 'shared_clone_other'
 SUPPLEMENTAL_CONSUMERS['internal/myce/engine_health.go'] = (
     'engine_recovery_test.go', 'engine_recovery_round3_test.go')
 
+# Adaptive private budgets are exercised through their observable consumers.
+SUPPLEMENTAL_CONSUMERS['internal/myce/observation_cache_budget.go'] = (
+    'status_read_test.go',)
+SUPPLEMENTAL_CONSUMERS['internal/myce/telemetry_budget.go'] = (
+    'job_get_volume_test.go', 'request_timing_test.go', 'queue_mutex_test.go')
+SUPPLEMENTAL_CONSUMERS['internal/myce/diagnostic_budget.go'] = (
+    'evidence_budget_test.go', 'evidence_readiness_test.go')
+
+# Platform socket helpers implement transfer progress underneath file clients.
+for source in ('file_socket_unix', 'file_socket_other'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
+        'client_adaptive_test.go', 'file_transfer_test.go')
+
+# The non-Linux Xe probe withholds telemetry; Linux exercises the read-only PMU
+# implementation; portable device and admission tests exercise missing evidence.
+SUPPLEMENTAL_CONSUMERS['internal/myce/xe_activity_other.go'] = (
+    'xe_activity_linux_test.go', 'device_telemetry_test.go', 'discrete_fanout_sharing_test.go')
+
 
 def changed_symbols(diff):
     symbols = set()

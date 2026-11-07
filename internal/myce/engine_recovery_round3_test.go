@@ -94,7 +94,7 @@ func TestEngineRecoveryLoadDeadlineCoversCopy(t *testing.T) {
 			}
 			call := addModelCall(t, q, "experiment")
 			s := q.s.ModelSlots[slotKey(m.ID, "test")]
-			deadline := *s.LoadUntil
+			started := *s.RunSince
 			attempt := s.Attempt
 			for i := 0; i < 12; i++ {
 				clock.Advance(10 * time.Second)
@@ -103,8 +103,8 @@ func TestEngineRecoveryLoadDeadlineCoversCopy(t *testing.T) {
 			if s.State != "loading" || s.LoadTimedOut || s.CrashCount != 0 || s.Attempt != attempt || call.Error != "" {
 				t.Fatalf("pre-launch preparation crossed readiness timeout: %+v %+v", s, call)
 			}
-			if !s.LoadUntil.Equal(deadline) || deadline.Sub(clock.Now()) != config.Wait-2*time.Minute+engineLoadSlack {
-				t.Fatal("whole-load deadline does not match max_wait plus slack, or was extended by a heartbeat")
+			if s.LoadUntil != nil || !s.RunSince.Equal(started) {
+				t.Fatal("queue reintroduced a load wall deadline or moved the load start")
 			}
 			recoveryReport(t, q, m, s, "ready")
 			if s.State != "ready" || call.Machine != m.ID || s.LoadUntil != nil {
@@ -118,67 +118,25 @@ func TestEngineRecoveryLoadDeadlineCoversCopy(t *testing.T) {
 }
 
 func TestEngineRecoveryLoadingDeadlineClock(t *testing.T) {
-	for _, pinned := range []bool{false, true} {
-		t.Run(fmt.Sprint(pinned), func(t *testing.T) {
-			q, clock, m := modelFixture(t)
-			q.models.Wait = 20 * time.Second
-			q.models.Models[0].ReadyTimeout = 2 * time.Second
-			m.ModelConfigHash = modelConfigHash(q.models)
-			check(t, q, m, nil)
-			if pinned {
-				if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			call := addModelCall(t, q, "experiment")
-			s := q.s.ModelSlots[slotKey(m.ID, "test")]
-			if s.LoadUntil == nil || s.LoadUntil.Sub(clock.Now()) != q.models.Wait+engineLoadSlack {
-				t.Fatal("missing whole-load max_wait plus slack")
-			}
-			old := s.Attempt
-			clock.Advance(s.LoadUntil.Sub(clock.Now()) - time.Nanosecond)
-			check(t, q, m, nil)
-			if s.State != "loading" {
-				t.Fatal("early loading expiry")
-			}
-			clock.Advance(time.Nanosecond)
-			check(t, q, m, nil)
-			if s.State != "unloading" || !s.LoadTimedOut || q.modelMemory(m.ID) != 8 {
-				t.Fatalf("expiry credited unconfirmed memory: %+v", s)
-			}
-			if s.RuntimeFailed || call.Error != "model load failed" {
-				t.Fatal("deadline must promptly fail waiting calls as a load failure")
-			}
-			// A late ready receipt cannot resurrect the timed-out attempt.
-			recoveryReport(t, q, m, s, "ready")
-			if s.State != "unloading" {
-				t.Fatal("late readiness bypassed deadline")
-			}
-			// The worker may never have started B; acknowledge absence under B.
-			rt := &modelRuntime{models: map[string]*workerModel{}, session: m.Session}
-			rt.sync(q.modelPlan(m.ID))
-			reports, _ := rt.report()
-			if reports[0].Attempt != old || reports[0].State != "unloaded" {
-				t.Fatal("missing cleanup acknowledgement for never-started attempt")
-			}
-			if _, err := q.Checkin(Checkin{Machine: m, ModelReports: reports}); err != nil {
-				t.Fatal(err)
-			}
-			if s.State != "failed" || s.RuntimeFailed || call.Error != "model load failed" || s.CrashCount != 1 {
-				t.Fatalf("deadline did not remain a load failure: %+v %+v", s, call)
-			}
-			clock.Advance(time.Second)
-			check(t, q, m, nil)
-			if !pinned {
-				if q.s.ModelSlots[slotKey(m.ID, "test")] != nil {
-					t.Fatal("failed unpinned demand kept retrying")
-				}
-				return
-			}
-			if s.State != "loading" || s.Attempt == old || s.LoadTimedOut {
-				t.Fatal("load deadline did not recover under a fresh attempt")
-			}
-		})
+	q, clock, m := modelFixture(t)
+	call := addModelCall(t, q, "experiment")
+	slot := q.s.ModelSlots[slotKey(m.ID, "test")]
+	// A legacy persisted deadline is not evidence that a current worker has
+	// stalled. Only the worker's exact-attempt failure can settle that load.
+	until := clock.Now().Add(time.Second)
+	slot.LoadUntil = &until
+	for i := 0; i < 20; i++ {
+		clock.Advance(30 * time.Second)
+		recoveryReport(t, q, m, slot, "loading")
+	}
+	if slot.State != "loading" || slot.LoadUntil != nil || call.Error != "" {
+		t.Fatal("queue killed a live load by wall clock")
+	}
+	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: slot.Attempt, State: "failed"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if call.Error != "model load failed" {
+		t.Fatal("worker stall failure did not fail demand")
 	}
 }
 
@@ -210,41 +168,29 @@ func TestEngineRecoveryWarmupFailureStopsUnpinnedRecovery(t *testing.T) {
 }
 
 func TestEngineRecoveryHealthFailureWindowClock(t *testing.T) {
-	_, clock, _ := modelFixture(t)
-	if serverProbeTimeout != 5*time.Second || serverHealthWindow != 15*time.Second {
-		t.Fatal("wrong probe policy")
-	}
-	failures := serverProbeFailures{}
-	start := clock.Now()
-	for i := 0; i < 3; i++ {
-		if failures.observe(false, start, clock.Now()) {
-			t.Fatal("fast failures withdrew readiness before 15 seconds")
+	for _, latency := range []time.Duration{time.Millisecond, 10 * time.Second} {
+		_, clock, _ := modelFixture(t)
+		f := serverProbeFailures{}
+		started := clock.Now()
+		clock.Advance(latency)
+		f.observe(true, started, clock.Now())
+		budget := f.latency.budget()
+		started = clock.Now()
+		if f.observe(false, started, started) {
+			t.Fatal("single failure withdrew health")
 		}
-	}
-	clock.Advance(15*time.Second - time.Nanosecond)
-	if failures.observe(false, clock.Now(), clock.Now()) {
-		t.Fatal("early unhealthy-window expiry")
-	}
-	clock.Advance(time.Nanosecond)
-	if !failures.observe(false, clock.Now(), clock.Now()) {
-		t.Fatal("continuous failures did not withdraw readiness")
-	}
-	if failures.observe(true, clock.Now(), clock.Now()) {
-		t.Fatal("success remained failed")
-	}
-	start = clock.Now()
-	clock.Advance(time.Minute)
-	for i := 0; i < 2; i++ {
-		if failures.observe(false, start, clock.Now()) {
-			t.Fatal("window alone bypassed failure threshold")
+		clock.Advance(budget - time.Nanosecond)
+		if f.observe(false, started, clock.Now()) {
+			t.Fatal("early failure")
 		}
-	}
-	if !failures.observe(false, clock.Now(), clock.Now()) {
-		t.Fatal("third failure after full window remained ready")
-	}
-	failures.observe(true, clock.Now(), clock.Now())
-	if failures.count != 0 || !failures.since.IsZero() {
-		t.Fatal("success did not reset continuity")
+		clock.Advance(time.Nanosecond)
+		if !f.observe(false, started, clock.Now()) {
+			t.Fatal("continuous failure past local envelope retained health")
+		}
+		f.observe(true, clock.Now(), clock.Now())
+		if f.count != 0 || !f.since.IsZero() {
+			t.Fatal("success did not reset continuity")
+		}
 	}
 }
 
@@ -504,7 +450,8 @@ func TestEngineRecoveryDeadlineDoesNotMaskLoadFailure(t *testing.T) {
 	q, clock, m := modelFixture(t)
 	call := addModelCall(t, q, "experiment")
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	clock.Advance(s.LoadUntil.Sub(clock.Now()))
+	// The caller's explicit wait can expire; loads no longer have a queue wall deadline.
+	clock.Advance(q.models.Wait)
 	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "failed"}}}); err != nil {
 		t.Fatal(err)
 	}

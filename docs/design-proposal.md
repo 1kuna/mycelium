@@ -1311,7 +1311,7 @@ placement changes require their later amendments.
 
 ## Safe sparse curves (slice 2, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the maintainer's delegated design authority,
 following the [research build plan](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/research/benchmark-batch-placement.md#incremental-build-plan).
 Placement and ordinary admission/concurrency limits remain unchanged.
 
@@ -1325,7 +1325,7 @@ load generation. Prepared exact variants and native baselines must qualify first
 
 Reuse host-wide benchmark preparation custody, command supervision and cleanup.
 Busy/recovering hosts cannot start; components run serially. Daily-use hosts need
-fresh five-minute idle, external-power and safe-heat evidence. Owner return or
+fresh locally measured idle recovery, external-power and safe-heat evidence. Owner return or
 unsafe/unknown signals cancels the command, retaining custody until cleanup.
 A sweep has a 60-second Clock budget, and each command a ten-second bound.
 Stop on non-increasing aggregate throughput, memory exhaustion or failure.
@@ -1353,7 +1353,7 @@ Native mixed-load curves and fleet acceptance require separate authorization.
 
 ## Completion-aware placement (slice 3, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the maintainer's delegated design authority,
 following the [research build plan](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/research/benchmark-batch-placement.md#incremental-build-plan).
 Rank qualified extension commands using a common completion estimate: declared
 workload units divided by the exact comparable serial measured rate, plus cold
@@ -1381,10 +1381,48 @@ sweep concurrency does not qualify a model server for concurrent calls. The
 future #145 quality-tolerance filter belongs at the existing qualified-variant
 eligibility boundary, before completion ranking; no quality policy is added here.
 
+### Repeated plain-command measurements (#878)
+
+Under MY-31/MY-34, native plain commands without workload units can teach seconds
+per whole job through the same accepted-attempt timing path and observation store.
+The speed key adds a digest of the exact run, frozen source archive and input
+manifests, output contract, environment recipes and isolation. It retains the
+existing target, physical host/component, runtime fingerprint, resources,
+allowance and power-mode identity. This exact-byte identity is deliberately
+narrower than the memory work identity; changing source/input size cannot reuse
+a prior speed, even when memory learning remains comparable. Unversioned legacy
+inputs, dynamic upstream inputs, external work directories/runtimes and missing
+runtime fingerprints remain unknown. Undeclared external state is outside this
+comparison contract; these observations do not qualify software or prove parity.
+
+Only successful accepted serial attempts with exact custody and complete clean
+contention evidence contribute. Resumptions, failed/interrupted/stale/duplicate
+results and intervals with another host obligation are excluded. Existing memory
+pressure classification must be eligible, and complete CPU scheduling-stall,
+quota-throttling and I/O-stall counters must measure zero. Linux `cpu.pressure`
+is read in the existing resource sampler; quota throttling alone cannot detect
+an unrelated process delaying execution. An independently negotiated optional
+CPU-pressure field preserves the prior telemetry contract with older queues.
+This has no new tuned pressure threshold: its cost is that internal parallelism,
+intrinsic I/O stalls and platforms without complete counters cannot teach a clean
+comparison. No second collector or benchmark runs.
+
+Each comparable key retains the incremental mean seconds/job, a clean sample
+count and observed minimum/maximum. One sample explicitly leaves variability
+unknown; the observed range is not a confidence interval or a deadline. Existing
+staleness/invalidation rules apply. Each speed mutation records its exact
+before/after digest in the job's accepted-sample ledger transaction, preserving
+release-verification evidence even when the usable timing window restarts.
+Status and inspection expose this evidence
+through work curves and attempt timing. Completion ranking adds existing setup
+and measured transfer costs and remains after admission, tiers, fairness and
+least-valuable fit. Estimates neither reserve capacity nor wait for a busy faster
+machine. Prediction-error calibration is separate work (#879).
+
 
 ## Amendment: job memory envelopes (#146)
 
-Approved by the orchestrator under Zach's delegated design authority, 2026-10-24.
+Approved by the orchestrator under the maintainer's delegated design authority, 2026-10-24.
 Explicit `needs.host_memory_gb` and GPU `needs.memory_gb` retain their current
 admission meanings and defaults, including production. Optional `needs.memory:
 auto` first selects fresh accepted slice-1 whole-attempt peaks for the same
@@ -1671,7 +1709,7 @@ field in a policy update keeps the saved switch.
 
 ## Declared fan-out and batch planning (slice 4, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the maintainer's delegated design authority,
 following the [research build plan](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/research/benchmark-batch-placement.md#incremental-build-plan).
 This approval covers explicit homogeneous independent pieces, measured discrete
 horizon planning, and the model-measurement binding deferred from slice 3.
@@ -1689,6 +1727,18 @@ wave is one ordinary attempt on one component; independent GPU attempts remain
 one per device. A failed/lost wave retries only its own fixed membership, with
 existing cleanup and stale-attempt fences. Accepted outputs gather by piece key
 on the parent; the application owns semantic reduction of the gathered results.
+
+**Explicit discrete-XPU sharing (#886, maintainer relay 2026-11-07).**
+`fan_out.share_xpu: true` opts a declaration and its materialized/retried waves
+into measured same-card sharing only with other opted-in waves. Default omission
+or `false` retains the existing admission and frozen bytes; ordinary/default-off
+work is not enlisted. Single-card discrete XPU, equal tiers, fresh card activity
+and memory, measured host/attempt headroom, declared or accepted learned vectors,
+growth guard and exact release all remain required. Supporting queue/worker/CLI
+code can ship with this off. Production opt-in requires owner-accepted matched
+replay benefit and unchanged output parity; baseline and candidate use the same
+release, workload and extension digest, changing only this flag. This permission
+does not change host allowances, qualification or worker configuration.
 
 Only declared groups use the new planner. Enumerate safe measured counts and
 integer waves over a completion horizon, including measured smaller tails.
@@ -1895,6 +1945,15 @@ Recheck production demand before selecting each remaining host and put productio
 hosts last. Upgrade the queue before workers needing its new protocol and before
 its colocated worker. If that conflicts with production-last ordering, refuse
 incompatible workers before mutation; protocol migrations need a separate plan.
+Normal updates leave an enabled busy host pending with ordinary admission open
+until its next fresh natural idle moment (MY-35, #900). Skip busy hosts so an
+idle compatible host can progress. Select idle and acquire the existing drain
+in the same queue transaction before placement can refill the gap. Unreleased
+attempts, preparations, cleanup and calls remain busy regardless of elapsed time;
+a ready idle model may enter drain, but must unload with exact confirmed custody
+before restart. Pending intent survives queue restart without owning a drain.
+Freeze current validated runtime identities when selecting that idle host;
+already-issued helpers and operator maintenance keep their original fences.
 Drain withdraws unstarted assignments and blocks admission. All Started work
 finishes naturally: exact attempt, preparation, engine, model-call and release
 custody must settle before restart. Offline or uncertain custody means a visible

@@ -424,7 +424,9 @@ func TestDockerSidecarsMainExitAndReadiness(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
 	j := dockerGroupJob(t)
 	var ready atomic.Bool
+	var probes atomic.Int32
 	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		probes.Add(1)
 		if !ready.Load() {
 			rw.WriteHeader(503)
 		}
@@ -432,7 +434,7 @@ func TestDockerSidecarsMainExitAndReadiness(t *testing.T) {
 	defer server.Close()
 	u, _ := url.Parse(server.URL)
 	port, _ := strconv.Atoi(u.Port())
-	j.Spec.Run.DockerSidecars[0].Readiness = &DockerReadiness{Port: port, Path: "/ready", Timeout: "10s"}
+	j.Spec.Run.DockerSidecars[0].Readiness = &DockerReadiness{Port: port, Path: "/ready"}
 	p, e := startDockerFixture(w, s, j)
 	if e != nil {
 		t.Fatal(e)
@@ -442,6 +444,9 @@ func TestDockerSidecarsMainExitAndReadiness(t *testing.T) {
 	if _, e := os.Stat(filepath.Join(root, "running")); e == nil {
 		t.Fatal("main started before ready")
 	}
+	await(t, func() bool { return probes.Load() > 0 })
+	// Fast inspect/503 replies cannot bound unknown silent initialization.
+	c.advance(2 * time.Minute)
 	ready.Store(true)
 	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
 	_ = os.Rename(filepath.Join(root, "running"), filepath.Join(root, "main-exited"))

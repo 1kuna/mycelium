@@ -42,5 +42,5 @@ func (d *dockerAttempt) stopOrphan(id string, kill bool) ([]byte, error) {
 	if d.state.Accelerator {
 		return d.call("kill", "--signal=TERM", id)
 	}
-	return d.callWithTimeout(grace+d.timeout, "stop", "--time", strconv.FormatInt(seconds, 10), id)
+	return d.callWithTimeout(addReadinessDuration(grace, d.rpcBudget("stop")), "stop", "--time", strconv.FormatInt(seconds, 10), id)
 }

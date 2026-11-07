@@ -587,6 +587,8 @@ func TestMaintenancePlannedCausePersistsAndStageFailureWins(t *testing.T) {
 
 func TestMaintenanceLateDockerCreateAndPolicyDelivery(t *testing.T) {
 	w, store, clock, root := dockerFixture(t)
+	// This incident simulates an explicit lost CLI reply, not cold initialization expiry.
+	w.dockerCallTimeout = 2 * time.Second
 	q, _ := fixture(t)
 	q.clock = clock
 	m := w.Machine

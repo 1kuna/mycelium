@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// Synthetic old-release observations replay custody/hysteresis incidents.
+const sharedWakeHighMS = 20.0
+const sharedWakeLowMS = 0.0
+const sharedPSIHigh = 1.0
+const sharedPSILow = 0.0
+
 func sharedRunning(t *testing.T, resumable bool) (*Queue, *fakeClock, Machine, *Job) {
 	t.Helper()
 	q, clock := fixture(t)
@@ -80,6 +86,20 @@ func TestSharedHostPressureYieldHysteresisAndExactRelease(t *testing.T) {
 			p.MemoryPSI = sharedPSILow
 			p.WakeDelayMS = sharedWakeLowMS
 			r = check(t, q, m, nil)
+			if sensor == "owner latency" {
+				// The first latency interruption now requires affirmative quiet
+				// observations covering this attempt's measured interference span.
+				if r.Job != nil {
+					t.Fatal("latency cooldown skipped")
+				}
+				for i := 0; i < 16; i++ {
+					clock.Advance(time.Second)
+					r = check(t, q, m, nil)
+					if r.Job != nil {
+						break
+					}
+				}
+			}
 			if r.Job == nil || r.Job.ID != run.ID || r.Job.Attempt <= run.Attempt {
 				t.Fatal("fresh recovery did not requeue same job", r)
 			}

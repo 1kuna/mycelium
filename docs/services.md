@@ -223,7 +223,7 @@ The actual engine always binds loopback; only the token-protected worker proxy
 is LAN-visible. Model configuration hashes must match between queue and workers,
 so a mismatched catalog fails visibly rather than loading another model silently.
 `--model-idle` and `--model-wait` override YAML timeouts. These timeouts are not
-part of the model identity hash. Queue and worker wait values should agree.
+part of the model identity hash. Omitted values use adaptive residency and caller cancellation; a positive wait bounds caller queue waiting. See [adaptive readiness](readiness.md).
 General `server` engines and the `vllm` preset are described in the [server guide](services.md).
 
 ## Scheduling, draining, and recovery
@@ -233,9 +233,9 @@ deadline, and waiting-age ordering; competing experiment projects first share
 by weighted recent usage. An already loaded eligible model is preferred. Otherwise
 all fitting free workers are considered before making room. CUDA workers report
 live dedicated GPU memory from `nvidia-smi`, or Linux `MemAvailable` when
-CUDA memory fields are unsupported (`[N/A]` on Spark). Metal uses macOS
+CUDA memory fields are unsupported (`[N/A]` on GB10 systems). Metal uses macOS
 `vm_stat` free + inactive pages. Both are optionally capped with `--memory-gb`,
-then reduced by `--reserve-memory-gb` (start with 16 GiB on Spark). Resident models and
+then reduced by `--reserve-memory-gb` (start with 16 GiB on a large unified-memory CUDA worker). Resident models and
 running commands are
 already reflected in that reading; only not-yet-reflected loading reservations
 are subtracted by the queue. XPU/fake and explicit `--memory-mode fixed` use
@@ -247,7 +247,7 @@ Workers recheck before every command or
 model load. Each worker runs at most one batch, alongside models that fit.
 
 Idle time starts after load readiness or the most recent call finishes.
-`idle_timeout` defaults to ten minutes. A higher-priority batch or call can drain
+`idle_timeout` is adaptive when omitted: observed demand spacing and reload cost determine residency. An explicit positive value overrides it. A higher-priority batch or call can drain
 lower-priority models to reclaim memory. Protection follows the highest priority
 of currently admitted calls, not historical use; an idle model is reclaimable
 as experiment priority. Draining stops new queue admissions;
@@ -260,11 +260,12 @@ also stops non-resumable lower-priority batches immediately; deadlines grant
 2 minutes and preserve non-resumable work. Pinned models never idle-unload
 or surrender their memory to other work.
 
-`max_wait` defaults to five minutes and bounds queue/load waiting (including a
-retry's placement). Inference has a separate per-model `request_timeout`
+`max_wait` is omitted by default; queue/load waiting then ends on caller
+cancellation or a real load failure. A positive value bounds the caller's queue
+waiting (including retry placement). Inference has a separate per-model `request_timeout`
 (default `10m`). Clients should use
-a timeout that includes loading and inference. The load process itself has the
-worker's configured maximum wait. A failed load returns a clear error and a
+a timeout that includes loading and inference. The load process follows local progress and successful same-model load history,
+with no automatic whole-load wall deadline. A failed load returns a clear error and a
 later request can try loading again.
 
 Quiet-worker timeouts follow the highest-priority active workload (including
@@ -394,8 +395,12 @@ precede PATH. `{environment}` is the published environment directory;
 the physical selector; `{port}` is a chosen loopback port. Templates substitute
 individual argv strings with no implicit shell. The health check requires HTTP
 2xx. The whole load, including copies, environment setup and admission waits,
-is bounded by `max_wait`. The optional `ready_timeout` starts at engine launch
-and additionally bounds process readiness. Timeout or crash
+has no default wall deadline. Comparable successful local load history detects
+silent stalls; unknown cold loads retain custody without a guessed deadline.
+Observed process CPU time, reads and memory growth also count as activity. An
+inactive cold load under eligible resource contention reports owner attention
+and raises an episode-based health alert, preserving custody. Advancing loads continue. The optional explicit `ready_timeout` starts
+at engine launch and bounds process readiness. Timeout or crash
 kills the owned group and returns a visible error. The optional stop command
 and TERM share `stop_timeout` (default 10 seconds), followed by KILL and group
 verification. Failed unload retains its memory reservation and environment lease.
@@ -553,13 +558,14 @@ a fixed message plus HTTP status; control errors/public diagnostics never echo
 upstream bodies.
 
 After readiness, the supervisor watches process exit for the entire engine
-lifetime. It also repeats the startup health check every **100 ms**, with a
-**five-second timeout per probe**, requiring HTTP 2xx without redirects. Readiness is
-withdrawn after **at least three consecutive failures spanning at least 15
-seconds**, measured from the start of the first failed probe. Fast HTTP failures
-keep probing through that window; a successful probe resets both the failure
-count and window. Probes are serial and each has a five-second deadline. Process
-exit requires no health-failure threshold.
+lifetime. Serial health checks learn their cost, response envelope and failure
+window from that worker. They require HTTP 2xx without redirects; one failed
+probe alone cannot withdraw readiness. Completed failures confirm continuous
+failure beyond the learned envelope; success resets failure continuity. A timed-out
+observation widens the next transport allowance and retains degraded custody, so
+a slower healthy response can still be observed. See
+[adaptive readiness](readiness.md) for load signals and the retired assumptions.
+Process exit requires no health-failure threshold.
 At the next worker check-in the slot leaves `ready`, routing stops, and cleanup
 terminates/verifies the owned group. Memory and the environment lease stay held
 until cleanup succeeds. `unload_failed` stays held visibly and never auto-reloads.
@@ -582,14 +588,11 @@ With no pin or remaining demand, the failed slot is removed. Pins and retry stat
 persist; a new worker session reloads. If a rejoining worker still holds a
 different engine attempt, it drains and cleans that attempt before starting the
 replacement. Cleanup failure blocks the replacement and retains custody. A load
-plan expires after `max_wait` plus five seconds of check-in slack, using the
-injected queue Clock (`load_until`), covering the whole load rather than just
-process readiness. Expiry fails waiting calls promptly as a load failure
-(`runtime_failed: false`) and withdraws the load; it never credits unconfirmed
-memory. After cleanup is acknowledged, pins retry with backoff, while unpinned
-demand cannot drive retries of the failed load.
-
-Queued calls may wait for recovery only within their existing `max_wait`.
+plan does not expire by a queue wall clock. The worker's progress supervisor
+reports learned silent stalls under the exact attempt and retains cleanup
+custody until release is confirmed. Unknown cold loads remain owned, with
+activity/contended inactivity visible through status and health alerts. Explicit positive `max_wait` still bounds
+queued calls; omission waits for cancellation or a real failure.
 The failed-worker exclusion is scoped to an engine attempt: a fresh attempt on
 the same worker is eligible. In-flight calls with `retry_safe: false`
 fail cleanly on detected engine death or worker-to-engine transport failure,
@@ -622,7 +625,7 @@ Trusted custom commands must respect the no-download contract too.
 See the [placeholder server catalog](../examples/sim-judge-vllm.example.yaml):
 two generic servers for a roughly 35B chat model and an OCR model, both vLLM
 0.27.1. Use exact approved argv, not the vLLM preset. CPU FastEmbed stays outside
-the GPU queue. This is not deployable or Spark qualification. Read official model and
+the GPU queue. This is not deployable or native unified-memory CUDA qualification. Read official model and
 runtime guidance and record the effective contract before a hardware run.
 
 ## Immutable multi-file weights

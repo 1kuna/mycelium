@@ -44,7 +44,7 @@ shared_inputs:
 	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
 	defer server.Close()
 	var out bytes.Buffer
 	err := runProfile(context.Background(), path, nil, nil, "shared", "", "", "", server.URL, "test", &out, io.Discard)
@@ -105,7 +105,7 @@ targets: [{os: linux, arch: amd64, platform: cpu}]
 check: [true]
 `
 	path := filepath.Join(root, ".mycelium", "profiles", "shared.yaml")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
 	defer server.Close()
 	invoke := func(arg string) profileReceipt {
 		t.Helper()
@@ -122,7 +122,7 @@ check: [true]
 	}
 	write(".mycelium/profiles/shared.yaml", profile)
 	first := invoke("first")
-	private := first.Spec.Files[".myce-inputs/"+profileHash("shared/runtime")]
+	private := first.Spec.Files["shared/runtime"]
 	if private.SHA256 == "" || private.SHA256 == first.Spec.SharedInputs["runtime"].SHA256 {
 		t.Fatal("shared and private input identities collided")
 	}
@@ -164,7 +164,7 @@ func TestProfileLocalSharedInputIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, ".mycelium/profiles/test.yaml")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
 	defer server.Close()
 	for _, tc := range []struct{ name, hash, size, want string }{
 		{"derive size", ref.SHA256, "", ""},

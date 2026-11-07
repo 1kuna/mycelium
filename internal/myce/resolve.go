@@ -23,6 +23,7 @@ type ResolveRequest struct {
 }
 
 type ResolveReport struct {
+	Linkage     []MachOLinkage     `json:"linkage,omitempty"`
 	Blocker     *Blocker           `json:"blocker,omitempty"`
 	FileInputs  []ResolveFileInput `json:"file_inputs,omitempty"`
 	ObservedAt  time.Time          `json:"observed_at"`
@@ -78,7 +79,7 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		req.RequirementReasons = req.Spec.RequirementReasons
 	}
 	if req.Recipe != nil {
-		return q.resolveNative(req)
+		return q.resolveNative(req, ctx)
 	}
 	view, _, err := q.captureObservation("", ctx)
 	if err != nil {
@@ -388,6 +389,11 @@ func WriteResolve(dest io.Writer, r ResolveReport, asJSON bool) error {
 		return e.Encode(r)
 	}
 	var out strings.Builder
+	if r.Portability == nil {
+		for _, d := range r.Linkage {
+			fmt.Fprintln(&out, "Warning: "+d.String())
+		}
+	}
 	if r.Blocker != nil {
 		fmt.Fprintln(&out, r.Blocker.Text())
 	}

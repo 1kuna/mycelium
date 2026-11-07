@@ -89,7 +89,7 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			a.pageSize = 4096 // b70 kernel pages, independent of the test host.
+			a.pageSize = 4096 // Fixture kernel pages, independent of the test host.
 			proc := t.TempDir()
 			put := func(p, v string) {
 				t.Helper()
@@ -854,7 +854,7 @@ func TestGPUHostMemoryFallbackAndFloors(t *testing.T) {
 			probe.State = "queued"
 			estimate := q.memoryEstimate(&probe, &target)
 			switch mode {
-			case "complete":
+			case "complete", "stale":
 				if math.Abs(estimate.measuredHostGB-8) > 1e-8 {
 					t.Fatalf("wrong complete sizing: %+v", estimate)
 				}
@@ -871,7 +871,7 @@ func TestGPUHostMemoryFallbackAndFloors(t *testing.T) {
 					t.Fatalf("lost measured variance: %+v", estimate)
 				}
 			default:
-				if mode != "stale" && estimate.measuredHostGB < hostMemoryPeakGB(estimate.host) || mode == "stale" && estimate.measuredHostGB != 0 {
+				if estimate.measuredHostGB < hostMemoryPeakGB(estimate.host) || mode == "stale" && estimate.measuredHostGB < 8 {
 					t.Fatalf("incomplete/nonlocal evidence reduced GPU memory: %+v", estimate)
 				}
 				if mode == "transfer" && (estimate.host == nil || hostMemoryPeakGB(estimate.host)*estimate.hostFactor < (host+20)) {

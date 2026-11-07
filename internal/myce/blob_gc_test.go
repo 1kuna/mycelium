@@ -50,7 +50,10 @@ func TestBlobGCRejectedRecipeRetentionAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { q.Close() })
-	clock.Advance(DefaultFileRetention - time.Nanosecond)
+	if err := q.ConfigureFileRetention(testFileRetention); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(testFileRetention - time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +88,7 @@ func TestBlobGCBundlePrunedAfterRetainedAnswer(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -105,8 +108,8 @@ func TestBlobGCBundlePrunedAfterRetainedAnswer(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(q.files.blob(*e.FilesRef)); !os.IsNotExist(err) {
-		t.Fatal("pruned bundle leaked", err)
+	if _, err := os.Stat(q.files.blob(*e.FilesRef)); err != nil {
+		t.Fatal("durable replay lost its frozen bundle", err)
 	}
 }
 
@@ -122,7 +125,7 @@ func TestBlobGCConcurrentUploadAndReferences(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	// A real concurrent upload has reached its durability barrier while GC runs.
 	// It reuses an old internal blob and refreshes mtime before acquiring custody.
 	source := filepath.Join(t.TempDir(), "recipe.json")
@@ -156,7 +159,7 @@ func TestBlobGCConcurrentUploadAndReferences(t *testing.T) {
 	if err := q.files.verify(context.Background(), *r.FilesRef); err != nil {
 		t.Fatal("fresh upload lost within retention", err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +231,7 @@ func TestBlobGCImportStartedBeforeRecipePublication(t *testing.T) {
 	if err := fileResponse(res, 204); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +244,7 @@ func TestBlobGCExpiredInputCannotShortenRecipeRetention(t *testing.T) {
 	q, clock := fixture(t)
 	r := gcRecipe(t, q, "shared with old expired input")
 	if err := q.update(func() error {
-		ended := clock.Now().Add(-DefaultFileRetention)
+		ended := clock.Now().Add(-testFileRetention)
 		q.putJob("expired", &Job{ID: "expired", State: "succeeded", ReleaseConfirmed: true, FinishedAt: &ended, Spec: Spec{Files: FileManifest{"input": *r.FilesRef}}})
 		return nil
 	}); err != nil {
@@ -254,7 +257,7 @@ func TestBlobGCExpiredInputCannotShortenRecipeRetention(t *testing.T) {
 	if err := q.files.verify(context.Background(), *r.FilesRef); err != nil {
 		t.Fatal("expired input shortened internal retention", err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +325,7 @@ func TestBlobGCImportCompletesBeforeEnrollment(t *testing.T) {
 	if uploadErr != nil {
 		t.Fatal(uploadErr)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +360,7 @@ func TestBlobGCImportDedupAfterPOST(t *testing.T) {
 	if err := c.UploadFile(context.Background(), path, ref); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}

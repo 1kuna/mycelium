@@ -38,6 +38,10 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 		if len(tenants) < 2 || !settled || d.BudgetGB <= 0 {
 			continue // Own limits handle single tenants; pending stops retain custody.
 		}
+		fanOut := false
+		for _, j := range tenants {
+			fanOut = fanOut || fanOutDeviceSharing(j)
+		}
 		used, over := 0.0, map[string]float64{}
 		growth := false
 		measured := true
@@ -51,7 +55,7 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 			peak := 0.0 // Stale or missing device samples contribute no growth.
 			if fresh {
 				peak = s.deviceGB
-				if unifiedCUDA(&card) {
+				if unifiedCUDA(&card) || fanOut {
 					// Cover both the next observed sensor horizon and the existing
 					// checkpoint/termination grace, using the measured growth rate.
 					margin := s.deviceGrowthGB + s.deviceRateGB*q.gpuStopGrace().Seconds()
@@ -82,6 +86,9 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 			if floor, ok := unifiedCUDAFloor(m); ok {
 				physicalPressure = m.MemoryObservation.TotalGB-m.MemoryObservation.UsedGB-floor <= forecast
 			}
+		}
+		if fanOut && card.GPU == "xpu" && !card.UnifiedMemory && forecast > 0 && deviceTelemetryReady(d.Telemetry, q.clock.Now()) {
+			physicalPressure = *d.Telemetry.FreeGB <= forecast
 		}
 		if !uncertain && (!measured || !growth && !physicalPressure || used <= d.BudgetGB && !physicalPressure) {
 			continue

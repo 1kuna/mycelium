@@ -55,6 +55,7 @@ type ForeignConsumer struct {
 }
 
 type HostHealth struct {
+	Probe            *ProbeObservation  `json:"probe,omitempty"`
 	DiskRecovery     map[string]float64 `json:"disk_recovery,omitempty"`
 	PersistenceError string             `json:"persistence_error,omitempty"`
 	History          []HostHealthSample `json:"history"`
@@ -193,6 +194,8 @@ type hostHealthMonitor struct {
 	mounts           map[string]*hostMountProbe
 	disks            map[string]float64
 	done             chan struct{}
+	timing           probeTiming
+	foreignTiming    probeTiming
 	persist          func(HostHealth) error
 	storageBackings  map[string]*storageBacking
 	storageRoots     map[string]storageRoot
@@ -248,6 +251,10 @@ func openHostHealth(dir string, clock Clock) (*hostHealthMonitor, error) {
 func (m *hostHealthMonitor) sample(ctx context.Context) error {
 	at := m.clock.Now()
 	r, err := m.source(ctx)
+	return m.record(ctx, at, r, err, nil)
+}
+
+func (m *hostHealthMonitor) record(ctx context.Context, at time.Time, r HostHealthReading, err error, observation *ProbeObservation) error {
 	s := HostHealthSample{HostHealthReading: r, At: at}
 	if err != nil {
 		s.Error = "host_sensor_unavailable"
@@ -255,10 +262,13 @@ func (m *hostHealthMonitor) sample(ctx context.Context) error {
 	var foreign []ForeignConsumer
 	var foreignErr error
 	m.mu.Lock()
-	foreignDue := m.health.ForeignAt.IsZero() || at.Sub(m.health.ForeignAt) >= time.Minute
+	foreignDue := m.health.ForeignAt.IsZero() || !at.Before(m.foreignTiming.next)
 	m.mu.Unlock()
 	if foreignDue && m.foreign != nil {
+		started := m.clock.Now()
 		foreign, foreignErr = m.foreign(ctx)
+		m.foreignTiming.base, m.foreignTiming.cores = m.timing.base, m.timing.cores
+		m.foreignTiming.observe(started, m.clock.Now(), foreignErr != nil || !slices.Equal(foreign, m.health.Foreign))
 	}
 	var storageRoots map[string]storageRoot
 	if m.readStorageRoots != nil {
@@ -282,6 +292,7 @@ func (m *hostHealthMonitor) sample(ctx context.Context) error {
 		return 0
 	})
 	m.projectStorageFaults(&s)
+	m.health.Probe = observation
 	m.health.observe(s)
 	if foreignDue && m.foreign != nil {
 		m.health.Foreign, m.health.ForeignAt, m.health.ForeignError = foreign, at, ""
@@ -373,6 +384,8 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 		return nil, err
 	}
 	m.source = source
+	// A cold or restarted source must positively establish its first observation.
+	m.health.Probe = &ProbeObservation{}
 	if workerForeignConsumers != nil {
 		m.foreign = func(ctx context.Context) ([]ForeignConsumer, error) { return workerForeignConsumers(ctx, dir) }
 	}
@@ -380,24 +393,25 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 	m.readStorageRoots = w.storageRoots
 	m.storageRoots = w.storageRoots()
 	for role, path := range workerHealthMounts(w) {
-		m.mounts[role] = &hostMountProbe{root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path), storage: m}
+		m.mounts[role] = &hostMountProbe{root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path), storage: m, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}
 	}
-
+	m.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go func() {
 		defer close(m.done)
-		// Reuse the existing observation cadence. No sampling sleeps occur in
-		// scheduling; the injected clock decides which sample is due.
-		tick := time.NewTicker(signalRefresh)
-		defer tick.Stop()
+		lane := hostProbeLane[HostHealthReading]{clock: w.Clock, timing: m.timing}
 		for {
-			probeCtx, cancel := context.WithTimeout(ctx, signalRefresh)
-			_ = m.sample(probeCtx)
-			cancel()
+			if completed, err := lane.step(ctx, m.source); completed {
+				_ = m.record(ctx, lane.at, lane.value, err, lane.observation)
+			}
+			timer := time.NewTimer(lane.waitDuration())
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return
-			case <-tick.C:
+			case <-timer.C:
+			case <-lane.done:
 			}
+			timer.Stop()
 		}
 	}()
 	return m, nil
@@ -428,10 +442,27 @@ func hostHygieneReason(m *Machine) string {
 func (q *Queue) hostHygieneReason(m *Machine) string {
 	for _, other := range q.s.Machines {
 		if hostID(other) == hostID(m) && other.Replacement == nil && !other.Gone && !q.unreported[other.ID] {
-			if reason := hostHygieneReason(other); reason != "" {
+			if reason := hostHygieneReasonAt(other, q.clock.Now()); reason != "" {
 				return reason
 			}
 		}
 	}
-	return hostHygieneReason(m)
+	return hostHygieneReasonAt(m, q.clock.Now())
+}
+
+func hostHealthEvidenceValid(h *HostHealth, elapsed time.Duration) bool {
+	if h == nil || h.Probe == nil {
+		return true
+	} // Legacy evidence has no new timing fields.
+	return h.Probe.valid() && validMemoryValue(h.AgeSeconds) && elapsed >= 0 &&
+		elapsed.Seconds()+h.AgeSeconds < h.Probe.freshness().Seconds() && len(h.History) > 0 && h.History[len(h.History)-1].Error == ""
+}
+func hostHygieneReasonAt(m *Machine, now time.Time) string {
+	if reason := hostHygieneReason(m); reason != "" {
+		return reason
+	}
+	if m != nil && !hostHealthEvidenceValid(m.HostHealth, now.Sub(m.LastSeen)) {
+		return "host_probe_unknown"
+	}
+	return ""
 }
