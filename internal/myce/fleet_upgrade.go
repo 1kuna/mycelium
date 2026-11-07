@@ -23,14 +23,15 @@ type FleetUpgradeStatus struct {
 	Hosts              []FleetHostStatus `json:"hosts"`
 }
 type FleetHostStatus struct {
-	Checks       []FleetCheck       `json:"checks,omitempty"`
-	StopRequests []FleetStopRequest `json:"stop_requests,omitempty"`
-	Host         string             `json:"host"`
-	Phase        string             `json:"phase"`
-	Wait         string             `json:"wait,omitempty"`
-	Failure      string             `json:"failure,omitempty"`
-	FailureCode  string             `json:"failure_code,omitempty"`
-	ProgressAt   time.Time          `json:"progress_at"`
+	Preservation *FleetQueuePreservation `json:"preservation,omitempty"`
+	Checks       []FleetCheck            `json:"checks,omitempty"`
+	StopRequests []FleetStopRequest      `json:"stop_requests,omitempty"`
+	Host         string                  `json:"host"`
+	Phase        string                  `json:"phase"`
+	Wait         string                  `json:"wait,omitempty"`
+	Failure      string                  `json:"failure,omitempty"`
+	FailureCode  string                  `json:"failure_code,omitempty"`
+	ProgressAt   time.Time               `json:"progress_at"`
 }
 type fleetUpgrade struct {
 	Urgency            string              `json:"urgency,omitempty"`
@@ -96,6 +97,10 @@ func (q *Queue) fleetUpgradeStatus() *FleetUpgradeStatus {
 	out := &FleetUpgradeStatus{Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Hosts: []FleetHostStatus{}}
 	for _, h := range u.Hosts {
 		status := h.FleetHostStatus
+		if status.Preservation != nil {
+			copy := *status.Preservation
+			status.Preservation = &copy
+		}
 		status.Checks = q.fleetHostChecks(h)
 		out.Hosts = append(out.Hosts, status)
 	}
@@ -656,6 +661,10 @@ func (q *Queue) maintainFleetUpgrade() {
 		}
 		a, _ := u.Release.Manifest.Select(p.OS, p.Arch)
 		if p.Proof.Version == u.Release.Manifest.Version && p.Proof.SHA256 == a.SHA256 {
+			if h.Preservation != nil && h.Preservation.State != "verified" {
+				h.Wait = "waiting for verified committed queue records"
+				return
+			}
 			if h.QueueBefore.Version != u.Release.Manifest.Version && (p.Proof.Session == h.QueueBefore.Session || p.Proof.PID == h.QueueBefore.PID) {
 				h.Wait = "waiting for a new queue process and session"
 				return
@@ -870,6 +879,9 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.
 		case "restarting":
 			h.HelperRevision = ack.Revision
 			if queue {
+				if q.fleetService != nil && (h.Preservation == nil || h.Preservation.State != "verified" && h.Preservation.Revision < ack.Revision) {
+					h.Preservation = &FleetQueuePreservation{State: "required", Revision: ack.Revision, Session: ack.Session}
+				}
 				h.Phase = "queue_health"
 			} else {
 				h.Phase = "worker_health"

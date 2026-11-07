@@ -2339,6 +2339,27 @@ operations, queue cutover, missing runtime proof and queue restart. Dependency
 classification shares submission's device/variant qualification; component
 checks share enrollment's inventory baseline and acknowledged CPU/RAM budgets.
 
+From the release containing #900's queue-preservation slice, managed queue
+restart intent requires a final committed-record certificate. Shutdown closes
+SQLite while retaining its process lock, hashes immutable committed records
+outside the queue mutex, then fsyncs the certificate beside the database.
+Startup verifies it before index reconstruction, inventory resets and recovery
+transactions. Each host's `preservation` receipt records `required` or
+`verified`, the original session/revision, digest, record/byte counts and the
+queue-clock verification time. `queue_preservation` is ready only after this
+verification; `supported_handoff_not_observed` means older/unmanaged or not yet
+restarted, and is not passing proof. Remote batch work may continue through the
+handoff and retains its attempt identity.
+
+Missing, changed or undecodable records refuse startup with a fixed
+`fleet_preservation_*` code. Preserve the database and certificate for the
+maintenance owner; do not delete the requirement or restore an old database over
+new writes. The certificate covers normalized queue records, including retained
+terminal jobs, submission-key answers, accepted checkpoint/output references,
+custody and learned curves. It does not prove the remote blob contents,
+logs/usage tables, native downtime or safe database downgrade. No whole-queue
+status request or private preflight script is needed for this record proof.
+
 From the release containing #900's critical slice, `--urgency normal|critical`
 is persisted with the operation; omitted urgency is `normal`. Normal waits for
 idle. Critical requests the existing maintenance checkpoint/stop/requeue as soon

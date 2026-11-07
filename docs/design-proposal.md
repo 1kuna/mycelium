@@ -1943,6 +1943,17 @@ and stop on conflicting edits. Interruption/rerun rechecks the same postconditio
 rather than blindly restarting. Stop on the first download, verification, install,
 restart or health failure, leaving that host maintained and later hosts untouched.
 Status classifies runtime, custody, storage and component checks by capability.
+For a supported managed queue handoff, the accepted restart intent requires a
+certificate of the final normalized committed records. Close the database under
+the existing process file lock, hash immutable committed encodings outside the
+queue mutex and fsync a compact operation/revision/session-bound certificate.
+Startup verifies exact record count/hash and lossless field decoding before
+rebuilding indices, resetting inventory or running recovery/retention mutations.
+Only then persist verified preservation; missing/changed/undecodable records
+refuse startup and keep maintenance. This includes retained terminal jobs,
+keyed answers, checkpoint/output references, custody and learned curves. It does
+not verify remote blob bytes, logs/usage tables, native process survival or
+release-pair downgrade compatibility. Older/unmanaged handoffs remain unverified.
 A pre-existing checkpoint probe flag can be advisory only while it remains
 unrecovered, no live NAS-checkpoint/model work depends on that worker and no root
 is reported unavailable. It still restricts admission, and installer storage

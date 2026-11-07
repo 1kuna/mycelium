@@ -114,6 +114,7 @@ type state struct {
 }
 type Queue struct {
 	requestBudgets      requestBudgets
+	preservationPath    string          // Local handoff certificate; never a database backup.
 	waitStates          *waitStateIndex // scalar committed wait observations; separate reader mutex.
 	modelIntervalWrites []ModelIntervalEvent
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
@@ -265,6 +266,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	db.SetMaxOpenConns(1)
 	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	q.healthStoreProbe.timeout = heartbeatFilesystemBudget
+	q.preservationPath = path + ".fleet-preservation"
 	q.nasProbe.timeout = heartbeatFilesystemBudget
 	q.nasProgress.timeout = heartbeatFilesystemBudget
 	for _, option := range options {
@@ -293,6 +295,16 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
+	if err = q.loadPersistedRecords(); err == nil {
+		err = q.verifyFleetQueuePreservation()
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if q.persisted != nil {
+		q.rebuildRecords()
+	}
 	// Inventories are refreshed by workers after restart, including legacy state.
 	for _, m := range q.s.Machines {
 		m.ToolInventory = nil
@@ -301,10 +313,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	// additive table. Recover allocation before any startup transaction emits an
 	// event; the retained SQLite sequence is authoritative across re-upgrades.
 	if err = db.QueryRow("SELECT COALESCE(MAX(seq),0) FROM model_intervals").Scan(&q.s.ModelIntervalHighWater); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err = q.loadPersistedState(); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -477,8 +485,9 @@ func (q *Queue) BeginShutdown() {
 }
 
 func (q *Queue) Close() error {
+	q.BeginShutdown()
 	q.mu.Lock()
-	defer q.mu.Unlock()
+	seal := q.fleetQueueSeal()
 	var err error
 	if q.usageReader != nil {
 		err = q.usageReader.Close()
@@ -488,9 +497,17 @@ func (q *Queue) Close() error {
 		err = errors.Join(err, q.uploadSpool.lock.Close())
 		q.uploadSpool.lock = nil
 	}
-	if q.lock != nil {
-		err = errors.Join(err, syscall.Flock(int(q.lock.Fd()), syscall.LOCK_UN), q.lock.Close())
-		q.lock = nil
+	lock := q.lock
+	q.lock = nil
+	q.mu.Unlock()
+	if lock != nil {
+		// The database and writers are closed, and the process file lock still
+		// excludes a replacement queue. Hash immutable committed encodings with
+		// no queue mutex held; seal only after a successful database close.
+		if err == nil && seal != nil {
+			err = q.writeFleetQueueSeal(seal)
+		}
+		err = errors.Join(err, syscall.Flock(int(lock.Fd()), syscall.LOCK_UN), lock.Close())
 	}
 	return err
 }
