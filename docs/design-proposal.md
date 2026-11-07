@@ -1942,6 +1942,11 @@ operation's own drain via owner/timestamp CAS; preserve prior operator maintenan
 and stop on conflicting edits. Interruption/rerun rechecks the same postconditions
 rather than blindly restarting. Stop on the first download, verification, install,
 restart or health failure, leaving that host maintained and later hosts untouched.
+Status classifies runtime, custody, storage and component checks by capability.
+A pre-existing checkpoint probe flag can be advisory only while it remains
+unrecovered, no live NAS-checkpoint/model work depends on that worker and no root
+is reported unavailable. It still restricts admission, and installer storage
+checks remain binding. New degradation remains a health verification blocker.
 Fix forward; never invoke installer restore/rollback, bypass storage
 preflight or automatically retry. Status shows target, order, host phase, wait
 reason, last verified progress and failure. Decisions use the injected Clock;

@@ -23,6 +23,7 @@ type FleetUpgradeStatus struct {
 	Hosts              []FleetHostStatus `json:"hosts"`
 }
 type FleetHostStatus struct {
+	Checks       []FleetCheck       `json:"checks,omitempty"`
 	StopRequests []FleetStopRequest `json:"stop_requests,omitempty"`
 	Host         string             `json:"host"`
 	Phase        string             `json:"phase"`
@@ -44,11 +45,12 @@ type fleetUpgrade struct {
 	CreatedAt          time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
-	CriticalStopAt *time.Time `json:"critical_stop_at,omitempty"`
-	RetryPhase     string     `json:"retry_phase,omitempty"`
-	HealthSince    time.Time  `json:"health_since,omitempty"`
-	HealthIdentity string     `json:"health_identity,omitempty"`
-	HelperRevision int        `json:"helper_revision,omitempty"`
+	CheckpointProbeRecovered bool       `json:"checkpoint_probe_recovered,omitempty"`
+	CriticalStopAt           *time.Time `json:"critical_stop_at,omitempty"`
+	RetryPhase               string     `json:"retry_phase,omitempty"`
+	HealthSince              time.Time  `json:"health_since,omitempty"`
+	HealthIdentity           string     `json:"health_identity,omitempty"`
+	HelperRevision           int        `json:"helper_revision,omitempty"`
 	FleetHostStatus
 	Queue       bool               `json:"queue"`
 	QueueDone   bool               `json:"queue_done"`
@@ -93,7 +95,9 @@ func (q *Queue) fleetUpgradeStatus() *FleetUpgradeStatus {
 	}
 	out := &FleetUpgradeStatus{Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Hosts: []FleetHostStatus{}}
 	for _, h := range u.Hosts {
-		out.Hosts = append(out.Hosts, h.FleetHostStatus)
+		status := h.FleetHostStatus
+		status.Checks = q.fleetHostChecks(h)
+		out.Hosts = append(out.Hosts, status)
 	}
 	return out
 }
@@ -680,6 +684,9 @@ func (q *Queue) maintainFleetUpgrade() {
 			h.Wait = "waiting for worker runtime proof"
 			return
 		}
+		if !m.CheckpointUnavailable {
+			h.CheckpointProbeRecovered = true
+		}
 		a, _ := u.Release.Manifest.Select(h.Before.CapabilityProfile.OS, h.Before.CapabilityProfile.Arch)
 		if m.Fleet.Version == u.Release.Manifest.Version && m.Fleet.SHA256 == a.SHA256 {
 			if m.Fleet.Session != m.Session || h.Before.Fleet.Version != u.Release.Manifest.Version && (m.Session == h.Before.Session || m.Fleet.PID == h.Before.Fleet.PID) {
@@ -696,6 +703,11 @@ func (q *Queue) maintainFleetUpgrade() {
 				}
 			}
 			observed := cloneMachine(m)
+			if q.fleetCheckpointAdvisory(h, m) {
+				// Classify the retained probe flag without changing admission or
+				// hiding it from status. Every other enrollment check still binds.
+				observed.CheckpointUnavailable = false
+			}
 			if observed.Enrollment == nil {
 				p := m.Fleet
 				observed.Enrollment = &EnrollmentProof{Version: p.Version, StartGate: p.StartGate, AttemptProtocol: p.AttemptProtocol, RunnerSmoke: p.RunnerSmoke}

@@ -938,6 +938,11 @@ func printStatus(s myce.Snapshot, full bool) {
 		fmt.Printf("fleet upgrade %s: release=%s state=%s urgency=%s queue_only=%t wait_production_idle=%t\n", u.Operation, u.Release, u.State, urgency, u.QueueOnly, u.WaitProductionIdle)
 		for _, h := range u.Hosts {
 			fmt.Printf("  host %s: phase=%s wait=%s failure=%s verified_progress=%s\n", h.Host, h.Phase, h.Wait, h.Failure, h.ProgressAt.UTC().Format(time.RFC3339))
+			for _, check := range h.Checks {
+				if check.State != "ready" {
+					fmt.Printf("    %s: %s (%s; capability=%s)\n", check.Check, check.State, check.Code, check.Capability)
+				}
+			}
 			for _, request := range h.StopRequests {
 				r := request.Obligation
 				switch {
