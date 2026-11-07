@@ -2429,8 +2429,15 @@ on their shared recorder's event-count bound. Shed payloads retain an explicit
 `decision_omitted` marker. Capture never waits for a diagnostic flush: if its
 immutable batch is busy, durability is omitted and the latest cache remains.
 Capacity withdrawal during a flush applies before that batch releases its
-memory. Restart reads receipt payloads through targeted durable readback instead
+memory. Victim sizing and ordering run outside the shared control-recorder
+mutex; each applied omission holds it only for one small mutation. Withdrawal
+publication and the final flush-ownership handoff share that mutex, so a
+concurrent withdrawal cannot fall between the final check and release.
+Restart reads receipt payloads through targeted durable readback instead
 of loading them into the general recent-event ring.
+The general `GET /api/control` read also omits receipt payloads from its recent
+view and strips them in SQL before durable event decoding, marking
+`decision_omitted`. Use the targeted per-job endpoint for those payloads.
 Each request's capture and reply scratch also fit its measured share.
 Unexplained dispatch gaps and rejected/competing decisions take precedence
 over ordinary offers; oldest equal-value detail yields when capacity shrinks. There is no new fixed row cap, heartbeat sampling rate or expiry timer.

@@ -169,8 +169,10 @@ func (c *ControlTelemetry) Summary() string {
 }
 
 type controlRecorder struct {
+	decisionReleasePrepared                 func()
+	decisionRetentionPrepared               func()
 	decisionBytes, decisionCapacity         int64
-	decisionLimit                           atomic.Int64
+	decisionLimit                           int64
 	writeGate                               sync.Mutex
 	controlWriters                          atomic.Int64
 	backlog                                 []ControlEvent
@@ -243,7 +245,7 @@ func (c *controlRecorder) append(e ControlEvent) {
 		return
 	}
 	if e.Decision != nil {
-		c.appendDecision(e, c.decisionLimit.Load())
+		c.appendDecision(e, c.decisionBudgetLimit())
 		return
 	}
 	c.mu.Lock()
@@ -353,11 +355,7 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 		return nil
 	}
 	c.flushMu.Lock()
-	defer func() {
-		// Apply withdrawals made while this immutable batch was in flight.
-		c.retainDecision(ControlEvent{}, c.decisionLimit.Load())
-		c.flushMu.Unlock()
-	}()
+	defer c.releaseDecisionFlush()
 	for {
 		c.mu.Lock()
 		if len(c.backlog) == 0 {
@@ -814,10 +812,16 @@ type ControlPage struct {
 
 func (q *Queue) controlPage(ctx context.Context, after int64) (ControlPage, error) {
 	page := ControlPage{Telemetry: q.control.snapshot(), Next: after, Entries: []ControlRecord{}}
+	for i := range page.Telemetry.Recent {
+		e := &page.Telemetry.Recent[i]
+		if e.Decision != nil {
+			e.Decision, e.DecisionOmitted = nil, true
+		}
+	}
 	if err := q.usageReader.QueryRowContext(ctx, `SELECT COALESCE(MIN(seq),0),COALESCE(MAX(seq),0) FROM control_events`).Scan(&page.First, &page.HighWater); err != nil {
 		return page, err
 	}
-	rows, err := q.usageReader.QueryContext(ctx, `SELECT seq,data FROM control_events WHERE seq>? ORDER BY seq LIMIT ?`, after, requestLatencyWindow)
+	rows, err := q.usageReader.QueryContext(ctx, `SELECT seq,json_remove(data,'$.decision') FROM control_events WHERE seq>? ORDER BY seq LIMIT ?`, after, requestLatencyWindow)
 	if err != nil {
 		return page, err
 	}
@@ -830,6 +834,9 @@ func (q *Queue) controlPage(ctx context.Context, after int64) (ControlPage, erro
 		}
 		if err = json.Unmarshal(raw, &record.ControlEvent); err != nil {
 			return page, err
+		}
+		if record.Kind == "decision" {
+			record.DecisionOmitted = true
 		}
 		page.Entries = append(page.Entries, record)
 		page.Next = record.Sequence

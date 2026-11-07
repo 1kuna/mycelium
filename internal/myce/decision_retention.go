@@ -1,35 +1,74 @@
 package myce
 
-// Receipt history shares the measured observation envelope with the latest
-// cache. Only this helper admits variable receipt payloads to the recorder.
-// A flusher owns its immutable batch through flushMu; capture never waits on its
-// SQL. Refusal leaves the latest cache readable and counts missing durability.
+import (
+	"slices"
+	"time"
+)
+
+// Receipt history shares the measured envelope with the latest cache.
+// The flusher owns payload mutations through flushMu. Captures never wait for
+// its SQL; c.mu protects only constant-size handoffs and individual mutations.
 func (c *controlRecorder) appendDecision(e ControlEvent, budget int64) {
-	c.decisionLimit.Store(budget)
-	if !c.flushMu.TryLock() {
-		if e.Decision != nil {
-			c.mu.Lock()
-			c.dropped++
-			c.mu.Unlock()
-		}
+	c.mu.Lock()
+	c.decisionLimit = budget
+	owned := c.flushMu.TryLock()
+	if !owned && e.Decision != nil {
+		c.dropped++
+	}
+	c.mu.Unlock()
+	if !owned {
 		return
 	}
-	defer c.flushMu.Unlock()
-	c.retainDecision(e, c.decisionLimit.Load())
+	defer c.releaseDecisionFlush()
+	c.retainDecision(e, c.decisionBudgetLimit())
 }
 
-// Caller owns flushMu; no immutable flusher batch can retain shed payloads.
-func (c *controlRecorder) retainDecision(e ControlEvent, budget int64) {
+func (c *controlRecorder) decisionBudgetLimit() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.decisionCapacity = budget
-	buffers := [][]ControlEvent{c.pending, c.backlog, c.recent}
-	c.decisionBytes = 0
+	return c.decisionLimit
+}
+
+// Publishing a withdrawal and releasing flush ownership use the same mutex.
+// A withdrawal either belongs to this owner's final trim or acquires/joins the
+// next owner; it cannot fall between the final limit check and flushMu.Unlock.
+func (c *controlRecorder) releaseDecisionFlush() {
+	for {
+		budget := c.decisionBudgetLimit()
+		c.retainDecision(ControlEvent{}, budget)
+		if c.decisionReleasePrepared != nil {
+			c.decisionReleasePrepared()
+		}
+		c.mu.Lock()
+		if c.decisionLimit == budget {
+			c.flushMu.Unlock()
+			c.mu.Unlock()
+			return
+		}
+		c.mu.Unlock()
+	}
+}
+
+// Caller owns flushMu. Ordinary producers only append beyond these immutable
+// prefixes; snapshotting three slice headers needs no payload scan under c.mu.
+func (c *controlRecorder) retainDecision(e ControlEvent, budget int64) {
+	c.mu.Lock()
+	buffers := [3][]ControlEvent{c.pending, c.backlog, c.recent}
+	c.mu.Unlock()
+	type victim struct {
+		event *ControlEvent
+		cost  int64
+		value int
+		at    time.Time
+	}
+	var victims []victim
+	used := int64(0)
 	for _, events := range buffers {
-		for _, event := range events {
-			if event.Decision != nil {
-				// Charge repeated references conservatively; no scratch map.
-				c.decisionBytes += decisionCost(event.Decision)
+		for i := range events {
+			if r := events[i].Decision; r != nil {
+				cost := decisionCost(r)
+				used += cost // Repeated references are conservatively charged.
+				victims = append(victims, victim{&events[i], cost, decisionValue(*r), r.At})
 			}
 		}
 	}
@@ -37,31 +76,37 @@ func (c *controlRecorder) retainDecision(e ControlEvent, budget int64) {
 	if e.Decision != nil {
 		cost, value = decisionCost(e.Decision), decisionValue(*e.Decision)
 	}
-	for c.decisionBytes+cost > budget {
-		var victim *ControlEvent
-		for _, events := range buffers {
-			for i := range events {
-				item := &events[i]
-				r := item.Decision
-				if r == nil || decisionValue(*r) > value {
-					continue
-				}
-				if victim == nil || decisionValue(*r) < decisionValue(*victim.Decision) || decisionValue(*r) == decisionValue(*victim.Decision) && r.At.Before(victim.Decision.At) {
-					victim = item
-				}
-			}
+	// All scanning, sizing and ordering occur outside the shared control mutex.
+	// Victim metadata fits the retained versions' conservative two-copy charge.
+	slices.SortFunc(victims, func(a, b victim) int {
+		if a.value != b.value {
+			return a.value - b.value
 		}
-		if victim == nil {
+		return a.at.Compare(b.at)
+	})
+	if c.decisionRetentionPrepared != nil {
+		c.decisionRetentionPrepared()
+	}
+	c.mu.Lock()
+	c.decisionCapacity, c.decisionBytes = budget, used
+	c.mu.Unlock()
+	for _, v := range victims {
+		if used+cost <= budget || v.value > value {
 			break
 		}
-		c.decisionBytes -= decisionCost(victim.Decision)
-		victim.Decision, victim.DecisionOmitted = nil, true
+		c.mu.Lock()
+		v.event.Decision, v.event.DecisionOmitted = nil, true
+		c.decisionBytes -= v.cost
 		c.dropped++
+		c.mu.Unlock()
+		used -= v.cost
 	}
 	if e.Decision == nil {
 		return
 	}
-	if cost > budget-c.decisionBytes || len(c.pending) == cap(c.pending) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cost > budget-used || len(c.pending) == cap(c.pending) {
 		c.dropped++
 		return
 	}

@@ -1,9 +1,93 @@
 package myce
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestDecisionRetentionFinalWithdrawalHandoff(t *testing.T) {
+	q, _, _ := decisionFixture(t)
+	c := q.control
+	c.appendDecision(ControlEvent{Kind: "decision", Decision: &DecisionReceipt{JobID: "queued"}}, 8<<20)
+	prepared, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	c.decisionReleasePrepared = func() { once.Do(func() { close(prepared); <-resume }) }
+	done := make(chan struct{})
+	go func() {
+		c.appendDecision(ControlEvent{}, 8<<20)
+		close(done)
+	}()
+	<-prepared // The old limit was read and its trim finished.
+	c.appendDecision(ControlEvent{}, 0)
+	close(resume)
+	<-done
+	c.decisionReleasePrepared = nil
+	if c.decisionCapacity != 0 || c.decisionBytes != 0 {
+		t.Fatal("final release lost the concurrent withdrawal")
+	}
+}
+
+func TestDecisionRetentionSelectionAllowsControlProgress(t *testing.T) {
+	q, _, _ := decisionFixture(t)
+	c := q.control
+	for i := 0; i < 128; i++ {
+		c.appendDecision(ControlEvent{Kind: "decision", Decision: &DecisionReceipt{JobID: ID()}}, 8<<20)
+	}
+	prepared, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	c.decisionRetentionPrepared = func() { once.Do(func() { close(prepared); <-resume }) }
+	done := make(chan struct{})
+	go func() { c.appendDecision(ControlEvent{}, 0); close(done) }()
+	<-prepared
+	progress := make(chan struct{})
+	go func() { q.PriorityPolicy(); close(progress) }()
+	select {
+	case <-progress:
+	case <-time.After(2 * time.Second):
+		close(resume)
+		<-done
+		t.Fatal("history selection held the shared control mutex")
+	}
+	close(resume)
+	<-done
+	c.decisionRetentionPrepared = nil
+	if c.decisionBytes != 0 {
+		t.Fatal("withdrawal did not shed history")
+	}
+}
+
+func TestDecisionRetentionGeneralControlReadOmitsPayload(t *testing.T) {
+	q, _, _ := decisionFixture(t)
+	r := &DecisionReceipt{JobID: "queued", Target: "target", CheckinWorker: "worker", Reply: DecisionReply{Directives: []DecisionDirective{{Execution: Execution{ID: "offered", Attempt: 1}, Offer: true}}}}
+	q.control.appendDecision(ControlEvent{Kind: "decision", Operation: "checkin", Decision: r}, 8<<20)
+	if err := q.control.flush(q.db); err != nil {
+		t.Fatal(err)
+	}
+	page, err := q.controlPage(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range page.Entries {
+		if e.Kind == "decision" {
+			found = true
+			if e.Decision != nil || !e.DecisionOmitted {
+				t.Fatal("durable general read hydrated payload")
+			}
+		}
+	}
+	for _, e := range page.Telemetry.Recent {
+		if e.Decision != nil {
+			t.Fatal("general telemetry retained payload in its response")
+		}
+	}
+	targeted, err := q.DecisionReceipts(context.Background(), "queued")
+	if err != nil || !found || len(targeted.Receipts) != 1 || len(targeted.Receipts[0].Reply.Directives) != 1 {
+		t.Fatalf("targeted durable evidence was lost: %+v %v", targeted, err)
+	}
+}
 
 func TestDecisionRetentionDeferredHistoryBudget(t *testing.T) {
 	q, clock, _ := decisionFixture(t)
