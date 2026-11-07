@@ -168,17 +168,15 @@ independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
 
-From the next release (#881), job `health_recovery` explains a correction to stale
-free-RAM evidence after repeated direct-RAM prelaunch refusals. Growth-forecast
-refusals (`live_host_growth`) leave capacity unchanged and ask the Mycelium
-maintenance owner to inspect forecast bounds and paired queue/worker snapshots;
-they do not prove stale free RAM. `verifying` means the same
-job is waiting for normal capacity and a later successful start; keep its ID and
-submission key. `verified` names the later started attempt; it does not establish
-completion or accepted output. `owner_required` names the worker owner's next
-action and uses the existing health notification channel. `unverified` means the
-original demand/session ended without matching start evidence. Do not raise shared
-budgets, clear custody or resubmit to bypass it. No new notifier setup is needed.
+From the next release (#881), job `health_recovery` retains an `owner_required`
+decision after repeated infrastructure failures: `action: none` means Mycelium
+performed no automatic repair and left capacity unchanged. The summary names
+what happened and `next_step` names the owner's action. For `live_host_growth`,
+the Mycelium maintenance owner inspects forecast bounds and paired queue/worker
+snapshots; the comparison alone does not prove stale free RAM. Keep the same job
+ID and submission key. Do not raise shared budgets, clear custody or resubmit to
+bypass the finding. It uses the existing health notification channel; no new
+notifier setup is needed. Later progress does not establish a causal repair.
 
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,

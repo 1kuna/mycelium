@@ -41,8 +41,8 @@
         "action": {
           "type": "string"
         },
-        "admission_revision": {
-          "type": "integer"
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
         },
         "at": {
           "format": "date-time",
@@ -50,9 +50,6 @@
         },
         "attempt": {
           "type": "integer"
-        },
-        "available_gb": {
-          "type": "number"
         },
         "cause": {
           "type": "string"
@@ -69,9 +66,6 @@
         "next_step": {
           "type": "string"
         },
-        "previous_gb": {
-          "type": "number"
-        },
         "session": {
           "type": "string"
         },
@@ -80,13 +74,6 @@
         },
         "summary": {
           "type": "string"
-        },
-        "verified_at": {
-          "format": "date-time",
-          "type": "string"
-        },
-        "verified_attempt": {
-          "type": "integer"
         }
       },
       "required": [
@@ -1824,10 +1811,6 @@
     },
     "Job": {
       "properties": {
-        "admission_revision": {
-          "type": "integer",
-          "x-contract": "diagnostic"
-        },
         "allocated_devices": {
           "items": {
             "type": "string"

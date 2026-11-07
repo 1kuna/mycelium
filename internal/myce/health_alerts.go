@@ -116,7 +116,7 @@ func (q *Queue) appendHealthAlert(e HealthAlert) {
 func (q *Queue) pruneHealthEvents() {
 	for len(q.s.Health.Events) > 256 {
 		i := slices.IndexFunc(q.s.Health.Events, func(e HealthAlert) bool {
-			return (e.Delivered || !q.s.Health.DeliveryConfigured) && (e.Recovery == nil || e.Recovery.State != "verifying")
+			return (e.Delivered || !q.s.Health.DeliveryConfigured)
 		})
 		if i < 0 {
 			return
@@ -174,7 +174,6 @@ func (q *Queue) detectHealth() {
 	}
 	q.detectIncidentHealth()
 	q.detectRemainingHealth()
-	q.verifyHealthRecoveries()
 }
 func (q *Queue) alertAttemptLoss(j *Job, outcome AttemptOutcome, quiet bool) {
 	if j.Attempt == 0 || cancelled(j) || plannedStop(j) || historyPlannedStop(j) || j.Spec.Priority != "production" || outcome.PoliteStop || outcome.OperatorStop || outcome.PriorityStop != nil {

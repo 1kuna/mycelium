@@ -129,13 +129,13 @@ func (q *Queue) detectRemainingHealth() {
 // classifier has overwritten any provisional requeue record. Two is a protocol
 // definition of repeated loss, not a timed fleet threshold.
 type healthEnding struct {
-	Memory  *alertMemoryEvidence `json:"memory,omitempty"`
-	JobID   string               `json:"job_id"`
-	Attempt int                  `json:"attempt"`
-	Session string               `json:"session"`
-	Infra   bool                 `json:"infra,omitempty"`
-	Staged  bool                 `json:"staged,omitempty"`
-	Refused bool                 `json:"refused,omitempty"`
+	Memory  *AdmissionDetail `json:"memory,omitempty"`
+	JobID   string           `json:"job_id"`
+	Attempt int              `json:"attempt"`
+	Session string           `json:"session"`
+	Infra   bool             `json:"infra,omitempty"`
+	Staged  bool             `json:"staged,omitempty"`
+	Refused bool             `json:"refused,omitempty"`
 }
 
 func sameHealthEnding(a healthEnding, j *Job, o AttemptOutcome) bool {
