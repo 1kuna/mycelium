@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -10,6 +11,34 @@ import (
 	"testing"
 	"time"
 )
+
+func TestQueueRetentionCapacityIgnoresWorkerMemoryOverride(t *testing.T) {
+	workerSource, queueSource := workerHostMemorySource, queueHostMemorySource
+	t.Cleanup(func() {
+		workerHostMemorySource, queueHostMemorySource = workerSource, queueSource
+	})
+	workerCalled := false
+	workerHostMemorySource = func(float64) (MemorySource, error) {
+		workerCalled = true
+		return nil, errors.New("worker inventory is not ready")
+	}
+	SetQueueHostMemorySource(func(reserve float64) (MemorySource, error) {
+		if reserve != 0 {
+			t.Errorf("queue memory reserve = %v, want 0", reserve)
+		}
+		return func(context.Context) (float64, error) { return 32, nil }, nil
+	})
+	capacity, err := queueRetentionCapacity(context.Background(), t.TempDir())
+	if workerCalled {
+		t.Fatal("queue retention capacity invoked the worker inventory override")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capacity.MemoryAvailableBytes != 32<<30 || capacity.DiskAvailableBytes == 0 {
+		t.Fatalf("queue host capacity = %+v", capacity)
+	}
+}
 
 func TestEvidenceRetentionCapacityValueAndPins(t *testing.T) {
 	for _, hosts := range []int{1, 200} {
