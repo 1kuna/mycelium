@@ -33,6 +33,7 @@ type VLLMPreset struct {
 	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
 }
 type Model struct {
+	readinessRecipe string
 	Measurement     *ModelMeasurementBinding `yaml:"measurement,omitempty" json:"measurement,omitempty"`
 	Project         string                   `yaml:"project,omitempty" json:"project,omitempty"`
 	AllowedMachines []string                 `yaml:"allowed_machines,omitempty" json:"allowed_machines,omitempty"`
@@ -77,7 +78,7 @@ type ModelConfig struct {
 }
 
 func ReadModels(path string) (ModelConfig, error) {
-	c := ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}
+	c := ModelConfig{}
 	if path == "" {
 		return c, nil
 	}
@@ -98,8 +99,8 @@ func ReadModels(path string) (ModelConfig, error) {
 	return c, validateModels(c)
 }
 func validateModels(c ModelConfig) error {
-	if c.Idle <= 0 || c.Wait <= 0 {
-		return errors.New("model timeouts must be positive")
+	if c.Idle < 0 || c.Wait < 0 {
+		return errors.New("model timeouts must be nonnegative (zero learns residency and waits for caller cancellation)")
 	}
 	seen := map[string]bool{}
 	for _, m := range c.Models {
@@ -457,7 +458,7 @@ func (q *Queue) maintainModels() {
 			q.maintainEngineRetry(k, s, m, model)
 			continue
 		}
-		if s.State != "unloading" && s.State != "unload_failed" && ((!exists || !q.modelUsableMachine(model, m)) || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && now.Sub(s.LastUsed) >= q.models.Idle) {
+		if s.State != "unloading" && s.State != "unload_failed" && ((!exists || !q.modelUsableMachine(model, m)) || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && q.modelIdleExpired(s)) {
 			s.State = "draining"
 		}
 	}
@@ -563,6 +564,7 @@ func (q *Queue) maintainModels() {
 			if s.InFlight == 0 || q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}) < 0 {
 				s.Priority, s.Class, s.Project = c.Priority, c.Class, c.Project
 			}
+			q.noteModelDemand(c.Model, m.ID)
 			s.InFlight++
 			s.LastUsed = now
 			continue
@@ -583,7 +585,7 @@ func (q *Queue) maintainModels() {
 			q.beginEngineAttempt(s, c.Priority)
 			s.Class, s.Project = c.Class, c.Project
 		} else {
-			s = &ModelSlot{Project: c.Project, Model: c.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
+			s = &ModelSlot{Project: c.Project, Model: c.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
 			q.s.ModelSlots[targetSlotKey(m, c.Model)] = s
 		}
 		q.initEnginePreemption(s)
@@ -893,7 +895,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		e = a.Queue.updateRequest(r.Context(), func() error {
 			a.Queue.maintain()
 			call = *a.Queue.calls[c.ID]
-			timedOut = a.Queue.clock.Now().Sub(call.Queued) >= a.Queue.models.Wait
+			timedOut = a.Queue.models.Wait > 0 && a.Queue.clock.Now().Sub(call.Queued) >= a.Queue.models.Wait
 			requestExpired = !requestUntil.IsZero() && !a.Queue.clock.Now().Before(requestUntil)
 			engineLost = a.Queue.engineAttemptLost(&call)
 			if m := a.Queue.s.Machines[call.Machine]; m != nil && !m.Gone && m.Session == call.Session && a.Queue.callAttemptLive(&call) {

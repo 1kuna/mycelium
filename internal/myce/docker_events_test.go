@@ -16,6 +16,8 @@ import (
 // survive independently of the successful-delivery receipt and daemon history.
 func TestDockerRetainsEventsWhenKillReplyTimesOut(t *testing.T) {
 	w, store, clock, root := dockerFixture(t)
+	// This incident simulates an explicit lost CLI reply, not cold initialization expiry.
+	w.dockerCallTimeout = 2 * time.Second
 	t.Setenv("MYCE_TEST_DOCKER_EVENTS", "1")
 	if err := syscall.Mkfifo(filepath.Join(root, "events-sent"), 0600); err != nil {
 		t.Fatal(err)

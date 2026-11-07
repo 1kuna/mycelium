@@ -90,10 +90,10 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 	if o.LoadTimeout < 0 || o.WarmupParallel < 0 {
 		return report, errors.New("load timeout and warmup parallelism must be positive")
 	}
-	if o.LoadTimeout == 0 {
-		o.LoadTimeout = 5 * time.Minute
-	}
+
 	if o.WarmupParallel == 0 {
+		// Sequential warm-up is required to attribute incremental per-model
+		// peaks. Explicit parallel warm-up instead measures a joint peak.
 		o.WarmupParallel = 1
 	}
 	if o.Worker.Clock == nil {
@@ -226,6 +226,9 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 		if engine == nil {
 			return report, errors.New("nil measurement engine")
 		}
+		if owned, ok := engine.(*LlamaEngine); ok {
+			owned.readinessWorker = &o.Worker
+		}
 		engines = append(engines, engine)
 		releases = append(releases, pendingRelease)
 		pendingRelease = nil
@@ -240,9 +243,19 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 		}
 		start := o.Worker.Clock.Now()
 		e = sampleMeasureOperation(ctx, o.SampleInterval, sample, func(c context.Context) error {
-			loadCtx, cancel := context.WithTimeout(c, o.LoadTimeout)
+			loadCtx, cancel := context.WithCancel(c)
+			if o.LoadTimeout > 0 {
+				cancel()
+				loadCtx, cancel = context.WithTimeout(c, o.LoadTimeout)
+			}
 			defer cancel()
-			return engine.Load(loadCtx, m)
+			loadCtx, _, finish := superviseModelLoad(loadCtx, m, s.dir, o.Worker.Clock)
+			e := engine.Load(loadCtx, m)
+			if e == nil && loadCtx.Err() != nil {
+				e = context.Cause(loadCtx)
+			}
+			finish(e == nil)
+			return e
 		})
 		stage.LoadSeconds = o.Worker.Clock.Now().Sub(start).Seconds()
 		if e == nil && o.WarmupParallel == 1 {

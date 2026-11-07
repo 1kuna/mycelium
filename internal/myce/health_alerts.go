@@ -122,6 +122,7 @@ func (q *Queue) pruneHealthEvents() {
 
 func (q *Queue) detectHealth() {
 	q.detectHostHygiene()
+	q.detectReadinessHealth()
 	// Job-specific pressure conditions follow live demand, rather than growing
 	// with retained job history. Project input conditions are bounded by policy.
 	for key := range q.s.Health.Conditions {
