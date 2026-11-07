@@ -24,7 +24,8 @@ func retireSharedProfileSocket(root, path string, identity os.FileInfo) error {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
-		_ = os.Remove(filepath.Dir(path))
+		// The per-user parent is shared by distinct registries. Another registry
+		// can be between creating that directory and binding its own socket.
 	}
 	return nil
 }
