@@ -232,9 +232,10 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("fake manager supports Darwin and Linux")
 	}
-	// This bounds a broken acceptance harness, never production work/drain time.
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-	t.Cleanup(cancel)
+	// The gate supervisor learns a silence budget from measured command timings.
+	// Report real phase progress below and use the runner's cancellation: fixture
+	// builds and per-service stability windows do not form a fixed journey budget.
+	ctx := t.Context()
 	dir := t.TempDir()
 	const token = "fleet-e2e-test-authority"
 	const oldVersion, newVersion = "v99.244.1", "v99.244.2"
@@ -248,6 +249,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	}
 	buildRelease := func(version string) release {
 		t.Helper()
+		t.Logf("fleet acceptance: building signed fixture %s", version)
 		path := filepath.Join(dir, version, "myce")
 		cmd := exec.CommandContext(ctx, "go", "build", "-p", "1", "-tags=myce_test", "-ldflags", "-X mycelium/internal/myce.BuildVersion="+version, "-o", path, ".")
 		cmd.Env = append(os.Environ(), "GOMAXPROCS=2")
@@ -371,10 +373,13 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	var lastErr error
 	poll := func(description string, predicate func() bool) {
 		t.Helper()
+		started := time.Now()
+		t.Logf("fleet acceptance: waiting for %s", description)
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			if predicate() {
+				t.Logf("fleet acceptance: completed %s in %s", description, time.Since(started).Round(time.Millisecond))
 				return
 			}
 			select {
@@ -384,9 +389,22 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			}
 		}
 	}
+	lastProgress := ""
 	status := func() bool {
 		snapshot = myce.Snapshot{}
-		lastErr = client.Call(ctx, "GET", "/api/status", nil, &snapshot)
+		// Global status need not include completed jobs: adaptive history pages
+		// may contain only one row. Read exact receipts for continuity below.
+		lastErr = client.Call(ctx, "GET", "/api/status?jobs=active", nil, &snapshot)
+		if lastErr == nil && snapshot.FleetUpgrade != nil {
+			parts := []string{snapshot.FleetUpgrade.State}
+			for _, host := range snapshot.FleetUpgrade.Hosts {
+				parts = append(parts, fmt.Sprintf("%s=%s (%s)", host.Host, host.Phase, host.Wait))
+			}
+			if progress := strings.Join(parts, "; "); progress != lastProgress {
+				t.Logf("fleet acceptance progress: %s", progress)
+				lastProgress = progress
+			}
+		}
 		return lastErr == nil
 	}
 	poll("queue startup", func() bool {
@@ -564,14 +582,9 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	assertAttempts := func() {
 		t.Helper()
 		for id, initial := range jobs {
-			var observed *myce.Job
-			for _, j := range snapshot.Jobs {
-				if j.ID == id {
-					observed = j
-				}
-			}
-			if observed == nil {
-				t.Errorf("job %s lost", id)
+			observed, err := client.GetJob(ctx, id)
+			if err != nil {
+				t.Errorf("read job %s continuity: %v", id, err)
 				continue
 			}
 			if observed.Attempt != initial.Attempt || observed.Starts != 1 || observed.Losses != 0 || observed.InfrastructureRetries != 0 || observed.Session != initial.Session || observed.Machine != initial.Machine || observed.StartedAt == nil || !observed.StartedAt.Equal(*initial.StartedAt) {
@@ -614,13 +627,12 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			return false
 		}
 		for id := range jobs {
-			found := false
-			for _, j := range snapshot.Jobs {
-				if j.ID == id && j.State == "succeeded" {
-					found = true
-				}
+			j, err := client.GetJob(ctx, id)
+			if err != nil {
+				lastErr = err
+				return false
 			}
-			if !found {
+			if j.State != "succeeded" {
 				return false
 			}
 		}
