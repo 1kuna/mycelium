@@ -342,8 +342,8 @@ func TestObservationLimitRetainedProductionLedger(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if q.s.Jobs[j.ID] != nil {
-		t.Fatal("fixture was not pruned")
+	if q.s.Jobs[j.ID] == nil {
+		t.Fatal("unique production history was pruned")
 	}
 	for _, restart := range []bool{false, true} {
 		if restart {
@@ -369,8 +369,8 @@ func TestObservationLimitRetainedProductionLedger(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if _, protected := l.index.observationPriority(j.ID); protected {
-		t.Fatal("expired intent retained")
+	if _, protected := l.index.observationPriority(j.ID); !protected {
+		t.Fatal("unique production intent lost on age")
 	}
 }
 

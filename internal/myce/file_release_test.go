@@ -488,9 +488,9 @@ func TestFileReleaseProtectsExpiredCustodyAndRecoveredResults(t *testing.T) {
 				case "expired_custody":
 					other.Attempt = 1
 				case "recovered_result":
-					other.RecoveredResults = []RecoveredResult{{RecoveryRequest: RecoveryRequest{Files: FileManifest{"recovery": ref}}, ExpiresAt: clock.Now().Add(DefaultFileRetention)}}
+					other.RecoveredResults = []RecoveredResult{{RecoveryRequest: RecoveryRequest{Files: FileManifest{"recovery": ref}}, ExpiresAt: clock.Now().Add(testFileRetention)}}
 				case "refreshed_bundle":
-					q.s.BundleUploads = map[string]time.Time{ref.SHA256: clock.Now().Add(-DefaultFileRetention)}
+					q.s.BundleUploads = map[string]time.Time{ref.SHA256: clock.Now().Add(-testFileRetention)}
 				case "recent_bundle":
 					q.s.BundleUploads = map[string]time.Time{ref.SHA256: clock.Now()}
 				}

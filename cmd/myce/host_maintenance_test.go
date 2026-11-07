@@ -219,7 +219,7 @@ func TestHostMaintenanceBudgetDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	var s myce.HostBudgetSuggestion
-	if err = json.Unmarshal(out.Bytes(), &s); err != nil || s.SuggestedGB != 16 || !s.DryRun || s.History.Samples != 1 {
+	if err = json.Unmarshal(out.Bytes(), &s); err != nil || s.SuggestedGB != 20 || s.HeadroomGB != 0 || !s.DryRun || s.History.Samples != 1 {
 		t.Fatal(out.String(), err)
 	}
 	after, err := q.HostMaintenanceStatus("host")

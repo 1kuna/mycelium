@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 )
 
 func (d *dockerAttempt) rpcBudget(operation string) time.Duration {
@@ -53,27 +54,27 @@ type dockerProgressOutput struct {
 		status  string
 		current int64
 	}
-	line     []byte
-	dropping bool
+	line     diagnosticLine
+	releases []func()
 }
 
 func (w *dockerProgressOutput) Write(b []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	n, err := w.output.Write(b)
-	for _, c := range b[:n] {
-		if c == '\n' || c == '\r' {
-			if !w.dropping {
-				w.record(w.line)
-			}
-			w.line, w.dropping = w.line[:0], false
-		} else if len(w.line) < dockerEventLineLimit && !w.dropping {
-			w.line = append(w.line, c)
-		} else {
-			w.line, w.dropping = w.line[:0], true
-		}
-	}
+	w.line.write(b[:n], w.record)
 	return n, err
+}
+
+func (w *dockerProgressOutput) close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.line.clear()
+	for _, release := range w.releases {
+		release()
+	}
+	w.releases = nil
+	w.layers = nil
 }
 func (w *dockerProgressOutput) record(line []byte) {
 	var v struct {
@@ -94,6 +95,17 @@ func (w *dockerProgressOutput) record(line []byte) {
 		}{}
 	}
 	old, exists := w.layers[v.ID]
+	if !exists {
+		// Layer identities survive individual lines; reserve their retained
+		// representation separately from transient JSON/parser memory.
+		needed := uint64(len(v.ID)+len(v.Status)) + uint64(unsafe.Sizeof(old)+unsafe.Sizeof(v.ID))
+		grant, release := w.line.tail.reserveBytes(needed)
+		if uint64(grant) < needed {
+			release()
+			return
+		}
+		w.releases = append(w.releases, release)
+	}
 	if !exists || dockerProgressPhase(v.Status) > dockerProgressPhase(old.status) || v.Status == old.status && v.Progress.Current > old.current {
 		w.layers[v.ID] = struct {
 			status  string

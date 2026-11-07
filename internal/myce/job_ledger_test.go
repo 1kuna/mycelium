@@ -198,8 +198,8 @@ func TestJobLedgerRequeuesCustodyPaginationRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(q.s.Jobs[j.ID].AttemptHistory) != attemptHistoryLimit {
-		t.Fatal("diagnostic cap changed")
+	if len(q.s.Jobs[j.ID].AttemptHistory) != 18 {
+		t.Fatal("open attempt diagnostics were dropped")
 	}
 	q = reopenCancellationQueue(t, q, clock)
 	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())

@@ -62,6 +62,7 @@ func (q *Queue) memoryObservations(k ObservationKey, configuration string) []*Wo
 	return q.memoryObservationCatalog().work[memoryWorkIdentity(k, configuration)]
 }
 func (q *Queue) putWorkObservation(id string, point WorkObservation) {
+	q.evidenceGeneration++
 	if q.s.WorkObservations == nil {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}

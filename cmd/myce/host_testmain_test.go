@@ -77,7 +77,11 @@ func cliTestMain(m *testing.M) int {
 		code = m.Run()
 	}
 
-	if err := testenv.Cleanup(dir); err != nil { // All tests and children have joined.
+	if err := stopCLIObserverFixtures(dir); err != nil {
+		fmt.Fprintln(os.Stderr, "retain active observer fixture:", err)
+		return 1
+	}
+	if err := testenv.Cleanup(dir); err != nil { // All tests and observers have joined.
 		code = 1
 	}
 	return code

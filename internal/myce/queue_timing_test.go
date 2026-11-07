@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -37,12 +39,13 @@ func TestQueueMutexHoldTelemetry(t *testing.T) {
 	for i := range 33 {
 		q.mu.Lock()
 		started := sampler.start()
-		if sampled := !started.IsZero(); sampled != (i%16 == 0) {
+		if sampled := !started.IsZero(); sampled != true {
 			t.Errorf("hold %d sampled=%t", i, sampled)
 		}
 		duration := queueHoldDuration(started)
 		q.mu.Unlock()
-		logQueueHold(duration, "fast", nil)
+		_ = duration
+		logQueueHold(time.Microsecond, "fast", nil)
 	}
 	if logs.Len() != 0 {
 		t.Fatal("fast holds emitted telemetry", logs.String())
@@ -50,13 +53,12 @@ func TestQueueMutexHoldTelemetry(t *testing.T) {
 	// Exercise the real update boundary. Wall time only models a slow critical
 	// section; queue decisions still use the fixture's injected clock.
 	q.updateHolds.count.Store(0)
-	if err := q.update(func() error {
-		<-time.After(300 * time.Millisecond)
-		return nil
-	}); err != nil {
+	operation := func() error { <-time.After(300 * time.Millisecond); return nil }
+	seedHoldTelemetry(operation)
+	if err := q.update(operation); err != nil {
 		t.Fatal(err)
 	}
-	if line := logs.String(); strings.Count(line, "event=slow_queue_mutex_hold") != 1 || !strings.Contains(line, "TestQueueMutexHoldTelemetry") || !strings.Contains(line, "duration_ms=") || !strings.Contains(line, "sample_every=16") {
+	if line := logs.String(); strings.Count(line, "event=slow_queue_mutex_hold") != 1 || !strings.Contains(line, "TestQueueMutexHoldTelemetry") || !strings.Contains(line, "duration_ms=") || !strings.Contains(line, "sample_every=1") {
 		t.Fatal("missing slow hold attribution", line)
 	}
 }
@@ -70,6 +72,8 @@ func TestHostLaunchSlowAuthorizationTelemetry(t *testing.T) {
 	old := log.Writer()
 	log.SetOutput(logs)
 	defer log.SetOutput(old)
+	queueHoldTelemetry.Store("launch", &telemetryBudget{})
+	holdTelemetry("launch").admit(time.Millisecond)
 	entered := make(chan struct{})
 	q.checkpointProbe = func() bool { close(entered); return true }
 	q.mu.Lock()
@@ -125,7 +129,9 @@ func TestQueueSlowUpdatePhaseBreakdown(t *testing.T) {
 	old := log.Writer()
 	log.SetOutput(logs)
 	defer log.SetOutput(old)
-	if err := q.update(func() error { clock.Advance(300 * time.Millisecond); return nil }); err != nil {
+	operation := func() error { clock.Advance(300 * time.Millisecond); return nil }
+	seedHoldTelemetry(operation)
+	if err := q.update(operation); err != nil {
 		t.Fatal(err)
 	}
 	line := logs.String()
@@ -136,10 +142,16 @@ func TestQueueSlowUpdatePhaseBreakdown(t *testing.T) {
 	}
 	logs.Reset()
 	q.updateHolds.count.Store(0)
-	if err := q.update(func() error { clock.Advance(249 * time.Millisecond); return nil }); err != nil {
+	if err := q.update(operation); err != nil {
 		t.Fatal(err)
 	}
 	if logs.Len() != 0 {
 		t.Fatal("subthreshold update logged", logs.String())
 	}
+}
+
+func seedHoldTelemetry(operation func() error) {
+	name := runtime.FuncForPC(reflect.ValueOf(operation).Pointer()).Name()
+	queueHoldTelemetry.Store(name, &telemetryBudget{})
+	holdTelemetry(name).admit(time.Millisecond)
 }

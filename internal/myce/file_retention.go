@@ -9,17 +9,18 @@ import (
 	"time"
 )
 
-const DefaultFileRetention = 7 * 24 * time.Hour
+// Zero selects automatic retention. Unique file bytes require explicit release;
+// a positive configured duration remains an operator-authored policy.
+const DefaultFileRetention time.Duration = 0
 
-// Six hours covers the gap from the first file's publish/HEAD to submit or
-// complete: later multi-GB uploads, slow NAS, and a queue outage or deploy can
-// delay that reference for hours. Only refreshed bytes receive this publication
-// grace; it does not extend a terminal job's result-recovery window.
-const filePublicationGrace = 6 * time.Hour
-
+// Publication/reference lifecycle locks and revision fences, rather than an
+// elapsed grace, protect concurrent writes. Unclaimed unique bytes stay pinned
+// in automatic mode; an explicit retention policy supplies any orphan deadline.
 // Bound filesystem work while draining a large expiry backlog so maintenance
 // remains responsive. Durable per-job progress avoids repeating completed work.
-const fileReclaimBatch = 64
+// One atomic reference/record is the indivisible reclamation unit. Yield the
+// control lock between units rather than guessing a fleet-wide batch size.
+const fileReclaimBatch = 1
 
 // Stored on the existing job record, not a separate blob index. A non-nil value
 // with no pending hashes means this job's input/result reclamation is complete.
@@ -133,8 +134,8 @@ func (q *Queue) releaseFileUploadMarkers() {
 }
 
 func (q *Queue) ConfigureFileRetention(age time.Duration) error {
-	if age <= 0 {
-		return errors.New("file-retention must be positive")
+	if age < 0 {
+		return errors.New("file-retention must be nonnegative")
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -158,6 +159,9 @@ func isResultExpired(err error) bool {
 // answers; increasing retention later cannot restore deleted bytes.
 func (q *Queue) maintainFileExpiry() {
 	now := q.clock.Now()
+	if q.fileRetention == 0 {
+		return
+	}
 	if q.records == nil {
 		q.rebuildRecords()
 	}
@@ -227,6 +231,13 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 			}
 		}
 	}
+	for _, claim := range q.s.FileInputClaims {
+		if claim.SettledAt.IsZero() {
+			owner = FileKeepingReference{Project: claim.Project}
+			keepFiles("input_claim", FileManifest{claim.ID: claim.File})
+		}
+	}
+	owner = FileKeepingReference{}
 	for hash := range q.bundleReferences(subset...) {
 		keepFiles("extension_environment_bundle", FileManifest{"bundle": {SHA256: hash}})
 	}
@@ -282,7 +293,7 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		// attached after the original job's ordinary files have already expired.
 		for _, r := range j.RecoveredResults {
 			add(referenced, r.Files)
-			if q.clock.Now().Before(r.ExpiresAt) {
+			if r.ExpiresAt.IsZero() || q.clock.Now().Before(r.ExpiresAt) {
 				keepFiles("recovered_result", r.Files)
 			} else {
 				add(expired, r.Files)
@@ -297,7 +308,7 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		for _, a := range j.AttemptHistory {
 			if a.Diagnostics != nil {
 				add(referenced, a.Diagnostics.Files)
-				if j.Spec.OutputDestination != nil && j.FinishedAt != nil && q.clock.Now().Before(j.FinishedAt.Add(q.fileRetention)) {
+				if j.Spec.OutputDestination != nil && j.FinishedAt != nil && (q.fileRetention == 0 || q.clock.Now().Before(j.FinishedAt.Add(q.fileRetention))) {
 					keepFiles("retained_attempt_diagnostics", a.Diagnostics.Files)
 				}
 			}
@@ -422,17 +433,17 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 		}
 	}
 	revision := q.fileReferenceRevision
-	cutoff := q.clock.Now().Add(-filePublicationGrace)
+	cutoff := q.clock.Now().Add(-q.s.PublicationHorizon)
 	orphanCutoff := q.clock.Now().Add(-q.fileRetention)
 	orphans := map[string]time.Time{}
 	bundles := map[string]time.Time{}
 	for hash, published := range q.s.BundleUploads {
-		if !published.After(orphanCutoff) && !referenced[hash] {
+		if q.fileRetention > 0 && !published.After(orphanCutoff) && !referenced[hash] {
 			bundles[hash] = published
 		}
 	}
 	for hash, published := range q.jobUploadMarkers() {
-		if !published.IsZero() && !published.After(orphanCutoff) && !referenced[hash] {
+		if q.fileRetention > 0 && !published.IsZero() && !published.After(orphanCutoff) && !referenced[hash] {
 			orphans[hash] = published
 		}
 	}
@@ -441,7 +452,6 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 		return nil
 	}
 	gone := map[string]bool{}
-	checked := 0
 	deferred := false
 	reclaim := func(hash string, orphan, bundle bool) {
 		// The same fence covers tus publication and verify-then-commit callers.
@@ -496,24 +506,21 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 		}
 	}
 	for _, hash := range candidates {
-		if checked == fileReclaimBatch || deferred {
+		if deferred || requestCtx.Err() != nil || q.fileReclaimUnderPressure() {
 			break
 		}
-		checked++
 		reclaim(hash, false, false)
 	}
 	for hash := range orphans {
-		if checked == fileReclaimBatch || deferred {
+		if deferred || requestCtx.Err() != nil || q.fileReclaimUnderPressure() {
 			break
 		}
-		checked++
 		reclaim(hash, true, false)
 	}
 	for hash := range bundles {
-		if checked == fileReclaimBatch || deferred {
+		if deferred || requestCtx.Err() != nil || q.fileReclaimUnderPressure() {
 			break
 		}
-		checked++
 		reclaim(hash, false, true)
 	}
 	requestUnlock3 := requestLock(requestCtx, &q.mu)
@@ -595,3 +602,8 @@ func hasJobFiles(j *Job) bool {
 	}
 	return false
 }
+
+// Per-object lifecycle and control fences release between I/O operations. A
+// measured waiting control request yields the rest; an idle queue drains its
+// backlog without an arbitrary producer-count limit.
+func (q *Queue) fileReclaimUnderPressure() bool { busy, _ := q.evidencePressure(); return busy }

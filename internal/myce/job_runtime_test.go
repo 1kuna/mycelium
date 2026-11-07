@@ -68,8 +68,8 @@ func TestJobRuntimeStaleAndNoncomparableHistory(t *testing.T) {
 	}
 	second := startObservation(t, q, m, s)
 	r := runtimeJob(t, q, second.ID).Runtime
-	if r.RemainingSeconds != nil || !strings.Contains(r.Reason, "older than 30 days") {
-		t.Fatalf("stale history: %+v", r)
+	if r.RemainingSeconds == nil || r.RemainingWorkUnknown {
+		t.Fatalf("age alone expired comparable evidence: %+v", r)
 	}
 	q.s.Jobs[second.ID].Timing.Reason = "mixed or unknown host occupancy"
 	r = runtimeJob(t, q, second.ID).Runtime
