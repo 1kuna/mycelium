@@ -173,6 +173,11 @@ for the response age. Inspection and filtered/full status take a fresh capture;
 default status can reuse a generation for up to one second, with immediate
 terminal/release invalidation.
 
+From the next release, mixed CPU/RAM waits name occupied cores on eligible
+hosts alongside the other hosts' RAM shortages. Reserved cores are admission
+accounting, not measured CPU utilization; a RAM figure alone does not explain
+why every eligible host is waiting.
+
 From the next collector release, job GET/status `resource_attempts` reports
 cumulative CPU time, block I/O and latest attempt PSI; machine `io_pressure`
 reports host PSI. Read the exact attempt/session, source, age and unavailable

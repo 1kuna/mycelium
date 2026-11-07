@@ -64,6 +64,24 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 					blocked = append(blocked, why)
 				}
 			}
+			// Permanent capacity above deliberately ignores current occupancy.
+			// Explain occupied cores here, before an otherwise empty target can
+			// discard the other hosts' blockers or the RAM-only fallback skips it.
+			if !cpuFits(candidate, m) {
+				why := m.CPUCapacityReason
+				if why == "" {
+					_, why = cpuCapacity(m)
+				}
+				if why == "" {
+					why = fmt.Sprintf("%d cores needed; %d cores unreserved of %d admitted (%d reserved; CPU utilization unknown)", candidate.Spec.Needs.cores(), m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
+				}
+				blocked = append(blocked, "CPU capacity: "+why)
+			}
+			// Permanent qualification also clears temporary availability. Such
+			// a host cannot serve this job just because its cores and RAM fit.
+			if m.Disabled != "" || m.Gone || m.Leaving || m.Recovering || availabilityBlocked(m) {
+				blocked = append(blocked, HyphaAvailability(m))
+			}
 			specific = specific || len(blocked) > 0
 			if why := hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB); why != "" {
 				n := candidate.Spec.Needs
@@ -86,7 +104,13 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 		return ""
 	}
 	slices.Sort(reasons)
-	return strings.Join(slices.Compact(reasons), "; ")
+	reason := strings.Join(slices.Compact(reasons), "; ")
+	if len(j.Spec.AllowedMachines) > 0 {
+		// Preserve authored placement context when a pinned host's temporary
+		// blocker is more specific than the ordinary allowed-machine wait.
+		reason = "waiting for allowed machines: " + strings.Join(j.Spec.AllowedMachines, ", ") + "; " + reason
+	}
+	return reason
 }
 
 // Occupancy is not RAM pressure. Explain the same sharing/release gate used by
