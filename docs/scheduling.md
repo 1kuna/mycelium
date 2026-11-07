@@ -5,6 +5,14 @@ machine. Eligibility and owner tiers precede weighted fairness, available capaci
 victim disruption and least-valuable fit. Same-tier indefinite work has no bounded
 wait guarantee. Advice and estimates are snapshots, never reservations.
 
+CPU backfill also accounts for queued fan-out waves and wave retries. The
+ordinary wave planner selects their measured resource vector and destination;
+finite CPU executions, including running waves, can supply projected RAM/cores
+as they finish. New work behind that demand's tier/fair turn may use only the
+remaining capacity. An immediately usable production destination takes precedence
+over a different host's projected releases. Projections never authorize an early
+start or release existing custody; withdrawal removes the admission fence.
+
 - [Placement and memory](#placement-without-hardware-requirements-v3)
 - [Owner priority policy](#owner-priority-policy)
 - [Fair sharing and usage](#sharing-gpus-and-measuring-the-pool)
