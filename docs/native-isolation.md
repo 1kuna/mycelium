@@ -15,15 +15,16 @@ and sandboxed commands and sidecar groups. Explicit host-memory declarations kee
 their resolved threshold (including configured slack). GPU jobs, managed Docker,
 preparation and model servers retain their existing behavior.
 
-A learned reservation is an estimate, not an authored hard limit. From the next
+Learned and bounded exploratory reservations are estimates, not authored hard limits. From the next
 release, a queue and worker that both support adaptive native CPU memory let a
-learned `memory: auto` attempt grow its charge from live measurement. Linux's
+learned or bounded exploratory `memory: auto` attempt grow its charge from live measurement. Linux's
 parent `memory.max` is bounded by measured physical RAM and the configured host
-allowance, rather than the smaller learned estimate. Explicit member cgroups stay
+allowance, rather than the smaller estimate. Cold physical probes keep their initial
+execution ceiling and existing probe-charge forecast. Explicit member cgroups stay
 in place. Darwin uses sampled RSS and has no kernel memory ceiling. An older
 queue or worker retains the previous reservation-sized ceiling/guard contract.
 
-Above the learned reservation, sustained measured contention stops the exact
+Above an estimated reservation, sustained measured contention stops the exact
 attempt: OS warning/critical pressure, new swap/OOM/stall activity, or live
 availability insufficient for the configured owner reserve plus measured growth
 over the sampling horizon. The configured host allowance remains a hard bound.
@@ -44,6 +45,12 @@ Its timing was not retained. A synthetic fake-clock replay of an accelerating
 fork shape must stop while pressure is still normal and before swap starts;
 its shared-RSS/stable-headroom counterpart retains the learned growth contract.
 This is a stop-decision regression, not historical timing or native stress proof.
+A later saved #850 incident stopped at 3.3578033447265625 GiB against a
+3.2467041015625 GiB bounded exploratory estimate despite normal pressure and
+8.378646850585938 GiB minimum available. The fake-clock regression permits this
+growth, re-reserves through the common forecast, and lets the clean completion
+teach an accepted peak. The pressure counterpart remains an OOM-class guard stop
+and cannot train an accepted peak. Growth of an estimate alone is not an OOM.
 The #850 recovery separately retains the measured 0.560638427734375 GiB overshoot
 as uncertainty without doubling demand beyond every eligible allowance.
 

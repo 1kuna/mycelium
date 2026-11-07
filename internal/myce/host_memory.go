@@ -493,13 +493,13 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 // A CPU probe's ceiling contains an unknown run; it is not measured demand.
 // Once its exact attempt supplies fresh, uniquely charged resident usage and a
 // measured growth horizon, account for that forecast instead of holding the
-// whole initial ceiling. Learned native CPU jobs reuse that forecast, with the
-// learned reservation as a floor. RSS increases the charge but grants no
+// whole initial ceiling. Estimated native CPU jobs reuse that forecast, with the
+// resolved reservation as a floor. RSS increases the charge but grants no
 // resident credit. No GPU attribution earns probe credit. Unknown/stale samples and stopping attempts
 // retain the complete ceiling, including after restart or worker downgrade.
 func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
 	charge = ceiling
-	adaptiveCeiling := learnedMemoryCeilingGB(j, m)
+	adaptiveCeiling := adaptiveMemoryCeilingGB(j, m)
 	if adaptiveCeiling > 0 {
 		// Unknown/stale telemetry retains the physical/explicit execution
 		// ceiling, including while stopping. It cannot release a grown charge.
@@ -513,7 +513,7 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	forecast := sample.growthGB + sample.rateGB*now.Sub(sample.at).Seconds()
 	floor := e.ProbeFloorGB
 	if adaptiveCeiling > 0 {
-		floor = max(floor, ceiling) // Learned estimates can grow, never earn probe credit.
+		floor = max(floor, ceiling) // Estimates can grow, never earn probe credit.
 	}
 	charge = max(floor, sample.footprintGB+forecast+exploratoryDriftMarginGB(m))
 	growth = max(0, charge-sample.gb)

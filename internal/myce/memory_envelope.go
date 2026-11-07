@@ -482,7 +482,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	// with older queues, and older workers on their existing kernel ceilings.
 	if contains(m.Capabilities, learnedMemoryGuardCapability) {
 		copy.MemoryEnvelope.Enforcement = learnedMemoryGuardEnforcement
-		if learnedMemoryCeilingGB(&copy, m) <= 0 {
+		if adaptiveMemoryCeilingGB(&copy, m) <= 0 {
 			copy.MemoryEnvelope.Enforcement = enforcement
 		}
 	}

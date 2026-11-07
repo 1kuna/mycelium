@@ -2076,10 +2076,11 @@ precedence remain binding; active same-tier work is not stopped to repay debt.
 
 ## Learned native CPU memory growth (next release)
 
-An acknowledged `adaptive native CPU memory guard` treats the learned reservation
-as a prediction. Fresh exact-attempt footprint and growth measurements use the
+An acknowledged `adaptive native CPU memory guard` treats learned and bounded
+exploratory reservations as predictions. Fresh exact-attempt footprint and growth measurements use the
 same forecast as cold CPU probes, including sample age and measured drift, with
-the learned reservation as a floor. Unknown/stale telemetry and stopping attempts
+the resolved estimate as a floor. Cold physical probes retain their initial
+execution ceiling. Unknown/stale telemetry and stopping attempts
 retain the complete physical/explicit execution ceiling. Darwin RSS can increase
 the charge but grants no resident-memory credit because shared pages can appear
 in multiple processes. The reported estimate and the execution ceiling therefore

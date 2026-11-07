@@ -8,11 +8,17 @@ import (
 const learnedMemoryGuardCapability = "learned_cpu_memory_growth_v1"
 const learnedMemoryGuardEnforcement = "adaptive native CPU memory guard"
 
-// A learned native CPU reservation is a prediction, not an authored limit.
+// Learned and bounded exploratory CPU reservations are predictions, not authored
+// limits. A cold physical probe keeps its initial containment ceiling: its
+// ProbeFloorGB marks the measured-headroom execution contract from admission.
 // The kernel still contains the attempt within physical RAM and the operator's
 // explicit allowance. Member limits, Docker and declared thresholds are unchanged.
-func learnedMemoryCeilingGB(j *Job, m *Machine) float64 {
-	if j == nil || m == nil || j.Spec.Run.Docker || !j.Spec.Needs.cpuOnly() || j.Spec.Needs.Memory != "auto" || j.MemoryEnvelope == nil || j.MemoryEnvelope.Basis != "learned" || j.MemoryEnvelope.Enforcement != learnedMemoryGuardEnforcement {
+func adaptiveMemoryCeilingGB(j *Job, m *Machine) float64 {
+	if j == nil || m == nil || j.Spec.Run.Docker || !j.Spec.Needs.cpuOnly() || j.Spec.Needs.Memory != "auto" || j.MemoryEnvelope == nil || j.MemoryEnvelope.Enforcement != learnedMemoryGuardEnforcement {
+		return 0
+	}
+	e := j.MemoryEnvelope
+	if e.Basis != "learned" && (e.Basis != "exploratory" || e.ProbeFloorGB > 0) {
 		return 0
 	}
 	cap := m.HostMemoryBudgetGB
@@ -33,7 +39,7 @@ func (w Worker) jobCeilingBytes(j Job) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if cap := learnedMemoryCeilingGB(&j, &w.Machine); cap > 0 {
+	if cap := adaptiveMemoryCeilingGB(&j, &w.Machine); cap > 0 {
 		if _, err := MemoryCeilingConfig(cap, 0, w.MemorySwapMaxBytes); err != nil {
 			return 0, err
 		}
@@ -57,7 +63,7 @@ type learnedMemoryGuard struct {
 
 func (w Worker) learnedGuard(j Job) learnedMemoryGuard {
 	limit, _ := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-	cap, _ := memoryBytes(learnedMemoryCeilingGB(&j, &w.Machine))
+	cap, _ := memoryBytes(adaptiveMemoryCeilingGB(&j, &w.Machine))
 	hard, _ := memoryBytes(w.Machine.HostMemoryBudgetGB)
 	return learnedMemoryGuard{rssGuard: rssGuard{limit: limit}, ceiling: cap, hard: hard, reserve: w.HostMemoryReserveGB}
 }

@@ -354,7 +354,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if p.docker == nil {
 				report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
-				if memory == nil && learnedMemoryCeilingGB(&a.job, &w.Machine) > 0 {
+				if memory == nil && adaptiveMemoryCeilingGB(&a.job, &w.Machine) > 0 {
 					report.CurrentHostMemory = p.currentProcessHostMemory()
 				}
 			}

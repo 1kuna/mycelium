@@ -92,10 +92,124 @@ func TestLearnedMemoryGuardLinuxCeiling(t *testing.T) {
 	if err != nil || string(data) != strconv.FormatInt(12<<30, 10) {
 		t.Fatalf("kernel cap: %s %v", data, err)
 	}
+	j.MemoryEnvelope.Basis = "exploratory"
+	bytes, err = w.jobCeilingBytes(j)
+	if err != nil || bytes != 12<<30 {
+		t.Fatalf("bounded exploratory cap: %d %v", bytes, err)
+	}
+	j.MemoryEnvelope.ProbeFloorGB = 1 // A cold physical probe keeps its launch ceiling.
+	bytes, err = w.jobCeilingBytes(j)
+	if err != nil || bytes != 4214571008 {
+		t.Fatalf("cold physical cap changed: %d %v", bytes, err)
+	}
 	j.Spec.Needs.Memory, j.MemoryEnvelope.Basis = "", "declared"
 	bytes, err = w.jobCeilingBytes(j)
 	if err != nil || bytes != 4214571008 {
 		t.Fatalf("declared cap changed: %d %v", bytes, err)
+	}
+}
+
+// Saved #850 follow-up: a changed profile identity used a bounded exploratory
+// estimate, then RSS-stopped with normal pressure and 8.38 GiB still available.
+// Replay the exact peak/estimate through negotiation, the guard and learning.
+// GrowthGB is retained as observed; its timing is investigated separately.
+func TestLearnedMemoryGuardExploratoryIncident(t *testing.T) {
+	const limit, peak = 3.2467041015625, 3.3578033447265625
+	const observedGrowth = 2.1867791904561273
+	for _, pressure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pressure=%v", pressure), func(t *testing.T) {
+			q, clock, m := learnedMemoryFixture(t)
+			m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 12, .125
+			m.CapabilityProfile.OS, m.CapabilityProfile.Arch = "darwin", "arm64"
+			m.CapabilityProfile.SystemMemoryBytes = 16 << 30
+			m.MemoryEnforcement = darwinRSSGuardStatus
+			m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
+			check(t, q, m, nil)
+			s := cpuSpec(1, 0)
+			s.Run.Command = []string{"sh", "-c", "echo prior-profile"}
+			runMemory(t, q, clock, m, s, limit-.125-minimumHostMemoryGB, func(r *Result) {
+				r.MemoryPeak.CgroupGB = nil
+				r.MemoryPeak.Source = processGroupMemorySource
+			})
+			s.Run.Command = []string{"sh", "-c", "echo changed-profile"}
+			pending := submit(t, q, s)
+			run := check(t, q, m, nil).Job
+			if run == nil || run.ID != pending.ID {
+				t.Fatal("changed profile not assigned")
+			}
+			e := run.MemoryEnvelope
+			if e.Basis != "exploratory" || e.ProbeFloorGB != 0 || math.Abs(e.HostGB-limit) > 1e-9 || e.Enforcement != learnedMemoryGuardEnforcement {
+				t.Fatalf("estimated exploratory contract not negotiated: %+v", e)
+			}
+			if err := q.Started(result(run, false)); err != nil {
+				t.Fatal(err)
+			}
+			w := Worker{Machine: m, HostMemoryReserveGB: 3}
+			guard := w.learnedGuard(*run)
+			var stop *RSSLimitEvidence
+			for i := 0; i < 4; i++ {
+				host := &gpuHostState{available: 8.378646850585938, level: 1}
+				if pressure {
+					host.available, host.level = .5, 2
+				}
+				stop = guard.observeMemory(clock.Now(), map[int]string{7: "birth"}, uint64(peak*(1<<30)), 2, nil, host)
+				if stop != nil {
+					break
+				}
+				clock.Advance(processMemorySamplePeriod)
+			}
+			if (stop != nil) != pressure {
+				t.Fatalf("exploratory stop=%+v pressure=%v", stop, pressure)
+			}
+			if !pressure {
+				// Re-reserve through #852's common forecast, with no RSS resident
+				// credit and no second calculation for exploratory estimates.
+				footprint := peak
+				report := AttemptReport{Execution: Execution{ID: run.ID, Attempt: run.Attempt}, Session: run.Session, Started: true,
+					CurrentHostMemory: &CurrentHostMemory{FootprintGB: &footprint, GrowthObserved: true, GrowthGB: observedGrowth, GrowthRateGB: observedGrowth}}
+				sample := currentHostMemorySamples([]AttemptReport{report}, clock.Now())[jobKey(*run)]
+				charge, pending := jobHostMemoryCharge(job(t, q, run.ID), &m, limit, sample, clock.Now())
+				if math.Abs(charge-5.669582535182689) > 1e-9 || pending != charge {
+					t.Fatalf("exploratory growth not re-reserved without RSS credit: charge=%g pending=%g", charge, pending)
+				}
+			}
+			r := classifyAttemptOutcome(result(run, stop == nil), attemptCause{memberOutcome: memberOutcome{RSSLimit: stop}})
+			p, growth := peak, observedGrowth
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &p, GrowthGB: &growth, Source: processGroupMemorySource, Constrained: stop != nil}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			ended := job(t, q, run.ID)
+			if len(ended.MemoryAttempts) != 1 {
+				t.Fatal("missing exact attempt learning facts")
+			}
+			facts := ended.MemoryAttempts[0]
+			if pressure {
+				if facts.LearningReason != "oom" || !facts.MemoryPeak.Constrained || !r.OutOfMemory || safeRSSLimit(r.ExecutionCause.RSSLimit) == nil {
+					t.Fatalf("real contention lost stop/learning evidence: %+v result=%+v", facts, r)
+				}
+			} else if facts.LearningReason != "eligible" || facts.MemoryPeak.Constrained || r.OutOfMemory || ended.MemoryOOMFloor != nil || ended.State != "succeeded" {
+				t.Fatalf("estimate overage became OOM evidence: %+v job=%+v", facts, ended)
+			}
+			accepted := false
+			for _, point := range q.s.WorkObservations {
+				if point.Key == *run.Timing.Key && !point.MemoryRecordedAt.IsZero() && point.MemoryPeak != nil && !point.MemoryPeak.constrained() {
+					accepted = true
+					if *point.MemoryPeak.HostGB != peak || memoryGrowthGB(point.MemoryPeak) != observedGrowth {
+						t.Fatalf("clean grown measurement changed: %+v", point.MemoryPeak)
+					}
+				}
+			}
+			if accepted == pressure {
+				t.Fatalf("accepted learning=%v pressure=%v", accepted, pressure)
+			}
+			if !pressure {
+				next := q.memoryCandidate(submit(t, q, s), &m)
+				if next.MemoryEnvelope.Basis != "learned" || next.MemoryEnvelope.Evidence < 1 || next.MemoryEnvelope.HostGB < peak {
+					t.Fatalf("healthy grown run did not teach estimate: %+v", next.MemoryEnvelope)
+				}
+			}
+		})
 	}
 }
 
@@ -255,16 +369,16 @@ func TestLearnedMemoryGuardNegotiatesBeforeWidening(t *testing.T) {
 	if legacy.MemoryEnvelope.Basis != "learned" {
 		t.Fatalf("fixture has no accepted estimate: %+v", legacy.MemoryEnvelope)
 	}
-	if learnedMemoryCeilingGB(legacy, &m) > 0 {
+	if adaptiveMemoryCeilingGB(legacy, &m) > 0 {
 		t.Fatal("old worker acquired wider ceiling")
 	}
 	m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
 	current := q.memoryCandidate(pending, &m)
-	if cap := learnedMemoryCeilingGB(current, &m); cap != 12 {
+	if cap := adaptiveMemoryCeilingGB(current, &m); cap != 12 {
 		t.Fatalf("new queue did not acknowledge accounting: %+v cap=%g", current.MemoryEnvelope, cap)
 	}
 	current.MemoryEnvelope.Enforcement = "memory ceilings enforced (cgroup v2)"
-	if learnedMemoryCeilingGB(current, &m) > 0 {
+	if adaptiveMemoryCeilingGB(current, &m) > 0 {
 		t.Fatal("old queue authorized wider worker cap")
 	}
 }
