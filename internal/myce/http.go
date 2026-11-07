@@ -449,6 +449,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		if workerProtocolEndpoint(r.URL.Path) {
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
+			w.Header().Set(cpuPressureProtocolHeader, cpuPressureProtocol)
 		}
 		finishObservation, admitted := observationLimit.admit(w, r)
 		if !admitted {
@@ -599,7 +600,8 @@ type Client struct {
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
-	in, resourceFields := resourceWireInput(in, supported)
+	cpuPressure := c.resourceWire != nil && c.resourceWire.cpuPressure.Load()
+	in, resourceFields := resourceWireInput(in, supported, cpuPressure)
 	err := c.callOnce(ctx, method, path, in, out)
 	var api *HTTPError
 	if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
@@ -607,6 +609,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		// additive telemetry removed; retain the original durable local result.
 		if c.resourceWire != nil {
 			c.resourceWire.supported.Store(false)
+			c.resourceWire.cpuPressure.Store(false)
 		}
 		legacy, _ := resourceWireInput(in, false)
 		return c.callOnce(ctx, method, path, legacy, out)
@@ -652,6 +655,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	defer res.Body.Close()
 	if c.resourceWire != nil && workerProtocolEndpoint(path) {
 		c.resourceWire.supported.Store(res.Header.Get(resourceProtocolHeader) == resourceProtocol)
+		c.resourceWire.cpuPressure.Store(res.Header.Get(cpuPressureProtocolHeader) == cpuPressureProtocol)
 	}
 	if support, ok := ctx.Value(waitCapabilityKey{}).(*bool); ok {
 		*support = res.Header.Get("X-Myce-Wait") == "batch-v1"

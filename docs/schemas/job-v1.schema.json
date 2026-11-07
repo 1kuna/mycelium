@@ -102,6 +102,9 @@
         "periods": {
           "type": "integer"
         },
+        "pressure": {
+          "$ref": "#/$defs/IOPressure"
+        },
         "source": {
           "type": "string"
         },

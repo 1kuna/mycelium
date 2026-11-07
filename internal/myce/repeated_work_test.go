@@ -28,7 +28,7 @@ func cleanRepeatedResult(j *Job) Result {
 	r := result(j, true)
 	zero := 0.0
 	r.MemoryPeak = &AttemptMemoryPeak{Pressure: &MemoryPressureEvidence{Reason: "eligible"}}
-	r.Resources = &AttemptResources{CPU: AttemptCPUTime{Source: "cgroup_v2", UsageSeconds: &zero, ThrottledSeconds: &zero}, IO: AttemptIO{Pressure: &IOPressure{Some: &PressureStall{}}}}
+	r.Resources = &AttemptResources{CPU: AttemptCPUTime{Source: "cgroup_v2", UsageSeconds: &zero, ThrottledSeconds: &zero, Pressure: &IOPressure{Some: &PressureStall{}}}, IO: AttemptIO{Pressure: &IOPressure{Some: &PressureStall{}}}}
 	return r
 }
 
@@ -221,8 +221,33 @@ func TestRepeatedWorkKeepsMemoryGrouping(t *testing.T) {
 	}
 }
 
+func TestRepeatedWorkPreservation(t *testing.T) {
+	q, clock, m, _, s := repeatedFixture(t)
+	before := preservationSnapshot(t, q)
+	var pages []JobLedgerPage
+	for _, duration := range []time.Duration{time.Second, 2 * time.Second, time.Second} {
+		if len(pages) == 2 {
+			clock.Advance(workCurveMaxAge + time.Second)
+			check(t, q, m, nil)
+		}
+		j := teachRepeated(t, q, clock, m, s, duration)
+		page, err := q.JobLedger(j.ID, 0, -1, 256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages = append(pages, page)
+		after := preservationSnapshot(t, q)
+		if _, err := VerifyCurvePreservation(before, after, pages); err != nil {
+			t.Fatal("accepted speed mutation lacks release-preservation proof", err)
+		}
+		if _, err := VerifyCurvePreservation(before, after, nil); err == nil {
+			t.Fatal("speed mutation accepted without ledger provenance")
+		}
+	}
+}
+
 func TestRepeatedWorkRejectsUncleanAttempts(t *testing.T) {
-	for _, scenario := range []string{"failed", "interrupted", "stale", "memory pressure", "missing pressure", "missing counters", "throttled", "io stalls", "mixed host"} {
+	for _, scenario := range []string{"failed", "interrupted", "stale", "memory pressure", "missing pressure", "missing counters", "missing cpu pressure", "cpu scheduling", "throttled", "io stalls", "mixed host"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, clock, m, _, s := repeatedFixture(t)
 			j := startObservation(t, q, m, s)
@@ -240,6 +265,12 @@ func TestRepeatedWorkRejectsUncleanAttempts(t *testing.T) {
 				r.MemoryPeak = nil
 			case "missing counters":
 				r.Resources = nil
+			case "missing cpu pressure":
+				r.Resources.CPU.Pressure = nil
+			case "cpu scheduling":
+				// An unrelated process can delay scheduling with zero quota
+				// throttling, memory pressure and I/O stalls.
+				r.Resources.CPU.Pressure.Some.TotalUS = 1
 			case "throttled":
 				v := .1
 				r.Resources.CPU.ThrottledSeconds = &v

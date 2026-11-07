@@ -91,13 +91,18 @@ func (q *Queue) recordRepeatedObservation(j *Job, r Result) {
 	t.ActualSeconds = &seconds
 	prior, _ := q.repeatedPoint(t.RepeatedKey)
 	p := addRepeatedTiming(prior, seconds)
-	q.putWorkObservation(identityHash(t.RepeatedKey), WorkObservation{Key: *t.RepeatedKey, Repeated: p,
-		Samples: p.Samples, RecordedAt: q.clock.Now(), Source: "accepted repeated command",
-		Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})
+	id := identityHash(t.RepeatedKey)
+	old, exists := q.s.WorkObservations[id]
+	point := WorkObservation{Key: *t.RepeatedKey, Repeated: p,
+		Samples: old.Samples + 1, RecordedAt: q.clock.Now(), Source: "accepted repeated command",
+		Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
+	q.putWorkObservation(id, point)
+	q.recordCurveLearning(j, old, exists, point)
 }
 
 // No new pressure threshold: a clean comparison requires measured zero CPU
-// throttling and I/O stalls. This can exclude intrinsically I/O-bound work; that
+// scheduling stalls, quota throttling and I/O stalls. This can exclude work
+// delayed by internal parallelism or intrinsic I/O; that
 // is preferable to teaching external contention as machine speed. Missing or
 // lower-bound counters cannot assert zero. Memory uses its existing baselined
 // pressure classification. No additional collectors or benchmark jobs run.
@@ -111,11 +116,12 @@ func repeatedContentionReason(r Result) string {
 	}
 	if a == nil || a.CPU.Unavailable != "" || a.CPU.LowerBound || a.CPU.UsageSeconds == nil ||
 		!validMemoryValue(*a.CPU.UsageSeconds) || a.CPU.ThrottledSeconds == nil || !validMemoryValue(*a.CPU.ThrottledSeconds) ||
+		a.CPU.Pressure == nil || a.CPU.Pressure.Unavailable != "" || a.CPU.Pressure.Some == nil ||
 		a.IO.Pressure == nil || a.IO.Pressure.Unavailable != "" || a.IO.Pressure.Some == nil {
 		return "CPU or I/O contention evidence unavailable; speed unknown"
 	}
-	if *a.CPU.ThrottledSeconds > 0 || a.IO.Pressure.Some.TotalUS > 0 {
-		return "CPU throttling or I/O stalls; speed comparison excluded"
+	if *a.CPU.ThrottledSeconds > 0 || a.CPU.Pressure.Some.TotalUS > 0 || a.IO.Pressure.Some.TotalUS > 0 {
+		return "CPU scheduling/throttling or I/O stalls; speed comparison excluded"
 	}
 	return ""
 }

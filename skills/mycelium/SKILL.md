@@ -161,7 +161,8 @@ without `workload` units. Status work curves and attempt timing explain the exac
 command/source/input/environment comparison, clean sample count and observed
 range. A single sample leaves variability unknown; ranges are not deadlines.
 Changed source/input bytes, resumptions, overlapping work, pressure and missing
-CPU/I/O counters leave speed unknown. Legacy unversioned inputs and external
+CPU scheduling-pressure/I/O counters leave speed unknown. Quota throttling alone
+does not establish a clean CPU comparison. Legacy unversioned inputs and external
 work directories/runtimes do not establish a comparison. Describe frozen work
 normally: Mycelium uses learned speed after admission and least-valuable fit,
 and never waits for a busy faster machine. This does not qualify a platform or

@@ -69,6 +69,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		c = legacyUnifiedMemoryCheckin(w.legacyHygieneCheckin(full))
 		if w.Client.resourceWire != nil {
 			w.Client.resourceWire.supported.Store(false)
+			w.Client.resourceWire.cpuPressure.Store(false)
 		}
 		if w.unifiedMemoryWire != nil {
 			w.unifiedMemoryWire.supported = false
