@@ -9,16 +9,15 @@ import (
 	"time"
 )
 
-// #868: a 4 GiB job refused live_host_growth at 17.106637954711914 /
-// 17.005722045898438 GiB. This replay supplies explicit co-tenant growth and
-// assignment availability, which the historical receipt did NOT retain. It
-// proves the supported recovery shape, not the incident's unknown RAM cause.
+// Synthetic direct-RAM refusal fixture for the action lifecycle. #868's
+// live_host_growth incident does not establish snapshot drift; its forecast
+// regression is covered separately below and must yield an owner finding.
 func alertRecoveryFixture(t *testing.T) (*Queue, *fakeClock, Machine, *Job, *Job) {
 	t.Helper()
 	q, c := fixture(t)
 	m := cpuMachine("worker", "host", "cpu", 8, 64)
 	m.Devices = []MachineDevice{} // the keyed concurrent worker protocol
-	co := submit(t, q, cpuSpec(1, 13.106637954711914))
+	co := submit(t, q, cpuSpec(1, 13))
 	assigned := assignedJob(machineCheck(t, q, m))
 	if assigned == nil {
 		t.Fatal("missing co-tenant")
@@ -36,20 +35,20 @@ func refusedRAM(j *Job, available float64) Result {
 	r := result(j, false)
 	r.Interrupted = true
 	r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit", Predicate: "memory_capacity", PrelaunchRefused: true,
-		Admission: &AdmissionDetail{Subcheck: "live_host_growth", Unit: "GiB", Required: 17.106637954711914, Available: &available, EnvelopeSource: "declared", EnvelopeHostGB: 4}}
+		Admission: &AdmissionDetail{Subcheck: "live_host_ram", Unit: "GiB", Required: 4, Available: &available, EnvelopeSource: "declared", EnvelopeHostGB: 4}}
 	return r
 }
 
 func twoRAMRefusals(t *testing.T, q *Queue, m Machine, co, j *Job) *Job {
 	t.Helper()
-	if err := q.Complete(refusedRAM(j, 17.005722045898438)); err != nil {
+	if err := q.Complete(refusedRAM(j, 3)); err != nil {
 		t.Fatal(err)
 	}
 	next := assignedJob(machineCheck(t, q, m, co))
 	if next == nil {
 		t.Fatal("missing second attempt")
 	}
-	if err := q.Complete(refusedRAM(next, 17.005722045898438)); err != nil {
+	if err := q.Complete(refusedRAM(next, 3)); err != nil {
 		t.Fatal(err)
 	}
 	return next
@@ -64,14 +63,14 @@ func recoveryReceipt(t *testing.T, q *Queue) *AlertRecovery {
 	return e[0].Recovery
 }
 
-func TestAlertRecoveryRAMIncidentAndHealthyHistory(t *testing.T) {
+func TestAlertRecoveryDirectRAMAndHealthyHistory(t *testing.T) {
 	q, c, m, co, j := alertRecoveryFixture(t)
 	if len(alertsOf(q, "infrastructure_loss_streak")) != 0 {
 		t.Fatal("healthy assignments triggered recovery")
 	}
 	refused := twoRAMRefusals(t, q, m, co, j)
 	r := recoveryReceipt(t, q)
-	if r.State != "verifying" || r.Action != "refresh_live_host_memory" || r.Cause != "live_host_growth" || r.PreviousGB != 64 || r.AvailableGB != 17.005722045898438 {
+	if r.State != "verifying" || r.Action != "refresh_live_host_memory" || r.Cause != "live_host_ram" || r.PreviousGB != 64 || r.AvailableGB != 3 {
 		t.Fatalf("missing exact action/cause/result: %+v", r)
 	}
 	if q.s.Machines[m.ID].HostAvailableMemoryGB != r.AvailableGB || q.s.Machines[m.ID].FreeHostMemoryGB >= 4 {
@@ -122,7 +121,7 @@ func TestAlertRecoveryRAMIncidentAndHealthyHistory(t *testing.T) {
 	}
 	// A separate healthy history includes successful work between losses.
 	q2, _, m2, co2, j2 := alertRecoveryFixture(t)
-	if err := q2.Complete(refusedRAM(j2, 17.005722045898438)); err != nil {
+	if err := q2.Complete(refusedRAM(j2, 3)); err != nil {
 		t.Fatal(err)
 	}
 	healthy := assignedJob(machineCheck(t, q2, m2, co2))
@@ -206,11 +205,11 @@ func TestAlertRecoveryRejectsNewerObservationAndUnsupportedCause(t *testing.T) {
 	for _, unsupported := range []bool{false, true} {
 		t.Run(map[bool]string{false: "newer-observation", true: "unsupported"}[unsupported], func(t *testing.T) {
 			q, _, m, co, j := alertRecoveryFixture(t)
-			if err := q.Complete(refusedRAM(j, 17.005722045898438)); err != nil {
+			if err := q.Complete(refusedRAM(j, 3)); err != nil {
 				t.Fatal(err)
 			}
 			next := assignedJob(machineCheck(t, q, m, co))
-			r := refusedRAM(next, 17.005722045898438)
+			r := refusedRAM(next, 3)
 			if unsupported {
 				r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "io_error", Predicate: "command_start"}
 			} else {
@@ -242,7 +241,7 @@ func TestAlertRecoveryFailedVerificationOneOwnerFinding(t *testing.T) {
 	twoRAMRefusals(t, q, m, co, j)
 	r := recoveryReceipt(t, q)
 	next := assignedJob(machineCheck(t, q, m, co))
-	if err := q.Complete(refusedRAM(next, 16.814495086669922)); err != nil {
+	if err := q.Complete(refusedRAM(next, 2)); err != nil {
 		t.Fatal(err)
 	}
 	for range 4 {
@@ -264,5 +263,78 @@ func TestAlertRecoveryFailedVerificationOneOwnerFinding(t *testing.T) {
 	public, err := q.jobSnapshot(j.ID)
 	if err != nil || !strings.Contains(JobReason(public), "did not resolve") {
 		t.Fatal("job finding lost failed recovery", public, err)
+	}
+}
+
+// #868's 2026-11-07 capture recorded this unbounded forecast comparison.
+// Replay the retained receipt, independent of #909's fix to the producer:
+// correcting availability cannot establish the required forecast's validity.
+func TestAlertRecoveryUnboundedGrowthForecastNeedsOwner(t *testing.T) {
+	q, _ := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 8, 128)
+	m.Devices = []MachineDevice{}
+	submit(t, q, cpuSpec(1, 13))
+	co := assignedJob(machineCheck(t, q, m))
+	submit(t, q, cpuSpec(1, 4.125))
+	j := assignedJob(machineCheck(t, q, m, co))
+	if co == nil || j == nil {
+		t.Fatal("missing assignments")
+	}
+	available := 89.68
+	for range 2 {
+		r := refusedRAM(j, available)
+		r.ExecutionCause.Admission = &AdmissionDetail{Subcheck: "live_host_growth", Unit: "GiB", Required: 89.83, Available: &available, EnvelopeSource: "declared", EnvelopeHostGB: 4.125}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if len(alertsOf(q, "infrastructure_loss_streak")) == 0 {
+			j = assignedJob(machineCheck(t, q, m, co))
+		}
+	}
+	r := recoveryReceipt(t, q)
+	if r.State != "owner_required" || r.Action != "none" || r.Cause != "live_host_growth" || r.AvailableGB != available || !strings.Contains(r.NextStep, "forecast bounds") {
+		t.Fatalf("forecast refusal needs an immediate actionable owner finding: %+v", r)
+	}
+	if q.s.Machines[m.ID].HostAvailableMemoryGB != 128 {
+		t.Fatal("growth forecast was misdiagnosed as stale availability")
+	}
+	for range 3 {
+		if err := q.Complete(refusedRAM(j, 1)); err != nil && !errors.Is(err, ErrStale) {
+			t.Fatal(err)
+		}
+		if err := q.update(func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(alertsOf(q, "infrastructure_loss_streak")) != 1 || len(alertsOf(q, "alert_recovery_action_required")) != 0 || q.s.Machines[m.ID].HostAvailableMemoryGB != 128 {
+		t.Fatal("repeated observation duplicated the finding or changed capacity")
+	}
+	public, err := q.jobSnapshot(j.ID)
+	if err != nil || !strings.Contains(JobReason(public), "forecast bounds") {
+		t.Fatal("job finding omitted the forecast owner's next step", public, err)
+	}
+}
+
+// The original #868 attempts 5/6 lack paired assignment/forecast snapshots.
+// Their recorded comparisons must not be treated as evidence of RAM drift.
+func TestAlertRecoveryHistoricalGrowthRefusalsNeedOwner(t *testing.T) {
+	q, _, m, co, j := alertRecoveryFixture(t)
+	for _, comparison := range [][2]float64{
+		{17.106637954711914, 17.005722045898438},
+		{16.86988639831543, 16.814495086669922},
+	} {
+		r := refusedRAM(j, comparison[1])
+		r.ExecutionCause.Admission.Subcheck = "live_host_growth"
+		r.ExecutionCause.Admission.Required = comparison[0]
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if len(alertsOf(q, "infrastructure_loss_streak")) == 0 {
+			j = assignedJob(machineCheck(t, q, m, co))
+		}
+	}
+	r := recoveryReceipt(t, q)
+	if r.State != "owner_required" || r.Action != "none" || q.s.Machines[m.ID].HostAvailableMemoryGB != 64 || !strings.Contains(r.NextStep, "paired queue/worker") {
+		t.Fatal("historical growth comparison incorrectly authorized correction", r)
 	}
 }

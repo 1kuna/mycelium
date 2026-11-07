@@ -75,7 +75,13 @@ func (q *Queue) recoverHealthAlert(e HealthAlert) *AlertRecovery {
 	// A later check-in is authoritative, even at the very same injected-clock
 	// timestamp. Replayed endings, replaced sessions and later executions cannot
 	// downgrade its live memory evidence. Old assignments have no generation.
-	if proof != nil && j != nil && j.Attempt == e.Attempt && j.State == "queued" && j.Machine == "" && !cancelled(j) &&
+	if proof != nil && proof.Cause == "live_host_growth" {
+		// #868/#909: the required side can be an unbounded growth forecast,
+		// rather than stale availability. AdmissionDetail has no paired owner
+		// forecast terms to distinguish them; a generation fence cannot do so.
+		r.Summary = "Repeated prelaunch memory refusals include a growth forecast whose cause is unverified; Mycelium left capacity unchanged"
+		r.NextStep = "Ask the Mycelium maintenance owner to inspect forecast bounds and paired queue/worker memory snapshots; keep the same job and submission key"
+	} else if proof != nil && j != nil && j.Attempt == e.Attempt && j.State == "queued" && j.Machine == "" && !cancelled(j) &&
 		last.JobID == e.JobID && last.Attempt == e.Attempt && m != nil && !m.Gone && !m.Leaving &&
 		m.Session == last.Session && proof.AdmissionRevision != 0 && m.AdmissionRevision == proof.AdmissionRevision &&
 		m.HostMemoryMeasured && m.HostMemoryError == "" && proof.AvailableGB < m.HostAvailableMemoryGB {

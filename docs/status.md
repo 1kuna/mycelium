@@ -1648,14 +1648,19 @@ cost evidence and its actual duration, never an assumed complete minute.
   Replays cannot increment it; planned stops are excluded. Successful
   or workload-caused endings break the streak. Historical failures interrupted
   by successful work do not fire. It preserves all existing attempt fences.
-  From the next release (#881), a matching proven prelaunch `live_host_ram` or
-  `live_host_growth` refusal can correct an older live free-RAM snapshot using
+  From the next release (#881), a matching proven prelaunch `live_host_ram`
+  refusal can correct an older live free-RAM snapshot using
   its retained available-RAM comparison. The assignment must still own the exact
   queue-written check-in generation and worker session; a newer report, including
   one at the same timestamp, wins. This never changes a configured allowance,
   reservation, learned size, retry budget, checkpoint or release obligation.
   The usual placement rules use the corrected snapshot; new worker observations
   remain authoritative. It does not infer the historical cause of RAM drift.
+  `live_host_growth` instead yields an immediate `owner_required` finding with
+  capacity unchanged: the retained comparison cannot distinguish stale
+  availability from an inflated growth forecast (#868/#909). The maintenance
+  owner needs forecast bounds and paired queue/worker memory snapshots; a fresh
+  assignment generation alone does not establish that cause.
   `health_alerts[].recovery` and the affected job's `health_recovery` retain the
   episode, exact execution/session, action, cause, before/after availability,
   summary and next step. `verifying` requires a later matching attempt to pass

@@ -169,7 +169,10 @@ failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
 
 From the next release (#881), job `health_recovery` explains a correction to stale
-free-RAM evidence after repeated prelaunch refusals. `verifying` means the same
+free-RAM evidence after repeated direct-RAM prelaunch refusals. Growth-forecast
+refusals (`live_host_growth`) leave capacity unchanged and ask the Mycelium
+maintenance owner to inspect forecast bounds and paired queue/worker snapshots;
+they do not prove stale free RAM. `verifying` means the same
 job is waiting for normal capacity and a later successful start; keep its ID and
 submission key. `verified` names the later started attempt; it does not establish
 completion or accepted output. `owner_required` names the worker owner's next
