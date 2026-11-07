@@ -348,3 +348,32 @@ func TestEstimateCalibrationQualificationAndParity(t *testing.T) {
 		t.Fatal("placement did not retain calibration evidence")
 	}
 }
+
+func TestEstimateCalibrationBenchmarkCannotTrainOrReplacePairs(t *testing.T) {
+	q, clock, m, e, s := curveFixture(t)
+	key, reason := curveKey(e, q.s.Machines[m.ID], s.workType())
+	if key == nil {
+		t.Fatal(reason)
+	}
+	point := WorkObservation{Key: *key, Source: "idle reference", SampleID: "first-benchmark", Rate: 5, Units: 10, Seconds: 2, LatencySeconds: 2, RecordedAt: clock.Now(),
+		Calibration: &ServiceCalibration{Estimator: serviceEstimator, Samples: 100, MeanError: 100, RecordedAt: clock.Now()}}
+	publishCurves(t, q, m, []WorkObservation{point})
+	id := identityHash(key)
+	if got := q.s.WorkObservations[id]; got.Samples != 1 || got.Calibration != nil {
+		t.Fatal("unpaired benchmark introduced calibration", got)
+	}
+	j := startObservation(t, q, m, s)
+	clock.Advance(4 * time.Second)
+	if err := q.Complete(cleanRepeatedResult(&j)); err != nil {
+		t.Fatal(err)
+	}
+	prior := q.s.WorkObservations[id].Calibration
+	if prior == nil || prior.Samples != 1 || prior.MeanError != .2 {
+		t.Fatal("accepted pair not recorded", prior)
+	}
+	point.SampleID, point.RecordedAt = "second-benchmark", clock.Now()
+	publishCurves(t, q, m, []WorkObservation{point})
+	if got := q.s.WorkObservations[id].Calibration; got == nil || *got != *prior {
+		t.Fatal("benchmark replaced accepted calibration", got, prior)
+	}
+}
