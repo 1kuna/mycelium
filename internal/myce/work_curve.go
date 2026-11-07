@@ -222,6 +222,8 @@ func (q *Queue) acceptCurveReports(c Checkin, m *Machine) {
 				p.DeviceMemoryGB = max(old.DeviceMemoryGB, p.DeviceMemoryGB)
 				p.IncrementalHostMemoryGB = max(old.IncrementalHostMemoryGB, p.IncrementalHostMemoryGB)
 				p.IncrementalDeviceMemoryGB = max(old.IncrementalDeviceMemoryGB, p.IncrementalDeviceMemoryGB)
+				// Raw benchmark reports cannot introduce or replace accepted paired errors.
+				p.Calibration, _ = q.calibrationPrior(old)
 				// Memory evidence comes only from accepted attempts, never a report.
 				p.MemoryPeak, p.MemoryRecordedAt, p.MemoryConfiguration, p.MemoryLayout = old.MemoryPeak, old.MemoryRecordedAt, old.MemoryConfiguration, old.MemoryLayout
 				p.MemoryEscalation = old.MemoryEscalation

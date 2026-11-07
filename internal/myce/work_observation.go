@@ -61,6 +61,7 @@ type MemoryEscalationPrior struct {
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
+	Calibration         *ServiceCalibration    `json:"service_calibration,omitempty"`
 	Repeated            *RepeatedWorkTiming    `json:"repeated,omitempty"`
 	MemoryEscalation    *MemoryEscalationPrior `json:"memory_escalation,omitempty"`
 	GPUHostRange        *MemoryPeakRange       `json:"gpu_host_range,omitempty"`
@@ -95,12 +96,13 @@ type WorkObservation struct {
 }
 
 type WorkTiming struct {
-	RepeatedKey       *ObservationKey `json:"repeated_key,omitempty"`
-	Comparability     string          `json:"comparability,omitempty"`
-	Uncertainty       string          `json:"uncertainty,omitempty"`
-	HistoryReason     string          `json:"history_reason,omitempty"`
-	HistoryRecordedAt *time.Time      `json:"history_recorded_at,omitempty"`
-	HistorySource     string          `json:"history_source,omitempty"`
+	ServiceEstimate   *ServiceEstimate `json:"service_estimate,omitempty"`
+	RepeatedKey       *ObservationKey  `json:"repeated_key,omitempty"`
+	Comparability     string           `json:"comparability,omitempty"`
+	Uncertainty       string           `json:"uncertainty,omitempty"`
+	HistoryReason     string           `json:"history_reason,omitempty"`
+	HistoryRecordedAt *time.Time       `json:"history_recorded_at,omitempty"`
+	HistorySource     string           `json:"history_source,omitempty"`
 
 	PlacementReason  string          `json:"placement_reason,omitempty"`
 	Execution        Execution       `json:"execution"`
@@ -257,6 +259,7 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 }
 
 func (q *Queue) beginWorkTiming(j *Job) {
+	defer q.calibrateWorkTiming(j)
 	if j.Spec.Workload == nil && !plainCommandWork(j.Spec) && !(j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory == "auto") {
 		return
 	}
@@ -403,6 +406,11 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 	point.HostMemoryGB, point.DeviceMemoryGB = old.HostMemoryGB, old.DeviceMemoryGB
 	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB
 	point.Forbidden = old.Forbidden
+	// A fresh raw sample cannot rehabilitate invalidated paired errors.
+	point.Calibration, _ = q.calibrationPrior(old)
+	if throughput {
+		q.recordServiceCalibration(j, r, original, &point)
+	}
 	point.SampleID = old.SampleID
 	point.MemoryEscalation = old.MemoryEscalation
 	point.MemoryPeak = old.MemoryPeak
@@ -453,6 +461,9 @@ func JobTiming(j *Job) string {
 	}
 	if t.PlacementReason != "" {
 		text += "; " + t.PlacementReason
+	}
+	if t.ServiceEstimate != nil {
+		text += "; " + t.ServiceEstimate.text()
 	}
 	return text + envelope + runtimeText(j)
 }

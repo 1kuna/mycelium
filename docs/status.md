@@ -1380,6 +1380,32 @@ have explicit `runtime.reason` values. Plain commands still show elapsed time
 and explain their missing workload/reference metadata. These observations do not
 change placement or measurement qualification.
 
+From the next release (#879), exact repeated-command and comparable extension
+forecasts correct service time using accepted raw prediction error. Job timing
+`service_estimate` exposes `raw_seconds`, signed `correction_seconds`, `samples`
+(the number of accepted prediction/outcome pairs), `estimator`, `uncertainty` and
+an optional fallback `reason`. `predicted_seconds` is raw plus correction; the
+placement reason and CLI/HTML explain the same calculation alongside unchanged
+setup and transfer costs. The correction is the mean actual-minus-raw seconds
+per work unit, scaled to the requested units (one job for repeated commands).
+Corrected predictions never train their own correction. The first accepted run
+has no prior prediction and cannot supply a pair.
+
+Evidence shares the exact work/target/component/runtime/configuration key and
+SQLite observation row. Failed, interrupted, stale, mixed, constrained and
+incompatible attempts cannot train it. Missing, invalidated or changed estimator
+evidence retains the raw estimate with an explicit reason; if raw evidence is
+unknown, calibration cannot make it known. Calibration shares the existing
+history-validity fence. One pair has unknown variability; multiple pairs show
+the observed raw error range, not a confidence bound. Nonpositive or nonfinite
+corrected durations retain raw service. No additional sample threshold, clipping
+constant, expiry window or fleet-tuned gain is introduced. Preparation and
+transfer remain uncalibrated because their separate paired outcomes are not
+available in Started-to-accepted timing. Status reads never train or persist.
+These forecasts rank only eligible, currently admissible alternatives after
+qualification, parity, tiers, fairness, disruption cost and scarcity. They grant
+no capacity, reserve no future slot and do not move running work.
+
 Native commands and extensions can atomically replace the local JSON file named
 by `MYCE_PROGRESS_FILE` (also mounted for managed Docker commands):
 

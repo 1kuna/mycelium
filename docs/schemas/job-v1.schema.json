@@ -4384,6 +4384,36 @@
       ],
       "type": "object"
     },
+    "ServiceEstimate": {
+      "properties": {
+        "correction_seconds": {
+          "type": "number"
+        },
+        "estimator": {
+          "type": "string"
+        },
+        "raw_seconds": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "uncertainty": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "estimator",
+        "raw_seconds",
+        "correction_seconds",
+        "samples",
+        "uncertainty"
+      ],
+      "type": "object"
+    },
     "SharedHostBackoff": {
       "properties": {
         "last_observation": {
@@ -5179,6 +5209,9 @@
         },
         "samples": {
           "type": "integer"
+        },
+        "service_estimate": {
+          "$ref": "#/$defs/ServiceEstimate"
         },
         "session": {
           "type": "string"

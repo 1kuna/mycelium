@@ -9,6 +9,7 @@ const workCurveMaxAge = 30 * 24 * time.Hour
 
 // A forecast ranks already eligible placements. It grants no resources or slots.
 type completionEstimate struct {
+	calibration                *ServiceEstimate
 	comparability, uncertainty string
 	group                      string
 	service, setup, transfer   float64
@@ -21,6 +22,9 @@ func (e completionEstimate) reason() string {
 	reason := fmt.Sprintf("measured completion %.2fs (service %.2fs + setup %.2fs + transfer %.2fs; %d samples; concurrency %d)", e.seconds(), e.service, e.setup, e.transfer, e.samples, max(1, e.count))
 	if e.comparability != "" {
 		reason += "; " + e.comparability + "; " + e.uncertainty
+	}
+	if e.calibration != nil {
+		reason += "; " + e.calibration.text()
 	}
 	return reason
 }
@@ -78,6 +82,7 @@ func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool
 			service: copy.Spec.Workload.Units / rate,
 			setup:   environmentSeconds(&copy, m), transfer: transfer + q.loadSeconds(copy.Spec.Needs.Model, m), samples: point.Samples,
 		}
+		e.service, e.calibration = q.calibratedService(key, e.service, copy.Spec.Workload.Units)
 		if validRate(e.seconds()) && validMemoryValue(e.setup) && validMemoryValue(e.transfer) {
 			return e, true
 		}

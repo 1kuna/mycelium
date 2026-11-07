@@ -211,6 +211,15 @@ normally: Mycelium uses learned speed after admission and least-valuable fit,
 and never waits for a busy faster machine. This does not qualify a platform or
 replace output-parity checks.
 
+From the next release (#879), comparable completion forecasts expose
+`timing.service_estimate`: raw service seconds, signed correction seconds,
+accepted pair count, uncertainty and a fallback reason. `predicted_seconds`
+includes that correction. CLI/HTML placement reasons explain it too. Pair count
+is distinct from raw timing sample count; observed error ranges are not confidence
+bounds or deadlines. Preparation/transfer remain separate and uncalibrated.
+Missing or incompatible pairs retain the raw estimate or its unknown state;
+forecasts grant no capacity, reserve no slot and do not move running work.
+
 If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
 repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium

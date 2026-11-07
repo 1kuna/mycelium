@@ -96,6 +96,7 @@ func (q *Queue) recordRepeatedObservation(j *Job, r Result) {
 	point := WorkObservation{Key: *t.RepeatedKey, Repeated: p,
 		Samples: old.Samples + 1, RecordedAt: q.clock.Now(), Source: "accepted repeated command",
 		Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
+	q.recordServiceCalibration(j, r, old, &point)
 	q.putWorkObservation(id, point)
 	q.recordCurveLearning(j, old, exists, point)
 }
@@ -180,5 +181,6 @@ func (q *Queue) estimateRepeatedCompletion(j *Job, m *Machine) (completionEstima
 	e := completionEstimate{group: key.RepeatedWork, service: p.Seconds,
 		setup: environmentSeconds(&copy, m), transfer: transfer, samples: p.Samples,
 		comparability: "exact repeated command", uncertainty: p.uncertainty()}
+	e.service, e.calibration = q.calibratedService(key, e.service, 1)
 	return e, validRate(e.seconds()) && validMemoryValue(e.setup) && validMemoryValue(e.transfer)
 }
