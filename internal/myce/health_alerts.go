@@ -18,22 +18,23 @@ const DefaultHealthStorageDelay = 5 * time.Minute
 // HealthAlert contains identities and fixed diagnostic codes, never worker text.
 // Receivers deduplicate DeliveryID, including after an ambiguous hook exit.
 type HealthAlert struct {
-	Recovery    *AlertRecovery `json:"recovery,omitempty"`
-	Machine     string         `json:"machine,omitempty"`
-	ClientKind  string         `json:"client_kind,omitempty"`
-	Project     string         `json:"project,omitempty"`
-	Reason      string         `json:"reason,omitempty"`
-	Recipients  []string       `json:"recipients,omitempty"`
-	DeliveryID  string         `json:"delivery_id"`
-	Kind        string         `json:"kind"`
-	Store       string         `json:"store,omitempty"`
-	Host        string         `json:"host,omitempty"`
-	Device      string         `json:"device,omitempty"`
-	Reservation string         `json:"reservation,omitempty"`
-	JobID       string         `json:"job_id,omitempty"`
-	Attempt     int            `json:"attempt,omitempty"`
-	At          time.Time      `json:"at"`
-	Delivered   bool           `json:"delivered"`
+	Recovery    *AlertRecovery   `json:"recovery,omitempty"`
+	Machine     string           `json:"machine,omitempty"`
+	ClientKind  string           `json:"client_kind,omitempty"`
+	Project     string           `json:"project,omitempty"`
+	Reason      string           `json:"reason,omitempty"`
+	Recipients  []string         `json:"recipients,omitempty"`
+	DeliveryID  string           `json:"delivery_id"`
+	Kind        string           `json:"kind"`
+	Store       string           `json:"store,omitempty"`
+	Host        string           `json:"host,omitempty"`
+	Device      string           `json:"device,omitempty"`
+	Reservation string           `json:"reservation,omitempty"`
+	JobID       string           `json:"job_id,omitempty"`
+	Attempt     int              `json:"attempt,omitempty"`
+	At          time.Time        `json:"at"`
+	Delivered   bool             `json:"delivered"`
+	Mount       *HostMountHealth `json:"mount,omitempty"`
 }
 type healthCondition struct {
 	Endings     []healthEnding `json:"endings,omitempty"`
