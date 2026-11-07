@@ -6,7 +6,6 @@ import (
 	"context"
 	"runtime"
 	"testing/fstest"
-	"time"
 
 	"mycelium/internal/probeguard"
 )

@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"testing"
 	"testing/fstest"
-	"time"
 )
 
 func TestMain(m *testing.M) {
