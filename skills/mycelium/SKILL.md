@@ -191,6 +191,16 @@ independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
 
+From the next release (#881), job `health_recovery` retains an `owner_required`
+decision after repeated infrastructure failures: `action: none` means Mycelium
+performed no automatic repair and left capacity unchanged. The summary names
+what happened and `next_step` names the owner's action. For `live_host_growth`,
+the Mycelium maintenance owner inspects forecast bounds and paired queue/worker
+snapshots; the comparison alone does not prove stale free RAM. Keep the same job
+ID and submission key. Do not raise shared budgets, clear custody or resubmit to
+bypass the finding. It uses the existing health notification channel; no new
+notifier setup is needed. Later progress does not establish a causal repair.
+
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
 negative behind), the measured history horizon, weighted oldest project-wait
@@ -322,3 +332,18 @@ their supported request shape while local collection continues.
 Installed/rollback images, active state, receipts and unknown data are retained;
 foreign services/processes and other projects' shared caches are owner context
 only. See [worker cleanup](https://github.com/1kuna/mycelium/blob/main/docs/status.md#worker-cleanup-834-next-release).
+
+## Queue efficiency (next release)
+
+Use `myce efficiency` for one concise read of reservation versus measured use,
+blocker wait totals, authored exclusions stranding fitting work, prediction
+errors and wasted/suspect attempts. `myce efficiency --json` reads the immutable
+maintenance report without fetching job payloads; status/inspection JSON also
+include `efficiency`. Read its `at` and coverage: nullable CPU/I/O counters,
+lower-bound flags, elapsed attempt windows and dropped-attempt count distinguish
+observed use from unknown. CPU/I/O counter windows can differ from the
+reservation horizon; they are not a utilization ratio. Missing memory samples
+are not zero use. `efficiency_regression` wakes use the existing
+health notification path and this installation's learned baselines. Investigate
+an offender with its per-job status; keep authored hard requirements and parity
+checks. See [queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/status.md#queue-efficiency-next-release-857).

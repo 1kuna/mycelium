@@ -63,6 +63,8 @@ func observationRouteClass(r *http.Request) string {
 		return "page"
 	case "/api/status":
 		return "status"
+	case "/api/efficiency":
+		return "efficiency"
 	case "/api/inspection":
 		return "inspection"
 	case "/api/usage":

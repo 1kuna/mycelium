@@ -2300,6 +2300,19 @@ are injectable for laptop verification.
 
 ## Rolling fleet upgrades
 
+Queue shutdown fences new requests without waiting for the queue mutex and
+cancels accepted HTTP/HTTPS observations, long polls and socket I/O. An
+uncommitted control transaction retries against the replacement queue; an
+already committing SQLite transaction finishes at its existing atomic boundary.
+The journal reports `event=queue_shutdown` phases `fenced`, `api_draining`,
+`api_closed`, `storage_wait` and `storage_closed`. A prolonged `storage_wait`
+requires transaction/storage evidence, not permission to treat a timeout as
+confirmed release. Both API transports share the existing ten-second HTTP
+stop budget; expiry closes their sockets and reports failure. It does not kill
+the queue or prove storage closure. The installed service-manager timeout is
+unchanged pending measured native shutdown evidence (#889); laptop cancellation
+tests do not qualify a native stop duration.
+
 Tested fixes deploy without a separate task, bundled one release at a time; roll
 back if the queue is not healthy. Do not patch during a successful production
 run. Fixing a run failing because of Mycelium is allowed and expected. Keep the
@@ -2338,6 +2351,30 @@ Accepted worker reports latch positive checkpoint recovery across stopped
 operations, queue cutover, missing runtime proof and queue restart. Dependency
 classification shares submission's device/variant qualification; component
 checks share enrollment's inventory baseline and acknowledged CPU/RAM budgets.
+
+From the release containing #900's queue-preservation slice, managed queue
+restart intent requires a final committed-record certificate. Shutdown closes
+SQLite while retaining its process lock, hashes immutable committed records
+outside the queue mutex, then fsyncs the certificate beside the database.
+Startup verifies it before index reconstruction, inventory resets and recovery
+transactions. Each host's `preservation` receipt records `required` or
+`verified`, the original session/revision, digest, record/byte counts and the
+queue-clock verification time. `queue_preservation` is ready only after this
+verification; `supported_handoff_not_observed` means older/unmanaged or not yet
+restarted, and is not passing proof. Remote batch work may continue through the
+handoff and retains its attempt identity.
+
+Missing, changed or undecodable records refuse startup with a fixed
+`fleet_preservation_*` code. Preserve the database and certificate for the
+maintenance owner; do not delete the requirement or restore an old database over
+new writes. The certificate covers normalized queue records, including retained
+terminal jobs, submission-key answers, accepted checkpoint/output references,
+custody and learned curves. It does not prove the remote blob contents,
+logs/usage tables, native downtime or safe database downgrade. No whole-queue
+status request or private preflight script is needed for this record proof.
+Writable offline conversion refuses `fleet_preservation_pending` until normal
+queue startup has verified and durably consumed the handoff. Read-only conversion
+preview remains available; it cannot consume or rewrite the certificate.
 
 From the release containing #900's critical slice, `--urgency normal|critical`
 is persisted with the operation; omitted urgency is `normal`. Normal waits for

@@ -1311,7 +1311,7 @@ placement changes require their later amendments.
 
 ## Safe sparse curves (slice 2, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the maintainer's delegated design authority,
 following the [research build plan](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/research/benchmark-batch-placement.md#incremental-build-plan).
 Placement and ordinary admission/concurrency limits remain unchanged.
 
@@ -1353,7 +1353,7 @@ Native mixed-load curves and fleet acceptance require separate authorization.
 
 ## Completion-aware placement (slice 3, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the maintainer's delegated design authority,
 following the [research build plan](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/research/benchmark-batch-placement.md#incremental-build-plan).
 Rank qualified extension commands using a common completion estimate: declared
 workload units divided by the exact comparable serial measured rate, plus cold
@@ -1384,7 +1384,7 @@ eligibility boundary, before completion ranking; no quality policy is added here
 
 ## Amendment: job memory envelopes (#146)
 
-Approved by the orchestrator under Zach's delegated design authority, 2026-10-24.
+Approved by the orchestrator under the maintainer's delegated design authority, 2026-10-24.
 Explicit `needs.host_memory_gb` and GPU `needs.memory_gb` retain their current
 admission meanings and defaults, including production. Optional `needs.memory:
 auto` first selects fresh accepted slice-1 whole-attempt peaks for the same
@@ -1671,7 +1671,7 @@ field in a policy update keeps the saved switch.
 
 ## Declared fan-out and batch planning (slice 4, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the maintainer's delegated design authority,
 following the [research build plan](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/research/benchmark-batch-placement.md#incremental-build-plan).
 This approval covers explicit homogeneous independent pieces, measured discrete
 horizon planning, and the model-measurement binding deferred from slice 3.
@@ -1943,6 +1943,17 @@ and stop on conflicting edits. Interruption/rerun rechecks the same postconditio
 rather than blindly restarting. Stop on the first download, verification, install,
 restart or health failure, leaving that host maintained and later hosts untouched.
 Status classifies runtime, custody, storage and component checks by capability.
+For a supported managed queue handoff, the accepted restart intent requires a
+certificate of the final normalized committed records. Close the database under
+the existing process file lock, hash immutable committed encodings outside the
+queue mutex and fsync a compact operation/revision/session-bound certificate.
+Startup verifies exact record count/hash and lossless field decoding before
+rebuilding indices, resetting inventory or running recovery/retention mutations.
+Only then persist verified preservation; missing/changed/undecodable records
+refuse startup and keep maintenance. This includes retained terminal jobs,
+keyed answers, checkpoint/output references, custody and learned curves. It does
+not verify remote blob bytes, logs/usage tables, native process survival or
+release-pair downgrade compatibility. Older/unmanaged handoffs remain unverified.
 A pre-existing checkpoint probe flag can be advisory only while it remains
 unrecovered, no live NAS-checkpoint/model work depends on that worker and no root
 is reported unavailable. It still restricts admission, and installer storage

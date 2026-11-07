@@ -94,12 +94,7 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 			return nil, err
 		}
 	}
-	base := q.s
-	base.Jobs = nil
-	base.Submissions = nil
-	base.Extensions = nil
-	base.WorkObservations = nil
-	base.StorageObservations = nil
+	base := normalizedQueueBase(q.s)
 	if err := put("state", base); err != nil {
 		return nil, err
 	}
@@ -165,7 +160,24 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 	return next, nil
 }
 
+func normalizedQueueBase(s state) state {
+	s.Jobs = nil
+	s.Submissions = nil
+	s.Extensions = nil
+	s.WorkObservations = nil
+	s.StorageObservations = nil
+	return s
+}
+
 func (q *Queue) loadPersistedState() error {
+	err := q.loadPersistedRecords()
+	if err == nil && q.persisted != nil {
+		q.rebuildRecords()
+	}
+	return err
+}
+
+func (q *Queue) loadPersistedRecords() error {
 	var marker []byte
 	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&marker); err == sql.ErrNoRows {
 		return nil
@@ -195,6 +207,5 @@ func (q *Queue) loadPersistedState() error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	q.rebuildRecords()
 	return nil
 }

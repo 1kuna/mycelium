@@ -136,7 +136,9 @@ func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[stri
 	// Keep physical free space and the inventory on the same side of a bundle
 	// write. Otherwise its bytes can be deducted by both disk-free and the
 	// completion ledger. No queue callbacks run under this filesystem fence.
-	s.uploadFilesMu.RLock()
+	if err := lockUploadContext(ctx, s.uploadFilesMu.RLock, s.uploadFilesMu.RUnlock); err != nil {
+		return FileStoreStatus{}, nil, err
+	}
 	defer s.uploadFilesMu.RUnlock()
 	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve, UnidentifiedWritesMayUseReserve: s.productionReserve > 0, UnidentifiedReserveAdmittedBytes: s.unidentifiedReserveAdmitted.Load()}
 	payloads, err := s.inventoryUnlocked(ctx)
@@ -232,7 +234,9 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
-	q.mu.RLock()
+	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return &FileStoreStatus{Error: "file store capacity unavailable"}
+	}
 	view := q.captureFileStoreStatus()
 	q.mu.RUnlock()
 	return view.status(ctx)
@@ -245,7 +249,9 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	if store == nil {
 		return nil
 	}
-	store.lifecycle.RLock()
+	if err := lockUploadContext(ctx, store.lifecycle.RLock, store.lifecycle.RUnlock); err != nil {
+		return &FileStoreStatus{Error: "file store capacity unavailable"}
+	}
 	defer store.lifecycle.RUnlock()
 	status, payloads, err := store.capacity(ctx)
 	status.Projects = v.projects.usage(now)
@@ -269,7 +275,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 			status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
 		}
 	}
-	status.ReservedOutputBytes = store.reservedOutputs(payloads)
+	status.ReservedOutputBytes = store.reservedOutputs(payloads, ctx)
 	status.FreeBytes -= min(status.FreeBytes, status.ReservedOutputBytes)
 	status.Physical = store.physicalStorageStatus(ctx, status, payloads, now)
 	return &status

@@ -66,7 +66,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		respond(w, map[string]bool{"referenced": a.Queue.environmentReferenced(r.Context(), key)}, nil)
 	})
 	mux.HandleFunc("GET /api/portability", func(w http.ResponseWriter, r *http.Request) {
-		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")})
+		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")}, r.Context())
 		respondOperation(w, report, err, "portability_invalid")
 	})
 	mux.HandleFunc("POST /api/portability", func(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +74,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		if !decode(w, r, &request) {
 			return
 		}
-		report, err := a.Queue.Portability(request)
+		report, err := a.Queue.Portability(request, r.Context())
 		respondOperation(w, report, err, "portability_invalid")
 	})
 	mux.HandleFunc("POST /api/resolve", func(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +112,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			respondOperation(w, nil, err, "extension_invalid")
 			return
 		}
-		respond(w, ExtensionRegistration{OK: true, Warnings: a.Queue.extensionRegistrationWarnings(e)}, nil)
+		respond(w, ExtensionRegistration{OK: true, Warnings: a.Queue.extensionRegistrationWarnings(e, r.Context())}, nil)
 	})
 	mux.HandleFunc("GET /api/extensions/{digest}", func(w http.ResponseWriter, r *http.Request) {
 		e, err := a.Queue.extensionByDigest(r.PathValue("digest"), r.Context())
@@ -204,6 +204,16 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	})
 	// Administrative inspection must remain fresh for migration custody and
 	// measurement safety. It never consumes the observational status cache.
+	mux.HandleFunc("GET /api/efficiency", func(w http.ResponseWriter, r *http.Request) {
+		unlock, err := requestObservationLock(r.Context(), &a.Queue.mu)
+		if err != nil {
+			respondOperation(w, nil, err, "status_unavailable")
+			return
+		}
+		report := a.Queue.efficiencyView
+		unlock()
+		respond(w, report, nil) // immutable projection; encoding stays outside q.mu.
+	})
 	mux.HandleFunc("GET /api/inspection", func(w http.ResponseWriter, r *http.Request) {
 		s, err := a.Queue.publicSnapshot(r.Context())
 		respondOperation(w, s, err, "status_unavailable")
@@ -417,7 +427,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Leave(r.PathValue("id"), c.Now, r.Context()), "worker_leave_invalid")
 	})
-	return a.Queue.measureRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return a.Queue.shutdownRequests(a.Queue.measureRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, r.Pattern = mux.Handler(r)
 		if r.URL.Path == "/api/invites/redeem" {
 			a.redeemInvite(w, r, joiningPin)
@@ -465,7 +475,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		defer finishObservation()
 		mux.ServeHTTP(w, r)
-	}), mux.patterns)
+	}), mux.patterns))
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	err := decodeBudget(w, r, v)

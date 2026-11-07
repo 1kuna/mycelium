@@ -80,6 +80,15 @@ func (q *Queue) fleetHostChecks(h *fleetUpgradeHost) []FleetCheck {
 			add("queue_runtime", "ready", "", "queue")
 		}
 	}
+	if h.Queue {
+		if h.Preservation == nil {
+			add("queue_preservation", "waiting", "supported_handoff_not_observed", "queue_records")
+		} else if h.Preservation.State == "verified" {
+			add("queue_preservation", "ready", "", "queue_records")
+		} else {
+			add("queue_preservation", "waiting", "committed_record_verification_pending", "queue_records")
+		}
+	}
 	if m := q.s.Machines[h.Machine]; m != nil {
 		if q.fleetProofFresh(m.Fleet) {
 			add("worker_runtime", "ready", "", "worker")
