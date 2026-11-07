@@ -2808,9 +2808,11 @@ requests bypass client data caching where supported; success does not attest
 server cache behavior or the producer's complete declared digest. Full staging
 still verifies that digest. Unsupported/refused bypass records
 `cache_bypass: unavailable` in private evidence and keeps the data-fault hold.
-Private recovery custody retains the observed backing across restart and is
-validated against the current configured roots, including sibling roots on that
-backing. Storage events never recount a cached host-pressure sensor reading.
+One in-memory record per backing holds its latest generation, recovery counter
+and one recovery owner; sibling roles project that shared state through
+`HostMountHealth`, `UnavailableRoots` and the existing dependency resolver.
+Owned, probe and recovery faults enter the same transition. Storage events
+never recount a cached host-pressure sensor reading.
 No sentinel write is required, including on read-only layouts. The failed
 source must remain readable; a removed or empty source cannot prove recovery.
 
@@ -2818,9 +2820,14 @@ Three newly completed proofs, each started after the latest fault, clear the
 hold. Every newer fault resets the candidate and generation; pre-fault requests,
 metadata-only success and cached results cannot count. Existing per-operation
 stall accounting and failure retry backoff apply; there is no recovery cooldown.
-Healthy operation adds no recovery reads. During a data fault each affected
-root's existing lane performs at most two page reads per completion, plus opens,
+Healthy operation adds no recovery reads. During a data fault one recovery
+owner per backing performs at most two page reads per completion, plus opens,
 stats and closes. An unreturned syscall retains that one lane.
+
+Known limit: a worker restart forgets this in-memory fault latch. The first
+NAS-dependent attempt after restart may encounter the fault again and re-latch
+it. There is no new local-state writer or crash-recovery protocol. Durability is
+parked on #894; revisit on an observed post-restart repeat failure.
 
 An incident owner's temporary whole-host exclusion remains independent. Retire
 it only after deploying the reviewed release and verifying live that the fault

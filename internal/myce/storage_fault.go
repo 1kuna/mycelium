@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -113,44 +112,64 @@ func storageIOFault(err error) (*os.PathError, syscall.Errno, bool) {
 // The OS error retains the exact syscall's path and operation through wrappers.
 // Attribution requires a configured/observed network backing, never a host name
 // or an error from a local destination beside a NAS source.
-func (w Worker) observeStorageError(err error) {
-	if w.storageHealth == nil {
-		return
+// One backing owns the data latch and its recovery counter. Roles contain
+// only a backing identity; they never receive copies of this state.
+type storageBacking struct {
+	fault         StorageFault
+	owner, source string
+	successes     int
+	cycle         uint64
+}
+type storageRoot struct{ path, backing string }
+
+func (w Worker) storageRoots() map[string]storageRoot {
+	paths := map[string]string{"checkpoint": w.CheckpointRoot, "job-files": w.JobFileRoot, "model": w.ModelRoot, "model-cache": w.CacheRoot, "environment-source": w.EnvironmentSourceRoot, "environment": w.EnvironmentRoot, "file-cache": w.FileCacheRoot, "extension": w.ExtensionRoot}
+	if w.ServiceConfig != nil {
+		paths["nas"] = w.ServiceConfig.NAS
 	}
-	storageErrorLeaves(err, func(leaf error) {
-		if p, number, ok := storageIOFault(leaf); ok && filepath.IsAbs(p.Path) {
-			w.observeStoragePath(p, number)
+	if w.storageHealth != nil {
+		w.storageHealth.mu.Lock()
+		if p := w.storageHealth.mounts["checkpoint"]; p != nil {
+			paths["checkpoint"] = p.path
 		}
-	})
+		w.storageHealth.mu.Unlock()
+	}
+	backings := w.storageRoleBackings(paths)
+	roots := map[string]storageRoot{}
+	for role, path := range paths {
+		if path != "" {
+			roots[role] = storageRoot{path: path, backing: backings[role]}
+		}
+	}
+	return roots
 }
 
-func (w Worker) observeStoragePath(p *os.PathError, number syscall.Errno) {
-	if !filepath.IsAbs(p.Path) {
+func (w Worker) observeStorageError(err error) {
+	if w.storageHealth == nil || err == nil {
 		return
 	}
-	roots := map[string]string{"checkpoint": w.CheckpointRoot, "job-files": w.JobFileRoot}
-	w.storageHealth.mu.Lock()
-	if p := w.storageHealth.mounts["checkpoint"]; p != nil {
-		roots["checkpoint"] = p.path
-	}
-	w.storageHealth.mu.Unlock()
-	expected := w.storageRoleBackings(roots)
-	backing := ""
-	for role, path := range roots {
-		if path != "" && expected[role] != "" && withinNAS(path, p.Path) && len(expected[role]) > len(backing) {
-			backing = expected[role]
+	roots := w.storageRoots()
+	m := w.storageHealth
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.storageRoots = roots
+	storageErrorLeaves(err, func(leaf error) {
+		e, _, ok := storageIOFault(leaf)
+		if !ok || !filepath.IsAbs(e.Path) {
+			return
 		}
-	}
-	if backing == "" {
-		return
-	}
-	affected := map[string]string{}
-	for role, path := range roots {
-		if expected[role] == backing {
-			affected[role] = path
+		role := ""
+		// Attribution chooses one configured source role, never a fan-out set.
+		for _, candidate := range []string{"checkpoint", "job-files"} {
+			r := roots[candidate]
+			if r.backing != "" && withinNAS(r.path, e.Path) && (role == "" || len(r.path) > len(roots[role].path)) {
+				role = candidate
+			}
 		}
-	}
-	w.storageHealth.observeStorageFault(p, number, backing, affected)
+		if role != "" {
+			m.storageFault(role, leaf, m.clock.Now(), false)
+		}
+	})
 }
 
 func (w Worker) storageRoleBackings(roots map[string]string) map[string]string {
@@ -172,61 +191,141 @@ func (w Worker) storageRoleBackings(roots map[string]string) map[string]string {
 	return expected
 }
 
-func (m *hostHealthMonitor) observeStorageFault(e *os.PathError, number syscall.Errno, backing string, roots map[string]string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	at := m.clock.Now()
-	// A single backing mount can serve checkpoint and input roles. Their
-	// existing lanes receive the same observation, not a whole-host drain.
-	for role, path := range roots {
-		if path == "" || !withinNAS(backing, path) {
+// Called only under m.mu. Owned I/O, probe errors and recovery failures all
+// enter this one transition; a sibling cannot retain an older generation.
+func (m *hostHealthMonitor) storageFault(role string, err error, at time.Time, proof bool) {
+	root := m.storageRoots[role]
+	if root.backing == "" {
+		return
+	}
+	observed := false
+	storageErrorLeaves(err, func(leaf error) {
+		event, errno, ok := storageIOFault(leaf)
+		if !ok {
+			return
+		}
+		// A probe's inventory error is not an error on its network root. The
+		// recovery source may belong to a sibling role on this same backing.
+		attributed := false
+		for _, r := range m.storageRoots {
+			if r.backing == root.backing && filepath.IsAbs(event.Path) && withinNAS(r.path, event.Path) {
+				attributed = true
+				break
+			}
+		}
+		if !attributed {
+			return
+		}
+		observed = true
+		m.latchStorageFault(role, event, errno, at, err)
+	})
+	if !observed && proof {
+		// Verification, bypass and premature EOF errors need no invented errno.
+		// They invalidate the same candidate as a syscall fault.
+		m.latchStorageFault(role, nil, 0, at, err)
+	}
+}
+
+func (m *hostHealthMonitor) latchStorageFault(role string, event *os.PathError, errno syscall.Errno, at time.Time, err error) {
+	root := m.storageRoots[role]
+	if m.storageBackings == nil {
+		m.storageBackings = map[string]*storageBacking{}
+	}
+	state := m.storageBackings[root.backing]
+	if state == nil {
+		state = &storageBacking{}
+		m.storageBackings[root.backing] = state
+	}
+	data := state.fault.Active && state.fault.Data
+	source := state.source
+	operation, class := "reopen", "verification_failed"
+	if event != nil {
+		operation, class = event.Op, "filesystem_io"
+		if errno == 0 {
+			class = "incomplete_read"
+		}
+		if event.Op == "read" {
+			data, source = true, event.Path
+		}
+	}
+	// Keep one owner until recovery, including across repeated sibling faults.
+	if !state.fault.Active {
+		state.owner = role
+		for _, candidate := range []string{"checkpoint", "nas"} {
+			if m.mounts[candidate] != nil && m.storageRoots[candidate].backing == root.backing {
+				state.owner = candidate
+				break
+			}
+		}
+	}
+	state.fault = StorageFault{Root: role, Operation: operation, Errno: int(errno), Class: class, At: at, Generation: state.fault.Generation + 1, Data: data, Active: true}
+	state.source, state.successes = source, 0
+	// Do not reset the offset cycle: consecutive attempts rotate even when a
+	// newer failure resets the candidate. Generation and time fence results.
+	if errors.Is(err, errStorageCacheBypass) {
+		state.fault.CacheBypass = "unavailable"
+	}
+	if m.mounts[state.owner] == nil {
+		owner := m.storageRoots[state.owner]
+		m.mounts[state.owner] = &hostMountProbe{root: state.owner, path: owner.path, clock: m.clock, probe: healthMountAccess("nas"), storage: m}
+	}
+}
+
+func (p *hostMountProbe) backingFault() *storageBacking {
+	if p.storage == nil {
+		return nil
+	}
+	return p.storage.storageBackings[p.storage.storageRoots[p.root].backing]
+}
+func (p *hostMountProbe) faultGeneration() uint64 {
+	if state := p.backingFault(); state != nil {
+		return state.fault.Generation
+	}
+	return 0
+}
+
+func (m *hostHealthMonitor) storageResult(p *hostMountProbe, r hostMountResult, now time.Time) bool {
+	if r.err != nil {
+		m.storageFault(p.root, r.err, now, r.dataProof)
+		return true
+	}
+	state := p.backingFault()
+	if state == nil || !state.fault.Active {
+		return true
+	}
+	fresh := r.generation == state.fault.Generation && p.started.After(state.fault.At)
+	if state.owner == p.root && fresh && (!state.fault.Data || r.dataProof) {
+		state.successes++
+		if r.dataProof {
+			state.fault.CacheBypass = "requested"
+		}
+		if state.successes >= hostHealthConfirmation {
+			state.fault.Active = false
+		}
+	}
+	return fresh && (!r.dataProof || state.owner == p.root)
+}
+
+// Only the data latch is shared. Existing role metadata/advisory/stall policy
+// stays in hostMountProbe; every role projects the backing latch over it.
+func (m *hostHealthMonitor) projectStorageFaults(sample *HostHealthSample) {
+	for role, root := range m.storageRoots {
+		state := m.storageBackings[root.backing]
+		if state == nil || !state.fault.Active {
 			continue
 		}
-		p := m.mounts[role]
-		if p == nil {
-			p = &hostMountProbe{root: role, path: path, clock: m.clock, probe: healthMountAccess("nas")}
-			m.mounts[role] = p
+		found := false
+		for i := range sample.Mounts {
+			if sample.Mounts[i].Root == role {
+				sample.Mounts[i].Reason = "mount_probe_failed"
+				sample.Mounts[i].Adverse = true
+				found = true
+			}
 		}
-		p.recoveryBacking = backing
-		p.recordStorageFault(e, number, at)
+		if !found {
+			sample.Mounts = append(sample.Mounts, HostMountHealth{Root: role, Reason: "mount_probe_failed", Adverse: true})
+		}
 	}
-	if p := m.mounts["nas"]; p != nil && withinNAS(backing, p.path) {
-		p.recoveryBacking = backing
-		p.recordStorageFault(e, number, at)
-	}
-	// snapshot overlays active mount latches immediately. Only the sampler
-	// may count a fresh host-pressure reading toward a whole-host drain.
-}
-
-// Called only with the health monitor mutex held (or by its single sampler).
-func (p *hostMountProbe) recordStorageFault(e *os.PathError, number syscall.Errno, at time.Time) {
-	data := e.Op == "read"
-	if p.fault != nil && p.fault.Active {
-		data = data || p.fault.Data
-	}
-	var generation uint64 = 1
-	if p.fault != nil {
-		generation = p.fault.Generation + 1
-	}
-	class := "filesystem_io"
-	if number == 0 {
-		class = "incomplete_read"
-	}
-	p.fault = &StorageFault{Root: p.root, Operation: e.Op, Errno: int(number), Class: class, At: at, Generation: generation, Data: data, Active: true}
-	if e.Op == "read" {
-		p.recoverySource = e.Path // Private local custody; never part of StorageFault/wire.
-	}
-	p.recoveryCycle = 0
-	p.reason, p.candidate, p.consecutive = "mount_probe_failed", "", 0
-	p.last.Reason, p.last.Adverse = p.reason, true
-	p.nextProbe = time.Time{}
-}
-
-func (p *hostMountProbe) faultGeneration() uint64 {
-	if p.fault == nil {
-		return 0
-	}
-	return p.fault.Generation
 }
 
 // A fresh open/read/close followed by a second open/read/close tests data and
@@ -292,53 +391,4 @@ func verifyStorageReopen(path string, cycle uint64, progress func(), open func(s
 
 var workerStorageReopen = func(path string, cycle uint64, progress func()) error {
 	return verifyStorageReopen(path, cycle, progress, func(path string) (fs.File, error) { return os.Open(path) }, storageCacheBypass)
-}
-
-// Snapshot private typed evidence separately from the versioned wire history.
-type storageRecoverySource struct {
-	Path    string `json:"path"`
-	Backing string `json:"backing"`
-}
-
-func (m *hostHealthMonitor) storageFaultDisk() (map[string]StorageFault, map[string]storageRecoverySource) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	faults, sources := map[string]StorageFault{}, map[string]storageRecoverySource{}
-	for role, p := range m.mounts {
-		if p.fault != nil {
-			faults[role] = *p.fault
-			sources[role] = storageRecoverySource{Path: p.recoverySource, Backing: p.recoveryBacking}
-		}
-	}
-	return faults, sources
-}
-
-func restoreStorageFault(p *hostMountProbe, f StorageFault, source storageRecoverySource) {
-	p.fault, p.recoverySource, p.recoveryBacking = &f, source.Path, source.Backing
-	if f.Active {
-		p.reason = "mount_probe_failed"
-		p.last = HostMountHealth{Root: p.root, Reason: p.reason, Adverse: true}
-	}
-}
-
-func storageRecoveryInScope(w Worker, root string, source storageRecoverySource) bool {
-	if source.Path == "" || withinNAS(root, source.Path) {
-		return true
-	}
-	// A learned backing remains private custody across restart. Both the new
-	// configured role and the source's still-configured sibling must be on it.
-	if source.Backing == "" || !withinNAS(source.Backing, root) {
-		return false
-	}
-	for _, sibling := range []string{w.CheckpointRoot, w.JobFileRoot} {
-		if sibling != "" && withinNAS(source.Backing, sibling) && withinNAS(sibling, source.Path) {
-			return true
-		}
-	}
-	return false
-}
-
-// Keep direct role projection in the existing dependency resolver.
-func storageFaultRole(role string) bool {
-	return slices.Contains([]string{"checkpoint", "job-files"}, role)
 }
