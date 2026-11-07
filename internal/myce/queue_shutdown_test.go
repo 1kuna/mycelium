@@ -217,6 +217,61 @@ func TestQueueShutdownCancelsPortability(t *testing.T) {
 	}
 }
 
+func TestQueueShutdownCancelsEfficiency(t *testing.T) {
+	for _, transport := range []string{"primary", "joining"} {
+		t.Run(transport, func(t *testing.T) {
+			q, clock := fixture(t)
+			api := API{Queue: q, Token: "test"}
+			handler := api.Handler()
+			if transport == "joining" {
+				handler = api.HandlerWithJoiningIdentity("fixture-pin")
+			}
+			handlerDone := make(chan struct{})
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(handlerDone)
+				handler.ServeHTTP(w, r)
+			}))
+			if transport == "joining" {
+				server.StartTLS()
+			} else {
+				server.Start()
+			}
+			defer server.Close()
+			pressure := q.mu.enablePressure(clock)
+			q.mu.Lock()
+			defer q.mu.Unlock()
+			requestDone := make(chan struct{})
+			go func() {
+				defer close(requestDone)
+				client := Client{URL: server.URL, Token: "test", HTTP: server.Client()}
+				_ = client.Call(context.Background(), http.MethodGet, "/api/efficiency", nil, nil)
+			}()
+			await(t, func() bool {
+				pressure.mu.Lock()
+				defer pressure.mu.Unlock()
+				return len(pressure.waiting) > 0
+			})
+			// Hold the transaction through HTTP shutdown: closing sockets alone
+			// cannot release a handler waiting for the queue mutex.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := q.ShutdownServers(ctx, server.Config); err != nil {
+				t.Fatal("efficiency retained its queue lock wait during shutdown", err)
+			}
+			select {
+			case <-handlerDone:
+			default:
+				t.Fatal("shutdown returned before the efficiency handler exited")
+			}
+			select {
+			case <-requestDone:
+			case <-ctx.Done():
+				t.Fatal("efficiency client retained shutdown", ctx.Err())
+			}
+		})
+	}
+}
+
 func TestQueueShutdownCancelsFileStatus(t *testing.T) {
 	for _, phase := range []string{"lifecycle", "reservations"} {
 		t.Run(phase, func(t *testing.T) {
