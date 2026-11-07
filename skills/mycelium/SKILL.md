@@ -119,6 +119,13 @@ expire merely with elapsed age. A smaller recovery attempt
 remains guarded and can fail on unseen growth; sampled Darwin RSS cannot contain
 a burst between observations. Keep the same queued job rather than resubmitting.
 
+From the next release (#954), Darwin process growth pairs each RSS increment
+with its own interval. Flat live samples report zero growth/rate; retained peak
+growth is historical sizing evidence. Positive slopes still extend through
+sample age. Measured physical RAM bounds forecast charges while retaining actual
+RSS and known floors; RSS grants no resident credit. A forecast is not measured
+allocation or proof of a historical refusal. See [process growth](../../docs/process-memory-growth.md).
+
 Plain native commands default to **unsandboxed** under MY-25; explicitly set
 `isolation: sandboxed` to opt in. New native extension registrations default to
 sandboxing; retained registrations keep their frozen policy.
