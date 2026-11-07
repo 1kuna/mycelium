@@ -148,7 +148,7 @@ func TestStagingSharedInputTimeoutAfterPreemptions(t *testing.T) {
 		r.Interrupted = true
 		if attempt >= 2 && attempt <= 7 {
 			if err := q.update(func() error {
-				q.stopBatchFor(q.s.Jobs[j.ID], &Job{ID: "demand", Spec: spec("production")})
+				q.stopBatchFor(q.s.Jobs[j.ID], &Job{ID: "demand", Spec: spec("deadline")})
 				return nil
 			}); err != nil {
 				t.Fatal(err)
