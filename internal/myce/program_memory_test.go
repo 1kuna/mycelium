@@ -91,6 +91,20 @@ func TestProgramMemoryForecastValidityAndFloors(t *testing.T) {
 	finishProgramMemory(t, q, clock, next, usage, &growing)
 	clock.Advance(workCurveMaxAge + time.Second)
 	check(t, q, m, nil)
+	retained := startProgramMemory(t, q, m, s)
+	if retained.Spec.Needs.MemoryGB != 5 || retained.Spec.Needs.HostMemoryGB != 7 {
+		t.Fatal("matching forecast expired during idle time", retained.Spec.Needs)
+	}
+	finishProgramMemory(t, q, clock, retained, usage, &growing)
+	// Elapsed age alone is not staleness (#875/#998). Evidence from an
+	// obsolete estimator revision cannot license a reduced charge.
+	for key, evidence := range q.s.ProgramMemory {
+		for hardware, forecast := range evidence.Forecasts {
+			forecast.Revision = programForecastRevision - 1
+			evidence.Forecasts[hardware] = forecast
+		}
+		q.s.ProgramMemory[key] = evidence
+	}
 	stale := startProgramMemory(t, q, m, s)
 	if stale.Spec.Needs.MemoryGB != 102 || stale.Spec.Needs.HostMemoryGB != 104 {
 		t.Fatal("stale evidence spent credit", stale.Spec.Needs)

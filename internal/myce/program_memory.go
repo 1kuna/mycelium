@@ -116,9 +116,11 @@ func (q *Queue) learnedProgramMemory(j *Job, e Extension, platform string) (Size
 			matched = true
 			f, ok := evidence.Forecasts[programMemoryHardware(m)]
 			age := q.clock.Now().Sub(f.RecordedAt)
-			// Reuse the existing accepted-memory lifetime. A new host, sensor
-			// downgrade, revision change or stale observation spends no credit.
-			if !ok || !f.Complete || f.Revision != programForecastRevision || f.Source == "" || f.RecordedAt.IsZero() || age < 0 || age > workCurveMaxAge {
+			// Matching accepted evidence survives idle time, like retained work
+			// memory. Hardware drift, sensor downgrade, estimator invalidation
+			// or a future timestamp spends no credit. These rows remain retained
+			// independently of the work-observation collector and its reader pins.
+			if !ok || !f.Complete || f.Revision != programForecastRevision || f.Source == "" || f.RecordedAt.IsZero() || age < 0 {
 				return fallback, exists
 			}
 			need = maxSize(need, SizeHint{MemoryGB: evidence.Demand.MemoryGB + f.Margin.MemoryGB, HostMemoryGB: evidence.Demand.HostMemoryGB + f.Margin.HostMemoryGB})

@@ -107,8 +107,9 @@ reusable bound.
 From the next release, program memory learning separates accepted demand from
 forecast headroom. Fresh complete observations on known hardware can replace an
 inflated forecast, including for queued work and after queue restart. Accepted
-demand, authored requirements and OOM floors remain; stale, incomplete or
-unknown-hardware evidence retains the conservative total. Opaque totals saved
+demand, authored requirements and OOM floors remain; obsolete estimator,
+incomplete or unknown-hardware evidence retains the conservative total. Matching
+accepted forecasts survive idle time. Opaque totals saved
 before this separation stay conservative because their demand and forecast
 cannot be distinguished safely.
 Comparable peaks use observed variability and sampling growth; cross-target
