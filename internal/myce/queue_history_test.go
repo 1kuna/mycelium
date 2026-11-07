@@ -3,6 +3,7 @@ package myce
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,18 +62,12 @@ func measureQueueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 	// A median of three independent fixtures suppresses a single scheduler or
 	// storage outlier without retrying failed assertions or dropping samples.
 	var waits, burstHolds, launchWaits, launchHolds []time.Duration
-	for sample := range 3 {
-		// A subtest ends each fixture's SQLite/queue lifetime before the next
-		// sample. Keep all three independent histories and every observation.
-		if !t.Run(fmt.Sprintf("sample-%d", sample), func(t *testing.T) {
-			got := queueHistoryBurst(t, count)
-			waits = append(waits, got.burstWait)
-			burstHolds = append(burstHolds, got.burstHold)
-			launchWaits = append(launchWaits, got.launchWait)
-			launchHolds = append(launchHolds, got.launchHold)
-		}) {
-			t.FailNow()
-		}
+	for range 3 {
+		got := queueHistoryBurst(t, count)
+		waits = append(waits, got.burstWait)
+		burstHolds = append(burstHolds, got.burstHold)
+		launchWaits = append(launchWaits, got.launchWait)
+		launchHolds = append(launchHolds, got.launchHold)
 	}
 	slices.Sort(waits)
 	slices.Sort(burstHolds)
@@ -83,7 +78,16 @@ func measureQueueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 
 func queueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 	t.Helper()
-	q, c := fixture(t)
+	// Own the queue here rather than retaining fixture(t)'s cleanup closure
+	// through all three samples. Keep the same clock, SQLite and NAS fixture;
+	// release each database and its reachable history before the next sample.
+	c := &fakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
+	q, err := Open(filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	fakeCheckpointAvailability(t, q, true)
 	// Approximate the incident's 4.6 MB jobs + 4.7 MB keyed answers per 1k.
 	q.mu.Lock()
 	q.s.Submissions = map[string]*submissionRecord{}
