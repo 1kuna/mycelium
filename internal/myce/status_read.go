@@ -14,14 +14,8 @@ import (
 	"time"
 )
 
-const statusCacheLifetime = time.Second
-
-// At four polls/second this bounds diagnostic work to one in eight reads.
-// Job commits invalidate immediately; fleet-dependent diagnostics and elapsed
-// times can lag by at most this window, measured from the start of capture.
-const jobSnapshotLifetime = 2 * time.Second
-
 type jobSnapshotCache struct {
+	hitCost       time.Duration
 	mu            sync.Mutex // Never acquired by a queue writer.
 	data          string     // Immutable public JSON; each caller decodes its own copy.
 	expires       time.Time
@@ -69,6 +63,7 @@ func (c Client) inspectionSnapshot(ctx context.Context) (Snapshot, error) {
 // the queue itself. Encoded JSON is immutable; callers that need a struct decode
 // a private copy, so even an HTML renderer cannot mutate the cached generation.
 type statusCache struct {
+	hitCost          time.Duration
 	mu               sync.Mutex
 	data             string
 	expires          time.Time
@@ -137,7 +132,10 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 			if int64(len(c.data)) > (allocation.limit-allocation.held)/6 || !allocation.charge(6*int64(len(c.data))) {
 				return "", projectionRefusal(allocation.limit - allocation.held)
 			}
-			return q.statusJSONFreshness(c.data, c.capturedAt, true)
+			started := q.clock.Now()
+			data, err := q.statusJSONFreshness(c.data, c.capturedAt, true)
+			c.hitCost = q.clock.Now().Sub(started)
+			return data, err
 		}
 		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent"}, contexts...)
 		if err != nil {
@@ -154,7 +152,7 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 			}
 			continue
 		}
-		c.data, c.expires, c.generation = string(data), s.Now.Add(statusCacheLifetime), revision
+		c.data, c.expires, c.generation = string(data), q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(s.Now), c.hitCost)), revision
 		c.capturedAt = s.Now
 		return q.statusJSONFreshness(c.data, c.capturedAt, false)
 	}
@@ -238,7 +236,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	hold := q.statusHolds.start()
 	var files fileStoreObservation
 	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
-		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
+		evidenceRetention: q.evidenceRetention, simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root}
 	// Freeze session contact at capture time just like the queue clock. Without
@@ -248,6 +246,8 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now())}
 	}
 	s := q.s
+	healthEvents, externalMemory := s.Health.Events, maps.Clone(s.ExternalMemory)
+	s.Health.Events, s.ExternalMemory = nil, nil
 	s.Jobs, s.Submissions = map[string]*Job{}, map[string]*submissionRecord{}
 	frozen := map[string]*Job{}
 	var selected *Job
@@ -410,6 +410,11 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	if err != nil {
 		return nil, files, err
 	}
+	detached.State.Health.Events = append([]HealthAlert(nil), healthEvents...)
+	detached.State.ExternalMemory = make(map[string]*externalMemoryRing, len(externalMemory))
+	for key, ring := range externalMemory {
+		detached.State.ExternalMemory[key] = ring
+	}
 	for key, input := range frozen {
 		if err = chargeProjectionValue(requestContext(contexts), input); err != nil {
 			return nil, files, err
@@ -523,7 +528,7 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 			valid = q.jobSnapshots[key] == entry
 			if valid && captureErr == nil {
 				data = string(encoded)
-				entry.data, entry.expires = data, now.Add(jobSnapshotLifetime)
+				entry.data, entry.expires = data, q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(now), entry.hitCost))
 			}
 			unlock()
 			entry.mu.Unlock()
@@ -548,8 +553,14 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 			}
 		}
 
+		started := q.clock.Now()
 		var out Job
 		err = json.Unmarshal([]byte(data), &out)
+		if hit {
+			entry.mu.Lock()
+			entry.hitCost = q.clock.Now().Sub(started)
+			entry.mu.Unlock()
+		}
 		return &out, err
 	}
 }

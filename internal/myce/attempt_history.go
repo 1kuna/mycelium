@@ -6,10 +6,6 @@ import (
 	"time"
 )
 
-// Three infrastructure endings (two retries), plus the one allowed OOM retry.
-// Planned requeues can repeat indefinitely; retain only this latest window.
-const attemptHistoryLimit = max(3, DefaultProductionInfrastructureRetries+1) + 1
-
 // AttemptOutcome preserves the existing classifier's facts, not a new cause
 // taxonomy. State is the queue decision after this attempt (queued or terminal).
 // It is diagnostic evidence, never release proof or a retry/accounting input.
@@ -95,7 +91,5 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 		}
 	}
 	j.AttemptHistory = append(j.AttemptHistory, outcome)
-	if len(j.AttemptHistory) > attemptHistoryLimit {
-		j.AttemptHistory = append([]AttemptOutcome(nil), j.AttemptHistory[len(j.AttemptHistory)-attemptHistoryLimit:]...)
-	}
+
 }

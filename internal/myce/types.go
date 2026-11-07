@@ -804,6 +804,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	EvidenceRetention   *EvidenceRetention   `json:"evidence_retention,omitempty"`
 	Freshness           *SnapshotFreshness   `json:"freshness,omitempty"`
 	StorageObservations []StorageObservation `json:"storage_observations,omitempty"`
 	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`

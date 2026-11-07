@@ -97,14 +97,14 @@ func TestHealthAlertDeliveryConfigurationClearsAfterRestart(t *testing.T) {
 	if q.s.Health.DeliveryConfigured {
 		t.Fatal("historical hook configuration survived startup without a notifier")
 	}
-	if len(q.s.Health.Events) != 256 {
-		t.Fatal("diagnostic-only retention was not restored")
+	if len(q.s.Health.Events) != 257 {
+		t.Fatal("clearing notifier configuration discarded unique alert history")
 	}
 	snapshot, err := q.publicSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.HealthAlertDelivery == nil || snapshot.HealthAlertDelivery.Configured || snapshot.HealthAlertDelivery.Pending != 256 {
+	if snapshot.HealthAlertDelivery == nil || snapshot.HealthAlertDelivery.Configured || snapshot.HealthAlertDelivery.Pending != 257 {
 		t.Fatalf("restarted status: %+v", snapshot.HealthAlertDelivery)
 	}
 }

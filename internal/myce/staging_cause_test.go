@@ -117,7 +117,7 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 
 func TestStagingSubmissionRefusalAndRetention(t *testing.T) {
 	q, clock := fixture(t)
-	if err := q.ConfigureLogRetention(2 * DefaultFileRetention); err != nil {
+	if err := q.ConfigureLogRetention(2 * testFileRetention); err != nil {
 		t.Fatal(err)
 	}
 	spec := submitVerificationInput(t, q)
@@ -159,7 +159,7 @@ func TestStagingSubmissionRefusalAndRetention(t *testing.T) {
 	// of the older receipt cannot collect bytes needed by this waiting job.
 	spec.SubmissionKey = "reuse-verified-input"
 	second := submit(t, q, spec)
-	clock.Advance(DefaultFileRetention + filePublicationGrace + time.Second)
+	clock.Advance(testFileRetention + filePublicationGrace + time.Second)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}

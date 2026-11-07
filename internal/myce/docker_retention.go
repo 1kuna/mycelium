@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-const DefaultContainerRetention = 24 * time.Hour
+// The largest representable duration is the API sentinel for automatic
+// protection, not an expiry age. An explicit duration (including zero) remains
+// operator authorization to retire acknowledged stopped containers.
+const DefaultContainerRetention time.Duration = math.MaxInt64
 
 type dockerAcknowledgement struct {
 	Worker string    `json:"worker"`
@@ -56,6 +60,9 @@ func pruneStoppedDocker(ctx context.Context, dir, worker, active string, now tim
 }
 
 func pruneStoppedDockerPaths(ctx context.Context, dir, worker, active string, now time.Time, retention time.Duration, paths []string, caller func(*dockerAttempt) func(...string) ([]byte, error)) error {
+	if retention == DefaultContainerRetention {
+		return nil
+	}
 	var failures []error
 	for _, path := range paths {
 		if ctx.Err() != nil {

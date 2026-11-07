@@ -159,7 +159,7 @@ symlinks below the chosen output directory remain refused.
 
 Success means `result` verified output hashes and sizes **and** `cmp` exited 0:
 the exact result is 23 bytes including newline. A wake or command exit alone is
-insufficient. Download within retention (default seven days).
+insufficient. On a release containing #811, omitted retention protects results until explicit release; saved positive operator windows still apply.
 
 On releases with the mixed-version cache correction, workers without an optional
 shared-input cache-capacity report retain staging-time admission. Reporting workers
@@ -170,7 +170,7 @@ jobs. **Available from the next release:** status and inspection JSON include
 `freshness.captured_at`, `served_at`, `age_seconds` and `cached`; `now` remains
 capture time. Interpret worker freshness and diagnostics at that time, allowing
 for the response age. Inspection and filtered/full status take a fresh capture;
-default status can reuse a generation for up to one second, with immediate
+default status learns its cache lease from local capture/read/write costs, with immediate
 terminal/release invalidation.
 
 From the next release, mixed CPU/RAM waits name occupied cores on eligible

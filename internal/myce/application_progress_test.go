@@ -28,6 +28,13 @@ func TestApplicationProgressAttemptScopeStalenessAndAdvisory(t *testing.T) {
 	if got.ApplicationProgress == nil || got.ApplicationProgress.Completed != 10 || got.ApplicationProgress.Stale || got.State != "running" || got.Progress != 0 || len(got.OutputRefs) != 0 {
 		t.Fatalf("advisory progress: %+v", got)
 	}
+	// Ordered source updates teach the reporter cadence; a cold report alone
+	// cannot establish staleness.
+	report.ApplicationProgress.UpdatedAt = clock.Now()
+	send(report)
+	clock.Advance(time.Second)
+	report.ApplicationProgress.UpdatedAt = clock.Now()
+	send(report)
 	clock.Advance(31 * time.Second)
 	got = runtimeJob(t, q, j.ID)
 	if !got.ApplicationProgress.Stale || got.ApplicationProgress.AgeSeconds != 31 || !strings.Contains(JobTiming(got), "stale") {
@@ -206,6 +213,15 @@ func TestApplicationProgressQueueRestartRetainsAge(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	j := startObservation(t, q, m, s)
 	report := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, ApplicationProgress: progressReport(1, 2, "records")}
+	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}}); err != nil {
+		t.Fatal(err)
+	}
+	report.ApplicationProgress.UpdatedAt = clock.Now()
+	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	report.ApplicationProgress.UpdatedAt = clock.Now()
 	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}}); err != nil {
 		t.Fatal(err)
 	}

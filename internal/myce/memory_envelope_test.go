@@ -1432,8 +1432,8 @@ func TestMemoryEnvelopeMeasuredRangeFloorsAndExpiry(t *testing.T) {
 		t.Fatalf("fell below observed resident peak: %v", got)
 	}
 	clock.Advance(workCurveMaxAge + time.Second)
-	if estimate := q.memoryEstimate(candidate, &m); estimate.host != nil || estimate.measuredHostGB != 0 {
-		t.Fatalf("expired range reused: %+v", estimate)
+	if estimate := q.memoryEstimate(candidate, &m); estimate.host == nil || estimate.measuredHostGB < 9+minimumHostMemoryGB {
+		t.Fatalf("age alone discarded the measured range/floor: %+v", estimate)
 	}
 }
 
