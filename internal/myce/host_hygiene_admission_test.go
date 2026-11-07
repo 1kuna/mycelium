@@ -126,10 +126,13 @@ func TestHostHygieneMountAdvisoryEscalatesAndNeedsFreshRecovery(t *testing.T) {
 	returns := make(chan error)
 	t.Cleanup(func() { close(returns) })
 	var calls atomic.Int32
+	var latency atomic.Int64
+	latency.Store(int64(100 * time.Millisecond))
 	p := &hostMountProbe{root: "checkpoint", path: "root", clock: clock, reason: "mount_probe_slow", last: HostMountHealth{Root: "checkpoint", LatencySeconds: .1}}
 	p.measure = func(string, func()) hostMountResult {
 		calls.Add(1)
-		return hostMountResult{latency: 100 * time.Millisecond, err: <-returns}
+		err := <-returns
+		return hostMountResult{latency: time.Duration(latency.Load()), err: err}
 	}
 	initial := p.sample(clock.Now(), baseline)
 	if publish(initial) != "" {
@@ -157,6 +160,12 @@ func TestHostHygieneMountAdvisoryEscalatesAndNeedsFreshRecovery(t *testing.T) {
 	clock.Advance(p.nextProbe.Sub(clock.Now()))
 	p.sample(clock.Now(), baseline)
 	for i := 0; i < hostHealthConfirmation; i++ {
+		// Mixed fast/slow successes establish recovery just as consecutive
+		// fast successes do. Their advisory classifications may differ.
+		latency.Store(int64(100 * time.Millisecond))
+		if i%2 == 1 {
+			latency.Store(int64(time.Millisecond))
+		}
 		returns <- nil
 		await(t, func() bool { return len(p.pending) == 1 })
 		clock.Advance(signalRefresh)
@@ -174,6 +183,18 @@ func TestHostHygieneMountAdvisoryEscalatesAndNeedsFreshRecovery(t *testing.T) {
 			}
 		} else if reason != "" || recovered.Reason != "mount_probe_slow" {
 			t.Fatal("fresh successful outliers did not restore admission", recovered, reason)
+		}
+	}
+}
+
+func TestHostHygieneMountCachedPreFailureSuccessCannotRecover(t *testing.T) {
+	_, clock, baseline, publish := mountAdmissionFixture(t, "checkpoint")
+	release := make(chan struct{})
+	p := &hostMountProbe{root: "checkpoint", path: "root", clock: clock, reason: "mount_probe_failed", last: HostMountHealth{Root: "checkpoint", LatencySeconds: .001}, probe: func(string, func()) error { <-release; return nil }}
+	t.Cleanup(func() { close(release); await(t, func() bool { return len(p.pending) == 1 }) })
+	for i := 0; i < hostHealthConfirmation+2; i++ {
+		if got := p.sample(clock.Now(), baseline); publish(got) == "" {
+			t.Fatal("cached pre-failure success counted as fresh recovery", got)
 		}
 	}
 }

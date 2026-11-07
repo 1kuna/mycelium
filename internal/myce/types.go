@@ -695,6 +695,7 @@ type Reply struct {
 	ProbeMemoryProtocol        string                       `json:"probe_memory_protocol,omitempty"`
 	HostCollectionProtocol     string                       `json:"hygiene_collection_protocol,omitempty"`
 	HostHygieneProtocol        string                       `json:"host_hygiene_protocol,omitempty"`
+	HostMountProgressProtocol  string                       `json:"host_mount_progress_protocol,omitempty"`
 	ToolInventoryProtocol      string                       `json:"tool_inventory_protocol,omitempty"`
 	ToolInventoryRequired      bool                         `json:"tool_inventory_required,omitempty"`
 	ToolInventoryHash          string                       `json:"tool_inventory_hash,omitempty"`

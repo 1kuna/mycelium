@@ -240,7 +240,7 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		result.OperationAgeSeconds = max(0, now.Sub(progressed).Seconds())
 		if result.OperationAgeSeconds >= result.StallAllowanceSeconds {
 			result.Reason = "mount_probe_stalled"
-			return p.confirm(result)
+			return p.confirm(result, false)
 		}
 		// An unfinished read, even with progress, cannot clear a failed/stalled
 		// episode. Recovery still requires fresh successful completions.
@@ -250,14 +250,14 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		}
 		if result.LatencySeconds == 0 {
 			result.Reason = "mount_probe_pending"
-			return p.confirm(result)
+			return p.confirm(result, false)
 		}
 		if len(base) < hostHealthWarmup || result.PendingSeconds <= limit.Seconds() {
 			result.Reason = p.reason
 			return result
 		}
 		result.Reason = "mount_probe_slow"
-		return p.confirm(result)
+		return p.confirm(result, false)
 	}
 	if completed && len(base) >= hostHealthWarmup && result.LatencySeconds > limit.Seconds() && result.Reason == "" {
 		result.Reason = "mount_probe_slow"
@@ -292,21 +292,31 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		result.Reason = p.reason
 		return result
 	}
-	return p.confirm(result)
+	return p.confirm(result, completed)
 }
 
 func mountHealthWithholds(reason string) bool {
 	return reason != "" && reason != "mount_probe_slow"
 }
 
-func (p *hostMountProbe) confirm(result HostMountHealth) HostMountHealth {
+func (p *hostMountProbe) confirm(result HostMountHealth, fresh bool) HostMountHealth {
 	result.Adverse = result.Reason != ""
 	if result.Reason != "" && result.Reason != "mount_probe_slow" && result.Reason != "mount_probe_stalled" {
 		p.reason, p.candidate, p.consecutive = result.Reason, result.Reason, 0
 		return result
 	}
-	if result.Reason != p.candidate {
-		p.candidate, p.consecutive = result.Reason, 0
+	candidate := result.Reason
+	if mountHealthWithholds(p.reason) && !mountHealthWithholds(candidate) {
+		if !fresh {
+			result.Reason = p.reason
+			return result
+		}
+		// Fast and advisory fresh completions both establish access;
+		// alternating them must not reset successful recovery evidence.
+		candidate = "recovered"
+	}
+	if candidate != p.candidate {
+		p.candidate, p.consecutive = candidate, 0
 	}
 	p.consecutive++
 	if p.consecutive >= hostHealthConfirmation {

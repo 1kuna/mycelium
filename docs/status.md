@@ -52,7 +52,9 @@ samples (`adverse`) are excluded from healthy baselines before confirmation.
 History serialization/fsync runs outside the mutex used by heartbeat snapshots.
 
 Workers send the additive health fields only after the queue advertises
-`host_hygiene_protocol: host-hygiene-v1`. A strict older queue receives the
+`host_hygiene_protocol: host-hygiene-v1`. The additive operation evidence also
+requires `host_mount_progress_protocol: mount-progress-v1`; v1-only queues still
+receive the original health and collection payloads. A strict older queue receives the
 legacy shape; local evidence still persists and a confirmed local drain uses
 the existing leaving signal. A queue downgrade retries the legacy shape once
 after a strict-decoder rejection, preserving session and attempt custody.
