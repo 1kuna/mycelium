@@ -646,12 +646,18 @@ func TestStoredExtensionInputAndOutput(t *testing.T) {
 	state := newTestStateRoot(t)
 	w := Worker{EnvironmentLimit: 1 << 30, Client: c, ExtensionRoot: root, StateDir: state, Clock: RealClock{}, Interval: 20 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "extension", HostID: "extension", GPU: "fake", FreeMemoryGB: 8, ExtensionReports: reports}}
 	go func() { done <- w.Run(ctx) }()
+	var got *Job
 	await(t, func() bool {
 		snap, _ := q.Snapshot()
-		return snap.Jobs[0].State == "succeeded" || snap.Jobs[0].State == "failed"
+		// Automatic extension checks can appear before the submitted job.
+		for _, candidate := range snap.Jobs {
+			if candidate.ID == j.ID {
+				got = candidate
+				return got.State == "succeeded" || got.State == "failed"
+			}
+		}
+		return false
 	})
-	snap, _ := q.Snapshot()
-	got := snap.Jobs[0]
 	if got.ID != j.ID || got.State != "succeeded" || got.OutputRefs["output"] != ref {
 		t.Fatalf("extension file transport: %+v", got)
 	}
