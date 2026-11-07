@@ -133,6 +133,12 @@ printf 'mycelium-ease-audit-ok\n' > expected.txt
 cmp expected.txt accepted/result.txt
 ```
 
+From the next release, `wait` prints one short line per state change (progress
+on stderr, terminal states on stdout). Use `myce wait --json JOB_ID` for full
+reasons and initial diagnostics, or `myce status JOB_ID` for current details.
+Relative result directories also work under symlinked working-directory ancestors;
+symlinks below the chosen output directory remain refused.
+
 Success means `result` verified output hashes and sizes **and** `cmp` exited 0:
 the exact result is 23 bytes including newline. A wake or command exit alone is
 insufficient. Download within retention (default seven days).

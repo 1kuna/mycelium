@@ -29,7 +29,7 @@ func TestWaitActionableBlockerThenQuietSuccess(t *testing.T) {
 	defer server.Close()
 	var out, diagnostics bytes.Buffer
 	err := waitJobs(context.Background(), myce.Client{URL: server.URL}, []string{"cpu-job"}, time.Minute, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); done.Store(true); return nil })
-	if err != nil || out.String() != "cpu-job succeeded\n" || !strings.Contains(diagnostics.String(), b.Text()) || strings.Contains(diagnostics.String(), "tutorial") || strings.Contains(diagnostics.String(), "Blockers: .") {
+	if err != nil || out.String() != "cpu-job succeeded\n" || diagnostics.String() != "cpu-job queued\n" || strings.Contains(diagnostics.String(), "tutorial") || strings.Contains(diagnostics.String(), "Blockers: .") {
 		t.Fatalf("%v stdout=%q stderr=%q", err, &out, &diagnostics)
 	}
 }
