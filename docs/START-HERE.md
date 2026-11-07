@@ -14,6 +14,8 @@ A few words you'll see in commands and output:
 - **fleet token**: the shared password every machine and client uses to talk to
   the queue. Treat it like a password.
 
+<a id="five-minute-start"></a>
+
 ## 1. Try it on one laptop
 
 With Git, [Go](https://go.dev/dl/) 1.25.6+ and a Unix shell on macOS or Linux
