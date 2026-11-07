@@ -134,6 +134,26 @@ func (w Worker) observeStoragePath(p *os.PathError, number syscall.Errno) {
 		roots["checkpoint"] = p.path
 	}
 	w.storageHealth.mu.Unlock()
+	expected := w.storageRoleBackings(roots)
+	backing := ""
+	for role, path := range roots {
+		if path != "" && expected[role] != "" && withinNAS(path, p.Path) && len(expected[role]) > len(backing) {
+			backing = expected[role]
+		}
+	}
+	if backing == "" {
+		return
+	}
+	affected := map[string]string{}
+	for role, path := range roots {
+		if expected[role] == backing {
+			affected[role] = path
+		}
+	}
+	w.storageHealth.observeStorageFault(p, number, backing, affected)
+}
+
+func (w Worker) storageRoleBackings(roots map[string]string) map[string]string {
 	expected := map[string]string{}
 	if w.rootMonitor != nil {
 		w.rootMonitor.mu.Lock()
@@ -144,21 +164,12 @@ func (w Worker) observeStoragePath(p *os.PathError, number syscall.Errno) {
 	}
 	if w.ServiceConfig != nil && w.ServiceConfig.NAS != "" {
 		for role, path := range roots {
-			if path != "" && withinNAS(w.ServiceConfig.NAS, path) {
-				expected[role] = w.ServiceConfig.NAS
+			if path != "" && withinNAS(w.ServiceConfig.NAS, path) && len(w.ServiceConfig.NAS) > len(expected[role]) {
+				expected[role] = filepath.Clean(w.ServiceConfig.NAS)
 			}
 		}
 	}
-	backing := ""
-	for role, path := range roots {
-		if path != "" && expected[role] != "" && withinNAS(path, p.Path) && len(expected[role]) > len(backing) {
-			backing = expected[role]
-		}
-	}
-	if backing == "" {
-		return
-	}
-	w.storageHealth.observeStorageFault(p, number, backing, roots)
+	return expected
 }
 
 func (m *hostHealthMonitor) observeStorageFault(e *os.PathError, number syscall.Errno, backing string, roots map[string]string) {

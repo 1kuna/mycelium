@@ -212,6 +212,10 @@ func (q *Queue) storageRootReason(j *Job, m *Machine) string {
 
 func (w Worker) storageRootReason(j *Job) string {
 	machine := w.storageMachine()
+	if w.storageHealth != nil {
+		machine.HostHealth = w.storageHealth.currentSnapshot()
+		applyHostMountHealth(w, &machine)
+	}
 	for _, model := range w.ModelConfig.Models {
 		if model.Name == j.Spec.Needs.Model {
 			var recipe *EnvironmentRecipe

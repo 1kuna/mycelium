@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -407,5 +409,140 @@ func TestStorageFaultStartupRetainsLearnedSiblingCustody(t *testing.T) {
 			}
 			await(t, func() bool { return len(p.pending) == 1 })
 		})
+	}
+}
+
+func TestStorageFaultBlocksPreparationRetryBeforeHeartbeat(t *testing.T) {
+	w := recoveryWorker(t)
+	_, m, clock := storageFaultFixture(t)
+	w.storageHealth, w.Clock = m, clock
+	w.CheckpointRoot, w.ServiceConfig = "/share/checkpoints", &ServiceConfig{NAS: "/share"}
+	s, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	j := recoveryJob(t, []string{"true"})
+	var calls int
+	w.checkpointPrepare = func(Job) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", &os.PathError{Op: "read", Path: "/share/checkpoints/previous/save", Err: syscall.EIO}
+		}
+		return t.TempDir(), nil
+	}
+	if _, err = startAfterFixtureInputs(t, w, s, j); !errors.Is(err, errWorkerCheckpoint) {
+		t.Fatal("missing preparation fault", err)
+	}
+	// No new health sample or queue report has occurred. Even a successful
+	// filesystem retry must not bypass the active data-fault latch.
+	if p, err := startAfterFixtureInputs(t, w, s, j); p != nil || err == nil || !strings.Contains(err.Error(), "checkpoint unavailable") || calls != 1 {
+		if p != nil {
+			p.stop(clock.Now(), 0, true)
+		}
+		t.Fatal("retry bypassed live fault before three proofs", err, calls)
+	}
+}
+
+func TestStorageFaultFencesFinalStartAuthorization(t *testing.T) {
+	w, _, _ := storageFaultFixture(t)
+	w.Machine.ID = "test-worker"
+	j := Job{ID: "test-job", Attempt: 1, Spec: Spec{Priority: "experiment"}}
+	var calls int
+	w.Client = Client{URL: "http://test.invalid", HTTP: &http.Client{Transport: fetchTransport(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			w.observeStorageError(&os.PathError{Op: "read", Path: "/share/inputs/source", Err: syscall.EIO})
+		}
+		reply := httptest.NewRecorder()
+		reply.Header().Set("Content-Type", "application/json")
+		_, _ = reply.WriteString(`{"ok":true,"start_gate":"` + startGateProtocol + `"}`)
+		return reply.Result(), nil
+	})}}
+	if err := w.authorizeStart(j, "test-session"); !errors.Is(err, errWorkerStartAuthorization) || !strings.Contains(err.Error(), "checkpoint unavailable") || calls != 1 {
+		t.Fatal("queue's earlier healthy report bypassed new fault", err, calls)
+	}
+	if err := w.authorizeStart(j, "test-session"); !errors.Is(err, errWorkerStartAuthorization) || calls != 1 {
+		t.Fatal("active fault was not checked before authorization", err, calls)
+	}
+	j.Spec.Priority = "production" // No NAS dependencies.
+	if err := w.authorizeStart(j, "test-session"); err != nil || calls != 2 {
+		t.Fatal("live mount fault blocked independent local start", err, calls)
+	}
+}
+
+func TestStorageFaultKeepsNestedBackingIndependent(t *testing.T) {
+	w, m, clock := storageFaultFixture(t)
+	w.JobFileRoot = "/share/nested/inputs"
+	w.rootMonitor = &workerRootMonitor{expected: map[string]string{"checkpoint": "/share", "job-files": "/share/nested"}}
+	m.mounts["nas"] = &hostMountProbe{root: "nas", path: "/share", clock: clock}
+	w.observeStorageError(&os.PathError{Op: "read", Path: "/share/checkpoints/source", Err: syscall.EIO})
+	if m.mounts["checkpoint"].fault == nil || m.mounts["nas"].fault == nil || m.mounts["job-files"] != nil {
+		t.Fatal("path containment conflated distinct backing mounts", m.mounts)
+	}
+	machine := Machine{HostHealth: m.snapshot(nil)}
+	applyHostMountHealth(w, &machine)
+	for _, root := range machine.UnavailableRoots {
+		if root.Root == "job-files" {
+			t.Fatal("NAS projection withheld a separate nested backing", machine.UnavailableRoots)
+		}
+	}
+	if w.storageRootReason(&Job{Spec: Spec{Priority: "experiment"}}) == "" {
+		t.Fatal("affected checkpoint root lost its hold")
+	}
+	inputJob := Job{Spec: Spec{Priority: "production", Inputs: map[string]string{"asset": "source"}}}
+	if reason := w.storageRootReason(&inputJob); reason != "" {
+		t.Fatal("independent nested input dependency was withheld", reason)
+	}
+	w.observeStorageError(&os.PathError{Op: "read", Path: "/share/nested/inputs/source", Err: syscall.EIO})
+	if m.mounts["checkpoint"].fault.Generation != 1 || m.mounts["nas"].fault.Generation != 1 || m.mounts["job-files"].fault == nil {
+		t.Fatal("nested fault propagated to the parent backing")
+	}
+	if reason := w.storageRootReason(&inputJob); reason == "" {
+		t.Fatal("faulted nested input dependency remained eligible")
+	}
+}
+
+func TestStorageFaultCheckpointCopyKeepsReadAttribution(t *testing.T) {
+	w, m, clock := storageFaultFixture(t)
+	w.CheckpointRoot = t.TempDir()
+	w.ServiceConfig.NAS = w.CheckpointRoot
+	w.JobFileRoot = ""
+	p := m.mounts["checkpoint"]
+	p.path = w.CheckpointRoot
+	j := Job{ID: "copy-fault", Attempt: 2, Checkpoint: filepath.Join(w.CheckpointRoot, "job")}
+	source := filepath.Join(j.Checkpoint, "attempt-1", "checkpoint.json")
+	if err := os.MkdirAll(filepath.Dir(source), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte(`{"myce_checkpoint":{"generation":4}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := prepareCheckpointCopySync(j, func(out io.Writer, in io.Reader) (int64, error) {
+		// Model the Linux fast-copy error boundary: an optimized file copy
+		// cannot tell which descriptor caused ESTALE and labels it write.
+		if _, optimized := in.(io.WriterTo); optimized {
+			return 0, &os.PathError{Op: "write", Path: filepath.Join(j.Checkpoint, ".staging"), Err: syscall.ESTALE}
+		}
+		if _, optimized := out.(io.ReaderFrom); optimized {
+			return 0, &os.PathError{Op: "write", Path: filepath.Join(j.Checkpoint, ".staging"), Err: syscall.ESTALE}
+		}
+		return io.Copy(out, storageFaultReader{err: &os.PathError{Op: "read", Path: source, Err: syscall.ESTALE}})
+	}, func(string) error { return nil })
+	if !errors.Is(err, syscall.ESTALE) {
+		t.Fatal("missing copy fault", err)
+	}
+	w.observeStorageError(err)
+	if p.fault == nil || !p.fault.Data || p.fault.Operation != "read" || p.recoverySource != source {
+		t.Fatal("source data fault became destination metadata failure", p.fault, p.recoverySource)
+	}
+	p.dataProbe = func(string, uint64, func()) error { return errors.New("no fresh data proof") }
+	clock.Advance(time.Second)
+	p.started, p.pending = clock.Now(), make(chan hostMountResult, 1)
+	p.pending <- hostMountResult{generation: p.fault.Generation, latency: time.Millisecond}
+	p.sample(clock.Now(), nil)
+	await(t, func() bool { return len(p.pending) == 1 })
+	if !p.fault.Active || p.consecutive != 0 {
+		t.Fatal("metadata recovered a checkpoint source read fault")
 	}
 }

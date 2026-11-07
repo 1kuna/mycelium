@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"sync/atomic"
@@ -393,8 +394,10 @@ func applyHostMountHealth(w Worker, m *Machine) {
 			continue
 		}
 		if probe.Root == "nas" && w.ServiceConfig != nil {
-			for role, path := range map[string]string{"job-files": w.JobFileRoot, "model": w.ModelRoot, "model-cache": w.CacheRoot, "environment-source": w.EnvironmentSourceRoot, "environment": w.EnvironmentRoot, "file-cache": w.FileCacheRoot, "extension": w.ExtensionRoot} {
-				if path != "" && withinNAS(w.ServiceConfig.NAS, path) {
+			roots := map[string]string{"job-files": w.JobFileRoot, "model": w.ModelRoot, "model-cache": w.CacheRoot, "environment-source": w.EnvironmentSourceRoot, "environment": w.EnvironmentRoot, "file-cache": w.FileCacheRoot, "extension": w.ExtensionRoot}
+			backings := w.storageRoleBackings(roots)
+			for role, path := range roots {
+				if path != "" && withinNAS(w.ServiceConfig.NAS, path) && backings[role] == filepath.Clean(w.ServiceConfig.NAS) {
 					mark(role, probe.Reason)
 				}
 			}

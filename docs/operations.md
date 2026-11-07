@@ -2789,6 +2789,15 @@ missing files, permissions, cancellation, a bad declared digest and local cache
 errors do not quarantine a mount. This is automatic worker behavior, with no
 opt-in switch and no consumer syscall or kernel-log sensor.
 
+Worker start checks use the live latch through the existing dependency resolver,
+including before and after the final queue authorization. A fault between
+heartbeats therefore fences a retry or an older healthy queue reply. Faults
+propagate only to roles with the same known backing; a separately mounted
+nested root stays independent. Checkpoint preparation uses explicit userspace
+read/write streaming so Linux fast-copy errors cannot mislabel source data
+faults as destination metadata errors. This preserves syscall provenance at the
+cost of userspace copying; live NAS throughput for this change is unmeasured.
+
 For a data fault the existing single outstanding probe lane replaces metadata
 checks with a bounded read/reopen proof: two fresh open/stat/read/close cycles,
 at the same offset within that completion, verify nonempty bytes and stable

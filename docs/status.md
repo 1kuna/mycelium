@@ -84,6 +84,11 @@ network backing latch `mount_probe_failed` for dependent roots. A fault resets
 recovery evidence; an older in-flight completion cannot clear it. Data faults
 require three fresh read/reopen completions after the latest fault. Metadata,
 cached probe results and incomplete requests cannot recover data access.
+The worker dependency resolver reads the live latch before placement/start
+checks and at the final start hand-off, including after the queue reply. An
+earlier healthy heartbeat or successful preparation retry cannot bypass it.
+Separate learned backing mounts remain independent even when one mountpoint
+is nested beneath another.
 The worker retains path-free typed operation/errno/time/generation evidence in
 its private health file; recovery source custody is private and never sent in
 status. Learned backing attribution survives restart, with recovery custody

@@ -310,6 +310,21 @@ func (m *hostHealthMonitor) snapshot(disks []DiskVolume) *HostHealth {
 			m.disks[v.ID] = float64(v.FreeBytes)
 		}
 	}
+	return m.snapshotLocked()
+}
+
+// Admission reads current evidence without replacing the sampler's latest
+// disk-volume measurements with an actor's older machine snapshot.
+func (m *hostHealthMonitor) currentSnapshot() *HostHealth {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.snapshotLocked()
+}
+
+func (m *hostHealthMonitor) snapshotLocked() *HostHealth {
 	h := m.health
 	if len(h.History) > 0 {
 		h.AgeSeconds = max(0, m.clock.Now().Sub(h.History[len(h.History)-1].At).Seconds())
