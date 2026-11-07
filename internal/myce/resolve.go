@@ -41,6 +41,7 @@ type ResolveEnvironment struct {
 
 type ResolveTarget struct {
 	session       string
+	freshUntil    time.Time
 	cachedInputs  map[string]bool
 	nasInspection bool
 	Environment   *ResolveEnvironment `json:"environment,omitempty"`
@@ -310,6 +311,7 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 		live := q.s.Machines[m.ID]
 		if live != nil {
 			row.session = live.Session
+			row.freshUntil = live.LastSeen.Add(q.machineLossTimeout(m.ID))
 		}
 		if live == nil || live.LastSeen.IsZero() {
 			row.Freshness = "unknown"

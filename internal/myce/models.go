@@ -818,7 +818,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" {
 			endpoint += "?" + r.URL.RawQuery
 		}
-		spool, bodySize, e = a.Queue.uploadSpool.request(r.Context(), r.Body, maxGenericRequestBytes, r.ContentLength)
+		spool, bodySize, e = a.Queue.uploadSpool.request(r.Context(), r.Body, 0, r.ContentLength)
 		if e != nil {
 			status := 400
 			if errors.Is(e, errModelRequestTooLarge) {
@@ -832,7 +832,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				message = "model request too large"
 			}
 			if errors.Is(e, errUploadSpoolFull) {
-				message = errUploadSpoolFull.Error()
+				message = e.Error()
 			}
 			http.Error(w, message, status)
 			return
@@ -843,9 +843,10 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	} else {
-		data, e = io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
+		var shape map[string]json.RawMessage
+		data, e = readBudgetJSON(r, &shape)
 		if e != nil {
-			modelError(w, 400, "invalid model request")
+			respond(w, nil, e)
 			return
 		}
 		if e = json.Unmarshal(data, &body); e != nil {

@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -10,6 +11,17 @@ import (
 	"testing"
 	"time"
 )
+
+const defaultStatusJobs = 100 // synthetic page capacity, not a runtime default
+
+func setStatusTestCapacity(q *Queue) {
+	q.requestBudgets.lanes = 1
+	q.requestBudgets.rowTime = 1
+	q.requestBudgets.controlTime = defaultStatusJobs
+	q.requestBudgets.memory = func(context.Context) (int64, error) {
+		return 256 << 20, nil
+	}
+}
 
 func readStatusOptions(t *testing.T, q *Queue, query string) Snapshot {
 	t.Helper()
@@ -30,6 +42,7 @@ func readStatusOptions(t *testing.T, q *Queue, query string) Snapshot {
 func TestStatusOptionsBoundedHistoryAndPaging(t *testing.T) {
 	const history = defaultStatusJobs + 3
 	q, c := fixture(t)
+	setStatusTestCapacity(q)
 	for i := range history {
 		id := fmt.Sprintf("history-%04d", i)
 		at := c.Now().Add(-time.Duration(i) * time.Second)
@@ -56,10 +69,17 @@ func TestStatusOptionsBoundedHistoryAndPaging(t *testing.T) {
 	c.Advance(statusCacheLifetime)
 	larger := readStatusOptions(t, q, "")
 	more, _ := json.Marshal(larger)
-	oldJobs, _ := json.Marshal(s.Jobs)
-	newJobs, _ := json.Marshal(larger.Jobs)
-	if len(larger.Jobs) != len(s.Jobs) || len(more) > 1<<20 || string(oldJobs) != string(newJobs) {
+	if len(larger.Jobs) > len(s.Jobs) || len(more) > 1<<20 {
 		t.Fatalf("history growth amplified summary: %d -> %d", len(data), len(more))
+	}
+	previous := map[string]bool{}
+	for _, j := range s.Jobs {
+		previous[j.ID] = true
+	}
+	for _, j := range larger.Jobs {
+		if !previous[j.ID] {
+			t.Fatal("adaptive page skipped newer history", j.ID)
+		}
 	}
 	active := readStatusOptions(t, q, "?jobs=active")
 	if len(active.Jobs) != 2 || len(active.WorkCurves) != 1 {
@@ -108,7 +128,7 @@ func TestStatusOptionsPaging(t *testing.T) {
 }
 
 func TestStatusOptionsRejectInvalidQuery(t *testing.T) {
-	for _, query := range []string{"jobs=unknown", "limit=0", "limit=1001", "since=invalid", "detail=unknown", "before=missing"} {
+	for _, query := range []string{"jobs=unknown", "limit=0", "limit=-1", "since=invalid", "detail=unknown", "before=missing"} {
 		q, _ := fixture(t)
 		r := httptest.NewRequest("GET", "/api/status?"+query, nil)
 		r.Header.Set("Authorization", "Bearer test")

@@ -23,6 +23,12 @@ prove activation. Report it to the Mycelium maintenance owner; an unapproved
 slot refuses recovery with `fleet_slot_unapproved`. Use the supported installer
 and preserve the refusal and identities for that owner.
 
+From the next queue release, request bodies, wait batches and status history pages
+follow current queue capacity; 413 refusals name the cause and fitting size.
+Follow returned page cursors and retain the same submission key after a refusal.
+Custom peers can negotiate `capacity-v1` through HTTP headers without changing
+legacy JSON. See [request budgets](https://github.com/1kuna/mycelium/blob/main/docs/request-budgets.md).
+
 ## First run: adapter to verified result
 
 Mycelium runs CPU and GPU work through one queue. Describe needs and verified

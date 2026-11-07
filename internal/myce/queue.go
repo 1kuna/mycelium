@@ -112,6 +112,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	requestBudgets      requestBudgets
 	waitStates          *waitStateIndex // scalar committed wait observations; separate reader mutex.
 	modelIntervalWrites []ModelIntervalEvent
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
@@ -654,8 +655,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		log.Printf("submission rejected code=%s reason=%q", code, reason)
 	}()
-	ctx, cancel := context.WithTimeout(ctx, submitVerificationTimeout)
-	defer cancel()
 	if s.SubmissionKey != "" {
 		if err := validateSubmissionKey(s.SubmissionKey); err != nil {
 			return nil, err
@@ -665,9 +664,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	if err != nil {
 		return nil, err
 	}
-	unlockRequest := requestLock(ctx, &q.mu)
-	// Own all client maps/slices across the unlocked verification interval.
+	// Own all client maps/slices before the lock and across verification.
 	s = cloneJob(&Job{Spec: s}).Spec
+	unlockRequest := requestLock(ctx, &q.mu)
 	store := q.files
 	catalog := q.environments
 	environmentRevision := q.environmentRevision

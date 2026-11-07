@@ -6,10 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 )
-
-const submitVerificationTimeout = 30 * time.Second
 
 // Filesystem syscalls cannot be interrupted by context cancellation. Use one
 // standard semaphore slot per queue so a stuck read/fsync cannot accumulate
