@@ -1398,15 +1398,22 @@ comparison contract; these observations do not qualify software or prove parity.
 Only successful accepted serial attempts with exact custody and complete clean
 contention evidence contribute. Resumptions, failed/interrupted/stale/duplicate
 results and intervals with another host obligation are excluded. Existing memory
-pressure classification must be eligible, and complete CPU throttling and I/O
-stall counters must both measure zero. This has no new tuned pressure threshold:
-its cost is that intrinsic I/O stalls and platforms without complete counters
-cannot teach a clean comparison. No second collector or benchmark runs.
+pressure classification must be eligible, and complete CPU scheduling-stall,
+quota-throttling and I/O-stall counters must measure zero. Linux `cpu.pressure`
+is read in the existing resource sampler; quota throttling alone cannot detect
+an unrelated process delaying execution. An independently negotiated optional
+CPU-pressure field preserves the prior telemetry contract with older queues.
+This has no new tuned pressure threshold: its cost is that internal parallelism,
+intrinsic I/O stalls and platforms without complete counters cannot teach a clean
+comparison. No second collector or benchmark runs.
 
 Each comparable key retains the incremental mean seconds/job, a clean sample
 count and observed minimum/maximum. One sample explicitly leaves variability
 unknown; the observed range is not a confidence interval or a deadline. Existing
-staleness/invalidation rules apply. Status and inspection expose this evidence
+staleness/invalidation rules apply. Each speed mutation records its exact
+before/after digest in the job's accepted-sample ledger transaction, preserving
+release-verification evidence even when the usable timing window restarts.
+Status and inspection expose this evidence
 through work curves and attempt timing. Completion ranking adds existing setup
 and measured transfer costs and remains after admission, tiers, fairness and
 least-valuable fit. Estimates neither reserve capacity nor wait for a busy faster
