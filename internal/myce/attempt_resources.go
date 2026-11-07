@@ -17,15 +17,18 @@ import (
 // These counters are observations, never admission or release authority. Pointers
 // distinguish a measured zero from an unavailable OS/controller counter.
 type AttemptCPUTime struct {
-	UsageSeconds     *float64 `json:"usage_seconds,omitempty"`
-	UserSeconds      *float64 `json:"user_seconds,omitempty"`
-	SystemSeconds    *float64 `json:"system_seconds,omitempty"`
-	Periods          *uint64  `json:"periods,omitempty"`
-	ThrottledPeriods *uint64  `json:"throttled_periods,omitempty"`
-	ThrottledSeconds *float64 `json:"throttled_seconds,omitempty"`
-	Source           string   `json:"source,omitempty"`
-	Unavailable      string   `json:"unavailable,omitempty"`
-	LowerBound       bool     `json:"lower_bound,omitempty"`
+	// Linux cgroup cpu.pressure includes scheduling delay from other host work,
+	// unlike quota throttling. Nil on older workers/unsupported platforms.
+	Pressure         *IOPressure `json:"pressure,omitempty"`
+	UsageSeconds     *float64    `json:"usage_seconds,omitempty"`
+	UserSeconds      *float64    `json:"user_seconds,omitempty"`
+	SystemSeconds    *float64    `json:"system_seconds,omitempty"`
+	Periods          *uint64     `json:"periods,omitempty"`
+	ThrottledPeriods *uint64     `json:"throttled_periods,omitempty"`
+	ThrottledSeconds *float64    `json:"throttled_seconds,omitempty"`
+	Source           string      `json:"source,omitempty"`
+	Unavailable      string      `json:"unavailable,omitempty"`
+	LowerBound       bool        `json:"lower_bound,omitempty"`
 }
 type PressureStall struct {
 	Avg10   float64 `json:"avg10"`
@@ -157,6 +160,7 @@ func cgroupResources(a *memoryAttempt, at time.Time) *AttemptResources {
 			r.CPU.Unavailable = "invalid_counters"
 		}
 	}
+	r.CPU.Pressure = readIOPressure(a.fs.ReadFile, filepath.Join(a.path, "cpu.pressure"), at)
 	r.IO.Pressure = readIOPressure(a.fs.ReadFile, filepath.Join(a.path, "io.pressure"), at)
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "io.stat")); err == nil {
 		// Parent counters already include descendants. Sum devices exactly once;
@@ -535,6 +539,7 @@ func safeAttemptResources(r *AttemptResources) *AttemptResources {
 			*field = &n
 		}
 	}
+	v.CPU.Pressure = safeIOPressure(v.CPU.Pressure)
 	v.IO.Pressure = safeIOPressure(v.IO.Pressure)
 	return &v
 }

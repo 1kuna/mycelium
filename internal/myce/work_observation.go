@@ -27,6 +27,9 @@ func (r WorkReference) valid() bool {
 // ObservationKey contains no private input paths or application-specific data.
 // Configuration is a digest of resource reservations, allowances and power mode.
 type ObservationKey struct {
+	// RepeatedWork binds exact plain-command bytes, independently of the broader
+	// memory Work identity. Memory readers deliberately group across this field.
+	RepeatedWork    string          `json:"repeated_work,omitempty"`
 	ServerDigest    string          `json:"server_digest,omitempty"`
 	Allowance       string          `json:"allowance,omitempty"`
 	Work            string          `json:"work"`
@@ -58,6 +61,7 @@ type MemoryEscalationPrior struct {
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
+	Repeated            *RepeatedWorkTiming    `json:"repeated,omitempty"`
 	MemoryEscalation    *MemoryEscalationPrior `json:"memory_escalation,omitempty"`
 	GPUHostRange        *MemoryPeakRange       `json:"gpu_host_range,omitempty"`
 	MemoryRange         *MemoryPeakRange       `json:"memory_range,omitempty"`
@@ -91,9 +95,12 @@ type WorkObservation struct {
 }
 
 type WorkTiming struct {
-	HistoryReason     string     `json:"history_reason,omitempty"`
-	HistoryRecordedAt *time.Time `json:"history_recorded_at,omitempty"`
-	HistorySource     string     `json:"history_source,omitempty"`
+	RepeatedKey       *ObservationKey `json:"repeated_key,omitempty"`
+	Comparability     string          `json:"comparability,omitempty"`
+	Uncertainty       string          `json:"uncertainty,omitempty"`
+	HistoryReason     string          `json:"history_reason,omitempty"`
+	HistoryRecordedAt *time.Time      `json:"history_recorded_at,omitempty"`
+	HistorySource     string          `json:"history_source,omitempty"`
 
 	PlacementReason  string          `json:"placement_reason,omitempty"`
 	Execution        Execution       `json:"execution"`
@@ -124,7 +131,7 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 		}
 		return key, "declared wave; serial occupancy is not comparable"
 	}
-	if j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory != "auto" || j.Spec.ExtensionCheck == nil && j.Spec.Workload == nil && !plainMemoryWork(j.Spec) {
+	if j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory != "auto" || j.Spec.ExtensionCheck == nil && j.Spec.Workload == nil && !plainCommandWork(j.Spec) {
 		return nil, "workload/reference metadata unavailable"
 	}
 	if j.Spec.Resumable && j.Attempt > 1 {
@@ -157,7 +164,7 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 	if a := machineAvailability(m); a != nil && !a.Available {
 		return nil, "owner availability withdrawn"
 	}
-	if plainMemoryWork(j.Spec) {
+	if plainCommandWork(j.Spec) {
 		key, reason := referenceObservationKey(Extension{}, m, WorkReference{}, profileMemoryIdentity(j), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
 		key.Environment = environmentKey(j, m)
 		return key, reason
@@ -250,7 +257,7 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 }
 
 func (q *Queue) beginWorkTiming(j *Job) {
-	if j.Spec.Workload == nil && !plainMemoryWork(j.Spec) && !(j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory == "auto") {
+	if j.Spec.Workload == nil && !plainCommandWork(j.Spec) && !(j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory == "auto") {
 		return
 	}
 	placement := ""
@@ -260,6 +267,11 @@ func (q *Queue) beginWorkTiming(j *Job) {
 	key, reason := q.workObservationKey(j)
 	j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Key: key, Reason: reason}
 	j.Timing.PlacementReason = placement
+	if plainCommandWork(j.Spec) {
+		j.Timing.RepeatedKey, j.Timing.Reason = q.repeatedObservationKey(j)
+		q.beginRepeatedTiming(j)
+		return
+	}
 	j.Timing.HistoryReason = "no accepted matching measurement"
 	if key != nil {
 		if old, ok := q.s.WorkObservations[identityHash(key)]; ok {
@@ -321,6 +333,19 @@ func (q *Queue) validateWorkTiming(j *Job, obligations []HostObligation) {
 		t.Reason = "reference, qualification or configuration changed"
 		return
 	}
+	if t.RepeatedKey != nil {
+		current, reason := q.repeatedObservationKey(j)
+		if reason != "" || current == nil || *current != *t.RepeatedKey {
+			t.Reason = "exact command/source/input configuration changed"
+			return
+		}
+		if m := q.s.Machines[j.Machine]; q.s.HostMaintenance[hostID(m)].SharedHost != nil {
+			if reason := q.hostPressureReason(m); reason != "" {
+				t.Reason = "host pressure unknown or contended"
+				return
+			}
+		}
+	}
 	for _, p := range obligations {
 		r := p.Result
 		if p.Launch != nil || p.Engine != nil || p.Call != nil || p.Preparation || r.ID != j.ID || r.Attempt != j.Attempt || r.Machine != j.Machine || r.Session != j.Session {
@@ -336,7 +361,13 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 		return
 	}
 	q.validateWorkTiming(j, q.hostObligations(t.Key.Host))
-	throughput := t.Reason == ""
+	if t.RepeatedKey != nil && t.Reason == "" {
+		t.Reason = repeatedContentionReason(r)
+		if t.Reason == "" {
+			q.recordRepeatedObservation(j, r)
+		}
+	}
+	throughput := t.Reason == "" && !plainCommandWork(j.Spec)
 	memory := sample != nil && sample.work
 	if !throughput && !memory {
 		return
@@ -410,6 +441,15 @@ func JobTiming(j *Job) string {
 	text := "prediction " + prediction + "; actual " + actual
 	if t.Reason != "" {
 		text += "; " + t.Reason
+	}
+	if t.Comparability != "" {
+		text += "; " + t.Comparability
+	}
+	if t.Uncertainty != "" {
+		text += "; " + t.Uncertainty
+	}
+	if t.PredictedSeconds == nil && t.HistoryReason != "" {
+		text += "; " + t.HistoryReason
 	}
 	if t.PlacementReason != "" {
 		text += "; " + t.PlacementReason
