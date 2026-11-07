@@ -170,6 +170,11 @@ func (q *Queue) maintainStartDeadlines() {
 		if disabled && (!pending || !expired(j.Spec.StartBy, now)) {
 			j.Reason = "production cannot start: no eligible host is enabled; " + reason
 		}
+		if disabled {
+			j.DiagnosticCode = "host_unavailable"
+			j.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "host_unavailable", Predicate: "no_eligible_host_enabled"}
+			j.ExecutionEvidence = unstartedExecution(0)
+		}
 		j.FinishedAt = &now
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false

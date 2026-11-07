@@ -12,7 +12,7 @@ const cpuPressureProtocol = "cpu-pressure-v1"
 
 // Shared by every worker lane, including saved-result delivery. A new session
 // starts without support; headers negotiate without unknown JSON on old queues.
-type resourceWire struct{ supported, cpuPressure atomic.Bool }
+type resourceWire struct{ supported, cpuPressure, executionEvidence atomic.Bool }
 
 func resourceWireInput(in any, supported bool, cpuPressure ...bool) (any, bool) {
 	if supported && len(cpuPressure) > 0 && cpuPressure[0] {

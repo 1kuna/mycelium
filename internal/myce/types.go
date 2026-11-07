@@ -420,8 +420,8 @@ type SpecProjection struct {
 
 type Job struct {
 	LaunchCapacityWait map[string]LaunchCapacityWait `json:"launch_capacity_wait,omitempty"`
-
-	HealthRecovery *AlertRecovery `json:"health_recovery,omitempty"`
+	ExecutionEvidence  *ExecutionEvidence            `json:"execution_evidence,omitempty"`
+	HealthRecovery     *AlertRecovery                `json:"health_recovery,omitempty"`
 
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
@@ -768,6 +768,7 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
+	ExecutionEvidence         *ExecutionEvidence  `json:"execution_evidence,omitempty"`
 	Resources                 *AttemptResources   `json:"resources,omitempty"`
 	FinalCheckpointGeneration *int64              `json:"final_checkpoint_generation,omitempty"`
 	StoragePeak               *AttemptStoragePeak `json:"storage_peak,omitempty"`

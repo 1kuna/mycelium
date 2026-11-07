@@ -137,6 +137,10 @@ func (s *workerStore) startFailureAt(j Job, kind string, cause error, at time.Ti
 	return &recordedStartError{cause: cause, facts: facts}
 }
 func startFailureOutcome(owner Result, err error) Result {
+	var observed *executionEvidenceError
+	if errors.As(err, &observed) {
+		owner.ExecutionEvidence = safeExecutionEvidence(observed.evidence, owner.Attempt)
+	}
 	var recorded *recordedStartError
 	facts := memberOutcome{}
 	if errors.As(err, &recorded) {
@@ -278,6 +282,7 @@ func operatorOutcome(result Result, stopped bool) Result {
 // Only these fixed predicates/messages cross the worker boundary. Never derive
 // public text from Error(), paths, submitted commands or environment values.
 var launchPredicateMessages = map[string]string{
+	"no_eligible_host_enabled":              "no eligible host is enabled",
 	"native_workdir_containment":            rejectionMessages["native_workdir_containment"],
 	"native_isolation":                      "native isolation setup refused; check managed workspace and isolation support",
 	"device_probe_unavailable":              "accelerator inventory probe unavailable before launch",
