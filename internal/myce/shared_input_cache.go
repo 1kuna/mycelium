@@ -334,14 +334,14 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 
 // Only the calling attempt may publish. This detached work writes exclusively
 // into its unique unpublished directory and cannot touch another build's data.
-func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nasRoot, stage string) error {
+func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nasRoot, stage string) (err error) {
+	defer func() { observeStorageContext(ctx, err) }()
 	if c.beforeStage != nil {
 		c.beforeStage(ctx)
 	}
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
-	var err error
 	if s.ManifestFile != "" {
 		manifestPath, e := c.nasPathContext(ctx, nasRoot, s.ManifestFile)
 		if e != nil {
@@ -466,7 +466,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	return syncModelDirectoryContext(ctx, stage)
 }
 
-func copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
+func copySharedFile(ctx context.Context, source, target string, ref FileRef) (err error) {
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
@@ -507,6 +507,9 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) err
 		}
 		// A changing NAS original cannot consume more than its admitted bytes.
 		_, err = io.CopyN(struct{ io.Writer }{out}, contextReader{ctx, in}, ref.SizeBytes)
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			observeStorageContext(ctx, &os.PathError{Op: "read", Path: source, Err: io.ErrUnexpectedEOF})
+		}
 		err = errors.Join(err, out.Sync(), out.Close())
 		if err != nil {
 			return err

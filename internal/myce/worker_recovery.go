@@ -777,7 +777,15 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 			if err != nil {
 				return err
 			}
-			_, err = copyFile(out, in)
+			// File-to-file io.Copy can use copy_file_range on Linux, whose
+			// source faults can be returned as destination "write" errors.
+			// Stream through Reader/Writer only so errno and custody retain
+			// the actual failing read or write syscall and source path.
+			copied, copyErr := copyFile(struct{ io.Writer }{out}, struct{ io.Reader }{in})
+			err = copyErr
+			if err == nil && copied < info.Size() {
+				err = &os.PathError{Op: "read", Path: path, Err: io.ErrUnexpectedEOF}
+			}
 			if err == nil {
 				err = out.Sync()
 			}

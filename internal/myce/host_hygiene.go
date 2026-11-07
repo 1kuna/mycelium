@@ -183,17 +183,20 @@ func (h *HostHealth) observe(s HostHealthSample) {
 }
 
 type hostHealthMonitor struct {
-	mu        sync.Mutex
-	clock     Clock
-	dir       string
-	health    HostHealth
-	heartbeat float64
-	source    func(context.Context) (HostHealthReading, error)
-	foreign   func(context.Context) ([]ForeignConsumer, error)
-	mounts    map[string]*hostMountProbe
-	disks     map[string]float64
-	done      chan struct{}
-	persist   func(HostHealth) error
+	mu               sync.Mutex
+	clock            Clock
+	dir              string
+	health           HostHealth
+	heartbeat        float64
+	source           func(context.Context) (HostHealthReading, error)
+	foreign          func(context.Context) ([]ForeignConsumer, error)
+	mounts           map[string]*hostMountProbe
+	disks            map[string]float64
+	done             chan struct{}
+	persist          func(HostHealth) error
+	storageBackings  map[string]*storageBacking
+	storageRoots     map[string]storageRoot
+	readStorageRoots func() map[string]storageRoot
 }
 
 // Version the on-disk probe evidence only. The wire shape is unchanged, and
@@ -257,7 +260,14 @@ func (m *hostHealthMonitor) sample(ctx context.Context) error {
 	if foreignDue && m.foreign != nil {
 		foreign, foreignErr = m.foreign(ctx)
 	}
+	var storageRoots map[string]storageRoot
+	if m.readStorageRoots != nil {
+		storageRoots = m.readStorageRoots()
+	}
 	m.mu.Lock()
+	if storageRoots != nil {
+		m.storageRoots = storageRoots
+	}
 	s.HeartbeatSeconds, s.DiskFree = m.heartbeat, m.disks
 	for _, probe := range m.mounts {
 		s.Mounts = append(s.Mounts, probe.sample(at, m.health.Baseline))
@@ -271,6 +281,7 @@ func (m *hostHealthMonitor) sample(ctx context.Context) error {
 		}
 		return 0
 	})
+	m.projectStorageFaults(&s)
 	m.health.observe(s)
 	if foreignDue && m.foreign != nil {
 		m.health.Foreign, m.health.ForeignAt, m.health.ForeignError = foreign, at, ""
@@ -303,12 +314,35 @@ func (m *hostHealthMonitor) snapshot(disks []DiskVolume) *HostHealth {
 			m.disks[v.ID] = float64(v.FreeBytes)
 		}
 	}
+	return m.snapshotLocked()
+}
+
+// Admission reads current evidence without replacing the sampler's latest
+// disk-volume measurements with an actor's older machine snapshot.
+func (m *hostHealthMonitor) currentSnapshot() *HostHealth {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.snapshotLocked()
+}
+
+func (m *hostHealthMonitor) snapshotLocked() *HostHealth {
 	h := m.health
 	if len(h.History) > 0 {
 		h.AgeSeconds = max(0, m.clock.Now().Sub(h.History[len(h.History)-1].At).Seconds())
 	}
 	// observe may append into these backing arrays on its next tick.
 	h = cloneHostHealth(h)
+	if len(h.History) == 0 && len(m.storageBackings) > 0 {
+		h.History = []HostHealthSample{{At: m.clock.Now()}}
+	}
+	if len(h.History) > 0 {
+		last := &h.History[len(h.History)-1]
+		last.Mounts = slices.Clone(last.Mounts)
+		m.projectStorageFaults(last)
+	}
 	return &h
 }
 
@@ -343,9 +377,12 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 		m.foreign = func(ctx context.Context) ([]ForeignConsumer, error) { return workerForeignConsumers(ctx, dir) }
 	}
 	m.done = make(chan struct{})
+	m.readStorageRoots = w.storageRoots
+	m.storageRoots = w.storageRoots()
 	for role, path := range workerHealthMounts(w) {
-		m.mounts[role] = &hostMountProbe{root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path)}
+		m.mounts[role] = &hostMountProbe{root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path), storage: m}
 	}
+
 	go func() {
 		defer close(m.done)
 		// Reuse the existing observation cadence. No sampling sleeps occur in

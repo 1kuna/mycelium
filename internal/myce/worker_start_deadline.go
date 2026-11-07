@@ -23,6 +23,9 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
+	if reason := w.storageRootReason(&j); reason != "" {
+		return fmt.Errorf("%w: %s", errWorkerStartAuthorization, reason)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), workerStartRequestTimeout)
 	defer cancel()
 	requested := time.Time{}
@@ -55,6 +58,11 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 		if err := w.batchAdmission(ctx, HostLaunch{Machine: w.Machine.ID, Session: session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)}); err != nil {
 			return err
 		}
+	}
+	// A queue reply can predate a fault observed while the request was in
+	// flight. Reuse the live dependency resolver at the payload hand-off.
+	if reason := w.storageRootReason(&j); reason != "" {
+		return fmt.Errorf("%w: %s", errWorkerStartAuthorization, reason)
 	}
 	return w.checkAvailability()
 }
