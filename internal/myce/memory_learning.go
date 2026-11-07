@@ -180,10 +180,8 @@ func (q *Queue) recordProgramNeeds(sample eligibleMemorySample) {
 	if q.s.ProgramNeeds == nil {
 		q.s.ProgramNeeds = map[string]SizeHint{}
 	}
-	old, floor, usage := q.s.ProgramNeeds[sample.programKey], sample.programFloor, sample.result.Usage
-	// Explicit floors and prior requirements never shrink. New headroom comes
-	// from the attempt sensors, rather than a universal percentage.
-	q.s.ProgramNeeds[sample.programKey] = SizeHint{MemoryGB: max(old.MemoryGB, floor.MemoryGB, usage.MemoryGB+deviceMemoryGrowthGB(sample.result.MemoryPeak)), HostMemoryGB: max(old.HostMemoryGB, floor.HostMemoryGB, usage.HostMemoryGB+memoryGrowthGB(sample.result.MemoryPeak))}
+	q.recordProgramMemory(sample)
+	usage := sample.result.Usage
 	observation := *usage
 	sample.job.MeasuredNeeds = &observation
 }

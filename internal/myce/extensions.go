@@ -464,6 +464,10 @@ func extensionJobsWithRefusal(j *Job, m *Machine, qualified bool) ([]*Job, strin
 	if !j.Spec.extensionJob() || j.State == "running" || j.State == "stopping" || j.MemoryEnvelope != nil && j.MemoryEnvelope.Machine == m.ID && j.MemoryEnvelope.Device == m.Device {
 		return []*Job{j}, ""
 	}
+	// Variant floors must be evaluated without a preceding learned forecast.
+	base := *j
+	resetProgramMemory(&base)
+	j = &base
 	if !deviceAllowed(j, m) {
 		return nil, "device"
 	}

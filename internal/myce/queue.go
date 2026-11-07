@@ -98,6 +98,7 @@ type state struct {
 
 	Submissions      map[string]*submissionRecord `json:"submissions,omitempty"`
 	ProgramNeeds     map[string]SizeHint          `json:"program_needs,omitempty"`
+	ProgramMemory    map[string]ProgramMemory     `json:"program_memory,omitempty"`
 	Extensions       map[string]Extension         `json:"extensions,omitempty"`
 	Hosts            map[string]*HostState        `json:"hosts,omitempty"`
 	HostReleases     map[string]HostRelease       `json:"host_releases,omitempty"`

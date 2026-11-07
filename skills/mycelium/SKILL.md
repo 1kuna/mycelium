@@ -104,6 +104,13 @@ its containment ceiling stays fixed. Missing/stale measurements retain the full
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.
+From the next release, program memory learning separates accepted demand from
+forecast headroom. Fresh complete observations on known hardware can replace an
+inflated forecast, including for queued work and after queue restart. Accepted
+demand, authored requirements and OOM floors remain; stale, incomplete or
+unknown-hardware evidence retains the conservative total. Opaque totals saved
+before this separation stay conservative because their demand and forecast
+cannot be distinguished safely.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).

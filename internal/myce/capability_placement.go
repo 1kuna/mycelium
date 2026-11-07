@@ -120,15 +120,17 @@ func programNeedsKey(j *Job, e Extension, platform string) string {
 }
 
 func (q *Queue) applyLearnedNeeds(j *Job) {
-	if j.Spec.Program == nil {
+	if j.Spec.Program == nil || j.State == "running" || j.State == "stopping" {
 		return
 	}
+	resetProgramMemory(j)
+	base := SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB}
 	for _, e := range j.Extensions {
 		for _, p := range e.platforms() {
 			if len(j.Spec.Needs.Platform.Required) > 0 && !contains(j.Spec.Needs.Platform.Required, p) {
 				continue
 			}
-			if needs, ok := q.s.ProgramNeeds[programNeedsKey(j, e, p)]; ok {
+			if needs, ok := q.learnedProgramMemory(j, e, p); ok {
 				if j.Spec.Needs.cpuOnly() {
 					j.Spec.Needs.HostMemoryGB = max(j.Spec.Needs.HostMemoryGB, needs.MemoryGB)
 				} else {
@@ -138,6 +140,12 @@ func (q *Queue) applyLearnedNeeds(j *Job) {
 			}
 		}
 	}
+	if f := j.MemoryOOMFloor; f != nil {
+		j.Spec.Needs.MemoryGB = max(j.Spec.Needs.MemoryGB, f.MemoryGB)
+		j.Spec.Needs.HostMemoryGB = max(j.Spec.Needs.HostMemoryGB, f.HostMemoryGB)
+	}
+	j.Spec.Needs.MemoryGB = max(j.Spec.Needs.MemoryGB, j.DeviceMemoryFloorGB)
+	j.ProgramMemoryApplied = &ProgramMemoryApplied{Base: base, Applied: SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB}}
 }
 
 func (q *Queue) unmeasuredProgram(j *Job, m *Machine) bool {

@@ -517,6 +517,7 @@ type Job struct {
 	MemoryOOMFloor        *SizeHint              `json:"memory_oom_floor,omitempty"`
 	DeviceMemoryFloorGB   float64                `json:"device_memory_floor_gb,omitempty"`
 	MeasuredNeeds         *SizeHint              `json:"measured_needs,omitempty"`
+	ProgramMemoryApplied  *ProgramMemoryApplied  `json:"program_memory_applied,omitempty"`
 	OOMCapacity           *SizeHint              `json:"oom_capacity,omitempty"`
 	OOMRetries            int                    `json:"oom_retries,omitempty"`
 	Extensions            []Extension            `json:"extensions,omitempty"`
