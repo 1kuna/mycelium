@@ -546,6 +546,15 @@ An unsupported, multiplexed, incomplete or nonadvancing counter remains unknown.
 Sensor ages are rebased onto queue time; cached inventory cannot refresh them.
 Strict older queues receive the existing inventory shape after negotiation.
 
+Fan-out execution may share a discrete XPU card only with fresh host/card
+memory and activity evidence, unsaturated engines, and fresh exact-attempt host
+and device samples for every started holder. Missing evidence keeps new work
+exclusive. This adds no host allowance or numeric concurrency cap; declared or
+accepted learned memory, same-tier isolation, physical headroom and exact
+release still bind. The existing growth guard also projects fan-out device
+growth through the observation horizon and stop grace. Native throughput and
+output parity require separate matched measurement before release.
+
 A RAM figure on another target cannot hide that card contention. A RAM wait gives the resolved
 envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
