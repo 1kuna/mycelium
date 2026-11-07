@@ -298,7 +298,6 @@ exclusive create/close/remove check instead of enumerating the checkpoint root.
 This removes unnecessary directory work; genuinely slow checkpoint metadata
 still withholds dependent jobs under the unchanged measured thresholds.
 
-
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
