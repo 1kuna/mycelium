@@ -1293,7 +1293,7 @@ foreground wake lateness, local age and queue receipt time),
 attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
 observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
-On negotiated `host-probe-v1` workers, `shared_host_pressure.probe` reports
+On negotiated `host-probe-v2` workers, `shared_host_pressure.probe` reports
 measured period/cost and frozen validity in seconds. Local sample age must remain
 below that validity, including time waiting behind queue transactions.
 Matching-session contact cannot renew a negotiated observation. `availability.probe` and
@@ -2197,3 +2197,22 @@ current condition without retraining that history with zeros. Job-only captures
 omit the fleet report and its baseline maps.
 Reads reuse the published generation. Sensor coverage and maintenance sampling
 limits are evidence limits, not authorization to release custody or shrink needs.
+
+## Shared owner yield and measured CPU (#389, next release)
+
+`cpu_in_use_cores` includes shared-host measured overuse, rounded up and never
+below declared cores. Job `cpu_observation` retains the exact sample identity,
+previous elapsed/usage counters and logical-job `peak_cores` lower bound. The
+first reading establishes a counter origin; subsequent adjacent readings raise
+the learned rate. The CPU `resources` entry exposes this learned need. It remains
+valid through checkpoint/requeue, including missing or quieter later telemetry;
+it does not predict a different submission.
+
+`shared_host_pressure` additionally reports `cpu_known` and `cpu_psi` on Linux.
+Memory/CPU PSI and owner latency use this host's learned healthy bands; macOS
+memory warnings and existing host-relative swap-growth/latency health also
+withhold admission. Resumable lower-tier work receives `shared_host_pressure`
+checkpoint/requeue provenance. Production tier and non-resumable running jobs
+report a reason naming the pressure and retained work. Owner pressure alone
+does not authorize stopping those jobs. Native containment and stress
+qualification remain separate from these diagnostics and synthetic tests.

@@ -17,6 +17,8 @@ import (
 // Pressure readings are aggregate OS signals, never owner input or app names.
 // AgeSeconds crosses clocks; ReceivedAt belongs exclusively to the queue.
 type SharedHostPressure struct {
+	CPUKnown    bool                    `json:"cpu_known,omitempty"`
+	CPUPSI      float64                 `json:"cpu_psi,omitempty"`
 	Probe       *ProbeObservation       `json:"probe,omitempty"`
 	Learning    *sharedPressureLearning `json:"learning,omitempty"` // Queue-owned; never accepted from a worker.
 	MemoryKnown bool                    `json:"memory_known"`
@@ -32,13 +34,15 @@ type SharedHostPressure struct {
 const sharedHostPressureCause = "shared_host_pressure"
 
 type sharedPressureLearning struct {
-	Wake probeEstimate `json:"wake"`
-	PSI  probeEstimate `json:"psi"`
-	At   time.Time     `json:"at"`
+	CPUKnown bool          `json:"cpu_known,omitempty"`
+	CPU      probeEstimate `json:"cpu"`
+	Wake     probeEstimate `json:"wake"`
+	PSI      probeEstimate `json:"psi"`
+	At       time.Time     `json:"at"`
 }
 
 func validSharedPressure(p *SharedHostPressure) bool {
-	return p != nil && p.MemoryKnown && p.WakeKnown && (p.MemoryLevel == 0 || p.MemoryLevel == 1 || p.MemoryLevel == 2 || p.MemoryLevel == 4) &&
+	return p != nil && (!p.CPUKnown || validMemoryValue(p.CPUPSI) && p.CPUPSI <= 100) && p.MemoryKnown && p.WakeKnown && (p.MemoryLevel == 0 || p.MemoryLevel == 1 || p.MemoryLevel == 2 || p.MemoryLevel == 4) &&
 		validMemoryValue(p.MemoryPSI) && p.MemoryPSI <= 100 && validMemoryValue(p.WakeDelayMS) &&
 		validMemoryValue(p.AgeSeconds) && (p.Probe == nil || p.Probe.valid()) && p.AgeSeconds < p.Probe.freshness().Seconds()
 }
@@ -75,12 +79,18 @@ func (q *Queue) acceptSharedPressure(m, old *Machine) {
 		m.SharedHostYieldReason = "shared host memory pressure"
 	} else if psiHigh || first && p.MemoryPSI > 0 {
 		m.SharedHostYieldReason = "shared host memory PSI"
+	} else if p.CPUKnown && (!learned.CPUKnown && p.CPUPSI > 0 || learned.CPUKnown && p.CPUPSI > learned.CPU.upper()) {
+		m.SharedHostYieldReason = "shared host CPU PSI"
 	} else if wakeHigh {
 		m.SharedHostYieldReason = "shared host owner scheduling latency"
-	} else if first || p.MemoryLevel <= 1 && p.MemoryPSI <= learned.PSI.Mean && p.WakeDelayMS <= learned.Wake.Mean {
+	} else if first || p.MemoryLevel <= 1 && p.MemoryPSI <= learned.PSI.Mean && p.WakeDelayMS <= learned.Wake.Mean && (!p.CPUKnown || !learned.CPUKnown || p.CPUPSI <= learned.CPU.Mean) {
 		m.SharedHostYieldReason = ""
 	}
 	if m.SharedHostYieldReason == "" && (first || p.ReceivedAt.After(learned.At)) {
+		if p.CPUKnown {
+			learned.CPU.observe(p.CPUPSI)
+			learned.CPUKnown = true
+		}
 		learned.Wake.observe(p.WakeDelayMS)
 		learned.PSI.observe(p.MemoryPSI)
 		learned.At = p.ReceivedAt
@@ -134,27 +144,7 @@ func (q *Queue) hostPressureReason(m *Machine) string {
 // Planned stop intent is attached to the exact attempt. Existing delivery facts,
 // checkpoint grace, cancellation precedence and cleanup custody remain in charge.
 func (q *Queue) maintainSharedHosts() {
-	for _, m := range q.s.Machines {
-		if m.Gone || q.unreported[m.ID] || m.Replacement != nil || q.s.HostMaintenance[hostID(m)].SharedHost == nil || m.SharedHostYieldReason == "" {
-			continue
-		}
-		for _, j := range q.liveJobs() {
-			owner := q.s.Machines[j.Machine]
-			if owner == nil || hostID(owner) != hostID(m) || j.State != "running" || cancelled(j) || plannedStop(j) {
-				continue
-			}
-			for i := range j.Copies {
-				c := &j.Copies[i]
-				if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session {
-					c.StopCause = sharedHostPressureCause
-					c.PriorityStop = &PriorityPreemption{Cause: sharedHostPressureCause, Demand: "owner/" + hostID(m), Victim: j.ID, Policy: q.priorityMatch(j.Spec)}
-					c.Recoverable = false
-				}
-			}
-			q.stopFor(j, "owner", "pressure")
-			j.Reason = m.SharedHostYieldReason
-		}
-	}
+	q.yieldSharedOwnerPressure()
 }
 
 // Probe in the worker's bounded observation lane. Real elapsed time is sensor
@@ -183,6 +173,15 @@ func localSharedHostPressure(ctx context.Context) (SharedHostPressure, error) {
 		if err != nil {
 			return p, err
 		}
+		b, err = os.ReadFile("/proc/pressure/cpu")
+		if err != nil {
+			return p, err
+		}
+		p.CPUPSI, err = sharedMemoryPSI(b)
+		if err != nil {
+			return p, err
+		}
+		p.CPUKnown = true
 	default:
 		return p, errors.New("host pressure unavailable")
 	}
