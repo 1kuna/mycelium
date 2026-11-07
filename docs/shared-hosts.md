@@ -12,12 +12,14 @@ signal changes. The queue requires age below that observation's frozen
 `probe.valid_seconds`; it derives observation time from its injected Clock minus
 worker-local age. Worker wall timestamps cannot renew evidence.
 
-Matching-session in-flight check-in contact can discount queue delay within the
-existing contact budget. Total age is still bounded by the observation's frozen
-validity plus that budget. A failed probe removes its observation immediately;
-a pending probe retains the old age and never extends its horizon. Missing/stale
-pressure withholds new work without becoming measured pressure or stopping
-running work. Direct launch and exact release checks remain authoritative.
+For legacy workers only, matching-session in-flight check-in contact can discount
+queue delay within the existing contact budget. Their total observation age is
+still bounded by the legacy validity plus that budget. Negotiated observations
+expire at their frozen validity without contact credit. A failed probe removes
+its observation immediately; a pending probe retains the old age and never
+extends its horizon. Missing/stale pressure withholds new work without becoming
+measured pressure or stopping running work. Direct launch and exact release
+checks remain authoritative.
 
 Older workers retain the legacy 5-second cadence, 15-second sample age and
 30-second contact allowance until upgraded. These are compatibility stopgaps,
@@ -26,9 +28,11 @@ for the replacement calculation, owner recovery and remaining inventory.
 
 ## Health agreement
 
-Host maintenance health includes pressure freshness for shared-profile hosts and uses the
-same bounded session contact as worker-loss detection. Fleet status copies those
-contact facts into its detached observation and uses the same host classifier.
+Host maintenance health includes pressure freshness for shared-profile hosts.
+Legacy pressure observations use the same bounded session contact as worker-loss
+detection; negotiated pressure observations use their frozen validity. Fleet
+status copies those facts into its detached observation and uses the same host
+classifier.
 Expected owner-pressure yield is temporary occupancy and does not itself emit
 an infrastructure-failure alert or mark the host unhealthy. Missing/stale sensor
 evidence still does, including when a previous pressure latch remains set.
