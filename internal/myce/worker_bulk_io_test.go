@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
@@ -99,21 +100,24 @@ func TestWorkerBulkIOSharedAllowanceAndIntentionalProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	waits := 0
-	p.wait = func(context.Context, time.Duration, <-chan struct{}) error {
+	p.wait = func(_ context.Context, interval time.Duration, _ <-chan struct{}) error {
 		waits++
+		if interval != checkpointAvailabilityStallBudget/2 {
+			t.Fatalf("renewal must follow watchdog budget, got %s", interval)
+		}
 		if second.Len() != 0 {
 			t.Fatal("a second copy obtained an independent allowance")
 		}
 		if age := clock.Now().Sub(progress); age >= checkpointAvailabilityStallBudget {
 			t.Fatalf("intentional pacing became an operation stall: %s", age)
 		}
-		clock.Advance(time.Second)
-		if waits == 2*int(checkpointAvailabilityStallBudget/time.Second) {
+		clock.Advance(interval)
+		if waits == 5 {
 			bulkIOHeartbeat(p, clock, time.Second, nil)
 		}
 		return nil
 	}
-	if _, err := bulkWriter(ctx, &second).Write([]byte("second")); err != nil || waits < int(checkpointAvailabilityStallBudget/time.Second) {
+	if _, err := bulkWriter(ctx, &second).Write([]byte("second")); err != nil || waits != 5 {
 		t.Fatalf("long deliberate waits did not preserve staging progress: %v waits=%d", err, waits)
 	}
 }
@@ -204,5 +208,147 @@ func TestWorkerBulkIOLocalLinuxOnly(t *testing.T) {
 	bulkIOHeartbeat(p, clock, 0, nil)
 	if _, err := io.Copy(bulkWriter(p.context(context.Background()), io.Discard), bytes.NewReader(make([]byte, 2*bulkIOQuantum))); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A sync present at begin, or one entirely inside the request, excludes the
+// delayed observation even if it ends before the heartbeat does.
+func TestWorkerBulkIOOverlapAndTimeoutEvidence(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	p := newWorkerBulkIO(clock)
+	bulkIOHeartbeat(p, clock, time.Millisecond, nil)
+	ctx := p.context(context.Background())
+	for _, presentAtBegin := range []bool{true, false} {
+		var finish func()
+		if presentAtBegin {
+			finish = trackBulkIO(ctx)
+		}
+		p.begin()
+		if !presentAtBegin {
+			finish = trackBulkIO(ctx)
+		}
+		clock.Advance(time.Second)
+		finish()
+		p.end(nil)
+		if p.baseline() != time.Millisecond {
+			t.Fatal("overlapping sync contaminated idle baseline")
+		}
+	}
+	p.budget = 64 * bulkIOQuantum
+	p.used = int64(p.budget)
+	bulkIOHeartbeat(p, clock, 10*time.Millisecond, context.DeadlineExceeded)
+	backedOff := p.budget
+	if backedOff >= 64*bulkIOQuantum {
+		t.Fatal("timeout retained offending allowance")
+	}
+	bulkIOHeartbeat(p, clock, time.Millisecond, nil)
+	if p.budget != backedOff || p.baseline() != time.Millisecond {
+		t.Fatal("recovery reply grew allowance or learned idle pressure")
+	}
+	p.used = int64(p.budget)
+	bulkIOHeartbeat(p, clock, time.Millisecond, nil)
+	if p.budget <= backedOff {
+		t.Fatal("successful work after recovery did not grow allowance")
+	}
+}
+
+func TestWorkerBulkIOConcurrentHeartbeat(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	p := newWorkerBulkIO(clock)
+	bulkIOHeartbeat(p, clock, time.Millisecond, nil)
+	ctx, cancel := context.WithCancel(p.context(context.Background()))
+	defer cancel()
+	// The wait seam only signals entry, then uses the production wait. No
+	// scripted heartbeat: another goroutine completes the request independently.
+	waiting := make(chan time.Duration, 1)
+	p.wait = func(ctx context.Context, interval time.Duration, wake <-chan struct{}) error {
+		waiting <- interval
+		return waitWorkerBulkIO(ctx, interval, wake)
+	}
+	if _, err := bulkWriter(ctx, io.Discard).Write(make([]byte, bulkIOQuantum)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := bulkWriter(ctx, io.Discard).Write([]byte("next")); done <- err }()
+	if interval := <-waiting; interval != 0 {
+		t.Fatalf("writer without watchdog must not poll at %s", interval)
+	}
+	bulkIOHeartbeat(p, clock, time.Millisecond, nil)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// Cancellation also releases the real wait without a heartbeat or timer.
+	p.mu.Lock()
+	p.failed = true
+	p.mu.Unlock()
+	go func() { _, err := bulkWriter(ctx, io.Discard).Write([]byte("cancel")); done <- err }()
+	<-waiting
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkerBulkIOSourceAndRecovery(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	p := newWorkerBulkIO(clock)
+	bulkIOHeartbeat(p, clock, time.Millisecond, nil)
+	ctx := p.context(context.Background())
+	waits := 0
+	p.wait = func(context.Context, time.Duration, <-chan struct{}) error {
+		waits++
+		bulkIOHeartbeat(p, clock, time.Millisecond, nil)
+		return nil
+	}
+	data := bytes.Repeat([]byte("source"), bulkIOQuantum)
+	var archive bytes.Buffer
+	tw := tar.NewWriter(&archive)
+	if err := tw.WriteHeader(&tar.Header{Name: "source", Size: int64(len(data)), Mode: 0600}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	archivePath := filepath.Join(root, "source.tar")
+	if err := os.WriteFile(archivePath, archive.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractJobSourceContext(ctx, archivePath, root); err != nil {
+		t.Fatal(err)
+	}
+	if waits == 0 {
+		t.Fatal("source extraction bypassed pacing")
+	}
+	before := waits
+	p.used = int64(p.budget)
+	cache := &ModelCache{}
+	original := filepath.Join(root, "source")
+	dest := filepath.Join(root, "recovery")
+	if err := cache.finishTrashMove(ctx, original, dest); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil || !bytes.Equal(got, data) || waits == before {
+		t.Fatal("recovery bypassed pacing or changed bytes", err)
+	}
+	if _, err := os.Stat(original); !os.IsNotExist(err) {
+		t.Fatal("verified move retained original", err)
+	}
+	// Recovery obtains the controller even with a fresh caller context.
+	cache.FileClient = &Client{bulkIO: p}
+	p.used = int64(p.budget)
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	p.wait = func(ctx context.Context, _ time.Duration, _ <-chan struct{}) error { cancel(); return ctx.Err() }
+	// Exercise the paced recovery helper's cancellation contract without needing
+	// two filesystems on the laptop; discardContext attaches this same controller.
+	if err := cache.finishTrashMove(cancelCtx, dest, filepath.Join(root, "cancelled")); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(dest); err != nil || !bytes.Equal(got, data) {
+		t.Fatal("cancelled recovery lost source", err)
 	}
 }

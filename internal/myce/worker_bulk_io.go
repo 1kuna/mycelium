@@ -19,18 +19,19 @@ const bulkIOQuantum = 32 * 1024
 // file I/O, or caller callback is made while holding mu. Heartbeats never wait
 // on bulk writers. The clock controls every pacing decision.
 type workerBulkIO struct {
-	mu      sync.Mutex
-	clock   Clock
-	wake    chan struct{}
-	started time.Time
-	budget  float64
-	used    int64
-	waiters int
-	active  int
-	failed  bool
-	samples uint64
-	mean    float64
-	m2      float64
+	mu         sync.Mutex
+	clock      Clock
+	wake       chan struct{}
+	started    time.Time
+	budget     float64
+	used       int64
+	waiters    int
+	active     int
+	failed     bool
+	overlapped bool // Sticky bulk activity in this check-in observation window.
+	samples    uint64
+	mean       float64
+	m2         float64
 	// Test seam for deterministic waiting; production uses a cancellable timer.
 	wait func(context.Context, time.Duration, <-chan struct{}) error
 }
@@ -78,6 +79,7 @@ func (p *workerBulkIO) begin() {
 	}
 	p.mu.Lock()
 	p.started = p.clock.Now()
+	p.overlapped = p.used > 0 || p.waiters > 0 || p.active > 0
 	p.mu.Unlock()
 }
 
@@ -100,26 +102,26 @@ func (p *workerBulkIO) end(err error) {
 	elapsed := p.clock.Now().Sub(p.started)
 	p.started = time.Time{}
 	baseline := p.baseline()
+	recovering := p.failed
 	p.failed = err != nil
+	busy := p.overlapped || p.used > 0 || p.waiters > 0 || p.active > 0
+	if elapsed > 0 && baseline > 0 && (err != nil || busy) && elapsed > baseline {
+		// A timeout is latency evidence too. Retain its reduced allowance across
+		// recovery, so one healthy check-in cannot repeat the offending burst.
+		p.budget = max(bulkIOQuantum, p.budget*float64(baseline)/float64(elapsed))
+	}
 	if err == nil && elapsed > 0 {
-		if p.samples == 0 || p.used == 0 && p.waiters == 0 && p.active == 0 {
-			// Never teach the idle baseline from a window containing bulk writes
-			// or writers waiting for their allowance: pressure must not normalize
-			// itself into recovery. Constant-space Welford statistics.
+		if !busy && !recovering {
+			// Constant-space idle statistics. Activity at any point in the
+			// observation window excludes the whole sample, even after it ends.
 			p.samples++
 			delta := float64(elapsed) - p.mean
 			p.mean += delta / float64(p.samples)
 			p.m2 += delta * (float64(elapsed) - p.mean)
-		} else if baseline > 0 {
-			if elapsed > baseline {
-				// Preserve forward progress in one ordinary copy quantum, while
-				// reducing aggregate bytes in proportion to observed interference.
-				p.budget = max(bulkIOQuantum, p.budget*float64(baseline)/float64(elapsed))
-			} else if p.used > 0 {
-				// Probe the available device instead of imposing a fixed ceiling.
-				// Double only a consumed allowance supported by a healthy heartbeat.
-				p.budget = min(float64(math.MaxInt64/2), p.budget+float64(p.used))
-			}
+		} else if baseline > 0 && elapsed <= baseline && p.used > 0 && !recovering {
+			// Probe only after a successful recovery; never grow on the reply
+			// that first clears a failed check-in.
+			p.budget = min(float64(math.MaxInt64/2), p.budget+float64(p.used))
 		}
 	}
 	p.used = 0
@@ -146,6 +148,9 @@ func trackBulkIO(ctx context.Context) func() {
 	}
 	p.mu.Lock()
 	p.active++
+	if !p.started.IsZero() {
+		p.overlapped = true
+	}
 	p.mu.Unlock()
 	return func() {
 		p.mu.Lock()
@@ -161,6 +166,9 @@ func (p *workerBulkIO) take(ctx context.Context, bytes int) (int, error) {
 		}
 		p.mu.Lock()
 		baseline := p.baseline()
+		if !p.started.IsZero() {
+			p.overlapped = true
+		}
 		if baseline <= 0 {
 			// Missing/zero-resolution observations cannot establish contention.
 			// In particular, fake queue clocks need not advance during HTTP I/O.
@@ -182,16 +190,24 @@ func (p *workerBulkIO) take(ctx context.Context, bytes int) (int, error) {
 		p.mu.Unlock()
 		// A deliberate control-pressure wait is not a stalled source read or
 		// local write. Renew only while waiting here, never during blocked I/O.
+		interval := time.Duration(0)
 		if progress, ok := ctx.Value(ioProgressKey{}).(func()); ok {
 			progress()
+			// Renew relative to the existing stall watchdog, not check-in RTT.
+			// Writers with no watchdog need no timer at all.
+			budget := checkpointAvailabilityStallBudget
+			if readiness, ok := ctx.Value(readinessProgressKey{}).(*readinessProgress); ok {
+				if learned, _ := readiness.state(); learned > 0 {
+					budget = min(budget, learned)
+				}
+			}
+			interval = max(time.Nanosecond, budget/2)
 		}
 		wait := p.wait
 		if wait == nil {
 			wait = waitWorkerBulkIO
 		}
-		// Once measured, renew at the observed control interval. Before the
-		// first check-in, wake only on its completion (or cancellation).
-		err := wait(ctx, baseline, wake)
+		err := wait(ctx, interval, wake)
 		p.mu.Lock()
 		p.waiters--
 		p.mu.Unlock()

@@ -10,13 +10,14 @@ The worker resolves its authenticated queue endpoint against local interface
 addresses. Only a local Linux endpoint enables pacing. Remote workers and macOS
 keep their existing behavior; the installer rejects this option on macOS or a
 queue service. Multiple local disks are not distinguished: all this worker's
-owned bulk copies share one controller. An unresolved/proxied endpoint cannot
-establish queue co-location. No token, database or spool is inspected to detect it.
+owned bulk copies share one controller. Address matching is a heuristic: a local
+proxy for a remote queue can match too, and an unresolved endpoint disables pacing.
+The release owner must verify actual co-location before opting in. No token, database or spool is inspected to detect it.
 
 The controller learns the mean and standard deviation of successful idle
 check-in round trips. During bulk work, an allowance starts at one normal Go
 copy buffer (32 KiB), then grows by the consumed allowance only after a check-in
-within the observed idle mean plus one standard deviation. Slower replies reduce
+within the observed idle mean plus one standard deviation. Slower replies, including timeouts, reduce
 the next allowance in proportion to baseline/observed latency. One copy buffer
 per successful check-in preserves progress. This buffer bounds bootstrap work;
 it is not a byte-per-second setting. The resulting throughput follows the
