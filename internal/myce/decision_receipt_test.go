@@ -252,6 +252,18 @@ func TestDecisionReceiptDurableTargetedRead(t *testing.T) {
 	if len(page.Receipts) != 1 || page.Receipts[0].Winner != winner.ID || !page.Receipts[0].Reply.WinnerOffered || page.Receipts[0].Request == 0 {
 		t.Fatalf("durable receipt unavailable: %+v", page)
 	}
+	found := false
+	for _, e := range reopened.control.snapshot().Recent {
+		if e.Kind == "decision" {
+			found = true
+			if e.Decision != nil || !e.DecisionOmitted {
+				t.Fatal("restart hid general-view payload omission")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("restart lost general decision marker")
+	}
 }
 
 func TestDecisionReceiptRecorderlessSimulation(t *testing.T) {

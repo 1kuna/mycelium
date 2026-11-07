@@ -331,6 +331,9 @@ func (c *controlRecorder) initialize(db *sql.DB) error {
 		if err = json.Unmarshal(raw, &e); err != nil {
 			break
 		}
+		if e.Kind == "decision" {
+			e.DecisionOmitted = true
+		}
 		c.recent = append(c.recent, e)
 	}
 	return errorsControl(err, rows.Err(), rows.Close())
@@ -565,6 +568,14 @@ func (c *controlRecorder) snapshot() *ControlTelemetry {
 	out.Pending = len(c.pending) + c.backlogPending
 	out.AdmissionScope = "handler_frontier_queue_pressure"
 	c.mu.Unlock()
+	// All general views, including status generations and their encoded cache,
+	// omit variable receipt payloads. Per-job readback owns their byte budget.
+	for i := range out.Recent {
+		e := &out.Recent[i]
+		if e.Decision != nil || e.Kind == "decision" {
+			e.Decision, e.DecisionOmitted = nil, true
+		}
+	}
 	sort.Slice(out.InFlight, func(i, j int) bool { return out.InFlight[i].ID < out.InFlight[j].ID })
 	sort.Slice(out.Totals, func(i, j int) bool {
 		return out.Totals[i].Kind+out.Totals[i].Operation < out.Totals[j].Kind+out.Totals[j].Operation
@@ -812,12 +823,6 @@ type ControlPage struct {
 
 func (q *Queue) controlPage(ctx context.Context, after int64) (ControlPage, error) {
 	page := ControlPage{Telemetry: q.control.snapshot(), Next: after, Entries: []ControlRecord{}}
-	for i := range page.Telemetry.Recent {
-		e := &page.Telemetry.Recent[i]
-		if e.Decision != nil {
-			e.Decision, e.DecisionOmitted = nil, true
-		}
-	}
 	if err := q.usageReader.QueryRowContext(ctx, `SELECT COALESCE(MIN(seq),0),COALESCE(MAX(seq),0) FROM control_events`).Scan(&page.First, &page.HighWater); err != nil {
 		return page, err
 	}

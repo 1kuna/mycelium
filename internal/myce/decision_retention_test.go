@@ -89,6 +89,62 @@ func TestDecisionRetentionGeneralControlReadOmitsPayload(t *testing.T) {
 	}
 }
 
+func TestDecisionRetentionStatusRefreshAfterCapacityWithdrawal(t *testing.T) {
+	q, clock, client := decisionFixture(t)
+	r := &DecisionReceipt{JobID: "queued"}
+	for i := 0; i < 1024; i++ {
+		r.Reply.Directives = append(r.Reply.Directives, DecisionDirective{Execution: Execution{ID: ID(), Attempt: 1}, Offer: true})
+	}
+	q.control.appendDecision(ControlEvent{Kind: "decision", Decision: r}, 8<<20)
+	if err := q.control.flush(q.db); err != nil {
+		t.Fatal(err)
+	}
+	read := func() Snapshot {
+		t.Helper()
+		var out Snapshot
+		if err := client.Call(context.Background(), "GET", "/api/status", nil, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.ControlTelemetry == nil {
+			t.Fatal("missing general telemetry")
+		}
+		found := false
+		for _, e := range out.ControlTelemetry.Recent {
+			if e.Decision != nil {
+				t.Fatal("status hydrated historical receipt payload")
+			}
+			if e.Kind == "decision" {
+				found = true
+				if !e.DecisionOmitted {
+					t.Fatal("status hid payload omission")
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing retained decision marker")
+		}
+		return out
+	}
+	first := read()
+	q.requestBudgets.memory = func(context.Context) (int64, error) { return 64 << 10, nil }
+	clock.Advance(2 * time.Second) // Expire the general status cache generation.
+	second := read()
+	if !second.Freshness.CapturedAt.After(first.Freshness.CapturedAt) {
+		t.Fatal("status did not refresh")
+	}
+	// Withdrawal affects the read's current share; no subsequent check-in has
+	// trimmed the recorder's historical, larger-budget payload. It must stay
+	// absent from both refreshed status and its encoded cache.
+	foundPayload := false
+	for _, e := range q.control.recent {
+		foundPayload = foundPayload || e.Decision != nil
+	}
+	if !foundPayload {
+		t.Fatal("fixture lost historical payload before refresh")
+	}
+	read()
+}
+
 func TestDecisionRetentionDeferredHistoryBudget(t *testing.T) {
 	q, clock, _ := decisionFixture(t)
 	budget := 6 * decisionCost(&DecisionReceipt{})

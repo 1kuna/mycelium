@@ -2435,9 +2435,10 @@ publication and the final flush-ownership handoff share that mutex, so a
 concurrent withdrawal cannot fall between the final check and release.
 Restart reads receipt payloads through targeted durable readback instead
 of loading them into the general recent-event ring.
-The general `GET /api/control` read also omits receipt payloads from its recent
-view and strips them in SQL before durable event decoding, marking
-`decision_omitted`. Use the targeted per-job endpoint for those payloads.
+All general telemetry snapshots, including full status and its encoded cache,
+omit receipt payloads and mark `decision_omitted`. The marker also survives
+restart. `GET /api/control` strips payloads in SQL before durable event
+decoding. Use the targeted per-job endpoint for those payloads.
 Each request's capture and reply scratch also fit its measured share.
 Unexplained dispatch gaps and rejected/competing decisions take precedence
 over ordinary offers; oldest equal-value detail yields when capacity shrinks. There is no new fixed row cap, heartbeat sampling rate or expiry timer.
