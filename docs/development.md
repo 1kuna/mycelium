@@ -923,6 +923,11 @@ spools and queue restart retain the same key for buffered results. An exact
 non-pending native release-only acknowledgement advances its recorded stop to
 requeue or cancellation, without waiting for an omitted attempt in a heartbeat.
 
+A stale diagnostic log or publication reply is not a release acknowledgement.
+The attempt actor sends an exact release-only completion and retains its durable
+Job/Result until that request succeeds, even if replay or an earlier completion
+was stale. Failed release delivery retries through the same actor.
+
 Compatibility and refusal:
 
 - Current host-launch-v3 one-attempt worker → new queue: unchanged legacy form.
