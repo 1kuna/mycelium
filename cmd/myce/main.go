@@ -946,6 +946,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	if page := s.JobsPage; page != nil && page.NextBefore != "" {
+		fmt.Printf("jobs: %d of %d retained jobs shown; use status JOB_ID for a known job or status --history for all history\n", page.Returned, page.Total)
+	}
 	if s.HealthAlertDelivery != nil {
 		fmt.Println(s.HealthAlertDelivery.Summary())
 	}

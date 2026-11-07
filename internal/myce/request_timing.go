@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -271,4 +272,20 @@ func newRequestMux() *requestMux {
 func (m *requestMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
 	m.ServeMux.HandleFunc(pattern, handler)
 	m.patterns[pattern] = struct{}{}
+}
+
+// Only selected-job projection and its wire encoding teach row cost. Fleet
+// diagnostics, disk reads, SQL usage history and mutex waiting are fixed or
+// independent request work, not marginal costs of another history row.
+func startStatusProjection(budgets []*requestBudgets) func([]*Job) {
+	if len(budgets) == 0 {
+		return func([]*Job) {}
+	}
+	started := time.Now()
+	return func(jobs []*Job) {
+		data, err := json.Marshal(jobs)
+		if err == nil {
+			budgets[0].recordProjection(len(jobs), len(data), time.Since(started))
+		}
+	}
 }

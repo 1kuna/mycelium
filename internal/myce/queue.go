@@ -2106,7 +2106,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 }
 
 // Projection runs against either the locked queue or a fully detached read view.
-func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
+func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
 	out := Snapshot{Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	for _, s := range q.s.ModelSlots {
@@ -2220,6 +2220,7 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
 	order, reasons := q.queueProjection()
+	finishProjection := startStatusProjection(budgets)
 	for _, stored := range q.s.Jobs {
 		if q.observationSelection != nil && !q.observationSelection.ids[stored.ID] {
 			continue
@@ -2232,6 +2233,7 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		}
 		out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
 	}
+	finishProjection(out.Jobs)
 	for _, m := range q.s.Machines {
 		copy := cloneMachine(m)
 		copy.ExternalMemory = q.externalMemoryStatus(hostID(m))

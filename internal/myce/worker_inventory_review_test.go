@@ -285,7 +285,7 @@ func TestInventoryReviewUnifiedLocalProbe(t *testing.T) {
 							return []byte("GPU-unified, driver"), nil
 						}
 						return []byte("NVIDIA GB10, N/A"), nil
-					case "vm_stat":
+					case "/usr/bin/vm_stat":
 						return []byte(fmt.Sprintf("Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free: %d.\nPages inactive: 0.\n", available*262144)), nil
 					}
 					return nil, exec.ErrNotFound
