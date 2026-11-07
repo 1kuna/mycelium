@@ -73,7 +73,11 @@ func copyJobFileContentsContext(ctx context.Context, src, dst string) error {
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(out, contextReader{ctx, f})
+	copied, copyErr := io.Copy(out, contextReader{ctx, f})
+	if copyErr == nil && copied < info.Size() {
+		copyErr = &os.PathError{Op: "read", Path: src, Err: io.ErrUnexpectedEOF}
+		observeStorageContext(ctx, copyErr)
+	}
 	syncErr := out.Sync()
 	return errors.Join(copyErr, syncErr, out.Close())
 }
@@ -81,6 +85,8 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 	return w.prepareExtensionFilesContext(context.Background(), j, stateDir)
 }
 func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateDir string) (stageErr error) {
+	ctx = w.storageIOContext(ctx)
+	defer func() { observeStorageMetadata(ctx, stageErr) }()
 	operation, input, ref := "prepare", "", (FileRef{})
 	defer func() { stageErr = withStagingCause(input, ref, operation, stageErr) }()
 	if err := ctx.Err(); err != nil {

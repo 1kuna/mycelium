@@ -183,17 +183,19 @@ func (h *HostHealth) observe(s HostHealthSample) {
 }
 
 type hostHealthMonitor struct {
-	mu        sync.Mutex
-	clock     Clock
-	dir       string
-	health    HostHealth
-	heartbeat float64
-	source    func(context.Context) (HostHealthReading, error)
-	foreign   func(context.Context) ([]ForeignConsumer, error)
-	mounts    map[string]*hostMountProbe
-	disks     map[string]float64
-	done      chan struct{}
-	persist   func(HostHealth) error
+	mu              sync.Mutex
+	clock           Clock
+	dir             string
+	health          HostHealth
+	heartbeat       float64
+	source          func(context.Context) (HostHealthReading, error)
+	foreign         func(context.Context) ([]ForeignConsumer, error)
+	mounts          map[string]*hostMountProbe
+	disks           map[string]float64
+	done            chan struct{}
+	persist         func(HostHealth) error
+	restoredFaults  map[string]StorageFault
+	restoredSources map[string]string
 }
 
 // Version the on-disk probe evidence only. The wire shape is unchanged, and
@@ -202,13 +204,17 @@ const hostMountProbeVersion = "checkpoint-access-v2"
 
 type hostHealthDisk struct {
 	HostHealth
-	MountProbeVersion string `json:"mount_probe_version,omitempty"`
+	MountProbeVersion string                  `json:"mount_probe_version,omitempty"`
+	StorageFaults     map[string]StorageFault `json:"storage_faults,omitempty"`
+	// Private recovery custody, deliberately outside the path-free fault/wire.
+	RecoverySources map[string]string `json:"recovery_sources,omitempty"`
 }
 
 func openHostHealth(dir string, clock Clock) (*hostHealthMonitor, error) {
 	m := &hostHealthMonitor{dir: dir, clock: clock, mounts: map[string]*hostMountProbe{}}
 	m.persist = func(h HostHealth) error {
-		return saveWorkerJSON(dir, "host-health.json", hostHealthDisk{HostHealth: h, MountProbeVersion: hostMountProbeVersion})
+		faults, sources := m.storageFaultDisk()
+		return saveWorkerJSON(dir, "host-health.json", hostHealthDisk{HostHealth: h, MountProbeVersion: hostMountProbeVersion, StorageFaults: faults, RecoverySources: sources})
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "host-health.json"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -222,6 +228,7 @@ func openHostHealth(dir string, clock Clock) (*hostHealthMonitor, error) {
 		return nil, err
 	}
 	m.health = saved.HostHealth
+	m.restoredFaults, m.restoredSources = saved.StorageFaults, saved.RecoverySources
 	if saved.MountProbeVersion != hostMountProbeVersion {
 		for i := range m.health.Baseline {
 			if saved.MountProbeVersion == "stat-readdir-v1" {
@@ -309,6 +316,28 @@ func (m *hostHealthMonitor) snapshot(disks []DiskVolume) *HostHealth {
 	}
 	// observe may append into these backing arrays on its next tick.
 	h = cloneHostHealth(h)
+	// A fault can arrive after a persisted sample or before the first sample
+	// following restart. Snapshot the active latch, never the old success.
+	for _, p := range m.mounts {
+		if p.fault == nil || !p.fault.Active {
+			continue
+		}
+		if len(h.History) == 0 {
+			h.History = []HostHealthSample{{At: m.clock.Now()}}
+		}
+		last := &h.History[len(h.History)-1]
+		last.Mounts = slices.Clone(last.Mounts)
+		found := false
+		for i := range last.Mounts {
+			if last.Mounts[i].Root == p.root {
+				last.Mounts[i].Reason, last.Mounts[i].Adverse = p.reason, true
+				found = true
+			}
+		}
+		if !found {
+			last.Mounts = append(last.Mounts, HostMountHealth{Root: p.root, Reason: p.reason, Adverse: true})
+		}
+	}
 	return &h
 }
 
@@ -345,6 +374,22 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 	m.done = make(chan struct{})
 	for role, path := range workerHealthMounts(w) {
 		m.mounts[role] = &hostMountProbe{root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path)}
+	}
+	for role, fault := range m.restoredFaults {
+		p := m.mounts[role]
+		if p == nil && role == "job-files" && w.JobFileRoot != "" {
+			p = &hostMountProbe{root: role, path: w.JobFileRoot, clock: m.clock, probe: recoveryMountProbe(w, "nas", w.JobFileRoot)}
+			m.mounts[role] = p
+		}
+		if p != nil {
+			source := m.restoredSources[role]
+			if source != "" && !withinNAS(p.path, source) && (w.ServiceConfig == nil || w.ServiceConfig.NAS == "" || !withinNAS(w.ServiceConfig.NAS, source)) {
+				// Preserve the hold across a restart, but never read an old
+				// source outside the newly configured storage scope.
+				source = ""
+			}
+			restoreStorageFault(p, fault, source)
+		}
 	}
 	go func() {
 		defer close(m.done)

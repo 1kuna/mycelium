@@ -252,6 +252,16 @@ exclusive create/close/remove check instead of enumerating the checkpoint root.
 This removes unnecessary directory work; genuinely slow checkpoint metadata
 still withholds dependent jobs under the unchanged measured thresholds.
 
+From the owned-NAS fault follow-up, Mycelium's own staging/hash and checkpoint
+I/O failures also withhold work that depends on the affected network root,
+through the same host-health reason and alerts. Independent local work remains
+eligible. Data faults recover only after three fresh cache-bypass read/reopen
+proofs; metadata or cached probe success cannot clear them. No sentinel write
+is required on read-only inputs. Unsupported cache bypass retains the hold for
+the storage owner. This is automatic after the worker release; it does not
+observe arbitrary consumer syscalls. Keep the same job while the root recovers;
+do not work around the hold by pinning a host or changing mounts.
+
 ## Read before extending this fixture
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.

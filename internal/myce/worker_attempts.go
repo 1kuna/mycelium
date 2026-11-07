@@ -377,7 +377,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		if needsCheckpoint(&a.job) {
 			path := attemptCheckpoint(a.job)
 			var err error
-			report.Progress, err = s.nasProgress.run(path, func() (int64, error) { return checkpointProgress(path) })
+			report.Progress, err = s.nasProgress.run(path, func() (int64, error) {
+				progress, err := checkpointProgress(path)
+				w.observeStorageError(err)
+				return progress, err
+			})
 			// A scan still waiting on NAS I/O is not a completed storage
 			// failure. The independent root probe fences actual root stalls.
 			if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errCheckpointIOPending) {
@@ -844,6 +848,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	if err != nil {
 		return err
 	}
+	w.storageHealth = health
 	defer func() { cancel(); health.wait() }()
 	var qualification checkpointIO[bool]
 	var ioProbe checkpointIO[*IOPressure]
@@ -1128,6 +1133,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			checkpointRoot := root.state.CheckpointRoot
 			available, _ := root.nasProbe.runProgress(checkpointRoot, func(progress func()) (bool, error) {
 				err := workerCheckpointAvailable(checkpointRoot, progress)
+				w.observeStorageError(err)
 				return err == nil, err
 			})
 			m.CheckpointUnavailable = !available || diagnostics.CheckpointUnavailable

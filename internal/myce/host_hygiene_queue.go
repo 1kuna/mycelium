@@ -32,7 +32,7 @@ func (q *Queue) detectHostHygiene() {
 			continue
 		}
 		s := m.HostHealth.History[len(m.HostHealth.History)-1]
-		for _, role := range []string{"nas", "checkpoint"} {
+		for _, role := range []string{"nas", "checkpoint", "job-files"} {
 			cause := ""
 			var evidence *HostMountHealth
 			for _, mount := range s.Mounts {

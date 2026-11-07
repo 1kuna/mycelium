@@ -152,23 +152,29 @@ func recoveryMountProbe(w Worker, role, path string) func(string, func()) error 
 }
 
 type hostMountResult struct {
-	latency time.Duration
-	err     error
+	latency      time.Duration
+	err          error
+	generation   uint64
+	dataVerified bool
 }
 type hostMountProbe struct {
-	root, path  string
-	clock       Clock
-	progressed  atomic.Pointer[time.Time]
-	probe       func(string, func()) error
-	measure     func(string, func()) hostMountResult
-	pending     chan hostMountResult
-	started     time.Time
-	last        HostMountHealth
-	candidate   string
-	consecutive int
-	reason      string
-	nextProbe   time.Time
-	retryDelay  time.Duration
+	root, path     string
+	clock          Clock
+	progressed     atomic.Pointer[time.Time]
+	probe          func(string, func()) error
+	measure        func(string, func()) hostMountResult
+	pending        chan hostMountResult
+	started        time.Time
+	last           HostMountHealth
+	candidate      string
+	consecutive    int
+	reason         string
+	nextProbe      time.Time
+	retryDelay     time.Duration
+	fault          *StorageFault
+	recoverySource string
+	dataProbe      func(string, uint64, func()) error
+	recoveryCycle  uint64
 }
 
 func workerHealthMounts(w Worker) map[string]string {
@@ -209,8 +215,25 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		select {
 		case r := <-p.pending:
 			p.pending, completed = nil, true
+			fresh := r.generation == p.faultGeneration() && (p.fault == nil || !p.fault.Active || p.started.After(p.fault.At))
+			if r.err == nil && (!fresh || p.fault != nil && p.fault.Active && p.fault.Data && !r.dataVerified) {
+				// A prior request or metadata-only completion cannot clear a newer
+				// data fault. Consume custody, then start one eligible proof below.
+				completed = false
+				break
+			}
 			p.last = HostMountHealth{Root: p.root, LatencySeconds: r.latency.Seconds()}
+			if p.fault != nil && p.fault.Active && p.fault.Data {
+				if errors.Is(r.err, errStorageCacheBypass) {
+					p.fault.CacheBypass = "unavailable"
+				} else if r.dataVerified {
+					p.fault.CacheBypass = "requested"
+				}
+			}
 			if r.err != nil {
+				if e, number, ok := storageIOFault(r.err); ok {
+					p.recordStorageFault(e, number, now)
+				}
 				p.last.Reason = "mount_probe_failed"
 				var recovery mountRecoveryError
 				if errors.As(r.err, &recovery) {
@@ -266,6 +289,18 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		p.pending, p.started = make(chan hostMountResult, 1), now
 		p.progressed.Store(&now)
 		done, path, probe, measure := p.pending, p.path, p.probe, p.measure
+		generation := p.faultGeneration()
+		cycle := p.recoveryCycle
+		data := p.fault != nil && p.fault.Active && p.fault.Data
+		if data {
+			p.recoveryCycle++
+			path = p.recoverySource
+			dataProbe := p.dataProbe
+			if dataProbe == nil {
+				dataProbe = workerStorageReopen
+			}
+			probe = func(path string, progress func()) error { return dataProbe(path, cycle, progress) }
+		}
 		clock := p.clock
 		if clock == nil {
 			clock = RealClock{}
@@ -275,13 +310,15 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 				at := clock.Now()
 				p.progressed.Store(&at)
 			}
-			if measure != nil {
-				done <- measure(path, progress)
+			if measure != nil && !data {
+				result := measure(path, progress)
+				result.generation = generation
+				done <- result
 				return
 			}
 			started := time.Now() // OS elapsed I/O measurement, never a scheduling clock.
 			err := probe(path, progress)
-			done <- hostMountResult{time.Since(started), err}
+			done <- hostMountResult{latency: time.Since(started), err: err, generation: generation, dataVerified: data && err == nil}
 		}()
 	}
 	if !completed && result.LatencySeconds == 0 && result.Reason == "" {
@@ -321,6 +358,9 @@ func (p *hostMountProbe) confirm(result HostMountHealth, fresh bool) HostMountHe
 	p.consecutive++
 	if p.consecutive >= hostHealthConfirmation {
 		p.reason = result.Reason
+		if !mountHealthWithholds(p.reason) && p.fault != nil {
+			p.fault.Active = false
+		}
 	}
 	result.Reason = p.reason
 	return result
@@ -345,8 +385,8 @@ func applyHostMountHealth(w Worker, m *Machine) {
 		if !mountHealthWithholds(probe.Reason) {
 			continue
 		}
-		if probe.Root == "checkpoint" {
-			mark("checkpoint", probe.Reason)
+		if storageFaultRole(probe.Root) {
+			mark(probe.Root, probe.Reason)
 			continue
 		}
 		if probe.Root == "nas" && w.ServiceConfig != nil {

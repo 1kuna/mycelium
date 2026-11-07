@@ -189,6 +189,9 @@ func (r contextReader) Read(p []byte) (int, error) {
 		return 0, e
 	}
 	n, err := r.reader.Read(p)
+	// Observe the actual read error before cancellation can replace the
+	// caller's result. Detached staging tails retain this same observer.
+	observeStorageContext(r.ctx, err)
 	if n > 0 {
 		if progress, ok := r.ctx.Value(ioProgressKey{}).(func()); ok {
 			progress()

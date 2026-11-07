@@ -2781,6 +2781,43 @@ NAS-dependent work waits with a typed root reason; local/cached work continues
 when its own dependencies are available. Existing operator drains and attempt
 custody are unchanged.
 
+From the owned-NAS fault follow-up, errors in Mycelium-owned shared-input
+staging/hash reads, ordinary input staging, checkpoint preparation/progress and
+existing probes latch the same dependency-scoped mount health failure. Only
+exact filesystem errors attributed to a configured network backing qualify;
+missing files, permissions, cancellation, a bad declared digest and local cache
+errors do not quarantine a mount. This is automatic worker behavior, with no
+opt-in switch and no consumer syscall or kernel-log sensor.
+
+For a data fault the existing single outstanding probe lane replaces metadata
+checks with a bounded read/reopen proof: two fresh open/stat/read/close cycles,
+at the same offset within that completion, verify nonempty bytes and stable
+size/mode/mtime. The offset rotates between completions; each read is at most
+one OS page. Darwin requests `F_NOCACHE` on each descriptor; Linux requests
+`POSIX_FADV_DONTNEED` for the page-rounded window before each read. These OS
+requests bypass client data caching where supported; success does not attest
+server cache behavior or the producer's complete declared digest. Full staging
+still verifies that digest. Unsupported/refused bypass records
+`cache_bypass: unavailable` in private evidence and keeps the data-fault hold.
+No sentinel write is required, including on read-only layouts. The failed
+source must remain readable; a removed or empty source cannot prove recovery.
+
+Three newly completed proofs, each started after the latest fault, clear the
+hold. Every newer fault resets the candidate and generation; pre-fault requests,
+metadata-only success and cached results cannot count. Existing per-operation
+stall accounting and failure retry backoff apply; there is no recovery cooldown.
+Healthy operation adds no recovery reads. During a data fault each affected
+root's existing lane performs at most two page reads per completion, plus opens,
+stats and closes. An unreturned syscall retains that one lane.
+
+An incident owner's temporary whole-host exclusion remains independent. Retire
+it only after deploying the reviewed release and verifying live that the fault
+withholds NAS-dependent work, independent local work stays eligible, and fresh
+cache-bypass read/reopen proof recovers the affected roots. The incident owner
+removes that exclusion; merge, elapsed time or metadata success alone is not
+sufficient. A natural data fault unseen by owned I/O is the trigger to revisit
+a kernel-log sensor; it is not part of this implementation.
+
 On **Linux**, a surviving automount is retried by access, including a late
 network after boot. Apply the operator-owned boot integration above to prevent
 `mount-start-limit-hit`. When the automount has disappeared, the worker reports
