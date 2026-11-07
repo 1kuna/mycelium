@@ -35,7 +35,8 @@ type ModelCache struct {
 	progress      sync.Map
 	speed         float64
 	speedMu       sync.Mutex
-	beforeChunk   func(context.Context) // deterministic interruption hook for tests
+	beforeChunk   func(context.Context)      // deterministic interruption hook for tests
+	trashRename   func(string, string) error // Cross-device recovery fault seam.
 
 	localCheckMu        sync.Mutex
 	localApprovalRound  uint64
@@ -75,9 +76,6 @@ func (c *ModelCache) init() error {
 
 // Move evictions to NAS Trash when a NAS root is configured. This preserves
 // recoverability while releasing local blocks on a separate filesystem.
-func (c *ModelCache) discard(path string) error {
-	return c.discardContext(context.Background(), path)
-}
 func (c *ModelCache) discardContext(ctx context.Context, path string) error {
 	if c.FileClient != nil {
 		ctx = c.FileClient.bulkIO.context(ctx)
@@ -113,7 +111,11 @@ func (c *ModelCache) discardContext(ctx context.Context, path string) error {
 		return e
 	}
 	dest := filepath.Join(trash, ID()+"-"+filepath.Base(path))
-	if e = os.Rename(path, dest); e == nil {
+	rename := c.trashRename
+	if rename == nil {
+		rename = os.Rename
+	}
+	if e = rename(path, dest); e == nil {
 		return nil
 	} else if !errors.Is(e, syscall.EXDEV) {
 		return e
@@ -613,8 +615,11 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		r.Error = e.Error()
 		if mismatch || oversize {
 			r.State = "failed"
-			e = errors.Join(e, c.discard(temp))
-			r.Bytes = 0
+			discardErr := c.discardContext(ctx, temp)
+			e = errors.Join(e, discardErr)
+			if discardErr == nil {
+				r.Bytes = 0
+			}
 		}
 		c.progress.Store(key, r)
 		return "", e

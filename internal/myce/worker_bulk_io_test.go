@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -350,5 +352,54 @@ func TestWorkerBulkIOSourceAndRecovery(t *testing.T) {
 	}
 	if got, err := os.ReadFile(dest); err != nil || !bytes.Equal(got, data) {
 		t.Fatal("cancelled recovery lost source", err)
+	}
+}
+
+func TestWorkerBulkIOSingleFileFailureCleanupCancellation(t *testing.T) {
+	cache, model := cacheFixture(t)
+	m := model("bad-hash", "data")
+	m.SHA256 = strings.Repeat("0", 64)
+	p := newWorkerBulkIO(cache.Clock)
+	bulkIOHeartbeat(p, cache.Clock.(*fakeClock), time.Millisecond, nil)
+	cache.FileClient = &Client{bulkIO: p}
+	// Inject only the cross-device rename result. The ensuing recovery uses
+	// real files, the production byte wait, verification and copy custody.
+	cache.trashRename = func(string, string) error {
+		p.mu.Lock()
+		p.used = int64(p.budget)
+		p.failed = true
+		p.mu.Unlock()
+		return syscall.EXDEV
+	}
+	waiting := make(chan struct{})
+	p.wait = func(ctx context.Context, interval time.Duration, wake <-chan struct{}) error {
+		close(waiting)
+		return waitWorkerBulkIO(ctx, interval, wake)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := cache.Prepare(ctx, m); done <- err }()
+	<-waiting
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal("cleanup lost copy cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled paced failure cleanup blocked copy shutdown")
+	}
+	partial := filepath.Join(cache.Root, cacheKey(m)+".partial")
+	got, err := os.ReadFile(partial)
+	if err != nil || string(got) != "data" {
+		t.Fatal("failed cleanup lost retained bytes", err)
+	}
+	reports, _ := cache.CopyReports()
+	if len(reports) != 1 || reports[0].Bytes != 4 || reports[0].State != "failed" {
+		t.Fatalf("failed cleanup misreported retained bytes: %+v", reports)
+	}
+	if _, err := os.Stat(filepath.Join(cache.Root, cacheKey(m))); !os.IsNotExist(err) {
+		t.Fatal("bad model published", err)
 	}
 }
