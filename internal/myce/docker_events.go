@@ -122,8 +122,14 @@ func (w *dockerEventWriter) event(line []byte) error {
 	// Accepted events are unique attempt evidence. Exhaustion stops optional
 	// capture, never discards earlier custody diagnostics to make room.
 	if w.reserve != nil {
-		grant, release := w.reserve(uint64(len(line)))
-		if grant < int64(len(line)) {
+		// The input/parser reservation is transient. Archive only the sanitized
+		// event's measured encoding, not discarded private labels/attributes.
+		encoded, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		grant, release := w.reserve(uint64(len(encoded)))
+		if grant < int64(len(encoded)) {
 			release()
 			return errors.New("Docker event evidence capacity exhausted")
 		}

@@ -54,6 +54,9 @@ sample adds to their retained counts.
   failure floors stay protected; elapsed time alone says nothing about reuse.
 - Input claims pin their exact bytes between requests until submission transfers
   custody. HEAD/upload lifecycle fences and reference revisions protect races;
+  settlement keeps shared transfer receipts valid: a sibling upload may still
+  hold one. Unrelated claim requests never revoke those receipts; authorized
+  collection forgets them only when the corresponding payload leaves.
   the longest observed claim-to-submission delay supplies additional publication
   protection. There is no universal six-hour promise. Unknown imports and
   unclaimed attempt directories have no age-based collection authority.
@@ -139,3 +142,6 @@ Diagnostic streams reserve their measured expanded representations as input arri
 An idle event subscription reserves only its physical read page; records spanning
 pages grow through shared admission, without a page-sized record limit. Exit/stderr
 capture shares the process pool with the event archive, progress and failure reports.
+Raw event attributes hold transient parsing reservations; the persistent archive
+is charged only for the measured sanitized event representation. Discarded labels
+cannot consume the archive's future kill/exit capture capacity.
