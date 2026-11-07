@@ -71,7 +71,7 @@ In short: run `myce spec check --resolve` first; the job's class is the only urg
    On a release with profile urgency overrides, `myce run --profile NAME --class CLASS --deadline RFC3339` (also for adapter entries) overrides those top-level fields; omit either flag to retain the authored value. A changed submission needs a new key.
 
    - `production`: work your project's rulings call production. Under the current policy it ranks first and can stop lower-tier work, including non-resumable commands.
-   - `deadline` with `--deadline <RFC3339>`: work with a real date that Zach or a ruling set. It can stop lower-tier resumable work after a grace period; non-resumable commands keep running.
+   - `deadline` with `--deadline <RFC3339>`: work with a real date that the owner or a ruling set. It can stop lower-tier resumable work after a grace period; non-resumable commands keep running.
    - `experiment` (the default): everything else.
 
    Compatible idle capacity is preferred before stopping work elsewhere. When a batch demand causes preemption, it keeps the selected host and cards through exact release and starts there; losing the worker/session permits replanning. Equal-tier work normally keeps running; the qualified scarce-host yield described below is the narrow exception. Eligibility, resources and locks still apply, so a higher class doesn't guarantee immediate capacity. A higher class than the work deserves takes capacity from someone else's real deadline.

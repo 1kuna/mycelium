@@ -30,7 +30,7 @@ func familyProbe(t *testing.T, nvidiaClass string) MachineProbe {
 			if name != "nvidia-smi" {
 				t.Fatalf("unexpected command: %s", name)
 			}
-			// A local shell exits with the same status as the B70's installed nvidia-smi.
+			// A local shell exits with the same status as a discrete-GPU Linux host's installed nvidia-smi.
 			return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 9").Output()
 		},
 		CommandEnv: func(_ context.Context, env map[string]string, name string, args ...string) ([]byte, error) {
