@@ -90,6 +90,9 @@ extended by the measured growth rate through the sample's age;
 its containment ceiling stays fixed. On releases with the contained-forecast fix,
 the forecast cannot reserve beyond a hard Linux cgroup ceiling; measured overuse
 and workers without hard containment remain conservative.
+Hard-contained CPU attempts also bound their remaining-growth forecast by their
+full ceiling, including declared and learned work; raw live RAM and allowance
+checks still apply.
 Missing/stale measurements retain the full
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
