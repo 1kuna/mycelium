@@ -3883,3 +3883,54 @@ backfill. Missing assignment, load-start or release evidence cannot pass a
 complete interval proof. Join events by attempt/machine/session/device and use
 class-change event times to split tier occupancy. For batch copies, continue to
 use job GET times and the paginated job ledger described in [status](status.md).
+
+## Completion observer upgrade and recovery (next release)
+
+Managed observers adopt all armed registrations in their private user registry.
+An ordinary keyed profile/adapter command starts one when the lifetime lock is
+free. Updating a CLI symlink does not change the image of an existing process.
+Supporting newer clients write a versioned upgrade request when arming or
+adopting a receipt. The owner verifies the requesting image and handles it
+between deliveries: it cancels and joins outstanding authority readers, releases
+receipt locks, passes its lifetime lock to the new image and waits for readiness.
+Socket cleanup holds the startup lock across its identity check and unlink, so
+the old owner cannot race replacement startup. On startup failure it retains ownership and
+reloads durable arms. A paused/stalled loop cannot perform that handoff; the
+request itself is not proof of replacement. Unversioned development images do
+not request automatic replacement.
+
+Use `myce wait --observer-status` first. Privately preserve its safe metadata,
+bounded `observer.log` files, a native process sample, exact process birth/image,
+and receipt field names, states, job IDs and timestamps. Never print or publish
+notifier targets, environment/authority values or private paths. Count bindings
+without exposing values. Establish job terminal states with the installed CLI,
+not the queue database. A stale phase is the last boundary reached; an unavailable
+live frame remains unknown.
+
+A legacy owner has neither upgrade support nor diagnostics. Recovery of a shared
+owner requires the owner's authorization and consideration of the wake volume:
+
+1. Refresh the private receipt/registration snapshot and process identities.
+2. Send SIGTERM to that exact observer. Verify its identity and descendants have
+   exited and lifetime/receipt locks are free. Stop if a survivor or lock remains;
+   do not substitute force-kill or edit registration state.
+3. Compare every receipt against the snapshot. Older cancellation paths can
+   disarm pending observations; report the exact affected job set before replay.
+4. From the original consumer workspace, repeat its ordinary supported command,
+   for example `myce run --profile PROFILE --key SAVED_KEY`. Keep the original
+   arguments and notifier binding; omission inherits the saved binding. The
+   replay starts a fresh owner and adopts registrations made by other callers.
+   A new agent's arm would also start it, triggering the same backlog.
+5. Verify a sample of terminal receipts has `delivery_status: delivered` and
+   `observation: not_armed`, receiver delivery IDs are unique, same-key replay
+   does not resend, and a new arm works. A receiver success does not prove useful
+   agent work or accepted job results.
+
+Delivery is serial. Supporting replacements pace stale terminal backlog per
+binding using mean observed delivery service cost times remaining binding demand;
+the first delivery per binding is immediately eligible. There is no legacy pacing
+option. Distinct bindings and fresh completions can still wake together; the
+measurement is notifier runtime, not downstream agent-turn runtime. Use a distinct
+notifier executable path per thread, as required by the binding contract.
+Receipt acknowledgement prevents ordinary replay duplicates; exactly-once
+external effects across crashes require receiver deduplication by `delivery_id`.
