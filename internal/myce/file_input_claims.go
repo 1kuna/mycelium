@@ -55,40 +55,10 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 	if err := normalizeJobClass(&s); err != nil {
 		return out, err
 	}
-	// Failed creation can leave only a claim. Inventory remains outside q.mu.
-	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
-		return out, err
-	}
-	store := q.files
-	stale := map[string]FileInputClaim{}
-	for id, claim := range q.s.FileInputClaims {
-		if !claim.SettledAt.IsZero() {
-			stale[id] = claim
-		}
-	}
-	q.mu.RUnlock()
-	var view *fileCapacitySnapshot
-	if len(stale) > 0 && store != nil {
-		store.lifecycle.RLock()
-		defer store.lifecycle.RUnlock()
-		view = store.snapshotCapacity(ctx)
-		defer view.release()
-	}
+	// Settlement transfers quota attribution to the job, but concurrent uploads
+	// may still hold this receipt. An unrelated claim grants no revocation
+	// authority. Payload collection forgets receipts only when their bytes leave.
 	err := q.updateUploadRequest(ctx, func() error {
-		if view != nil {
-			store.mu.Lock()
-			status, payloads := view.current()
-			store.mu.Unlock()
-			if status.Error != "" {
-				return errors.New(status.Error)
-			}
-			for id, claim := range stale {
-				_, exists := payloads[claim.File.SHA256]
-				if (!exists || !claim.SettledAt.IsZero()) && q.s.FileInputClaims[id] == claim {
-					delete(q.s.FileInputClaims, id)
-				}
-			}
-		}
 		for _, claim := range q.s.FileInputClaims {
 			if claim.Project == s.Project && claim.Class == s.Class && claim.File == ref && claim.valid(q.clock.Now()) {
 				out = claim

@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -281,10 +282,10 @@ func TestDiagnosticStreamsShareActualBytes(t *testing.T) {
 			release()
 		}
 	}()
-	line := strings.SplitN(dockerEventsInput(time.Unix(1, 0)), "\n", 2)[0]
-	// Long private metadata is parsed but never retained in the archive.
-	line = strings.Replace(line, "DO-NOT-RETAIN", strings.Repeat("x", int(2*page)), 1)
-	if err := diagnosticLines(strings.NewReader(line+"\n"), reserve, writer.event); err != nil {
+	// Repeated long private metadata is parsed transiently; only the much
+	// smaller sanitized events consume persistent capacity, through kill/die.
+	input := strings.ReplaceAll(dockerEventsInput(time.Unix(1, 0)), "DO-NOT-RETAIN", strings.Repeat("x", int(2*page)))
+	if err := diagnosticLines(strings.NewReader(input), reserve, writer.event); err != nil {
 		t.Fatal(err)
 	}
 	tails := []*diagnosticTail{{reserve: reserve}, {reserve: reserve}}
@@ -295,8 +296,16 @@ func TestDiagnosticStreamsShareActualBytes(t *testing.T) {
 			t.Fatal("event stream starved stderr capture")
 		}
 	}
-	if len(writer.archive.Events) != 1 || pool.reserved >= capacity.MemoryAvailableBytes {
-		t.Fatal("stream reserved unused headroom")
+	if len(writer.archive.Events) != 260 || pool.reserved >= capacity.MemoryAvailableBytes {
+		t.Fatal("discarded metadata exhausted event capacity", len(writer.archive.Events))
+	}
+	kill, exit := writer.archive.Events[258], writer.archive.Events[259]
+	if kill.Signal != "9" || exit.ExitCode == nil || *exit.ExitCode != 137 {
+		t.Fatal("terminal evidence lost", kill, exit)
+	}
+	encoded, err := json.Marshal(writer.archive)
+	if err != nil || strings.Contains(string(encoded), "private") || strings.Contains(string(encoded), strings.Repeat("x", int(2*page))) {
+		t.Fatal("discarded attributes entered archive", err)
 	}
 }
 func TestEvidenceRetentionLearntKeyAndUniqueWaitRemain(t *testing.T) {
