@@ -88,3 +88,25 @@ latency before calling a policy protective. If the unchanged check-in deadline
 is still missed, report that result and retain the standard delegated `io`
 controller/`io.max` path with the host-configuration owner. Do not add an
 unmeasured default or change live fleet units/cgroups by hand.
+
+The opt-in Linux-only `TestWorkerBulkIONativeMeasurement` provides a matched
+scratch protocol under an authorized idle-host job:
+
+```sh
+MYCE_TEST_BULK_IO_NATIVE=1 GOMAXPROCS=2 go test -p 2 ./internal/myce \
+  -run '^TestWorkerBulkIONativeMeasurement$' -count=1 -timeout=9m -v
+```
+
+It counterbalances unpaced/paced/paced/unpaced 90-second phases, with four
+32 KiB writers, per-file sync every 64 MiB, 256 MiB maximum payload and eight
+idle heartbeat observations per phase. It requires 60 GiB free and uses the
+working directory's filesystem rather than a potentially memory-backed temporary
+directory. It writes `internal/myce/bulk-io-measurement.json`; retain that result
+and remove only the experiment's disposable files after all writers join.
+The normal gates skip this experiment. The controller, real check-in HTTP API,
+SQLite persistence and worker heartbeat cadence are real; the queue is a small
+disposable fixture. A separate small mutation exposes SQLite probe-commit time,
+not the installed queue's or check-in's isolated commit span. Host PSI and device
+await include unrelated activity. The result cannot certify production history
+size, arbitrary payload writes or live worker activation. Never run it while
+another consumer's reservation or production work occupies the host.
