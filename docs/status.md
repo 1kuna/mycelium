@@ -1860,6 +1860,10 @@ most 1 MiB, mode 0600. Structured lifecycle, delivery and failure events exclude
 authority, raw transport errors, notifier paths/targets and environment values.
 The last-error timestamp distinguishes an old refusal from present progress.
 Legacy observers have no diagnostic record; absence cannot establish a cause.
+Status snapshots use atomic temporary-file replacement without durable syncs;
+observer progress reconstructs them after an unclean host stop. Receipt, arm
+registration and delivery acknowledgement saves still sync both the file and
+its parent directory before returning success.
 See [supported recovery](operations.md#completion-observer-upgrade-and-recovery-next-release).
 
 ## Batched waits and consumer flood protection
