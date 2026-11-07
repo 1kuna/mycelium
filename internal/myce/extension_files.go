@@ -54,6 +54,7 @@ func copyJobFileContents(src, dst string) error {
 	return copyJobFileContentsContext(context.Background(), src, dst)
 }
 func copyJobFileContentsContext(ctx context.Context, src, dst string) error {
+	defer trackBulkIO(ctx)()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -73,7 +74,7 @@ func copyJobFileContentsContext(ctx context.Context, src, dst string) error {
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(out, contextReader{ctx, f})
+	_, copyErr := io.Copy(bulkWriter(ctx, out), contextReader{ctx, f})
 	syncErr := out.Sync()
 	return errors.Join(copyErr, syncErr, out.Close())
 }

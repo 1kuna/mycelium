@@ -21,6 +21,7 @@ type FileCache struct {
 }
 
 func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stageErr error) {
+	ctx = c.Client.bulkIO.context(ctx)
 	operation := "cache_init"
 	defer func() { stageErr = withStagingCause("", ref, operation, stageErr) }()
 	c.mu.Lock()

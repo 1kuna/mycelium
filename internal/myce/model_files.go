@@ -301,7 +301,7 @@ func (c *ModelCache) copyBundleFile(ctx context.Context, src, dst string, f Mode
 			break
 		}
 		if count > 0 {
-			written, err := io.MultiWriter(out, h).Write(buf[:count])
+			written, err := io.MultiWriter(bulkWriter(ctx, out), h).Write(buf[:count])
 			n += int64(written)
 			*copied += int64(written)
 			r.Bytes += int64(written)
@@ -372,7 +372,7 @@ func (c *ModelCache) recoverModelDirectory(ctx context.Context, src, dst string)
 			return e
 		}
 		hash := sha256.New()
-		n, copyErr := io.Copy(io.MultiWriter(out, hash), contextReader{ctx, in})
+		n, copyErr := io.Copy(io.MultiWriter(bulkWriter(ctx, out), hash), contextReader{ctx, in})
 		e = errors.Join(copyErr, in.Close(), out.Sync(), out.Close())
 		if e != nil {
 			return e

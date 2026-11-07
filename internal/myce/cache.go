@@ -134,7 +134,7 @@ func (c *ModelCache) discardContext(ctx context.Context, path string) error {
 		return e
 	}
 	hash := sha256.New()
-	n, e := io.Copy(io.MultiWriter(out, hash), contextReader{ctx, in})
+	n, e := io.Copy(io.MultiWriter(bulkWriter(ctx, out), hash), contextReader{ctx, in})
 	if e == nil {
 		e = out.Sync()
 	}
@@ -227,6 +227,10 @@ func (c *ModelCache) Precopy(ctx context.Context, m Model, score int) (string, e
 	return c.prepare(ctx, m, true, score)
 }
 func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, score int) (string, error) {
+	if c.FileClient != nil {
+		ctx = c.FileClient.bulkIO.context(ctx)
+	}
+	defer trackBulkIO(ctx)()
 	if m.LocalSource != "" {
 		return c.prepareLocal(ctx, m)
 	}
@@ -546,7 +550,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 				e = errors.New("NAS model exceeds declared size")
 				break
 			}
-			written, writeErr := io.MultiWriter(out, h).Write(buf[:count])
+			written, writeErr := io.MultiWriter(bulkWriter(ctx, out), h).Write(buf[:count])
 			n += int64(written)
 			copied += int64(written)
 			r.Bytes = n
