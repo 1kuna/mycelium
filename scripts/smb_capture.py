@@ -33,56 +33,71 @@ def capture_command(argv: list[str], destination: Path, seconds: float) -> dict:
     started = time.monotonic()
     state = {"started_at": utc_now(), "status": "ok"}
     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as output:
-        try:
-            process = subprocess.Popen(
-                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, start_new_session=True,
-                # These OS inspection tools need no job or fleet environment.
-                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "TZ": "UTC"},
-            )
-        except OSError as exc:
-            return {**state, "status": "unavailable", "errno": exc.errno}
+    process = None
+    try:
+        process = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, start_new_session=True,
+            # These OS inspection tools need no job or fleet environment.
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "TZ": "UTC"},
+        )
         assert process.stdout is not None
         state["pid"] = process.pid
-
-        def stop() -> None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
         total = 0
-        try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                while selector.get_map():
-                    remaining = seconds - (time.monotonic() - started)
-                    if remaining <= 0:
-                        state["status"] = "timeout"
-                        break
-                    if not selector.select(remaining):
-                        continue
-                    chunk = os.read(process.stdout.fileno(), min(65536, MAX_CAPTURE_BYTES - total + 1))
-                    if not chunk:
-                        break
-                    output.write(chunk[:MAX_CAPTURE_BYTES - total])
-                    total += len(chunk)
-                    if total > MAX_CAPTURE_BYTES:
-                        state["status"] = "output_limit"
-                        break
-            if state["status"] != "ok":
-                stop()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    state["status"] = "timeout"
+                    break
+                if not selector.select(remaining):
+                    continue
+                chunk = os.read(process.stdout.fileno(), min(65536, MAX_CAPTURE_BYTES - total + 1))
+                if not chunk:
+                    break
+                pending = memoryview(chunk[:MAX_CAPTURE_BYTES - total])
+                while pending:
+                    written = os.write(fd, pending)
+                    if written == 0:
+                        raise OSError(errno.EIO, "diagnostic write made no progress")
+                    pending = pending[written:]
+                total += len(chunk)
+                if total > MAX_CAPTURE_BYTES:
+                    state["status"] = "output_limit"
+                    break
+        if state["status"] == "ok":
             try:
                 process.wait(timeout=max(0.001, seconds - (time.monotonic() - started)))
             except subprocess.TimeoutExpired:
                 state["status"] = "timeout"
-                stop()
-                # One second observes exit after KILL, not useful I/O duration.
+    except OSError as exc:
+        state.update(status="capture_io_error" if process else "unavailable", errno=exc.errno)
+    except Exception as exc:
+        state.update(status="capture_error", error_type=type(exc).__name__)
+    finally:
+        if process is not None:
+            # Every post-spawn exit owns cleanup, including selector/read/write
+            # exceptions and interruption. A local evidence-disk error must not
+            # orphan the still-running SMB inspection.
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                if state["status"] == "ok":
+                    state["status"] = "unexpected_descendants"
                 try:
-                    process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except OSError:
                     state["status"] = "cleanup_unconfirmed"
+            # One second observes exit after KILL, not useful I/O duration.
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                state["status"] = "cleanup_unconfirmed"
             state["returncode"] = process.returncode
             try:
                 os.killpg(process.pid, 0)
@@ -90,8 +105,9 @@ def capture_command(argv: list[str], destination: Path, seconds: float) -> dict:
                 pass
             else:
                 state["status"] = "cleanup_unconfirmed"
-        finally:
-            process.stdout.close()
+            if process.stdout is not None:
+                process.stdout.close()
+        os.close(fd)
     state.update(finished_at=utc_now(), elapsed_seconds=time.monotonic() - started)
     return state
 
@@ -116,6 +132,7 @@ class Capture:
         self.mount = mount
         self.command_seconds = command_seconds
         self.last_error: str | None = None
+        self.unresolved_pids: list[int] = []
         self._lock = threading.RLock()
         self._phases: set[str] = set()
         self._stopped = False
@@ -149,10 +166,13 @@ class Capture:
                 ]))
             for label, argv in commands:
                 result = capture_command(argv, self.output / f"{phase}-{label}.txt", self.command_seconds)
-                self._write("capture.jsonl", {"phase": phase, "command": label, **result})
+                if result["status"] == "cleanup_unconfirmed":
+                    self.unresolved_pids.append(result["pid"])
                 if result["status"] != "ok" or result.get("returncode") != 0:
                     self._stopped = True  # Stop on refusal/uncertain custody.
                     self.last_error = result["status"] if result["status"] != "ok" else "command_refused"
+                self._write("capture.jsonl", {"phase": phase, "command": label, **result})
+                if self._stopped:
                     break
 
     def incident(self, operation: str, path_class: str, *, started_at: str,
@@ -210,8 +230,10 @@ class Capture:
         except OSError as exc:
             record(exc.errno, None)
             raise
-        if expected_bytes is not None and isinstance(value, (bytes, bytearray, memoryview)) and len(value) < expected_bytes:
-            record(None, len(value))
+        if expected_bytes is not None and isinstance(value, (bytes, bytearray, memoryview)):
+            returned = value.nbytes if isinstance(value, memoryview) else len(value)
+            if returned < expected_bytes:
+                record(None, returned)
         return value
 
 

@@ -54,6 +54,16 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual((event["requested_bytes"], event["returned_bytes"], event["errno"]), (40, len(result), None))
             self.assertNotIn("private payload", json.dumps(event))
 
+    def test_typed_memoryview_counts_bytes_not_elements(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Capture(Path(temporary) / "capture", "/example-mount")
+            value = memoryview(b"1234").cast("I")
+            self.assertIs(capture.observe("read", "nas_input", lambda: value, expected_bytes=4), value)
+            self.assertFalse((capture.output / "events.jsonl").exists())
+            with patch("smb_capture.capture_command", return_value={"status": "ok", "returncode": 0}):
+                capture.observe("read", "nas_input", lambda: value, expected_bytes=8)
+            self.assertEqual(json.loads((capture.output / "events.jsonl").read_text())["returned_bytes"], 4)
+
     def test_refusal_stops_collection_and_capture_failure_keeps_payload_error(self):
         with tempfile.TemporaryDirectory() as temporary:
             capture = Capture(Path(temporary) / "capture", "/example-mount")
@@ -83,6 +93,31 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(result["returncode"], 0)
             self.assertEqual(output.read_text().strip(), "False")
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+
+    def test_output_write_failure_stops_live_command_and_retains_pid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch("smb_capture.os.write", side_effect=OSError(errno.ENOSPC, "full")):
+                result = capture_command([
+                    sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(60)"
+                ], Path(temporary) / "command.txt", 5)
+            self.assertEqual(result["status"], "capture_io_error")
+            self.assertEqual(result["errno"], errno.ENOSPC)
+            self.assertEqual(result["returncode"], -9)
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(result["pid"], 0)
+
+    def test_unresolved_custody_survives_a_failed_status_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Capture(Path(temporary) / "capture", "/example-mount")
+            with patch("smb_capture.capture_command", return_value={"status": "cleanup_unconfirmed", "pid": 123}):
+                with patch.object(capture, "_write", side_effect=OSError(errno.ENOSPC, "full")):
+                    with self.assertRaises(OSError):
+                        capture.baseline()
+            self.assertEqual(capture.unresolved_pids, [123])
+            self.assertEqual(capture.last_error, "cleanup_unconfirmed")
+            with patch("smb_capture.capture_command") as run:
+                capture.baseline()
+                self.assertEqual(run.call_count, 0)
 
 
 if __name__ == "__main__":

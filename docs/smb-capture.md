@@ -39,6 +39,7 @@ capture.observe("replace", "checkpoint", lambda: temporary.replace(destination))
 
 # Preserve/report this field if collection was refused, timed out, or failed.
 capture_incomplete = capture.last_error
+unresolved_diagnostic_processes = capture.unresolved_pids
 ```
 
 Only supply `expected_bytes` where the caller already requires that exact
@@ -72,7 +73,9 @@ On refusal, timeout, truncation or uncertain child exit, collection stops with
 an incomplete result and no alternate privilege/tool path. Its process group
 receives KILL on timeout; one second verifies exit. A kernel-blocked process can
 survive KILL: `cleanup_unconfirmed` is a hold for the owner, not cleanup proof.
-Retain the capture directory and report the PID/custody separately; do not
+The capture ledger records the command PID; `unresolved_pids` also preserves it
+in memory if the local evidence disk cannot write the ledger. Retain the capture
+directory and report the PID/custody separately; do not
 reboot/remount or start another workload to clear it.
 
 To settle attribution, align the event with client SMB READ/CREATE/SET_INFO/
