@@ -346,8 +346,13 @@ thread wake. Older releases omit configuration; do not infer a cause from false.
 Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium
 resumes after measured recovery; an operator drain remains independent. Running
-attempts retain custody. NAS/checkpoint degradation withholds dependent work;
-independent local work can remain eligible. Existing OS automounts are re-triggered
+attempts retain custody. From the next release, `mount_probe_slow` is advisory:
+successful or progressing slow metadata operations preserve admission, with
+measured evidence in `host_mount_degraded` alerts. Failed operations and
+`mount_probe_stalled` still withhold dependent work; the latter uses the unchanged
+measured per-operation no-progress allowance, not whole-sequence elapsed time.
+`host_mount_unavailable` wakes if an advisory becomes a stall/failure. Cold access
+still requires proof. Independent local work can remain eligible. Existing OS automounts are re-triggered
 with backoff. `mount_linux_operator_required` needs the storage operator to
 restore the configured mount; `mount_macos_approval_required` needs the owner to
 restore it and approve Keychain if requested. `host_mount_action_required` uses
