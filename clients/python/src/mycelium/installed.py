@@ -54,12 +54,12 @@ def _pinned_handler(pin):
         def https_open(self, req):
             connection = Connection
             if getattr(req, "_mycelium_file_transfer", False):
-                from .transfer import ProgressConnection
+                from .transfer import ProgressConnection, file_connection
 
                 class FileConnection(ProgressConnection, Connection):
                     pass
 
-                connection = FileConnection
+                connection = file_connection(FileConnection, req)
             return self.do_open(connection, req)
 
     return Handler()
