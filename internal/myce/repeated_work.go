@@ -132,7 +132,7 @@ func (q *Queue) repeatedPoint(key *ObservationKey) (*RepeatedWorkTiming, *WorkOb
 		return nil, nil
 	}
 	p, ok := q.s.WorkObservations[identityHash(key)]
-	if !ok || p.Key != *key || p.Forbidden || p.StaleReason != "" || q.clock.Now().Before(p.RecordedAt) || q.clock.Now().Sub(p.RecordedAt) > workCurveMaxAge ||
+	if !ok || p.Key != *key || p.Forbidden || p.StaleReason != "" || q.clock.Now().Before(p.RecordedAt) ||
 		p.Repeated == nil || p.Repeated.Samples <= 0 || !validRate(p.Repeated.Seconds) {
 		return nil, nil
 	}
