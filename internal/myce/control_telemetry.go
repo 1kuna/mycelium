@@ -22,10 +22,12 @@ import (
 	"time"
 )
 
-// Reuse the existing telemetry envelope, rather than an installation-sized
-// request-rate limit. Overflow is explicit; active control is never blocked on
-// diagnostic storage. #811 can resize this shared diagnostic envelope.
-const controlEventCapacity = requestLatencyRoutes * requestLatencyWindow
+// Preserve the reviewed diagnostic envelope independently of request latency
+// histograms: main now keeps those as duration bins rather than sample windows.
+// These bounds limit diagnostic memory, live detail and retained rows, never
+// request admission. Overflow and omitted detail remain explicit.
+const controlDetailCapacity = 256
+const controlEventCapacity = 128 * controlDetailCapacity
 const controlTelemetryProtocol = "control-telemetry-v1"
 
 // ControlEvent contains only generated IDs, finite protocol labels, anonymous
@@ -211,7 +213,7 @@ type controlRecorder struct {
 }
 
 func newControlRecorder(clock Clock) *controlRecorder {
-	c := &controlRecorder{clock: clock, epoch: ID(), pending: make([]ControlEvent, 0, controlEventCapacity), spare: make([]ControlEvent, 0, controlEventCapacity), totals: map[string]ControlTotal{}, flights: make(map[uint64]ControlFlight, requestLatencyWindow)}
+	c := &controlRecorder{clock: clock, epoch: ID(), pending: make([]ControlEvent, 0, controlEventCapacity), spare: make([]ControlEvent, 0, controlEventCapacity), totals: map[string]ControlTotal{}, flights: make(map[uint64]ControlFlight, controlDetailCapacity)}
 	if _, err := rand.Read(c.salt[:]); err != nil {
 		panic(err)
 	}
@@ -306,7 +308,7 @@ func (c *controlRecorder) initialize(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	rows, err = db.Query(`SELECT data FROM (SELECT seq,data FROM control_events ORDER BY seq DESC LIMIT ?) ORDER BY seq`, requestLatencyWindow)
+	rows, err = db.Query(`SELECT data FROM (SELECT seq,data FROM control_events ORDER BY seq DESC LIMIT ?) ORDER BY seq`, controlDetailCapacity)
 	if err != nil {
 		return err
 	}
@@ -514,8 +516,8 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 		c.backlog = c.backlog[n:]
 		c.backlogPending = len(c.backlog)
 		c.recent = append(c.recent, keep...)
-		if len(c.recent) > requestLatencyWindow {
-			c.recent = append([]ControlEvent(nil), c.recent[len(c.recent)-requestLatencyWindow:]...)
+		if len(c.recent) > controlDetailCapacity {
+			c.recent = append([]ControlEvent(nil), c.recent[len(c.recent)-controlDetailCapacity:]...)
 		}
 		empty := len(c.backlog) == 0
 		if empty {
@@ -633,7 +635,7 @@ func (l *controlLock) acquire(read bool) {
 			mode = "read"
 		}
 		c.inFlightTotal++
-		l.event.FlightDetailOmitted = len(c.flights) >= requestLatencyWindow
+		l.event.FlightDetailOmitted = len(c.flights) >= controlDetailCapacity
 		if l.event.FlightDetailOmitted {
 			c.flightDetailsDropped++
 		} else {
@@ -801,7 +803,7 @@ func (q *Queue) controlPage(ctx context.Context, after int64) (ControlPage, erro
 	if err := q.usageReader.QueryRowContext(ctx, `SELECT COALESCE(MIN(seq),0),COALESCE(MAX(seq),0) FROM control_events`).Scan(&page.First, &page.HighWater); err != nil {
 		return page, err
 	}
-	rows, err := q.usageReader.QueryContext(ctx, `SELECT seq,data FROM control_events WHERE seq>? ORDER BY seq LIMIT ?`, after, requestLatencyWindow)
+	rows, err := q.usageReader.QueryContext(ctx, `SELECT seq,data FROM control_events WHERE seq>? ORDER BY seq LIMIT ?`, after, controlDetailCapacity)
 	if err != nil {
 		return page, err
 	}

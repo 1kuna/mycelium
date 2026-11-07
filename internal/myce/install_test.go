@@ -397,10 +397,13 @@ func TestInstallDeploymentDefaultUnitAndNASBoundary(t *testing.T) {
 	nas := filepath.Join(home, "nas")
 	os.Mkdir(nas, 0700)
 	c, _ := PlanInstall("queue", home, "", nas, "http://queue:7331", "q", Detection{OS: "linux", Arch: "amd64"})
-	for _, want := range []string{"PrivateDevices=no", "NoNewPrivileges=yes", "Nice=0", "CPUQuota=\n", "MemoryMax=infinity\n", "TasksMax=64", "--restart-grace", "3m0s", "--production-loss-timeout", "5s", "--deadline-loss-timeout", "20s", "--experiment-loss-timeout", "1m0s", "--upload-spool-bytes", strconv.FormatInt(DefaultUploadSpoolBytes, 10), "--log-retention", "168h0m0s"} {
+	for _, want := range []string{"PrivateDevices=no", "NoNewPrivileges=yes", "Nice=0", "CPUQuota=\n", "MemoryMax=infinity\n", "TasksMax=64", "--restart-grace", "3m0s", "--production-loss-timeout", "5s", "--deadline-loss-timeout", "20s", "--experiment-loss-timeout", "1m0s", "--upload-spool-bytes", strconv.FormatInt(DefaultUploadSpoolBytes, 10)} {
 		if !strings.Contains(c.ServiceText(), want) {
 			t.Error("missing default", want)
 		}
+	}
+	if strings.Contains(c.ServiceText(), "--log-retention") {
+		t.Fatal("omitted payload policy acquired a fixed expiry")
 	}
 	outside := t.TempDir()
 	os.Symlink(outside, filepath.Join(nas, "mycelium"))

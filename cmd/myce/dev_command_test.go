@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -152,9 +153,11 @@ finally:
 	if err := os.WriteFile(filepath.Join(filepath.Dir(profilePath), "interrupt.yaml"), []byte(strings.Replace(string(profile), "cat hello.txt", "sleep 60; cat hello.txt", 1)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	script := `./myce run --profile interrupt --key interrupt-fixture > receipt.json; sleep 60 & echo $! > child.pid; printf '%s' "$MYCE_DEV_SESSION_ROOT" > dev-root; printf '%s' "$MYCE_QUEUE" > endpoint; wait`
+	script := `set -eu; ./myce run --profile interrupt --key interrupt-fixture > receipt.json; sleep 60 & echo $! > child.pid; printf '%s' "$MYCE_DEV_SESSION_ROOT" > dev-root; printf '%s' "$MYCE_QUEUE" > endpoint; wait`
 	cmd = exec.CommandContext(ctx, "./myce", "dev", "--", "sh", "-c", script)
 	cmd.Dir, cmd.Env = filepath.Join(root, "mycelium"), env
+	var helperErrors bytes.Buffer
+	cmd.Stderr = &helperErrors
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +173,12 @@ finally:
 	var endpoint []byte
 	for len(endpoint) == 0 {
 		endpoint, _ = os.ReadFile(filepath.Join(cmd.Dir, "endpoint"))
+		select {
+		case helperErr := <-done:
+			joined = true
+			t.Fatalf("interruption helper exited before readiness: %v\n%s", helperErr, sanitizeSmokeEvidence(helperErrors.String(), root, "ambient-fixture-secret"))
+		default:
+		}
 		if err := waitPause(ctx, 10*time.Millisecond); err != nil {
 			t.Fatal(err)
 		}

@@ -42,6 +42,7 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 	f := flag.NewFlagSet("wait", flag.ContinueOnError)
 	f.SetOutput(errOut)
 	authority := installedClientFlags(f)
+	observerStatus := f.Bool("observer-status", false, "show private local completion-observer diagnostics")
 	observerDir := f.String("observer-dir", "", "private shared profile observer registry")
 	detached := f.Bool("detached", false, "continue after parent exit (explicit managed use only)")
 	receipt := f.String("receipt", "", "private profile receipt directory (managed detached observer)")
@@ -77,6 +78,17 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 			return nil
 		}
 		return &exitError{2, err}
+	}
+	if *observerStatus {
+		root := *observerDir
+		if root == "" {
+			var err error
+			root, err = sharedProfileRoot()
+			if err != nil {
+				return err
+			}
+		}
+		return observerStatusCommand(root, out)
 	}
 	if !*detached {
 		var cancel context.CancelFunc

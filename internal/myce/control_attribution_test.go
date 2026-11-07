@@ -13,13 +13,13 @@ import (
 // waiting population. Cohort IDs preserve reader joins without N-by-N lists.
 func TestControlAttributionBoundedFlightsAndDependencies(t *testing.T) {
 	q, clock := fixture(t)
-	readers := make([]*controlLock, requestLatencyWindow+20)
+	readers := make([]*controlLock, controlDetailCapacity+20)
 	for i := range readers {
 		readers[i] = q.mu.named("reader_population", nil)
 		readers[i].RLock()
 	}
 	snap := q.control.snapshot()
-	if len(snap.InFlight) != requestLatencyWindow || snap.InFlightTotal != len(readers) || snap.FlightDetailsDropped != 20 {
+	if len(snap.InFlight) != controlDetailCapacity || snap.InFlightTotal != len(readers) || snap.FlightDetailsDropped != 20 {
 		t.Fatal("unbounded or hidden live detail", len(snap.InFlight), snap.InFlightTotal, snap.FlightDetailsDropped)
 	}
 	first, second := q.mu.named("first_writer", nil), q.mu.named("second_writer", nil)

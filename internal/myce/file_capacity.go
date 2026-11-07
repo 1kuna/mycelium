@@ -199,6 +199,7 @@ type fileStoreObservation struct {
 	bundles                   map[string]time.Time
 	now                       time.Time
 	retention                 time.Duration
+	publicationHorizon        time.Duration
 	projects                  projectFileFacts
 }
 
@@ -230,7 +231,7 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			markers[hash] = at
 		}
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, projects}
+	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, q.s.PublicationHorizon, projects}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -262,14 +263,14 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		return &status
 	}
 	for hash, p := range payloads {
-		if keep[hash] || p.modified.After(now.Add(-filePublicationGrace)) {
+		if keep[hash] || p.modified.After(now.Add(-v.publicationHorizon)) {
 			continue
 		}
 		if at, tracked := v.bundles[hash]; tracked && (at.After(now.Add(-retention)) || p.modified.After(now.Add(-retention))) {
 			continue
 		}
 		reclaimable := !p.upload && expired[hash]
-		if at, marked := markers[hash]; marked && !referenced[hash] && !p.modified.After(now.Add(-retention)) {
+		if at, marked := markers[hash]; retention > 0 && marked && !referenced[hash] && !p.modified.After(now.Add(-retention)) {
 			reclaimable = p.upload || !at.IsZero() && !at.After(now.Add(-retention))
 		}
 		if reclaimable {
@@ -365,20 +366,22 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			markers[hash] = at
 		}
 	}
-	cutoff := q.clock.Now().Add(-max(q.fileRetention, filePublicationGrace))
+	if q.fileRetention == 0 {
+		requestUnlock1()
+		return nil
+	}
+	cutoff := q.clock.Now().Add(-max(q.fileRetention, q.s.PublicationHorizon))
 	requestUnlock1()
 	if store == nil || len(markers) == 0 {
 		return nil
 	}
-	checked := 0
 	for hash, at := range markers {
 		if (FileRef{SHA256: hash}).validate() != nil {
 			continue
 		}
-		if checked == fileReclaimBatch {
+		if requestCtx.Err() != nil || q.fileReclaimUnderPressure() {
 			break
 		}
-		checked++
 		if !q.fileLifecycle.TryLock() {
 			return nil
 		}

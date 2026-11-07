@@ -170,7 +170,6 @@ func (q *Queue) accountUsage(now time.Time) {
 	if !now.After(from) {
 		return
 	}
-	from = maxTime(from, now.Add(-90*24*time.Hour))
 	for _, m := range q.plannerMachines() {
 		if m.Gone || q.unreported[m.ID] || m.MemoryError != "" {
 			continue
@@ -198,24 +197,7 @@ func (q *Queue) accountUsage(now time.Time) {
 		}
 	}
 	q.s.UsageAt = now
-	q.usageMaintenance = now.Sub(q.s.UsageMaintenance) >= time.Hour
-	if q.usageMaintenance {
-		q.s.UsageMaintenance = now
-	}
-	starts := q.s.ProductionStarts[:0]
-	for _, p := range q.s.ProductionStarts {
-		if !p.At.Before(now.Add(-90 * 24 * time.Hour)) {
-			starts = append(starts, p)
-		}
-	}
-	q.s.ProductionStarts = starts
-	keep := q.s.Preemptions[:0]
-	for _, p := range q.s.Preemptions {
-		if !p.At.Before(now.Add(-90 * 24 * time.Hour)) {
-			keep = append(keep, p)
-		}
-	}
-	q.s.Preemptions = keep
+
 }
 func minTime(a, b time.Time) time.Time {
 	if a.Before(b) {
@@ -263,18 +245,6 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 			return e
 		}
 	}
-	now := q.clock.Now()
-	// After seven days retain hourly dimensions/totals, rather than minute rows.
-	if q.usageMaintenance {
-		cutoff := now.Add(-7 * 24 * time.Hour).Truncate(time.Hour).Unix()
-		_, e = q.persistenceExec(tx, `INSERT INTO usage_samples SELECT (at/3600)*3600,3600,machine,device,project,job,model,SUM(busy),SUM(idle),SUM(pinned),SUM(memory_seconds),SUM(observed) FROM usage_samples WHERE span=60 AND at<? GROUP BY (at/3600),machine,device,project,job,model ON CONFLICT(at,span,machine,device,project,job,model) DO UPDATE SET busy=busy+excluded.busy,idle=idle+excluded.idle,pinned=pinned+excluded.pinned,memory_seconds=memory_seconds+excluded.memory_seconds,observed=observed+excluded.observed`, cutoff)
-		if e != nil {
-			return e
-		}
-		if _, e = q.persistenceExec(tx, `DELETE FROM usage_samples WHERE (span=60 AND at<?) OR at+span<=?`, cutoff, now.Add(-90*24*time.Hour).Unix()); e != nil {
-			return e
-		}
-	}
 
 	if e = q.persistModelIntervals(tx); e != nil {
 		return e
@@ -291,6 +261,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	}
 	changedJobs := false
 	for key, value := range next {
+		q.noteEvidenceRecord(key, q.persisted[key], value)
 		// persistState reuses the immutable byte slice for unchanged records.
 		// Invalidate only after SQLite commit, including removal, and never on
 		// ordinary check-ins that merely journal an unchanged live job.
@@ -303,7 +274,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 			delete(q.records.catalog, key)
 		} else {
 			q.persisted[key] = value
-			if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") || strings.HasPrefix(key, "storage_observations/") {
+			if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") || strings.HasPrefix(key, "storage_observations/") || strings.HasPrefix(key, "external_memory/") {
 				q.records.catalog[key] = true
 			}
 		}

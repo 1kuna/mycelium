@@ -109,20 +109,13 @@ func (q *Queue) appendHealthAlert(e HealthAlert) {
 	e.DeliveryID, e.At = ID(), q.clock.Now()
 	e.Recovery = q.recoverHealthAlert(e)
 	q.s.Health.Events = append(q.s.Health.Events, e)
-	// Keep pending deliveries. Delivered history is a diagnostic window, not an
-	// unbounded second job history. No configured notifier keeps the latest 256.
+	// Delivery identities are unique custody evidence, stored as separate immutable
+	// rows so history never enlarges ordinary queue transactions.
 	q.pruneHealthEvents()
 }
 func (q *Queue) pruneHealthEvents() {
-	for len(q.s.Health.Events) > 256 {
-		i := slices.IndexFunc(q.s.Health.Events, func(e HealthAlert) bool {
-			return (e.Delivered || !q.s.Health.DeliveryConfigured)
-		})
-		if i < 0 {
-			return
-		}
-		q.s.Health.Events = slices.Delete(q.s.Health.Events, i, i+1)
-	}
+	// Pending events and active incident evidence have readers. Capacity-aware
+	// maintenance runs separately from the control transaction.
 }
 
 func (q *Queue) detectHealth() {
@@ -262,15 +255,7 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 				failed = true
 				break
 			}
-			err = q.update(func() error {
-				for i := range q.s.Health.Events {
-					if q.s.Health.Events[i].DeliveryID == e.DeliveryID {
-						q.s.Health.Events[i].Delivered = true
-					}
-				}
-				q.pruneHealthEvents()
-				return nil
-			})
+			err = q.ackHealthEvent(ctx, e.DeliveryID)
 			if err != nil {
 				failed = true
 				break
@@ -300,6 +285,45 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 				return
 			case <-wake:
 			}
+		}
+	}
+}
+
+// Clone a delivered generation outside control. Concurrent append/delivery
+// invalidates the plan; retry against the current immutable slice.
+func (q *Queue) ackHealthEvent(ctx context.Context, id string) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		q.mu.RLock()
+		events := q.s.Health.Events
+		q.mu.RUnlock()
+		copy := slices.Clone(events)
+		index := -1
+		for i, e := range copy {
+			if e.DeliveryID == id {
+				index = i
+				break
+			}
+		}
+		if index < 0 || copy[index].Delivered {
+			return nil
+		}
+		copy[index].Delivered = true
+		applied := false
+		err := q.updateRequest(ctx, func() error {
+			current := q.s.Health.Events
+			if len(current) != len(events) || len(current) > 0 && &current[0] != &events[0] {
+				return nil
+			}
+			q.s.Health.Events = copy
+			q.records.healthChanged[index] = true
+			applied = true
+			return nil
+		}, nil)
+		if err != nil || applied {
+			return err
 		}
 	}
 }

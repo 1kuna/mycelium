@@ -148,6 +148,8 @@ func TestStatusReadFreshness(t *testing.T) {
 	if first.Freshness == nil || first.Freshness.Cached || first.Freshness.AgeSeconds != 0 || !first.Freshness.CapturedAt.Equal(first.Now) {
 		t.Fatalf("fresh capture metadata: %+v", first.Freshness)
 	}
+	// Inject locally measured capture/hit/write costs for this cache generation.
+	q.statusCache.expires = clock.Now().Add(observationCacheLease(time.Second, time.Millisecond, 2*time.Second))
 	clock.Advance(500 * time.Millisecond)
 	cached := readStatusOptions(t, q, "")
 	if cached.Freshness == nil || !cached.Freshness.Cached || cached.Freshness.AgeSeconds != 0.5 || !cached.Freshness.CapturedAt.Equal(first.Now) || !cached.Freshness.ServedAt.Equal(clock.Now()) {

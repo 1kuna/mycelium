@@ -248,9 +248,9 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 	if clock == nil {
 		clock = RealClock{}
 	}
-	guard := rssGuard{}
+	guard := learnedMemoryGuard{}
 	if attempt != nil && attempt.job.Spec.Needs.cpuOnly() {
-		guard.limit, _ = memoryBytes(hostNeed(&w.Machine, attempt.job.Spec.Needs.MemoryGB, attempt.job.Spec.Needs.HostMemoryGB))
+		guard = w.learnedGuard(attempt.job)
 	}
 	probe := w.processMemory
 	var mu sync.Mutex
@@ -271,8 +271,12 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 		worst = *baseline
 	}
 	sample := func(enforce bool) {
-		host, err := readPressure()
-		if err != nil || host == nil || baseline == nil || host.swapOut < baseline.swapOut {
+		host, pressureErr := readPressure()
+		if pressureErr != nil {
+			host = nil
+		}
+		var err error
+		if pressureErr != nil || host == nil || baseline == nil || host.swapOut < baseline.swapOut {
 			complete = false
 		} else {
 			worst.retainPressure(host)
@@ -289,7 +293,7 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 			roots := attempt.rssRoots()
 			bytes, members, err = probe.OwnedResident(roots)
 			if enforce {
-				if evidence := guard.observe(clock.Now(), roots, bytes, members, err); evidence != nil {
+				if evidence := guard.observeMemory(clock.Now(), roots, bytes, members, err, host); evidence != nil {
 					guard.exceeded = attempt.stopRSS(clock.Now(), roots, evidence)
 				}
 			}
@@ -297,10 +301,17 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 			bytes, members, err = probe.Resident(ids)
 		}
 		if err != nil || members == 0 {
+			growth = memoryGrowth{}
+			if attempt != nil {
+				attempt.rssMemory.Store(nil)
+			}
 			return
 		}
 		gb := float64(bytes) / (1 << 30)
 		margin := growth.observe(clock.Now(), gb)
+		if attempt != nil {
+			attempt.rssMemory.Store(&processResidentSample{gb: gb, growth: margin, rate: growth.rate, at: clock.Now(), observed: growth.horizon > 0})
+		}
 		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource, GrowthGB: &margin}
 		mu.Lock()
 		peak = sampledMemoryPeak(peak, next)
@@ -463,6 +474,12 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 	}
 	var samplers sync.WaitGroup
 	var growth memoryGrowth
+	guard := w.learnedGuard(j)
+	guard.hard = guard.ceiling // Linux's uniquely charged bytes have a physical bound.
+	var guarded *process
+	if len(attempts) > 0 && guard.ceiling > 0 {
+		guarded = attempts[0]
+	}
 	hostSampled := false // Read only after joining the host sampler.
 	samplers.Add(1)
 	go func() {
@@ -476,6 +493,19 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 			case <-ctx.Done():
 				return
 			case <-hostTick.C:
+				if guarded != nil {
+					data, currentErr := a.fs.ReadFile(filepath.Join(a.path, "memory.current"))
+					bytes, parseErr := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+					host, hostErr := readGPUHostState(a.fs)
+					if hostErr != nil {
+						host = nil
+					}
+					roots := guarded.rssRoots()
+					if evidence := guard.observeMemory(clock.Now(), roots, bytes, 1, errors.Join(currentErr, parseErr), host); evidence != nil {
+						evidence.Quality = "cgroup_current"
+						guard.exceeded = guarded.stopRSS(clock.Now(), roots, evidence)
+					}
+				}
 				sample := a.peak()
 				if sample != nil && sample.HostGB != nil {
 					margin := growth.observe(clock.Now(), hostMemoryPeakGB(sample))
@@ -521,6 +551,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 				completeGPUHost = false
 			}
 			if peak != nil {
+				peak.Constrained = peak.Constrained || guard.exceeded
 				resident := 0.0
 				if peak.HostGB != nil {
 					resident = *peak.HostGB

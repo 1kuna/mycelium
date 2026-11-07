@@ -5,15 +5,12 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/bits"
 	"net/http"
 	"sort"
 	"sync"
 	"time"
 )
-
-const requestSlowThreshold = time.Second
-const requestLatencyWindow = 256
-const requestLatencyRoutes = 128
 
 type requestSpanKey struct{}
 
@@ -68,16 +65,21 @@ func requestObservationLock(ctx context.Context, mu sync.Locker) (func(), error)
 	return func() { unlockTimedRequest(ctx, mu, timing) }, nil
 }
 
-// Fixed samples and a fixed route cap bound memory even for unmatched requests.
+// Duration representation bounds aggregate storage even for unmatched requests.
 // Only ServeMux patterns enter this map; paths, queries and bodies never do.
 type requestLatencies struct {
 	mu     sync.Mutex
 	routes map[string]*requestLatencySamples
 }
+
+// One bin per bit of a nanosecond duration: bounded by time.Duration's
+// representation, independent of request volume or installation size. Exact
+// observed maxima bound each bin; there is no raw-sample ring to overflow.
 type requestLatencySamples struct {
-	values     [requestLatencyWindow]time.Duration
-	next, size int
-	count      uint64
+	counts    [64]uint64
+	maxima    [64]time.Duration
+	count     uint64
+	telemetry *telemetryBudget
 }
 
 type RequestLatency struct {
@@ -89,7 +91,7 @@ type RequestLatency struct {
 	P99MS   float64 `json:"p99_ms"`
 }
 
-func (l *requestLatencies) record(route string, duration time.Duration) {
+func (l *requestLatencies) record(route string, duration time.Duration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.routes == nil {
@@ -97,33 +99,40 @@ func (l *requestLatencies) record(route string, duration time.Duration) {
 	}
 	v := l.routes[route]
 	if v == nil {
-		if len(l.routes) >= requestLatencyRoutes {
-			return
-		}
-		v = &requestLatencySamples{}
+		v = &requestLatencySamples{telemetry: &telemetryBudget{}}
 		l.routes[route] = v
 	}
-	v.values[v.next] = duration
-	v.next = (v.next + 1) % requestLatencyWindow
-	v.size = min(v.size+1, requestLatencyWindow)
+	bin := bits.Len64(uint64(max(0, duration)))
+	if bin > 0 {
+		bin--
+	}
+	v.counts[bin]++
+	v.maxima[bin] = max(v.maxima[bin], duration)
 	v.count++
+	return v.telemetry.admit(duration)
 }
 
 func (l *requestLatencies) snapshot() []RequestLatency {
 	l.mu.Lock()
 	copies := make(map[string]requestLatencySamples, len(l.routes))
 	for route, v := range l.routes {
-		copies[route] = *v
+		copies[route] = requestLatencySamples{counts: v.counts, maxima: v.maxima, count: v.count}
 	}
 	l.mu.Unlock()
 	out := make([]RequestLatency, 0, len(copies))
 	for route, v := range copies {
-		values := v.values[:v.size]
-		sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
 		percentile := func(p float64) float64 {
-			return float64(values[int(math.Ceil(p*float64(v.size)))-1]) / float64(time.Millisecond)
+			target := uint64(math.Ceil(p * float64(v.count)))
+			var count uint64
+			for i, n := range v.counts {
+				count += n
+				if count >= target {
+					return float64(v.maxima[i]) / float64(time.Millisecond)
+				}
+			}
+			return 0
 		}
-		out = append(out, RequestLatency{Route: route, Count: v.count, Samples: v.size, P50MS: percentile(.5), P95MS: percentile(.95), P99MS: percentile(.99)})
+		out = append(out, RequestLatency{Route: route, Count: v.count, Samples: int(min(v.count, uint64(math.MaxInt))), P50MS: percentile(.5), P95MS: percentile(.95), P99MS: percentile(.99)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Route < out[j].Route })
 	return out
@@ -191,9 +200,9 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 				status = http.StatusOK
 			}
 			q.control.append(ControlEvent{ID: s.id, Kind: "request", Operation: route, Request: s.id, Handler: handler, Client: s.client, Family: jobGetClient(r.UserAgent()).Kind, Enqueued: s.arrived, Finished: q.clock.Now(), WaitNS: wait, HoldNS: hold, Status: status})
-			q.requestLatencies.record(route, duration)
+			slow := q.requestLatencies.record(route, duration)
 			q.requestHealth.recordRequest(q.clock.Now(), route, duration, wait)
-			if duration <= requestSlowThreshold {
+			if !slow {
 				return
 			}
 			after := time.Duration(0)
@@ -204,7 +213,12 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 			if route == "GET /api/fleet/instruction" {
 				phases = fmt.Sprintf(" writer_wait_ms=%.3f work_ms=%.3f", float64(writerWait)/float64(time.Millisecond), float64(max(0, hold-writerWait))/float64(time.Millisecond))
 			}
+			logStarted := time.Now()
 			log.Printf("event=slow_request route=%q status=%d duration_ms=%.3f mutex_measured=%t mutex_wait_ms=%.3f mutex_hold_ms=%.3f after_unlock_ms=%.3f%s", route, status, float64(duration)/float64(time.Millisecond), measured, float64(wait)/float64(time.Millisecond), float64(hold)/float64(time.Millisecond), float64(after)/float64(time.Millisecond), phases)
+			q.requestLatencies.mu.Lock()
+			budget := q.requestLatencies.routes[route].telemetry
+			q.requestLatencies.mu.Unlock()
+			budget.spent(time.Since(logStarted))
 		}()
 		next.ServeHTTP(response, r)
 	})

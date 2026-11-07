@@ -102,8 +102,9 @@ shows full job IDs. Open the queue address in a browser for the same information
 sign in as `myce`, using the token as the password. The page is read-only and
 refreshes every five seconds. Keep tokens in private configuration, not URLs.
 
-The page and `GET /api/status` share a snapshot for up to one second. Job receipt
-polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
+The page and `GET /api/status` share a snapshot for a lease learned from local
+capture/hit costs and mutation intervals. Job receipts use the same cost-based
+policy with their own generations. Status snapshots do
 not drive start authorization, cancellation or result publication.
 Terminal job commits and their release acknowledgements invalidate the shared
 snapshot immediately. If one commits while status is projecting or waiting for
@@ -139,6 +140,16 @@ capacity when staging.
 Machine `cpu_extension_fingerprint` identifies the CPU qualification identity;
 device entries carry their own extension fingerprints and reports. The scalar
 `extension_fingerprint` and reports retain a first-device compatibility view.
+
+From the next release (#891), extension report `reason` and status displays
+say `not yet checked on this device; run the extension check` when no matching
+work/device record exists for the installed version. Existing records distinguish
+`hardware/driver fingerprint changed`, `extension fingerprint (digest) changed`,
+and `hardware/driver fingerprint unavailable` (current or recorded identity is
+missing); these require setup and check. `fingerprint` is the hardware/driver/OS
+qualification hash; `digest` identifies the extension contents. The text is a
+human diagnostic, not a machine code; `setup` and `qualified` remain the stable
+boolean verdicts. No record does not establish a hardware change.
 
 Default status keeps the existing JSON fields and job shape, but includes all
 nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
@@ -546,6 +557,18 @@ An unsupported, multiplexed, incomplete or nonadvancing counter remains unknown.
 Sensor ages are rebased onto queue time; cached inventory cannot refresh them.
 Strict older queues receive the existing inventory shape after negotiation.
 
+Fan-out execution may share a discrete XPU card only when every tenant opts in
+with `fan_out.share_xpu: true`; omission or `false` preserves existing admission.
+The declaration is frozen as `batch.share_xpu` on each executing child, including
+retries, after its `spec.fan_out` is stripped. Sharing also needs fresh host/card
+memory and activity evidence, unsaturated engines, and fresh exact-attempt host
+and device samples for every started holder. Missing evidence keeps new work
+exclusive. This adds no host allowance or numeric concurrency cap; declared or
+accepted learned memory, same-tier isolation, physical headroom and exact
+release still bind. The existing growth guard also projects fan-out device
+growth through the observation horizon and stop grace. Native throughput and
+output parity require separate matched measurement before production opt-in.
+
 A RAM figure on another target cannot hide that card contention. A RAM wait gives the resolved
 envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
@@ -765,11 +788,9 @@ running attempts, `recent` over every retained assigned job, and
 `declared_with_evidence` for explicit figures with a learned comparison.
 These facts persist with the job
 independently of learning, including a constrained first run with no comparable
-learned point. Retention is bounded to 32 rows: the first and the most recent
-31. Optional `memory_attempts_dropped` counts evicted rows (omitted zero), so
-missing intermediate facts are visible. Attempts that never launched and have
-no peak do not create rows or increment the dropped count. The four-entry
-`attempt_history` window is independent. Old jobs cannot reconstruct missing
+learned point. Unique attempt facts are retained. Historical `memory_attempts_dropped`
+counts remain readable; they describe earlier discarded rows. Attempts that never launched and have
+no peak do not create rows or increment the dropped count. `attempt_history` also retains distinct attempt evidence. Old jobs cannot reconstruct missing
 telemetry. Launched attempts ending without a worker reading retain the
 envelope and omit the peak. Release-only kill-time acknowledgements retain
 their measured facts too.
@@ -1188,7 +1209,7 @@ shedding; it does not take `q.mu` or project jobs. Status and inspection JSON
 also include `control_telemetry`; a cached status generation can lag this view.
 
 `GET /api/control?after=SEQUENCE` (CLI `myce control --json --after SEQUENCE`)
-returns at most the existing 256-sample request window, with `first`,
+returns at most the 256-record control detail window, with `first`,
 `high_water`, `next` and `entries`. Continue from `next` while it is below
 `high_water`. An older cursor than `first` indicates overwritten history.
 `telemetry.recent` contains the latest window, while `totals` retain lifetime
@@ -1209,7 +1230,7 @@ reader cohorts that could overlap its wait. Compare timestamps to identify the
 actual blocking readers. Contended holders remain retained. This uses constant
 bookkeeping per acquisition, rather than copying the waiting population.
 `blocker` and `phase` preserve the writer and phase observed at enqueue.
-`in_flight` exposes up to the existing 256-record window of waiting/active detail,
+`in_flight` exposes up to the 256-record control detail window of waiting/active detail,
 independently of queue progress. `in_flight_total`, `flight_details_dropped` and
 event `flight_detail_omitted` make truncation explicit. These omissions affect
 live detail, not the acquisition's buffered completion. Hold timing includes
@@ -1306,19 +1327,12 @@ Laptop overhead and reproducible baseline comparisons are documented in
 
 ### API request latency
 
-Authenticated status JSON includes `request_latencies`: one entry per HTTP route
-pattern with lifetime `count`, retained `samples`, and nearest-rank `p50_ms`,
-`p95_ms`, and `p99_ms` handler durations. Each route retains its latest 256
-completed requests, with a hard cap of 128 routes. Samples reset on queue restart;
-the ordinary one-second status cache also applies to this summary. These are
-server handler times, not client transport or process-budget times.
-
-The queue emits one `event=slow_request` line for each handler taking more than
-one second. It records the route pattern, response status, `duration_ms`,
-`mutex_wait_ms`, `mutex_hold_ms`, and `after_unlock_ms`. Wait and hold accumulate
-across the request's measured queue acquisitions; after-unlock measures the tail
-from the final measured unlock through response completion, including hydration
-and response writes. Work before/between acquisitions is included in total time.
+Authenticated status JSON includes `request_latencies`: finite registered route
+patterns, lifetime counts and conservative histogram percentiles. Duration-bit
+bins replace raw sample rings and route caps. Locally measured service cost and
+adjacent variation select unusual `slow_request` lines; measured logging cost
+gates further lines. No universal one-second threshold applies. Lines retain
+route/status and mutex wait/hold/after-unlock durations.
 
 Mutex attribution follows request contexts through queue-backed routes, including
 hydration recovery, file-store callbacks, and model forwarding. A
@@ -1361,13 +1375,12 @@ pages, reparented processes, or short spikes. Docker daemon children and other
 Mycelium processes outside the worker tree remain in the residual, conservatively
 reducing suggested budgets. Device-only GPU RAM is not host RAM.
 
-Storage is bounded to 673 fifteen-minute bucket slots per host. Each bucket has
-a fixed 64-bin logarithmic histogram, stored sparsely, plus exact maximum and its
-time. Percentiles weight heartbeat samples and use bin upper edges (up to 20%
-rounding, minimum positive bin 0.125 GiB), capped at the exact maximum. The
-boundary bucket is included, so a window can include up to fifteen extra minutes.
-Offline gaps have no invented samples. These are observations, not proof of a
-future peak or a complete week: inspect counts and first/last bucket times.
+Capacity and measured serialization cost determine aligned time subdivisions.
+They retain counts, byte-bit distribution summaries and exact observed maxima.
+The boundary subdivision can extend the requested window; first/last bucket and
+peak times expose that coverage. Offline gaps create no samples. Histories use
+separate durable records and expire only beyond every public reader window.
+See [adaptive retention](retention.md) for budgets and dependency protection.
 
 ### Suggesting a host allowance
 
@@ -1384,11 +1397,10 @@ history are required. The suggested GiB allowance is:
 max(0, physical RAM - seven-day external max - headroom - extra queue reserve)
 ```
 
-It rounds down to 0.25 GiB. Headroom is the greater of `--headroom-gb` (default
-4 GiB for interactive use/new workloads) and 25% of the external maximum (the
-existing guard against external growth). This deliberate reserve costs admitted
-capacity to leave room for unsampled or future external peaks. Max, rather than
-p99, preserves observed bursts. No suggested value changes the configured budget.
+There is no quarter-GiB rounding. Headroom is the greater of authored
+`--headroom-gb` (omitted: no extra authored reserve) and observed peak-to-typical
+variation. Unknown/single-sample variability cannot invent a reserve. This is a
+dry-run observation, never a guarantee against unseen future peaks.
 
 A queue already running on the host is included in the residual: its overhead
 is already subtracted once. `--queue-overhead-gb` defaults to zero and is an
@@ -1483,6 +1495,32 @@ of completion. Missing, invalidated, older-than-30-day and noncomparable history
 have explicit `runtime.reason` values. Plain commands still show elapsed time
 and explain their missing workload/reference metadata. These observations do not
 change placement or measurement qualification.
+
+From the next release (#879), exact repeated-command and comparable extension
+forecasts correct service time using accepted raw prediction error. Job timing
+`service_estimate` exposes `raw_seconds`, signed `correction_seconds`, `samples`
+(the number of accepted prediction/outcome pairs), `estimator`, `uncertainty` and
+an optional fallback `reason`. `predicted_seconds` is raw plus correction; the
+placement reason and CLI/HTML explain the same calculation alongside unchanged
+setup and transfer costs. The correction is the mean actual-minus-raw seconds
+per work unit, scaled to the requested units (one job for repeated commands).
+Corrected predictions never train their own correction. The first accepted run
+has no prior prediction and cannot supply a pair.
+
+Evidence shares the exact work/target/component/runtime/configuration key and
+SQLite observation row. Failed, interrupted, stale, mixed, constrained and
+incompatible attempts cannot train it. Missing, invalidated or changed estimator
+evidence retains the raw estimate with an explicit reason; if raw evidence is
+unknown, calibration cannot make it known. Calibration shares the existing
+history-validity fence. One pair has unknown variability; multiple pairs show
+the observed raw error range, not a confidence bound. Nonpositive or nonfinite
+corrected durations retain raw service. No additional sample threshold, clipping
+constant, expiry window or fleet-tuned gain is introduced. Preparation and
+transfer remain uncalibrated because their separate paired outcomes are not
+available in Started-to-accepted timing. Status reads never train or persist.
+These forecasts rank only eligible, currently admissible alternatives after
+qualification, parity, tiers, fairness, disruption cost and scarcity. They grant
+no capacity, reserve no future slot and do not move running work.
 
 Native commands and extensions can atomically replace the local JSON file named
 by `MYCE_PROGRESS_FILE` (also mounted for managed Docker commands):
@@ -1657,8 +1695,7 @@ Each dimension predicts its largest accepted complete peak plus
 `max(observed range, positive prediction error)`, rounding allocated bytes to the
 observed filesystem allocation unit. `evidence` exposes samples/minimum/peak/error;
 `margin` and `multiplier` explain the managed-byte prediction. A single complete
-4-unit sample with no error predicts exactly 4 units. Evidence expires for reuse
-after 30 days according to the queue's injected clock. `spec.disk.output_bytes`
+4-unit sample with no error predicts exactly 4 units. Evidence reuse depends on comparable identity, not elapsed age. `spec.disk.output_bytes`
 is only a cold output prior: scratch, total need and file counts remain unknown
 until measured. Output hints never seed scratch or silently become hard limits.
 
@@ -1753,8 +1790,10 @@ omit configuration and attempt evidence, so `delivered: false` alone cannot
 establish why delivery has not been acknowledged. The queue owner must verify
 the running hook configuration and sanitized delivery/commit evidence.
 Successful hook exit does not itself prove downstream thread execution.
-Restarting without a hook clears its historical configuration flag and restores
-the existing 256-event diagnostic retention window. Job completion observers
+Restarting without a hook clears its historical configuration flag. On releases
+containing #811, all unique alert and delivery history remains protected, including
+events recorded without a hook; disabling delivery never reinstates a count cap.
+Job completion observers
 and their thread-bound notifiers are independent of this queue-level channel.
 
 `health_alerts` retains diagnostic events delivered by the existing optional
@@ -1902,6 +1941,24 @@ uninterrupted coverage period; a rollback through an older binary can create
 a gap even though older events remain readable. Unknown legacy times remain absent.
 A status snapshot's `loaded_models` alone cannot rule out transient arrivals.
 
+## Local completion observer diagnostics (next release)
+
+`myce wait --observer-status` reads the user registry's `observer.status` and
+reports `owner_locked` from the lifetime lock. A record alone does not prove a
+live owner; the lock alone does not prove progress. Compare `captured_at`,
+`phase`, `last_read_at` and `last_delivery_at` with job completion timestamps.
+Phases identify discovery, authority resolution, batch/terminal reads, notifier
+execution, waiting, handoff and stopped state. Version, commit, PID, start time,
+registration/delivery/failure counts and typed last-error cause support diagnosis.
+The `readers` map retains each in-flight operation's phase, job count and start/capture times independently, so one responsive authority does not hide another stalled read. `next_read_at` and `next_delivery_at` identify recorded backoff/pacing. Stale metadata identifies the last recorded boundary, not the current Go frame.
+
+The private registry retains `observer.log` and one rotated `.1` file, each at
+most 1 MiB, mode 0600. Structured lifecycle, delivery and failure events exclude
+authority, raw transport errors, notifier paths/targets and environment values.
+The last-error timestamp distinguishes an old refusal from present progress.
+Legacy observers have no diagnostic record; absence cannot establish a cause.
+See [supported recovery](operations.md#completion-observer-upgrade-and-recovery-next-release).
+
 ## Batched waits and consumer flood protection
 
 `POST /api/wait` accepts `{"ids":["JOB_A","JOB_B"],"after":{"JOB_A":1},"seconds":20}`.
@@ -1937,7 +1994,9 @@ request cost determines the order. Requests spanning contention cannot teach a
 healthy cost, even if pressure clears before they complete. Unknown cost cannot
 claim to be cheaper.
 Only a higher-value read crosses that frontier; equal/lower-value reads receive
-HTTP 429 `client_rate_limited` before projection work. If no observation remains
+HTTP 429 `client_rate_limited` before projection work. Supporting queues add
+`code_alias: observation_shed_control_pressure` while keeping the legacy code.
+This is fleet-wide control pressure, not a per-client quota. If no observation remains
 in flight, one request can measure recovery. As soon as live lock wait clears,
 all reads are admitted again, even if previous observations are still active.
 This is progress-based admission, not a fixed concurrency allowance.
@@ -1956,6 +2015,16 @@ and environment-reference dependencies remain exempt. Existing clients and the
 positive integer number of seconds, the HTTP header's granularity. It does not
 promise the queue will have recovered by then.
 
+The CLI's idempotent GET recovery already honors Retry-After with positive
+jitter (#819). Retry bounds belong to caller cancellation or an explicit owner
+deadline; no fixed retry count or fleet-tuned timeout is added. From #960,
+interruption retains the last HTTP error and prints its Retry-After interval.
+Follow the seconds-scale server signal rather than guessing minutes of backoff.
+From #959, `myce logs JOB --after SEQ` resumes strictly after a log sequence.
+An interrupted read prints the continuation command on stderr; stdout remains
+ordered raw log text. The cursor advances after each successfully written chunk,
+so resuming skips completed pages. Add `--follow` to continue following.
+
 Measurements and active-request bookkeeping are process-local. A first concurrent
 wave can arrive before pressure is measurable, and production observations remain
 exempt even during overload. This protects control from continued nonproduction
@@ -1965,8 +2034,8 @@ includes #800; earlier deployed releases may still use the fixed-rate stopgap.
 
 ## Job GET request attribution
 
-The API emits `event=job_get_totals totals=[...]` at most once per minute,
-triggered by job GET traffic or refused observations. Each row has `kind` (`cli`, `python` or `unknown`),
+The API emits `event=job_get_totals totals=[...]` when cumulative traffic reaches a new binary magnitude,
+subject to measured sink cost and one in-flight summary. Each row has `kind` (`cli`, `python` or `unknown`),
 `version`, and cumulative `full` and `wait` counts since that API handler started.
 `wait` counts requests with `?view=wait`, including terminal replies that return
 full Jobs; other views count as `full`. Counts include failed job lookups.
@@ -1981,7 +2050,7 @@ Go/CLI requests identify as `myce/BUILD_VERSION`; Python uses
 `mycelium-python/PACKAGE_VERSION` (or `development` from an unpackaged source
 checkout). Older clients with no first-party identity, including stock Go/Python
 User-Agents, count as `unknown`. These are self-reported identities, not access
-controls. Storage is bounded to 64 client/version identities plus per-kind
+controls. Distinct sanitized versions share measured local diagnostic headroom plus per-kind
 `other` overflow buckets; all requests remain counted. Raw User-Agents and job
 IDs and peer addresses are never retained in these counters or summaries.
 Counting, summary encoding and logging run outside the
@@ -2199,6 +2268,20 @@ allocation completes. Unknown reconnect/restart gaps never add service age. See 
 These are conditional admission comparisons. Hard eligibility, quotas and tier
 precedence remain binding; active same-tier work is not stopped to repay debt.
 
+
+## Learned native CPU memory growth (next release)
+
+An acknowledged `adaptive native CPU memory guard` treats learned and bounded
+exploratory reservations as predictions. Fresh exact-attempt footprint and growth measurements use the
+same forecast as cold CPU probes, including sample age and measured drift, with
+the resolved estimate as a floor. Cold physical probes retain their initial
+execution ceiling. Unknown/stale telemetry and stopping attempts
+retain the complete physical/explicit execution ceiling. Darwin RSS can increase
+the charge but grants no resident-memory credit because shared pages can appear
+in multiple processes. The reported estimate and the execution ceiling therefore
+serve different purposes. Explicit declarations, member limits and Docker keep
+their existing containment contract. See [native isolation](native-isolation.md).
+
 ## Live view (`myce view`)
 
 `myce view` serves a live, read-only picture of the cluster on this computer:
@@ -2341,3 +2424,10 @@ current condition without retraining that history with zeros. Job-only captures
 omit the fleet report and its baseline maps.
 Reads reuse the published generation. Sensor coverage and maintenance sampling
 limits are evidence limits, not authorization to release custody or shrink needs.
+
+## Adaptive evidence budgets (#811)
+
+`evidence_retention` is an immutable maintenance summary of queue-host capacity,
+soft budget, retained/protected bytes, reclamation and unavailable/over-budget
+state. Status does no measurement or collection. See [retention rules and the
+complete replacement inventory](retention.md).

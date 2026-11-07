@@ -29,12 +29,9 @@ func (c FileInputClaim) equal(other FileInputClaim) bool {
 		c.At.Equal(other.At) && c.SettledAt.Equal(other.SettledAt)
 }
 
-func (c FileInputClaim) valid(now time.Time) bool {
-	if !c.SettledAt.IsZero() {
-		return c.SettledAt.Add(filePublicationGrace).After(now)
-	}
-	return c.Allocated || c.At.Add(filePublicationGrace).After(now)
-}
+// A claim is explicit upload/submission intent. Elapsed time cannot release
+// its bytes or reservation; settlement transfers accounting to the job.
+func (c FileInputClaim) valid(_ time.Time) bool { return true }
 
 type fileInputClaimKey struct{}
 type fileDeclaredOutputKey struct{}
@@ -67,40 +64,10 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 	if err := normalizeJobClass(&s); err != nil {
 		return out, err
 	}
-	// Failed creation can leave only a claim. Inventory remains outside q.mu.
-	if err := lockUploadContext(ctx, controlMu.RLock, controlMu.RUnlock); err != nil {
-		return out, err
-	}
-	store := q.files
-	stale := map[string]FileInputClaim{}
-	for id, claim := range q.s.FileInputClaims {
-		if !claim.At.Add(filePublicationGrace).After(q.clock.Now()) && (claim.SettledAt.IsZero() || !claim.valid(q.clock.Now())) {
-			stale[id] = claim
-		}
-	}
-	controlMu.RUnlock()
-	var view *fileCapacitySnapshot
-	if len(stale) > 0 && store != nil {
-		store.lifecycle.RLock()
-		defer store.lifecycle.RUnlock()
-		view = store.snapshotCapacity(ctx)
-		defer view.release()
-	}
+	// Settlement transfers quota attribution to the job, but concurrent uploads
+	// may still hold this receipt. An unrelated claim grants no revocation
+	// authority. Payload collection forgets receipts only when their bytes leave.
 	err := q.updateUploadRequest(ctx, func() error {
-		if view != nil {
-			store.mu.Lock()
-			status, payloads := view.current()
-			store.mu.Unlock()
-			if status.Error != "" {
-				return errors.New(status.Error)
-			}
-			for id, claim := range stale {
-				_, exists := payloads[claim.File.SHA256]
-				if (!exists || !claim.SettledAt.IsZero()) && q.s.FileInputClaims[id].equal(claim) {
-					delete(q.s.FileInputClaims, id)
-				}
-			}
-		}
 		for _, claim := range q.s.FileInputClaims {
 			if claim.Project == s.Project && claim.Class == s.Class && claim.File == ref && claim.valid(q.clock.Now()) {
 				out = claim
@@ -220,6 +187,7 @@ func (q *Queue) settleFileInputClaims(s Spec) {
 	for _, ref := range submissionFiles(s) {
 		for id, claim := range q.s.FileInputClaims {
 			if claim.Project == s.Project && claim.File == ref {
+				q.s.PublicationHorizon = max(q.s.PublicationHorizon, q.clock.Now().Sub(claim.At))
 				claim.SettledAt = q.clock.Now()
 				q.s.FileInputClaims[id] = claim
 			}

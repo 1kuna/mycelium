@@ -45,6 +45,7 @@ type state struct {
 	EfficiencyHosts        map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
 	EfficiencyHealth       map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
 	StrandedDemand         []StrandedDemand              `json:"stranded_demand,omitempty"`
+	PublicationHorizon     time.Duration                 `json:"publication_horizon,omitempty"`
 	ToolInventories        map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
 	FileInputClaims        map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
 	ModelIntervalSince     *time.Time                    `json:"model_interval_since,omitempty"`
@@ -118,11 +119,22 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	requestBudgets      requestBudgets
-	efficiencyView      *EfficiencyReport // immutable maintenance projection; published only after commit.
-	waitStates          *waitStateIndex   // scalar committed wait observations; separate reader mutex.
-	nasInspections      *resolveNASCache  // ephemeral evidence shared by every listener for this queue.
-	modelIntervalWrites []ModelIntervalEvent
+	requestBudgets       requestBudgets
+	evidencePending      map[string]bool
+	evidenceRows         []string
+	evidenceBytes        uint64
+	evidenceDeferred     map[string]bool
+	evidenceLearned      map[string]bool
+	evidenceLedgerCounts map[string]int
+
+	observationCacheBudget observationCacheBudget
+	evidenceGeneration     uint64
+	evidenceMaintenance    evidenceMaintenance
+	evidenceRetention      *EvidenceRetention
+	waitStates             *waitStateIndex // scalar committed wait observations; separate reader mutex.
+	modelIntervalWrites    []ModelIntervalEvent
+	efficiencyView         *EfficiencyReport // immutable maintenance projection; published only after commit.
+	nasInspections         *resolveNASCache  // ephemeral evidence shared by every listener for this queue.
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin *Queue
 	// Only detached observation views set this page selection.
@@ -654,6 +666,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 	}
 	if err == nil {
 		q.fileReferenceRevision++
+		q.observationCacheBudget.mutation(q.clock.Now())
 	}
 	hold.next(holdNotify)
 	if err == nil && q.wake != nil {
@@ -1256,7 +1269,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	}
 	q.publishEfficiencyDiagnostics(diagnostics, requestCtx)
 	_ = q.control.flush(q.db) // Diagnostic failure is reported, never an admission failure.
-	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
+	return errors.Join(q.maintainEvidence(requestCtx), q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)
@@ -2168,7 +2181,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	for _, s := range q.s.ModelSlots {
 		copy := *s

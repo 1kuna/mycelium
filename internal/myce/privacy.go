@@ -55,7 +55,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 			a.Reason = safeAvailabilityReason(a.Reason)
 		}
 		for i := range m.ExtensionReports {
-			m.ExtensionReports[i].Reason = diagnostic(m.ExtensionReports[i].Reason, "setup and check required")
+			m.ExtensionReports[i].Reason = extensionReportDiagnostic(m.ExtensionReports[i].Reason)
 		}
 		for i, name := range m.Environments {
 			m.Environments[i] = statusEnvironmentName(name)
@@ -222,7 +222,7 @@ func statusJobValue(job *Job) Job {
 			j.Reason = "never started: " + extensionCheckAdmissionReason(strings.TrimPrefix(j.Reason, "never started: "))
 		case j.Spec.ExtensionCheck != nil && j.Reason == "check execution timeout exceeded":
 			// Fixed queue-owned execution timeout, with no worker error suffix.
-		case j.ExecutionCause != nil && (j.ExecutionCause.Operation == "input_staging" || j.ExecutionCause.Predicate != ""):
+		case j.ExecutionCause != nil && (j.ExecutionCause.Operation == "input_staging" || j.ExecutionCause.Class == machoLibraryMissing || j.ExecutionCause.Predicate != ""):
 			j.Reason = "execution failed: " + j.ExecutionCause.String()
 		case j.Reason == "command failed: "+execFormatMessage || j.Reason == "native check failed: "+execFormatMessage:
 			// Fixed exec failure guidance contains no payload or machine paths.

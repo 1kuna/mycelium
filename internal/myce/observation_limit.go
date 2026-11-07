@@ -160,7 +160,7 @@ func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func()
 		// the protocol's smallest positive unit, rather than a refill schedule.
 		seconds := max(int64(1), int64(math.Ceil(delay.Seconds())))
 		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
-		respond(w, nil, &HTTPError{Status: 429, Code: "client_rate_limited", Message: "queue control is delayed; retry observation after Retry-After"})
+		respond(w, nil, &HTTPError{Status: 429, Code: "client_rate_limited", Message: "fleet-wide control pressure; retry observation after Retry-After"})
 		return nil, false
 	}
 	read.healthy = !pressure

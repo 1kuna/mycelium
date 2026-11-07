@@ -13,14 +13,14 @@ import (
 	"time"
 )
 
-const DefaultLogRetention = 7 * 24 * time.Hour
+const DefaultLogRetention time.Duration = 0
 
 // ConfigureLogRetention bounds completed batch output. Active work and pending
 // worker replay are protected; retention is logical deletion, not secure erasure.
 func (q *Queue) ConfigureLogRetention(age time.Duration) error {
 	controlMu := q.mu.named("ConfigureLogRetention", nil)
-	if age <= 0 {
-		return errors.New("log-retention must be positive")
+	if age < 0 {
+		return errors.New("log-retention must be nonnegative")
 	}
 	controlMu.Lock()
 	q.logRetention = age
@@ -90,6 +90,9 @@ func (q *Queue) pruneBatchLogs(requestContexts ...context.Context) error {
 }
 
 func pruneWorkerLogs(dir, pending string, now time.Time, age time.Duration) error {
+	if age == 0 {
+		return nil
+	}
 	protected := map[string]bool{pending: true}
 	paths, err := filepath.Glob(filepath.Join(dir, "state-attempt-*.json"))
 	if err != nil {
@@ -160,7 +163,6 @@ func pruneWorkerLogs(dir, pending string, now time.Time, age time.Duration) erro
 
 // AttemptFilesGrace keeps an unclaimed attempt folder for diagnosis; failed
 // and cancelled runs' work files may not be uploaded. It matches stopped-container retention.
-const AttemptFilesGrace = 24 * time.Hour
 
 // unclaimedMarker records, by its modification time, when retention first saw
 // an attempt folder without custody.
@@ -305,11 +307,11 @@ func attemptFilesExpired(path string, now time.Time, published bool) (bool, erro
 		return false, err
 	}
 	if !info.IsDir() {
-		return published || !info.ModTime().After(now.Add(-AttemptFilesGrace)), nil
+		return published, nil
 	}
 	marker := filepath.Join(path, unclaimedMarker)
 	if info, err = os.Lstat(marker); err == nil {
-		return !info.ModTime().After(now.Add(-AttemptFilesGrace)), nil
+		return published, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return false, err

@@ -225,7 +225,7 @@ func TestExtensionBundleStoreInterruptedMigrationAndRecipes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := reopened.Tick(); err != nil {
 		t.Fatal(err)
 	}

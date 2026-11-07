@@ -456,6 +456,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		if workerProtocolEndpoint(r.URL.Path) {
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
+			w.Header().Set(cpuPressureProtocolHeader, cpuPressureProtocol)
 		}
 		var finishBudget func()
 		var budgetErr error
@@ -547,6 +548,9 @@ func respond(w http.ResponseWriter, v any, err error) {
 				message = rejectionMessages[apiError.Code]
 			}
 			body = map[string]any{"error": message, "code": apiError.Code}
+			if apiError.Code == "client_rate_limited" {
+				body["code_alias"] = "observation_shed_control_pressure"
+			}
 			if apiError.PathDiagnostic != nil {
 				body["path_diagnostic"] = apiError.PathDiagnostic
 			}
@@ -610,9 +614,11 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	ctx, cancel := c.apiContext(ctx)
 	defer cancel()
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
-	in, resourceFields := resourceWireInput(in, supported)
+	cpuPressure := c.resourceWire != nil && c.resourceWire.cpuPressure.Load()
+	in, resourceFields := resourceWireInput(in, supported, cpuPressure)
 	clock := c.clock()
 	pace := ClientPace{}
+	var last error
 	for {
 		started := clock.Now()
 		err := c.callOnce(ctx, method, path, in, out)
@@ -622,17 +628,22 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			// additive telemetry removed; retain the original durable local result.
 			if c.resourceWire != nil {
 				c.resourceWire.supported.Store(false)
+				c.resourceWire.cpuPressure.Store(false)
 			}
 			legacy, _ := resourceWireInput(in, false)
 			return c.callOnce(ctx, method, path, legacy, out)
 		}
 		safe := method == "GET" || method == "HEAD"
 		if c.singleAttempt || !safe || !errors.As(err, &api) || (api.Status != 429 && api.Status != 503) {
+			if last != nil && ctx.Err() != nil {
+				return &clientRetryStopped{last, ctx.Err()}
+			}
 			return err
 		}
+		last = err
 		pace.Observe(clock.Now().Sub(started), false)
-		if err := c.pause(ctx, pace.Delay(clock.Now(), time.Time{}, err, c.Jitter)); err != nil {
-			return err
+		if stopped := c.pause(ctx, pace.Delay(clock.Now(), time.Time{}, err, c.Jitter)); stopped != nil {
+			return &clientRetryStopped{err, stopped}
 		}
 	}
 }
@@ -668,6 +679,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	defer res.Body.Close()
 	if c.resourceWire != nil && workerProtocolEndpoint(path) {
 		c.resourceWire.supported.Store(res.Header.Get(resourceProtocolHeader) == resourceProtocol)
+		c.resourceWire.cpuPressure.Store(res.Header.Get(cpuPressureProtocolHeader) == cpuPressureProtocol)
 	}
 	if support, ok := ctx.Value(waitCapabilityKey{}).(*bool); ok {
 		*support = res.Header.Get("X-Myce-Wait") == "batch-v1"
@@ -713,13 +725,17 @@ type HTTPError struct {
 }
 
 func (e *HTTPError) Error() string {
+	interval := ""
+	if e.RetryAfter > 0 {
+		interval = fmt.Sprintf("; retry after %s (Retry-After)", e.RetryAfter)
+	}
 	if e.Code == "job_failed" || e.Code == "job_cancelled" {
 		return e.Code + ": " + e.Message
 	}
 	if e.Code != "" {
-		return fmt.Sprintf("queue: HTTP %d: %s: %s", e.Status, e.Code, e.Message)
+		return fmt.Sprintf("queue: HTTP %d: %s: %s", e.Status, e.Code, e.Message) + interval
 	}
-	return fmt.Sprintf("queue: HTTP %d: %s", e.Status, e.Message)
+	return fmt.Sprintf("queue: HTTP %d: %s", e.Status, e.Message) + interval
 }
 func stale(err error) bool {
 	var e *HTTPError

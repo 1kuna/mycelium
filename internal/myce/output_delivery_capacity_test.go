@@ -135,7 +135,7 @@ func TestOutputDeliveryAbandonedUploadReclaimed(t *testing.T) {
 	if err = q.reserveDeliveryResult(context.Background(), uploaded); !errors.Is(err, ErrStale) {
 		t.Fatalf("abandoned attempt resurrected: %v", err)
 	}
-	clock.Advance(DefaultFileRetention + filePublicationGrace + time.Hour)
+	clock.Advance(testFileRetention + filePublicationGrace + time.Hour)
 	if err = q.reclaimJobFiles(); err != nil {
 		t.Fatal(err)
 	}
