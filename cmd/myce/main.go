@@ -58,7 +58,7 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 
-const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage|view\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage|view\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_native-exec" {
@@ -226,7 +226,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		return modelCommand(args[1:])
 	}
 	switch args[0] {
-	case "dev", "queue", "join", "submit", "usage", "status", "cancel", "leave", "ledger", "logs":
+	case "dev", "queue", "join", "submit", "usage", "status", "efficiency", "cancel", "leave", "ledger", "logs":
 	default:
 		return &exitError{2, fmt.Errorf("unknown command %q\n%s", args[0], topLevelUsage)}
 	}
@@ -791,6 +791,25 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return e
 		}
 		return printUsage(os.Stdout, report, *by)
+	case "efficiency":
+		if f.NArg() != 0 {
+			return errors.New("usage: myce efficiency [--json]")
+		}
+		var report *myce.EfficiencyReport
+		if err := client.Call(ctx, "GET", "/api/efficiency", nil, &report); err != nil {
+			return err
+		}
+		if *statusJSON {
+			return json.NewEncoder(os.Stdout).Encode(report)
+		}
+		if report == nil {
+			fmt.Println("efficiency: unknown (awaiting maintenance observation)")
+			return nil
+		}
+		for _, line := range report.Lines() {
+			fmt.Println(line)
+		}
+		return nil
 	case "status":
 		if f.NArg() > 1 {
 			return errors.New("usage: myce status [job]")
@@ -926,6 +945,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 func printStatus(s myce.Snapshot, full bool) {
 	if s.HealthAlertDelivery != nil {
 		fmt.Println(s.HealthAlertDelivery.Summary())
+	}
+	for _, line := range s.Efficiency.Lines() {
+		fmt.Println(line)
 	}
 	if s.QueueRelease.Version != "" {
 		fmt.Printf("queue release: %s (%s)\n", s.QueueRelease.Version, s.QueueRelease.Commit)

@@ -2102,3 +2102,95 @@ To try it without a cluster, run `./myce dev --workers 5`, then
 leaving, and a production job. `scripts/view-smoke.sh` loads the page in
 headless Chrome or Chromium against `myce dev` and checks for live frames and
 no script errors.
+
+## Queue efficiency (next release, #857)
+
+`myce efficiency` is the concise diagnosis; `myce efficiency --json` reads
+`GET /api/efficiency`. Status and inspection JSON also include `efficiency`.
+The dedicated read returns an immutable maintenance projection without planning,
+job history scans or storage work. `at` is its observation time; a new queue
+returns `null` until its first maintenance observation. It does not change
+admission, placement, authored intent or retry decisions.
+
+- `hosts` compares instantaneous reservations with measured Mycelium RAM and
+  independent physical used/total RAM. `programs` groups reservation-time and
+  measured-use integrals by host, opaque work identity and sizing basis. These
+  include assigned/startup/stopping custody until release, not just execution.
+  Current program reservations use the admission ledger's charge, including
+  fresh measured CPU-probe growth credit; the fixed execution ceiling remains
+  the separate prediction-envelope comparison.
+  Retained rates keep the original host/work/basis after requeue clears the
+  current assignment, and end only when exact release settles that obligation.
+  Host attribution includes the worker and managed descendants. Per-program
+  memory is the existing nonreclaimable attempt attribution, not historical peak
+  RSS. Coverage seconds distinguish missing samples from zero use. Reservation
+  integrals span custody; use integrals stop at the existing sensor freshness
+  boundary. `reserved_covered_memory_gb_seconds` supports like-for-like gap
+  comparisons over measured coverage. Worst program comparisons rank measured
+  gaps; unknown coverage cannot establish wasted memory.
+- Job `efficiency.wait_seconds` and report `jobs`/`projects` retain queue-clock
+  time by sampled blocker: `memory_reservation`, `authored_platform_targets`,
+  `environment`, `priority_fairness`, `preparation`, `capacity`, `holds`,
+  `dependency`, or `unknown`. The existing waiting-reason planner supplies each
+  category on maintenance. A category starts when observed, without assigning
+  earlier unknown time to today's reason. Paused time is separately attributed
+  to holds. Report jobs identify the current blocker and whether demand is live.
+- `stranded` means the resource need fits **current** available capacity after
+  removing only the named authored/policy exclusions (`targets`,
+  `allowed_machines`, `excluded_machines`, or project policy allowed machines).
+  Capability, software/qualification, parity, preparation, resource, reservation
+  and custody checks still apply. It names every excluding field. This is the
+  shared definition for resolve advice; it grants no portability or parity.
+- `predictions` shows signed reservation-minus-accepted-peak and
+  predicted-minus-actual-duration errors, with sizing basis and exact attempt.
+  Memory comparisons require the existing accepted-learning classifier;
+  constrained, failed and pressure-unknown peaks are excluded.
+- `wasted_attempts` reports lost, killed, guard-stopped and OOM endings, excluding
+  explicit operator and priority stops. The exact attempt's pressure window and
+  minimum headroom accompany it. The first outcome also preserves fresh host
+  headroom, pressure and swap observations across cleanup replays. `suspect: true`
+  requires positive headroom with complete zero-stall/swap/OOM attempt evidence,
+  or fresh first-outcome host evidence showing normal OS memory pressure and no
+  swap growth. Adverse host evidence overrides an apparently healthy attempt
+  window. Unavailable evidence is `null`, not healthy. Suspect is a diagnosis to investigate, not proof the
+  stop was erroneous. Exact retained `resources` add CPU and I/O counters to each
+  ending; the first stop observation also freezes host I/O pressure when available.
+  Missing counters remain unknown; reservation cores are not utilization.
+
+Host/program `measured_cpu_seconds`, `cpu_observed_elapsed_seconds` and
+`cpu_observed_attempts` sum the collector's one cumulative record per exact
+retained attempt, never successive heartbeat totals. `cpu_lower_bound` marks
+sampled or incomplete/live counters. Nullable `read_bytes`, `write_bytes`,
+`read_ops` and `write_ops` preserve measured zero versus unknown;
+`io_observed_attempts` and `io_lower_bound` describe their coverage. The report's
+`resource_attempts_dropped` names the owning history's first-plus-latest retention
+loss. These full observed attempt windows can differ from the reservation
+integrals' horizon; do not divide them to infer utilization over a common period.
+Historical sizing basis is unknown if its matching memory record is gone.
+Host `io_pressure` retains nullable PSI dimensions and source age; unavailable or
+stale evidence cannot train a healthy zero. Fresh I/O pressure compares against
+its own learned local baseline. No extra telemetry retention is introduced.
+
+`efficiency_regression` uses the existing adaptive health notification path.
+Reservation gaps, live blocker waits, stranded demand, accepted prediction errors
+and wasted/suspect endings compare with their own local histories. It reuses the
+host/request statistical model's bounded observation history, warmup, robust
+quartile/observed-resolution band and consecutive confirmations. There are no
+fleet-size, GiB, utilization-percent or hours-waiting alert thresholds. Adverse
+samples cannot normalize a regression; healthy confirmations rearm delivery.
+Cold or absent evidence is unknown. Alerts carry fixed metric codes and safe
+identities through the existing episode/delivery-ID machinery.
+
+Accounting is compact and stored with its owning job, so job removal also removes
+its diagnostic contribution; there is no new age-based history policy or raw
+sample log. Host aggregates follow inventory, and baseline subjects follow the
+retained evidence. Bulk projection, sorting and baseline statistics run outside
+`q.mu`; the existing maintenance commit applies monotonic observations and exact-job
+fences. Unrelated heartbeats do not starve diagnostic publication.
+Host identity uses sorted sibling inventory, so CPU/GPU heartbeat order cannot
+reset accounting or alert warmup. Project wait history survives gaps between
+queue episodes while its owning jobs remain retained; idle gaps resolve the
+current condition without retraining that history with zeros. Job-only captures
+omit the fleet report and its baseline maps.
+Reads reuse the published generation. Sensor coverage and maintenance sampling
+limits are evidence limits, not authorization to release custody or shrink needs.
