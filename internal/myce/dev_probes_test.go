@@ -19,7 +19,7 @@ func devProbe(t *testing.T) (*Dev, DevConfig, context.Context) {
 	t.Helper()
 	root := newTestStateRoot(t)
 	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "probe-token", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}
-	c.environmentSizeLimit = func(string) (int64, error) { return environmentCacheSize(23 << 30) }
+	c.environmentSizeLimit = func(string) (int64, error) { return 0, errors.New("fixture disk evidence unavailable") }
 	t.Setenv("MYCE_TOKEN", c.Token)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
