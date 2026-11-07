@@ -87,6 +87,14 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		if len(flags) == 0 {
 			return errors.New("usage: myce install worker|queue --nas DIR [--dry-run]")
 		}
+		if flags[0] == "--help" || flags[0] == "-h" {
+			f := flag.NewFlagSet("install", flag.ContinueOnError)
+			f.Usage = func() {
+				fmt.Fprintln(f.Output(), "Usage of myce install worker|queue [flags]:")
+				fmt.Fprintln(f.Output(), "Run myce install worker --help or myce install queue --help for installation flags.")
+			}
+			return f.Parse(flags)
+		}
 		role = flags[0]
 		flags = flags[1:]
 	}
@@ -132,7 +140,21 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	defaults := values
 	myce.RegisterInstallFlags(f, &values)
 	config := &values.Config
-	if e = f.Parse(flags); e != nil {
+	catalog := f
+	if action != "install" {
+		names := "root config"
+		if action == "uninstall" {
+			names += " dry-run"
+		}
+		usage := f.Usage
+		f = selectCommandFlags(action, names, catalog)
+		if action == "doctor" {
+			// The existing usage closure prints defaults from the scoped set.
+			f.Usage = usage
+		}
+	}
+	f, e = parseCommandFlags(f, catalog, flags)
+	if e != nil {
 		return e
 	}
 	if f.NArg() != 0 {

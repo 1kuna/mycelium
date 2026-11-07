@@ -1217,7 +1217,7 @@ func (w Worker) Run(stop context.Context) error {
 	if _, err := MemoryCeilingConfig(w.Machine.HostMemoryBudgetGB, w.Machine.MemoryCeilingSlackGB, w.MemorySwapMaxBytes); err != nil {
 		return err
 	}
-	log.Print(w.Machine.MemoryEnforcement)
+	log.Print(MemoryProtectionNotice(w.Machine.MemoryEnforcement))
 	w.Machine.HostMemoryMeasured = true
 	w.batchMemory = &atomic.Uint64{}
 	if s.state.Job != nil {

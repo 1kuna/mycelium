@@ -176,7 +176,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	var after int64
 	lastStatus := ""
 	j, err = client.WaitSubmitted(observerCtx, j, func(j *myce.Job) error {
-		line := j.ID + " " + j.State + " " + myce.JobReason(j)
+		line := j.ID + " " + j.State + " " + jobReasonText(j)
 		if line != lastStatus {
 			if _, e := fmt.Fprintln(errOut, strings.ReplaceAll(line, client.Token, "[redacted]")); e != nil {
 				return e
@@ -201,7 +201,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	if cause := j.ExecutionCause; j.State == "failed" && cause != nil && cause.Class == "command_exit" && cause.ExitCode != nil && *cause.ExitCode > 0 && *cause.ExitCode <= 255 {
 		code = *cause.ExitCode
 	}
-	return waitError(code, fmt.Sprintf("job %s %s: %s", j.ID, j.State, myce.JobReason(j)))
+	return waitError(code, fmt.Sprintf("job %s %s: %s", j.ID, j.State, jobReasonText(j)))
 }
 
 func runMemory(value string) (float64, error) {

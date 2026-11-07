@@ -118,6 +118,27 @@ func TestRequestTimingRollingStatusAndFastSilence(t *testing.T) {
 	}
 }
 
+func TestRequestTimingIdlePoll(t *testing.T) {
+	q, _ := fixture(t)
+	var logs bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(old)
+	mux := newRequestMux()
+	mux.HandleFunc("GET /api/workers/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		<-time.After(1100 * time.Millisecond)
+	})
+	r := httptest.NewRequest("GET", "/api/workers/demo/events", nil)
+	q.measureRequests(mux, mux.patterns).ServeHTTP(httptest.NewRecorder(), r)
+	if strings.Contains(logs.String(), "event=slow_request") {
+		t.Fatalf("normal idle poll was logged as a problem: %s", logs.String())
+	}
+	summary := q.requestLatencies.snapshot()
+	if len(summary) != 1 || summary[0].Route != "GET /api/workers/{id}/events" || summary[0].Count != 1 || summary[0].P99MS < 1000 {
+		t.Fatalf("poll timing missing from status JSON metrics: %+v", summary)
+	}
+}
+
 func TestRequestTimingHydrationRecovery(t *testing.T) {
 	q, _ := fixture(t)
 	s := &requestSpan{started: time.Now()}
