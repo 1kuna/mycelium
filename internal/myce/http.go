@@ -454,6 +454,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			return
 		}
 		if workerProtocolEndpoint(r.URL.Path) {
+			w.Header().Set(executionEvidenceProtocolHeader, executionEvidenceProtocol)
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
 			w.Header().Set(cpuPressureProtocolHeader, cpuPressureProtocol)
 		}
@@ -614,6 +615,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	defer cancel()
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
 	cpuPressure := c.resourceWire != nil && c.resourceWire.cpuPressure.Load()
+	in, evidenceFields := executionEvidenceWireInput(in, c.resourceWire != nil && c.resourceWire.executionEvidence.Load())
 	in, resourceFields := resourceWireInput(in, supported, cpuPressure)
 	clock := c.clock()
 	pace := ClientPace{}
@@ -622,14 +624,16 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		started := clock.Now()
 		err := c.callOnce(ctx, method, path, in, out)
 		var api *HTTPError
-		if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
+		if (resourceFields || evidenceFields) && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
 			// Strict JSON rejection occurs before mutation. Retry only once, with
 			// additive telemetry removed; retain the original durable local result.
 			if c.resourceWire != nil {
 				c.resourceWire.supported.Store(false)
 				c.resourceWire.cpuPressure.Store(false)
+				c.resourceWire.executionEvidence.Store(false)
 			}
-			legacy, _ := resourceWireInput(in, false)
+			legacy, _ := executionEvidenceWireInput(in, false)
+			legacy, _ = resourceWireInput(legacy, false)
 			return c.callOnce(ctx, method, path, legacy, out)
 		}
 		safe := method == "GET" || method == "HEAD"
@@ -677,6 +681,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	}
 	defer res.Body.Close()
 	if c.resourceWire != nil && workerProtocolEndpoint(path) {
+		c.resourceWire.executionEvidence.Store(res.Header.Get(executionEvidenceProtocolHeader) == executionEvidenceProtocol)
 		c.resourceWire.supported.Store(res.Header.Get(resourceProtocolHeader) == resourceProtocol)
 		c.resourceWire.cpuPressure.Store(res.Header.Get(cpuPressureProtocolHeader) == cpuPressureProtocol)
 	}
