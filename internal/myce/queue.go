@@ -1382,6 +1382,10 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		m.Gone = false
 		m.LastSeen = q.clock.Now()
 		m.DiskReceivedAt = m.LastSeen // Ignore worker-supplied queue timestamps.
+		m.AdmissionRevision = 1
+		if old != nil && old.Session == m.Session {
+			m.AdmissionRevision = old.AdmissionRevision + 1
+		}
 		// Recovery is queue-observed admission state, not worker-supplied status.
 		m.Recovering, m.RecoveringSince, m.RecoveryNeedsAttention = c.Recovering, nil, false
 		if m.Recovering {
@@ -2729,6 +2733,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	now := q.clock.Now()
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	j.AssignedAt = &now
+	j.AdmissionRevision = m.AdmissionRevision
 	j.FinishedAt = nil
 	j.StartLatencySeconds = 0
 	m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)

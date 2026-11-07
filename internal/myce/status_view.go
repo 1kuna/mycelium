@@ -207,6 +207,12 @@ func JobReason(j *Job) string {
 			reason = "waiting for this attempt to stop"
 		}
 	}
+	if j.HealthRecovery != nil {
+		reason += "; " + j.HealthRecovery.Summary
+		if j.HealthRecovery.NextStep != "" {
+			reason += "; " + j.HealthRecovery.NextStep
+		}
+	}
 	if isolation := jobNativeIsolationStatus(j); isolation != "" {
 		if reason != "" {
 			return reason + "; " + isolation

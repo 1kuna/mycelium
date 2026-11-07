@@ -129,12 +129,13 @@ func (q *Queue) detectRemainingHealth() {
 // classifier has overwritten any provisional requeue record. Two is a protocol
 // definition of repeated loss, not a timed fleet threshold.
 type healthEnding struct {
-	JobID   string `json:"job_id"`
-	Attempt int    `json:"attempt"`
-	Session string `json:"session"`
-	Infra   bool   `json:"infra,omitempty"`
-	Staged  bool   `json:"staged,omitempty"`
-	Refused bool   `json:"refused,omitempty"`
+	Memory  *alertMemoryEvidence `json:"memory,omitempty"`
+	JobID   string               `json:"job_id"`
+	Attempt int                  `json:"attempt"`
+	Session string               `json:"session"`
+	Infra   bool                 `json:"infra,omitempty"`
+	Staged  bool                 `json:"staged,omitempty"`
+	Refused bool                 `json:"refused,omitempty"`
 }
 
 func sameHealthEnding(a healthEnding, j *Job, o AttemptOutcome) bool {
@@ -156,6 +157,7 @@ func (q *Queue) recordRemainingAttemptHealth(j *Job, o AttemptOutcome) {
 	}
 	cause := o.ExecutionCause
 	e := healthEnding{JobID: j.ID, Attempt: o.Attempt, Session: o.Session, Infra: o.Interrupted && !o.OutOfMemory && !launchRefusalOutcome(o), Staged: o.inputsStaged, Refused: cause != nil && cause.Operation == "input_staging" && cause.Class != "cancelled"}
+	e.Memory = memoryRefusalEvidence(j, o)
 	if i >= 0 {
 		c.Endings[i] = e
 	} else {
@@ -185,7 +187,7 @@ func (q *Queue) detectAttemptEndingHealth() {
 			e = c.Endings[len(c.Endings)-1]
 		}
 		repeated := len(c.Endings) == 2 && c.Endings[0].Infra && c.Endings[1].Infra
-		q.observeCurrentHealth("infrastructure-streak/"+machine, repeated, HealthAlert{Kind: "infrastructure_loss_streak", Host: host, JobID: e.JobID, Attempt: e.Attempt, Reason: "consecutive_infrastructure_losses"})
+		q.observeCurrentHealth("infrastructure-streak/"+machine, repeated, HealthAlert{Kind: "infrastructure_loss_streak", Host: host, Machine: machine, JobID: e.JobID, Attempt: e.Attempt, Reason: "consecutive_infrastructure_losses"})
 		// Missing staging facts cannot establish recovery. Use the latest positive
 		// refusal or successful staging/start fact; unknown endings leave it alone.
 		for i := len(c.Endings) - 1; i >= 0; i-- {

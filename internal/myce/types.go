@@ -419,6 +419,10 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	HealthRecovery *AlertRecovery `json:"health_recovery,omitempty"`
+	// Queue-owned check-in generation used by this assignment, not worker time.
+	AdmissionRevision uint64 `json:"admission_revision,omitempty"`
+
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
 	Blocker                 *Blocker               `json:"blocker,omitempty"`
@@ -655,6 +659,7 @@ type Machine struct {
 	Models                      []string            `json:"models,omitempty"`
 	Environments                []string            `json:"environments,omitempty"`
 	LastSeen                    time.Time           `json:"last_seen"`
+	AdmissionRevision           uint64              `json:"admission_revision,omitempty"`
 	Leaving                     bool                `json:"leaving"`
 	Gone                        bool                `json:"gone"`
 

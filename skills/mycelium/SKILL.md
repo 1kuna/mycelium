@@ -168,6 +168,15 @@ independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
 
+From the next release (#881), job `health_recovery` explains a correction to stale
+free-RAM evidence after repeated prelaunch refusals. `verifying` means the same
+job is waiting for normal capacity and a later successful start; keep its ID and
+submission key. `verified` names the later started attempt; it does not establish
+completion or accepted output. `owner_required` names the worker owner's next
+action and uses the existing health notification channel. `unverified` means the
+original demand/session ended without matching start evidence. Do not raise shared
+budgets, clear custody or resubmit to bypass it. No new notifier setup is needed.
+
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
 negative behind), the measured history horizon, weighted oldest project-wait

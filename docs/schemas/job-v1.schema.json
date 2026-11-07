@@ -36,6 +36,72 @@
       ],
       "type": "object"
     },
+    "AlertRecovery": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "admission_revision": {
+          "type": "integer"
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "available_gb": {
+          "type": "number"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "episode": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "next_step": {
+          "type": "string"
+        },
+        "previous_gb": {
+          "type": "number"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "verified_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "verified_attempt": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "episode",
+        "action",
+        "state",
+        "cause",
+        "summary",
+        "machine",
+        "job_id",
+        "attempt",
+        "at"
+      ],
+      "type": "object"
+    },
     "ApplicationProgress": {
       "properties": {
         "age_seconds": {
@@ -1758,6 +1824,10 @@
     },
     "Job": {
       "properties": {
+        "admission_revision": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
         "allocated_devices": {
           "items": {
             "type": "string"
@@ -1945,6 +2015,10 @@
         },
         "front": {
           "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "health_recovery": {
+          "$ref": "#/$defs/AlertRecovery",
           "x-contract": "diagnostic"
         },
         "id": {

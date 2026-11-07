@@ -1648,6 +1648,25 @@ cost evidence and its actual duration, never an assumed complete minute.
   Replays cannot increment it; planned stops are excluded. Successful
   or workload-caused endings break the streak. Historical failures interrupted
   by successful work do not fire. It preserves all existing attempt fences.
+  From the next release (#881), a matching proven prelaunch `live_host_ram` or
+  `live_host_growth` refusal can correct an older live free-RAM snapshot using
+  its retained available-RAM comparison. The assignment must still own the exact
+  queue-written check-in generation and worker session; a newer report, including
+  one at the same timestamp, wins. This never changes a configured allowance,
+  reservation, learned size, retry budget, checkpoint or release obligation.
+  The usual placement rules use the corrected snapshot; new worker observations
+  remain authoritative. It does not infer the historical cause of RAM drift.
+  `health_alerts[].recovery` and the affected job's `health_recovery` retain the
+  episode, exact execution/session, action, cause, before/after availability,
+  summary and next step. `verifying` requires a later matching attempt to pass
+  launch checks and start; a heartbeat alone cannot verify it. `verified` records
+  that attempt and queue time. Ended demand or a replaced session is `unverified`.
+  Another matching refusal produces one `alert_recovery_action_required` event
+  through the existing health notifier and stops this recovery adapter for the
+  episode. Unsupported or stale evidence yields one `owner_required` finding in
+  the original event. Delivery/restart never runs the action again. No remediation
+  timer or retry is added; normal scheduling and owner policy still apply.
+  Plain CLI/page job reasons include the recovery summary and outstanding action.
 - `staging_cache_refused`: accepted worker transfer/cache/copy failure reports or
   an exact attempt's typed input-staging refusal. Cold caches, successful copies
   and planned stops do not fire. A repaired report or later successful staging
