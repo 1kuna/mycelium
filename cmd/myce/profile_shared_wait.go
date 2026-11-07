@@ -174,13 +174,8 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 		socket.Close()
 		return e
 	}
-	defer func() {
-		socket.Close()
-		if current, err := os.Stat(socketPath); err == nil && os.SameFile(identity, current) {
-			_ = os.Remove(socketPath)
-			_ = os.Remove(filepath.Dir(socketPath))
-		}
-	}()
+	defer func() { socket.Close(); _ = retireSharedProfileSocket(root, socketPath, identity) }()
+
 	wakes := make(chan struct{}, 1)
 	done := make(chan struct{})
 	defer func() { socket.Close(); <-done }()
@@ -363,21 +358,21 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 		}
 	}
 	nextWake := func() (pending bool, due time.Time) {
-		for _, group := range groups {
-			if group.pending {
-				pending = true
-				continue
-			}
-			if !group.next.IsZero() && (due.IsZero() || group.next.Before(due)) {
-				due = group.next
-			}
-		}
 		for _, watch := range watches {
 			if watch.finishing {
 				if pace := bindings[watch.registration.Observer.Notify]; pace != nil && (due.IsZero() || pace.next.Before(due)) {
 					due = pace.next
 				}
 				continue
+			}
+			// A delivery-only authority has no outstanding read demand. Its old
+			// read timer must not turn a future delivery deadline into busy polling.
+			if group := groups[sharedProfileAuthority(watch.registration)]; group != nil {
+				if group.pending {
+					pending = true
+				} else if !group.next.IsZero() && (due.IsZero() || group.next.Before(due)) {
+					due = group.next
+				}
 			}
 			if end := watch.registration.Expires; !end.IsZero() && (due.IsZero() || end.Before(due)) {
 				due = end
@@ -480,6 +475,10 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 		diagnostics.update(func(state *observerDiagnostic) { state.Registrations = len(watches) })
 		byAuthority := map[string][]string{}
 		for entry, w := range watches {
+			if w.finishing {
+				finish(entry, w.finalJob, w.finalCause)
+				continue
+			}
 			key := sharedProfileAuthority(w.registration)
 			byAuthority[key] = append(byAuthority[key], entry)
 		}
@@ -538,10 +537,12 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 				}
 			}(key, append([]string(nil), entries...), state, snapshot, group, readerCtx)
 		}
-		// Retired groups must not contribute stale next times to pacing.
+		// Retired and delivery-only groups have no network demand to schedule.
 		live := map[string]bool{}
 		for _, w := range watches {
-			live[sharedProfileAuthority(w.registration)] = true
+			if !w.finishing {
+				live[sharedProfileAuthority(w.registration)] = true
+			}
 		}
 		for key, group := range groups {
 			if !live[key] {
