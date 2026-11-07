@@ -1785,7 +1785,7 @@ live owner; the lock alone does not prove progress. Compare `captured_at`,
 Phases identify discovery, authority resolution, batch/terminal reads, notifier
 execution, waiting, handoff and stopped state. Version, commit, PID, start time,
 registration/delivery/failure counts and typed last-error cause support diagnosis.
-Stale metadata identifies the last recorded boundary, not the current Go frame.
+The `readers` map retains each in-flight operation's phase, job count and start/capture times independently, so one responsive authority does not hide another stalled read. `next_read_at` and `next_delivery_at` identify recorded backoff/pacing. Stale metadata identifies the last recorded boundary, not the current Go frame.
 
 The private registry retains `observer.log` and one rotated `.1` file, each at
 most 1 MiB, mode 0600. Structured lifecycle, delivery and failure events exclude
