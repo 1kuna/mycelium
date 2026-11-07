@@ -455,6 +455,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		if workerProtocolEndpoint(r.URL.Path) {
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
+			w.Header().Set(cpuPressureProtocolHeader, cpuPressureProtocol)
 		}
 		var finishBudget func()
 		var budgetErr error
@@ -609,7 +610,8 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	ctx, cancel := c.apiContext(ctx)
 	defer cancel()
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
-	in, resourceFields := resourceWireInput(in, supported)
+	cpuPressure := c.resourceWire != nil && c.resourceWire.cpuPressure.Load()
+	in, resourceFields := resourceWireInput(in, supported, cpuPressure)
 	clock := c.clock()
 	pace := ClientPace{}
 	for {
@@ -621,6 +623,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			// additive telemetry removed; retain the original durable local result.
 			if c.resourceWire != nil {
 				c.resourceWire.supported.Store(false)
+				c.resourceWire.cpuPressure.Store(false)
 			}
 			legacy, _ := resourceWireInput(in, false)
 			return c.callOnce(ctx, method, path, legacy, out)
@@ -667,6 +670,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	defer res.Body.Close()
 	if c.resourceWire != nil && workerProtocolEndpoint(path) {
 		c.resourceWire.supported.Store(res.Header.Get(resourceProtocolHeader) == resourceProtocol)
+		c.resourceWire.cpuPressure.Store(res.Header.Get(cpuPressureProtocolHeader) == cpuPressureProtocol)
 	}
 	if support, ok := ctx.Value(waitCapabilityKey{}).(*bool); ok {
 		*support = res.Header.Get("X-Myce-Wait") == "batch-v1"

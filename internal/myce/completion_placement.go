@@ -9,15 +9,20 @@ const workCurveMaxAge = 30 * 24 * time.Hour
 
 // A forecast ranks already eligible placements. It grants no resources or slots.
 type completionEstimate struct {
-	group                    string
-	service, setup, transfer float64
-	samples                  int
-	count                    int
+	comparability, uncertainty string
+	group                      string
+	service, setup, transfer   float64
+	samples                    int
+	count                      int
 }
 
 func (e completionEstimate) seconds() float64 { return e.service + e.setup + e.transfer }
 func (e completionEstimate) reason() string {
-	return fmt.Sprintf("measured completion %.2fs (service %.2fs + setup %.2fs + transfer %.2fs; %d samples; concurrency %d)", e.seconds(), e.service, e.setup, e.transfer, e.samples, max(1, e.count))
+	reason := fmt.Sprintf("measured completion %.2fs (service %.2fs + setup %.2fs + transfer %.2fs; %d samples; concurrency %d)", e.seconds(), e.service, e.setup, e.transfer, e.samples, max(1, e.count))
+	if e.comparability != "" {
+		reason += "; " + e.comparability + "; " + e.uncertainty
+	}
+	return reason
 }
 
 func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool) {
@@ -28,6 +33,9 @@ func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool
 		return completionEstimate{group: j.Batch.Parent, service: j.Batch.Seconds, count: j.Batch.Concurrency}, true
 	}
 	if j.Spec.Workload == nil || !j.Spec.extensionJob() {
+		if plainCommandWork(j.Spec) {
+			return q.estimateRepeatedCompletion(j, m)
+		}
 		return completionEstimate{}, false
 	}
 	// Queued retries still carry the preceding attempt number. No remaining

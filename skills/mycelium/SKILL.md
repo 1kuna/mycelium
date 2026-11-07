@@ -193,6 +193,18 @@ reason. Missing means unknown. macOS sampled CPU is a lower bound and I/O PSI
 is explicitly unavailable. These observations do not grant capacity or change
 admission. See [CPU and I/O fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
 
+From the next release, repeated native plain commands can learn seconds/job
+without `workload` units. Status work curves and attempt timing explain the exact
+command/source/input/environment comparison, clean sample count and observed
+range. A single sample leaves variability unknown; ranges are not deadlines.
+Changed source/input bytes, resumptions, overlapping work, pressure and missing
+CPU scheduling-pressure/I/O counters leave speed unknown. Quota throttling alone
+does not establish a clean CPU comparison. Legacy unversioned inputs and external
+work directories/runtimes do not establish a comparison. Describe frozen work
+normally: Mycelium uses learned speed after admission and least-valuable fit,
+and never waits for a busy faster machine. This does not qualify a platform or
+replace output-parity checks.
+
 If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
 repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium
