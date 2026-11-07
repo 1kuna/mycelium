@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Nil counters mean unavailable. HostGB samples anon + kernel + shmem, excluding
@@ -650,6 +651,7 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 	var exact, sameHost, family, sameOS, other *AttemptMemoryPeak
 	var exactN, sameHostN, familyN, sameOSN, otherN, constrainedGB = 0, 0, 0, 0, 0, 0.0
 	var hostRange *MemoryPeakRange
+	var hostAcceptedAt time.Time
 	completeHostRange := true
 	gpuHost := !j.Spec.Needs.cpuOnly() && key.Target.Platform == "xpu" && !m.UnifiedMemory
 	invalidated := false
@@ -700,6 +702,9 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 		samples := max(1, point.MemorySamples)
 		if sameFamily && sameMemoryHost(k, *key, m) {
 			sameHost, sameHostN = mergeMemoryPeaks(sameHost, p), sameHostN+samples
+			if point.MemoryRecordedAt.After(hostAcceptedAt) {
+				hostAcceptedAt = point.MemoryRecordedAt
+			}
 			rangePeak := point.MemoryRange
 			if gpuHost {
 				rangePeak = point.GPUHostRange
@@ -784,14 +789,18 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 				// observed guard overshoot as uncertainty after clean recovery.
 				facts := q.memoryConstraintEvidence(*key, configuration, gpuHost)
 				if facts.recovery > 0 {
-					bound := max(estimate.measuredHostGB, facts.lower, facts.recovery)
+					// A newer accepted same-host completion can replace an older
+					// constrained class prior, never a later constrained peak or
+					// the caller's durable per-job OOM floor.
+					lower := q.memoryConstraintEvidenceAfter(*key, configuration, gpuHost, hostAcceptedAt).lower
+					bound := max(estimate.measuredHostGB, lower, facts.recovery)
 					room, why := q.recoveryMemoryRoom(j, m)
 					if why != "" {
 						estimate.refusal = why
 					}
 					// Fresh clean evidence replaces the constrained class prior.
-					// Bound its uncertainty by this target, never the clean peak.
-					estimate.measuredHostGB = max(estimate.measuredHostGB, min(bound, room))
+					// Bound uncertainty, never clean or constrained measurements.
+					estimate.measuredHostGB = max(estimate.measuredHostGB, lower, min(bound, room))
 				}
 			}
 		} else {

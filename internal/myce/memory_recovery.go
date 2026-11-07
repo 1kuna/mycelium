@@ -79,12 +79,12 @@ func (q *Queue) recoveryMemoryBound(j *Job, m *Machine, estimate memoryEstimate,
 		recovery = facts.recovery
 	}
 	room, why := q.recoveryMemoryRoom(j, m)
-	bound := max(prior, lower, recovery)
 	if lower == 0 || recovery <= 0 {
 		// Without an observed error/growth margin there is no finite upper
 		// estimate. Preserve physical probing, including the measured floor.
-		bound = max(bound, room)
+		return max(prior, room, lower, measuredPrior), why
 	}
+	bound := max(prior, lower, recovery)
 	// Only replaceable uncertainty yields to this target's usable room. A
 	// constrained/accepted peak still refuses a smaller target; the caller
 	// reapplies authored/member and durable job-local OOM floors as well.

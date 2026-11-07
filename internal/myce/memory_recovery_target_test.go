@@ -108,3 +108,29 @@ func TestMemoryRecoveryTargetRetainsOOMFloor(t *testing.T) {
 		t.Fatal("comparable OOM peak clipped on a new job", e.MemoryEnvelope)
 	}
 }
+
+// An accepted sample selects the clean-history reader, but cannot erase a
+// larger constrained measurement when other work consumes live target room.
+func TestMemoryRecoveryTargetAcceptedHistoryRetainsLower(t *testing.T) {
+	q, clock, m := learnedMemoryFixture(t)
+	m.MemoryCeilingSlackGB = .125
+	check(t, q, m, nil)
+	s := cpuSpec(1, 0)
+	runMemory(t, q, clock, m, s, 3, func(r *Result) {
+		r.Success = false
+		r.MemoryPeak.Constrained = true
+		growth := 2.0
+		r.MemoryPeak.GrowthGB = &growth
+	})
+	runMemory(t, q, clock, m, s, 4, nil)
+	runMemory(t, q, clock, m, s, 8, func(r *Result) {
+		r.MemoryPeak.Constrained = true
+	})
+	queued := submit(t, q, s)
+	physical := *q.s.Machines[m.ID]
+	physical.FreeHostMemoryGB = 6
+	candidate := q.memoryCandidate(queued, &physical)
+	if candidate.Spec.Needs.HostMemoryGB < 8 || hostFits(&physical, 0, candidate.Spec.Needs.HostMemoryGB) {
+		t.Fatal("accepted history clipped constrained measured need", candidate.MemoryEnvelope)
+	}
+}

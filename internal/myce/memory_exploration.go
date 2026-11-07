@@ -73,27 +73,32 @@ func (q *Queue) memoryLowerBound(key ObservationKey, configuration string, discr
 type memoryConstraintEvidence struct{ lower, recovery float64 }
 
 func (q *Queue) memoryConstraintEvidence(key ObservationKey, configuration string, discrete bool) memoryConstraintEvidence {
+	return q.memoryConstraintEvidenceAfter(key, configuration, discrete, time.Time{})
+}
+
+func (q *Queue) memoryConstraintEvidenceAfter(key ObservationKey, configuration string, discrete bool, after time.Time) memoryConstraintEvidence {
 	if cache := q.memoryPlanning; cache != nil {
 		id := memoryLowerIdentity(key, configuration)
 		id.discrete = discrete
+		id.after = after
 		if lower, ok := cache.history.lower[id]; ok {
 			return lower
 		}
-		lower := q.memoryConstraintEvidenceFrom(key, configuration, slices.Values(cache.retainedMemoryJobs(q, id)), discrete)
+		lower := q.memoryConstraintEvidenceFrom(key, configuration, slices.Values(cache.retainedMemoryJobs(q, id)), discrete, after)
 		cache.history.lower[id] = lower
 		return lower
 	}
-	return q.memoryConstraintEvidenceFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs), discrete)
+	return q.memoryConstraintEvidenceFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs), discrete, after)
 }
 func (q *Queue) sameOSMemoryLowerBoundUncached(key ObservationKey, configuration string) float64 {
 	return q.sameOSMemoryLowerBoundFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs), false)
 }
 
 func (q *Queue) sameOSMemoryLowerBoundFrom(key ObservationKey, configuration string, jobs iter.Seq[*Job], discrete bool) float64 {
-	return q.memoryConstraintEvidenceFrom(key, configuration, jobs, discrete).lower
+	return q.memoryConstraintEvidenceFrom(key, configuration, jobs, discrete, time.Time{}).lower
 }
 
-func (q *Queue) memoryConstraintEvidenceFrom(key ObservationKey, configuration string, jobs iter.Seq[*Job], discrete bool) memoryConstraintEvidence {
+func (q *Queue) memoryConstraintEvidenceFrom(key ObservationKey, configuration string, jobs iter.Seq[*Job], discrete bool, after time.Time) memoryConstraintEvidence {
 	history := q.memoryHistory()
 	evidence := memoryConstraintEvidence{}
 	for j := range jobs {
@@ -109,7 +114,7 @@ func (q *Queue) memoryConstraintEvidenceFrom(key ObservationKey, configuration s
 		if ended.IsZero() && j.StartedAt != nil && j.FinishedAt != nil {
 			ended = *j.FinishedAt
 		}
-		if ended.IsZero() {
+		if ended.IsZero() || ended.Before(after) {
 			continue
 		}
 		age := q.clock.Now().Sub(ended)
