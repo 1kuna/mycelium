@@ -1,5 +1,7 @@
 package myce
 
+import "time"
+
 // Owned by one immutable planning pass, shared across its target machines.
 // Never retained across placements, inventory changes, or transaction boundaries.
 type memoryPlanningCache struct {
@@ -41,6 +43,7 @@ type memoryLowerKey struct {
 	work     memoryWorkKey
 	os       string
 	discrete bool
+	after    time.Time
 }
 type constrainedMemoryKey struct {
 	lower       memoryLowerKey
