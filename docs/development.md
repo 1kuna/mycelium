@@ -161,20 +161,20 @@ injected clock, `GOMAXPROCS=2` and `-p 2`. Baseline source was
 benchmark file copied into its source archive. Baseline/candidate/baseline/candidate
 rounds each contain five measurements; medians below include all ten per version:
 
-- An uncontended request-backed lock acquisition/release: 222.25 ns baseline,
-  833.10 ns candidate; +610.85 ns (+274.8%). Allocations rise from 2 to 6 and
+- An uncontended request-backed lock acquisition/release: 179.50 ns baseline,
+  864.75 ns candidate; +685.25 ns (+381.8%). Allocations rise from 2 to 6 and
   25 to 1,144 bytes per acquisition. Both include the existing pressure sensor.
-- A small authenticated HTTP request: 3,565 ns baseline, 3,277 ns candidate;
-  -288 ns (-8.1%). Allocations rise from 45 to 53 and 8,641 to 9,256 bytes.
-  Ranges overlap: 3,303–5,020 ns versus 2,801–3,605 ns; this does not establish
+- A small authenticated HTTP request: 3,710.5 ns baseline, 3,549.5 ns candidate;
+  -161 ns (-4.3%). Allocations rise from 45 to 53 and 8,641 to 9,256 bytes.
+  Ranges overlap: 2,805–4,328 ns versus 3,204–5,618 ns; this does not establish
   a speedup. The previous corrected-head comparison measured +120 ns (+3.6%).
 - A SQLite worker check-in, including one maintenance/drain per 100 requests:
-  503.254 µs baseline, 467.255 µs candidate (-36 µs, -7.2%). Ranges are
-  374–1,068 µs versus 387–591 µs. **This guarded result is not an equal-durability
-  cost comparison:** candidate rounds retained 8–159 pending events and dropped
+  375.742 µs baseline, 403.200 µs candidate (+27.458 µs, +7.3%). Ranges are
+  318–800 µs versus 366–567 µs. **This guarded result is not an equal-durability
+  cost comparison:** candidate rounds retained 8–606 pending events and dropped
   0–2.56 ordinary spans/check-in during measured cost deferral. Successfully
-  committed diagnostic payload ranged 404–840 bytes/check-in and transactions
-  0.115–0.235/check-in. These include cold startup records and this artificial
+  committed diagnostic payload ranged 391–862 bytes/check-in and transactions
+  0.110–0.245/check-in. These include cold startup records and this artificial
   maintenance cadence; do not extrapolate them directly to a real queue.
 
 Before storage-pressure shedding was added, a separate ten-measurement comparison
@@ -232,6 +232,8 @@ at 20,632 / 127,752 / 24,752 WAL bytes, with conservative bootstrap allowances
 of 1,652,152 / 1,693,352 / 1,981,752 bytes. An 8 KiB free-space fixture refused
 all three before writing any WAL frame. These examples validate those cases;
 they are not production physical-write measurements or exhaustive growth proof.
+A separate regression holds the sole SQLite connection for a pruning deletion
+while diagnostics wait; final admission observes that deletion before writing.
 Successful write samples adapt per-operation costs; healthy write service across
 operations can restore recording after an infrequent administrative stall (see
 [control attribution](status.md#retained-control-path-attribution-next-release)).

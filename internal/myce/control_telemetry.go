@@ -450,15 +450,26 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 				return nil
 			}
 		}
-		// Re-probe after reserving the writer so an intervening queue commit
-		// cannot make the capacity observation stale before this transaction.
+		// Some maintenance writers (log pruning) bypass writeGate. Own the
+		// sole SQLite connection before probing; retain it through commit so
+		// those writers cannot invalidate this capacity observation.
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			c.writeGate.Unlock()
+			c.mu.Lock()
+			c.storageError = true
+			c.mu.Unlock()
+			return err
+		}
 		if !c.storagePermit(c.transactionGrowth(physicalPayload, mutations)) {
+			conn.Close()
 			c.writeGate.Unlock()
 			return nil
 		}
-		err := func() error {
+		err = func() error {
 			defer c.writeGate.Unlock()
-			tx, err := db.Begin()
+			defer conn.Close()
+			tx, err := conn.BeginTx(context.Background(), nil)
 			if err != nil {
 				return err
 			}

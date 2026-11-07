@@ -1276,9 +1276,10 @@ I/O measurement or a guarantee against external writers/filesystem overhead.
 Each probe uses the current WAL extent; checkpoint/truncation removes historical
 growth from the reserve. The free-space/WAL probe runs outside `q.mu`;
 unavailable capacity also defers. Prepared capacity is rechecked with the writer
-reserved, before beginning SQL. Commit-cost recovery accumulates successful
-healthy write-commit service
-across operation classes until it covers the baseline service cost that triggered
+reserved and the sole SQLite connection acquired, before beginning SQL. That
+connection stays reserved through commit, including against maintenance writers
+that bypass the queue writer gate. Commit-cost recovery accumulates successful
+healthy write-commit service across operation classes until it covers the baseline service cost that triggered
 deferral. A cheap unrelated write cannot erase a larger stall immediately;
 recurring healthy check-ins can recover without repeating an infrequent admin
 operation. Read-only and failed commits cannot renew that evidence. Every

@@ -1,8 +1,10 @@
 package myce
 
 import (
+	"context"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -210,5 +212,63 @@ func TestControlStorageCrossOperationRecovery(t *testing.T) {
 	}
 	if c.commitPressure {
 		t.Fatal("persistent latency change never adapted")
+	}
+}
+
+// Log pruning writes after dropping q.mu and bypasses writeGate. Reproduce its
+// deletion while it owns the sole SQL connection: final admission must occur
+// after that write, not while diagnostics are still waiting for the connection.
+func TestControlStorageInterveningPruningWrite(t *testing.T) {
+	q, _ := fixture(t)
+	c := q.control
+	var path string
+	if err := q.db.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.db.Exec(`INSERT INTO logs(job,attempt,text) VALUES('prune',1,?)`, strings.Repeat("x", 20000)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := q.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var probes atomic.Int64
+	c.storageProbe = func() (controlDiskBudget, error) {
+		probes.Add(1)
+		st, err := os.Stat(path + "-wal")
+		if err != nil {
+			return controlDiskBudget{}, err
+		}
+		wal := uint64(st.Size())
+		available := uint64(1 << 30)
+		if wal > 0 {
+			available = wal
+		}
+		return controlDiskBudget{Available: available, WALBytes: wal}, nil
+	}
+	c.append(ControlEvent{Kind: "checkin", Operation: "pruning_race"})
+	before := q.db.Stats().WaitCount
+	done := make(chan error, 1)
+	go func() { done <- c.flush(q.db) }()
+	await(t, func() bool { return q.db.Stats().WaitCount > before })
+	// Save evidence before releasing the connection; let the goroutine finish
+	// even when testing an implementation that incorrectly probed too early.
+	beforePruneProbes := probes.Load()
+	_, deleteErr := conn.ExecContext(context.Background(), `DELETE FROM logs WHERE rowid IN (SELECT rowid FROM logs WHERE job=? LIMIT 512)`, "prune")
+	closeErr := conn.Close()
+	flushErr := <-done
+	if deleteErr != nil || closeErr != nil || flushErr != nil {
+		t.Fatal(deleteErr, closeErr, flushErr)
+	}
+	if beforePruneProbes != 1 {
+		t.Fatal("final capacity probe preceded pruning connection release", beforePruneProbes)
+	}
+	snap := c.snapshot()
+	if !snap.StorageDeferred || snap.StorageReason != "checkpoint_headroom" || snap.DiagnosticTransactions != 0 {
+		t.Fatal("intervening pruning write did not cause fresh admission refusal", snap)
 	}
 }
