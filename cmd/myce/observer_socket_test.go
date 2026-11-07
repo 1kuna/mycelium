@@ -19,7 +19,6 @@ func TestObserverSocketRetirementSerializesStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer old.Close()
-	defer os.Remove(filepath.Dir(path))
 	defer os.Remove(path)
 	identity, err := os.Stat(path)
 	if err != nil {
