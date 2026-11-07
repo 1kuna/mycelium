@@ -1097,7 +1097,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			m.SharedHostPressure = nil
 			if w.Machine.SharedHost != nil {
-				m.SharedHostPressure = pressureProbe.snapshot(true)
 				switch runtime.GOOS {
 				case "darwin":
 					m.SharedCPUEnforcement = "background task policy; declared-core cap; CPU time unenforced"
@@ -1117,10 +1116,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						m.SharedCPUEnforcement = "CPU time unenforced: dev admission-only"
 					}
 				}
-				w.Machine.SharedHostPressure = m.SharedHostPressure
 				w.Machine.SharedCPUEnforcement = m.SharedCPUEnforcement
 			} else {
-				pressureProbe.snapshot(false)
 				w.sharedExecutionCeilings, sharedCPUAllowance = nil, 0
 				m.SharedCPUEnforcement = ""
 			}
@@ -1230,6 +1227,10 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				a := w.availability.snapshot()
 				m.CapabilityProfile.Availability = &a
 			}
+			// Snapshot at send time: preparation must not disappear from the
+			// sensor age, and report-gap learning includes the entire control path.
+			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
+			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()
 			reply, err := w.checkin(ctx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			health.noteHeartbeat(w.Clock.Now().Sub(heartbeatStarted))

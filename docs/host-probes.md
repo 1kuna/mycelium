@@ -27,7 +27,13 @@ kernel-journal deadline.
 
 `probe.period_seconds`, `cost_seconds`, and `valid_seconds` describe the completed
 observation. Validity is the period plus the measured service-cost prediction
-(mean plus four absolute-deviation estimates). The prediction uses RFC 6298's
+(mean plus four absolute-deviation estimates). Shared-pressure reports also
+include the prediction of their observed control/report gap: the preceding
+queue round trip plus the next report's preparation. Cheap OS sensing does not
+imply cheap delivery to a launch fence. This gap trains before profile activation
+and affects only newly completed probes; later slow reports cannot renew old
+evidence. Pressure age is captured at send time, after report preparation.
+The prediction uses RFC 6298's
 1/8 mean and 1/4 deviation smoothing. These dimensionless coefficients supply
 statistical memory and a jitter allowance; they are not fleet latency thresholds.
 They can cause conservative withholding after a cost outlier.

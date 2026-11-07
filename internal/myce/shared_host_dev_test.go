@@ -59,7 +59,7 @@ func TestSharedHostDevPressureCheckpointRequeueAndCancel(t *testing.T) {
 	s.Resumable = true
 	s.SubmissionKey = "shared-pressure-resume"
 	s.Run.Command = []string{"sh", "-c", `test "$GOMAXPROCS" = 1 || exit 40
-if test "$MYCE_ATTEMPT" -gt 1; then
+if test -f "$MYCE_CHECKPOINT_DIR/checkpoint.json"; then
   grep -q '"value":42' "$MYCE_CHECKPOINT_DIR/checkpoint.json" || exit 41
   echo checkpoint-resumed
 fi
@@ -93,6 +93,7 @@ while :; do sleep .02; done`}
 		return false
 	}
 	await(t, func() bool { readJob(); return j.StartedAt != nil && hasLog("payload-ready") })
+	initialAttempt := j.Attempt
 	// Advance only the dev clock to refresh the injected sensor immediately.
 	setPressure := func(p SharedHostPressure) {
 		t.Helper()
@@ -108,7 +109,9 @@ while :; do sleep .02; done`}
 		t.Fatal("pressure stop lost provenance or logical work", status, j)
 	}
 	setPressure(SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1})
-	await(t, func() bool { readJob(); return j.Attempt == 2 && hasLog("checkpoint-resumed") })
+	// Refused launches consume attempts without executing or checkpointing.
+	// The resumed payload itself must verify the checkpoint written on yield.
+	await(t, func() bool { readJob(); return j.Attempt > initialAttempt && hasLog("checkpoint-resumed") })
 	if err := c.Call(ctx, "POST", "/api/jobs/"+id+"/cancel", nil, nil); err != nil {
 		t.Fatal(err)
 	}

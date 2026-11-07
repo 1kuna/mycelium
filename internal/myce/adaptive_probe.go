@@ -55,6 +55,7 @@ type probeTiming struct {
 	base       time.Duration // Existing worker control cadence, never a new polling SLA.
 	cores      int
 	cost       probeEstimate
+	delivery   probeEstimate // Measured consumer/report gap, when the lane crosses that path.
 	lastChange time.Time
 	change     probeEstimate
 	next       time.Time
@@ -91,7 +92,7 @@ func (p *probeTiming) observe(start, end time.Time, changed bool) *ProbeObservat
 	if p.change.Mean > 0 {
 		period = max(p.controlPeriod().Seconds(), cost, min(period, p.change.Mean/2))
 	}
-	valid := period + max(cost, p.cost.upper())
+	valid := period + max(cost, p.cost.upper()) + p.delivery.upper()
 	result := &ProbeObservation{PeriodSeconds: period, CostSeconds: cost, ValidSeconds: valid}
 	p.next = start.Add(time.Duration(period * float64(time.Second)))
 	return result

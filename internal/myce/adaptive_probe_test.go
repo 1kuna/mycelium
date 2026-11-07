@@ -418,3 +418,48 @@ func TestAdaptiveProbeDedicatedPolicyDoesNotDependOnOwnerSensorAge(t *testing.T)
 		t.Fatal("dedicated host acquired daily-owner freshness policy")
 	}
 }
+
+func TestAdaptiveProbePressureReportDeliveryAndFrozenExpiry(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedHostFixture(t, q)
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+	monitor := sharedPressureMonitor{clock: clock}
+	monitor.lane.timing = probeTiming{base: 100 * time.Millisecond, cores: 2}
+	// Observe the actual control/report gap before enabling the shared profile.
+	// Cheap OS sensing does not imply equally cheap report delivery or launch.
+	monitor.snapshot(false)
+	clock.Advance(400 * time.Millisecond)
+	monitor.snapshot(true)
+	start := clock.Now()
+	clock.Advance(time.Millisecond)
+	monitor.current = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1,
+		sampledAt: start, Probe: monitor.lane.timing.observe(start, clock.Now(), false)}
+	m.SharedHostPressure = monitor.snapshot(true)
+	check(t, q, m, nil)
+	if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+	j := submit(t, q, cpuSpec(1, 1))
+	run := check(t, q, m, nil).Job
+	if run == nil || run.ID != j.ID {
+		t.Fatal("missing shared-host assignment")
+	}
+	// The queue's last report must survive the measured delivery path, even
+	// though the independent OS lane can complete more probes meanwhile.
+	clock.Advance(200 * time.Millisecond)
+	if err := q.AuthorizeLaunch(HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: run.ID, Attempt: "1"}); err != nil {
+		t.Fatal("healthy pressure expired before measured launch delivery", err)
+	}
+	frozen := *monitor.current.Probe
+	clock.Advance(2 * time.Second)
+	late := monitor.snapshot(true)
+	if *late.Probe != frozen || validSharedPressure(late) || q.sharedPressureFresh(q.s.Machines[m.ID]) {
+		t.Fatal("slow reporting renewed the old observation")
+	}
+	// Only a newly completed probe can use the subsequently learned gap.
+	start = clock.Now()
+	next := monitor.lane.timing.observe(start, start.Add(time.Millisecond), false)
+	if next.ValidSeconds <= frozen.ValidSeconds {
+		t.Fatal("new evidence did not adapt to the slower report path")
+	}
+}
