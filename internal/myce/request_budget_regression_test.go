@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -105,7 +106,7 @@ func TestExtensionMeasurementFailureIsNotPayloadRefusal(t *testing.T) {
 func TestRequestBudgetRowSampleExcludesFleetEnvelope(t *testing.T) {
 	q, c := fixture(t)
 	budgetHost(q, 256<<20, 1)
-	q.s.Jobs["sample"] = &Job{ID: "sample", State: "succeeded", ReleaseConfirmed: true, Queued: c.Now()}
+	q.s.Jobs["sample"] = &Job{ID: "sample", State: "queued", Queued: c.Now(), Spec: Spec{Project: "sample", Run: RunSpec{Command: []string{strings.Repeat("omitted-payload", 4096)}}}}
 	snapshot := readStatusOptions(t, q, "?jobs=all&limit=1")
 	data, err := json.Marshal(snapshot.Jobs)
 	if err != nil {

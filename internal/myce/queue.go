@@ -2220,7 +2220,8 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
 	order, reasons := q.queueProjection()
-	finishProjection := startStatusProjection(budgets)
+	projectionSample := startStatusProjection(budgets)
+	finishJobWork := projectionSample.measure()
 	for _, stored := range q.s.Jobs {
 		if q.observationSelection != nil && !q.observationSelection.ids[stored.ID] {
 			continue
@@ -2233,7 +2234,7 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 		}
 		out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
 	}
-	finishProjection(out.Jobs)
+	finishJobWork()
 	for _, m := range q.s.Machines {
 		copy := cloneMachine(m)
 		copy.ExternalMemory = q.externalMemoryStatus(hostID(m))
@@ -2270,9 +2271,12 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 		}
 		out.Machines = append(out.Machines, &copy)
 	}
+	finishJobWork = projectionSample.measure()
 	for _, j := range out.Jobs {
 		q.projectJobDiagnostics(j, forStatus, false)
 	}
+	finishJobWork()
+	projectionSample.finish(out.Jobs)
 	sort.SliceStable(out.Jobs, func(i, k int) bool { return statusBefore(out.Jobs[i], out.Jobs[k]) })
 	sort.Slice(out.Machines, func(i, k int) bool { return out.Machines[i].ID < out.Machines[k].ID })
 	return out

@@ -277,15 +277,32 @@ func (m *requestMux) HandleFunc(pattern string, handler func(http.ResponseWriter
 // Only selected-job projection and its wire encoding teach row cost. Fleet
 // diagnostics, disk reads, SQL usage history and mutex waiting are fixed or
 // independent request work, not marginal costs of another history row.
-func startStatusProjection(budgets []*requestBudgets) func([]*Job) {
+type statusProjectionSample struct {
+	budgets *requestBudgets
+	elapsed time.Duration
+}
+
+func startStatusProjection(budgets []*requestBudgets) *statusProjectionSample {
 	if len(budgets) == 0 {
-		return func([]*Job) {}
+		return nil
+	}
+	return &statusProjectionSample{budgets: budgets[0]}
+}
+func (sample *statusProjectionSample) measure() func() {
+	if sample == nil {
+		return func() {}
 	}
 	started := time.Now()
-	return func(jobs []*Job) {
-		data, err := json.Marshal(jobs)
-		if err == nil {
-			budgets[0].recordProjection(len(jobs), len(data), time.Since(started))
-		}
+	return func() { sample.elapsed += time.Since(started) }
+}
+func (sample *statusProjectionSample) finish(jobs []*Job) {
+	if sample == nil {
+		return
+	}
+	done := sample.measure()
+	data, err := json.Marshal(jobs)
+	done()
+	if err == nil {
+		sample.budgets.recordProjection(len(jobs), len(data), sample.elapsed)
 	}
 }
