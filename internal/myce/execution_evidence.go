@@ -20,6 +20,23 @@ func unstartedExecution(attempt int) *ExecutionEvidence {
 	return &ExecutionEvidence{attempt, executionNotStarted, executionNotStarted, executionNotStarted}
 }
 
+// The actor retains one store across availability/checkpoint retries. Keep the
+// observed boundaries monotonic until the physical identity changes. Restored
+// state without a completed result never establishes a fresh no-execution proof.
+func (s *workerStore) startExecutionEvidence(j Job) *ExecutionEvidence {
+	key := jobKey(j)
+	if s.liveEvidence == nil || s.liveEvidenceKey != key {
+		s.liveEvidenceKey = key
+		s.liveEvidence = unstartedExecution(j.Attempt)
+		if s.state.Job != nil && jobKey(*s.state.Job) == key {
+			s.liveEvidence.Main = executionUnknown
+			s.liveEvidence.Sidecars = executionUnknown
+			s.liveEvidence.EnvironmentPreparation = executionUnknown
+		}
+	}
+	return s.liveEvidence
+}
+
 func safeExecutionEvidence(e *ExecutionEvidence, attempt int) *ExecutionEvidence {
 	if e == nil || e.Attempt != attempt || attempt < 0 {
 		return nil

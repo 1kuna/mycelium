@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -253,5 +255,71 @@ func TestExecutionEvidenceProtocolCompatibility(t *testing.T) {
 	}
 	if safeExecutionEvidence(result.ExecutionEvidence, 2) != nil {
 		t.Fatal("wrong attempt proof accepted")
+	}
+}
+
+// One physical attempt can build, pause for availability, then fail its next
+// start call before environment acquisition. That must not erase the build.
+func TestExecutionEvidenceSameAttemptPreparationRetry(t *testing.T) {
+	w := recoveryWorker(t)
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	j := recoveryJob(t, []string{"true"})
+	j.Session = "session"
+	j.Spec.Needs.HostMemoryGB = 2
+	marker := filepath.Join(t.TempDir(), "built")
+	r, err := snapshotEnvironment(EnvironmentRecipe{Build: []string{"sh", "-c", `printf built > "$1"`, "_", marker}}, "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.Spec.Environment.Name = "build"
+	j.EnvironmentRecipes = map[string]EnvironmentRecipe{"fake": r}
+	available := newAvailabilityMonitor(RealClock{}, false, false, true)
+	defer available.cancel()
+	w.availability = available
+	free := 64.0
+	w.HostMemorySource = func(context.Context) (float64, error) { return free, nil }
+	w.environmentCache = &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Run: func(ctx context.Context, argv []string, dir string, env []string, stdout, stderr io.Writer) error {
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = dir, env, stdout, stderr
+		err := cmd.Run()
+		available.mu.Lock()
+		available.current.Available = false
+		available.mu.Unlock()
+		return err
+	}}
+	p, first := startAfterFixtureInputs(t, w, store, j)
+	if p != nil || !errors.Is(first, errWorkerUnavailable) {
+		t.Fatalf("expected post-build availability pause: %v %v", p, first)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("build did not execute", err)
+	}
+	available.mu.Lock()
+	available.current.Available = true
+	available.mu.Unlock()
+	free = 0
+	p, second := w.start(store, j)
+	if p != nil || !errors.Is(second, errWorkerMemory) {
+		t.Fatalf("expected early memory refusal: %v %v", p, second)
+	}
+	got := startFailureOutcome(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, second).ExecutionEvidence
+	if got == nil || got.Main != executionNotStarted || got.Sidecars != executionNotStarted || got.EnvironmentPreparation != executionMayHaveRun {
+		t.Fatalf("same-attempt build was erased: %+v", got)
+	}
+	j.Attempt++
+	_, next := w.start(store, j)
+	fresh := startFailureOutcome(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, next).ExecutionEvidence
+	if !reflect.DeepEqual(fresh, unstartedExecution(j.Attempt)) {
+		t.Fatalf("new attempt inherited evidence: %+v", fresh)
+	}
+	// A restored store must not infer no execution from its saved Job snapshot.
+	restored := &workerStore{state: workerState{Job: &j}}
+	e := restored.startExecutionEvidence(j)
+	if e.Main != executionUnknown || e.Sidecars != executionUnknown || e.EnvironmentPreparation != executionUnknown {
+		t.Fatalf("recovery invented proof: %+v", e)
 	}
 }
