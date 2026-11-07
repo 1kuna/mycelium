@@ -31,6 +31,17 @@ func TestXPUTelemetryIdentityAndUnknown(t *testing.T) {
 	}
 }
 
+func TestDeviceTelemetryAndHostProbeAdvertisement(t *testing.T) {
+	q, _ := fixture(t)
+	reply, err := q.Checkin(Checkin{Machine: sharedDiscreteMachine("xpu")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.DeviceTelemetryProtocol != deviceTelemetryProtocol || reply.HostProbeProtocol != hostProbeProtocol {
+		t.Fatal("check-in did not advertise both independent telemetry protocols", reply)
+	}
+}
+
 func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 	_, clock := fixture(t)
 	strict := false
