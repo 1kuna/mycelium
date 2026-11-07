@@ -21,6 +21,14 @@ type FileInputClaim struct {
 	SettledAt time.Time `json:"settled_at,omitempty"`
 }
 
+// Rollback and reopen round-trip timestamps through JSON. Compare instants,
+// not time.Time's location pointers or process-local monotonic readings.
+func (c FileInputClaim) equal(other FileInputClaim) bool {
+	return c.ID == other.ID && c.Project == other.Project && c.Class == other.Class &&
+		c.File == other.File && c.Allocated == other.Allocated &&
+		c.At.Equal(other.At) && c.SettledAt.Equal(other.SettledAt)
+}
+
 func (c FileInputClaim) valid(now time.Time) bool {
 	if !c.SettledAt.IsZero() {
 		return c.SettledAt.Add(filePublicationGrace).After(now)
@@ -87,7 +95,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 			}
 			for id, claim := range stale {
 				_, exists := payloads[claim.File.SHA256]
-				if (!exists || !claim.SettledAt.IsZero()) && q.s.FileInputClaims[id] == claim {
+				if (!exists || !claim.SettledAt.IsZero()) && q.s.FileInputClaims[id].equal(claim) {
 					delete(q.s.FileInputClaims, id)
 				}
 			}
@@ -177,7 +185,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 			if ok && current.valid(q.clock.Now()) && (current.Allocated || !current.SettledAt.IsZero()) {
 				return nil
 			}
-			if !ok || current != claim || !current.valid(q.clock.Now()) {
+			if !ok || !current.equal(claim) || !current.valid(q.clock.Now()) {
 				return inputClaimError()
 			}
 			current.Allocated = true
