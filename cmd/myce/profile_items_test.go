@@ -75,9 +75,13 @@ check: [test, -s, result]
 		t.Fatal(err)
 	}
 	defer d.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	wait(t, ctx, func() bool { s, e := status(ctx, d.Client()); return e == nil && len(s.Machines) == 1 })
+	// Each completed item is progress. Bound individual operations rather than
+	// making every later item inherit time already spent on successful items.
+	ready, stopReady := context.WithTimeout(ctx, devTestTimeout)
+	wait(t, ready, func() bool { s, e := status(ready, d.Client()); return e == nil && len(s.Machines) == 1 })
+	stopReady()
 	target, _ := url.Parse(d.URL)
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	var mu sync.Mutex
@@ -93,6 +97,8 @@ check: [test, -s, result]
 	defer server.Close()
 	invoke := func(checkout, item, arg string) profileReceipt {
 		t.Helper()
+		ctx, stop := context.WithTimeout(ctx, devTestTimeout)
+		defer stop()
 		cmd := exec.CommandContext(ctx, binary, "run", "--profile", "items", "--queue", server.URL, "--input", "item="+filepath.Join(checkout, "items", item), "--", arg)
 		cmd.Dir = checkout
 		cmd.Env = append(os.Environ(), "MYCE_TOKEN="+token, "MYCE_NOTIFY=")
@@ -110,6 +116,8 @@ check: [test, -s, result]
 	}
 	finish := func(r profileReceipt) *myce.Job {
 		t.Helper()
+		ctx, stop := context.WithTimeout(ctx, devTestTimeout)
+		defer stop()
 		j, err := d.Client().Wait(ctx, r.JobID)
 		if err != nil || j.State != "succeeded" {
 			t.Fatalf("job: %+v %v", j, err)
@@ -140,7 +148,10 @@ check: [test, -s, result]
 			}
 		}
 		output := filepath.Join(t.TempDir(), "result")
-		if err := d.Client().DownloadResult(ctx, j.ID, "result", output); err != nil {
+		download, stopDownload := context.WithTimeout(ctx, devTestTimeout)
+		err := d.Client().DownloadResult(download, j.ID, "result", output)
+		stopDownload()
+		if err != nil {
 			t.Fatal(err)
 		}
 		got, _ := os.ReadFile(output)

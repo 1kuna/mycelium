@@ -31,7 +31,7 @@ func TestHealthAlertDiskGuard(t *testing.T) {
 	}
 	c.Advance(time.Second)
 	m.DiskVolumes[0].SampledAt = c.Now()
-	m.DiskVolumes[0].FreeBytes = 100 << 20
+	m.DiskVolumes[0].FreeBytes = diskFreeFloor(m.DiskVolumes[0].TotalBytes) - 1
 	check(t, q, m, nil)
 	check(t, q, m, nil)
 	if len(alertsOf(q, "disk_below_guard")) != 1 {
@@ -49,7 +49,7 @@ func TestHealthAlertDiskGuard(t *testing.T) {
 	}
 	m.DiskVolumes[0].FreeBytes = 2 << 30
 	check(t, q, m, nil)
-	m.DiskVolumes[0].FreeBytes = 100 << 20
+	m.DiskVolumes[0].FreeBytes = diskFreeFloor(m.DiskVolumes[0].TotalBytes) - 1
 	check(t, q, m, nil)
 	if len(alertsOf(q, "disk_below_guard")) != 2 {
 		t.Fatal("recovered disk did not rearm")

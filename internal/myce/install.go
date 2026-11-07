@@ -9,7 +9,6 @@ import (
 	"html"
 	"io/fs"
 	"log"
-	"math"
 	"net/url"
 	"os"
 	"os/exec"
@@ -174,20 +173,24 @@ type ServiceConfig struct {
 	Config                 string    `json:"config"`
 }
 
+// The largest interoperable JSON integer survives generic float64 decoders.
+// It is a rollback representation sentinel, never a runtime cache budget.
+const automaticCacheWireLimit int64 = 1<<53 - 1
+
 // s071's strict saved-config reader requires positive cache ceilings. Encode
-// automatic modes as the representation's unbounded sentinel for rollback; the
+// automatic modes as a positive compatibility sentinel for rollback; the
 // current reader restores zero before any cache admission uses this value.
 // This is wire compatibility, never an automatically chosen storage budget.
 func (c ServiceConfig) MarshalJSON() ([]byte, error) {
 	type wire ServiceConfig
 	if c.ModelCacheBytes == 0 {
-		c.ModelCacheBytes = math.MaxInt64
+		c.ModelCacheBytes = automaticCacheWireLimit
 	}
 	if c.EnvironmentCacheBytes == 0 {
-		c.EnvironmentCacheBytes = math.MaxInt64
+		c.EnvironmentCacheBytes = automaticCacheWireLimit
 	}
 	if c.FileStoreBytes == 0 {
-		c.FileStoreBytes = math.MaxInt64
+		c.FileStoreBytes = automaticCacheWireLimit
 	}
 	return json.Marshal(wire(c))
 }
@@ -611,13 +614,13 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 		RequiredWorkers json.RawMessage `json:"required_workers"`
 	}{ServiceConfig: &c}
 	e = decoder.Decode(&legacy)
-	if e == nil && c.ModelCacheBytes == math.MaxInt64 {
+	if e == nil && c.ModelCacheBytes == automaticCacheWireLimit {
 		c.ModelCacheBytes = 0
 	}
-	if e == nil && c.EnvironmentCacheBytes == math.MaxInt64 {
+	if e == nil && c.EnvironmentCacheBytes == automaticCacheWireLimit {
 		c.EnvironmentCacheBytes = 0
 	}
-	if e == nil && c.FileStoreBytes == math.MaxInt64 {
+	if e == nil && c.FileStoreBytes == automaticCacheWireLimit {
 		c.FileStoreBytes = 0
 	}
 	// Like environment sizing, retire only the exact old default. Earlier

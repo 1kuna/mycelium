@@ -156,7 +156,8 @@ func TestResolveOldInterpreterBuilderJourney(t *testing.T) {
 					for run := range 2 {
 						got, err := client.Wait(wait, submitted.ID)
 						if err != nil || got.State != "succeeded" || !got.ReleaseConfirmed {
-							t.Fatalf("builder job: %+v %v", got, err)
+							current := job(t, q, submitted.ID)
+							t.Fatalf("builder job: %+v %v; current state=%s reason=%s", got, err, current.State, current.Reason)
 						}
 						logs, err := q.Logs(got.ID, 0)
 						if err != nil {

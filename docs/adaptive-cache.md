@@ -3,10 +3,10 @@
 Automatic byte limits stay zero: each admission remeasures its filesystem.
 Explicit positive caps and project quota contracts remain operator intent.
 Inventories and allocation scans run outside the queue mutex.
-Saved model/environment/store ceilings encode automatic mode as the signed integer maximum
+Saved model/environment/store ceilings encode automatic mode as the largest interoperable JSON integer (2^53 - 1)
 solely because the rollback release's strict reader rejects zero; current
 readers restore automatic mode before admission. This representation sentinel
-does not select a physical cache size. Rollback retains the older disk policy.
+survives generic IEEE-754 numeric round trips and does not select a current physical cache size. Rollback retains the older disk policy, with that representation ceiling.
 
 Cooperating queue and worker processes under the same account share pending
 blocks through local kernel-locked records keyed by filesystem identity. A

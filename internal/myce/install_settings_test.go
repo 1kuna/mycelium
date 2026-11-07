@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -369,8 +368,18 @@ func TestInstallAutomaticCacheRollbackEncoding(t *testing.T) {
 		if err := json.Unmarshal(data, &legacy); err != nil || legacy.ModelCacheBytes <= 0 || legacy.EnvironmentCacheBytes <= 0 || legacy.FileStoreBytes <= 0 {
 			t.Fatalf("rollback reader cannot accept automatic ceiling: %v", err)
 		}
-		if limit == 0 && (legacy.ModelCacheBytes != math.MaxInt64 || legacy.EnvironmentCacheBytes != math.MaxInt64 || legacy.FileStoreBytes != math.MaxInt64) {
+		if limit == 0 && (legacy.ModelCacheBytes != automaticCacheWireLimit || legacy.EnvironmentCacheBytes != automaticCacheWireLimit || legacy.FileStoreBytes != automaticCacheWireLimit) {
 			t.Fatal("automatic ceiling was serialized as a finite default")
+		}
+		// Installation conversion uses generic JSON objects. The automatic marker
+		// must survive their float64 numeric representation without overflow.
+		var generic map[string]any
+		if err := json.Unmarshal(data, &generic); err != nil {
+			t.Fatal(err)
+		}
+		data, err = json.Marshal(generic)
+		if err != nil {
+			t.Fatal(err)
 		}
 		path := filepath.Join(t.TempDir(), "config.json")
 		if err := os.WriteFile(path, data, 0600); err != nil {
