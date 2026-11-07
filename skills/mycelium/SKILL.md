@@ -95,6 +95,15 @@ reusable bound.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
+From the next release, constrained recovery pairs each failed run's growth or
+overshoot margin with that run's peak. A different constrained run contributes
+its peak as a lower bound, without inheriting that margin. Replaceable uncertainty
+uses the candidate target's allowance and measured usable headroom, leaving launch
+slack and measured drift unused. Measured peaks, authored/member requirements,
+job-local OOM floors and release custody still bind. A smaller recovery attempt
+remains guarded and can fail on unseen growth; sampled Darwin RSS cannot contain
+a burst between observations. Keep the same queued job rather than resubmitting.
+
 Plain native commands default to **unsandboxed** under MY-25; explicitly set
 `isolation: sandboxed` to opt in. New native extension registrations default to
 sandboxing; retained registrations keep their frozen policy.

@@ -74,8 +74,11 @@ func (q *Queue) coldMemoryBound(j *Job, m *Machine, estimate memoryEstimate, flo
 	lower := q.constrainedMemoryLowerFor(j, estimate, !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory)
 	if lower > 0 && estimate.key != nil {
 		facts := q.memoryConstraintEvidence(*estimate.key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program), !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory)
-		if facts.margin > 0 {
-			bound, _ := q.recoveryMemoryBound(j, m, estimate, host, 0)
+		if facts.recovery > 0 {
+			bound, why := q.recoveryMemoryBound(j, m, estimate, host, 0)
+			if why != "" {
+				return 0, "", 0, false // Keep the physical probe's refusal diagnostic.
+			}
 			return bound, source, 0, true
 		}
 	}

@@ -68,7 +68,9 @@ func (q *Queue) memoryLowerBound(key ObservationKey, configuration string, discr
 	return q.memoryConstraintEvidence(key, configuration, discrete).lower
 }
 
-type memoryConstraintEvidence struct{ lower, margin float64 }
+// recovery pairs each failed attempt's uncertainty with that attempt's peak.
+// lower is independent measured demand, including constrained successes.
+type memoryConstraintEvidence struct{ lower, recovery float64 }
 
 func (q *Queue) memoryConstraintEvidence(key ObservationKey, configuration string, discrete bool) memoryConstraintEvidence {
 	if cache := q.memoryPlanning; cache != nil {
@@ -160,8 +162,8 @@ func (q *Queue) memoryConstraintEvidenceFrom(key ObservationKey, configuration s
 			if envelope := facts.MemoryEnvelope; envelope != nil && envelope.HostGB > 0 {
 				margin = max(margin, peak-envelope.HostGB)
 			}
-			if facts.LearningReason == "oom" || facts.LearningReason == "attempt_failed" {
-				evidence.margin = max(evidence.margin, margin)
+			if margin > 0 && (facts.LearningReason == "oom" || facts.LearningReason == "attempt_failed") {
+				evidence.recovery = max(evidence.recovery, peak+margin)
 			}
 		}
 	}

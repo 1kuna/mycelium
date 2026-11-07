@@ -783,12 +783,11 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 				// Learned RSS is an estimate, not an explicit hard limit. Retain
 				// observed guard overshoot as uncertainty after clean recovery.
 				facts := q.memoryConstraintEvidence(*key, configuration, gpuHost)
-				if facts.margin > 0 {
-					bound := max(estimate.measuredHostGB, facts.lower) + facts.margin
-					capacity := q.qualificationCapacity(m)
-					room := capacity.FreeHostMemoryGB - capacity.MemoryCeilingSlackGB
-					if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
-						room -= j.Spec.Needs.MemoryGB
+				if facts.recovery > 0 {
+					bound := max(estimate.measuredHostGB, facts.lower, facts.recovery)
+					room, why := q.recoveryMemoryRoom(j, m)
+					if why != "" {
+						estimate.refusal = why
 					}
 					// Fresh clean evidence replaces the constrained class prior.
 					// Bound its uncertainty by this target, never the clean peak.

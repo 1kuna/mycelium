@@ -73,32 +73,31 @@ func (q *Queue) memoryEvidenceWaitingReason(j *Job) string {
 
 func (q *Queue) recoveryMemoryBound(j *Job, m *Machine, estimate memoryEstimate, prior, measuredPrior float64) (float64, string) {
 	lower := q.constrainedMemoryLowerFor(j, estimate, !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory)
-	margin := 0.0
+	recovery := 0.0
 	if estimate.key != nil {
 		facts := q.memoryConstraintEvidence(*estimate.key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program), !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory)
-		margin = facts.margin
+		recovery = facts.recovery
 	}
-	if lower == 0 || margin <= 0 {
+	room, why := q.recoveryMemoryRoom(j, m)
+	bound := max(prior, lower, recovery)
+	if lower == 0 || recovery <= 0 {
 		// Without an observed error/growth margin there is no finite upper
 		// estimate. Preserve physical probing, including the measured floor.
-		room, why := q.exploratoryMemory(j, m)
-		return max(prior, room, lower, measuredPrior), why
+		bound = max(bound, room)
 	}
-	bound := max(prior, lower+margin)
-	largest := 0.0
-	q.memoryHistory().evaluateTargetsMemory(memoryIntent(j), false, func(fit targetFit, candidate *Job, target *Machine) bool {
-		if fit.failures == 0 {
-			room := target.FreeHostMemoryGB - target.MemoryCeilingSlackGB
-			if target.UnifiedMemory && !candidate.Spec.Needs.cpuOnly() {
-				room -= candidate.Spec.Needs.MemoryGB
-			}
-			largest = max(largest, room)
-		}
-		return true
-	})
-	if largest > 0 {
-		bound = min(bound, largest)
+	// Only replaceable uncertainty yields to this target's usable room. A
+	// constrained/accepted peak still refuses a smaller target; the caller
+	// reapplies authored/member and durable job-local OOM floors as well.
+	return max(min(bound, room), lower, measuredPrior), why
+}
+
+func (q *Queue) recoveryMemoryRoom(j *Job, m *Machine) (float64, string) {
+	// Reuse physical headroom, allowance, launch drift and release custody.
+	// Qualification passes its permanent-capacity view; dispatch passes the
+	// live ledger. Neither needs another target's allowance or a fixed cap.
+	room, why := q.exploratoryMemory(j, m)
+	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
+		room -= j.Spec.Needs.MemoryGB
 	}
-	// Capping uncertainty never authorizes a run below measured need.
-	return max(bound, lower, measuredPrior), ""
+	return max(0, room), why
 }
