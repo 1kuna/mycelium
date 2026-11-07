@@ -250,8 +250,8 @@ func TestProjectFileStoreSettlementKeepsConcurrentClaimValid(t *testing.T) {
 		t.Fatal("settlement double charged", u)
 	}
 	clock.Advance(filePublicationGrace + time.Second)
-	if _, err = q.inputClaimContext(ctx, ref, false); err == nil {
-		t.Fatal("settled validation receipt never expired")
+	if _, err = q.inputClaimContext(ctx, ref, false); err != nil {
+		t.Fatal("elapsed time invalidated a concurrent transfer receipt", err)
 	}
 }
 

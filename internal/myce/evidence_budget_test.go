@@ -3,7 +3,9 @@ package myce
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -258,6 +260,43 @@ func TestDiagnosticReservationsConcurrentHeadroom(t *testing.T) {
 	defer releaseC()
 	if c != 1024 {
 		t.Fatal("released budget unavailable", c)
+	}
+}
+
+// An idle subscription and retained events must leave memory for exit evidence;
+// reservations follow consumed bytes, including a record spanning read pages.
+func TestDiagnosticStreamsShareActualBytes(t *testing.T) {
+	var pool diagnosticReservations
+	page := uint64(os.Getpagesize())
+	capacity := RetentionCapacity{MemoryAvailableBytes: 16 * page * diagnosticExpansion, DiskAvailableBytes: 32 * page * diagnosticExpansion}
+	reserve := func(n uint64) (int64, func()) {
+		grant, release := pool.reserve(capacity, 0, n, diagnosticExpansion)
+		return int64(grant), release
+	}
+	_, releaseReader := reserve(page)
+	defer releaseReader()
+	writer := &dockerEventWriter{identity: "ATTEMPT", reserve: reserve}
+	defer func() {
+		for _, release := range writer.releases {
+			release()
+		}
+	}()
+	line := strings.SplitN(dockerEventsInput(time.Unix(1, 0)), "\n", 2)[0]
+	// Long private metadata is parsed but never retained in the archive.
+	line = strings.Replace(line, "DO-NOT-RETAIN", strings.Repeat("x", int(2*page)), 1)
+	if err := diagnosticLines(strings.NewReader(line+"\n"), reserve, writer.event); err != nil {
+		t.Fatal(err)
+	}
+	tails := []*diagnosticTail{{reserve: reserve}, {reserve: reserve}}
+	for _, tail := range tails {
+		defer tail.release()
+		_, _ = tail.Write([]byte("payload stderr\n"))
+		if string(tail.data) != "payload stderr\n" {
+			t.Fatal("event stream starved stderr capture")
+		}
+	}
+	if len(writer.archive.Events) != 1 || pool.reserved >= capacity.MemoryAvailableBytes {
+		t.Fatal("stream reserved unused headroom")
 	}
 }
 func TestEvidenceRetentionLearntKeyAndUniqueWaitRemain(t *testing.T) {

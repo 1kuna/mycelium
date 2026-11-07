@@ -289,8 +289,8 @@ func TestWorkObservationStatusLabelsExpiredThroughput(t *testing.T) {
 		if days == 0 && (!fresh || !strings.Contains(html.String(), "5.00 records/s; measured")) {
 			t.Fatalf("fresh rate not shown: %s", cli)
 		}
-		if days > 0 && (fresh || strings.Contains(html.String(), "records/s") || !strings.Contains(cli, "unknown; throughput expired")) {
-			t.Fatalf("expired rate presented as measured: %s", cli)
+		if days > 0 && (!fresh || !strings.Contains(html.String(), "5.00 records/s; measured")) {
+			t.Fatalf("unchanged rate lost on elapsed time: %s", cli)
 		}
 	}
 }

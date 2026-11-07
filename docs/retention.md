@@ -41,6 +41,9 @@ sample adds to their retained counts.
 - Job intent, cancellation, wait/error attribution, individual attempt facts,
   custody ledgers, replay answers, accounting and incident delivery identities
   are unique evidence. Neither a file/log policy nor elapsed age deletes them.
+  This includes cleared worker actors and their result, signal, launch, usage
+  and private Docker evidence; deleting a stopped container is not permission
+  to delete its unique incident record.
   Under pressure, only byte-identical duplicate closed-attempt rows compact;
   distinct identities, placements, waits and prediction errors remain.
 - Open jobs/calls conservatively pin learning inputs, including pooled and
@@ -131,3 +134,8 @@ immutable generations and copies/projects their histories after unlocking.
 These are synthetic laptop/fleet test mechanisms, not native hardware, real daemon
 or production-load qualification. The consumer's acceptance checks and exact-attempt
 custody rules remain independent.
+
+Diagnostic streams reserve their measured expanded representations as input arrives.
+An idle event subscription reserves only its physical read page; records spanning
+pages grow through shared admission, without a page-sized record limit. Exit/stderr
+capture shares the process pool with the event archive, progress and failure reports.

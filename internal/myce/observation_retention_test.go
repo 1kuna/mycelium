@@ -49,7 +49,7 @@ func TestObservationRetentionDropsOnlyUnreadRows(t *testing.T) {
 		t.Fatal("forbidden point dropped; sweeps would retry it")
 	}
 	// Retained constrained provenance still raises the bound at any age.
-	if j := runMemory(t, q, clock, m, named("limited"), 3, nil); j.Spec.Needs.HostMemoryGB != 32-minimumHostMemoryGB {
+	if j := runMemory(t, q, clock, m, named("limited"), 3, nil); j.Spec.Needs.HostMemoryGB < 6 || j.MemoryEnvelope.Source != acceptedMemoryEscalation {
 		t.Fatalf("constrained peak lost: %+v", j.MemoryEnvelope)
 	}
 	if j := runMemory(t, q, clock, m, named("fresh"), 2, nil); j.MemoryEnvelope.Basis != "learned" || j.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {

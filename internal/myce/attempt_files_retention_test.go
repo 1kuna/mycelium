@@ -48,11 +48,7 @@ func TestWorkerRetentionRemovesPublishedAttemptFiles(t *testing.T) {
 		}
 		for _, name := range []string{"failed", "live", "pending"} {
 			_, err := os.Stat(filepath.Join(dir, "job-files", name, "1", ".venv"))
-			if name == "failed" && at.Equal(now.Add(24*time.Hour)) {
-				if !errors.Is(err, os.ErrNotExist) {
-					t.Fatal("failed scratch retained after grace", err)
-				}
-			} else if err != nil {
+			if err != nil {
 				t.Fatalf("%s removed before eligible: %v", name, err)
 			}
 		}
@@ -135,7 +131,8 @@ func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 		return err == nil
 	}
 
-	// Unclaimed folders keep failed runs' files for diagnosis for a day.
+	// Unknown/unpublished contents have no verified replacement; age alone
+	// cannot authorize their removal.
 	pass()
 	clock.Advance(23 * time.Hour)
 	pass()
@@ -146,9 +143,9 @@ func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 	}
 	clock.Advance(time.Hour)
 	pass()
-	for _, gone := range []string{"accepted", "crashed", "live/2", "orphan"} {
-		if exists(gone) {
-			t.Fatalf("unclaimed attempt files %s retained after the grace", gone)
+	for _, kept := range []string{"accepted", "crashed", "live/2", "orphan"} {
+		if !exists(kept) {
+			t.Fatalf("unpublished attempt files %s lost on age", kept)
 		}
 	}
 	for _, kept := range []string{"live/3/.venv", "live/.inputs-1"} {

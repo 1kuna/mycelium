@@ -283,7 +283,7 @@ func TestCancelledAttemptPartialFilesRemainRecoverable(t *testing.T) {
 	if err := workerRetention(workerDir, unclaimedAt.Add(AttemptFilesGrace), testLogRetention); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("partial output retained beyond grace: %v", err)
+	if b, err := os.ReadFile(path); err != nil || string(b) != "partial" {
+		t.Fatalf("unique partial output lost on elapsed time: %q %v", b, err)
 	}
 }

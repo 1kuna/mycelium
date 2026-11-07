@@ -9,6 +9,40 @@ import (
 	"unsafe"
 )
 
+// Streams reserve bytes as they arrive. Reserving all measured headroom for an
+// idle event subscription would starve the same attempt's exit/stderr capture.
+type diagnosticTail struct {
+	dockerTail
+	dir      string
+	reserve  func(uint64) (int64, func())
+	releases []func()
+}
+
+func (b *diagnosticTail) Write(p []byte) (int, error) {
+	needed := len(b.data) + len(p) - b.limit
+	if needed > 0 {
+		reserve := b.reserve
+		if reserve == nil {
+			reserve = func(n uint64) (int64, func()) { return reserveDiagnosticBytes(b.dir, n) }
+		}
+		grant, release := reserve(uint64(needed))
+		if grant > 0 {
+			b.releases = append(b.releases, release)
+		} else {
+			release()
+		}
+		b.limit += int(grant)
+	}
+	return b.dockerTail.Write(p)
+}
+
+func (b *diagnosticTail) release() {
+	for _, release := range b.releases {
+		release()
+	}
+	b.releases = nil
+}
+
 // A process-wide reservation includes concurrent progress, Docker and failure
 // captures. Available RAM excludes live allocations; outstanding grants cover
 // their not-yet-allocated peak too. Unknown measurements withhold optional copies.
