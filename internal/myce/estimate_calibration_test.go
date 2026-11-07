@@ -223,10 +223,15 @@ func TestEstimateCalibrationPlacementBoundaries(t *testing.T) {
 	for _, rule := range []string{"ranking", "busy and custody", "scarcity", "tier", "fairness"} {
 		t.Run(rule, func(t *testing.T) {
 			q, clock, slow, fast, s := repeatedFixture(t)
+			var trained Job
 			for _, duration := range []time.Duration{time.Second, time.Second, 5 * time.Second} {
 				teachRepeated(t, q, clock, fast, s, duration)
-				teachRepeated(t, q, clock, slow, s, 3*time.Second)
+				trained = teachRepeated(t, q, clock, slow, s, 3*time.Second)
 			}
+			// Forecast the same canonical resource contract as submission; CPU
+			// memory_gb is normalized into host_memory_gb by admission.
+			s = trained.Spec
+			s.AllowedMachines = nil
 			probe := &Job{Spec: s, State: "queued"}
 			a, aok := q.estimateCompletion(probe, q.s.Machines[slow.ID])
 			b, bok := q.estimateCompletion(probe, q.s.Machines[fast.ID])
