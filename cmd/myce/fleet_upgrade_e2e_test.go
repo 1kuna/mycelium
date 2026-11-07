@@ -564,14 +564,12 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	assertAttempts := func() {
 		t.Helper()
 		for id, initial := range jobs {
-			var observed *myce.Job
-			for _, j := range snapshot.Jobs {
-				if j.ID == id {
-					observed = j
-				}
-			}
-			if observed == nil {
-				t.Errorf("job %s lost", id)
+			// Aggregate status pages completed history according to measured
+			// capacity. Exact identity assertions must inspect the known job,
+			// rather than interpret omission from that page as data loss.
+			var observed myce.Job
+			if err := client.Call(ctx, "GET", "/api/jobs/"+id, nil, &observed); err != nil {
+				t.Errorf("inspect rollout job %s: %v", id, err)
 				continue
 			}
 			if observed.Attempt != initial.Attempt || observed.Starts != 1 || observed.Losses != 0 || observed.InfrastructureRetries != 0 || observed.Session != initial.Session || observed.Machine != initial.Machine || observed.StartedAt == nil || !observed.StartedAt.Equal(*initial.StartedAt) {
@@ -614,13 +612,9 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			return false
 		}
 		for id := range jobs {
-			found := false
-			for _, j := range snapshot.Jobs {
-				if j.ID == id && j.State == "succeeded" {
-					found = true
-				}
-			}
-			if !found {
+			var observed myce.Job
+			lastErr = client.Call(ctx, "GET", "/api/jobs/"+id, nil, &observed)
+			if lastErr != nil || observed.State != "succeeded" {
 				return false
 			}
 		}

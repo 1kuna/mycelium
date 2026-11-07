@@ -35,6 +35,15 @@ Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
+After upgrading both queue and worker, learned native CPU `memory: auto` jobs
+can grow their charge from fresh measurements while the host has room. OS
+pressure, exhausted measured headroom, the configured host allowance and
+explicit limits still stop growth. Linux retains a physical/allowance kernel
+ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
+shared-page credit. Missing/stale telemetry protects the execution ceiling.
+`memory_envelope.enforcement` names the acknowledged behavior; older queues or
+workers retain the previous estimate-sized ceiling. Declared numeric limits,
+explicit member caps and Docker behavior are unchanged.
 From the next release, `host_capacity_accumulation` means new CPU work is waiting
 so ready CPU or accelerator work can acquire host RAM/cores as running CPU
 attempts finish. Mycelium chooses one fitting target; earlier fair turns,

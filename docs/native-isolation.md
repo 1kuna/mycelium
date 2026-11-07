@@ -10,62 +10,89 @@ deployment evidence**.
 
 ## macOS sampled memory guard (#770)
 
-On a guard-capable worker, native CPU attempts automatically use their positive
-resolved host-memory reservation (including configured ceiling slack) as an RSS
-threshold, for both plain and sandboxed commands and native sidecar groups.
-Zero/unresolved reservations have no guard. GPU jobs, managed Docker, preparation
-and model servers retain their existing behavior; Linux retains cgroup ceilings.
-The worker reports `sampled RSS guard (native CPU); no kernel memory ceiling`.
+Native CPU attempts use the worker's birth-fenced memory observer for both plain
+and sandboxed commands and sidecar groups. Explicit host-memory declarations keep
+their resolved threshold (including configured slack). GPU jobs, managed Docker,
+preparation and model servers retain their existing behavior.
 
 A learned reservation is an estimate, not an authored hard limit. From the next
-release (#850), failed comparable attempts contribute their observed overshoot
-and sampling growth as headroom. Fresh accepted evidence restores learning,
-retaining this observed variance within the target allowance; it never shrinks
-the clean measured bound. Explicit limits and durable per-job OOM retry floors
-retain their existing contract. The guard uses that resolved reservation, so
-admission and the stop threshold agree without a second unreserved allowance.
+release, a queue and worker that both support adaptive native CPU memory let a
+learned `memory: auto` attempt grow its charge from live measurement. Linux's
+parent `memory.max` is bounded by measured physical RAM and the configured host
+allowance, rather than the smaller learned estimate. Explicit member cgroups stay
+in place. Darwin uses sampled RSS and has no kernel memory ceiling. An older
+queue or worker retains the previous reservation-sized ceiling/guard contract.
+
+Above the learned reservation, sustained measured contention stops the exact
+attempt: OS warning/critical pressure, new swap/OOM/stall activity, or live
+availability insufficient for the configured owner reserve plus measured growth
+over the sampling horizon. The configured host allowance remains a hard bound.
+Missing pressure evidence cannot establish contention. Unknown current-memory
+telemetry retains the full execution ceiling's admission charge until fresh
+measurements return; it cannot free capacity for another job. Explicit limits do
+not depend on pressure evidence.
 
 The 2026-11-06 incident recorded 4.4857635498046875 GiB RSS against a
-3.9251251220703125 GiB threshold. The numeric stop followed the guard contract;
-its 0.560638427734375 GiB overshoot now supplies measured headroom instead of
-doubling demand. The receipt cannot establish exclusive physical demand,
-complete shared-page attribution or contemporaneous host pressure. It therefore
-does not establish physical OOM or prove that the historical stop was warranted
-by real contention. Existing birth/session fencing, control-process exclusion,
-descendant/sidecar inventory and unknown-sample resets remain unchanged.
+3.9251251220703125 GiB learned threshold. Stopping solely at that estimate was the
+wrong rule for a healthy job on a host with room. The retained receipt cannot
+establish contemporaneous host pressure or exclusive physical demand, so it
+cannot establish whether that particular execution was healthy or under physical
+pressure. Fake-clock replays exercise both states and retain explicit limits.
+The #389 incident separately recorded 64.07 GiB summed RSS and 2,004 Python
+processes on 16 GiB RAM with critical pressure and about 44.83 GiB swap-out.
+Its timing was not retained. A synthetic fake-clock replay of an accelerating
+fork shape must stop while pressure is still normal and before swap starts;
+its shared-RSS/stable-headroom counterpart retains the learned growth contract.
+This is a stop-decision regression, not historical timing or native stress proof.
+The #850 recovery separately retains the measured 0.560638427734375 GiB overshoot
+as uncertainty without doubling demand beyond every eligible allowance.
 
+The process observer samples once per second and includes main, helpers and
+attributable descendants within the cleanup session boundary, excluding the
+control anchor, worker and sibling attempts. The tree parser counts each PID
+once even when its parent is also owned; each PID's RSS is its own resident set,
+not a recursive child sum. Shared physical pages can appear in multiple PIDs'
+RSS. Apple's [ps implementation](https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/print.c)
+prints task `resident_size`; XNU exposes [resident size, compressed bytes and
+physical footprint separately](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/task_info.h).
+RSS is not a unique physical footprint and can omit compressed memory. Summed
+RSS greater than physical RAM alone therefore does not establish exhaustion.
+Darwin receives no anonymous-resident admission credit from this measurement.
 
-The existing process-memory observer samples once per second. It reuses the
-cleanup session inventory, launch birth identities and tree-RSS parser to include
-main, helpers and attributable descendants, excluding sibling attempts and the
-worker. A valid RSS above the threshold on three consecutive observations spanning
-two seconds stops that exact attempt through normal cleanup. Under normal probe
-latency this detects sustained growth within about three seconds. A lower sample,
-missing/denied/incomplete inventory, changed anchor identity or observation gap
-over two periods resets the window. Unknown observations never establish overage
-or release. Pressure/owner-latency yield and admission remain independent.
+Three valid overage/contention observations spanning two seconds normally stop
+through exact-attempt cleanup. A rapidly growing owned process tree shortens
+that grace when consecutive valid observations show both RSS/member-count growth
+and actual host headroom loss: if the measured depletion rate would consume the
+remaining room within one observed sampling interval plus the existing grace,
+the guard stops an already-over-limit attempt immediately. This applies to both
+learned and declared thresholds. It uses neither a process-count cap nor summed
+RSS as physical usage; stable host headroom does not earn this early stop. A lower or pressure-free sample, missing inventory,
+changed birth/session identity or gap over two sample periods resets the window.
+The ordinary grace filters a transient spike without another polling loop;
+physical Linux and explicit member ceilings remain kernel-enforced between reads.
 
 The cadence preserves the observer's measured cost budget: 30 original RSS plus
 pressure cycles took 27.0 ms median, 32.1 ms maximum; 20 complete birth-fenced
 session/RSS plus pressure cycles, including member birth checks, took 65.4 ms
 median, 74.0 ms p95, 77.9 ms maximum
 on one development Mac. One new cycle per second uses about 65 ms of serialized probe wall time versus
-54 ms for two old cycles, while retaining a roughly three-second reaction window.
-A two-second cadence would halve probe work but double that reaction window.
+54 ms for two old cycles, while retaining a roughly three-second ordinary reaction window. The growth
+forecast above avoids spending that grace during a measured fork/growth burst.
+A two-second cadence would halve probe work but double that ordinary reaction window.
 Two further observations filter brief
 spikes without a second sampler or an arbitrary memory multiplier. These are
 bounded local overhead measurements, not fleet load qualification.
 
 Job GET/status retains `execution_cause.class: rss_limit_exceeded` with
 `rss_limit` evidence (`observed_bytes`, `limit_bytes`, `quality:
-owned_session_rss`). The fact is persisted before stopping and survives worker
-recovery. It is a memory failure, not infrastructure loss: `memory: auto` uses the
+owned_session_rss` on Darwin; `cgroup_current` for Linux pressure stops). The
+fact is persisted before stopping and survives worker recovery. It is a memory failure, not infrastructure loss: `memory: auto` uses the
 existing bounded OOM escalation; plain declared-limit failures are terminal, and
 extension retry remains bounded by the existing OOM policy. Failed/constrained
 readings cannot become accepted clean memory peaks. Partial diagnostics and
 cleanup charges retain ordinary custody until all owned processes are gone.
 
-This is a reactive RSS guard, **not a kernel ceiling or aggregate RAM containment**.
+Darwin has a reactive RSS guard, **not a kernel ceiling or aggregate RAM containment**.
 It can miss fast spikes, compression and deliberately escaped sessions; shared
 pages can count more than once. A sufficiently fast allocation can still exhaust
 RAM before detection. A bounded native runner check with a memory-using child
