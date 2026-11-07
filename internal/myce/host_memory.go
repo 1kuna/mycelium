@@ -505,6 +505,7 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	}
 	forecast := sample.growthGB + sample.rateGB*now.Sub(sample.at).Seconds()
 	charge = max(e.ProbeFloorGB, sample.footprintGB+forecast+exploratoryDriftMarginGB(m))
+	charge = boundedProcessMemoryCharge(m, e.ProbeFloorGB, sample.footprintGB, charge)
 	growth = max(0, charge-sample.gb)
 	return
 }

@@ -89,6 +89,12 @@ reusable bound.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
+From the next release (#954), Darwin process growth pairs each RSS increment
+with its own interval. Flat live samples report zero growth/rate; retained peak
+growth is historical sizing evidence. Positive slopes still extend through
+sample age. Measured physical RAM bounds forecast charges while retaining actual
+RSS and known floors; RSS grants no resident credit. A forecast is not measured
+allocation or proof of a historical refusal. See [process growth](../../docs/process-memory-growth.md).
 Plain native commands default to **unsandboxed** under MY-25; explicitly set
 `isolation: sandboxed` to opt in. New native extension registrations default to
 sandboxing; retained registrations keep their frozen policy.
