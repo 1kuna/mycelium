@@ -516,6 +516,7 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 		floor = max(floor, ceiling) // Estimates can grow, never earn probe credit.
 	}
 	charge = max(floor, sample.footprintGB+forecast+exploratoryDriftMarginGB(m))
+	charge = boundedProcessMemoryCharge(m, floor, sample.footprintGB, charge)
 	growth = max(0, charge-sample.gb)
 	return
 }
