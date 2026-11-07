@@ -439,3 +439,23 @@ func TestControlTelemetryStorageRequestIdentity(t *testing.T) {
 	}
 	t.Fatal("storage acquisition missing")
 }
+
+func TestControlTelemetryEfficiencyRequestIdentity(t *testing.T) {
+	q, _ := fixture(t)
+	r := httptest.NewRequest("GET", "/api/efficiency", nil)
+	r.Header.Set("Authorization", "Bearer test-only")
+	w := httptest.NewRecorder()
+	API{q, "test-only"}.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Code)
+	}
+	if err := q.control.flush(q.db); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range q.control.snapshot().Recent {
+		if e.Kind == "lock" && e.Request != 0 && e.Handler != 0 && e.Client != "" {
+			return
+		}
+	}
+	t.Fatal("HTTP read acquisition lost request identity")
+}
