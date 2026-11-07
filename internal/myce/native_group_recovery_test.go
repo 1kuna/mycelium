@@ -314,6 +314,12 @@ func TestNativeGroupProductionOutcomes(t *testing.T) {
 			if cur.State != wantState || cur.InfrastructureRetries != wantRetries {
 				t.Fatalf("expected %s/%d", wantState, wantRetries)
 			}
+			if mode == "infrastructure" {
+				next := check(t, r.q, r.w.Machine, nil).Job
+				if next == nil || next.ID != r.j.ID || next.Attempt != 2 {
+					t.Fatal("delivered stop held recovery on the unchanged worker", next)
+				}
+			}
 		})
 	}
 }

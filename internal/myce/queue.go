@@ -1879,11 +1879,6 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		r.ExecutionCause, r.Error = wallTimeCause(), wallTimeLimit
 	}
 	r.ExecutionCause = safeAttemptRuntimeCause(j, r.ExecutionCause)
-	// Positive payload-exit evidence takes precedence over a contradictory
-	// interruption flag; deterministic failures must not become recovery holds.
-	if !r.Success && r.ExecutionCause != nil && r.ExecutionCause.Operation == "command" && r.ExecutionCause.Class == "command_exit" {
-		r.Interrupted, r.PriorityStop = false, nil
-	}
 	if r.ExecutionCause != nil && r.ExecutionCause.Operation == "input_staging" {
 		// Keep the durable reason as safe as the structured cause; Error may
 		// contain the original worker-supplied diagnostic name or private text.

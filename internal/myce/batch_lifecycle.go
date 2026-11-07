@@ -242,6 +242,12 @@ func batchInfrastructureState(j *Job, m *Machine) string {
 }
 
 func (q *Queue) holdUnproductiveInfrastructure(j *Job) {
+	// Exit status does not diagnose a preparation/launch fault. The worker's
+	// interruption classification already accounts for delivered stops and exit
+	// ordering; a stopped command can exit nonzero and still recover unchanged.
+	if cause := j.ExecutionCause; cause != nil && cause.Operation == "command" && cause.Class == "command_exit" {
+		return
+	}
 	// An unobserved exit/lost heartbeat has no repeatable failure signature.
 	// Keep recovering those interruptions; never mistake them for command exits.
 	// A fresh capacity admission sample is itself relevant pressure evidence;
