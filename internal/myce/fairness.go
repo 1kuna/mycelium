@@ -282,6 +282,9 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 		}
 		q.applyLearnedNeeds(candidate)
 		candidate = q.memoryCandidate(candidate, m)
+		if r := q.decisionCapture.row(j, m); r != nil {
+			r.Memory = decisionMemory(candidate, m, m.FreeMemoryGB)
+		}
 		if check(q.capReasonFor(candidate, m) == "", "project_cap") && q.batchResourcesFitWithScan(candidate, m, resources) {
 			return candidate
 		}
@@ -368,6 +371,9 @@ func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batc
 	}
 	if !q.decisionCheck(j, m, room.ok, "release_plan") {
 		return false
+	}
+	if r := q.decisionCapture.row(j, m); r != nil {
+		r.ProjectedMemory = decisionMemory(j, &room.machine, room.memory)
 	}
 	if q.decisionCapture == nil {
 		return fitsResources(j, &room.machine, room.memory)

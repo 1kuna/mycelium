@@ -1632,21 +1632,21 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resul
 		}()
 		reply.Leave = m.Leaving
 		decisions = &decisionCapture{worker: m.ID, session: m.Session, rows: map[decisionKey]*DecisionReceipt{}, remaining: decisionBudget, revision: q.fileReferenceRevision + 1, at: q.clock.Now(), early: "none"}
+		protocol := "legacy"
+		if c.AttemptProtocol != "" {
+			protocol = "keyed"
+		}
+		decisions.incoming = DecisionIncoming{Protocol: protocol, Recovering: c.Recovering, Fresh: c.Fresh, Started: c.Started, Running: c.Running != nil, Reports: len(c.Attempts), Devices: c.Machine.Devices != nil, Leaving: c.Machine.Leaving, BenchmarkDone: c.BenchmarkDone != ""}
+		if c.Running != nil {
+			decisions.legacy = *c.Running
+		}
 		if span := spanFrom(ctx); span != nil {
 			decisions.request = span.id
 		}
-		q.decisionCapture = decisions
-		defer func() { q.snapshotDecisionFences(decisions); q.decisionCapture = nil }()
-		// Early-return evidence does not run a speculative placement pass.
-		defer func() {
-			if decisions.early != "none" {
-				for _, j := range q.liveJobs() {
-					for _, target := range q.placementTargets(&m) {
-						decisions.row(j, target)
-					}
-				}
-			}
-		}()
+		if decisionBudget >= decisionCost(&DecisionReceipt{}) && q.control != nil {
+			q.decisionCapture = decisions
+		}
+		defer func() { q.finishDecisionCapture(decisions, &m) }()
 		if m.BenchmarkPending || c.BenchmarkDone != "" {
 			decisions.early = "benchmark"
 			return nil
@@ -1660,8 +1660,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resul
 		}
 		if c.AttemptProtocol != "" && m.Devices != nil {
 			q.checkinMachineAttempts(&m, reports, progresses, c.Recovering, &reply)
-			q.snapshotDecisionFences(decisions)
-			q.decisionCapture = nil
+			q.finishDecisionCapture(decisions, &m)
 			q.maintain()
 			return nil
 		}
@@ -1741,8 +1740,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (out Reply, resul
 				reply.Job = &out
 			}
 		}
-		q.snapshotDecisionFences(decisions)
-		q.decisionCapture = nil
+		q.finishDecisionCapture(decisions, &m)
 		if m.Leaving && reply.Job == nil && len(q.modelPlan(m.ID)) == 0 {
 			m.Gone = true
 			m.Models = nil

@@ -335,6 +335,9 @@ func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, s
 			}
 			if r := q.decisionCapture.row(winner, set.m); r != nil {
 				r.Immediate = code
+				if code == "ready" || code == "immediate_resources" {
+					r.ImmediateMemory = decisionMemory(winner, set.m, set.m.FreeMemoryGB)
+				}
 			}
 			if code != "ready" {
 				continue

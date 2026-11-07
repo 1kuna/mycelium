@@ -12,15 +12,22 @@ const recoveryAttentionDelay = 2 * time.Minute
 // Status presentation consumes measured facts and the existing queue projection.
 // It never selects a hypha or changes an admission decision.
 func HyphaAvailability(m *Machine) string {
+	_, detail := hyphaAvailability(m)
+	return detail
+}
+
+// Availability is a decision; advisory prose never makes an available target
+// blocked. Status consumers use the boolean, while display retains the detail.
+func hyphaAvailability(m *Machine) (available bool, detail string) {
 	switch {
 	case m.Disabled != "":
-		return "disabled by operator"
+		return false, "disabled by operator"
 	case m.Gone:
-		return "offline; waiting for this hypha to return"
+		return false, "offline; waiting for this hypha to return"
 	case m.Leaving:
-		return "leaving; no new work"
+		return false, "leaving; no new work"
 	case m.HostMemoryPolicyMismatch:
-		return "host allowance policy mismatch; no new work"
+		return false, "host allowance policy mismatch; no new work"
 	case m.Recovering:
 		state := "recovering saved attempts; no new work"
 		if m.RecoveringSince != nil {
@@ -29,35 +36,34 @@ func HyphaAvailability(m *Machine) string {
 		if m.RecoveryNeedsAttention {
 			state += "; needs attention (recovery longer than 2 minutes)"
 		}
-		return state
+		return false, state
 	}
 	if m.CPUCapacityReason != "" && m.GPU == "cpu" {
-		return m.CPUCapacityReason
+		return false, m.CPUCapacityReason
 	}
 	if reason := capabilityUnavailableReason(m); reason != "" {
-		return reason
+		return false, reason
 	}
 	if a := machineAvailability(m); a != nil && !a.Available {
-		return availabilityWords(a.Reason)
+		return false, availabilityWords(a.Reason)
 	}
 	if m.AdmissionReason != "" {
-		return admissionWords(m.AdmissionReason)
+		return false, admissionWords(m.AdmissionReason)
 	}
 	if m.MemoryError != "" || m.HostMemoryError != "" {
-		return "waiting for memory readings"
+		return false, "waiting for memory readings"
 	}
 	if m.DockerCleanup != "" {
-		return "waiting for previous work to finish cleaning up"
+		return false, "waiting for previous work to finish cleaning up"
 	}
 	if a := machineAvailability(m); a != nil && a.Available && a.Reason == "CPU thermal coverage waived for desktop" {
-		return "available for work; CPU thermal coverage waived for desktop"
+		return true, "available for work; CPU thermal coverage waived for desktop"
 	}
 	if m.CPUIsolation == "not-enforced" {
-		return "available for work; GPU isolation is not enforced for CPU work (Metal has no device mask)"
+		return true, "available for work; GPU isolation is not enforced for CPU work (Metal has no device mask)"
 	}
-	return "available for work"
+	return true, "available for work"
 }
-
 func availabilityWords(reason string) string {
 	switch reason {
 	case "waiting for 5 idle minutes":
@@ -301,17 +307,17 @@ func (q *Queue) statusWaitingReasonDetail(j *Job) string {
 				continue
 			}
 			possible++
-			state := HyphaAvailability(m)
+			available, state := hyphaAvailability(m)
 			if q.maintenanceBlocked(hostID(m)) {
-				state = "planned host maintenance"
+				available, state = false, "planned host maintenance"
 			}
-			if strings.HasPrefix(state, "available for work") && q.machineLimitReason(m) != "" {
-				state = admissionWords(q.machineLimitReason(m))
+			if available && q.machineLimitReason(m) != "" {
+				available, state = false, admissionWords(q.machineLimitReason(m))
 			}
-			if strings.HasPrefix(state, "available for work") && m.CheckpointUnavailable && needsCheckpoint(j) {
-				state = "waiting for saved progress storage"
+			if available && m.CheckpointUnavailable && needsCheckpoint(j) {
+				available, state = false, "waiting for saved progress storage"
 			}
-			if !strings.HasPrefix(state, "available for work") {
+			if !available {
 				blocked = append(blocked, m.ID+": "+state)
 			}
 		}

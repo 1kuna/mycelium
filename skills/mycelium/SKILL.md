@@ -196,7 +196,9 @@ admission. See [CPU and I/O fields](https://github.com/1kuna/mycelium/blob/main/
 On a queue containing #884's decision capture, the targeted authenticated
 `GET /api/jobs/JOB_ID/decisions` read retains the admission predicate, competing
 winner/fairness, global plan, immediate readiness and matching check-in reply
-for attempt-zero queued work. It needs no full status poll. Use the exact saved
+for attempt-zero queued work, including incoming recovery/protocol flags,
+exact evaluated memory inputs and bounded outgoing directive identities.
+It needs no full status poll. Use the exact saved
 job ID; read coverage/omission and durable timestamps before attributing a cause.
 An empty receipt is unknown. See [decision receipts](https://github.com/1kuna/mycelium/blob/main/docs/status.md#queued-decision-receipts-884-next-queue-release).
 

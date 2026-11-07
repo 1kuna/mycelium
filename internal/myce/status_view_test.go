@@ -1,12 +1,39 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestStatusAvailabilityAdvisoryDoesNotBlock(t *testing.T) {
+	q, _, client := decisionFixture(t)
+	m := cpuMachine("advisory-worker", "advisory-host", "cpu", 8, 32)
+	m.CPUIsolation = "not-enforced"
+	m.MaxJobs = 1
+	attemptWire(t, client, Checkin{Machine: m})
+	if available, detail := hyphaAvailability(q.s.Machines[m.ID]); !available || !strings.Contains(detail, "Metal has no device mask") {
+		t.Fatal("fixture lost the available advisory", available, detail)
+	}
+	first := submit(t, q, cpuSpec(1, 1))
+	out, err := client.GetJob(context.Background(), first.ID)
+	if err != nil || out.Blocker == nil || out.Blocker.Code != "waiting_for_worker" || strings.Contains(out.Reason, "available for work") {
+		t.Fatalf("advisory became a blocker: %+v %v", out, err)
+	}
+	offer := attemptWire(t, client, Checkin{Machine: m})
+	if offer.Job == nil || offer.Job.ID != first.ID {
+		t.Fatal("status altered admission")
+	}
+	second := submit(t, q, cpuSpec(1, 1))
+	attemptWire(t, client, Checkin{Machine: m, Running: &Execution{ID: first.ID, Attempt: offer.Job.Attempt}})
+	out, err = client.GetJob(context.Background(), second.ID)
+	if err != nil || out.Blocker == nil || !strings.Contains(out.Reason, "simultaneous job limit") || strings.Contains(out.Reason, "available for work") {
+		t.Fatalf("advisory hid real gate: %+v %v", out, err)
+	}
+}
 
 func statusViewResponse(t *testing.T, q *Queue, path string) string {
 	t.Helper()

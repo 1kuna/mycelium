@@ -2368,6 +2368,17 @@ Each receipt pairs the assignment pass with its completed check-in reply:
   `checkpoint_storage`, `preemption_placement`, `release_plan` and
   `host_capacity_accumulation`. A failure in a projected release plan is named
   `release_plan`; it does not claim that current RAM is the cause.
+- `incoming` retains the actual check-in's fixed protocol label (`legacy` or
+  `keyed`), recovery/fresh/start/running/leaving/benchmark-completion flags,
+  report count and device-inventory presence, including pre-planner returns.
+- `memory` retains the resolved candidate's numeric host/device envelope,
+  probe floor and evidence count, requested memory, launch slack, computed host
+  need, measured live availability, free admission headroom, reserved memory and
+  allowance. `projected_memory` records the release projection's inputs;
+  `immediate_memory` records the live readiness inputs when that fit is reached.
+  `evaluated: false` means the stage was skipped, rather than a zero-memory
+  decision. Refusal, auto-sizing, unified memory and measurement presence are
+  booleans; source prose is not copied.
 - `winner` and `winner_class` name the target's selected competitor; `fairness`
   records whether that winner precedes this job and which existing comparator
   decided (`priority_tier`, `release_turn`, `accelerator_demand`, `fair_score`,
@@ -2379,23 +2390,39 @@ Each receipt pairs the assignment pass with its completed check-in reply:
   `early_return` distinguishes recovery, cleanup, leaving, benchmarking, legacy
   attempt reports and an existing attempt from the ordinary planning path.
 - `reply` records assignment/stop/kill/hold counts, whether this job, its target
-  winner and its global winner were offered and at which attempts, legacy
+  winner and its global winner were offered and at which attempts. The matching
+  `job_execution`, `winner_execution` and `global_execution` identify the concrete
+  offered job; a fan-out parent's offer names its child execution. It also records legacy
   control flags, leave and preparation/copy/model-plan presence. Its anonymized
   `identity` fingerprints the safe execution/directive summary of the matching
-  reply, keeping retained size independent of the number of running attempts.
+  reply, including detail shed from the retained view.
+  `directives` retains the actual outgoing execution IDs/attempts, anonymized
+  sessions, parent IDs and offer/stop/kill/hold flags after wire adaptation.
+  `addressed` distinguishes wire-addressed directives from legacy unaddressed
+  control flags joined to the incoming running execution.
+  Detail fits the capture's measured share; `directives_omitted` reports shedding.
+  Counts and the digest cover the entire reply. Directive order is canonicalized,
+  so reordered concurrent reports do not create changed evidence.
   `reply_ready` means queue processing and hydration completed. It cannot prove
   HTTP delivery or worker receipt; `reply_failed` retains a post-commit reply
   failure without copying error prose.
 
-Unchanged decisions retain their original matching reply and increment in-memory
+Semantically unchanged decisions retain their original exact memory inputs and
+matching reply and increment in-memory
 `checkins`, `observed_through` and `through_revision`; time alone adds no durable
-writes. Changed evidence enters the existing control recorder's guarded storage,
+writes. Continuous free-headroom jitter alone also adds no writes; a changed
+envelope, predicate, winner or directive retains new exact evidence. Repeat
+counters attest the semantic decision, not identical numeric headroom.
+Changed evidence enters the existing control recorder's guarded storage,
 which serializes and writes outside `q.mu`. Its pressure, measured commit cost,
 WAL/checkpoint headroom and existing ring retention apply. The latest-view cache
 and each capture fit one existing observation-memory share derived from current
 OS/process headroom and runnable concurrency. Unexplained dispatch gaps and rejected/competing decisions take precedence
 over ordinary offers; oldest equal-value detail yields when capacity shrinks. There is no new fixed row cap, heartbeat sampling rate or expiry timer.
-`omitted`, `control_dropped`, `control_overwritten`, `storage_deferred` and
+The targeted read bounds retained rows, deduplication keys and decoding scratch
+by the current observation share. `truncated` means the read exhausted that
+share; zero capacity starts no durable scan. Recorderless simulator queues omit
+capture. `omitted`, `control_dropped`, `control_overwritten`, `storage_deferred` and
 `durable_at` describe incomplete coverage. In-memory repeat counts can be lost
 on restart; retained durable decisions remain readable until shared-ring eviction.
 Receipts contain no commands, paths, addresses, credentials or authored prose.
@@ -2407,4 +2434,5 @@ revision's predicate, competitor, global winner and reply before attributing a
 cause. Preserve #884 until a captured occurrence is explained and fixed. Current
 status also names a host allowance policy mismatch that already withholds
 admission; a generic availability advisory cannot hide the simultaneous-work or
-checkpoint-storage fence.
+checkpoint-storage fence. Availability is typed separately from advisory prose:
+the Metal CPU-isolation advisory cannot become a `resource_pressure` blocker.
