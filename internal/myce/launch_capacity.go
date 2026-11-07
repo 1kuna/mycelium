@@ -73,6 +73,10 @@ func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 
 func (q *Queue) waitLaunchCapacity(j *Job, r Result) {
 	q.recordLaunchCapacityWait(j, r)
+	q.requeueLaunchCapacity(j)
+}
+
+func (q *Queue) requeueLaunchCapacity(j *Job) {
 	// Fence every copy for every tier. Missing Started is never release proof.
 	for i := range j.Copies {
 		j.Copies[i].Recoverable = false
@@ -120,7 +124,7 @@ func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
 		}
 		room := *m
 		room.FreeCPUCores, room.CPUInUseCores = room.EffectiveCPUCores, 0
-		for _, c := range extensionJobs(j, &room, true) {
+		for _, c := range q.memoryCandidates(j, m) {
 			if !fitsResources(c, &room, room.TotalMemoryGB) {
 				continue
 			}

@@ -1135,6 +1135,16 @@ func (q *Queue) maintain() {
 					if cancelled(j) {
 						q.finishCancellation(j)
 					} else {
+						if q.launchCapacityPending(j) {
+							// A validated refusal may still be verifying diagnostics
+							// outside the lock. Its stopped execution is known; quiet
+							// contact adds no infrastructure loss or release proof.
+							for i := range j.Copies {
+								j.Copies[i].Recoverable = false
+							}
+							q.retainRelease(j)
+							continue
+						}
 						for i := range j.Copies {
 							if j.Copies[i].Attempt == j.Attempt {
 								j.Copies[i].Recoverable = j.State == "running"
@@ -1431,6 +1441,10 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 				if j.Machine == m.ID && j.Session == old.Session && (j.State == "running" || j.State == "stopping") {
 					if cancelled(j) {
 						q.finishCancellation(j)
+						continue
+					}
+					if q.launchCapacityPending(j) {
+						q.requeueLaunchCapacity(j)
 						continue
 					}
 					if j.State == "running" {

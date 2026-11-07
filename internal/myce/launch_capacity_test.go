@@ -220,6 +220,9 @@ func TestLaunchCapacityOrdinaryPreemption(t *testing.T) {
 			if err := q.Complete(capacityResult(offer, false)); err != nil {
 				t.Fatal(err)
 			}
+			if got := job(t, q, j.ID); got.Losses != 0 || got.InfrastructureRetries != 0 || got.State != "queued" {
+				t.Fatal("capacity contention spent demand budget", got.State, got.Losses, got.InfrastructureRetries)
+			}
 			if got := job(t, q, victim.ID); (got.State == "stopping") != (tier == "experiment") {
 				t.Fatalf("wrong tier preemption: %s %+v", tier, got)
 			}
@@ -259,6 +262,8 @@ func TestLaunchCapacityDiagnosticDeadlineRace(t *testing.T) {
 	}
 	m := machine("worker", "fake")
 	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 64
+	healthy := machine("healthy", "cpu")
+	check(t, q, healthy, nil)
 	s := spec("production")
 	s.Files, s.Diagnostics = FileManifest{"input": ref}, &DiagnosticSpec{}
 	j := submit(t, q, s)
@@ -294,8 +299,12 @@ func TestLaunchCapacityDiagnosticDeadlineRace(t *testing.T) {
 	case <-time.After(testWaitTimeout):
 		t.Fatal("diagnostic I/O blocked queue maintenance")
 	}
-	if got := job(t, q, j.ID); got.State != "running" {
-		t.Fatal("maintenance expired typed refusal during diagnostic I/O", got.State, got.Reason)
+	for elapsed := time.Duration(0); elapsed <= q.machineLossTimeout(m.ID); elapsed += time.Second {
+		clock.Advance(time.Second)
+		check(t, q, healthy, nil)
+	}
+	if got := job(t, q, j.ID); got.State != "running" || got.Losses != 0 || got.InfrastructureRetries != 0 || !q.s.Machines[m.ID].Gone {
+		t.Fatal("maintenance expired/charged known refusal during diagnostic I/O", got.State, got.Reason, got.Losses, got.InfrastructureRetries, q.s.Machines[m.ID].Gone)
 	}
 	unblock()
 	select {
@@ -530,5 +539,94 @@ func TestLaunchCapacityProjectionCacheIsolation(t *testing.T) {
 				t.Fatal("ordinary demand inherited unnecessary stops", plan)
 			}
 		}
+	}
+}
+
+func TestLaunchCapacityKnownRefusalRestart(t *testing.T) {
+	for _, tier := range []string{"production", "experiment"} {
+		t.Run(tier, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("worker", "fake")
+			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 64
+			s := spec(tier)
+			if tier == "production" {
+				s.StartWindow = "1m"
+			}
+			j := submit(t, q, s)
+			offer := check(t, q, m, nil).Job
+			if err := q.Started(result(offer, true)); err != nil {
+				t.Fatal(err)
+			}
+			r := capacityResult(offer, true)
+			if err := q.update(func() error { q.retainLaunchCapacityRefusal(r); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			previous := m.Session
+			m.Session = "replacement"
+			reply, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := job(t, q, j.ID)
+			if got.Losses != 0 || got.InfrastructureRetries != 0 || len(got.Copies) == 0 || !got.Copies[0].ReleaseConfirmed || got.Copies[0].Recoverable {
+				t.Fatal("known refusal restart spent budget or lost exact fence", got.Losses, got.InfrastructureRetries, got.Copies)
+			}
+			next := reply.Job
+			if next == nil || next.ID != j.ID || next.Attempt != 2 {
+				t.Fatal("clean restart did not resume capacity demand", next)
+			}
+			if tier == "production" && !next.Spec.StartBy.Equal(*offer.Spec.StartBy) {
+				t.Fatal("fresh session extended caller deadline")
+			}
+			finish(t, q, next, true)
+		})
+	}
+}
+
+func TestLaunchCapacityInitialLearnedMemory(t *testing.T) {
+	for _, deadline := range []string{"generated", "absolute", "relative"} {
+		t.Run(deadline, func(t *testing.T) {
+			q, clock, m, s := observationFixture(t)
+			first := startObservation(t, q, m, s)
+			clock.Advance(time.Second)
+			r := result(&first, true)
+			host := 2.0
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			s.Priority, s.Needs.Memory = "production", "auto"
+			if deadline == "absolute" {
+				at := clock.Now().Add(time.Second)
+				s.StartBy = &at
+			}
+			if deadline == "relative" {
+				s.StartWindow = "1s"
+			}
+			m.HostAvailableMemoryGB = 1
+			check(t, q, m, nil)
+			j := submit(t, q, s)
+			if next := check(t, q, m, nil).Job; next != nil {
+				t.Fatal("learned need bypassed live RAM", next)
+			}
+			clock.Advance(ProductionStartTimeout + time.Second)
+			got := job(t, q, j.ID)
+			if deadline != "generated" {
+				if got.State != "failed" {
+					t.Fatal("learned sizing suppressed caller cutoff", got.State)
+				}
+				return
+			}
+			if got.State != "queued" || !got.StartCapacityWaiting {
+				t.Fatal("recipe default hid learned capacity wait", got.State, got.Reason)
+			}
+			m.HostAvailableMemoryGB = 8
+			next := check(t, q, m, nil).Job
+			if next == nil || next.ID != j.ID || next.Spec.Needs.HostMemoryGB <= 2 || !next.Spec.StartBy.After(clock.Now()) {
+				t.Fatal("learned demand did not resume with startup window", next)
+			}
+			finish(t, q, next, true)
+		})
 	}
 }
