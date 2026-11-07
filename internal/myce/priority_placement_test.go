@@ -1,6 +1,9 @@
 package myce
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestPriorityPreemptionCallCapacity(t *testing.T) {
 	for _, pin := range []bool{false, true} {
