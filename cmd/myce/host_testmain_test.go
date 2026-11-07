@@ -86,7 +86,11 @@ func cliTestMain(m *testing.M) int {
 // In-process dev workers need the same synthetic host as tagged CLI children.
 func installSyntheticHost() {
 	myce.SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
-	myce.SetWorkerProbeDefaults(myce.WorkerProbeDefaults{
+	myce.SetWorkerProbeDefaults(syntheticWorkerProbes())
+}
+
+func syntheticWorkerProbes() myce.WorkerProbeDefaults {
+	return myce.WorkerProbeDefaults{
 		IOPressure: func(clock myce.Clock) *myce.IOPressure {
 			return &myce.IOPressure{SampledAt: clock.Now(), Some: &myce.PressureStall{TotalUS: 1234}, Full: &myce.PressureStall{}}
 		},
@@ -113,5 +117,5 @@ func installSyntheticHost() {
 				return []byte("synthetic hardware identity"), nil
 			}}
 		},
-	})
+	}
 }

@@ -36,6 +36,7 @@ worker; only the GPU is simulated, so you need no GPU or drivers.
 
 `./myce dev -- COMMAND` starts a temporary queue with two pretend machines on a
 free local port, points COMMAND at it (ignoring any other Mycelium settings),
+waits for both workers to advertise their inventory before starting COMMAND,
 and removes everything except your downloaded results when COMMAND finishes or
 you press Ctrl-C. No token setup or second terminal is needed. To try your own
 command, run `./myce dev -- ./myce run -- echo hello`. Plain `./myce dev` keeps
