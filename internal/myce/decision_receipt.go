@@ -137,32 +137,35 @@ type DecisionReply struct {
 	Model             bool                `json:"model"`
 }
 type DecisionPage struct {
-	Truncated          bool              `json:"truncated"`
-	ControlDropped     uint64            `json:"control_dropped"`
-	ControlOverwritten uint64            `json:"control_overwritten"`
-	StorageDeferred    bool              `json:"storage_deferred"`
-	DurableAt          time.Time         `json:"durable_at"`
-	At                 time.Time         `json:"at"`
-	Receipts           []DecisionReceipt `json:"receipts"`
-	Omitted            uint64            `json:"omitted"`
-	CapacityBytes      int64             `json:"capacity_bytes"`
-	RetainedBytes      int64             `json:"retained_bytes"`
-	Changes            uint64            `json:"changes"`
+	RecorderRetainedBytes int64             `json:"recorder_retained_bytes"`
+	RecorderCapacityBytes int64             `json:"recorder_capacity_bytes"`
+	Truncated             bool              `json:"truncated"`
+	ControlDropped        uint64            `json:"control_dropped"`
+	ControlOverwritten    uint64            `json:"control_overwritten"`
+	StorageDeferred       bool              `json:"storage_deferred"`
+	DurableAt             time.Time         `json:"durable_at"`
+	At                    time.Time         `json:"at"`
+	Receipts              []DecisionReceipt `json:"receipts"`
+	Omitted               uint64            `json:"omitted"`
+	CapacityBytes         int64             `json:"capacity_bytes"`
+	RetainedBytes         int64             `json:"retained_bytes"`
+	Changes               uint64            `json:"changes"`
 }
 type decisionKey struct{ job, target string }
 type decisionCapture struct {
-	incoming        DecisionIncoming
-	legacy          Execution
-	fences          bool
-	request         uint64
-	worker, session string
-	current         decisionKey
-	rows            map[decisionKey]*DecisionReceipt
-	remaining       int64
-	omitted         uint64
-	early           string
-	revision        uint64
-	at              time.Time
+	trialMemory, trialProjected DecisionMemory
+	incoming                    DecisionIncoming
+	legacy                      Execution
+	fences                      bool
+	request                     uint64
+	worker, session             string
+	current                     decisionKey
+	rows                        map[decisionKey]*DecisionReceipt
+	remaining                   int64
+	omitted                     uint64
+	early                       string
+	revision                    uint64
+	at                          time.Time
 }
 
 func decisionCost(r *DecisionReceipt) int64 {
@@ -197,6 +200,7 @@ func (q *Queue) decisionCheck(j *Job, m *Machine, ok bool, code string) bool {
 		if r := q.decisionCapture.row(j, m); r != nil && (r.Admission == "not_evaluated" || r.Admission == "admitted") {
 			r.Admission = code
 			r.Admitted = false
+			r.Memory, r.ProjectedMemory = q.decisionCapture.trialMemory, q.decisionCapture.trialProjected
 		}
 	}
 	return ok
@@ -205,7 +209,36 @@ func (q *Queue) decisionAdmitted(j *Job, m *Machine, ok bool) {
 	if r := q.decisionCapture.row(j, m); r != nil && ok {
 		r.Admitted = true
 		r.Admission = "admitted"
+		r.Memory, r.ProjectedMemory = q.decisionCapture.trialMemory, q.decisionCapture.trialProjected
 	}
+}
+
+// Trial facts follow the currently evaluated alternative. A failed receipt
+// freezes its own facts; only an eventually admitted alternative replaces them.
+func (q *Queue) decisionCandidateMemory(j *Job, m *Machine, memory float64, projected bool) {
+	c := q.decisionCapture
+	if c == nil || c.current != (decisionKey{j.ID, targetKey(m)}) {
+		return
+	}
+	facts := decisionMemory(j, m, memory)
+	if projected {
+		c.trialProjected = facts
+	} else {
+		c.trialMemory, c.trialProjected = facts, DecisionMemory{}
+	}
+	if r := c.row(j, m); r != nil && (r.Admission == "not_evaluated" || r.Admission == "admitted") {
+		r.Memory, r.ProjectedMemory = c.trialMemory, c.trialProjected
+	}
+}
+
+func (q *Queue) decisionResourcesFit(j *Job, m *Machine, memory float64) bool {
+	q.decisionCandidateMemory(j, m, memory, true)
+	if q.decisionCapture == nil {
+		return fitsResources(j, m, memory)
+	}
+	report := targetFit{stopFirst: true}
+	ok := fitsResourcesChecked(j, m, memory, &report)
+	return q.decisionCheck(j, m, ok, decisionFitCode(report.first))
 }
 func (q *Queue) decisionWinner(s *candidateSet, winner *Job) {
 	if q.decisionCapture == nil || winner == nil {
@@ -255,82 +288,27 @@ func (q *Queue) publishDecisions(c *decisionCapture, reply Reply, outcome string
 	if c == nil || q.control == nil {
 		return
 	}
-	d := DecisionReply{Stop: reply.Stop, Kill: reply.Kill, Hold: reply.Hold, Outcome: outcome, Leave: reply.Leave, Preparation: len(reply.EnvironmentPlan) > 0, Copy: len(reply.CopyPlan) > 0, Model: len(reply.ModelPlan) > 0}
-	// Canonicalize only safe control facts, outside q.mu. Actor/report order
-	// carries no evidence value and must not turn repeats into durable writes.
-	type directive = DecisionDirective
-	d.AdmissionBlocked = reply.AdmissionBlocked
-	directives := make([]directive, 0, len(reply.Attempts)+1)
-	for _, a := range reply.Attempts {
-		item := directive{Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Addressed: true, Session: q.control.anonymous(a.Session), Offer: a.Job != nil, Stop: a.Stop, Kill: a.Kill, Hold: a.Hold}
-		if a.Job != nil && a.Job.Batch != nil {
-			item.Parent = a.Job.Batch.Parent
-		}
-		directives = append(directives, item)
+	// One measured share covers the latest cache and retained recorder versions.
+	// Capture/reply scratch uses its own request share, charged before allocation.
+	scratch := budget
+	for _, r := range c.rows {
+		scratch -= decisionCost(r)
 	}
-	if j := reply.Job; j != nil {
-		item := directive{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Addressed: true, Session: q.control.anonymous(j.Session), Offer: true, Stop: reply.Stop, Kill: reply.Kill, Hold: reply.Hold}
-		if j.Batch != nil {
-			item.Parent = j.Batch.Parent
+	scratch = min(scratch, c.remaining)
+	budget /= 2
+	q.control.appendDecision(ControlEvent{}, budget)
+	if len(c.rows) == 0 || budget < decisionCost(&DecisionReceipt{}) {
+		store := &q.decisions
+		store.mu.Lock()
+		store.capacity = budget
+		for store.bytes > budget && len(store.rows) > 0 {
+			store.evict(3)
 		}
-		directives = append(directives, item)
+		store.omitted += c.omitted
+		store.mu.Unlock()
+		return
 	}
-	if reply.Job == nil && c.legacy.ID != "" && (reply.Stop || reply.Kill || reply.Hold) {
-		directives = append(directives, directive{Execution: c.legacy, Session: q.control.anonymous(c.session), Stop: reply.Stop, Kill: reply.Kill, Hold: reply.Hold})
-	}
-	slices.SortFunc(directives, func(a, b directive) int {
-		if n := strings.Compare(a.ID, b.ID); n != 0 {
-			return n
-		}
-		if a.Attempt != b.Attempt {
-			return a.Attempt - b.Attempt
-		}
-		if n := strings.Compare(a.Session, b.Session); n != 0 {
-			return n
-		}
-		if n := strings.Compare(a.Parent, b.Parent); n != 0 {
-			return n
-		}
-		bits := func(d directive) int {
-			n := 0
-			for _, v := range []bool{d.Addressed, d.Offer, d.Stop, d.Kill, d.Hold} {
-				n *= 2
-				if v {
-					n++
-				}
-			}
-			return n
-		}
-		return bits(a) - bits(b)
-	})
-	digest := sha256.New()
-	encoder := json.NewEncoder(digest)
-	_ = encoder.Encode(d)
-	offered := map[string]Execution{}
-	for _, a := range directives {
-		_ = encoder.Encode(a)
-		if a.Offer {
-			offered[a.ID] = a.Execution
-			// A planned parent dispatches as a child execution. Keep a canonical
-			// matching child identity if several waves occur in this reply.
-			if a.Parent != "" {
-				if old, ok := offered[a.Parent]; !ok || a.ID < old.ID {
-					offered[a.Parent] = a.Execution
-				}
-			}
-			d.Assignments++
-		}
-		if a.Stop {
-			d.Stops++
-		}
-		if a.Kill {
-			d.Kills++
-		}
-		if a.Hold {
-			d.Holds++
-		}
-	}
-	d.Identity = q.control.anonymous(hex.EncodeToString(digest.Sum(nil)))
+	d, directives := q.summarizeDecisionReply(c, reply, outcome, max(0, scratch))
 	store := &q.decisions
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -364,15 +342,19 @@ func (q *Queue) publishDecisions(c *decisionCapture, reply Reply, outcome string
 		r.EarlyReturn = c.early
 		r.Incoming = c.incoming
 		r.Reply = d
-		r.Reply.JobExecution = offered[r.JobID].ID
-		r.Reply.JobAttempt = offered[r.JobID].Attempt
-		r.Reply.JobOffered = r.Reply.JobAttempt > 0
-		r.Reply.WinnerExecution = offered[r.Winner].ID
-		r.Reply.WinnerAttempt = offered[r.Winner].Attempt
-		r.Reply.WinnerOffered = r.Reply.WinnerAttempt > 0
-		r.Reply.GlobalExecution = offered[r.GlobalWinner].ID
-		r.Reply.GlobalAttempt = offered[r.GlobalWinner].Attempt
-		r.Reply.GlobalOffered = r.Reply.GlobalAttempt > 0
+		offer := func(id string) Execution {
+			var selected Execution
+			visitDecisionDirectives(c, reply, func(item DecisionDirective) {
+				if item.Offer && (item.ID == id || item.Parent != "" && item.Parent == id) && (selected.ID == "" || item.ID < selected.ID) {
+					selected = item.Execution
+				}
+			})
+			return selected
+		}
+		job, winner, global := offer(r.JobID), offer(r.Winner), offer(r.GlobalWinner)
+		r.Reply.JobExecution, r.Reply.JobAttempt, r.Reply.JobOffered = job.ID, job.Attempt, job.Attempt > 0
+		r.Reply.WinnerExecution, r.Reply.WinnerAttempt, r.Reply.WinnerOffered = winner.ID, winner.Attempt, winner.Attempt > 0
+		r.Reply.GlobalExecution, r.Reply.GlobalAttempt, r.Reply.GlobalOffered = global.ID, global.Attempt, global.Attempt > 0
 		// Retain addressed directives within this capture's per-row share.
 		// The digest and counts cover the entire reply if detail is shed.
 		allowance := budget / int64(max(1, len(c.rows)))
@@ -386,7 +368,7 @@ func (q *Queue) publishDecisions(c *decisionCapture, reply Reply, outcome string
 			retained++
 		}
 		r.Reply.Directives = directives[:retained]
-		r.Reply.DirectivesOmitted = len(directives) - retained
+		r.Reply.DirectivesOmitted = d.DirectivesOmitted + len(directives) - retained
 		// Own only the retained backing array, not the omitted reply tail.
 		r.Reply.Directives = slices.Clone(r.Reply.Directives)
 		key := decisionKey{r.JobID, r.Target + "/" + r.CheckinWorker}
@@ -425,7 +407,7 @@ func (q *Queue) publishDecisions(c *decisionCapture, reply Reply, outcome string
 		// Existing guarded recorder handles serialization, SQL and physical-space
 		// admission outside q.mu. No new persistence path or per-check-in commit.
 		copy := *r
-		q.control.append(ControlEvent{Kind: "decision", Operation: "checkin", Request: r.Request, Decision: &copy})
+		q.control.appendDecision(ControlEvent{Kind: "decision", Operation: "checkin", Request: r.Request, Decision: &copy}, budget)
 	}
 	for store.bytes > budget && len(store.rows) > 0 {
 		store.evict(3)
@@ -527,6 +509,7 @@ func (q *Queue) DecisionReceipts(ctx context.Context, id string) (DecisionPage, 
 	p.ControlOverwritten = q.control.overwritten
 	p.StorageDeferred = q.control.storageDeferred
 	p.DurableAt = q.control.durableAt
+	p.RecorderRetainedBytes, p.RecorderCapacityBytes = q.control.decisionBytes, q.control.decisionCapacity
 	q.control.mu.Unlock()
 	if budget < decisionCost(&DecisionReceipt{}) {
 		p.Truncated = true

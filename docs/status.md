@@ -2379,6 +2379,10 @@ Each receipt pairs the assignment pass with its completed check-in reply:
   `evaluated: false` means the stage was skipped, rather than a zero-memory
   decision. Refusal, auto-sizing, unified memory and measurement presence are
   booleans; source prose is not copied.
+  For a measured fan-out wave, the resource-fit view uses the existing live
+  scaled inputs directly; serial fallback records its ordinary release
+  projection. If alternatives all fail, the first rejection and its memory
+  inputs stay together. An admitted alternative replaces that rejected pair.
 - `winner` and `winner_class` name the target's selected competitor; `fairness`
   records whether that winner precedes this job and which existing comparator
   decided (`priority_tier`, `release_turn`, `accelerator_demand`, `fair_score`,
@@ -2401,8 +2405,10 @@ Each receipt pairs the assignment pass with its completed check-in reply:
   `addressed` distinguishes wire-addressed directives from legacy unaddressed
   control flags joined to the incoming running execution.
   Detail fits the capture's measured share; `directives_omitted` reports shedding.
-  Counts and the digest cover the entire reply. Directive order is canonicalized,
-  so reordered concurrent reports do not create changed evidence.
+  Counts and an order-independent streaming digest cover the entire reply.
+  Scratch capacity determines how much canonical directive detail fits before
+  allocating it; no complete directive copy or offer index is built. Reordered
+  concurrent reports do not create changed evidence.
   `reply_ready` means queue processing and hydration completed. It cannot prove
   HTTP delivery or worker receipt; `reply_failed` retains a post-commit reply
   failure without copying error prose.
@@ -2416,8 +2422,17 @@ counters attest the semantic decision, not identical numeric headroom.
 Changed evidence enters the existing control recorder's guarded storage,
 which serializes and writes outside `q.mu`. Its pressure, measured commit cost,
 WAL/checkpoint headroom and existing ring retention apply. The latest-view cache
-and each capture fit one existing observation-memory share derived from current
-OS/process headroom and runnable concurrency. Unexplained dispatch gaps and rejected/competing decisions take precedence
+and recorder-held receipt history split one existing observation-memory share
+derived from current OS/process headroom and runnable concurrency. Pending,
+backlog and recent payload versions are charged together, rather than relying
+on their shared recorder's event-count bound. Shed payloads retain an explicit
+`decision_omitted` marker. Capture never waits for a diagnostic flush: if its
+immutable batch is busy, durability is omitted and the latest cache remains.
+Capacity withdrawal during a flush applies before that batch releases its
+memory. Restart reads receipt payloads through targeted durable readback instead
+of loading them into the general recent-event ring.
+Each request's capture and reply scratch also fit its measured share.
+Unexplained dispatch gaps and rejected/competing decisions take precedence
 over ordinary offers; oldest equal-value detail yields when capacity shrinks. There is no new fixed row cap, heartbeat sampling rate or expiry timer.
 The targeted read bounds retained rows, deduplication keys and decoding scratch
 by the current observation share. `truncated` means the read exhausted that
@@ -2425,6 +2440,9 @@ share; zero capacity starts no durable scan. Recorderless simulator queues omit
 capture. `omitted`, `control_dropped`, `control_overwritten`, `storage_deferred` and
 `durable_at` describe incomplete coverage. In-memory repeat counts can be lost
 on restart; retained durable decisions remain readable until shared-ring eviction.
+`retained_bytes`/`capacity_bytes` describe the latest cache;
+`recorder_retained_bytes`/`recorder_capacity_bytes` describe charged recorder
+payloads (including conservative charges for repeated references).
 Receipts contain no commands, paths, addresses, credentials or authored prose.
 
 On recurrence—an accepted job remains at attempt zero through successful fresh

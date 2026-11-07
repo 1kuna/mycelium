@@ -40,6 +40,7 @@ type ControlTransaction struct {
 	Spans [5]ControlPhaseSpan `json:"spans"`
 }
 type ControlEvent struct {
+	DecisionOmitted     bool                             `json:"decision_omitted,omitempty"`
 	Decision            *DecisionReceipt                 `json:"decision,omitempty"`
 	Epoch               string                           `json:"epoch"`
 	ID                  uint64                           `json:"id"`
@@ -168,6 +169,8 @@ func (c *ControlTelemetry) Summary() string {
 }
 
 type controlRecorder struct {
+	decisionBytes, decisionCapacity         int64
+	decisionLimit                           atomic.Int64
 	writeGate                               sync.Mutex
 	controlWriters                          atomic.Int64
 	backlog                                 []ControlEvent
@@ -239,6 +242,10 @@ func (c *controlRecorder) append(e ControlEvent) {
 	if c == nil {
 		return
 	}
+	if e.Decision != nil {
+		c.appendDecision(e, c.decisionLimit.Load())
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.appendLocked(e)
@@ -307,7 +314,9 @@ func (c *controlRecorder) initialize(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	rows, err = db.Query(`SELECT data FROM (SELECT seq,data FROM control_events ORDER BY seq DESC LIMIT ?) ORDER BY seq`, requestLatencyWindow)
+	// Receipt payloads use targeted durable readback after restart. Do not
+	// hydrate their variable-sized history into the count-bounded recent ring.
+	rows, err = db.Query(`SELECT json_remove(data,'$.decision') FROM (SELECT seq,data FROM control_events ORDER BY seq DESC LIMIT ?) ORDER BY seq`, requestLatencyWindow)
 	if err != nil {
 		return err
 	}
@@ -344,7 +353,11 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 		return nil
 	}
 	c.flushMu.Lock()
-	defer c.flushMu.Unlock()
+	defer func() {
+		// Apply withdrawals made while this immutable batch was in flight.
+		c.retainDecision(ControlEvent{}, c.decisionLimit.Load())
+		c.flushMu.Unlock()
+	}()
 	for {
 		c.mu.Lock()
 		if len(c.backlog) == 0 {
@@ -512,6 +525,8 @@ func (c *controlRecorder) flushMode(db *sql.DB, closing bool) error {
 		c.overwritten = overwritten
 		c.durableAt = at
 		c.retainedRows = c.retainedRows + uint64(len(keep)) - uint64(removed)
+		// The reusable drain/spare backing array must not keep consumed payloads.
+		clear(c.backlog[:n])
 		c.backlog = c.backlog[n:]
 		c.backlogPending = len(c.backlog)
 		c.recent = append(c.recent, keep...)

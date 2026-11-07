@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -397,17 +398,82 @@ func TestDecisionReceiptFanOutOffer(t *testing.T) {
 		if !r.Reply.JobOffered || !r.Reply.WinnerOffered || !r.Reply.GlobalOffered || r.Reply.JobExecution != reply.Job.ID || r.Reply.JobAttempt != reply.Job.Attempt || decisionValue(r) == 3 {
 			t.Fatalf("successful child misreported as omitted: %+v", r)
 		}
+		if !r.Memory.Evaluated || !r.ProjectedMemory.Evaluated || r.Memory.HostGB != reply.Job.Spec.Needs.HostMemoryGB || r.ProjectedMemory.HostGB != reply.Job.Spec.Needs.HostMemoryGB {
+			t.Fatalf("measured wave lost scaled memory inputs: %+v", r)
+		}
 	}
 	if !found {
 		t.Fatal("missing parent dispatch receipt")
 	}
 }
 
+func TestDecisionReceiptAlternativePredicateMemory(t *testing.T) {
+	q, _, client := decisionFixture(t)
+	first := compositionExtension(t, false)
+	first.Variants[0].Target.Platform = "cpu"
+	first.Variants[0].Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 1, HostMemoryGB: 1, Tools: []string{"unavailable-fixture-tool"}}
+	first = freezeComposition(t, first)
+	second := compositionExtension(t, false)
+	second.Version = "2"
+	second.Variants[0].Target.Platform = "cpu"
+	second.Variants[0].Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 4, HostMemoryGB: 4}
+	second = freezeComposition(t, second)
+	for _, e := range []Extension{first, second} {
+		if err := q.AddExtension(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := cpuMachine("alternative-worker", "alternative-host", "cpu", 8, 32)
+	m.CapabilityProfile.OS, m.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
+	m.ExtensionFingerprint = "alternative-fixture"
+	for _, e := range []Extension{first, second} {
+		r := newExtensionReport(e, &m, "kind:sample")
+		r.Setup, r.Qualified, r.CheckID = true, true, "qualified"
+		m.ExtensionReports = append(m.ExtensionReports, r)
+	}
+	attemptWire(t, client, Checkin{Machine: m})
+	j := submit(t, q, Spec{Name: "alternatives", Project: "test", Kind: "sample"})
+	// Freeze the fixture's intended alternative order; both are real registered,
+	// qualified extensions and use the ordinary HTTP check-in planner.
+	q.s.Jobs[j.ID].Extensions = []Extension{first, second}
+	m.HostAvailableMemoryGB = 1.5
+	attemptWire(t, client, Checkin{Machine: m})
+	page := readDecisions(t, client, j.ID)
+	if len(page.Receipts) != 1 || page.Receipts[0].Admission != "tools" || page.Receipts[0].Memory.HostGB != 1 || page.Receipts[0].ProjectedMemory.HostGB != 1 {
+		t.Fatalf("alternative rejection and inputs diverged: %+v", page)
+	}
+}
+
+func TestDecisionReceiptFanOutFallbackMemory(t *testing.T) {
+	q, _, m, s := fanOutFixture(t, 2)
+	q.requestBudgets.memory = func(context.Context) (int64, error) { return 8 << 20, nil }
+	q.requestBudgets.lanes = 1
+	q.s.WorkObservations = map[string]WorkObservation{}
+	parent := submit(t, q, s)
+	reply := check(t, q, m, nil)
+	if reply.Job == nil || reply.Job.Batch == nil || reply.Job.Batch.Run {
+		t.Fatal("missing serial fallback")
+	}
+	page, err := q.DecisionReceipts(context.Background(), parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range page.Receipts {
+		if r.GlobalWinner == parent.ID {
+			if !r.Memory.Evaluated || !r.ProjectedMemory.Evaluated || r.Memory.HostGB != reply.Job.Spec.Needs.HostMemoryGB {
+				t.Fatalf("fallback lost its actual memory inputs: %+v", r)
+			}
+			return
+		}
+	}
+	t.Fatal("missing fallback receipt")
+}
+
 func TestDecisionReceiptReadCapacityExhaustion(t *testing.T) {
 	q, _, _ := decisionFixture(t)
 	for i := 0; i < 64; i++ {
 		r := &DecisionReceipt{JobID: "queued", Target: ID(), CheckinWorker: ID()}
-		q.control.append(ControlEvent{Kind: "decision", Operation: "checkin", Decision: r})
+		q.control.appendDecision(ControlEvent{Kind: "decision", Operation: "checkin", Decision: r}, 8<<20)
 	}
 	if err := q.control.flush(q.db); err != nil {
 		t.Fatal(err)

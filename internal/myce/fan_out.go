@@ -189,7 +189,8 @@ func (q *Queue) fanOutComponents(j *Job, inventories ...[]*Machine) ([]batchComp
 		}
 		for _, candidate := range extensionJobs(q.fanOutTemplate(j), m, true) {
 			q.applyLearnedNeeds(candidate)
-			if q.variantParityReason(candidate, m) != "" || q.capReasonFor(candidate, m) != "" || !fitsResources(candidate, m, m.FreeMemoryGB) {
+			q.decisionCandidateMemory(candidate, m, m.FreeMemoryGB, false)
+			if !q.decisionCheck(candidate, m, q.variantParityReason(candidate, m) == "", "variant_parity") || !q.decisionCheck(candidate, m, q.capReasonFor(candidate, m) == "", "project_cap") || !q.decisionResourcesFit(candidate, m, m.FreeMemoryGB) {
 				continue
 			}
 			e := qualifiedExtension(candidate, m)
@@ -225,7 +226,8 @@ func (q *Queue) fanOutComponents(j *Job, inventories ...[]*Machine) ([]batchComp
 				}
 				copy := *candidate
 				copy.Spec.Needs = scaledBatchNeeds(copy.Spec.Needs, p, count)
-				if !fitsResources(&copy, m, m.FreeMemoryGB) || q.capReasonFor(&copy, m) != "" {
+				q.decisionCandidateMemory(&copy, m, m.FreeMemoryGB, false)
+				if !q.decisionResourcesFit(&copy, m, m.FreeMemoryGB) || !q.decisionCheck(&copy, m, q.capReasonFor(&copy, m) == "", "project_cap") {
 					continue
 				}
 				component.points = append(component.points, batchPoint{count: count, rate: p.Rate, cpu: float64(copy.Spec.Needs.CPUCores), host: hostNeed(m, copy.Spec.Needs.MemoryGB, copy.Spec.Needs.HostMemoryGB)})
@@ -269,6 +271,8 @@ func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[b
 		copy.Spec.FanOut = j.Spec.FanOut
 		copy.FanOut = j.FanOut
 		copy.Batch = &BatchWork{Parent: j.ID, Pieces: slices.Clone(j.Spec.FanOut.Pieces[j.FanOut.Next : j.FanOut.Next+a.count]), Concurrency: a.count, Run: true, Seconds: float64(a.count) * j.Spec.Workload.Units / q.s.WorkObservations[identityHash(key)].Rate}
+		q.decisionCandidateMemory(&copy, m, m.FreeMemoryGB, false)
+		q.decisionCandidateMemory(&copy, m, m.FreeMemoryGB, true)
 		return &copy
 	}
 	if len(plan) > 0 {
@@ -280,7 +284,8 @@ func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[b
 		candidate.Spec.Args = append(slices.Clone(candidate.Spec.Args), j.Spec.FanOut.Pieces[j.FanOut.Next].Args...)
 		q.applyLearnedNeeds(candidate)
 		candidate = q.memoryCandidate(candidate, m)
-		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
+		q.decisionCandidateMemory(candidate, m, m.FreeMemoryGB, false)
+		if q.decisionCheck(candidate, m, q.capReasonFor(candidate, m) == "", "project_cap") && q.batchResourcesFitWithScan(candidate, m, resources) {
 			candidate.Spec.FanOut = j.Spec.FanOut
 			candidate.FanOut = j.FanOut
 			candidate.Batch = &BatchWork{Parent: j.ID, Pieces: []FanOutPiece{j.Spec.FanOut.Pieces[j.FanOut.Next]}, Concurrency: 1}

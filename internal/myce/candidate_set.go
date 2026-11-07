@@ -46,6 +46,7 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 	for _, j := range q.liveJobs() {
 		if q.decisionCapture != nil {
 			q.decisionCapture.current = decisionKey{j.ID, targetKey(m)}
+			q.decisionCapture.trialMemory, q.decisionCapture.trialProjected = DecisionMemory{}, DecisionMemory{}
 		}
 		q.decisionCapture.row(j, m)
 		if !q.decisionCheck(j, m, !(fence != nil && j.ID != fence.ID && q.comparePriority(j.Spec, fence.Spec) >= 0), "group_demand") {
