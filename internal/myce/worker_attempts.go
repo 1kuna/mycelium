@@ -737,6 +737,17 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		if sharedCard && unifiedCUDA(allocationMachine(&w.Machine, j.AllocatedDevices)) && !sharedDeviceSampleReady(w.hostMemorySamples[jobKey(j)], w.Clock.Now()) {
 			return errors.New(deviceUnifiedUncertain)
 		}
+		if sharedCard && fanOutDeviceSharing(&next) != fanOutDeviceSharing(&j) {
+			return errors.New("XPU fan-out sharing requires every tenant to opt in")
+		}
+		if sharedCard && (fanOutDeviceSharing(&next) || fanOutDeviceSharing(&j)) {
+			card := allocationMachine(&w.Machine, j.AllocatedDevices)
+			sample, telemetry := w.hostMemorySamples[jobKey(j)], cardTelemetry(card)
+			if card.GPU != "xpu" || card.UnifiedMemory || !deviceTelemetryReady(telemetry, w.Clock.Now()) || *telemetry.ActivePercent >= 100 ||
+				!fanOutDeviceSampleReady(sample, w.Clock.Now()) {
+				return errors.New("fan-out sharing requires fresh discrete XPU headroom evidence")
+			}
+		}
 		if !next.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }) && !(sharesDevice(&next) && sharesDevice(&j)) {
 			return refuseAdmission("local_device_reservation", "slots", 1, 0, false)
 		}
@@ -763,13 +774,15 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 			continue
 		}
 		usedGPU := deviceShareGB(&next)
+		fanOut, deviceGrowth := fanOutDeviceSharing(&next), deviceShareGB(&next)
 		for _, j := range jobs {
 			if !j.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, id) {
-				charge := deviceShareGB(&j)
-				if s := w.hostMemorySamples[jobKey(j)]; d.UnifiedMemory && d.Platform == "cuda" && sharedDeviceSampleReady(s, w.Clock.Now()) {
-					charge = max(charge, s.deviceGB+s.deviceGrowthGB)
-				}
+				card := d.machine(w.Machine)
+				charge := sampledDeviceCharge(&j, &card, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 				usedGPU += charge // A co-tenant sharing this card (#538).
+				fanOut = fanOut || fanOutDeviceSharing(&j)
+				s := w.hostMemorySamples[jobKey(j)]
+				deviceGrowth += max(0, deviceShareGB(&j)-s.deviceGB) + s.deviceGrowthGB + s.deviceRateGB*w.Clock.Now().Sub(s.deviceAt).Seconds()
 			}
 		}
 		for _, r := range models {
@@ -783,6 +796,9 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		}
 		if usedGPU > d.BudgetGB {
 			return refuseAdmission("device_budget", "GiB", usedGPU, d.BudgetGB, false)
+		}
+		if fanOut && usedGPU > deviceShareGB(&next) && (d.Telemetry == nil || d.Telemetry.FreeGB == nil || *d.Telemetry.FreeGB < deviceGrowth) {
+			return refuseAdmission("live_device_growth", "GiB", deviceGrowth, 0, true)
 		}
 	}
 	if why != "" || usedCores > cores {

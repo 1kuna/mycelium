@@ -108,6 +108,17 @@ An explicit absolute `start_by` takes precedence. Keep the policy on the entry,
 alongside class and fan-out, rather than in hardware variants or extension recipes.
 Experiment entries omit it and retain no start deadline.
 
+On supporting queue, worker and CLI releases, an entry can explicitly set
+`fan_out: {share_xpu: true, max_concurrency: 1, pieces: [...]}` to request
+measured sharing among opted-in single-card discrete-XPU executions. Omission
+or `false` preserves existing fan-out admission and submission bytes. Every
+co-tenant must opt in; tier, qualification, fresh card/host/attempt headroom,
+growth guard and exact release still bind. This is an execution policy on the
+job, not a new extension digest or an increased allowance. First compare the
+same frozen workload and extension digest on the same release at experiment
+class with the option off/on. Production opt-in requires owner-accepted
+measured benefit and unchanged parity.
+
 A native fan-out entry may depend on an existing fan-out parent in the same
 project: set `after: {job: PARENT_ID, outputs: {first/input: first/result}}`
 alongside `fan_out` and `workload`, omitting `after.piece`. Each mapping names a

@@ -19,6 +19,8 @@ type FanOutPiece struct {
 type FanOut struct {
 	Pieces         []FanOutPiece `json:"pieces" yaml:"pieces"`
 	MaxConcurrency int           `json:"max_concurrency" yaml:"max_concurrency"`
+	// ShareXPU permits measured same-card admission only beside other opted-in pieces.
+	ShareXPU bool `json:"share_xpu,omitempty" yaml:"share_xpu,omitempty"`
 }
 type PieceResult struct {
 	Execution   Execution         `json:"execution"`
@@ -36,6 +38,8 @@ type BatchWork struct {
 	Concurrency int           `json:"concurrency"`
 	Run         bool          `json:"run,omitempty"`
 	Seconds     float64       `json:"seconds,omitempty"`
+	// Frozen from the parent declaration; survives stripping Spec.FanOut on assignment.
+	ShareXPU bool `json:"share_xpu,omitempty"`
 }
 
 func validateFanOut(s Spec) error {
@@ -268,7 +272,7 @@ func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[b
 		copy.Spec.Needs = scaledBatchNeeds(copy.Spec.Needs, q.s.WorkObservations[identityHash(key)], a.count)
 		copy.Spec.FanOut = j.Spec.FanOut
 		copy.FanOut = j.FanOut
-		copy.Batch = &BatchWork{Parent: j.ID, Pieces: slices.Clone(j.Spec.FanOut.Pieces[j.FanOut.Next : j.FanOut.Next+a.count]), Concurrency: a.count, Run: true, Seconds: float64(a.count) * j.Spec.Workload.Units / q.s.WorkObservations[identityHash(key)].Rate}
+		copy.Batch = &BatchWork{Parent: j.ID, Pieces: slices.Clone(j.Spec.FanOut.Pieces[j.FanOut.Next : j.FanOut.Next+a.count]), Concurrency: a.count, Run: true, Seconds: float64(a.count) * j.Spec.Workload.Units / q.s.WorkObservations[identityHash(key)].Rate, ShareXPU: j.Spec.FanOut.ShareXPU}
 		return &copy
 	}
 	if len(plan) > 0 {
@@ -283,7 +287,7 @@ func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[b
 		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
 			candidate.Spec.FanOut = j.Spec.FanOut
 			candidate.FanOut = j.FanOut
-			candidate.Batch = &BatchWork{Parent: j.ID, Pieces: []FanOutPiece{j.Spec.FanOut.Pieces[j.FanOut.Next]}, Concurrency: 1}
+			candidate.Batch = &BatchWork{Parent: j.ID, Pieces: []FanOutPiece{j.Spec.FanOut.Pieces[j.FanOut.Next]}, Concurrency: 1, ShareXPU: j.Spec.FanOut.ShareXPU}
 			return candidate
 		}
 	}
