@@ -12,7 +12,7 @@ For an existing installation use [maintenance](#queue-maintenance),
 [polite participation](#polite-part-time-hyphae) or [shared-host sizing](#shared-interactive-hosts).
 Detailed [status fields](status.md), [native qualification](development.md#native-acceptance-checklist)
 and [isolation limits](native-isolation.md) distinguish readiness from enforcement.
-Agent skill/harness installation lives [beside the skill](../skills/mycelium-offload/setup-project.md).
+Agent skill/harness installation lives [beside the skill](../skills/mycelium/setup-project.md).
 
 You are a coding agent setting up Mycelium on a user's own computers. Follow
 these steps in order. Commands are written for a POSIX shell. Text in CAPITALS

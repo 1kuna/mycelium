@@ -1,5 +1,24 @@
 # Seeing your mycelium
 
+## Reading `myce status`
+
+`myce status` prints the queue's health, each machine and recent jobs. Add
+`--full` for full job IDs, `--history` for every retained job, or `--json` for
+the same data as JSON. For one job, `myce wait JOB_ID` prints each state change
+and `myce logs JOB_ID` prints its output.
+
+- **Machines:** each worker has a `hypha NAME:` line (a hypha is one machine)
+  with its hardware and free memory. It says `available for work` when it can
+  take jobs; otherwise it says why not, for example that its owner is using it,
+  it is on battery, an operator disabled it, or it is offline.
+- **Jobs:** each job line shows a short ID, its name, `[project/class]`, its
+  state and the machine that ran it (`hypha=`). The main states are `queued`,
+  `running`, `stopping`, `succeeded`, `failed`, `cancelled` and `paused`. A
+  queued job carries a reason naming what it is waiting for and who needs to act.
+
+The rest of this page is a field-by-field reference, including
+[live view](#live-view-myce-view).
+
 From the next release, cold CPU probes retain their initial containment ceiling
 in `memory_envelope.host_gb`, with known need and member/retry floors in
 `probe_floor_gb`. A running probe's host admission charge can follow its fresh

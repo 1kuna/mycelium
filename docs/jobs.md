@@ -21,10 +21,13 @@ myce run --cpu 2 --mem 8G --detach -- python task.py
 
 `run` uses the ordinary submission API and waits with transient status-read
 retry. It sends command arguments literally; use `sh -c` explicitly for shell
-syntax. Defaults are CPU-only, one logical core, 1 GiB host RAM, project
-`default`, class `experiment`, and non-resumable execution. With `--gpu
+syntax. Defaults are CPU-only, one logical core, project `default`, class
+`experiment`, and non-resumable execution. Without `--mem`, the job's memory is
+`auto`: the queue learns it from measured runs (see
+[measured job envelopes](#measured-job-envelopes)). With `--gpu
 cuda|xpu|metal`, `--mem` means accelerator RAM and `--host-mem` is additional
-host RAM (default 1 GiB). `G`/`GiB` and `M`/`MiB` use binary units; a bare
+host RAM (default 1 GiB when `--mem` or `--host-mem` is given; otherwise
+learned). `G`/`GiB` and `M`/`MiB` use binary units; a bare
 number is GiB. `--name`, `--class`, legacy `--priority` and RFC3339 `--deadline`
 cover common scheduling declarations. Deadline priority requires a deadline.
 
