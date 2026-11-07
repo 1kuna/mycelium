@@ -109,6 +109,12 @@ func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Jo
 			}
 			a.mu.Unlock()
 		}
+		// Freeze the independently advancing device sampler before the physical
+		// headroom read. Later aging must not fetch newer allocation counters.
+		memory = memory.aged(w.Clock.Now())
+		if memory != nil {
+			memory.deviceSample = nil
+		}
 		reports[i].CurrentHostMemory = memory
 	}
 	// Sample physical headroom after the attempt counters. Crediting newer

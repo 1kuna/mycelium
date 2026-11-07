@@ -42,22 +42,14 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 	return floor, true
 }
 
-// Physical availability already includes resident allocations. Direct, fresh
-// exact-attempt device counters can establish occupancy, but not its overlap
-// with cgroup RAM. Credit only the larger resident vector, never their sum.
-// An RSS/host-delta estimate is not a resident device counter. Unknown device
-// ownership retains the full device vector; peaks never establish occupancy.
+// Host anon/current cannot establish overlap with CUDA allocations (#424).
+// Per-process device counters can themselves count shared allocations more
+// than once, so neither their sum nor an RSS estimate proves unique physical
+// residency. Credit only the uniquely charged host vector; retain the full
+// device floor until device residency/overlap can be independently established.
 func remainingAllocationGrowth(m *Machine, device, reservation float64, sample hostMemorySample, now time.Time) float64 {
 	growth := remainingHostGrowth(reservation, sample, now)
 	if unifiedCUDA(m) {
-		if sharedDeviceSampleReady(sample, now) && sample.source == "" && validMemoryValue(sample.deviceGB) {
-			credit, forecast := min(device, sample.deviceGB), sample.deviceGrowthGB+sample.deviceRateGB*now.Sub(sample.deviceAt).Seconds()
-			if !sample.at.IsZero() && !now.Before(sample.at) && now.Sub(sample.at) < hostMemorySampleFreshFor && validMemoryValue(sample.gb) {
-				credit = max(credit, sample.gb)
-				forecast += sample.growthGB + sample.rateGB*now.Sub(sample.at).Seconds()
-			}
-			return max(0, reservation-credit+forecast)
-		}
 		growth = max(growth, device)
 	}
 	return growth

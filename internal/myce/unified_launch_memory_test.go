@@ -4,37 +4,41 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // The incident's learned physical charge includes 38.732 host + 22.318 device
 // + .125 launch slack. Two smaller co-tenants fit the 96 GiB allowance. A helper
-// has already consumed device RAM before main Starts; that RAM is also absent
-// from the physical availability read and must not remain wholly pending.
+// has already consumed uniquely charged host RAM before main Starts. Credit
+// that occupancy once; device residency remains unknown even with counters.
 func TestUnifiedLaunchMemoryQueueAndWorker(t *testing.T) {
 	q, clock := fixture(t)
 	m := unifiedCUDAAdmissionMachine()
-	m.CapabilityProfile.SystemMemoryBytes = 127 << 30
+	m.CapabilityProfile.SystemMemoryBytes = 121 << 30
 	m.CapabilityProfile.LogicalCPUs = 32
 	m.HostAvailableMemoryGB = 102 // 118 raw minus the separate 16 GiB reserve.
-	m.MemoryObservation = &HostMemoryObservation{TotalGB: 127, UsedGB: 9}
+	m.MemoryObservation = &HostMemoryObservation{TotalGB: 121, UsedGB: 3}
 	machineCheck(t, q, m)
 	jobs, reports := []Job{}, []AttemptReport{}
 	for i, n := range [][3]float64{{38.73198699951172, 22.31842041015625, 22.28}, {9.114835, 9.7861328125, 9.78}, {6.875, 8, 0}} {
 		j := Job{ID: fmt.Sprintf("stage-%d", i), Attempt: 1, Session: m.Session, Machine: m.ID, State: "running", Spec: spec("production")}
 		j.Spec.Needs.HostMemoryGB, j.Spec.Needs.MemoryGB = n[0], n[1]
 		jobs = append(jobs, j)
-		device := n[2]
+		device, resident := n[2], 1.22
+		if i == 2 {
+			resident = 0
+		} // The queue has not assigned this candidate yet.
 		reports = append(reports, AttemptReport{Execution: Execution{ID: j.ID, Attempt: 1}, Session: j.Session,
-			CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 1.22, DeviceGB: &device}})
+			CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: resident, DeviceGB: &device}})
 		if i < 2 {
 			q.s.Jobs[j.ID] = &jobs[i]
 		}
 	}
 	samples := currentHostMemorySamples(reports, clock.Now())
 	rt := modelRuntime{clock: clock, machine: m.ID, memoryMachine: m, batchJobs: jobs, batchHostMemorySamples: samples,
-		batchSupervisors: map[attemptKey]*attemptSupervisor{}, hostMemorySource: func(context.Context) (float64, error) { return 87, nil }}
+		batchSupervisors: map[attemptKey]*attemptSupervisor{}, hostMemorySource: func(context.Context) (float64, error) { return 93, nil }}
 	for _, j := range jobs {
 		rt.batchSupervisors[jobKey(j)] = &attemptSupervisor{job: j, admissionMu: &rt.admissionMu}
 	}
@@ -48,8 +52,8 @@ func TestUnifiedLaunchMemoryQueueAndWorker(t *testing.T) {
 	if err := rt.checkBatchLaunchMemory(t.Context(), launch); err != nil {
 		t.Fatal("launch disagreed with fitting queue admission", err)
 	}
-	// No multiplication of the resident credit: overlapping host/device vectors
-	// establish only their maximum. This leaves real future host growth booked.
+	// No multiplication of resident credit: device counters do not prove unique
+	// physical allocations. Keep future growth even with a fresh direct counter.
 	s := hostMemorySample{gb: 30, at: clock.Now(), deviceGB: 22, deviceAt: clock.Now()}
 	if got := remainingAllocationGrowth(&m, 22, 61, s, clock.Now()); got != 31 {
 		t.Fatalf("overlapping occupancy credited twice: growth=%g, want 31", got)
@@ -59,7 +63,7 @@ func TestUnifiedLaunchMemoryQueueAndWorker(t *testing.T) {
 		t.Fatalf("RSS estimate earned device credit: growth=%g", got)
 	}
 	// The same reservations must wait when raw availability actually falls.
-	m.MemoryObservation.UsedGB = 57 // 70 raw - 31 floor = 39 usable.
+	m.MemoryObservation.UsedGB = 57 // 64 raw - 25 floor = 39 usable.
 	q.s.Machines[m.ID].MemoryObservation = m.MemoryObservation
 	q.refreshHostMemory()
 	if hostFits(q.s.Machines[m.ID], n.MemoryGB, n.HostMemoryGB) {
@@ -72,7 +76,7 @@ func TestUnifiedLaunchMemoryQueueAndWorker(t *testing.T) {
 	// Stale samples cannot keep spending earlier occupancy. Exact reservations
 	// still bind even when the current free-RAM read is generous.
 	clock.Advance(deviceMemorySampleFreshFor)
-	rt.hostMemorySource = func(context.Context) (float64, error) { return 87, nil }
+	rt.hostMemorySource = func(context.Context) (float64, error) { return 93, nil }
 	if err := rt.checkBatchLaunchMemory(t.Context(), launch); !errors.Is(err, errWorkerMemory) {
 		t.Fatal("stale occupancy admitted three full pending envelopes", err)
 	}
@@ -171,5 +175,42 @@ func TestHelperMemoryHeartbeatKeepsMainUnstarted(t *testing.T) {
 	clock.Advance(time.Second)
 	if sample.AgeSeconds != 0 {
 		t.Fatal("heartbeat mutated actor's publication")
+	}
+}
+
+func TestHelperMemoryHeartbeatFreezesDeviceBeforeAvailability(t *testing.T) {
+	_, clock := fixture(t)
+	var device atomic.Pointer[hostMemorySample]
+	device.Store(&hostMemorySample{gb: 0, at: clock.Now()})
+	j := Job{ID: "helper", Attempt: 1, Session: "session"}
+	r := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session,
+		CurrentHostMemory: &CurrentHostMemory{sampledAt: clock.Now(), deviceSample: &device}}
+	a := &attemptSupervisor{job: j, report: r}
+	w := Worker{Clock: clock, HostMemorySource: func(context.Context) (float64, error) {
+		// Allocated just after the physical read: these newer 20 GiB must not
+		// be combined with that earlier 50 GiB availability in the heartbeat.
+		clock.Advance(time.Second)
+		device.Store(&hostMemorySample{gb: 20, at: clock.Now()})
+		return 50, nil
+	}}
+	reports := []AttemptReport{r}
+	w.sampleHeartbeatMemory(t.Context(), &Machine{}, nil, reports, map[attemptKey]*attemptSupervisor{jobKey(j): a})
+	s := reports[0].CurrentHostMemory
+	if s == nil || s.DeviceGB == nil || *s.DeviceGB != 0 || s.DeviceAgeSeconds != 1 || s.deviceSample != nil {
+		t.Fatalf("newer allocation counter combined with older availability: %+v", s)
+	}
+	if current := device.Load(); current.gb != 20 {
+		t.Fatal("fixture did not publish the intervening allocation")
+	}
+}
+
+func TestUnifiedLaunchMemoryDoesNotCreditSummedDeviceCounters(t *testing.T) {
+	_, clock := fixture(t)
+	m := unifiedCUDAAdmissionMachine()
+	// Two process rows may map the same 11 GiB allocation. A sum of 22 GiB
+	// cannot prove 22 GiB uniquely resident and spend 11 GiB of phantom room.
+	s := hostMemorySample{at: clock.Now(), deviceAt: clock.Now(), deviceGB: 22}
+	if growth := remainingAllocationGrowth(&m, 22, 61, s, clock.Now()); growth != 61 {
+		t.Fatalf("unqualified device sum earned physical residency credit: %g", growth)
 	}
 }
