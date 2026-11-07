@@ -56,8 +56,15 @@ func TestMemoryAdmissionPreservesCancelledOwnerThroughDeadline(t *testing.T) {
 	if len(l.Owners) != 1 || l.Owners[0].Kind != "attempt" || l.Owners[0].Execution.ID != run.ID || l.Owners[0].Execution.Attempt != run.Attempt || l.Owners[0].State != "stopping" {
 		t.Fatalf("missing exact cancelled owner or double-counted receipt: %+v", l.Owners)
 	}
-	if len(wait.Reservations) != 1 || wait.Reservations[0].State != "draining" || len(wait.Reservations[0].Pending) == 0 {
+	if len(wait.Reservations) != 1 || wait.Reservations[0].State != "draining" || !wait.Reservations[0].PendingKnown || wait.Reservations[0].PendingObservedAt == nil || len(wait.Reservations[0].Pending) == 0 {
 		t.Fatalf("missing reservation pending state: %+v", wait.Reservations)
+	}
+	clock.Advance(time.Second)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if !q.s.Jobs[queued.ID].LastMemoryAdmission.CapturedAt.Equal(wait.CapturedAt) {
+		t.Fatal("unchanged reservation facts rewrote waiting evidence")
 	}
 	clock.Advance(10 * time.Minute)
 	if err := q.Tick(); err != nil {
@@ -202,5 +209,56 @@ func TestMemoryAdmissionNamesOrphanReleaseAndModelCustody(t *testing.T) {
 	}
 	if release.Kind != "release" || release.Execution.ID != "previous" || release.Execution.Attempt != 3 || release.Session != "old-session" || release.ChargeGB != 4 {
 		t.Fatal("lost orphan release owner", release)
+	}
+}
+
+func TestMemoryAdmissionIgnoresRunningVictimDestinations(t *testing.T) {
+	q, clock, m := memoryAdmissionFixture(t)
+	submit(t, q, cpuSpec(2, 6))
+	victim := assignedJob(machineCheck(t, q, m))
+	if victim == nil {
+		t.Fatal("missing victim")
+	}
+	destination := cpuMachine("destination", "other-host", "cpu", 8, .5)
+	destination.Devices = []MachineDevice{}
+	destination.Capabilities = append(destination.Capabilities, scarceHostYieldCapability)
+	machineCheck(t, q, destination)
+	prior := &MemoryAdmissionSnapshot{CapturedAt: clock.Now(), WaitingSince: victim.WaitingSince, Attempt: victim.Attempt, Machine: m.ID, Ledger: &HostMemoryLedger{}}
+	if err := q.update(func() error {
+		live := q.touchJob(victim.ID)
+		live.LastMemoryAdmission = prior
+		q.memoryAdmissionCapture = &memoryAdmissionCapture{decisions: map[string]memoryAdmissionDecision{}, drift: map[string]float64{}}
+		defer func() { q.memoryAdmissionCapture = nil }()
+		q.yieldAlternative(live, m.HostID, nil)
+		// Other hypothetical callers also cannot make a queued copy of a
+		// running durable victim look like actual waiting demand.
+		copy := *live
+		copy.State, copy.MemoryEnvelope = "queued", nil
+		q.memoryCandidate(&copy, q.s.Machines[destination.ID])
+		q.retainMemoryAdmissions()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(q.s.Jobs[victim.ID].LastMemoryAdmission, prior) {
+		t.Fatal("hypothetical destination overwrote running evidence")
+	}
+}
+
+func TestMemoryAdmissionRetainsTerminalLossEvidence(t *testing.T) {
+	q, clock, m := memoryAdmissionFixture(t)
+	j := submit(t, q, cpuSpec(1, 6))
+	prior := &MemoryAdmissionSnapshot{CapturedAt: clock.Now(), WaitingSince: j.WaitingSince, Machine: m.ID, Ledger: &HostMemoryLedger{}}
+	if err := q.update(func() error {
+		live := q.touchJob(j.ID)
+		live.LastMemoryAdmission, live.Losses = prior, 3
+		q.requeue(live, "machine quiet for lost worker", true)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live := q.s.Jobs[j.ID]
+	if live.State != "failed" || !reflect.DeepEqual(live.LastMemoryAdmission, prior) {
+		t.Fatal("infrastructure exhaustion erased waiting evidence", live.LastMemoryAdmission)
 	}
 }

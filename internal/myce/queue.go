@@ -1019,8 +1019,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	}
 	j.Machine = ""
 	j.StorageEnvelope = nil
-	j.MemoryEnvelope = nil      // Re-resolve variants and live sizing for every retry.
-	j.LastMemoryAdmission = nil // A new wait episode must not inherit the previous decision.
+	j.MemoryEnvelope = nil // Re-resolve variants and live sizing for every retry.
 	j.Session = ""
 	j.StopAt = nil
 	j.StartedAt = nil
@@ -1032,6 +1031,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		j.Reason = "failed after 3 infrastructure losses: " + why
 		return
 	}
+	j.LastMemoryAdmission = nil // Only an actual new wait episode clears the previous decision.
 	j.WaitingSince = q.clock.Now()
 	q.s.Front++
 	j.Front = q.s.Front

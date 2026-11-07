@@ -26,10 +26,13 @@ type MemoryAdmissionSnapshot struct {
 }
 
 type MemoryAdmissionReservation struct {
-	ID      string   `json:"id"`
-	Job     string   `json:"job"`
-	State   string   `json:"state"`
-	Pending []string `json:"pending"`
+	ID                string     `json:"id"`
+	Job               string     `json:"job"`
+	State             string     `json:"state"`
+	ReadyAt           *time.Time `json:"ready_at,omitempty"`
+	PendingKnown      bool       `json:"pending_known"`
+	PendingObservedAt *time.Time `json:"pending_observed_at,omitempty"`
+	Pending           []string   `json:"pending"`
 }
 
 type HostMemoryLedger struct {
@@ -114,6 +117,39 @@ type memoryAdmissionDecision struct {
 type memoryAdmissionCapture struct {
 	decisions map[string]memoryAdmissionDecision
 	drift     map[string]float64
+	// Populated only by existing reservation accounting, never by a candidate.
+	reservations map[string]MemoryAdmissionReservation
+}
+
+func memoryAdmissionReservation(r Reservation, j *Job, pending []string, known bool) MemoryAdmissionReservation {
+	s := MemoryAdmissionReservation{ID: r.ID, Job: r.Job, ReadyAt: r.ReadyAt, State: "unknown", PendingKnown: known, Pending: slices.Clone(pending)}
+	switch {
+	case r.ReleasedAt != nil:
+		s.State = "released"
+	case r.ExpiredAt != nil:
+		s.State = "expired"
+	case j == nil || terminal(j.State):
+		s.State = "waiting_for_release"
+	case j.StartedAt != nil && (j.State == "running" || j.State == "stopping"):
+		s.State = "in_use"
+	case known && len(pending) > 0:
+		s.State = "draining"
+	case known:
+		s.State = "ready"
+	}
+	return s
+}
+
+func (q *Queue) observeReservationPending(r Reservation, pending []string) {
+	if c := q.memoryAdmissionCapture; c != nil {
+		if c.reservations == nil {
+			c.reservations = map[string]MemoryAdmissionReservation{}
+		}
+		s := memoryAdmissionReservation(r, q.retainedJob(r.Job), pending, true)
+		now := q.clock.Now()
+		s.PendingObservedAt = &now
+		c.reservations[r.ID] = s
+	}
 }
 
 func memoryAdmissionKey(j *Job, m *Machine) string { return j.ID + "/" + targetKey(m) }
@@ -127,6 +163,9 @@ func (q *Queue) observeMemoryAdmissionDrift(j *Job, m *Machine, gb float64) {
 func (q *Queue) observeMemoryAdmission(j *Job, m *Machine) {
 	c := q.memoryAdmissionCapture
 	if c == nil || j.State != "queued" || j.MemoryEnvelope == nil || !q.jobAllowsMachine(j, m.ID) {
+		return
+	}
+	if stored := q.s.Jobs[j.ID]; stored == nil || stored.State != "queued" {
 		return
 	}
 	why := hostFitFailure(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
@@ -165,8 +204,15 @@ func (q *Queue) observeMemoryAdmission(j *Job, m *Machine) {
 	s.Reservations = []MemoryAdmissionReservation{}
 	for _, r := range q.s.Reservations {
 		if r.active() && (r.Job == j.ID || r.Target.matchesTarget(m)) {
-			p := q.projectReservation(r)
-			s.Reservations = append(s.Reservations, MemoryAdmissionReservation{ID: r.ID, Job: r.Job, State: p.State, Pending: slices.Clone(p.Pending)})
+			p, known := c.reservations[r.ID]
+			if !known {
+				p = memoryAdmissionReservation(r, q.retainedJob(r.Job), nil, false)
+			} else {
+				observed := p.PendingObservedAt
+				p = memoryAdmissionReservation(r, q.retainedJob(r.Job), p.Pending, true)
+				p.PendingObservedAt = observed
+			}
+			s.Reservations = append(s.Reservations, p)
 		}
 	}
 	slices.SortFunc(s.Reservations, func(a, b MemoryAdmissionReservation) int { return cmp.Compare(a.ID, b.ID) })
@@ -190,6 +236,12 @@ func (q *Queue) retainMemoryAdmissions() {
 			left.CapturedAt = right.CapturedAt
 			left.ObservedAt = right.ObservedAt
 			before.Ledger, after.Ledger = &left, &right
+			if len(before.Reservations) == len(after.Reservations) {
+				before.Reservations = slices.Clone(before.Reservations)
+				for i := range before.Reservations {
+					before.Reservations[i].PendingObservedAt = after.Reservations[i].PendingObservedAt
+				}
+			}
 			if reflect.DeepEqual(before, after) {
 				continue
 			}
