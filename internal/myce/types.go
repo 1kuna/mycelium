@@ -419,6 +419,8 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	LaunchCapacityWait map[string]LaunchCapacityWait `json:"launch_capacity_wait,omitempty"`
+
 	HealthRecovery *AlertRecovery `json:"health_recovery,omitempty"`
 
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`

@@ -2006,6 +2006,8 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
 	} else if diskFailure {
 		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
+	} else if launchCapacityRefusal(r) {
+		q.waitLaunchCapacity(j, r)
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.storageRootReason(j, q.s.Machines[j.Machine]) != "" {
@@ -2781,6 +2783,10 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		recipe := q.environments.Environments[model.Environment][m.GPU]
 		j.ModelEnvironmentKey = recipe.Key
 		j.ModelEnvironmentNeedsSource = recipe.Binary != "" || recipe.BinaryRelative != ""
+	}
+	if len(j.LaunchCapacityWait) > 0 && !absoluteStartBy(j) && j.Spec.StartBy != nil {
+		deadline := q.clock.Now().Add(j.StartWindow)
+		j.Spec.StartBy = &deadline
 	}
 	j.State = "running"
 	j.ExecutionCause, j.CleanupCause = nil, nil

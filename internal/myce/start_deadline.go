@@ -71,6 +71,9 @@ func (q *Queue) startupPending(j *Job) bool {
 			}
 		}
 	}
+	if j.State == "queued" && len(j.LaunchCapacityWait) > 0 && !absoluteStartBy(j) {
+		return false // Capacity is not failed startup; caller-owned cutoffs still bind.
+	}
 	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
 }
 

@@ -279,7 +279,7 @@ func (g *nativeGroup) recordInfrastructureLocked(kind, member, port string, caus
 		group = g.supervisor.Process.Pid
 	}
 	prior := g.p.outcome.Infrastructure
-	g.p.outcome.Infrastructure = append(append([]infrastructureFact(nil), prior...), infrastructureFact{Kind: kind, At: time.Now().UTC(), Member: member, Port: port, Group: group, Predicate: launchFailurePredicate(kind, cause)})
+	g.p.outcome.Infrastructure = append(append([]infrastructureFact(nil), prior...), infrastructureFact{Kind: kind, At: time.Now().UTC(), Member: member, Port: port, Group: group, Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, g.p.job)})
 	if err := g.saveLocked(); err != nil {
 		g.p.outcome.Infrastructure = prior
 		return errors.Join(cause, err)
@@ -395,7 +395,9 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		if runErr != nil {
 			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
-			if stage && r.ExecutionCause.Class == "io_error" {
+			if errors.Is(runErr, errWorkerMemory) {
+				r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit"}
+			} else if stage && r.ExecutionCause.Class == "io_error" {
 				r.ExecutionCause.Class = "stage_failed"
 			}
 		}

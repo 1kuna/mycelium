@@ -581,6 +581,9 @@ func reservationWaitReason(m *Machine, batchSlot bool, sharedWith int) string {
 	return strings.Join(parts, "; ")
 }
 func (q *Queue) waitReason(j *Job, scans ...*placementScan) string {
+	if j.State == "queued" && len(j.LaunchCapacityWait) > 0 {
+		return "waiting for launch capacity or exact release; unchanged capacity evidence is not re-offered"
+	}
 	if why := q.yieldWaitReason(j); why != "" {
 		return why
 	}
