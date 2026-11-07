@@ -138,9 +138,6 @@ func (w Worker) storageRoots() map[string]storageRoot {
 			if w.rootMonitor != nil {
 				backing = w.rootMonitor.expected[role]
 			}
-			if backing == "" && paths["nas"] != "" && withinNAS(paths["nas"], path) {
-				backing = filepath.Clean(paths["nas"])
-			}
 			roots[role] = storageRoot{path: path, backing: backing}
 		}
 	}

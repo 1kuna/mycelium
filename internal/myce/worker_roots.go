@@ -22,7 +22,7 @@ type UnavailableRoot struct {
 type workerRootMonitor struct {
 	mu        sync.Mutex
 	paths     map[string]string
-	expected  map[string]string
+	expected  map[string]string // Last positively observed backing, never a configured directory.
 	readiness *workerStorageReadiness
 }
 
@@ -116,9 +116,6 @@ func (w *Worker) sampleStorageRoots(ctx context.Context, checkpoint string) []Un
 	missing := []UnavailableRoot{}
 	for role, path := range w.rootMonitor.paths {
 		expected := w.rootMonitor.expected[role]
-		if expected == "" && nas != "" && withinNAS(nas, path) {
-			expected = filepath.Clean(nas)
-		}
 		if err == nil {
 			for _, mount := range mounts {
 				mount = filepath.Clean(mount)
@@ -127,10 +124,12 @@ func (w *Worker) sampleStorageRoots(ctx context.Context, checkpoint string) []Un
 				}
 			}
 		}
-		if expected == "" {
+		if expected == "" && (nas == "" || !withinNAS(nas, path)) {
 			continue
 		}
-		w.rootMonitor.expected[role] = expected
+		if expected != "" {
+			w.rootMonitor.expected[role] = expected
+		}
 		mounted := slices.ContainsFunc(mounts, func(mount string) bool { return filepath.Clean(mount) == expected })
 		if err != nil || !mounted {
 			reason := "configured NAS mount missing"

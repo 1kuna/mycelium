@@ -23,6 +23,8 @@ func storageFaultFixture(t *testing.T) (Worker, *hostHealthMonitor, *fakeClock) 
 	t.Helper()
 	m, clock := healthFixture(t, 1)
 	w := Worker{Clock: clock, CheckpointRoot: "/share/checkpoints", JobFileRoot: "/share/inputs", ServiceConfig: &ServiceConfig{NAS: "/share"}, storageHealth: m}
+	w.MountRoots = func(context.Context) ([]string, error) { return []string{"/share"}, nil }
+	w.sampleStorageRoots(context.Background(), w.CheckpointRoot)
 	m.storageRoots = w.storageRoots()
 	for role, path := range map[string]string{"checkpoint": w.CheckpointRoot, "job-files": w.JobFileRoot} {
 		m.mounts[role] = &hostMountProbe{root: role, path: path, clock: clock, storage: m, probe: func(string, func()) error { return nil }}
@@ -353,11 +355,13 @@ func TestStorageFaultCheckpointPreparationPublishesExactFault(t *testing.T) {
 	w.storageHealth, w.Clock = m, clock
 	w.CheckpointRoot = "/share/checkpoints"
 	w.ServiceConfig = &ServiceConfig{NAS: "/share"}
+	w.MountRoots = func(context.Context) ([]string, error) { return []string{"/share"}, nil }
 	s, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.close()
+	s.state.CheckpointRoot = w.CheckpointRoot // Worker.Run publishes the effective root before attempts.
 	j := recoveryJob(t, []string{"true"})
 	fault := &os.PathError{Op: "read", Path: "/share/checkpoints/previous/save", Err: syscall.EIO}
 	w.checkpointPrepare = func(Job) (string, error) { return "", fault }
@@ -424,11 +428,13 @@ func TestStorageFaultBlocksPreparationRetryBeforeHeartbeat(t *testing.T) {
 	_, m, clock := storageFaultFixture(t)
 	w.storageHealth, w.Clock = m, clock
 	w.CheckpointRoot, w.ServiceConfig = "/share/checkpoints", &ServiceConfig{NAS: "/share"}
+	w.MountRoots = func(context.Context) ([]string, error) { return []string{"/share"}, nil }
 	s, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.close()
+	s.state.CheckpointRoot = w.CheckpointRoot
 	j := recoveryJob(t, []string{"true"})
 	var calls int
 	w.checkpointPrepare = func(Job) (string, error) {
@@ -546,7 +552,7 @@ func TestStorageFaultModelLaunchUsesSharedResolver(t *testing.T) {
 func TestStorageFaultKeepsNestedBackingIndependent(t *testing.T) {
 	w, m, clock := storageFaultFixture(t)
 	w.JobFileRoot = "/share/nested/inputs"
-	w.rootMonitor = &workerRootMonitor{expected: map[string]string{"checkpoint": "/share", "job-files": "/share/nested"}}
+	w.rootMonitor = &workerRootMonitor{expected: map[string]string{"nas": "/share", "checkpoint": "/share", "job-files": "/share/nested"}}
 	m.mounts["nas"] = &hostMountProbe{root: "nas", path: "/share", clock: clock, storage: m}
 	w.observeStorageError(&os.PathError{Op: "read", Path: "/share/checkpoints/source", Err: syscall.EIO})
 	if storageTestFault(m.mounts["checkpoint"]) == nil || storageTestFault(m.mounts["nas"]) == nil || storageTestFault(m.mounts["job-files"]) != nil {
@@ -580,6 +586,8 @@ func TestStorageFaultCheckpointCopyKeepsReadAttribution(t *testing.T) {
 	w.CheckpointRoot = t.TempDir()
 	w.ServiceConfig.NAS = w.CheckpointRoot
 	w.JobFileRoot = ""
+	w.MountRoots = func(context.Context) ([]string, error) { return []string{w.CheckpointRoot}, nil }
+	w.sampleStorageRoots(context.Background(), w.CheckpointRoot)
 	p := m.mounts["checkpoint"]
 	p.path = w.CheckpointRoot
 	j := Job{ID: "copy-fault", Attempt: 2, Checkpoint: filepath.Join(w.CheckpointRoot, "job")}

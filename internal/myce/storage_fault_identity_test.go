@@ -15,6 +15,37 @@ import (
 	"time"
 )
 
+func TestStorageFaultConfiguredSubdirectoryUsesObservedBacking(t *testing.T) {
+	w, m, clock := storageFaultFixture(t)
+	w.ServiceConfig.NAS = "/share/team"
+	w.CheckpointRoot, w.JobFileRoot = "/share/team/checkpoints", "/share/team/inputs"
+	w.rootMonitor = nil
+	w.MountRoots = func(context.Context) ([]string, error) { return []string{"/share"}, nil }
+	if missing := w.sampleStorageRoots(context.Background(), w.CheckpointRoot); len(missing) != 0 {
+		t.Fatal("healthy configured subdirectory rejected", missing)
+	}
+	for _, role := range []string{"nas", "checkpoint", "job-files"} {
+		if r := w.storageRoots()[role]; r.backing != "/share" {
+			t.Fatal("configured directory was treated as observed backing", role, r)
+		}
+	}
+	m.storageRoots = w.storageRoots()
+	m.mounts["checkpoint"].path = w.CheckpointRoot
+	m.mounts["job-files"].path = w.JobFileRoot
+	w.observeStorageError(&os.PathError{Op: "read", Path: w.JobFileRoot + "/source", Err: syscall.EIO})
+	state := m.mounts["checkpoint"].backingFault()
+	if state == nil || !state.fault.Active || state != m.mounts["job-files"].backingFault() {
+		t.Fatal("subdirectory roles lost shared fault attribution")
+	}
+	// NAS metadata failure projects through the observed mount identity too.
+	machine := Machine{HostHealth: &HostHealth{History: []HostHealthSample{{At: clock.Now(), Mounts: []HostMountHealth{{Root: "nas", Reason: "mount_probe_failed"}}}}}}
+	applyHostMountHealth(w, &machine)
+	input := &Job{Spec: Spec{Priority: "production", Inputs: map[string]string{"asset": "source"}}}
+	if storageRootReason(input, &machine) == "" {
+		t.Fatal("subdirectory NAS probe failure lost dependent role projection")
+	}
+}
+
 func TestStorageFaultNestedMountLossKeepsRecoveryIdentity(t *testing.T) {
 	w, m, clock := storageFaultFixture(t)
 	w.JobFileRoot = "/share/nested/inputs"
