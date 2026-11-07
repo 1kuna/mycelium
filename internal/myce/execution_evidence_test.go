@@ -163,7 +163,7 @@ func TestExecutionEvidenceMemoryRefusal(t *testing.T) {
 			if r.ExecutionCause == nil || r.ExecutionCause.Predicate != "memory_capacity" || !r.Interrupted {
 				t.Fatalf("refusal classification changed: %+v", r)
 			}
-			if phase != "after_environment" && (r.ExecutionCause.Operation != "command" || r.ExecutionCause.Class != "stage_failed") {
+			if phase != "after_environment" && (r.ExecutionCause.Operation != "launch" || r.ExecutionCause.Class != "resource_limit") {
 				t.Fatalf("group cause changed: %+v", r.ExecutionCause)
 			}
 			if _, err := os.Stat(main); !errors.Is(err, os.ErrNotExist) {
@@ -176,6 +176,11 @@ func TestExecutionEvidenceMemoryRefusal(t *testing.T) {
 			if got.StartedAt != nil || !reflect.DeepEqual(got.ExecutionEvidence, e) || len(got.AttemptHistory) != 1 || !reflect.DeepEqual(got.AttemptHistory[0].ExecutionEvidence, e) {
 				t.Fatalf("queue lost evidence: %+v", got)
 			}
+			// Unchanged capacity must wait; a changed measurement enables retry.
+			if next := check(t, q, m, nil).Job; next != nil {
+				t.Fatal("unchanged capacity re-offered", next)
+			}
+			m.HostAvailableMemoryGB += 1
 			// Retrying must discard current evidence; history retains the exact old attempt.
 			next := check(t, q, m, nil).Job
 			if next == nil || next.ExecutionEvidence != nil || !reflect.DeepEqual(next.AttemptHistory[0].ExecutionEvidence, e) {

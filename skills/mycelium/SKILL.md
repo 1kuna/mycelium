@@ -53,6 +53,16 @@ shared-page credit. Missing/stale telemetry protects the execution ceiling.
 workers retain the previous estimate-sized ceiling. Cold physical probes keep
 their initial execution ceilings. Declared numeric limits,
 explicit member caps and Docker behavior are unchanged.
+From the release containing #1011, typed `launch/resource_limit/memory_capacity`
+refusals wait on the same job and submission key without spending infrastructure
+retries or losses, including after a helper ran or Started was authorized. Keep
+that key: Mycelium uses ordinary lower-tier preemption and exact release before
+reuse; equal-tier production waits. Unchanged capacity evidence is not re-offered.
+Generated startup windows pause for capacity; explicit `start_by`, `start_window`,
+give-up deadlines and cancellation still apply. `execution_evidence` describes
+component boundaries separately from cleanup; a helper that ran is never proof
+that the whole attempt stayed unlaunched.
+
 From the next release, `host_capacity_accumulation` means new CPU work is waiting
 so ready CPU or accelerator work can acquire host RAM/cores as running CPU
 attempts finish. Mycelium chooses one fitting target; earlier fair turns,

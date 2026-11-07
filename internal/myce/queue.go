@@ -1004,7 +1004,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		}
 		return
 	}
-	if automaticExtensionCheck(j) != nil {
+	if automaticExtensionCheck(j) != nil && why != launchCapacityWaitReason {
 		now := q.clock.Now()
 		j.State, j.Reason, j.FinishedAt = "failed", "native check interrupted: "+why, &now
 		j.StopAt = nil
@@ -1829,6 +1829,13 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	return rejected
 }
 func (q *Queue) complete(r Result, filesVerified bool) error {
+	// A refusal can race the generated startup cutoff. Validate identity before
+	// retaining it, then let caller deadlines/cancellation and custody run normally.
+	if launchCapacityRefusal(r) && !r.ReleaseOnly {
+		if j, err := q.current(r); err == nil {
+			q.recordLaunchCapacityWait(j, r)
+		}
+	}
 	q.maintainWallTimeLimits()
 	if r.MemoryPeak.constrained() && !r.MemoryPeak.Constrained {
 		peak := *r.MemoryPeak
@@ -2785,10 +2792,11 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		j.ModelEnvironmentKey = recipe.Key
 		j.ModelEnvironmentNeedsSource = recipe.Binary != "" || recipe.BinaryRelative != ""
 	}
-	if len(j.LaunchCapacityWait) > 0 && !absoluteStartBy(j) && j.Spec.StartBy != nil {
+	if (j.StartCapacityWaiting || len(j.LaunchCapacityWait) > 0) && !callerStartDeadline(j) && j.Spec.StartBy != nil {
 		deadline := q.clock.Now().Add(j.StartWindow)
 		j.Spec.StartBy = &deadline
 	}
+	j.StartCapacityWaiting = false
 	j.State = "running"
 	j.ExecutionCause, j.CleanupCause = nil, nil
 	j.ExecutionEvidence = nil

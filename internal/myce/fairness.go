@@ -321,7 +321,7 @@ type batchResourceRoom struct {
 
 func resourceKey(j *Job) batchResourceKey {
 	id := ""
-	if len(j.Spec.RequirementReasons) > 0 || len(j.Extensions) > 0 {
+	if len(j.LaunchCapacityWait) > 0 || len(j.Spec.RequirementReasons) > 0 || len(j.Extensions) > 0 {
 		id = j.ID
 	}
 	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j), fanOutDeviceSharing(j)}

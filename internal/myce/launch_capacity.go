@@ -3,7 +3,6 @@ package myce
 import (
 	"fmt"
 	"slices"
-	"strings"
 )
 
 // LaunchCapacityWait remembers the evidence behind a refused offer. It is
@@ -17,7 +16,14 @@ type LaunchCapacityWait struct {
 	Admission *AdmissionDetail `json:"admission,omitempty"`
 }
 
+const launchCapacityWaitReason = "waiting for launch capacity"
+
+func callerStartDeadline(j *Job) bool { return absoluteStartBy(j) || j.Spec.StartWindow != "" }
+
 func launchCapacityRefusal(r Result) bool {
+	if e := safeExecutionEvidence(r.ExecutionEvidence, r.Attempt); e != nil && e.Main != executionNotStarted {
+		return false
+	}
 	c := r.ExecutionCause
 	return !r.Success && !r.OutOfMemory && r.Interrupted && c != nil &&
 		c.Operation == "launch" && c.Class == "resource_limit" && c.Predicate == "memory_capacity"
@@ -30,8 +36,8 @@ func (q *Queue) launchCapacityEvidence(j *Job, m *Machine) string {
 	if m == nil {
 		return ""
 	}
-	parts := []string{fmt.Sprintf("%s/%s/%t/%g/%s/%g/%g/%g/%d/%d/%g", m.ID, m.Session,
-		m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryError, m.HostMemoryBudgetGB,
+	parts := []string{fmt.Sprintf("%s/%s/%t/%g/%t/%g/%g/%g/%d/%d/%g", m.ID, m.Session,
+		m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryError != "", m.HostMemoryBudgetGB,
 		m.MemoryUsedGB, m.TotalMemoryGB, m.CPUBudgetCores, m.CPUReserveCores, m.ReservedMemoryGB)}
 	if m.CapabilityProfile != nil {
 		parts = append(parts, fmt.Sprint(m.CapabilityProfile.LogicalCPUs))
@@ -40,13 +46,17 @@ func (q *Queue) launchCapacityEvidence(j *Job, m *Machine) string {
 		if o.Result.ID == j.ID {
 			continue
 		}
-		parts = append(parts, obligationKey(o))
+		part := obligationKey(o)
+		if other := q.s.Jobs[o.Result.ID]; other != nil && other.Machine == o.Result.Machine && other.Session == o.Result.Session && other.Attempt == o.Result.Attempt {
+			part += fmt.Sprintf("/%g/%d", q.hostJobCharge(other), other.Spec.Needs.cores())
+		}
+		parts = append(parts, part)
 	}
 	slices.Sort(parts)
-	return strings.Join(parts, "|")
+	return identityHash(parts)
 }
 
-func (q *Queue) waitLaunchCapacity(j *Job, r Result) {
+func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 	if j.LaunchCapacityWait == nil {
 		j.LaunchCapacityWait = map[string]LaunchCapacityWait{}
@@ -56,11 +66,15 @@ func (q *Queue) waitLaunchCapacity(j *Job, r Result) {
 			Attempt: j.Attempt, Admission: safeAdmissionDetail(r.ExecutionCause.Admission),
 			Evidence: q.launchCapacityEvidence(j, m)}
 	}
+}
+
+func (q *Queue) waitLaunchCapacity(j *Job, r Result) {
+	q.recordLaunchCapacityWait(j, r)
 	// Fence every copy for every tier. Missing Started is never release proof.
 	for i := range j.Copies {
 		j.Copies[i].Recoverable = false
 	}
-	q.requeue(j, "waiting for launch capacity", false)
+	q.requeue(j, launchCapacityWaitReason, false)
 }
 
 func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
@@ -76,4 +90,70 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 	}
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
 	return ok && h.Evidence == q.launchCapacityEvidence(j, m)
+}
+
+func (q *Queue) launchCapacityPending(j *Job) bool {
+	if len(j.LaunchCapacityWait) == 0 {
+		return false
+	}
+	if j.State == "queued" {
+		return true
+	}
+	for _, hold := range j.LaunchCapacityWait {
+		if hold.Machine == j.Machine && hold.Session == j.Session && hold.Attempt == j.Attempt {
+			return true
+		}
+	}
+	return false
+}
+
+// A qualified route with occupied resources is capacity waiting even before its
+// first offer. Missing/incompatible/disabled hosts retain their existing startup
+// diagnosis. This uses the existing fit checks with only resources released.
+func (q *Queue) queuedCapacityWait(j *Job) bool {
+	if !dependencyReady(j) || cancelled(j) {
+		return false
+	}
+	for _, m := range q.plannerMachines() {
+		if m.Gone || m.Leaving || q.maintenanceBlocked(hostID(m)) || !q.jobAllowsMachine(j, m.ID) {
+			continue
+		}
+		room := *m
+		room.FreeCPUCores, room.CPUInUseCores = room.EffectiveCPUCores, 0
+		for _, c := range extensionJobs(j, &room, true) {
+			if !fitsResources(c, &room, room.TotalMemoryGB) {
+				continue
+			}
+			if !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Feed the worker's measured deficit into ordinary release planning only.
+// This neither discounts reservations nor authorizes admission. The existing
+// planner chooses lower tiers; same-tier work remains protected. Exact releases
+// and a changed capacity snapshot are still required by dispatch.
+func (q *Queue) launchCapacityProjection(j *Job, m *Machine) *Machine {
+	h, ok := j.LaunchCapacityWait[targetKey(m)]
+	if !ok || h.Evidence != q.launchCapacityEvidence(j, m) || h.Admission == nil {
+		return m
+	}
+	d := h.Admission
+	if d.Unavailable || d.Available == nil || d.Required <= *d.Available {
+		return m
+	}
+	copy := *m
+	deficit := d.Required - *d.Available
+	switch d.Subcheck {
+	case "live_host_ram", "live_host_growth", "aggregate_host_allowance", "configured_host_allowance":
+		copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-deficit)
+	case "aggregate_cpu_allowance":
+		copy.EffectiveCPUCores -= max(0, copy.FreeCPUCores-j.Spec.Needs.cores()+int(deficit))
+	default:
+		return m
+	}
+	return &copy
 }

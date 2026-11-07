@@ -71,7 +71,7 @@ func (q *Queue) startupPending(j *Job) bool {
 			}
 		}
 	}
-	if j.State == "queued" && len(j.LaunchCapacityWait) > 0 && !absoluteStartBy(j) {
+	if !callerStartDeadline(j) && (q.launchCapacityPending(j) || j.State == "queued" && j.StartCapacityWaiting) {
 		return false // Capacity is not failed startup; caller-owned cutoffs still bind.
 	}
 	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
@@ -124,6 +124,9 @@ func (q *Queue) maintainStartDeadlines() {
 	for _, j := range q.liveJobs() {
 		if j.Spec.Priority == "production" && !terminal(j.State) && (j.Spec.StartBy != nil || dependencyReady(j)) {
 			initializeStartDeadline(j, j.Queued)
+		}
+		if j.State == "queued" && !callerStartDeadline(j) && q.queuedCapacityWait(j) {
+			j.StartCapacityWaiting = true
 		}
 		// Disabled-host rejection is an admission decision, independent of the
 		// relative timeout exemption for logical fan-out capacity waits.

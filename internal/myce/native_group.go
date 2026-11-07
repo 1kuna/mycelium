@@ -367,11 +367,15 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 				release()
 			}
 		}()
+		independentFailure := g.independentMemberFailure()
 		p.waitStopGrace(w.Clock, g.supervisor.Process.Pid, g.supervisor.Process.Pid)
 		p.mu.Lock()
 		forced, polite := p.killed, p.polite
 		stage = stage || g.stageFailure
 		facts := g.outcomeLocked(runErr, stage)
+		if independentFailure && errors.Is(runErr, errWorkerMemory) {
+			facts.Infrastructure = slices.DeleteFunc(facts.Infrastructure, func(f infrastructureFact) bool { return f.Kind == launchRefused && f.Predicate == "memory_capacity" })
+		}
 		priorityStop := p.priorityStop
 		p.mu.Unlock()
 		groupErr := g.cleanupProcesses(writer, false)
@@ -397,7 +401,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		if runErr != nil {
 			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
-			if errors.Is(runErr, errWorkerMemory) {
+			if errors.Is(runErr, errWorkerMemory) && !independentFailure {
 				r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit"}
 			} else if stage && r.ExecutionCause.Class == "io_error" {
 				r.ExecutionCause.Class = "stage_failed"
