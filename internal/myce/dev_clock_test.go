@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -200,7 +201,7 @@ func TestDevClockQueueDecisions(t *testing.T) {
 type accountingInterleaveClock struct {
 	base             Clock
 	queue            *Queue
-	once             sync.Once
+	paused           atomic.Bool
 	entered, release chan struct{}
 }
 
@@ -212,7 +213,13 @@ func (c *accountingInterleaveClock) Now() time.Time {
 		c.queue.mu.RUnlock()
 		return value
 	}
-	c.once.Do(func() { close(c.entered); <-c.release })
+	// Only the accounting call that establishes this interleaving pauses.
+	// Other clock observations (including request-arrival telemetry) must not
+	// wait behind it before reaching the transaction's availability probe.
+	if c.paused.CompareAndSwap(false, true) {
+		close(c.entered)
+		<-c.release
+	}
 	return value
 }
 

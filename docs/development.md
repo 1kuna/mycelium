@@ -202,6 +202,16 @@ GOMAXPROCS=2 go test -p 2 ./internal/myce -run '^$' \
 The quick selector rejects the benchmark-only file with no mapped tests and
 requires full; do not bypass that refusal with a handwritten selection.
 
+A full-gate run exposed an interleaving-fixture deadlock in
+`TestDevClockAdvanceDuringCheckin`: its `sync.Once` made all concurrent clock
+reads wait for the first paused accounting read. Request-arrival telemetry
+legitimately reads the injected clock before the availability probe; the fixture
+then waited for that probe before releasing its first reader. A focused timeout
+stack reproduced this dependency, while the pre-telemetry baseline passed.
+The fixture now pauses only the first locked accounting reader with an atomic
+claim, allowing other observations through. The accounting assertions and
+production behavior are unchanged.
+
 #### Diagnostic write volume
 
 A read-only review estimated a workload of 2.64 check-ins/second and 18.44 listed
