@@ -354,6 +354,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if p.docker == nil {
 				report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
+				if memory == nil && adaptiveMemoryCeilingGB(&a.job, &w.Machine) > 0 {
+					report.CurrentHostMemory = p.currentProcessHostMemory()
+				}
 			}
 		}
 		if s.state.Job != nil {
@@ -1204,6 +1207,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				return c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
 			m.Capabilities = append(m.Capabilities, w.nativeIsolationCapabilities()...)
+			if w.memoryCeilings != nil || w.processMemory != nil && w.processMemory.OwnedResident != nil {
+				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
+			}
 			if w.DockerEndpoint != "" {
 				// Refresh without allowing a slow daemon to block heartbeats.
 				if supported, err := dockerQualification.run("docker-envelope", func() (bool, error) { return probeWorker.dockerEnvelopeSupported(), nil }); err == nil {
