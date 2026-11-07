@@ -471,11 +471,11 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 		remove := q.files == store && expired[hash] && !keep[hash]
 		if orphan {
 			published, marked := q.jobUploadMarker(hash)
-			remove = q.files == store && marked && published == orphans[hash] && !referenced[hash]
+			remove = q.files == store && marked && published.Equal(orphans[hash]) && !referenced[hash]
 		}
 		if bundle {
 			published, marked := q.s.BundleUploads[hash]
-			remove = q.files == store && marked && published == bundles[hash] && !referenced[hash]
+			remove = q.files == store && marked && published.Equal(bundles[hash]) && !referenced[hash]
 		}
 		bundleTime, trackedBundle := q.s.BundleUploads[hash]
 		// An expired input can share bytes with a newly created, rejected
@@ -542,13 +542,13 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 			delete(q.s.RetiredJobFiles, hash)
 			// A re-publication between unlink and this transaction owns a newer
 			// marker. Never erase its eligibility/progress with an older result.
-			if q.s.JobInputUploads[hash] == orphans[hash] {
+			if q.s.JobInputUploads[hash].Equal(orphans[hash]) {
 				delete(q.s.JobInputUploads, hash)
 			}
-			if q.s.AttemptOutputUploads[hash] == orphans[hash] {
+			if q.s.AttemptOutputUploads[hash].Equal(orphans[hash]) {
 				delete(q.s.AttemptOutputUploads, hash)
 			}
-			if q.s.BundleUploads[hash] == bundles[hash] {
+			if q.s.BundleUploads[hash].Equal(bundles[hash]) {
 				delete(q.s.BundleUploads, hash)
 			}
 		}
