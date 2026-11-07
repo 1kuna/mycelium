@@ -123,22 +123,25 @@ type storageBacking struct {
 type storageRoot struct{ path, backing string }
 
 func (w Worker) storageRoots() map[string]storageRoot {
-	paths := map[string]string{"checkpoint": w.CheckpointRoot, "job-files": w.JobFileRoot, "model": w.ModelRoot, "model-cache": w.CacheRoot, "environment-source": w.EnvironmentSourceRoot, "environment": w.EnvironmentRoot, "file-cache": w.FileCacheRoot, "extension": w.ExtensionRoot}
-	if w.ServiceConfig != nil {
-		paths["nas"] = w.ServiceConfig.NAS
-	}
-	if w.storageHealth != nil {
-		w.storageHealth.mu.Lock()
-		if p := w.storageHealth.mounts["checkpoint"]; p != nil {
-			paths["checkpoint"] = p.path
+	paths := w.configuredStoragePaths()
+	if w.rootMonitor != nil {
+		w.rootMonitor.mu.Lock()
+		defer w.rootMonitor.mu.Unlock()
+		for role, path := range w.rootMonitor.paths {
+			paths[role] = path
 		}
-		w.storageHealth.mu.Unlock()
 	}
-	backings := w.storageRoleBackings(paths)
 	roots := map[string]storageRoot{}
 	for role, path := range paths {
-		if path != "" {
-			roots[role] = storageRoot{path: path, backing: backings[role]}
+		if path != "" && role != "data" {
+			backing := ""
+			if w.rootMonitor != nil {
+				backing = w.rootMonitor.expected[role]
+			}
+			if backing == "" && paths["nas"] != "" && withinNAS(paths["nas"], path) {
+				backing = filepath.Clean(paths["nas"])
+			}
+			roots[role] = storageRoot{path: path, backing: backing}
 		}
 	}
 	return roots
@@ -170,25 +173,6 @@ func (w Worker) observeStorageError(err error) {
 			m.storageFault(role, leaf, m.clock.Now(), false)
 		}
 	})
-}
-
-func (w Worker) storageRoleBackings(roots map[string]string) map[string]string {
-	expected := map[string]string{}
-	if w.rootMonitor != nil {
-		w.rootMonitor.mu.Lock()
-		for role, mount := range w.rootMonitor.expected {
-			expected[role] = mount
-		}
-		w.rootMonitor.mu.Unlock()
-	}
-	if w.ServiceConfig != nil && w.ServiceConfig.NAS != "" {
-		for role, path := range roots {
-			if path != "" && withinNAS(w.ServiceConfig.NAS, path) && len(w.ServiceConfig.NAS) > len(expected[role]) {
-				expected[role] = filepath.Clean(w.ServiceConfig.NAS)
-			}
-		}
-	}
-	return expected
 }
 
 // Called only under m.mu. Owned I/O, probe errors and recovery failures all

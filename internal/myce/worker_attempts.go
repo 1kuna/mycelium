@@ -1317,6 +1317,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				}
 				if !w.fileCheckpoints && w.CheckpointRoot == "" && reply.CheckpointRoot != "" {
 					root.state.CheckpointRoot = reply.CheckpointRoot
+					w.publishCheckpointRoot(reply.CheckpointRoot)
 				}
 				if err = root.save(); err != nil {
 					return err
