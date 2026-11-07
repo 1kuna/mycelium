@@ -221,6 +221,10 @@ func TestCancellationSubmitOrders(t *testing.T) {
 func TestCancellationHTTP(t *testing.T) {
 	t.Parallel()
 	q, _ := fixture(t)
+	// This test exercises cancellation wire/state semantics. Real shared-host
+	// headroom can correctly refuse its tiny bodies during a loaded suite;
+	// capacity admission has separate injected-budget regressions.
+	q.requestBudgets.memory = func(context.Context) (int64, error) { return 1 << 30, nil }
 	server := httptest.NewServer(API{Queue: q, Token: "test-only"}.Handler())
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test-only"}

@@ -37,6 +37,13 @@ func TestStatusReadHistoryGeneration(t *testing.T) {
 	q.records.statusHistory = nil
 	q.mu.Unlock()
 	uncached, err := q.publicSnapshot()
+	// Control diagnostics are captured independently for each read and count
+	// the read acquisitions themselves. They are not projected job history.
+	// Preserve comparison of every generation-backed field below.
+	if indexed.ControlTelemetry == nil || uncached.ControlTelemetry == nil {
+		t.Fatal("missing independent control diagnostics")
+	}
+	indexed.ControlTelemetry, uncached.ControlTelemetry = nil, nil
 	if err != nil || !reflect.DeepEqual(indexed, uncached) {
 		t.Fatal("incremental history changed the full response", err)
 	}

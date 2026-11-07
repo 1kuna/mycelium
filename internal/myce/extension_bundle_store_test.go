@@ -179,6 +179,11 @@ func TestExtensionBundleStoreInterruptedMigrationAndRecipes(t *testing.T) {
 			t.Fatal("failed migration changed durable state", err)
 		}
 	}
+	// End the injected migration-write failure after proving durable metadata
+	// stayed unchanged. Normal shutdown also flushes independent diagnostics.
+	if _, err := q.db.Exec("PRAGMA query_only=OFF"); err != nil {
+		t.Fatal(err)
+	}
 	dbPath := q.lock.Name()[:len(q.lock.Name())-len(".lock")]
 	root := q.root
 	if err := q.Close(); err != nil {
