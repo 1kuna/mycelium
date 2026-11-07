@@ -106,19 +106,27 @@ func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
 							// Each requeue clears StartedAt, so the failed
 							// record alone no longer shows the check ran.
 							m.HostAvailableMemoryGB = 32
-							for range 3 {
-								running := check(t, q, m, nil).Job
-								if running == nil {
-									t.Fatalf("check not assigned: %+v", job(t, q, submitted.ID))
-								}
-								if err := q.Started(result(running, true)); err != nil {
-									t.Fatal(err)
-								}
-								lost := result(running, false)
-								lost.Interrupted = true
-								if err := q.Complete(lost); err != nil {
-									t.Fatal(err)
-								}
+							running := check(t, q, m, nil).Job
+							if running == nil {
+								t.Fatalf("check not assigned: %+v", job(t, q, submitted.ID))
+							}
+							if err := q.Started(result(running, true)); err != nil {
+								t.Fatal(err)
+							}
+							lost := result(running, false)
+							lost.Interrupted = true
+							if err := q.Complete(lost); err != nil {
+								t.Fatal(err)
+							}
+							// Infrastructure loss is recoverable; the check's
+							// authored cutoff, not a loss count, ends recovery.
+							if got := job(t, q, submitted.ID); got.State != "queued" || got.Spec.StartBy == nil {
+								t.Fatalf("lost check did not retain recovery/cutoff: %+v", got)
+							} else {
+								clock.Advance(got.Spec.StartBy.Sub(clock.Now()))
+							}
+							if err := q.Tick(); err != nil {
+								t.Fatal(err)
 							}
 						}
 					}

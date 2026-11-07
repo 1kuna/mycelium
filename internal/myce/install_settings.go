@@ -266,8 +266,8 @@ func InstallSettings() []InstallSetting {
 		}),
 		installSetting("restart-grace", "RestartGrace", "queue restart recovery grace", func(c *ServiceConfig) *time.Duration { return &c.RestartGrace }, installNonnegativeDuration),
 		installSetting("production-infrastructure-retries", "ProductionInfrastructureRetries", "maximum infrastructure requeues per production job", func(c *ServiceConfig) *int { return &c.ProductionInfrastructureRetries }, func(n int) error {
-			if n < 0 {
-				return errors.New("must be nonnegative")
+			if n < -1 {
+				return errors.New("must be -1 (adaptive) or nonnegative")
 			}
 			return nil
 		}),

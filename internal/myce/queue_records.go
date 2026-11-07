@@ -218,6 +218,8 @@ func (q *Queue) deleteJob(id string) {
 		q.records.jobCount--
 	}
 	delete(q.s.Jobs, id)
+	delete(q.s.BatchLifecycle, id)
+	delete(q.s.BatchRetries, id)
 	if q.records != nil {
 		delete(q.records.live, id)
 	}

@@ -238,6 +238,10 @@ func TestMakingRoom(t *testing.T) {
 	}{{"production stops experiment", "production", true, true}, {"deadline stops experiment", "deadline", true, true}, {"production stops nonresumable", "production", false, true}, {"deadline preserves nonresumable", "deadline", false, false}, {"experiment cannot stop peer", "experiment", true, false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, _ := fixture(t)
+			// This preemption protocol fixture authors the grace it asserts.
+			if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+				t.Fatal(err)
+			}
 			s := spec("experiment")
 			s.Resumable = tc.resumable
 			submit(t, q, s)
@@ -313,6 +317,9 @@ func TestMakingRoom(t *testing.T) {
 func TestGraceAndFrontOfLine(t *testing.T) {
 	t.Parallel()
 	q, c := fixture(t)
+	if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	r := check(t, q, m, nil).Job
@@ -453,7 +460,7 @@ func stringBool(v bool) string {
 	}
 	return "false"
 }
-func TestThreeAttempts(t *testing.T) {
+func TestNonresumableInfrastructureLossesKeepRecovering(t *testing.T) {
 	t.Parallel()
 	q, c := fixture(t)
 	s := spec("experiment")
@@ -477,14 +484,12 @@ func TestThreeAttempts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	requireState(t, q, j.ID, "failed")
-	if !strings.Contains(job(t, q, j.ID).Reason, "3 infrastructure losses") {
-		t.Fatal("missing plain failure reason")
-	}
-	if check(t, q, m, nil).Job != nil {
-		t.Fatal("fourth attempt assigned")
+	requireState(t, q, j.ID, "queued")
+	if next := check(t, q, m, nil).Job; next == nil || next.Attempt != 4 || next.Losses != 3 {
+		t.Fatal("unexplained infrastructure losses exhausted recovery", next)
 	}
 }
+
 func TestWaitingReasonAndGiveUp(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{"platform", "pinned", "environment", "memory"} {
@@ -693,11 +698,11 @@ func TestResumableThreeInfrastructureLosses(t *testing.T) {
 		}
 	}
 	got := job(t, q, j.ID)
-	if got.Losses != 3 || got.State != "failed" {
-		t.Fatalf("after %d counted losses: state=%s, want failed", got.Losses, got.State)
+	if got.Losses != 3 || got.State != "queued" {
+		t.Fatalf("after %d counted losses: state=%s, want queued", got.Losses, got.State)
 	}
-	if check(t, q, m, nil).Job != nil {
-		t.Fatal("failed job received a fourth execution")
+	if next := check(t, q, m, nil).Job; next == nil || next.Attempt != 4 || next.Losses != 3 {
+		t.Fatal("unexplained infrastructure losses exhausted recovery", next)
 	}
 }
 

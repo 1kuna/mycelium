@@ -37,9 +37,11 @@ func TestProductionStartGateMixedVersions(t *testing.T) {
 			}
 		})
 	}
-	w := Worker{}
-	if _, err := w.start(nil, Job{Spec: spec("production")}); err == nil || !strings.Contains(err.Error(), "no start_by") {
-		t.Fatalf("legacy assignment accepted: %v", err)
+	// A missing start cutoff is now valid intent; the durable protocol gate
+	// remains mandatory independently of whether a caller authored a deadline.
+	w := recoveryWorker(t)
+	if err := w.authorizeStart(Job{ID: "test", Spec: spec("production")}, "test"); err != nil {
+		t.Fatalf("valid unbounded start rejected: %v", err)
 	}
 }
 
@@ -65,7 +67,7 @@ func TestProductionStartGatePlannedStopDoesNotRenewOnLoss(t *testing.T) {
 			if err := q.SetLossTimeouts(5*time.Second, 20*time.Second, 60*time.Second); err != nil {
 				t.Fatal(err)
 			}
-			s := spec("production")
+			s := authoredStartSpec() // This assertion compares an authored cutoff across a planned stop.
 			s.AllowedMachines = []string{"b70"}
 			j := submit(t, q, s)
 			m := machine("b70", "xpu")

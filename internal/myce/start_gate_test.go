@@ -14,10 +14,15 @@ import (
 )
 
 func TestProductionStartGateSingleDurableWinner(t *testing.T) {
-	for _, boundary := range []bool{false, true} {
-		t.Run(map[bool]string{false: "before", true: "exactly"}[boundary], func(t *testing.T) {
+	for _, mode := range []string{"unbounded", "before", "exactly"} {
+		t.Run(mode, func(t *testing.T) {
+			boundary := mode == "exactly"
 			q, c := fixture(t)
-			submit(t, q, spec("production"))
+			s := spec("production")
+			if mode != "unbounded" {
+				s = authoredStartSpec()
+			}
+			submit(t, q, s)
 			a := check(t, q, machine("b70", "xpu"), nil).Job
 			c.Advance(ProductionStartTimeout - time.Second)
 			if boundary {
@@ -75,8 +80,7 @@ func TestProductionStartGateRecoveryWindow(t *testing.T) {
 		t.Run(outage.String(), func(t *testing.T) {
 			q, c := fixture(t)
 			s := spec("production")
-			deadline := c.Now().Add(30 * time.Second)
-			s.StartBy = &deadline
+			s.StartWindow = "30s" // Relative recovery renews; an absolute start_by never does.
 			submit(t, q, s)
 			a := check(t, q, machine("b70", "xpu"), nil).Job
 			if e := q.Started(result(a, true)); e != nil {
@@ -125,7 +129,7 @@ func TestProductionStartGateRecoveryWindow(t *testing.T) {
 
 func TestProductionStartGateUnreachableDoesNotExecute(t *testing.T) {
 	q, c := fixture(t)
-	s := spec("production")
+	s := authoredStartSpec()
 	s.Resumable = false
 	s.Run.Command = []string{"/bin/sh", "-c", "echo ran > {work}/ran"}
 	submit(t, q, s)
@@ -221,7 +225,7 @@ func TestProductionStartGateWorkerRestartReconciles(t *testing.T) {
 
 func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 	q, c := fixture(t)
-	s := spec("production")
+	s := authoredStartSpec()
 	s.Resumable = false
 	s.Run.Command = []string{"/bin/sh", "-c", "echo ran >> {work}/executions"}
 	submit(t, q, s)
@@ -307,7 +311,7 @@ func TestProductionStartGateDetectedLoss(t *testing.T) {
 			if e := q.SetLossTimeouts(5*time.Second, 20*time.Second, 60*time.Second); e != nil {
 				t.Fatal(e)
 			}
-			s := spec("production")
+			s := authoredStartSpec()
 			s.AllowedMachines = []string{"b70", "retry"}
 			j := submit(t, q, s)
 			m := machine("b70", "xpu")

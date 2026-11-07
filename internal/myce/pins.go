@@ -214,8 +214,8 @@ func (q *Queue) SetProductionGrace(d time.Duration) error {
 	return q.SetPreemptionGrace(d)
 }
 func (q *Queue) SetPreemptionGrace(d time.Duration) error {
-	if d <= 0 {
-		return errors.New("preemption grace must be positive")
+	if d < 0 {
+		return errors.New("preemption grace must be nonnegative (zero selects adaptive)")
 	}
 	q.mu.Lock()
 	q.productionGrace = d
@@ -229,13 +229,8 @@ func (q *Queue) stopFor(j *Job, priority, kind string) {
 	}
 	q.stop(j, "making room for "+priority+" "+kind)
 	if j.State == "stopping" {
-		grace := q.preemptionGrace()
-		if priority == "deadline" {
-			grace = StopGrace
-		}
-		if gracefulGPUStop(j) {
-			grace = q.gpuStopGrace()
-		} else if !j.Spec.Resumable {
+		grace := q.batchStopGrace(j)
+		if !j.Spec.Resumable && !gracefulGPUStop(j) {
 			grace = 0
 		}
 		t := q.clock.Now().Add(grace)

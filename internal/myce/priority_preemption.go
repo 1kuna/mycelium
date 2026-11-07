@@ -96,8 +96,8 @@ func (q *Queue) preemptionGrace() time.Duration {
 	return 10 * time.Second
 }
 
-// Keep accelerator teardown inside the 150s production window: at most 15s
-// to drain, 120s for cleanup escalation, and 15s for reporting/launch.
+// Legacy engine grace values are separate from measured batch stop policy.
+// Batch workers honor positive queue budgets without a universal accelerator cap.
 const maxGPUStopGrace = 15 * time.Second
 const defaultGPUStopGrace = 10 * time.Second
 
@@ -105,7 +105,7 @@ func acceleratorStopGrace(d time.Duration) time.Duration {
 	if d <= 0 {
 		return defaultGPUStopGrace
 	}
-	return min(d, maxGPUStopGrace)
+	return d
 }
 
 func (q *Queue) gpuStopGrace() time.Duration {
@@ -129,7 +129,7 @@ func plannedStop(j *Job) bool         { return plannedMaintenanceStop(j) || plan
 // Pending cleanup is planning credit only. A slow kill must eventually stop
 // attracting demand so another device can be reclaimed without releasing custody.
 func (q *Queue) batchCreditUntil(j *Job) time.Time {
-	if j.StopAt == nil {
+	if j.StopAt == nil || unmeasuredBatchStop(j) {
 		return time.Time{}
 	}
 	until := *j.StopAt

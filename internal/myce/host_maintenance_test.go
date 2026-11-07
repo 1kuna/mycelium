@@ -385,6 +385,16 @@ func TestMaintenancePlannedStopsDoNotConsumeRetries(t *testing.T) {
 					case "timeout":
 						c.Advance(StopGrace)
 						check(t, q, b, nil)
+						// Elapsed grace permits a kill but cannot prove cleanup.
+						got := job(t, q, j.ID)
+						if got.State != "stopping" || got.InfrastructureRetries != 0 || got.Losses != 0 {
+							t.Fatal("planned stop lost custody or spent a retry", got.State, got.InfrastructureRetries, got.Losses)
+						}
+						r := result(j, false)
+						r.Interrupted = true
+						if err := q.Complete(r); err != nil {
+							t.Fatal(err)
+						}
 					default:
 						r := result(j, false)
 						r.Interrupted = true

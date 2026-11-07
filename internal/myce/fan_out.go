@@ -245,7 +245,7 @@ func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
 }
 
 func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom, inventories ...[]*Machine) *Job {
-	if j.State != "queued" || absoluteStartBy(j) && expired(j.Spec.StartBy, q.clock.Now()) || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
+	if j.State != "queued" || expired(fanOutStartCutoff(j), q.clock.Now()) || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
 	components, candidates := q.fanOutComponents(j, inventories...)

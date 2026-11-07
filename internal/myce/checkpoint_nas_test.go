@@ -72,6 +72,10 @@ func TestProductionDuringMissingNAS(t *testing.T) {
 
 func TestProductionPreemptsDuringNASLoss(t *testing.T) {
 	q, clock := fixture(t)
+	// This protocol/recovery fixture authors its cleanup deadline.
+	if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	exp := submit(t, q, spec("experiment"))
 	m := machine("worker", "fake")
 	running := check(t, q, m, nil).Job

@@ -56,7 +56,11 @@ func TestHostLaunchTimeoutAttemptDiagnostic(t *testing.T) {
 	if strings.Contains(string(data), "private") || strings.Contains(string(data), "restarted") {
 		t.Error("private text or invented restart in job diagnostics", string(data))
 	}
-	// The same worker can succeed next; no fresh-session check-in is involved.
+	// Unchanged evidence stays held. Requalification can release the same session.
+	if next := check(t, q, m, nil).Job; next != nil {
+		t.Fatal("unchanged authorization failure retried", next.ID)
+	}
+	m.ExtensionFingerprint = "requalified-runtime"
 	b := check(t, q, m, nil).Job
 	if b == nil || b.Attempt != 2 || b.Session != a.Session {
 		t.Fatal("same-session retry missing", b)

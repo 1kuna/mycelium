@@ -19,6 +19,8 @@ func TestPriorityPreemptionEveryBatchKind(t *testing.T) {
 		for _, higher := range []bool{false, true} {
 			t.Run(kind+"/higher="+map[bool]string{false: "no", true: "yes"}[higher], func(t *testing.T) {
 				q, _ := fixture(t)
+				// This tier test authors its asserted 10-second stop policy.
+				q.SetPreemptionGrace(10 * time.Second)
 				victim := spec("experiment")
 				victim.Resumable = kind != "restart"
 				if kind == "native-group" {

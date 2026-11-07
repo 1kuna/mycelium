@@ -44,6 +44,10 @@ func TestNativeOutcomeTermStop(t *testing.T) {
 // Adapter production of these Results remains covered by TestOutcomeRuntimeTable.
 func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
 	q, _ := fixture(t)
+	// Exhaustion here is explicit operator intent, not the adaptive default.
+	if err := q.SetProductionInfrastructureRetries(2); err != nil {
+		t.Fatal(err)
+	}
 	m := machine("worker", "fake")
 	m.HostMemoryMeasured = true
 	m.HostAvailableMemoryGB = 8

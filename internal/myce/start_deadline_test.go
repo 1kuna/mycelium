@@ -29,6 +29,7 @@ func TestProductionStartDeadlineQualifiedRouteDiagnostic(t *testing.T) {
 	m.HostAvailableMemoryGB = .05
 	check(t, q, m, nil)
 	s.Priority = "production"
+	s.StartWindow = ProductionStartTimeout.String()
 	j := submit(t, q, s)
 	var logs bytes.Buffer
 	previous := log.Writer()
@@ -58,18 +59,13 @@ func TestProductionStartDeadlineDefault(t *testing.T) {
 	s := spec("production")
 	s.Needs.Platform = Platform{Required: []string{"xpu"}}
 	j := submit(t, q, s)
-	c.Advance(149 * time.Second)
+	c.Advance(24 * time.Hour)
 	waiting := job(t, q, j.ID)
-	if waiting.State != "queued" || !strings.Contains(waiting.Reason, "needs xpu") || !strings.Contains(waiting.Reason, "1s left to start") {
-		t.Fatalf("waiting: %+v", waiting)
+	if waiting.State != "queued" || waiting.Spec.StartBy != nil || !strings.Contains(waiting.Reason, "no submitted start cutoff") {
+		t.Fatalf("default invented a start cutoff: %+v", waiting)
 	}
-	c.Advance(time.Second)
-	failed := job(t, q, j.ID)
-	if failed.State != "failed" || !strings.Contains(failed.Reason, "production start deadline exceeded") || !strings.Contains(failed.Reason, "needs xpu") {
-		t.Fatalf("expired: %+v", failed)
-	}
-	if check(t, q, machine("b70", "xpu"), nil).Job != nil {
-		t.Fatal("expired production was assigned")
+	if check(t, q, machine("b70", "xpu"), nil).Job == nil {
+		t.Fatal("healthy delayed production was not assigned")
 	}
 }
 
@@ -78,7 +74,7 @@ func TestProductionStartDeadlineActualStart(t *testing.T) {
 		t.Run(map[bool]string{false: "before", true: "at"}[boundary], func(t *testing.T) {
 			q, c := fixture(t)
 			m := machine("b70", "xpu")
-			j := submit(t, q, spec("production"))
+			j := submit(t, q, authoredStartSpec())
 			assigned := check(t, q, m, nil).Job
 			if assigned == nil {
 				t.Fatal("not assigned")
@@ -128,6 +124,8 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 	for _, blocker := range []string{"experiments", "Docker"} {
 		t.Run(blocker, func(t *testing.T) {
 			q, c := fixture(t)
+			// This fixture asserts a known cleanup countdown inside an authored start fence.
+			q.SetPreemptionGrace(10 * time.Second)
 			m := machine("b70", "xpu")
 			if blocker == "Docker" {
 				m.Capabilities = append(m.Capabilities, "docker")
@@ -150,7 +148,7 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 			} else if err := setMaintenance(t, q, "b70", "disable"); err != nil {
 				t.Fatal(err)
 			}
-			s := spec("production")
+			s := authoredStartSpec()
 			deadline := c.Now().Add(6 * time.Second)
 			s.StartBy = &deadline
 			j := submit(t, q, s)
@@ -190,7 +188,7 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 
 func TestProductionStartDeadlineRestart(t *testing.T) {
 	q, c := fixture(t)
-	j := submit(t, q, spec("production"))
+	j := submit(t, q, authoredStartSpec())
 	deadline := *j.Spec.StartBy
 	c.Advance(149 * time.Second)
 	path := strings.TrimSuffix(q.lock.Name(), ".lock")
@@ -213,7 +211,7 @@ func TestProductionStartDeadlinePermit(t *testing.T) {
 	for _, timely := range []bool{true, false} {
 		t.Run(fmt.Sprintf("timely=%t", timely), func(t *testing.T) {
 			q, c := fixture(t)
-			j := submit(t, q, spec("production"))
+			j := submit(t, q, authoredStartSpec())
 			assigned := check(t, q, machine("b70", "xpu"), nil).Job
 			if assigned == nil {
 				t.Fatal("not assigned")
@@ -249,7 +247,7 @@ func TestProductionStartDeadlinePermit(t *testing.T) {
 
 func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) {
 	q, c := fixture(t)
-	s := spec("production")
+	s := authoredStartSpec()
 	s.Run.Command = []string{"sh", "-c", "echo started > {work}/started"}
 	j := submit(t, q, s)
 	assigned := check(t, q, machine("b70", "xpu"), nil).Job
@@ -285,7 +283,7 @@ func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) 
 
 func TestProductionStartDeadlineStatusPage(t *testing.T) {
 	q, c := fixture(t)
-	submit(t, q, spec("production"))
+	submit(t, q, authoredStartSpec())
 	for _, expired := range []bool{false, true} {
 		if expired {
 			c.Advance(ProductionStartTimeout)
@@ -310,7 +308,7 @@ func TestProductionStartDeadlineStatusPage(t *testing.T) {
 
 func TestProductionStartDeadlineRetryAndGiveUp(t *testing.T) {
 	q, c := fixture(t)
-	j := submit(t, q, spec("production"))
+	j := submit(t, q, authoredStartSpec())
 	assigned := check(t, q, machine("b70", "xpu"), nil).Job
 	if err := q.Started(result(assigned, true)); err != nil {
 		t.Fatal(err)
@@ -325,7 +323,7 @@ func TestProductionStartDeadlineRetryAndGiveUp(t *testing.T) {
 	if requeued.State != "queued" || !requeued.Spec.StartBy.Equal(c.Now().Add(ProductionStartTimeout)) {
 		t.Fatalf("started attempt did not get a recovery window: %+v", requeued)
 	}
-	s := spec("production")
+	s := authoredStartSpec()
 	giveUp := c.Now().Add(time.Second)
 	s.GiveUpAt = &giveUp
 	earlier := submit(t, q, s)
@@ -340,7 +338,7 @@ func TestProductionStartDeadlinePastDoesNotPreempt(t *testing.T) {
 	submit(t, q, spec("experiment"))
 	m := machine("b70", "xpu")
 	experiment := check(t, q, m, nil).Job
-	s := spec("production")
+	s := authoredStartSpec()
 	now := c.Now()
 	s.StartBy = &now
 	j := submit(t, q, s)
@@ -356,7 +354,7 @@ func TestProductionStartDeadlineRequiresSuccessfulExec(t *testing.T) {
 	if err := os.WriteFile(command, []byte("#!/myce-does-not-exist\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	s := spec("production")
+	s := authoredStartSpec()
 	s.Resumable = false
 	s.Run.Command = []string{command}
 	submit(t, q, s)
@@ -385,6 +383,7 @@ func TestProductionStartDeadlineDockerLateDispatch(t *testing.T) {
 	q.clock = clock
 	s := dockerJob().Spec
 	s.Priority = "production"
+	s.StartWindow = ProductionStartTimeout.String()
 	s.Resumable = false
 	submit(t, q, s)
 	assigned := check(t, q, w.Machine, nil).Job
@@ -415,7 +414,7 @@ func TestProductionStartDeadlineUnconfirmedHost(t *testing.T) {
 	m := machine("b70", "xpu")
 	m.DockerCleanup = "cleanup unconfirmed"
 	check(t, q, m, nil)
-	j := submit(t, q, spec("production"))
+	j := submit(t, q, authoredStartSpec())
 	if reply := check(t, q, m, nil); reply.Job != nil {
 		t.Fatal("unconfirmed Docker host admitted production")
 	}
@@ -432,7 +431,7 @@ func TestProductionStartDeadlineRoomAtBoundary(t *testing.T) {
 	m := machine("b70", "xpu")
 	submit(t, q, spec("experiment"))
 	experiment := check(t, q, m, nil).Job
-	s := spec("production")
+	s := authoredStartSpec()
 	deadline := c.Now().Add(6 * time.Second)
 	s.StartBy = &deadline
 	j := submit(t, q, s)
@@ -456,7 +455,7 @@ func TestProductionStartDeadlineDisabledFleetFailsPromptly(t *testing.T) {
 			if err := setMaintenance(t, q, "b70", "disable"); err != nil {
 				t.Fatal(err)
 			}
-			s := spec("production")
+			s := authoredStartSpec()
 			s.Needs.Platform = Platform{Required: []string{"xpu"}}
 			j := submit(t, q, s)
 			got := job(t, q, j.ID)
@@ -476,6 +475,7 @@ func TestProductionStartDeadlineOwnDockerPreparationPermit(t *testing.T) {
 	m := dockerMachine("b70", "xpu")
 	s := dockerJob().Spec
 	s.Priority = "production"
+	s.StartWindow = ProductionStartTimeout.String()
 	submit(t, q, s)
 	assigned := check(t, q, m, nil).Job
 	if assigned == nil {
@@ -580,7 +580,7 @@ func TestProductionStartDeadlineExecErrorPreservesUnknownRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	s := spec("production")
+	s := authoredStartSpec()
 	s.Resumable = false
 	s.Run.Command = []string{command}
 	submit(t, q, s)
@@ -602,7 +602,7 @@ func TestProductionStartDeadlineExecErrorPreservesUnknownRelease(t *testing.T) {
 
 func TestProductionStartDeadlineReleaseOnlyClearsPendingStatus(t *testing.T) {
 	q, c := fixture(t)
-	submit(t, q, spec("production"))
+	submit(t, q, authoredStartSpec())
 	assigned := check(t, q, machine("b70", "xpu"), nil).Job
 	c.Advance(ProductionStartTimeout)
 	requireState(t, q, assigned.ID, "failed")
@@ -615,4 +615,12 @@ func TestProductionStartDeadlineReleaseOnlyClearsPendingStatus(t *testing.T) {
 	if !got.ReleaseConfirmed || strings.Contains(got.Reason, "release pending") {
 		t.Fatalf("settled cleanup still pending: %+v", got)
 	}
+}
+
+// Historical deadline/custody fixtures intentionally author their old 150s
+// boundary. The default no-cutoff contract is exercised separately above.
+func authoredStartSpec() Spec {
+	s := spec("production")
+	s.StartWindow = ProductionStartTimeout.String()
+	return s
 }

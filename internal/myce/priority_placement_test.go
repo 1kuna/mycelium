@@ -1,6 +1,9 @@
 package myce
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestPriorityPreemptionCallCapacity(t *testing.T) {
 	for _, pin := range []bool{false, true} {
@@ -247,6 +250,9 @@ func TestPriorityPreemptionLeastCostUsefulRelease(t *testing.T) {
 	for _, kind := range []string{"call", "pin", "batch-ram"} {
 		t.Run(kind, func(t *testing.T) {
 			q, _, m := modelFixture(t)
+			if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+				t.Fatal(err)
+			}
 			preemptionPolicy(t, q)
 			m.FreeMemoryGB = 16
 			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 16

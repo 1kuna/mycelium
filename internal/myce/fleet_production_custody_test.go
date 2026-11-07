@@ -11,7 +11,7 @@ import (
 
 func TestFleetProductionIdleLastCopyReleaseAfterRetry(t *testing.T) {
 	q, c, workers := fleetFixture(t, "queue", "remote")
-	s := spec("production")
+	s := authoredStartSpec()
 	s.AllowedMachines = []string{workers[0].ID}
 	submit(t, q, s)
 	run := check(t, q, workers[0], nil).Job

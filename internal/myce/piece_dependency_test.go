@@ -65,6 +65,7 @@ func TestPieceDependencyProductionWindowStartsAtReadiness(t *testing.T) {
 	parent := submit(t, q, s)
 	c := pieceConsumer(s, parent.ID, "item-0")
 	c.Priority = "production"
+	c.StartWindow = ProductionStartTimeout.String()
 	consumer := submit(t, q, c)
 	explicit := c
 	explicit.Name = "explicit-window"

@@ -27,6 +27,9 @@ func TestSharedGPUPressureGrowth(t *testing.T) {
 	for _, layout := range []string{"unified", "separate"} {
 		t.Run(layout, func(t *testing.T) {
 			q, clock := fixture(t)
+			if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+				t.Fatal(err)
+			}
 			m := sharedUnifiedMachine()
 			m.CapabilityProfile.MemoryLayout = layout
 			m.Devices[0].UnifiedMemory = layout == "unified"

@@ -14,6 +14,10 @@ import (
 func holdFleet(t *testing.T, enabled bool) (*Queue, *fakeClock, Machine, Machine, Machine) {
 	t.Helper()
 	q, c := fixture(t)
+	// Hold/release protocol fixtures author their cleanup budget.
+	if err := q.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	if enabled {
 		if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); err != nil {
 			t.Fatal(err)

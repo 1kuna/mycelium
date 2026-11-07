@@ -597,7 +597,7 @@ func (g *nativeGroup) cleanupProcesses(writer *os.File, retry bool) error {
 		}
 		tick.Stop()
 	} else if graceful {
-		g.p.stop(g.worker.Clock.Now(), acceleratorStopGrace(g.worker.AcceleratorStopGrace), false)
+		g.p.stopAfterExit(g.worker.Clock.Now(), acceleratorStopGrace(g.worker.AcceleratorStopGrace))
 		g.p.waitStopGrace(g.worker.Clock, g.supervisor.Process.Pid, g.supervisor.Process.Pid)
 	}
 	// Cancellation may arrive while the normal completion path starts its
@@ -1355,6 +1355,10 @@ func (s *workerStore) drainCancelledNativeMain(st *workerState, clock Clock, mem
 					if err := memory.stop(clock); err != nil {
 						return err
 					}
+				} else if s.cleanupNonblocking {
+					// Keep control startup and heartbeats available while main
+					// drains, so an exact force can still reach this attempt.
+					return errRecoveryStopPending
 				}
 				<-tick.C
 			}

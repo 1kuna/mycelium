@@ -305,8 +305,8 @@ func (s Spec) Validate() error {
 	}
 	if s.StartWindow != "" {
 		window, err := time.ParseDuration(s.StartWindow)
-		if s.Priority != "production" || err != nil || window <= 0 || window > MaxProductionStartWindow {
-			return reject("job_deadline_invalid", errors.New("start_window requires production and a duration greater than 0 and at most 1h"))
+		if s.Priority != "production" || err != nil || window <= 0 {
+			return reject("job_deadline_invalid", errors.New("start_window requires production and a positive representable duration"))
 		}
 	}
 	if s.Priority == "deadline" && s.Deadline == nil {

@@ -35,7 +35,7 @@ func TestProductionAdmissionRepeatedPreemptionBackoff(t *testing.T) {
 				if next == "outside-window" && i == 1 {
 					clock.Advance(2*ProductionStartTimeout + time.Second)
 				}
-				p := spec("production")
+				p := authoredStartSpec()
 				p.AllowedMachines = []string{a.ID}
 				prod := submit(t, q, p)
 				if !check(t, q, a, run).Stop {

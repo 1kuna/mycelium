@@ -34,6 +34,9 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock := fixture(t)
+			if err := q.SetProductionInfrastructureRetries(2); err != nil {
+				t.Fatal(err)
+			}
 			spec := submitVerificationInput(t, q)
 			spec.Priority = "production"
 			spec.Resumable = false
@@ -94,7 +97,7 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 				t.Fatal("stale cause accepted", err)
 			}
 			if tc.retry {
-				for retry := 1; retry <= DefaultProductionInfrastructureRetries; retry++ {
+				for retry := 1; retry <= 2; retry++ {
 					clock.Advance(time.Second)
 					assigned = check(t, q, m, nil).Job
 					if assigned == nil {
@@ -107,7 +110,7 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 					}
 				}
 				got = job(t, q, submitted.ID)
-				if got.State != "failed" || got.Reason != "infrastructure_retries_exhausted" || got.InfrastructureRetries != DefaultProductionInfrastructureRetries {
+				if got.State != "failed" || got.Reason != "infrastructure_retries_exhausted" || got.InfrastructureRetries != 2 {
 					t.Fatal("unbounded staging retries", got)
 				}
 			}

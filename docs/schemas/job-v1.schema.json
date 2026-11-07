@@ -4403,7 +4403,7 @@
           "x-contract": "diagnostic"
         },
         "start_window": {
-          "description": "Optional production relative start duration (Go duration string), greater than zero and at most 1h. Defaults to 150s; explicit start_by takes precedence.",
+          "description": "Optional positive representable production relative start duration (Go duration string). Omission uses a submitted deadline, with no default start cutoff; explicit start_by takes precedence over a relative window, and the submitted deadline still binds.",
           "type": "string",
           "x-contract": "diagnostic"
         },

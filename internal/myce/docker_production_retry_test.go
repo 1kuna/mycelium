@@ -36,8 +36,8 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 				j.Spec.Run.DockerSidecars[0].Readiness = &DockerReadiness{Port: port, Path: "/ready", Timeout: "10s"}
 			}
 			submitted := submit(t, q, j.Spec)
-			// A configured value above two must not expand the agreed budget.
-			if err := q.SetProductionInfrastructureRetries(4); err != nil {
+			// Exercise an explicitly authored budget, independent of adaptive defaults.
+			if err := q.SetProductionInfrastructureRetries(2); err != nil {
 				t.Fatal(err)
 			}
 			attempts := 1

@@ -11,7 +11,7 @@ import (
 // Both the job and its retained keyed answer must return to the prior state.
 func TestRetainedKeyAnswerSurvivesRejectedResult(t *testing.T) {
 	q, c := fixture(t)
-	s := spec("production")
+	s := authoredStartSpec()
 	s.SubmissionKey = "rollback-deadline"
 	submit(t, q, s)
 	c.Advance(ProductionStartTimeout + time.Second)

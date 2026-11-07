@@ -79,6 +79,7 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
+	cleanupNonblocking    bool             // Worker actors retain custody while the control loop remains available.
 	storageObserver       *storageObserver // Exact attempt; shared with its publication callbacks.
 	inputStaging          *atomic.Bool     // Shared by all attempt stores; bounds detached ordinary staging.
 	sharedRelease         func()           // Idempotent; retained until exact process cleanup.
@@ -483,7 +484,7 @@ func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, 
 					// An ordinary command's delivered cancel must not gain another
 					// TERM or wait, even when shared inputs gave it group custody.
 					if !st.UserCancel || st.SidecarStopAt != nil {
-						if err := gracefulRecoveredGroups(&st, clock, func() error { return saveWorkerJSON(s.dir, "attempt-"+s.state.Identity+".json", st) }, memoryFiles...); err != nil {
+						if err := gracefulRecoveredGroups(&st, clock, func() error { return saveWorkerJSON(s.dir, "attempt-"+s.state.Identity+".json", st) }, s.cleanupNonblocking, memoryFiles...); err != nil {
 							return err
 						}
 					}
@@ -553,7 +554,7 @@ func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, 
 		if !owned {
 			group = 0 // Only the cgroup is authenticated, never signal a reused PGID.
 		}
-		if err := gracefulRecoveredGroup(group, clock, &s.state.StopAt, s.state.StopGrace, s.save, memory); err != nil {
+		if err := gracefulRecoveredGroupMode(group, clock, &s.state.StopAt, s.state.StopGrace, s.save, s.cleanupNonblocking, memory); err != nil {
 			return err
 		}
 	}
@@ -870,7 +871,7 @@ func syncCheckpointDirectory(dir string, filesystem func(*os.File) (bool, error)
 
 // Recovery authenticates every surviving group before sending any signal. A
 // persisted deadline prevents worker restarts from renewing or resending TERM.
-func gracefulRecoveredGroups(st *workerState, clock Clock, persist func() error, memoryFiles ...memoryFS) error {
+func gracefulRecoveredGroups(st *workerState, clock Clock, persist func() error, nonblocking bool, memoryFiles ...memoryFS) error {
 	var memory *memoryAttempt
 	if st.Cgroup != "" {
 		if filepath.Base(st.Cgroup) != "attempt-"+st.Identity {
@@ -948,12 +949,21 @@ func gracefulRecoveredGroups(st *workerState, clock Clock, persist func() error,
 		if !alive {
 			return nil
 		}
+		if nonblocking {
+			return errRecoveryStopPending
+		}
 		<-tick.C
 	}
 	return nil
 }
 
+var errRecoveryStopPending = errors.New("recovered attempt cooperative stop pending; custody retained")
+
 func gracefulRecoveredGroup(group int, clock Clock, deadline **time.Time, grace time.Duration, persist func() error, memories ...*memoryAttempt) error {
+	return gracefulRecoveredGroupMode(group, clock, deadline, grace, persist, false, memories...)
+}
+
+func gracefulRecoveredGroupMode(group int, clock Clock, deadline **time.Time, grace time.Duration, persist func() error, nonblocking bool, memories ...*memoryAttempt) error {
 	var memory *memoryAttempt
 	if len(memories) > 0 {
 		memory = memories[0]
@@ -994,6 +1004,9 @@ func gracefulRecoveredGroup(group int, clock Clock, deadline **time.Time, grace 
 		}
 		if len(members) == 0 && !outside {
 			return nil
+		}
+		if nonblocking {
+			return errRecoveryStopPending
 		}
 		<-tick.C
 	}

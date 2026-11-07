@@ -131,7 +131,7 @@ One measured physical-host memory allowance covers simultaneous production deman
 **Machines leaving.** Workers pull jobs, so a job is never tied to a machine until it starts. That means there is no list of waiting jobs per machine to clean up. Leaving works like this:
 
 - **Planned leave** (`myce leave`, or Ctrl-C on the worker). The machine stops taking new jobs at once. Resumable jobs get the stop signal, save to the NAS, and go back to the front of their line. For jobs that can't be resumed, `myce leave` asks whether to wait for them to finish or to stop them now and put them back in the queue. `myce leave --now` skips the question and stops everything.
-- **Sudden loss** (unplugged, asleep, network drop): without a check-in, the queue marks the machine gone after 5 seconds for production work, 20 seconds for deadline work, or 60 seconds for experiments (defaults based on the machine's active job priority). Its running jobs go back in the queue. Resumable jobs continue from their last checkpoint. Others start over. Experiments and deadline jobs fail loudly after three counted infrastructure losses; their planned stops to make room or leave do not count. Production uses the bounded infrastructure retry budget below, including planned host release or leave. Model calls that were in flight are retried on another machine, and models loaded there are marked as gone.
+- **Sudden loss** (unplugged, asleep, network drop): without a check-in, the queue marks the machine gone after 5 seconds for production work, 20 seconds for deadline work, or 60 seconds for experiments (defaults based on the machine's active job priority). Its running jobs go back in the queue. Resumable jobs continue from their last checkpoint. Others start over. Infrastructure losses do not exhaust a fixed default attempt budget; planned stops to make room or leave remain uncharged. Production recovery follows the evidence-based retry contract below. Model calls that were in flight are retried on another machine, and models loaded there are marked as gone.
 - **Late return.** A network split can briefly leave the same job running on two machines. When contact returns, the queue keeps the resumable copy with the newest complete checkpoint, or the current attempt when there is no newer checkpoint, and tells the other copy to stop. Jobs must make output writes safe to repeat.
 - **Jobs no remaining machine can run.** These are jobs pinned to the machine that left, or jobs that need a GPU type no current machine has (for example, Apple-only work when every Mac is away). They stay in the queue, and `myce status` says plainly why each one is waiting: "no machine in the fleet can run this right now (needs metal)". A job can set a give-up time, after which it is marked failed instead of waiting forever.
 
@@ -147,23 +147,36 @@ One measured physical-host memory allowance covers simultaneous production deman
 
 **Data stays local.** Every machine in the fleet is on-premises, so job data never leaves our machines. A job can also list the specific machines it is allowed to run on.
 
-**Production infrastructure retries (#80).** An interrupted production batch job requeues at the front of its priority line under the same job ID and `submission_key`, at most **2** times (`queue --production-infrastructure-retries`, a nonnegative limit clamped to two; zero disables requeue). Worker restart or loss, an unreported attempt after queue restart, undelivered/lost results, worker interruption/release, planned leave and reboot all use the existing requeue path. A queue restart that reconnects a still-current running command or its buffered result does not interrupt it. The third interruption fails with `infrastructure_retries_exhausted` and a terminal timestamp. The durable job counter `infrastructure_retries` records requeues used and is an additive optional integer in status and job-v1 (omitted at zero). It survives restart; release evidence cannot refund or revive an exhausted production budget.
+**Infrastructure retries (#80, adaptive default #807).** An interrupted production batch job requeues at the front of its priority line under the same job ID and `submission_key`. Infrastructure loss by itself is not evidence of a broken command: the default (`queue --production-infrastructure-retries=-1`) does not exhaust after two requeues, and experiments/deadline work no longer fail on a third loss. Worker restart or loss, an unreported attempt after queue restart, undelivered/lost results, worker interruption/release, planned leave and reboot retain their existing classification and requeue path. A reconnect of the current command or buffered result does not interrupt it. An explicit nonnegative operator limit still binds (`0` disables retries); positive values are honored without clamping. Exhaustion of that explicit budget remains `infrastructure_retries_exhausted`. The durable `infrastructure_retries` counter records actual production infrastructure requeues and survives restart. Diagnosed preparation/launch failures without accepted progress hold that target until its worker session, preparation or qualification evidence changes; another eligible target can run immediately. Routine heartbeats and fluctuating pressure do not release the hold. Unclassified observation loss remains recoverable. Independent command failures remain terminal; recovery never revives an exhausted/failed job or refunds custody. Existing saved service retry limits remain explicit configuration; an operator selects `-1` to adopt adaptive recovery without a fleet configuration change in this implementation.
 
 Classification uses Mycelium-recorded facts for native, native-group and Docker attempts. Infrastructure evidence is a durably recorded stop or kill delivered to that member before its exit was observed; loss of observation; a Mycelium-side pre-execution or launch refusal/failure (including authorization, exec/spawn or environment preparation infrastructure failure); or Mycelium's own probe proving that an allocated readiness port belongs to a process outside this group when readiness fails. Exit codes, payload stderr, stop intent and signals recorded after exit observation are never infrastructure evidence. Independent member exits, OOM (including an extension job), and readiness timeouts without such evidence fail production immediately without an infrastructure retry. A successful terminal outcome is preserved. Cancellation takes precedence: once `will_not_run: true` is acknowledged, no interruption can requeue the job. Superseded production attempts cannot recover ownership or publish a late result; exact release evidence can still discharge their custody. At most one attempt's result is published. Commands and output writes must still be safe to repeat; external side effects are not exactly-once. Experiments retain their existing retry, checkpoint recovery and planned-stop behavior.
 
 A production attempt that had started gets its original-length start window from interruption detection, including a worker interruption/release. Planned leave keeps its original start deadline. A requeued job may wait for its maintained host to resume within that window; a new production submission to only disabled eligible hosts still fails immediately. Unstarted attempts do not renew their start deadline.
 
 Production batch jobs and adapter entries may declare `start_window: 600s`, a
-positive Go duration no greater than `1h`; omission retains the `150s` default.
-This bounds availability waiting while allowing contended startup preparation;
-longer windows spend more caller latency before failure. Generated deadlines
-start at submission, dependency readiness, or physical fan-out child assignment,
-as applicable. Children inherit the declared length. Explicit absolute `start_by`
-takes precedence and passes unchanged through fan-out; its original window is
-the deadline minus original submission time. Job GET exposes the declaration in
-`spec.start_window` and the effective original length in top-level `start_window`
-(nanoseconds), including before startup. Experiments omit the fields and have no
-start deadline. Loss recovery retains that original effective length.
+positive representable duration. Omission supplies no universal start cutoff:
+the job's submitted `deadline` bounds first start/recovery when present;
+otherwise comparable observed placement latency is advisory. An overloaded
+healthy queue cannot manufacture a terminal deadline. Explicit absolute
+`start_by` takes precedence over a relative window, and the earlier submitted
+`deadline` still binds. Absolute cutoffs never move on infrastructure recovery.
+Relative windows start at submission, dependency readiness, or physical fan-out
+child assignment, as applicable, and renew after a started infrastructure loss
+without extending an absolute submitted deadline. Children retain the declared
+length. Job GET exposes `spec.start_window` and the original effective relative
+length in top-level `start_window` (nanoseconds). Experiments have no production
+start deadline.
+
+**Batch stop and cleanup (#807).** A stop grants the observed checkpoint cadence
+and same-target confirmed cleanup duration, with the observed range as jitter
+headroom. These are queue-owned exact-attempt measurements using `Clock`, never
+checkpoint/release authority. Without a measurement, cooperative TERM retains
+custody until release or an explicit force boundary; cleanup uncertainty calls
+for attention rather than pretending two minutes proves failure or release.
+A positive `--preemption-stop-grace` is an explicit override, and workers honor
+that budget without the former silent 15-second clip. Healthy slow Docker
+creation remains live. Failed or unmeasurable cleanup requires attention;
+otherwise escalation uses the measured budget. Escalation never clears custody.
 
 ## Queue-owned host maintenance
 
@@ -204,7 +217,7 @@ observed independent command failure, OOM or sidecar/readiness failure still
 fails production immediately. Started attempts get their original-length start
 window on requeue; an unstarted attempt keeps its deadline. Retries can wait on
 the maintained host or use another eligible host, subject to ordinary deadlines.
-The earlier two-infrastructure-retry contract still applies to other causes.
+The infrastructure retry contract above applies to other causes.
 
 The queue bootstraps the memory allowance once from the first worker report,
 including zero for an uncapped laptop. Subsequent reports cannot change it.
@@ -1071,7 +1084,7 @@ required ceilings refuse them. Core reservations do not enforce CPU time.
 
 One machine heartbeat uses the shortest active loss timeout: production 5 s,
 deadline 20 s, experiment 60 s. A stall affects every owned attempt independently,
-including each production retry counter (at most two infrastructure requeues).
+including each production infrastructure retry counter.
 Unknown release stays charged; a timeout cannot authorize overlap. A single
 attempt's failure does not mark its neighbors lost. Control/heartbeats and bulk
 preparation/result I/O remain independent; bulk I/O never holds the queue lock.

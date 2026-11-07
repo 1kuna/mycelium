@@ -213,6 +213,29 @@ caps/quotas still bind; running same-tier work is not stopped to repay debt.
 
 On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. During measured control pressure, expensive/lower-value nonproduction reads can return 429; honor `Retry-After` and prefer batched waits. Production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
 
+## Lifecycle recovery (next release, #807)
+
+Infrastructure interruptions no longer fail a job on its third loss. Mycelium
+retains the job/key and retry counters and retries infrastructure failures with
+useful progress. Diagnosed preparation/launch failures without progress wait on
+the failed target until its worker session, preparation or qualification changes;
+another eligible target can run immediately. Routine heartbeat/pressure changes
+do not release this hold. Unclassified observation loss remains recoverable;
+independent command exits, readiness failures without infrastructure evidence, and ordinary
+fixed-memory OOM remain failures. Resumable work still needs complete durable
+checkpoints. An operator may explicitly bound production retries (`-1` selects
+adaptive recovery; `0` disables requeue; positive limits are honored).
+
+Production has no invented 150-second start cutoff. Submit `deadline`, `start_by`
+or a positive `start_window` for a real cutoff. Absolute caller cutoffs survive
+recovery; a relative recovery window cannot extend the submitted deadline. With
+none, observed comparable placement latency is advisory and capacity/preparation
+can wait. Batch stop/cleanup uses measured checkpoint cadence and exact release
+duration on the target. Cold resumable work gets cooperative stop; unmeasured
+cleanup requires attention and retains custody. A positive explicit
+`--preemption-stop-grace` overrides learning. Elapsed time and progress reports
+never release an attempt or its resources, and output writes remain repeat-safe.
+
 ## Adaptive model readiness (next release)
 
 Omitted model `max_wait` follows caller cancellation and actual load failures;

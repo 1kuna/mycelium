@@ -220,6 +220,17 @@ func (p *process) recordPriorityStop(s *workerStore, stop *PriorityPreemption) e
 func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
 	p.stopDirective(now, grace, kill, false)
 }
+
+// Main exit starts cleanup only when cooperative shutdown is not already in
+// progress. An exit cannot replace a queue-issued checkpoint/drain deadline.
+func (p *process) stopAfterExit(now time.Time, grace time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopRequested.IsZero() {
+		p.stopGroup = !p.job.Spec.Needs.cpuOnly() && !p.userCancel
+		p.stopLocked(now, grace, false)
+	}
+}
 func (p *process) stopService(now time.Time, grace time.Duration) {
 	if p.stopAdmission != nil {
 		p.stopAdmission()
@@ -273,7 +284,12 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 		if kill {
 			grace = p.stopGrace
 		}
-		grace = min(acceleratorStopGrace(grace), acceleratorStopGrace(p.stopGrace))
+		if grace <= 0 {
+			grace = acceleratorStopGrace(p.stopGrace)
+		}
+		if p.stopGrace > 0 {
+			grace = min(grace, p.stopGrace)
+		}
 		deadline := now.Add(grace)
 		if p.stopped && p.stopAt != nil && p.stopAt.Before(deadline) {
 			deadline = *p.stopAt
@@ -405,9 +421,6 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
-		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
 	if parkedStorage(&j) {
 		return nil, s.startFailure(j, launchRefused, errors.New(parkedStorageReason))
@@ -668,7 +681,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; exec 3>&-; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
 	args = append(args, j.Spec.Run.Command[1:]...)
 	var readyReader, readyWriter, approvalReader, approvalWriter *os.File
-	if j.Spec.StartBy != nil {
+	if j.Spec.Priority == "production" || j.Spec.StartBy != nil {
 		executable, e := os.Executable()
 		if e != nil {
 			return nil, e
@@ -893,7 +906,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if w.control != nil {
 		w.control.set(p)
 	}
-	if j.Spec.StartBy == nil {
+	if readyReader == nil {
 		if err = w.authorizeStart(j, s.state.Session, s.dir); err != nil {
 			return nil, abort(s.startFailure(j, launchRefused, err))
 		}
@@ -958,7 +971,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		observationErr := p.saveOutcome(p.outcome)
 		p.mu.Unlock()
 		if !j.Spec.Needs.cpuOnly() {
-			p.stop(w.Clock.Now(), acceleratorStopGrace(w.AcceleratorStopGrace), false)
+			p.stopAfterExit(w.Clock.Now(), acceleratorStopGrace(w.AcceleratorStopGrace))
 		}
 		p.waitStopGrace(w.Clock, cmd.Process.Pid, 0)
 		p.mu.Lock()

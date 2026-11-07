@@ -258,6 +258,7 @@ func TestCapabilityFirstProductionProgramUsesLeastValueFreeWithHold(t *testing.T
 	}
 	s := placementSpec(true)
 	s.Priority = "production"
+	s.StartWindow = "30s"
 	j := submit(t, q, s)
 	if got := job(t, q, j.ID).ProductionHost; got != small.ID {
 		t.Fatalf("production chose %s, want %s", got, small.ID)

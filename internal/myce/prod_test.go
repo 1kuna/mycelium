@@ -123,6 +123,8 @@ func TestCachedPlacementAndPinPersistence(t *testing.T) {
 }
 func TestImmediateStopNotification(t *testing.T) {
 	q, _ := fixture(t)
+	// The notification/timing contract here uses an authored stop budget.
+	q.SetPreemptionGrace(10 * time.Second)
 	m := machine("one", "fake")
 	submit(t, q, spec("experiment"))
 	r := check(t, q, m, nil).Job
@@ -155,6 +157,10 @@ func TestDevProductionStartsUnder15SecondsRealTime(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer d.Close()
+	// This latency canary explicitly requests its measured 10s checkpoint policy.
+	if err := d.Queue.SetPreemptionGrace(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
 	// Immediate delivery independently has a long-poll notification test.
 	s := spec("experiment")
 	s.Run.Command = []string{"sh", "-c", `if [ "$MYCE_ATTEMPT" != 1 ]; then exit 0; fi; trap '' TERM; echo ready; while :; do sleep 1; done`}
@@ -267,6 +273,8 @@ func TestPinnedLoadFailureVisible(t *testing.T) {
 
 func TestProductionShortensExistingDeadlineGrace(t *testing.T) {
 	q, c := fixture(t)
+	// Authored policy changes can shorten existing grace; class alone no longer invents a shorter duration.
+	q.SetPreemptionGrace(2 * time.Minute)
 	s := cpuSpec(1, 1)
 	s.Resumable = true
 	submit(t, q, s)
@@ -277,6 +285,7 @@ func TestProductionShortensExistingDeadlineGrace(t *testing.T) {
 		t.Fatal("deadline grace")
 	}
 	c.Advance(time.Second)
+	q.SetPreemptionGrace(10 * time.Second)
 	submit(t, q, spec("production"))
 	if check(t, q, m, r).GraceSeconds != 10 {
 		t.Fatal("production did not shorten existing grace")
@@ -289,6 +298,8 @@ func TestProductionShortensExistingDeadlineGrace(t *testing.T) {
 
 func TestProductionShorteningPreservesCancellation(t *testing.T) {
 	q, c := fixture(t)
+	// The notification/timing contract here uses an authored stop budget.
+	q.SetPreemptionGrace(10 * time.Second)
 	j := submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	r := check(t, q, m, nil).Job
@@ -308,6 +319,8 @@ func TestProductionShorteningPreservesCancellation(t *testing.T) {
 // own measurement. The real-time counterpart above is skipped only with -short.
 func TestProductionStartLatencyFakeClock(t *testing.T) {
 	q, c := fixture(t)
+	// The notification/timing contract here uses an authored stop budget.
+	q.SetPreemptionGrace(10 * time.Second)
 	submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	run := check(t, q, m, nil).Job
@@ -422,6 +435,8 @@ func TestProductionPreemptionReleaseGrace(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			q, c := fixture(t)
+			// The notification/timing contract here uses an authored stop budget.
+			q.SetPreemptionGrace(10 * time.Second)
 			a, b := machine("a", "fake"), machine("b", "fake")
 			submit(t, q, spec("experiment"))
 			first := check(t, q, a, nil).Job

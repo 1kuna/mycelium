@@ -254,6 +254,10 @@ func TestWorkerWaitsForNonresumableOnInterrupt(t *testing.T) {
 }
 func TestWorkerCommandStartFailure(t *testing.T) {
 	q, _ := fixture(t)
+	// This fixture exercises an explicitly bounded launch policy.
+	if err := q.SetProductionInfrastructureRetries(2); err != nil {
+		t.Fatal(err)
+	}
 	q.clock = RealClock{}
 	s := spec("production")
 	s.Run.Command = []string{"/does-not-exist/myce-test"}

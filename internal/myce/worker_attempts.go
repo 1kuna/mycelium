@@ -242,11 +242,34 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		// A failed inventory/cleanup keeps custody, but must not freeze the
 		// finished actor until a worker restart. Reuse recovery's exact process
 		// identity checks; only confirmed cleanup can clear pending release.
+		cooperativeCleanup := false
 		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 			var fs memoryFS = osMemoryFS{}
 			if w.memoryCeilings != nil {
 				fs = w.memoryCeilings.fs
 			}
+			// Apply exact-attempt control before another nonblocking recovery
+			// step. Persist force/cancel so a second restart cannot renew grace.
+			if connected && d.Stop {
+				deadline := now.Add(time.Duration(max(0, d.GraceSeconds) * float64(time.Second)))
+				if d.Kill {
+					deadline = now
+				}
+				if s.state.StopAt == nil || deadline.Before(*s.state.StopAt) {
+					s.state.StopAt = &deadline
+				}
+				s.state.UserCancel = s.state.UserCancel || d.UserCancel
+				intent := workerState{Identity: s.state.Identity, StopAt: s.state.StopAt, UserCancel: s.state.UserCancel}
+				if err := saveWorkerJSON(s.dir, s.state.Identity+".stop.json", intent); err != nil {
+					finish(err)
+					return
+				}
+				if err := s.save(); err != nil {
+					finish(err)
+					return
+				}
+			}
+			s.cleanupNonblocking = true
 			if err := s.cleanupOrphan(w.Clock, fs); err == nil {
 				released := *s.state.Result
 				released.ReleasePending = false
@@ -262,6 +285,8 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					finish(err)
 					return
 				}
+			} else {
+				cooperativeCleanup = errors.Is(err, errRecoveryStopPending)
 			}
 		}
 		if connected {
@@ -404,7 +429,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if err == nil && (a.job.storedFileResults() || s.state.Result != nil && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
-				if s.state.Result != nil {
+				if s.state.Result != nil && !cooperativeCleanup {
 					if !s.state.Result.ReleasePending {
 						released := *s.state.Result
 						released.ReleaseOnly = true
@@ -451,7 +476,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 				}
 			}
-			if err == nil && s.state.Result != nil {
+			// A recovered cooperative drain is still active custody. Publishing
+			// its interruption now would requeue it and turn the next heartbeat
+			// into a stale-attempt kill before its accepted grace has elapsed.
+			// Logs and checkpoint progress above remain publishable meanwhile.
+			if err == nil && s.state.Result != nil && !cooperativeCleanup {
 				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 			}
 			if s.state.Result != nil && (err == nil || stale(err)) && !s.state.Result.ReleasePending {
@@ -538,8 +567,17 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 			return nil, err
 		}
 	}
+	s.cleanupNonblocking = true
 	if err := s.cleanupOrphan(w.Clock, fs); err != nil {
-		return nil, err
+		if !errors.Is(err, errRecoveryStopPending) {
+			return nil, err
+		}
+		if s.state.Result == nil {
+			r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; cleanup pending"}, attemptCause{memberOutcome: memberOutcome{ObservationLost: true}, PriorityStop: s.state.PriorityStop})
+			s.state.Result = &r
+		}
+		s.state.Result.ReleasePending = true
+		return nil, s.save()
 	}
 	var p *process
 	var err error
