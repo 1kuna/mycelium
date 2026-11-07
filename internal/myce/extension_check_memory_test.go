@@ -13,17 +13,28 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 	for _, tc := range []struct {
 		name                           string
 		hint, total                    float64
+		available                      float64
 		oom, missingDevice, sameTarget bool
 	}{
-		{"hint", 12, 10.855361938476562, false, false, false},
-		{"no hint", 0, 10.855361938476562, false, false, false},
-		{"oversized cgroup despite small RSS", 12, 25, false, false, false},
-		{"failed probe cannot repeat", 12, 10.855361938476562, true, false, false},
-		{"missing device telemetry", 12, 10.855361938476562, true, true, false},
-		{"same target different layout", 12, 10.855361938476562, true, false, true},
+		{name: "hint", hint: 12, total: 10.855361938476562},
+		{name: "no hint", total: 10.855361938476562},
+		{name: "oversized cgroup despite small RSS", hint: 12, total: 25},
+		{name: "shared host", total: 9.93, available: 13.7},
+		{name: "drained host below allowance", total: 9.93, available: 23},
+		{name: "cgroup prior exceeds live room", total: 9.93, available: 8},
+		{name: "hint exceeds live room", hint: 14, total: 9.93, available: 13.7},
+		{name: "failed probe cannot repeat", hint: 12, total: 10.855361938476562, available: 13.7, oom: true},
+		{name: "missing device telemetry", hint: 12, total: 10.855361938476562, oom: true, missingDevice: true},
+		{name: "same target different layout", hint: 12, total: 10.855361938476562, oom: true, sameTarget: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock, m, s := gpuHostFixture(t)
+			if tc.available > 0 {
+				// Start a new sensor session at the captured headroom, rather
+				// than inventing a large drop from the generic fixture's 28 GiB.
+				m.ID, m.HostID, m.Session = "live-headroom-target", "live-headroom-target", "live-headroom-session"
+				m.HostAvailableMemoryGB, m.MemoryCeilingSlackGB = tc.available, .2
+			}
 			e := registeredExtension(t, q, s.Extension)
 			e.Version = "2"
 			cuda := e.Variants[0]
@@ -70,7 +81,8 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 				queued := submit(t, q, s)
 				run := assignedJob(machineCheck(t, q, owner))
 				if run == nil || run.ID != queued.ID {
-					t.Fatalf("check not assigned: %+v", job(t, q, queued.ID))
+					got := job(t, q, queued.ID)
+					t.Fatalf("check not assigned (%s): %s", got.State, got.Reason)
 				}
 				if err := q.Started(result(run, false)); err != nil {
 					t.Fatal(err)
@@ -87,6 +99,9 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 				}
 			}
 			rss, device := 5.0111541748046875, 5.7197265625
+			if tc.available > 0 {
+				rss, device = 4.42, 1.10
+			}
 			seed := &AttemptMemoryPeak{HostGB: &rss, CgroupGB: &tc.total, DeviceGB: &device, Events: &MemoryEventCounts{}}
 			if tc.missingDevice {
 				seed.DeviceGB = nil
@@ -95,8 +110,25 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 			s.Targets = []ExecutionTarget{e.Variants[0].Target}
 			s.AllowedMachines = []string{m.ID}
 			s.SizeHint = SizeHint{HostMemoryGB: tc.hint}
+			budget := 24 - m.MemoryCeilingSlackGB - exploratoryDriftMarginGB(&m)
+			if tc.available > 0 {
+				budget = min(budget, tc.available-m.MemoryCeilingSlackGB-exploratoryDriftMarginGB(&m))
+			}
 			if tc.total > 24 {
 				memoryExplorationRefused(t, q, s)
+				return
+			}
+			if tc.total > budget || tc.hint > budget {
+				queued := submit(t, q, s)
+				if run := assignedJob(machineCheck(t, q, m)); run != nil {
+					t.Fatal("probe started below the total-cgroup prior or host hint")
+				}
+				if got := job(t, q, queued.ID); got.State != "queued" || !strings.Contains(got.Reason, "RAM envelope") {
+					t.Fatalf("live headroom shortage did not wait: %s %s", got.State, got.Reason)
+				}
+				if len(q.s.MemoryExplorations) != 0 {
+					t.Fatal("refusal spent the exploration claim")
+				}
 				return
 			}
 			run := start(m)
@@ -104,7 +136,7 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 			if tc.missingDevice {
 				wantSource += "; unknown device peak; exclusive card"
 			}
-			if run.MemoryEnvelope.Basis != "exploratory" || run.MemoryEnvelope.Source != wantSource || run.Spec.Needs.HostMemoryGB != 24-minimumHostMemoryGB || len(q.s.MemoryExplorations) != 1 {
+			if run.MemoryEnvelope.Basis != "exploratory" || run.MemoryEnvelope.Source != wantSource || math.Abs(run.Spec.Needs.HostMemoryGB-budget) > 1e-9 || len(q.s.MemoryExplorations) != 1 {
 				t.Fatalf("single cross-family prior still blocks bounded measurement: %+v", run.MemoryEnvelope)
 			}
 			host, residual := 7.25, .25

@@ -238,8 +238,21 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 		return 0, "", false
 	}
 	room, why := q.exploratoryMemory(j, m)
+	if crossGPU && why == "" {
+		// An allowance is a permanent capacity ceiling, not RAM that can
+		// necessarily become free: the queue and other processes may share
+		// this host. Probe the measured usable headroom instead. This remains
+		// uncalibrated exploration, never an upper bound inferred from the
+		// source runtime. exploratoryMemory already reserves slack and drift.
+		// Retain total-cgroup/constrained/hint floors even when they cannot
+		// fit right now; that is a live wait, not impossible static capacity.
+		budget = max(lower, hint, min(budget, room))
+	}
 	if why == "" && room < budget {
 		why = "bounded memory exploration needs the largest eligible host allowance free"
+		if crossGPU {
+			why = "bounded memory exploration needs its observed host-memory floor or hint free"
+		}
 	}
 	return budget, why, true
 }
