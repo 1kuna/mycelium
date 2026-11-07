@@ -1308,3 +1308,47 @@ cgroup/proc data and an injected clock. The initial implementation ran that nati
 check on macOS (CPU readings and explicit unsupported I/O); native Linux delegated
 cgroup CPU/stat/PSI and Linux host PSI were not run. No daemon, GPU, I/O isolation
 or loaded queue-latency qualification follows from these measurements.
+
+### Fault evidence cost and native qualification
+
+The device-fault monitor reuses its existing kernel cursor and attempt-memory
+samples. It adds no periodic sampler. A scan with matching lines reads host
+memory/page tables and attempt PIDs once per affected device; burst lines share
+that observation with independent kernel timestamps. No host/kernel/core I/O
+runs under the queue mutex. Queue attachment compares exact attempt/session
+identities and bounded metadata only.
+
+Each proc/journal section has a 64 KiB read/retention boundary: ordinary memory
+tables are a few pages, while unusually large NUMA tables are explicitly marked
+truncated. The existing 1 MiB diagnostic-report budget bounds each device and
+current attempt's retained history; a conservative escaped-JSON size charge
+avoids serialization under the mutex. Oldest events yield first; omissions are
+visible. These bounds prevent driver storms/large proc tables from growing
+control transactions with uptime; they do not gate healthy work or alter
+placement. Capture durations are recorded per snapshot for native measurement.
+
+Fatal-signal metadata queries reuse the monitor's two-second journal I/O budget,
+only after a matching fatal exit and outside process/queue locks. The cost is
+up to that budget in result latency; timeout reports missing evidence and never
+blocks process-control locking. The exit is published before collection so the
+teardown classifier sees it immediately. One small PID pipe preserves an
+unwrapped plain command's child identity without tracing or modifying its
+environment. Joined native members reuse the launch handshake's payload PID;
+other wrappers need exact-attempt cgroup core metadata or report unknown. Core
+queries cover the execution lifetime and match current-boot payload PIDs, allowing
+core writing to delay Wait without losing earlier crash metadata. Systemd does
+not export process births; kernel crash timestamps have second resolution.
+Newest-first bounded journal reads retain recent evidence on long attempts. Synthetic
+`BenchmarkFaultEvidenceCapture` measures parsing/attribution overhead, not GPU
+sampling or native journal latency. A Darwin arm64 synthetic run measured 3.623 µs/op,
+1,256 bytes/op and 30 allocations/op (200 ms benchmark); this excludes real
+proc/PID I/O and is not a native latency claim.
+
+Laptop checks use injected clocks, kernel lines, cgroup files and wait statuses;
+core records/maps are synthetic. Native acceptance, after an authorized release,
+requires a naturally occurring fault: verify kernel/capture/sample alignment,
+exact PID ownership, page counters, native query latency and capture availability.
+For a natural signal exit verify any core pointer and privately recover stack,
+argument registers and ELF build IDs. Do not induce GPU faults or enable cores
+as part of the laptop/full gate. Current historical causes for #155/#300 remain
+unknown; this capture is not a preventive fix or a benign classification.

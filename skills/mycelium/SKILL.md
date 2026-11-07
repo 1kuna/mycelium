@@ -255,3 +255,15 @@ their supported request shape while local collection continues.
 Installed/rollback images, active state, receipts and unknown data are retained;
 foreign services/processes and other projects' shared caches are owner context
 only. See [worker cleanup](https://github.com/1kuna/mycelium/blob/main/docs/status.md#worker-cleanup-834-next-release).
+
+## Fault evidence (next release)
+
+Device `fault_evidence`, job `fault_evidence` and terminal `attempt_history`
+retain bounded attempt/PID/memory/page snapshots for observed driver faults.
+Fatal native signals add `signal_evidence`, including readable fault address,
+loaded-library mapping identities and existing core pointers/capture availability.
+Use one `myce status JOB_ID` inspection and compare kernel, capture and sample
+timestamps; delayed samples, ambiguous CUDA-device attribution and missing native
+cores do not establish a cause. Report `unknown` until the causal chain is proved.
+Core enablement is a separately authorized operator task; agents must not change
+limits, core patterns or drivers. See [fault evidence](https://github.com/1kuna/mycelium/blob/main/docs/status.md#fault-evidence-next-release).

@@ -44,8 +44,11 @@ func (signal deliveredSignal) before(exit *memberExit) bool {
 }
 
 type memberExit struct {
-	Status     int       `json:"status"`
-	ObservedAt time.Time `json:"observed_at"`
+	CoreDumped bool            `json:"core_dumped,omitempty"`
+	Signal     string          `json:"signal,omitempty"`
+	Evidence   *SignalEvidence `json:"signal_evidence,omitempty"`
+	Status     int             `json:"status"`
+	ObservedAt time.Time       `json:"observed_at"`
 }
 type infrastructureFact struct {
 	Kind             string           `json:"kind"`
@@ -173,6 +176,9 @@ func startFailureOutcome(owner Result, err error) Result {
 }
 
 func classifyAttemptOutcome(result Result, facts attemptCause) Result {
+	if facts.Exit != nil {
+		result.SignalEvidence = facts.Exit.Evidence
+	}
 	if e := safeRSSLimit(facts.RSSLimit); e != nil {
 		result.Success, result.OutOfMemory = false, true
 		result.ExecutionCause = &RuntimeCause{Operation: "command", Class: rssLimitExceeded, RSSLimit: e}
@@ -259,14 +265,22 @@ func withStopProvenance(result Result, stop *PriorityPreemption) Result {
 
 // The wait status supplies only the exit status. It never establishes cause.
 func observedNativeExit(cmd *exec.Cmd, at time.Time) *memberExit {
-	code := 1
 	if cmd.ProcessState != nil {
-		code = cmd.ProcessState.ExitCode()
-		if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			code = 128 + int(status.Signal())
+		if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok {
+			return nativeWaitExit(status, at)
 		}
+		return &memberExit{Status: cmd.ProcessState.ExitCode(), ObservedAt: at}
 	}
-	return &memberExit{Status: code, ObservedAt: at}
+	return &memberExit{Status: 1, ObservedAt: at}
+}
+func nativeWaitExit(status syscall.WaitStatus, at time.Time) *memberExit {
+	e := &memberExit{Status: status.ExitStatus(), ObservedAt: at}
+	if status.Signaled() {
+		e.Status = 128 + int(status.Signal())
+		e.Signal = crashSignal(status.Signal())
+		e.CoreDumped = status.CoreDump()
+	}
+	return e
 }
 
 // An operator marker is provenance, never evidence of signal delivery.

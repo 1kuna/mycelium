@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -449,6 +450,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		if workerProtocolEndpoint(r.URL.Path) {
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
+			w.Header().Set(faultEvidenceHeader, faultEvidenceProtocol)
 		}
 		finishObservation, admitted := observationLimit.admit(w, r)
 		if !admitted {
@@ -590,6 +592,7 @@ func (q *Queue) Run(ctx context.Context) error {
 
 type Client struct {
 	resourceWire *resourceWire
+	faultWire    *atomic.Bool
 	URL          string
 	Token        string
 	HTTP         *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
@@ -599,16 +602,21 @@ type Client struct {
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
+	in, faultFields := faultWireInput(in, c.faultWire != nil && c.faultWire.Load())
 	in, resourceFields := resourceWireInput(in, supported)
 	err := c.callOnce(ctx, method, path, in, out)
 	var api *HTTPError
-	if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
+	if (faultFields || resourceFields && path != "/api/workers/checkin") && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
 		// Strict JSON rejection occurs before mutation. Retry only once, with
 		// additive telemetry removed; retain the original durable local result.
 		if c.resourceWire != nil {
 			c.resourceWire.supported.Store(false)
 		}
+		if c.faultWire != nil {
+			c.faultWire.Store(false)
+		}
 		legacy, _ := resourceWireInput(in, false)
+		legacy, _ = faultWireInput(legacy, false)
 		return c.callOnce(ctx, method, path, legacy, out)
 	}
 	// Ordinary idempotent reads get one refill retry. Wait loops own repeated
@@ -650,6 +658,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		return err
 	}
 	defer res.Body.Close()
+	if c.faultWire != nil && workerProtocolEndpoint(path) {
+		c.faultWire.Store(res.Header.Get(faultEvidenceHeader) == faultEvidenceProtocol)
+	}
 	if c.resourceWire != nil && workerProtocolEndpoint(path) {
 		c.resourceWire.supported.Store(res.Header.Get(resourceProtocolHeader) == resourceProtocol)
 	}

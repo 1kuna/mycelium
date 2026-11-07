@@ -17,6 +17,8 @@ func init() {
 	workerHostHealthSource = nil
 	workerMountRoots = func(context.Context) ([]string, error) { return []string{"/"}, nil }
 	workerDeviceFaultSource = func() DeviceFaultSource { return nil }
+	workerFaultHost = func() (map[string]string, []string) { return nil, []string{"synthetic_host"} }
+	workerSignalEvidence = func(SignalCapture) *SignalEvidence { return &SignalEvidence{CoreCapture: "unavailable"} }
 	SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
 	extensionIdentityProbe = func() MachineProbe {
 		return MachineProbe{Files: fstest.MapFS{"proc/cpuinfo": {Data: []byte("model name : synthetic CPU\n")}}, Command: func(context.Context, string, ...string) ([]byte, error) {

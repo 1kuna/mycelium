@@ -14,6 +14,7 @@ import (
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
 type MachineDevice struct {
+	FaultEvidence         []*FaultEvidence   `json:"fault_evidence,omitempty"`
 	pciFact               *pciAccelerator    // Physical facts from the shared probe.
 	pciAddress            string             // Local probe fact; never part of the queue protocol.
 	Attempts              []Execution        `json:"attempts,omitempty"`

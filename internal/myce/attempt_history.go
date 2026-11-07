@@ -14,6 +14,8 @@ const attemptHistoryLimit = max(3, DefaultProductionInfrastructureRetries+1) + 1
 // taxonomy. State is the queue decision after this attempt (queued or terminal).
 // It is diagnostic evidence, never release proof or a retry/accounting input.
 type AttemptOutcome struct {
+	FaultEvidence  []*FaultEvidence    `json:"fault_evidence,omitempty"`
+	SignalEvidence *SignalEvidence     `json:"signal_evidence,omitempty"`
 	inputsStaged   bool                // transient positive staging evidence; not part of the wire/history shape.
 	Placement      *PlacementDecision  `json:"placement,omitempty"`
 	Diagnostics    *AttemptDiagnostics `json:"diagnostics,omitempty"`
@@ -41,6 +43,7 @@ func historyPlannedStop(j *Job) bool {
 
 func attemptOutcome(j *Job, r Result) AttemptOutcome {
 	return AttemptOutcome{
+		FaultEvidence: j.FaultEvidence, SignalEvidence: r.SignalEvidence,
 		inputsStaged: r.Success || j.StartedAt != nil || j.InputsStagedAt != nil || r.InputsStagedAt != nil,
 		Placement:    j.Placement,
 		Attempt:      j.Attempt, Machine: j.Machine, Session: j.Session,

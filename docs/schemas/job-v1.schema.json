@@ -307,6 +307,15 @@
         "execution_cause": {
           "$ref": "#/$defs/RuntimeCause"
         },
+        "fault_evidence": {
+          "items": {
+            "$ref": "#/$defs/FaultEvidence"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "interrupted": {
           "type": "boolean"
         },
@@ -333,6 +342,9 @@
         },
         "session": {
           "type": "string"
+        },
+        "signal_evidence": {
+          "$ref": "#/$defs/SignalEvidence"
         },
         "state": {
           "type": "string"
@@ -1582,6 +1594,163 @@
       ],
       "type": "object"
     },
+    "FaultAttempt": {
+      "properties": {
+        "assigned_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "device_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "device_gb": {
+          "type": "number"
+        },
+        "device_source": {
+          "type": "string"
+        },
+        "host_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "host_gb": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "pid_unavailable": {
+          "type": "boolean"
+        },
+        "pids": {
+          "items": {
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "session",
+        "pids",
+        "host_at",
+        "device_at"
+      ],
+      "type": "object"
+    },
+    "FaultEvidence": {
+      "properties": {
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/FaultAttempt"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "capture_ns": {
+          "type": "integer"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "device_attribution": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string"
+        },
+        "host": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "kernel_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "omitted_attempts": {
+          "type": "integer"
+        },
+        "replaced": {
+          "type": "integer"
+        },
+        "unavailable": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "event",
+        "kind",
+        "device",
+        "kernel_at",
+        "captured_at",
+        "capture_ns",
+        "device_attribution",
+        "attempts",
+        "host"
+      ],
+      "type": "object"
+    },
+    "FaultLibrary": {
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "inode": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "address",
+        "offset",
+        "device",
+        "inode"
+      ],
+      "type": "object"
+    },
     "FileCheckpoint": {
       "properties": {
         "files": {
@@ -1913,6 +2082,16 @@
         },
         "fan_out": {
           "$ref": "#/$defs/FanOutProgress",
+          "x-contract": "diagnostic"
+        },
+        "fault_evidence": {
+          "items": {
+            "$ref": "#/$defs/FaultEvidence"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
           "x-contract": "diagnostic"
         },
         "file_checkpoints": {
@@ -4058,6 +4237,80 @@
           "type": "integer"
         }
       },
+      "type": "object"
+    },
+    "SignalEvidence": {
+      "properties": {
+        "attribution": {
+          "type": "string"
+        },
+        "capture_ns": {
+          "type": "integer"
+        },
+        "core_bytes": {
+          "type": "integer"
+        },
+        "core_capture": {
+          "type": "string"
+        },
+        "core_pointer": {
+          "type": "string"
+        },
+        "core_truncated": {
+          "type": "boolean"
+        },
+        "exit_status": {
+          "type": "integer"
+        },
+        "fault_address": {
+          "type": "string"
+        },
+        "kernel_core_dumped": {
+          "type": "boolean"
+        },
+        "libraries": {
+          "items": {
+            "$ref": "#/$defs/FaultLibrary"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "signal": {
+          "type": "string"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "unavailable": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "started_at",
+        "attribution",
+        "exit_status",
+        "pid",
+        "signal",
+        "observed_at",
+        "core_capture",
+        "capture_ns"
+      ],
       "type": "object"
     },
     "SizeHint": {
