@@ -499,6 +499,12 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
 	charge = ceiling
 	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, ceiling, sample, now)
+	if j.Spec.Needs.cpuOnly() && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
+		// Even a declared attempt's burst forecast cannot grow beyond its
+		// full hard limit. Keep the complete ceiling as the bound, rather than
+		// assuming the sampled resident memory is still present at admission.
+		growth = min(growth, ceiling)
+	}
 	e := j.MemoryEnvelope
 	if e == nil || e.ProbeFloorGB <= 0 || j.Spec.Needs.Memory != "auto" || !j.Spec.Needs.cpuOnly() || j.State != "running" || !sample.growthObserved || sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= hostMemorySampleFreshFor || !validMemoryValue(sample.gb) || !validMemoryValue(sample.growthGB) {
 		return
