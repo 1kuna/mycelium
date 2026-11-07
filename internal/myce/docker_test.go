@@ -602,6 +602,8 @@ func TestDockerDelayedStartSurvivesLostReply(t *testing.T) {
 }
 func TestDockerHangingCallDoesNotBlockStopOrHeartbeat(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
+	// Exercise an explicitly bounded lost reply; cold create has no inferred deadline.
+	w.dockerCallTimeout = 2 * time.Second
 	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("hang"), 0600)
 	j := dockerJob()
 	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
