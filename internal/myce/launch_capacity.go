@@ -36,7 +36,7 @@ func (q *Queue) launchCapacityEvidence(j *Job, m *Machine) string {
 	if m == nil {
 		return ""
 	}
-	parts := []string{fmt.Sprintf("%s/%s/%t/%g/%t/%g/%g/%g/%d/%d/%g", m.ID, m.Session,
+	parts := []string{fmt.Sprintf("demand/%g/%g/%d", j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores()), fmt.Sprintf("%s/%s/%t/%g/%t/%g/%g/%g/%d/%d/%g", m.ID, m.Session,
 		m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryError != "", m.HostMemoryBudgetGB,
 		m.MemoryUsedGB, m.TotalMemoryGB, m.CPUBudgetCores, m.CPUReserveCores, m.ReservedMemoryGB)}
 	if m.CapabilityProfile != nil {
