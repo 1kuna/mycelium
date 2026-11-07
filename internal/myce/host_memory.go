@@ -505,6 +505,12 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	}
 	forecast := sample.growthGB + sample.rateGB*now.Sub(sample.at).Seconds()
 	charge = max(e.ProbeFloorGB, sample.footprintGB+forecast+exploratoryDriftMarginGB(m))
+	if m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
+		// A forecast cannot grow through the attempt's hard memory.max.
+		// Keep actual overuse and known floors conservative; admission-only
+		// workers have no such physical bound and retain the full forecast.
+		charge = max(e.ProbeFloorGB, sample.footprintGB, min(charge, ceiling))
+	}
 	growth = max(0, charge-sample.gb)
 	return
 }
