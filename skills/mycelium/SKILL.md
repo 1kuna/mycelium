@@ -221,6 +221,15 @@ verifies the master without replacing it. Keep staging while a fetch is active.
 Verify the whole manifest before use; loading never downloads weights. See
 [explicit master downloads](https://github.com/1kuna/mycelium/blob/main/docs/services.md#explicit-master-download-and-pins).
 
+## Normal fleet updates (next release)
+
+On releases containing #900's idle-moment upgrade slice, a normal fleet update
+keeps busy enabled hosts `pending` and available for new work until a fresh
+natural idle moment. Other idle hosts can update first. Keep using the queue;
+do not cancel experiments to finish a drain. Started attempts finish naturally,
+and exact release custody still gates restart. The separately requested
+`--wait-production-idle` policy continues to hold new production assignments.
+
 ## Automatic host hygiene (next release)
 
 On releases exposing `health_alert_delivery`, status explains whether the

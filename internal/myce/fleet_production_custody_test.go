@@ -94,7 +94,13 @@ func TestFleetProductionIdleReconcilesPersistedCopyJobs(t *testing.T) {
 				}
 				fleetTick(t, q)
 				if err := q.update(func() error {
-					h := q.fleetActiveHost()
+					h := q.s.FleetUpgrade.Hosts[0]
+					if h.Phase == "pending" {
+						if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "drain", DrainOwner: q.s.FleetUpgrade.Operation}); err != nil {
+							return err
+						}
+						h.Owned, h.Policy = true, q.s.HostMaintenance[h.Host]
+					}
 					h.Phase, h.Wait = "draining", "waiting for production attempts and release custody across the fleet"
 					return nil
 				}); err != nil {

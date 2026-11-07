@@ -1895,6 +1895,15 @@ Recheck production demand before selecting each remaining host and put productio
 hosts last. Upgrade the queue before workers needing its new protocol and before
 its colocated worker. If that conflicts with production-last ordering, refuse
 incompatible workers before mutation; protocol migrations need a separate plan.
+Normal updates leave an enabled busy host pending with ordinary admission open
+until its next fresh natural idle moment (MY-35, #900). Skip busy hosts so an
+idle compatible host can progress. Select idle and acquire the existing drain
+in the same queue transaction before placement can refill the gap. Unreleased
+attempts, preparations, cleanup and calls remain busy regardless of elapsed time;
+a ready idle model may enter drain, but must unload with exact confirmed custody
+before restart. Pending intent survives queue restart without owning a drain.
+Freeze current validated runtime identities when selecting that idle host;
+already-issued helpers and operator maintenance keep their original fences.
 Drain withdraws unstarted assignments and blocks admission. All Started work
 finishes naturally: exact attempt, preparation, engine, model-call and release
 custody must settle before restart. Offline or uncertain custody means a visible

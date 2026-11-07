@@ -353,6 +353,66 @@ func (q *Queue) fleetHostQuiet(h *fleetUpgradeHost) bool {
 	}
 	return q.hostMaintenanceStatus(h.Host).Quiescent
 }
+
+// An enabled host retains ordinary admission until its next fresh, natural idle
+// moment. Select and acquire its drain in the same queue transaction, before
+// placement can refill the gap. Existing operator drains/recovery keep their
+// original fences; no deadline or empty stale report proves idle custody.
+func (q *Queue) fleetPendingWait(h *fleetUpgradeHost) string {
+	if h.RetryPhase != "" || h.Policy.Mode == "disabled" {
+		return ""
+	}
+	policy := q.s.HostMaintenance[h.Host]
+	if policy.Mode != "" && policy.Mode != "enabled" {
+		return ""
+	}
+	if h.Queue && !h.QueueDone {
+		if q.fleetQueue == nil || !q.fleetProofFresh(q.fleetQueue.Proof) {
+			return "waiting for healthy queue runtime proof before idle cutover"
+		}
+		if q.s.FleetUpgrade.WaitProductionIdle && !q.fleetProductionIdle() {
+			return "waiting for production attempts and release custody across the fleet; host admission remains enabled"
+		}
+		if len(q.calls) > 0 {
+			return "waiting for model calls and streams to finish; host admission remains enabled"
+		}
+	}
+	found := false
+	for _, m := range q.s.Machines {
+		if hostID(m) == h.Host && m.Replacement == nil && !q.migrationHistoricalMachine(m) {
+			found = true
+			break
+		}
+	}
+	if found {
+		status := q.hostMaintenanceStatus(h.Host)
+		if len(status.PendingCleanup) > 0 || len(status.Workers) == 0 {
+			return "waiting for the next fresh idle moment; host admission remains enabled"
+		}
+		for _, worker := range status.Workers {
+			if !worker.Fresh {
+				return "waiting for the next fresh idle moment; host admission remains enabled"
+			}
+		}
+		for _, obligation := range q.hostObligations(h.Host) {
+			if engine := obligation.Engine; engine != nil {
+				// A ready idle model can unload through the existing drain. It
+				// has custody, but no work is interrupted. Loading, live calls
+				// and uncertain teardown are not an idle moment.
+				if slot := q.s.ModelSlots[slotKey(engine.Machine, engine.Model, engine.Device)]; slot != nil && slot.Session == engine.Session && slot.Attempt == engine.Attempt && slot.State == "ready" && slot.InFlight == 0 && !slot.Recovering && !slot.ReleasingCalls && !slot.CallsUnconfirmed {
+					continue
+				}
+			}
+			return "waiting for the next fresh idle moment; host admission remains enabled"
+		}
+	} else if !h.Queue || len(q.hostObligations(h.Host)) > 0 {
+		return "waiting for fresh exact execution and release custody; host admission remains enabled"
+	}
+	if h.Machine != "" && q.fleetWorkerFailure(q.s.Machines[h.Machine], &q.s.FleetUpgrade.Release) != "" {
+		return "waiting for compatible worker runtime proof before idle cutover"
+	}
+	return ""
+}
 func (q *Queue) fleetPausesCalls() bool {
 	h := q.fleetActiveHost()
 	return h != nil && h.Queue && !h.QueueDone && q.s.FleetUpgrade.State != "complete"
@@ -429,15 +489,47 @@ func (q *Queue) maintainFleetUpgrade() {
 			}
 			return pending[i].Host < pending[j].Host
 		})
-		h = pending[0]
-		// Reflect execution order in status while retaining completed history.
+		// Retain completed history, then the selected idle host and pending order.
 		var ordered []*fleetUpgradeHost
 		for _, v := range u.Hosts {
 			if v.Phase == "complete" || v.Phase == "failed" {
 				ordered = append(ordered, v)
 			}
 		}
-		u.Hosts = append(ordered, pending...)
+		for _, candidate := range pending {
+			wait := q.fleetPendingWait(candidate)
+			if wait != candidate.Wait {
+				candidate.Wait, candidate.ProgressAt = wait, q.clock.Now()
+			}
+			if wait == "" {
+				h = candidate
+				ordered = append(ordered, h)
+				break
+			}
+		}
+		for _, candidate := range pending {
+			if candidate != h {
+				ordered = append(ordered, candidate)
+			}
+		}
+		u.Hosts = ordered
+		if h == nil {
+			return
+		}
+		// No helper has been issued for a pending host. A supported restart
+		// while waiting can change its session; freeze the current idle runtime
+		// rather than authorizing its obsolete operation-start identity.
+		if h.RetryPhase == "" && h.Policy.Mode != "disabled" {
+			if h.Machine != "" {
+				if m := q.s.Machines[h.Machine]; q.fleetWorkerFailure(m, &u.Release) == "" {
+					before := cloneMachine(m)
+					h.Before = &before
+				}
+			}
+			if h.Queue && !h.QueueDone && q.fleetQueue != nil && q.fleetQueue.Proof != nil {
+				h.QueueBefore = cloneFleetProof(q.fleetQueue.Proof)
+			}
+		}
 		if h.RetryPhase != "" || h.Policy.Mode == "disabled" {
 			// Keep the original maintenance and runtime phase fences when
 			// retrying; pending is only a place in the sequential order.
