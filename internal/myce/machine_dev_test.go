@@ -204,6 +204,9 @@ func TestM3DevModelEnginesPerDevice(t *testing.T) {
 			journeyFatal(t, err)
 		}
 		slots = snap.LoadedModels
+		for _, slot := range slots {
+			journeyGet(t).slot("status_engine", slot)
+		}
 		return len(slots) == 2 && slots[0].State == "ready" && slots[1].State == "ready"
 	})
 	if slots[0].Device == slots[1].Device || slots[0].Attempt == slots[1].Attempt {

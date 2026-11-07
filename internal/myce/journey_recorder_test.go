@@ -343,6 +343,12 @@ func (w *journeyWriter) Flush() {
 }
 func (r *journeyRecorder) handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// Observe only the existing control reply and exact engine route. Status
+		// may be gzip encoded: the journey records its already-decoded ready read.
+		if req.URL.Path != "/api/workers/checkin" && req.URL.Path != "/v1/completions" {
+			next.ServeHTTP(w, req)
+			return
+		}
 		start := RealClock{}.Now().UnixNano()
 		body := &journeyBody{ReadCloser: req.Body}
 		if req.Body != nil {
@@ -375,14 +381,6 @@ func (r *journeyRecorder) handler(next http.Handler) http.Handler {
 			}
 			r.add("engine_response", map[string]any{"start": start, "status": out.status, "reason": reason, "attempt": journeyID(req.Header.Get("X-Myce-Engine-Attempt")), "session": journeyID(req.Header.Get("X-Myce-Session"))})
 		}
-		if pattern == "GET /api/status" {
-			var snap Snapshot
-			if !out.omitted && json.Unmarshal(out.b.Bytes(), &snap) == nil {
-				for _, s := range snap.LoadedModels {
-					r.slot("status_engine", s)
-				}
-			}
-		}
 		if pattern == "POST /api/workers/checkin" {
 			var in Checkin
 			if !body.omitted && json.Unmarshal(body.b.Bytes(), &in) == nil {
@@ -401,13 +399,7 @@ func (r *journeyRecorder) handler(next http.Handler) http.Handler {
 				}
 			}
 		}
-		// A scalar schema is extracted from the existing response, never recomputed.
-		if pattern == "GET /api/hosts/{id}/maintenance" {
-			var s HostMaintenanceStatus
-			if !out.omitted && json.Unmarshal(out.b.Bytes(), &s) == nil {
-				r.add("maintenance_response", map[string]any{"start": start, "host": journeyID(s.Host), "mode": s.Policy.Mode, "revision_time": s.Policy.UpdatedAt.UnixNano(), "healthy": s.Healthy, "quiescent": s.Quiescent, "migration_ready": s.MigrationReady, "preparations": s.Preparations, "pending_releases": len(s.PendingReleases), "pending_cleanup": len(s.PendingCleanup)})
-			}
-		}
+
 		r.add("http", map[string]any{"start": start, "pattern": pattern, "status": out.status, "request_omitted": body.omitted, "response_omitted": out.omitted})
 	})
 }
@@ -427,7 +419,11 @@ func (r *journeyRecorder) rpc(kind, operation string, p *readinessProgress, err 
 		return
 	}
 	p.mu.Lock()
-	data := map[string]any{"operation": operation, "budget_ns": int64(p.budget), "gap_ns": int64(p.gap), "revision": p.revision, "last": p.last.UnixNano(), "started": p.started.UnixNano(), "real_last": p.realLast.UnixNano(), "stage": p.stage, "completed": p.completed, "class": journeyClass(err)}
+	effective := p.budget
+	if effective > 0 {
+		effective = max(effective, scaleReadinessDuration(p.gap, 2), scaleReadinessDuration(p.activityPeriod, 2))
+	}
+	data := map[string]any{"operation": operation, "budget_ns": int64(p.budget), "effective_budget_ns": int64(effective), "suspended": p.suspended, "gap_ns": int64(p.gap), "revision": p.revision, "last": p.last.UnixNano(), "started": p.started.UnixNano(), "real_last": p.realLast.UnixNano(), "stage": p.stage, "completed": p.completed, "class": journeyClass(err)}
 	p.mu.Unlock()
 	r.add(kind, data)
 }
