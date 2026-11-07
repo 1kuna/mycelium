@@ -270,6 +270,9 @@ func (p WorkObservation) summary(state string) string {
 	if state == "measured" && validRate(p.Rate) {
 		rate = fmt.Sprintf("%.2f %s/s", p.Rate, p.Key.Reference.Unit)
 	}
+	if p.Key.RepeatedWork != "" && p.Repeated != nil && state == "measured" {
+		rate = fmt.Sprintf("%.2fs/job (%d clean samples; exact repeated command; %s)", p.Repeated.Seconds, p.Repeated.Samples, p.Repeated.uncertainty())
+	}
 	// Accepted memory_peak covers memory-only observations; legacy usage maxima stay the fallback.
 	hostPeak, devicePeak := p.HostMemoryGB, p.DeviceMemoryGB
 	if p.MemoryPeak != nil && p.MemoryPeak.HostGB != nil {
