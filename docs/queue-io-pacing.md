@@ -60,6 +60,16 @@ dirty-page reclaim as the causal stall, so direct I/O is not adopted without a
 matched native measurement. Pacing is the independent control being qualified.
 See Linux `fsync(2)` and `open(2)` (`O_DIRECT`) for these syscall guarantees.
 
+A bounded Linux arm64 scratch study on 2026-11-07 used three repeats per mode,
+64 MiB per repeat and at most 64 MiB of payload. Per-file `fsync` measured
+1096–1160 MiB/s; per-file `fdatasync`, 1091–1175 MiB/s; `fdatasync` every MiB,
+94–98 MiB/s; aligned direct writes plus final `fdatasync`, 1024–1073 MiB/s.
+The job succeeded, removed its payload and returned a hash-verified result.
+This small warm-cache comparison ran away from the reserved queue host, with
+uncontrolled background work and fixed mode order. It provides no queue-commit,
+reclaim or cold-storage guarantee. It supplies no observed benefit justifying a
+sync-policy change; frequent flushes had a large throughput cost on that device.
+
 ## Evidence and remaining qualification
 
 `TestWorkerBulkIOBackoffAndRecovery` and the cancellation/shared-allowance tests
