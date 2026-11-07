@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const boundedMemoryCapacityWait = "bounded memory exploration needs the largest eligible host allowance free"
+
 const boundedMemoryExploration = "bounded cross-OS exploration"
 const boundedGPUExploration = "bounded cross-family GPU exploration"
 const spentMemoryExploration = "transferred prior; bounded exploration already used"
@@ -239,7 +241,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	}
 	room, why := q.exploratoryMemory(j, m)
 	if why == "" && room < budget {
-		why = "bounded memory exploration needs the largest eligible host allowance free"
+		why = boundedMemoryCapacityWait
 	}
 	return budget, why, true
 }

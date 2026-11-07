@@ -128,7 +128,7 @@ func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
 			temporary := false
 			if c.MemoryEnvelope != nil && c.MemoryEnvelope.Refusal != "" {
 				_, why, capacity := q.exploratoryMemoryStatus(j, m)
-				if capacity && c.MemoryEnvelope.Refusal == why {
+				if capacity && c.MemoryEnvelope.Refusal == why || c.MemoryEnvelope.Refusal == boundedMemoryCapacityWait {
 					// Keep resolved demand and every structural fit check. Only
 					// this known physical wait is ignored for route eligibility.
 					copy := *c

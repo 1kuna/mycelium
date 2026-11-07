@@ -733,3 +733,48 @@ func TestLaunchCapacityKnownRefusalQuarantine(t *testing.T) {
 		t.Fatal("release charged known refusal", got.Losses, got.InfrastructureRetries)
 	}
 }
+
+func TestLaunchCapacityBoundedExploration(t *testing.T) {
+	for _, caller := range []bool{false, true} {
+		t.Run(fmt.Sprint(caller), func(t *testing.T) {
+			q, clock, linux, target, s := memoryExplorationFixture(t)
+			memoryExplorationSeed(t, q, clock, linux, target, s, 3, 3.634326934814453)
+			s.Targets = []ExecutionTarget{machineTarget(&target)}
+			s.Needs.HostMemoryGB = 1
+			occupancy := s
+			occupancy.Name = "independent-occupant"
+			occupancy.Needs.Memory, occupancy.Needs.HostMemoryGB = "", 1
+			busy := memoryExplorationRun(t, q, target, occupancy)
+			if caller {
+				s.StartWindow = "1s"
+			}
+			j := submit(t, q, s)
+			candidate := q.memoryCandidate(q.s.Jobs[j.ID], q.s.Machines[target.ID])
+			if candidate.MemoryEnvelope == nil || candidate.MemoryEnvelope.Refusal != boundedMemoryCapacityWait {
+				t.Fatal("fixture did not establish bounded capacity refusal", candidate.MemoryEnvelope)
+			}
+			if next := check(t, q, target, busy).Job; next != nil {
+				t.Fatal("bounded probe bypassed occupied allowance", next)
+			}
+			clock.Advance(ProductionStartTimeout + time.Second)
+			got := job(t, q, j.ID)
+			if caller {
+				if got.State != "failed" {
+					t.Fatal("bounded wait ignored caller cutoff", got.State)
+				}
+				return
+			}
+			if got.State != "queued" || !got.StartCapacityWaiting || got.Losses != 0 || got.InfrastructureRetries != 0 {
+				t.Fatal("bounded capacity wait expired or charged", got.State, got.Reason)
+			}
+			memoryExplorationComplete(t, q, clock, busy, 1, false, false)
+			next := check(t, q, target, nil).Job
+			if next == nil || next.ID != j.ID || (next.MemoryEnvelope == nil || next.MemoryEnvelope.Refusal != "") || !next.Spec.StartBy.After(clock.Now()) {
+				if next == nil {
+					t.Fatal("no bounded offer after release")
+				}
+				t.Fatalf("bounded offer: got=%s want=%s source=%+v cutoff=%v now=%v", next.ID, j.ID, next.MemoryEnvelope, next.Spec.StartBy, clock.Now())
+			}
+		})
+	}
+}
