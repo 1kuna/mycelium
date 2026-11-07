@@ -269,7 +269,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 			continue
 		}
 		reclaimable := !p.upload && expired[hash]
-		if at, marked := markers[hash]; marked && !referenced[hash] && !p.modified.After(now.Add(-retention)) {
+		if at, marked := markers[hash]; retention > 0 && marked && !referenced[hash] && !p.modified.After(now.Add(-retention)) {
 			reclaimable = p.upload || !at.IsZero() && !at.After(now.Add(-retention))
 		}
 		if reclaimable {
