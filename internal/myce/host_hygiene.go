@@ -35,11 +35,14 @@ type HostHealthSample struct {
 }
 
 type HostMountHealth struct {
-	Adverse        bool    `json:"adverse,omitempty"`
-	Root           string  `json:"root"`
-	LatencySeconds float64 `json:"latency_seconds"`
-	PendingSeconds float64 `json:"pending_seconds"`
-	Reason         string  `json:"reason,omitempty"`
+	Adverse               bool    `json:"adverse,omitempty"`
+	Root                  string  `json:"root"`
+	LatencySeconds        float64 `json:"latency_seconds"`
+	PendingSeconds        float64 `json:"pending_seconds"`
+	OperationAgeSeconds   float64 `json:"operation_age_seconds,omitempty"`
+	SlowThresholdSeconds  float64 `json:"slow_threshold_seconds,omitempty"`
+	StallAllowanceSeconds float64 `json:"stall_allowance_seconds,omitempty"`
+	Reason                string  `json:"reason,omitempty"`
 }
 
 // Executable and Service are basenames/identities only; never argv or env.
@@ -341,7 +344,7 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 	}
 	m.done = make(chan struct{})
 	for role, path := range workerHealthMounts(w) {
-		m.mounts[role] = &hostMountProbe{root: role, path: path, probe: recoveryMountProbe(w, role, path)}
+		m.mounts[role] = &hostMountProbe{root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path)}
 	}
 	go func() {
 		defer close(m.done)

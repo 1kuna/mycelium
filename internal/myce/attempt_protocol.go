@@ -62,6 +62,16 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	var refusal *HTTPError
+	if hasMountProgressWireFields(c) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+		// A queue downgraded to hygiene v1 can still consume health and
+		// collection. Retry without only the newly negotiated mount evidence;
+		// the existing full legacy fallback remains for older queues.
+		c = legacyMountProgressCheckin(c)
+		if w.hygieneWire != nil {
+			w.hygieneWire.mountProgressSupported = false
+		}
+		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
+	}
 	if (w.toolReport != nil && c.ToolInventoryHash != "" || hasHygieneWireFields(c) || hasUnifiedMemoryWireFields(c) || hasResourceFields(c)) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
 		// Strict decoding rejected additive inventory/hygiene/resource fields before mutation
 		// (for example, a queue replaced with an older inventory-capable binary).
