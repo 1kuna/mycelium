@@ -73,7 +73,9 @@ policy. Declare `isolation: sandboxed` when that boundary is needed.
 
 On releases with the contained-forecast correction, CPU forecast reservations
 stay within their actual hard cgroup ceiling; measured demand and probe floors
-remain protected. See [memory sizing](advanced.md#submit).
+remain protected. Hard-contained CPU remaining-growth forecasts also stay within
+the full ceiling; live RAM and allowance checks still apply. See
+[memory sizing](advanced.md#submit).
 
 Prepare directory source deliberately: ignored files are included except `.git`
 and `.mycelium/receipts`; links are refused. A Git source such as
