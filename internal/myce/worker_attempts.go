@@ -454,7 +454,20 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			if err == nil && s.state.Result != nil {
 				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 			}
-			if s.state.Result != nil && (err == nil || stale(err)) && !s.state.Result.ReleasePending {
+			releaseAcknowledged := err == nil
+			if stale(err) && s.state.Result != nil && !s.state.Result.ReleasePending {
+				// A stale log/publication reply says nothing about release. The
+				// queue may have lost this copy while staging was still running.
+				// Retain its only sender until an exact release is acknowledged.
+				released := *s.state.Result
+				released.ReleaseOnly, released.OutputRefs = true, nil
+				releaseErr := w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
+				releaseAcknowledged = releaseErr == nil
+				if releaseErr != nil {
+					err = releaseErr
+				}
+			}
+			if s.state.Result != nil && releaseAcknowledged && !s.state.Result.ReleasePending {
 				// Release callbacks are best effort and may race result delivery.
 				// Never retire the durable owner until every cache pin is removed.
 				if e := s.releaseSharedInputPins(); e != nil {
