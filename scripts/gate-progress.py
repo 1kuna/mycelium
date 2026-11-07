@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Learn host/selection timings and stop silent commands, not progressing work."""
 import hashlib
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import importlib.util
 import json
 import math
@@ -201,11 +202,53 @@ def interrupted(signum, frame):
     raise SystemExit(128 + signum)
 
 
+def run_packages(selection, cores):
+    """Refill the slot that completes, retaining each package's watchdog/custody."""
+    packages = iter(line.split('\t', 1) for line in selection.read_text().splitlines())
+    status = 0
+
+    def execute(package, names):
+        label = f'test:{package}:{names}'
+        print(f'gate {package}: {names}', flush=True)
+        return subprocess.run([sys.executable, __file__, label, 'go', 'test',
+                               '-race', '-vet=off', '-json', '-p', '1',
+                               '-parallel', str(cores), '-count=1', package,
+                               '-run', names]).returncode
+
+    with ThreadPoolExecutor(max_workers=cores) as pool:
+        pending = set()
+
+        def fill():
+            while len(pending) < cores:
+                item = next(packages, None)
+                if item is None:
+                    break
+                pending.add(pool.submit(execute, *item))
+
+        fill()
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                result = future.result()
+                if result == 125:
+                    # Uncertain fixture exit must stop admission immediately.
+                    # The outer gate supervisor retains custody of active peers.
+                    os._exit(125)
+                if result == 124:
+                    status = 124
+                elif result != 0 and status != 124:
+                    status = 1
+            fill()
+    return status
+
+
 if __name__ == '__main__':
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
     if sys.argv[1:] == ['--cpus']:
         print(cpu_count())
+    elif sys.argv[1:2] == ['--packages']:
+        sys.exit(run_packages(Path(sys.argv[2]), int(sys.argv[3])))
     else:
         label, *command = sys.argv[1:]
         sys.exit(run(label, command, Path(os.environ['GATE_TIMING_CACHE']),

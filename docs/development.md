@@ -124,7 +124,9 @@ quota and optional `GOMAXPROCS` contract, rounded down to whole runnable cores
 (with a one-core minimum). Profiles retain their explicit two-core reservation
 and matching `GOMAXPROCS=2` contract. Each test command takes one build slot;
 quick and full overlap no more packages than available cores, each under its
-own selection and watchdog. Test parallelism uses that same CPU count.
+own selection and watchdog. The next package starts when any slot finishes;
+a long earlier package cannot strand a slot released by a shorter sibling.
+Test parallelism uses that same CPU count.
 Tests that mutate process environment remain serial.
 `GORACE=atexit_sleep_ms=0` omits the race runtime's artificial one-second delay
 on each helper-process exit; product code and assertions remain race-instrumented

@@ -148,6 +148,33 @@ class ProgressTests(unittest.TestCase):
             self.assertEqual(json.loads((root / 'report').read_text())['exit'], 7)
             self.assertEqual(list((root / 'cache').iterdir()), [])
 
+    def test_packages_collect_failures_without_skipping_siblings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            selection = Path(folder) / 'selection'
+            selection.write_text('a\t^TestA$\nb\t^TestB$\nc\t^TestC$\n')
+            codes = {'a': 7, 'b': 124, 'c': 0}
+            seen = []
+
+            def execute(command):
+                package = command[-3]
+                seen.append(package)
+                return subprocess.CompletedProcess(command, codes[package])
+
+            with patch.object(progress.subprocess, 'run', side_effect=execute):
+                self.assertEqual(progress.run_packages(selection, 2), 124)
+            self.assertCountEqual(seen, codes)
+
+    def test_packages_stop_admission_on_uncertain_custody(self):
+        with tempfile.TemporaryDirectory() as folder:
+            selection = Path(folder) / 'selection'
+            selection.write_text('a\t.*\nb\t.*\n')
+            with (patch.object(progress.subprocess, 'run', return_value=Mock(returncode=125)) as launch,
+                  patch.object(progress.os, '_exit', side_effect=SystemExit) as stop):
+                with self.assertRaises(SystemExit):
+                    progress.run_packages(selection, 1)
+            stop.assert_called_once_with(125)
+            self.assertEqual(launch.call_count, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

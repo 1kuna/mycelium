@@ -119,31 +119,15 @@ fi
 # One watchdog per package: output from a sibling cannot hide a stalled test.
 # Concurrency follows the execution host's available/assigned CPU count.
 {
-  # Each selected package has its own expression, so run separate go test
-  # commands. Each takes one build slot; overlap no more than assigned cores.
-  pending_pids=()
-  related_status=0
-  wait_related() {
-    local result=0
-    wait "$1" || result=$?
-    if (( result == 125 )); then exit 125; fi
-    if (( result == 124 )); then related_status=124
-    elif (( result != 0 && related_status != 124 )); then related_status=1; fi
-  }
   if [[ ! -s $scratch/selection ]]; then
     printf 'cmd/myce\t^TestDevStandaloneSmoke$\n' > "$scratch/selection"
   fi
   while IFS=$'\t' read -r dir names; do
     if [[ $mode == full ]]; then package=$dir
     else package=$(go list "./${dir#./}"); fi
-    echo "$mode $package: $names"
-    step "test:$package:$names" go test -race -vet=off -json -p 1 -parallel "$cores" -count=1 "$package" -run "$names" &
-    pending_pids+=("$!")
-    if (( ${#pending_pids[@]} >= cores )); then
-      wait_related "${pending_pids[0]}"
-      pending_pids=("${pending_pids[@]:1}")
-    fi
-  done < "$scratch/selection"
-  for pid in "${pending_pids[@]}"; do wait_related "$pid"; done
-  exit "$related_status"
+    printf '%s\t%s\n' "$package" "$names"
+  done < "$scratch/selection" > "$scratch/packages"
+  # Refill any completed slot; waiting for the oldest PID stranded a slot
+  # behind long CLI tests while the core package had not even started.
+  python3 scripts/gate-progress.py --packages "$scratch/packages" "$cores"
 }

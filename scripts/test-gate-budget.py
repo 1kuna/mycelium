@@ -107,7 +107,7 @@ class GateBudgetTests(unittest.TestCase):
             shutil.copyfile(Path(__file__).with_name('gate-budget.py'), scripts / 'gate-budget.py')
             shutil.copyfile(Path(__file__).with_name('gate-handles.py'), scripts / 'gate-handles.py')
             shutil.copyfile(Path(__file__).with_name('test-gate-progress.py'), scripts / 'test-gate-progress.py')
-            (scripts / 'gate-related.py').write_text('print("a\\t^TestA$")\nprint("b\\t^TestB$")\n')
+            (scripts / 'gate-related.py').write_text('print("a\\t^TestA$")\nprint("b\\t^TestB$")\nprint("c\\t^TestC$")\n')
             bin_dir = root / 'bin'
             bin_dir.mkdir()
             git = bin_dir / 'git'
@@ -130,8 +130,10 @@ elif args[0] == 'build':
 elif args[0] == 'list':
     print(args[1].removeprefix('./'))
 elif args[0] == 'test':
-    package = next(arg for arg in args if arg in ('a', 'b'))
-    other = 'b' if package == 'a' else 'a'
+    package = next(arg for arg in args if arg in ('a', 'b', 'c'))
+    # The first command cannot finish until the third has started. Waiting
+    # for the oldest PID instead of either completed slot deadlocks here.
+    other = 'c' if package == 'a' else 'a'
     (root / (package + '-started')).touch()
     deadline = time.monotonic() + 5
     while not (root / (other + '-started')).exists():
@@ -152,6 +154,7 @@ elif args[0] == 'test':
             self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertTrue((root / 'a-finished').exists(), run.stdout + run.stderr)
             self.assertTrue((root / 'b-finished').exists(), run.stdout + run.stderr)
+            self.assertTrue((root / 'c-finished').exists(), run.stdout + run.stderr)
 
     def test_hung_network_mount_does_not_block_owned_scratch(self):
         if sys.platform != 'darwin':
