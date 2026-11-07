@@ -55,9 +55,11 @@ func TestQueueStatusReadsDoNotWriteRetainedHistory(t *testing.T) {
 	}
 	// Exercise the stock Go client's transparent gzip support: the realistic
 	// history must remain readable without transferring its repetitive JSON.
+	// Request the page needed for compression: the full read above teaches real
+	// row cost and can legitimately replace the fixture's synthetic timing.
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/status", nil)
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/status?limit=%d", server.URL, defaultStatusJobs), nil)
 	req.Header.Set("Authorization", "Bearer test")
 	response, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -25,7 +25,10 @@ and preserve the refusal and identities for that owner.
 
 From the next queue release, request bodies, wait batches and status history pages
 follow current queue capacity; 413 refusals name the cause and fitting size.
-Follow returned page cursors and retain the same submission key after a refusal.
+Default status is a partial history page: absence does not mean a job was lost
+or is incomplete. Use `myce status JOB_ID` or a batched wait for known jobs,
+`myce status --history` for all retained jobs, and follow `jobs_page.next_before`
+when paging the API. Retain the same submission key after a refusal.
 Custom peers can negotiate `capacity-v1` through HTTP headers without changing
 legacy JSON. See [request budgets](https://github.com/1kuna/mycelium/blob/main/docs/request-budgets.md).
 

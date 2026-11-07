@@ -25,9 +25,12 @@ import (
 const requestBudgetProtocol = "capacity-v1"
 
 type requestMemoryMeasurement struct {
-	done  chan struct{}
-	bytes int64
-	err   error
+	done      chan struct{}
+	bytes     int64
+	err       error
+	waiters   int
+	cancel    context.CancelFunc
+	abandoned bool
 }
 
 type requestBudgetKey struct{}
@@ -79,30 +82,84 @@ func requestMemory(ctx context.Context) (int64, error) {
 // Overlapping admissions share an in-flight physical observation. There is no
 // time-based cache: the next non-overlapping admission measures again. This
 // keeps a burst of reads from spawning one OS helper per caller on platforms
-// whose memory interface is a command. Waiting never holds the queue mutex.
+// whose memory interface is a command. The probe owns its context: its physical
+// bound is one helper and the lifetime of the live waiter set. Each caller may
+// leave independently; the last departure cancels the helper, and its slot is
+// retained until exit. No orphan probe or unbounded retry work can accumulate.
+// Waiting never holds the queue mutex.
 func (b *requestBudgets) measureMemory(ctx context.Context) (int64, error) {
-	if b.memory != nil {
-		return b.memory(ctx)
-	}
-	b.mu.Lock()
-	if active := b.measurement; active != nil {
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		b.mu.Lock()
+		active := b.measurement
+		if active != nil && active.abandoned {
+			b.mu.Unlock()
+			// Retain the single probe slot until its helper exits. A new live caller
+			// never inherits an abandoned probe's cancellation or creates a second one.
+			select {
+			case <-active.done:
+				continue
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}
+		if active == nil {
+			probeCtx, cancel := context.WithCancel(context.Background())
+			active = &requestMemoryMeasurement{done: make(chan struct{}), cancel: cancel}
+			b.measurement = active
+			go func(sample *requestMemoryMeasurement) {
+				defer cancel()
+				probe := b.memory
+				if probe == nil {
+					probe = requestMemory
+				}
+				sample.bytes, sample.err = probe(probeCtx)
+				b.mu.Lock()
+				b.measurement = nil
+				close(sample.done)
+				b.mu.Unlock()
+			}(active)
+		}
+		active.waiters++
 		b.mu.Unlock()
+		defer func() {
+			b.mu.Lock()
+			active.waiters--
+			if active.waiters == 0 && b.measurement == active {
+				active.abandoned = true
+				active.cancel()
+			}
+			b.mu.Unlock()
+		}()
 		select {
 		case <-active.done:
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 			return active.bytes, active.err
 		case <-ctx.Done():
 			return 0, ctx.Err()
 		}
 	}
-	active := &requestMemoryMeasurement{done: make(chan struct{})}
-	b.measurement = active
-	b.mu.Unlock()
-	active.bytes, active.err = requestMemory(ctx)
-	b.mu.Lock()
-	b.measurement = nil
-	close(active.done)
-	b.mu.Unlock()
-	return active.bytes, active.err
+}
+
+// Public causes distinguish failed evidence from measured zero headroom without
+// leaking helper stderr, private paths or host details.
+func memoryMeasurementCause(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "probe_deadline"
+	case errors.Is(err, context.Canceled):
+		return "probe_cancelled"
+	case errors.Is(err, exec.ErrNotFound), errors.Is(err, os.ErrNotExist):
+		return "probe_unavailable"
+	case errors.Is(err, os.ErrPermission):
+		return "probe_permission"
+	default:
+		return "probe_failed"
+	}
 }
 
 func (b *requestBudgets) capacity(ctx context.Context) (int64, error) {
@@ -114,7 +171,10 @@ func (b *requestBudgets) capacity(ctx context.Context) (int64, error) {
 	}
 	n, err := b.measureMemory(ctx)
 	if err != nil {
-		return 0, &HTTPError{Status: 503, Code: "request_capacity_unavailable", Message: "queue memory headroom is unavailable; fitting bytes=0; retry after memory measurement recovers"}
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		return 0, &HTTPError{Status: 503, Code: "request_capacity_unavailable", Message: fmt.Sprintf("queue memory measurement failed (%s); fitting bytes=0; retry after memory measurement recovers", memoryMeasurementCause(err))}
 	}
 	lanes := b.lanes
 	if lanes == 0 {
@@ -388,7 +448,7 @@ func (b *requestBudgets) recordProjection(n, bytes int, d time.Duration) {
 	b.rowBytes = max(1, int64(bytes)/int64(n))
 	b.rowTime = max(1, d/time.Duration(n))
 }
-func (b *requestBudgets) pageLimit(ctx context.Context, element reflect.Type) (int, error) {
+func (b *requestBudgets) pageLimit(ctx context.Context, element reflect.Type, requested ...int) (int, error) {
 	capacity, err := b.capacity(ctx)
 	if err != nil {
 		return 0, err
@@ -409,9 +469,15 @@ func (b *requestBudgets) pageLimit(ctx context.Context, element reflect.Type) (i
 		return 0, &HTTPError{Status: 503, Code: "projection_capacity_exceeded", Message: fmt.Sprintf("projection requires at least %d bytes; fitting bytes=%d", 3*row, capacity)}
 	}
 	limit := capacity / max(1, 3*row)
+	need := int64(1)
+	if len(requested) > 0 {
+		need = max(need, int64(requested[0]))
+	}
+	// Authored page intent supplies the service floor; it cannot enlarge the
+	// physical memory allowance. Callers without a page need use learned cost.
 	if element == reflect.TypeFor[Job]() {
 		if cost > 0 && control > 0 {
-			limit = min(limit, max(1, int64(control/cost)))
+			limit = min(limit, max(need, int64(control/cost)))
 		} else {
 			// Before comparable timings exist, probe one row per execution
 			// lane. This physical concurrency bound prevents a cold wide read
@@ -420,7 +486,7 @@ func (b *requestBudgets) pageLimit(ctx context.Context, element reflect.Type) (i
 			if lanes == 0 {
 				lanes = runtime.GOMAXPROCS(0) + 1
 			}
-			limit = min(limit, int64(max(1, lanes)))
+			limit = min(limit, max(need, int64(max(1, lanes))))
 		}
 	}
 	return int(min(int64(math.MaxInt), max(1, limit))), nil

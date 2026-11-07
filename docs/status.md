@@ -142,7 +142,7 @@ device entries carry their own extension fingerprints and reports. The scalar
 
 Default status keeps the existing JSON fields and job shape, but includes all
 nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
-100 other terminal jobs by submission time. Work curves remain included for
+capacity-sized page of other terminal jobs by submission time. Work curves remain included for
 existing consumer audits and release-preservation guards.
 This bounds retained-history detail without hiding control-plane custody.
 `jobs_page` ([schema](schemas/status-jobs-page-v1.schema.json)) reports the
@@ -151,8 +151,8 @@ filtered `total`, `returned`, `mode`, and optional `next_before` job ID.
 - `GET /api/status?jobs=active` returns all active/cleanup-pending jobs.
 - `?jobs=all&limit=100` pages all history, newest submission first; append
   `&before=NEXT_BEFORE` from each reply until that field is absent. `limit` is
-  positive and bounded by current queue memory and measured projection cost from
-  the next release; omission chooses an adaptive page. See [request budgets](request-budgets.md). The normal status presentation order is retained
+  positive and capped by current queue memory. Explicit page intent sets the
+  projection-service floor; omission chooses a page from measured job-row cost. See [request budgets](request-budgets.md). The normal status presentation order is retained
   within each page; use the returned cursor rather than the last displayed ID.
 - `?project=example&since=2026-10-30T00:00:00Z` filters jobs by project and
   inclusive submission timestamp. Filters do not alter fleet health, eligibility

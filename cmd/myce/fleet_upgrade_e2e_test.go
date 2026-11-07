@@ -564,11 +564,10 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	assertAttempts := func() {
 		t.Helper()
 		for id, initial := range jobs {
-			var observed *myce.Job
-			for _, j := range snapshot.Jobs {
-				if j.ID == id {
-					observed = j
-				}
+			observed, readErr := client.GetJob(ctx, id)
+			if readErr != nil {
+				t.Errorf("read known job %s: %v", id, readErr)
+				continue
 			}
 			if observed == nil {
 				t.Errorf("job %s lost", id)
@@ -614,13 +613,12 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			return false
 		}
 		for id := range jobs {
-			found := false
-			for _, j := range snapshot.Jobs {
-				if j.ID == id && j.State == "succeeded" {
-					found = true
-				}
+			observed, err := client.GetJob(ctx, id)
+			if err != nil {
+				lastErr = err
+				return false
 			}
-			if !found {
+			if observed.State != "succeeded" {
 				return false
 			}
 		}
