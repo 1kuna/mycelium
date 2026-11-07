@@ -499,13 +499,40 @@ details remain in the private receipt. It does not retry an impossible allowance
 or weaken the learned memory envelope. Darwin proves the native CGO target; Linux
 proves its native builds and full race/dev suite.
 
-The deterministic `main-ci:SHA:OS` keys adopt the same jobs on a workflow rerun,
-including after an uncertain submit. A failed suite is not automatically rerun.
+The deterministic `main-ci:SHA:OS:RUN_ID:RUN_ATTEMPT` keys identify this
+workflow attempt's two jobs. Repeating a submission within that attempt adopts
+the same job, including after an uncertain submit. A workflow rerun uses fresh
+attempt keys: an older attempt's cleanup cannot cancel its replacement, and a
+cancelled key cannot poison a rerun. A failed suite is not automatically rerun.
 The CLI handles immutable source uploads, idempotent submission and reconnects;
-there is no custom watcher, cursor or status publisher. An interrupted workflow
-leaves submitted fleet jobs running; rerun it to adopt those jobs. No custom
-wall deadline kills healthy full suites. GitHub's own runner/job service limits
-still apply. Inspect failures privately with `myce logs JOB_ID`; public logs and
+there is no custom watcher, cursor or status publisher.
+
+SIGINT, SIGTERM, timeout and all normal/error exits cancel both intended keys
+using `myce cancel --project mycelium --key KEY`. This also fences a submission
+whose receipt was lost or which reaches the queue after cancellation. The
+submitter stops and reaps its active CLI child before cleanup. An `always()`
+workflow step repeats this idempotent cleanup if Actions interrupts the submitter
+before it finishes. Terminal suite results are preserved by the queue's existing
+cancellation semantics. Queued gates lose their capacity-accumulation claim;
+running gates follow normal stop/release custody. Cleanup never scans jobs by
+age or cancels PR gates, another project's jobs, another merge or another attempt.
+
+GitHub's six-hour job limit is an external owner deadline. A monotonic budget
+starts before checkout and interrupts normal submitter work after 350 minutes,
+leaving five minutes for its two cancellation requests (150 seconds each) and
+five minutes for Actions overhead. The workflow explicitly keeps the 360-minute
+job limit; its final cleanup step also has a five-minute bound. These reserves
+trade up to ten minutes of possible gate progress for cleanup before GitHub can
+kill the job. A timeout fails CI and cancels unfinished gates even if healthy;
+it is not a new general gate watchdog. Cleanup reports only fixed confirmation
+states; unconfirmed cancellation fails CI and requires private reconciliation
+with that attempt's exact keys. An unavailable queue or abruptly lost runner can
+prevent confirmation; repeat `scripts/actions-full.py --cleanup-only` with the
+original SHA, run ID and attempt environment after authority is restored.
+No coalescing or supersession of other runs is introduced. If coalescing is
+approved later, cancelling a replaced attempt uses this same ownership path.
+
+Inspect failures privately with `myce logs JOB_ID`; public logs and
 the summary contain only job IDs, fixed states and exit codes, never raw CLI
 receipts, remote reasons or host paths.
 
@@ -514,8 +541,8 @@ submitted suite reporting `failed`. Its platform row says `infrastructure failur
 and the workflow emits a `CI infrastructure failure` error annotation: that
 platform has no verified suite result. Submission may have been accepted despite
 a lost reply. Resolve the infrastructure problem privately, then
-rerun the same workflow/merge; the deterministic keys recover any jobs that were
-accepted before the outage. There is no automatic retry for a failed suite.
+repeat cleanup for the original attempt, then rerun the workflow/merge with
+fresh attempt keys. There is no automatic retry for a failed suite.
 
 ### Public repository and private authority
 
