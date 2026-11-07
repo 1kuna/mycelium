@@ -3273,7 +3273,7 @@ No GPU, power, fan, sleep or screen settings are changed. No input is recorded.
 myce join --daily-use --max-jobs 1
 ```
 
-Daily-use hyphae take work after **five idle minutes**, on confirmed external
+From the next release, daily-use hyphae take work after **locally measured owner idle recovery**, on confirmed external
 power when battery-equipped, with a known safe heat signal. Batteryless desktops
 need a confirmed batteryless power report. Plugging in never overrides owner
 activity. An unknown required signal means waiting with a reason in CLI/HTML
@@ -3287,9 +3287,10 @@ The battery-equipped classification is retained throughout a worker session
 if a subsequent power read fails. Daily-use flags are available on foreground `join`; installed services can
 pass them through `service ... -- join`. Installation alone is not an opt-in.
 
-Signals refresh every five seconds independently of queue connectivity.
-Required readings older than 15 seconds withhold work. A sampling gap, including
-sleep, starts a fresh five-minute awake window; the worker never prevents sleep.
+Signals refresh independently of queue connectivity using the host's measured
+probe cost and signal-change cadence. Required readings expire at their frozen
+observation horizon. A sampling gap, including sleep, requires fresh awake
+evidence; the worker never prevents sleep. See [adaptive probes](host-probes.md).
 Owner return, battery use, unsafe heat or unknown required signals stop admission
 locally and through the queue. Resumable commands get SIGTERM and up to ten
 seconds to checkpoint, then are killed if needed. Non-resumable commands stop
@@ -3316,13 +3317,13 @@ concurrency, not watts, GPU percentage, fan speed or noise.
 - **macOS:** the binary links CoreGraphics' combined-session aggregate event age,
   IOKit's power-source snapshot, and Foundation's process thermal state. It needs
   no event tap, keylogging, screen capture or sensor permission. Daily work
-  withholds at fair/serious/critical; nominal must persist for 60 seconds after
+  withholds at fair/serious/critical; nominal must persist for the measured cooling/reheat recovery span after
   a heat hold. Building on macOS needs cgo and the usual Xcode command-line SDK.
   A macOS binary built without cgo reports unknown signals and waits in daily mode.
   The aggregate query covers the worker's login session; fast user switching
   and coverage of other logged-in users remain unverified.
 - **Linux:** logind, queried through `loginctl`, covers every listed user session.
-  Work waits five minutes after every user session's idle hint, which is more
+  Work waits for locally measured idle recovery after every user session's idle hint, which is more
   conservative than claiming it is a last-input timer. Hint age uses the same
   OS monotonic clock as logind, rather than boot uptime that includes sleep. No user session, an
   uncovered session, denied access or missing desktop idle hints means waiting.
@@ -3331,7 +3332,7 @@ concurrency, not watts, GPU percentage, fan speed or noise.
   All discovered relevant sensors must be usable. A max alarm/limit holds work;
   a critical-only sensor uses critical minus 10°C. Recovery needs readings at
   least 5°C below the guard (or a more conservative supplied hysteresis) for
-  60 seconds. Unknown heat holds work. The recognized sensor list is intentionally
+  the measured thermal recovery span. Unknown heat holds work. The recognized sensor list is intentionally
   small; unsensed accelerators and these margins are not hardware-qualified.
 - **WSL2:** owner activity, power and physical heat must come from the **Windows
   host**, never the Linux guest. The [per-user Windows host bridge](operations.md)
@@ -3516,42 +3517,19 @@ does not repair storage or authorize clearing maintenance.
 
 ## Pressure response
 
-Only shared-profile workers collect pressure samples. A bounded background lane
-reads `kern.memorystatus_vm_pressure_level` (the macOS memory-pressure notification
-level) or Linux `/proc/pressure/memory` `some avg10`, then measures twenty normal-
-priority 5 ms timer wakes. The maximum lateness measures scheduling interference,
-including competing owner/agent work, without recording apps or owner input.
-It cannot attribute contention to a particular process. Probes never run under
-the queue mutex or synchronously block heartbeat delivery for their full duration.
+Only shared-profile workers collect pressure samples. An independent lane reads
+the OS memory-pressure level or memory PSI, then performs one OS timer wake
+proportional to measured probe cost and CPU capacity. Each host learns its own
+wake/PSI prediction band; adverse samples freeze the healthy baseline and fresh
+readings back at its mean recover it. OS memory warnings remain immediate.
 
-Thresholds and recovery bands:
-
-| Signal | Yield | Recover |
-| --- | --- | --- |
-| macOS memory level | warning (2) or critical (4) | normal (1) |
-| Linux memory PSI `some avg10` | >= 1% | <= 0.1% |
-| Foreground-class wake lateness | >= 20 ms | <= 5 ms |
-
-macOS uses the OS's pressure warning rather than inventing a free-RAM percentage.
-The PSI bands represent 100 ms / 10 ms of stalled time per ten seconds. They are
-conservative latency budgets; native Linux interference calibration remains
-unverified. The wake bands use a 5 ms recovery allowance and a 20 ms yield threshold;
-20 ms exceeds a 60 Hz interaction frame. A short local canary observed no
-foreground starvation, but cannot establish a universal latency guarantee.
-Native pressure-stress calibration and representative owner qualification remain
-outstanding; repeat the probe for the intended workload before enablement.
-
-Samples refresh in an independent worker lane at the existing 5-second
-owner-signal cadence, including while a check-in is waiting for its response.
-The queue requires reported sample age below 15 seconds, discounts bounded
-matching-session check-in contact between reports, and caps total observation
-age at 45 seconds. See [pressure freshness](shared-hosts.md) for the rule and its
-safety bounds. Worker-local age is translated to queue receipt time; worker wall
-timestamps cannot renew evidence. Missing, malformed, failed or
-stale observations remain **unknown** and withhold new work. Unknown alone does
-not stop running work or clear a pressure latch. A fresh low sample for every
-signal clears the latch; middling samples retain it. There is no extra recovery
-sleep. This amplitude hysteresis avoids stopping/restarting at one threshold.
+Probe cadence and freshness follow this host's cost, variation and signal changes.
+Missing, failed or stale observations remain unknown and withhold new admission.
+Negotiated observations include queue processing delay; queue contact cannot
+renew them. The first latency interruption
+starts a job/host hold that requires a measured quiet recovery span. See
+[adaptive host observations](host-probes.md) for timing, protocol compatibility,
+remaining inventory and native qualification limits.
 
 On measured pressure, the queue withholds new work on the physical host and
 attaches `shared_host_pressure` planned-stop provenance to each exact running

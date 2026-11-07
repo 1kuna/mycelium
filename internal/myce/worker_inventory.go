@@ -309,7 +309,12 @@ func (w Worker) verifyDevice() error {
 			return reject("device_probe_unavailable", errors.New("device inventory probe unavailable before launch"))
 		}
 	}
-	if expected.Reason != "" {
+	// Background observation expiry withholds new queue admission, but is
+	// not a device fault. This direct launch probe can establish recovery for
+	// an already assigned attempt. Its current error, exact identity and
+	// current health reason still fence execution below; saved policy and
+	// identity refusals remain independent of observation freshness.
+	if expected.Reason != "" && expected.Reason != "device_probe_unavailable" {
 		return reject(expected.Reason, errors.New(rejectionMessages[expected.Reason]))
 	}
 	if matches != 1 {

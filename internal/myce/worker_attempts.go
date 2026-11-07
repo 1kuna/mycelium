@@ -852,7 +852,18 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		source = localSharedHostPressure
 	}
 	pressureProbe := &sharedPressureMonitor{clock: w.Clock, source: source, enabled: w.Machine.SharedHost != nil}
+	pressureProbe.lane.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go pressureProbe.run(ctx)
+	inventory := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: w.Clock, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}}
+	probeInventory := w.InventoryProbe
+	go inventory.run(ctx, func(probeCtx context.Context) ([]MachineDevice, error) {
+		devices, err := probeInventory(probeCtx)
+		for i := range devices {
+			d := &devices[i]
+			d.ExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, d.Platform, d.ID)
+		}
+		return devices, err
+	})
 	var cpuProbe checkpointIO[*memoryCeilings]
 	sharedCPUAllowance := 0
 	events := make(chan WorkerEvent, 16)
@@ -916,7 +927,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	toolInventory := map[string][]string{"": executableTools(jobBaseEnvironment()["PATH"])}
 	w.Machine.CPUIsolation = cpuIsolationUnavailable
 	var retry workerRetry
-	var nextRetention, nextFaultProbe time.Time
+	var nextRetention time.Time
 	leaving, leaveSent := stop.Err() != nil, false
 	stopCh := stop.Done()
 	base := w.Machine.FreeMemoryGB
@@ -1018,25 +1029,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)
 			m.DockerCleanup, m.DockerCause = diagnostics.DockerCleanup, diagnostics.DockerCause
 			m.FileTransferError = diagnostics.FileTransferError
-			probeInventory := w.InventoryProbe
-			observed, probeErr := root.inventory.run("devices", func() ([]MachineDevice, error) {
-				probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				defer cancel()
-				devices, err := probeInventory(probeCtx)
-				for i := range devices {
-					d := &devices[i]
-					d.ExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, d.Platform, d.ID)
-				}
-				return devices, err
-			})
+			observed, probeErr := inventory.snapshot()
 			if err := w.refreshInventory(ctx, observed, probeErr, root); err != nil {
 				return err
 			}
-			if !now.Before(nextFaultProbe) {
+			if root.deviceFaults.inFlight() || !now.Before(root.faultTiming.next) {
 				if err := w.refreshDeviceFaults(ctx, root); err != nil {
 					return err
 				}
-				nextFaultProbe = now.Add(5 * time.Second)
 			}
 			m.Devices = slices.Clone(w.Machine.Devices)
 			m.FaultMonitorError = w.Machine.FaultMonitorError
@@ -1097,7 +1097,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			m.SharedHostPressure = nil
 			if w.Machine.SharedHost != nil {
-				m.SharedHostPressure = pressureProbe.snapshot(true)
 				switch runtime.GOOS {
 				case "darwin":
 					m.SharedCPUEnforcement = "background task policy; declared-core cap; CPU time unenforced"
@@ -1117,10 +1116,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						m.SharedCPUEnforcement = "CPU time unenforced: dev admission-only"
 					}
 				}
-				w.Machine.SharedHostPressure = m.SharedHostPressure
 				w.Machine.SharedCPUEnforcement = m.SharedCPUEnforcement
 			} else {
-				pressureProbe.snapshot(false)
 				w.sharedExecutionCeilings, sharedCPUAllowance = nil, 0
 				m.SharedCPUEnforcement = ""
 			}
@@ -1226,6 +1223,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.HostHealth = health.snapshot(m.DiskVolumes)
 			applyHostMountHealth(w, &m)
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
+			if m.CapabilityProfile != nil {
+				a := w.availability.snapshot()
+				m.CapabilityProfile.Availability = &a
+			}
+			// Snapshot at send time: preparation must not disappear from the
+			// sensor age, and report-gap learning includes the entire control path.
+			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
+			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()
 			reply, err := w.checkin(ctx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			health.noteHeartbeat(w.Clock.Now().Sub(heartbeatStarted))
