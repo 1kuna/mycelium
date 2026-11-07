@@ -151,6 +151,15 @@ func TestMemoryAdmissionCapturesGrowthWithoutNominalDoubleCharge(t *testing.T) {
 
 func TestMemoryAdmissionColdDriftAndOOMFloor(t *testing.T) {
 	q, clock, m := memoryAdmissionFixture(t)
+	// The retained comparison must name the measured reserve used by #902,
+	// rather than the older page-only floor at this capture point.
+	clock.Advance(time.Second)
+	m.HostAvailableMemoryGB -= .5
+	machineCheck(t, q, m)
+	drift := q.coldProbeDriftMarginGB(&m)
+	if drift <= exploratoryDriftMarginGB(&m) {
+		t.Fatal("fixture has no measured launch drift")
+	}
 	// An auto requirement retained from an OOM must never shrink to live room.
 	s := cpuSpec(1, 0)
 	s.Needs.Memory = "auto"
@@ -164,7 +173,7 @@ func TestMemoryAdmissionColdDriftAndOOMFloor(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := q.s.Jobs[j.ID].LastMemoryAdmission
-	if a == nil || a.Envelope.HostGB < 22 || math.Abs(a.DriftReserveGB-exploratoryDriftMarginGB(&m)) > 1e-10 {
+	if a == nil || a.Envelope.HostGB < 22 || math.Abs(a.DriftReserveGB-drift) > 1e-10 {
 		t.Fatalf("lost cold reserve or OOM floor: %+v", a)
 	}
 	if !a.CapturedAt.Equal(clock.Now()) || !a.WaitingSince.Equal(j.WaitingSince) || a.Session != m.Session || a.Target.OS != "linux" {
