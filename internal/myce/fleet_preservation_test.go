@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"maps"
 	"os"
 	"path/filepath"
@@ -12,6 +13,65 @@ import (
 	"testing"
 	"time"
 )
+
+func TestFleetQueuePreservationFencesOfflineConversionUntilConsumed(t *testing.T) {
+	c, clock, mapping := m4OfflineQueue(t)
+	q, err := Open(c.DB, c.Checkpoints, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeCheckpointAvailability(t, q, true)
+	configureManagedPreservation(t, q, clock)
+	requestManagedQueueHandoff(t, q)
+	if err = q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	seal, err := os.ReadFile(q.preservationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := os.ReadFile(c.ProjectConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(context.Context, string, ...string) ([]byte, error) { return nil, nil }
+	// This is otherwise valid conversion intent, including read-only preview.
+	if err = ConvertQueueInstall(context.Background(), c, mapping, true, false, clock, run); err != nil {
+		t.Fatal("valid preview refused", err)
+	}
+	err = ConvertQueueInstall(context.Background(), c, mapping, false, false, clock, run)
+	var refusal *HTTPError
+	if !errors.As(err, &refusal) || refusal.Code != "fleet_preservation_pending" {
+		t.Fatal("writable conversion accepted unconsumed handoff", err)
+	}
+	afterSeal, sealErr := os.ReadFile(q.preservationPath)
+	afterPolicy, policyErr := os.ReadFile(c.ProjectConfig)
+	if sealErr != nil || policyErr != nil || !reflect.DeepEqual(seal, afterSeal) || !reflect.DeepEqual(policy, afterPolicy) {
+		t.Fatal("refusal changed certificate or policy", sealErr, policyErr)
+	}
+	// Startup can still consume the exact sealed records after refusal.
+	q, err = Open(c.DB, c.Checkpoints, clock)
+	if err != nil {
+		t.Fatal("offline refusal invalidated queue startup", err)
+	}
+	if q.s.MachineConversion != nil || q.fleetActiveHost().Preservation.State != "verified" {
+		t.Fatal("offline conversion mutated state or consumed proof")
+	}
+	if err = q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = ConvertQueueInstall(context.Background(), c, mapping, false, false, clock, run); err != nil {
+		t.Fatal("conversion remained blocked after proof was consumed", err)
+	}
+	q, err = Open(c.DB, c.Checkpoints, clock)
+	if err != nil {
+		t.Fatal("converted queue failed startup", err)
+	}
+	defer q.Close()
+	if q.s.MachineConversion == nil || q.s.Machines[mapping[0].From].Replacement == nil {
+		t.Fatal("authorized conversion was not durable")
+	}
+}
 
 func TestFleetQueuePreservationAcceptedFileReferences(t *testing.T) {
 	// Reuse the existing supported file/program fixture and its bound root.

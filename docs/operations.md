@@ -2359,6 +2359,9 @@ terminal jobs, submission-key answers, accepted checkpoint/output references,
 custody and learned curves. It does not prove the remote blob contents,
 logs/usage tables, native downtime or safe database downgrade. No whole-queue
 status request or private preflight script is needed for this record proof.
+Writable offline conversion refuses `fleet_preservation_pending` until normal
+queue startup has verified and durably consumed the handoff. Read-only conversion
+preview remains available; it cannot consume or rewrite the certificate.
 
 From the release containing #900's critical slice, `--urgency normal|critical`
 is persisted with the operation; omitted urgency is `normal`. Normal waits for

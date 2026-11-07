@@ -83,6 +83,11 @@ func convertQueueInstall(ctx context.Context, c ServiceConfig, mapping []Machine
 		return err
 	}
 	defer q.Close()
+	if h := q.fleetActiveHost(); !dry && h != nil && h.Preservation != nil && h.Preservation.State == "required" {
+		// Offline conversion cannot rewrite a sealed handoff or consume its
+		// startup proof. A normal queue open verifies and durably consumes it.
+		return migrationError("fleet_preservation_pending", "start the queue to verify its handoff before writable offline conversion")
+	}
 	var receipts []VerifiedEmptyDrainReceipt
 	if options.Mode == "verified-empty" && (q.s.MachineConversion == nil || q.s.MachineConversion.RolledBack) {
 		var release func()
