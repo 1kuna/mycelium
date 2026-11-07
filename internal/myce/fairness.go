@@ -300,8 +300,8 @@ func (q *Queue) mayNeedCards(j *Job, m *Machine) bool {
 	return false
 }
 
-// Ordinary projections depend on the concrete vector and tier; scarce yields
-// also depend on the exact demand. Reuse within one read-only device scan and only
+// Ordinary projections depend on the concrete vector and tier; capacity evidence
+// and scarce yields also depend on the exact demand. Reuse within one read-only device scan and only
 // without preparations, whose sharing decision also depends on the recipe.
 type batchResourceKey struct {
 	project, class, priority string
@@ -339,9 +339,12 @@ func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batc
 	if !found {
 		// #740 made every annotated/extension job miss the whole resource
 		// projection cache, even when no scarce-host yield was possible.
-		// Share ordinary release work; retain the exact-demand fallback.
+		// Share ordinary release work; capacity deficits and the yield fallback
+		// retain exact-demand identity.
 		ordinaryKey := key
-		ordinaryKey.yieldDemand = ""
+		if len(j.LaunchCapacityWait) == 0 {
+			ordinaryKey.yieldDemand = ""
+		}
 		var ok bool
 		room, ok = resources[ordinaryKey]
 		if !ok {

@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -263,10 +265,46 @@ func TestLaunchCapacityDiagnosticDeadlineRace(t *testing.T) {
 	offer := check(t, q, m, nil).Job
 	r := capacityResult(offer, false)
 	r.Diagnostics = &AttemptDiagnostics{Files: FileManifest{"summary.json": ref, "log-tail.txt": ref}}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	syncDir := q.files.syncDir
+	q.files.syncDir = func(path string) error {
+		close(entered)
+		<-release
+		return syncDir(path)
+	}
 	clock.Advance(ProductionStartTimeout + time.Second)
-	// No maintenance runs between expiry and receipt.
-	if err := q.Complete(r); err != nil {
-		t.Fatal("valid diagnostic refusal rejected after generated cutoff", err)
+	done := make(chan error, 1)
+	go func() { done <- q.Complete(r) }()
+	select {
+	case <-entered:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("diagnostic verification did not reach barrier")
+	}
+	clock.Advance(time.Second)
+	maintained := make(chan error, 1)
+	go func() { maintained <- q.Tick() }()
+	select {
+	case err := <-maintained:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatal("diagnostic I/O blocked queue maintenance")
+	}
+	if got := job(t, q, j.ID); got.State != "running" {
+		t.Fatal("maintenance expired typed refusal during diagnostic I/O", got.State, got.Reason)
+	}
+	unblock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal("valid diagnostic refusal rejected after generated cutoff", err)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatal("diagnostic completion did not finish")
 	}
 	got := job(t, q, j.ID)
 	if got.State != "queued" || got.InfrastructureRetries != 0 || got.Losses != 0 {
@@ -440,4 +478,57 @@ func TestLaunchCapacityExperimentPreemptionSequence(t *testing.T) {
 		t.Fatal("experiment did not start after changed capacity", offer)
 	}
 	finish(t, q, offer, true)
+}
+
+func TestLaunchCapacityProjectionCacheIsolation(t *testing.T) {
+	q, _ := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 8, 32)
+	m.Devices = []MachineDevice{}
+	victim := submit(t, q, cpuSpec(1, 4))
+	running := assignedJob(machineCheck(t, q, m))
+	if running == nil || running.ID != victim.ID {
+		t.Fatal("missing lower tier", running)
+	}
+	s := cpuSpec(1, 4)
+	s.Priority = "production"
+	if err := normalizeResources(&s); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := &Job{ID: "ordinary", State: "queued", Spec: s}
+	refused := cloneJob(ordinary)
+	refused.ID, refused.Attempt, refused.Machine, refused.Session = "refused", 1, m.ID, m.Session
+	q.recordLaunchCapacityWait(&refused, capacityResult(&refused, false))
+	var target *Machine
+	for _, candidate := range q.plannerMachines() {
+		if candidate.GPU == "cpu" {
+			target = candidate
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("missing CPU target")
+	}
+	for _, order := range [][]*Job{{ordinary, &refused}, {&refused, ordinary}} {
+		resources := map[batchResourceKey]batchResourceRoom{}
+		for _, demand := range order {
+			if !q.batchResourcesFitWithScan(demand, target, resources) {
+				t.Fatal("cached projection lost eligible demand", demand.ID)
+			}
+			plan := resources[resourceKey(demand)].plan
+			expected := q.batchResourceProjection(demand, target).plan
+			if !reflect.DeepEqual(plan, expected) {
+				t.Fatal("cached release plan differs from exact demand", demand.ID, plan, expected)
+			}
+			if demand.ID == refused.ID {
+				if plan == nil || len(plan.jobs) != 1 || plan.jobs[0].ID != victim.ID {
+					t.Fatal("refused demand lost measured lower-tier reclaim", plan)
+				}
+			} else if plan != nil && len(plan.jobs) > 0 {
+				t.Fatal("ordinary demand inherited unnecessary stops", plan)
+			}
+		}
+	}
 }

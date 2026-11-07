@@ -1718,6 +1718,16 @@ func (q *Queue) Complete(r Result) error {
 func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
+	// Retain validated admission evidence durably before unlocking for bulk
+	// diagnostic verification. Maintenance during that I/O must see the wait.
+	if launchCapacityRefusal(r) && !r.ReleaseOnly {
+		if err := q.updateRequest(ctx, func() error {
+			q.retainLaunchCapacityRefusal(r)
+			return nil
+		}, nil); err != nil {
+			return err
+		}
+	}
 	quotaFailure := attemptDiskLimitFailure(r)
 	unlockRequest := requestLock(ctx, &q.mu)
 	j, err := q.wallTimeVerificationJob(r)

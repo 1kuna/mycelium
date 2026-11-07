@@ -28,8 +28,9 @@ func productionStartWindow(s Spec) time.Duration {
 func initializeStartDeadline(j *Job, since time.Time) {
 	if j.Spec.ExtensionCheck != nil && j.Spec.ExtensionCheck.Timeout != "" {
 		// Reuse the startup fence without promoting qualification to production.
-		// One hour bounds unavailable-capacity/preparation waits at the existing
-		// maximum start window, independently of the execution budget.
+		// One hour bounds unavailable-route/preparation waits at the existing
+		// maximum start window. Capacity waiting pauses this startup budget,
+		// independently of the execution budget.
 		if j.Spec.StartBy == nil {
 			j.StartWindow = MaxProductionStartWindow
 			deadline := since.Add(j.StartWindow)
