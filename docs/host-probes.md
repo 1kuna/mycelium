@@ -43,6 +43,11 @@ A slow pending scan never extends the previous observation. A completed failure
 removes it immediately. Inventory retains stable device identity, but stale or
 failed capacity cannot qualify work; partial driver failures preserve fresh
 healthy siblings. Direct launch ownership/identity checks remain mandatory.
+For an already assigned attempt, a fresh direct launch probe can establish
+recovery from a cached `device_probe_unavailable` observation. The direct probe
+must still succeed, identify exactly the assigned device and report healthy
+capacity; saved identity and policy fences remain binding. This does not renew
+the background observation or restore its advertised queue capacity.
 
 The queue translates worker-local age at request receipt to its own injected
 clock and includes preparation/transaction waiting time. New observations expire
