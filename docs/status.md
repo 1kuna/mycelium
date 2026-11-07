@@ -1170,9 +1170,17 @@ reserve is already removed from live availability; it is not subtracted again.
 Only fresh exact-attempt cgroup anonymous resident memory reduces growth,
 including managed Docker containers with per-member caps and no shared parent.
 The worker verifies exact attempt labels and local container cgroup membership,
-then sums disjoint container charges. The unified-CUDA device-growth floor
-remains: host cgroup memory cannot cancel the device reservation.
-Only this current nonreclaimable memory reduces growth;
+then sums disjoint container charges. From the next release, fresh direct
+unified-CUDA device counters also establish occupied physical RAM. Host/device
+overlap is unknown, so remaining growth credits only the larger resident vector,
+never their sum; measured growth through each sample's age stays pending.
+RSS/host-delta device estimates and uncertain ownership earn no device credit.
+Native helper memory can be reported before main starts: occupancy does not
+establish main execution. Launch takes fresh actor snapshots before its live
+physical-RAM read and rechecks exact custody afterward. Confirmed local cleanup
+removes an old actor's reservation even before its next heartbeat; stop intent
+and pending cleanup do not.
+Only this current resident evidence reduces growth;
 reclaimable cache, historical peaks and process RSS do not. Missing or five-second-old
 samples retain the full reservation, as do models and unconfirmed release custody.
 Queue restarts discard current-use credit. macOS uses the conservative fallback
