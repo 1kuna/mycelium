@@ -44,9 +44,9 @@ func (q *Queue) calibrationPrior(p WorkObservation) (*ServiceCalibration, string
 		return nil, "no accepted matching prediction/outcome pairs"
 	case c.Estimator != serviceEstimator:
 		return nil, "raw estimator changed; calibration unknown"
-	case q.clock.Now().Before(c.RecordedAt) || q.clock.Now().Sub(c.RecordedAt) > workCurveMaxAge:
-		// Share the raw curve's existing age fence. No additional fleet-tuned
-		// history window or minimum sample count is introduced.
+	case q.clock.Now().Before(c.RecordedAt):
+		// Retained matching history has no elapsed-age cutoff. Missing or
+		// invalidated observations are rejected with the raw evidence above.
 		return nil, "calibration outside matching history validity"
 	case c.Samples <= 0 || !finiteError(c.MeanError) || !finiteError(c.MinError) || !finiteError(c.MaxError):
 		return nil, "calibration evidence invalid"
@@ -104,7 +104,7 @@ func (q *Queue) recordServiceCalibration(j *Job, r Result, old WorkObservation, 
 		!r.Success || r.Interrupted || r.Forced || r.OutOfMemory || r.ReleasePending ||
 		t.Execution.ID != r.ID || t.Execution.Attempt != r.Attempt || t.Machine != r.Machine || t.Session != r.Session ||
 		old.Forbidden || old.StaleReason != "" || point.Key.Check ||
-		t.HistoryRecordedAt == nil || q.clock.Now().Before(*t.HistoryRecordedAt) || q.clock.Now().Sub(*t.HistoryRecordedAt) > workCurveMaxAge ||
+		t.HistoryRecordedAt == nil || q.clock.Now().Before(*t.HistoryRecordedAt) ||
 		r.MemoryPeak != nil && r.MemoryPeak.constrained() {
 		return
 	}

@@ -11,7 +11,7 @@ import (
 
 // #216: cleared attempts retain diagnosis for the log window; held and replay
 // pending custody, the machine index, and Docker cleanup retain their evidence.
-func TestWorkerRetentionPrunesClearedAttemptStateAfterLogWindow(t *testing.T) {
+func TestWorkerRetentionPreservesUniqueAttemptStateAfterLogWindow(t *testing.T) {
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}
 	ids := map[string]string{}
@@ -48,12 +48,12 @@ func TestWorkerRetentionPrunesClearedAttemptStateAfterLogWindow(t *testing.T) {
 	}
 	pass := func() {
 		t.Helper()
-		if err := workerRetention(dir, clock.Now(), DefaultLogRetention); err != nil {
+		if err := workerRetention(dir, clock.Now(), testLogRetention); err != nil {
 			t.Fatal(err)
 		}
 	}
 	pass()
-	clock.Advance(DefaultLogRetention - time.Second)
+	clock.Advance(testLogRetention - time.Second)
 	pass()
 	assertPresent := func(name string, want bool) {
 		t.Helper()
@@ -70,24 +70,24 @@ func TestWorkerRetentionPrunesClearedAttemptStateAfterLogWindow(t *testing.T) {
 	}
 	pass()
 	for kind, id := range ids {
-		keep := kind != "cleared"
+		keep := true
 		assertPresent("state-attempt-"+kind+".json", keep)
 		for _, name := range []string{id + ".result.json", id + ".outcome.json", id + ".cid", id + "-helper.cid", id + ".docker-evidence.json", id + ".docker-events.json", "attempt-" + id + ".json", "native-" + id + ".json"} {
 			assertPresent(name, keep)
 		}
 	}
-	// Once the existing Docker collector removes custody, old private evidence goes.
+	// Removing stopped containers does not authorize deleting unique evidence.
 	if err := os.Remove(filepath.Join(dir, ids["docker"]+".docker.json")); err != nil {
 		t.Fatal(err)
 	}
 	pass()
-	assertPresent(ids["docker"]+".docker-evidence.json", false)
-	assertPresent("state-attempt-docker.json", false)
+	assertPresent(ids["docker"]+".docker-evidence.json", true)
+	assertPresent("state-attempt-docker.json", true)
 }
 
 // Review regression: refused Docker jobs have no execution identity, and their
 // launch diagnostics use the job/attempt name rather than an execution identity.
-func TestWorkerRetentionPrunesAcknowledgedLaunchRefusals(t *testing.T) {
+func TestWorkerRetentionPreservesAcknowledgedLaunchRefusals(t *testing.T) {
 	for _, docker := range []bool{false, true} {
 		t.Run(map[bool]string{false: "native", true: "docker"}[docker], func(t *testing.T) {
 			dir := t.TempDir()
@@ -116,11 +116,11 @@ func TestWorkerRetentionPrunesAcknowledgedLaunchRefusals(t *testing.T) {
 			}
 			pass := func() {
 				t.Helper()
-				if err := workerRetention(dir, clock.Now(), DefaultLogRetention); err != nil {
+				if err := workerRetention(dir, clock.Now(), testLogRetention); err != nil {
 					t.Fatal(err)
 				}
 			}
-			clock.Advance(2 * DefaultLogRetention)
+			clock.Advance(2 * testLogRetention)
 			pass() // Result replay remains pending regardless of diagnostic age.
 			for _, name := range []string{store.stateName, outcome} {
 				if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
@@ -138,11 +138,11 @@ func TestWorkerRetentionPrunesAcknowledgedLaunchRefusals(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dir, outcome)); err != nil {
 				t.Fatal(err)
 			}
-			clock.Advance(DefaultLogRetention)
+			clock.Advance(testLogRetention)
 			pass()
 			for _, name := range []string{store.stateName, outcome} {
-				if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("expired refusal %s retained: %v", name, err)
+				if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+					t.Fatalf("unique refusal %s lost: %v", name, err)
 				}
 			}
 		})
@@ -197,13 +197,13 @@ func TestWorkerRetentionNativeStartFailureAcknowledgement(t *testing.T) {
 	if err := os.Chtimes(filepath.Join(store.dir, store.state.LaunchOutcome), clock.Now(), clock.Now()); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultLogRetention)
-	if err := workerRetention(store.dir, clock.Now(), DefaultLogRetention); err != nil {
+	clock.Advance(testLogRetention)
+	if err := workerRetention(store.dir, clock.Now(), testLogRetention); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{store.stateName, store.state.LaunchOutcome} {
-		if _, err := os.Stat(filepath.Join(store.dir, name)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("acknowledged native failure retained %s: %v", name, err)
+		if _, err := os.Stat(filepath.Join(store.dir, name)); err != nil {
+			t.Fatalf("acknowledged native failure lost %s: %v", name, err)
 		}
 	}
 }

@@ -110,7 +110,7 @@ func TestOutputDeliverySpoolUsesManagedRetention(t *testing.T) {
 		if err := os.Chmod(dataDir, 0500); err != nil {
 			t.Fatal(err)
 		}
-		if err := workerRetention(store.dir, clock.Now(), DefaultLogRetention); err == nil {
+		if err := workerRetention(store.dir, clock.Now(), testLogRetention); err == nil {
 			t.Fatal("read-only data did not reproduce partial deletion")
 		}
 		if err := os.Chmod(dataDir, 0700); err != nil {
@@ -118,7 +118,7 @@ func TestOutputDeliverySpoolUsesManagedRetention(t *testing.T) {
 		}
 		clock.Advance(AttemptFilesGrace + time.Second)
 	}
-	if err := workerRetention(store.dir, clock.Now(), DefaultLogRetention); err != nil {
+	if err := workerRetention(store.dir, clock.Now(), testLogRetention); err != nil {
 		t.Fatal("managed cleanup did not recover", err)
 	}
 	if _, err := os.Stat(spool); !os.IsNotExist(err) {

@@ -101,7 +101,7 @@ func TestFleetInstructionPruneAndQueueWrite(t *testing.T) {
 				} else {
 					q, c = fixture(t)
 				}
-				ended := c.Now().Add(-2 * DefaultLogRetention)
+				ended := c.Now().Add(-2 * testLogRetention)
 				if err := q.update(func() error {
 					q.putJob("expired", &Job{ID: "expired", State: "succeeded", FinishedAt: &ended, ReleaseConfirmed: true})
 					return nil
@@ -171,6 +171,7 @@ func TestFleetInstructionPruneAndQueueWrite(t *testing.T) {
 func TestFleetInstructionSlowSpanWriterPhases(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		q, c, _ := fleetFixture(t, "host", "host")
+		q.requestLatencies.record("GET /api/fleet/instruction", time.Millisecond)
 		if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 			t.Fatal(err)
 		}

@@ -148,7 +148,7 @@ func (q *Queue) recordWorkMemory(sample eligibleMemorySample, old WorkObservatio
 	if oldCorrected && r.MemoryPeak.GPUHost != nil && !corrected {
 		return // A result from a pre-upgrade worker cannot poison corrected history.
 	}
-	if corrected && !oldCorrected || !memoryIdentityUsable(old) || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge {
+	if corrected && !oldCorrected || !memoryIdentityUsable(old) {
 		old.MemoryPeak, old.MemoryRange, old.GPUHostRange, old.MemorySamples = nil, nil, nil, 0
 	}
 	point.MemoryEscalation = nil

@@ -122,7 +122,7 @@ check: [true]
 	}
 	write(".mycelium/profiles/shared.yaml", profile)
 	first := invoke("first")
-	private := first.Spec.Files[".myce-inputs/"+profileHash("shared/runtime")]
+	private := first.Spec.Files["shared/runtime"]
 	if private.SHA256 == "" || private.SHA256 == first.Spec.SharedInputs["runtime"].SHA256 {
 		t.Fatal("shared and private input identities collided")
 	}

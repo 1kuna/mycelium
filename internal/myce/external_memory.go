@@ -3,12 +3,12 @@ package myce
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
+	"math/bits"
+	"sort"
 	"time"
 )
-
-const externalBucketWidth = 15 * time.Minute
-const externalBucketCount = 7*24*4 + 1
 
 // HostMemoryObservation is simultaneous best-effort host used RAM and current
 // worker/descendant RSS plus managed Docker cgroup memory. It never uses
@@ -21,12 +21,19 @@ type HostMemoryObservation struct {
 	MyceliumGB         float64 `json:"mycelium_gb"`
 }
 type externalMemoryBucket struct {
-	Start  time.Time        `json:"start"`
-	Counts map[uint8]uint32 `json:"counts"`
-	MaxGB  float64          `json:"max_gb"`
-	PeakAt time.Time        `json:"peak_at"`
+	ByteCounts map[uint8]uint64  `json:"byte_counts,omitempty"`
+	ByteMax    map[uint8]float64 `json:"byte_max,omitempty"`
+	Values     map[uint64]uint64 `json:"values,omitempty"`
+	End        time.Time         `json:"end,omitempty"`
+	Start      time.Time         `json:"start"`
+	Counts     map[uint8]uint32  `json:"counts"`
+	MaxGB      float64           `json:"max_gb"`
+	PeakAt     time.Time         `json:"peak_at"`
 }
 type externalMemoryRing struct {
+	Slots   int                           `json:"slots,omitempty"`
+	LastAt  time.Time                     `json:"last_at,omitempty"`
+	Cadence time.Duration                 `json:"cadence,omitempty"`
 	Buckets map[int]*externalMemoryBucket `json:"buckets"`
 }
 type ExternalMemoryWindow struct {
@@ -79,33 +86,49 @@ func (q *Queue) recordExternalMemory(m *Machine) {
 		r = &externalMemoryRing{Buckets: map[int]*externalMemoryBucket{}}
 		q.s.ExternalMemory[host] = r
 	}
+	// Published rings/buckets are immutable generations, borrowed by status and
+	// undo without copying history while control is locked.
+	copy := *r
+	r = &copy
+	r.Buckets = maps.Clone(r.Buckets)
+	q.s.ExternalMemory[host] = r
 	now := q.clock.Now()
-	start := now.Truncate(externalBucketWidth)
-	index := (start.Unix() / int64(externalBucketWidth/time.Second)) % externalBucketCount
-	if index < 0 {
-		index += externalBucketCount
-	}
-	b := r.Buckets[int(index)]
+	r.LastAt = now
+	width := externalBucketSpan(r.Slots)
+	start := now.Truncate(width)
+	index := int(start.UnixNano() / int64(width) % int64(max(1, r.Slots)+1))
+	b := r.Buckets[index]
 	if b == nil || !b.Start.Equal(start) {
-		b = &externalMemoryBucket{Start: start, Counts: map[uint8]uint32{}}
-		r.Buckets[int(index)] = b
+		b = &externalMemoryBucket{Start: start}
+	} else {
+		cloned := *b
+		b = &cloned
 	}
+	b.ByteCounts, b.ByteMax = maps.Clone(b.ByteCounts), maps.Clone(b.ByteMax)
+	if b.ByteCounts == nil {
+		b.ByteCounts = map[uint8]uint64{}
+		b.ByteMax = map[uint8]float64{}
+	}
+	r.Buckets[index] = b
+	b.End = now
 	v := o.UsedGB - o.MyceliumGB
-	bin := uint8(externalBin(v))
-	if b.Counts[bin] < math.MaxUint32 {
-		b.Counts[bin]++
-	}
+	// One bin per bit of an addressable byte count. Values beyond the physical
+	// uint64 address range saturate in the final bin; exact observed maxima stay.
+	bytes := uint64(min(float64(^uint64(0)>>1), math.Ceil(v*(1<<30))))
+	bin := uint8(bits.Len64(bytes))
+	b.ByteCounts[bin]++
+	b.ByteMax[bin] = max(b.ByteMax[bin], v)
 	if b.PeakAt.IsZero() || v > b.MaxGB {
 		b.MaxGB, b.PeakAt = v, now
 	}
 }
 func (r *externalMemoryRing) window(now time.Time, duration time.Duration) ExternalMemoryWindow {
 	var w ExternalMemoryWindow
-	var counts [64]uint64
-	// Include the boundary bucket: conservatively at most 15 minutes extra.
-	cutoff := now.Add(-duration).Truncate(externalBucketWidth)
+	values := map[float64]uint64{}
+	// Include only actual sample intervals intersecting this public query window.
+	cutoff := now.Add(-duration)
 	for _, b := range r.Buckets {
-		if b.PeakAt.IsZero() || b.Start.Before(cutoff) || b.Start.After(now) {
+		if b.PeakAt.IsZero() || maxTime(b.Start, b.End).Before(cutoff) || b.Start.After(now) {
 			continue
 		}
 		w.Buckets++
@@ -116,23 +139,33 @@ func (r *externalMemoryRing) window(now time.Time, duration time.Duration) Exter
 			w.LastAt = b.Start
 		}
 		for i, n := range b.Counts {
-			counts[i] += uint64(n)
+			values[externalBinUpper(int(i))] += uint64(n)
 			w.Samples += uint64(n)
+		}
+		for bin, n := range b.ByteCounts {
+			values[b.ByteMax[bin]] += n
+			w.Samples += n
+		}
+		for value, n := range b.Values {
+			values[math.Float64frombits(value)] += n
+			w.Samples += n
 		}
 		if w.PeakAt.IsZero() || b.MaxGB > w.MaxGB || b.MaxGB == w.MaxGB && b.PeakAt.Before(w.PeakAt) {
 			w.MaxGB, w.PeakAt = b.MaxGB, b.PeakAt
 		}
 	}
+	ordered := make([]float64, 0, len(values))
+	for value := range values {
+		ordered = append(ordered, value)
+	}
+	sort.Float64s(ordered)
 	quantile := func(p float64) float64 {
 		target := uint64(math.Ceil(float64(w.Samples) * p))
 		var n uint64
-		for i, c := range counts {
-			n += c
+		for _, value := range ordered {
+			n += values[value]
 			if n >= target {
-				if i == 63 {
-					return w.MaxGB
-				}
-				return min(w.MaxGB, externalBinUpper(i))
+				return min(w.MaxGB, value)
 			}
 		}
 		return w.MaxGB
@@ -171,6 +204,16 @@ func SuggestHostBudget(total, headroom, queue float64, h *ExternalMemoryHistory)
 		return HostBudgetSuggestion{}, errors.New("no measured external memory history")
 	}
 	w := h.Week
-	headroom = max(headroom, .25*w.MaxGB)
-	return HostBudgetSuggestion{TotalGB: total, ExternalMaxGB: w.MaxGB, HeadroomGB: headroom, QueueOverheadGB: queue, SuggestedGB: math.Floor(max(0, total-w.MaxGB-headroom-queue)*4) / 4, History: w, DryRun: true}, nil
+	// Keep authored headroom; observed variability, not a universal quarter,
+	// accounts for the difference between typical and peak external use.
+	if w.Samples > 1 && w.P50GB > 0 {
+		headroom = max(headroom, w.MaxGB-w.P50GB)
+	}
+	return HostBudgetSuggestion{TotalGB: total, ExternalMaxGB: w.MaxGB, HeadroomGB: headroom, QueueOverheadGB: queue, SuggestedGB: max(0, total-w.MaxGB-headroom-queue), History: w, DryRun: true}, nil
+}
+
+// The public longest query window supplies the coverage horizon. The number
+// of subdivisions is measured from storage/memory and serialization cost.
+func externalBucketSpan(slots int) time.Duration {
+	return max(time.Nanosecond, 7*24*time.Hour/time.Duration(max(1, slots)))
 }

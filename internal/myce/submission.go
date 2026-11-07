@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-const submissionRetention = 30 * 24 * time.Hour
-
 var submissionKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
 func validateSubmissionKey(key string) error {
@@ -87,7 +85,7 @@ func (q *Queue) maintainSubmissions() {
 			} else if record.RemovedAt == nil {
 				removed := now
 				record.RemovedAt = &removed
-				q.records.keys.set(digest, removed.Add(submissionRetention))
+				q.records.keys.set(digest, time.Time{})
 			}
 		}
 	}
@@ -147,14 +145,6 @@ func (q *Queue) expireSubmission(digest string) {
 	if r == nil {
 		return
 	}
-	var at *time.Time
-	if r.Kind == submissionReservation {
-		at = r.Created
-	}
-	if r.Kind == submissionBinding && q.s.Jobs[r.JobID] == nil {
-		at = r.RemovedAt
-	}
-	if at != nil && !q.clock.Now().Before(at.Add(submissionRetention)) {
-		q.putSubmission(digest, &submissionRecord{Kind: submissionExpired})
-	}
+	// The digest and durable answer are still read by replay/cancellation.
+	// Time alone cannot prove that a client has stopped depending on them.
 }

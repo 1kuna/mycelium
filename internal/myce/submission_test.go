@@ -156,24 +156,18 @@ func TestSubmissionRetention(t *testing.T) {
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			data, err := json.Marshal(q.s.Submissions[digest])
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(data) != `{"kind":"expired"}` {
-				t.Fatalf("marker retains full identity: %s", data)
-			}
-			_, err = q.Submit(s)
-			submissionError(t, err, 410, "submission_key_expired")
 			c.Advance(100 * submissionRetention)
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			_, err = q.Submit(s)
-			submissionError(t, err, 410, "submission_key_expired")
-			if len(q.s.Jobs) != 0 {
-				t.Fatal("expired key created job")
+			got := submit(t, q, s)
+			if got.State != "cancelled" || original != nil && got.ID != original.ID {
+				t.Fatal("age changed replay/cancellation intent")
 			}
+			if q.s.Submissions[digest].Kind != submissionBinding {
+				t.Fatal("replay answer lost")
+			}
+
 		})
 	}
 }
@@ -340,7 +334,10 @@ func TestSubmissionHTTP(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	submissionError(t, client.Call(ctx, "POST", "/api/jobs", s, nil), http.StatusGone, "submission_key_expired")
+	var reserved Job
+	if err := client.Call(ctx, "POST", "/api/jobs", s, &reserved); err != nil || reserved.State != "cancelled" {
+		t.Fatal("age lost cancelled intent", err)
+	}
 }
 
 func TestSubmissionLegacyState(t *testing.T) {
@@ -403,10 +400,9 @@ func TestSubmissionReservationAndMarkerRestart(t *testing.T) {
 	}
 	s.SubmissionKey = "expired-key"
 	jobsBefore := len(q.s.Jobs)
-	_, err = q.Submit(s)
-	submissionError(t, err, 410, "submission_key_expired")
-	if len(q.s.Jobs) != jobsBefore {
-		t.Fatal("marker created a job after restart")
+	retained := submit(t, q, s)
+	if retained.State != "cancelled" || len(q.s.Jobs) != jobsBefore+1 {
+		t.Fatal("restart lost cancelled intent")
 	}
 }
 
