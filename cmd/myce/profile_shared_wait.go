@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -72,7 +73,7 @@ func registerSharedObserver(ctx context.Context, dir string, cfg profileObserver
 	}
 	lock, err := profileLock(filepath.Join(root, "observer.lock"))
 	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-		return nil
+		return requestObserverUpgrade(root)
 	}
 	if err != nil {
 		return err
@@ -82,6 +83,10 @@ func registerSharedObserver(ctx context.Context, dir string, cfg profileObserver
 	if err != nil {
 		return err
 	}
+	return startSharedObserver(ctx, executable, root, lock)
+}
+
+func startSharedObserver(ctx context.Context, executable, root string, lock *os.File) error {
 	ready, writeReady, err := os.Pipe()
 	if err != nil {
 		return err
@@ -90,11 +95,19 @@ func registerSharedObserver(ctx context.Context, dir string, cfg profileObserver
 	defer writeReady.Close()
 	cmd := exec.Command(executable, "wait", "--observer-dir", root, "--detached")
 	cmd.Env = append(notifierEnvironment(), "MYCE_SHARED_OBSERVER=1")
+	output, err := os.OpenFile(filepath.Join(root, "observer.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer output.Close()
+	// Real file descriptors survive submitter exit; exec copy pipes do not.
+	cmd.Stdout, cmd.Stderr = output, output
 	cmd.ExtraFiles = []*os.File{lock, writeReady}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if os.Getenv("MYCE_DEV_SESSION_ROOT") != "" {
-		// The temporary queue cannot outlive its dev command. Keep this isolated
-		// observer in that command's group so dev shutdown also retires it.
+	if os.Getenv("MYCE_DEV_SESSION_ROOT") != "" || os.Getenv("MYCE_PROCESS_SESSION") != "" {
+		// A dev command or worker attempt owns this session. Its queue/test
+		// observer must remain in that session for exact-release cleanup, even
+		// after the submitting command exits. Setsid would escape that custody.
 		cmd.SysProcAttr = nil
 	}
 	if err = cmd.Start(); err != nil {
@@ -122,6 +135,9 @@ type sharedProfileWatch struct {
 	registration sharedProfileRegistration
 	receipt      profileReceipt
 	lock         *os.File
+	finishing    bool
+	finalJob     *myce.Job
+	finalCause   error
 }
 type sharedProfileGroup struct {
 	unknownOffset int
@@ -137,6 +153,7 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 	if os.Getenv("MYCE_SHARED_OBSERVER") != "1" {
 		return waitError(2, "shared observer is started by profile submission")
 	}
+	log.SetOutput(&observerLogWriter{root: root})
 	syscall.CloseOnExec(3)
 	lock := os.NewFile(3, "observer.lock")
 	defer lock.Close()
@@ -152,9 +169,18 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 	if e != nil {
 		return e
 	}
-	defer os.Remove(filepath.Dir(socketPath))
-	defer os.Remove(socketPath)
-	defer socket.Close()
+	identity, e := os.Stat(socketPath)
+	if e != nil {
+		socket.Close()
+		return e
+	}
+	defer func() {
+		socket.Close()
+		if current, err := os.Stat(socketPath); err == nil && os.SameFile(identity, current) {
+			_ = os.Remove(socketPath)
+			_ = os.Remove(filepath.Dir(socketPath))
+		}
+	}()
 	wakes := make(chan struct{}, 1)
 	done := make(chan struct{})
 	defer func() { socket.Close(); <-done }()
@@ -184,12 +210,8 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 		}
 	}
 	ready := os.NewFile(4, "ready")
-	_, err := ready.Write([]byte{1})
-	ready.Close()
-	if err != nil {
-		return err
-	}
-	return runSharedProfileLoop(ctx, root, lock, myce.RealClock{}, adaptivePause, wakes)
+	defer ready.Close()
+	return runSharedProfileLoopStarted(ctx, root, lock, myce.RealClock{}, adaptivePause, func() error { _, err := ready.Write([]byte{1}); return err }, wakes)
 }
 
 type sharedProfileFinish struct {
@@ -214,23 +236,73 @@ func sharedProfileAuthority(reg sharedProfileRegistration) string {
 // independent, cancellable network operation; a silent server cannot withhold
 // another authority's completion or an owner's deadline.
 func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock myce.Clock, pause func(context.Context, time.Duration) error, events ...<-chan struct{}) error {
+	return runSharedProfileLoopStarted(ctx, root, lock, clock, pause, nil, events...)
+}
+
+func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File, clock myce.Clock, pause func(context.Context, time.Duration) error, startup func() error, events ...<-chan struct{}) error {
 	ctx, cancelAll := context.WithCancel(ctx)
 	var workers sync.WaitGroup
-	defer func() { cancelAll(); workers.Wait() }()
+	readerCtx, cancelReaders := context.WithCancel(ctx)
+	defer func() { cancelReaders(); cancelAll(); workers.Wait() }()
+	diagnostics := newObserverDiagnostics(root, clock)
+	if err := diagnostics.record("started", "", nil, true); err != nil {
+		return err
+	}
+	defer func() {
+		var owner observerDiagnostic
+		if readProfileJSON(filepath.Join(root, "observer.status"), &owner) == nil && owner.PID == os.Getpid() && owner.StartedAt.Equal(diagnostics.state.StartedAt) {
+			_ = diagnostics.record("stopped", "", ctx.Err(), true)
+		}
+	}()
+	if startup != nil {
+		if err := startup(); err != nil {
+			return err
+		}
+	}
 	watches := map[string]*sharedProfileWatch{}
+	bindings := map[string]*observerBindingPace{}
+	var pass uint64
 	defer func() {
 		for _, w := range watches {
 			w.lock.Close()
 		}
 	}()
 	finish := func(entry string, j *myce.Job, cause error) bool {
+		// Shutdown hands durable registrations to the next owner. Cancellation
+		// is not an observation failure and must never disarm a pending batch.
+		if ctx.Err() != nil {
+			return false
+		}
 		watch := watches[entry]
 		if watch == nil {
 			return true
 		}
-		_ = finishProfileObservation(ctx, watch.registration.Directory, watch.receipt, watch.registration.Observer, j, cause, watch.registration.NotifyEnv)
+		if !watch.finishing {
+			watch.finishing, watch.finalJob, watch.finalCause = true, j, cause
+		}
+		j, cause = watch.finalJob, watch.finalCause
+		binding := watch.registration.Observer.Notify
+		pace := bindings[binding]
+		if pace == nil {
+			pace = &observerBindingPace{}
+			bindings[binding] = pace
+		}
+		stale := binding != "" && j != nil && j.FinishedAt != nil && j.FinishedAt.Before(diagnostics.state.StartedAt)
+		if stale && !pace.ready(clock.Now(), pass) {
+			return false
+		}
+		started := clock.Now()
+		_ = diagnostics.record("notifier", watch.receipt.JobID, nil, false)
+		// A failed registration unlink must not invoke a completed notifier again.
+		var previous profileReceipt
+		alreadyFinished := readProfileJSON(filepath.Join(watch.registration.Directory, "receipt.json"), &previous) == nil && previous.ArmNonce == watch.receipt.ArmNonce && previous.Observation == "not_armed" && (binding == "" || previous.DeliveryStatus == "delivered" || previous.DeliveryStatus == "failed")
+		var finishErr error
+		if !alreadyFinished {
+			finishErr = finishProfileObservation(ctx, watch.registration.Directory, watch.receipt, watch.registration.Observer, j, cause, watch.registration.NotifyEnv)
+		}
 		var saved profileReceipt
 		if readProfileJSON(filepath.Join(watch.registration.Directory, "receipt.json"), &saved) != nil || saved.ArmNonce != watch.receipt.ArmNonce || saved.Observation != "not_armed" {
+			_ = diagnostics.record("receipt_persistence_failed", watch.receipt.JobID, finishErr, true)
 			return false
 		}
 		if watch.registration.Observer.Notify != "" && saved.DeliveryStatus != "delivered" && saved.DeliveryStatus != "failed" {
@@ -239,13 +311,30 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 		// Keep ownership until both receipt persistence and registration retirement
 		// succeed. A rearm cannot be deleted by a late old-owner cleanup.
 		if err := os.Remove(entry); err != nil && !os.IsNotExist(err) {
+			_ = diagnostics.record("registration_retirement_failed", watch.receipt.JobID, err, true)
 			return false
 		}
 		delete(watches, entry)
 		watch.lock.Close()
+		if stale && !alreadyFinished {
+			pace.pass = pass
+			remaining := 0
+			for _, peer := range watches {
+				if peer.registration.Observer.Notify == binding {
+					remaining++
+				}
+			}
+			pace.observed(started, clock.Now(), remaining)
+		}
+		if saved.DeliveryStatus == "delivered" {
+			diagnostics.update(func(state *observerDiagnostic) { state.Delivered++; state.LastDeliveryAt = clock.Now() })
+		}
+		if saved.DeliveryStatus == "failed" {
+			diagnostics.update(func(state *observerDiagnostic) { state.Failed++ })
+		}
+		_ = diagnostics.record("receipt_finished", watch.receipt.JobID, finishErr, true)
 		return true
 	}
-
 	groups := map[string]*sharedProfileGroup{}
 	completed := make(chan sharedProfileRead)
 	var wake <-chan struct{}
@@ -264,6 +353,9 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 		if !result.cancelled {
 			*group = result.group
 		}
+		if result.cancelled {
+			return
+		}
 		for _, action := range result.finished {
 			if watches[action.entry] == action.watch {
 				finish(action.entry, action.job, action.cause)
@@ -281,6 +373,12 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			}
 		}
 		for _, watch := range watches {
+			if watch.finishing {
+				if pace := bindings[watch.registration.Observer.Notify]; pace != nil && (due.IsZero() || pace.next.Before(due)) {
+					due = pace.next
+				}
+				continue
+			}
 			if end := watch.registration.Expires; !end.IsZero() && (due.IsZero() || end.Before(due)) {
 				due = end
 			}
@@ -290,6 +388,24 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		pass++
+		quiesce := func() {
+			cancelReaders()
+			workers.Wait()
+			for _, group := range groups {
+				group.pending = false
+				group.cancel = nil
+			}
+			readerCtx, cancelReaders = context.WithCancel(ctx)
+		}
+		if handed, err := tryObserverHandoff(ctx, root, lock, watches, diagnostics, quiesce); handed {
+			return nil
+		} else if err != nil {
+			_ = diagnostics.record("handoff_failed", "", err, true)
+		}
+		if err := diagnostics.record("discovery", "", nil, false); err != nil {
+			return err
 		}
 		passStarted := clock.Now()
 		entries, err := filepath.Glob(filepath.Join(root, "*.json"))
@@ -361,6 +477,7 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			}
 		}
 
+		diagnostics.update(func(state *observerDiagnostic) { state.Registrations = len(watches) })
 		byAuthority := map[string][]string{}
 		for entry, w := range watches {
 			key := sharedProfileAuthority(w.registration)
@@ -376,6 +493,10 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			active := entries[:0]
 			for _, entry := range entries {
 				w := watches[entry]
+				if w.finishing {
+					finish(entry, w.finalJob, w.finalCause)
+					continue
+				}
 				if !w.registration.Expires.IsZero() && !clock.Now().Before(w.registration.Expires) || w.receipt.JobID == "" {
 					cause := error(context.DeadlineExceeded)
 					if w.receipt.JobID == "" {
@@ -401,21 +522,21 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 			for id, revision := range group.after {
 				state.after[id] = revision
 			}
-			requestCtx, stop := context.WithCancel(ctx)
+			requestCtx, stop := context.WithCancel(readerCtx)
 			group.pending = true
 			group.cancel = stop
 			workers.Add(1)
-			go func(key string, entries []string, state sharedProfileGroup, snapshot map[string]*sharedProfileWatch, owner *sharedProfileGroup) {
+			go func(key string, entries []string, state sharedProfileGroup, snapshot map[string]*sharedProfileWatch, owner *sharedProfileGroup, operationCtx context.Context) {
 				defer workers.Done()
 				defer stop()
-				result := readSharedProfileAuthority(requestCtx, entries, snapshot, state, clock)
+				result := readSharedProfileAuthority(requestCtx, entries, snapshot, state, clock, diagnostics)
 				result.key = key
 				result.owner = owner
 				select {
 				case completed <- result:
-				case <-ctx.Done():
+				case <-operationCtx.Done():
 				}
-			}(key, append([]string(nil), entries...), state, snapshot, group)
+			}(key, append([]string(nil), entries...), state, snapshot, group, readerCtx)
 		}
 		// Retired groups must not contribute stale next times to pacing.
 		live := map[string]bool{}
@@ -434,6 +555,22 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 		previousCount = len(watches)
 		delay := discovery.Delay(clock.Now(), time.Time{}, nil, nil)
 		pending, due := nextWake()
+		diagnostics.update(func(state *observerDiagnostic) {
+			state.NextReadAt, state.NextDeliveryAt = time.Time{}, time.Time{}
+			for _, group := range groups {
+				if !group.pending && clock.Now().Before(group.next) && (state.NextReadAt.IsZero() || group.next.Before(state.NextReadAt)) {
+					state.NextReadAt = group.next
+				}
+			}
+			for _, pace := range bindings {
+				if clock.Now().Before(pace.next) && (state.NextDeliveryAt.IsZero() || pace.next.Before(state.NextDeliveryAt)) {
+					state.NextDeliveryAt = pace.next
+				}
+			}
+		})
+		if err := diagnostics.record("observing", "", nil, false); err != nil {
+			return err
+		}
 		if pending {
 			var timer *time.Timer
 			var timerC <-chan time.Time
@@ -476,8 +613,13 @@ func runSharedProfileLoop(ctx context.Context, root string, lock *os.File, clock
 	}
 }
 
-func readSharedProfileAuthority(ctx context.Context, entries []string, watches map[string]*sharedProfileWatch, state sharedProfileGroup, clock myce.Clock) (result sharedProfileRead) {
+func readSharedProfileAuthority(ctx context.Context, entries []string, watches map[string]*sharedProfileWatch, state sharedProfileGroup, clock myce.Clock, diagnostics ...*observerDiagnostics) (result sharedProfileRead) {
 	group := &state
+	var trace *observerReadTrace
+	if len(diagnostics) > 0 {
+		trace = diagnostics[0].beginRead(len(entries))
+	}
+	defer trace.done()
 	defer func() { result.group = state; result.cancelled = ctx.Err() != nil }()
 	finish := func(entry string, j *myce.Job, cause error) bool {
 		result.finished = append(result.finished, sharedProfileFinish{entry, watches[entry], j, cause})
@@ -487,6 +629,7 @@ func readSharedProfileAuthority(ctx context.Context, entries []string, watches m
 	sample := watches[entries[0]].registration
 	c, e := runClient(sample.Observer.Config, sample.Observer.Joining, sample.Observer.Queue, sample.Token)
 	if e != nil {
+		trace.phase("authority_failed", "", e)
 		group.pace.Observe(clock.Now().Sub(started), false)
 		group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, e, nil))
 		group.retrying = true
@@ -508,9 +651,11 @@ batchLoop:
 		if len(entries) > 256 {
 			seconds = 0
 		}
+		trace.phase("batch_read", "", nil)
 		reply, readErr := c.WaitBatch(readCtx, ids, group.after, seconds)
 		cancel()
 		if readErr != nil {
+			trace.phase("batch_read_failed", "", readErr)
 			// Unknown IDs must not poison their healthy batch peers. Resolve this
 			// batch individually only on a permanent unknown response.
 			var api *myce.HTTPError
@@ -559,6 +704,7 @@ batchLoop:
 			group.retrying = true
 			break
 		}
+		trace.phase("batch_read_complete", "", nil)
 		group.retrying = false
 		changed := false
 		for _, state := range reply.Jobs {
@@ -578,9 +724,11 @@ batchLoop:
 			}
 			entry := batch[i]
 			finalCtx, cancel := sharedProfileReadContext(ctx, []string{entry}, watches, clock)
+			trace.phase("terminal_read", state.ID, nil)
 			j, finalErr := c.GetJobForWait(finalCtx, state.ID)
 			cancel()
 			if finalErr != nil {
+				trace.phase("terminal_read_failed", state.ID, finalErr)
 				if !myce.RetryStatusRead(finalErr) {
 					finish(entry, nil, finalErr)
 				} else {

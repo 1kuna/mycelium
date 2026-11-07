@@ -422,7 +422,37 @@ submitted IDs; unknown IDs and other HTTP client errors fail immediately.
 Exit codes: `0` all succeeded (also help), `1` any failed/cancelled, `2`
 usage/auth/API error, `3` timeout, `4` interrupted. `--timeout` must be positive;
 omit it to wait indefinitely. Timeout/interruption leaves the jobs running.
-Run one wait detached for long jobs; see [the agent workflow](jobs.md#cli-flags-and-defaults).
+Keep foreground waits owned by their agent session. Profile/adapter commands
+with a notifier use one managed completion observer per user; do not launch
+`wait --observer-dir ... --detached` yourself.
+
+### Managed completion observers (next release)
+
+An ordinary same-key profile/adapter replay starts an observer when its lifetime
+lock is free. It discovers every durable armed registration in the user registry,
+including registrations written by other processes and worktrees. A completed
+receipt is marked `not_armed` with `delivery_status: delivered` after its notifier
+returns successfully; repeating the keyed command does not send it again.
+The notifier must deduplicate its stable `delivery_id`: a crash between the
+external side effect and durable acknowledgement can require replay.
+
+`myce wait --observer-status` reads local diagnostic metadata without queue access
+or notifier execution. See [observer status](status.md#local-completion-observer-diagnostics-next-release)
+and [upgrade/recovery](operations.md#completion-observer-upgrade-and-recovery-next-release).
+Newer versioned clients request a cooperative handoff from supporting older
+observers at a delivery boundary, preserving all registrations and the lifetime
+lock. Legacy observers without this protocol require explicit operator recovery.
+
+Terminal jobs that predate observer startup are paced by notifier executable
+binding: the first is eligible immediately, then its measured mean delivery
+service time times remaining binding demand separates subsequent deliveries.
+Other bindings and fresh completions remain eligible. This reduces consecutive
+backlog wakes; it measures notifier cost, not the duration of the awakened agent.
+Bindings must use a distinct executable path per receiving thread.
+
+Inside a worker attempt or a dev session, managed observers retain that session
+so attempt cleanup can stop them. CLI test owners stop their exact observer
+executables before deleting fixture state; failed teardown retains the fixture.
 
 ## HTTP and models
 
