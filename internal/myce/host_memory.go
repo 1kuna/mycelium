@@ -476,7 +476,9 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 			s.gb, s.at = sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds*float64(time.Second)))
 			s.growthGB = sample.GrowthGB
 			if sample.FootprintGB != nil && validMemoryValue(*sample.FootprintGB) {
-				s.growthObserved = sample.GrowthObserved && (sample.GrowthGB == 0 || sample.GrowthRateGB > 0)
+				// Helper occupancy can reduce pending physical growth, but cannot
+				// release a CPU probe's whole future main-execution reservation.
+				s.growthObserved = r.Started && sample.GrowthObserved && (sample.GrowthGB == 0 || sample.GrowthRateGB > 0)
 				s.footprintGB, s.rateGB = *sample.FootprintGB, sample.GrowthRateGB
 			}
 		}

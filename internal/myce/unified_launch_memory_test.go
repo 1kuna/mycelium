@@ -88,7 +88,7 @@ func TestBatchLaunchMemoryUsesFreshActorBeforeAvailability(t *testing.T) {
 	clock := rt.clock.(*fakeClock)
 	clock.Advance(hostMemorySampleFreshFor) // Heartbeat map is now stale.
 	footprint := 2.0
-	actor.report = AttemptReport{Execution: Execution{ID: actor.job.ID, Attempt: actor.job.Attempt}, Session: actor.job.Session,
+	actor.report = AttemptReport{Execution: Execution{ID: actor.job.ID, Attempt: actor.job.Attempt}, Session: actor.job.Session, Started: true,
 		CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 2, FootprintGB: &footprint, GrowthObserved: true, sampledAt: clock.Now()}}
 	next := Job{ID: "next", Machine: rt.machine, Session: actor.job.Session, Attempt: 1, State: "running", Spec: cpuSpec(1, 4)}
 	if err := normalizeResources(&next.Spec); err != nil {
@@ -98,7 +98,7 @@ func TestBatchLaunchMemoryUsesFreshActorBeforeAvailability(t *testing.T) {
 	rt.batchSupervisors[jobKey(next)] = &attemptSupervisor{job: next, admissionMu: &rt.admissionMu}
 	launch := HostLaunch{Machine: rt.machine, Session: next.Session, Key: next.ID, Attempt: "1"}
 	if err := rt.checkBatchLaunchMemory(t.Context(), launch); err != nil {
-		t.Fatal("fresh exact helper snapshot hidden by stale heartbeat", err)
+		t.Fatal("fresh exact actor snapshot hidden by stale heartbeat", err)
 	}
 	// Invalidate the fresh publication during the blocking availability read.
 	// Its replacement must not grant resident credit against that earlier read.
@@ -141,7 +141,8 @@ func TestBatchLaunchMemoryConfirmedReleaseFence(t *testing.T) {
 func TestHelperMemoryHeartbeatKeepsMainUnstarted(t *testing.T) {
 	_, clock := fixture(t)
 	j := Job{ID: "helper", Attempt: 1, Session: "session"}
-	sample := &CurrentHostMemory{NonreclaimableGB: 2, sampledAt: clock.Now()}
+	footprint := 2.0
+	sample := &CurrentHostMemory{NonreclaimableGB: 2, GrowthObserved: true, FootprintGB: &footprint, sampledAt: clock.Now()}
 	r := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, CurrentHostMemory: sample}
 	a := &attemptSupervisor{job: j, report: r}
 	w := Worker{Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 118, nil }}
@@ -153,6 +154,19 @@ func TestHelperMemoryHeartbeatKeepsMainUnstarted(t *testing.T) {
 	}
 	if s := currentHostMemorySamples(reports, clock.Now())[jobKey(j)]; s.gb != 2 {
 		t.Fatal("helper custody did not reach exact-attempt accounting", s)
+	}
+	j.State, j.Spec, j.MemoryEnvelope = "running", cpuSpec(1, 16), &JobMemoryEnvelope{ProbeFloorGB: .125}
+	j.Spec.Needs.Memory = "auto"
+	if err := normalizeResources(&j.Spec); err != nil {
+		t.Fatal(err)
+	}
+	// Physical occupancy alone cannot stand in for the as-yet-unexecuted main
+	// of a cold probe. Keep its full reservation, while crediting the 2 GiB
+	// already absent from physical availability exactly once.
+	machine := cpuMachine("cpu", "host", "cpu", 4, 24)
+	charge, growth := jobHostMemoryCharge(&j, &machine, 16, currentHostMemorySamples(reports, clock.Now())[jobKey(j)], clock.Now())
+	if charge != 16 || growth != 14 {
+		t.Fatalf("helper released future main demand: charge=%g growth=%g", charge, growth)
 	}
 	clock.Advance(time.Second)
 	if sample.AgeSeconds != 0 {
