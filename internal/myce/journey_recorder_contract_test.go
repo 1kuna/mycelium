@@ -62,7 +62,7 @@ func TestJourneyRecorderImmutableAndBounded(t *testing.T) {
 	}
 	wg.Wait()
 	r.add("oversized", strings.Repeat("x", journeyFactBytes*2))
-	if r.count != 2*len(r.ring)+2 || r.oversized != 1 {
+	if r.count != uint64(2*len(r.ring)+2) || r.oversized != 1 {
 		t.Fatal("event loss accounting", r.count, r.oversized)
 	}
 	for _, v := range r.ring {
