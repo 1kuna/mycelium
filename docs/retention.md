@@ -145,3 +145,11 @@ capture shares the process pool with the event archive, progress and failure rep
 Raw event attributes hold transient parsing reservations; the persistent archive
 is charged only for the measured sanitized event representation. Discarded labels
 cannot consume the archive's future kill/exit capture capacity.
+
+Docker/model readiness parsers use the same shared pool for incomplete lines and
+transient decoding. Delimiters release raw/parser reservations; retained Docker
+layer identities reserve their own measured representation until command exit.
+Capacity exhaustion suppresses that optional progress observation through the next
+delimiter, without changing captured output or treating a truncated suffix as
+progress. Process exit releases incomplete lines. No fixed progress-line size is
+required, and later smaller observations can resume after pressure clears.

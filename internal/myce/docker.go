@@ -490,9 +490,14 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	// interval to drain. Outage backoff must not strand worker shutdown.
 	cmd.WaitDelay = d.rpcCadence("inspect")
 	var stdout bytes.Buffer
-	var stderr dockerTail
-	cmd.Stdout = &dockerProgressOutput{output: &stdout, progress: progress}
-	cmd.Stderr = &dockerProgressOutput{output: &stderr, progress: progress}
+	stderr := diagnosticTail{dir: d.dir}
+	defer stderr.release()
+	stdoutProgress := &dockerProgressOutput{output: &stdout, progress: progress, line: diagnosticLine{tail: diagnosticTail{dir: d.dir}}}
+	stderrProgress := &dockerProgressOutput{output: &stderr, progress: progress, line: diagnosticLine{tail: diagnosticTail{dir: d.dir}}}
+	defer stdoutProgress.close()
+	defer stderrProgress.close()
+	cmd.Stdout = stdoutProgress
+	cmd.Stderr = stderrProgress
 	err = cmd.Run()
 	out = stdout.Bytes()
 	if exit := new(exec.ExitError); errors.As(err, &exit) {

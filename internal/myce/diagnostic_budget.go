@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"math"
@@ -18,14 +19,21 @@ type diagnosticTail struct {
 	releases []func()
 }
 
+func (b *diagnosticTail) reserveBytes(n uint64) (int64, func()) {
+	if b.reserve != nil {
+		return b.reserve(n)
+	}
+	dir := b.dir
+	if dir == "" {
+		dir = "." // Transient observers without a spool use their working volume.
+	}
+	return reserveDiagnosticBytes(dir, n)
+}
+
 func (b *diagnosticTail) Write(p []byte) (int, error) {
 	needed := len(b.data) + len(p) - b.limit
 	if needed > 0 {
-		reserve := b.reserve
-		if reserve == nil {
-			reserve = func(n uint64) (int64, func()) { return reserveDiagnosticBytes(b.dir, n) }
-		}
-		grant, release := reserve(uint64(needed))
+		grant, release := b.reserveBytes(uint64(needed))
 		if grant > 0 {
 			b.releases = append(b.releases, release)
 		} else {
@@ -34,6 +42,47 @@ func (b *diagnosticTail) Write(p []byte) (int, error) {
 		b.limit += int(grant)
 	}
 	return b.dockerTail.Write(p)
+}
+
+// A progress parser retains only its incomplete line. Exhaustion suppresses that
+// optional observation until the delimiter; output still reaches its sink. A
+// truncated suffix must never masquerade as a complete progress record.
+type diagnosticLine struct {
+	tail     diagnosticTail
+	dropping bool
+}
+
+func (l *diagnosticLine) clear() {
+	l.tail.data = nil
+	l.tail.limit = 0
+	l.tail.release()
+}
+
+func (l *diagnosticLine) write(p []byte, consume func([]byte)) {
+	for len(p) > 0 {
+		end := bytes.IndexAny(p, "\r\n")
+		n := len(p)
+		if end >= 0 {
+			n = end
+		}
+		if !l.dropping {
+			want := len(l.tail.data) + n
+			_, _ = l.tail.Write(p[:n])
+			if len(l.tail.data) != want {
+				l.clear()
+				l.dropping = true
+			}
+		}
+		if end < 0 {
+			return
+		}
+		if !l.dropping {
+			consume(l.tail.data)
+		}
+		l.clear()
+		l.dropping = false
+		p = p[end+1:]
+	}
 }
 
 func (b *diagnosticTail) release() {
