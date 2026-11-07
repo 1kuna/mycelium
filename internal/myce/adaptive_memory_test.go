@@ -63,11 +63,11 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := job(t, q, next.ID)
-			if got.MemoryOOMFloor == nil || got.MemoryOOMFloor.HostMemoryGB != next.Spec.Needs.HostMemoryGB*1.25 || got.MemoryOOMFloor.MemoryGB != 0 || got.OOMRetries != 1 {
+			if got.MemoryOOMFloor == nil || got.MemoryOOMFloor.HostMemoryGB != next.MemoryEnvelope.HostGB+minimumHostMemoryGB || got.MemoryOOMFloor.MemoryGB != 0 || got.OOMRetries != 1 {
 				t.Fatalf("OOM floor lost: %+v", got.MemoryOOMFloor)
 			}
-			// More physical room permits the existing one retry. A second OOM
-			// must still terminate, without erasing the original requirement.
+			// More physical room permits recovery. A measured need beyond the
+			// physical capacity terminates, preserving the larger requirement.
 			m.HostAvailableMemoryGB = tc.ram
 			retry := check(t, q, m, nil).Job
 			if retry == nil || retry.ID != next.ID || retry.Spec.Needs.HostMemoryGB < got.MemoryOOMFloor.HostMemoryGB {
@@ -79,11 +79,12 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 			clock.Advance(time.Second)
 			r = result(retry, false)
 			r.OutOfMemory = true
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &tc.ram, Constrained: true}
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
-			if final := job(t, q, retry.ID); final.State != "failed" || final.OOMRetries != 1 {
-				t.Fatal("physical probe bypassed the existing retry limit", final.State, final.OOMRetries)
+			if final := job(t, q, retry.ID); final.State != "failed" || final.MemoryOOMFloor.HostMemoryGB <= tc.ram || final.OOMRetries != 2 {
+				t.Fatal("physical probe bypassed capacity", final.State, final.OOMRetries)
 			}
 		})
 	}

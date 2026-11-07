@@ -2547,3 +2547,32 @@ no infrastructure or loss retries. There is no migration daemon, new cooldown,
 capacity reservation or live process transfer. CPU dev proof uses simulated
 inventory and real commands, file-store generations, native sidecars and one
 verified accepted artifact; native hardware qualification remains separate.
+
+
+## Amendment: measured auto-memory stop floors (#907)
+
+This supersedes the auto-memory 25%/doubling retry floors and one-retry cutoff
+in the earlier memory-envelope amendments under MY-34. Each memory stop retains
+a job-local host floor of at least its observed peak plus the larger measured
+sampling growth or guard overshoot. The prior floor and failed host vector never
+shrink; one supported kernel page is the rounding/progress minimum. Native CPU
+recovery without telemetry advances beyond the failed resolved ceiling.
+Darwin guard observations and Linux cgroup peaks use the same queue transition;
+a guard observation larger than the final sample remains evidence.
+
+The durable floor survives queue restart, loss of comparable retry timing and
+target movement. Further auto-memory stops can retry only with an increased
+floor that fits eligible physical capacity/allowances. There is no arbitrary
+attempt-count substitute for that measured requirement. Worker guards, authored
+member caps, exact-attempt release and the one-shot transferred-prior probe's
+no-retry contract remain in force. A host OOM does not infer a larger device
+allocation. A new finite reservation is an empirical allowance, not proof
+against unseen bursts; native stress and shared-RSS attribution need separate
+qualification.
+
+Cold CPU sizing remains common to Linux and Darwin: it reserves the queue's
+currently usable ledger headroom, after reservations, pending growth and launch
+margin, rather than total host RAM. A small physical remainder can therefore
+produce a small exploratory ceiling. Reconstructing a historical small ceiling
+requires its assignment-time availability/reservation ledger; terminal process
+RSS and minimum host availability do not reconstruct that ledger.

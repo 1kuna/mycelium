@@ -126,8 +126,8 @@ func TestLearnedMemoryBoundsGrowAndNeverShrink(t *testing.T) {
 	if j.Spec.Needs.HostMemoryGB != 3+minimumHostMemoryGB || j.MemoryEnvelope.Evidence != 1 || !strings.Contains(j.MemoryEnvelope.Origin(), "bounded by 1 similar accepted attempts") {
 		t.Fatal("family evidence lost", j.MemoryEnvelope)
 	}
-	// Preserve the existing doubling protocol when a measured family envelope
-	// underestimates a new shape. The floor is never replaced by a smaller peak.
+	// A failed family envelope advances its durable floor without multiplying
+	// it. Missing telemetry cannot authorize another identical CPU ceiling.
 	other.Run.Command = []string{"echo", "larger"}
 	queued := submit(t, q, other)
 	run := check(t, q, m, nil).Job
@@ -144,8 +144,8 @@ func TestLearnedMemoryBoundsGrowAndNeverShrink(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := job(t, q, run.ID)
-	if got.MemoryOOMFloor == nil || got.MemoryOOMFloor.HostMemoryGB != run.Spec.Needs.HostMemoryGB*2 || got.OOMRetries != 0 {
-		t.Fatal("existing bounded OOM floor changed", got.MemoryOOMFloor)
+	if got.MemoryOOMFloor == nil || got.MemoryOOMFloor.HostMemoryGB != run.MemoryEnvelope.HostGB+minimumHostMemoryGB || got.OOMRetries != 1 {
+		t.Fatal("bounded OOM floor lost", got.MemoryOOMFloor)
 	}
 }
 
@@ -337,8 +337,8 @@ func TestLearnedMemoryDiscreteGPUSimilarHostAndOOM(t *testing.T) {
 		t.Fatal(err)
 	}
 	retry := assignGPU(t, q, m, next)
-	if retry.Spec.Needs.HostMemoryGB != (4+minimumHostMemoryGB)*2 || retry.MemoryEnvelope.DeviceGB != 96 || retry.OOMRetries != 0 {
-		t.Fatalf("host OOM did not double only host vector: %+v", retry.MemoryEnvelope)
+	if retry.Spec.Needs.HostMemoryGB != 4+2*minimumHostMemoryGB || retry.MemoryEnvelope.DeviceGB != 96 || retry.OOMRetries != 1 {
+		t.Fatalf("host OOM changed device vector or lost host floor: %+v", retry.MemoryEnvelope)
 	}
 }
 

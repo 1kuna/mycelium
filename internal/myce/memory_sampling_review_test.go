@@ -259,6 +259,8 @@ func TestMemorySamplingOOMRetryExceedsCapacity(t *testing.T) {
 			clock.Advance(time.Second)
 			r := result(first, false)
 			r.OutOfMemory = true
+			peak := 8.0
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, CgroupGB: &peak, Constrained: true}
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
