@@ -103,6 +103,9 @@ type Worker struct {
 
 	checkpointPrepare     func(Job) (string, error) // Filesystem fault seam.
 	control               *processControl
+	cancelStart           context.CancelFunc
+	controlLatency        *workerControlLatency
+	launchCtx             context.Context // Exact attempt/preparation owner; cancels handshake waits.
 	batchAdmission        func(context.Context, HostLaunch) error
 	stopAdmission         func()
 	DeviceBinding         string
@@ -148,6 +151,7 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
+	cancelStart      context.CancelFunc // Immutable; cancel before taking a launch-held mutex.
 	stopAdmission    func()
 	resources        *resourceObserver
 	saveStopIntent   func(*time.Time, bool) error
@@ -218,10 +222,17 @@ func (p *process) recordPriorityStop(s *workerStore, stop *PriorityPreemption) e
 	return nil
 }
 
+func (p *process) cancelStarting() {
+	if p.cancelStart != nil {
+		p.cancelStart()
+	}
+}
+
 func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
 	p.stopDirective(now, grace, kill, false)
 }
 func (p *process) stopService(now time.Time, grace time.Duration) {
+	p.cancelStarting()
 	if p.stopAdmission != nil {
 		p.stopAdmission()
 	}
@@ -240,6 +251,7 @@ func (p *process) stopService(now time.Time, grace time.Duration) {
 	p.stopLocked(now, grace, false)
 }
 func (p *process) stopDirective(now time.Time, grace time.Duration, kill, userCancel bool) {
+	p.cancelStarting()
 	if p.stopAdmission != nil {
 		p.stopAdmission()
 	}
@@ -403,7 +415,14 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	return w.startContext(context.Background(), s, j)
 }
 
-func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
+func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (startedProcess *process, startErr error) {
+	ctx, cancel := context.WithCancel(ctx)
+	w.launchCtx, w.cancelStart = ctx, cancel
+	defer func() {
+		if startedProcess == nil {
+			cancel()
+		}
+	}()
 	// Start preparation can pause and retry without advancing the attempt.
 	j.ExecutionEvidence = s.startExecutionEvidence(j)
 	defer func() {
@@ -887,7 +906,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err = w.reportNativeCustody(j, s.state.Session, identity, identity, "started", cmd.Process.Pid); err != nil {
 		return nil, abort(s.startFailure(j, launchRefused, err))
 	}
-	p := &process{job: j, stopAdmission: w.stopAdmission, stopGrace: w.AcceleratorStopGrace, cmd: cmd, birth: custody.Groups[cmd.Process.Pid][cmd.Process.Pid], done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder(), memory: memoryAttempt}
+	p := &process{cancelStart: w.cancelStart, job: j, stopAdmission: w.stopAdmission, stopGrace: w.AcceleratorStopGrace, cmd: cmd, birth: custody.Groups[cmd.Process.Pid][cmd.Process.Pid], done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder(), memory: memoryAttempt}
 	var savedStopAt *time.Time
 	var savedUserCancel bool
 	p.saveStopIntent = func(deadline *time.Time, userCancel bool) error {
@@ -1107,6 +1126,8 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	w.launchCtx = stop
+	w.controlLatency = &workerControlLatency{}
 	w.Client.resourceWire = &resourceWire{}
 	w.hygieneWire = &workerHygieneWire{}
 	w.unifiedMemoryWire = &workerUnifiedMemoryWire{}
@@ -1171,7 +1192,7 @@ func (w Worker) Run(stop context.Context) error {
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}
-	environments := &environmentRuntime{authorize: w.authorizeLaunch, dir: s.dir, cache: w.environmentCache, reports: map[string]EnvironmentReport{}}
+	environments := &environmentRuntime{authorize: w.authorizeLaunchContext, dir: s.dir, cache: w.environmentCache, reports: map[string]EnvironmentReport{}}
 	if err = environments.restore(); err != nil {
 		return err
 	}
@@ -1323,7 +1344,7 @@ func (w Worker) Run(stop context.Context) error {
 	// Payload policy protects the actual listener port, including a configured
 	// non-loopback alias and an ephemeral ModelListen port.
 	w.ModelListen = strings.TrimPrefix(rt.url, "http://")
-	rt.authorize = w.authorizeLaunch
+	rt.authorize = w.authorizeLaunchContext
 	modelAvailabilityDone := make(chan struct{})
 	go func() {
 		defer close(modelAvailabilityDone)

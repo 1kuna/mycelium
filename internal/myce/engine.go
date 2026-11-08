@@ -504,7 +504,7 @@ type modelRuntime struct {
 	batchHostMemorySamples map[attemptKey]hostMemorySample
 	verifyDevice           func() error
 	deviceEnv              map[string]string
-	authorize              func(HostLaunch) error
+	authorize              func(context.Context, HostLaunch) error
 	copyResults            map[string]CopyReport
 	localApprovals         map[string]string
 	localApprovalStates    map[string]ModelApprovalState
@@ -792,15 +792,16 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if rt.availability != nil {
 			parent = rt.availability.workContext()
 		}
+		ctx, cancel := context.WithCancel(parent)
 		if authorize := rt.authorize; authorize != nil {
 			// Capture the exact plan under rt.mu; heartbeats update rt.session.
 			launch := HostLaunch{Machine: rt.machine, Session: s.Session, Kind: "engine", Key: s.Model, Device: s.Device, Attempt: s.Attempt}
 			rootWorker := rt.worker
-			parent = withLaunchGate(parent, func() error {
+			ctx = withLaunchGate(ctx, func() error {
 				if rootWorker != nil {
 					probe := *rootWorker
 					probe.Machine = probe.storageMachine()
-					probe.Machine.UnavailableRoots = probe.sampleStorageRoots(parent, probe.CheckpointRoot)
+					probe.Machine.UnavailableRoots = probe.sampleStorageRoots(ctx, probe.CheckpointRoot)
 					dependency := &Job{Spec: Spec{Priority: "production", Needs: ResourceNeeds{Model: model.Name}}}
 					if reason := storageRootReasonForModel(dependency, &probe.Machine, model, s.EnvironmentRecipe); reason != "" {
 						return errors.New(reason)
@@ -811,10 +812,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 						return err
 					}
 				}
-				return authorize(launch)
+				return authorize(ctx, launch)
 			})
 		}
-		ctx, cancel := context.WithCancel(parent)
 		m := &workerModel{device: s.Device, bound: bound, model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
 		rt.models[engineKey(s.Model, s.Device)] = m
 		rt.wg.Add(1)

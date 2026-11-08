@@ -1187,7 +1187,7 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 }
 
 type environmentRuntime struct {
-	authorize func(HostLaunch) error
+	authorize func(context.Context, HostLaunch) error
 	dir       string
 	cache     *EnvironmentCache
 	prepare   func(context.Context, EnvironmentRecipe) error
@@ -1240,7 +1240,7 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 			if r.Launch == nil {
 				return ErrStale
 			}
-			return rt.authorize(*r.Launch)
+			return rt.authorize(ctx, *r.Launch)
 		})
 	}
 	rt.cancel = cancel

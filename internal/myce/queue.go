@@ -2629,7 +2629,10 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 			rejected = e
 			return nil
 		}
-		if j.State != "running" || j.ReleaseConfirmed || !dependencyReady(j) || cancelled(j) || (j.Spec.StartBy != nil && j.StartedAt != nil) {
+		// An exact-current replay reconciles a lost durable Started reply. It
+		// must still pass every live fence, and markStarted never resets time or
+		// appends a second start. Acknowledgement is not a second execution.
+		if j.State != "running" || j.ReleaseConfirmed || !dependencyReady(j) || cancelled(j) {
 			rejected = ErrStale
 			return nil
 		}

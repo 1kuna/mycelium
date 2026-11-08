@@ -62,7 +62,7 @@ func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy b
 				if launch == nil {
 					return ErrStale
 				}
-				return rt.authorize(*launch)
+				return rt.authorize(ctx, *launch)
 			})
 		}
 		if rt.copyResults == nil {

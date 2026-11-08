@@ -475,3 +475,15 @@ now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
 [host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).
+
+## Reconciled launch handshakes (next release, #1028)
+
+A slow start, launch or native-custody reply retains the same gated attempt and
+custody without spending a loss or retry. Keep the job ID and submission key.
+Workers reconcile ambiguous replies with the same identity, using completed
+control-request RTTs and jitter for retry pacing. A durable Started replay
+preserves the original start and wall-time budget. Typed refusals, cancellation
+and explicit job deadlines still apply; local cleanup must prove exact release
+before replacement. A silent control connection can remain pending until its
+owner cancels or transport returns; time alone cannot authorize execution or
+prove release. This requires the matching queue and worker release.

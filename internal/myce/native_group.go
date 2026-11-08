@@ -307,9 +307,13 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	s.state.Result = nil
 	s.state.OperatorStopped = false
 	p := &process{stopAdmission: w.stopAdmission, stopGrace: w.AcceleratorStopGrace, job: j, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
+	// Preparation cancellation owns only the initial gated supervisor. Once
+	// registered, process control owns running-group stops (provisional yield
+	// directives must not cancel a running group before stop authorization).
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: workerState{Identity: identity, Accelerator: !j.Spec.Needs.cpuOnly(), StopGrace: acceleratorStopGrace(w.AcceleratorStopGrace), Groups: map[int]map[int]string{}}}
 	p.native = g
+	p.cancelStart = cancel
 	if memory != nil {
 		g.custody.Cgroup = memory.path
 	}
@@ -327,6 +331,9 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	if w.control != nil {
 		w.control.set(p)
 	}
+	// The supervisor is now registered with process control. Group stops cancel
+	// later member handshakes without depending on the preparation actor.
+	g.worker.launchCtx = g.ctx
 	p.resources = w.observeResources(p, memory)
 	// A port-collision retry replaces the supervisor and its process group.
 	finishMemory := w.observeAttemptMemory(memory, j, func() []int {
