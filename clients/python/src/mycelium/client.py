@@ -454,9 +454,17 @@ class Client:
             except APIError as error:
                 if error.status not in (404, 410):
                     raise
-            with request("HEAD", endpoint, headers=headers) as response:
-                offset = int(response.headers["Upload-Offset"])
-                length = int(response.headers["Upload-Length"])
+            try:
+                with request("HEAD", endpoint, headers=headers) as response:
+                    offset = int(response.headers["Upload-Offset"])
+                    length = int(response.headers["Upload-Length"])
+            except APIError as error:
+                if error.status not in (404, 410):
+                    raise
+                # Final publication can race the blob probe, then remove tus
+                # metadata before this HEAD acquires the original upload lock.
+                with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
+                    return ref
             if length != size or not 0 <= offset <= size:
                 raise ValueError("invalid upload offset/length")
             with source.open("rb") as stream:

@@ -725,9 +725,12 @@ type fileTransferConn struct {
 	readProgress, writeProgress transferProgress
 	reading, writing            *atomic.Bool
 	awaiting                    *atomic.Bool
+	deadlineMu                  sync.Mutex
 }
 
 func (c *fileTransferConn) deadline(read bool, bytes int) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
 	idle := c.idle
 	if idle == 0 {
 		if read {
@@ -756,6 +759,20 @@ func (c *fileTransferConn) deadline(read bool, bytes int) error {
 	}
 	return c.SetWriteDeadline(end)
 }
+
+// Serialize with deadline's phase check AND socket update; otherwise a reader
+// that saw the old phase can clear the newly armed response deadline.
+func (c *fileTransferConn) awaitResponse() {
+	c.awaiting.Store(true)
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	clock := c.clock
+	if clock == nil {
+		clock = RealClock{}
+	}
+	c.SetReadDeadline(clock.Now().Add(max(c.idle, c.timing.window())))
+}
+
 func (c *fileTransferConn) Read(p []byte) (int, error) {
 	if err := c.deadline(true, len(p)); err != nil {
 		return 0, err
@@ -891,7 +908,7 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 			// Arm the header wait only after the last body byte, so a long but
 			// progressing upload never spends its response-service window.
 			if conn := progressConn.Load(); conn != nil && conn.timing != nil {
-				conn.SetReadDeadline(c.clock().Now().Add(max(conn.idle, conn.timing.window())))
+				conn.awaitResponse()
 			}
 		},
 	}))
@@ -940,7 +957,9 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 			if method == "PATCH" {
 				timing = c.uploadTiming
 			}
-			wrapped := &fileTransferConn{Conn: conn, idle: idle, clock: c.clock(), reading: &reading, writing: &writing, awaiting: &awaiting, timing: timing}
+			// Socket deadlines use the real socket's clock, independently of an
+			// injected observation/pacing clock (unit tests may freeze that).
+			wrapped := &fileTransferConn{Conn: conn, idle: idle, clock: RealClock{}, reading: &reading, writing: &writing, awaiting: &awaiting, timing: timing}
 			progressConn.Store(wrapped)
 			return wrapped, nil
 		}
@@ -1144,6 +1163,12 @@ func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref File
 	endpoint := "/api/files/uploads/" + ref.SHA256
 	offset, err := c.uploadOffset(ctx, endpoint, ref.SizeBytes)
 	if err != nil {
+		var missing *HTTPError
+		if errors.As(err, &missing) && (missing.Status == 404 || missing.Status == 410) {
+			// Publication can finish after the preceding blob probe, while tus HEAD
+			// waits for its upload lock. Publishing removes the tus metadata.
+			return c.hasFile(ctx, ref, headPurpose)
+		}
 		return err
 	}
 	for {

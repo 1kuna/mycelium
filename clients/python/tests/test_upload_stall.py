@@ -17,12 +17,13 @@ class UploadStallTests(unittest.TestCase):
     def test_paused_patch_tolerates_or_resumes_accepted_prefix(self):
         # One pause exceeds the old 523ms detector but fits the protocol floor;
         # the other forces a real stall and accepted-offset reconciliation.
-        for pause, lost_ack in ((.7, False), (1.5, False), (0, True)):
-            with self.subTest(pause=pause, lost_ack=lost_ack):
+        for pause, lost_ack, delayed_publication in ((.7, False, False), (1.5, False, False), (0, True, False), (0, True, True)):
+            with self.subTest(pause=pause, lost_ack=lost_ack, delayed_publication=delayed_publication):
                 body = b"source" * (2 << 20)
                 digest = hashlib.sha256(body).hexdigest()
                 accepted = bytearray()
                 offsets = []
+                published = [not delayed_publication]
                 lock = threading.Lock()
                 class Handler(BaseHTTPRequestHandler):
                     def log_message(self, *_):
@@ -30,10 +31,15 @@ class UploadStallTests(unittest.TestCase):
                     def do_HEAD(self):
                         with lock:
                             if "/blobs/" in self.path:
-                                self.send_response(200 if len(accepted) == len(body) else 404)
+                                self.send_response(200 if len(accepted) == len(body) and published[0] else 404)
                                 self.send_header("Content-Length", str(len(body)))
                                 self.send_header("ETag", '"' + digest + '"')
                             else:
+                                if delayed_publication and len(accepted) == len(body):
+                                    published[0] = True
+                                    self.send_response(404)
+                                    self.end_headers()
+                                    return
                                 self.send_response(200)
                                 self.send_header("Upload-Offset", str(len(accepted)))
                                 self.send_header("Upload-Length", str(len(body)))

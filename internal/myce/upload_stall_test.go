@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -22,13 +23,15 @@ import (
 // scale without depending on any production data or queue storage.
 func TestUploadFilePausedPATCH(t *testing.T) {
 	for _, scenario := range []struct {
-		name    string
-		pause   time.Duration
-		lostAck bool
+		name               string
+		pause              time.Duration
+		lostAck            bool
+		delayedPublication bool
 	}{
-		{"tolerates", 700 * time.Millisecond, false},
-		{"resumes", 1500 * time.Millisecond, false},
-		{"published-without-ack", 0, true},
+		{"tolerates", 700 * time.Millisecond, false, false},
+		{"resumes", 1500 * time.Millisecond, false, false},
+		{"published-without-ack", 0, true, false},
+		{"publication-races-offset-probe", 0, true, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			pause := scenario.pause
@@ -44,18 +47,24 @@ func TestUploadFilePausedPATCH(t *testing.T) {
 			var mu sync.Mutex
 			var accepted []byte
 			patches := 0
+			publicationRaced := false
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				if r.Method == "HEAD" {
 					defer mu.Unlock()
 					if r.URL.Path == "/api/files/blobs/"+ref.SHA256 {
-						if len(accepted) != len(body) {
+						if len(accepted) != len(body) || scenario.delayedPublication && !publicationRaced {
 							w.WriteHeader(404)
 							return
 						}
 						w.Header().Set("ETag", `"`+ref.SHA256+`"`)
 						w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 					} else {
+						if scenario.delayedPublication && len(accepted) == len(body) {
+							publicationRaced = true
+							w.WriteHeader(404)
+							return
+						}
 						w.Header().Set("Upload-Offset", strconv.Itoa(len(accepted)))
 						w.Header().Set("Upload-Length", strconv.Itoa(len(body)))
 					}
@@ -122,6 +131,11 @@ func TestUploadFilePausedPATCH(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 			defer cancel()
 			client := Client{URL: server.URL, HTTP: &http.Client{Transport: transport}, Jitter: func() float64 { return 0 }}
+			// Force the interrupted branch independently of warm-up request
+			// timing; the default-window branch above proves pause tolerance.
+			if scenario.name == "resumes" {
+				client.transferIdle = 250 * time.Millisecond
+			}
 			if err := client.UploadFile(ctx, path, ref); err != nil {
 				t.Fatal(err)
 			}
@@ -178,4 +192,47 @@ func TestUploadDeadConnectionDetected(t *testing.T) {
 	if clock.Now().Sub(start) != time.Second {
 		t.Fatal("unbounded dead connection")
 	}
+}
+
+// Hold a pre-body response reader inside its clear-deadline operation, then
+// complete the request body. The phase transition must leave a finite response
+// deadline even when that earlier clear resumes after the transition starts.
+func TestUploadResponseDeadlineTransition(t *testing.T) {
+	source := &uploadDeadlineConn{entered: make(chan struct{}), release: make(chan struct{})}
+	var reading, awaiting atomic.Bool
+	conn := &fileTransferConn{Conn: source, timing: &uploadTiming{}, reading: &reading, awaiting: &awaiting}
+	cleared := make(chan error, 1)
+	go func() { cleared <- conn.deadline(true, 256) }()
+	<-source.entered
+	armed := make(chan struct{})
+	go func() { conn.awaitResponse(); close(armed) }()
+	await(t, func() bool { return awaiting.Load() })
+	close(source.release)
+	if err := <-cleared; err != nil {
+		t.Fatal(err)
+	}
+	<-armed
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.deadline.IsZero() {
+		t.Fatal("pre-body reader erased the response deadline")
+	}
+}
+
+type uploadDeadlineConn struct {
+	net.Conn
+	mu               sync.Mutex
+	deadline         time.Time
+	entered, release chan struct{}
+}
+
+func (c *uploadDeadlineConn) SetReadDeadline(end time.Time) error {
+	if end.IsZero() {
+		close(c.entered)
+		<-c.release
+	}
+	c.mu.Lock()
+	c.deadline = end
+	c.mu.Unlock()
+	return nil
 }
