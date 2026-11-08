@@ -7,10 +7,78 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// Returning an observation-pending result must leave the owned input copy
+// alive. The next start consumes that same completed snapshot.
+func TestWorkerOrdinaryStagingSurvivesStartRetry(t *testing.T) {
+	w := recoveryWorker(t)
+	w.JobFileRoot = t.TempDir()
+	if err := os.WriteFile(filepath.Join(w.JobFileRoot, "input"), []byte("value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+	j := recoveryJob(t, []string{"sh", "-c", `test "$(cat input)" = value`})
+	j.Spec.Inputs = map[string]string{"input": "input"}
+	store, err := newAttemptStore(root, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	var once, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(unblock) }) }
+	defer release()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx = context.WithValue(ctx, ioProgressKey{}, func() { once.Do(func() { close(entered); <-unblock }) })
+	done := make(chan error, 1)
+	go func() { _, err := w.startContext(ctx, store, j); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("input copy did not enter")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, errWorkerCheckpoint) {
+			t.Fatal("start did not retain pending input copy", err)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatal("start observation did not return")
+	}
+	store.extensionFiles.mu.Lock()
+	pending := store.extensionFiles.pending
+	store.extensionFiles.mu.Unlock()
+	if pending == nil {
+		t.Fatal("input copy lost its owner")
+	}
+	release()
+	<-pending.done
+	if pending.err != nil {
+		t.Fatal("start retry cancelled the still-owned input copy", pending.err)
+	}
+	p, err := startAfterFixtureInputsContext(t, ctx, w, store, j)
+	if err != nil || p == nil {
+		t.Fatal("completed input copy was not consumed", p, err)
+	}
+	defer p.stop(w.Clock.Now(), 0, true)
+	select {
+	case f := <-p.done:
+		if f.err != nil || !f.result.Success {
+			t.Fatal("payload did not receive staged input", f)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatal("payload did not finish")
+	}
+}
 
 func TestWorkerPreparationCancellationRetainsUnconfirmedHelper(t *testing.T) {
 	ps, err := exec.LookPath("ps")

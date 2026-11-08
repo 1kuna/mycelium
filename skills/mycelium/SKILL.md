@@ -71,8 +71,15 @@ refusals wait on the same job and submission key without spending infrastructure
 retries or losses, including after a helper ran or Started was authorized. Keep
 that key: Mycelium uses ordinary lower-tier preemption and exact release before
 reuse; equal-tier production waits. Unchanged capacity evidence is not re-offered.
-Generated startup windows pause for capacity; explicit `start_by`, `start_window`,
-give-up deadlines and cancellation still apply. `execution_evidence` describes
+From the next release, every relative startup window pauses for qualified memory,
+device or host-capacity waiting, including explicit `start_window: 600s` and the
+omitted `150s` default. Assignment restores the full window for preparation;
+status shows the start budget and `paused for capacity` while waiting. This also
+protects recovery windows and typed uncharged refusals after Started authorization.
+An assigned start without an accepted startup acknowledgement, stuck preparation
+or an unreachable worker still consumes the window. Absolute `start_by`,
+`give_up_at`, `deadline` and cancellation keep their existing semantics.
+`execution_evidence` describes
 component boundaries separately from cleanup; a helper that ran is never proof
 that the whole attempt stayed unlaunched.
 
@@ -130,6 +137,14 @@ supporting native guards use physical/allowance containment. Missing/stale measu
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.
+From the next release, a new native extension version can start from accepted
+memory of its nearest prior version on the same platform and native identity.
+Checks also reuse workload peaks when both versions and the check launch the
+same main command, assets and environment. Measured variation
+and growth supply headroom; a fresh accepted run replaces this prior. After a
+host OOM, native CPU/check recovery grows from measured demand and overshoot,
+independently of current free RAM. Capacity refusals retain the same logical job
+under the queue's launch-capacity waiting contract; no resubmission is needed.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
@@ -331,6 +346,13 @@ notifier setup is needed. Later progress does not establish a causal repair.
 From the host-growth accounting correction, fresh exact-attempt anonymous
 residency reduces the unreached envelope once. Pending host growth is the larger
 of that remainder and the live growth forecast, extended through sample age.
+From the helper-residency correction, the exact native launch on unified CUDA
+can also credit its own fresh direct single-process device occupancy against
+its complete physical envelope. Shared process counters are not summed for
+credit, anonymous overlap is counted once, and measured overshoot increases the
+charge. Neighbors, stale/unknown counters and RSS estimates retain their bounds;
+discrete device memory never credits host RAM. This does not reduce learned
+envelopes or promise concurrent throughput.
 The static allowance still protects the envelope and observed over-use;
 missing/stale telemetry, unified-CUDA device floors and release custody remain
 binding. An aggregate refusal alone cannot identify a sibling's contribution or
@@ -414,7 +436,10 @@ thread wake. Older releases omit configuration; do not infer a cause from false.
 Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium
 resumes after measured recovery; an operator drain remains independent. Running
-attempts retain custody. From the next release, `mount_probe_slow` is advisory:
+attempts retain custody. From the worker release with the zero-pressure-baseline
+correction, an all-zero idle PSI reference learns ordinary workload variation
+while swap/local-wake signals remain within their learned bands; corroborated
+pressure still drains the host. From the next release, `mount_probe_slow` is advisory:
 successful or progressing slow metadata operations preserve admission, with
 measured evidence in `host_mount_degraded` alerts. Failed operations and
 `mount_probe_stalled` still withhold dependent work; the latter uses the unchanged
@@ -500,3 +525,18 @@ now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
 [host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).
+
+## Reconciled launch handshakes (next release, #1028)
+
+A slow start, launch or native-custody reply retains the same gated attempt and
+custody without spending a loss or retry. Keep the job ID and submission key.
+Workers reconcile ambiguous replies with the same identity, using completed
+control-request RTTs and jitter for retry pacing. A durable Started replay
+preserves the original start and wall-time budget. Typed refusals, cancellation
+and explicit job deadlines still apply; local cleanup must prove exact release
+before replacement. A silent control connection can remain pending until its
+owner cancels or transport returns; time alone cannot authorize execution or
+prove release. This requires the matching queue and worker release.
+Connection-establishment failure returns `control_unreachable` instead of
+retrying indefinitely. It does not revoke an earlier durable start or prove
+release: exact process cleanup and queue reconciliation still gate replacement.

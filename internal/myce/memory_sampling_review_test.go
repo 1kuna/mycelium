@@ -178,7 +178,7 @@ func TestMemorySamplingOOMInvalidatesAndRelearns(t *testing.T) {
 		t.Fatal(err)
 	}
 	explore := startObservation(t, q, m, s)
-	if explore.MemoryEnvelope.Source != acceptedMemoryEscalation || explore.MemoryEnvelope.Basis != "exploratory" || explore.MemoryEnvelope.HostGB != 32-minimumHostMemoryGB {
+	if explore.MemoryEnvelope.Source != acceptedMemoryEscalation || explore.MemoryEnvelope.Basis != "exploratory" || explore.MemoryEnvelope.HostGB != host+2*minimumHostMemoryGB {
 		t.Fatalf("invalidated class did not explore: %+v", explore.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)

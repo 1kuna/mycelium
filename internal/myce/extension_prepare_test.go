@@ -109,7 +109,7 @@ func TestExtensionPrepareCustodyAndQualificationIdentity(t *testing.T) {
 	if err := q.AuthorizeLaunch(*plan.Launch); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.prepareRegisteredExtension(withLaunchGate(context.Background(), func() error { return q.AuthorizeLaunch(*plan.Launch) }), plan); err != nil {
+	if err := w.prepareRegisteredExtension(withLaunchGate(context.Background(), func(ctx context.Context) error { return q.AuthorizeLaunch(*plan.Launch) }), plan); err != nil {
 		t.Fatal(err)
 	}
 	r := newExtensionReport(e, &w.Machine, j.Spec.workType())

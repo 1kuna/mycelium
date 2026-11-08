@@ -423,6 +423,7 @@ type CurrentHostMemory struct {
 	DeviceAgeSeconds float64  `json:"device_age_seconds,omitempty"`
 	deviceSampledAt  time.Time
 	deviceSample     *atomic.Pointer[hostMemorySample]
+	deviceResidentGB float64 // Local direct CUDA single-process lower bound; never sent on the wire.
 }
 
 // Refresh device telemetry independently of the actor snapshot. Log/result I/O
@@ -441,6 +442,7 @@ func (s *CurrentHostMemory) aged(now time.Time) *CurrentHostMemory {
 			gb := device.gb
 			sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB
 			sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB = device.source, device.exclusive, device.rateGB
+			sample.deviceResidentGB = device.residentGB
 		}
 	}
 	sample.AgeSeconds = now.Sub(sample.sampledAt).Seconds()
@@ -469,6 +471,7 @@ type hostMemorySample struct {
 	source                   string
 	exclusive                bool
 	gb, deviceGB             float64
+	residentGB               float64
 	growthGB, deviceGrowthGB float64
 	rateGB, deviceRateGB     float64
 	at, deviceAt             time.Time
@@ -527,6 +530,7 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 			s.deviceGB, s.deviceAt = *d, now.Add(-time.Duration(sample.DeviceAgeSeconds*float64(time.Second)))
 			s.deviceGrowthGB = sample.DeviceGrowthGB
 			s.source, s.exclusive, s.deviceRateGB = sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB
+			s.residentGB = sample.deviceResidentGB
 		}
 		s.peakGB = max(old.peakGB, s.gb, s.footprintGB)
 		s.period, s.receivedAt = old.period, now

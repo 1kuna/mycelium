@@ -504,7 +504,7 @@ type modelRuntime struct {
 	batchHostMemorySamples map[attemptKey]hostMemorySample
 	verifyDevice           func() error
 	deviceEnv              map[string]string
-	authorize              func(HostLaunch) error
+	authorize              func(context.Context, HostLaunch) error
 	copyResults            map[string]CopyReport
 	localApprovals         map[string]string
 	localApprovalStates    map[string]ModelApprovalState
@@ -792,15 +792,16 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if rt.availability != nil {
 			parent = rt.availability.workContext()
 		}
+		ctx, cancel := context.WithCancel(parent)
 		if authorize := rt.authorize; authorize != nil {
 			// Capture the exact plan under rt.mu; heartbeats update rt.session.
 			launch := HostLaunch{Machine: rt.machine, Session: s.Session, Kind: "engine", Key: s.Model, Device: s.Device, Attempt: s.Attempt}
 			rootWorker := rt.worker
-			parent = withLaunchGate(parent, func() error {
+			ctx = withLaunchGate(ctx, func(ctx context.Context) error {
 				if rootWorker != nil {
 					probe := *rootWorker
 					probe.Machine = probe.storageMachine()
-					probe.Machine.UnavailableRoots = probe.sampleStorageRoots(parent, probe.CheckpointRoot)
+					probe.Machine.UnavailableRoots = probe.sampleStorageRoots(ctx, probe.CheckpointRoot)
 					dependency := &Job{Spec: Spec{Priority: "production", Needs: ResourceNeeds{Model: model.Name}}}
 					if reason := storageRootReasonForModel(dependency, &probe.Machine, model, s.EnvironmentRecipe); reason != "" {
 						return errors.New(reason)
@@ -811,10 +812,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 						return err
 					}
 				}
-				return authorize(launch)
+				return authorize(ctx, launch)
 			})
 		}
-		ctx, cancel := context.WithCancel(parent)
 		m := &workerModel{device: s.Device, bound: bound, model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
 		rt.models[engineKey(s.Model, s.Device)] = m
 		rt.wg.Add(1)
@@ -849,11 +849,12 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 			owned.memoryMachine = bound.Machine
 		}
 		parent := ctx
-		ctx = withLaunchGate(parent, func() error {
+		priorGate := launchGateFrom(parent)
+		ctx = withLaunchGate(parent, func(ctx context.Context) error {
 			if err := bound.verifyDevice(); err != nil {
 				return err
 			}
-			return checkLaunchGate(parent)
+			return priorGate(ctx)
 		})
 	}
 	if owned, ok := m.engine.(*LlamaEngine); ok {
@@ -898,11 +899,12 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	// Authorization and preparation may block while a batch receives a stop.
 	// Recheck current admission after authorization at every engine launch gate.
 	parent := ctx
-	ctx = withLaunchGate(parent, func() error {
-		if err := checkLaunchGate(parent); err != nil {
+	priorGate := launchGateFrom(parent)
+	ctx = withLaunchGate(parent, func(ctx context.Context) error {
+		if err := priorGate(ctx); err != nil {
 			return err
 		}
-		return rt.checkLoadMemory(parent, m)
+		return rt.checkLoadMemory(ctx, m)
 	})
 	deviceEnv := rt.deviceEnv
 	platform, device = rt.platform, rt.device
@@ -1029,6 +1031,8 @@ func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySampl
 // actor reads never acquire process/control locks or perform receipt I/O.
 func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool, samples map[attemptKey]hostMemorySample, launching ...attemptKey) error {
 	cores, ram, growth := 0, 0.0, 0.0
+	anon, ownResident, ownCharge, ownAnon, ownForecast, ownPending := 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+	ownDevicePending := 0.0
 	now := time.Time{}
 	if rt.clock != nil {
 		now = rt.clock.Now()
@@ -1052,6 +1056,30 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 			charge = hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 			pending = charge
 		}
+		sample := samples[jobKey(j)]
+		forecast, fresh := sample.hostGrowth(now)
+		if fresh {
+			anon += sample.gb
+		}
+		if slices.Contains(launching, jobKey(j)) {
+			// The exact launch owns this complete reservation (#1033). Helpers
+			// cannot demand more unallocated RAM than that bound.
+			pending = min(pending, charge)
+			if len(launching) == 1 {
+				expanded := helperHostCharge(&j, owner, sample, now, charge)
+				ownResident = helperDeviceResident(owner, sample, now)
+				// Anonymous occupancy does not prove that future CUDA demand is
+				// already allocated. Preserve the device component, including its
+				// forecast/overshoot, after crediting only direct device occupancy.
+				ownDevicePending = max(0, helperDeviceCharge(&j, sample, now)-ownResident)
+				pending += expanded - charge
+				charge = expanded
+				ownCharge, ownPending = charge, pending
+				if fresh {
+					ownAnon, ownForecast = sample.gb, forecast
+				}
+			}
+		}
 		ram += charge
 		growth += pending
 	}
@@ -1062,6 +1090,13 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 			ram += need
 			growth += need
 		}
+	}
+	if ownResident > 0 {
+		// Host anon is uniquely charged across attempt cgroups, but can also
+		// contain CUDA pages. Credit only the union lower bound max(all anon,
+		// one process's CUDA counter), never their sum or two process counters.
+		additional := max(0, ownResident-anon)
+		growth += max(0, ownCharge-ownAnon-additional, ownForecast, ownDevicePending) - ownPending
 	}
 	capacity, reason := cpuCapacity(&rt.memoryMachine)
 	if reason == "" && cores > capacity {

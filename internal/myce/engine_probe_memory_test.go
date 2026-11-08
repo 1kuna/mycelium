@@ -73,7 +73,7 @@ func TestEngineProbeMemoryStopDuringPreparation(t *testing.T) {
 				t.Fatal("running probe should permit the model", err)
 			}
 			preparing, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			ctx = withLaunchGate(ctx, func() error {
+			ctx = withLaunchGate(ctx, func(ctx context.Context) error {
 				select {
 				case <-preparing:
 				default:
