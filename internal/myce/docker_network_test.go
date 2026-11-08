@@ -579,6 +579,11 @@ func TestDockerReadinessTimeoutAndStop(t *testing.T) {
 				if f.result.Success {
 					t.Fatal("failed readiness succeeded")
 				}
+				if !stop {
+					if f.result.Interrupted || f.result.Success {
+						t.Fatalf("readiness failure became loss: %+v", f.result)
+					}
+				}
 				if !stop && !strings.Contains(f.result.Error, "readiness timeout") {
 					t.Fatalf("wrong reason: %+v", f.result)
 				}
@@ -688,36 +693,6 @@ func TestDockerReadinessRejectsSuccessAtDeadline(t *testing.T) {
 	})
 	if _, e := os.Stat(filepath.Join(root, "running")); e == nil {
 		t.Fatal("main started at expired readiness boundary")
-	}
-}
-
-func TestDockerReadinessFailureIsCommandFailureNotLoss(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	j := dockerGroupJob(t)
-	var checked atomic.Bool
-	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { checked.Store(true); rw.WriteHeader(503) }))
-	defer server.Close()
-	u, _ := url.Parse(server.URL)
-	port, _ := strconv.Atoi(u.Port())
-	j.Spec.Run.DockerSidecars[0].Readiness = &DockerReadiness{Port: port, Path: "/ready", Timeout: "1s"}
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, func() bool { return checked.Load() })
-	c.advance(time.Second)
-	expireDockerStop(t, p)
-	select {
-	case f := <-p.done:
-		if f.result.Interrupted || f.result.Success {
-			t.Fatalf("readiness failure became loss: %+v", f.result)
-		}
-	case <-time.After(4 * time.Second):
-		t.Fatal("cleanup stuck")
-	}
-	if _, e := os.Stat(filepath.Join(root, "running")); e == nil {
-		t.Fatal("main started")
 	}
 }
 
