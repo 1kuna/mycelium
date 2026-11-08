@@ -193,3 +193,35 @@ func TestStartedEndpointRecordsAdmissionRefusal(t *testing.T) {
 		t.Fatalf("cleared Started refusal charged: %+v", got)
 	}
 }
+
+// Relative recovery windows follow current startup policy; only an absolute
+// caller cutoff must remain fixed after a never-executed main is requeued.
+func TestStartAuthorizationRefusalRestoresRelativeWindow(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("worker", "fake")
+	s := spec("production")
+	s.StartWindow = "600s"
+	submit(t, q, s)
+	a := check(t, q, m, nil).Job
+	if err := q.Started(result(a, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	if err := q.update(func() error { q.s.Machines[m.ID].Leaving = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AuthorizeLaunch(HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: strconv.Itoa(a.Attempt)}); !errors.Is(err, ErrStale) {
+		t.Fatal("missing refusal", err)
+	}
+	r := result(a, false)
+	r.Interrupted = true
+	r.ExecutionCause = &RuntimeCause{Operation: "start_authorization", Class: "admission_changed", Predicate: "launch_authorization"}
+	r.ExecutionEvidence = unstartedExecution(a.Attempt)
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, a.ID)
+	if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Spec.StartBy.Sub(clock.Now()) != 600*time.Second {
+		t.Fatalf("relative recovery budget lost: state=%s losses=%d retries=%d cutoff=%v", got.State, got.Losses, got.InfrastructureRetries, got.Spec.StartBy)
+	}
+}
