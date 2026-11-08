@@ -41,6 +41,9 @@ type batchRelease struct {
 }
 
 type state struct {
+	// Frozen accepted-contact validity is only for stopped-queue conversion.
+	// A running/restarted queue always requires live session contact evidence.
+	ContactEvidence        map[string]contactEvidence    `json:"contact_evidence,omitempty"`
 	EfficiencyAt           time.Time                     `json:"efficiency_at,omitempty"`
 	EfficiencyHosts        map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
 	EfficiencyHealth       map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
@@ -1084,14 +1087,14 @@ func (q *Queue) stop(j *Job, why string) {
 	j.State = "stopping"
 	j.Reason = why
 }
-func (q *Queue) fleetQuiet(now time.Time, ignored ...*checkinContact) bool {
+func (q *Queue) fleetQuiet(now time.Time, includePending bool) bool {
 	active, healthy := 0, 0
 	quietFor := time.Duration(1<<63 - 1)
 	for _, m := range q.s.Machines {
 		if !m.Gone && !m.Leaving && q.workerLossAllowance(m) > 0 {
 			active++
 			quietFor = min(quietFor, q.machineLossTimeout(m.ID))
-			if q.workerContactFresh(m, now, ignored...) {
+			if q.contactFresh(m, now, includePending) {
 				healthy++
 			}
 		}
@@ -1141,7 +1144,7 @@ func (q *Queue) maintain() {
 			delete(q.s.BatchReleases, machine)
 		}
 	}
-	q.networkQuiet = q.fleetQuiet(now)
+	q.networkQuiet = q.fleetQuiet(now, true)
 	for _, m := range q.s.Machines {
 		unreported := q.unreported[m.ID]
 		grace := unreported && q.inRestartGrace(now)
@@ -1510,10 +1513,10 @@ func (q *Queue) checkinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptEnvironmentFailures(&m, old)
 		// Assess the previous fleet before this arrival or replacement can
-		// conceal the outage. Its own pending request is new evidence, not a
-		// continuously reporting survivor from before the recovery epoch.
+		// conceal the outage. Pending reconnects are new evidence, not accepted
+		// survivors from before recovery, even when several arrive together.
 		if old != nil && !old.Gone && !q.inRestartGrace(m.LastSeen) && q.s.NetworkRecoveryAt.IsZero() &&
-			(q.networkQuiet || q.fleetQuiet(m.LastSeen, c.contact)) {
+			(q.networkQuiet || q.fleetQuiet(m.LastSeen, false)) {
 			q.startNetworkRecovery(m.LastSeen)
 		}
 		q.s.Machines[m.ID] = &m
@@ -1577,6 +1580,18 @@ func (q *Queue) checkinContext(ctx context.Context, c Checkin) (Reply, error) {
 			// Onboarding reports health and exact custody before any ordinary
 			// admission. Do not return offers that this startup phase cannot run.
 			if c.Recovering || q.workerSuspect(&m, q.clock.Now()) {
+				// Preserve retained engines and deliver their cleanup deadlines.
+				// A retention-only plan cannot start a missing engine: the worker
+				// starts only loading plans. New launch authorization also refuses
+				// suspect sessions, including cached preparation plans.
+				if !c.Recovering {
+					for _, slot := range q.modelPlan(m.ID) {
+						if slot.State == "loading" {
+							slot.State = "ready"
+						}
+						reply.ModelPlan = append(reply.ModelPlan, slot)
+					}
+				}
 				q.cancelUnofferedPreparations(&m, reply)
 				return
 			}

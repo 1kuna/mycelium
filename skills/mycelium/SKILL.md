@@ -461,6 +461,8 @@ upgrade, headerless
 sessions qualify on their second accepted arrival, adding at most one observed
 send interval plus control-path delay to the first offer. Startup reports can
 qualify earlier; existing attempts retain custody through this idle response.
+Existing model engines retain their plans and cleanup deadlines while cadence
+qualifies; this cannot start a new preparation on a suspect host.
 Queue slowness alone does not charge any class a retry or infrastructure loss. A dead worker normally
 needs roughly two send intervals plus learned variation and a maintenance turn;
 overload adds actual blocked queue time. Under continuous saturation, silence

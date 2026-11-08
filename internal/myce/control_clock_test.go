@@ -220,6 +220,69 @@ func TestControlClockLegacyFirstWorkAfterOneInterval(t *testing.T) {
 	}
 }
 
+func TestControlClockLegacyRejoinRetainsEngine(t *testing.T) {
+	for _, state := range []string{"loading", "ready"} {
+		t.Run(state, func(t *testing.T) {
+			q, clock, m := modelFixture(t)
+			call := addModelCall(t, q, "production")
+			reportModel(t, q, m, state)
+			if state == "ready" {
+				if err := q.finishCall(call.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			slot := *q.s.ModelSlots[slotKey(m.ID, "test")]
+			config, root := q.models, q.root
+			var path string
+			if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			q, err = Open(path, root, clock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer q.Close()
+			if err = q.ConfigureModels(config); err != nil {
+				t.Fatal(err)
+			}
+			// The first old-wire report after a queue-first upgrade has no
+			// known cadence. It must preserve its live engine, without offering
+			// a fresh engine start or another preparation.
+			r, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: slot.Attempt, State: state}}})
+			if err != nil || !q.workerSuspect(q.s.Machines[m.ID], clock.Now()) || len(r.ModelPlan) != 1 || r.ModelPlan[0].Attempt != slot.Attempt || r.ModelPlan[0].State != "ready" || r.Job != nil || len(r.EnvironmentPlan) != 0 {
+				t.Fatalf("cold legacy rejoin interrupted custody or offered a start: %+v %v", r, err)
+			}
+		})
+	}
+}
+
+func TestControlClockOfflineContactValidityExpires(t *testing.T) {
+	c, clock, mapping := m4OfflineQueue(t)
+	q, err := openConversionQueue(c, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var allowance time.Duration
+	for _, m := range q.s.Machines {
+		if !q.workerFresh(m, clock.Now()) {
+			t.Fatal("stopped queue lost committed contact evidence")
+		}
+		allowance = max(allowance, q.machineLossTimeout(m.ID))
+	}
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(allowance)
+	err = ConvertQueueInstall(context.Background(), c, mapping, true, false, clock, func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
+	if err == nil {
+		t.Fatal("offline conversion renewed expired worker evidence")
+	}
+}
+
 func TestControlClockDevQueueStall(t *testing.T) {
 	d, _, ctx := devProbe(t)
 	release := filepath.Join(t.TempDir(), "release")
@@ -534,6 +597,46 @@ func TestControlClockFailedSessionReplacementRestoresLossDetection(t *testing.T)
 	got := q.s.Jobs[job.ID]
 	if !q.s.Machines[worker.ID].Gone || got.Losses != 1 || got.InfrastructureRetries != 1 || got.State != "queued" {
 		t.Fatalf("restored dead session stranded its attempt: %+v", got)
+	}
+}
+
+func TestControlClockConcurrentReconnectsDoNotLearnOutage(t *testing.T) {
+	q, clock, worker, peer, job := adaptiveLossFixture(t, "production")
+	allowance := q.machineLossTimeout(worker.ID)
+	clock.Advance(time.Hour)
+	ctx := context.Background()
+	a, settleA := q.trackWorkerCheckin(worker.ID, worker.Session, time.Second, true, ctx)
+	b, settleB := q.trackWorkerCheckin(peer.ID, peer.Session, time.Second, true, ctx)
+	defer settleA(false)
+	defer settleB(false)
+	// Both arrivals exist before either serialized transaction publishes. A late
+	// pending reconnect must not masquerade as a survivor from before the outage.
+	r, err := q.checkinContext(ctx, Checkin{Machine: worker, Running: &Execution{ID: job.ID, Attempt: job.Attempt}, period: time.Second, contact: a})
+	if err != nil || r.Stop {
+		t.Fatal("first returning attempt lost custody", err)
+	}
+	settleA(true)
+	if _, err := q.checkinContext(ctx, Checkin{Machine: peer, period: time.Second, contact: b}); err != nil {
+		t.Fatal(err)
+	}
+	settleB(true)
+	if q.machineLossTimeout(worker.ID) > allowance || q.machineLossTimeout(peer.ID) > allowance {
+		t.Fatal("concurrent reconnects trained outage as cadence")
+	}
+	clock.Advance(allowance - time.Nanosecond)
+	if q.workerSuspect(q.s.Machines[worker.ID], clock.Now()) {
+		t.Fatal("worker became suspect before its measured allowance")
+	}
+	// The survivor keeps reporting while the other worker genuinely stops.
+	check(t, q, peer, nil)
+	clock.Advance(time.Nanosecond)
+	if !q.workerSuspect(q.s.Machines[worker.ID], clock.Now()) {
+		t.Fatal("outage hid bounded suspicion of a new genuine failure")
+	}
+	check(t, q, peer, nil)
+	got := q.s.Jobs[job.ID]
+	if !q.s.Machines[worker.ID].Gone || got.Losses != 1 || got.InfrastructureRetries != 1 {
+		t.Fatal("outage hid prompt confirmation of a new genuine failure")
 	}
 }
 

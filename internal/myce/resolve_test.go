@@ -152,6 +152,7 @@ func TestResolveExplainsSharedHostRefusal(t *testing.T) {
 	q.environments = EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": {Key: key, Backend: "uv", LockFile: "requirements.txt", Files: map[string][]byte{"requirements.txt": []byte("# pinned\n")}}}}}
 	m := machine("shared", "cpu")
 	m.LastSeen = c.Now()
+	check(t, q, m, nil)
 	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 1}
 	m.EnvironmentBuilder = true
 	q.s.Machines[m.ID] = &m
@@ -184,7 +185,7 @@ func TestResolveFlagsDataLocalityPin(t *testing.T) {
 	for _, id := range []string{"data-host", "other-host"} {
 		m := machine(id, "cpu")
 		m.LastSeen = c.Now()
-		q.s.Machines[id] = &m
+		check(t, q, m, nil)
 	}
 	s := cpuResolveSpec()
 	s.AllowedMachines = []string{"data-host"}

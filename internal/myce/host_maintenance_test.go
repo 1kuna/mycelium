@@ -290,7 +290,7 @@ func TestMaintenancePersistenceRejoinAndMemoryDebt(t *testing.T) {
 	a.Session = "rejoined"
 	a.HostMemoryBudgetGB = 1
 	b.HostMemoryBudgetGB = 1
-	if r, err := q.Checkin(Checkin{Machine: a, Fresh: true, PreviousSession: old}); err != nil || r.Job != nil || !r.AdmissionBlocked {
+	if r, err := q.Checkin(Checkin{Machine: a, Fresh: true, PreviousSession: old, period: time.Second}); err != nil || r.Job != nil || !r.AdmissionBlocked {
 		t.Fatal(r, err)
 	}
 	check(t, q, b, nil)
@@ -530,7 +530,7 @@ func TestMaintenancePreparationSidecarsAndFreshness(t *testing.T) {
 	if err != nil || status.Preparations != 2 || status.Sidecars != 1 || len(status.PendingReleases) != 1 || status.Quiescent {
 		t.Fatal(status, err)
 	}
-	c.Advance(ProductionLossAfter)
+	c.Advance(q.machineLossTimeout(a.ID))
 	status, err = q.HostMaintenanceStatus("host")
 	if err != nil || status.Healthy || status.Workers[0].Fresh || status.Quiescent {
 		t.Fatal("stale worker certified", status, err)

@@ -2620,6 +2620,8 @@ worker waits at most one observed send interval plus actual control-path delay
 for its first offer after a queue cutover. Startup recovery reports can supply
 these samples before ordinary admission. An empty keyed reply is idle, with no
 assignment to launch; existing attempts continue reporting and retain custody.
+Retained engines receive retention-only plans and their existing cleanup
+deadlines during cold qualification; those plans cannot start a missing engine.
 Until then automatic loss is unknown and capacity is suspect, even with a saved
 operator minimum, so no new attempt can acquire an unbounded unknown loss
 allowance. The allowance is at least two send intervals (the
@@ -2627,6 +2629,11 @@ expected arrival and one missed-arrival confirmation), extended by the shared
 RFC 6298 mean/variation estimator. It has no class-specific default duration.
 Explicit old timeout settings remain minimums, never permission to count queue
 delay as silence; zero selects automatic timing. Existing saved settings survive.
+Each accepted transaction also saves its session's frozen contact allowance for
+offline conversion. That stopped-queue observation expires against the original
+accepted wall timestamp; opening a queue does not renew it. An older database
+without this evidence needs the existing verified-empty drain path. Running
+queues still require live contact and startup reconciliation.
 
 The queue accounts the union of all queue-mutex occupancy, including readers,
 with constant-size local counters. This time is unavailable control service and

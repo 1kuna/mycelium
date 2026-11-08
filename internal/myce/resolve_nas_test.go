@@ -58,7 +58,7 @@ func TestResolveNASCacheFreshnessAndSession(t *testing.T) {
 	m.Session = "one"
 	m.LastSeen = clock.Now()
 	m.Capabilities = append(m.Capabilities, "nas_inspection_v1")
-	q.s.Machines[m.ID] = &m
+	check(t, q, m, nil)
 	req := ResolveRequest{Spec: cpuResolveSpec(), InspectNAS: true}
 	req.Spec.SharedInputs = map[string]SharedInput{"data": {NAS: "data/input", SHA256: strings.Repeat("a", 64), SizeBytes: 1}}
 	cache := newResolveNASCache(clock)
@@ -101,12 +101,12 @@ func TestResolveNASCacheFreshnessAndSession(t *testing.T) {
 		t.Fatal("duplicate report renewed evidence")
 	}
 	clock.Advance(31 * time.Second)
-	m.LastSeen = clock.Now()
+	check(t, q, m, nil)
 	if got := resolve().Targets[0].NASInputs[0]; got.State != "present" || !got.ObservedAt.Equal(observed) {
 		t.Fatal("session-fresh evidence disappeared at a fixed minute", got)
 	}
 	clock.Advance(2 * time.Minute)
-	m.LastSeen = clock.Now()
+	check(t, q, m, nil)
 	if resolve().Targets[0].NASInputs[0].State != "pending" {
 		t.Fatal("expired signal reused")
 	}

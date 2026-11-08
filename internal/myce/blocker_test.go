@@ -133,6 +133,8 @@ func TestActionableBlockerNativePreparationIdentity(t *testing.T) {
 	m.EnvironmentReports = []EnvironmentReport{{Key: extensionPreparationKey(e, &m), State: "uploading", FailureKind: "deterministic", Error: "dependency resolution failed", Log: "No solution found"}}
 	q.s.Machines[m.ID] = &m
 	j := &Job{State: "queued", Spec: Spec{ExtensionCheck: &ExtensionCheckRequest{Work: "extension:" + e.Name}}, Extensions: []Extension{e}}
+	check(t, q, m, nil)
+	m = *q.s.Machines[m.ID]
 	b := q.environmentBlocker(j, &m)
 	if b == nil || b.Code != "deterministically_failed" || !strings.Contains(b.Evidence, "No solution found") {
 		t.Fatalf("%+v", b)

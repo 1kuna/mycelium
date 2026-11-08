@@ -44,6 +44,11 @@ type checkinContact struct {
 // restored session and never resurrects a settled rejected request.
 type contactTransaction struct{ before map[string]*workerContact }
 
+type contactEvidence struct {
+	Session   string        `json:"session"`
+	Allowance time.Duration `json:"allowance"`
+}
+
 // Caller holds q.mu and contactMu.
 func (q *Queue) editContact(id string) *workerContact {
 	current := q.contacts[id]
@@ -110,7 +115,16 @@ func (q *Queue) startNetworkRecovery(now time.Time) {
 // allowance. Current workers qualify on their advertised interval immediately.
 func (q *Queue) acceptContactPeriod(m *Machine, period time.Duration, pending *checkinContact) {
 	q.contactMu.Lock()
-	defer q.contactMu.Unlock()
+	defer func() {
+		q.contactMu.Unlock()
+		if q.s.ContactEvidence == nil {
+			q.s.ContactEvidence = map[string]contactEvidence{}
+		}
+		q.s.ContactEvidence[m.ID] = contactEvidence{Session: m.Session}
+		if q.workerLossAllowance(m) > 0 {
+			q.s.ContactEvidence[m.ID] = contactEvidence{Session: m.Session, Allowance: q.machineLossTimeout(m.ID)}
+		}
+	}()
 	if q.contacts == nil {
 		q.contacts = map[string]*workerContact{}
 	}
@@ -254,7 +268,13 @@ func (q *Queue) trackWorkerCheckin(machine, session string, period time.Duration
 // lastContact is the later of m.LastSeen and the queue's own contact record for
 // m's current session; active processing protects that worker from confirmed
 // loss, while wall-clock suspicion remains independent. Callers hold q.mu.
-func (q *Queue) lastContact(m *Machine, now time.Time, ignored ...*checkinContact) time.Time {
+func (q *Queue) lastContact(m *Machine, now time.Time) time.Time {
+	return q.contactTime(m, now, true)
+}
+
+// Pending requests protect their sender, but cannot identify a continuously
+// reporting survivor when deciding whether a fleet outage preceded reconnects.
+func (q *Queue) contactTime(m *Machine, now time.Time, includePending bool) time.Time {
 	allowance := q.machineLossTimeout(m.ID)
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
@@ -265,7 +285,7 @@ func (q *Queue) lastContact(m *Machine, now time.Time, ignored ...*checkinContac
 	opportunity := q.controlNow()
 	contact := false
 	for pending := range c.pending {
-		if len(ignored) > 0 && pending == ignored[0] {
+		if !includePending {
 			continue
 		}
 		if pending.inFlight || opportunity-pending.opportunity < max(allowance, 2*pending.period) {
