@@ -220,7 +220,7 @@ class BatchWaitTests(unittest.TestCase):
         calls, reads = [], []
         def batch(ids, after, seconds, timeout):
             calls.append(ids)
-            clock.now += .01
+            clock.now += min(.01, timeout) if timeout is not None else .01
             if len(calls) > 1:
                 raise HTTPError("http://fixture.invalid/api/wait", 503, "busy", {}, Reply({}))
             return [{"id": "job", "state": "running", "revision": 1}]
