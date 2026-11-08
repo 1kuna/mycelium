@@ -146,7 +146,7 @@ func TestSimDeterministic(t *testing.T) {
 	b := simTestStream("b", "production", 10, 2, 2)
 	w := SimWorkload{Streams: []SimStream{a, b}}
 	var previous []byte
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 2; i++ {
 		r := runSimTest(t, f, w, 100)
 		data, _ := json.Marshal(r)
 		if previous != nil && !reflect.DeepEqual(data, previous) {

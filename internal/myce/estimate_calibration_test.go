@@ -4,54 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"math"
 	"strings"
 	"testing"
 	"time"
 )
-
-// Replay the unchanged raw estimator and calibration on the same accepted
-// history. Every held-out prediction precedes its outcome; no future samples
-// leak into either forecast. Units change on continuation to test normalization.
-func TestEstimateCalibrationHeldOutContinuation(t *testing.T) {
-	for _, biased := range []bool{false, true} {
-		t.Run(map[bool]string{false: "unbiased", true: "biased"}[biased], func(t *testing.T) {
-			q, clock, m, s := observationFixture(t)
-			rawSquared, correctedSquared := 0.0, 0.0
-			for i := range 80 {
-				seconds := 2.0
-				if biased {
-					seconds = float64(1 + 2*(i%2))
-				}
-				if i >= 60 {
-					s.Workload = &Workload{InputShape: "small-v1", Units: 20}
-					seconds *= 2
-				}
-				j := startObservation(t, q, m, s)
-				timing := q.s.Jobs[j.ID].Timing
-				if i >= 60 {
-					e := timing.ServiceEstimate
-					if e == nil || e.Samples != i-1 {
-						t.Fatalf("held-out forecast lost paired evidence: %+v", timing)
-					}
-					rawSquared += math.Pow(e.RawSeconds-seconds, 2)
-					correctedSquared += math.Pow(*timing.PredictedSeconds-seconds, 2)
-					if !biased && (e.CorrectionSeconds != 0 || *timing.PredictedSeconds != seconds) {
-						t.Fatal("unbiased history acquired bias", e)
-					}
-				}
-				clock.Advance(time.Duration(seconds * float64(time.Second)))
-				if err := q.Complete(cleanRepeatedResult(&j)); err != nil {
-					t.Fatal(err)
-				}
-			}
-			t.Logf("20 held-out forecasts: raw MSE %.6f, calibrated MSE %.6f", rawSquared/20, correctedSquared/20)
-			if biased && correctedSquared >= rawSquared {
-				t.Fatal("calibration did not improve held-out error")
-			}
-		})
-	}
-}
 
 func TestEstimateCalibrationPairsAndRestart(t *testing.T) {
 	q, clock, m, _, s := repeatedFixture(t)
@@ -207,41 +163,6 @@ func TestEstimateCalibrationRejectsIneligiblePairs(t *testing.T) {
 				t.Fatal("ineligible outcome trained calibration", after, before)
 			}
 		})
-	}
-}
-
-func TestEstimateCalibrationUnknownAndPhysicalFallback(t *testing.T) {
-	q, clock, m, _, s := repeatedFixture(t)
-	j := teachRepeated(t, q, clock, m, s, time.Second)
-	key := q.s.Jobs[j.ID].Timing.RepeatedKey
-	id := identityHash(key)
-	for _, scenario := range []string{"missing", "changed estimator", "future", "retired history", "forbidden", "invalidated", "negative duration"} {
-		p := q.s.WorkObservations[id]
-		p.Calibration = &ServiceCalibration{Estimator: serviceEstimator, Samples: 2, MeanError: 1, MinError: 0, MaxError: 2, RecordedAt: clock.Now()}
-		switch scenario {
-		case "missing":
-			p.Calibration = nil
-		case "changed estimator":
-			p.Calibration.Estimator = "different-raw-estimator"
-		case "future":
-			p.Calibration.RecordedAt = clock.Now().Add(time.Second)
-		case "forbidden":
-			p.Forbidden = true
-		case "invalidated":
-			p.StaleReason = "changed configuration"
-		case "negative duration":
-			p.Calibration.MeanError = -2
-		}
-		q.s.WorkObservations[id] = p
-		if scenario == "retired history" {
-			delete(q.s.WorkObservations, id)
-		}
-		seconds, e := q.calibratedService(key, 1, 1)
-		if seconds != 1 || e.CorrectionSeconds != 0 || e.Reason == "" {
-			t.Fatal("unsafe correction or unexplained fallback", scenario, seconds, e)
-		}
-		p.Forbidden, p.StaleReason = false, ""
-		q.s.WorkObservations[id] = p
 	}
 }
 

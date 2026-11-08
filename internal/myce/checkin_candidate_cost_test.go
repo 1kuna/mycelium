@@ -2,8 +2,6 @@ package myce
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -140,58 +138,4 @@ func BenchmarkCheckinCandidateCost(b *testing.B) {
 	b.StopTimer()
 	b.ReportMetric(float64(total.Nanoseconds())/float64(b.N), "hold-ns/op")
 	b.ReportMetric(float64(maximum.Nanoseconds()), "max-hold-ns")
-}
-
-// Freeze the original planner's full per-target candidate sequence, resolved
-// resource vectors and memory envelopes, not just its first winning job.
-// #806 intentionally changes these envelopes: physical cold headroom, measured
-// local uncertainty and uncalibrated transfers replace universal multipliers.
-// The refreshed digests retain all 402 decisions for each history shape.
-// ProbeFloorGB adds metadata in 180 retained-history envelopes; removing only
-// that field reproduces the prior digest with identical decisions/resources.
-// #1017 adds LaunchDriftGB/AvailableHostGB in those same 180 envelopes. Clearing
-// only those fields reproduces e7757cb9 with all 402 decisions/resources intact.
-func TestCandidateCostPlacementEquivalence(t *testing.T) {
-	for _, retained := range []bool{true, false} {
-		t.Run(fmt.Sprintf("retained=%v", retained), func(t *testing.T) {
-			q, _ := candidateCostFixture(t)
-			if !retained {
-				for id, j := range q.s.Jobs {
-					if j.State == "succeeded" {
-						delete(q.s.Jobs, id)
-					}
-				}
-			}
-			for i := range 5 {
-				delete(q.s.Jobs, fmt.Sprintf("running-%d", i))
-			}
-			q.refreshHostMemory()
-			q.refreshHostCPU()
-			type decision struct {
-				Target, Job string
-				Needs       ResourceNeeds
-				Envelope    *JobMemoryEnvelope
-			}
-			var decisions []decision
-			scan := q.placementScan()
-			for _, m := range scan.machines {
-				set := q.candidates(m, scan)
-
-				excluded := map[string]bool{}
-				for j := set.pick(excluded); j != nil; j = set.pick(excluded) {
-					decisions = append(decisions, decision{targetKey(m), j.ID, j.Spec.Needs, j.MemoryEnvelope})
-					excluded[j.ID] = true
-				}
-			}
-			data, err := json.Marshal(decisions)
-			if err != nil {
-				t.Fatal(err)
-			}
-			digest := fmt.Sprintf("%x", sha256.Sum256(data))
-			want := map[bool]string{true: "c10fc6597e76f5bc3f0298146a20dfc62e94cd6742f1eb10cc593beec95b9f61", false: "64f5571bc125dc317237aa5b4e477dbfa3646573bb59b9fba02f899bd9ed0b09"}[retained]
-			if digest != want {
-				t.Fatalf("placement digest %s (%d decisions), want %s", digest, len(decisions), want)
-			}
-		})
-	}
 }

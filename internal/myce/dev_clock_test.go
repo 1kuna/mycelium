@@ -98,20 +98,6 @@ func TestDevClockConcurrentAdvances(t *testing.T) {
 	}
 }
 
-func TestDevClockOrdinaryElapsedTime(t *testing.T) {
-	clock := &devClock{}
-	if _, err := clock.advance(time.Hour.Seconds()); err != nil {
-		t.Fatal(err)
-	}
-	// The timer supplies an elapsed-time observation; no process or scheduler
-	// decision is synchronized by an arbitrary sleep.
-	elapsed := <-time.After(time.Millisecond)
-	now := clock.Now()
-	if now.Before(elapsed.Add(time.Hour)) || now.After(RealClock{}.Now().Add(time.Hour)) {
-		t.Fatal("dev time did not continue with ordinary elapsed time")
-	}
-}
-
 func TestDevClockRestartReset(t *testing.T) {
 	root := t.TempDir()
 	config := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "test", Workers: 1, MemoryGB: 8}

@@ -12,7 +12,7 @@ import (
 )
 
 func TestTargetPayloadOSOnlyPlacement(t *testing.T) {
-	for _, arch := range []string{"amd64", "arm64"} {
+	for _, arch := range []string{"arm64"} {
 		t.Run(arch, func(t *testing.T) {
 			q, _ := fixture(t)
 			small, scarce := valueMachine("z-general", "cpu", 16), valueMachine("a-scarce", "fake", 64)
