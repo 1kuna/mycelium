@@ -62,10 +62,33 @@ func invalidWaitReply() error {
 }
 
 // GetJobWaitCapability preserves one initial diagnostic read while negotiating
-// batch waits through a response header ignored by old clients/queues.
+// batch waits through a response header ignored by old clients/queues. A shed
+// bootstrap switches to the scalar endpoint; placement/spec metadata is then
+// unavailable, while queue execution deadlines and caller bounds still apply.
 func (c Client) GetJobWaitCapability(ctx context.Context, id string) (*Job, bool, error) {
 	supported := false
 	j, err := c.GetJob(context.WithValue(ctx, waitCapabilityKey{}, &supported), id)
+	var api *HTTPError
+	if errors.As(err, &api) && api.Status == 429 {
+		// Diagnostic bootstrap is expendable under control pressure. Probe the
+		// shed-exempt scalar endpoint instead of retrying this GET forever.
+		reply, waitErr := c.WaitBatch(ctx, []string{id}, nil, 0)
+		if waitErr != nil {
+			// A transient probe failure must retry the batch route, too.
+			return nil, RetryStatusRead(waitErr), waitErr
+		}
+		state := reply.Jobs[0]
+		if state.Revision == 0 {
+			// An older queue used the GET fallback; retain the original retry
+			// signal rather than mistaking that reply for batch support.
+			return nil, false, err
+		}
+		j = &Job{ID: state.ID, State: state.State, Reason: state.Reason}
+		if terminal(state.State) {
+			j, waitErr = c.GetJobForWait(ctx, state.ID)
+		}
+		return j, true, waitErr
+	}
 	return j, supported, err
 }
 

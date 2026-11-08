@@ -675,6 +675,7 @@ class Client:
             return not (isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError))
 
         batch_unavailable = False
+        bootstrap_batch = False
 
         def observe(original, observed):
             nonlocal changed, ids, end, event
@@ -721,7 +722,7 @@ class Client:
             failure = None
             held = False
             changed = False
-            batched = not batch_unavailable and self._batch_supported and all(job_id in jobs for job_id in pending)
+            batched = not batch_unavailable and self._batch_supported and (bootstrap_batch or all(job_id in jobs for job_id in pending))
             try:
                 if batched:
                     seconds = min(20, int(pace.next(started, event)))
@@ -748,6 +749,13 @@ class Client:
                             row = self._read_job(job_id, timeout=request_budget(),
                                                  wait=job_id in jobs, retry=False)
                         except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
+                            if isinstance(error, APIError) and error.status == 429 and not batch_unavailable:
+                                # A shed metadata GET cannot gate the shed-exempt
+                                # batch endpoint. Try all pending IDs together.
+                                self._batch_supported = True
+                                bootstrap_batch = True
+                                failure = error
+                                break
                             if not retryable(error):
                                 raise
                             failure = error

@@ -47,3 +47,36 @@ func TestWaitBatchInvalidReply(t *testing.T) {
 		}
 	}
 }
+
+func TestClientWaitShedBootstrapAndTransientProbe(t *testing.T) {
+	for _, alreadyDone := range []bool{false, true} {
+		clock := &fakeClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
+		gets, batches := 0, 0
+		c := Client{URL: "http://fixture.invalid", Clock: clock, Pause: func(_ context.Context, d time.Duration) error { clock.Advance(d); return nil }, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+			clock.Advance(time.Millisecond)
+			status, body := 200, ""
+			if r.Method == "POST" {
+				batches++
+				if batches == 1 {
+					status, body = 429, `{"code":"client_rate_limited"}`
+				} else {
+					state := "running"
+					if alreadyDone || batches >= 4 {
+						state = "succeeded"
+					}
+					body = `{"jobs":[{"id":"job","state":"` + state + `","revision":1}]}`
+				}
+			} else if r.URL.RawQuery == "view=wait" {
+				body = `{"id":"job","state":"succeeded","reason":"full terminal payload"}`
+			} else {
+				gets++
+				status, body = 429, `{"code":"client_rate_limited"}`
+			}
+			return &http.Response{StatusCode: status, Header: http.Header{"Retry-After": {"1"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})}}
+		j, err := c.Wait(context.Background(), "job")
+		if err != nil || j == nil || j.Reason != "full terminal payload" || gets != 1 || batches < 2 {
+			t.Fatal(alreadyDone, j, err, gets, batches)
+		}
+	}
+}

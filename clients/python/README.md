@@ -271,3 +271,8 @@ Use one call per agent rather than a thread per job. Supporting queues use one
 revision-based `/api/wait` after initial metadata reads; older queues fall back
 to lightweight reads. The batch-v1 limit is 256 distinct IDs. Wait timeouts never
 cancel jobs.
+
+If control pressure sheds initial metadata (HTTP 429), waiting probes the
+shed-exempt batch endpoint instead of repeatedly retrying that GET. Placement
+and spec metadata may then be unavailable; queue execution deadlines and the
+caller's timeout still apply. A full terminal Job is still fetched for results.

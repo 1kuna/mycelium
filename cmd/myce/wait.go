@@ -231,6 +231,11 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				j, supported, err = c.GetJobWaitCapability(requestCtx, id)
 				// Structured output also uses revision waits; fetch details only on changes.
 				batchSupported = batchSupported || supported
+				if supported && err != nil {
+					// The endpoint was negotiated even if its terminal detail read
+					// was shed. Retry through the batch path, not bootstrap GET.
+					observed[id] = true
+				}
 			} else if batchSupported {
 				if batchJobs == nil {
 					batchJobs = map[string]*myce.Job{}
@@ -248,7 +253,14 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				j, err = batchJobs[id], batchErr
 				if err == nil && jsonOutput && j != nil {
 					if lastDetail[j.ID] != j.State+"\x00"+j.Reason {
-						j, err = c.GetJob(requestCtx, j.ID)
+						detail, detailErr := c.GetJob(requestCtx, j.ID)
+						var api *myce.HTTPError
+						if errors.As(detailErr, &api) && api.Status == 429 {
+							// JSON diagnostics must not prevent scalar completion.
+							err = nil
+						} else {
+							j, err = detail, detailErr
+						}
 					}
 				}
 			} else {

@@ -72,9 +72,11 @@ func TestWaitAdaptiveRetryAfterOwnerTimeout(t *testing.T) {
 	for _, status := range []int{429, 503} {
 		clock := &waitClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
 		reads := 0
+		var methods []string
 		var sleeps []time.Duration
 		client := myce.Client{URL: "http://fixture.invalid", Jitter: func() float64 { return 0 }, HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
 			reads++
+			methods = append(methods, r.Method)
 			clock.advance(time.Millisecond)
 			return &http.Response{StatusCode: status, Header: http.Header{"Retry-After": []string{"7"}}, Body: io.NopCloser(strings.NewReader(`{"code":"client_rate_limited"}`))}, nil
 		})}}
@@ -83,7 +85,15 @@ func TestWaitAdaptiveRetryAfterOwnerTimeout(t *testing.T) {
 			clock.advance(d)
 			return nil
 		})
-		if exitCode(err) != 3 || reads != 2 || len(sleeps) != 2 || sleeps[0] < 7*time.Second || sleeps[1] >= 7*time.Second {
+		expectedReads := 2
+		if status == 429 {
+			// One initial GET, then the shed-exempt probe and its retry.
+			expectedReads = 3
+			if strings.Join(methods, ",") != "GET,POST,POST" {
+				t.Fatal(methods)
+			}
+		}
+		if exitCode(err) != 3 || reads != expectedReads || len(sleeps) != 2 || sleeps[0] < 7*time.Second || sleeps[1] >= 7*time.Second {
 			t.Fatal(status, err, reads, sleeps)
 		}
 	}

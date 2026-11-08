@@ -74,3 +74,36 @@ func TestWaitDefaultBatchUnchangedJobs(t *testing.T) {
 		})
 	}
 }
+
+// A full GET may be shed indefinitely while /api/wait remains available.
+func TestWaitShedBootstrapStillStartsBatch(t *testing.T) {
+	for _, structured := range []bool{false, true} {
+		for _, alreadyDone := range []bool{false, true} {
+			t.Run(fmt.Sprint(structured, alreadyDone), func(t *testing.T) {
+				clock := &waitClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
+				batches, gets := 0, 0
+				client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
+					clock.advance(time.Millisecond)
+					status, body := 200, ""
+					if r.Method == "POST" && r.URL.Path == "/api/wait" {
+						batches++
+						state := "running"
+						if alreadyDone || batches >= 4 {
+							state = "succeeded"
+						}
+						body = fmt.Sprintf(`{"jobs":[{"id":"job","state":%q,"revision":1}]}`, state)
+					} else {
+						gets++
+						status, body = 429, `{"code":"client_rate_limited"}`
+					}
+					return &http.Response{StatusCode: status, Header: http.Header{"Retry-After": {"1"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+				})}}
+				var out bytes.Buffer
+				err := waitJobsReporting(context.Background(), client, nil, []string{"job"}, time.Minute, &out, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil }, structured)
+				if err != nil || batches == 0 || gets > 4 || !strings.Contains(out.String(), "succeeded") {
+					t.Fatal(err, batches, gets, out.String())
+				}
+			})
+		}
+	}
+}
