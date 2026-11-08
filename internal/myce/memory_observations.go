@@ -14,9 +14,10 @@ func memoryWorkIdentity(k ObservationKey, configuration string) memoryWorkKey {
 }
 
 type memoryObservationCatalog struct {
-	targets map[memoryTransferTarget]map[memoryWorkKey][]*WorkObservation
-	work    map[memoryWorkKey][]*WorkObservation
-	family  map[similarMemoryKey][]*WorkObservation
+	extensions map[string][]*WorkObservation
+	targets    map[memoryTransferTarget]map[memoryWorkKey][]*WorkObservation
+	work       map[memoryWorkKey][]*WorkObservation
+	family     map[similarMemoryKey][]*WorkObservation
 }
 
 // Copy each aggregate once, then lend immutable pointers to both readers. Only
@@ -32,7 +33,9 @@ func (q *Queue) memoryObservationCatalog() *memoryObservationCatalog {
 	}
 	if index == nil {
 		index = &memoryObservationCatalog{targets: map[memoryTransferTarget]map[memoryWorkKey][]*WorkObservation{}, work: map[memoryWorkKey][]*WorkObservation{}, family: map[similarMemoryKey][]*WorkObservation{}}
+		index.extensions = map[string][]*WorkObservation{}
 		for _, point := range q.s.WorkObservations {
+			index.extensions[point.Key.ExtensionDigest] = append(index.extensions[point.Key.ExtensionDigest], &point)
 			if point.MemoryConfiguration != "" {
 				key := memoryWorkIdentity(point.Key, point.MemoryConfiguration)
 				index.work[key] = append(index.work[key], &point)

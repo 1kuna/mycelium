@@ -206,7 +206,7 @@ func TestMemoryReviewResumedEstimateAndOOMFloor(t *testing.T) {
 	second := startObservation(t, q, m, s)
 	clock.Advance(time.Second)
 	r = result(&second, false)
-	r.OutOfMemory, r.Error = true, "exceeded its 2.5 GiB memory ceiling"
+	r.OutOfMemory, r.Error = true, "host memory ceiling exceeded"
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestMemoryReviewResumedEstimateAndOOMFloor(t *testing.T) {
 		t.Fatalf("auto OOM requires a larger hypha: %+v", queued)
 	}
 	next := check(t, q, m, nil).Job
-	if next == nil || next.Spec.Needs.HostMemoryGB <= 2.5 {
+	if next == nil || next.Spec.Needs.HostMemoryGB <= second.Spec.Needs.HostMemoryGB || next.Spec.Needs.HostMemoryGB < queued.MemoryOOMFloor.HostMemoryGB {
 		t.Fatalf("same-host retry lost OOM lower bound: %+v; %s", next, job(t, q, second.ID).Reason)
 	}
 	if next != nil {

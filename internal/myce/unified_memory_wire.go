@@ -3,11 +3,13 @@ package myce
 import "slices"
 
 const unifiedMemoryProtocol = "unified-attempt-memory-v1"
+const hostMemorySampleProtocol = "host-memory-sample-v1"
 const probeMemoryProtocol = "cpu-probe-memory-v1"
 
 type workerUnifiedMemoryWire struct {
 	machine, session   string
 	supported          bool
+	sampleSupported    bool
 	probeSupported     bool
 	telemetrySupported bool
 }
@@ -16,6 +18,9 @@ func (w Worker) unifiedMemoryCheckin(c Checkin) Checkin {
 	if r := w.unifiedMemoryWire; r != nil {
 		if r.machine != c.Machine.ID || r.session != c.Machine.Session {
 			*r = workerUnifiedMemoryWire{machine: c.Machine.ID, session: c.Machine.Session}
+		}
+		if !r.sampleSupported {
+			c = legacyHostMemorySampleCheckin(c)
 		}
 		if r.supported {
 			if r.probeSupported {
@@ -66,7 +71,7 @@ func legacyUnifiedMemoryCheckin(c Checkin) Checkin {
 
 func hasUnifiedMemoryWireFields(c Checkin) bool {
 	for _, r := range c.Attempts {
-		if s := r.CurrentHostMemory; s != nil && (s.DeviceSource != "" || s.DeviceExclusive || s.DeviceGrowthRateGB != 0 || s.GrowthObserved || s.GrowthRateGB != 0 || s.FootprintGB != nil) {
+		if s := r.CurrentHostMemory; s != nil && (s.SampleID != 0 || s.DeviceSource != "" || s.DeviceExclusive || s.DeviceGrowthRateGB != 0 || s.GrowthObserved || s.GrowthRateGB != 0 || s.FootprintGB != nil) {
 			return true
 		}
 	}
@@ -81,7 +86,19 @@ func legacyProbeMemoryCheckin(c Checkin) Checkin {
 		if r.CurrentHostMemory != nil {
 			s := *r.CurrentHostMemory
 			s.GrowthObserved, s.FootprintGB = false, nil
-			s.GrowthRateGB = 0
+			s.GrowthRateGB, s.SampleID = 0, 0
+			c.Attempts[i].CurrentHostMemory = &s
+		}
+	}
+	return c
+}
+
+func legacyHostMemorySampleCheckin(c Checkin) Checkin {
+	c.Attempts = slices.Clone(c.Attempts)
+	for i, r := range c.Attempts {
+		if r.CurrentHostMemory != nil {
+			s := *r.CurrentHostMemory
+			s.SampleID = 0
 			c.Attempts[i].CurrentHostMemory = &s
 		}
 	}

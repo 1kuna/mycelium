@@ -218,10 +218,16 @@ func TestProductionStartDeadlinePermit(t *testing.T) {
 	for _, timely := range []bool{true, false} {
 		t.Run(fmt.Sprintf("timely=%t", timely), func(t *testing.T) {
 			q, c := fixture(t)
-			j := submit(t, q, spec("production"))
+			s := spec("production")
+			s.WallTime = "10m"
+			j := submit(t, q, s)
 			assigned := check(t, q, machine("b70", "xpu"), nil).Job
 			if assigned == nil {
 				t.Fatal("not assigned")
+			}
+			custody := NativeCustodyReport{Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}, Machine: assigned.Machine, Session: assigned.Session, ProcessID: "original-process", CustodyID: "original-group", Phase: "reserved"}
+			if err := q.NativeCustody(custody); err != nil {
+				t.Fatal(err)
 			}
 			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 			defer server.Close()
@@ -235,17 +241,31 @@ func TestProductionStartDeadlinePermit(t *testing.T) {
 					t.Fatalf("permit: %+v", permit)
 				}
 			}
+			before := job(t, q, j.ID)
 			c.Advance(ProductionStartTimeout)
-			if err := client.Call(context.Background(), "POST", "/api/workers/started", result(assigned, true), &permit); err == nil {
-				t.Fatal("late or duplicate permit granted")
-			}
+			err := client.Call(context.Background(), "POST", "/api/workers/started", result(assigned, true), &permit)
 			if timely {
-				// A duplicate cannot revoke an already durable successful start.
+				// The reply might have been lost: acknowledge the original durable
+				// start, without minting a new start, budget or process identity.
 				got := job(t, q, j.ID)
-				if got.State != "running" || got.StartedAt == nil {
-					t.Fatal("duplicate revoked the valid start", got)
+				starts := 0
+				for _, e := range got.LedgerEntries {
+					if e.Kind == "started" {
+						starts++
+					}
+				}
+				if err != nil || got.State != "running" || got.StartedAt == nil || !got.StartedAt.Equal(*before.StartedAt) || starts != 1 || len(q.s.ProductionStarts) != 1 || got.Starts != 1 || permit["wall_time_remaining_seconds"] != (10*time.Minute-ProductionStartTimeout).Seconds() {
+					t.Fatal("replay changed original authorization", got, permit, err)
+				}
+				custody.ProcessID, custody.CustodyID = "second-process", "second-group"
+				if err := q.NativeCustody(custody); !errors.Is(err, ErrStale) {
+					t.Fatal("replay authorized a duplicate process", err)
 				}
 			} else {
+				var refusal *HTTPError
+				if !errors.As(err, &refusal) || refusal.Code != "request_stale" {
+					t.Fatal("late first start did not retain its typed refusal", err)
+				}
 				requireState(t, q, j.ID, "failed")
 			}
 		})
