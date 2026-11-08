@@ -89,7 +89,7 @@ class BatchWaitTests(unittest.TestCase):
                     clock.now += .01
                     if request.selector == "/api/jobs/done":
                         return Reply({"id": "done", "state": "succeeded"})
-                    if request.selector == "/api/jobs/early":
+                    if request.selector.startswith("/api/jobs/early"):
                         return Reply({"id": "early", "state": "running", "spec": {
                             "deadline": "2026-11-05T12:00:02Z"}})
                     budgets.append(kwargs["timeout"])
@@ -103,5 +103,27 @@ class BatchWaitTests(unittest.TestCase):
                     client.wait_many(["done", "early", "peer"])
                 self.assertAlmostEqual(clock.now, 2, places=6)
                 self.assertEqual(reads.count("/api/jobs/done"), 1)
-                self.assertEqual(reads.count("/api/jobs/early"), 1)
+                self.assertGreaterEqual(sum(path.startswith("/api/jobs/early") for path in reads), 1)
                 self.assertTrue(all(0 < budget <= 2 for budget in budgets))
+
+    def test_failing_peer_does_not_hide_completion_or_retain_deadline(self):
+        client = Client(token="fixture")
+        clock = client._clock = Clock()
+        client._jitter = lambda: 0
+        early_reads = []
+
+        def respond(request, **kwargs):
+            clock.now += .01
+            if request.selector.startswith("/api/jobs/early"):
+                early_reads.append(clock.now)
+                return Reply({"id": "early", "state": "running" if clock.now < 1 else "succeeded",
+                              "spec": {"deadline": "2026-11-05T12:00:02Z"}})
+            if clock.now < 3:
+                raise HTTPError(request.full_url, 503, "busy", {"Retry-After": "1"}, Reply({}))
+            return Reply({"id": "peer", "state": "succeeded"})
+
+        client._urlopen = respond
+        rows = client.wait_many(["peer", "early"], timeout=10)
+        self.assertEqual([row["id"] for row in rows], ["peer", "early"])
+        self.assertGreater(len(early_reads), 1)
+        self.assertGreaterEqual(clock.now, 3)

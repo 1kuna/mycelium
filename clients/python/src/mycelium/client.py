@@ -669,6 +669,11 @@ class Client:
             if remaining is not None and remaining <= 0:
                 raise timed_out()
             return remaining if self.timeout is None else (self.timeout if remaining is None else min(self.timeout, remaining))
+        def retryable(error):
+            if isinstance(error, APIError):
+                return error.code != "job_reply_invalid" and (error.status in {408, 429} or error.status >= 500)
+            return not (isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError))
+
         batch_unavailable = False
 
         def observe(original, observed):
@@ -681,7 +686,8 @@ class Client:
             saved = metadata[job_id]
             if observed["state"] == "running" and not saved.get("started_at"):
                 saved["started_at"] = dt.datetime.fromtimestamp(self._clock.time(), dt.timezone.utc).isoformat()
-            del pending[original]
+            if observed["state"] in TERMINAL or original != job_id:
+                del pending[original]
             if observed["state"] in TERMINAL:
                 results[job_id] = observed
             else:
@@ -735,21 +741,20 @@ class Client:
                             row = self._read_job(row["id"], timeout=request_budget(), wait=True)
                         observe(original, row)
                 else:
-                    # Retain each successful read before a peer can fail or block.
-                    # During initialization, retry only missing metadata.
-                    initializing = any(job_id not in jobs for job_id in pending)
+                    # Apply each read immediately and keep observing healthy peers
+                    # even when another ID has a transient visibility/read failure.
                     for job_id in list(pending):
-                        if initializing and job_id in jobs:
+                        try:
+                            row = self._read_job(job_id, timeout=request_budget(),
+                                                 wait=job_id in jobs, retry=False)
+                        except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
+                            if not retryable(error):
+                                raise
+                            failure = error
                             continue
-                        row = self._read_job(job_id, timeout=request_budget(),
-                                             wait=job_id in jobs, retry=False)
                         observe(job_id, row)
-            except APIError as error:
-                if error.code == "job_reply_invalid" or (error.status not in {408, 429} and error.status < 500):
-                    raise
-                failure = error
-            except (TimeoutError, URLError, IncompleteReplyError) as error:
-                if isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError):
+            except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
+                if not retryable(error):
                     raise
                 failure = error
             if not pending:
