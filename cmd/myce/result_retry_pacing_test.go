@@ -77,7 +77,7 @@ func TestResultRetryPacingCurrentPressure(t *testing.T) {
 							header.Set("ETag", `"`+ref.SHA256+`"`)
 						}
 					}
-					return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
+					return &http.Response{StatusCode: status, Header: header, ContentLength: int64(len(body)), Body: io.NopCloser(strings.NewReader(body))}, nil
 				})}}
 				out := t.TempDir()
 				if recovery {
