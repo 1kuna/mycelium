@@ -327,6 +327,10 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 				probeFloor = max(probeFloor, hostMemoryPeakGB(estimate.host))
 			}
 		}
+		deviceFloor := j.DeviceMemoryFloorGB
+		if floor := j.MemoryOOMFloor; floor != nil {
+			deviceFloor = max(deviceFloor, floor.MemoryGB)
+		}
 		switch {
 		case estimate.host != nil:
 			source, basis, evidence = estimate.source, "learned", estimate.samples
@@ -372,7 +376,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			if !n.cpuOnly() && (n.MemoryGB == 0 || n.HostMemoryGB == 0) {
 				var device, host float64
 				var why string
-				if device, host, why, evidence, bounded = q.unifiedGPUFirstRun(j, m, estimate, n.MemoryGB, n.HostMemoryGB, hostFloor); bounded {
+				if device, host, why, evidence, bounded = q.unifiedGPUFirstRun(j, m, estimate, max(n.MemoryGB, deviceFloor), n.HostMemoryGB, hostFloor); bounded {
 					n.MemoryGB, n.HostMemoryGB, source = device, host, "submitter hint "+why
 				}
 			}
@@ -401,20 +405,22 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 				source = estimate.source
 			}
 			host, why := 0.0, ""
-			device, unified, bounded, similar, gpuBounded := q.unifiedGPUFirstRun(j, m, estimate, 0, 0, hostFloor)
+			probeMachine := m
+			if !n.cpuOnly() && j.Spec.ExtensionCheck != nil && !copy.Spec.Run.Docker {
+				physical := *m
+				physical.FreeHostMemoryGB = min(m.HostAvailableMemoryGB, q.qualificationCapacity(m).FreeHostMemoryGB)
+				physical.hostReservationDebtGB = 0
+				probeMachine = &physical
+			}
+			// Choose the physical opportunity before splitting a unified pool.
+			// Admission against m still waits for its existing reservations.
+			device, unified, bounded, similar, gpuBounded := q.unifiedGPUFirstRun(j, probeMachine, estimate, deviceFloor, 0, hostFloor)
 			if gpuBounded {
 				n.MemoryGB, host, source, evidence = device, unified, source+" "+bounded, similar
 			} else if bound, bounded, similar, ok := q.coldMemoryBound(j, m, estimate, hostFloor); ok {
 				host, source, evidence = bound, bounded, similar
 			} else {
-				if !n.cpuOnly() && j.Spec.ExtensionCheck != nil && !copy.Spec.Run.Docker {
-					physical := *m
-					physical.FreeHostMemoryGB = min(m.HostAvailableMemoryGB, q.qualificationCapacity(m).FreeHostMemoryGB)
-					physical.hostReservationDebtGB = 0
-					host, why = q.exploratoryMemory(j, &physical)
-				} else {
-					host, why = q.exploratoryMemory(j, m)
-				}
+				host, why = q.exploratoryMemory(j, probeMachine)
 				if q.learnedMemory() && n.cpuOnly() {
 					probeFloor = hostFloor
 				}
@@ -450,6 +456,15 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			// worker launch checks still refuse an intervening loss of RAM.
 			margin := q.jobProbeDriftMarginGB(j, m)
 			host, why := q.exploratoryMemoryWithDrift(j, m, margin)
+			if m.UnifiedMemory && !n.cpuOnly() {
+				// The probe is the shared physical pool. hostNeed adds the
+				// retained device vector, so leave that share out of host RAM.
+				device := max(n.MemoryGB, deviceFloor)
+				if floor := j.MemoryOOMFloor; floor != nil {
+					device = max(floor.MemoryGB, j.DeviceMemoryFloorGB)
+				}
+				host -= device
+			}
 			n.HostMemoryGB = max(n.HostMemoryGB, host)
 			source, basis, evidence = "exploratory OOM recovery; measured peak + growth; physical headroom", "exploratory", 0
 			refusal = why

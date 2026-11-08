@@ -203,3 +203,53 @@ func TestExploratoryOOMExtensionCheckWaitsForPhysicalOpportunity(t *testing.T) {
 		t.Fatal(got.State, got.Reason)
 	}
 }
+
+func unifiedCheckOOMFixture(t *testing.T) (*Queue, *fakeClock, Machine, Spec) {
+	t.Helper()
+	q, clock, m, s := coldProbeAdmissionFixture(t, false)
+	m.UnifiedMemory, m.CapabilityProfile.MemoryLayout = true, "unified"
+	m.Devices[0].UnifiedMemory, m.Devices[0].MemoryMode = true, "unified"
+	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 24, 12
+	machineCheck(t, q, m)
+	return q, clock, m, s
+}
+
+// Review counterexample: an 8 GiB device hint is already part of the shared
+// pool. A 4 GiB host OOM floor still fits when headroom rises from 12 to 20 GiB.
+func TestExploratoryOOMUnifiedCheckRecoveryKeepsSharedSplit(t *testing.T) {
+	q, clock, m, s := unifiedCheckOOMFixture(t)
+	s.SizeHint = SizeHint{MemoryGB: 8}
+	queued := submit(t, q, s)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID || run.MemoryEnvelope.HostGB > 12 || run.Spec.Needs.MemoryGB != 8 {
+		t.Fatalf("first unified check: %+v", run)
+	}
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	r := result(run, false)
+	peak := 4.0
+	r.OutOfMemory = true
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: true, Events: &MemoryEventCounts{OOM: 1, OOMKill: 1}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	m.HostAvailableMemoryGB = 20
+	retry := assignedJob(machineCheck(t, q, m))
+	if retry == nil || retry.ID != queued.ID || retry.MemoryEnvelope.HostGB > 20 || retry.Spec.Needs.MemoryGB != 8 || retry.Spec.Needs.HostMemoryGB < peak {
+		t.Fatalf("shared recovery double-counted or lost floor: retry=%+v reason=%s", retry, job(t, q, queued.ID).Reason)
+	}
+}
+
+func TestExploratoryOOMUnifiedCheckWaitsForPhysicalOpportunity(t *testing.T) {
+	q, _, m, s := unifiedCheckOOMFixture(t)
+	queued := submit(t, q, s)
+	target := m.Devices[0].machine(*q.s.Machines[m.ID])
+	target.FreeHostMemoryGB = 1.0571327209472656
+	target.HostAvailableMemoryGB = 19.742050170898438
+	candidate := q.memoryCandidate(queued, &target)
+	if candidate.MemoryEnvelope.HostGB < 4 || hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
+		t.Fatalf("unified check launched in tiny ledger remainder: %+v", candidate.MemoryEnvelope)
+	}
+}
