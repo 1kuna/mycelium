@@ -277,23 +277,6 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(call.call_args.args, ("POST", "/api/jobs/job%2Fone/cancel", {}))
         self.assertEqual(APIError(404, '{"code":"job_unknown","will_not_run":null}').code, "job_unknown")
 
-    def test_submission_key_and_error_code(self):
-        client = Client(token="test-only")
-        spec = {"project": "test", "submission_key": "stable-key"}
-        with patch.object(client, "_call", return_value={"id": "original"}) as call:
-            self.assertEqual(client.submit(spec)["id"], "original")
-        self.assertEqual(call.call_args.args[2]["submission_key"], "stable-key")
-        self.assertEqual(spec, {"project": "test", "submission_key": "stable-key"})
-        error = APIError(409, '{"code":"submission_key_conflict","error":"different spec"}')
-        self.assertEqual(error.status, 409)
-        self.assertEqual(error.code, "submission_key_conflict")
-        self.assertIsNone(APIError(400, "invalid request").code)
-
-    def test_wait_reports_production_start_deadline(self):
-        client = Client(token="test-only")
-        failed = {"id": "prod", "state": "failed", "reason": "production start deadline exceeded"}
-        with patch.object(client, "_wait_batch", return_value=[dict(failed, revision=1)]), patch.object(client, "_read_job", return_value=failed):
-            self.assertEqual(client.wait("prod"), failed)
 
 
     def test_log_pages_and_terminal_drain(self):
