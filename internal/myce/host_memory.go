@@ -474,11 +474,23 @@ type hostMemorySample struct {
 	at, deviceAt             time.Time
 }
 
+func (s hostMemorySample) hostGrowth(now time.Time) (float64, bool) {
+	if s.at.IsZero() || now.Before(s.at) || now.Sub(s.at) >= s.freshFor() || !validMemoryValue(s.gb) {
+		return 0, false
+	}
+	growth := s.growthGB + s.rateGB*now.Sub(s.at).Seconds()
+	return growth, validMemoryValue(growth)
+}
+
 func remainingHostGrowth(reservation float64, sample hostMemorySample, now time.Time) float64 {
-	if sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= sample.freshFor() || !validMemoryValue(sample.gb) {
+	forecast, fresh := sample.hostGrowth(now)
+	if !fresh {
 		return reservation
 	}
-	return max(0, reservation-sample.gb+sample.growthGB+sample.rateGB*now.Sub(sample.at).Seconds())
+	// The envelope and the live forecast protect the same future bytes. Raw
+	// availability already excludes resident anon: spend that credit once,
+	// then protect whichever remaining bound is larger, including sample age.
+	return max(0, reservation-sample.gb, forecast)
 }
 
 func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemptKey]hostMemorySample {

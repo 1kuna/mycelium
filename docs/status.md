@@ -1217,8 +1217,12 @@ available RAM after its configured host reserve. `host_memory_in_use_gb` is
 Mycelium's reservation ledger, not measured process RSS.
 `free_host_memory_gb` is admitted headroom: the smaller of live availability
 minus running attempts' remaining growth room, and the configured allowance
-minus full reservations (when configured). Remaining growth is
-`max(0, reservation - current nonreclaimable use)` per attempt. The operator
+minus full reservations (when configured). From the next release, remaining
+growth is `max(0, reservation - current nonreclaimable use, live growth forecast)`
+per attempt. The forecast includes the measured growth rate through the sample's
+age. The envelope and forecast cover the same future bytes; they are not added.
+The static charge is at least the envelope and current anonymous residency plus
+that forecast, so observed over-use still consumes the allowance. The operator
 reserve is already removed from live availability; it is not subtracted again.
 Only fresh exact-attempt cgroup anonymous resident memory reduces growth,
 including managed Docker containers with per-member caps and no shared parent.
