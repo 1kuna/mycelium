@@ -2036,7 +2036,14 @@ From the release containing #1072, generic Go and Python GET/HEAD retries,
 downloads and replay-safe recovery use the current positive Retry-After plus
 positive jitter, independent of earlier errors or unchanged reads. Without that
 signal they use measured request service cost plus jitter, rather than accumulating
-exponential error pauses. The caller's deadline may end a pause before retry is
+exponential error pauses. From the fast-failure correction to #1072, no-signal
+recovery also permits at least the one-second initial/minimum TCP retransmission
+period from RFC 6298 sections 2.1/2.4. Fast connection failures and immediate
+503 replies cannot prove that the service has recovered at that RTT. The cost
+is up to one recovery period plus jitter before probing a fast recovery; slower
+measured service extends it. Positive Retry-After remains authoritative. This
+also applies to shared-observer retries, not successful long-poll pacing.
+The caller's deadline may end a pause before retry is
 permitted; it stops recovery instead of starting an early request. No fixed cap
 or retry count is introduced.
 From #959, `myce logs JOB --after SEQ` resumes strictly after a log sequence.
