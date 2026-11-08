@@ -4,6 +4,7 @@ import os
 import contextlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import signal
 import shlex
@@ -22,6 +23,81 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def test_abandoned_slots_reconcile_but_live_fixtures_keep_custody(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cache = Path(folder)
+            # Reproduce the incident: both flocks are free but both cancelled
+            # runs left complete legacy records. Keep one orphan fixture alive
+            # after its supervisor exits, outside its original ancestry.
+            scratches = [cache / 'run.first', cache / 'run.second']
+            markers = ['GATE_RUN_ID=' + digit * 32 for digit in ('a', 'b')]
+            for i in range(2):
+                scratches[i].mkdir()
+                (cache / f'mycelium-full-gate-{i}.custody').write_text(
+                    json.dumps(dict(marker=markers[i], scratch=str(scratches[i]))))
+            fixture = subprocess.Popen(
+                [sys.executable, '-c', 'import signal; signal.pause()'],
+                env=dict(os.environ, GATE_RUN_ID=markers[1].split('=')[1]),
+                start_new_session=True)
+            real_check_output = subprocess.check_output
+
+            def inventory(args, **kwargs):
+                return folder if args[0] == 'go' else real_check_output(args, **kwargs)
+
+            try:
+                with patch.object(budget.subprocess, 'check_output', side_effect=inventory):
+                    first = budget.acquire_full_slot()
+                    try:
+                        # Real ps/OS-handle inventory reclaimed exactly one.
+                        self.assertEqual(Path(first.name).name, 'mycelium-full-gate-0.lock')
+                        saved = json.loads((cache / 'mycelium-full-gate-0.custody').read_text())
+                        self.assertEqual(saved['holder_pid'], os.getpid())
+                        self.assertEqual(saved['holder_start'], budget.process_start(os.getpid()))
+                        self.assertEqual(len(list(cache.glob('*.reconciled-*'))), 1)
+                        with (cache / 'mycelium-full-gate-1.lock').open('a') as held:
+                            budget.fcntl.flock(held, budget.fcntl.LOCK_EX | budget.fcntl.LOCK_NB)
+                            self.assertFalse(budget.reconcile_full_custody(held))
+                        self.assertIsNone(fixture.poll())  # Recovery never kills fixtures.
+                        fixture.terminate()
+                        fixture.wait(timeout=5)
+                        second = budget.acquire_full_slot()
+                        budget.release_full_slot(second, True)
+                        self.assertEqual(len(list(cache.glob('*.reconciled-*'))), 2)
+                        self.assertTrue(all(p.exists() for p in scratches))
+                    finally:
+                        budget.release_full_slot(first, True)
+            finally:
+                if fixture.poll() is None:
+                    fixture.kill()
+                fixture.wait(timeout=5)
+
+    def test_holder_birth_fences_reuse_and_uncertain_inventory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            slot = (Path(folder) / 'mycelium-full-gate-0.lock').open('a')
+            self.addCleanup(slot.close)
+            path = Path(slot.name).with_suffix('.custody')
+            record = dict(holder_pid=123, holder_start='old birth', phase='running',
+                          marker='GATE_RUN_ID=' + 'c' * 32, scratch=folder + '/run.old')
+            path.write_text(json.dumps(record))
+            with (patch.object(budget, 'process_start', return_value='old birth'),
+                  patch.object(budget, 'owned_processes') as fixtures):
+                self.assertFalse(budget.reconcile_full_custody(slot))
+                fixtures.assert_not_called()
+            with (patch.object(budget, 'process_start', return_value='reused PID birth'),
+                  patch.object(budget, 'owned_processes', side_effect=PermissionError('unknown'))):
+                self.assertFalse(budget.reconcile_full_custody(slot))
+                self.assertEqual(json.loads(path.read_text()), record)
+            with (patch.object(budget, 'process_start', return_value='reused PID birth'),
+                  patch.object(budget, 'owned_processes', return_value=set())):
+                self.assertTrue(budget.reconcile_full_custody(slot))
+            # A supervisor killed before scratch/child creation leaves a complete
+            # reservation which is reclaimable without inventing a run marker.
+            path.write_text(json.dumps(dict(holder_pid=123, holder_start='old birth', phase='reserved')))
+            with patch.object(budget, 'process_start', return_value=None):
+                self.assertTrue(budget.reconcile_full_custody(slot))
+            path.write_text('')
+            self.assertFalse(budget.reconcile_full_custody(slot))
+
     def test_linux_full_does_not_wait_on_mac_suite_limit(self):
         with tempfile.TemporaryDirectory() as folder:
             gate = Path(folder) / 'scripts/gate.sh'
@@ -41,7 +117,8 @@ class GateBudgetTests(unittest.TestCase):
             # New full packages carry -run expressions; owner locks, not the
             # number or arguments of their package processes, bound full suites.
             processes = '123 go test -race -run .* mycelium/pkg\n'
-            with patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else processes):
+            with (patch.object(budget, 'process_start', return_value='owner start'),
+                  patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else processes)):
                 first = budget.acquire_full_slot()
                 second = budget.acquire_full_slot()
                 try:
@@ -61,13 +138,15 @@ class GateBudgetTests(unittest.TestCase):
             budget.fcntl.flock(higher, budget.fcntl.LOCK_EX | budget.fcntl.LOCK_NB)
             legacy = '123 go test -race ./...\n'
             try:
-                with (patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else legacy),
+                with (patch.object(budget, 'process_start', return_value='owner start'),
+                      patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else legacy),
                       patch.object(budget.time, 'sleep', side_effect=RuntimeError('blocked'))):
                     with self.assertRaisesRegex(RuntimeError, 'blocked'):
                         budget.acquire_full_slot()
             finally:
                 higher.close()
-            with patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else legacy):
+            with (patch.object(budget, 'process_start', return_value='owner start'),
+                  patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else legacy)):
                 admitted = budget.acquire_full_slot()
                 budget.release_full_slot(admitted, True)
 
@@ -77,7 +156,8 @@ class GateBudgetTests(unittest.TestCase):
             processes = '123 go test -race -run .* mycelium/pkg\n'
             child = unittest.mock.Mock()
             child.wait.return_value = 0
-            with patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else processes):
+            with (patch.object(budget, 'process_start', return_value='owner start'),
+                  patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else processes)):
                 first = budget.acquire_full_slot()
                 peer = budget.acquire_full_slot()
                 try:

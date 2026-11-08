@@ -1045,7 +1045,7 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 	s.Needs.Memory = "auto"
 	s.SizeHint = SizeHint{} // An old declaration must not act as a submitter hint.
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != acceptedMemoryEscalation || next.MemoryEnvelope.HostGB != 32-minimumHostMemoryGB {
+	if next.MemoryEnvelope.Source != acceptedMemoryEscalation || next.MemoryEnvelope.HostGB != host+2*minimumHostMemoryGB {
 		t.Errorf("constrained explicit attempt left its old seed usable: %+v", next.MemoryEnvelope)
 	}
 	// Subsequent failed auto pressure still invalidates comparable evidence.
@@ -1056,8 +1056,9 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	third := startObservation(t, q, m, s)
-	// With no measured overshoot or growth, the prior remains a physical probe.
-	if third.MemoryEnvelope.Source != acceptedMemoryEscalation || third.MemoryEnvelope.HostGB != 32-minimumHostMemoryGB {
+	// Without measured growth, advance the censored demand by a kernel page;
+	// current free RAM cannot replace the invalidated demand estimate.
+	if third.MemoryEnvelope.Source != acceptedMemoryEscalation || third.MemoryEnvelope.HostGB != next.MemoryEnvelope.HostGB+minimumHostMemoryGB {
 		t.Errorf("auto pressure failed to clear the explicit seed: %+v", third.MemoryEnvelope)
 	}
 }

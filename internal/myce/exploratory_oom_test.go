@@ -14,6 +14,7 @@ func TestExploratoryOOMIncidentMakesProgress(t *testing.T) {
 	q, clock, m, s := coldProbeAdmissionFixture(t, true)
 	m.HostAvailableMemoryGB = 22.7
 	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+	m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
 	machineCheck(t, q, m)
 	q.s.HostLaunchMemory[hostID(&m)].RefusalGB = 22.7 - .16655705502260787
 	queued := submit(t, q, s)
@@ -39,7 +40,7 @@ func TestExploratoryOOMIncidentMakesProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	retry := assignedJob(machineCheck(t, q, m))
-	if retry == nil || retry.ID != first.ID || retry.MemoryEnvelope.HostGB < 2 {
+	if retry == nil || retry.ID != first.ID || retry.MemoryEnvelope.HostGB < peak+growth || adaptiveMemoryCeilingGB(retry, &m) < 2 {
 		t.Fatalf("fitting job starved after OOM: state=%s floor=%+v retry=%+v", job(t, q, first.ID).State, job(t, q, first.ID).MemoryOOMFloor, retry)
 	}
 	if err := q.Started(result(retry, false)); err != nil {
@@ -52,7 +53,7 @@ func TestExploratoryOOMIncidentMakesProgress(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	if got := job(t, q, first.ID); got.State != "succeeded" || len(got.MemoryAttempts) != 2 || !strings.Contains(got.MemoryAttempts[1].MemoryEnvelope.Source, "physical headroom") {
+	if got := job(t, q, first.ID); got.State != "succeeded" || len(got.MemoryAttempts) != 2 || !strings.Contains(got.MemoryAttempts[1].MemoryEnvelope.Source, "measured demand") {
 		t.Fatalf("missing success/applied-envelope explanation: %+v", got)
 	}
 }
@@ -186,8 +187,27 @@ func TestExploratoryOOMExtensionCheckWaitsForPhysicalOpportunity(t *testing.T) {
 		t.Fatal(err)
 	}
 	retry := assignedJob(machineCheck(t, q, m))
-	if retry == nil || retry.MemoryEnvelope.HostGB < 4 || retry.Spec.Needs.MemoryGB != run.Spec.Needs.MemoryGB {
+	if retry == nil || retry.MemoryEnvelope.HostGB <= peak || retry.Spec.Needs.MemoryGB != run.Spec.Needs.MemoryGB {
 		t.Fatalf("host OOM retry starved check or changed device: %+v", retry)
+	}
+	// A model can need more than one measured recovery increment. Execute
+	// bounded probes until the real 4 GiB load fits, without spending losses.
+	for retry.Spec.Needs.HostMemoryGB < 4 {
+		if err := q.Started(result(retry, false)); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second)
+		peak, growth := retry.Spec.Needs.HostMemoryGB, .5
+		r := result(retry, false)
+		r.OutOfMemory = true
+		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, GrowthGB: &growth, Events: &MemoryEventCounts{OOM: 1}}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		retry = assignedJob(machineCheck(t, q, m))
+		if retry == nil {
+			t.Fatal("measured recovery stopped before model fit")
+		}
 	}
 	if err := q.Started(result(retry, false)); err != nil {
 		t.Fatal(err)

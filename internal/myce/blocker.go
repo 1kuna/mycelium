@@ -56,9 +56,18 @@ func (q *Queue) inventoryFresh(m *Machine) bool {
 
 // Called only on detached observation copies. Sort by the shared closest-fit
 // ordering so targeted GET, aggregate status and resolve choose the same cause.
-func (q *Queue) actionableBlocker(j *Job) *Blocker {
+func (q *Queue) actionableBlocker(j *Job) (blocker *Blocker) {
 	if j.State != "queued" {
 		return nil
+	}
+	if q.startCapacityPaused(j) {
+		// Every blocker owns its diagnosis, including environment and stale
+		// inventory returns below. Keep the suspended budget visible with it.
+		defer func() {
+			if blocker != nil {
+				blocker.Evidence += "; " + pausedStartBudget(j)
+			}
+		}()
 	}
 	if !dependencyReady(j) {
 		copy := *j

@@ -306,7 +306,7 @@ func TestWorkerRootsDiscoveredCachesReachActorAndModelLaunch(t *testing.T) {
 	if err := localAttemptAdmission(actor, nil, next, nil); err != nil {
 		t.Fatal("stale actor rejected discovered input", err)
 	}
-	rt := &modelRuntime{models: map[string]*workerModel{}, worker: &engineWorker, session: m.Session, machine: m.ID, platform: "fake", cache: cache, environmentCache: envCache, config: ModelConfig{Wait: time.Second, Models: []Model{model}}, memoryMachine: m, memorySource: func(context.Context) (float64, error) { return 8, nil }, engineFactory: func(Model) Engine { return &FakeEngine{} }, authorize: func(HostLaunch) error { return nil }}
+	rt := &modelRuntime{models: map[string]*workerModel{}, worker: &engineWorker, session: m.Session, machine: m.ID, platform: "fake", cache: cache, environmentCache: envCache, config: ModelConfig{Wait: time.Second, Models: []Model{model}}, memoryMachine: m, memorySource: func(context.Context) (float64, error) { return 8, nil }, engineFactory: func(Model) Engine { return &FakeEngine{} }, authorize: func(context.Context, HostLaunch) error { return nil }}
 	rt.sync([]ModelSlot{{Model: model.Name, Session: m.Session, Attempt: "cache-after-mount-loss", State: "loading", EnvironmentRecipe: &recipe}})
 	rt.wg.Wait()
 	loaded := rt.models[model.Name]

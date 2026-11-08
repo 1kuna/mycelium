@@ -253,18 +253,19 @@ func (q *Queue) reconcilePreparationPlans(c Checkin) {
 	}
 }
 func (w Worker) authorizeLaunch(l HostLaunch) error {
+	return w.authorizeLaunchContext(w.launchContext(), l)
+}
+
+func (w Worker) authorizeLaunchContext(ctx context.Context, l HostLaunch) error {
+	w.launchCtx = ctx
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
-	// Queue contention must fit the normal control-request budget, independently
-	// of heartbeat cadence. A timeout still cannot authorize a payload (#225).
-	ctx, cancel := context.WithTimeout(context.Background(), workerStartRequestTimeout)
-	defer cancel()
 	var reply struct {
 		OK        bool   `json:"ok"`
 		StartGate string `json:"start_gate"`
 	}
-	if err := w.Client.Call(ctx, "POST", "/api/workers/launch", l, &reply); err != nil {
+	if _, err := w.controlHandshake("/api/workers/launch", l, &reply); err != nil {
 		return fmt.Errorf("%w: %w", errWorkerStartAuthorization, err)
 	}
 	if !reply.OK || reply.StartGate != startGateProtocol {
@@ -275,22 +276,33 @@ func (w Worker) authorizeLaunch(l HostLaunch) error {
 			return err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return w.checkAvailability()
 }
 
 type launchGateKey struct{}
 
-func withLaunchGate(ctx context.Context, gate func() error) context.Context {
+func withLaunchGate(ctx context.Context, gate func(context.Context) error) context.Context {
 	return context.WithValue(ctx, launchGateKey{}, gate)
 }
+
+// Wrappers capture the prior gate before installing their own, but pass the
+// invoking operation's context through it. A build/readiness child may stop
+// while its enclosing preparation still owns the same offer.
+func launchGateFrom(ctx context.Context) func(context.Context) error {
+	if gate, ok := ctx.Value(launchGateKey{}).(func(context.Context) error); ok {
+		return gate
+	}
+	return func(context.Context) error { return nil }
+}
+
 func checkLaunchGate(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if gate, ok := ctx.Value(launchGateKey{}).(func() error); ok {
-		return gate()
-	}
-	return nil
+	return launchGateFrom(ctx)(ctx)
 }
 
 func (q *Queue) cancelUnofferedPreparations(m *Machine, reply Reply) {

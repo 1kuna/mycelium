@@ -241,6 +241,8 @@ func runtimeErrorFor(operation string, err error) error {
 	var rejection *rejectionError
 	var response *HTTPError
 	switch {
+	case errors.Is(err, errWorkerControlUnreachable):
+		c.Class = "control_unreachable"
 	case (c.Operation == "start_authorization" || c.Operation == "start_handoff") && errors.As(err, &response) && response.Status == 409 && response.Code == "request_stale":
 		c.Class = "admission_changed"
 	case errors.As(err, &rejection) && rejection.code == cpuIsolationUnavailable:
@@ -319,6 +321,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	classes[diskLimitExceeded] = true
 	classes[rssLimitExceeded] = true
 	classes["input_unavailable"], classes["invalid_input"] = true, true
+	classes["control_unreachable"] = c.Operation == "start_authorization" || c.Operation == "start_handoff"
 	operations["start_authorization"] = true
 	operations["start_handoff"] = true
 	operations["input_staging"] = true
