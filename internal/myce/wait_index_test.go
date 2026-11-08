@@ -173,7 +173,8 @@ func TestWaitIndexScalarDeadlineMetadata(t *testing.T) {
 		Deadline: &deadline, StartBy: &startBy, ExpectedMinutes: 10,
 		Project: "private-project", Run: RunSpec{Command: []string{"private-command"}},
 	}}
-	index := &waitStateIndex{jobs: map[string]WaitState{}, changed: make(chan struct{})}
+	q, _ := fixture(t)
+	index := q.waitIndex()
 	index.set(j.ID, j)
 	rows, _, _, err := index.read(WaitRequest{IDs: []string{j.ID}})
 	if err != nil {
