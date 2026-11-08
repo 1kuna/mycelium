@@ -9,8 +9,8 @@ const learnedMemoryGuardCapability = "learned_cpu_memory_growth_v1"
 const learnedMemoryGuardEnforcement = "adaptive native CPU memory guard"
 
 // Learned and bounded exploratory CPU reservations are predictions, not authored
-// limits. A cold physical probe keeps its initial containment ceiling: its
-// ProbeFloorGB marks the measured-headroom execution contract from admission.
+// limits. Cold CPU probes use the same physical guard: residual admission
+// headroom is not a measured upper bound on an unknown command.
 // The kernel still contains the attempt within physical RAM and the operator's
 // explicit allowance. Member limits, Docker and declared thresholds are unchanged.
 func adaptiveMemoryCeilingGB(j *Job, m *Machine) float64 {
@@ -18,7 +18,7 @@ func adaptiveMemoryCeilingGB(j *Job, m *Machine) float64 {
 		return 0
 	}
 	e := j.MemoryEnvelope
-	if e.Basis != "learned" && (e.Basis != "exploratory" || e.ProbeFloorGB > 0) {
+	if e.Basis != "learned" && e.Basis != "exploratory" {
 		return 0
 	}
 	cap := m.HostMemoryBudgetGB

@@ -822,9 +822,13 @@ Use the usual pinned environments and native baselines. The standard
 `myce extension check` submits `needs.memory: auto` for this variant. A check
 is sized only from earlier accepted checks of the same variant and work, never
 from the workload's peaks, because it runs the small reference fixture. Without
-such a peak, its first run takes the bounded first-run figure, a quarter of the
-host allowance (its card still explores), under the existing
+such a peak, its first run reserves a measured physical host-memory opportunity
+(its card still explores), under the existing
 [memory envelope rules](design-proposal.md#amendment-job-memory-envelopes-146).
+From the next release, an unknown native accelerator check waits instead of
+using a tiny leftover ledger reservation as a hard limit. A host cgroup OOM
+retains the killed peak as a floor and re-probes headroom, without a fixed
+exploratory retry count; device-OOM handling is separate.
 Missing telemetry or headroom leaves it waiting; qualification still requires a
 successful check and matching baseline output.
 
