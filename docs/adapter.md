@@ -820,14 +820,21 @@ variants:
 
 Use the usual pinned environments and native baselines. The standard
 `myce extension check` submits `needs.memory: auto` for this variant. A check
-is sized only from earlier accepted checks of the same variant and work, never
-from the workload's peaks, because it runs the small reference fixture. Without
-such a peak, its first run reserves a measured physical host-memory opportunity
+uses earlier accepted checks of the same variant and work. From the next release,
+a new version also starts from its nearest prior version's accepted memory on
+the same platform and native identity. Checks include prior workload peaks when
+they launch the same main command or retained model helpers with matching assets
+and environments. Separate reference-only checks keep their own evidence.
+Measured peak variation and sampling growth supply headroom. Accepted evidence
+of the new version replaces the prior; it never grants qualification. Without
+usable evidence, the first run reserves a measured physical host-memory opportunity
 (its card still explores), under the existing
 [memory envelope rules](design-proposal.md#amendment-job-memory-envelopes-146).
 From the next release, an unknown native accelerator check waits instead of
 using a tiny leftover ledger reservation as a hard limit. A host cgroup OOM
-retains the killed peak as a floor and re-probes headroom, without a fixed
+retains the killed peak as a floor and grows from measured demand, sampling
+growth and ceiling overshoot. Available RAM constrains admission and never sets
+the recovery demand. Recovery has no fixed
 exploratory retry count; device-OOM handling is separate.
 Missing telemetry or headroom leaves it waiting; qualification still requires a
 successful check and matching baseline output.

@@ -1051,6 +1051,12 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 			charge = hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 			pending = charge
 		}
+		if slices.Contains(launching, jobKey(j)) {
+			// The exact attempt already owns this complete reservation. Its
+			// sampled helper growth cannot require more unallocated RAM than
+			// the envelope before main has executed. Neighbors keep forecasts.
+			pending = min(pending, charge)
+		}
 		ram += charge
 		growth += pending
 	}

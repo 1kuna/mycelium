@@ -84,6 +84,8 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 	// their fixed components, including the optional sizing floors.
 	parts := strings.Split(d.EnvelopeSource, "; ")
 	allowed := map[string]bool{
+		measuredOOMRecoverySource: true, priorVersionMemorySource: true,
+		"exploratory OOM recovery": true, "measured peak + growth": true, "physical headroom": true,
 		"declared": true, "submitter hint": true, "exploratory host": true,
 		"exploratory first run": true, "exploratory (previous peak constrained)": true,
 		"accepted peak × 1.25": true, "accepted peak + measured uncertainty": true, "cross-machine estimate": true,
