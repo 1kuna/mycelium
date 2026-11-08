@@ -314,3 +314,103 @@ func TestNASInputTornCompletionRecordRecovers(t *testing.T) {
 		})
 	}
 }
+
+func TestNASInputArchiveResetCannotDoubleCreditConcurrentAdmission(t *testing.T) {
+	_, clock := fixture(t)
+	nas, root := t.TempDir(), t.TempDir()
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: root, Limit: 1 << 20, Clock: clock}}
+	if err := cache.cache.init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := removeSharedEntry(root); err != nil {
+			t.Error(err)
+		}
+	})
+	input := sharedArchive(t, nas)
+	const expansion = 64 << 10
+	input.UnpackedBytes = expansion
+	stage := filepath.Join(root, identityHash("input-stage:"+input.key())+".partial")
+	if err := os.MkdirAll(filepath.Join(stage, "data"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(nas, input.NAS))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string][]byte{"archive": b, "resume": []byte(input.key()), "data/stale": []byte(strings.Repeat("x", expansion))} {
+		if err := os.WriteFile(filepath.Join(stage, name), body, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	populate, resume, reset, rebuild, populated, finish := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var entered atomic.Bool
+	cache.beforeStage = func(context.Context) { entered.Store(true); close(populate); <-resume }
+	cache.afterArchiveReset = func() {
+		// On the old path reset happened after population began, while a
+		// peer could already be between reservation and disk measurements.
+		if entered.Load() {
+			close(reset)
+			<-rebuild
+		}
+	}
+	cache.beforePublish = func() { close(populated); <-finish }
+	ownerDone := make(chan error, 1)
+	go func() {
+		_, release, err := cache.Acquire(context.Background(), input, nas)
+		if release != nil {
+			release()
+		}
+		ownerDone <- err
+	}()
+	select {
+	case <-populate:
+	case err := <-ownerDone:
+		t.Fatal("archive owner did not start population", err)
+	}
+	measured, measureDisk := make(chan struct{}), make(chan struct{})
+	peer := &SharedInputCache{cache: EnvironmentCache{Root: root, Limit: 1 << 20, Clock: clock},
+		beforeAdmissionMeasure: func() { close(measured); <-measureDisk },
+		diskProbe: func(string) (DiskReading, error) {
+			written, err := environmentSize(filepath.Join(stage, "data"))
+			if err != nil && !os.IsNotExist(err) {
+				return DiskReading{}, err
+			}
+			return DiskReading{TotalBytes: 1 << 30, FreeBytes: diskFreeFloor(1<<30) + uint64(expansion-written)}, nil
+		},
+	}
+	peerDone := make(chan error, 1)
+	go func() {
+		gate, err := peer.cache.lock(context.Background(), "admission", syscall.LOCK_EX)
+		if err == nil {
+			err = peer.admit(context.Background(), identityHash("competing-input"), expansion/2)
+			unlockEnvironment(gate)
+		}
+		peerDone <- err
+	}()
+	select { // Peer freezes remaining-byte reservations before reading disk.
+	case <-measured:
+	case err := <-peerDone:
+		close(resume)
+		close(rebuild)
+		close(finish)
+		<-ownerDone
+		t.Fatal("peer did not measure admission", err)
+	}
+	close(resume)
+	select {
+	case <-reset: // Old code freed the counted tree while peer owns admission.
+	case <-populated: // Fixed code had reset before publishing its reservation.
+	}
+	close(measureDisk)
+	peerErr := <-peerDone
+	close(rebuild)
+	close(finish)
+	if err := <-ownerDone; err != nil {
+		t.Fatal("archive owner failed", err)
+	}
+	var refusal *stagingCapacityError
+	if !errors.As(peerErr, &refusal) {
+		t.Fatalf("admitted bytes still needed by archive rebuild: %v", peerErr)
+	}
+}

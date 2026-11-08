@@ -23,23 +23,25 @@ import (
 // Reuse the environment cache's OS locking and state-root initialization. Data
 // entries have their own integrity records and no environment/catalog lifecycle.
 type SharedInputCache struct {
-	cache            EnvironmentCache
-	automatic        bool
-	readNAS          func(*os.File, []byte) (int, error)
-	diskProbe        func(string) (DiskReading, error)
-	Client           Client
-	mu               sync.Mutex
-	verified         map[string]string
-	staging          map[*sharedInputStaging]struct{}
-	beforeStage      func(context.Context)
-	resolveNAS       func(root, relative string) (string, error)
-	beforePublish    func()
-	beforeVerify     func() // Test hook: a full re-hash of a cached entry starts.
-	afterStageCancel func() // Test hook: withdrawal cancellation has reached its writer.
-	hits             uint64
-	misses           uint64
-	nasBytes         uint64
-	capacity         *SharedInputCapacity
+	cache                  EnvironmentCache
+	automatic              bool
+	readNAS                func(*os.File, []byte) (int, error)
+	diskProbe              func(string) (DiskReading, error)
+	Client                 Client
+	mu                     sync.Mutex
+	verified               map[string]string
+	staging                map[*sharedInputStaging]struct{}
+	beforeStage            func(context.Context)
+	resolveNAS             func(root, relative string) (string, error)
+	beforePublish          func()
+	beforeVerify           func() // Test hook: a full re-hash of a cached entry starts.
+	beforeAdmissionMeasure func() // Test hook: reservations counted, before disk measurement.
+	afterArchiveReset      func() // Test hook: interrupted extraction removed.
+	afterStageCancel       func() // Test hook: withdrawal cancellation has reached its writer.
+	hits                   uint64
+	misses                 uint64
+	nasBytes               uint64
+	capacity               *SharedInputCapacity
 }
 
 // sharedVerifiedRecord holds the metadata signature (size, mode, mtime, inode
@@ -279,6 +281,15 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		if e == nil {
 			e = removeSharedEntry(root + ".partial")
 		}
+		if e == nil && !complete && s.Archive != "" {
+			// Rebuilding an extracted tree shrinks staged bytes. Serialize that
+			// reset with all accounting, then reserve its full expansion again.
+			// Once admission is unlocked, this stage must only grow.
+			e = removeSharedEntry(filepath.Join(stage, "data"))
+			if e == nil && c.afterArchiveReset != nil {
+				c.afterArchiveReset()
+			}
+		}
 		if e == nil {
 			// Retained local prefixes already occupy cache/free bytes. Reserve
 			// only the remainder for this stage, without double charging it.
@@ -507,11 +518,8 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 		}
 		if s.Archive != "" {
 			traceSharedInput(ctx, "extract", "cache")
-			// Extraction has no resumable format: reuse the verified local archive
-			// and rebuild only its unpublished local expanded tree.
-			if err = removeSharedEntry(dst); err != nil {
-				return err
-			}
+			// Admission already reset any interrupted extraction under its lock.
+			// Reuse the verified local archive and only grow the reserved tree.
 			if err = unpackSharedArchive(ctx, target, dst, s.Archive, s.UnpackedBytes); err != nil {
 				return err
 			}
@@ -796,6 +804,9 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 	sort.Slice(victims, func(i, j int) bool { return victims[i].used < victims[j].used })
 	var cacheAvailable, diskAvailable, limit int64
 	enough := func() (bool, error) {
+		if c.beforeAdmissionMeasure != nil {
+			c.beforeAdmissionMeasure()
+		}
 		used, e := c.cache.DiskUsage()
 		if e != nil {
 			return false, e
