@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -383,5 +384,58 @@ func TestReadSnapshotKeyedReferencesStayWithinGeneration(t *testing.T) {
 	old, _, err := before.inputs(context.Background())
 	if err != nil || old.Submissions[key].Job.Reason != originalReason {
 		t.Fatal("later commit mutated an earlier keyed answer", err)
+	}
+}
+
+func TestReadSnapshotKeyedCompletionClearsLiveReference(t *testing.T) {
+	q, _ := fixture(t)
+	s := spec("experiment")
+	s.SubmissionKey = "released-reference"
+	j := submit(t, q, s)
+	queued := submit(t, q, spec("experiment"))
+	key := "submissions/" + submissionDigest(s.Project, s.SubmissionKey)
+	if err := q.update(func() error {
+		job := q.touchJob(j.ID)
+		job.State, job.Attempt, job.ReleaseConfirmed = "succeeded", 1, false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := q.readGeneration
+	pending := readGet(before.root, key)
+	if pending == nil || !pending.mutable {
+		t.Fatal("completion dropped pending attempt custody")
+	}
+	if err := q.update(func() error {
+		q.touchJob(j.ID).ReleaseConfirmed = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after := q.readGeneration
+	released := readGet(after.root, key)
+	if released == nil || released.mutable || !bytes.Equal(pending.data, released.data) {
+		t.Fatal("unchanged reference retained live traversal after release")
+	}
+	for _, sample := range []struct {
+		generation *readGeneration
+		want       bool
+	}{{before, true}, {after, false}} {
+		visited := false
+		readWalk(sample.generation.root, true, func(name string, _ *readRecord) {
+			if name == key {
+				visited = true
+			}
+		})
+		if visited != sample.want {
+			t.Fatal("reference liveness changed in the wrong generation", visited, sample.want)
+		}
+		live, _, err := sample.generation.jobInputs(context.Background(), queued.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (live.Submissions[submissionDigest(s.Project, s.SubmissionKey)] != nil) != sample.want {
+			t.Fatal("queued read retained released keyed history")
+		}
 	}
 }

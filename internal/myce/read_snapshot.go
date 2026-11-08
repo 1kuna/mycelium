@@ -274,20 +274,25 @@ func (r *readRecord) decode(key string) (any, error) {
 // discards a reader's lazy decoded records. No SQLite access is used by reads.
 func (q *Queue) publishReadRecords(next map[string][]byte) {
 	for key, data := range next {
+		mutable := false
+		if len(data) > 0 {
+			if id, ok := strings.CutPrefix(key, "jobs/"); ok {
+				mutable = mutableJob(q.s.Jobs[id])
+			}
+			if id, ok := strings.CutPrefix(key, "submissions/"); ok {
+				r := q.s.Submissions[id]
+				mutable = r != nil && r.Job != nil && mutableJob(r.Job)
+			}
+		}
 		old := readGet(q.readRoot, key)
-		if old != nil && bytes.Equal(old.data, data) {
+		// Reference bytes need not change when their job's custody clears.
+		// Liveness belongs to this generation, just like its committed bytes.
+		if old != nil && old.mutable == mutable && bytes.Equal(old.data, data) {
 			continue
 		}
 		var record *readRecord
 		if len(data) > 0 {
-			record = &readRecord{data: data}
-			if id, ok := strings.CutPrefix(key, "jobs/"); ok {
-				record.mutable = mutableJob(q.s.Jobs[id])
-			}
-			if id, ok := strings.CutPrefix(key, "submissions/"); ok {
-				r := q.s.Submissions[id]
-				record.mutable = r != nil && r.Job != nil && mutableJob(r.Job)
-			}
+			record = &readRecord{data: data, mutable: mutable}
 		}
 		q.readRoot = readPut(q.readRoot, key, record)
 	}
