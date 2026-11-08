@@ -679,6 +679,10 @@ func cgroupResidentGB(fs memoryFS, path string) (float64, bool) {
 
 // The bool reports another process on the attempt's CUDA device.
 func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS, known ...map[int]bool) (float64, bool, error) {
+	return w.attemptDeviceMemoryReading(ctx, ids, fs, nil, known...)
+}
+
+func (w Worker) attemptDeviceMemoryReading(ctx context.Context, ids map[int]bool, fs memoryFS, resident *float64, known ...map[int]bool) (float64, bool, error) {
 	if len(w.selectedDevices) > 1 {
 		return 0, false, errAttemptMemoryUnsupported // One card's sample cannot describe a multi-card attempt.
 	}
@@ -705,7 +709,7 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 			// Driver startup and query timeouts do not establish lack of support.
 			return 0, false, errAttemptMemoryPending
 		}
-		return cudaAttemptMemory(b, selector, ids, known...)
+		return cudaAttemptMemoryReading(b, selector, ids, resident, known...)
 	}
 	if w.Machine.GPU == "xpu" && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" {
 		clients := map[string]float64{}
@@ -743,11 +747,15 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 // N/A rows for the attempt's own processes mean "listed, not reported" (some
 // unified-memory drivers); a partial sum would undercount, so none is used.
 func cudaAttemptMemory(b []byte, selector string, ids map[int]bool, known ...map[int]bool) (float64, bool, error) {
+	return cudaAttemptMemoryReading(b, selector, ids, nil, known...)
+}
+
+func cudaAttemptMemoryReading(b []byte, selector string, ids map[int]bool, resident *float64, known ...map[int]bool) (float64, bool, error) {
 	rows, err := csv.NewReader(strings.NewReader(string(b))).ReadAll()
 	if err != nil {
 		return 0, false, errAttemptMemoryUnsupported
 	}
-	total, found, unreported, foreign := 0.0, false, false, false
+	total, largest, found, unreported, foreign := 0.0, 0.0, false, false, false
 	for _, row := range rows {
 		if len(row) != 3 {
 			return 0, false, errAttemptMemoryUnsupported
@@ -774,7 +782,14 @@ func cudaAttemptMemory(b []byte, selector string, ids map[int]bool, known ...map
 			return 0, false, errAttemptMemoryUnsupported
 		}
 		total += mib / 1024
+		largest = max(largest, mib/1024)
 		found = true
+	}
+	if resident != nil && found && !unreported {
+		// A sum can count one CUDA allocation in several processes. A single
+		// process's counter is a lower bound on their physical union. Keep this
+		// worker-local: neither RSS/fallback estimates nor remote reports grant it.
+		*resident = largest
 	}
 	switch {
 	case unreported:
@@ -881,6 +896,7 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 		gb := device.gb
 		sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB
 		sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB = device.source, device.exclusive, device.rateGB
+		sample.deviceResidentGB = device.residentGB
 	}
 	return sample
 }
@@ -927,7 +943,8 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 				if len(ids) == 0 {
 					continue
 				}
-				gb, foreign, err := w.attemptDeviceMemory(ctx, ids, fs, known)
+				resident := 0.0
+				gb, foreign, err := w.attemptDeviceMemoryReading(ctx, ids, fs, &resident, known)
 				// Known co-tenants also make a whole-host delta ambiguous.
 				shared = shared || foreign || len(known) > 0
 				source, exclusive := "", false
@@ -955,7 +972,7 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 				margin := growth.observe(clock.Now(), gb)
 				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb, DeviceGrowthGB: &margin, DeviceSource: source})
 				if a != nil {
-					a.device.Store(&hostMemorySample{gb: gb, at: clock.Now(), growthGB: margin, source: source, exclusive: exclusive, rateGB: growth.rate})
+					a.device.Store(&hostMemorySample{gb: gb, residentGB: resident, at: clock.Now(), growthGB: margin, source: source, exclusive: exclusive, rateGB: growth.rate})
 				}
 			}
 		}
