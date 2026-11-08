@@ -459,13 +459,11 @@ func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("first call did not start")
 	}
-	if e := q.update(func() error {
-		clock.Advance(LossAfter)
-		q.s.Machines[other.ID].LastSeen = clock.Now()
-		q.maintain()
-		return nil
-	}); e != nil {
-		t.Fatal(e)
+	// Advance between transactions while the survivor keeps checking in. A
+	// jump while holding q.mu represents blocked service, not worker silence.
+	for elapsed := time.Duration(0); elapsed < LossAfter; elapsed += time.Second {
+		clock.Advance(time.Second)
+		check(t, q, other, nil)
 	}
 	select {
 	case data := <-result:

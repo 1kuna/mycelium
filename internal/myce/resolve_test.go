@@ -120,7 +120,15 @@ func TestResolveLockedCPUJobWithStagedInputOnTwoRoots(t *testing.T) {
 		if err := client.Call(context.Background(), "POST", "/api/resolve", ResolveRequest{Spec: s}, &r); err != nil {
 			t.Fatal(err)
 		}
-		return len(r.Targets) == 2 && len(r.FileInputs) == 2 && r.FileInputs[0].State == "needs-staging" && r.FileInputs[1].State == "needs-staging"
+		if len(r.Targets) != 2 || len(r.FileInputs) != 2 || r.FileInputs[0].State != "needs-staging" || r.FileInputs[1].State != "needs-staging" {
+			return false
+		}
+		for _, target := range r.Targets {
+			if !target.Eligible {
+				return false
+			}
+		}
+		return true
 	})
 	for _, target := range r.Targets {
 		if !target.Eligible || !strings.Contains(target.Reason, "environment prepared") || target.Target.Platform != "cpu" {
