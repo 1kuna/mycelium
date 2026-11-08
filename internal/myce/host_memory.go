@@ -413,6 +413,7 @@ type CurrentHostMemory struct {
 	DeviceAgeSeconds float64  `json:"device_age_seconds,omitempty"`
 	deviceSampledAt  time.Time
 	deviceSample     *atomic.Pointer[hostMemorySample]
+	deviceResidentGB float64 // Local direct CUDA single-process lower bound; never sent on the wire.
 }
 
 // Refresh device telemetry independently of the actor snapshot. Log/result I/O
@@ -428,6 +429,7 @@ func (s *CurrentHostMemory) aged(now time.Time) *CurrentHostMemory {
 			gb := device.gb
 			sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB
 			sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB = device.source, device.exclusive, device.rateGB
+			sample.deviceResidentGB = device.residentGB
 		}
 	}
 	sample.AgeSeconds = now.Sub(sample.sampledAt).Seconds()
@@ -451,16 +453,29 @@ type hostMemorySample struct {
 	source                   string
 	exclusive                bool
 	gb, deviceGB             float64
+	residentGB               float64
 	growthGB, deviceGrowthGB float64
 	rateGB, deviceRateGB     float64
 	at, deviceAt             time.Time
 }
 
+func (s hostMemorySample) hostGrowth(now time.Time) (float64, bool) {
+	if s.at.IsZero() || now.Before(s.at) || now.Sub(s.at) >= hostMemorySampleFreshFor || !validMemoryValue(s.gb) {
+		return 0, false
+	}
+	growth := s.growthGB + s.rateGB*now.Sub(s.at).Seconds()
+	return growth, validMemoryValue(growth)
+}
+
 func remainingHostGrowth(reservation float64, sample hostMemorySample, now time.Time) float64 {
-	if sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= hostMemorySampleFreshFor || !validMemoryValue(sample.gb) {
+	forecast, fresh := sample.hostGrowth(now)
+	if !fresh {
 		return reservation
 	}
-	return max(0, reservation-sample.gb+sample.growthGB)
+	// The envelope and the live forecast protect the same future bytes. Raw
+	// availability already excludes resident anon: spend that credit once,
+	// then protect whichever remaining bound is larger, including sample age.
+	return max(0, reservation-sample.gb, forecast)
 }
 
 func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemptKey]hostMemorySample {
@@ -486,6 +501,7 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 			s.deviceGB, s.deviceAt = *d, now.Add(-time.Duration(sample.DeviceAgeSeconds*float64(time.Second)))
 			s.deviceGrowthGB = sample.DeviceGrowthGB
 			s.source, s.exclusive, s.deviceRateGB = sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB
+			s.residentGB = sample.deviceResidentGB
 		}
 		if !s.at.IsZero() || !s.deviceAt.IsZero() {
 			samples[attemptKey{r.ID, r.Attempt, r.Session}] = s
@@ -508,6 +524,11 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 		// Unknown/stale telemetry retains the physical/explicit execution
 		// ceiling, including while stopping. It cannot release a grown charge.
 		charge = adaptiveCeiling
+	}
+	if forecast, fresh := sample.hostGrowth(now); fresh {
+		// An envelope is not proof that current occupancy or observed growth
+		// stayed below it. The static allowance must cover that larger bound too.
+		charge = max(charge, sample.gb+forecast)
 	}
 	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, charge, sample, now)
 	e := j.MemoryEnvelope

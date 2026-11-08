@@ -1211,7 +1211,7 @@ func (q *Queue) maintain() {
 	scan := q.placementScan()
 	scan.memory = q.memoryPlanning
 	for _, j := range q.liveJobs() {
-		if q.startupPending(j) {
+		if q.startupPending(j) || q.startCapacityPaused(j) {
 			j.Reason = q.startStatusReason(j, scan)
 		}
 	}
@@ -2352,7 +2352,7 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 			j.Reason = "NAS checkpoint root is unreachable"
 		}
 	}
-	if q.startupPending(j) {
+	if q.startupPending(j) || q.startCapacityPaused(j) {
 		j.Reason = q.startStatusReason(j)
 	}
 	if j.State == "running" && j.ReleaseConfirmed {
@@ -2831,7 +2831,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		j.ModelEnvironmentKey = recipe.Key
 		j.ModelEnvironmentNeedsSource = recipe.Binary != "" || recipe.BinaryRelative != ""
 	}
-	if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !callerStartDeadline(j) && j.Spec.StartBy != nil {
+	if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !absoluteStartBy(j) && j.Spec.StartBy != nil {
 		deadline := q.clock.Now().Add(j.StartWindow)
 		j.Spec.StartBy = &deadline
 	}
