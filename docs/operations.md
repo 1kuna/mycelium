@@ -3950,6 +3950,16 @@ without exposing values. Establish job terminal states with the installed CLI,
 not the queue database. A stale phase is the last boundary reached; an unavailable
 live frame remains unknown.
 
+From the release containing #919’s recurrence fix, next-read spacing uses measured
+observation service cost and the current Retry-After signal, with failure jitter
+spread over one measured service period. Unchanged long-poll history is used only
+to select the protocol hold; it cannot amplify the next-read timer. This trades
+unbounded read suppression for continued observation at the measured service
+rate; the queue can still shed reads with its explicit pressure signal.
+Terminal-detail requests survive those pressure passes and resume before another
+batch read, so learning a terminal state cannot repeatedly consume the credit
+needed to retrieve its result reference.
+
 A legacy owner has neither upgrade support nor diagnostics. Recovery of a shared
 owner requires the owner's authorization and consideration of the wake volume:
 
