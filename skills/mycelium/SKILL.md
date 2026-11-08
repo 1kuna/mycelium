@@ -43,15 +43,21 @@ Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
-After upgrading both queue and worker, learned and bounded exploratory native
+After upgrading both queue and worker, learned and exploratory native
 CPU `memory: auto` jobs can grow their charge from fresh measurements while the host has room. OS
 pressure, exhausted measured headroom, the configured host allowance and
 explicit limits still stop growth. Linux retains a physical/allowance kernel
 ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
 shared-page credit. Missing/stale telemetry protects the execution ceiling.
 `memory_envelope.enforcement` names the acknowledged behavior; older queues or
-workers retain the previous estimate-sized ceiling. Cold physical probes keep
-their initial execution ceilings. Declared numeric limits,
+workers retain the previous estimate-sized ceiling. From the next release, cold
+CPU probes also use the adaptive guard, so a small residual admission envelope
+is not their execution limit. Native CPU auto-memory OOMs and native accelerator-check host cgroup OOMs
+retain killed-peak floors and retry against usable physical headroom;
+exploratory under-sizing does not spend a fixed attempt budget.
+Growth/overshoot stays replaceable uncertainty, rather than a permanent floor.
+If the measured lower bound exceeds every eligible capacity, the job reports
+a capacity refusal. Inspect each attempt's envelope and learning reason. Declared numeric limits,
 explicit member caps and Docker behavior are unchanged.
 From the next release, `host_capacity_accumulation` means new CPU work is waiting
 so ready CPU or accelerator work can acquire host RAM/cores as running CPU
@@ -95,12 +101,15 @@ YAML
 The tiny declared memory bounds this fixture; real work can omit memory to learn
 it. From the next release, cold auto-memory work reserves measured physical
 headroom on one host.
-Cold ceilings leave the host's measured check-in/launch drift unused; strict
-worker launch checks still refuse a larger unseen drop and teach the next probe.
+Native CPU probes and extension checks leave this job's measured launch-error
+reserve unused; unrelated inventory drops and other jobs' old refusals do not
+shrink their envelopes. Strict worker checks refuse unseen drops and teach
+the same job's next offer. Unknown accelerator checks wait for a physical
+opportunity rather than starting with a tiny leftover ledger reservation.
 A running CPU probe can share after fresh complete cgroup
 measurements establish its live footprint and growth over a sampling horizon,
 extended by the measured growth rate through the sample's age;
-its containment ceiling stays fixed. Missing/stale measurements retain the full
+supporting native guards use physical/allowance containment. Missing/stale measurements retain the full
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.

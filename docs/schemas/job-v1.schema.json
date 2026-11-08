@@ -2770,6 +2770,9 @@
     },
     "JobMemoryEnvelope": {
       "properties": {
+        "available_host_gb": {
+          "type": "number"
+        },
         "basis": {
           "type": "string"
         },
@@ -2786,6 +2789,9 @@
           "type": "integer"
         },
         "host_gb": {
+          "type": "number"
+        },
+        "launch_drift_gb": {
           "type": "number"
         },
         "learned": {

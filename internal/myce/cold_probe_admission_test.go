@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -58,11 +59,28 @@ func TestColdProbeAdmissionUsesMeasuredHeadroomDrift(t *testing.T) {
 			if probe == nil || probe.ID != queued.ID {
 				t.Fatal("cold probe not assigned", job(t, q, queued.ID).Reason)
 			}
+			// Inventory declines alone do not establish this command's
+			// launch error. Observe one exact refused offer, then retry.
+			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 19.4525, nil }}
+			launchErr := localAttemptAdmission(w, nil, *probe, nil)
+			if !errors.Is(launchErr, errWorkerMemory) {
+				t.Fatal("missing initial drift refusal", launchErr)
+			}
+			refused := result(probe, false)
+			refused.Interrupted = true
+			refused.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit", Predicate: "memory_capacity", PrelaunchRefused: true, Admission: admissionDetail(launchErr, *probe)}
+			if err := q.Complete(refused); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			probe = assignedJob(machineCheck(t, q, m))
+			if probe == nil {
+				t.Fatal("no launch-error retry")
+			}
 			ceiling := probe.MemoryEnvelope.HostGB
 			if ceiling <= 11.9 || ceiling >= 19.4525 || q.hostJobCharge(q.s.Jobs[probe.ID]) != ceiling {
 				t.Fatalf("cold ceiling/charge did not retain measured headroom: %g", ceiling)
 			}
-			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 19.4525, nil }}
 			if err := localAttemptAdmission(w, nil, *probe, nil); err != nil {
 				t.Fatal("drained host refused fitting cold probe", err)
 			}
@@ -71,7 +89,7 @@ func TestColdProbeAdmissionUsesMeasuredHeadroomDrift(t *testing.T) {
 			}
 			a := &attemptSupervisor{job: *probe}
 			rt := modelRuntime{clock: clock, machine: m.ID, memoryMachine: m, batchJobs: []Job{*probe}, batchSupervisors: map[attemptKey]*attemptSupervisor{jobKey(*probe): a}, hostMemorySource: w.HostMemorySource}
-			if err := rt.checkBatchLaunchMemory(context.Background(), HostLaunch{Machine: m.ID, Session: probe.Session, Key: probe.ID, Attempt: "1"}); err != nil {
+			if err := rt.checkBatchLaunchMemory(context.Background(), HostLaunch{Machine: m.ID, Session: probe.Session, Key: probe.ID, Attempt: strconv.Itoa(probe.Attempt)}); err != nil {
 				t.Fatal("final launch gate refused cold probe", err)
 			}
 			bytes, err := w.ceilingBytes(probe.Spec.Needs.MemoryGB, probe.Spec.Needs.HostMemoryGB)
@@ -202,7 +220,7 @@ func TestColdProbeAdmissionRefusalRetainsReserveAtHistoryRollover(t *testing.T) 
 	submit(t, q, s)
 	q.clock = coldProbeAdvancingClock{clock}
 	probe := assignedJob(machineCheck(t, q, m))
-	if probe == nil || math.Abs(probe.MemoryEnvelope.HostGB-(m.HostAvailableMemoryGB-.5-minimumHostMemoryGB)) > 1e-9 {
+	if probe == nil || math.Abs(probe.MemoryEnvelope.HostGB-(m.HostAvailableMemoryGB-minimumHostMemoryGB)) > 1e-9 {
 		t.Fatal("cold offer did not reserve the observed drop", probe)
 	}
 	free := probe.MemoryEnvelope.HostGB - .1
@@ -217,8 +235,8 @@ func TestColdProbeAdmissionRefusalRetainsReserveAtHistoryRollover(t *testing.T) 
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	margin := q.coldProbeDriftMarginGB(&m)
-	if margin < .6 || margin > .6+3*minimumHostMemoryGB {
+	margin := q.jobProbeDriftMarginGB(q.s.Jobs[probe.ID], &m)
+	if margin < .1 || margin > .1+3*minimumHostMemoryGB {
 		t.Fatal("refusal forgot the reserve used for admission", margin)
 	}
 	probe = assignedJob(machineCheck(t, q, m))
