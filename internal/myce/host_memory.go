@@ -509,7 +509,7 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 		// Native helpers acquire physical custody before main Starts. Their
 		// exact-attempt memory is occupancy evidence, never main-start evidence.
 		if sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
-			samples[key] = hostMemorySample{id: old.id, at: old.at, receivedAt: old.receivedAt, period: old.period, peakGB: old.peakGB, retainedGB: max(old.retainedGB, old.hostForecast(now))}
+			samples[key] = hostMemorySample{id: old.id, at: old.at, receivedAt: old.receivedAt, period: old.period, peakGB: old.peakGB, retainedGB: old.retainedGB}
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) {
@@ -551,11 +551,20 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 				// expiry and credit, while still retaining larger usage below.
 				s.at, s.receivedAt, s.id = old.at, old.receivedAt, old.id
 				s.gb = min(s.gb, old.gb)
+				// A cached/unknown observation cannot replace the slope while
+				// borrowing an earlier observation's identity and validity.
+				s.growthGB, s.rateGB = old.growthGB, old.rateGB
+				s.growthObserved = old.growthObserved
 			}
 		}
-		// Retain forecasts before replacing even a missing, flat or aged sample.
-		// This is reservation evidence, never resident credit.
-		s.retainedGB = max(old.retainedGB, old.hostForecast(now), s.hostForecast(now))
+		// Only fresh identified observations can revise a prediction. Keep an
+		// accepted prediction through missing/stale data, but let a distinct
+		// observation replace it; measured peaks are retained independently.
+		forecast, fresh := s.identifiedHostForecast(now)
+		s.retainedGB = max(old.retainedGB, forecast)
+		if fresh && (old.id == 0 || s.id > old.id) {
+			s.retainedGB = forecast
+		}
 		if !s.at.IsZero() || !s.deviceAt.IsZero() || s.retainedGB > 0 {
 			samples[key] = s
 		}
@@ -588,10 +597,7 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 		charge = max(charge, adaptiveCeiling)
 	}
 	if bounded {
-		// A forecast cannot allocate beyond containment; actual observations and
-		// already-grown reservations remain floors even if policy shrinks.
-		forecast := max(sample.retainedGB, sample.hostForecast(now)) + exploratoryDriftMarginGB(m)
-		charge = max(charge, retainedHostCharge(j), sample.peakGB, sample.gb, sample.footprintGB, min(adaptiveCeiling, forecast))
+		charge = boundedHostMemoryCharge(j, m, ceiling, adaptiveCeiling, sample, now)
 	}
 	if !bounded && !sample.at.IsZero() && !now.Before(sample.at) && now.Sub(sample.at) < sample.freshFor() {
 		charge = max(charge, sample.hostForecast(now))
@@ -630,12 +636,41 @@ func (s hostMemorySample) hostForecast(now time.Time) float64 {
 	return max(s.gb, s.footprintGB) + s.growthGB + s.rateGB*now.Sub(s.at).Seconds()
 }
 
-// Durable, exact-attempt high water survives queue restart without preserving
-// resident credit. A retry or another session cannot inherit it.
+func (s hostMemorySample) identifiedHostForecast(now time.Time) (float64, bool) {
+	if s.id <= 0 || !s.growthObserved {
+		return 0, false
+	}
+	if _, fresh := s.hostGrowth(now); !fresh {
+		return 0, false
+	}
+	return s.hostForecast(now), true
+}
+
+func boundedHostMemoryCharge(j *Job, m *Machine, ceiling, containment float64, sample hostMemorySample, now time.Time) float64 {
+	retained := retainedHostCharge(j)
+	forecast, fresh := sample.identifiedHostForecast(now)
+	observed := max(sample.peakGB, sample.gb, sample.footprintGB)
+	if c := j.HostMemoryCharge; retained > 0 && c != nil && c.ObservedGB != nil {
+		observed = max(observed, *c.ObservedGB)
+		if fresh && sample.id > c.SampleID {
+			// A genuinely newer observation replaces forecast uncertainty. The
+			// durable observed peak cannot be released, even across restart.
+			retained = *c.ObservedGB
+		}
+	}
+	drift := exploratoryDriftMarginGB(m)
+	return max(ceiling, retained, observed+drift, min(containment, max(sample.retainedGB, forecast)+drift))
+}
+
+// Durable exact-attempt demand and replaceable forecast survive restart without
+// preserving resident credit. Nil ObservedGB means a pre-provenance opaque floor:
+// it cannot safely be attributed to forecast, so it remains conservative.
 type AttemptHostMemoryCharge struct {
 	Execution
-	Session string  `json:"session"`
-	GiB     float64 `json:"gib"`
+	Session    string   `json:"session"`
+	GiB        float64  `json:"gib"`
+	ObservedGB *float64 `json:"observed_gb,omitempty"`
+	SampleID   int64    `json:"sample_id,omitempty"`
 }
 
 func retainedHostCharge(j *Job) float64 {
@@ -651,10 +686,23 @@ func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || adaptiveMemoryCeilingGB(j, m) <= 0 || j.MemoryEnvelope.ProbeFloorGB > 0 {
 			continue
 		}
-		charge, _ := jobHostMemoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[machine][jobKey(*j)], now)
-		if charge > retainedHostCharge(j) {
+		sample := q.hostMemorySamples[machine][jobKey(*j)]
+		charge, _ := jobHostMemoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), sample, now)
+		observed, id := 0.0, int64(0)
+		if old := j.HostMemoryCharge; retainedHostCharge(j) > 0 && old != nil {
+			observed, id = old.GiB, old.SampleID
+			if old.ObservedGB != nil {
+				observed = *old.ObservedGB
+			}
+		}
+		observed = max(observed, sample.peakGB, sample.gb, sample.footprintGB)
+		if _, fresh := sample.identifiedHostForecast(now); fresh {
+			id = max(id, sample.id)
+		}
+		old := j.HostMemoryCharge
+		if charge != retainedHostCharge(j) || old == nil || old.ObservedGB == nil || observed != *old.ObservedGB || id != old.SampleID {
 			j = q.touchJob(j.ID)
-			j.HostMemoryCharge = &AttemptHostMemoryCharge{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, GiB: charge}
+			j.HostMemoryCharge = &AttemptHostMemoryCharge{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, GiB: charge, ObservedGB: &observed, SampleID: id}
 		}
 	}
 }
