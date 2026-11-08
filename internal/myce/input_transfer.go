@@ -16,6 +16,19 @@ var errInputTransferUnreachable = errors.New("input storage unreachable")
 
 type inputTransferRecoveryKey struct{}
 
+func preferTransferError(current, next string) string {
+	// Actor maps have no iteration order. A pending read must never replace
+	// another attempt's real refusal; choose real errors deterministically.
+	switch {
+	case next == "" || next == inputTransferRecoveringReason && current != "":
+		return current
+	case current == "" || current == inputTransferRecoveringReason || next < current:
+		return next
+	default:
+		return current
+	}
+}
+
 // A completed idle expiry says to resume the immutable read, not that an
 // execution was lost. Retain the partial and the preparation owner's context;
 // neither an API timeout nor an observation retry creates a new owner here.

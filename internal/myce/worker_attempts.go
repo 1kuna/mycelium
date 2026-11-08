@@ -1036,9 +1036,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			reports = append(reports, report)
 			diagnostics.CheckpointUnavailable = diagnostics.CheckpointUnavailable || status.CheckpointUnavailable
-			if status.FileTransferError != "" {
-				diagnostics.FileTransferError = status.FileTransferError
-			}
+			diagnostics.FileTransferError = preferTransferError(diagnostics.FileTransferError, status.FileTransferError)
 			if status.DockerCleanup != "" && (diagnostics.DockerCleanup == "" || status.DockerCleanup < diagnostics.DockerCleanup) {
 				diagnostics.DockerCleanup, diagnostics.DockerCause = status.DockerCleanup, status.DockerCause
 			}

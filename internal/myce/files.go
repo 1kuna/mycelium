@@ -765,6 +765,13 @@ func (c *fileTransferConn) Write(p []byte) (int, error) {
 }
 
 func fileTransferTimeout(err error, idle time.Duration) error {
+	// Dial completion is definitive reachability evidence, not an idle body
+	// expiry. Preserve its identity through every transport wrapper so the
+	// preparation owner can end a real outage rather than resume forever.
+	var dial *net.OpError
+	if errors.As(err, &dial) && dial.Op == "dial" {
+		return err
+	}
 	var timeout net.Error
 	if errors.As(err, &timeout) && timeout.Timeout() {
 		return fmt.Errorf("%w: no network progress for %s", errFileTransferStalled, idle)

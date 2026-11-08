@@ -211,6 +211,47 @@ func TestInputTransferRealOutageReturnsWithoutRecovery(t *testing.T) {
 	}
 }
 
+// The actual HTTP transport normalizes dial timeouts before cache recovery
+// sees them. A completed timed-out dial is not an ambiguous live body stall.
+func TestInputTransferTimedOutDialReturnsWithoutRecovery(t *testing.T) {
+	for _, phase := range []string{"HEAD", "GET"} {
+		t.Run(phase, func(t *testing.T) {
+			ref := sharedFixtureFile(t, t.TempDir(), "input", "dependency")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("ETag", fmt.Sprintf("%q", ref.SHA256))
+				w.Header().Set("Content-Length", fmt.Sprint(ref.SizeBytes))
+			}))
+			defer server.Close()
+			var dials atomic.Int32
+			wantDials := int32(1)
+			if phase == "GET" {
+				wantDials = 2
+			}
+			transport := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				if dials.Add(1) == wantDials {
+					return nil, &net.OpError{Op: "dial", Net: network, Err: context.DeadlineExceeded}
+				}
+				return (&net.Dialer{}).DialContext(ctx, network, address)
+			}}
+			defer transport.CloseIdleConnections()
+			c := Client{URL: server.URL, HTTP: &http.Client{Transport: transport}, Pause: func(context.Context, time.Duration) error {
+				t.Error("recovered a completed timed-out dial")
+				return context.Canceled
+			}}
+			cache := FileCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Client: c}
+			dest := filepath.Join(t.TempDir(), "input")
+			err := cache.copyTo(context.Background(), ref, dest)
+			var dial *net.OpError
+			if !errors.Is(err, errInputTransferUnreachable) || !errors.As(err, &dial) || dial.Op != "dial" || stagingErrorName(err) != "storage_unreachable" || dials.Load() != wantDials {
+				t.Fatal("completed dial timeout lost identity", dials.Load(), err)
+			}
+			if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("published on dial timeout", err)
+			}
+		})
+	}
+}
+
 func TestInputTransferPermanentRefusalsDoNotRecover(t *testing.T) {
 	for _, failure := range []string{"auth", "typed_storage", "etag", "checksum"} {
 		t.Run(failure, func(t *testing.T) {
