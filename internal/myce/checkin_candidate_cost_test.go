@@ -149,6 +149,8 @@ func BenchmarkCheckinCandidateCost(b *testing.B) {
 // The refreshed digests retain all 402 decisions for each history shape.
 // ProbeFloorGB adds metadata in 180 retained-history envelopes; removing only
 // that field reproduces the prior digest with identical decisions/resources.
+// #1017 adds LaunchDriftGB/AvailableHostGB in those same 180 envelopes. Clearing
+// only those fields reproduces e7757cb9 with all 402 decisions/resources intact.
 func TestCandidateCostPlacementEquivalence(t *testing.T) {
 	for _, retained := range []bool{true, false} {
 		t.Run(fmt.Sprintf("retained=%v", retained), func(t *testing.T) {
@@ -186,7 +188,7 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 				t.Fatal(err)
 			}
 			digest := fmt.Sprintf("%x", sha256.Sum256(data))
-			want := map[bool]string{true: "e7757cb9cf917ba7bbdecdd721a17d064f79593a655fd8cbd5e70d4b96bca280", false: "64f5571bc125dc317237aa5b4e477dbfa3646573bb59b9fba02f899bd9ed0b09"}[retained]
+			want := map[bool]string{true: "c10fc6597e76f5bc3f0298146a20dfc62e94cd6742f1eb10cc593beec95b9f61", false: "64f5571bc125dc317237aa5b4e477dbfa3646573bb59b9fba02f899bd9ed0b09"}[retained]
 			if digest != want {
 				t.Fatalf("placement digest %s (%d decisions), want %s", digest, len(decisions), want)
 			}
