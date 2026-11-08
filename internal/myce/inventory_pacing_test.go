@@ -37,7 +37,7 @@ func TestInventorySemanticChangesAndBackoff(t *testing.T) {
 	}
 	for _, platform := range []string{"xpu", "cuda", "metal", "fake"} {
 		t.Run(platform, func(t *testing.T) {
-			lane := hostProbeLane[[]MachineDevice]{clock: clock, equal: sameInventory, timing: probeTiming{base: time.Second, cores: 2}}
+			lane := hostProbeLane[[]MachineDevice]{clock: clock, equal: sameInventoryObservation, timing: probeTiming{base: time.Second, cores: 2}}
 			source := func(context.Context) ([]MachineDevice, error) {
 				d := slices.Clone(changed)
 				d[0].Platform = platform
@@ -65,6 +65,38 @@ func TestInventorySemanticChangesAndBackoff(t *testing.T) {
 	changed[0].Reason = "device_probe_unavailable"
 	if sameInventory(original, changed) {
 		t.Fatal("health transition ignored")
+	}
+}
+
+func TestInventoryStablePartialFailureBackoff(t *testing.T) {
+	clock := &workerFakeClock{now: time.Unix(1000, 0)}
+	lane := hostProbeLane[[]MachineDevice]{clock: clock, equal: sameInventoryObservation, timing: probeTiming{base: time.Second, cores: 2}}
+	partial := &acceleratorProbeError{cuda: true}
+	var failure error = partial
+	source := func(context.Context) ([]MachineDevice, error) {
+		clock.Advance(250 * time.Millisecond)
+		return []MachineDevice{{ID: "0", Platform: "xpu", Identity: "card", Selector: "0", Fingerprint: "driver"}}, failure
+	}
+	finishInventoryProbe(t, &lane, source)
+	first := lane.observation.PeriodSeconds
+	clock.Advance(time.Hour)
+	finishInventoryProbe(t, &lane, source)
+	if lane.observation.PeriodSeconds <= first {
+		t.Fatal("unchanged partial inventory kept discovery frequent", first, lane.observation)
+	}
+	devices, err := hostInventorySnapshot(&lane)
+	if len(devices) != 1 || !errors.Is(err, partial) || lane.fresh(clock.Now()) {
+		t.Fatal("partial failure lost its validity boundary", devices, err)
+	}
+	clock.Advance(lane.observation.freshness())
+	if devices, _ := hostInventorySnapshot(&lane); len(devices) != 0 {
+		t.Fatal("backoff renewed an expired partial observation")
+	}
+	clock.Advance(time.Hour)
+	failure = nil
+	finishInventoryProbe(t, &lane, source)
+	if !lane.fresh(clock.Now()) || lane.observation.PeriodSeconds != first {
+		t.Fatal("recovery did not reset discovery pacing", lane.observation)
 	}
 }
 
@@ -184,7 +216,7 @@ func TestInventoryHelperLaunchMeasurement(t *testing.T) {
 		}
 		inventory := hostProbeLane[[]MachineDevice]{clock: clock, timing: probeTiming{base: time.Second, cores: 2}}
 		if !legacy {
-			inventory.equal = sameInventory
+			inventory.equal = sameInventoryObservation
 		}
 		telemetry := hostProbeLane[[]MachineDevice]{clock: clock, timing: probeTiming{base: deviceMemorySamplePeriod, cores: 2}}
 		sensor := func(ctx context.Context) ([]MachineDevice, error) {

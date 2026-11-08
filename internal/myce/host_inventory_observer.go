@@ -61,11 +61,22 @@ func sameInventory(a, b []MachineDevice) bool {
 	return reflect.DeepEqual(semantic(a), semantic(b))
 }
 
+// Repeated unknown/partial results do not make unchanged hardware new. Recovery
+// or a changed failed-family classification does; validity remains independent.
+func sameInventoryObservation(a []MachineDevice, aerr error, b []MachineDevice, berr error) bool {
+	if (aerr == nil) != (berr == nil) || !sameInventory(a, b) {
+		return false
+	}
+	var ap, bp *acceleratorProbeError
+	aPartial, bPartial := errors.As(aerr, &ap), errors.As(berr, &bp)
+	return aPartial == bPartial && (!aPartial || ap.cuda == bp.cuda && ap.xpu == bp.xpu)
+}
+
 // Inventory is an observation lane, not an attempt sampler. No per-host driver
 // latency default kills a progressing scan; cancellation owns its lifetime.
 // A pending scan retains identity but never indefinitely retains live capacity.
 func sampleHostInventory(ctx context.Context, lane *hostProbeLane[[]MachineDevice], source func(context.Context) ([]MachineDevice, error)) ([]MachineDevice, error) {
-	lane.equal = sameInventory
+	lane.equal = sameInventoryObservation
 	lane.step(ctx, source)
 	return hostInventorySnapshot(lane)
 }
@@ -108,7 +119,7 @@ func (m *hostInventoryObserver) snapshot() ([]MachineDevice, error) {
 	return devices, err
 }
 func (m *hostInventoryObserver) run(ctx context.Context, source func(context.Context) ([]MachineDevice, error)) {
-	m.lane.equal = sameInventory
+	m.lane.equal = sameInventoryObservation
 	m.telemetry.clock = m.lane.clock
 	// Sharing consumes device samples every five seconds and expires them
 	// after one missed sample. Faster queries cannot extend that contract.

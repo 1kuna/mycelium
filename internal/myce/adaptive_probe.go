@@ -128,7 +128,7 @@ type hostProbeLane[T any] struct {
 	known       bool
 	at          time.Time
 	observation *ProbeObservation
-	equal       func(T, T) bool // Semantic changes can differ from sampled counters.
+	equal       func(T, error, T, error) bool // Semantic observations include failure classification.
 }
 
 func (p *hostProbeLane[T]) step(ctx context.Context, source func(context.Context) (T, error)) (bool, error) {
@@ -146,11 +146,13 @@ func (p *hostProbeLane[T]) step(ctx context.Context, source func(context.Context
 				p.known = false
 				return false, nil
 			}
-			equal := p.equal
-			if equal == nil {
-				equal = func(a, b T) bool { return reflect.DeepEqual(a, b) }
+			var changed bool
+			if p.equal != nil {
+				changed = p.observation == nil || !p.equal(r.value, r.err, p.value, p.err)
+			} else {
+				changed = !p.known || !reflect.DeepEqual(r.value, p.value) || r.err != nil
 			}
-			p.observation = p.timing.observe(r.start, r.end, !p.known || !equal(r.value, p.value) || r.err != nil)
+			p.observation = p.timing.observe(r.start, r.end, changed)
 			p.known = r.err == nil && !r.end.Before(r.start)
 			p.value, p.at, p.err = r.value, r.start, r.err
 		default:

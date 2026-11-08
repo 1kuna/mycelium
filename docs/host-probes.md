@@ -50,7 +50,9 @@ failed capacity cannot qualify work; partial driver failures preserve fresh
 healthy siblings. Direct launch ownership/identity checks remain mandatory.
 Inventory compares hardware, topology, configuration and health, excluding
 telemetry timestamps, activity counters, free memory and a unified device's
-live uncapped budget. Workload activity cannot reset discovery backoff. Each
+live uncapped budget. Workload activity cannot reset discovery backoff.
+Unchanged failed-family classifications also back off; failed devices remain
+unknown and partial observations retain their original expiry. Each
 pass reuses its device enumeration for XPU qualification fingerprints and
 shares identical fingerprint commands across cards; fingerprint bytes remain
 compatible with existing qualification records.
