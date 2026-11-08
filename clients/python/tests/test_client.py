@@ -684,7 +684,9 @@ class WaitFloodBackoffTests(unittest.TestCase):
         client = Client(token="fixture")
         error = APIError(429, '{"code":"client_rate_limited"}')
         terminal = {"id": "job", "state": "succeeded"}
-        with patch.object(client, "_read_job", side_effect=[error, error, terminal]), patch("mycelium.client.time.sleep") as pause:
+        # A shed bootstrap now probes /api/wait; mock that transport too.
+        with patch.object(client, "_read_job", side_effect=[error, terminal]), patch.object(
+                client, "_wait_batch", side_effect=[error, [dict(terminal, revision=1)]]), patch("mycelium.client.time.sleep") as pause:
             self.assertEqual(client.wait("job"), terminal)
         self.assertEqual(pause.call_count, 2)
         self.assertGreater(pause.call_args_list[1].args[0], 0)
