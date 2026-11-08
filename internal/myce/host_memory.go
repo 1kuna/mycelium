@@ -519,7 +519,15 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 		s.peakGB = max(old.peakGB, s.gb, s.footprintGB)
 		s.period, s.receivedAt = old.period, now
 		if !old.at.IsZero() {
-			if s.id > 0 && old.id > 0 && s.id > old.id {
+			if s.id > 0 && old.id == 0 {
+				// Anchor the first negotiated identity. It might name the same
+				// cached observation as the unidentified bootstrap, so retain its
+				// expiry until a distinct identity arrives. A local sampler's
+				// timestamp can independently prove a newer observation.
+				if sample.sampledAt.IsZero() || !sample.sampledAt.After(old.at) {
+					s.at, s.gb = old.at, min(s.gb, old.gb)
+				}
+			} else if s.id > 0 && old.id > 0 && s.id > old.id {
 				// Learn delivery cadence only from proven distinct observations.
 				s.period = max(s.period, now.Sub(old.receivedAt))
 			} else {

@@ -91,6 +91,31 @@ func TestHostMemoryDelayedCachedSampleRetainsExpiry(t *testing.T) {
 	}
 }
 
+func TestHostMemoryNegotiatedIdentityRecoversAfterBootstrap(t *testing.T) {
+	_, clock := fixture(t)
+	key := attemptKey{"holder", 1, "session"}
+	w := Worker{unifiedMemoryWire: &workerUnifiedMemoryWire{machine: "worker", session: "session", supported: true, probeSupported: true}}
+	c := Checkin{Machine: Machine{ID: "worker", Session: "session"}, Attempts: []AttemptReport{{Execution: Execution{ID: key.job, Attempt: key.attempt}, Session: key.session, Started: true, CurrentHostMemory: &CurrentHostMemory{SampleID: 1, NonreclaimableGB: 2, GrowthObserved: true}}}}
+	samples := currentHostMemorySamples(w.unifiedMemoryCheckin(c).Attempts, clock.Now())
+	w.unifiedMemoryWire.sampleSupported = true
+	// Negotiation can reveal the identity of an already expired cached sample.
+	// Anchor that identity without pretending receipt proves new sampling.
+	clock.Advance(20 * time.Second)
+	c.Attempts[0].CurrentHostMemory.AgeSeconds = 10
+	samples = updateHostMemorySamples(w.unifiedMemoryCheckin(c).Attempts, clock.Now(), samples)
+	if s := samples[key]; s.id != 1 || s.period != 0 || remainingHostGrowth(3, s, clock.Now()) != 3 {
+		t.Fatalf("identity transition renewed expired credit or lost anchor: %+v", s)
+	}
+	for _, id := range []int64{2, 3} {
+		clock.Advance(6 * time.Second)
+		c.Attempts[0].CurrentHostMemory.SampleID, c.Attempts[0].CurrentHostMemory.AgeSeconds = id, 0
+		samples = updateHostMemorySamples(w.unifiedMemoryCheckin(c).Attempts, clock.Now(), samples)
+		if s := samples[key]; s.id != id || s.period != 6*time.Second || remainingHostGrowth(3, s, clock.Now()) != 1 {
+			t.Fatalf("fresh identified sample failed to recover cadence/credit: %+v", s)
+		}
+	}
+}
+
 func TestNeverStartedLearnedAllocationKeepsBoundedCharge(t *testing.T) {
 	q, clock := fixture(t)
 	m := cpuMachine("worker", "host", "cpu", 8, 64)
