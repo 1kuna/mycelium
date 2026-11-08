@@ -88,6 +88,31 @@ func TestOwnHelperCreditDoesNotSpendNeighborsAnonTwice(t *testing.T) {
 	}
 }
 
+func TestOwnHelperRetainsRemainingDeviceDemand(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		device, forecast, free float64
+	}{
+		{"unreached device envelope", 22, 0, 1},
+		{"device growth forecast", 10, 20, 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, clock := fixture(t)
+			m := unifiedCUDAAdmissionMachine()
+			j := Job{ID: "own", Machine: m.ID, Session: m.Session, Attempt: 1, State: "running", Spec: spec("production")}
+			j.Spec.Needs.HostMemoryGB, j.Spec.Needs.MemoryGB = 8, 24
+			rt := modelRuntime{clock: clock, machine: m.ID, memoryMachine: m, batchJobs: []Job{j}, batchSupervisors: map[attemptKey]*attemptSupervisor{}, hostMemorySource: func(context.Context) (float64, error) { return tc.free, nil }}
+			// Anonymous occupancy remains below the composite32.125GiB ceiling.
+			// It cannot prove that the future CUDA allocation already exists.
+			r := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 32, sampledAt: clock.Now(), DeviceGB: &tc.device, deviceSampledAt: clock.Now(), deviceResidentGB: tc.device, DeviceGrowthGB: tc.forecast}}
+			rt.batchSupervisors[jobKey(j)] = &attemptSupervisor{job: j, report: r, admissionMu: &rt.admissionMu}
+			if err := rt.checkBatchLaunchMemory(t.Context(), HostLaunch{Machine: m.ID, Session: m.Session, Key: j.ID, Attempt: "1"}); !errors.Is(err, errWorkerMemory) {
+				t.Fatal("host occupancy erased pending device demand", err)
+			}
+		})
+	}
+}
+
 func TestOwnHelperDiscreteHostLaunch(t *testing.T) {
 	_, clock := fixture(t)
 	m := unifiedCUDAAdmissionMachine()

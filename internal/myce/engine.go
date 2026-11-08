@@ -1030,6 +1030,7 @@ func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySampl
 func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool, samples map[attemptKey]hostMemorySample, launching ...attemptKey) error {
 	cores, ram, growth := 0, 0.0, 0.0
 	anon, ownResident, ownCharge, ownAnon, ownForecast, ownPending := 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+	ownDevicePending := 0.0
 	now := time.Time{}
 	if rt.clock != nil {
 		now = rt.clock.Now()
@@ -1063,9 +1064,13 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 			pending = min(pending, charge)
 			if len(launching) == 1 {
 				expanded := helperHostCharge(&j, owner, sample, now, charge)
+				ownResident = helperDeviceResident(owner, sample, now)
+				// Anonymous occupancy does not prove that future CUDA demand is
+				// already allocated. Preserve the device component, including its
+				// forecast/overshoot, after crediting only direct device occupancy.
+				ownDevicePending = max(0, helperDeviceCharge(&j, sample, now)-ownResident)
 				pending += expanded - charge
 				charge = expanded
-				ownResident = helperDeviceResident(owner, sample, now)
 				ownCharge, ownPending = charge, pending
 				if fresh {
 					ownAnon, ownForecast = sample.gb, forecast
@@ -1088,7 +1093,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		// contain CUDA pages. Credit only the union lower bound max(all anon,
 		// one process's CUDA counter), never their sum or two process counters.
 		additional := max(0, ownResident-anon)
-		growth += max(0, ownCharge-ownAnon-additional, ownForecast) - ownPending
+		growth += max(0, ownCharge-ownAnon-additional, ownForecast, ownDevicePending) - ownPending
 	}
 	capacity, reason := cpuCapacity(&rt.memoryMachine)
 	if reason == "" && cores > capacity {

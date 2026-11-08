@@ -19,6 +19,13 @@ func helperHostCharge(j *Job, m *Machine, s hostMemorySample, now time.Time, cha
 	if !unifiedCUDA(m) || !m.HostMemoryMeasured || !sharedDeviceSampleReady(s, now) || s.source != "" {
 		return charge
 	}
-	device := max(j.Spec.Needs.MemoryGB, s.deviceGB+s.deviceGrowthGB+s.deviceRateGB*now.Sub(s.deviceAt).Seconds())
-	return charge + max(0, device-j.Spec.Needs.MemoryGB)
+	host := j.Spec.Needs.HostMemoryGB
+	if forecast, fresh := s.hostGrowth(now); fresh {
+		host = max(host, s.gb+forecast)
+	}
+	return max(charge, hostNeed(m, helperDeviceCharge(j, s, now), host))
+}
+
+func helperDeviceCharge(j *Job, s hostMemorySample, now time.Time) float64 {
+	return max(j.Spec.Needs.MemoryGB, s.deviceGB+s.deviceGrowthGB+s.deviceRateGB*now.Sub(s.deviceAt).Seconds())
 }
