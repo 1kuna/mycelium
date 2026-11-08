@@ -632,7 +632,7 @@ func readSharedProfileAuthority(ctx context.Context, entries []string, watches m
 	if e != nil {
 		trace.phase("authority_failed", "", e)
 		group.pace.Observe(clock.Now().Sub(started), false)
-		group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, e, nil))
+		group.next = clock.Now().Add(group.pace.ServiceDelay(e, nil))
 		group.retrying = true
 		return
 	}
@@ -686,7 +686,7 @@ batchLoop:
 						finish(entry, nil, jobErr)
 					} else {
 						group.pace.Observe(clock.Now().Sub(started), false)
-						group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, jobErr, nil))
+						group.next = clock.Now().Add(group.pace.ServiceDelay(jobErr, nil))
 						group.retrying = true
 						break batchLoop
 					}
@@ -701,7 +701,7 @@ batchLoop:
 				}
 			}
 			group.pace.Observe(clock.Now().Sub(started), false)
-			group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, readErr, nil))
+			group.next = clock.Now().Add(group.pace.ServiceDelay(readErr, nil))
 			group.retrying = true
 			break
 		}
@@ -712,7 +712,7 @@ batchLoop:
 			changed = changed || group.after[state.ID] != state.Revision
 		}
 		group.pace.Observe(clock.Now().Sub(started), changed)
-		group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, nil, nil))
+		group.next = clock.Now().Add(group.pace.ServiceDelay(nil, nil))
 		// A negotiated long-poll already paces unchanged jobs and wakes on a
 		// revision. Re-enter it without an additional growing sleep.
 		if seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0 {
@@ -734,7 +734,7 @@ batchLoop:
 					finish(entry, nil, finalErr)
 				} else {
 					group.pace.Observe(clock.Now().Sub(started), false)
-					group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, finalErr, nil))
+					group.next = clock.Now().Add(group.pace.ServiceDelay(finalErr, nil))
 					group.retrying = true
 					break batchLoop
 				}

@@ -235,3 +235,93 @@ func TestSharedProfileAdaptiveUnknownDoesNotStarveLaterBatch(t *testing.T) {
 		t.Fatalf("unknown first batch starved completion: %+v", result.finished)
 	}
 }
+
+// A healthy held read paces itself, yet used to double hidden retry history.
+// After enough unchanged replies, one timeout scheduled the next read centuries
+// away (#919). Exercise the actual authority reader through recovery, including
+// servers with more than one batch (where protocol holds are disabled).
+func TestSharedProfileAdaptiveNextReadBoundedByServiceAndPressure(t *testing.T) {
+	for _, count := range []int{1, 257} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			clock := &waitClock{now: time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)}
+			var failure int
+			var disconnect bool
+			var retryAfter time.Duration
+			terminal := false
+			const service = time.Second
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				clock.advance(service)
+				if disconnect {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err == nil {
+						_ = conn.Close()
+					}
+					return
+				}
+				if failure != 0 {
+					w.Header().Set("Retry-After", fmt.Sprint(int(retryAfter/time.Second)))
+					w.WriteHeader(failure)
+					_, _ = io.WriteString(w, `{"code":"request_failed"}`)
+					return
+				}
+				state := "running"
+				if terminal {
+					state = "succeeded"
+				}
+				adaptiveReply(w, r, state)
+			}))
+			defer server.Close()
+			entries := make([]string, 0, count)
+			watches := map[string]*sharedProfileWatch{}
+			for i := 0; i < count; i++ {
+				id := fmt.Sprintf("job-%03d", i)
+				entries = append(entries, id)
+				watches[id] = &sharedProfileWatch{registration: sharedProfileRegistration{Observer: profileObserver{Queue: server.URL}, Token: "fixture"}, receipt: profileReceipt{JobID: id}}
+			}
+			group := sharedProfileGroup{after: map[string]uint64{}}
+			read := func() sharedProfileRead {
+				result := readSharedProfileAuthority(context.Background(), entries, watches, group, clock)
+				group = result.group
+				return result
+			}
+			// Stable revisions for more reads than it takes to saturate a
+			// duration, without advancing centuries or sleeping in real time.
+			for i := 0; i < 80; i++ {
+				read()
+				if d := group.next.Sub(clock.Now()); d < 0 || d > time.Duration((count+255)/256)*service {
+					t.Fatalf("unchanged response scheduled beyond measured read cost: %s", d)
+				}
+				clock.advance(group.next.Sub(clock.Now()))
+			}
+			// A transient transport failure must not turn the previous healthy
+			// read count into a backoff timer (the retained incident was timeout).
+			disconnect = true
+			read()
+			if d := group.next.Sub(clock.Now()); !group.retrying || d <= 0 || d > 2*time.Duration((count+255)/256)*service {
+				t.Fatalf("failure inherited unchanged-read history: %s", d)
+			}
+			disconnect = false
+			for _, signal := range []struct {
+				status int
+				after  time.Duration
+			}{{429, 7 * time.Second}, {503, 3 * time.Second}, {503, time.Second}} {
+				clock.advance(group.next.Sub(clock.Now()))
+				failure, retryAfter = signal.status, signal.after
+				read()
+				d := group.next.Sub(clock.Now())
+				// Each rejection ends the pass at its first batch. Earlier
+				// two-batch service measurements may still be in the mean.
+				bound := time.Duration((count+255)/256) * service
+				if !group.retrying || d < retryAfter || d > max(bound, retryAfter)+bound {
+					t.Fatalf("next read escaped current service/pressure bound: %s, server %s", d, retryAfter)
+				}
+			}
+			clock.advance(group.next.Sub(clock.Now()))
+			failure, terminal = 0, true
+			result := read()
+			if group.retrying || len(result.finished) != count {
+				t.Fatalf("authority failed to resume: retrying=%v completions=%d", group.retrying, len(result.finished))
+			}
+		})
+	}
+}

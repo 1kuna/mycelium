@@ -62,6 +62,29 @@ func (p *ClientPace) Delay(now time.Time, event time.Time, failure error, jitter
 	return max(delay, time.Nanosecond)
 }
 
+// ServiceDelay bounds a shared observer's next read by measured service cost
+// and the current server not-before signal. Unchanged long-polls can accumulate
+// exponential search history for choosing a protocol hold, but that history is
+// not evidence of pressure and must never become a retry or scalar-read timer.
+func (p *ClientPace) ServiceDelay(failure error, jitter func() float64) time.Duration {
+	cost := max(p.cost, time.Nanosecond)
+	delay := cost
+	if failure != nil {
+		var api *HTTPError
+		if errors.As(failure, &api) {
+			delay = max(delay, api.RetryAfter)
+		}
+		if jitter == nil {
+			jitter = rand.Float64
+		}
+		// Spread contenders over one measured service period, never over the
+		// accumulated failure count. Integer headroom prevents jitter overflow.
+		extra := time.Duration(float64(cost) * min(1, max(0, jitter())))
+		delay += min(max(0, extra), time.Duration(math.MaxInt64)-delay)
+	}
+	return delay
+}
+
 // Seconds is the existing batch-v1 protocol's whole-second, at-most-20s hold.
 // No extra poll sleep is needed when the transport already waited this long.
 func (p *ClientPace) Seconds(now time.Time, event time.Time) int {
