@@ -11,8 +11,8 @@ import (
 // and 15s for reporting and replacement launch; grace never extends StartBy.
 const ProductionStartTimeout = maxGPUStopGrace + StopGrace + 15*time.Second
 
-// A startup availability budget may cover contended preparation, but must not
-// silently turn production admission into an unbounded capacity wait.
+// Bound unavailable-route and stuck-preparation detection. Qualified capacity
+// waiting is separate from this relative startup budget.
 const MaxProductionStartWindow = time.Hour
 
 func productionStartWindow(s Spec) time.Duration {
@@ -75,10 +75,15 @@ func (q *Queue) startupPending(j *Job) bool {
 			}
 		}
 	}
-	if !callerStartDeadline(j) && (q.launchCapacityPending(j) || j.State == "queued" && j.StartCapacityWaiting) {
-		return false // Capacity is not failed startup; caller-owned cutoffs still bind.
+	if q.startCapacityPaused(j) {
+		return false // Capacity is not failed startup; absolute cutoffs still bind.
 	}
 	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
+}
+
+func (q *Queue) startCapacityPaused(j *Job) bool {
+	return j.Spec.StartBy != nil && !absoluteStartBy(j) && !terminal(j.State) && !cancelled(j) &&
+		(q.launchCapacityPending(j) || j.State == "queued" && j.StartCapacityWaiting)
 }
 
 func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
@@ -139,7 +144,7 @@ func (q *Queue) maintainStartDeadlines() {
 		defer func() { q.memoryPlanning = previous }()
 		status := map[*Job]capacityStatus{}
 		for _, j := range q.liveJobs() {
-			if j.State == "queued" && j.Spec.StartBy != nil && !callerStartDeadline(j) {
+			if j.State == "queued" && j.Spec.StartBy != nil && !absoluteStartBy(j) {
 				waiting, ready := q.queuedCapacityStatus(j)
 				status[j] = capacityStatus{waiting, ready}
 			}
@@ -242,6 +247,11 @@ func (q *Queue) startupReleaseDetail(host string) HoldDetail {
 }
 
 func (q *Queue) startStatusReason(j *Job, scans ...*placementScan) string {
+	if q.startCapacityPaused(j) {
+		// Assignment restores the original relative window. The old saved
+		// cutoff is suspended, so subtracting wall time would report zero.
+		return q.startWaitingReason(j, scans...) + fmt.Sprintf("; %.0fs left to start (paused for capacity)", j.StartWindow.Seconds())
+	}
 	return q.startWaitingReason(j, scans...) + fmt.Sprintf("; %.0fs left to start", max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds()))
 }
 

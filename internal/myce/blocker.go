@@ -121,6 +121,9 @@ func (q *Queue) actionableBlocker(j *Job) *Blocker {
 	}
 	copy := *j
 	copy.Reason = q.waitReason(j)
+	if q.startCapacityPaused(j) {
+		copy.Reason = q.startStatusReason(j)
+	}
 	reason := q.statusWaitingReasonDetail(&copy)
 	if key := j.Spec.Environment.Key(); key != "" {
 		reason = strings.ReplaceAll(reason, key, "required software")
