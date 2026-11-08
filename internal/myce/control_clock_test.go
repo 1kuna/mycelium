@@ -497,9 +497,9 @@ func TestControlClockOverlappingReadersCountOnce(t *testing.T) {
 	clock.Advance(time.Second)
 	c.begin()
 	clock.Advance(time.Second)
-	c.end()
+	c.end(func() {})
 	clock.Advance(time.Second)
-	c.end()
+	c.end(func() {})
 	clock.Advance(time.Second)
 	if got := c.now(); got != 2*time.Second {
 		t.Fatalf("overlapping occupancy counted twice: %s", got)

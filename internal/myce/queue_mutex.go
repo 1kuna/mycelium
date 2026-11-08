@@ -38,9 +38,10 @@ func (m *queueMutex) Unlock() {
 	if p := m.pressure.Load(); p != nil {
 		p.release()
 	}
-	m.mu.Unlock()
 	if m.control != nil {
-		m.control.end()
+		m.control.end(m.mu.Unlock)
+	} else {
+		m.mu.Unlock()
 	}
 }
 
@@ -59,9 +60,10 @@ func (m *queueMutex) RUnlock() {
 	if p := m.pressure.Load(); p != nil {
 		p.release()
 	}
-	m.mu.RUnlock()
 	if m.control != nil {
-		m.control.end()
+		m.control.end(m.mu.RUnlock)
+	} else {
+		m.mu.RUnlock()
 	}
 }
 
