@@ -505,7 +505,12 @@ CLI or the image of an existing shared observer; check its reported commit.
 From the release containing #1072, Go and Python GET/HEAD, download and
 replay-safe retries follow the current positive `Retry-After` plus jitter;
 previous errors and unchanged reads cannot stretch that pause. Without a server
-signal, retry spacing follows measured request service cost plus jitter. Caller
+signal, retry spacing follows measured request service cost plus jitter, with
+at least the RFC 6298 one-second initial/minimum TCP recovery period from the
+fast-failure correction to #1072. This prevents fast refusals and immediate
+503s from driving repeated probes at millisecond intervals; the cost is one
+recovery period plus jitter before probing fast recovery. Slower measured
+service can extend that period; a positive Retry-After remains authoritative. Caller
 deadlines stop recovery without retrying before the server permits it. Python
 `timeout` bounds API recovery and `transfer_timeout` bounds each file request;
 Go uses the caller context or explicitly configured HTTP timeout.
