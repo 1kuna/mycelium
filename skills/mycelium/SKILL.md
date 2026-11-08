@@ -397,6 +397,19 @@ Keep the job; cancellation still withdraws preparation. A completed failed dial
 returns `storage_unreachable`; permanent storage, authentication and integrity
 refusals still stop preparation. Execution waits for verified staging.
 
+From the release containing #1074, connection reset/refusal, handshake EOF and
+TLS internal errors during a listener restart remain transient: observation
+keeps its binding and retries with measured pacing and the server's current
+`Retry-After`. A `tls:` error prefix alone does not prove an identity mismatch.
+Explicit certificate/pin, TLS integrity and protocol refusals still stop with
+`observation_error: tls_identity`; report those to the installation/authority
+owner and preserve the receipt and notifier. Do not change trust or resubmit
+under a new key. Older clients can misclassify a cutover as `tls_identity`;
+only after the authority owner verifies unchanged trust and identity, replay
+the original saved command/key with its notifier and current installed
+authority, serialized. Updating a candidate binary does not update the installed
+CLI or the image of an existing shared observer; check its reported commit.
+
 From the release containing #1072, Go and Python GET/HEAD, download and
 replay-safe retries follow the current positive `Retry-After` plus jitter;
 previous errors and unchanged reads cannot stretch that pause. Without a server

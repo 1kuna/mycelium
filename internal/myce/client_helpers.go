@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -117,7 +119,7 @@ func waitStatusPause(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// IsTLSIdentityError identifies permanent TLS identity/handshake failures without
+// IsTLSIdentityError identifies permanent TLS identity/protocol failures without
 // exposing certificate, endpoint or credential diagnostics to notifications.
 func IsTLSIdentityError(err error) bool {
 	var verification *tls.CertificateVerificationError
@@ -125,10 +127,25 @@ func IsTLSIdentityError(err error) bool {
 	if errors.Is(err, errJoiningIdentity) || errors.As(err, &verification) || errors.As(err, &record) {
 		return true
 	}
-	// Go also emits unexported TLS alert/handshake errors. Network timeouts
-	// (including net/http's TLS handshake timeout) retain their retry policy.
+	// A restart can interrupt a handshake without changing the peer's identity.
+	// Keep explicit verification/record failures above authoritative, even when
+	// an error also wraps a connection failure.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) {
+		return false
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return false
+	}
+	// Go's TLS alerts and several integrity/protocol errors are unexported.
+	// Exempt only known shutdown/internal alerts; retain every other TLS refusal
+	// (including bad record MAC, Finished hash and protocol version failures).
 	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
-		if strings.HasPrefix(cause.Error(), "tls:") || strings.HasPrefix(cause.Error(), "remote error: tls:") {
+		message := strings.TrimPrefix(cause.Error(), "remote error: ")
+		if message == "tls: internal error" || message == "tls: use of closed connection" || message == "tls: user canceled" {
+			continue
+		}
+		if strings.HasPrefix(message, "tls:") {
 			return true
 		}
 	}
