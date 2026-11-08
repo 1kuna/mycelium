@@ -200,6 +200,7 @@ class ExtensionClientTests(unittest.TestCase):
         for run in (False, True):
             elapsed = [0.0]
             with patch.object(client, "_read_job", return_value=job), \
+                 patch.object(client, "_wait_batch", return_value=[dict(job, revision=1)]), \
                  patch.object(client, "submit", return_value=job), \
                  patch.object(client, "cancel_submission") as cancel, \
                  patch("mycelium.client.time.monotonic", side_effect=lambda: elapsed[0]), \
@@ -219,6 +220,7 @@ class ExtensionClientTests(unittest.TestCase):
         job = {"id": "12345678abcdef", "state": "running"}
         elapsed = [0.0]
         with patch.object(client, "_read_job", return_value=job), \
+             patch.object(client, "_wait_batch", return_value=[dict(job, revision=1)]), \
              patch("mycelium.client.time.monotonic", side_effect=lambda: elapsed[0]), \
              patch("mycelium.client.time.sleep", side_effect=lambda d: elapsed.__setitem__(0, elapsed[0]+d)):
             with self.assertRaises(TimeoutError) as caught:
