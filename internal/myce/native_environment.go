@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -50,8 +51,8 @@ func (g *nativeGroup) sidecarEnvironment(j Job, side NativeSidecar, inherited st
 	if j.ExecutionEvidence != nil {
 		j.ExecutionEvidence.EnvironmentPreparation = executionMayHaveRun
 	}
-	return g.worker.environmentCache.Acquire(withLaunchGate(g.ctx, func() error {
-		return g.worker.authorizeLaunch(HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
+	return g.worker.environmentCache.Acquire(withLaunchGate(g.ctx, func(ctx context.Context) error {
+		return g.worker.authorizeLaunchContext(ctx, HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 	}), recipe)
 }
 
