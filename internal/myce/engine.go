@@ -797,7 +797,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			// Capture the exact plan under rt.mu; heartbeats update rt.session.
 			launch := HostLaunch{Machine: rt.machine, Session: s.Session, Kind: "engine", Key: s.Model, Device: s.Device, Attempt: s.Attempt}
 			rootWorker := rt.worker
-			ctx = withLaunchGate(ctx, func() error {
+			ctx = withLaunchGate(ctx, func(ctx context.Context) error {
 				if rootWorker != nil {
 					probe := *rootWorker
 					probe.Machine = probe.storageMachine()
@@ -849,11 +849,12 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 			owned.memoryMachine = bound.Machine
 		}
 		parent := ctx
-		ctx = withLaunchGate(parent, func() error {
+		priorGate := launchGateFrom(parent)
+		ctx = withLaunchGate(parent, func(ctx context.Context) error {
 			if err := bound.verifyDevice(); err != nil {
 				return err
 			}
-			return checkLaunchGate(parent)
+			return priorGate(ctx)
 		})
 	}
 	if owned, ok := m.engine.(*LlamaEngine); ok {
@@ -898,11 +899,12 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	// Authorization and preparation may block while a batch receives a stop.
 	// Recheck current admission after authorization at every engine launch gate.
 	parent := ctx
-	ctx = withLaunchGate(parent, func() error {
-		if err := checkLaunchGate(parent); err != nil {
+	priorGate := launchGateFrom(parent)
+	ctx = withLaunchGate(parent, func(ctx context.Context) error {
+		if err := priorGate(ctx); err != nil {
 			return err
 		}
-		return rt.checkLoadMemory(parent, m)
+		return rt.checkLoadMemory(ctx, m)
 	})
 	deviceEnv := rt.deviceEnv
 	platform, device = rt.platform, rt.device

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -480,6 +481,56 @@ func TestWorkerPreparationHandshakeCancellation(t *testing.T) {
 	if report.State != "paused" || report.Attempt != "exact-preparation" {
 		t.Fatal("cancel lost preparation identity", report)
 	}
+}
+
+// A build monitor cancels its operation without withdrawing the outer offer.
+// The actual runtime's inherited gate must interrupt an already-pending request.
+func TestWorkerEnvironmentHandshakeBuildCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered := make(chan struct{})
+		cancelOperation := make(chan context.CancelFunc, 1)
+		outerError := make(chan error, 1)
+		calls := 0
+		w := Worker{Client: Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(fmt.Sprintf(`{"ok":true,"start_gate":%q}`, startGateProtocol)))}, nil
+			}
+			close(entered)
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		})}}}
+		rt := &environmentRuntime{dir: t.TempDir(), cache: &EnvironmentCache{Root: t.TempDir()}, reports: map[string]EnvironmentReport{}, authorize: w.authorizeLaunchContext}
+		rt.prepare = func(parent context.Context, _ EnvironmentRecipe) error {
+			ctx, cancel := context.WithCancel(parent)
+			defer cancel()
+			cancelOperation <- cancel
+			err := checkLaunchGate(ctx)
+			outerError <- parent.Err()
+			return err
+		}
+		defer rt.stop()
+		r := EnvironmentRecipe{Key: "build-cancellation", Preparation: &ExtensionSelection{}, Launch: &HostLaunch{Kind: "environment", Attempt: "exact-attempt"}}
+		rt.sync([]EnvironmentRecipe{r}, false)
+		rt.mu.Lock()
+		done := rt.done
+		rt.mu.Unlock()
+		<-entered
+		(<-cancelOperation)()
+		select {
+		case <-done:
+		case <-time.After(testWaitTimeout):
+			t.Fatal("build cancellation did not interrupt pending authorization")
+		}
+		if err := <-outerError; err != nil {
+			t.Fatal("test withdrew the outer preparation", err)
+		}
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		if calls != 2 || rt.cancel != nil || rt.reports[r.Key].Attempt != r.Launch.Attempt || rt.reports[r.Key].State != "paused" {
+			t.Fatal("operation cancellation lost exact preparation or retained slot", calls, rt.reports[r.Key])
+		}
+	})
 }
 
 // Only the control loop uses this clock; its first ordinary tick is a named

@@ -600,8 +600,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		r.readyOnly = j.CommandDiscovery != nil || j.Spec.extensionJob() || w.Machine.SharedHost != nil
 		buildCtx := context.WithValue(ctx, preparationCustodyKey{}, s.retainPreparation)
 		j.ExecutionEvidence.EnvironmentPreparation = executionMayHaveRun
-		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(buildCtx, func() error {
-			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
+		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(buildCtx, func(ctx context.Context) error {
+			return w.authorizeLaunchContext(ctx, HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), r)
 		if err != nil {
 			return nil, s.startFailure(j, environmentFailed, err)

@@ -1236,7 +1236,7 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 	prepare := rt.prepare
 	ctx, cancel := context.WithCancel(context.Background())
 	if rt.authorize != nil {
-		ctx = withLaunchGate(ctx, func() error {
+		ctx = withLaunchGate(ctx, func(ctx context.Context) error {
 			if r.Launch == nil {
 				return ErrStale
 			}

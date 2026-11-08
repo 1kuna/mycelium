@@ -58,7 +58,7 @@ func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy b
 		ctx, cancel := context.WithCancel(context.Background())
 		launch := task.Launch
 		if rt.authorize != nil {
-			ctx = withLaunchGate(ctx, func() error {
+			ctx = withLaunchGate(ctx, func(ctx context.Context) error {
 				if launch == nil {
 					return ErrStale
 				}

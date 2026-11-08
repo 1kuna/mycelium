@@ -87,7 +87,7 @@ func (w *Worker) runBenchmark(stop context.Context, s *workerStore) error {
 	launch := *reply.BenchmarkPlan
 	ctx, cancel := context.WithCancel(stop)
 	defer cancel()
-	ctx = withLaunchGate(ctx, func() error { return w.authorizeLaunchContext(ctx, launch) })
+	ctx = withLaunchGate(ctx, func(ctx context.Context) error { return w.authorizeLaunchContext(ctx, launch) })
 	if err := checkLaunchGate(ctx); err != nil {
 		var rejected *HTTPError
 		if errors.As(err, &rejected) && rejected.Code == "request_stale" {
