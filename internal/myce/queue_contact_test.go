@@ -21,6 +21,7 @@ func TestCheckinWaitingOnQueueLockIsNotWorkerSilence(t *testing.T) {
 	}
 	c.Advance(4 * time.Second)
 	check(t, q, peer, nil)
+	arrived := c.Now()
 
 	q.mu.Lock() // A slow update holds the queue lock for 6 s.
 	done := make(chan error, 1)
@@ -46,11 +47,22 @@ func TestCheckinWaitingOnQueueLockIsNotWorkerSilence(t *testing.T) {
 	}
 	requireState(t, q, j.ID, "running")
 
-	c.Advance(q.machineLossTimeout(worker.ID))
+	// The completed six-second response also teaches wall delivery cost. Real
+	// silence must miss that arrival prediction AND the service allowance.
+	m := q.s.Machines[worker.ID]
+	opportunity, wall := q.machineLossTimeout(worker.ID), q.workerArrivalAllowance(m)
+	remaining := max(opportunity, arrived.Add(wall).Sub(c.Now()))
+	t.Logf("post-stall loss: opportunity=%s wall=%s remaining=%s", opportunity, wall, remaining)
+	advanceReportingPeer(t, q, c, peer, remaining-time.Nanosecond)
+	requireState(t, q, j.ID, "running")
+	if got := job(t, q, j.ID); got.Losses != 0 || got.InfrastructureRetries != 0 {
+		t.Fatal("loss charged before the measured silence bound", got)
+	}
+	c.Advance(time.Nanosecond)
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "queued")
-	if !q.s.Machines[worker.ID].Gone {
-		t.Fatal("quiet worker stayed joined after its last processed check-in")
+	if got := job(t, q, j.ID); !q.s.Machines[worker.ID].Gone || got.Losses != 1 || got.InfrastructureRetries != 1 {
+		t.Fatal("quiet worker escaped exact loss/retry at the measured bound", got)
 	}
 }
 
