@@ -4946,11 +4946,20 @@
         "blob": {
           "type": "string"
         },
+        "bytes_copied": {
+          "type": "integer"
+        },
         "capacity": {
           "type": "string"
         },
+        "errno": {
+          "type": "integer"
+        },
         "error": {
           "type": "string"
+        },
+        "expected_bytes": {
+          "type": "integer"
         },
         "input": {
           "type": "string"
@@ -4961,8 +4970,14 @@
         "operation": {
           "type": "string"
         },
+        "path_class": {
+          "type": "string"
+        },
         "required_bytes": {
           "type": "integer"
+        },
+        "stage": {
+          "type": "string"
         },
         "status": {
           "type": "integer"

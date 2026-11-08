@@ -59,6 +59,11 @@ func (c *workerHygieneCollector) collect(ctx context.Context) {
 		return
 	}
 	r := WorkerHygieneCollection{At: started}
+	// Refresh while idle as well as at admission: freeing unrelated disk must
+	// wake cache-blocked placement without a worker restart or a new attempt.
+	if c.w.sharedInputs != nil {
+		c.w.sharedInputs.refreshCapacity()
+	}
 	if c.w.fileCache != nil {
 		r.FileCache = c.w.fileCache.collect(ctx)
 	}
@@ -120,12 +125,12 @@ func (c *FileCache) collectionLockStorage() (*EnvironmentCache, string, error) {
 }
 
 func (c *FileCache) collect(ctx context.Context) (r CacheCollection) {
-	r.Limit = c.Limit
 	if !c.mu.TryLock() {
 		r.Busy = true
 		return r
 	}
 	defer c.mu.Unlock()
+	r.Limit = c.Limit
 	cache, key, err := c.collectionLockStorage()
 	if err != nil {
 		r.Error = "file_cache_collect_failed"
@@ -172,6 +177,15 @@ func (c *FileCache) collect(ctx context.Context) (r CacheCollection) {
 			continue
 		}
 		victims = append(victims, victim{entry.Name(), info})
+	}
+	explicit := c.Limit
+	if c.automatic {
+		explicit = 0
+	}
+	r.Limit, _, err = inputCacheBudget(c.Root, r.Bytes, explicit, c.diskProbe)
+	if err != nil {
+		r.Error = "file_cache_collect_failed"
+		return r
 	}
 	sort.Slice(victims, func(i, j int) bool { return victims[i].info.ModTime().Before(victims[j].info.ModTime()) })
 	for _, v := range victims {

@@ -2114,21 +2114,22 @@ semantics apply unchanged. Native Windows/WSL CPU qualification is later work.
 
 ## File and shared-input cache capacity
 
-From s072, omitted `--file-cache-bytes` (or `0`) selects automatic sizing at
-worker startup, using the local cache filesystem's nearest existing ancestor.
-It reuses the environment policy: `min(max(free/4, 4 GiB), 80 GiB, free-20 GiB)`;
-less than 24 GiB free refuses automatic startup. These are ceilings for **each**
-of the private file and shared-input caches, not allocations or reservations.
-The quarter fraction leaves room for both caches, environments and active work;
-the existing physical free-space floor also applies at admission. This sampled
-policy is not the native disk-isolation guarantee parked under #504/#506.
+From the release containing #1061, omitted `--file-cache-bytes` (or `0`)
+selects automatic sizing from **current** local filesystem headroom. Admission
+and the existing worker retention sweep refresh it without restarting the worker.
+The effective allowance adds occupied cache blocks to measured usable free
+space, so eviction exchanges occupied and free bytes without shrinking the
+allowance. The existing floor leaves 1% of the filesystem, at least 256 MiB,
+for filesystem metadata, logs and control state. Other caches, active work and
+external writers already reduce measured free space; concurrent shared stages
+reserve their unwritten bytes. Cache allocation is not a reservation against
+unmanaged external writers or the native disk-isolation guarantee parked under
+#504/#506. Staging rechecks current headroom and reports required/available bytes.
 
-Read-only measurements for this change found approximately 152 GiB and
-1,085 GiB free on two worker filesystems. The reused formula yields about
-38 GiB and 80 GiB, respectively, enough for the incident's 16.5 + 3.4 GiB
-file inputs. The old 10 GiB default could never hold that pair. The 80 GiB
-ceiling preserves the existing bounded environment-cache policy; this change
-does not invent a fleet-wide storage allocator or reserve disk from other writers.
+The startup-only policy in s072 through releases before #1061 used quarter-free,
+4–80 GiB ceilings and a 20 GiB reserve. Its fixed ceiling could remain too small
+after disk reclamation; #1060 records that incident. Input caches no longer use
+those startup caps. Environment and model caches keep their separate policies.
 
 `myce install worker --config CONFIG --file-cache-bytes 34359738368` retains an
 explicit 32 GiB ceiling across reinstall and signed upgrade. Saved distinct positive
@@ -2137,7 +2138,7 @@ default in an older configuration migrates to automatic mode: older settings did
 not record whether that value was explicit. New explicit settings persist that
 intent, including an explicit 10 GiB. An omitted field selects automatic mode; reinstall with `--file-cache-bytes 0`
 clears a saved override. No installer writes a machine-specific automatic size:
-the worker recomputes it from its actual filesystem at each startup.
+the worker refreshes it from its actual filesystem during admission and retention.
 
 Workers report shared-input capacity, free and evictable bytes without cache
 scans in check-in. Discovery and accounting run at startup and cache changes,

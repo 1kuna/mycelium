@@ -194,7 +194,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 		if err != nil {
 			return withStagingCause(name, FileRef{}, "nas_read", err)
 		}
-		return withStagingCause(name, FileRef{}, "copy", copyJobFileContext(ctx, p, filepath.Join(staged, name)))
+		return withStagingCause(name, FileRef{}, "copy", copyNASInput(ctx, w.Client, p, filepath.Join(staged, name), nil, nil))
 	}); err != nil {
 		return err
 	}

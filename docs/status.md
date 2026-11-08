@@ -144,6 +144,11 @@ Old CLIs continue to decode the existing fields.
 From s072, machine `shared_input_cache` reports `capacity_bytes`, `free_bytes`
 and `evictable_bytes`. Free space excludes cache allocation and outstanding
 staging reservations; evictable space contains only inactive reproducible entries.
+From #1061, automatic capacity follows current headroom during admission and the
+existing worker retention sweep. Free bytes exclude unwritten reservation bytes,
+without charging already written prefixes twice. Inactive resumable prefixes are
+evictable; a detached writer keeps its build lock and remaining-byte reservation.
+Explicit cache ceilings and the filesystem control-space floor still bind.
 `protected` maps cache identities to allocated bytes held by readers/custody, so
 placement can reuse an already held input without charging it twice. Check-ins
 copy an in-memory snapshot; cache discovery does not run under the queue mutex.
@@ -723,7 +728,15 @@ it resolves the actual managed workspace and symlinks on that host.
 
 Input-staging failures carry `execution_cause.staging` on the job and exact
 attempt history: `input`, `blob` (SHA-256), `operation`, `error`, optional
-`syscall`, and optional HTTP `status`. Capacity failures also name `capacity`
+`syscall`, and optional HTTP `status`. From the next worker release, shared-input
+failures also retain `stage` (for example read, write, sync, verify or headers),
+`path_class` (source, cache or store), `bytes_copied`, `expected_bytes`, and
+numeric OS `errno` when supplied. A timeout snapshots the currently active
+operation even if its private writer finishes later. Byte counts describe the
+active file's materialization, including a resumed prefix or successful clone;
+verification does not add copied bytes. Missing errno means no OS errno was
+observed, rather than EIO. Zero fields may be omitted; older workers omit these
+fields entirely. Capacity failures also name `capacity`
 and byte comparisons (`required_bytes`, `available_bytes`, `limit_bytes`;
 zero values may be omitted). Names are bound to declared and resolved dependency inputs;
 expanded worker paths and raw upstream text are excluded. `myce logs JOB_ID`

@@ -1098,7 +1098,10 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 	}
 	return c.hasFile(ctx, ref, headPurpose)
 }
-func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) error {
+func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) (stageErr error) {
+	traceSharedFile(ctx, ref)
+	defer func() { stageErr = tracedSharedError(ctx, stageErr) }()
+	traceSharedInput(ctx, "prepare", "cache")
 	if err := ref.validate(); err != nil {
 		return err
 	}
@@ -1120,11 +1123,13 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	if err := noModelSymlinks(dest, true); err != nil {
 		return err
 	}
+	traceSharedInput(ctx, "open", "cache")
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	traceSharedInput(ctx, "stat", "cache")
 	st, err := f.Stat()
 	if err != nil {
 		return err
@@ -1139,12 +1144,14 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 				return err
 			}
 		}
+		traceSharedInput(ctx, "verify", "cache")
 		return verifyFile(ctx, dest, ref)
 	}
 	headers := map[string]string{"If-Range": `"` + ref.SHA256 + `"`}
 	if offset > 0 {
 		headers["Range"] = fmt.Sprintf("bytes=%d-", offset)
 	}
+	traceSharedInput(ctx, "headers", "store")
 	res, err := c.fileRequest(ctx, "GET", "/api/files/blobs/"+ref.SHA256, nil, headers, ref.SizeBytes)
 	if err != nil {
 		return err
@@ -1175,13 +1182,28 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
-	n, err := copyFileDownload(f, io.LimitReader(contextReader{ctx, res.Body}, ref.SizeBytes-offset+1))
+	var output io.Writer = f
+	var input io.Reader = res.Body
+	if t, ok := ctx.Value(sharedInputTraceKey{}).(*sharedInputTrace); ok {
+		t.mu.Lock()
+		t.detail.BytesCopied = offset
+		t.mu.Unlock()
+		output, input = sharedInputWriter{ctx, f}, sharedInputReader{ctx, res.Body, "store"}
+	}
+	n, copyErr := io.Copy(fileDownloadWriter{output}, io.LimitReader(contextReader{ctx, input}, ref.SizeBytes-offset+1))
+	copyErr = tracedSharedCopyError(ctx, copyErr)
+	traceSharedInput(ctx, "sync", "cache")
+	err = copyErr
+	if syncErr := f.Sync(); syncErr != nil {
+		err = fmt.Errorf("%w: %w", errFileTransferLocal, tracedSharedError(ctx, syncErr))
+	}
 	if err != nil {
 		return err
 	}
 	if n != ref.SizeBytes-offset {
 		return errors.New("download interrupted or oversized")
 	}
+	traceSharedInput(ctx, "verify", "cache")
 	return verifyFile(ctx, dest, ref)
 }
 
