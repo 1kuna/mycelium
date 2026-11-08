@@ -1,8 +1,10 @@
 # Decisions
 
-Reviewed: 2026-11-06 (MY-35). Owner: project maintainer. This records sanitized rulings; [the approved design](design-proposal.md) remains the only product spec. Dates identify the original rulings, not new qualification. Exact source records and deployment facts remain in private local history.
+Reviewed: 2026-11-08 (MY-36). Owner: project maintainer. This records sanitized rulings; [the approved design](design-proposal.md) remains the only product spec. Dates identify the original rulings, not new qualification. Exact source records and deployment facts remain in private local history.
 
 ## Current rulings
+
+- **MY-36 — 2026-11-08 — Never hold other consumers for one consumer's production.** Mycelium must not pause, hold or ask other projects to stop submitting because one consumer has a production run, a deadline or a pending fix release. Protect production only with the narrowest mechanism that addresses an evidenced conflict: class and priority, a job-local exclusion of one contended host, or cancelling or holding Mycelium's own jobs. Lift it when the conflict ends. Source: maintainer, 2026-11-08, sanitized: other projects must never again be stopped because of one consumer's production hold. Relationships: applies with MY-33 (production runs are protected from patches, not by stopping other consumers) and MY-34 (shed or yield only under real contention).
 
 - **Orchestrator default — 2026-11-07 — Known, owned main failures do not block unrelated merges.** A failure on main is known and owned when an open issue or PR names it and has an owner. It does not block merging an unrelated PR when the PR's exact-head full gate fails only in that known test, or when the main run hit a known capacity cancellation (`main-full` cancelled at GitHub's six-hour limit), provided every other test passes with no race or panic. The PR must name the known failure, its owning issue and the failing job ID. Any new or unexplained failure still blocks. Examples in force on 2026-11-07: `TestDevCommandQuickstart` (#957/#958) and `TestPreDeployModelCopyFaults` (#944/#945). Source: orchestrator default, 2026-11-07; not a maintainer ruling. Relationships: narrows the [main-failure merge hold](development.md#automatic-main-full-gates) only for these known, owned failures; exact-head gate and independent-review requirements remain.
 
