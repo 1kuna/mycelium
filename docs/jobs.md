@@ -749,8 +749,8 @@ deadline expiry wins; a previously accepted start is not failed by `start_by`.
 This records an accepted hand-off, not proof of successful physical exec or
 model readiness. A private exec-helper pipe holds plain-command execution until
 the positive reply; managed Docker uses the same confirmation before its start
-operation. From the release containing #1028, a slow or unreachable control
-plane retains the same gated execution and custody without charging a loss or
+operation. From the release containing #1028, a slow control-plane response
+retains the same gated execution and custody without charging a loss or
 retry. Ambiguous transport replies replay the same exact identity with measured
 request-RTT pacing and jitter. Typed refusal, stale custody and cancellation
 refuse execution. A Started replay rechecks live fences and returns the original
@@ -761,7 +761,10 @@ attempt started in the queue but unexecuted until that same worker reconciles
 the reply. Cancellation can stop a stalled handshake and release only its exact
 local execution; elapsed time never proves release. There is no automatic
 handshake lifetime: caller cancellation, explicit job deadlines, and actual
-refusals remain authoritative.
+refusals remain authoritative. A completed connection-establishment failure ends
+the handshake with `control_unreachable`; it cannot authorize payload execution
+or prove that an earlier request was not committed. Exact local cleanup and
+release reconciliation still apply before replacement.
 Deploy the matching queue and workers together. Check-in requires the durable-start
 protocol marker; older workers receive HTTP 426 before assignment. Production
 workers also require an explicit matching durable-start answer and `start_by`,

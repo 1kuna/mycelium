@@ -497,3 +497,6 @@ and explicit job deadlines still apply; local cleanup must prove exact release
 before replacement. A silent control connection can remain pending until its
 owner cancels or transport returns; time alone cannot authorize execution or
 prove release. This requires the matching queue and worker release.
+Connection-establishment failure returns `control_unreachable` instead of
+retrying indefinitely. It does not revoke an earlier durable start or prove
+release: exact process cleanup and queue reconciliation still gate replacement.

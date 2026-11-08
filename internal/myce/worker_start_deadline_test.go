@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -21,7 +23,7 @@ import (
 // #225: exercise the production worker's complete gate/exec receipt path
 // against the HTTP Started handler delayed behind the real queue mutex.
 func TestWorkerStartHandoffQueueWait(t *testing.T) {
-	for _, state := range []string{"current", "cancelled", "lost-reply", "cancel-after-commit"} {
+	for _, state := range []string{"current", "cancelled", "lost-reply", "cancel-after-commit", "outage-after-commit"} {
 		t.Run(state, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("one", "fake")
@@ -34,7 +36,7 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			handler := (API{Queue: q, Token: "test"}).Handler()
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/api/workers/started" && calls.Add(1) == 1 && state != "lost-reply" && state != "cancel-after-commit" {
+				if r.URL.Path == "/api/workers/started" && calls.Add(1) == 1 && state != "lost-reply" && state != "cancel-after-commit" && state != "outage-after-commit" {
 					q.mu.Lock()
 					// Real I/O and mutex waits cannot use synctest time.
 					select {
@@ -53,11 +55,22 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			}))
 			defer server.Close()
 			w := Worker{control: &processControl{clock: clock}, StateDir: newTestStateRoot(t), Machine: m, Clock: clock, Client: Client{URL: server.URL, Token: "test"}}
-			if state == "lost-reply" || state == "cancel-after-commit" {
+			if state == "lost-reply" || state == "cancel-after-commit" || state == "outage-after-commit" {
 				var dropped atomic.Bool
 				w.Client.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+					if state == "outage-after-commit" && r.URL.Path == "/api/workers/started" && dropped.Load() {
+						return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+					}
 					response, err := http.DefaultTransport.RoundTrip(r)
 					if err == nil && r.URL.Path == "/api/workers/started" && !dropped.Swap(true) {
+						if state == "lost-reply" {
+							// A replayable acknowledgement must not admit another native
+							// process for this attempt while the first still owns custody.
+							replacement := NativeCustodyReport{Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Machine: a.Machine, Session: a.Session, ProcessID: "duplicate-process", CustodyID: "duplicate-group", Phase: "reserved"}
+							if err := q.NativeCustody(replacement); !errors.Is(err, ErrStale) {
+								t.Error("durable Started admitted duplicate process", err)
+							}
+						}
 						if state == "cancel-after-commit" {
 							if err := q.Cancel(a.ID); err != nil {
 								t.Error(err)
@@ -104,6 +117,23 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if state == "outage-after-commit" {
+					if f.result.ExecutionCause == nil || f.result.ExecutionCause.Class != "control_unreachable" || f.result.ReleasePending {
+						t.Fatalf("outage lost typed cause or exact cleanup: %+v", f.result)
+					}
+					// Local empty-group proof is not a queue release. Retain
+					// the committed attempt until its exact result reconciles.
+					before := job(t, q, a.ID)
+					if before.ReleaseConfirmed || before.StartedAt == nil || before.Copies[0].ReleaseConfirmed {
+						t.Fatal("outage invented queue release", before)
+					}
+					if err := q.Complete(f.result); err != nil {
+						t.Fatal(err)
+					}
+					if !job(t, q, a.ID).Copies[0].ReleaseConfirmed {
+						t.Fatal("outage did not release exact custody")
+					}
+				}
 			case <-time.After(testWaitTimeout):
 				p.stop(clock.Now(), 0, true)
 				t.Fatal("delayed start did not finish")
@@ -113,11 +143,11 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			if state == "lost-reply" {
 				wantCalls = 2
 			}
-			if calls.Load() != wantCalls || got.Starts != 1 || got.Losses != 0 || got.InfrastructureRetries != 0 || (got.StartedAt != nil) != (state != "cancelled") {
+			if calls.Load() != wantCalls || got.Starts != 1 || state != "outage-after-commit" && (got.Losses != 0 || got.InfrastructureRetries != 0 || (got.StartedAt != nil) != (state != "cancelled")) {
 				t.Fatalf("handoff duplicated or escaped its fence: calls=%d job=%+v", calls.Load(), got)
 			}
 			data, err := os.ReadFile(filepath.Join(p.job.Spec.Run.Workdir, "executions"))
-			if (state == "current" || state == "lost-reply") && (err != nil || string(data) != "x") || (state == "cancelled" || state == "cancel-after-commit") && !os.IsNotExist(err) {
+			if (state == "current" || state == "lost-reply") && (err != nil || string(data) != "x") || (state == "cancelled" || state == "cancel-after-commit" || state == "outage-after-commit") && !os.IsNotExist(err) {
 				t.Fatalf("wrong payload execution count: state=%s marker=%q err=%v", state, data, err)
 			}
 			// An old session cannot obtain an additional positive hand-off.
@@ -183,6 +213,38 @@ func TestWorkerStartHandoffOwnerCancellation(t *testing.T) {
 			t.Fatalf("owner cancellation lost: calls=%d elapsed=%v err=%v", calls, time.Since(start), err)
 		}
 	})
+}
+
+// A completed dial refusal is positive outage evidence, unlike a slow response
+// or a lost reply after commit. Every handshake must return its typed cause.
+func TestWorkerControlHandshakeUnreachable(t *testing.T) {
+	for _, boundary := range []string{"started", "launch", "native-custody"} {
+		t.Run(boundary, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+				defer cancel()
+				calls := 0
+				w := Worker{launchCtx: ctx, Client: Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
+					calls++
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+				})}}}
+				started := time.Now()
+				var err error
+				switch boundary {
+				case "started":
+					err = w.authorizeStart(Job{}, "session")
+				case "launch":
+					err = w.authorizeLaunch(HostLaunch{})
+				case "native-custody":
+					err = w.reportNativeCustody(Job{}, "session", "execution", "custody", "reserved")
+				}
+				cause := runtimeDiagnostic(runtimeErrorFor("start_authorization", err))
+				if calls != 1 || time.Since(started) != 0 || !errors.Is(err, syscall.ECONNREFUSED) || cause.Class != "control_unreachable" {
+					t.Fatalf("outage did not return typed cause immediately: calls=%d elapsed=%v cause=%+v err=%v", calls, time.Since(started), cause, err)
+				}
+			})
+		})
+	}
 }
 
 // Fake-clock API replay: completed request RTT, rather than report cadence,

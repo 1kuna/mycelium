@@ -151,14 +151,12 @@ func TestProductionStartGateUnreachableDoesNotExecute(t *testing.T) {
 	}
 	defer store.close()
 	store.state.Session = a.Session
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	retries := 0
-	w.Client.Pause = func(context.Context, time.Duration) error { retries++; cancel(); return context.Canceled }
-	p, e := startAfterFixtureInputsContext(t, ctx, w, store, *a)
+	w.Client.Pause = func(context.Context, time.Duration) error { retries++; return errors.New("unexpected outage retry") }
+	p, e := startAfterFixtureInputs(t, w, store, *a)
 	// The durable custody gate precedes supervisor creation and Started.
-	if p != nil || !errors.Is(e, errWorkerStartAuthorization) || !errors.Is(e, context.Canceled) || retries != 1 {
-		t.Fatalf("unreachable queue did not remain gated until owner cancellation: process=%v err=%v", p, e)
+	if p != nil || !errors.Is(e, errWorkerStartAuthorization) || !errors.Is(e, errWorkerControlUnreachable) || retries != 0 {
+		t.Fatalf("unreachable queue did not refuse execution immediately: process=%v err=%v", p, e)
 	}
 
 	if _, e = os.Stat(filepath.Join(w.StateDir, "job-files", a.ID, "1", "ran")); !os.IsNotExist(e) {

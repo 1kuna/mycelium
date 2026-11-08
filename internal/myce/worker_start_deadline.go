@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"sync"
 	"time"
 )
 
 var errWorkerStartAuthorization = errors.New("queue start authorization unavailable")
+var errWorkerControlUnreachable = errors.New("queue control endpoint unreachable")
 
 // Distinguish the Started boundary while retaining the authorization family
 // used by adapters to keep control-plane failures out of stage-failure paths.
@@ -43,7 +45,7 @@ func (s *workerControlLatency) observe(path string, elapsed time.Duration) time.
 }
 
 // A handshake owns one in-flight request until it completes or its owner stops.
-// A transport failure is ambiguous: the queue may have committed before losing
+// A lost reply is ambiguous: the queue may have committed before losing
 // the reply. Replay only these idempotent exact-custody operations, with the
 // same identity and the ordinary measured client pacing. Elapsed time never
 // proves refusal or release and never creates a new execution.
@@ -77,6 +79,14 @@ func (w Worker) controlHandshake(path string, in, out any) (time.Time, error) {
 			// Decode only the final complete reply; a truncated reply cannot leave
 			// authorization fields behind for a later incomplete response.
 			return started, json.Unmarshal(body, out)
+		}
+		// A completed dial failure means this request never reached the queue.
+		// Stop with positive outage evidence so launch cleanup can run.
+		// This does not prove any earlier request uncommitted,
+		// nor release custody; the caller still cleans its exact local process.
+		var connect *net.OpError
+		if errors.As(err, &connect) && connect.Op == "dial" {
+			return time.Time{}, fmt.Errorf("%w: %w", errWorkerControlUnreachable, err)
 		}
 		// A per-request transport deadline is not the attempt owner's deadline.
 		// Typed refusals (including stale custody) and protocol errors stop now.
