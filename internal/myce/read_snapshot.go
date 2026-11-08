@@ -143,9 +143,30 @@ func decodeReadJob(data []byte) (*Job, error) {
 	return out, err
 }
 
-// Persisted JSON is already valid. Locate only the top-level ledger value,
+type readSubmissionJob Job
+
+func (j *readSubmissionJob) UnmarshalJSON(data []byte) error {
+	value, err := decodeReadJob(data)
+	*j = readSubmissionJob(*value)
+	return err
+}
+
+func decodeReadSubmission(data []byte) (*submissionRecord, error) {
+	type submission submissionRecord
+	out := &submissionRecord{}
+	wire := struct {
+		*submission
+		Job *readSubmissionJob `json:"job"`
+	}{submission: (*submission)(out)}
+	err := json.Unmarshal(data, &wire)
+	out.Job = (*Job)(wire.Job)
+	return out, err
+}
+
+// Persisted JSON is already valid and compact. Locate the job's ledger value,
 // without tokenizing its strings or allocating its retained execution history.
-func readJobLedgerSpan(data []byte) (int, int) {
+// A submission record contains the job one object level deeper.
+func readJobLedgerSpan(data []byte, jobDepth int) (int, int) {
 	depth, quoted, escaped := 0, false, false
 	for i, c := range data {
 		if quoted {
@@ -159,7 +180,7 @@ func readJobLedgerSpan(data []byte) (int, int) {
 			continue
 		}
 		if c == '"' {
-			if depth == 1 && bytes.HasPrefix(data[i:], []byte(`"ledger_entries":`)) {
+			if depth == jobDepth && bytes.HasPrefix(data[i:], []byte(`"ledger_entries":`)) {
 				start := i
 				end := i + len(`"ledger_entries":`)
 				nesting, inString, escape := 0, false, false
@@ -223,9 +244,7 @@ func (r *readRecord) decode(key string) (any, error) {
 			r.err = json.Unmarshal(r.data, out)
 			r.value = out
 		case "submissions":
-			out := &submissionRecord{}
-			r.err = json.Unmarshal(r.data, out)
-			r.value = out
+			r.value, r.err = decodeReadSubmission(r.data)
 		case "extensions":
 			out := &Extension{}
 			r.err = json.Unmarshal(r.data, out)
@@ -637,7 +656,9 @@ func (g *readGeneration) chargeDecode(ctx context.Context, live bool, selected s
 		data := r.data
 		start, end := 0, 0
 		if group == "jobs" {
-			start, end = readJobLedgerSpan(data)
+			start, end = readJobLedgerSpan(data, 1)
+		} else if group == "submissions" {
+			start, end = readJobLedgerSpan(data, 2)
 		}
 		// The immutable source bytes are already resident. Only non-ledger
 		// bytes require token scratch/copies; discarded ledger values are

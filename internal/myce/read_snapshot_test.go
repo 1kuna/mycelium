@@ -44,6 +44,41 @@ func TestReadSnapshotColdReceiptDiscardsLedgerBeforeBudgeting(t *testing.T) {
 	}
 }
 
+func TestReadSnapshotColdKeyedStatusDiscardsLedgerBeforeBudgeting(t *testing.T) {
+	for _, endpoint := range []string{"/api/status", "/api/status?jobs=active"} {
+		t.Run(endpoint, func(t *testing.T) {
+			q, _ := fixture(t)
+			s := spec("experiment")
+			s.SubmissionKey = "keyed-ledger"
+			j := submit(t, q, s)
+			if err := q.update(func() error {
+				live := q.touchJob(j.ID)
+				live.State, live.ReleaseConfirmed = "succeeded", true
+				for i := range 10000 {
+					live.LedgerEntries = append(live.LedgerEntries, JobLedgerEntry{Sequence: i + 1, Reason: strings.Repeat("retained history", 8)})
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			budgetHost(q, 2<<20, 1)
+			r := httptest.NewRequest("GET", endpoint, nil)
+			r.Header.Set("Authorization", "Bearer test")
+			w := httptest.NewRecorder()
+			API{q, "test"}.Handler().ServeHTTP(w, r)
+			if w.Code != 200 {
+				t.Fatal("embedded ledger prevented cold status", w.Code, w.Body.String())
+			}
+			if len(q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)].Job.LedgerEntries) != 10000 {
+				t.Fatal("read discarded durable ledger")
+			}
+			if q.requestBudgets.held != 0 {
+				t.Fatal("decode capacity leaked")
+			}
+		})
+	}
+}
+
 func TestReadSnapshotLogRefreshesMachineWithoutControlCommit(t *testing.T) {
 	q, clock := fixture(t)
 	submit(t, q, spec("experiment"))
