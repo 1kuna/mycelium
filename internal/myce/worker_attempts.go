@@ -1259,15 +1259,15 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			if m.IOPressure != nil {
 				m.IOPressure.AgeSeconds = max(0, w.Clock.Now().Sub(m.IOPressure.SampledAt).Seconds())
 			}
-			m.HostHealth = health.snapshot(m.DiskVolumes)
-			applyHostMountHealth(w, &m)
-			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			if m.CapabilityProfile != nil {
 				a := w.availability.snapshot()
 				m.CapabilityProfile.Availability = &a
 			}
 			// Snapshot at send time: preparation must not disappear from the
 			// sensor age, and report-gap learning includes the entire control path.
+			m.HostHealth = health.report(m.DiskVolumes)
+			applyHostMountHealth(w, &m)
+			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
 			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()
