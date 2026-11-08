@@ -57,6 +57,13 @@ func TestEnvironmentRecipeStoreSubmissionAndSweep(t *testing.T) {
 				} else {
 					var answer submissionRecord
 					err = json.Unmarshal(data, &answer)
+					if err != nil {
+						t.Fatal("invalid keyed recipe answer", err)
+					}
+					if answer.Job == nil && answer.JobID != "" {
+						jobData := durableQueueRecord(t, q.db, "jobs/"+answer.JobID)
+						err = json.Unmarshal(jobData, &answer.Job)
+					}
 					if err != nil || answer.Job == nil {
 						t.Fatal("missing keyed recipe job", err)
 					}

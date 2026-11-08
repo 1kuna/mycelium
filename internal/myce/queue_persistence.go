@@ -103,6 +103,9 @@ func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
 // Immutable history stays in SQLite but is not rewritten by each heartbeat.
 // Compare canonical JSON in memory; SQLite sees only changed logical records.
 func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[string][]byte, error) {
+	if q.persistencePageBytes <= 0 {
+		return nil, fmt.Errorf("queue persistence page size is not initialized")
+	}
 	next := map[string][]byte{}
 	exec := func(query string, args ...any) (sql.Result, error) {
 		started := holdNow(q.holdClock)

@@ -180,6 +180,18 @@ func TestQueuePersistenceLegacyMigration(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Genuine v1 keyed answers embed the complete last durable job.
+	legacy := make(map[string][]byte, len(q.persisted))
+	for key, data := range q.persisted {
+		legacy[key] = data
+	}
+	for key, record := range q.s.Submissions {
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy["submissions/"+key] = data
+	}
 	tx, err := q.db.Begin()
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +200,7 @@ func TestQueuePersistenceLegacyMigration(t *testing.T) {
 	if _, err = tx.Exec("DELETE FROM queue_state"); err != nil {
 		t.Fatal(err)
 	}
-	for key, data := range q.persisted {
+	for key, data := range legacy {
 		if _, err = tx.Exec("INSERT INTO queue_state(key,data) VALUES(?,?)", key, data); err != nil {
 			t.Fatal(err)
 		}
@@ -197,6 +209,28 @@ func TestQueuePersistenceLegacyMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// Resume the old layout in this fixture without a startup write, then
+	// force the marker's final write to fail after all field writes ran.
+	q.fragmented = false
+	q.persisted = legacy
+	q.persistenceFieldsCache = nil
+	if _, err := q.db.Exec(`CREATE TRIGGER reject_migration BEFORE UPDATE ON queue BEGIN SELECT RAISE(ABORT,'migration interrupted'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error { return nil }); err == nil {
+		t.Fatal("interrupted migration committed")
+	}
+	var retainedMarker []byte
+	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&retainedMarker); err != nil || !bytes.Equal(retainedMarker, legacyNormalizedQueueMarker) {
+		t.Fatal("failed migration published format marker", err)
+	}
+	var fragmentCount int
+	if err := q.db.QueryRow("SELECT count(*) FROM queue_state WHERE key GLOB 'fields/*'").Scan(&fragmentCount); err != nil || fragmentCount != 0 {
+		t.Fatal("failed migration leaked fragments", fragmentCount, err)
+	}
+	if _, err := q.db.Exec("DROP TRIGGER reject_migration"); err != nil {
 		t.Fatal(err)
 	}
 	q = reopenQueue(t, q, clock)
