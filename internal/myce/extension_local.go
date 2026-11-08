@@ -157,6 +157,10 @@ func ExtensionFingerprint(ctx context.Context, platform, device string) (string,
 }
 
 func extensionFingerprintFrom(ctx context.Context, platform, device string, identity func() MachineProbe) (string, error) {
+	return extensionFingerprintWithInventory(ctx, platform, device, identity, nil)
+}
+
+func extensionFingerprintWithInventory(ctx context.Context, platform, device string, identity func() MachineProbe, inventory func(context.Context) ([]MachineDevice, error)) (string, error) {
 	if platform == "cpu" {
 		device = ""
 	}
@@ -195,7 +199,10 @@ func extensionFingerprintFrom(ctx context.Context, platform, device string, iden
 		// Runtime ordinals select a component; they are not its identity. Reuse
 		// the shared PCI/Level Zero probe instead of hashing incidental OpenCL
 		// enumeration (which can differ between a shell and the worker).
-		devices, err := probe.Accelerators(ctx)
+		if inventory == nil {
+			inventory = probe.Accelerators
+		}
+		devices, err := inventory(ctx)
 		var selected *MachineDevice
 		for i := range devices {
 			d := &devices[i]

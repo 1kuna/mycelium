@@ -48,6 +48,25 @@ A slow pending scan never extends the previous observation. A completed failure
 removes it immediately. Inventory retains stable device identity, but stale or
 failed capacity cannot qualify work; partial driver failures preserve fresh
 healthy siblings. Direct launch ownership/identity checks remain mandatory.
+Inventory compares hardware, topology, configuration and health, excluding
+telemetry timestamps, activity counters, free memory and a unified device's
+live uncapped budget. Workload activity cannot reset discovery backoff. Each
+pass reuses its device enumeration for XPU qualification fingerprints and
+shares identical fingerprint commands across cards; fingerprint bytes remain
+compatible with existing qualification records.
+
+Discrete XPU telemetry has its own observation lane. One host-wide `xpu-smi`
+CSV query supplies PCI-keyed memory counters for all cards, at most once per
+existing five-second device-consumer interval (or the slower control/probe-cost
+cadence). Xe PMU activity remains per PCI device. A missing tool, unsupported
+counter, missing row or duplicate PCI row supplies unknown memory. Results keep
+their original sample start, and merge only into matching device/driver,
+selector, topology and reserve observations. Missing or ten-second-old samples
+cannot authorize telemetry-dependent sharing. A slow query never blocks
+discovery, check-ins or starts another copy of itself. Per-device runtime
+fallbacks use private device-affinity environments where supported; a full
+inventory or host-wide telemetry query intentionally covers the host.
+
 For an already assigned attempt, a fresh direct launch probe can establish
 recovery from a cached `device_probe_unavailable` observation. The direct probe
 must still succeed, identify exactly the assigned device and report healthy
@@ -132,3 +151,20 @@ These are laptop proofs. Native daemon, GPU driver stress, thermal cycles,
 Windows session bridge, OS hang reproduction and representative daily-owner
 latency under load require a separately authorized maintenance run. No native
 hang-cause attribution, fleet change or deployment is implied.
+
+`TestInventoryHelperLaunchMeasurement` measures an instrumented two-card fake
+inventory for one simulated minute, with a one-second heartbeat, 250ms scan
+cost and two CPU cores. The former per-card fingerprint/query path launches
+174 enumeration and 116 memory helpers; the corrected path launches 35 and 12.
+This compares launch counts, not native driver overhead or throughput. No
+production GPU or compute workload is exercised.
+
+After an authorized deploy, the operator can compare equal-duration kernel-log
+windows before and after worker activation: count peer-to-peer DMA warnings per
+elapsed minute and record helper launches, observation cost/period, sample age,
+workload occupancy and driver errors. Use existing logs and read-only process
+observations; do not start GPU stress or extra driver probes on a production
+host. Exclude the activation window from steady-state rates and compare similar
+occupancy. Expected evidence is fewer enumeration/memory helpers and fewer
+warnings without stale data granting sharing. A warning-rate reduction alone
+does not establish the cause of compute timeouts; track those independently.

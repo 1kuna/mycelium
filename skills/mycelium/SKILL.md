@@ -485,3 +485,7 @@ now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
 [host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).
+From the next release, hardware discovery backs off independently of changing
+device usage. Discrete XPU memory/activity uses a separate shared host sample;
+missing, ambiguous or stale counters remain unknown and withhold
+telemetry-dependent sharing. A heartbeat never refreshes a cached sample's age.

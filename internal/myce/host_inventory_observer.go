@@ -3,7 +3,9 @@ package myce
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,18 +17,55 @@ func (w Worker) inventorySource() func(context.Context) ([]MachineDevice, error)
 	identity := extensionIdentityProbe
 	return func(ctx context.Context) ([]MachineDevice, error) {
 		devices, err := probeInventory(ctx)
+		devices = slices.Clone(devices)
+		probe := identity()
+		// Qualification hashes retain their existing bytes, while common OS and
+		// driver commands run once for this immutable inventory pass.
+		type result struct {
+			data []byte
+			err  error
+		}
+		cache := map[string]result{}
+		command := probe.Command
+		probe.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			key := name + "\x00" + strings.Join(args, "\x00")
+			if r, ok := cache[key]; ok {
+				return r.data, r.err
+			}
+			data, err := command(ctx, name, args...)
+			cache[key] = result{data, err}
+			return data, err
+		}
 		for i := range devices {
 			d := &devices[i]
-			d.ExtensionFingerprint, _ = extensionFingerprintFrom(ctx, d.Platform, d.ID, identity)
+			d.ExtensionFingerprint, _ = extensionFingerprintWithInventory(ctx, d.Platform, d.ID, func() MachineProbe { return probe }, func(context.Context) ([]MachineDevice, error) { return devices, err })
 		}
 		return devices, err
 	}
+}
+
+// Discovery responds to identity, topology, configuration and health changes,
+// not wall time or workload activity. In particular, free unified RAM also
+// changes its uncapped budget; neither is a hardware change.
+func sameInventory(a, b []MachineDevice) bool {
+	semantic := func(devices []MachineDevice) []MachineDevice {
+		out := slices.Clone(devices)
+		for i := range out {
+			out[i].Telemetry, out[i].FreeMemoryGB = nil, 0
+			if out[i].UnifiedMemory {
+				out[i].BudgetGB = 0
+			}
+		}
+		return out
+	}
+	return reflect.DeepEqual(semantic(a), semantic(b))
 }
 
 // Inventory is an observation lane, not an attempt sampler. No per-host driver
 // latency default kills a progressing scan; cancellation owns its lifetime.
 // A pending scan retains identity but never indefinitely retains live capacity.
 func sampleHostInventory(ctx context.Context, lane *hostProbeLane[[]MachineDevice], source func(context.Context) ([]MachineDevice, error)) ([]MachineDevice, error) {
+	lane.equal = sameInventory
 	lane.step(ctx, source)
 	return hostInventorySnapshot(lane)
 }
@@ -44,20 +83,46 @@ func hostInventorySnapshot(lane *hostProbeLane[[]MachineDevice]) ([]MachineDevic
 
 // Inventory progresses independently of check-in duration and control ticks.
 type hostInventoryObserver struct {
-	mu   sync.Mutex
-	lane hostProbeLane[[]MachineDevice]
+	mu              sync.Mutex
+	lane            hostProbeLane[[]MachineDevice]
+	telemetry       hostProbeLane[[]MachineDevice]
+	sampleTelemetry func(context.Context, []MachineDevice) ([]MachineDevice, error)
 }
 
 func (m *hostInventoryObserver) snapshot() ([]MachineDevice, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return hostInventorySnapshot(&m.lane)
+	devices, err := hostInventorySnapshot(&m.lane)
+	if m.telemetry.fresh(m.lane.clock.Now()) {
+		for i := range devices {
+			for _, sampled := range m.telemetry.value {
+				if devices[i].ID == sampled.ID && devices[i].Platform == sampled.Platform && devices[i].Identity == sampled.Identity && devices[i].Selector == sampled.Selector && devices[i].Fingerprint == sampled.Fingerprint && devices[i].pciAddress == sampled.pciAddress && devices[i].ReserveMemoryGB == sampled.ReserveMemoryGB && devices[i].UnifiedMemory == sampled.UnifiedMemory && devices[i].Reason == "" {
+					devices[i].Telemetry = sampled.Telemetry
+					if deviceTelemetryFresh(sampled.Telemetry, m.lane.clock.Now()) && sampled.Telemetry.FreeGB != nil {
+						devices[i].FreeMemoryGB = min(devices[i].FreeMemoryGB, *sampled.Telemetry.FreeGB)
+					}
+				}
+			}
+		}
+	}
+	return devices, err
 }
 func (m *hostInventoryObserver) run(ctx context.Context, source func(context.Context) ([]MachineDevice, error)) {
+	m.lane.equal = sameInventory
+	m.telemetry.clock = m.lane.clock
+	// Sharing consumes device samples every five seconds and expires them
+	// after one missed sample. Faster queries cannot extend that contract.
+	m.telemetry.timing = probeTiming{base: max(deviceMemorySamplePeriod, m.lane.timing.controlPeriod()), cores: m.lane.timing.cores}
 	for {
 		m.mu.Lock()
 		m.lane.step(ctx, source)
 		wait, done := m.lane.waitDuration(), m.lane.done
+		if m.sampleTelemetry != nil && len(m.lane.value) > 0 {
+			devices, _ := hostInventorySnapshot(&m.lane)
+			m.telemetry.step(ctx, func(ctx context.Context) ([]MachineDevice, error) { return m.sampleTelemetry(ctx, devices) })
+			wait = min(wait, m.telemetry.waitDuration())
+		}
+		telemetryDone := m.telemetry.done
 		m.mu.Unlock()
 		timer := time.NewTimer(wait)
 		select {
@@ -66,6 +131,7 @@ func (m *hostInventoryObserver) run(ctx context.Context, source func(context.Con
 			return
 		case <-timer.C:
 		case <-done:
+		case <-telemetryDone:
 		}
 		timer.Stop()
 	}

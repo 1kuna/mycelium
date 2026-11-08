@@ -550,7 +550,14 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 		if d.UnifiedMemory && configured.Machine.FreeMemoryGB == 0 {
 			d.BudgetGB = d.FreeMemoryGB
 		}
-		w.sampleXPUTelemetry(ctx, probe, d)
+		if d.Platform == "xpu" && !d.UnifiedMemory {
+			// Live telemetry is sampled separately from hardware discovery.
+			clock := w.Clock
+			if clock == nil {
+				clock = RealClock{}
+			}
+			d.Telemetry = &DeviceTelemetry{At: clock.Now(), Source: "XPU telemetry not yet sampled"}
+		}
 	}
 	return physical, err
 }
