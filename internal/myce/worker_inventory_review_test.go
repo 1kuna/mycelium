@@ -19,7 +19,10 @@ func awaitInventoryReview(t *testing.T, ready func() bool) {
 	t.Helper()
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
-	timeout := time.NewTimer(5 * time.Second)
+	// A real check-in can wait behind queue I/O: the fleet gate recorded a
+	// 5.686s mutex wait while this five-second fixture deadline was running.
+	// Use the shared worker fixture backstop; it does not bound product work.
+	timeout := time.NewTimer(testWaitTimeout)
 	defer timeout.Stop()
 	for !ready() {
 		select {

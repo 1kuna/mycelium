@@ -434,7 +434,11 @@ func (q *Queue) reservationAllows(j *Job, m *Machine) bool {
 			continue
 		}
 		matches := r.Target.matchesTarget(m)
-		if bound && (!matches || len(q.reservationPending(r)) > 0) || !bound && matches {
+		// Acquiring a hold must not revoke its own existing assignment, even
+		// between custody and Started. Readiness gates new assignments; other
+		// reservations and independent launch/priority fences still apply.
+		assigned := bound && j.Machine == m.ID && (j.State == "running" || j.State == "stopping")
+		if bound && (!matches || !assigned && len(q.reservationPending(r)) > 0) || !bound && matches {
 			return false
 		}
 	}

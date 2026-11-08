@@ -19,6 +19,24 @@ import (
 
 var errExtensionUnavailable = errors.New("extension qualification unavailable")
 
+const (
+	extensionUncheckedReason          = "not yet checked on this device; run the extension check"
+	extensionDriverChangedReason      = "hardware/driver fingerprint changed; setup and check required"
+	extensionContentChangedReason     = "extension fingerprint (digest) changed; setup and check required"
+	extensionFingerprintMissingReason = "hardware/driver fingerprint unavailable; setup and check required"
+)
+
+// Keep only fixed report diagnostics in public status; arbitrary check output
+// can contain private command details.
+func extensionReportDiagnostic(reason string) string {
+	switch reason {
+	case extensionUncheckedReason, extensionDriverChangedReason, extensionContentChangedReason, extensionFingerprintMissingReason:
+		return reason
+	default:
+		return diagnostic(reason, "setup and check required")
+	}
+}
+
 type ExtensionReport struct {
 	Device              string           `json:"device,omitempty"`
 	Host                string           `json:"host,omitempty"`
@@ -135,6 +153,10 @@ func LocalExtensions(root string) ([]Extension, error) {
 // Fingerprints are only hashes. Rejoining after a hardware/driver/OS change
 // invalidates cached qualification. A failed identity probe fails closed.
 func ExtensionFingerprint(ctx context.Context, platform, device string) (string, error) {
+	return extensionFingerprintFrom(ctx, platform, device, extensionIdentityProbe)
+}
+
+func extensionFingerprintFrom(ctx context.Context, platform, device string, identity func() MachineProbe) (string, error) {
 	if platform == "cpu" {
 		device = ""
 	}
@@ -146,7 +168,7 @@ func ExtensionFingerprint(ctx context.Context, platform, device string) (string,
 	if platform == "fake" && device == "" {
 		device = "0"
 	}
-	probe := extensionIdentityProbe()
+	probe := identity()
 	data := []byte(runtime.GOOS + "/" + runtime.GOARCH + "/" + platform + "/" + device)
 	commands := [][]string{}
 	switch platform {
@@ -320,7 +342,7 @@ func LocalExtensionReports(root, platform, fingerprint string, machines ...*Mach
 		}
 		records := readExtensionReports(root, e, platform)
 		for _, work := range extensionWorks(e) {
-			r := ExtensionReport{Name: e.Name, Version: e.Version, Digest: e.Digest, Platform: platform, Work: work, Reason: "setup and check required"}
+			r := ExtensionReport{Name: e.Name, Version: e.Version, Digest: e.Digest, Platform: platform, Work: work, Reason: extensionUncheckedReason}
 			if len(e.Variants) > 0 {
 				t := ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: platform}
 				r.Target = &t
@@ -330,16 +352,29 @@ func LocalExtensionReports(root, platform, fingerprint string, machines ...*Mach
 					continue
 				}
 			}
+			found, changedExtension := false, false
 			for _, old := range records {
-				if old.Work == work && old.Digest == e.Digest && (len(machines) == 0 || extensionReportDevice(platform, old.Device) == extensionReportDevice(platform, machines[0].Device)) {
-					r = old
-					break
+				if old.Work != work || len(machines) > 0 && extensionReportDevice(platform, old.Device) != extensionReportDevice(platform, machines[0].Device) {
+					continue
 				}
+				if old.Digest != e.Digest {
+					changedExtension = true
+					continue
+				}
+				r, found = old, true
+				break
 			}
-			if fingerprint == "" || r.Fingerprint != fingerprint {
+			if !found {
+				if changedExtension {
+					r.Reason = extensionContentChangedReason
+				}
+			} else if fingerprint == "" || r.Fingerprint == "" || r.Fingerprint != fingerprint {
 				r.Setup = false
 				r.Qualified = false
-				r.Reason = "hardware/driver identity changed or unavailable; setup and check required"
+				r.Reason = extensionDriverChangedReason
+				if fingerprint == "" || r.Fingerprint == "" {
+					r.Reason = extensionFingerprintMissingReason
+				}
 			}
 			if len(e.Variants) > 0 && r.Qualified {
 				local := Machine{HostID: r.Host, GPU: platform, ExtensionFingerprint: fingerprint, CapabilityProfile: &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}}
@@ -639,6 +674,9 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 		if w.environmentCache == nil || !w.environmentCache.ready(key) {
 			unlock()
 			return nil, nil, errors.New("extension assets are not prepared")
+		}
+		if j.ExecutionEvidence != nil {
+			j.ExecutionEvidence.EnvironmentPreparation = executionMayHaveRun
 		}
 		root, release, err := w.environmentCache.Acquire(withLaunchGate(context.Background(), func() error {
 			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: w.Machine.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})

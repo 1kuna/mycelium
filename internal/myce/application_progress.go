@@ -11,11 +11,6 @@ import (
 	"time"
 )
 
-// Thirty seconds allows several ordinary heartbeats while exposing a stopped
-// application reporter. It changes presentation only, never execution/custody.
-const applicationProgressMaxAge = 30 * time.Second
-const applicationProgressMaxBytes = 4096
-
 // Counts need pointers on input so missing fields cannot masquerade as zero.
 type ProgressReport struct {
 	updatedAt time.Time
@@ -32,6 +27,7 @@ type ProgressReport struct {
 }
 
 type ApplicationProgress struct {
+	CadenceSeconds float64   `json:"cadence_seconds,omitempty"`
 	Completed      float64   `json:"completed"`
 	Total          float64   `json:"total"`
 	Unit           string    `json:"unit"`
@@ -71,7 +67,12 @@ func applicationProgressFile(spool string, j Job) string {
 func readApplicationProgress(spool string, j Job, now time.Time) *ProgressReport {
 	path := applicationProgressFile(spool, j)
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > applicationProgressMaxBytes {
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	limit, releaseBudget := reserveDiagnosticBytes(spool, uint64(max(0, info.Size())))
+	defer releaseBudget()
+	if info.Size() > limit {
 		return nil
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
@@ -83,8 +84,8 @@ func readApplicationProgress(spool string, j Job, now time.Time) *ProgressReport
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
 		return nil
 	}
-	data, err := io.ReadAll(io.LimitReader(f, applicationProgressMaxBytes+1))
-	if err != nil || len(data) > applicationProgressMaxBytes {
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || int64(len(data)) > limit {
 		return nil
 	}
 	var p ProgressReport
@@ -119,6 +120,7 @@ func (q *Queue) retainApplicationProgress(j *Job, report *AttemptReport, m *Mach
 		return
 	}
 	now := q.clock.Now()
+	cadence := 0.0
 	if old := j.ApplicationProgress; old != nil && old.Attempt == j.Attempt && old.Session == j.Session {
 		// File times order evidence within this worker/session, independently of
 		// transport delay. Equal times are repeats and must not renew freshness.
@@ -127,6 +129,10 @@ func (q *Queue) retainApplicationProgress(j *Job, report *AttemptReport, m *Mach
 		}
 		// Legacy workers lack source ordering. Only those reports use relative
 		// age; transport delay makes ages incomparable to timestamped evidence.
+		cadence = old.CadenceSeconds
+		if !old.UpdatedAt.IsZero() && !p.UpdatedAt.IsZero() {
+			cadence = max(cadence, p.UpdatedAt.Sub(old.UpdatedAt).Seconds())
+		}
 		oldAge := old.AgeSeconds + max(0, now.Sub(old.ReceivedAt).Seconds())
 		if (old.UpdatedAt.IsZero() && p.UpdatedAt.IsZero() && p.AgeSeconds > oldAge) || (old.StageIndex != nil && p.StageIndex != nil && *p.StageIndex < *old.StageIndex) {
 			return
@@ -140,5 +146,5 @@ func (q *Queue) retainApplicationProgress(j *Job, report *AttemptReport, m *Mach
 		n := *v
 		return &n
 	}
-	j.ApplicationProgress = &ApplicationProgress{Completed: *p.Completed, Total: *p.Total, Unit: p.Unit, Attempt: j.Attempt, Machine: m.ID, Session: m.Session, ReceivedAt: now, UpdatedAt: p.UpdatedAt, AgeSeconds: p.AgeSeconds, StageIndex: cloneInt(p.StageIndex), StageCount: cloneInt(p.StageCount), TotalWorkKnown: p.TotalWorkKnown}
+	j.ApplicationProgress = &ApplicationProgress{CadenceSeconds: cadence, Completed: *p.Completed, Total: *p.Total, Unit: p.Unit, Attempt: j.Attempt, Machine: m.ID, Session: m.Session, ReceivedAt: now, UpdatedAt: p.UpdatedAt, AgeSeconds: p.AgeSeconds, StageIndex: cloneInt(p.StageIndex), StageCount: cloneInt(p.StageCount), TotalWorkKnown: p.TotalWorkKnown}
 }

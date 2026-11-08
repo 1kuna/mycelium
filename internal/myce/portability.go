@@ -24,6 +24,7 @@ type PortabilityRequest struct {
 }
 
 type PortabilityReport struct {
+	Linkage      []MachOLinkage           `json:"linkage,omitempty"`
 	ObservedAt   time.Time                `json:"observed_at"`
 	Inventory    string                   `json:"inventory"`
 	Requirements []PortabilityRequirement `json:"requirements"`
@@ -646,6 +647,9 @@ func WritePortability(dest io.Writer, r PortabilityReport, asJSON bool) error {
 		return e.Encode(r)
 	}
 	var out strings.Builder
+	for _, d := range r.Linkage {
+		fmt.Fprintln(&out, "Warning: "+d.String())
+	}
 	if _, err := fmt.Fprintf(&out, "Inventory: %s (observed %s)\n", r.Inventory, r.ObservedAt.Format(time.RFC3339)); err != nil {
 		return err
 	}

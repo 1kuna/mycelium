@@ -264,6 +264,15 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 	if _, err := d.Queue.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
 		t.Fatal(err)
 	}
+	// Terminal jobs do not certify the worker's current inventory or release
+	// custody. Observe rollback's prerequisite before invoking the installer.
+	await(t, func() bool {
+		var status HostMaintenanceStatus
+		if err := client.Call(ctx, "GET", "/api/hosts/host/maintenance", nil, &status); err != nil {
+			t.Fatal(err)
+		}
+		return status.Policy.Mode == "disabled" && (status.MigrationReady || status.Quiescent && status.Healthy)
+	})
 	// Rollback's service stop drives precisely this worker, preserving neighbors.
 	rollbackRunner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if name == "systemctl" && args[1] == "stop" && args[len(args)-1] == filepath.Base(c.Service) && !stopped {

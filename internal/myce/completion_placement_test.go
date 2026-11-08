@@ -168,6 +168,7 @@ func TestCompletionTransferExactEvidenceAndReleaseCosts(t *testing.T) {
 	live.Spec.Files = nil
 	for id, p := range q.s.WorkObservations {
 		p.RecordedAt = clock.Now().Add(-31 * 24 * time.Hour)
+		p.StaleReason = "driver or backend fingerprint changed"
 		q.s.WorkObservations[id] = p
 	}
 	if _, ok := q.completionBetter(live, cm, wm); ok {

@@ -5,6 +5,7 @@ package myce
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"sync"
 	"syscall"
@@ -46,6 +47,8 @@ func TestCheckinRetainedHistoryContention(t *testing.T) {
 		mu.Unlock()
 	}
 	var before, after syscall.Rusage
+	var memBefore, memAfter runtime.MemStats
+	runtime.ReadMemStats(&memBefore)
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &before); err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +93,7 @@ func TestCheckinRetainedHistoryContention(t *testing.T) {
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &after); err != nil {
 		t.Fatal(err)
 	}
+	runtime.ReadMemStats(&memAfter)
 	percentiles := func(values []time.Duration) (time.Duration, time.Duration) {
 		sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
 		return values[(len(values)-1)/2], values[(99*len(values)+99)/100-1]
@@ -101,6 +105,7 @@ func TestCheckinRetainedHistoryContention(t *testing.T) {
 		return int64(r.Utime.Sec+r.Stime.Sec)*1e6 + int64(r.Utime.Usec+r.Stime.Usec)
 	}
 	t.Logf("120 check-ins, six workers, 6500 retained executions, 110 queued, 1400 curves, 1200 concurrent job GETs: update hold p50/p99=%s/%s; all hold p50/p99=%s/%s; GET wait p50/p99=%s/%s; process CPU/check-in=%.3fms", p50, p99, a50, a99, g50, g99, float64(cpuUS(after)-cpuUS(before))/120/1000)
+	t.Logf("process allocation/check-in=%.3f MB, %.0f allocations", float64(memAfter.TotalAlloc-memBefore.TotalAlloc)/120/1e6, float64(memAfter.Mallocs-memBefore.Mallocs)/120)
 	for i := range workers {
 		j := q.s.Jobs[fmt.Sprintf("running-%d", i)]
 		if j.State != "running" || j.Attempt != 1 || j.Losses != 0 {

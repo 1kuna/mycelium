@@ -13,6 +13,10 @@ func TestFleetProductionIdleLastCopyReleaseAfterRetry(t *testing.T) {
 	q, c, workers := fleetFixture(t, "queue", "remote")
 	s := spec("production")
 	s.AllowedMachines = []string{workers[0].ID}
+	// The terminal-expiry custody check needs a caller-owned cutoff: generated
+	// startup deadlines pause while the unreleased copy occupies capacity.
+	deadline := c.Now().Add(ProductionStartTimeout)
+	s.StartBy = &deadline
 	submit(t, q, s)
 	run := check(t, q, workers[0], nil).Job
 	if run == nil {
@@ -26,6 +30,9 @@ func TestFleetProductionIdleLastCopyReleaseAfterRetry(t *testing.T) {
 	got := job(t, q, run.ID)
 	if got.State != "queued" || got.Machine != "" || got.Session != "" || got.ReleaseConfirmed {
 		t.Fatalf("retry did not clear current identity with custody retained: %+v", got)
+	}
+	if q.fleetProductionIdle() {
+		t.Fatal("queued retry lost unreleased production custody")
 	}
 	c.Advance(ProductionStartTimeout + time.Second)
 	q.fleetQueue.Proof.ObservedAt = c.Now()

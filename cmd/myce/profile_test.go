@@ -333,16 +333,20 @@ printf '\n' >> "$NOTIFICATION_FILE"
 	if exitCodeForTest(err) != 78 || impossible.Status != "intent" || impossible.JobID != "" {
 		t.Fatal("impossible target did not retain typed hold", impossible, err)
 	}
-	// Keep job metadata longer than result bytes so this journey still proves
-	// the typed result_expired response and exact expired receipt recovery.
-	if err := d.Queue.ConfigureLogRetention(2 * myce.DefaultFileRetention); err != nil {
+	// Explicit operator payload expiry exercises typed result_expired recovery;
+	// the omitted policy now protects unique results until release.
+	const payloadPolicy = 7 * 24 * time.Hour
+	if err := d.Queue.ConfigureFileRetention(payloadPolicy); err != nil {
 		t.Fatal(err)
 	}
 	// The same real profile result remains recoverable until the queue's
 	// fake clock advances beyond the documented recovery window.
-	if err = d.Client().Call(ctx, "POST", "/api/dev/clock/advance", map[string]any{"seconds": (myce.DefaultFileRetention + time.Second).Seconds()}, nil); err != nil {
+	if err = d.Client().Call(ctx, "POST", "/api/dev/clock/advance", map[string]any{"seconds": (payloadPolicy + time.Second).Seconds()}, nil); err != nil {
 		t.Fatal(err)
 	}
+	// Maintenance yields between records; await this result's durable expiry
+	// before asserting the transport/replay error contract.
+	wait(t, ctx, func() bool { job, err := d.Client().GetJob(ctx, r.JobID); return err == nil && job.FilesExpired })
 	var expired *myce.HTTPError
 	if err = d.Client().DownloadResult(ctx, r.JobID, "result", filepath.Join(root, "expired")); !errors.As(err, &expired) || expired.Status != 410 || expired.Code != "result_expired" {
 		t.Fatal("profile result did not expire loudly", err)

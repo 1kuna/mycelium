@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -113,35 +114,8 @@ func TestDevCommandQuickstart(t *testing.T) {
 	}
 	assertClean()
 	// A real controlling terminal must remain readable by the helper group.
-	run(filepath.Join(root, "mycelium"), env, "python3", "-c", `
-import os, pty, select, time
-pid, fd = pty.fork()
-if pid == 0:
-    os.execv('./myce', ['./myce', 'dev', '--', 'sh', '-c', 'test -t 0 && read line && test "$line" = terminal-input && echo terminal-ok'])
-try:
-    os.write(fd, b'terminal-input\n')
-    data = b''
-    until = time.monotonic() + 15
-    while time.monotonic() < until:
-        ready, _, _ = select.select([fd], [], [], 0.1)
-        if ready:
-            try:
-                chunk = os.read(fd, 4096)
-            except OSError:
-                break
-            if not chunk:
-                break
-            data += chunk
-    done, status = os.waitpid(pid, os.WNOHANG)
-    assert done == pid and os.waitstatus_to_exitcode(status) == 0 and b'terminal-ok' in data, data
-finally:
-    try:
-        os.kill(pid, 15)
-        os.waitpid(pid, 0)
-    except ProcessLookupError:
-        pass
-    os.close(fd)
-`)
+	run(filepath.Join(root, "mycelium"), env, "python3", "-c", devCommandPTYProbe,
+		"./myce", "dev", "--", "sh", "-c", `test -t 0 && read line && test "$line" = terminal-input && echo terminal-ok`)
 	assertClean()
 	// Interrupt a real command tree, then prove its child and listener are gone.
 	profilePath := filepath.Join(root, "mycelium", ".mycelium", "profiles", "quickstart.yaml")
@@ -152,9 +126,11 @@ finally:
 	if err := os.WriteFile(filepath.Join(filepath.Dir(profilePath), "interrupt.yaml"), []byte(strings.Replace(string(profile), "cat hello.txt", "sleep 60; cat hello.txt", 1)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	script := `./myce run --profile interrupt --key interrupt-fixture > receipt.json; sleep 60 & echo $! > child.pid; printf '%s' "$MYCE_DEV_SESSION_ROOT" > dev-root; printf '%s' "$MYCE_QUEUE" > endpoint; wait`
+	script := `set -eu; ./myce run --profile interrupt --key interrupt-fixture > receipt.json; sleep 60 & echo $! > child.pid; printf '%s' "$MYCE_DEV_SESSION_ROOT" > dev-root; printf '%s' "$MYCE_QUEUE" > endpoint; wait`
 	cmd = exec.CommandContext(ctx, "./myce", "dev", "--", "sh", "-c", script)
 	cmd.Dir, cmd.Env = filepath.Join(root, "mycelium"), env
+	var helperErrors bytes.Buffer
+	cmd.Stderr = &helperErrors
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +146,12 @@ finally:
 	var endpoint []byte
 	for len(endpoint) == 0 {
 		endpoint, _ = os.ReadFile(filepath.Join(cmd.Dir, "endpoint"))
+		select {
+		case helperErr := <-done:
+			joined = true
+			t.Fatalf("interruption helper exited before readiness: %v\n%s", helperErr, sanitizeSmokeEvidence(helperErrors.String(), root, "ambient-fixture-secret"))
+		default:
+		}
 		if err := waitPause(ctx, 10*time.Millisecond); err != nil {
 			t.Fatal(err)
 		}

@@ -157,6 +157,10 @@ func (q *Queue) retryOOM(j *Job) {
 		j.State, j.Reason = "failed", j.MemoryEnvelope.Source+" exhausted after out of memory; "+memoryCapacityRemedies
 		return
 	}
+	if j.Spec.Needs.Memory == "auto" && (j.Spec.Needs.cpuOnly() || j.Spec.ExtensionCheck != nil && hostOOMAttempt(j)) && !j.Spec.Run.Docker {
+		q.retryHostOOM(j)
+		return
+	}
 	if j.Spec.Needs.Memory == "auto" {
 		// A bounded first run doubles without spending the one retry; at half
 		// the allowance, host-wide exploration and that retry take over.
@@ -214,4 +218,48 @@ func capabilityWaitingReason(j *Job) string {
 		return fmt.Sprintf("waiting for a larger qualified hypha after out of memory (at least %.1f GiB accelerator-reachable and %.1f GiB system, with one pool larger)", j.OOMCapacity.MemoryGB, j.OOMCapacity.HostMemoryGB)
 	}
 	return ""
+}
+
+// A killed peak is a lower bound, not a successful demand estimate. Retain
+// the killed peak and previous reservation; uncertainty is sized separately,
+// bounded by target headroom, rather than becoming a permanent requirement.
+// Strictly larger floors prevent another execution of the same failed bound;
+// physical qualification, rather than an attempt count, bounds a leaking job.
+func (q *Queue) retryHostOOM(j *Job) {
+	need := j.Spec.Needs.HostMemoryGB
+	if f := j.MemoryOOMFloor; f != nil {
+		need = max(need, f.HostMemoryGB)
+	}
+	for _, facts := range j.MemoryAttempts {
+		if facts.Attempt != j.Attempt || facts.Machine != j.Machine || facts.Session != j.Session {
+			continue
+		}
+		if p := facts.MemoryPeak; p != nil && p.HostGB != nil && validRate(*p.HostGB) {
+			peak := hostMemoryPeakGB(p)
+			need = max(need, peak)
+		}
+	}
+	j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: need + minimumHostMemoryGB}
+	j.OOMCapacity = nil
+	j.OOMRetries++
+	probe := cloneJob(j)
+	probe.State, probe.MemoryEnvelope = "queued", nil
+	probe.Spec.Needs.HostMemoryGB = j.MemoryOOMFloor.HostMemoryGB
+	if ok, _ := q.qualifiedTargetMemory(&probe, false); !ok {
+		j.State, j.Reason = "failed", fmt.Sprintf("needs more memory than any eligible host allows (%.3f GiB measured OOM lower bound)", j.MemoryOOMFloor.HostMemoryGB)
+		return
+	}
+	q.requeue(j, "out of memory; waiting for measured peak plus growth and physical headroom", false)
+}
+
+// GPU allocation failure is not evidence of a host-RAM shortage. Only local
+// memcg OOM events select host recovery for an accelerator extension check.
+func hostOOMAttempt(j *Job) bool {
+	for _, f := range j.MemoryAttempts {
+		if f.Attempt == j.Attempt && f.Machine == j.Machine && f.Session == j.Session && f.MemoryPeak != nil && f.MemoryPeak.Events != nil {
+			e := f.MemoryPeak.Events
+			return e.OOM > 0 || e.OOMKill > 0 || e.OOMGroupKill > 0
+		}
+	}
+	return false
 }

@@ -43,8 +43,10 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 }
 
 // Host anon/current cannot establish overlap with CUDA allocations (#424).
-// Credit at most the host vector; the full device vector remains growth even
-// when the cgroup is larger. Complete device peaks are not current ownership.
+// Per-process device counters can themselves count shared allocations more
+// than once, so neither their sum nor an RSS estimate proves unique physical
+// residency. Credit only the uniquely charged host vector; retain the full
+// device floor until device residency/overlap can be independently established.
 func remainingAllocationGrowth(m *Machine, device, reservation float64, sample hostMemorySample, now time.Time) float64 {
 	growth := remainingHostGrowth(reservation, sample, now)
 	if unifiedCUDA(m) {

@@ -256,6 +256,7 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 	unlock := requestReadLock(ctx, &q.mu)
 	plan, err := q.fileReleaseMetadata(selection)
 	store, now, retention := q.files, q.clock.Now(), q.fileRetention
+	publicationHorizon := q.s.PublicationHorizon
 	unlock()
 	metadata := fileReleaseDigest(plan)
 	if err != nil {
@@ -289,7 +290,7 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 		}
 		b.Present, b.SizeBytes, b.ModifiedAt = true, st.Size(), st.ModTime()
 		stored[i].Present, stored[i].SizeBytes, stored[i].ModifiedAt = true, st.Size(), st.ModTime()
-		publicationCutoff, orphanCutoff := now.Add(-filePublicationGrace), now.Add(-retention)
+		publicationCutoff, orphanCutoff := now.Add(-publicationHorizon), now.Add(-retention)
 		b.PublicationProtected = st.ModTime().After(publicationCutoff)
 		b.BundleProtected = b.BundleProtected || b.BundleTracked && st.ModTime().After(orphanCutoff)
 		if b.CollectionEligible && !b.BundleProtected && filePayloadAgeEligible(st, publicationCutoff, orphanCutoff, b.BundleTracked) {
