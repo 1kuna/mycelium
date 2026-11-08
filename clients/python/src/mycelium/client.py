@@ -669,6 +669,41 @@ class Client:
             if remaining is not None and remaining <= 0:
                 raise timed_out()
             return remaining if self.timeout is None else (self.timeout if remaining is None else min(self.timeout, remaining))
+        batch_unavailable = False
+
+        def observe(original, observed):
+            nonlocal changed, ids, end, event
+            job_id = observed["id"]
+            job = jobs.get(job_id)
+            changed = changed or job is None or any(observed.get(k) != job.get(k) for k in ("state", "reason", "revision"))
+            jobs[job_id] = observed
+            metadata.setdefault(job_id, dict(observed))
+            saved = metadata[job_id]
+            if observed["state"] == "running" and not saved.get("started_at"):
+                saved["started_at"] = dt.datetime.fromtimestamp(self._clock.time(), dt.timezone.utc).isoformat()
+            del pending[original]
+            if observed["state"] in TERMINAL:
+                results[job_id] = observed
+            else:
+                pending[job_id] = None
+            # Preserve aliases for the input-order result below.
+            if original != job_id:
+                ids = [job_id if key == original else key for key in ids]
+            event = None
+            end = owner_end
+            for job_id in pending:
+                saved = metadata.get(job_id, {})
+                spec = saved.get("spec") or {}
+                if spec.get("deadline"):
+                    until = dt.datetime.fromisoformat(spec["deadline"].replace("Z", "+00:00")).timestamp() - self._clock.time()
+                    deadline = self._clock.monotonic() + until
+                    end = deadline if end is None else min(end, deadline)
+                if saved.get("started_at") and spec.get("expected_minutes"):
+                    expected = dt.datetime.fromisoformat(saved["started_at"].replace("Z", "+00:00")).timestamp() + spec["expected_minutes"] * 60
+                    next_event = self._clock.monotonic() + expected - self._clock.time()
+                    if next_event > self._clock.monotonic():
+                        event = next_event if event is None else min(event, next_event)
+
         while pending:
             started = self._clock.monotonic()
             remaining = None if end is None else end - started
@@ -679,7 +714,8 @@ class Client:
                 budget = remaining if budget is None else min(budget, remaining)
             failure = None
             held = False
-            batched = self._batch_supported and all(job_id in jobs for job_id in pending)
+            changed = False
+            batched = not batch_unavailable and self._batch_supported and all(job_id in jobs for job_id in pending)
             try:
                 if batched:
                     seconds = min(20, int(pace.next(started, event)))
@@ -691,17 +727,23 @@ class Client:
                     except APIError as error:
                         if not (error.status == 405 or error.status == 404 and not error.code):
                             raise
-                        self._batch_supported = False
+                        batch_unavailable = True
                         observations = []
-                    for observed in observations:
-                        after[observed["id"]] = observed["revision"]
-                    # Fetch full terminal payloads once, never on unchanged waits.
-                    observations = [self._read_job(row["id"], timeout=request_budget(), wait=True)
-                                    if row["state"] in TERMINAL else row for row in observations]
+                    for original, row in zip(list(pending), observations):
+                        after[row["id"]] = row["revision"]
+                        if row["state"] in TERMINAL:
+                            row = self._read_job(row["id"], timeout=request_budget(), wait=True)
+                        observe(original, row)
                 else:
-                    observations = [self._read_job(job_id, timeout=request_budget(),
-                                                  wait=job_id in jobs, retry=False)
-                                    for job_id in pending]
+                    # Retain each successful read before a peer can fail or block.
+                    # During initialization, retry only missing metadata.
+                    initializing = any(job_id not in jobs for job_id in pending)
+                    for job_id in list(pending):
+                        if initializing and job_id in jobs:
+                            continue
+                        row = self._read_job(job_id, timeout=request_budget(),
+                                             wait=job_id in jobs, retry=False)
+                        observe(job_id, row)
             except APIError as error:
                 if error.code == "job_reply_invalid" or (error.status not in {408, 429} and error.status < 500):
                     raise
@@ -710,42 +752,10 @@ class Client:
                 if isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError):
                     raise
                 failure = error
-            else:
-                changed = False
-                for original, observed in zip(list(pending), observations):
-                    job_id = observed["id"]
-                    job = jobs.get(job_id)
-                    changed = changed or job is None or any(observed.get(k) != job.get(k) for k in ("state", "reason", "revision"))
-                    jobs[job_id] = observed
-                    metadata.setdefault(job_id, dict(observed))
-                    saved = metadata[job_id]
-                    if observed["state"] == "running" and not saved.get("started_at"):
-                        saved["started_at"] = dt.datetime.fromtimestamp(self._clock.time(), dt.timezone.utc).isoformat()
-                    del pending[original]
-                    if observed["state"] in TERMINAL:
-                        results[job_id] = observed
-                    else:
-                        pending[job_id] = None
-                    # Preserve aliases for the input-order result below.
-                    if original != job_id:
-                        ids = [job_id if key == original else key for key in ids]
+            if not pending:
+                return [results[job_id] for job_id in ids]
+            if failure is None:
                 pace.observe(self._clock.monotonic() - started, changed)
-                if not pending:
-                    return [results[job_id] for job_id in ids]
-                event = None
-                end = owner_end
-                for job_id in pending:
-                    saved = metadata.get(job_id, {})
-                    spec = saved.get("spec") or {}
-                    if spec.get("deadline"):
-                        until = dt.datetime.fromisoformat(spec["deadline"].replace("Z", "+00:00")).timestamp() - self._clock.time()
-                        deadline = self._clock.monotonic() + until
-                        end = deadline if end is None else min(end, deadline)
-                    if saved.get("started_at") and spec.get("expected_minutes"):
-                        expected = dt.datetime.fromisoformat(saved["started_at"].replace("Z", "+00:00")).timestamp() + spec["expected_minutes"] * 60
-                        next_event = self._clock.monotonic() + expected - self._clock.time()
-                        if next_event > self._clock.monotonic():
-                            event = next_event if event is None else min(event, next_event)
             if failure is not None:
                 pace.observe(self._clock.monotonic() - started)
             delay = pace.next(self._clock.monotonic(), event, failure)
