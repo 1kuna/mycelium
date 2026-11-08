@@ -1,5 +1,16 @@
 package myce
 
+func modelReportsQuiescent(reports []ModelReport) bool {
+	for _, r := range reports {
+		// Failed is published only after successful cleanup. Failed unloads
+		// keep their separate custody state, as do all live/unknown states.
+		if r.InFlight != 0 || r.State != "unloaded" && r.State != "failed" {
+			return false
+		}
+	}
+	return true
+}
+
 // Whole-host quiescence is independent of process RSS attribution. A worker
 // asserts local zero custody; the queue excludes every outstanding owner and
 // legacy sibling. Never infer idle from a reservation or an absent RSS sample.

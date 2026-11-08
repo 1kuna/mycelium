@@ -1259,7 +1259,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			// Refresh memory together after inventory, then age through the reads.
 			w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
 			if m.MemoryObservation != nil {
-				m.MemoryObservation.Quiescent = !recovering && !leaving && len(actors) == 0 && len(modelReports) == 0 && environments.cores() == 0 && !hostPreparing(&m)
+				m.MemoryObservation.Quiescent = !recovering && !leaving && len(actors) == 0 && modelReportsQuiescent(modelReports) && environments.cores() == 0 && !hostPreparing(&m)
 			}
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
 			rt.mu.Lock()

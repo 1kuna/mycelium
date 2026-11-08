@@ -30,12 +30,14 @@ type externalMemoryBucket struct {
 	Windows    uint64                `json:"windows,omitempty"`
 	ByteCounts map[uint8]uint64      `json:"byte_counts,omitempty"`
 	ByteMax    map[uint8]float64     `json:"byte_max,omitempty"`
-	Values     map[uint64]uint64     `json:"values,omitempty"`
-	End        time.Time             `json:"end,omitempty"`
-	Start      time.Time             `json:"start"`
-	Counts     map[uint8]uint32      `json:"counts"`
-	MaxGB      float64               `json:"max_gb"`
-	PeakAt     time.Time             `json:"peak_at"`
+	// Idle quantiles use lower endpoints: binning must never erase variation.
+	ByteMin map[uint8]float64 `json:"byte_min,omitempty"`
+	Values  map[uint64]uint64 `json:"values,omitempty"`
+	End     time.Time         `json:"end,omitempty"`
+	Start   time.Time         `json:"start"`
+	Counts  map[uint8]uint32  `json:"counts"`
+	MaxGB   float64           `json:"max_gb"`
+	PeakAt  time.Time         `json:"peak_at"`
 }
 type externalMemoryRing struct {
 	WasQuiescent bool                          `json:"was_quiescent,omitempty"`
@@ -142,6 +144,7 @@ func (q *Queue) recordExternalMemory(m *Machine) {
 			*idle = *b.Quiescent
 		}
 		idle.ByteCounts, idle.ByteMax = maps.Clone(idle.ByteCounts), maps.Clone(idle.ByteMax)
+		idle.ByteMin = maps.Clone(idle.ByteMin)
 		if idle.ByteCounts == nil {
 			idle.ByteCounts, idle.ByteMax = map[uint8]uint64{}, map[uint8]float64{}
 		}
@@ -151,6 +154,12 @@ func (q *Queue) recordExternalMemory(m *Machine) {
 		idle.End = now
 		v := o.UsedGB
 		bin := uint8(bits.Len64(uint64(min(float64(^uint64(0)>>1), math.Ceil(v*(1<<30))))))
+		if idle.ByteMin == nil {
+			idle.ByteMin = map[uint8]float64{}
+		}
+		if prior, ok := idle.ByteMin[bin]; !ok || v < prior {
+			idle.ByteMin[bin] = v
+		}
 		idle.ByteCounts[bin]++
 		idle.ByteMax[bin] = max(idle.ByteMax[bin], v)
 		if idle.PeakAt.IsZero() || v > idle.MaxGB {
@@ -181,7 +190,11 @@ func (r *externalMemoryRing) window(now time.Time, duration time.Duration) Exter
 			w.Samples += uint64(n)
 		}
 		for bin, n := range b.ByteCounts {
-			values[b.ByteMax[bin]] += n
+			value := b.ByteMax[bin]
+			if lower, ok := b.ByteMin[bin]; ok {
+				value = lower
+			}
+			values[value] += n
 			w.Samples += n
 		}
 		for value, n := range b.Values {

@@ -447,6 +447,7 @@ func mergeExternalMemoryBucket(a, b *externalMemoryBucket) *externalMemoryBucket
 		copy := *b
 		copy.Counts, copy.Values = maps.Clone(b.Counts), maps.Clone(b.Values)
 		copy.ByteCounts, copy.ByteMax = maps.Clone(b.ByteCounts), maps.Clone(b.ByteMax)
+		copy.ByteMin = maps.Clone(b.ByteMin)
 		copy.Quiescent = mergeExternalMemoryBucket(nil, b.Quiescent)
 		return &copy
 	}
@@ -458,6 +459,14 @@ func mergeExternalMemoryBucket(a, b *externalMemoryBucket) *externalMemoryBucket
 		a.ByteCounts, a.ByteMax = map[uint8]uint64{}, map[uint8]float64{}
 	}
 	for bin, n := range b.ByteCounts {
+		if lower, ok := b.ByteMin[bin]; ok {
+			if a.ByteMin == nil {
+				a.ByteMin = map[uint8]float64{}
+			}
+			if prior, exists := a.ByteMin[bin]; !exists || lower < prior {
+				a.ByteMin[bin] = lower
+			}
+		}
 		a.ByteCounts[bin] += n
 		a.ByteMax[bin] = max(a.ByteMax[bin], b.ByteMax[bin])
 	}

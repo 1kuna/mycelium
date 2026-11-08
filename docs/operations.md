@@ -1842,6 +1842,9 @@ including child cgroups; an elapsed stop deadline cannot release memory.
   unused, while preserving the operator's protection floor and live pressure,
   growth, execution-ceiling and release-custody guards. It does not bound unseen
   future external demand or make sampled Darwin containment a kernel guarantee.
+  Idle histogram quantiles use each bin's minimum as a conservative lower bound;
+  exact observed maxima remain intact. Quantization may enlarge the variation
+  reserve, but cannot erase variation within one bin, including after compaction.
 
   Only new `external_memory.quiescent_v1` history qualifies. The worker must
   report no local attempts (including cleanup), models or preparation, and the

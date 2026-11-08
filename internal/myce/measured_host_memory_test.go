@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -61,7 +62,7 @@ func TestMeasuredHostMemoryRequiresWholeHostCustody(t *testing.T) {
 		t.Fatal("idle fixture not qualified")
 	}
 	r := HostRelease{Host: m.HostID, Job: "old-attempt", Machine: m.ID, Session: "old-session", Attempt: 1, HostChargeGB: 1}
-	q.s.HostReleases[releaseKey(r)] = r
+	q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
 	if q.hostMemoryQuiescent(&m) {
 		t.Fatal("pending release treated as idle")
 	}
@@ -96,7 +97,7 @@ func TestMeasuredHostMemoryZeroIsExhaustedNotUncapped(t *testing.T) {
 		t.Fatal("worker bypassed zero derived allowance", err)
 	}
 	q.s.Machines[m.ID] = &m
-	q.s.HostMaintenance[m.HostID] = HostMaintenance{MemoryBudget: &HostMemoryBudget{GiB: 20, Measured: true}}
+	q.s.HostMaintenance = map[string]HostMaintenance{m.HostID: {MemoryBudget: &HostMemoryBudget{GiB: 20, Measured: true}}}
 	q.refreshHostMemory()
 	if m.FreeHostMemoryGB != 0 || hostFits(&m, 0, 1) {
 		t.Fatal("queue bypassed exhausted allowance", m)
@@ -142,5 +143,48 @@ func TestMeasuredHostMemoryCompactionPreservesIdleProvenance(t *testing.T) {
 	after := q.externalMemoryStatus(m.HostID).Quiescent.Week
 	if after.Samples != before.Samples || after.MaxGB != before.MaxGB || after.Windows != before.Windows {
 		t.Fatal(before, after)
+	}
+}
+
+func TestMeasuredHostMemoryResumesAfterModelUnload(t *testing.T) {
+	rt, m, _ := runtimeLoadFixture(t, &lifecycleEngine{})
+	rt.load(context.Background(), m)
+	reports, _ := rt.report()
+	if modelReportsQuiescent(reports) {
+		t.Fatal("loaded model lost custody")
+	}
+	rt.sync(nil)
+	rt.wg.Wait()
+	reports, _ = rt.report()
+	if len(reports) != 1 || reports[0].State != "unloaded" || !modelReportsQuiescent(reports) {
+		t.Fatal("unloaded receipt prevented idle learning", reports)
+	}
+	// Failed cleanup still owns memory; a failure receipt after cleanup does not.
+	rt, m, _ = runtimeLoadFixture(t, &lifecycleEngine{loadErr: errors.New("load"), unloadErr: errors.New("cleanup")})
+	rt.load(context.Background(), m)
+	reports, _ = rt.report()
+	if modelReportsQuiescent(reports) {
+		t.Fatal("failed cleanup treated as idle")
+	}
+}
+
+func TestMeasuredHostMemorySameBinVariationSurvivesCompaction(t *testing.T) {
+	q, clock := fixture(t)
+	m := measuredMemoryMachine()
+	m.MemoryObservation.Quiescent, m.MemoryObservation.ReserveGB = true, 1
+	for i := 0; i < 100; i++ {
+		m.MemoryObservation.UsedGB = 4.25
+		if i == 99 {
+			m.MemoryObservation.UsedGB = 7.75
+		}
+		q.recordExternalMemory(&m)
+		clock.Advance(time.Minute)
+	}
+	for i := 0; i < 2; i++ {
+		budget, d := q.measuredHostMemoryBudget(&m, HostMemoryBudget{GiB: 20, Measured: true})
+		if budget.GiB != 20.75 || d.History.P50GB != 4.25 || d.ReserveGB != 3.5 {
+			t.Fatal("histogram erased observed variation", budget, d)
+		}
+		compactExternalEvidence(q.s.ExternalMemory[m.HostID], clock.Now(), 1)
 	}
 }
