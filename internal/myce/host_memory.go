@@ -567,6 +567,19 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 // wider execution ceiling contains unseen growth but is not measured demand.
 // Cold probes still need complete fresh evidence before releasing their ceiling.
 func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
+	if m != nil && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" &&
+		!j.Spec.Run.Docker && j.Spec.Needs.cpuOnly() && j.Spec.Needs.Memory != "auto" && j.Spec.Needs.HostMemoryGB > 0 {
+		// The native attempt's parent cgroup contains main and all helpers at
+		// hostNeed (declaration plus slack). Its complete reservation already
+		// covers every possible growth forecast. Preserve contradictory actual
+		// observations, but do not invent use beyond kernel containment. This
+		// does not apply to RSS or accelerator memory outside the cgroup.
+		charge = max(ceiling, retainedHostCharge(j), sample.peakGB, sample.gb, sample.footprintGB)
+		if _, fresh := sample.hostGrowth(now); fresh {
+			return charge, max(0, charge-sample.gb)
+		}
+		return charge, charge // Missing/stale data grants no resident credit.
+	}
 	adaptiveCeiling := adaptiveMemoryCeilingGB(j, m)
 	e := j.MemoryEnvelope
 	bounded := adaptiveCeiling > 0 && e.ProbeFloorGB <= 0
