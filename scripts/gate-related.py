@@ -21,6 +21,12 @@ SUPPLEMENTAL_CONSUMERS = {
 SUPPLEMENTAL_CONSUMERS['internal/myce/checkin_candidate_cost_test.go'] = (
     'status_read_test.go', 'memory_planning_test.go', 'host_backfill_cost_test.go')
 
+# Incident-shaped check-in benchmarks share these focused correctness checks.
+SUPPLEMENTAL_CONSUMERS['internal/myce/checkin_evidence_cache_test.go'] = (
+    'checkin_history_contention_test.go', 'status_read_test.go')
+SUPPLEMENTAL_CONSUMERS['internal/myce/host_release_bench_test.go'] = (
+    'host_release_handback_test.go', 'host_release_search_test.go')
+
 # Platform clone helpers are exercised through model snapshot staging.
 for source in ('shared_clone_darwin', 'shared_clone_linux', 'shared_clone_other'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('model_snapshots_test.go',)
