@@ -41,11 +41,15 @@ func sharedInputPath(ctx context.Context, root, relative string) (string, error)
 // withdrawn, refuse new source operations until its private writer joins. This
 // bounds detached work by the attempts already admitted, without serializing I/O.
 // Publication belongs only to the caller; no process runs in a detached writer.
-func (c *SharedInputCache) stageInput(parent context.Context, populate func(context.Context, string) error, publish func(string) error) error {
+func (c *SharedInputCache) stageInput(parent context.Context, populate func(context.Context, string) error, publish func(string) error) (stageErr error) {
 	if err := parent.Err(); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithCancel(parent)
+	if ctx.Value(sharedInputTraceKey{}) == nil {
+		ctx = context.WithValue(ctx, sharedInputTraceKey{}, &sharedInputTrace{detail: StagingCause{Operation: "shared_input", Stage: "prepare", PathClass: "cache"}})
+	}
+	defer func() { stageErr = tracedSharedError(ctx, stageErr) }()
 	c.mu.Lock()
 	for pending := range c.staging {
 		select {
@@ -104,6 +108,7 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 				err = populate(ctx, stage)
 			}
 		}
+		err = tracedSharedError(ctx, err)
 		select {
 		case result <- err:
 			// Publication/cleanup must finish before the writer removes scratch.
@@ -127,6 +132,7 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 			if err != nil {
 				return err
 			}
+			traceSharedInput(ctx, "publish", "cache")
 			return publish(stage)
 		case <-tick.C:
 			if c.cache.Clock.Now().Sub(time.Unix(0, b.progress.Load())) >= checkpointAvailabilityStallBudget {
