@@ -44,7 +44,7 @@ func TestNewVersionSeedsFromPriorAcceptedMemory(t *testing.T) {
 			m.ExtensionReports = append(m.ExtensionReports, report)
 			check.Extension, check.ExtensionDigest = extensionKey(next), next.Digest
 			queued := submit(t, q, check)
-			candidate := q.memoryCandidate(queued, q.s.Machines[m.ID])
+			candidate := seedMemoryCandidate(t, q, queued, q.s.Machines[m.ID])
 			want := 2.25
 			if mode == "same model command" {
 				want = 6
@@ -68,6 +68,17 @@ func TestNewVersionSeedsFromPriorAcceptedMemory(t *testing.T) {
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
+			// A fresh check of this version replaces the older workload
+			// prior before its first ordinary workload has completed.
+			report.Qualified, report.CheckID = true, run.ID
+			m.ExtensionReports[len(m.ExtensionReports)-1] = report
+			machineCheck(t, q, m)
+			work := s
+			work.Extension = extensionKey(next)
+			firstWork := submit(t, q, work)
+			if got := seedMemoryCandidate(t, q, firstWork, q.s.Machines[m.ID]).Spec.Needs.HostMemoryGB; got != 1.1 {
+				t.Fatalf("historical workload hid fresh current-version check: %g", got)
+			}
 			next.Version = "3"
 			next = freezeComposition(t, next)
 			if err := q.AddExtension(next); err != nil {
@@ -75,10 +86,53 @@ func TestNewVersionSeedsFromPriorAcceptedMemory(t *testing.T) {
 			}
 			check.Extension, check.ExtensionDigest = extensionKey(next), next.Digest
 			third := submit(t, q, check)
-			if got := q.memoryCandidate(third, q.s.Machines[m.ID]).Spec.Needs.HostMemoryGB; got != 1.1 {
+			if got := seedMemoryCandidate(t, q, third, q.s.Machines[m.ID]).Spec.Needs.HostMemoryGB; got != 1.1 {
 				t.Fatalf("nearest accepted predecessor not selected: %g", got)
 			}
 		})
+	}
+}
+
+func TestNewVersionSeedRetainsCurrentVersionOOM(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	s.Needs.Memory, s.Workload = "auto", nil
+	s.AllowedMachines = []string{m.ID}
+	s.ExtensionDigest = registeredExtension(t, q, s.Extension).Digest
+	s.ExtensionCheck = &ExtensionCheckRequest{Work: s.workType(), Directory: t.TempDir()}
+	run := startSeedCheck(t, q, m, s)
+	clock.Advance(time.Second)
+	peak, growth := 2.0, .25
+	r := result(&run, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, GrowthGB: &growth}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	next := registeredExtension(t, q, s.Extension)
+	next.Version = "2"
+	next = freezeComposition(t, next)
+	if err := q.AddExtension(next); err != nil {
+		t.Fatal(err)
+	}
+	report := newExtensionReport(next, &m, s.workType())
+	report.Setup = true
+	m.ExtensionReports = append(m.ExtensionReports, report)
+	s.Extension, s.ExtensionDigest = extensionKey(next), next.Digest
+	run = startSeedCheck(t, q, m, s)
+	clock.Advance(time.Second)
+	peak, growth = 8, 1
+	r = result(&run, false)
+	r.OutOfMemory = true
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, GrowthGB: &growth, Events: &MemoryEventCounts{OOM: 1}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	separate := submit(t, q, s)
+	if separate.MemoryOOMFloor != nil {
+		t.Fatal("new submission unexpectedly has the original job's retry floor")
+	}
+	candidate := seedMemoryCandidate(t, q, separate, q.s.Machines[m.ID])
+	if candidate.Spec.Needs.HostMemoryGB < 9 {
+		t.Fatalf("predecessor seed hid retained current-version OOM demand: %+v", candidate.MemoryEnvelope)
 	}
 }
 
@@ -114,7 +168,7 @@ func TestNewVersionUnifiedSeedRequiresPairedDevicePeak(t *testing.T) {
 	s.Extension, s.ExtensionDigest = extensionKey(next), next.Digest
 	queued := submit(t, q, s)
 	target := m.Devices[0].machine(*q.s.Machines[m.ID])
-	candidate := q.memoryCandidate(queued, &target)
+	candidate := seedMemoryCandidate(t, q, queued, &target)
 	if candidate.MemoryEnvelope.Source == priorVersionMemorySource || !hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
 		t.Fatalf("unpaired predecessor peak stranded the shared-pool probe: %+v", candidate.MemoryEnvelope)
 	}
@@ -165,7 +219,7 @@ func TestNewVersionSeedMixedVersionOrdering(t *testing.T) {
 	s.Extension, s.ExtensionDigest = extensionKey(base), base.Digest
 	queued := submit(t, q, s)
 	for range 50 {
-		candidate := q.memoryCandidate(queued, q.s.Machines[m.ID])
+		candidate := seedMemoryCandidate(t, q, queued, q.s.Machines[m.ID])
 		if candidate.Spec.Needs.HostMemoryGB != 5.1 {
 			t.Fatalf("mixed versions changed the selected predecessor: %+v", candidate.MemoryEnvelope)
 		}
@@ -183,4 +237,13 @@ func startSeedCheck(t *testing.T, q *Queue, m Machine, s Spec) Job {
 		t.Fatal(err)
 	}
 	return *run
+}
+
+func seedMemoryCandidate(t *testing.T, q *Queue, j *Job, m *Machine) *Job {
+	t.Helper()
+	candidates := extensionJobs(j, m, true)
+	if len(candidates) != 1 {
+		t.Fatalf("expected one resolved extension variant, got %d", len(candidates))
+	}
+	return q.memoryCandidate(candidates[0], m)
 }

@@ -14,11 +14,10 @@ func measuredOOMRecovery(j *Job) float64 {
 			continue
 		}
 		peak := hostMemoryPeakGB(facts.MemoryPeak)
-		previous := 0.0
-		if e := facts.MemoryEnvelope; e != nil {
-			previous = e.HostGB
+		margin := max(memoryGrowthGB(facts.MemoryPeak), minimumHostMemoryGB)
+		if e := facts.MemoryEnvelope; e != nil && validRate(e.HostGB) {
+			margin = max(margin, peak-e.HostGB)
 		}
-		margin := max(memoryGrowthGB(facts.MemoryPeak), peak-previous, minimumHostMemoryGB)
 		// The durable floor already retains the previous host demand. The
 		// historical envelope is a physical total, potentially including a
 		// device share; use it only to measure observed ceiling overshoot.

@@ -130,4 +130,8 @@ func TestOOMRecoveryDoesNotTransferHistoricalDeviceChargeToHost(t *testing.T) {
 	if candidate.Spec.Needs.HostMemoryGB != 4.25 || !hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
 		t.Fatalf("historical unified vector inflated discrete host demand: %+v", candidate.MemoryEnvelope)
 	}
+	queued.MemoryAttempts[0].MemoryEnvelope = nil
+	if got := measuredOOMRecovery(queued); got != 4.25 {
+		t.Fatalf("missing historical ceiling invented measured overshoot: %g", got)
+	}
 }

@@ -626,21 +626,23 @@ func sameMemoryHost(k, target ObservationKey, m *Machine) bool {
 // accepted runs then replace that seed, so a check never shrinks it.
 func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 	estimate := q.memoryEstimateFor(j, m, false)
-	if estimate.host == nil && j.Spec.extensionJob() {
-		if seed := q.priorVersionMemory(j, m, estimate); seed.host != nil {
+	if estimate.host != nil || estimate.key == nil || !j.Spec.extensionJob() {
+		return estimate
+	}
+	// Current-version qualification evidence supersedes historical workload
+	// evidence. Keep the existing invalidation and spent-exploration fences.
+	if estimate.source == "" && j.Spec.ExtensionCheck == nil {
+		seed := q.memoryEstimateFor(j, m, true)
+		if seed.host != nil && seed.source != spentMemoryExploration {
+			seed.key, seed.constrainedGB = estimate.key, max(seed.constrainedGB, estimate.constrainedGB)
+			seed.source += "; from qualification checks"
 			return seed
 		}
 	}
-	if estimate.host != nil || estimate.source != "" || estimate.key == nil || j.Spec.ExtensionCheck != nil || !j.Spec.extensionJob() {
-		return estimate
+	if seed := q.priorVersionMemory(j, m, estimate); seed.host != nil {
+		return seed
 	}
-	seed := q.memoryEstimateFor(j, m, true)
-	if seed.host == nil || seed.source == spentMemoryExploration {
-		return estimate
-	}
-	seed.key, seed.constrainedGB = estimate.key, max(seed.constrainedGB, estimate.constrainedGB)
-	seed.source += "; from qualification checks"
-	return seed
+	return estimate
 }
 
 const acceptedMemoryEscalation = "exploratory (accepted prior invalidated; measured recovery)"

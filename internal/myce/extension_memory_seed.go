@@ -88,12 +88,19 @@ func (q *Queue) priorVersionMemory(j *Job, m *Machine, estimate memoryEstimate) 
 	}
 	host, n := observedMemoryBound(points, false)
 	device, _ := observedMemoryBound(points, true)
+	lower := q.constrainedMemoryLowerFor(j, estimate, !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory)
+	refusal := ""
+	if lower > 0 {
+		// A separate submission has no job-local OOM floor. Retained failures
+		// of this version still disprove a smaller predecessor's demand.
+		host, refusal = q.recoveryMemoryBound(j, m, estimate, host, 0)
+	}
 	peak := &AttemptMemoryPeak{HostGB: &host}
 	if device > 0 {
 		peak.DeviceGB = &device
 	}
 	return memoryEstimate{key: estimate.key, host: peak, device: peak, hostFactor: 1, deviceFactor: 1,
-		measuredHostGB: max(host, estimate.constrainedGB), constrainedGB: estimate.constrainedGB, samples: n, source: priorVersionMemorySource,
+		measuredHostGB: host, constrainedGB: lower, samples: n, source: priorVersionMemorySource, refusal: refusal,
 		deviceUncalibrated: device == 0 && !j.Spec.Needs.cpuOnly()}
 }
 
