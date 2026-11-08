@@ -195,7 +195,7 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	os.WriteFile(c.Binary, []byte("old binary"), 0700)
 	os.MkdirAll(filepath.Dir(c.Service), 0700)
 	os.WriteFile(c.Service, []byte(c.ServiceText()), 0600)
-	return c, myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) { return nil, nil }}
+	return c, myce.MachineProbe{OS: "linux", Arch: "amd64", Command: fakeSetupManager}
 }
 
 func TestInstallPreservesEveryConfigField(t *testing.T) {
@@ -323,7 +323,7 @@ func TestInstallQueueFileStoreWithExecStartOverride(t *testing.T) {
 	defer log.SetOutput(writer)
 	injected := errors.New("injected reload failure before cutover")
 	fail := true
-	p.Command = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		switch strings.Join(args, " ") {
 		case "--user show myce-queue.service --property=DropInPaths --value":
 			return []byte(path), nil
@@ -333,7 +333,7 @@ func TestInstallQueueFileStoreWithExecStartOverride(t *testing.T) {
 				return nil, injected
 			}
 		}
-		return nil, nil
+		return fakeSetupManager(ctx, name, args...)
 	}
 	args := []string{"install", "queue", "--config", c.Config, "--file-store-bytes=12", "--file-store-production-reserve=6"}
 	if err := setupCommandWithProbe(args, p, c.NAS); !errors.Is(err, injected) {

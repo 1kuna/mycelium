@@ -181,3 +181,14 @@ func TestStatusQueueAndWorkerRunningReleases(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusExplainsPartialHistory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"jobs":[],"jobs_page":{"total":3,"returned":1,"mode":"recent","next_before":"cursor"}}`)
+	}))
+	defer server.Close()
+	out, _, err := captureUsageOutput(t, []string{"status", "--queue", server.URL, "--token", "test-only"})
+	if err != nil || !strings.Contains(out, "1 of 3 retained jobs shown") || !strings.Contains(out, "status JOB_ID") || !strings.Contains(out, "status --history") {
+		t.Fatalf("partial history was presented as exhaustive: %s %v", out, err)
+	}
+}

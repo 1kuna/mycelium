@@ -20,6 +20,14 @@ import (
 	"mycelium/internal/myce"
 )
 
+// The fake manager exposes the same effective lifecycle properties as systemd.
+func fakeSetupManager(_ context.Context, name string, args ...string) ([]byte, error) {
+	if name == "systemctl" && strings.Contains(strings.Join(args, " "), "--property=TimeoutStopUSec") {
+		return []byte("TimeoutStopUSec=45s\nTimeoutStartUSec=1min 30s\n"), nil
+	}
+	return nil, nil
+}
+
 func TestInstallCLIDryRunFakeDetection(t *testing.T) {
 	for _, platform := range []string{"cuda", "xpu", "metal"} {
 		t.Run(platform, func(t *testing.T) {
@@ -90,7 +98,7 @@ func TestInstallCLIStoresAbsoluteCatalogPaths(t *testing.T) {
 	fleet := filepath.Join(home, ".config", "myce", "fleet.env")
 	os.MkdirAll(filepath.Dir(fleet), 0700)
 	os.WriteFile(fleet, []byte("MYCE_TOKEN=test-only-token\nMYCE_QUEUE=http://queue:7331\n"), 0600)
-	p := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) { return nil, nil }}
+	p := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: fakeSetupManager}
 	if err := setupCommandWithProbe([]string{"install", "queue", "--nas", home, "--require-mounted-nas=false", "--model-config", "models.yaml", "--environment-config", "environments/catalog.yaml"}, p, home); err != nil {
 		t.Fatal(err)
 	}

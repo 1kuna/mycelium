@@ -247,3 +247,16 @@ func (p *queueHoldPhases) finish() time.Duration {
 	p.next(p.active)
 	return p.last.Sub(p.started)
 }
+
+// Body timers are opt-in diagnostics. Their wall clock never controls scheduling.
+func (q *Queue) bodyPhaseStart() time.Time {
+	if q.observeBodyPhase == nil {
+		return time.Time{}
+	}
+	return holdNow(q.holdClock)
+}
+func (q *Queue) bodyPhaseFinish(name string, started time.Time) {
+	if !started.IsZero() {
+		q.observeBodyPhase(name, holdNow(q.holdClock).Sub(started))
+	}
+}

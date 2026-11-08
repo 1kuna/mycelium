@@ -3,8 +3,10 @@ package myce
 import "context"
 
 type checkinMemoryIdentities struct {
-	revision uint64
-	values   map[*Job]string
+	revision         uint64
+	values           map[*Job]string
+	retainedRevision uint64
+	retained         retainedMemoryIndex
 }
 
 // Plain recipe identities include every input reference. Snapshot under the
@@ -14,6 +16,11 @@ func (q *Queue) snapshotCheckinMemoryIdentities(ctx context.Context) checkinMemo
 	unlock := requestLock(ctx, &q.mu)
 	snapshot := checkinMemoryIdentities{revision: q.fileReferenceRevision}
 	jobs := map[*Job]Job{}
+	var retained map[string]*Job
+	if ctx.Err() == nil && q.retainedMemoryIndex == nil && q.records != nil {
+		snapshot.retainedRevision = q.retainedMemoryRevision
+		retained = snapshotRetainedMemoryJobs(q)
+	}
 	if ctx.Err() == nil {
 		for _, j := range q.liveJobs() {
 			if j.State == "queued" && plainMemoryWork(j.Spec) && j.Spec.FanOut == nil {
@@ -22,6 +29,9 @@ func (q *Queue) snapshotCheckinMemoryIdentities(ctx context.Context) checkinMemo
 		}
 	}
 	unlock()
+	if retained != nil {
+		snapshot.retained = buildRetainedMemoryIndex(retained, nil)
+	}
 	snapshot.values = make(map[*Job]string, len(jobs))
 	for original, copy := range jobs {
 		snapshot.values[original] = profileMemoryIdentity(&copy)
@@ -36,4 +46,12 @@ func (s checkinMemoryIdentities) current(q *Queue) map[*Job]string {
 		return nil
 	}
 	return s.values
+}
+
+// The cold-record generation also changes on rollback, which need not advance
+// the commit revision. Owner inventory is deliberately not frozen in this index.
+func (s checkinMemoryIdentities) installRetainedMemory(q *Queue) {
+	if s.retained != nil && s.retainedRevision == q.retainedMemoryRevision && q.retainedMemoryIndex == nil {
+		q.retainedMemoryIndex = s.retained
+	}
 }

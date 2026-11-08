@@ -681,6 +681,11 @@ func (a API) registerFiles(mux *requestMux) {
 // the owner, since socket throughput cannot estimate server disk/hash work.
 var errFileTransferStalled = errors.New("file transfer stalled")
 
+// Record the failed phase before HTTP proxy wrapping or timeout normalization.
+// Only a completed dial reports this; a live transfer's idle expiry cannot.
+var errFileTransferDial = errors.New("file transfer dial failed")
+var errFileTransferLocal = errors.New("local download storage failed")
+
 func (c Client) fileTimeout(_ int64) time.Duration { return c.transferIdle }
 
 type fileTransferConn struct {
@@ -765,6 +770,13 @@ func (c *fileTransferConn) Write(p []byte) (int, error) {
 }
 
 func fileTransferTimeout(err error, idle time.Duration) error {
+	// Dial completion is definitive reachability evidence, not an idle body
+	// expiry. Preserve its identity through every transport wrapper so the
+	// preparation owner can end a real outage rather than resume forever.
+	var dial *net.OpError
+	if errors.Is(err, errFileTransferDial) || errors.As(err, &dial) && dial.Op == "dial" {
+		return err
+	}
 	var timeout net.Error
 	if errors.As(err, &timeout) && timeout.Timeout() {
 		return fmt.Errorf("%w: no network progress for %s", errFileTransferStalled, idle)
@@ -867,7 +879,11 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 		}
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			conn, err := fileTransferDial(ctx, idle, func(ctx context.Context) (net.Conn, error) {
-				return dial(ctx, network, addr)
+				conn, err := dial(ctx, network, addr)
+				if err != nil {
+					err = fmt.Errorf("%w: %w", errFileTransferDial, err)
+				}
+				return conn, err
 			})
 			if err != nil {
 				return nil, fileTransferTimeout(err, idle)
@@ -1082,7 +1098,10 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 	}
 	return c.hasFile(ctx, ref, headPurpose)
 }
-func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) error {
+func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) (stageErr error) {
+	traceSharedFile(ctx, ref)
+	defer func() { stageErr = tracedSharedError(ctx, stageErr) }()
+	traceSharedInput(ctx, "prepare", "cache")
 	if err := ref.validate(); err != nil {
 		return err
 	}
@@ -1104,11 +1123,13 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	if err := noModelSymlinks(dest, true); err != nil {
 		return err
 	}
+	traceSharedInput(ctx, "open", "cache")
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	traceSharedInput(ctx, "stat", "cache")
 	st, err := f.Stat()
 	if err != nil {
 		return err
@@ -1123,12 +1144,14 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 				return err
 			}
 		}
+		traceSharedInput(ctx, "verify", "cache")
 		return verifyFile(ctx, dest, ref)
 	}
 	headers := map[string]string{"If-Range": `"` + ref.SHA256 + `"`}
 	if offset > 0 {
 		headers["Range"] = fmt.Sprintf("bytes=%d-", offset)
 	}
+	traceSharedInput(ctx, "headers", "store")
 	res, err := c.fileRequest(ctx, "GET", "/api/files/blobs/"+ref.SHA256, nil, headers, ref.SizeBytes)
 	if err != nil {
 		return err
@@ -1159,15 +1182,55 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
-	n, copyErr := io.Copy(f, io.LimitReader(contextReader{ctx, res.Body}, ref.SizeBytes-offset+1))
-	err = errors.Join(copyErr, f.Sync())
+	var output io.Writer = f
+	var input io.Reader = res.Body
+	if t, ok := ctx.Value(sharedInputTraceKey{}).(*sharedInputTrace); ok {
+		t.mu.Lock()
+		t.detail.BytesCopied = offset
+		t.mu.Unlock()
+		output, input = sharedInputWriter{ctx, f}, sharedInputReader{ctx, res.Body, "store"}
+	}
+	n, copyErr := io.Copy(fileDownloadWriter{output}, io.LimitReader(contextReader{ctx, input}, ref.SizeBytes-offset+1))
+	copyErr = tracedSharedCopyError(ctx, copyErr)
+	traceSharedInput(ctx, "sync", "cache")
+	err = copyErr
+	if syncErr := f.Sync(); syncErr != nil {
+		err = fmt.Errorf("%w: %w", errFileTransferLocal, tracedSharedError(ctx, syncErr))
+	}
 	if err != nil {
 		return err
 	}
 	if n != ref.SizeBytes-offset {
 		return errors.New("download interrupted or oversized")
 	}
+	traceSharedInput(ctx, "verify", "cache")
 	return verifyFile(ctx, dest, ref)
+}
+
+func copyFileDownload(dst interface {
+	io.Writer
+	Sync() error
+}, src io.Reader) (int64, error) {
+	n, err := io.Copy(fileDownloadWriter{dst}, src)
+	// An interrupted remote read does not excuse a failed local durability
+	// boundary. Return the sync failure alone so its terminal cause wins.
+	if syncErr := dst.Sync(); syncErr != nil {
+		return n, fmt.Errorf("%w: %w", errFileTransferLocal, syncErr)
+	}
+	return n, err
+}
+
+type fileDownloadWriter struct{ io.Writer }
+
+func (w fileDownloadWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		err = fmt.Errorf("%w: %w", errFileTransferLocal, err)
+	}
+	return n, err
 }
 
 func fileTransferError(res *http.Response, message string, observed ...time.Time) error {

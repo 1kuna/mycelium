@@ -67,7 +67,7 @@ func (c *SharedInputCache) refreshCapacity() {
 // The existing cache admission lock serializes accounting with reservations and
 // eviction. A failed inventory withholds space; it never invents free capacity.
 func (c *SharedInputCache) refreshCapacityLocked() {
-	report := &SharedInputCapacity{CapacityBytes: uint64(max(0, c.cache.Limit)), Protected: map[string]uint64{}}
+	report := &SharedInputCapacity{Protected: map[string]uint64{}}
 	defer func() { c.mu.Lock(); c.capacity = report; c.mu.Unlock() }()
 	used, err := c.cache.DiskUsage()
 	if err != nil {
@@ -89,8 +89,36 @@ func (c *SharedInputCache) refreshCapacityLocked() {
 			if err != nil {
 				return
 			}
-			// Counting the full reservation is conservative while a writer grows.
-			reserved = addDiskBytes(reserved, n)
+			var written uint64
+			stage := strings.TrimSuffix(key, ".reservation") + ".partial"
+			for _, part := range []string{"data", "archive"} {
+				size, err := environmentSize(filepath.Join(c.cache.Root, stage, part))
+				if err != nil && !os.IsNotExist(err) {
+					return
+				}
+				written = addDiskBytes(written, uint64(max(0, size)))
+			}
+			if n > written {
+				reserved = addDiskBytes(reserved, n-written)
+			}
+			continue
+		}
+		if entry.IsDir() && strings.HasSuffix(key, ".partial") {
+			partial := filepath.Join(c.cache.Root, key)
+			if st, err := os.Lstat(filepath.Join(partial, "resume")); err == nil && st.Mode().IsRegular() {
+				lock, err := c.cache.tryLock(strings.TrimSuffix(key, ".partial") + ".build")
+				if err != nil {
+					return
+				}
+				if lock != nil {
+					n, err := environmentDiskUsage(partial)
+					unlockEnvironment(lock)
+					if err != nil {
+						return
+					}
+					evictable = addDiskBytes(evictable, uint64(n))
+				}
+			}
 			continue
 		}
 		if !entry.IsDir() || (FileRef{SHA256: key}).validate() != nil {
@@ -117,10 +145,32 @@ func (c *SharedInputCache) refreshCapacityLocked() {
 			evictable = addDiskBytes(evictable, uint64(n))
 		}
 	}
+	// Measure after reading growing prefixes; writes during the scan only make
+	// remaining-byte accounting more conservative.
+	used, err = c.cache.DiskUsage()
+	if err != nil {
+		return
+	}
+	explicit := c.cache.Limit
+	if c.automatic {
+		explicit = 0
+	}
+	limit, free, err := inputCacheBudget(c.cache.Root, used, explicit, c.diskProbe)
+	if err != nil {
+		return
+	}
+	report.CapacityBytes = uint64(max(0, limit))
 	occupied := addDiskBytes(uint64(max(0, used)), reserved)
 	if report.CapacityBytes > occupied {
 		report.FreeBytes = report.CapacityBytes - occupied
 	}
+	physical := uint64(max(0, free))
+	if physical > reserved {
+		physical -= reserved
+	} else {
+		physical = 0
+	}
+	report.FreeBytes = min(report.FreeBytes, physical)
 	report.EvictableBytes = min(evictable, report.CapacityBytes-report.FreeBytes)
 }
 

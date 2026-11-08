@@ -666,10 +666,9 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	}
 	defer finishBudget()
 	contexts = []context.Context{ctx}
-	started := q.clock.Now()
 	if options != nil {
 		owned := *options
-		limit, err := q.requestBudgets.pageLimit(requestContext(contexts), reflect.TypeFor[Job]())
+		limit, err := q.requestBudgets.pageLimit(requestContext(contexts), reflect.TypeFor[Job](), owned.limit)
 		if err != nil {
 			return Snapshot{}, err
 		}
@@ -693,7 +692,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	v.observationScan = v.placementScan()
 	v.observationScan.observationOwner = v
 	v.observationScan.memory = v.memoryPlanning
-	out := v.projectSnapshot(true)
+	out := v.projectSnapshot(true, &q.requestBudgets)
 	out.RequestLatencies = q.requestLatencies.snapshot()
 	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
 	if err == nil {
@@ -701,12 +700,6 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 		err = ctx.Err()
 	}
 	out.Freshness = q.snapshotFreshness(out.Now, false)
-	if err == nil {
-		data, encodeErr := json.Marshal(out)
-		if encodeErr == nil {
-			q.requestBudgets.recordProjection(len(out.Jobs), len(data), q.clock.Now().Sub(started))
-		}
-	}
 	return out, err
 }
 

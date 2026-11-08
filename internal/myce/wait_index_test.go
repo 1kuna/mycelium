@@ -163,3 +163,40 @@ func benchmarkWaitIndex200(b *testing.B, idle bool) {
 	b.ReportMetric((cpu(after)-cpu(before))/float64(b.N), "cpu-ms/200")
 	b.ReportMetric(0, "queue-lock-ns/200")
 }
+
+// Batch-first consumers must retain deadline/event metadata without projecting
+// execution inputs or sharing the queue's mutable timestamp pointers.
+func TestWaitIndexScalarDeadlineMetadata(t *testing.T) {
+	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	deadline, startBy := now.Add(time.Hour), now.Add(time.Minute)
+	j := &Job{ID: "job", State: "running", StartedAt: &now, Spec: Spec{
+		Deadline: &deadline, StartBy: &startBy, ExpectedMinutes: 10,
+		Project: "private-project", Run: RunSpec{Command: []string{"private-command"}},
+	}}
+	index := &waitStateIndex{jobs: map[string]WaitState{}, changed: make(chan struct{})}
+	index.set(j.ID, j)
+	rows, _, _, err := index.read(WaitRequest{IDs: []string{j.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := rows[0]
+	projected := row.Job()
+	if projected.Spec.Deadline == nil || !projected.Spec.Deadline.Equal(deadline) ||
+		projected.Spec.StartBy == nil || !projected.Spec.StartBy.Equal(startBy) ||
+		projected.Spec.ExpectedMinutes != 10 || projected.StartedAt == nil || !projected.StartedAt.Equal(now) {
+		t.Fatal("missing observation metadata", projected)
+	}
+	wire, err := json.Marshal(row)
+	if err != nil || bytes.Contains(wire, []byte("private")) {
+		t.Fatal("execution data escaped", string(wire), err)
+	}
+	deadline = deadline.Add(time.Minute)
+	if row.Spec.Deadline.Equal(deadline) {
+		t.Fatal("snapshot aliased mutable job metadata")
+	}
+	index.set(j.ID, j)
+	updated, _, changed, err := index.read(WaitRequest{IDs: []string{j.ID}, After: map[string]uint64{j.ID: row.Revision}})
+	if err != nil || !changed || updated[0].Revision == row.Revision || !updated[0].Spec.Deadline.Equal(deadline) {
+		t.Fatal("metadata change did not wake waiters", updated, changed, err)
+	}
+}

@@ -63,7 +63,6 @@ func (w Worker) controlHandshake(path string, in, out any) (time.Time, error) {
 	if base <= 0 {
 		base = defaultWorkerInterval
 	}
-	var spacing time.Duration
 	for {
 		if err := ctx.Err(); err != nil {
 			return time.Time{}, err
@@ -93,8 +92,7 @@ func (w Worker) controlHandshake(path string, in, out any) (time.Time, error) {
 		if !retryTransient(err) && !errors.Is(err, context.DeadlineExceeded) {
 			return time.Time{}, err
 		}
-		spacing = max(base, measured, growDuration(spacing))
-		pace := ClientPace{delay: spacing}
+		pace := ClientPace{cost: max(base, measured)}
 		if err := c.pause(ctx, pace.Delay(c.clock().Now(), time.Time{}, err, c.Jitter)); err != nil {
 			return time.Time{}, err
 		}

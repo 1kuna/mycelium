@@ -27,7 +27,10 @@ and preserve the refusal and identities for that owner.
 
 From the next queue release, request bodies, wait batches and status history pages
 follow current queue capacity; 413 refusals name the cause and fitting size.
-Follow returned page cursors and retain the same submission key after a refusal.
+Default status is a partial history page: absence does not mean a job was lost
+or is incomplete. Use `myce status JOB_ID` or a batched wait for known jobs,
+`myce status --history` for all retained jobs, and follow `jobs_page.next_before`
+when paging the API. Retain the same submission key after a refusal.
 Custom peers can negotiate `capacity-v1` through HTTP headers without changing
 legacy JSON. See [request budgets](https://github.com/1kuna/mycelium/blob/main/docs/request-budgets.md).
 
@@ -43,6 +46,23 @@ Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
+From the release containing #1079, the supported owner-write route is on the
+queue host as the account that can read its installed queue configuration:
+
+```sh
+myce policy get --yaml --config <installed-queue-config> > policy.yaml
+# Edit policy.yaml; N is the exported revision.
+myce policy set policy.yaml --if-revision N --config <installed-queue-config>
+```
+
+Use the same `--config <installed-queue-config>` for other owner-scoped writes
+such as `myce model sync MODEL --to all --config <installed-queue-config>`.
+The CLI resolves credentials internally and retains installed certificate trust.
+Never source env files or set `MYCE_TOKEN` by hand; never extract joining tokens.
+`owner_authority_unavailable` means the installation owner must restore access;
+`owner_authority_unpinned` means HTTPS owner authority lacks provisioned trust.
+Do not work around either refusal with credentials or TLS overrides.
+
 After upgrading both queue and worker, learned and exploratory native
 CPU `memory: auto` jobs can grow their charge from fresh measurements while the host has room. OS
 pressure, exhausted measured headroom, the configured host allowance and
@@ -272,6 +292,36 @@ printf 'mycelium-ease-audit-ok\n' > expected.txt
 cmp expected.txt accepted/result.txt
 ```
 
+From the release containing #1053, use **one batched wait per agent** for all
+of its pending jobs (up to 256 distinct IDs):
+
+```sh
+myce wait JOB_A JOB_B JOB_C
+# Full diagnostics on changes, using the same batched observation:
+myce wait --json JOB_A JOB_B JOB_C
+```
+
+Python callers use `client.wait_many([job_a, job_b, job_c])` (or pass the list to
+`client.wait`); a single ID still returns one Job. Lists return full terminal
+Jobs in input order. Supporting clients start directly with one shed-exempt
+`/api/wait` request for all pending IDs, carrying revisions so it wakes when any
+job changes. No per-job capability/bootstrap GET is required. New queue replies
+include scalar deadline/start metadata; older batch queues may omit it, so use
+an owner timeout when that bound matters. Clients try one bounded metadata read
+for an older batch queue: a successful read retains its deadline, while a
+slow/shed read leaves that metadata unavailable and observation continues. Optional reads share one batch-v1 hold interval
+(at most 20 seconds) per reply,
+not per job; caller deadlines can shorten it.
+Terminal payloads are fetched for results. Queues without the endpoint retain compatible lightweight reads after
+one unsupported-endpoint probe. Queue execution deadlines always apply.
+CLI JSON continues with scalar state/reason if a changed diagnostic read is slow
+or transiently unavailable; these optional reads use that same shared budget,
+and explicit Retry-After suppresses further diagnostic requests until eligible.
+Python/Go result consumers still fetch a full terminal Job before returning it.
+Do not build per-job wait processes, Python wait
+threads, repeated `get` calls or status loops. Use status once when diagnosing
+an actual blocker; a timeout leaves the jobs alive.
+
 From the next release, `wait` prints one short line per state change (progress
 on stderr, terminal states on stdout). Use `myce wait --json JOB_ID` for full
 reasons and initial diagnostics, or `myce status JOB_ID` for current details.
@@ -281,6 +331,34 @@ symlinks below the chosen output directory remain refused.
 Success means `result` verified output hashes and sizes **and** `cmp` exited 0:
 the exact result is 23 bytes including newline. A wake or command exit alone is
 insufficient. On a release containing #811, omitted retention protects results until explicit release; saved positive operator windows still apply.
+
+**NAS inputs: stage locally before processing, for every size.** Declare reusable
+read-only files as `shared_inputs: {source: {nas: RELATIVE, sha256: HASH,
+size_bytes: BYTES}}` and process `$MYCE_INPUT_SOURCE`. The path is the executing
+machine's verified local cache; never stream an input from its NAS mount during
+processing. Small files use the same path. Existing `inputs: {local_name:
+relative_nas_source}` already copy to the local attempt folder, so commands
+reading `local_name` need no rewrite. Prefer shared inputs for repeated or large
+files to avoid private copies per attempt. `myce file put PATH` can derive the
+identity and import bytes when no authored manifest is available.
+
+From the release containing #1061, automatic file/shared-input cache allowances
+follow current filesystem headroom, including after disk is freed, without a
+worker restart. Explicit operator limits and active pins still bind; unpinned
+copies can be evicted. A genuine refusal names required/available bytes. Do not
+clear caches or resubmit to evade it. Completed transient NAS reads resume the
+local prefix in the same preparation attempt; shared-input prefixes also survive
+cancellation/restart until reused or evicted. Final size/SHA-256 verification
+precedes publication. Local storage, integrity and permission failures remain
+terminal. Legacy path inputs verify the copied-byte digest locally and reject
+observed source changes; an authored hash is needed to assert immutable identity.
+
+Mycelium cannot discover NAS reads hidden in arbitrary shell strings, payload
+code/configuration or external working directories. Declare those inputs and use
+the local input path. `--checkpoint-root` resolves declared shared-input sources
+and separately holds mutable checkpoint generations; a path there is not an
+input declaration. Do not use the checkpoint directory as an input-media path.
+Checkpoint saves and NAS output publication retain their durability contracts.
 
 On releases with the mixed-version cache correction, workers without an optional
 shared-input cache-capacity report retain staging-time admission. Reporting workers
@@ -331,6 +409,14 @@ bounds or deadlines. Preparation/transfer remain separate and uncalibrated.
 Missing or incompatible pairs retain the raw estimate or its unknown state;
 forecasts grant no capacity, reserve no slot and do not move running work.
 
+From the next worker release (#1056), shared-input staging failures retain the
+active stage, source/cache/store path class, bytes copied and expected file size,
+plus numeric errno when the OS supplies it. A safe `timeout` identifies a
+withdrawn operation; absent errno does not establish kernel EIO. Report that
+exact attempt evidence to the storage owner; keep original inputs and cache
+custody intact. A later successful stage alone does not identify the earlier
+cause or establish a repair.
+
 If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
 repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium
@@ -362,6 +448,15 @@ missing/stale telemetry, unified-CUDA device floors and release custody remain
 binding. An aggregate refusal alone cannot identify a sibling's contribution or
 establish safe concurrency. See [live headroom](../../docs/status.md#live-headroom-and-reservations).
 
+From the stale-forecast correction (#1077), bounded native CPU auto jobs only
+raise forecast reservations from fresh identified samples. A newer observation
+can replace forecast uncertainty; observed peaks, accepted envelopes and exact
+release custody remain protected. Missing/stale samples retain the last accepted
+reservation without resident credit. Older workers without sample IDs cannot
+raise forecast-only floors. Pre-correction opaque attempt charges stay conservative
+until exact release, because their original measured/forecast split is unknown.
+Worker rollout alone does not repair the queue's forecast retention.
+
 From the declared-CPU containment correction (#1064), an enforced native cgroup
 attempt's live forecast cannot inflate its charge beyond its declaration plus
 ceiling slack. Actual larger observations remain protected; missing/stale samples
@@ -382,9 +477,38 @@ On releases with adaptive observation admission (#800), healthy queues accept re
 
 From the release containing #959, interrupted `myce logs JOB` prints `myce logs JOB --after SEQ` on stderr. Resume with that cursor after the reported Retry-After to avoid replaying completed pages; add `--follow` to keep following. From the release containing #890, read-only `myce policy get` resolves installed worker, then queue authority without setting or printing `MYCE_TOKEN`.
 
-**Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; each CLI job gets an initial diagnostic read to retain its deadline. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
+**Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; CLI/Python consumers use scalar batch deadline metadata without a bootstrap GET, as described above. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
 
 **Input and accepted-result recovery (next release, #831/#751):** profile/adapter input storage retries span preflight and reconciled uploads under the caller's one context deadline; each retry reports its sanitized cause and honours `Retry-After`. `myce result` uses the same transient recovery for accepted retrieval, including CI. Permanent authentication, TLS, capacity, integrity and configuration errors stop immediately. No retry count or new default deadline is imposed; without an owner deadline, interrupt to stop observation/recovery and resume the saved intent later.
+
+From the worker release containing #1045, ordinary queue-stored dependency and
+source inputs resume transient transfer stalls inside the same preparation
+attempt, retaining and verifying partial bytes. `input transfer recovering; same
+preparation attempt retained` is pending work and spends no infrastructure retry.
+Keep the job; cancellation still withdraws preparation. A completed failed dial
+returns `storage_unreachable`; permanent storage, authentication and integrity
+refusals still stop preparation. Execution waits for verified staging.
+
+From the release containing #1074, connection reset/refusal, handshake EOF and
+TLS internal errors during a listener restart remain transient: observation
+keeps its binding and retries with measured pacing and the server's current
+`Retry-After`. A `tls:` error prefix alone does not prove an identity mismatch.
+Explicit certificate/pin, TLS integrity and protocol refusals still stop with
+`observation_error: tls_identity`; report those to the installation/authority
+owner and preserve the receipt and notifier. Do not change trust or resubmit
+under a new key. Older clients can misclassify a cutover as `tls_identity`;
+only after the authority owner verifies unchanged trust and identity, replay
+the original saved command/key with its notifier and current installed
+authority, serialized. Updating a candidate binary does not update the installed
+CLI or the image of an existing shared observer; check its reported commit.
+
+From the release containing #1072, Go and Python GET/HEAD, download and
+replay-safe retries follow the current positive `Retry-After` plus jitter;
+previous errors and unchanged reads cannot stretch that pause. Without a server
+signal, retry spacing follows measured request service cost plus jitter. Caller
+deadlines stop recovery without retrying before the server permits it. Python
+`timeout` bounds API recovery and `transfer_timeout` bounds each file request;
+Go uses the caller context or explicitly configured HTTP timeout.
 
 ## Submission advice under control pressure (next release, #1065)
 
@@ -492,7 +616,7 @@ still withholds dependent jobs under the unchanged measured thresholds.
 - **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Helper occupancy is sampled before main but does not mean main started; device counter sums do not prove unique physical residency or release device growth reservations. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
 - **Discrete XPU fan-out sharing (next supporting release, default off):** explicitly set `fan_out.share_xpu: true`; every co-tenant must opt in and have fresh card/host/attempt headroom. Compare off/on at experiment class on the same release before owner-accepted production use. No allowance increase is implied. See [sharing and growth rules](advanced.md#submit).
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
-- **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits. From the next release, `myce wait --observer-status` reports local observer progress; newer clients request cooperative upgrades. Legacy shared-observer recovery belongs to its operator.
+- **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits. From the next release, `myce wait --observer-status` reports local observer progress; newer clients request cooperative upgrades. Legacy shared-observer recovery belongs to its operator. From the release containing #919’s recurrence fix, shared-observer read spacing is bounded by measured service cost and the current Retry-After signal; unchanged long-poll history cannot become a retry deadline. Pending terminal-detail reads resume before another batch after pressure, so progress does not require credit for both requests in one pass. After an older observer has stalled, its operator must still perform the documented recovery.
 - **Large outputs, diagnostics, quotas or early release:** [results and custody](advanced.md#results). Release only your own terminal results after all downstream uses and verified copies are complete.
 - **Reservation confirmation (#979, next release):** `reserve add` fails on rejected or unconfirmed writes instead of printing an empty record. Keep an explicit `--id`, inspect `reserve list` after uncertain confirmation, and retry the same binding.
 - **Urgency, reservations or pausing:** [class and validation rules](advanced.md#urgency-and-pausing). Class is the only urgency lever; shared policy changes belong to the queue owner.

@@ -144,6 +144,11 @@ Old CLIs continue to decode the existing fields.
 From s072, machine `shared_input_cache` reports `capacity_bytes`, `free_bytes`
 and `evictable_bytes`. Free space excludes cache allocation and outstanding
 staging reservations; evictable space contains only inactive reproducible entries.
+From #1061, automatic capacity follows current headroom during admission and the
+existing worker retention sweep. Free bytes exclude unwritten reservation bytes,
+without charging already written prefixes twice. Inactive resumable prefixes are
+evictable; a detached writer keeps its build lock and remaining-byte reservation.
+Explicit cache ceilings and the filesystem control-space floor still bind.
 `protected` maps cache identities to allocated bytes held by readers/custody, so
 placement can reuse an already held input without charging it twice. Check-ins
 copy an in-memory snapshot; cache discovery does not run under the queue mutex.
@@ -172,7 +177,7 @@ boolean verdicts. No record does not establish a hardware change.
 
 Default status keeps the existing JSON fields and job shape, but includes all
 nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
-100 other terminal jobs by submission time. Work curves remain included for
+capacity-sized page of other terminal jobs by submission time. Work curves remain included for
 existing consumer audits and release-preservation guards.
 This bounds retained-history detail without hiding control-plane custody.
 `jobs_page` ([schema](schemas/status-jobs-page-v1.schema.json)) reports the
@@ -181,8 +186,8 @@ filtered `total`, `returned`, `mode`, and optional `next_before` job ID.
 - `GET /api/status?jobs=active` returns all active/cleanup-pending jobs.
 - `?jobs=all&limit=100` pages all history, newest submission first; append
   `&before=NEXT_BEFORE` from each reply until that field is absent. `limit` is
-  positive and bounded by current queue memory and measured projection cost from
-  the next release; omission chooses an adaptive page. See [request budgets](request-budgets.md). The normal status presentation order is retained
+  positive and capped by current queue memory. Explicit page intent sets the
+  projection-service floor; omission chooses a page from measured job-row cost. See [request budgets](request-budgets.md). The normal status presentation order is retained
   within each page; use the returned cursor rather than the last displayed ID.
 - `?project=example&since=2026-10-30T00:00:00Z` filters jobs by project and
   inclusive submission timestamp. Filters do not alter fleet health, eligibility
@@ -723,7 +728,15 @@ it resolves the actual managed workspace and symlinks on that host.
 
 Input-staging failures carry `execution_cause.staging` on the job and exact
 attempt history: `input`, `blob` (SHA-256), `operation`, `error`, optional
-`syscall`, and optional HTTP `status`. Capacity failures also name `capacity`
+`syscall`, and optional HTTP `status`. From the next worker release, shared-input
+failures also retain `stage` (for example read, write, sync, verify or headers),
+`path_class` (source, cache or store), `bytes_copied`, `expected_bytes`, and
+numeric OS `errno` when supplied. A timeout snapshots the currently active
+operation even if its private writer finishes later. Byte counts describe the
+active file's materialization, including a resumed prefix or successful clone;
+verification does not add copied bytes. Missing errno means no OS errno was
+observed, rather than EIO. Zero fields may be omitted; older workers omit these
+fields entirely. Capacity failures also name `capacity`
 and byte comparisons (`required_bytes`, `available_bytes`, `limit_bytes`;
 zero values may be omitted). Names are bound to declared and resolved dependency inputs;
 expanded worker paths and raw upstream text are excluded. `myce logs JOB_ID`
@@ -1993,6 +2006,13 @@ jitter (#819). Retry bounds belong to caller cancellation or an explicit owner
 deadline; no fixed retry count or fleet-tuned timeout is added. From #960,
 interruption retains the last HTTP error and prints its Retry-After interval.
 Follow the seconds-scale server signal rather than guessing minutes of backoff.
+From the release containing #1072, generic Go and Python GET/HEAD retries,
+downloads and replay-safe recovery use the current positive Retry-After plus
+positive jitter, independent of earlier errors or unchanged reads. Without that
+signal they use measured request service cost plus jitter, rather than accumulating
+exponential error pauses. The caller's deadline may end a pause before retry is
+permitted; it stops recovery instead of starting an early request. No fixed cap
+or retry count is introduced.
 From #959, `myce logs JOB --after SEQ` resumes strictly after a log sequence.
 An interrupted read prints the continuation command on stderr; stdout remains
 ordered raw log text. The cursor advances after each successfully written chunk,

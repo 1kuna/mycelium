@@ -106,6 +106,7 @@ type Worker struct {
 	cancelStart           context.CancelFunc
 	controlLatency        *workerControlLatency
 	launchCtx             context.Context // Exact attempt/preparation owner; cancels handshake waits.
+	serviceStop           context.Context // Installed TERM cancels observation/I/O, not durable cleanup.
 	batchAdmission        func(context.Context, HostLaunch) error
 	stopAdmission         func()
 	DeviceBinding         string
@@ -476,7 +477,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := s.warnNativeIsolation(&j); err != nil {
 		return nil, err
 	}
-	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(context.WithValue(ctx, sharedInputOwnerKey{}, s), j)
+	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(context.WithValue(context.WithValue(ctx, sharedInputOwnerKey{}, s), inputTransferRecoveryKey{}, &s.inputTransferRecovering), j)
 	if sharedErr != nil {
 		if errors.Is(sharedErr, errCheckpointIOPending) {
 			return nil, fmt.Errorf("%w: shared input copy pending", errWorkerCheckpoint)
@@ -507,7 +508,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 				defer s.inputStaging.Store(false)
 			}
 			return captureStagedInputs(w.Clock, func() (string, error) {
-				err := w.prepareExtensionFilesContext(ctx, &value, s.dir)
+				transferCtx := context.WithValue(ctx, inputTransferRecoveryKey{}, &s.inputTransferRecovering)
+				err := w.prepareExtensionFilesContext(transferCtx, &value, s.dir)
 				return value.Spec.Run.Workdir, err
 			})
 		}, false)
@@ -1130,6 +1132,9 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 }
 func (w Worker) Run(stop context.Context) error {
 	w.launchCtx = stop
+	if w.ServiceConfig != nil {
+		w.serviceStop = stop
+	}
 	w.controlLatency = &workerControlLatency{}
 	w.Client.resourceWire = &resourceWire{}
 	w.hygieneWire = &workerHygieneWire{}
@@ -1275,7 +1280,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.LogRetention < 0 {
 		return errors.New("log-retention must be positive")
 	}
-	retentionCtx, retentionCancel := context.WithCancel(context.Background())
+	retentionCtx, retentionCancel := context.WithCancel(stop)
 	type retentionRequest struct {
 		active string
 		now    time.Time
@@ -1317,6 +1322,10 @@ func (w Worker) Run(stop context.Context) error {
 	}
 
 	availabilityCtx, availabilityCancel := context.WithCancel(context.Background())
+	if w.serviceStop != nil {
+		stopAvailability := context.AfterFunc(w.serviceStop, availabilityCancel)
+		defer stopAvailability()
+	}
 	availabilityDone := make(chan struct{})
 	availabilityWake := make(chan struct{}, 1)
 	w.availability = newAvailabilityMonitor(w.Clock, w.DailyUse, w.Laptop, w.Desktop)
@@ -1394,11 +1403,11 @@ func (w Worker) Run(stop context.Context) error {
 	if w.ExtensionRoot == "" {
 		w.ExtensionRoot = filepath.Join(s.dir, "extensions")
 	}
-	probeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	probeCtx, cancel := context.WithTimeout(stop, 15*time.Second)
 	w.extensionFingerprint, _ = ExtensionFingerprint(probeCtx, w.Machine.GPU, w.Machine.Device)
 	cancel()
 	w.Machine.ExtensionFingerprint = w.extensionFingerprint
-	probeCtx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
+	probeCtx, cancel = context.WithTimeout(stop, 15*time.Second)
 	w.Machine.CPUExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, "cpu", "")
 	cancel()
 	w.environmentCache.Fetch = w.fileCache.copyTo

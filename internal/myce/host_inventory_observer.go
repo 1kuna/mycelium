@@ -17,6 +17,9 @@ func (w Worker) inventorySource() func(context.Context) ([]MachineDevice, error)
 	identity := extensionIdentityProbe
 	return func(ctx context.Context) ([]MachineDevice, error) {
 		devices, err := probeInventory(ctx)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		devices = slices.Clone(devices)
 		probe := identity()
 		// Qualification hashes retain their existing bytes, while common OS and

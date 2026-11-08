@@ -72,7 +72,7 @@ func benchmarkCheckinPersistence(b *testing.B, manifests bool) {
 		sum.Bytes += p.Bytes
 		sum.Records += p.Records
 	}
-	q.observeUpdatePhases = func(p queueHoldPhases) {
+	q.observePersistenceHold = func(p queueHoldPhases) {
 		for i, v := range p.phases {
 			phases[i] += v
 		}

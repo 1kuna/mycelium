@@ -437,19 +437,36 @@ only before the first policy is stored. After first boot, the persisted SQLite
 policy is authoritative. Editing the config and restarting or reinstalling the
 queue no longer changes live policy or advances its revision.
 
-From the release containing #890, read-only `myce policy get` resolves installed
-worker authority, then queue authority, as `myce status` does. No `MYCE_TOKEN`
-environment setting is needed and no credential is printed; `--config` selects
-an explicit installed configuration. Policy writes retain owner-token requirements.
+`myce policy get` resolves installed worker authority, then queue authority.
+From the release containing #1079, policy and model writes use the same
+installed-authority resolver and preserve its certificate pin, including when
+legacy endpoint/credential environment variables are present.
 
-For a deliberate change, export the current policy, edit its `projects` mapping,
+The supported owner-write route is on the queue host, using the installed queue
+configuration. Run as the account allowed to read that configuration and its
+credential references. Export the current policy, edit its `projects` mapping,
 and import it using the revision printed by the export:
 
 ```sh
-myce policy get --yaml > policy.yaml
+myce policy get --yaml --config <installed-queue-config> > policy.yaml
 # Edit policy.yaml, then replace N with the exported revision.
-myce policy set policy.yaml --if-revision N
+myce policy set policy.yaml --if-revision N --config <installed-queue-config>
 ```
+
+The CLI reads the credential reference internally; the operator handles no
+credentials. The configured queue endpoint is retained (including a queue's
+installed HTTP endpoint); an installed joining authority retains its HTTPS pin.
+An HTTPS owner write without provisioned trust refuses with
+`owner_authority_unpinned`; missing or unreadable authority refuses with
+`owner_authority_unavailable`. Ask the installation owner to restore authority.
+Never source env files or set `MYCE_TOKEN` by hand, and never extract a joining
+token into environment variables. These are not supported operator workarounds.
+
+Other owner-scoped writes use the same `--config <installed-queue-config>` route,
+for example `myce model sync MODEL --to all --config <installed-queue-config>`
+and `myce host drain HOST --config <installed-queue-config>`. Enrollment still
+uses provisional shared authority; this CLI route does not introduce separate
+server-side roles or grant authority to an unenrolled machine.
 
 The same file carries the optional `models` mapping (permitted repository
 patterns, per-snapshot `max_bytes` and `free_floor_bytes`) for
@@ -491,7 +508,9 @@ live policy; a different startup file is refused, so edit host policy with
 
 All commands use the authenticated queue and run as an ordinary account.
 On an enrolled machine they read installed authority and keep its certificate
-pin, like `myce status` and `myce cancel`, so no token is needed. Explicit
+pin, like `myce status` and `myce cancel`, so no operator token handling is needed.
+For owner writes, use the queue-host `--config <installed-queue-config>` route
+above. Never source env files or set `MYCE_TOKEN` by hand. Explicit
 `--queue`/`--token`, `MYCE_QUEUE`/`MYCE_TOKEN`, `--config` and `--joining-file`
 still select the endpoint or authority.
 Use the physical host ID shared by all device workers:
@@ -1173,6 +1192,11 @@ reporting infrastructure interruptions. Installed shutdown also stops
 non-resumable CPU attempts; an interactive `join` still lets those finish.
 After 45 seconds systemd retains a final group-wide KILL, including delegated
 attempt cgroups. Payload failures observed before worker stop remain failures.
+From the next release (#1081), installed TERM cancels GPU inventory, host
+observations and pending queue I/O immediately. After local attempt cleanup is
+durable, exit does not require a queue reply or a remote model plan; unacknowledged
+results retain their exact attempt identity for startup replay. Interactive leave
+continues to use the existing graceful queue handshake.
 macOS uses the generated launchd service. Configuration and secret files stay
 private. Never run the ordinary binary as root.
 
@@ -1205,6 +1229,17 @@ drop-ins that override execution, credentials or containment block activation,
 except queue `ExecStart` overrides: these are preserved with a warning so their
 settings can be migrated before removal. Consumer files are preserved. Check
 health and exact cleanup before resuming.
+
+From the next release (#1081), Linux installer stop/start/restart waits read the
+unit's effective `TimeoutStopUSec` and `TimeoutStartUSec` from systemd, including
+drop-ins. Starts/restarts allow both a pending stop and the start phase, plus two
+measured manager round trips for dispatch/completion. Zero/infinite manager
+timeouts retain operator cancellation without an artificial client deadline.
+Unreadable/malformed timeouts refuse the lifecycle call. Recovery ignores the
+failed install's cancellation, gives each command its own fresh allowance, and
+inspects final manager state with an unexpired context. A failed manager itself
+can still prevent inspection; that error is reported rather than claiming a
+known state.
 
 For a signed-release deployment, installing the queue/worker bytes alone leaves
 the default onboarding approval unchanged. After verifying the updated queue,
@@ -2136,21 +2171,22 @@ semantics apply unchanged. Native Windows/WSL CPU qualification is later work.
 
 ## File and shared-input cache capacity
 
-From s072, omitted `--file-cache-bytes` (or `0`) selects automatic sizing at
-worker startup, using the local cache filesystem's nearest existing ancestor.
-It reuses the environment policy: `min(max(free/4, 4 GiB), 80 GiB, free-20 GiB)`;
-less than 24 GiB free refuses automatic startup. These are ceilings for **each**
-of the private file and shared-input caches, not allocations or reservations.
-The quarter fraction leaves room for both caches, environments and active work;
-the existing physical free-space floor also applies at admission. This sampled
-policy is not the native disk-isolation guarantee parked under #504/#506.
+From the release containing #1061, omitted `--file-cache-bytes` (or `0`)
+selects automatic sizing from **current** local filesystem headroom. Admission
+and the existing worker retention sweep refresh it without restarting the worker.
+The effective allowance adds occupied cache blocks to measured usable free
+space, so eviction exchanges occupied and free bytes without shrinking the
+allowance. The existing floor leaves 1% of the filesystem, at least 256 MiB,
+for filesystem metadata, logs and control state. Other caches, active work and
+external writers already reduce measured free space; concurrent shared stages
+reserve their unwritten bytes. Cache allocation is not a reservation against
+unmanaged external writers or the native disk-isolation guarantee parked under
+#504/#506. Staging rechecks current headroom and reports required/available bytes.
 
-Read-only measurements for this change found approximately 152 GiB and
-1,085 GiB free on two worker filesystems. The reused formula yields about
-38 GiB and 80 GiB, respectively, enough for the incident's 16.5 + 3.4 GiB
-file inputs. The old 10 GiB default could never hold that pair. The 80 GiB
-ceiling preserves the existing bounded environment-cache policy; this change
-does not invent a fleet-wide storage allocator or reserve disk from other writers.
+The startup-only policy in s072 through releases before #1061 used quarter-free,
+4–80 GiB ceilings and a 20 GiB reserve. Its fixed ceiling could remain too small
+after disk reclamation; #1060 records that incident. Input caches no longer use
+those startup caps. Environment and model caches keep their separate policies.
 
 `myce install worker --config CONFIG --file-cache-bytes 34359738368` retains an
 explicit 32 GiB ceiling across reinstall and signed upgrade. Saved distinct positive
@@ -2159,7 +2195,7 @@ default in an older configuration migrates to automatic mode: older settings did
 not record whether that value was explicit. New explicit settings persist that
 intent, including an explicit 10 GiB. An omitted field selects automatic mode; reinstall with `--file-cache-bytes 0`
 clears a saved override. No installer writes a machine-specific automatic size:
-the worker recomputes it from its actual filesystem at each startup.
+the worker refreshes it from its actual filesystem during admission and retention.
 
 Workers report shared-input capacity, free and evictable bytes without cache
 scans in check-in. Discovery and accounting run at startup and cache changes,
@@ -2200,7 +2236,8 @@ An indefinitely blocked CIFS call therefore refuses after 30 seconds, while
 completed operations taking at least 10 seconds report `NAS slow`, their operation
 and elapsed seconds. These incident samples are not a supported-load percentile
 or latency qualification. Mount inventory retains its
-5-second bound, and installer subprocesses retain a 15-second bound per command.
+5-second bound, and ordinary installer subprocesses retain a 15-second bound per
+command; systemd lifecycle waits use the effective unit timeouts described above.
 Cancellation remains active throughout setup. Logs report operation and root
 progress with elapsed time, without paths or mount credentials. A stalled syscall
 stays owned until it returns, so retries cannot start overlapping NAS sequences;
@@ -3951,6 +3988,16 @@ notifier targets, environment/authority values or private paths. Count bindings
 without exposing values. Establish job terminal states with the installed CLI,
 not the queue database. A stale phase is the last boundary reached; an unavailable
 live frame remains unknown.
+
+From the release containing #919’s recurrence fix, next-read spacing uses measured
+observation service cost and the current Retry-After signal, with failure jitter
+spread over one measured service period. Unchanged long-poll history is used only
+to select the protocol hold; it cannot amplify the next-read timer. This trades
+unbounded read suppression for continued observation at the measured service
+rate; the queue can still shed reads with its explicit pressure signal.
+Terminal-detail requests survive those pressure passes and resume before another
+batch read, so learning a terminal state cannot repeatedly consume the credit
+needed to retrieve its result reference.
 
 A legacy owner has neither upgrade support nor diagnostics. Recovery of a shared
 owner requires the owner's authorization and consideration of the wake volume:

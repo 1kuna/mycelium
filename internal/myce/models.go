@@ -684,6 +684,7 @@ func (q *Queue) slotReclaimableFor(s *ModelSlot, demand Spec) bool {
 }
 
 func (q *Queue) modelPlan(machine string) []ModelSlot {
+	defer q.bodyPhaseFinish("model_plan", q.bodyPhaseStart())
 	out := []ModelSlot{}
 	for _, s := range q.s.ModelSlots {
 		if s.Machine == machine {
