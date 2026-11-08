@@ -512,7 +512,7 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	}
 	forecast := sample.growthGB + sample.rateGB*now.Sub(sample.at).Seconds()
 	floor := e.ProbeFloorGB
-	if adaptiveCeiling > 0 {
+	if adaptiveCeiling > 0 && e.ProbeFloorGB <= 0 {
 		floor = max(floor, ceiling) // Estimates can grow, never earn probe credit.
 	}
 	charge = max(floor, sample.footprintGB+forecast+exploratoryDriftMarginGB(m))

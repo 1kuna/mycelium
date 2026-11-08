@@ -996,7 +996,7 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 // All blocking sensors run before this exact-attempt accounting snapshot.
 // Call with rt.mu and rt.admissionMu held. Stop publication shares this ledger;
 // actor reads never acquire process/control locks or perform receipt I/O.
-func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool) error {
+func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool, launching ...attemptKey) error {
 	cores, ram, growth := 0, 0.0, 0.0
 	now := time.Time{}
 	if rt.clock != nil {
@@ -1011,6 +1011,12 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
 		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], now)
+		if slices.Contains(launching, jobKey(j)) && adaptiveMemoryCeilingGB(&j, owner) > 0 {
+			// This exact command has not executed yet. Its offered reservation
+			// must fit; a stale running neighbor still retains the physical cap.
+			charge = hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+			pending = charge
+		}
 		ram += charge
 		growth += pending
 	}
@@ -1055,7 +1061,7 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 	if err != nil || actor == nil || launch.Machine != rt.machine || actor.admissionJob().State == "stopping" {
 		return fmt.Errorf("%w: batch admission custody changed", errWorkerMemory)
 	}
-	return rt.checkHostAdmissionLocked(hostFree, measured)
+	return rt.checkHostAdmissionLocked(hostFree, measured, jobKey(actor.job))
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {
