@@ -13,11 +13,13 @@ import (
 // FileCache contains only reproducible store copies. Attempt folders hold private
 // copies, so commands cannot mutate shared blobs and cache eviction cannot race use.
 type FileCache struct {
-	Root   string
-	Limit  int64
-	Clock  Clock
-	Client Client
-	mu     sync.Mutex
+	Root      string
+	Limit     int64
+	Clock     Clock
+	Client    Client
+	automatic bool
+	diskProbe func(string) (DiskReading, error)
+	mu        sync.Mutex
 }
 
 func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stageErr error) {
@@ -28,7 +30,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err := ref.validate(); err != nil {
 		return err
 	}
-	if c.Limit <= 0 || ref.SizeBytes > c.Limit {
+	if !c.automatic && c.Limit <= 0 {
 		return errors.New("file exceeds local cache limit")
 	}
 	if err := PrepareStateRoots(c.Root); err != nil {
@@ -98,7 +100,11 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if prefix > ref.SizeBytes {
 		return errors.New("file partial exceeds declared size")
 	}
-	free, err := diskFree(root)
+	explicit := c.Limit
+	if c.automatic {
+		explicit = 0
+	}
+	limit, free, err := inputCacheBudget(root, used, explicit, c.diskProbe)
 	if err != nil {
 		return err
 	}
@@ -110,7 +116,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 		return victims[i].used < victims[j].used
 	})
 	for _, v := range victims {
-		if used+need <= c.Limit && free >= need {
+		if used+need <= limit && free >= need {
 			break
 		}
 		hash := strings.TrimSuffix(v.name, ".partial")
@@ -126,14 +132,14 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 			return err
 		}
 		used -= v.size
-		free, err = diskFree(root)
+		limit, free, err = inputCacheBudget(root, used, explicit, c.diskProbe)
 		if err != nil {
 			return err
 		}
 	}
 	operation = "cache_admission"
-	if used+need > c.Limit || free < need {
-		return errors.New("insufficient local file cache space")
+	if used+need > limit || free < need {
+		return &stagingCapacityError{required: need, available: max(0, min(limit-used, free)), limit: limit, capacity: "file_cache"}
 	}
 	operation = "cache_download"
 	if err = c.Client.recoverInputTransfer(ctx, ref, operation, func(one Client) error { return one.DownloadFile(ctx, ref, partial) }); err != nil {

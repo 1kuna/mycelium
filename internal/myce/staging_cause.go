@@ -118,9 +118,11 @@ func stagingErrorName(err error) string {
 		return "invalid_cache_entry"
 	case "frozen native extension source missing", "invalid frozen extension path", "missing frozen source archive", "job files require a root and clean relative names", "attempt input folder is not a directory", "invalid source input name", "input ancestry is not a directory", "input overlaps a source directory":
 		return "invalid_input"
-	case "stored file identity mismatch", "download identity mismatch", "download size mismatch", "model file size or SHA-256 mismatch":
+	case "stored file identity mismatch", "download identity mismatch", "download size mismatch", "model file size or SHA-256 mismatch", "NAS input SHA-256 mismatch":
 		return "identity_mismatch"
-	case "invalid source archive name", "source traverses a symlink", "source symlink escapes archive", "source archive contains unsupported file type", "source contains filesystem aliases or reserved names", "archive/tar: invalid tar header":
+	case "invalid NAS input partial":
+		return "invalid_cache_entry"
+	case "NAS input changed during staging", "NAS input must be a regular file", "invalid source archive name", "source traverses a symlink", "source symlink escapes archive", "source archive contains unsupported file type", "source contains filesystem aliases or reserved names", "archive/tar: invalid tar header":
 		return "invalid_source"
 	}
 	return "io_error"
@@ -134,6 +136,9 @@ func withStagingCause(input string, ref FileRef, operation string, err error) er
 	if errors.As(err, &capacity) {
 		d.RequiredBytes, d.AvailableBytes, d.LimitBytes, d.Capacity = capacity.required, capacity.available, capacity.limit, capacity.capacity
 		d.Operation = "shared_input_admission"
+		if capacity.capacity == "file_cache" {
+			d.Operation = "cache_admission"
+		}
 		d.Error = "cache_space"
 	}
 	var se *stagingError
@@ -186,7 +191,7 @@ func safeStagingCause(d *StagingCause) *StagingCause {
 	if out.Errno < 0 {
 		out.Errno = 0
 	}
-	if !contains([]string{"shared_input_cache", "disk_free_floor"}, out.Capacity) || out.RequiredBytes < 0 || out.AvailableBytes < 0 || out.LimitBytes < 0 {
+	if !contains([]string{"shared_input_cache", "file_cache", "disk_free_floor"}, out.Capacity) || out.RequiredBytes < 0 || out.AvailableBytes < 0 || out.LimitBytes < 0 {
 		out.Capacity = ""
 		out.RequiredBytes, out.AvailableBytes, out.LimitBytes = 0, 0, 0
 	}

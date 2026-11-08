@@ -144,6 +144,11 @@ Old CLIs continue to decode the existing fields.
 From s072, machine `shared_input_cache` reports `capacity_bytes`, `free_bytes`
 and `evictable_bytes`. Free space excludes cache allocation and outstanding
 staging reservations; evictable space contains only inactive reproducible entries.
+From #1061, automatic capacity follows current headroom during admission and the
+existing worker retention sweep. Free bytes exclude unwritten reservation bytes,
+without charging already written prefixes twice. Inactive resumable prefixes are
+evictable; a detached writer keeps its build lock and remaining-byte reservation.
+Explicit cache ceilings and the filesystem control-space floor still bind.
 `protected` maps cache identities to allocated bytes held by readers/custody, so
 placement can reuse an already held input without charging it twice. Check-ins
 copy an in-memory snapshot; cache discovery does not run under the queue mutex.

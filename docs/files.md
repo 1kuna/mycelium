@@ -411,7 +411,7 @@ protected. Queue claims also cover assigned inputs before the next check-in.
 
 Worker-side admission remains authoritative against disk changes between samples.
 A staging failure reports `resource_limit`, operation `shared_input_admission`,
-error `cache_space`, and `capacity` (`shared_input_cache` or `disk_free_floor`),
+error `cache_space`, and `capacity` (`shared_input_cache`, `file_cache`, or `disk_free_floor`),
 with required/available/limit bytes. Inputs stage before source/plan blobs.
 Omitting `--file-cache-bytes` now sizes both separate cache ceilings automatically
 from disk headroom; see [cache policy](operations.md#file-and-shared-input-cache-capacity).
@@ -496,7 +496,26 @@ bytes, cache eviction, filesystem sync failure, stale attempts, restart and
 resume on another hypha. Filesystem sync ordering is tested; storage hardware's
 power-loss behavior needs its own qualification.
 
-## Large read-only inputs
+## Read-only inputs staged locally
+
+The default for **every declared NAS input**, including small files, is local
+staging before processing (MY-36). Read the local destination or
+`MYCE_INPUT_NAME`, never the NAS original during processing. Legacy `inputs`
+path mappings already copy to the local attempt folder; no command change is
+needed when it reads the declared destination. Repeated/large immutable inputs
+should use the shared cache below. Raw mounted paths hidden in shell commands,
+programs, configuration or external workdirs cannot be safely inferred or
+rewritten: declare the input and use its local path. Mutable checkpoint state
+and output publication retain their independent synchronization contracts.
+
+From #1061, NAS copies make one sequential read, resume completed transient
+interruptions from the local prefix within the preparation attempt, and verify
+the local checksum before execution. Declared shared-input prefixes also survive
+owner cancellation/worker restart and remain evictable when inactive. Authored
+hash/size provide immutable identity. Legacy path inputs instead freeze source
+metadata for the transfer, hash copied bytes and verify the local digest; an
+observed source change refuses preparation. This cannot establish an authored
+immutable snapshot of an otherwise mutable path.
 
 Deploy the queue before workers. Shared-input jobs require the advertised
 `shared_inputs_v1` capability; older workers cannot receive or start them.
@@ -572,7 +591,13 @@ exhausting disk. Use a fresh hash/manifest when changing content.
 
 Workers keep entries under `file-cache/shared-inputs`, separately bounded by
 `--file-cache-bytes` (automatic by default from s072), in addition to the private-file cache's
-allowance. Physical disk headroom applies across both. LRU eviction removes
+allowance. From #1061, automatic allowances refresh during admission and the
+existing worker retention sweep from current filesystem headroom plus occupied
+cache blocks, leaving the existing disk control floor (1% of the volume, at
+least 256 MiB) for metadata, logs and control state. There is no input-size cap
+or startup quarter-free ceiling. Other caches/writers already reduce measured
+free space; outstanding staging reserves only unwritten bytes. Explicit operator
+limits remain authoritative. Physical disk headroom applies across both. LRU eviction removes
 reproducible inactive copies; active attempts hold use locks through process
 cleanup. Mode bits provide cooperative read-only access, not a sandbox against
 the owning account changing permissions. First use after restart hashes every

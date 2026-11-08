@@ -275,6 +275,34 @@ Success means `result` verified output hashes and sizes **and** `cmp` exited 0:
 the exact result is 23 bytes including newline. A wake or command exit alone is
 insufficient. On a release containing #811, omitted retention protects results until explicit release; saved positive operator windows still apply.
 
+**NAS inputs: stage locally before processing, for every size.** Declare reusable
+read-only files as `shared_inputs: {source: {nas: RELATIVE, sha256: HASH,
+size_bytes: BYTES}}` and process `$MYCE_INPUT_SOURCE`. The path is the executing
+machine's verified local cache; never stream an input from its NAS mount during
+processing. Small files use the same path. Existing `inputs: {local_name:
+relative_nas_source}` already copy to the local attempt folder, so commands
+reading `local_name` need no rewrite. Prefer shared inputs for repeated or large
+files to avoid private copies per attempt. `myce file put PATH` can derive the
+identity and import bytes when no authored manifest is available.
+
+From the release containing #1061, automatic file/shared-input cache allowances
+follow current filesystem headroom, including after disk is freed, without a
+worker restart. Explicit operator limits and active pins still bind; unpinned
+copies can be evicted. A genuine refusal names required/available bytes. Do not
+clear caches or resubmit to evade it. Completed transient NAS reads resume the
+local prefix in the same preparation attempt; shared-input prefixes also survive
+cancellation/restart until reused or evicted. Final size/SHA-256 verification
+precedes publication. Local storage, integrity and permission failures remain
+terminal. Legacy path inputs verify the copied-byte digest locally and reject
+observed source changes; an authored hash is needed to assert immutable identity.
+
+Mycelium cannot discover NAS reads hidden in arbitrary shell strings, payload
+code/configuration or external working directories. Declare those inputs and use
+the local input path. `--checkpoint-root` resolves declared shared-input sources
+and separately holds mutable checkpoint generations; a path there is not an
+input declaration. Do not use the checkpoint directory as an input-media path.
+Checkpoint saves and NAS output publication retain their durability contracts.
+
 On releases with the mixed-version cache correction, workers without an optional
 shared-input cache-capacity report retain staging-time admission. Reporting workers
 are checked before placement; staging capacity failures give required/available/limit bytes.

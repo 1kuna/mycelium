@@ -24,6 +24,9 @@ import (
 // entries have their own integrity records and no environment/catalog lifecycle.
 type SharedInputCache struct {
 	cache            EnvironmentCache
+	automatic        bool
+	readNAS          func(*os.File, []byte) (int, error)
+	diskProbe        func(string) (DiskReading, error)
 	Client           Client
 	mu               sync.Mutex
 	verified         map[string]string
@@ -249,16 +252,29 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		}
 		need += s.SizeBytes
 	}
-	err = c.stageInput(ctx, func(ctx context.Context, stage string) error {
+	err = c.stageInputNamed(ctx, key, func(ctx context.Context, stage string) error {
 		traceSharedInput(ctx, "admission", "cache")
-		// The writer owns this random stage's build lock before reserving space.
+		// The writer owns this stage's build lock before reserving space.
 		// Matching reservation/partial names reuse existing remaining-byte accounting.
 		gate, e := c.cache.lock(ctx, "admission", syscall.LOCK_EX)
 		if e != nil {
 			return e
 		}
 		if e = removeSharedEntry(root + ".partial"); e == nil {
-			e = c.admit(ctx, key, need)
+			// Retained local prefixes already occupy cache/free bytes. Reserve
+			// only the remainder for this stage, without double charging it.
+			var written int64
+			for _, part := range []string{"data", "archive"} {
+				n, err := environmentSize(filepath.Join(stage, part))
+				if err != nil && !os.IsNotExist(err) {
+					e = err
+					break
+				}
+				written += n
+			}
+			if e == nil {
+				e = c.admit(ctx, key, max(0, need-written))
+			}
 		}
 		reservation := strings.TrimSuffix(stage, ".partial") + ".reservation"
 		if e == nil {
@@ -394,7 +410,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	dst := filepath.Join(stage, "data")
 	files := FileManifest{}
 	if len(s.Manifest) > 0 {
-		if err = os.Mkdir(dst, 0700); err != nil {
+		if err = os.MkdirAll(dst, 0700); err != nil {
 			return err
 		}
 		for name, ref := range s.Manifest {
@@ -410,7 +426,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 				}
 			}
 			target := filepath.Join(dst, name)
-			if e := copySharedFile(ctx, source, target, ref); e != nil {
+			if e := copyNASInput(ctx, c.Client, source, target, &ref, c.readNAS); e != nil {
 				return e
 			}
 			files[name] = ref
@@ -425,17 +441,22 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			if e != nil {
 				return e
 			}
-			if err = copySharedFile(ctx, source, target, s.ref()); err != nil {
+			if err = copyNASInput(ctx, c.Client, source, target, inputRef(s), c.readNAS); err != nil {
 				return err
 			}
 		} else {
-			err = c.Client.DownloadFile(ctx, s.ref(), target)
+			err = c.Client.recoverInputTransfer(ctx, s.ref(), "shared_input", func(one Client) error { return one.DownloadFile(ctx, s.ref(), target) })
 			if err != nil {
 				return err
 			}
 		}
 		if s.Archive != "" {
 			traceSharedInput(ctx, "extract", "cache")
+			// Extraction has no resumable format: reuse the verified local archive
+			// and rebuild only its unpublished local expanded tree.
+			if err = removeSharedEntry(dst); err != nil {
+				return err
+			}
 			if err = unpackSharedArchive(ctx, target, dst, s.Archive, s.UnpackedBytes); err != nil {
 				return err
 			}
@@ -486,77 +507,10 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	return syncModelDirectoryContext(ctx, stage)
 }
 
-func copySharedFile(ctx context.Context, source, target string, ref FileRef) (stageErr error) {
-	traceSharedFile(ctx, ref)
-	defer func() { stageErr = tracedSharedError(ctx, stageErr) }()
-	if err := sharedInputProgress(ctx); err != nil {
-		return err
-	}
-	traceSharedInput(ctx, "resolve", "source")
-	if err := noModelSymlinks(source, false); err != nil {
-		return err
-	}
-	if err := sharedInputProgress(ctx); err != nil {
-		return err
-	}
-	traceSharedInput(ctx, "open", "source")
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	if err := sharedInputProgress(ctx); err != nil {
-		return err
-	}
-	traceSharedInput(ctx, "stat", "source")
-	info, err := in.Stat()
-	if err != nil {
-		return err
-	}
-	if err := sharedInputProgress(ctx); err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() || info.Size() != ref.SizeBytes {
-		return errors.New("shared NAS file size/type differs from manifest")
-	}
-	traceSharedInput(ctx, "prepare", "cache")
-	if err = os.MkdirAll(filepath.Dir(target), 0700); err != nil {
-		return err
-	}
-	// A reflink preserves private immutable bytes without sharing a mutable inode.
-	traceSharedInput(ctx, "clone", "cache")
-	if !cloneSharedFile(in, target) {
-		traceSharedInput(ctx, "open", "cache")
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600|info.Mode().Perm()&0111)
-		if err != nil {
-			return err
-		}
-		// Neither ReaderFrom nor WriteTo can bypass the operation and byte recorder.
-		_, err = io.CopyN(sharedInputWriter{ctx, out}, contextReader{ctx, sharedInputReader{ctx, in, "source"}}, ref.SizeBytes)
-		err = tracedSharedCopyError(ctx, err)
-		traceSharedInput(ctx, "sync", "cache")
-		err = errors.Join(err, tracedSharedError(ctx, out.Sync()))
-		traceSharedInput(ctx, "close", "cache")
-		err = errors.Join(err, tracedSharedError(ctx, out.Close()))
-		if err != nil {
-			return err
-		}
-	} else {
-		if t, ok := ctx.Value(sharedInputTraceKey{}).(*sharedInputTrace); ok {
-			t.mu.Lock()
-			t.detail.BytesCopied = ref.SizeBytes
-			t.mu.Unlock()
-		}
-		if err = sharedInputProgress(ctx); err != nil {
-			return err
-		}
-	}
-	traceSharedInput(ctx, "permissions", "cache")
-	if err = os.Chmod(target, 0400|info.Mode().Perm()&0111); err != nil {
-		return err
-	}
-	traceSharedInput(ctx, "verify", "cache")
-	return verifyFile(ctx, target, ref)
+func inputRef(s SharedInput) *FileRef { ref := s.ref(); return &ref }
+
+func copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
+	return copyNASInput(ctx, Client{}, source, target, &ref, nil)
 }
 
 func makeSharedReadOnly(root string) error {
@@ -725,7 +679,12 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 				return e
 			}
 			if lock != nil {
-				e = removeSharedEntry(filepath.Join(c.cache.Root, d.Name()))
+				partial := filepath.Join(c.cache.Root, d.Name())
+				if info, resumeErr := os.Lstat(filepath.Join(partial, "resume")); resumeErr == nil && info.Mode().IsRegular() {
+					victims = append(victims, victim{d.Name(), info.ModTime().UnixNano()})
+				} else {
+					e = removeSharedEntry(partial)
+				}
 				unlockEnvironment(lock)
 				if e != nil {
 					return e
@@ -743,27 +702,28 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		victims = append(victims, victim{d.Name(), info.ModTime().UnixNano()})
 	}
 	sort.Slice(victims, func(i, j int) bool { return victims[i].used < victims[j].used })
-	var cacheAvailable, diskAvailable int64
+	var cacheAvailable, diskAvailable, limit int64
 	enough := func() (bool, error) {
 		used, e := c.cache.DiskUsage()
 		if e != nil {
 			return false, e
 		}
-		disk, e := workerDiskProbe(c.cache.Root)
+		explicit := c.cache.Limit
+		if c.automatic {
+			explicit = 0
+		}
+		var free int64
+		limit, free, e = inputCacheBudget(c.cache.Root, used, explicit, c.diskProbe)
 		if e != nil {
 			return false, e
 		}
-		floor := diskFreeFloor(disk.TotalBytes)
 		if reserved > int64(^uint64(0)>>1)-need {
 			return false, nil
 		}
 		projected := need + reserved
-		cacheAvailable = max(0, c.cache.Limit-used-reserved)
-		diskAvailable = 0
-		if disk.FreeBytes >= floor {
-			diskAvailable = int64(min(uint64(^uint64(0)>>1), disk.FreeBytes-floor))
-		}
-		return projected <= c.cache.Limit-used && disk.FreeBytes >= floor && uint64(projected) <= disk.FreeBytes-floor, nil
+		cacheAvailable = max(0, limit-used-reserved)
+		diskAvailable = free
+		return projected <= limit-used && projected <= free, nil
 	}
 	for _, v := range victims {
 		ok, e := enough()
@@ -776,7 +736,13 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		if e = ctx.Err(); e != nil {
 			return e
 		}
-		use, e := c.cache.tryLock(v.name + ".use")
+		// A retained partial is protected by its writer's build lock, not a
+		// published-entry use lock. Never unlink a detached writer's files.
+		lockKey := v.name + ".use"
+		if strings.HasSuffix(v.name, ".partial") {
+			lockKey = strings.TrimSuffix(v.name, ".partial") + ".build"
+		}
+		use, e := c.cache.tryLock(lockKey)
 		if e != nil {
 			return e
 		}
@@ -806,7 +772,7 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 	}
 	if !ok {
 		if need > cacheAvailable {
-			return &stagingCapacityError{required: need, available: cacheAvailable, limit: c.cache.Limit, capacity: "shared_input_cache"}
+			return &stagingCapacityError{required: need, available: min(cacheAvailable, max(0, diskAvailable-reserved)), limit: limit, capacity: "shared_input_cache"}
 		}
 		return &stagingCapacityError{required: need, available: max(0, diskAvailable-reserved), capacity: "disk_free_floor"}
 	}
