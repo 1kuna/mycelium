@@ -42,7 +42,7 @@ func TestM4InstallSignalJournal(t *testing.T) {
 				}
 				return nil, nil
 			}
-			return nil, nil
+			return fakeSetupManager(ctx, name, args...)
 		}}
 		err := setupCommandWithProbe([]string{"install", "worker", "--config", filepath.Join(root, "machine", "config.json"), "--from-worker-config", filepath.Join(root, "gpu0", "config.json")}, probe, root)
 		if !errors.Is(err, context.Canceled) {
