@@ -155,6 +155,20 @@ Six measured reads per endpoint make the reported p99 the sample maximum,
 not a production tail estimate. Compare accepted outputs from identical profile
 versions and CPU placement; natural fleet latency remains release-owner proof.
 
+`BenchmarkReadStages` compares the legacy capture/queued planner with published
+immutable inputs on the same #1030 fixture (160 or 6,500 retained constrained
+executions, 110 queued jobs, 1,400 curves and five occupied workers). Run it with
+`-run '^$' -bench '^BenchmarkReadStages$' -benchtime=20x`. It reports capture,
+derivation, JSON encoding, live-mutex hold, allocation and response bytes for
+default/full status and queued/running/terminal receipts. Capture includes mutex
+hold; do not add it twice. First materialization is included, and later reads
+reuse the generation. This isolates projection from usage/file-store I/O and
+transport; it does not establish production tail latency.
+`TestReadSnapshotBulkWorkDoesNotHoldQueue` blocks record decoding while a real
+control commit must complete, proving lock separation without a machine-tuned
+timing threshold. Existing terminal-commit, cache, custody, redaction and
+contention checks remain unchanged.
+
 ### Release upgrade compatibility
 
 Full also runs `python3 scripts/upgrade-compat.py run`. This builds race-instrumented

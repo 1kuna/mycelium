@@ -216,14 +216,18 @@ clock. The preservation guard requires that exact key's complete digest chain;
 another host's accepted sample alone never explains its mutation (#620).
 
 Only the unfiltered default shares the one-second cache. Filtered/full reads are
-fresh. Snapshot capture keeps scheduling inputs and dependency state under the
-queue lock; projection, usage queries, file inventory, encoding the reply and
-compression run after release. Cold retained jobs have immutable, payload-free
-observation inputs maintained by the existing committed-record journal; reads
-copy those inputs outside the lock. Mutable jobs and worker facts are still
-captured together under the lock. Each detached generation reuses one placement
-scan and memory-evidence catalog across ordering, startup and blocker diagnostics;
-derived capacity views keep their own scans. No bulk file or network I/O runs
+fresh. From the next release (#1052), status and job reads take an immutable committed
+input generation plus worker contact/private scalar facts under the queue lock.
+The commit journal publishes changed encoded records through a persistent tree;
+unchanged records and decoded inputs are shared across revisions. Traversal,
+decoding, selection, file-reference/cancellation walks, capacity accounting,
+recursive copies, projection, usage queries, file inventory, reply encoding and
+compression run after releasing the live lock. Selected started/terminal receipts
+decode only their own record and policy; queued receipts share live context,
+without materializing cold execution payloads. Cold decode capacity is charged
+before allocation. Each detached generation reuses one placement scan and
+memory-evidence planning cache across ordering, startup and blocker diagnostics,
+including a queued single-job read; derived capacity views keep their own scans. No bulk file or network I/O runs
 under `q.mu`. No jobs, curves, custody or foreign-load fields are removed.
 
 Jobs with explicitly recovered outputs expose an append-only `recovered_results`

@@ -119,6 +119,13 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	readGeneration       *readGeneration
+	readRoot             *readNode // q.mu; immutable committed input generations.
+	readModels           *ModelConfig
+	readEnvironments     *EnvironmentCatalog
+	readRuntime          *observationState
+	readSamples          map[string]map[attemptKey]hostMemorySample
+	detachedRead         bool // Private immutable source: never owns the live writer mutex.
 	requestBudgets       requestBudgets
 	evidencePending      map[string]bool
 	evidenceRows         []string
@@ -367,6 +374,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 			}
 		}
 	}
+	for _, j := range q.liveJobs() {
+		if j.Timing != nil && !terminal(j.State) {
+			j.Timing.Reason = "queue restarted; occupancy unknown"
+		}
+	}
 	if err = q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}); err != nil {
 		db.Close()
 		return nil, err
@@ -387,11 +399,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		}); err != nil {
 			db.Close()
 			return nil, err
-		}
-	}
-	for _, j := range q.liveJobs() {
-		if j.Timing != nil && !terminal(j.State) {
-			j.Timing.Reason = "queue restarted; occupancy unknown"
 		}
 	}
 	q.usageReader, err = openUsageReader(path)
@@ -659,6 +666,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.invalidateCallSnapshots(oldCalls)
 		q.invalidateTerminalStatus()
 		q.commitRecords()
+		q.publishReadRuntime()
 	}
 	return err
 }

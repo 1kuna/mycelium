@@ -1,0 +1,668 @@
+package myce
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"maps"
+	"reflect"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// Immutable AVL records share unchanged branches across commits. Publication is
+// proportional to changed records, not retained history. A reader takes one
+// root pointer under q.mu; traversal, decoding and projection own no live lock.
+// Old roots are reclaimed normally when their last reader finishes.
+type readNode struct {
+	key          string
+	record       *readRecord
+	left, right  *readNode
+	height, live int
+}
+type readRecord struct {
+	data    []byte // The persistence journal already owns immutable encodings.
+	mutable bool
+	once    sync.Once
+	decoded atomic.Bool
+	value   any
+	err     error
+	history statusHistoryEntry
+}
+
+func readHeight(n *readNode) int {
+	if n == nil {
+		return 0
+	}
+	return n.height
+}
+func readLive(n *readNode) int {
+	if n == nil {
+		return 0
+	}
+	return n.live
+}
+func readBranch(key string, record *readRecord, left, right *readNode) *readNode {
+	n := &readNode{key: key, record: record, left: left, right: right, height: 1 + max(readHeight(left), readHeight(right)), live: readLive(left) + readLive(right)}
+	if record.mutable {
+		n.live++
+	}
+	return n
+}
+func readRotateLeft(n *readNode) *readNode {
+	r := n.right
+	return readBranch(r.key, r.record, readBranch(n.key, n.record, n.left, r.left), r.right)
+}
+func readRotateRight(n *readNode) *readNode {
+	l := n.left
+	return readBranch(l.key, l.record, l.left, readBranch(n.key, n.record, l.right, n.right))
+}
+func readBalance(n *readNode) *readNode {
+	if readHeight(n.left)-readHeight(n.right) > 1 {
+		if readHeight(n.left.left) < readHeight(n.left.right) {
+			n = readBranch(n.key, n.record, readRotateLeft(n.left), n.right)
+		}
+		return readRotateRight(n)
+	}
+	if readHeight(n.right)-readHeight(n.left) > 1 {
+		if readHeight(n.right.right) < readHeight(n.right.left) {
+			n = readBranch(n.key, n.record, n.left, readRotateRight(n.right))
+		}
+		return readRotateLeft(n)
+	}
+	return n
+}
+func readPut(n *readNode, key string, record *readRecord) *readNode {
+	if n == nil {
+		if record == nil {
+			return nil
+		}
+		return readBranch(key, record, nil, nil)
+	}
+	if key < n.key {
+		return readBalance(readBranch(n.key, n.record, readPut(n.left, key, record), n.right))
+	}
+	if key > n.key {
+		return readBalance(readBranch(n.key, n.record, n.left, readPut(n.right, key, record)))
+	}
+	if record != nil {
+		return readBranch(key, record, n.left, n.right)
+	}
+	if n.left == nil {
+		return n.right
+	}
+	if n.right == nil {
+		return n.left
+	}
+	next := n.right
+	for next.left != nil {
+		next = next.left
+	}
+	return readBalance(readBranch(next.key, next.record, n.left, readPut(n.right, next.key, nil)))
+}
+func readGet(n *readNode, key string) *readRecord {
+	for n != nil {
+		if key == n.key {
+			return n.record
+		}
+		if key < n.key {
+			n = n.left
+		} else {
+			n = n.right
+		}
+	}
+	return nil
+}
+func readWalk(n *readNode, live bool, visit func(string, *readRecord)) {
+	if n == nil || live && n.live == 0 {
+		return
+	}
+	readWalk(n.left, live, visit)
+	if !live || n.record.mutable {
+		visit(n.key, n.record)
+	}
+	readWalk(n.right, live, visit)
+}
+
+// Decode each immutable record once, outside q.mu. Ledger history has a separate
+// paginated API and is never an input to receipt/status diagnostics.
+type discardReadJSON struct{}
+
+func (*discardReadJSON) UnmarshalJSON([]byte) error { return nil }
+func decodeReadJob(data []byte) (*Job, error) {
+	type job Job
+	out := &Job{}
+	wire := struct {
+		*job
+		LedgerEntries discardReadJSON `json:"ledger_entries"`
+	}{job: (*job)(out)}
+	err := json.Unmarshal(data, &wire)
+	return out, err
+}
+
+// Persisted JSON is already valid. Locate only the top-level ledger value,
+// without tokenizing its strings or allocating its retained execution history.
+func readJobLedgerSpan(data []byte) (int, int) {
+	depth, quoted, escaped := 0, false, false
+	for i, c := range data {
+		if quoted {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				quoted = false
+			}
+			continue
+		}
+		if c == '"' {
+			if depth == 1 && bytes.HasPrefix(data[i:], []byte(`"ledger_entries":`)) {
+				start := i
+				end := i + len(`"ledger_entries":`)
+				nesting, inString, escape := 0, false, false
+				for ; end < len(data); end++ {
+					v := data[end]
+					if inString {
+						if escape {
+							escape = false
+						} else if v == '\\' {
+							escape = true
+						} else if v == '"' {
+							inString = false
+						}
+						continue
+					}
+					if v == '"' {
+						inString = true
+						continue
+					}
+					if nesting == 0 && (v == ',' || v == '}') {
+						break
+					}
+					if v == '[' || v == '{' {
+						nesting++
+					}
+					if v == ']' || v == '}' {
+						nesting--
+					}
+				}
+				if end < len(data) && data[end] == ',' {
+					end++
+				} else if start > 0 && data[start-1] == ',' {
+					start--
+				}
+				return start, end
+			}
+			quoted = true
+		} else if c == '{' || c == '[' {
+			depth++
+		} else if c == '}' || c == ']' {
+			depth--
+		}
+	}
+	return 0, 0
+}
+func (r *readRecord) decode(key string) (any, error) {
+	r.once.Do(func() {
+		defer r.decoded.Store(true)
+		group, _, _ := strings.Cut(key, "/")
+		switch group {
+		case "jobs":
+			r.value, r.err = decodeReadJob(r.data)
+			if r.err == nil && !r.mutable {
+				j := r.value.(*Job)
+				input := statusJobInputs(j)
+				input.Spec.SubmissionKey = j.Spec.SubmissionKey
+				r.history = statusHistoryEntry{source: j, inputs: &input, dependency: statusDependencyJob(j)}
+			}
+		case "state":
+			out := &state{}
+			r.err = json.Unmarshal(r.data, out)
+			r.value = out
+		case "submissions":
+			out := &submissionRecord{}
+			r.err = json.Unmarshal(r.data, out)
+			r.value = out
+		case "extensions":
+			out := &Extension{}
+			r.err = json.Unmarshal(r.data, out)
+			r.value = out
+		case "work_observations":
+			out := &WorkObservation{}
+			r.err = json.Unmarshal(r.data, out)
+			r.value = out
+		case "storage_observations":
+			out := &StorageObservation{}
+			r.err = json.Unmarshal(r.data, out)
+			r.value = out
+		case "external_memory":
+			out := &externalMemoryRing{}
+			r.err = json.Unmarshal(r.data, out)
+			r.value = out
+		case "health_events":
+			out := &HealthAlert{}
+			r.err = json.Unmarshal(r.data, out)
+			r.value = out
+		}
+	})
+	return r.value, r.err
+}
+
+// Only successful commits publish. Rollback neither advances the root nor
+// discards a reader's lazy decoded records. No SQLite access is used by reads.
+func (q *Queue) publishReadRecords(next map[string][]byte) {
+	for key, data := range next {
+		old := readGet(q.readRoot, key)
+		if old != nil && bytes.Equal(old.data, data) {
+			continue
+		}
+		var record *readRecord
+		if len(data) > 0 {
+			record = &readRecord{data: data}
+			if id, ok := strings.CutPrefix(key, "jobs/"); ok {
+				record.mutable = mutableJob(q.s.Jobs[id])
+			}
+			if id, ok := strings.CutPrefix(key, "submissions/"); ok {
+				r := q.s.Submissions[id]
+				record.mutable = r != nil && r.Job != nil && mutableJob(r.Job)
+			}
+		}
+		q.readRoot = readPut(q.readRoot, key, record)
+	}
+}
+
+// Configuration is replaced by its setters; compare with detached copies so
+// unchanged commits reuse it. Calls and unreported contacts are small ephemeral
+// control records and are frozen once per commit, rather than once per reader.
+func (q *Queue) publishReadRuntime() {
+	if q.readModels == nil || !reflect.DeepEqual(*q.readModels, q.models) {
+		value := copyObservationValue(reflect.ValueOf(q.models)).Interface().(ModelConfig)
+		q.readModels = &value
+	}
+	if q.readEnvironments == nil || !reflect.DeepEqual(*q.readEnvironments, q.environments) {
+		value := copyObservationValue(reflect.ValueOf(q.environments)).Interface().(EnvironmentCatalog)
+		q.readEnvironments = &value
+	}
+	value := copyObservation(observationState{Calls: q.calls, Unreported: q.unreported})
+	q.readRuntime = &value
+	q.readGeneration = &readGeneration{root: q.readRoot}
+	q.readSamples = make(map[string]map[attemptKey]hostMemorySample, len(q.hostMemorySamples))
+	for id, samples := range q.hostMemorySamples {
+		q.readSamples[id] = maps.Clone(samples)
+	}
+}
+
+// A generation materializes the immutable input maps once, off the writer path.
+// Concurrent readers share that assembly and the unchanged records' decoders.
+// It never shares a mutable diagnostic planner or a projected response.
+type readGeneration struct {
+	root      *readNode
+	once      sync.Once
+	liveOnce  sync.Once
+	liveState state
+	liveErr   error
+	state     state
+	records   *queueRecords
+	err       error
+}
+
+func (g *readGeneration) inputs(ctx context.Context) (state, *queueRecords, error) {
+	if err := g.chargeDecode(ctx, false, ""); err != nil {
+		return state{}, nil, err
+	}
+	g.once.Do(func() {
+		base := readGet(g.root, "state")
+		value, err := base.decode("state")
+		if err != nil {
+			g.err = err
+			return
+		}
+		g.state = *(value.(*state))
+		s := &g.state
+		s.Jobs = map[string]*Job{}
+		s.Submissions = map[string]*submissionRecord{}
+		s.Extensions = map[string]Extension{}
+		s.WorkObservations = map[string]WorkObservation{}
+		s.StorageObservations = map[string]StorageObservation{}
+		s.ExternalMemory = map[string]*externalMemoryRing{}
+		g.records = &queueRecords{statusHistory: map[string]statusHistoryEntry{}}
+		readWalk(g.root, false, func(key string, record *readRecord) {
+			if g.err != nil {
+				return
+			}
+			value, err := record.decode(key)
+			if err != nil {
+				g.err = err
+				return
+			}
+			group, name, _ := strings.Cut(key, "/")
+			switch group {
+			case "jobs":
+				s.Jobs[name] = value.(*Job)
+				if record.history.inputs != nil {
+					g.records.statusHistory[name] = record.history
+				}
+			case "submissions":
+				s.Submissions[name] = value.(*submissionRecord)
+			case "extensions":
+				s.Extensions[name] = *value.(*Extension)
+			case "work_observations":
+				s.WorkObservations[name] = *value.(*WorkObservation)
+			case "storage_observations":
+				s.StorageObservations[name] = *value.(*StorageObservation)
+			case "external_memory":
+				s.ExternalMemory[name] = value.(*externalMemoryRing)
+			case "health_events":
+				index, e := strconv.Atoi(name)
+				if e != nil {
+					g.err = e
+					return
+				}
+				for len(s.Health.Events) <= index {
+					s.Health.Events = append(s.Health.Events, HealthAlert{})
+				}
+				s.Health.Events[index] = *value.(*HealthAlert)
+			}
+		})
+	})
+	if g.err != nil {
+		return state{}, nil, g.err
+	}
+	return g.state, g.records, ctx.Err()
+}
+
+// Selected receipts do not materialize retained execution payloads. A queued
+// receipt shares one live/context assembly per revision; started/terminal work
+// uses just its own immutable record and the current policy/machine identities.
+func (g *readGeneration) jobInputs(ctx context.Context, id string) (state, *queueRecords, error) {
+	if err := g.chargeDecode(ctx, false, id); err != nil {
+		return state{}, nil, err
+	}
+	selected := readGet(g.root, "jobs/"+id)
+	if selected != nil {
+		value, err := selected.decode("jobs/" + id)
+		if err != nil {
+			return state{}, nil, err
+		}
+		j := value.(*Job)
+		if j.FanOut != nil {
+			return g.inputs(ctx)
+		}
+		if terminal(j.State) || j.State != "queued" && j.StartedAt != nil && !jobHasVariants(j) {
+			value, err := readGet(g.root, "state").decode("state")
+			if err != nil {
+				return state{}, nil, err
+			}
+			base := value.(*state)
+			s := state{Jobs: map[string]*Job{id: j}, PriorityPolicy: base.PriorityPolicy, Policies: base.Policies, Machines: base.Machines, HostReleases: base.HostReleases}
+			return s, nil, ctx.Err()
+		}
+	}
+	if err := g.chargeDecode(ctx, true, ""); err != nil {
+		return state{}, nil, err
+	}
+	g.liveOnce.Do(func() {
+		value, err := readGet(g.root, "state").decode("state")
+		if err != nil {
+			g.liveErr = err
+			return
+		}
+		g.liveState = *(value.(*state))
+		s := &g.liveState
+		s.Jobs = map[string]*Job{}
+		s.Submissions = map[string]*submissionRecord{}
+		s.Extensions = map[string]Extension{}
+		s.WorkObservations = map[string]WorkObservation{}
+		s.StorageObservations = map[string]StorageObservation{}
+		s.ExternalMemory = nil
+		s.Health.Events = nil
+		readWalk(g.root, true, func(key string, record *readRecord) {
+			if g.liveErr != nil {
+				return
+			}
+			value, err := record.decode(key)
+			if err != nil {
+				g.liveErr = err
+				return
+			}
+			group, name, _ := strings.Cut(key, "/")
+			switch group {
+			case "jobs":
+				s.Jobs[name] = value.(*Job)
+			case "submissions":
+				s.Submissions[name] = value.(*submissionRecord)
+			}
+		})
+		readWalk(g.root, false, func(key string, record *readRecord) {
+			if g.liveErr != nil {
+				return
+			}
+			group, name, _ := strings.Cut(key, "/")
+			if group != "work_observations" && group != "extensions" && group != "storage_observations" {
+				return
+			}
+			value, err := record.decode(key)
+			if err != nil {
+				g.liveErr = err
+				return
+			}
+			switch group {
+			case "work_observations":
+				s.WorkObservations[name] = *value.(*WorkObservation)
+			case "extensions":
+				s.Extensions[name] = *value.(*Extension)
+			case "storage_observations":
+				s.StorageObservations[name] = *value.(*StorageObservation)
+			}
+		})
+	})
+	if g.liveErr != nil {
+		return state{}, nil, g.liveErr
+	}
+	return g.liveState, nil, ctx.Err()
+}
+
+// Reference walks, cancellation, capacity scans and recursive copying run on
+// an immutable private source after releasing the live queue mutex.
+func (q *Queue) captureReadObservation(id string, options *statusOptions, contexts ...context.Context) (*Queue, fileStoreObservation, error) {
+	ctx := requestContext(contexts)
+	started := readWallStart(q.observeRead)
+	unlock, err := requestObservationLock(ctx, &q.mu)
+	if err != nil {
+		return nil, fileStoreObservation{}, err
+	}
+	locked := readWallStart(q.observeRead)
+	imported := q.records != nil && (q.records.jobCount != len(q.s.Jobs) || q.records.submissionCount != len(q.s.Submissions))
+	generation, models, environments, runtime := q.readGeneration, q.readModels, q.readEnvironments, q.readRuntime
+	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, evidenceRetention: q.evidenceRetention, efficiencyView: q.efficiencyView,
+		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts, productionInfrastructureRetries: q.productionInfrastructureRetries,
+		restartUntil: q.restartUntil, networkQuiet: q.networkQuiet, root: q.root, files: q.files, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, detachedRead: true}
+	ledgers := make(map[string]observationMachineLedger, len(q.s.Machines))
+	type freshness struct {
+		lastSeen   time.Time
+		unreported bool
+	}
+	fresh := make(map[string]freshness, len(q.s.Machines))
+	source.contacts = make(map[string]*workerContact, len(q.s.Machines))
+	for key, m := range q.s.Machines {
+		ledgers[key] = observationMachineLedger{m.toolInventory, m.cpuLedger, m.hostBudgetGB, m.modelReservationDebtGB, m.hostReservationDebtGB}
+		fresh[key] = freshness{m.LastSeen, q.unreported[key]}
+		source.contacts[key] = &workerContact{session: m.Session, processed: q.lastContact(m, source.clock.Now())}
+	}
+	unlock()
+	observeRead(q.observeRead, id, started, locked)
+	if err := ctx.Err(); err != nil {
+		return nil, fileStoreObservation{}, err
+	}
+	// Offline imports can install uncommitted state directly. Durable API writes
+	// always publish their matching generation inside the transaction lock.
+	if imported || generation == nil {
+		return q.captureStatusObservation(id, options, ctx)
+	}
+	if id == "" {
+		source.s, source.records, err = generation.inputs(ctx)
+	} else {
+		source.s, source.records, err = generation.jobInputs(ctx, id)
+	}
+	if err != nil {
+		return nil, fileStoreObservation{}, err
+	}
+	source.models, source.environments, source.calls = *models, *environments, runtime.Calls
+	source.unreported = make(map[string]bool, len(fresh))
+	source.s.Machines = maps.Clone(source.s.Machines)
+	for key, m := range source.s.Machines {
+		copy := *m
+		copy.LastSeen = fresh[key].lastSeen
+		if fresh[key].unreported {
+			source.unreported[key] = true
+		}
+		l := ledgers[key]
+		copy.toolInventory = l.toolInventory
+		copy.cpuLedger = l.cpuLedger
+		copy.hostBudgetGB = l.hostBudgetGB
+		copy.modelReservationDebtGB = l.modelReservationDebtGB
+		copy.hostReservationDebtGB = l.hostReservationDebtGB
+		source.s.Machines[key] = &copy
+	}
+	return source.captureStatusObservation(id, options, ctx)
+}
+
+// Prefix resolution walks the immutable key range outside q.mu. Cache/commit
+// fences still recheck the resolved exact ID before publishing a receipt.
+func (q *Queue) resolveReadJobID(ctx context.Context, id string) (string, error) {
+	unlock, err := requestObservationLock(ctx, &q.mu)
+	if err != nil {
+		return "", err
+	}
+	root, runtime := q.readRoot, q.readRuntime
+	imported := q.records != nil && q.records.jobCount != len(q.s.Jobs)
+	if root == nil || imported {
+		j, e := q.findObservationJob(id)
+		unlock()
+		if e != nil {
+			return "", e
+		}
+		return j.ID, nil
+	}
+	unlock()
+	if readGet(root, "jobs/"+id) != nil {
+		return id, nil
+	}
+	if runtime != nil && runtime.Calls[id] != nil {
+		return id, nil
+	}
+	var matches []*Job
+	if len(id) >= 8 {
+		prefix := "jobs/" + id
+		var visit func(*readNode)
+		visit = func(n *readNode) {
+			if n == nil {
+				return
+			}
+			if n.key >= prefix {
+				visit(n.left)
+			}
+			if strings.HasPrefix(n.key, prefix) {
+				matches = append(matches, &Job{ID: strings.TrimPrefix(n.key, "jobs/")})
+			}
+			if n.key < prefix || strings.HasPrefix(n.key, prefix) {
+				visit(n.right)
+			}
+		}
+		visit(root)
+		if runtime != nil {
+			for key := range runtime.Calls {
+				if strings.HasPrefix(key, id) {
+					matches = append(matches, &Job{ID: key})
+				}
+			}
+		}
+	}
+	j, err := FindJob(matches, id)
+	if err != nil {
+		return "", err
+	}
+	return j.ID, ctx.Err()
+}
+
+// The immutable input cache belongs to the queue. Charge its cold decode before
+// allocation; warm records are already included in the host's measured RSS.
+// Recursive response copies retain their independent existing charge below.
+func (g *readGeneration) chargeDecode(ctx context.Context, live bool, selected string) error {
+	allocation := projectionAllocation(ctx)
+	if allocation == nil {
+		return ctx.Err()
+	}
+	var failure error
+	charge := func(key string, r *readRecord) {
+		if r == nil {
+			return
+		}
+		if failure != nil || r.decoded.Load() {
+			return
+		}
+		group, name, _ := strings.Cut(key, "/")
+		if selected != "" && key != "state" && (group != "jobs" || name != selected) {
+			return
+		}
+		if live && (group == "jobs" || group == "submissions") && !r.mutable {
+			return
+		}
+		if live && (group == "external_memory" || group == "health_events") {
+			return
+		}
+		var target reflect.Type
+		switch group {
+		case "state":
+			target = reflect.TypeFor[*state]()
+		case "jobs":
+			target = reflect.TypeFor[*Job]()
+		case "submissions":
+			target = reflect.TypeFor[*submissionRecord]()
+		case "extensions":
+			target = reflect.TypeFor[*Extension]()
+		case "work_observations":
+			target = reflect.TypeFor[*WorkObservation]()
+		case "storage_observations":
+			target = reflect.TypeFor[*StorageObservation]()
+		case "external_memory":
+			target = reflect.TypeFor[*externalMemoryRing]()
+		case "health_events":
+			target = reflect.TypeFor[*HealthAlert]()
+		}
+		fitting := allocation.limit - allocation.held
+		data := r.data
+		start, end := 0, 0
+		if group == "jobs" {
+			start, end = readJobLedgerSpan(data)
+		}
+		// The immutable source bytes are already resident. Only non-ledger
+		// bytes require token scratch/copies; discarded ledger values are
+		// scanned in place by decodeReadJob, without typed allocations.
+		wire := 6 * int64(len(data)-(end-start))
+		if !allocation.charge(wire) {
+			failure = projectionRefusal(fitting)
+			return
+		}
+		if end > start {
+			data = append(append(make([]byte, 0, len(data)-(end-start)), data[:start]...), data[end:]...)
+		}
+		cost, err := jsonAllocationCost(data, target, max(0, fitting-wire))
+		if err != nil || !allocation.charge(cost) {
+			failure = projectionRefusal(fitting)
+		}
+	}
+	if selected != "" {
+		charge("state", readGet(g.root, "state"))
+		charge("jobs/"+selected, readGet(g.root, "jobs/"+selected))
+	} else {
+		readWalk(g.root, false, charge)
+	}
+	if failure != nil {
+		return failure
+	}
+	return ctx.Err()
+}
