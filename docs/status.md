@@ -19,7 +19,7 @@ and `myce logs JOB_ID` prints its output.
 The rest of this page is a field-by-field reference, including
 [live view](#live-view-myce-view).
 
-From the next release, cold CPU probes retain their initial containment ceiling
+From the next release, cold CPU probes report their initial reservation
 in `memory_envelope.host_gb`, with known need and member/retry floors in
 `probe_floor_gb`. A running probe's host admission charge can follow its fresh
 complete cgroup footprint plus observed growth and launch drift instead of
@@ -28,7 +28,7 @@ charges; declared and learned allocations retain their full reservations.
 Two timed samples establish a growth horizon; the measured rate extends that
 forecast through the sample's age. Batch launches and model loads use the same
 exact-attempt charge. Missing counters, old workers,
-stale samples, restart and stopping custody restore the full ceiling charge.
+stale samples, restart and stopping custody restore the full execution ceiling charge.
 This forecasts measured growth; it cannot predict unseen bursts. Kernel
 ceilings, physical-memory rechecks and exact release remain independent.
 RAM wait text labels `live available` as available RAM after operator reserve,
@@ -732,6 +732,59 @@ that proof and no queue-recorded start/custody preserves ledger completeness,
 including a release-only acknowledgement before the final outcome. Missing
 process identity without this proof remains conservatively incomplete.
 
+### Positive execution evidence (#1008, next release)
+
+A production start refusal because every eligible host is disabled has
+`diagnostic_code: host_unavailable` and `execution_cause` with `operation: launch`,
+`class: host_unavailable`, `predicate: no_eligible_host_enabled`. Existing reason
+text is unchanged. It also has:
+
+```json
+"execution_evidence": {
+  "attempt": 0,
+  "main": "not_started",
+  "sidecars": "not_started",
+  "environment_preparation": "not_started"
+}
+```
+
+The same optional object is on job GET/status, returned Jobs from result/run
+clients, worker `Result` reports, exact `attempt_history` entries, and each
+`cancellation_scope.members[]` entry. A member describes its own job; parent
+proof is never inherited. Zero means rejection before assignment. Otherwise
+`attempt` identifies one physical attempt, not the entire retry history.
+
+Each component is `not_started` (positive evidence its boundary was never
+entered), `may_have_run` (boundary entered/opened; successful exec is not proved),
+or `unknown`. Missing objects, missing states and unrecognized values are unknown.
+`main` includes the submitted extension stage wrapper. `sidecars` describes all
+authored helpers collectively: `not_started` means none were released;
+`may_have_run` means at least one was allowed to execute. Framework supervisor
+and isolation/probe helpers are outside these authored-command components.
+`environment_preparation` covers attempt-local main/helper environment and
+extension-asset acquisition. It becomes `may_have_run` before acquisition, even
+on a cache hit, because acquisition can run authored build/install commands.
+Earlier independent preparation/qualification jobs are outside this evidence.
+
+Native memory refusals retain their existing cause, including
+`launch/resource_limit/memory_capacity` with `prelaunch_refused` where already
+applicable, or `command/stage_failed/memory_capacity` for native groups. Neither
+that predicate, `interrupted`, `starts`, nor absent `started_at` proves no user
+code ran. Sidecars and environment preparation can run before main's Started
+acknowledgement. Use the component evidence; a refused main can be `not_started`
+after a helper is `may_have_run`.
+
+For a no-user-code conclusion, require all three components `not_started` for
+every attempt and separately for each materialized member. Current evidence is
+cleared on assignment; history retains the prior attempt. Native live completion
+observations are persisted with their completed result. Incomplete recovery,
+older workers and unobserved daemon boundaries stay unknown. Workers negotiate
+`X-Myce-Execution-Evidence: execution-evidence-v1`; strict older queues receive
+no additive field while the durable local result retains it. These diagnostics
+change no retry or admission decisions and do not prove cleanup/release or grant
+overlap/deletion permission. Artifact-download APIs still require accepted
+results; read the Job for refusal evidence.
+
 History preserves the existing outcome classification: `launch` causes include
 `launch_refused`, `launch_failed` and `environment_failed`; `polite_stop` marks
 availability withdrawal or a queue-recorded planned stop (leaving or making
@@ -1171,7 +1224,16 @@ Only fresh exact-attempt cgroup anonymous resident memory reduces growth,
 including managed Docker containers with per-member caps and no shared parent.
 The worker verifies exact attempt labels and local container cgroup membership,
 then sums disjoint container charges. The unified-CUDA device-growth floor
-remains: host cgroup memory cannot cancel the device reservation.
+remains: host cgroup memory cannot cancel the device reservation. Summed
+per-process device counters may include shared allocations; neither their sum
+nor RSS/host-delta estimates establish unique physical residency for credit.
+From the next release, heartbeat device snapshots freeze before reading physical
+headroom; aging them afterward never fetches newer allocations.
+Native helper memory can be reported before main starts: occupancy does not
+establish main execution. Launch takes fresh actor snapshots before its live
+physical-RAM read and rechecks exact custody afterward. Confirmed local cleanup
+removes an old actor's reservation even before its next heartbeat; stop intent
+and pending cleanup do not.
 Only this current nonreclaimable memory reduces growth;
 reclaimable cache, historical peaks and process RSS do not. Missing or five-second-old
 samples retain the full reservation, as do models and unconfirmed release custody.
@@ -1837,6 +1899,10 @@ most 1 MiB, mode 0600. Structured lifecycle, delivery and failure events exclude
 authority, raw transport errors, notifier paths/targets and environment values.
 The last-error timestamp distinguishes an old refusal from present progress.
 Legacy observers have no diagnostic record; absence cannot establish a cause.
+Status snapshots use atomic temporary-file replacement without durable syncs;
+observer progress reconstructs them after an unclean host stop. Receipt, arm
+registration and delivery acknowledgement saves still sync both the file and
+its parent directory before returning success.
 See [supported recovery](operations.md#completion-observer-upgrade-and-recovery-next-release).
 
 ## Batched waits and consumer flood protection
@@ -2156,16 +2222,32 @@ precedence remain binding; active same-tier work is not stopped to repay debt.
 
 ## Learned native CPU memory growth (next release)
 
-An acknowledged `adaptive native CPU memory guard` treats learned and bounded
+An acknowledged `adaptive native CPU memory guard` treats learned and
 exploratory reservations as predictions. Fresh exact-attempt footprint and growth measurements use the
 same forecast as cold CPU probes, including sample age and measured drift, with
-the resolved estimate as a floor. Cold physical probes retain their initial
-execution ceiling. Unknown/stale telemetry and stopping attempts
+the resolved estimate as a floor for learned jobs. Cold CPU probes keep their
+known-need floor and use the same physical/allowance execution ceiling.
+Unknown/stale telemetry and stopping attempts
 retain the complete physical/explicit execution ceiling. Darwin RSS can increase
 the charge but grants no resident-memory credit because shared pages can appear
 in multiple processes. The reported estimate and the execution ceiling therefore
 serve different purposes. Explicit declarations, member limits and Docker keep
 their existing containment contract. See [native isolation](native-isolation.md).
+
+Native CPU auto-memory and native accelerator-check host-OOM recovery retain a
+durable lower bound from the previous reservation and killed peak, plus a
+physical page to require progress. Growth/overshoot remains replaceable sizing
+uncertainty, rather than a permanent demand floor.
+`memory_envelope.source` names the physical-headroom recovery probe; an ended
+attempt retains the envelope actually applied. Recovery does not fail merely
+because a fixed number of exploratory attempts OOMed. A lower bound exceeding
+all eligible physical/allowance capacities produces a capacity refusal. Linux
+kernel ceilings and the pressure guard still bound a leak. Docker and device-OOM retry contracts and accepted-family sizing are unchanged.
+Physical probes also report `launch_drift_gb` and `available_host_gb`: the
+exact job/worker-session launch-error reserve and ledger headroom at sizing.
+Unrelated inventory declines and other jobs' old launch errors cannot starve a
+new CPU probe or extension check. Exact launch refusals teach the same job's
+next offer; strict worker rechecks remain authoritative.
 
 ## Live view (`myce view`)
 

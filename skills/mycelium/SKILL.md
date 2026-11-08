@@ -43,15 +43,21 @@ Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
-After upgrading both queue and worker, learned and bounded exploratory native
+After upgrading both queue and worker, learned and exploratory native
 CPU `memory: auto` jobs can grow their charge from fresh measurements while the host has room. OS
 pressure, exhausted measured headroom, the configured host allowance and
 explicit limits still stop growth. Linux retains a physical/allowance kernel
 ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
 shared-page credit. Missing/stale telemetry protects the execution ceiling.
 `memory_envelope.enforcement` names the acknowledged behavior; older queues or
-workers retain the previous estimate-sized ceiling. Cold physical probes keep
-their initial execution ceilings. Declared numeric limits,
+workers retain the previous estimate-sized ceiling. From the next release, cold
+CPU probes also use the adaptive guard, so a small residual admission envelope
+is not their execution limit. Native CPU auto-memory OOMs and native accelerator-check host cgroup OOMs
+retain killed-peak floors and retry against usable physical headroom;
+exploratory under-sizing does not spend a fixed attempt budget.
+Growth/overshoot stays replaceable uncertainty, rather than a permanent floor.
+If the measured lower bound exceeds every eligible capacity, the job reports
+a capacity refusal. Inspect each attempt's envelope and learning reason. Declared numeric limits,
 explicit member caps and Docker behavior are unchanged.
 From the next release, `host_capacity_accumulation` means new CPU work is waiting
 so ready CPU or accelerator work can acquire host RAM/cores as running CPU
@@ -95,24 +101,40 @@ YAML
 The tiny declared memory bounds this fixture; real work can omit memory to learn
 it. From the next release, cold auto-memory work reserves measured physical
 headroom on one host.
-Cold ceilings leave the host's measured check-in/launch drift unused; strict
-worker launch checks still refuse a larger unseen drop and teach the next probe.
+Native CPU probes and extension checks leave this job's measured launch-error
+reserve unused; unrelated inventory drops and other jobs' old refusals do not
+shrink their envelopes. Strict worker checks refuse unseen drops and teach
+the same job's next offer. Unknown accelerator checks wait for a physical
+opportunity rather than starting with a tiny leftover ledger reservation.
 A running CPU probe can share after fresh complete cgroup
 measurements establish its live footprint and growth over a sampling horizon,
 extended by the measured growth rate through the sample's age;
-its containment ceiling stays fixed. Missing/stale measurements retain the full
+supporting native guards use physical/allowance containment. Missing/stale measurements retain the full
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
+From the next release, constrained recovery pairs each failed run's growth or
+overshoot margin with that run's peak. A different constrained run contributes
+its peak as a lower bound, without inheriting that margin. Replaceable uncertainty
+uses the candidate target's allowance and measured usable headroom, leaving launch
+slack and measured drift unused. Measured peaks, authored/member requirements,
+job-local OOM floors and release custody still bind. A newer accepted same-host
+completion can replace an older constrained class prior; it cannot erase a later
+constrained peak or a job-local OOM floor. Retained matching evidence does not
+expire merely with elapsed age. A smaller recovery attempt
+remains guarded and can fail on unseen growth; sampled Darwin RSS cannot contain
+a burst between observations. Keep the same queued job rather than resubmitting.
+
 From the next release (#954), Darwin process growth pairs each RSS increment
 with its own interval. Flat live samples report zero growth/rate; retained peak
 growth is historical sizing evidence. Positive slopes still extend through
 sample age. Measured physical RAM bounds forecast charges while retaining actual
 RSS and known floors; RSS grants no resident credit. A forecast is not measured
 allocation or proof of a historical refusal. See [process growth](../../docs/process-memory-growth.md).
+
 Plain native commands default to **unsandboxed** under MY-25; explicitly set
 `isolation: sandboxed` to opt in. New native extension registrations default to
 sandboxing; retained registrations keep their frozen policy.
@@ -165,6 +187,27 @@ not an infrastructure loss/retry. Bundle and relink the dependency or choose a
 compatible environment, then resubmit changed intent. System/loader-relative
 imports and present libraries do not warn. This check does not prove dynamic
 loader resolution or application compatibility. See [packaged Darwin libraries](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#packaged-darwin-library-dependencies-next-release-866).
+
+From the release containing #1008, an all-disabled eligible-host production
+refusal has `diagnostic_code: host_unavailable` and cause
+`launch/host_unavailable/no_eligible_host_enabled` (operation/class/predicate),
+with unchanged reason text. Read optional `execution_evidence` on the Job and
+each `cancellation_scope.members[]` entry: `attempt`, `main`, `sidecars`, and
+`environment_preparation`. Each component is `not_started`, `may_have_run`, or
+`unknown`; absent/unrecognized evidence is unknown. Before assignment, attempt
+zero proves all three `not_started`. For assigned native work, main includes
+its extension wrapper; sidecars are collective; environment acquisition is
+conservatively `may_have_run` even on a cache hit. Sidecars/build hooks can run
+before main's Started acknowledgement. Memory refusals retain existing
+`launch/resource_limit/memory_capacity` with `prelaunch_refused` where applicable,
+or native-group `command/stage_failed/memory_capacity`; those fields, interruption,
+`starts` and absent `started_at` alone never prove no user code ran. A safe
+no-user-code retry needs all three `not_started` across every attempt and each
+materialized member, plus the independent release contract. Earlier independent
+preparation/qualification jobs are outside this evidence. Incomplete recovery
+and older workers remain unknown. Result/run clients return the same Job;
+artifact downloads still require accepted outputs. See
+[execution evidence](https://github.com/1kuna/mycelium/blob/main/docs/status.md#positive-execution-evidence-1008-next-release).
 
 Resolve uploads nothing; `needs-staging` for the source archive is expected:
 `run` stages it automatically. Fix actual input/environment/eligibility blockers
@@ -377,11 +420,12 @@ still withholds dependent jobs under the unchanged measured thresholds.
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
 - **Benchmark host telemetry:** [bounded local capture and receipt schema](advanced.md#benchmark-telemetry-receipts) for queue/worker RSS, external RAM and per-card memory/activity; missing samples remain unknown.
-- **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
+- **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Helper occupancy is sampled before main but does not mean main started; device counter sums do not prove unique physical residency or release device growth reservations. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
 - **Discrete XPU fan-out sharing (next supporting release, default off):** explicitly set `fan_out.share_xpu: true`; every co-tenant must opt in and have fresh card/host/attempt headroom. Compare off/on at experiment class on the same release before owner-accepted production use. No allowance increase is implied. See [sharing and growth rules](advanced.md#submit).
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
 - **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits. From the next release, `myce wait --observer-status` reports local observer progress; newer clients request cooperative upgrades. Legacy shared-observer recovery belongs to its operator.
 - **Large outputs, diagnostics, quotas or early release:** [results and custody](advanced.md#results). Release only your own terminal results after all downstream uses and verified copies are complete.
+- **Reservation confirmation (#979, next release):** `reserve add` fails on rejected or unconfirmed writes instead of printing an empty record. Keep an explicit `--id`, inspect `reserve list` after uncertain confirmation, and retry the same binding.
 - **Urgency, reservations or pausing:** [class and validation rules](advanced.md#urgency-and-pausing). Class is the only urgency lever; shared policy changes belong to the queue owner.
 - **Blocked preparation or placement:** [diagnosis](advanced.md#when-a-job-waits).
 - **Real adapters, native variants or legacy formats:** [adapter contract](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md), [project setup and profile compatibility](setup-project.md), [harness routing](harness-binding.md).
@@ -422,7 +466,11 @@ checks. See [queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/
 
 On negotiated `host-probe-v1` workers, owner/pressure status includes measured
 probe period, cost and frozen validity. Read age against that observation's
-validity; a successful check-in cannot renew a failed probe. Owner-latency holds
+validity; a successful check-in cannot renew a failed probe. From the host-health
+delivery correction (#1025), new health observations include the same learned
+report-gap allowance as shared pressure. Stopped or failed sensors still lose
+admission while worker contact continues. An unprecedented delay can exceed the
+learned prediction; read the frozen validity and age together. Owner-latency holds
 now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
