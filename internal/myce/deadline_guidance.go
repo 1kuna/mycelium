@@ -25,13 +25,18 @@ type DeadlineGuidance struct {
 // Read only policy/planner facts under the lock; no filesystem or network I/O.
 // The accepted receipt is already detached and retains all submission fields.
 func (q *Queue) submissionDeadlineGuidance(j *Job, ctx context.Context) {
+	timing := newSubmissionAdviceTiming()
+	defer func() { timing.finish(q.observeSubmissionAdvice) }()
 	unlock := requestLock(ctx, &q.mu)
 	defer unlock()
+	timing.next(adviceWaitReason)
 	copy := *j
 	if copy.State == "queued" {
 		copy.Reason = q.waitReason(&copy)
+		timing.next(adviceStatusReason)
 		copy.Reason = q.statusWaitingReason(&copy)
 	}
+	timing.next(adviceDeadline)
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	j.DeadlineGuidance = q.deadlineGuidance(&copy)
 }

@@ -183,45 +183,46 @@ type Queue struct {
 	observationLive  map[string]*Job
 
 	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
-	checkpointProbe  func() bool // Availability seam; bounded real I/O is the default.
-	simulation       bool
-	simID            int64
-	uploadSpool      uploadSpool
-	logRetention     time.Duration
-	environments     EnvironmentCatalog
-	productionGrace  time.Duration
-	wake             chan struct{}
-	models           ModelConfig
-	calls            map[string]*ModelCall
-	lock             *os.File
-	mu               queueMutex
-	stopping         atomic.Bool // Fence before waiting for a queue transaction or either listener.
-	shutdownOnce     sync.Once
-	shutdownContext  context.Context
-	shutdownCancel   context.CancelFunc
-	contactMu        sync.Mutex
-	contacts         map[string]*workerContact
-	holdClock        Clock // Optional observational clock; never used for queue decisions.
-	updateHolds      queueHoldSampler
-	statusHolds      queueHoldSampler
-	logCleanupHolds  queueHoldSampler
-	statusCache      statusCache
-	jobSnapshots     map[string]*jobSnapshotCache // q.mu; entries serialize their own refreshes.
-	observeRead      func(string, time.Duration, time.Duration)
-	usageReader      *sql.DB
-	db               *sql.DB
-	persisted        map[string][]byte
-	records          *queueRecords
-	observeUpdate    func(time.Duration, time.Duration)
-	clock            Clock
-	root             string
-	restartUntil     time.Time
-	unreported       map[string]bool
-	networkQuiet     bool
-	lossTimeouts     [3]time.Duration
-	usageWrites      []usageSample
-	usageMaintenance bool
-	s                state
+	checkpointProbe         func() bool // Availability seam; bounded real I/O is the default.
+	simulation              bool
+	simID                   int64
+	uploadSpool             uploadSpool
+	logRetention            time.Duration
+	environments            EnvironmentCatalog
+	productionGrace         time.Duration
+	wake                    chan struct{}
+	models                  ModelConfig
+	calls                   map[string]*ModelCall
+	lock                    *os.File
+	mu                      queueMutex
+	stopping                atomic.Bool // Fence before waiting for a queue transaction or either listener.
+	shutdownOnce            sync.Once
+	shutdownContext         context.Context
+	shutdownCancel          context.CancelFunc
+	contactMu               sync.Mutex
+	contacts                map[string]*workerContact
+	holdClock               Clock // Optional observational clock; never used for queue decisions.
+	updateHolds             queueHoldSampler
+	statusHolds             queueHoldSampler
+	logCleanupHolds         queueHoldSampler
+	statusCache             statusCache
+	jobSnapshots            map[string]*jobSnapshotCache // q.mu; entries serialize their own refreshes.
+	observeRead             func(string, time.Duration, time.Duration)
+	observeSubmissionAdvice func(submissionAdviceTiming)
+	usageReader             *sql.DB
+	db                      *sql.DB
+	persisted               map[string][]byte
+	records                 *queueRecords
+	observeUpdate           func(time.Duration, time.Duration)
+	clock                   Clock
+	root                    string
+	restartUntil            time.Time
+	unreported              map[string]bool
+	networkQuiet            bool
+	lossTimeouts            [3]time.Duration
+	usageWrites             []usageSample
+	usageMaintenance        bool
+	s                       state
 
 	observeMemoryHistory func(int, bool) // Test observer: jobs visited by a full evidence scan.
 
