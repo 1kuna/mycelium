@@ -336,3 +336,54 @@ func TestSharedProfileAdaptiveNextReadBoundedByServiceAndPressure(t *testing.T) 
 		})
 	}
 }
+
+func TestSharedProfileAdaptiveTerminalDemandSurvivesPressure(t *testing.T) {
+	clock := &waitClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
+	next := clock.Now()
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		now := clock.Now()
+		if now.Before(next) {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(429)
+			return
+		}
+		next = now.Add(time.Second)
+		adaptiveReply(w, r, "succeeded")
+	}))
+	defer server.Close()
+	watches := map[string]*sharedProfileWatch{}
+	entries := []string{"first", "second"}
+	for _, id := range entries {
+		watches[id] = &sharedProfileWatch{registration: sharedProfileRegistration{Observer: profileObserver{Queue: server.URL}, Token: "fixture"}, receipt: profileReceipt{JobID: id}}
+	}
+	group := sharedProfileGroup{after: map[string]uint64{}}
+	seen := map[string]bool{}
+	// The fixture admits one request per advertised pressure period. A
+	// successful batch must not keep spending that credit ahead of its pending
+	// terminal GET, and retiring the first receipt must preserve the second.
+	for i := 0; i < 20 && len(entries) > 0; i++ {
+		result := readSharedProfileAuthority(context.Background(), entries, watches, group, clock)
+		for _, action := range result.finished {
+			if action.job == nil || action.job.State != "succeeded" || seen[action.job.ID] {
+				t.Fatalf("invalid or duplicate completion: %+v", action)
+			}
+			seen[action.job.ID] = true
+			delete(watches, action.entry)
+		}
+		active := entries[:0]
+		for _, entry := range entries {
+			if watches[entry] != nil {
+				active = append(active, entry)
+			}
+		}
+		entries = active
+		group = result.group
+		clock.advance(group.next.Sub(clock.Now()))
+	}
+	if len(seen) != 2 {
+		t.Fatal("no terminal progress despite successful batch states and honoring each Retry-After", len(seen))
+	}
+}

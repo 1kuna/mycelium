@@ -3936,6 +3936,9 @@ spread over one measured service period. Unchanged long-poll history is used onl
 to select the protocol hold; it cannot amplify the next-read timer. This trades
 unbounded read suppression for continued observation at the measured service
 rate; the queue can still shed reads with its explicit pressure signal.
+Terminal-detail requests survive those pressure passes and resume before another
+batch read, so learning a terminal state cannot repeatedly consume the credit
+needed to retrieve its result reference.
 
 A legacy owner has neither upgrade support nor diagnostics. Recovery of a shared
 owner requires the owner's authorization and consideration of the wake volume:

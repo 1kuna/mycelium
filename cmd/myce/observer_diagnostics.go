@@ -197,7 +197,7 @@ func (r *observerReadTrace) phase(phase, job string, cause error) {
 			Cause string    `json:"cause"`
 		}{d.clock.Now(), r.id, phase, d.state.LastError})
 	}
-	if phase == "batch_read_complete" {
+	if phase == "batch_read_complete" || phase == "terminal_read_complete" {
 		d.state.LastReadAt = d.clock.Now()
 	}
 	_ = d.save()
