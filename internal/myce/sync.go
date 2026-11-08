@@ -210,7 +210,7 @@ func (q *Queue) loadSeconds(model string, m *Machine) float64 {
 	return float64(remaining) / speed
 }
 func (q *Queue) workerIdle(m *Machine, demand *Job) bool {
-	if !q.batchSlotFree(m, demand) || q.untrackedPreparations(m) > 0 {
+	if q.launchCapacityBlocked(demand, m) || !q.batchSlotFree(m, demand) || q.untrackedPreparations(m) > 0 {
 		return false
 	}
 	for _, l := range q.s.PreparationPlans {

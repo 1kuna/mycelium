@@ -33,7 +33,11 @@ func TestObservationCopyDetachedState(t *testing.T) {
 		defer q.mu.Unlock()
 		original.Spec.Run.Env["INPUT"] = "after"
 		*q.s.WorkObservations["memory"].MemoryPeak.HostGB = 9
-		q.s.ExternalMemory[m.ID].Buckets[0].Counts[1] = 99
+		// Check-ins publish a new immutable ring; mutate through that production
+		// path rather than editing an already published generation in place.
+		updated := m
+		updated.MemoryObservation = &HostMemoryObservation{TotalGB: 32, UsedGB: 12, MyceliumGB: 2}
+		q.recordExternalMemory(&updated)
 		q.models.Models[0].Env["INPUT"] = "after"
 		q.environments.Environments["env"]["fake"].Files["input"][0] = 'X'
 		q.calls["call"].Workload.Units = 9

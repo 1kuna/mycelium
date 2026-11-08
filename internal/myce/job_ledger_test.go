@@ -92,6 +92,11 @@ func TestJobLedgerPrelaunchRefusalThenSuccess(t *testing.T) {
 				t.Fatal(err)
 			}
 			clock.Advance(time.Second)
+			// #1011 requires changed capacity before another launch offer.
+			if got := check(t, q, m, nil).Job; got != nil {
+				t.Fatal("unchanged refusal re-offered", got)
+			}
+			m.HostAvailableMemoryGB++
 			next := check(t, q, m, nil).Job
 			if next == nil || next.Attempt != 2 {
 				t.Fatal("missing second attempt", next)
@@ -198,8 +203,8 @@ func TestJobLedgerRequeuesCustodyPaginationRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(q.s.Jobs[j.ID].AttemptHistory) != attemptHistoryLimit {
-		t.Fatal("diagnostic cap changed")
+	if len(q.s.Jobs[j.ID].AttemptHistory) != 18 {
+		t.Fatal("open attempt diagnostics were dropped")
 	}
 	q = reopenCancellationQueue(t, q, clock)
 	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())

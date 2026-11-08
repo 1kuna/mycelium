@@ -34,6 +34,7 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 	}
 	request := myce.PortabilityRequest{Extension: *extension, Project: *project}
 	var placementAdvice []string
+	var linkage submitterFindings
 	if *adapter != "" {
 		// Metadata read only: no source archive, Git operation, registration or setup.
 		data, err := os.ReadFile(*adapter)
@@ -55,6 +56,11 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 		request.Project = p.Project
 		request.RequirementReasons = a.Entries[name].RequirementReasons
 		placementAdvice = p.placementAdvisories()
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		inspectSourceLinkage(root, p.Source, &linkage)
 		if p.Native != nil {
 			request.Recipe = p.Native
 			root, err := os.Getwd()
@@ -74,6 +80,8 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 	if err = client.Call(ctx, "POST", "/api/portability", request, &report); err != nil {
 		return err
 	}
+	report.Linkage = linkage.linkage
+	report.Notes = append(report.Notes, linkage.notes...)
 	// Local pins live outside a native recipe. Also support queues predating
 	// these notes without requiring a fleet upgrade for agent guidance.
 	for _, advice := range placementAdvice {

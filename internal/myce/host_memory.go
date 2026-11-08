@@ -467,14 +467,18 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 	samples := map[attemptKey]hostMemorySample{}
 	for _, r := range reports {
 		sample, s := r.CurrentHostMemory, hostMemorySample{}
-		if !r.Started || sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
+		// Native helpers acquire physical custody before main Starts. Their
+		// exact-attempt memory is occupancy evidence, never main-start evidence.
+		if sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) && sample.AgeSeconds < hostMemorySampleFreshFor.Seconds() {
 			s.gb, s.at = sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds*float64(time.Second)))
 			s.growthGB = sample.GrowthGB
 			if sample.FootprintGB != nil && validMemoryValue(*sample.FootprintGB) {
-				s.growthObserved = sample.GrowthObserved && (sample.GrowthGB == 0 || sample.GrowthRateGB > 0)
+				// Helper occupancy can reduce pending physical growth, but cannot
+				// release a CPU probe's whole future main-execution reservation.
+				s.growthObserved = r.Started && sample.GrowthObserved && (sample.GrowthGB == 0 || sample.GrowthRateGB > 0)
 				s.footprintGB, s.rateGB = *sample.FootprintGB, sample.GrowthRateGB
 			}
 		}
@@ -493,18 +497,30 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 // A CPU probe's ceiling contains an unknown run; it is not measured demand.
 // Once its exact attempt supplies fresh, uniquely charged resident usage and a
 // measured growth horizon, account for that forecast instead of holding the
-// whole initial ceiling. Known need/member limits remain a floor. No GPU or RSS
-// attribution earns this credit. Unknown/stale samples and stopping attempts
+// whole initial ceiling. Estimated native CPU jobs reuse that forecast, with the
+// resolved reservation as a floor. RSS increases the charge but grants no
+// resident credit. No GPU attribution earns probe credit. Unknown/stale samples and stopping attempts
 // retain the complete ceiling, including after restart or worker downgrade.
 func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
 	charge = ceiling
-	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, ceiling, sample, now)
+	adaptiveCeiling := adaptiveMemoryCeilingGB(j, m)
+	if adaptiveCeiling > 0 {
+		// Unknown/stale telemetry retains the physical/explicit execution
+		// ceiling, including while stopping. It cannot release a grown charge.
+		charge = adaptiveCeiling
+	}
+	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, charge, sample, now)
 	e := j.MemoryEnvelope
-	if e == nil || e.ProbeFloorGB <= 0 || j.Spec.Needs.Memory != "auto" || !j.Spec.Needs.cpuOnly() || j.State != "running" || !sample.growthObserved || sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= hostMemorySampleFreshFor || !validMemoryValue(sample.gb) || !validMemoryValue(sample.growthGB) {
+	if e == nil || (e.ProbeFloorGB <= 0 && adaptiveCeiling <= 0) || j.Spec.Needs.Memory != "auto" || !j.Spec.Needs.cpuOnly() || j.State != "running" || !sample.growthObserved || sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= hostMemorySampleFreshFor || !validMemoryValue(sample.gb) || !validMemoryValue(sample.growthGB) {
 		return
 	}
 	forecast := sample.growthGB + sample.rateGB*now.Sub(sample.at).Seconds()
-	charge = max(e.ProbeFloorGB, sample.footprintGB+forecast+exploratoryDriftMarginGB(m))
+	floor := e.ProbeFloorGB
+	if adaptiveCeiling > 0 && e.ProbeFloorGB <= 0 {
+		floor = max(floor, ceiling) // Estimates can grow, never earn probe credit.
+	}
+	charge = max(floor, sample.footprintGB+forecast+exploratoryDriftMarginGB(m))
+	charge = boundedProcessMemoryCharge(m, floor, sample.footprintGB, charge)
 	growth = max(0, charge-sample.gb)
 	return
 }

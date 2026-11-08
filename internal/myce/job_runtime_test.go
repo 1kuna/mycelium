@@ -68,8 +68,8 @@ func TestJobRuntimeStaleAndNoncomparableHistory(t *testing.T) {
 	}
 	second := startObservation(t, q, m, s)
 	r := runtimeJob(t, q, second.ID).Runtime
-	if r.RemainingSeconds != nil || !strings.Contains(r.Reason, "older than 30 days") {
-		t.Fatalf("stale history: %+v", r)
+	if r.RemainingSeconds == nil || r.RemainingWorkUnknown {
+		t.Fatalf("age alone expired comparable evidence: %+v", r)
 	}
 	q.s.Jobs[second.ID].Timing.Reason = "mixed or unknown host occupancy"
 	r = runtimeJob(t, q, second.ID).Runtime
@@ -96,7 +96,9 @@ func TestJobRuntimePlainCommandAndStartedBoundary(t *testing.T) {
 	}
 	clock.Advance(2 * time.Second)
 	r = runtimeJob(t, q, j.ID).Runtime
-	if *r.ElapsedSeconds != 2 || !strings.Contains(r.Reason, "metadata unavailable") {
+	// Plain commands now support learned timing, but this legacy fake machine
+	// has no physical inventory. That missing evidence must keep ETA unknown.
+	if *r.ElapsedSeconds != 2 || r.RemainingSeconds != nil || !r.RemainingWorkUnknown || !strings.Contains(r.Reason, "physical component inventory unavailable") {
 		t.Fatalf("plain command: %+v", r)
 	}
 }

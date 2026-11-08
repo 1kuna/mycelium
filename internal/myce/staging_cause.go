@@ -71,7 +71,7 @@ func stagingErrorName(err error) string {
 		err  error
 		name string
 	}{
-		{context.DeadlineExceeded, "timeout"}, {errFileTransferStalled, "timeout"}, {context.Canceled, "cancelled"},
+		{context.DeadlineExceeded, "timeout"}, {errFileTransferStalled, "timeout"}, {errCheckpointIOTimeout, "timeout"}, {context.Canceled, "cancelled"},
 		{io.ErrUnexpectedEOF, "unexpected_EOF"}, {io.EOF, "EOF"},
 		{syscall.ENOENT, "ENOENT"}, {syscall.EACCES, "EACCES"}, {syscall.EPERM, "EPERM"}, {syscall.ENOSPC, "ENOSPC"}, {syscall.EDQUOT, "EDQUOT"}, {syscall.EIO, "EIO"}, {syscall.EROFS, "EROFS"}, {syscall.ENOTDIR, "ENOTDIR"}, {syscall.EISDIR, "EISDIR"}, {syscall.EEXIST, "EEXIST"}, {syscall.EMFILE, "EMFILE"}, {syscall.ENFILE, "ENFILE"}, {syscall.ECONNREFUSED, "ECONNREFUSED"}, {syscall.ECONNRESET, "ECONNRESET"}, {syscall.EPIPE, "EPIPE"},
 	} {

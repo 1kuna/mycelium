@@ -92,6 +92,21 @@ func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
 							if err := q.Tick(); err != nil {
 								t.Fatal(err)
 							}
+							if waiting := job(t, q, submitted.ID); waiting.State != "queued" || waiting.StartedAt != nil || extensionCheckAdmissionReason(waiting.Reason) != "waiting for host RAM" {
+								t.Fatal("capacity wait expired or lost its original RAM diagnostic", waiting)
+							}
+							// Generated startup windows pause while the route is
+							// capacity-bound. Losing that route permits expiry
+							// without creating an execution verdict.
+							if err := q.update(func() error {
+								q.s.Machines[m.ID].Gone = true
+								return nil
+							}); err != nil {
+								t.Fatal(err)
+							}
+							if err := q.Tick(); err != nil {
+								t.Fatal(err)
+							}
 						case "runs and fails":
 							m.HostAvailableMemoryGB = 32
 							running := check(t, q, m, nil).Job

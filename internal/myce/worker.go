@@ -162,6 +162,7 @@ type process struct {
 	docker     *dockerAttempt
 	native     *nativeGroup
 	memory     *memoryAttempt // Plain command cgroup; carries live device samples.
+	rssMemory  atomic.Pointer[processResidentSample]
 	mu         sync.Mutex
 	job        Job
 	cmd        *exec.Cmd
@@ -403,6 +404,13 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
+	// Start preparation can pause and retry without advancing the attempt.
+	j.ExecutionEvidence = s.startExecutionEvidence(j)
+	defer func() {
+		if startErr != nil {
+			startErr = &executionEvidenceError{startErr, safeExecutionEvidence(j.ExecutionEvidence, j.Attempt)}
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -502,6 +510,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 
 	executionWork := j.Spec.Run.Workdir
+	if !j.Spec.Run.Docker {
+		if err := checkPayloadMachOLinkage(ctx, machineTarget(&w.Machine), executionWork); err != nil {
+			return nil, err
+		}
+	}
 	executionWorkdir, extensionErr = privateNativeExtension(&j, extensionEnv, executionWork, executionWorkdir)
 	if extensionErr != nil {
 		return nil, extensionErr
@@ -512,7 +525,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err := os.MkdirAll(filepath.Dir(applicationProgressFile(s.dir, j)), 0700); err != nil {
 		return nil, err
 	}
-	ceilingBytes, ceilingErr := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	ceilingBytes, ceilingErr := w.jobCeilingBytes(j)
 	if ceilingErr != nil {
 		return nil, ceilingErr
 	}
@@ -564,6 +577,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 		r.readyOnly = j.CommandDiscovery != nil || j.Spec.extensionJob() || w.Machine.SharedHost != nil
 		buildCtx := context.WithValue(ctx, preparationCustodyKey{}, s.retainPreparation)
+		j.ExecutionEvidence.EnvironmentPreparation = executionMayHaveRun
 		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(buildCtx, func() error {
 			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), r)
@@ -586,6 +600,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			return nil, err
 		}
 		environmentRelease := release
+		// Docker recovery/daemon boundaries are not observed by this native proof.
+		j.ExecutionEvidence.Main, j.ExecutionEvidence.Sidecars = executionUnknown, executionUnknown
 		p, e := w.startDocker(s, j, checkpoint, func() {
 			if environmentRelease != nil {
 				environmentRelease()
@@ -786,7 +802,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	cmd.Stderr = output
 	// Record intent before creating even the gated process. It cannot execute
 	// the command until its group identity has been durably recorded.
-	s.state.Job = &j
+	assigned := j
+	assigned.ExecutionEvidence = nil
+	s.state.Job = &assigned
 	s.state.Identity = identity
 	s.state.Log = logName
 	s.state.Offset = 0
@@ -899,6 +917,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 	}
 	payloadPossible = true
+	if readyReader == nil {
+		j.ExecutionEvidence.Main = executionMayHaveRun
+	}
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
 		return nil, abort(err)
 	}
@@ -913,6 +934,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		if err == nil {
 			// Queue waiting must not consume the local exec-receipt I/O budget.
 			_ = readyReader.SetReadDeadline(time.Now().Add(2 * time.Second))
+			j.ExecutionEvidence.Main = executionMayHaveRun
 			_, err = approvalWriter.Write([]byte("S"))
 		}
 		approvalWriter.Close()
@@ -937,7 +959,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			p.mu.Unlock()
 		}
 	}
-	result := Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	result := Result{ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt), InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	extensionStarted = true
 	sharedStarted = true

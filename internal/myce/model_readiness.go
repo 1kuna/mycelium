@@ -137,32 +137,26 @@ func publishReadinessHistory(path string, b []byte) error {
 var modelLoadPercent = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)%`)
 
 // stdout/stderr share one writer, so fragmented lines cannot interleave. The
-// existing diagnostic line budget bounds captured-output parser memory.
+// shared diagnostic pool bounds incomplete-line and parser memory.
 type modelReadinessOutput struct {
 	mu       sync.Mutex
 	output   io.Writer
 	progress *readinessProgress
-	line     []byte
-	dropping bool
+	line     diagnosticLine
 }
 
 func (w *modelReadinessOutput) Write(b []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	n, err := w.output.Write(b)
-	for _, c := range b[:n] {
-		if c == '\n' || c == '\r' {
-			if !w.dropping {
-				w.record(w.line)
-			}
-			w.line, w.dropping = w.line[:0], false
-		} else if len(w.line) < dockerEventLineLimit && !w.dropping {
-			w.line = append(w.line, c)
-		} else {
-			w.line, w.dropping = w.line[:0], true
-		}
-	}
+	w.line.write(b[:n], w.record)
 	return n, err
+}
+
+func (w *modelReadinessOutput) close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.line.clear()
 }
 func (w *modelReadinessOutput) record(line []byte) {
 	if b, ok := bytes.CutPrefix(line, []byte("MYCE_LOAD_PROGRESS ")); ok {

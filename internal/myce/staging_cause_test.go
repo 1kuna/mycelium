@@ -27,6 +27,7 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 		{"disk_full", syscall.ENOSPC, "cache_download", "ENOSPC", true},
 		{"permission", syscall.EACCES, "publish", "EACCES", true},
 		{"timeout", errFileTransferStalled, "cache_verify", "timeout", true},
+		{"shared_input_stall", fmt.Errorf("shared input: %w", errCheckpointIOTimeout), "shared_input", "timeout", true},
 		{"storage_outage", &HTTPError{Status: 503}, "cache_verify", "blob_unavailable", true},
 		{"missing", &HTTPError{Status: 404}, "cache_verify", "blob_missing", false},
 		{"expired", resultExpired(), "cache_verify", "blob_expired", false},
@@ -55,6 +56,9 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 			r := startFailureOutcome(result(assigned, false), err)
 			if r.Interrupted != tc.retry || r.ExecutionCause == nil || r.ExecutionCause.Staging == nil || r.ExecutionCause.Staging.Error != tc.reason {
 				t.Fatalf("classification lost: %+v", r)
+			}
+			if tc.reason == "timeout" && r.ExecutionCause.Class != "timeout" {
+				t.Fatalf("timeout cause lost: %+v", r.ExecutionCause)
 			}
 			if tc.retry {
 				var recorded *recordedStartError
@@ -115,9 +119,80 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 	}
 }
 
+// A high attempt number includes planned stops, not just infrastructure losses.
+// Reproduce the retained ninth-attempt ending without changing either budget.
+func TestStagingSharedInputTimeoutAfterPreemptions(t *testing.T) {
+	q, clock := fixture(t)
+	s := submitVerificationInput(t, q)
+	ref := s.Files["input"]
+	s.SharedInputs = map[string]SharedInput{"source": {SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}}
+	m := machine("staging", "fake")
+	m.Capabilities = append(m.Capabilities, "shared_inputs_v1")
+	j := submit(t, q, s)
+	w := Worker{StateDir: newTestStateRoot(t), Clock: clock, Machine: m}
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
+	defer server.Close()
+	w.Client = Client{URL: server.URL, Token: "test"}
+	for attempt := 1; attempt <= 9; attempt++ {
+		a := check(t, q, m, nil).Job
+		if a == nil || a.Attempt != attempt {
+			t.Fatalf("missing attempt %d: %+v", attempt, a)
+		}
+		clock.Advance(time.Second)
+		r := result(a, false)
+		r.Interrupted = true
+		if attempt >= 2 && attempt <= 7 {
+			if err := q.update(func() error {
+				q.stopBatchFor(q.s.Jobs[j.ID], &Job{ID: "demand", Spec: spec("deadline")})
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			store.state.Job, store.state.Session = a, a.Session
+			r = startFailureOutcome(r, w.stagingFailure(store, *a, withStagingCause("shared_inputs/source", ref, "shared_input", errCheckpointIOTimeout)))
+			if !r.Interrupted || r.ExecutionCause.Class != "timeout" || r.ExecutionCause.Staging.Error != "timeout" {
+				t.Fatalf("staging timeout misclassified: %+v", r)
+			}
+			if err := w.replay(context.Background(), store); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		got, err := w.Client.GetJob(context.Background(), j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		losses := 1
+		if attempt >= 8 {
+			losses = attempt - 6
+		}
+		if got.Losses != losses || got.InfrastructureRetries != 0 || got.State != map[bool]string{false: "queued", true: "failed"}[attempt == 9] {
+			t.Fatalf("attempt %d retry accounting: %+v", attempt, got)
+		}
+		if attempt == 9 {
+			last := got.AttemptHistory[len(got.AttemptHistory)-1]
+			if !strings.HasPrefix(got.Reason, "stopped after 3 infrastructure interruptions") || last.Reason != got.Reason || !last.Interrupted || last.ExecutionCause.Staging.Input != "shared_inputs/source" || last.ExecutionCause.Staging.Blob != ref.SHA256 || got.FinishedAt == nil || !got.FinishedAt.Equal(clock.Now()) {
+				t.Fatalf("terminal staging explanation lost: %+v", got)
+			}
+		}
+	}
+	logs, err := q.Logs(j.ID, 0)
+	if err != nil || len(logs) == 0 || !strings.Contains(logs[len(logs)-1].Text, "operation=shared_input error=timeout") {
+		t.Fatal("missing safe staging timeout log", logs, err)
+	}
+}
+
 func TestStagingSubmissionRefusalAndRetention(t *testing.T) {
 	q, clock := fixture(t)
-	if err := q.ConfigureLogRetention(2 * DefaultFileRetention); err != nil {
+	if err := q.ConfigureLogRetention(2 * testFileRetention); err != nil {
 		t.Fatal(err)
 	}
 	spec := submitVerificationInput(t, q)
@@ -159,7 +234,7 @@ func TestStagingSubmissionRefusalAndRetention(t *testing.T) {
 	// of the older receipt cannot collect bytes needed by this waiting job.
 	spec.SubmissionKey = "reuse-verified-input"
 	second := submit(t, q, spec)
-	clock.Advance(DefaultFileRetention + filePublicationGrace + time.Second)
+	clock.Advance(testFileRetention + filePublicationGrace + time.Second)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}

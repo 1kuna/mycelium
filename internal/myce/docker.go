@@ -490,9 +490,14 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	// interval to drain. Outage backoff must not strand worker shutdown.
 	cmd.WaitDelay = d.rpcCadence("inspect")
 	var stdout bytes.Buffer
-	var stderr dockerTail
-	cmd.Stdout = &dockerProgressOutput{output: &stdout, progress: progress}
-	cmd.Stderr = &dockerProgressOutput{output: &stderr, progress: progress}
+	stderr := diagnosticTail{dir: d.dir}
+	defer stderr.release()
+	stdoutProgress := &dockerProgressOutput{output: &stdout, progress: progress, line: diagnosticLine{tail: diagnosticTail{dir: d.dir}}}
+	stderrProgress := &dockerProgressOutput{output: &stderr, progress: progress, line: diagnosticLine{tail: diagnosticTail{dir: d.dir}}}
+	defer stdoutProgress.close()
+	defer stderrProgress.close()
+	cmd.Stdout = stdoutProgress
+	cmd.Stderr = stderrProgress
 	err = cmd.Run()
 	out = stdout.Bytes()
 	if exit := new(exec.ExitError); errors.As(err, &exit) {
@@ -1011,18 +1016,22 @@ func (d *dockerAttempt) recordSignal(id, name string, at time.Time) error {
 	return nil
 }
 
-const dockerStderrTailBytes = 64 * 1024
-
 // Docker --tail bounds lines; this writer additionally bounds bytes, including
 // one arbitrarily long line. stdout is discarded, never folded into stderr.
-type dockerTail struct{ data []byte }
+type dockerTail struct {
+	data  []byte
+	limit int
+}
 
 func (b *dockerTail) Write(p []byte) (int, error) {
 	n := len(p)
-	if len(p) >= dockerStderrTailBytes {
-		b.data = append(b.data[:0], p[len(p)-dockerStderrTailBytes:]...)
+	if b.limit <= 0 {
+		return n, nil
+	}
+	if len(p) >= b.limit {
+		b.data = append(b.data[:0], p[len(p)-b.limit:]...)
 	} else {
-		if extra := len(b.data) + len(p) - dockerStderrTailBytes; extra > 0 {
+		if extra := len(b.data) + len(p) - b.limit; extra > 0 {
 			b.data = append(b.data[:0], b.data[extra:]...)
 		}
 		b.data = append(b.data, p...)
@@ -1050,10 +1059,11 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) (err error
 		if m.ExitCode != nil {
 			continue
 		}
-		tail := &dockerTail{}
+		tail := &diagnosticTail{dir: d.dir}
+		defer tail.release()
 		if !logsNone {
 			ctx, cancel := context.WithTimeout(context.Background(), d.rpcBudget("logs"))
-			cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", "--tail", "256", c.ID)
+			cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", c.ID)
 			cmd.Env = d.env
 			cmd.Dir = d.workdir
 			cmd.Stdout = io.Discard

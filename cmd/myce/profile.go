@@ -66,7 +66,15 @@ func profileHash(value any) string {
 	return hex.EncodeToString(h[:])
 }
 
+var profileJSONSync = (*os.File).Sync
+
 func saveProfileJSON(path string, value any) error {
+	return saveAtomicProfileJSON(path, value, true)
+}
+
+// Diagnostic snapshots need atomic replacement, but are reconstructible. Arms,
+// receipts and delivery acknowledgements retain file and directory durability.
+func saveAtomicProfileJSON(path string, value any, durable bool) error {
 	b, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
@@ -80,19 +88,25 @@ func saveProfileJSON(path string, value any) error {
 		f.Close()
 		return err
 	}
-	err = errors.Join(f.Sync(), f.Close())
+	if durable {
+		err = profileJSONSync(f)
+	}
+	err = errors.Join(err, f.Close())
 	if err != nil {
 		return err
 	}
 	if err = os.Rename(f.Name(), path); err != nil {
 		return err
 	}
+	if !durable {
+		return nil
+	}
 	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
 	defer dir.Close()
-	return dir.Sync()
+	return profileJSONSync(dir)
 }
 func readProfileJSON[T any](path string, value *T) error {
 	b, err := os.ReadFile(path)
@@ -404,14 +418,10 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		s.SubmissionKey = ""
 		s.RequireTarget = p.Native == nil
 		s.Files = myce.FileManifest{".myce-source.tar": ref}
-		// Adapters keep public input destinations, so use StoredInputFiles keys
-		// for their uploads. Ordinary profiles retain their saved receipt format.
-		uploadPrefix := ""
-		if p.Adapter {
-			uploadPrefix = "files/"
-		}
+		// All newly frozen profiles prepare source and input overlays on the worker
+		// before prelaunch. Existing receipts retain their frozen wire spec.
+		uploadPrefix := "files/"
 		uploads := map[string]string{uploadPrefix + ".myce-source.tar": "source.tar"}
-		var inputCommands []string
 		for dest, local := range p.Inputs {
 			if !profileRelative(dest) || dest == ".myce-source.tar" {
 				return waitError(64, "profile_invalid: invalid input name")
@@ -432,7 +442,6 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			stored := ".myce-inputs/" + profileHash(dest)
 			uploads[uploadPrefix+stored] = filepath.Base(frozen)
 			s.Files[stored] = inputRef
-			inputCommands = append(inputCommands, "mkdir -p "+shellArg("./"+filepath.Dir(dest))+"; cp "+shellArg("./"+stored)+" "+shellArg("./"+dest))
 		}
 		for name, input := range p.SharedInputs {
 			if input.Local == "" {
@@ -494,29 +503,23 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		}
 		s.Inputs = nil
 		command := append(append([]string{}, p.Run.Command...), args...)
-		// Extraction is confined by freezeProfileSource's link/path checks. Inputs
-		// are already in the attempt cwd; no checkout or caller environment is copied.
-		slices.Sort(inputCommands)
-		if p.Adapter {
-			s.PrepareSource = true
-			// Inputs stage after source extraction and keep their public filenames.
-			for dest := range p.Inputs {
-				stored := ".myce-inputs/" + profileHash(dest)
-				s.Files[dest], uploads["files/"+dest] = s.Files[stored], uploads["files/"+stored]
-				delete(s.Files, stored)
-				delete(uploads, "files/"+stored)
-			}
-			if p.Native != nil {
-				s.ProfileMemory = ""
-				s.Args = append(s.Args, args...)
-				s.Run = myce.RunSpec{}
-			} else if s.Execution != nil {
-				s.Execution.Main.Command = checkedAdapterCommand(append(s.Execution.Main.Command, args...), p.Check)
-			} else {
-				s.Run.Command = checkedAdapterCommand(command, p.Check)
-			}
+		// Reuse native staging: extract once, then replace source paths with
+		// explicit inputs before linkage checks and before any member launches.
+		s.PrepareSource = true
+		for dest := range p.Inputs {
+			stored := ".myce-inputs/" + profileHash(dest)
+			s.Files[dest], uploads["files/"+dest] = s.Files[stored], uploads["files/"+stored]
+			delete(s.Files, stored)
+			delete(uploads, "files/"+stored)
+		}
+		if p.Native != nil {
+			s.ProfileMemory = ""
+			s.Args = append(s.Args, args...)
+			s.Run = myce.RunSpec{}
+		} else if s.Execution != nil {
+			s.Execution.Main.Command = checkedAdapterCommand(append(s.Execution.Main.Command, args...), p.Check)
 		} else {
-			s.Run.Command = []string{"sh", "-ec", "tar -xf .myce-source.tar\n" + strings.Join(inputCommands, "\n") + "\n" + shellCommand(command) + "\n" + shellCommand(p.Check)}
+			s.Run.Command = checkedAdapterCommand(command, p.Check)
 		}
 
 		s.SubmissionKey = key

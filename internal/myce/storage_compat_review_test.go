@@ -131,8 +131,8 @@ func TestStorageCompatCollectedCustodyDrains(t *testing.T) {
 	if err := q.pruneJobHistory(); err != nil {
 		t.Fatal(err)
 	}
-	if q.s.Jobs["retained"] != nil {
-		t.Fatal("settled history did not drain")
+	if q.s.Jobs["retained"] == nil {
+		t.Fatal("payload release discarded unique custody history")
 	}
 }
 

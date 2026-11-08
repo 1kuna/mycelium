@@ -443,6 +443,14 @@ func (q *Queue) quarantineDeviceAttempts(m *Machine) {
 			continue
 		}
 		q.retainRelease(j)
+		if q.launchCapacityPending(j) {
+			// Diagnostic verification may still be outside the queue lock. A
+			// later device fault cannot turn its known refusal into a loss.
+			for i := range j.Copies {
+				j.Copies[i].Recoverable = false
+			}
+			continue
+		}
 		j.Losses++
 		q.chargeLoss(j)
 		for i := range j.Copies {

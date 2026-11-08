@@ -65,6 +65,8 @@ func reopenQueue(t *testing.T, q *Queue, clock *fakeClock) *Queue {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reopened.fileRetention, reopened.logRetention = q.fileRetention, q.logRetention
+	reopened.rebuildRecords()
 	t.Cleanup(func() { reopened.Close() })
 	fakeCheckpointAvailability(t, reopened, true)
 	return reopened
@@ -126,8 +128,8 @@ func TestLearnedMemoryBoundsGrowAndNeverShrink(t *testing.T) {
 	if j.Spec.Needs.HostMemoryGB != 3+minimumHostMemoryGB || j.MemoryEnvelope.Evidence != 1 || !strings.Contains(j.MemoryEnvelope.Origin(), "bounded by 1 similar accepted attempts") {
 		t.Fatal("family evidence lost", j.MemoryEnvelope)
 	}
-	// Preserve the existing doubling protocol when a measured family envelope
-	// underestimates a new shape. The floor is never replaced by a smaller peak.
+	// A family envelope that underestimates a new shape retains its failed
+	// bound plus a physical page, without inventing a doubled demand floor.
 	other.Run.Command = []string{"echo", "larger"}
 	queued := submit(t, q, other)
 	run := check(t, q, m, nil).Job
@@ -144,8 +146,8 @@ func TestLearnedMemoryBoundsGrowAndNeverShrink(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := job(t, q, run.ID)
-	if got.MemoryOOMFloor == nil || got.MemoryOOMFloor.HostMemoryGB != run.Spec.Needs.HostMemoryGB*2 || got.OOMRetries != 0 {
-		t.Fatal("existing bounded OOM floor changed", got.MemoryOOMFloor)
+	if got.MemoryOOMFloor == nil || got.MemoryOOMFloor.HostMemoryGB != run.Spec.Needs.HostMemoryGB+minimumHostMemoryGB || got.OOMRetries != 1 {
+		t.Fatal("failed envelope floor lost", got.MemoryOOMFloor)
 	}
 }
 

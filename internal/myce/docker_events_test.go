@@ -62,15 +62,15 @@ func TestDockerRetainsEventsWhenKillReplyTimesOut(t *testing.T) {
 		t.Fatalf("lost Docker kill/exit events after timed-out reply: %v", err)
 	}
 	var archive dockerEventArchive
-	if err := json.Unmarshal(data, &archive); err != nil || len(archive.Events) != 256 || archive.Dropped != 4 {
-		t.Fatalf("bounded event archive: events=%d dropped=%d rejected=%d status=%s cause=%v err=%v", len(archive.Events), archive.Dropped, archive.Rejected, archive.Status, archive.Cause, err)
+	if err := json.Unmarshal(data, &archive); err != nil || len(archive.Events) != 260 || archive.Dropped != 0 {
+		t.Fatalf("complete event archive: events=%d dropped=%d rejected=%d status=%s cause=%v err=%v", len(archive.Events), archive.Dropped, archive.Rejected, archive.Status, archive.Cause, err)
 	}
-	kill, exit := archive.Events[254], archive.Events[255]
+	kill, exit := archive.Events[258], archive.Events[259]
 	if kill.Action != "kill" || kill.Signal != "9" || kill.At.IsZero() || exit.Action != "die" || exit.ExitCode == nil || *exit.ExitCode != 137 {
 		t.Fatalf("missing terminal timing: kill=%+v exit=%+v", kill, exit)
 	}
 	st, _ := os.Stat(path)
-	if st.Mode().Perm() != 0600 || len(data) > 128*1024 || strings.Contains(string(data), "DO-NOT-RETAIN") {
+	if st.Mode().Perm() != 0600 || strings.Contains(string(data), "DO-NOT-RETAIN") {
 		t.Fatal("event retention exposed labels or exceeded its bound")
 	}
 }
@@ -102,7 +102,7 @@ func TestDockerEventsSlowPersistence(t *testing.T) {
 		reader, producer := io.Pipe()
 		defer reader.Close()
 		defer producer.Close()
-		w := &dockerEventWriter{identity: "ATTEMPT"}
+		w := &dockerEventWriter{identity: "ATTEMPT", capacity: 1 << 20}
 		saving, releaseSave := make(chan struct{}), make(chan struct{})
 		readDone, produced := make(chan struct{}), make(chan struct{})
 		finished := make(chan error, 1)
@@ -144,10 +144,10 @@ func TestDockerEventsSlowPersistence(t *testing.T) {
 		if err := <-finished; err != nil {
 			t.Fatal(err)
 		}
-		if len(persisted.Events) != 256 || persisted.Dropped != 4 {
-			t.Fatalf("bounded event archive: events=%d dropped=%d", len(persisted.Events), persisted.Dropped)
+		if len(persisted.Events) != 260 || persisted.Dropped != 0 {
+			t.Fatalf("complete event archive: events=%d dropped=%d", len(persisted.Events), persisted.Dropped)
 		}
-		if persisted.Events[254].Action != "kill" || persisted.Events[255].Action != "die" {
+		if persisted.Events[258].Action != "kill" || persisted.Events[259].Action != "die" {
 			t.Fatal("lost terminal events during slow persistence")
 		}
 	})

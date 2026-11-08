@@ -16,6 +16,96 @@ import (
 	"time"
 )
 
+// Err is checked outside q.mu after the publication snapshot and before unlink.
+// Interleave a real rejected transaction there without timing a goroutine race.
+type retentionInterleaveContext struct {
+	context.Context
+	once func()
+}
+
+func (c *retentionInterleaveContext) Err() error {
+	if f := c.once; f != nil {
+		c.once = nil
+		f()
+	}
+	return c.Context.Err()
+}
+
+func TestFileRetentionRollbackTimestampFences(t *testing.T) {
+	for _, phase := range []string{"publication", "bookkeeping"} {
+		for _, kind := range []string{"input", "attempt-output", "bundle"} {
+			t.Run(phase+"/"+kind, func(t *testing.T) {
+				q, clock := fixture(t)
+				// JSON preserves this instant but normalizes the named location.
+				clock.now = time.Date(2026, 11, 7, 4, 15, 0, 0, time.FixedZone("fixture-local", -5*60*60))
+				c := retentionClient(t, q)
+				_, ref := retentionUpload(t, c, "rollback retention")
+				marker := func() map[string]time.Time {
+					switch kind {
+					case "input":
+						return q.s.JobInputUploads
+					case "attempt-output":
+						return q.s.AttemptOutputUploads
+					default:
+						return q.s.BundleUploads
+					}
+				}
+				published := clock.Now()
+				if err := q.update(func() error {
+					q.s.JobInputUploads = map[string]time.Time{}
+					q.s.AttemptOutputUploads = map[string]time.Time{}
+					q.s.BundleUploads = map[string]time.Time{}
+					marker()[ref.SHA256] = published
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				clock.Advance(testFileRetention)
+				entered := false
+				rollback := func() {
+					entered = true
+					if phase == "bookkeeping" {
+						if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
+							t.Fatal("bookkeeping interleave did not follow unlink", err)
+						}
+					}
+					sentinel := errors.New("unrelated rejected mutation")
+					if err := q.update(func() error { return sentinel }); !errors.Is(err, sentinel) {
+						t.Fatal(err)
+					}
+					current, exists := marker()[ref.SHA256]
+					if !exists || !current.Equal(published) || current == published {
+						t.Fatal("rollback did not normalize the unchanged marker", current, published)
+					}
+				}
+				ctx := context.Background()
+				if phase == "publication" {
+					ctx = &retentionInterleaveContext{Context: ctx, once: rollback}
+				} else {
+					q.checkpointProbe = func() bool {
+						// Disarm before the nested rejected transaction probes again.
+						q.checkpointProbe = func() bool { return true }
+						rollback()
+						return true
+					}
+				}
+				if err := q.reclaimPublishedFilesContext(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if !entered {
+					t.Fatal("rollback interleave was not exercised")
+				}
+				if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
+					t.Error("unchanged publication was not reclaimed", err)
+				}
+				if _, exists := marker()[ref.SHA256]; exists {
+					t.Error("unlinked publication retained its marker")
+				}
+			})
+		}
+	}
+}
+
 func TestFileRetention(t *testing.T) {
 	q, clock := fixture(t)
 	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "store"), 1<<20, true); err != nil {
@@ -24,8 +114,8 @@ func TestFileRetention(t *testing.T) {
 	if err := q.ConfigureFileRetention(time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.ConfigureFileRetention(0); err == nil {
-		t.Fatal("nonpositive retention accepted")
+	if err := q.ConfigureFileRetention(-time.Nanosecond); err == nil {
+		t.Fatal("negative retention accepted")
 	}
 	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer api.Close()
@@ -134,7 +224,7 @@ func TestFileRetentionSubmissionFence(t *testing.T) {
 	if err := q.Cancel(first.ID); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	if err := q.update(func() error { q.maintain(); return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +298,7 @@ func TestFileRetentionOrphanUploads(t *testing.T) {
 	if _, marked := q.s.JobInputUploads[referenced.SHA256]; marked {
 		t.Fatal("job admission did not clear input upload marker")
 	}
-	clock.Advance(DefaultFileRetention - time.Nanosecond)
+	clock.Advance(testFileRetention - time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +334,7 @@ func TestFileRetentionUnmarkedImports(t *testing.T) {
 	if err := q.ConfigureModels(catalog); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +409,7 @@ func TestFileRetentionOrphanReferences(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.reclaimJobFiles(); err != nil {
 		t.Fatal(err)
 	}
@@ -336,8 +426,8 @@ func TestFileRetentionOrphanBatch(t *testing.T) {
 	for i := 0; i < fileReclaimBatch+1; i++ {
 		retentionJobInput(t, c, fmt.Sprint("orphan-", i))
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
-	for _, want := range []int{1, 0} {
+	clock.Advance(testFileRetention + time.Nanosecond)
+	for _, want := range []int{0, 0} {
 		if err := q.Tick(); err != nil {
 			t.Fatal(err)
 		}
@@ -354,7 +444,7 @@ func TestFileRetentionOrphanSubmissionFence(t *testing.T) {
 	_, ref := retentionJobInput(t, c, "marked input awaiting verification")
 	s := spec("experiment")
 	s.Files = FileManifest{"input": ref}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	entered, unblock := gateSubmitVerification(t, q, nil)
 	defer unblock()
 	done := startSubmitVerification(q, context.Background(), s)
@@ -388,7 +478,7 @@ func TestFileRetentionUploadPurposeDedup(t *testing.T) {
 	if len(q.s.JobInputUploads) != 0 {
 		t.Fatal("generic import became collectible", q.s.JobInputUploads)
 	}
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -488,11 +578,14 @@ func TestFileRetentionMarkedUploadRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { reopened.Close() })
+	if err := reopened.ConfigureFileRetention(testFileRetention); err != nil {
+		t.Fatal(err)
+	}
 	if err := reopened.ConfigureFileStore(storeRoot, 1<<20, true); err != nil {
 		t.Fatal(err)
 	}
 	// No model configuration is loaded after restart.
-	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	clock.Advance(testFileRetention + time.Nanosecond)
 	if err := reopened.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +605,7 @@ func TestFileCacheEvictsExpiredVictims(t *testing.T) {
 		t.Run(fmt.Sprint("partial=", partial), func(t *testing.T) {
 			q, clock := fixture(t)
 			// Keep expiry metadata while testing eviction of expired cache bytes.
-			if err := q.ConfigureLogRetention(2 * DefaultFileRetention); err != nil {
+			if err := q.ConfigureLogRetention(2 * testFileRetention); err != nil {
 				t.Fatal(err)
 			}
 			c := retentionClient(t, q)
@@ -534,7 +627,7 @@ func TestFileCacheEvictsExpiredVictims(t *testing.T) {
 			if err := q.Cancel(j.ID); err != nil {
 				t.Fatal(err)
 			}
-			clock.Advance(DefaultFileRetention)
+			clock.Advance(testFileRetention)
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
@@ -565,7 +658,7 @@ func TestFileRetentionPublicationGrace(t *testing.T) {
 				if err := q.Cancel(first.ID); err != nil {
 					t.Fatal(err)
 				}
-				clock.Advance(DefaultFileRetention)
+				clock.Advance(testFileRetention)
 				if err := q.update(func() error { q.maintain(); return nil }); err != nil {
 					t.Fatal(err)
 				}
@@ -649,7 +742,7 @@ func TestFileRetentionRetriesRemovalFailure(t *testing.T) {
 	if err := os.Chtimes(path, clock.Now(), clock.Now()); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	var logs bytes.Buffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
@@ -694,12 +787,12 @@ func TestFileRetentionProgressAndBatch(t *testing.T) {
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if pending := q.retainedJob(j.ID).FileReclamation.Pending; len(pending) != 1 {
-		t.Fatal("filesystem work not bounded to one batch", len(pending))
+	if pending := q.retainedJob(j.ID).FileReclamation.Pending; len(pending) != 0 {
+		t.Fatal("idle queue did not drain reclaimable records", len(pending))
 	}
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
@@ -718,6 +811,9 @@ func TestFileRetentionProgressAndBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { reopened.Close() })
+	if err := reopened.ConfigureFileRetention(testFileRetention); err != nil {
+		t.Fatal(err)
+	}
 	if err := reopened.ConfigureFileStore(storeRoot, 1<<20, true); err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +841,7 @@ func TestFileRetentionDeferredDiagnostic(t *testing.T) {
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	var logs bytes.Buffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
@@ -797,7 +893,7 @@ func TestFileRetentionOpenDownload(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(DefaultFileRetention)
+	clock.Advance(testFileRetention)
 	if err = q.update(func() error { q.maintain(); return nil }); err != nil {
 		t.Fatal(err)
 	}
