@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"maps"
 	"time"
 )
 
@@ -34,6 +35,74 @@ type checkinContact struct {
 	period      time.Duration
 	advertised  bool
 	inFlight    bool
+	discarded   bool
+}
+
+// Contact decisions participate in the SQLite transaction without copying
+// every worker on every queue update. Only a changed worker is copied. Pending
+// arrivals can still be registered concurrently; rollback retains those for the
+// restored session and never resurrects a settled rejected request.
+type contactTransaction struct{ before map[string]*workerContact }
+
+// Caller holds q.mu and contactMu.
+func (q *Queue) editContact(id string) *workerContact {
+	current := q.contacts[id]
+	if tx := q.contactTransaction; tx != nil {
+		if tx.before == nil {
+			tx.before = map[string]*workerContact{}
+		}
+		if _, saved := tx.before[id]; !saved {
+			tx.before[id] = current
+			if current != nil {
+				copy := *current
+				copy.pending = maps.Clone(current.pending)
+				current = &copy
+				q.contacts[id] = current
+			}
+		}
+	}
+	return current
+}
+
+func (q *Queue) rollbackContacts(tx *contactTransaction) {
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	for id, before := range tx.before {
+		current := q.contacts[id]
+		if before == nil {
+			delete(q.contacts, id)
+			continue
+		}
+		if current != nil && current.session == before.session {
+			if before.pending == nil {
+				before.pending = map[*checkinContact]struct{}{}
+			}
+			for p := range current.pending {
+				before.pending[p] = struct{}{}
+			}
+		}
+		for p := range before.pending {
+			if p.discarded {
+				delete(before.pending, p)
+			}
+		}
+		q.contacts[id] = before
+	}
+}
+
+// Recovery is a fresh service opportunity, not a fictitious accepted heartbeat.
+// Actual arrival/LastSeen timestamps stay unchanged and continue to drive
+// suspicion. The confirmed-silence baseline alone restarts for missing peers.
+func (q *Queue) startNetworkRecovery(now time.Time) {
+	q.s.NetworkRecoveryAt = now
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	for id, m := range q.s.Machines {
+		if c := q.editContact(id); c != nil && c.session == m.Session {
+			c.processedOpportunity, c.measured = q.controlNow(), true
+			c.seenArrival = false
+		}
+	}
 }
 
 // Cadence qualification precedes new offers. A cold legacy sender must first
@@ -45,13 +114,27 @@ func (q *Queue) acceptContactPeriod(m *Machine, period time.Duration, pending *c
 	if q.contacts == nil {
 		q.contacts = map[string]*workerContact{}
 	}
-	c := q.contacts[m.ID]
+	c := q.editContact(m.ID)
 	if c == nil || c.session != m.Session {
 		c = &workerContact{session: m.Session}
 		q.contacts[m.ID] = c
 	}
-	c.period = period
+	if period > 0 {
+		c.period = period
+	}
 	if pending != nil {
+		// Qualify a legacy sender on its second arrival, before scheduling this
+		// response. Waiting until response settlement would idle it for an extra
+		// send interval. The contact undo discards learning on commit failure.
+		if c.seenArrival && !q.simulation && !q.networkQuiet && q.s.NetworkRecoveryAt.IsZero() {
+			if gap := pending.arrived.Sub(c.arrivalWall); gap > 0 {
+				c.cadence.observe(gap.Seconds())
+			}
+			if gap := pending.opportunity - c.arrivalOpportunity; gap > 0 {
+				c.gap.observe(gap.Seconds())
+			}
+		}
+		c.arrivalOpportunity, c.arrivalWall, c.seenArrival = pending.opportunity, pending.arrived, true
 		if c.pending == nil {
 			c.pending = map[*checkinContact]struct{}{}
 		}
@@ -65,7 +148,7 @@ func (q *Queue) acceptContactPeriod(m *Machine, period time.Duration, pending *c
 func (q *Queue) discontinueContactCadence(id string) {
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
-	if c := q.contacts[id]; c != nil {
+	if c := q.editContact(id); c != nil {
 		c.seenArrival = false
 	}
 }
@@ -110,6 +193,7 @@ func (q *Queue) trackWorkerCheckin(machine, session string, period time.Duration
 		}
 		settled = true
 		pending.inFlight = false
+		pending.discarded = requestContext(contexts).Err() == nil
 		// Acceptance can attach a first/new-session request after begin. Settle
 		// the authoritative contact, not just the session captured at arrival.
 		if c != nil {
@@ -145,16 +229,6 @@ func (q *Queue) trackWorkerCheckin(machine, session string, period time.Duration
 					current = &workerContact{session: session}
 					q.contacts[machine] = current
 				}
-				if current.seenArrival && !q.simulation && !q.networkQuiet && q.s.NetworkRecoveryAt.IsZero() {
-					if gap := pending.arrived.Sub(current.arrivalWall); gap > 0 {
-						current.cadence.observe(gap.Seconds())
-					}
-					if gap := pending.opportunity - current.arrivalOpportunity; gap > 0 {
-						current.gap.observe(gap.Seconds())
-					}
-				}
-				current.arrivalOpportunity, current.arrivalWall, current.seenArrival = pending.opportunity, pending.arrived, true
-				current.period = 0
 				if pending.advertised {
 					current.period = pending.period
 				}
@@ -180,7 +254,7 @@ func (q *Queue) trackWorkerCheckin(machine, session string, period time.Duration
 // lastContact is the later of m.LastSeen and the queue's own contact record for
 // m's current session; active processing protects that worker from confirmed
 // loss, while wall-clock suspicion remains independent. Callers hold q.mu.
-func (q *Queue) lastContact(m *Machine, now time.Time) time.Time {
+func (q *Queue) lastContact(m *Machine, now time.Time, ignored ...*checkinContact) time.Time {
 	allowance := q.machineLossTimeout(m.ID)
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
@@ -191,6 +265,9 @@ func (q *Queue) lastContact(m *Machine, now time.Time) time.Time {
 	opportunity := q.controlNow()
 	contact := false
 	for pending := range c.pending {
+		if len(ignored) > 0 && pending == ignored[0] {
+			continue
+		}
 		if pending.inFlight || opportunity-pending.opportunity < max(allowance, 2*pending.period) {
 			contact = true
 		} else {

@@ -20,6 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 # No v3 release tag was published. This is the verified deployed s071 source.
 PREVIOUS = "100840b4094d77bbc69a80d807dba58722db877c"
 INVENTORY_BASELINE = "8b2585e1d7edaff376e96430bc614daa9f788342"
+CADENCE_BASELINE = "9b1180db3fe2c6e580e1565352c263aceb020932"
 OLD_VERSION = "v3.1.0-rc.20261104.s071.100840b"
 VERSION = "v3.1.0-rc.20261104.s072.abce497.1"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
@@ -88,7 +89,7 @@ def extract(source, destination):
 
 
 def prepare():
-    for revision in (PREVIOUS, INVENTORY_BASELINE):
+    for revision in (PREVIOUS, INVENTORY_BASELINE, CADENCE_BASELINE):
         source = archive(revision)
         with tempfile.TemporaryDirectory(prefix="upgrade-modules-", dir=cache_root()) as tmp:
             extract(source, tmp)
@@ -243,6 +244,7 @@ def run(args):
         scratch = Path(tmp)
         previous = binaries(archive(PREVIOUS, offline=True), PREVIOUS, OLD_VERSION, scratch)
         baseline = binaries(archive(INVENTORY_BASELINE, offline=True), INVENTORY_BASELINE, VERSION, scratch)
+        legacy = binaries(archive(CADENCE_BASELINE, offline=True), CADENCE_BASELINE, VERSION, scratch)
         source = REPO
         if args.candidate:
             source = scratch / "candidate"
@@ -259,6 +261,7 @@ def run(args):
         cases = [
             ("candidate queue + candidate worker", lambda: pairing("same-source suffix", candidate[0], candidate[0], scratch / "same", tools, large=True)),
             ("candidate queue + previous worker", lambda: pairing("previous worker", candidate[0], previous[0], scratch / "old-worker", tools)),
+            ("legacy worker first work", lambda: legacy_first_work(candidate, legacy, scratch, tools)),
             ("previous queue + candidate worker", lambda: reverse(previous, candidate, scratch, tools)),
             ("saved config downgrade", lambda: downgrade(previous, candidate, scratch, tools)),
             ("full-inventory worker + candidate queue", lambda: pairing("#790 full worker", candidate[0], baseline[0], scratch / "full-worker", tools, full_only=True)),
@@ -337,6 +340,34 @@ def inventory_restarts(candidate, baseline, scratch, tools):
                        and not row["hash"] and not row["version"] for row in rows[1:]), "legacy full fallback did not rejoin"
             assert all(row["session"] == session and row["attempt_protocol"] == "keyed-attempt-v1" for row in rows), "fallback changed session or attempt protocol"
     print("upgrade-compat: PASS hash-only -> queue restart -> explicit full refresh -> #790 strict fallback", flush=True)
+
+
+def legacy_first_work(candidate, previous, scratch, tools):
+    root = scratch / "legacy-first-work"
+    with process(candidate[0], "queue-work", root / "queue") as queue:
+        url = await_file(root / "queue/url", queue)
+        with process(previous[0], "worker", root / "worker", queue=url, tools=tools) as worker:
+            def offered(value):
+                rows = json.loads(value)
+                assert all(row["status"] == 200 and not row["period"] for row in rows), rows
+                return any(row["offered"] for row in rows)
+            rows = json.loads(await_file(root / "queue/receipts.json", worker, offered))
+            # Startup recovery can qualify cadence before ordinary admission.
+            # Otherwise at most the first ordinary idle report needs a sample.
+            eligible = [row for row in rows if not row["recovering"]]
+            offer = next(i for i, row in enumerate(eligible) if row["offered"])
+            assert offer <= 1, "legacy admission waited beyond one observed send interval"
+            request = urllib.request.Request(url + "/api/jobs/cadence-work", headers={"Authorization": "Bearer upgrade-fixture"})
+            deadline = time.monotonic() + 30
+            while True:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    job = json.load(response)
+                if job["state"] in ("succeeded", "failed", "cancelled"):
+                    assert job["state"] == "succeeded" and job.get("losses", 0) == 0, job["state"]
+                    break
+                assert time.monotonic() < deadline, "legacy command did not finish"
+                time.sleep(.2)
+            print("upgrade-compat: PASS legacy worker empty idle reply -> measured cadence -> completed first work", flush=True)
 
 
 def downgrade(previous, candidate, scratch, tools):

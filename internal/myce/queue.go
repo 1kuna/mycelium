@@ -223,7 +223,8 @@ type Queue struct {
 	usageMaintenance bool
 	s                state
 
-	restartControlUntil time.Duration // Available startup service, not blocked wall time.
+	restartControlUntil time.Duration       // Available startup service, not blocked wall time.
+	contactTransaction  *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
 
 	memoryPlanning          *memoryPlanningCache // Only while a read-only placement scan is active.
 	memoryObservationIndex  *memoryObservationCatalog
@@ -620,6 +621,9 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		oldUnreported[id] = v
 	}
 	oldQuiet := q.networkQuiet
+	contacts := &contactTransaction{}
+	q.contactTransaction = contacts
+	defer func() { q.contactTransaction = nil }()
 	oldModels, oldEnvironments := q.models, q.environments
 	oldEnvironmentRevision := q.environmentRevision
 	hold.next(holdUsage)
@@ -666,6 +670,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.calls = oldCalls
 		q.unreported = oldUnreported
 		q.networkQuiet = oldQuiet
+		q.rollbackContacts(contacts)
 		q.rollbackRecords(old)
 	}
 
@@ -1079,14 +1084,14 @@ func (q *Queue) stop(j *Job, why string) {
 	j.State = "stopping"
 	j.Reason = why
 }
-func (q *Queue) fleetQuiet(now time.Time) bool {
+func (q *Queue) fleetQuiet(now time.Time, ignored ...*checkinContact) bool {
 	active, healthy := 0, 0
 	quietFor := time.Duration(1<<63 - 1)
 	for _, m := range q.s.Machines {
 		if !m.Gone && !m.Leaving && q.workerLossAllowance(m) > 0 {
 			active++
 			quietFor = min(quietFor, q.machineLossTimeout(m.ID))
-			if q.workerContactFresh(m, now) {
+			if q.workerContactFresh(m, now, ignored...) {
 				healthy++
 			}
 		}
@@ -1139,8 +1144,7 @@ func (q *Queue) maintain() {
 	q.networkQuiet = q.fleetQuiet(now)
 	for _, m := range q.s.Machines {
 		unreported := q.unreported[m.ID]
-		outageGrace := !q.s.NetworkRecoveryAt.IsZero() && m.LastSeen.Before(q.s.NetworkRecoveryAt) && now.Before(q.s.NetworkRecoveryAt.Add(q.machineLossTimeout(m.ID)))
-		grace := !unreported && outageGrace || unreported && q.inRestartGrace(now)
+		grace := unreported && q.inRestartGrace(now)
 		restartExpired := unreported && !grace
 		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
 			m.Gone = true
@@ -1505,6 +1509,13 @@ func (q *Queue) checkinContext(ctx context.Context, c Checkin) (Reply, error) {
 			}
 		}
 		q.acceptEnvironmentFailures(&m, old)
+		// Assess the previous fleet before this arrival or replacement can
+		// conceal the outage. Its own pending request is new evidence, not a
+		// continuously reporting survivor from before the recovery epoch.
+		if old != nil && !old.Gone && !q.inRestartGrace(m.LastSeen) && q.s.NetworkRecoveryAt.IsZero() &&
+			(q.networkQuiet || q.fleetQuiet(m.LastSeen, c.contact)) {
+			q.startNetworkRecovery(m.LastSeen)
+		}
 		q.s.Machines[m.ID] = &m
 		if old != nil && (old.Gone || q.unreported[m.ID] || q.networkQuiet || !q.s.NetworkRecoveryAt.IsZero() && old.LastSeen.Before(q.s.NetworkRecoveryAt)) {
 			q.discontinueContactCadence(m.ID)
@@ -1531,14 +1542,6 @@ func (q *Queue) checkinContext(ctx context.Context, c Checkin) (Reply, error) {
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)
-		// Count this worker as healthy, but detect majority silence before
-		// replacing the previous fleet contact. Otherwise the first reconnect
-		// looks like a continuously reporting survivor and expires its peers.
-		// Keep actual peer heartbeats and the active recovery deadline unchanged.
-		if (q.networkQuiet || q.fleetQuiet(m.LastSeen)) && old != nil && !old.Gone && !q.inRestartGrace(m.LastSeen) && q.s.NetworkRecoveryAt.IsZero() {
-			q.s.NetworkRecoveryAt = m.LastSeen
-			q.discontinueContactCadence(m.ID)
-		}
 		q.s.LastWorkerContact = m.LastSeen
 		delete(q.s.BatchReleases, m.ID) // This report supersedes acknowledgement credit.
 		for _, d := range m.Devices {

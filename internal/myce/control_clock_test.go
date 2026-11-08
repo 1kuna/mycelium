@@ -40,6 +40,18 @@ func adaptiveLossFixture(t *testing.T, priority string) (*Queue, *fakeClock, Mac
 	return q, clock, worker, peer, job
 }
 
+// Keep the survivor reporting at the fixture's advertised interval. One jump
+// with both workers silent would reproduce a fleet outage, not an isolated loss.
+func advanceReportingPeer(t *testing.T, q *Queue, clock *fakeClock, peer Machine, elapsed time.Duration) {
+	t.Helper()
+	for elapsed > 0 {
+		step := min(time.Second, elapsed)
+		clock.Advance(step)
+		check(t, q, peer, nil)
+		elapsed -= step
+	}
+}
+
 // The incident's new 31-second queue tail must be safe even when all preceding
 // measurements were fast. No percentile pretraining or class exception is used.
 func TestControlClockSlowQueuePreservesAttempts(t *testing.T) {
@@ -84,8 +96,7 @@ func TestControlClockDeadWorkerDetection(t *testing.T) {
 				clock.Advance(31 * time.Second)
 				q.mu.Unlock()
 			}
-			clock.Advance(allowance - time.Nanosecond)
-			check(t, q, peer, nil)
+			advanceReportingPeer(t, q, clock, peer, allowance-time.Nanosecond)
 			if q.s.Machines[worker.ID].Gone {
 				t.Fatal("lost before the measured opportunity allowance")
 			}
@@ -178,6 +189,34 @@ func TestControlClockHTTPAdvertisedCadence(t *testing.T) {
 	}
 	if got := q.machineLossTimeout(m.ID); got != 14*time.Second {
 		t.Fatalf("HTTP lost the actual worker interval: %s", got)
+	}
+}
+
+func TestControlClockLegacyFirstWorkAfterOneInterval(t *testing.T) {
+	q, clock := fixture(t)
+	if err := q.SetLossTimeouts(0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	api := API{Queue: q, Token: "test"}.Handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Del(checkinPeriodHeader) // Older workers never advertised cadence.
+		api.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	w := Worker{Machine: machine("legacy", "fake"), Interval: 12 * time.Second, Client: Client{URL: server.URL, Token: "test"}}
+	j := submit(t, q, spec("production"))
+	c := Checkin{Machine: w.Machine}
+	first, err := w.checkin(context.Background(), c)
+	if err != nil || first.Job != nil || len(first.Attempts) != 0 {
+		t.Fatalf("empty idle reply did not remain idle: %+v %v", first, err)
+	}
+	clock.Advance(w.Interval)
+	second, err := w.checkin(context.Background(), c)
+	if err != nil || second.Job == nil || second.Job.ID != j.ID || len(second.Attempts) != 1 {
+		t.Fatalf("legacy work waited beyond one observed interval: %+v %v", second, err)
+	}
+	if q.machineLossTimeout(w.Machine.ID) < 2*w.Interval || q.s.Jobs[j.ID].Losses != 0 || q.s.Jobs[j.ID].InfrastructureRetries != 0 {
+		t.Fatal("legacy admission lacked its measured silence allowance")
 	}
 }
 
@@ -448,23 +487,85 @@ func TestControlClockCachedPreparationCannotStartSuspect(t *testing.T) {
 }
 
 func TestControlClockLastReconnectDoesNotLearnOutage(t *testing.T) {
-	q, clock, worker, peer, _ := adaptiveLossFixture(t, "production")
-	clock.Advance(time.Hour)
-	if err := q.Tick(); err != nil {
+	for _, tick := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before-maintenance", true: "after-maintenance"}[tick], func(t *testing.T) {
+			q, clock, worker, peer, _ := adaptiveLossFixture(t, "production")
+			clock.Advance(time.Hour)
+			if tick {
+				if err := q.Tick(); err != nil {
+					t.Fatal(err)
+				}
+				if !q.networkQuiet {
+					t.Fatal("fixture missed outage")
+				}
+			}
+			check(t, q, worker, nil)
+			check(t, q, peer, nil) // This report clears the recovery epoch.
+			allowance := q.machineLossTimeout(peer.ID)
+			if allowance > 3*time.Second || q.machineLossTimeout(worker.ID) > 3*time.Second {
+				t.Fatalf("reconnect learned outage: first=%s last=%s", q.machineLossTimeout(worker.ID), allowance)
+			}
+			advanceReportingPeer(t, q, clock, worker, allowance)
+			if !q.s.Machines[peer.ID].Gone {
+				t.Fatal("last reconnected worker hid a new genuine loss")
+			}
+		})
+	}
+}
+
+func TestControlClockFailedSessionReplacementRestoresLossDetection(t *testing.T) {
+	q, clock, worker, peer, job := adaptiveLossFixture(t, "production")
+	allowance := q.machineLossTimeout(worker.ID)
+	if _, err := q.db.Exec(`CREATE TRIGGER contact_fail BEFORE UPDATE ON queue_state BEGIN SELECT RAISE(ABORT,'contact failure'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if !q.networkQuiet {
-		t.Fatal("fixture missed outage")
+	replacement := worker
+	replacement.Session = "replacement-session"
+	if _, err := q.Checkin(Checkin{Machine: replacement, Fresh: true, PreviousSession: worker.Session, period: time.Second}); err == nil {
+		t.Fatal("failed commit accepted replacement")
 	}
-	check(t, q, worker, nil)
-	check(t, q, peer, nil) // This report clears the recovery epoch.
-	allowance := q.machineLossTimeout(peer.ID)
-	if allowance > 3*time.Second {
-		t.Fatalf("last reconnect learned outage: %s", allowance)
+	if q.s.Machines[worker.ID].Session != worker.Session || q.machineLossTimeout(worker.ID) != allowance {
+		t.Fatal("failed replacement disabled the restored session's loss detector")
 	}
-	clock.Advance(allowance)
-	check(t, q, worker, nil)
-	if !q.s.Machines[peer.ID].Gone {
-		t.Fatal("last reconnected worker hid a new genuine loss")
+	if _, err := q.db.Exec(`DROP TRIGGER contact_fail`); err != nil {
+		t.Fatal(err)
+	}
+	advanceReportingPeer(t, q, clock, peer, allowance)
+	got := q.s.Jobs[job.ID]
+	if !q.s.Machines[worker.ID].Gone || got.Losses != 1 || got.InfrastructureRetries != 1 || got.State != "queued" {
+		t.Fatalf("restored dead session stranded its attempt: %+v", got)
+	}
+}
+
+func TestControlClockNetworkRecoveryExcludesQueueStall(t *testing.T) {
+	for _, delay := range []time.Duration{31 * time.Second, 90 * time.Second} {
+		t.Run(delay.String(), func(t *testing.T) {
+			q, clock, worker, peer, job := adaptiveLossFixture(t, "production")
+			lastSeen := q.s.Machines[worker.ID].LastSeen
+			clock.Advance(time.Hour)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			check(t, q, peer, nil)
+			if q.s.NetworkRecoveryAt.IsZero() {
+				t.Fatal("reconnect missed the recovery epoch")
+			}
+			q.mu.Lock()
+			clock.Advance(delay)
+			q.maintain()
+			q.mu.Unlock()
+			got := q.s.Jobs[job.ID]
+			if q.s.Machines[worker.ID].Gone || got.State != "running" || got.Losses != 0 || got.InfrastructureRetries != 0 || !q.s.Machines[worker.ID].LastSeen.Equal(lastSeen) {
+				t.Fatalf("blocked recovery charged false loss or invented a heartbeat: %+v", got)
+			}
+			if !q.workerSuspect(q.s.Machines[worker.ID], clock.Now()) {
+				t.Fatal("recovery fabricated healthy status")
+			}
+			advanceReportingPeer(t, q, clock, peer, q.machineLossTimeout(worker.ID))
+			got = q.s.Jobs[job.ID]
+			if !q.s.Machines[worker.ID].Gone || got.Losses != 1 || got.InfrastructureRetries != 1 {
+				t.Fatalf("recovery hid real loss after service resumed: %+v", got)
+			}
+		})
 	}
 }

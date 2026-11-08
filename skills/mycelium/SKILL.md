@@ -447,8 +447,12 @@ Older workers retain legacy fields and age rules. See
 
 Worker loss and status freshness follow the session's observed check-in cadence
 and control-path variation. Queue transaction time does not count as worker
-silence, and an in-flight check-in protects only its worker. Queue slowness alone
-does not charge any class a retry or infrastructure loss. A dead worker normally
+silence, and an in-flight check-in protects only its worker. During a queue-first
+upgrade, headerless
+sessions qualify on their second accepted arrival, adding at most one observed
+send interval plus control-path delay to the first offer. Startup reports can
+qualify earlier; existing attempts retain custody through this idle response.
+Queue slowness alone does not charge any class a retry or infrastructure loss. A dead worker normally
 needs roughly two send intervals plus learned variation and a maintenance turn;
 overload adds actual blocked queue time. Under continuous saturation, silence
 still becomes `suspect: true` within the measured arrival allowance plus the next

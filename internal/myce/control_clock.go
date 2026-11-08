@@ -127,9 +127,9 @@ func (q *Queue) workerFresh(m *Machine, now time.Time) bool {
 }
 
 // Network-outage recovery uses confirmation evidence, not wall-clock suspicion.
-func (q *Queue) workerContactFresh(m *Machine, now time.Time) bool {
+func (q *Queue) workerContactFresh(m *Machine, now time.Time, ignored ...*checkinContact) bool {
 	return m != nil && !m.Gone && !m.LastSeen.IsZero() && !now.Before(m.LastSeen) &&
-		now.Sub(q.lastContact(m, now)) < q.machineLossTimeout(m.ID)
+		now.Sub(q.lastContact(m, now, ignored...)) < q.machineLossTimeout(m.ID)
 }
 
 // Restart recovery also needs available queue service; a startup stall cannot

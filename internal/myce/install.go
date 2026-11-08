@@ -252,7 +252,9 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.FileStoreBytes = 100 << 30
 	c.RestartGrace = RestartGrace
 	c.ProductionInfrastructureRetries = DefaultProductionInfrastructureRetries
-	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = 0, 0, 0
+	// Worker configs retain these unused schema values so older installers can
+	// validate a saved worker config on rollback. Only queues decide worker loss.
+	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
 	c.UploadSpoolDir = filepath.Join(c.State, "uploads")
 	c.UploadSpoolBytes = DefaultUploadSpoolBytes
 	c.PrivateDevices, c.NoNewPrivileges = false, true
@@ -260,6 +262,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.CPUReserveCores = 0
 	c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = 10, "25%", "512M", "64"
 	if role == "queue" {
+		c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = 0, 0, 0
 		// Control transactions and heartbeats must not share job politeness limits.
 		c.Nice, c.CPUQuota, c.MemoryMax = 0, "", "infinity"
 	}

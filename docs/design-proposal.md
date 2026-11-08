@@ -2615,6 +2615,11 @@ measured with the injected queue Clock. Workers advertise their actual interval
 through an optional header compatible with older strict JSON decoders. An older
 worker without that header first establishes cadence from successive accepted
 wall-time arrivals; queue occupancy cannot compress its expected send period.
+The second accepted arrival learns cadence before admission, so a headerless
+worker waits at most one observed send interval plus actual control-path delay
+for its first offer after a queue cutover. Startup recovery reports can supply
+these samples before ordinary admission. An empty keyed reply is idle, with no
+assignment to launch; existing attempts continue reporting and retain custody.
 Until then automatic loss is unknown and capacity is suspect, even with a saved
 operator minimum, so no new attempt can acquire an unbounded unknown loss
 allowance. The allowance is at least two send intervals (the
