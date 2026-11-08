@@ -46,6 +46,23 @@ Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
+From the release containing #1079, the supported owner-write route is on the
+queue host as the account that can read its installed queue configuration:
+
+```sh
+myce policy get --yaml --config <installed-queue-config> > policy.yaml
+# Edit policy.yaml; N is the exported revision.
+myce policy set policy.yaml --if-revision N --config <installed-queue-config>
+```
+
+Use the same `--config <installed-queue-config>` for other owner-scoped writes
+such as `myce model sync MODEL --to all --config <installed-queue-config>`.
+The CLI resolves credentials internally and retains installed certificate trust.
+Never source env files or set `MYCE_TOKEN` by hand; never extract joining tokens.
+`owner_authority_unavailable` means the installation owner must restore access;
+`owner_authority_unpinned` means HTTPS owner authority lacks provisioned trust.
+Do not work around either refusal with credentials or TLS overrides.
+
 After upgrading both queue and worker, learned and exploratory native
 CPU `memory: auto` jobs can grow their charge from fresh measurements while the host has room. OS
 pressure, exhausted measured headroom, the configured host allowance and

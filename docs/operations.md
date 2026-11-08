@@ -437,19 +437,36 @@ only before the first policy is stored. After first boot, the persisted SQLite
 policy is authoritative. Editing the config and restarting or reinstalling the
 queue no longer changes live policy or advances its revision.
 
-From the release containing #890, read-only `myce policy get` resolves installed
-worker authority, then queue authority, as `myce status` does. No `MYCE_TOKEN`
-environment setting is needed and no credential is printed; `--config` selects
-an explicit installed configuration. Policy writes retain owner-token requirements.
+`myce policy get` resolves installed worker authority, then queue authority.
+From the release containing #1079, policy and model writes use the same
+installed-authority resolver and preserve its certificate pin, including when
+legacy endpoint/credential environment variables are present.
 
-For a deliberate change, export the current policy, edit its `projects` mapping,
+The supported owner-write route is on the queue host, using the installed queue
+configuration. Run as the account allowed to read that configuration and its
+credential references. Export the current policy, edit its `projects` mapping,
 and import it using the revision printed by the export:
 
 ```sh
-myce policy get --yaml > policy.yaml
+myce policy get --yaml --config <installed-queue-config> > policy.yaml
 # Edit policy.yaml, then replace N with the exported revision.
-myce policy set policy.yaml --if-revision N
+myce policy set policy.yaml --if-revision N --config <installed-queue-config>
 ```
+
+The CLI reads the credential reference internally; the operator handles no
+credentials. The configured queue endpoint is retained (including a queue's
+installed HTTP endpoint); an installed joining authority retains its HTTPS pin.
+An HTTPS owner write without provisioned trust refuses with
+`owner_authority_unpinned`; missing or unreadable authority refuses with
+`owner_authority_unavailable`. Ask the installation owner to restore authority.
+Never source env files or set `MYCE_TOKEN` by hand, and never extract a joining
+token into environment variables. These are not supported operator workarounds.
+
+Other owner-scoped writes use the same `--config <installed-queue-config>` route,
+for example `myce model sync MODEL --to all --config <installed-queue-config>`
+and `myce host drain HOST --config <installed-queue-config>`. Enrollment still
+uses provisional shared authority; this CLI route does not introduce separate
+server-side roles or grant authority to an unenrolled machine.
 
 The same file carries the optional `models` mapping (permitted repository
 patterns, per-snapshot `max_bytes` and `free_floor_bytes`) for
@@ -491,7 +508,9 @@ live policy; a different startup file is refused, so edit host policy with
 
 All commands use the authenticated queue and run as an ordinary account.
 On an enrolled machine they read installed authority and keep its certificate
-pin, like `myce status` and `myce cancel`, so no token is needed. Explicit
+pin, like `myce status` and `myce cancel`, so no operator token handling is needed.
+For owner writes, use the queue-host `--config <installed-queue-config>` route
+above. Never source env files or set `MYCE_TOKEN` by hand. Explicit
 `--queue`/`--token`, `MYCE_QUEUE`/`MYCE_TOKEN`, `--config` and `--joining-file`
 still select the endpoint or authority.
 Use the physical host ID shared by all device workers:

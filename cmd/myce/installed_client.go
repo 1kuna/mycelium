@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"net/url"
 	"os"
 
 	"mycelium/internal/myce"
@@ -24,4 +25,19 @@ func (f clientFlags) client() (myce.Client, error) {
 		token = os.Getenv("MYCE_TOKEN")
 	}
 	return runClient(*f.config, *f.joining, *f.queue, token)
+}
+
+// Owner operations must not turn a missing pin into ordinary system TLS trust.
+// The queue's configured HTTP endpoint remains supported; joining HTTPS always
+// requires its provisioned transport. No credential is included in refusals.
+func (f clientFlags) ownerClient() (myce.Client, error) {
+	client, err := f.client()
+	if err != nil {
+		return myce.Client{}, &myce.HTTPError{Status: 403, Code: "owner_authority_unavailable", Message: "cannot resolve owner authority; run on the queue host with --config <installed-queue-config>"}
+	}
+	endpoint, _ := url.Parse(client.URL)
+	if endpoint != nil && endpoint.Scheme == "https" && client.HTTP == nil {
+		return myce.Client{}, &myce.HTTPError{Status: 403, Code: "owner_authority_unpinned", Message: "HTTPS owner authority requires installed certificate trust; restore the pinned installation"}
+	}
+	return client, nil
 }
