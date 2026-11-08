@@ -30,6 +30,11 @@ func BoundSetupCommand(command func(context.Context, string, ...string) ([]byte,
 				}
 			}
 		}
+		// Timers own no process and have no service stop/start properties.
+		// Retiring their schedule is an ordinary bounded manager transaction.
+		if len(args) > 0 && strings.HasSuffix(args[len(args)-1], ".timer") {
+			stop, start = false, false
+		}
 		if !stop && !start {
 			bounded, cancel := SetupTimeout(ctx)
 			defer cancel()

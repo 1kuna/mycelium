@@ -1321,7 +1321,11 @@ func (w Worker) Run(stop context.Context) error {
 		}
 	}
 
-	availabilityCtx, availabilityCancel := context.WithCancel(stop)
+	availabilityCtx, availabilityCancel := context.WithCancel(context.Background())
+	if w.serviceStop != nil {
+		stopAvailability := context.AfterFunc(w.serviceStop, availabilityCancel)
+		defer stopAvailability()
+	}
 	availabilityDone := make(chan struct{})
 	availabilityWake := make(chan struct{}, 1)
 	w.availability = newAvailabilityMonitor(w.Clock, w.DailyUse, w.Laptop, w.Desktop)

@@ -194,6 +194,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	}
 	a.mu.Unlock()
 	p := a.recovering
+	pendingInputWriter := false
 	defer func() {
 		a.mu.Lock()
 		if a.liveness != nil {
@@ -268,12 +269,21 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		// A failed inventory/cleanup keeps custody, but must not freeze the
 		// finished actor until a worker restart. Reuse recovery's exact process
 		// identity checks; only confirmed cleanup can clear pending release.
-		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
+		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !s.extensionFiles.inFlight() && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 			var fs memoryFS = osMemoryFS{}
 			if w.memoryCeilings != nil {
 				fs = w.memoryCeilings.fs
 			}
-			if err := s.cleanupOrphan(w.Clock, fs); err == nil {
+			var cleanupErr error
+			if pendingInputWriter && s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending && len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == "" {
+				// This actor witnessed the only remaining writer finish before
+				// launch. No process custody was ever acquired; release its pins.
+				s.releaseSharedInputs()
+				cleanupErr = s.releaseSharedInputPins()
+			} else {
+				cleanupErr = s.cleanupOrphan(w.Clock, fs)
+			}
+			if cleanupErr == nil {
 				released := *s.state.Result
 				released.ReleasePending = false
 				// Recovery reloads this receipt before state. Record confirmed
@@ -295,7 +305,10 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			// loss. An unstarted assignment must also remain replayable.
 			connected = false
 			if p == nil && s.state.Result == nil {
-				s.state.Result = &Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Interrupted: true, Error: "worker service stopping before command started"}
+				pendingInputWriter = s.extensionFiles.inFlight()
+				cause := s.startFailureAt(a.job, launchRefused, context.Canceled, now)
+				result := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, ReleasePending: pendingInputWriter, Error: "worker service stopping before command started"}, cause)
+				s.state.Result = &result
 				if err := s.save(); err != nil {
 					finish(err)
 					return
@@ -328,6 +341,16 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						err = s.startFailure(a.job, launchRefused, err)
 					}
 					if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
+						if initial.serviceStop != nil && initial.serviceStop.Err() != nil && errors.Is(err, context.Canceled) {
+							// Cancellation of staging/launch belongs to installed
+							// shutdown, not a payload failure. Preserve exact helper
+							// and detached-writer custody until cleanup is confirmed.
+							err = s.startFailureAt(a.job, launchRefused, err, now)
+							if s.extensionFiles.inFlight() {
+								pendingInputWriter = true
+								err = errors.Join(err, errWorkerReleasePending)
+							}
+						}
 						r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
 						r = withStopProvenance(r, d.PriorityStop)
 						s.state.Result = &r
@@ -954,7 +977,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		return devices, nil
 	}
 	inventoryDone := make(chan struct{})
-	go func() { defer close(inventoryDone); inventory.run(observeCtx, w.inventorySource()) }()
+	inventorySource := w.inventorySource()
+	go func() { defer close(inventoryDone); inventory.run(observeCtx, inventorySource) }()
 	defer func() { cancelObservations(); <-inventoryDone }()
 	var cpuProbe checkpointIO[*memoryCeilings]
 	sharedCPUAllowance := 0

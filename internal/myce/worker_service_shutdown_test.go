@@ -76,6 +76,151 @@ func TestWorkerServiceShutdownCancelsInventoryAndSilentCheckin(t *testing.T) {
 	}
 }
 
+func TestWorkerServiceShutdownDuringStagingRetainsInterruption(t *testing.T) {
+	w := recoveryWorker(t)
+	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+	w.CPUIsolationProbe = func(context.Context) error { return nil }
+	w.JobFileRoot = t.TempDir()
+	if err := os.WriteFile(filepath.Join(w.JobFileRoot, "input"), []byte("value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+	j := recoveryJob(t, []string{"true"})
+	j.Spec = cpuSpec(1, 1)
+	j.Spec.Run.Command = []string{"true"}
+	j.Spec.Inputs = map[string]string{"input": "input"}
+	if err := normalizeResources(&j.Spec); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newAttemptStore(root, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.control = &processControl{clock: w.Clock}
+	stop, term := context.WithCancel(context.Background())
+	defer term()
+	w.serviceStop = stop
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), ioProgressKey{}, func() {
+		once.Do(func() { close(entered); <-release })
+	}))
+	a := &attemptSupervisor{store: s, job: j, worker: w, connected: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	go a.run(ctx)
+	defer func() { unblock(); cancel(); <-a.done }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		data, _ := os.ReadFile(filepath.Join(s.dir, s.stateName))
+		t.Fatalf("input staging did not enter: %s", data)
+	}
+	term()
+	readResult := func() *Result {
+		data, _ := os.ReadFile(filepath.Join(s.dir, s.stateName))
+		var state workerState
+		if json.Unmarshal(data, &state) != nil {
+			return nil
+		}
+		return state.Result
+	}
+	await(t, func() bool { r := readResult(); return r != nil && r.ReleasePending })
+	if r := readResult(); !r.Interrupted || r.Success {
+		t.Fatalf("TERM during staging became a payload failure: %+v", r)
+	}
+	a.mu.Lock()
+	released := a.released
+	a.mu.Unlock()
+	if released {
+		t.Fatal("detached input writer was released before it stopped")
+	}
+	unblock()
+	await(t, func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.released
+	})
+	if r := readResult(); r == nil || !r.Interrupted || r.ReleasePending {
+		t.Fatalf("cleanup lost the durable shutdown interruption: %+v", r)
+	}
+}
+
+func TestWorkerInteractiveLeaveKeepsAvailabilitySampling(t *testing.T) {
+	q, _ := fixture(t)
+	clock := &workerFakeClock{now: q.clock.Now()}
+	q.clock = clock
+	release := filepath.Join(t.TempDir(), "release")
+	spec := cpuSpec(1, 1)
+	spec.Resumable = false
+	spec.Run.Command = []string{"sh", "-c", `echo ready; while test ! -f "$RELEASE"; do sleep .01; done`}
+	spec.Run.Env = map[string]string{"RELEASE": release}
+	j := submit(t, q, spec)
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	var samples atomic.Int32
+	w := Worker{EnvironmentLimit: 1 << 20, StateDir: t.TempDir(), Clock: clock, Interval: time.Millisecond,
+		Machine: machine("interactive", "fake"), DailyUse: true, Client: Client{URL: server.URL, Token: "test"},
+		OwnerSignals: func(context.Context) OwnerSignals {
+			// Give the synthetic OS observation a nonzero measured cost;
+			// a zero-cost probe teaches a sub-tick freshness allowance.
+			clock.Advance(100 * time.Millisecond)
+			samples.Add(1)
+			return idleSignals()
+		}}
+	ctx, leave := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var runErr error
+	go func() { runErr = w.Run(ctx); close(done) }()
+	defer func() {
+		_ = os.WriteFile(release, nil, 0600)
+		leave()
+		_ = q.Cancel(j.ID)
+		await(t, func() bool {
+			clock.Advance(time.Millisecond)
+			select {
+			case <-done:
+				return true
+			default:
+				return false
+			}
+		})
+		if runErr != nil {
+			t.Error(runErr)
+		}
+	}()
+	await(t, func() bool {
+		clock.Advance(time.Millisecond)
+		logs, _ := q.Logs(j.ID, 0)
+		for _, line := range logs {
+			if strings.Contains(line.Text, "ready") {
+				return true
+			}
+		}
+		return false
+	})
+	before := samples.Load()
+	leave()
+	await(t, func() bool {
+		clock.Advance(time.Millisecond)
+		return samples.Load() >= before+3
+	})
+	if got := job(t, q, j.ID); got.State != "running" && got.State != "stopping" {
+		t.Fatalf("interactive drain stopped non-resumable CPU work: %s", got.State)
+	}
+	if err := os.WriteFile(release, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	await(t, func() bool {
+		clock.Advance(time.Millisecond)
+		return job(t, q, j.ID).State == "succeeded"
+	})
+}
+
 // Model the service manager's TERM targets from the generated unit. With the
 // old control-group unit the payload receives TERM without a Mycelium delivery
 // receipt, reproducing #629's terminal command_exit 143 on CPU experiments.
