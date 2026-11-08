@@ -182,11 +182,11 @@ Before isolation, a native ARM64 fixture with `GOMAXPROCS=2` and three measured
 calls spent 61.31 ms/op holding the live mutex (16.93 ms wait reason, 42.94 ms
 status waiting reason, 1.44 ms deadline guidance). After isolation, marginal
 snapshot pinning takes about 3.9 microseconds/op inside the commit, with no
-post-commit acquisition. Warm advice takes 6.88 ms/op (4.20 ms capture/charged
-active copies, 1.16 ms wait reason, 0.72 ms status reason, 0.74 ms deadline
+post-commit acquisition. Warm advice takes 10.24 ms/op (8.12 ms capture/charged
+active copies and catalog reservation, 0.82 ms wait reason, 0.64 ms status reason, 0.60 ms deadline
 advice), versus 61.39 ms/op before. Retained payloads are borrowed read-only;
 only active jobs, worker ledgers and private planner caches are owned. One cold
-decode measured 1.88 seconds outside the live mutex; it happens once for
+decode measured 1.72 seconds outside the live mutex; it happens once for
 unchanged immutable records across commits. The benchmark reports that cold
 sample separately from steady-state costs. This is fixture evidence, not a live
 tail claim; cold decoding remains visible and there is no history cutoff.
@@ -194,13 +194,16 @@ tail claim; cold decoding remains visible and there is no history cutoff.
 The HTTP regression blocks immutable decoding, completes a later control commit,
 and requires the original response to finish while another owner holds `q.mu`.
 Advice uses the accepted commit's policy and retained memory evidence. Cold
-decode and the detached copy both charge the existing measured request budget.
+decode, detached active/worker copies and private observation-catalog space all
+charge the existing measured request budget before construction.
 If diagnostic allocation cannot fit, preserve successful acceptance, policy and
 deadline-guidance fields with an explicit unavailable-blocker explanation. This
 prevents a post-commit error from encouraging duplicate unkeyed submissions;
 the cost is temporarily less detailed advice until headroom recovers. Normal
 headroom preserves the existing advice values. Cold/warm constrained-capacity
-HTTP regressions cover unkeyed acceptance and exact keyed replay. Production tail
+HTTP regressions cover unkeyed acceptance and exact keyed replay. A separate
+warm-curve regression with few jobs proves catalog allocation cannot bypass the
+allowance and that advice recovers on the same job when headroom returns. Production tail
 verification belongs to the separately authorized release after deployment.
 
 ### Release upgrade compatibility

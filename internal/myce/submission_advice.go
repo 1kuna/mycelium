@@ -126,6 +126,13 @@ func (s *submissionAdviceSnapshot) planner(ctx context.Context) (*Queue, error) 
 		m.toolInventory, m.cpuLedger, m.hostBudgetGB = l.toolInventory, l.cpuLedger, l.hostBudgetGB
 		m.modelReservationDebtGB, m.hostReservationDebtGB = l.modelReservationDebtGB, l.hostReservationDebtGB
 	}
+	// Catalog construction copies each curve and builds private lookup maps
+	// and slices even when immutable decoding is warm. Reserve the full curve
+	// representation with the shared projection/growth allowance first; this
+	// also covers the shallower catalog copies and indexes without a new cap.
+	if err := chargeProjectionValue(ctx, v.s.WorkObservations); err != nil {
+		return nil, err
+	}
 	v.memoryPlanning = newMemoryPlanningCache()
 	v.memoryObservationIndex = v.memoryObservationCatalog()
 	v.observationScan = v.placementScan()

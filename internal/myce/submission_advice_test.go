@@ -265,3 +265,60 @@ func TestSubmissionAdviceCapacityPreservesAcceptance(t *testing.T) {
 		})
 	}
 }
+
+// Warm curves with few jobs must not bypass the allowance via private indexes.
+// The job/copy allowance fits; catalog construction is the independent expense.
+func TestSubmissionAdviceWarmCurveCapacityPreservesAcceptance(t *testing.T) {
+	q, _ := fixture(t)
+	q.s.WorkObservations = map[string]WorkObservation{}
+	for i := range 2048 {
+		key := fmt.Sprint(i)
+		q.s.WorkObservations[key] = WorkObservation{Key: ObservationKey{Work: key}, MemoryConfiguration: key}
+	}
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := q.readGeneration.inputs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	handler := API{Queue: q, Token: "test"}.Handler()
+	s := spec("experiment")
+	s.SubmissionKey = "curve-capacity"
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func() Job {
+		r := httptest.NewRequest("POST", "/api/jobs", bytes.NewReader(data))
+		r.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatal("curve capacity lost committed acceptance", w.Code, w.Body.String())
+		}
+		var got Job
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.ID == "" || got.DeadlineGuidance == nil {
+			t.Fatal("accepted receipt missing")
+		}
+		if q.requestBudgets.held != 0 {
+			t.Fatal("curve capacity leaked")
+		}
+		return got
+	}
+	budgetHost(q, 256<<10, 1)
+	accepted := request()
+	if !strings.Contains(strings.Join(accepted.DeadlineGuidance.Blockers, " "), "details unavailable") {
+		t.Fatal("warm curve catalog bypassed measured capacity")
+	}
+	budgetHost(q, 64<<20, 1)
+	replay := request()
+	if replay.ID != accepted.ID || !replay.SubmissionReused || len(q.s.Jobs) != 1 {
+		t.Fatal("curve refusal duplicated accepted work")
+	}
+	if strings.Contains(strings.Join(replay.DeadlineGuidance.Blockers, " "), "details unavailable") {
+		t.Fatal("advice did not recover with measured headroom")
+	}
+}
