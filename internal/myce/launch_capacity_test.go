@@ -565,7 +565,7 @@ func TestLaunchCapacityKnownRefusalRestart(t *testing.T) {
 			clock.Advance(time.Second)
 			previous := m.Session
 			m.Session = "replacement"
-			reply, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous})
+			reply, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous, period: time.Second})
 			if err != nil {
 				t.Fatal(err)
 			}
