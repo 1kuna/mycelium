@@ -1514,7 +1514,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		if q.hostMemorySamples == nil {
 			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{}
 		}
-		q.hostMemorySamples[m.ID] = currentHostMemorySamples(reports, memoryReceivedAt)
+		q.retainHostMemoryCharges(m.ID, q.clock.Now())
+		q.hostMemorySamples[m.ID] = updateHostMemorySamples(reports, memoryReceivedAt, q.hostMemorySamples[m.ID])
+		q.retainHostMemoryCharges(m.ID, q.clock.Now())
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)

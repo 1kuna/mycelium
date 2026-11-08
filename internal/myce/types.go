@@ -508,6 +508,8 @@ type Job struct {
 	CommandDiscovery          *CommandDiscovery                       `json:"command_discovery,omitempty"`
 	SidecarEnvironmentRecipes map[string]map[string]EnvironmentRecipe `json:"sidecar_environment_recipes,omitempty"`
 
+	HostMemoryCharge *AttemptHostMemoryCharge `json:"host_memory_charge,omitempty"`
+
 	FileTransport         bool                   `json:"file_transport,omitempty"`
 	FileCheckpoints       map[int]FileCheckpoint `json:"file_checkpoints,omitempty"`
 	ResumeFiles           *FileCheckpoint        `json:"resume_files,omitempty"`

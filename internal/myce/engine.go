@@ -1016,11 +1016,11 @@ func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySampl
 			continue
 		}
 		report.CurrentHostMemory = report.CurrentHostMemory.aged(now)
-		delete(samples, key)
-		for key, sample := range currentHostMemorySamples([]AttemptReport{report}, now) {
+		for key, sample := range updateHostMemorySamples([]AttemptReport{report}, now, samples) {
 			samples[key] = sample
 		}
 	}
+	rt.batchHostMemorySamples = maps.Clone(samples)
 	return samples
 }
 
@@ -1045,9 +1045,10 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
 		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now)
-		if slices.Contains(launching, jobKey(j)) && adaptiveMemoryCeilingGB(&j, owner) > 0 {
-			// This exact command has not executed yet. Its offered reservation
-			// must fit; a stale running neighbor still retains the physical cap.
+		if slices.Contains(launching, jobKey(j)) && adaptiveMemoryCeilingGB(&j, owner) > 0 && j.MemoryEnvelope.ProbeFloorGB > 0 {
+			// This cold command has not executed yet. Its offered reservation
+			// must fit. Bounded estimates already use the offer plus retained
+			// growth; launch must not discard their observed helper occupancy.
 			charge = hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 			pending = charge
 		}
