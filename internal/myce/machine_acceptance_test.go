@@ -254,8 +254,7 @@ func TestM3SharedLossShortestAndPerAttemptBound(t *testing.T) {
 	if timeout != 3*time.Second {
 		t.Fatal("not shortest", timeout)
 	}
-	clock.Advance(3 * time.Second)
-	check(t, q, machine("healthy", "fake"), nil)
+	advanceReportingPeer(t, q, clock, machine("healthy", "fake"), 3*time.Second)
 	_, _ = q.Snapshot()
 	if got := job(t, q, a.ID); got.InfrastructureRetries != 1 {
 		t.Fatal("production loss not charged", got)
@@ -263,7 +262,7 @@ func TestM3SharedLossShortestAndPerAttemptBound(t *testing.T) {
 	// Every production attempt on this machine has its own two-requeue bound.
 	for cycle := 0; cycle < 2; cycle++ {
 		m.Session = "reconnected-" + string(rune('a'+cycle))
-		c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Fresh: true, PreviousSession: a.Session}
+		c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Fresh: true, PreviousSession: a.Session, period: time.Second}
 		r, err := q.Checkin(c)
 		if err != nil {
 			t.Fatal(err)
@@ -273,8 +272,7 @@ func TestM3SharedLossShortestAndPerAttemptBound(t *testing.T) {
 			t.Fatal("no infrastructure retry", r)
 		}
 		machineCheck(t, q, m, a)
-		clock.Advance(10 * time.Second)
-		check(t, q, machine("healthy", "fake"), nil)
+		advanceReportingPeer(t, q, clock, machine("healthy", "fake"), 10*time.Second)
 		_, _ = q.Snapshot()
 	}
 	if got := job(t, q, a.ID); got.State != "failed" || got.InfrastructureRetries != 2 {
