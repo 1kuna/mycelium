@@ -24,6 +24,11 @@ func unstartedExecution(attempt int) *ExecutionEvidence {
 // observed boundaries monotonic until the physical identity changes. Restored
 // state without a completed result never establishes a fresh no-execution proof.
 func (s *workerStore) startExecutionEvidence(j Job) *ExecutionEvidence {
+	// Early admission/protocol checks can run without attempt custody. Without
+	// a store, there is no retained observation to project as execution proof.
+	if s == nil {
+		return nil
+	}
 	key := jobKey(j)
 	if s.liveEvidence == nil || s.liveEvidenceKey != key {
 		s.liveEvidenceKey = key
