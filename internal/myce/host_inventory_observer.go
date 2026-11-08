@@ -117,7 +117,7 @@ func (m *hostInventoryObserver) run(ctx context.Context, source func(context.Con
 		m.mu.Lock()
 		m.lane.step(ctx, source)
 		wait, done := m.lane.waitDuration(), m.lane.done
-		if m.sampleTelemetry != nil && len(m.lane.value) > 0 {
+		if m.sampleTelemetry != nil && (len(m.lane.value) > 0 || m.telemetry.pending != nil) {
 			devices, _ := hostInventorySnapshot(&m.lane)
 			m.telemetry.step(ctx, func(ctx context.Context) ([]MachineDevice, error) { return m.sampleTelemetry(ctx, devices) })
 			wait = min(wait, m.telemetry.waitDuration())
