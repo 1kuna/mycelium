@@ -297,7 +297,7 @@ func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply, err := q.Checkin(Checkin{Machine: Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "a", Session: "a", GPU: "fake", FreeMemoryGB: 8}})
+	reply, err := q.Checkin(Checkin{Machine: Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "a", Session: "a", GPU: "fake", FreeMemoryGB: 8}, period: time.Second})
 	if err != nil || reply.Job == nil {
 		t.Fatal(err, reply)
 	}
