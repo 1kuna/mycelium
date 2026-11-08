@@ -437,6 +437,11 @@ only before the first policy is stored. After first boot, the persisted SQLite
 policy is authoritative. Editing the config and restarting or reinstalling the
 queue no longer changes live policy or advances its revision.
 
+From the release containing #890, read-only `myce policy get` resolves installed
+worker authority, then queue authority, as `myce status` does. No `MYCE_TOKEN`
+environment setting is needed and no credential is printed; `--config` selects
+an explicit installed configuration. Policy writes retain owner-token requirements.
+
 For a deliberate change, export the current policy, edit its `projects` mapping,
 and import it using the revision printed by the export:
 
@@ -2773,30 +2778,36 @@ NAS-root health stats the root and reads one directory entry, preserving
 read-only access checks. On macOS SMB, opening a directory stream can enumerate
 the directory even when the caller requests one entry. Avoiding that work
 removes unnecessary load and long directory-handle lifetimes; it does not make
-slow checkpoint create/remove operations healthy. Their measured latency still
-uses the unchanged host-relative thresholds. Access
+slow checkpoint create/remove operations fast. Their measured latency still
+uses the unchanged host-relative advisory thresholds. Access
 re-triggers an existing Linux systemd/autofs or macOS autofs mount through the
 OS; no separate repair daemon or privileged command is installed. Cached mount
 inventory is checked again after access, so an empty local mountpoint cannot
 pretend to be a recovered NAS. Independent local checkpoint roots remain local.
 
-The pending deadline is learned from this host's successful mount observations
-using the hygiene prediction band. Completed successful probes train through
-hygiene warmup before slow-completion classification; a single fast sample
-cannot permanently reject ordinary successful variation. Probe-format upgrades
-invalidate only incompatible mount baseline evidence, preserving other health
-evidence and historical diagnostics. Before any successful observation, one
-existing sampling interval bounds cold/unknown evidence. Three consecutive slow
-or stalled observations confirm degradation; explicit filesystem failures and
-unverified cold probes withhold dependent work immediately. Heartbeat delivery
-never waits for these filesystem calls. A stuck kernel request retains its one
-slot until it returns, including after its deadline; retries cannot multiply it.
+A learned whole-sequence latency outlier is advisory while filesystem
+operations still progress. The existing hygiene band and confirmation count
+remain unchanged; a slow success retains its evidence and alert without
+holding admission. A pending request is stalled only when no individual
+filesystem or inventory operation completes within the existing #234
+per-operation allowance. That unchanged 30-second backstop retains its measured
+basis in successful contended metadata tails (see checkpoint availability); it
+is not a total sequence deadline. Cold/unverified probes and explicit failures
+still withhold dependent work. Heartbeats never wait for these calls, and a
+stuck kernel request retains its one slot until it returns. No timeout creates
+another request. A separate `host_mount_unavailable` wake prevents an earlier
+advisory episode from hiding a new stall or failure.
 
+Completed successful probes train through hygiene warmup before outlier
+classification; adverse samples cannot widen the healthy baseline.
+Probe-format upgrades invalidate only incompatible baseline evidence, preserving
+other health evidence and historical diagnostics.
 Returned failures retry with exponential backoff starting at the larger of the
 sampling interval and measured operation cost. The ceiling is the larger of the
 existing signal-freshness allowance and that measured cost: this limits repeated
 connection pressure while keeping recovery discovery within the host's evidence
-budget. Three newly completed healthy probes clear the hold automatically.
+budget. Three newly completed successful probes clear the hold automatically, including
+slow successes; an unfinished probe cannot confirm recovery.
 NAS-dependent work waits with a typed root reason; local/cached work continues
 when its own dependencies are available. Existing operator drains and attempt
 custody are unchanged.
@@ -3895,3 +3906,54 @@ backfill. Missing assignment, load-start or release evidence cannot pass a
 complete interval proof. Join events by attempt/machine/session/device and use
 class-change event times to split tier occupancy. For batch copies, continue to
 use job GET times and the paginated job ledger described in [status](status.md).
+
+## Completion observer upgrade and recovery (next release)
+
+Managed observers adopt all armed registrations in their private user registry.
+An ordinary keyed profile/adapter command starts one when the lifetime lock is
+free. Updating a CLI symlink does not change the image of an existing process.
+Supporting newer clients write a versioned upgrade request when arming or
+adopting a receipt. The owner verifies the requesting image and handles it
+between deliveries: it cancels and joins outstanding authority readers, releases
+receipt locks, passes its lifetime lock to the new image and waits for readiness.
+Socket cleanup holds the startup lock across its identity check and unlink, so
+the old owner cannot race replacement startup. On startup failure it retains ownership and
+reloads durable arms. A paused/stalled loop cannot perform that handoff; the
+request itself is not proof of replacement. Unversioned development images do
+not request automatic replacement.
+
+Use `myce wait --observer-status` first. Privately preserve its safe metadata,
+bounded `observer.log` files, a native process sample, exact process birth/image,
+and receipt field names, states, job IDs and timestamps. Never print or publish
+notifier targets, environment/authority values or private paths. Count bindings
+without exposing values. Establish job terminal states with the installed CLI,
+not the queue database. A stale phase is the last boundary reached; an unavailable
+live frame remains unknown.
+
+A legacy owner has neither upgrade support nor diagnostics. Recovery of a shared
+owner requires the owner's authorization and consideration of the wake volume:
+
+1. Refresh the private receipt/registration snapshot and process identities.
+2. Send SIGTERM to that exact observer. Verify its identity and descendants have
+   exited and lifetime/receipt locks are free. Stop if a survivor or lock remains;
+   do not substitute force-kill or edit registration state.
+3. Compare every receipt against the snapshot. Older cancellation paths can
+   disarm pending observations; report the exact affected job set before replay.
+4. From the original consumer workspace, repeat its ordinary supported command,
+   for example `myce run --profile PROFILE --key SAVED_KEY`. Keep the original
+   arguments and notifier binding; omission inherits the saved binding. The
+   replay starts a fresh owner and adopts registrations made by other callers.
+   A new agent's arm would also start it, triggering the same backlog.
+5. Verify a sample of terminal receipts has `delivery_status: delivered` and
+   `observation: not_armed`, receiver delivery IDs are unique, same-key replay
+   does not resend, and a new arm works. A receiver success does not prove useful
+   agent work or accepted job results.
+
+Delivery is serial. Supporting replacements pace stale terminal backlog per
+binding using mean observed delivery service cost times remaining binding demand;
+the first delivery per binding is immediately eligible. There is no legacy pacing
+option. Distinct bindings and fresh completions can still wake together; the
+measurement is notifier runtime, not downstream agent-turn runtime. Use a distinct
+notifier executable path per thread, as required by the binding contract.
+Receipt acknowledgement prevents ordinary replay duplicates; exactly-once
+external effects across crashes require receiver deduplication by `delivery_id`.

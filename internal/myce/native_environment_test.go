@@ -17,7 +17,7 @@ func TestEnvironmentRecipeStoreSubmissionAndSweep(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			q, clock := fixture(t)
 			// Inspect the expired input after sweeping, before history retirement.
-			if err := q.ConfigureLogRetention(2 * DefaultFileRetention); err != nil {
+			if err := q.ConfigureLogRetention(2 * testFileRetention); err != nil {
 				t.Fatal(err)
 			}
 			lock := filepath.Join(t.TempDir(), "requirements.txt")
@@ -106,7 +106,7 @@ func TestEnvironmentRecipeStoreSubmissionAndSweep(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			clock.Advance(DefaultFileRetention + time.Nanosecond)
+			clock.Advance(testFileRetention + time.Nanosecond)
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}

@@ -22,11 +22,11 @@ func TestHostHygieneCheckpointLargeDirectoryDoesNotEnumerate(t *testing.T) {
 	var enumerations, accesses atomic.Int32
 	readProbe, checkpointProbe := workerHealthMountProbe, workerHealthCheckpointProbe
 	t.Cleanup(func() { workerHealthMountProbe, workerHealthCheckpointProbe = readProbe, checkpointProbe })
-	workerHealthMountProbe = func(path string) error {
+	workerHealthMountProbe = func(path string, _ func()) error {
 		enumerations.Add(1)
 		return errors.New("large-directory stream initialization stalled")
 	}
-	workerHealthCheckpointProbe = func(path string) error {
+	workerHealthCheckpointProbe = func(path string, progress func()) error {
 		if _, err := fs.Stat(files, path); err != nil {
 			return err
 		}
@@ -43,8 +43,8 @@ func TestHostHygieneCheckpointLargeDirectoryDoesNotEnumerate(t *testing.T) {
 	}
 	m, clock := healthFixture(t, 1)
 	access := healthMountAccess("checkpoint")
-	p := &hostMountProbe{root: "checkpoint", path: "checkpoints", measure: func(path string) hostMountResult {
-		return hostMountResult{latency: time.Millisecond, err: access(path)}
+	p := &hostMountProbe{root: "checkpoint", path: "checkpoints", measure: func(path string, _ func()) hostMountResult {
+		return hostMountResult{latency: time.Millisecond, err: access(path, func() {})}
 	}}
 	m.mounts["checkpoint"] = p
 	for i := 0; i < hostHealthWarmup+hostHealthConfirmation+1; i++ {
@@ -59,7 +59,7 @@ func TestHostHygieneCheckpointLargeDirectoryDoesNotEnumerate(t *testing.T) {
 		t.Fatal("directory enumeration withheld responsive checkpoint access", enumerations.Load(), accesses.Load(), got)
 	}
 	await(t, func() bool { return len(p.pending) == 1 })
-	if err := healthMountAccess("nas")("checkpoints"); err == nil || enumerations.Load() != 1 {
+	if err := healthMountAccess("nas")("checkpoints", func() {}); err == nil || enumerations.Load() != 1 {
 		t.Fatal("NAS root lost its read-only directory check")
 	}
 }
@@ -70,11 +70,11 @@ func TestHostHygieneCheckpointAccessHangKeepsSingleRequest(t *testing.T) {
 	var calls atomic.Int32
 	checkpointProbe := workerHealthCheckpointProbe
 	t.Cleanup(func() { workerHealthCheckpointProbe = checkpointProbe })
-	workerHealthCheckpointProbe = func(string) error { calls.Add(1); <-release; return nil }
+	workerHealthCheckpointProbe = func(string, func()) error { calls.Add(1); <-release; return nil }
 	p := &hostMountProbe{root: "checkpoint", path: "fake", probe: healthMountAccess("checkpoint")}
 	p.sample(clock.Now(), nil)
 	await(t, func() bool { return calls.Load() == 1 })
-	clock.Advance(time.Nanosecond) // A stall must exceed the cold deadline.
+	clock.Advance(checkpointAvailabilityStallBudget) // Unchanged per-operation stall allowance.
 	for i := 0; i < hostHealthConfirmation; i++ {
 		clock.Advance(signalRefresh)
 		p.sample(clock.Now(), nil)
@@ -109,7 +109,7 @@ func TestHostHygieneMountSlowHistoryDoesNotWidenBaseline(t *testing.T) {
 	for i := range m.health.Baseline {
 		m.health.Baseline[i].Mounts = []HostMountHealth{{Root: "checkpoint", LatencySeconds: .001}}
 	}
-	p := &hostMountProbe{root: "checkpoint", path: "sentinel", measure: func(string) hostMountResult { return hostMountResult{latency: 100 * time.Millisecond} }}
+	p := &hostMountProbe{root: "checkpoint", path: "sentinel", measure: func(string, func()) hostMountResult { return hostMountResult{latency: 100 * time.Millisecond} }}
 	m.mounts["checkpoint"] = p
 	for i := 0; i < hostHealthConfirmation+1; i++ {
 		c.Advance(signalRefresh)
@@ -134,7 +134,7 @@ func TestHostHygieneMountSingleOutstandingAndScopedRecovery(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	release := make(chan struct{})
 	var calls atomic.Int32
-	p := &hostMountProbe{root: "checkpoint", path: "sentinel", probe: func(string) error { calls.Add(1); <-release; return nil }}
+	p := &hostMountProbe{root: "checkpoint", path: "sentinel", probe: func(string, func()) error { calls.Add(1); <-release; return nil }}
 	baseline := make([]HostHealthSample, hostHealthWarmup)
 	for i := range baseline {
 		baseline[i].Mounts = []HostMountHealth{{Root: "checkpoint", LatencySeconds: .001}}
@@ -189,7 +189,7 @@ func TestHostHygieneMountRecoveryReadBackoffAndHumanAlert(t *testing.T) {
 			mounted := true
 			setFailure := func(err error, present bool) { fakeMu.Lock(); failure, mounted = err, present; fakeMu.Unlock() }
 			p := &hostMountProbe{root: "checkpoint", path: "root"}
-			p.measure = func(string) hostMountResult {
+			p.measure = func(string, func()) hostMountResult {
 				fakeMu.Lock()
 				defer fakeMu.Unlock()
 				err := probeRecoveryMount("/storage/checkpoints", "/storage", osname, func(string) error {
@@ -202,7 +202,7 @@ func TestHostHygieneMountRecoveryReadBackoffAndHumanAlert(t *testing.T) {
 							return nil, err
 						}
 						return f.(fs.ReadDirFile), nil
-					})
+					}, func() {})
 				}, func() ([]nasMount, error) {
 					if mounted {
 						return []nasMount{{root: "/storage", kind: "smbfs"}}, nil
@@ -325,21 +325,23 @@ func TestHostHygieneMountAutomountRetriggerAndMissingStub(t *testing.T) {
 	}
 }
 
-func TestHostHygieneMountColdStallAndLearnedDeadline(t *testing.T) {
+func TestHostHygieneMountColdAndLearnedUseOperationStallAllowance(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
 	for _, latency := range []time.Duration{0, time.Millisecond, time.Second} {
 		release := make(chan struct{})
 		calls := atomic.Int32{}
-		p := &hostMountProbe{root: "nas", path: "fake", probe: func(string) error { calls.Add(1); <-release; return nil }}
+		p := &hostMountProbe{root: "nas", path: "fake", probe: func(string, func()) error { calls.Add(1); <-release; return nil }}
 		var baseline []HostHealthSample
-		limit := signalRefresh
 		if latency > 0 {
 			baseline = []HostHealthSample{{Mounts: []HostMountHealth{{Root: "nas", LatencySeconds: latency.Seconds()}}}}
-			limit = latency
 		}
 		p.sample(clock.Now(), baseline)
 		await(t, func() bool { return calls.Load() == 1 })
-		clock.Advance(limit + time.Nanosecond)
+		clock.Advance(checkpointAvailabilityStallBudget - time.Nanosecond)
+		if got := p.sample(clock.Now(), baseline); got.Reason == "mount_probe_stalled" {
+			t.Fatal("learned latency shortened operation allowance", got)
+		}
+		clock.Advance(time.Nanosecond)
 		for i := 0; i < hostHealthConfirmation+10; i++ {
 			p.sample(clock.Now(), baseline)
 		}
@@ -354,7 +356,7 @@ func TestHostHygieneMountColdStallAndLearnedDeadline(t *testing.T) {
 func TestHostHygieneMountPendingReadCannotConfirmRecovery(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
 	release := make(chan struct{})
-	p := &hostMountProbe{root: "checkpoint", path: "fake", reason: "mount_linux_operator_required", probe: func(string) error { <-release; return nil }}
+	p := &hostMountProbe{root: "checkpoint", path: "fake", reason: "mount_linux_operator_required", probe: func(string, func()) error { <-release; return nil }}
 	// The first fresh success starts recovery, then the next read stalls within
 	// this host's measured deadline. Repeated observations are not new successes.
 	p.pending = make(chan hostMountResult, 1)
@@ -374,7 +376,7 @@ func TestHostHygieneMountWarmupAcceptsSuccessfulLatencyVariation(t *testing.T) {
 	m, clock := healthFixture(t, 1)
 	// Replay the review incident: one accepted 1ms success, then normal 2ms reads.
 	m.health.Baseline[0].Mounts = []HostMountHealth{{Root: "checkpoint", LatencySeconds: .001}}
-	p := &hostMountProbe{root: "checkpoint", path: "fake", measure: func(string) hostMountResult { return hostMountResult{latency: 2 * time.Millisecond} }}
+	p := &hostMountProbe{root: "checkpoint", path: "fake", measure: func(string, func()) hostMountResult { return hostMountResult{latency: 2 * time.Millisecond} }}
 	m.mounts["checkpoint"] = p
 	for i := 0; i < hostHealthWarmup+hostHealthConfirmation+1; i++ {
 		clock.Advance(signalRefresh)
@@ -426,7 +428,7 @@ func TestHostHygieneMountUpgradeDiscardsOnlyStatBaseline(t *testing.T) {
 	m.source = func(context.Context) (HostHealthReading, error) {
 		return HostHealthReading{Load: 1, WakeSeconds: .001}, nil
 	}
-	p := &hostMountProbe{root: "checkpoint", path: "fake", measure: func(string) hostMountResult { return hostMountResult{latency: 2 * time.Millisecond} }}
+	p := &hostMountProbe{root: "checkpoint", path: "fake", measure: func(string, func()) hostMountResult { return hostMountResult{latency: 2 * time.Millisecond} }}
 	m.mounts["checkpoint"] = p
 	for i := 0; i < hostHealthWarmup+hostHealthConfirmation+1; i++ {
 		clock.Advance(signalRefresh)

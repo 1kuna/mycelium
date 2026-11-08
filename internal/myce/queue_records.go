@@ -12,6 +12,8 @@ import (
 // enter through touchJob/touchSubmission; insertions use putJob/putSubmission.
 // This is an in-memory index, rebuilt from the same SQLite records on startup.
 type queueRecords struct {
+	healthCount               int
+	healthChanged             map[int]bool
 	statusHistory             map[string]statusHistoryEntry
 	encodings                 map[string]catalogEncoding
 	catalog                   map[string]bool
@@ -84,6 +86,28 @@ func mutableJob(j *Job) bool {
 	return deliveryPending(j) || !terminal(j.State) || attemptReleasePending(j)
 }
 func (q *Queue) indexJob(id string, j *Job) {
+	if q.evidenceLearned == nil {
+		q.evidenceLearned = map[string]bool{}
+		q.evidenceLedgerCounts = map[string]int{}
+	}
+	if j != nil {
+		for _, e := range j.LedgerEntries[min(len(j.LedgerEntries), q.evidenceLedgerCounts[id]):] {
+			if e.WorkLearning != nil {
+				q.evidenceLearned[identityHash(e.WorkLearning.Key)] = true
+			}
+		}
+		q.evidenceLedgerCounts[id] = len(j.LedgerEntries)
+	}
+	if j == nil || terminal(j.State) {
+		for key := range q.evidenceDeferred {
+			q.enqueueEvidence(key)
+		}
+		q.evidenceDeferred = nil
+	}
+
+	if j == nil || terminal(j.State) {
+		q.evidenceGeneration++
+	}
 	if j == nil {
 		delete(q.records.statusHistory, id)
 		delete(q.records.live, id)
@@ -101,7 +125,7 @@ func (q *Queue) indexJob(id string, j *Job) {
 		q.indexStatusHistory(id, j)
 	}
 	var at time.Time
-	if terminal(j.State) && hasJobFiles(j) && !j.FilesExpired && !deliveryPending(j) {
+	if q.fileRetention > 0 && terminal(j.State) && hasJobFiles(j) && !j.FilesExpired && !deliveryPending(j) {
 		at = q.clock.Now()
 		if j.FinishedAt != nil {
 			at = j.FinishedAt.Add(q.fileRetention)
@@ -109,26 +133,27 @@ func (q *Queue) indexJob(id string, j *Job) {
 	}
 	q.records.files.set(id, at)
 	var history, logs time.Time
-	if terminal(j.State) {
+	if terminal(j.State) && (q.fileRetention > 0 || q.logRetention > 0) {
 		ended := q.clock.Now()
 		if j.FinishedAt != nil {
 			ended = *j.FinishedAt
 		}
-		history = ended.Add(max(jobHistoryRetention, q.fileRetention, q.logRetention))
+		history = ended.Add(max(q.fileRetention, q.logRetention))
 		if j.FinishedAt == nil {
 			// First maintenance observation stamps the durable terminal time.
 			history = q.clock.Now()
-		} else if mutableJob(j) || hasJobFiles(j) && (!j.FilesExpired || j.FileReclamation == nil) || !q.records.logsDone[id] {
+		} else if mutableJob(j) || hasJobFiles(j) && (!j.FilesExpired || j.FileReclamation == nil) || q.logRetention > 0 && !q.records.logsDone[id] {
 			// Blocked old records must not monopolize the earliest batch.
-			history = maxTime(history, q.clock.Now().Add(time.Minute))
+			history = time.Time{}
 		}
-		if !q.records.logsDone[id] {
+		if q.logRetention > 0 && !q.records.logsDone[id] {
 			logs = ended.Add(q.logRetention)
 		}
 	}
-	q.records.history.set(id, history)
+	_ = history
+	q.records.history.set(id, time.Time{})
 	// Recovered evidence and its original provenance are append-only history.
-	if len(j.RecoveredResults) > 0 {
+	if len(j.RecoveredResults) > 0 || len(j.LedgerEntries) > 0 {
 		q.records.history.set(id, time.Time{})
 	}
 	q.records.logs.set(id, logs)
@@ -140,10 +165,10 @@ func (q *Queue) indexSubmission(id string, r *submissionRecord) {
 			q.records.bindings[r.JobID] = id
 		}
 		if r.Kind == submissionReservation && r.Created != nil {
-			at = r.Created.Add(submissionRetention)
+			at = time.Time{}
 		}
 		if r.Kind == submissionBinding && r.RemovedAt != nil {
-			at = r.RemovedAt.Add(submissionRetention)
+			at = time.Time{}
 		}
 	}
 	q.records.keys.set(id, at)
@@ -154,7 +179,7 @@ func (q *Queue) rebuildRecords() {
 		q.indexJob(id, j)
 	}
 	for key := range q.persisted {
-		if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") || strings.HasPrefix(key, "storage_observations/") {
+		if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") || strings.HasPrefix(key, "storage_observations/") || strings.HasPrefix(key, "external_memory/") {
 			q.records.catalog[key] = true
 		}
 	}
@@ -276,6 +301,9 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 	base.Jobs = nil
 	base.Submissions = nil
 	base.Extensions, base.WorkObservations, base.StorageObservations = nil, nil, nil
+	base.ExternalMemory = nil
+	base.Health.Events = nil
+	q.records.healthChanged = map[int]bool{}
 	old, err := json.Marshal(base)
 	if err != nil {
 		return recordUndo{}, err
@@ -305,13 +333,15 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 	for id, m := range q.s.Machines {
 		inventories[id] = m.toolInventory
 	}
-	return recordUndo{base: old, catalogs: catalogs, inventories: inventories}, nil
+	return recordUndo{base: old, catalogs: catalogs, inventories: inventories, health: q.s.Health.Events}, nil
 }
 func (q *Queue) rollbackRecords(old recordUndo) {
 	jobs, submissions := q.s.Jobs, q.s.Submissions
 	var base state
 	_ = json.Unmarshal(old.base, &base)
 	base.Extensions, base.WorkObservations, base.StorageObservations = old.catalogs.Extensions, old.catalogs.WorkObservations, old.catalogs.StorageObservations
+	base.ExternalMemory = old.catalogs.ExternalMemory
+	base.Health.Events = old.health
 	q.records.encodings = nil
 	base.Jobs, base.Submissions = jobs, submissions
 	q.s = base
@@ -342,6 +372,8 @@ func (q *Queue) rollbackRecords(old recordUndo) {
 	q.commitRecords()
 }
 func (q *Queue) commitRecords() {
+	q.records.healthCount = len(q.s.Health.Events)
+	q.records.healthChanged = nil
 	for key := range q.records.encodings {
 		if !q.records.catalog[key] {
 			delete(q.records.encodings, key)

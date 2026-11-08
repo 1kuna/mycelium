@@ -169,7 +169,9 @@ func TestReconcileRetiredDockerReportsPartialRemoval(t *testing.T) {
 func retentionConversion(t *testing.T) (ServiceConfig, ServiceConfig) {
 	t.Helper()
 	root := t.TempDir()
-	c := ServiceConfig{Role: "worker", Config: filepath.Join(root, "current.json"), State: filepath.Join(root, "current"), Name: "successor", HostID: "machine", Queue: "fixture-queue", DockerEndpoint: "fake"}
+	// Removal journeys require an explicitly authored stopped-container policy.
+	policy := 24 * time.Hour
+	c := ServiceConfig{ContainerRetention: &policy, Role: "worker", Config: filepath.Join(root, "current.json"), State: filepath.Join(root, "current"), Name: "successor", HostID: "machine", Queue: "fixture-queue", DockerEndpoint: "fake"}
 	s := c
 	s.Name, s.Config, s.State = "retired", filepath.Join(root, "retired.json"), filepath.Join(root, "retired")
 	for _, dir := range []string{c.State, s.State} {

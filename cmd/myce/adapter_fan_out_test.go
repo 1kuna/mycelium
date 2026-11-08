@@ -45,6 +45,35 @@ entries:
 %s`, runtime.GOOS, runtime.GOARCH, after)
 }
 
+func TestAdapterFanOutSharingOptIn(t *testing.T) {
+	var defaultSpec []byte
+	for _, policy := range []string{"", "share_xpu: false, ", "share_xpu: true, "} {
+		data := strings.Replace(fanOutAdapterYAML(""), "fan_out: {", "fan_out: {"+policy, 1)
+		a, err := decodeAdapter([]byte(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, _, err := adapterProfile(a, "stage")
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(p.Spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if policy == "" {
+			defaultSpec = encoded
+		}
+		if policy != "share_xpu: true, " {
+			if !bytes.Equal(encoded, defaultSpec) || bytes.Contains(encoded, []byte("share_xpu")) {
+				t.Fatal("default/false changed frozen submission bytes", string(encoded))
+			}
+		} else if !p.FanOut.ShareXPU || !bytes.Contains(encoded, []byte(`"share_xpu":true`)) {
+			t.Fatal("adapter lost explicit sharing intent", string(encoded))
+		}
+	}
+}
+
 func TestAdapterWholeParentFanOutGraph(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

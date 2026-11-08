@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -264,6 +265,44 @@ func TestPolicyCLIExplicitConfigChangeAfterRestart(t *testing.T) {
 			exported, err := myce.ReadPriorityPolicy(&out)
 			if err != nil || !reflect.DeepEqual(exported, policy) {
 				t.Fatalf("export lost explicit project settings: %+v, %v", exported, err)
+			}
+		})
+	}
+}
+
+func TestPolicyGetInstalledAuthorityWithoutToken(t *testing.T) {
+	for _, role := range []string{"worker", "queue"} {
+		t.Run(role, func(t *testing.T) {
+			const token = "private-policy-fixture"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer "+token || r.URL.Path != "/api/policy" {
+					t.Error("installed authority not used")
+				}
+				fmt.Fprint(w, `{"revision":23,"policy":{}}`)
+			}))
+			defer server.Close()
+			t.Setenv("MYCE_TOKEN", "")
+			t.Setenv("MYCE_QUEUE", "")
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			config := filepath.Join(home, ".local", "share", "mycelium", role, "config.json")
+			if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
+				t.Fatal(err)
+			}
+			credentials := filepath.Join(home, "fleet.env")
+			if err := os.WriteFile(credentials, []byte("MYCE_TOKEN="+token+"\nMYCE_QUEUE="+server.URL+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(myce.ServiceConfig{Role: role, EnvironmentFile: credentials})
+			if err := os.WriteFile(config, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := policyCommand([]string{"get"}, &out); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.String(), `"revision":23`) || strings.Contains(out.String(), token) {
+				t.Fatal("incorrect policy or credential in output")
 			}
 		})
 	}

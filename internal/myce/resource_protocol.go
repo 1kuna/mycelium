@@ -7,41 +7,56 @@ import (
 
 const resourceProtocol = "attempt-resources-v1"
 const resourceProtocolHeader = "X-Myce-Resource-Telemetry"
+const cpuPressureProtocolHeader = "X-Myce-CPU-Pressure"
+const cpuPressureProtocol = "cpu-pressure-v1"
 
 // Shared by every worker lane, including saved-result delivery. A new session
 // starts without support; headers negotiate without unknown JSON on old queues.
-type resourceWire struct{ supported atomic.Bool }
+type resourceWire struct{ supported, cpuPressure, executionEvidence atomic.Bool }
 
-func resourceWireInput(in any, supported bool) (any, bool) {
-	if supported {
+func resourceWireInput(in any, supported bool, cpuPressure ...bool) (any, bool) {
+	if supported && len(cpuPressure) > 0 && cpuPressure[0] {
 		return in, hasResourceFields(in)
+	}
+	resources := func(r *AttemptResources) *AttemptResources {
+		if !supported {
+			return nil
+		}
+		if r == nil {
+			return nil
+		}
+		copy := *r
+		copy.CPU.Pressure = nil
+		return &copy
 	}
 	switch c := in.(type) {
 	case *Checkin:
 		if c != nil {
-			return resourceWireInput(*c, false)
+			return resourceWireInput(*c, supported)
 		}
 	case *Result:
 		if c != nil {
-			return resourceWireInput(*c, false)
+			return resourceWireInput(*c, supported)
 		}
 	case *LogChunk:
 		if c != nil {
-			return resourceWireInput(*c, false)
+			return resourceWireInput(*c, supported)
 		}
 	case Checkin:
-		c.Machine.IOPressure = nil
+		if !supported {
+			c.Machine.IOPressure = nil
+		}
 		c.Attempts = slices.Clone(c.Attempts)
 		for i := range c.Attempts {
-			c.Attempts[i].Resources = nil
+			c.Attempts[i].Resources = resources(c.Attempts[i].Resources)
 		}
-		return c, false
+		return c, hasResourceFields(c)
 	case Result:
-		c.Resources = nil
-		return c, false
+		c.Resources = resources(c.Resources)
+		return c, hasResourceFields(c)
 	case LogChunk:
-		c.Resources = nil
-		return c, false
+		c.Resources = resources(c.Resources)
+		return c, hasResourceFields(c)
 	}
 	return in, false
 }

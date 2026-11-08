@@ -419,7 +419,11 @@ type SpecProjection struct {
 }
 
 type Job struct {
-	HealthRecovery *AlertRecovery `json:"health_recovery,omitempty"`
+	StartCapacityWaiting bool `json:"start_capacity_waiting,omitempty"`
+
+	LaunchCapacityWait map[string]LaunchCapacityWait `json:"launch_capacity_wait,omitempty"`
+	ExecutionEvidence  *ExecutionEvidence            `json:"execution_evidence,omitempty"`
+	HealthRecovery     *AlertRecovery                `json:"health_recovery,omitempty"`
 
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
@@ -700,6 +704,7 @@ type Reply struct {
 	HostCollectionProtocol     string                       `json:"hygiene_collection_protocol,omitempty"`
 	HostProbeProtocol          string                       `json:"host_probe_protocol,omitempty"`
 	HostHygieneProtocol        string                       `json:"host_hygiene_protocol,omitempty"`
+	HostMountProgressProtocol  string                       `json:"host_mount_progress_protocol,omitempty"`
 	ToolInventoryProtocol      string                       `json:"tool_inventory_protocol,omitempty"`
 	ToolInventoryRequired      bool                         `json:"tool_inventory_required,omitempty"`
 	ToolInventoryHash          string                       `json:"tool_inventory_hash,omitempty"`
@@ -765,6 +770,7 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
+	ExecutionEvidence         *ExecutionEvidence  `json:"execution_evidence,omitempty"`
 	Resources                 *AttemptResources   `json:"resources,omitempty"`
 	FinalCheckpointGeneration *int64              `json:"final_checkpoint_generation,omitempty"`
 	StoragePeak               *AttemptStoragePeak `json:"storage_peak,omitempty"`
@@ -808,6 +814,7 @@ type HoldDetail struct {
 
 type Snapshot struct {
 	Efficiency          *EfficiencyReport    `json:"efficiency,omitempty"`
+	EvidenceRetention   *EvidenceRetention   `json:"evidence_retention,omitempty"`
 	Freshness           *SnapshotFreshness   `json:"freshness,omitempty"`
 	StorageObservations []StorageObservation `json:"storage_observations,omitempty"`
 	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`
