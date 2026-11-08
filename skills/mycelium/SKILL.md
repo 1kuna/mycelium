@@ -321,6 +321,14 @@ ID and submission key. Do not raise shared budgets, clear custody or resubmit to
 bypass the finding. It uses the existing health notification channel; no new
 notifier setup is needed. Later progress does not establish a causal repair.
 
+From the host-growth accounting correction, fresh exact-attempt anonymous
+residency reduces the unreached envelope once. Pending host growth is the larger
+of that remainder and the live growth forecast, extended through sample age.
+The static allowance still protects the envelope and observed over-use;
+missing/stale telemetry, unified-CUDA device floors and release custody remain
+binding. An aggregate refusal alone cannot identify a sibling's contribution or
+establish safe concurrency. See [live headroom](../../docs/status.md#live-headroom-and-reservations).
+
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
 negative behind), the measured history horizon, weighted oldest project-wait
