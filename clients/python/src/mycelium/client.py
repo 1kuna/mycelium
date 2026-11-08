@@ -625,7 +625,8 @@ class Client:
                            "seconds": seconds}, timeout=timeout, retry=False)
         rows = reply.get("jobs") if isinstance(reply, dict) else None
         if (not isinstance(rows, list) or len(rows) != len(job_ids)
-                or any(not isinstance(row, dict) or row.get("id") != job_id
+                or any(not isinstance(row, dict) or not isinstance(row.get("id"), str)
+                       or not (row["id"] == job_id or len(job_id) >= 8 and row["id"].startswith(job_id))
                        or type(row.get("revision")) is not int or row["revision"] <= 0
                        for job_id, row in zip(job_ids, rows))):
             raise APIError(502, '{"code":"job_reply_invalid","error":"invalid wait reply"}')
@@ -739,7 +740,13 @@ class Client:
                     for original, row in zip(list(pending), observations):
                         after[row["id"]] = row["revision"]
                         if row["state"] in TERMINAL:
-                            row = self._read_job(row["id"], timeout=request_budget(), wait=True)
+                            try:
+                                row = self._read_job(row["id"], timeout=request_budget(), wait=True)
+                            except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
+                                if not retryable(error):
+                                    raise
+                                failure = error
+                                continue
                         observe(original, row)
                 else:
                     # Apply each read immediately and keep observing healthy peers

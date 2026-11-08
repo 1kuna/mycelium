@@ -153,3 +153,55 @@ class BatchWaitTests(unittest.TestCase):
         self.assertTrue(all(row["output_refs"] for row in rows))
         self.assertEqual(len([path for path in gets if "?" not in path]), 1)
         self.assertEqual(len(waits), 4)
+
+    def test_shed_bootstrap_resolves_prefix_like_queue_and_go_client(self):
+        client = Client(token="fixture")
+        client._clock = Clock()
+        full_id = "12345678abcdef"
+        batches = []
+
+        def respond(request, **kwargs):
+            client._clock.now += .01
+            if request.selector == "/api/wait":
+                body = json.loads(request.data)
+                batches.append(body["ids"])
+                return Reply({"jobs": [{"id": full_id, "state": "running" if len(batches) == 1 else "succeeded", "revision": len(batches)}]})
+            if request.selector.endswith("?view=wait"):
+                return Reply({"id": full_id, "state": "succeeded", "output_refs": {"answer": {"size_bytes": 42}}})
+            raise HTTPError(request.full_url, 429, "shed", {"Retry-After": "1"}, Reply({"code": "client_rate_limited"}))
+
+        client._urlopen = respond
+        row = client.wait(full_id[:8], timeout=10)
+        self.assertEqual(row["id"], full_id)
+        self.assertTrue(row["output_refs"])
+        self.assertEqual(batches, [[full_id[:8]], [full_id]])
+
+    def test_failed_terminal_payload_does_not_discard_completed_peer(self):
+        client = Client(token="fixture")
+        clock = client._clock = Clock()
+        client._jitter = lambda: 0
+        batches, peer_payloads = [], []
+
+        def respond(request, **kwargs):
+            clock.now += .01
+            if request.selector == "/api/wait":
+                body = json.loads(request.data)
+                batches.append(body["ids"])
+                clock.now = max(clock.now, 1)
+                return Reply({"jobs": [{"id": key, "state": "succeeded", "revision": 1} for key in body["ids"]]})
+            key = request.selector.split("/api/jobs/")[1].split("?")[0]
+            if request.selector.endswith("?view=wait"):
+                if key == "a" and clock.now < 3:
+                    raise HTTPError(request.full_url, 503, "busy", {"Retry-After": "1"}, Reply({}))
+                if key == "b":
+                    peer_payloads.append(clock.now)
+                return Reply({"id": key, "state": "succeeded", "output_refs": {"answer": {"size_bytes": 42}}})
+            return Reply({"id": key, "state": "running", "spec": {"deadline": "2026-11-05T12:00:02Z"} if key == "b" else {}},
+                         {"X-Myce-Wait": "batch-v1"})
+
+        client._urlopen = respond
+        rows = client.wait_many(["a", "b"], timeout=10)
+        self.assertEqual([row["id"] for row in rows], ["a", "b"])
+        self.assertEqual(len(peer_payloads), 1)
+        self.assertLess(peer_payloads[0], 2)
+        self.assertTrue(all(batch == ["a"] for batch in batches[1:]))
