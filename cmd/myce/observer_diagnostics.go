@@ -100,6 +100,11 @@ type observerDiagnostics struct {
 func newObserverDiagnostics(root string, clock myce.Clock) *observerDiagnostics {
 	return &observerDiagnostics{root: root, clock: clock, log: observerLogWriter{root: root}, state: observerDiagnostic{PID: os.Getpid(), Version: myce.BuildVersion, Commit: myce.BuildCommit, StartedAt: clock.Now()}}
 }
+
+func (d *observerDiagnostics) save() error {
+	return saveAtomicProfileJSON(filepath.Join(d.root, "observer.status"), d.state, false)
+}
+
 func (d *observerDiagnostics) record(phase, job string, cause error, event bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -108,7 +113,7 @@ func (d *observerDiagnostics) record(phase, job string, cause error, event bool)
 		d.state.LastError = myce.ClientErrorCause(cause)
 		d.state.LastErrorAt = d.clock.Now()
 	}
-	if err := saveProfileJSON(filepath.Join(d.root, "observer.status"), d.state); err != nil {
+	if err := d.save(); err != nil {
 		return err
 	}
 	if event {
@@ -168,7 +173,7 @@ func (d *observerDiagnostics) beginRead(jobs int) *observerReadTrace {
 		d.state.Readers = map[uint64]observerReadDiagnostic{}
 	}
 	d.state.Readers[d.nextRead] = observerReadDiagnostic{Phase: "authority", Jobs: jobs, StartedAt: d.clock.Now(), CapturedAt: d.clock.Now()}
-	_ = saveProfileJSON(filepath.Join(d.root, "observer.status"), d.state)
+	_ = d.save()
 	return &observerReadTrace{d, d.nextRead}
 }
 func (r *observerReadTrace) phase(phase, job string, cause error) {
@@ -195,7 +200,7 @@ func (r *observerReadTrace) phase(phase, job string, cause error) {
 	if phase == "batch_read_complete" {
 		d.state.LastReadAt = d.clock.Now()
 	}
-	_ = saveProfileJSON(filepath.Join(d.root, "observer.status"), d.state)
+	_ = d.save()
 }
 func (r *observerReadTrace) done() {
 	if r == nil {
@@ -205,5 +210,5 @@ func (r *observerReadTrace) done() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.state.Readers, r.id)
-	_ = saveProfileJSON(filepath.Join(d.root, "observer.status"), d.state)
+	_ = d.save()
 }
