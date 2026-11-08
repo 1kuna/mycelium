@@ -114,7 +114,7 @@ func TestMemoryEnvelopeGenuineConstraintEscalationBounded(t *testing.T) {
 			candidate := first
 			candidate.State = "queued"
 			got := q.memoryCandidate(&candidate, q.s.Machines[m.ID]).MemoryEnvelope
-			if got.HostGB != 32-minimumHostMemoryGB || got.Basis != "exploratory" || !strings.Contains(got.Source, "accepted prior invalidated") {
+			if got.HostGB != 2+2*minimumHostMemoryGB || got.Basis != "exploratory" || !strings.Contains(got.Source, "accepted prior invalidated") {
 				t.Fatalf("genuine failure lost measured exploration bound: %+v", got)
 			}
 			retryState := job(t, q, run.ID)

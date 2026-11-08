@@ -18,8 +18,6 @@ type LaunchCapacityWait struct {
 
 const launchCapacityWaitReason = "waiting for launch capacity"
 
-func callerStartDeadline(j *Job) bool { return absoluteStartBy(j) || j.Spec.StartWindow != "" }
-
 func launchCapacityRefusal(r Result) bool {
 	if e := safeExecutionEvidence(r.ExecutionEvidence, r.Attempt); e != nil && e.Main != executionNotStarted {
 		return false

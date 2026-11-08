@@ -679,10 +679,10 @@ Production jobs must acknowledge command startup before `start_by`. Set an
 absolute RFC3339 timestamp, for example `start_by: 2026-10-12T14:00:30Z`.
 For a relative budget, declare **`start_window: 600s`** on the job or the selected
 entry in `.mycelium/adapter.yaml`. It accepts a Go duration string (for example
-`600s` or `10m`), strictly positive and at most **1 hour**. The cap bounds the
-time production can wait on unavailable capacity or stuck preparation while
-allowing substantial contention; choosing a longer window delays failure by that
-budget. Zero, negative, malformed, overflowing and over-cap values are rejected.
+`600s` or `10m`), strictly positive and at most **1 hour**. The cap bounds
+unavailable-worker and stuck-preparation detection; qualified capacity waiting
+does not spend this budget. Choosing a longer window delays stuck-start failure
+by that budget. Zero, negative, malformed, overflowing and over-cap values are rejected.
 It is a startup budget, not a runtime limit. Experiments have no start deadline
 and must omit both fields. If both are supplied, the explicit absolute `start_by`
 wins, including for every physical fan-out child.
@@ -692,25 +692,31 @@ defaults to **150 seconds**: the ordinary
 10-second experiment grace, two-minute Docker cleanup escalation, and a small
 reporting margin. This is a bounded availability policy, not a native startup
 latency guarantee. A shorter caller-owned deadline can trigger fallback sooner.
-Unstarted retries, re-delivery and queue restarts never renew it. Older unfinished
+Ordinary unstarted retries, re-delivery and queue restarts never renew it. Older unfinished
 production records without the field receive the same default from their original submission.
 For a dependent job, its generated window starts at dependency readiness; for
 each physical fan-out child it starts at that child's assignment. The declared
 length survives both transitions. A logical fan-out parent's generated cutoff
 does not expire its capacity wait, even before its first child is assigned. Use
 an explicit absolute `start_by` or `give_up_at` to bound that orchestration wait.
-No preparation step or unstarted retry renews a physical child's cutoff.
+No preparation step or ordinary unstarted retry renews a physical child's cutoff.
 Retained jobs from before this declaration existed preserve their stored cutoff
 as absolute: older records did not record whether it was generated or submitted.
 
-From the release containing #1011, qualified resource contention and typed
-launch-capacity refusals suspend a **generated** startup window. The same logical
-job remains queued without spending infrastructure retries or losses. Assignment
-renews that generated window for command preparation; unchanged capacity evidence
-cannot cause repeated offers. Explicit caller `start_by` and `start_window`,
-`give_up_at` and cancellation still apply. Missing or incompatible inventory keeps
-its existing startup diagnosis. This supersedes the capacity-expiry behavior
-above for generated windows; it adds no timeout or retry-budget increase.
+From the next release, qualified resource contention and typed, uncharged
+launch-capacity refusals suspend **every relative** startup window, including an
+explicit `start_window: 600s` and the omitted `150s` default. This extends #1011's
+generated-window behavior. Memory, device and host-capacity waits use the same
+eligibility and refusal checks; a busy peer of the same tier is a fair wait.
+The same logical job remains queued without spending infrastructure retries or
+losses. Assignment restores the original relative window for command preparation;
+unchanged capacity evidence cannot cause repeated offers. This also applies to
+recovery after a prior attempt failed and to a typed refusal after Started
+authorization. Exact release custody still gates reuse.
+Explicit absolute `start_by`, `give_up_at`, `deadline` and cancellation keep their
+existing semantics. Missing, incompatible or unreachable workers and an assigned
+start without an accepted startup acknowledgement still consume the window.
+This adds no timeout or retry-budget increase.
 
 Job GET exposes the authored duration at `spec.start_window`, the current cutoff
 at `spec.start_by`, and the effective original length at top-level `start_window`
@@ -733,11 +739,15 @@ own request timeouts and the separate `max_wait` contract; they do not honor
 `start_by`. Models loaded inside a batch command are outside its start hand-off.
 
 Status, the status page and the job record show the blocker and seconds left.
+During qualified capacity waiting they show the restored start budget with
+`paused for capacity`; the suspended `spec.start_by` is not an active cutoff.
 New queued production fails immediately when every known eligible host is disabled
 by the operator. An interrupted production job may wait for reopening until its
 recovery start window expires. Unknown inventory may still join within the deadline. Pending stops,
-unconfirmed Docker cleanup, worker recovery, environment preparation and capacity
-can all exhaust the budget. At `now >= start_by`, an unstarted job fails with
+unconfirmed Docker cleanup, worker recovery and environment preparation
+can exhaust an active budget. Qualified capacity waiting pauses relative windows;
+absolute cutoffs keep counting down. At `now >= start_by`, an unstarted job with
+an active budget fails with
 `production start deadline exceeded: <blocker>`; a past deadline fails on submit
 without preempting anything. `myce wait` exits **1** and prints the reason; Python
 `Client.wait()` returns the failed record with its reason.
@@ -749,11 +759,22 @@ deadline expiry wins; a previously accepted start is not failed by `start_by`.
 This records an accepted hand-off, not proof of successful physical exec or
 model readiness. A private exec-helper pipe holds plain-command execution until
 the positive reply; managed Docker uses the same confirmation before its start
-operation. An unreachable queue, failed durable write, duplicate start, stale
-attempt or cancellation refuses execution. The worker stores launch intent before
+operation. From the release containing #1028, a slow control-plane response
+retains the same gated execution and custody without charging a loss or
+retry. Ambiguous transport replies replay the same exact identity with measured
+request-RTT pacing and jitter. Typed refusal, stale custody and cancellation
+refuse execution. A Started replay rechecks live fences and returns the original
+start and remaining wall-time allowance without another ledger start. The worker stores launch intent before
 asking, so restart reconciles/cleans that attempt and replays buffered results
-instead of executing it again. A lost positive reply conservatively leaves the
-attempt started in the queue but unexecuted; reconciliation handles recovery.
+instead of executing it again. A lost positive reply leaves the
+attempt started in the queue but unexecuted until that same worker reconciles
+the reply. Cancellation can stop a stalled handshake and release only its exact
+local execution; elapsed time never proves release. There is no automatic
+handshake lifetime: caller cancellation, explicit job deadlines, and actual
+refusals remain authoritative. A completed connection-establishment failure ends
+the handshake with `control_unreachable`; it cannot authorize payload execution
+or prove that an earlier request was not committed. Exact local cleanup and
+release reconciliation still apply before replacement.
 Deploy the matching queue and workers together. Check-in requires the durable-start
 protocol marker; older workers receive HTTP 426 before assignment. Production
 workers also require an explicit matching durable-start answer and `start_by`,
@@ -1518,8 +1539,10 @@ Declare `start_window: 600s` on a production consumer job to give it a ten-minut
 relative budget. Omission keeps the `150s` default; experiments omit it and have
 no start deadline. The declaration also works on a selected adapter entry in
 `.mycelium/adapter.yaml`. It accepts positive Go duration strings up to `1h`;
-the cap keeps unavailable capacity/preparation waits bounded while allowing
-contention. Longer budgets delay startup failure accordingly.
+the cap bounds unavailable-worker and stuck-preparation detection. Qualified
+capacity waiting pauses the budget, even for an explicit declaration; after
+capacity recovers, assignment restores the full window. Longer budgets delay
+stuck-start failure accordingly.
 Explicit `start_by`, `give_up_at` and `deadline` remain absolute. Accepted pieces
 survive sibling failure; consumers of unaccepted pieces fail with structured
 `diagnostic_code: upstream_failed`. Cancelling the parent is a pipeline abort,

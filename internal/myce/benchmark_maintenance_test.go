@@ -205,18 +205,19 @@ func TestMaintenanceDelayedBenchmarkCommand(t *testing.T) {
 			benchmark := w.Benchmark
 			w.Benchmark = func(ctx context.Context, c BenchmarkConfig, p *CapabilityProfile) error {
 				parent := ctx
+				priorGate := launchGateFrom(parent)
 				calls := 0
-				ctx = withLaunchGate(ctx, func() error {
+				ctx = withLaunchGate(ctx, func(ctx context.Context) error {
 					calls++
 					if calls == 6 { // Five resource checks, then the real shell supervisor.
 						close(entered)
 						select {
 						case <-proceed:
-						case <-parent.Done():
-							return parent.Err()
+						case <-ctx.Done():
+							return ctx.Err()
 						}
 					}
-					return checkLaunchGate(parent)
+					return priorGate(ctx)
 				})
 				return benchmark(ctx, c, p)
 			}
