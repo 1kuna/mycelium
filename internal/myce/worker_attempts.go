@@ -891,15 +891,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	pressureProbe.lane.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go pressureProbe.run(ctx)
 	inventory := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: w.Clock, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}}
-	probeInventory := w.InventoryProbe
-	go inventory.run(ctx, func(probeCtx context.Context) ([]MachineDevice, error) {
-		devices, err := probeInventory(probeCtx)
-		for i := range devices {
-			d := &devices[i]
-			d.ExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, d.Platform, d.ID)
-		}
-		return devices, err
-	})
+	go inventory.run(ctx, w.inventorySource())
 	var cpuProbe checkpointIO[*memoryCeilings]
 	sharedCPUAllowance := 0
 	events := make(chan WorkerEvent, 16)
