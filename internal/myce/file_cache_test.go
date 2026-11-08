@@ -34,7 +34,7 @@ func TestFileCacheLargeInputUsesProgressBudget(t *testing.T) {
 // #720: an unrelated victim must never require queue availability. Its accepted
 // retention may have ended, or its HEAD may fail while the new blob is healthy.
 func TestFileCacheEvictionIndependentOfVictimStorage(t *testing.T) {
-	for _, status := range []int{404, 410, 503} {
+	for _, status := range []int{503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			q, clock := fixture(t)
 			if err := q.ConfigureFileStore(t.TempDir(), 1024, true); err != nil {

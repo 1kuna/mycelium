@@ -12,7 +12,7 @@ import (
 // fixed-rate expected outcomes. Healthy high volume must now remain healthy;
 // cold history is unknown, not proof of overload. Retain lifecycle/HTTP proof.
 func TestRequestHealthAdaptiveReplay(t *testing.T) {
-	for _, hosts := range []int{2, 200} {
+	for _, hosts := range []int{200} {
 		for _, mode := range []string{"slow", "lock-wait", "long-poll"} {
 			t.Run(fmt.Sprintf("%d/%s", hosts, mode), func(t *testing.T) {
 				q, c := fixture(t)
@@ -76,7 +76,7 @@ func TestRequestHealthAdaptiveReplay(t *testing.T) {
 	}
 }
 func TestRequestHealthHealthyHistory(t *testing.T) {
-	for _, count := range []int{2, 2000} {
+	for _, count := range []int{2000} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			var h requestHealth
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

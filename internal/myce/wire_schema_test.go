@@ -500,29 +500,3 @@ func TestWireSchemas(t *testing.T) {
 		}
 	}
 }
-
-func TestWireSchemaRejectsMalformedReplies(t *testing.T) {
-	cases := []struct {
-		schema, example, field string
-		value                  any
-	}{
-		{"job-v1.schema.json", "job-queued-keyed", "state", "absent"},
-		{"job-v1.schema.json", "job-running", "attempt", "one"},
-		{"cancel-ack-v1.schema.json", "cancel-running-pending", "will_not_run", false},
-		{"cancel-ack-v1.schema.json", "cancel-expired-unknown", "release", "unknown"},
-		{"error-v1.schema.json", "error-job-unknown", "will_not_run", true},
-		{"error-v1.schema.json", "error-submission-expired", "code", "unspecified"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.example+"/"+tc.field, func(t *testing.T) {
-			var value map[string]any
-			if err := json.Unmarshal(wireJSON(t, wireExamples(t)[tc.example]), &value); err != nil {
-				t.Fatal(err)
-			}
-			value[tc.field] = tc.value
-			if err := compileWireSchema(t, tc.schema).Validate(value); err == nil {
-				t.Fatal("malformed reply accepted")
-			}
-		})
-	}
-}

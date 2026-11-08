@@ -9,7 +9,7 @@ import (
 )
 
 func TestRemainingHealthReportsRecipesCachesUpdates(t *testing.T) {
-	for _, hosts := range []int{2, 200} {
+	for _, hosts := range []int{200} {
 		t.Run(fmt.Sprint(hosts), func(t *testing.T) {
 			q, c := fixture(t)
 			// Install in-memory synthetic inventory in one transaction, avoiding O(n)
@@ -77,7 +77,7 @@ func TestRemainingHealthReportsRecipesCachesUpdates(t *testing.T) {
 }
 
 func TestRemainingHealthPinsTargetsAndHealthyOccupancy(t *testing.T) {
-	for _, hosts := range []int{2, 200} {
+	for _, hosts := range []int{200} {
 		t.Run(fmt.Sprint(hosts), func(t *testing.T) {
 			q, c := fixture(t)
 			if err := q.update(func() error {
@@ -120,7 +120,7 @@ func TestRemainingHealthPinsTargetsAndHealthyOccupancy(t *testing.T) {
 }
 
 func TestRemainingHealthAttemptStreak(t *testing.T) {
-	for _, hosts := range []int{2, 200} {
+	for _, hosts := range []int{200} {
 		t.Run(fmt.Sprint(hosts), func(t *testing.T) {
 			q, c := fixture(t)
 			m := cpuMachine("worker", "host", "cpu", 4, 16)

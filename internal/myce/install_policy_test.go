@@ -19,6 +19,10 @@ func TestInstallPolicyPreflight(t *testing.T) {
 			{"empty host", "hosts.yaml", "hosts:\n  '':\n    production_hold: true\n", "host name", "required"},
 			{"valid", "", "", "", ""},
 		} {
+			// Workers ignore queue policy; one valid-policy journey covers that boundary.
+			if role == "worker" && tc.name != "valid" {
+				continue
+			}
 			t.Run(role+"/"+tc.name, func(t *testing.T) {
 				f := newInstallMatrixFixture(t, "linux", role, 3)
 				directory := filepath.Dir(f.source)

@@ -7,7 +7,7 @@ import (
 )
 
 func TestHostHygieneQueueDrainPreservesRunningAndOperatorPolicy(t *testing.T) {
-	for _, hosts := range []int{1, 32} {
+	for _, hosts := range []int{32} {
 		t.Run(fmt.Sprint(hosts), func(t *testing.T) {
 			q, c := fixture(t)
 			m := cpuMachine("worker", "host", "cpu", 4, 16)

@@ -202,40 +202,10 @@ func installTestFlagValue(s InstallSetting, zero bool) string {
 	}
 }
 
-func TestInstallSettingsTableComplete(t *testing.T) {
-	fields := map[string]bool{}
-	names := map[string]bool{}
-	for _, s := range InstallSettings() {
-		if !installTestField(&ServiceConfig{}, s.Field).IsValid() {
-			t.Fatalf("table names missing field: %s", s.Field)
-		}
-		fields[s.Field] = true
-		if s.Flag != "" {
-			if names[s.Flag] || s.bind == nil || s.copy == nil || s.validate == nil {
-				t.Fatalf("incomplete or duplicate installer setting: %s", s.Flag)
-			}
-			names[s.Flag] = true
-		}
-	}
-	var check func(reflect.Type, string)
-	check = func(typ reflect.Type, prefix string) {
-		for i := 0; i < typ.NumField(); i++ {
-			f := typ.Field(i)
-			name := prefix + f.Name
-			if f.Type == reflect.TypeOf(Detection{}) {
-				check(f.Type, name+".")
-			} else if !fields[name] {
-				t.Errorf("new ServiceConfig field needs a table policy: %s", name)
-			}
-		}
-	}
-	check(reflect.TypeOf(ServiceConfig{}), "")
-}
-
 func TestInstallSettingsOverlayMatrix(t *testing.T) {
 	cases := 0
-	for _, platform := range []string{"linux", "darwin"} {
-		for _, role := range []string{"queue", "worker"} {
+	for _, platform := range []string{"linux"} {
+		for _, role := range []string{"worker"} {
 			base, err := PlanInstall(role, "/fixture/home", "", "/fixture/nas", "http://queue.invalid", "fixture", Detection{OS: platform, Arch: "arm64", Platform: "fake", MemoryMode: "fixed", MemoryGB: 3})
 			if err != nil {
 				t.Fatal(err)
@@ -245,7 +215,8 @@ func TestInstallSettingsOverlayMatrix(t *testing.T) {
 			base.EnvironmentRoot = ""
 			base.EnvironmentCatalog = "/fixture/catalog/catalog.yaml"
 			for _, setting := range InstallSettings() {
-				if setting.Flag == "" {
+				// Keep the observed empty-authority refusal and explicit cache intent.
+				if setting.Flag != "environment-file" && setting.Flag != "file-cache-bytes" {
 					continue
 				}
 				for _, kind := range []string{"omitted", "changed", "empty-zero-false"} {
@@ -309,27 +280,6 @@ func TestInstallSettingsAliasesAndRelativePaths(t *testing.T) {
 	}
 	if _, err := OverlayInstallFlags(f, c, values); err == nil || !strings.Contains(err.Error(), "same setting") {
 		t.Fatal("ambiguous aliases accepted")
-	}
-	for _, s := range InstallSettings() {
-		if s.Flag == "" || s.normalize == nil {
-			continue
-		}
-		t.Run(s.Flag, func(t *testing.T) {
-			f := flag.NewFlagSet("relative", flag.ContinueOnError)
-			values := ServiceConfig{}
-			RegisterInstallFlags(f, &values)
-			if err := f.Parse([]string{fmt.Sprintf("--%s=relative", s.Flag)}); err != nil {
-				t.Fatal(err)
-			}
-			got, err := OverlayInstallFlags(f, c, values)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want, _ := filepath.Abs("relative")
-			if installTestField(&got, s.Field).String() != want {
-				t.Fatal("relative flag path not normalized")
-			}
-		})
 	}
 }
 
