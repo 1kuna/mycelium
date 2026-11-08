@@ -537,8 +537,13 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 			if e2 != nil {
 				r.Reason = "check command failed"
 			} else {
-				output, e3 := readCapacityFile(env["MYCE_CHECK_OUTPUT"], int64(extensionByteLimit()))
-				if e3 != nil || len(output) > extensionByteLimit() {
+				limit, e3 := extensionByteLimit()
+				if e3 != nil {
+					_ = os.RemoveAll(tmp)
+					return reports, e3
+				}
+				output, e3 := readCapacityFile(env["MYCE_CHECK_OUTPUT"], int64(limit))
+				if e3 != nil || len(output) > limit {
 					r.Reason = "check output missing or too large"
 				} else if e3 = compareExtensionOutput(output, e.Files[b.Output], b); e3 != nil {
 					r.Reason = e3.Error()

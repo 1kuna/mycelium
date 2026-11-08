@@ -429,8 +429,12 @@ func measureReferences(ctx context.Context, c BenchmarkConfig, extensions []Exte
 				if err = runExtensionCommand(ctx, e.Benchmark, env["MYCE_EXTENSION_DIR"], env, io.Discard, commandScope{StateDir: c.StateDir, Clock: c.Clock}); err != nil {
 					return err
 				}
-				data, err := readCapacityFile(env["MYCE_CHECK_OUTPUT"], int64(extensionByteLimit()))
-				if err != nil || len(data) > extensionByteLimit() {
+				limit, err := extensionByteLimit()
+				if err != nil {
+					return err
+				}
+				data, err := readCapacityFile(env["MYCE_CHECK_OUTPUT"], int64(limit))
+				if err != nil || len(data) > limit {
 					return errors.New("reference output unavailable")
 				}
 				if err = compareExtensionOutput(data, e.Files[b.Output], b); err != nil {

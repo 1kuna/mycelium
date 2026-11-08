@@ -116,7 +116,7 @@ func hostAvailableMemory(ctx context.Context, goos string, readFile func(string)
 		}
 		return parseMemAvailable(out)
 	case "darwin":
-		out, err := command(ctx, "vm_stat")
+		out, err := command(ctx, "/usr/bin/vm_stat")
 		if err != nil {
 			return 0, fmt.Errorf("read vm_stat: %w", err)
 		}

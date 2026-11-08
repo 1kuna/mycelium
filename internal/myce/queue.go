@@ -2190,7 +2190,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 }
 
 // Projection runs against either the locked queue or a fully detached read view.
-func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
+func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
 	out := Snapshot{EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	for _, s := range q.s.ModelSlots {
@@ -2304,6 +2304,8 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
 	order, reasons := q.queueProjection()
+	projectionSample := startStatusProjection(budgets)
+	finishJobWork := projectionSample.measure()
 	for _, stored := range q.s.Jobs {
 		if q.observationSelection != nil && !q.observationSelection.ids[stored.ID] {
 			continue
@@ -2316,6 +2318,7 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		}
 		out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
 	}
+	finishJobWork()
 	for _, m := range q.s.Machines {
 		copy := cloneMachine(m)
 		copy.ExternalMemory = q.externalMemoryStatus(hostID(m))
@@ -2352,9 +2355,12 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		}
 		out.Machines = append(out.Machines, &copy)
 	}
+	finishJobWork = projectionSample.measure()
 	for _, j := range out.Jobs {
 		q.projectJobDiagnostics(j, forStatus, false)
 	}
+	finishJobWork()
+	projectionSample.finish(out.Jobs)
 	sort.SliceStable(out.Jobs, func(i, k int) bool { return statusBefore(out.Jobs[i], out.Jobs[k]) })
 	sort.Slice(out.Machines, func(i, k int) bool { return out.Machines[i].ID < out.Machines[k].ID })
 	return out
