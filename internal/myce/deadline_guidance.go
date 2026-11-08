@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -21,17 +20,17 @@ type DeadlineGuidance struct {
 	Message          string        `json:"message"`
 }
 
-// Submission advice needs no cancellation ancestry or retained-history copy.
-// Read only policy/planner facts under the lock; no filesystem or network I/O.
-// The accepted receipt is already detached and retains all submission fields.
-func (q *Queue) submissionDeadlineGuidance(j *Job, ctx context.Context) {
-	unlock := requestLock(ctx, &q.mu)
-	defer unlock()
+// Caller owns a detached planner view. The accepted receipt retains all of its
+// submission fields; waiting reasons and blocker mutations stay on a local copy.
+func (q *Queue) submissionDeadlineGuidance(j *Job, timing *submissionAdviceTiming) {
+	timing.next(adviceWaitReason)
 	copy := *j
 	if copy.State == "queued" {
 		copy.Reason = q.waitReason(&copy)
+		timing.next(adviceStatusReason)
 		copy.Reason = q.statusWaitingReason(&copy)
 	}
+	timing.next(adviceDeadline)
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	j.DeadlineGuidance = q.deadlineGuidance(&copy)
 }
