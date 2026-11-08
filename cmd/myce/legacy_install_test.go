@@ -99,7 +99,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		}
 	}
 	var calls []string
-	probe := myce.MachineProbe{OS: "linux", Arch: runtime.GOARCH, Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
+	probe := myce.MachineProbe{OS: "linux", Arch: runtime.GOARCH, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		call := strings.Join(args, " ")
 		calls = append(calls, n+" "+call)
 		if strings.Contains(call, "--property=UnitFileState") {
@@ -108,7 +108,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		if n == "systemctl" && strings.Contains(call, "is-active") {
 			return nil, installFixtureExit(3)
 		}
-		return nil, nil
+		return fakeSetupManager(ctx, n, args...)
 	}}
 	// Even install refuses before consulting/changing the manager, or publishing.
 	for _, c := range configs {
