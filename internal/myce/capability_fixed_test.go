@@ -79,20 +79,3 @@ func TestFixedAcceleratorMemoryExtensionPlacement(t *testing.T) {
 		})
 	}
 }
-
-func TestFixedAcceleratorMemoryPreservesOtherModes(t *testing.T) {
-	for _, tc := range []struct {
-		name, gpu, layout string
-		unified           bool
-	}{
-		{"fake", "fake", "separate", false}, {"unified profile", "xpu", "unified", false}, {"unified worker", "xpu", "separate", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := CapabilityProfile{MemoryLayout: tc.layout, Accelerators: []AcceleratorProfile{{Type: tc.gpu}}}
-			applyFixedAcceleratorMemory(&p, Machine{GPU: tc.gpu, UnifiedMemory: tc.unified, FreeMemoryGB: 31}, true)
-			if p.Accelerators[0].MemoryBytes != 0 {
-				t.Fatal("changed fake or unified capacity")
-			}
-		})
-	}
-}

@@ -135,6 +135,11 @@ func TestEntryGenericHeadersBeforeSpooling(t *testing.T) {
 		if !strings.Contains(w.Body.String(), "X-Myce-") {
 			t.Fatal("routing error lacks actionable header names")
 		}
+		if headers.Get("X-Myce-Project") == "" {
+			if w.Code != 400 || !strings.Contains(w.Body.String(), "X-Myce-Project and X-Myce-Priority are required") || strings.Contains(w.Body.String(), "default_call_priority") || strings.Contains(w.Body.String(), "entry") {
+				t.Fatal("generic route suggests unsupported defaults:", w.Body.String())
+			}
+		}
 	}
 }
 

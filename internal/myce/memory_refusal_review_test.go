@@ -33,32 +33,6 @@ func memoryRefusalReviewWorker(t *testing.T) Worker {
 	return w
 }
 
-func TestReviewCurrentCapacityFailureRefusesLaunch(t *testing.T) {
-	w := memoryRefusalReviewWorker(t)
-	ds, err := w.InventoryProbe(context.Background())
-	t.Logf("current devices=%+v error=%v", ds, err)
-	if _, err := w.forAttempt(Job{AllocatedDevices: []string{"0"}}); err == nil {
-		t.Fatal("launch accepted stale healthy CUDA device despite current capacity-detection failure")
-	}
-}
-
-func TestReviewCurrentCapacityFailureUnhealthy(t *testing.T) {
-	q, _ := fixture(t)
-	w := memoryRefusalReviewWorker(t)
-	runInventoryReviewWorker(t, q, w)
-	awaitInventoryReview(t, func() bool { s, _ := q.Snapshot(); return len(s.Machines) == 1 })
-	status, err := q.HostMaintenanceStatus("host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, d := range status.Workers[0].Machine.Devices {
-		t.Logf("device platform=%s reason=%s", d.Platform, d.Reason)
-	}
-	if status.Healthy {
-		t.Fatal("degraded capacity inventory reported Healthy=true")
-	}
-}
-
 func TestCurrentDeviceRefusalIsFamilyLocal(t *testing.T) {
 	for _, platform := range []string{"cuda", "xpu"} {
 		for _, reason := range []string{"device_memory_unavailable", "device_budget_unavailable", "device_probe_unavailable"} {

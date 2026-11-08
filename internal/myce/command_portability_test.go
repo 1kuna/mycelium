@@ -2,10 +2,7 @@ package myce
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -166,51 +163,5 @@ func TestCommandPortabilityCPUMemberCapsNormalizeBeforeLowering(t *testing.T) {
 		if identityHash(s) != before {
 			t.Fatal("normalization changed caller intent")
 		}
-	}
-}
-
-// The diagnostic is not a launch permit or a result check. A real small command
-// still goes through submit, accepted output verification and exact release.
-func TestCommandPortabilityRealCPUResult(t *testing.T) {
-	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "breadth-fixture", Interval: 10 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	s := cpuResolveSpec()
-	s.SubmissionKey = "breadth-result"
-	_, input := retentionJobInput(t, d.Client(), "portable-cpu-ok\n")
-	s.Files = map[string]FileRef{"source.txt": input}
-	s.Run.Command = []string{"sh", "-c", "cat source.txt > result.txt"}
-	s.Outputs = map[string]string{"result.txt": "results"}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	var report ResolveReport
-	if err := d.Client().Call(ctx, "POST", "/api/resolve", ResolveRequest{Spec: s}, &report); err != nil || report.Portability == nil {
-		t.Fatal(report, err)
-	}
-	j, err := d.Client().Submit(ctx, s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	completed, err := d.Client().Wait(ctx, j.ID)
-	if err != nil || completed.State != "succeeded" {
-		t.Fatal(completed, err)
-	}
-	dest := filepath.Join(root, "accepted.txt")
-	if err := d.Client().DownloadResult(ctx, j.ID, "result.txt", dest); err != nil {
-		t.Fatal(err)
-	}
-	if data, err := os.ReadFile(dest); err != nil || string(data) != "portable-cpu-ok\n" {
-		t.Fatalf("accepted bytes: %q %v", data, err)
-	}
-	await(t, func() bool {
-		current, err := d.Client().GetJob(ctx, j.ID)
-		return err == nil && current.ReleaseConfirmed
-	})
-	replayed, err := d.Client().Submit(ctx, s)
-	if err != nil || replayed.ID != j.ID || !replayed.SubmissionReused {
-		t.Fatal(replayed, err)
 	}
 }

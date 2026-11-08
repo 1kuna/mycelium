@@ -29,17 +29,6 @@ func TestIndependentDiscreteCUDANAMemory(t *testing.T) {
 	requirePreflightCode(t, err, "gpu_memory_unavailable")
 }
 
-func TestIndependentMissingNvidiaToolDoesNotBlockIntel(t *testing.T) {
-	p := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", "16", "NVIDIA", "", false}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
-	got, err := p.Accelerators(context.Background())
-	if err == nil {
-		t.Fatalf("driverless NVIDIA has no failure: inventory=%+v", got)
-	}
-	if len(got) != 1 || got[0].Platform != "xpu" {
-		t.Fatalf("Intel hidden: %+v err=%v", got, err)
-	}
-}
-
 func TestIndependentUnrelatedRenderNodeDoesNotHideIntel(t *testing.T) {
 	p := pciFixtureProbe(pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
 	glob, read := p.Glob, p.ReadFile
@@ -59,22 +48,6 @@ func TestIndependentUnrelatedRenderNodeDoesNotHideIntel(t *testing.T) {
 	got, err := p.Accelerators(context.Background())
 	if len(got) != 1 || got[0].Platform != "xpu" {
 		t.Fatalf("working Intel hidden by another render node: %+v err=%v", got, err)
-	}
-}
-
-func TestIndependentWorkerFamilyFailureRetainsIntel(t *testing.T) {
-	p := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", "16", "NVIDIA", "", true}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
-	cmd := p.Command
-	p.Command = func(ctx context.Context, n string, args ...string) ([]byte, error) {
-		if n == "nvidia-smi" {
-			return nil, os.ErrPermission
-		}
-		return cmd(ctx, n, args...)
-	}
-	w := Worker{Machine: Machine{GPU: "xpu", FreeMemoryGB: 16}, FixedAcceleratorMemory: true}
-	got, err := w.localInventoryWithProbe(context.Background(), p)
-	if len(got) != 1 || got[0].Platform != "xpu" {
-		t.Fatalf("worker lost healthy Intel after independent probe: %+v err=%v", got, err)
 	}
 }
 

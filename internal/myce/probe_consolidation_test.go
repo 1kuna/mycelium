@@ -208,6 +208,9 @@ func TestConsolidatedMissingFamilyTyped(t *testing.T) {
 	if !errors.As(err, &partial) || !partial.failed("cuda") || partial.failed("xpu") || len(devices) != 1 {
 		t.Fatal(fmt.Sprint(devices), err)
 	}
+	if devices[0].Platform != "xpu" {
+		t.Fatalf("Intel hidden: %+v err=%v", devices, err)
+	}
 }
 
 func TestConsolidatedMissingIntegratedRuntimeReported(t *testing.T) {

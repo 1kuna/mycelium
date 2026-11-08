@@ -115,17 +115,6 @@ func TestEntryUnknownApprovalKeepsReadySlots(t *testing.T) {
 	}
 }
 
-func TestEntryGenericMissingHeadersMessage(t *testing.T) {
-	q, _ := fixture(t)
-	r := httptest.NewRequest("POST", "/models/test/upload", strings.NewReader("unused"))
-	r.Header.Set("Authorization", "Bearer test")
-	w := httptest.NewRecorder()
-	(API{Queue: q, Token: "test"}).Handler().ServeHTTP(w, r)
-	if w.Code != 400 || !strings.Contains(w.Body.String(), "X-Myce-Project and X-Myce-Priority are required") || strings.Contains(w.Body.String(), "default_call_priority") || strings.Contains(w.Body.String(), "entry") {
-		t.Fatal("generic route suggests unsupported defaults:", w.Body.String())
-	}
-}
-
 func TestEntryUnknownApprovalBlocksNewLoadsAndCopies(t *testing.T) {
 	q, clock, m := modelFixture(t)
 	q.models.Models[0].LocalSource = "approved"

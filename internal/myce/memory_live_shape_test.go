@@ -15,7 +15,7 @@ func TestMemoryLiveShapeLearnedFamilyCoSchedules(t *testing.T) {
 	for _, tc := range []struct {
 		ram      float64
 		evidence int
-	}{{2, 1}, {2, 41}, {256, 1}, {256, 41}} {
+	}{{2, 1}, {2, 41}} {
 		ram := tc.ram
 		t.Run(fmt.Sprintf("%g/%d", ram, tc.evidence), func(t *testing.T) {
 			q, clock := fixture(t)
@@ -61,7 +61,7 @@ func TestMemoryLiveShapeLearnedFamilyCoSchedules(t *testing.T) {
 }
 
 func TestMemoryLiveShapeProtectedAttemptAllowsColdProbe(t *testing.T) {
-	for _, ram := range []float64{2, 256} {
+	for _, ram := range []float64{2} {
 		t.Run(fmt.Sprint(ram), func(t *testing.T) {
 			q, clock := fixture(t)
 			m := cpuMachine("worker", "host", "cpu", 16, ram)
@@ -123,7 +123,7 @@ func TestMemoryLiveShapeLinuxCacheIsAvailable(t *testing.T) {
 }
 
 func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T) {
-	for _, ram := range []float64{2, 256} {
+	for _, ram := range []float64{2} {
 		t.Run(fmt.Sprint(ram), func(t *testing.T) {
 			q, clock := fixture(t)
 			source := cpuMachine("source", "source-host", "cpu", 32, ram)

@@ -284,7 +284,7 @@ func TestCommandDiscoveryRealCPUResult(t *testing.T) {
 	r := breadthRecipe("linux-64", "linux-aarch64", "osx-64", "osx-arm64")
 	s := discoverySpec()
 	s.SubmissionKey = "discovered-result"
-	s.Run.Command = []string{"sh", "-c", "printf 'discovered-cpu-ok\\n' > result.txt"}
+	s.Run.Command = []string{"sh", "-c", "cat source.txt > result.txt"}
 	s.Outputs = map[string]string{"result.txt": "results"}
 	s.Needs.MemoryGB = 0.125
 	d, err := deriveCommandDiscovery(s, map[string]EnvironmentRecipe{"cpu": r}, nil)
@@ -308,7 +308,7 @@ func TestCommandDiscoveryRealCPUResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dev.Close()
-	_, input := retentionJobInput(t, dev.Client(), "portable source fixture\n")
+	_, input := retentionJobInput(t, dev.Client(), "discovered-cpu-ok\n")
 	s.Files = map[string]FileRef{"source.txt": input}
 	// startDev returns before the worker's first inventory report. Preserve
 	// require_target by waiting for observable admission, not an arbitrary delay.
@@ -320,6 +320,10 @@ func TestCommandDiscoveryRealCPUResult(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	var report ResolveReport
+	if err := dev.Client().Call(ctx, "POST", "/api/resolve", ResolveRequest{Spec: s}, &report); err != nil || report.Portability == nil {
+		t.Fatal(report, err)
+	}
 	j, err := dev.Client().Submit(ctx, s)
 	if err != nil {
 		t.Fatal(err)

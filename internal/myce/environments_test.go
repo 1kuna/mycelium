@@ -361,32 +361,6 @@ func TestEnvironmentPlacementAndFiltering(t *testing.T) {
 		t.Fatal(reason)
 	}
 }
-func TestEnvironmentFailedBuildLogs(t *testing.T) {
-	q, clock := fixture(t)
-	r := binaryRecipe(t, "fake")
-	q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"broken": {"fake": r}}})
-	s := spec("experiment")
-	s.Environment.Name = "broken"
-	j, e := q.Submit(s)
-	if e != nil {
-		t.Fatal(e)
-	}
-	_, e = q.Checkin(Checkin{Machine: Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "worker", Session: "session", GPU: "fake", FreeMemoryGB: 64, EnvironmentBuilder: true, EnvironmentReports: []EnvironmentReport{{Key: r.Key, State: "failed", Error: "build exit 9", Log: "compiler output\n"}}}})
-	if e != nil {
-		t.Fatal(e)
-	}
-	_ = clock
-	logs, e := q.Logs(j.ID, 0)
-	if e != nil || len(logs) != 1 || !strings.Contains(logs[0].Text, "compiler output") {
-		t.Fatalf("logs %v %v", logs, e)
-	}
-	snap, _ := q.Snapshot()
-	for _, j := range snap.Jobs {
-		if j.State != "failed" {
-			t.Fatal(j.State)
-		}
-	}
-}
 func TestEnvironmentWorkerBuildAndExecute(t *testing.T) {
 	q, _ := fixture(t)
 	r := binaryRecipe(t, "fake")

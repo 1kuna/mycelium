@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"errors"
-	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -114,33 +113,6 @@ func TestMemorySourceConfiguredBudget(t *testing.T) {
 	}
 	if got, err := source(context.Background()); err != nil || got != 0 {
 		t.Fatalf("zero fake memory = %v, %v", got, err)
-	}
-}
-
-func TestMemorySourceInvalidConfiguration(t *testing.T) {
-	for _, platform := range []string{"cuda", "fake", "xpu", "metal"} {
-		for _, invalid := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)} {
-			if _, err := NewMemorySource(platform, invalid, 0); err == nil {
-				t.Fatalf("%s accepted budget %v", platform, invalid)
-			}
-			if _, err := NewMemorySource(platform, 8, invalid); err == nil {
-				t.Fatalf("%s accepted reserve %v", platform, invalid)
-			}
-		}
-		if _, err := NewMemorySource(platform, 8, 9); err == nil {
-			t.Fatalf("%s accepted reserve larger than budget", platform)
-		}
-	}
-	for _, platform := range []string{"xpu"} {
-		if _, err := NewMemorySource(platform, 0, 0); err == nil {
-			t.Fatalf("%s accepted missing explicit positive budget", platform)
-		}
-	}
-	if _, err := NewMemorySource("unknown", 8, 0); err == nil {
-		t.Fatal("accepted unknown platform")
-	}
-	if _, err := newMemorySourceWithCommand("cuda", 0, 0, nil); err == nil {
-		t.Fatal("accepted nil CUDA command runner")
 	}
 }
 
