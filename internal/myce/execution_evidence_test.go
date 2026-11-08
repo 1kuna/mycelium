@@ -165,8 +165,8 @@ func TestExecutionEvidenceMemoryRefusal(t *testing.T) {
 			if r.ExecutionCause == nil || r.ExecutionCause.Predicate != "memory_capacity" || !r.Interrupted {
 				t.Fatalf("refusal classification changed: %+v", r)
 			}
-			if phase != "after_environment" && (r.ExecutionCause.Operation != "launch" || r.ExecutionCause.Class != "resource_limit") {
-				t.Fatalf("group cause changed: %+v", r.ExecutionCause)
+			if r.ExecutionCause.Operation != "launch" || r.ExecutionCause.Class != "resource_limit" {
+				t.Fatalf("launch refusal lost typed capacity cause: %+v", r.ExecutionCause)
 			}
 			if _, err := os.Stat(main); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("main executed: %v", err)

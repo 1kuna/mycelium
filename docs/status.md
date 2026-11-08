@@ -1224,7 +1224,16 @@ Only fresh exact-attempt cgroup anonymous resident memory reduces growth,
 including managed Docker containers with per-member caps and no shared parent.
 The worker verifies exact attempt labels and local container cgroup membership,
 then sums disjoint container charges. The unified-CUDA device-growth floor
-remains: host cgroup memory cannot cancel the device reservation.
+remains: host cgroup memory cannot cancel the device reservation. Summed
+per-process device counters may include shared allocations; neither their sum
+nor RSS/host-delta estimates establish unique physical residency for credit.
+From the next release, heartbeat device snapshots freeze before reading physical
+headroom; aging them afterward never fetches newer allocations.
+Native helper memory can be reported before main starts: occupancy does not
+establish main execution. Launch takes fresh actor snapshots before its live
+physical-RAM read and rechecks exact custody afterward. Confirmed local cleanup
+removes an old actor's reservation even before its next heartbeat; stop intent
+and pending cleanup do not.
 Only this current nonreclaimable memory reduces growth;
 reclaimable cache, historical peaks and process RSS do not. Missing or five-second-old
 samples retain the full reservation, as do models and unconfirmed release custody.

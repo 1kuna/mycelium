@@ -281,6 +281,13 @@ func (m *hostHealthMonitor) record(ctx context.Context, at time.Time, r HostHeal
 		}
 		return 0
 	})
+	if observation.valid() {
+		// The sensor lane runs independently of check-ins. Freeze the measured
+		// report-path allowance into this new completion, never a cached one.
+		completed := *observation
+		completed.ValidSeconds += m.timing.delivery.upper()
+		observation = &completed
+	}
 	m.health.Probe = observation
 	m.health.observe(s)
 	if foreignDue && m.foreign != nil {
@@ -308,6 +315,22 @@ func (m *hostHealthMonitor) snapshot(disks []DiskVolume) *HostHealth {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.snapshotLocked(disks)
+}
+
+// report is called once at send time. Local admission snapshots must not train
+// report cadence or erase preparation time from the advertised sensor age.
+func (m *hostHealthMonitor) report(disks []DiskVolume) *HostHealth {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.timing.noteReport(m.clock.Now())
+	return m.snapshotLocked(disks)
+}
+
+func (m *hostHealthMonitor) snapshotLocked(disks []DiskVolume) *HostHealth {
 	m.disks = map[string]float64{}
 	for _, v := range disks {
 		if v.Error == "" && !v.Retained && (len(v.Roots) > 1 || !slices.Contains(v.Roots, "checkpoint")) {
