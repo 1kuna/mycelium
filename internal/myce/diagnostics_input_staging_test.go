@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 )
 
@@ -22,17 +25,21 @@ func (stagingTimeoutReader) Read([]byte) (int, error) {
 
 // #246: the worker can acknowledge and discard a prelaunch failure while the
 // queue must retain the safe, exact-attempt diagnosis across reopen.
-func TestInputStagingTimeoutSurvivesAcknowledgementAndReopen(t *testing.T) {
+func TestInputStagingOutageSurvivesAcknowledgementAndReopen(t *testing.T) {
 	h := &machineHarness{controls: map[string]AttemptDirective{}}
 	j := harnessJob(t, ID(), "", "touch {work}/launched")
 	j.Spec.Files = FileManifest{"input": {SHA256: strings.Repeat("a", 64), SizeBytes: 1}}
 	h.jobs = []Job{j}
 	w := harnessWorker(t, h)
 	marker := filepath.Join(w.StateDir, "job-files", j.ID, "1", "launched")
+	var gets atomic.Int32
 	w.Client.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
 		if strings.HasPrefix(r.URL.Path, "/api/files/blobs/") {
 			if r.Method == "HEAD" {
 				return &http.Response{StatusCode: 200, ContentLength: 1, Header: http.Header{"Etag": {`"` + strings.Repeat("a", 64) + `"`}}, Body: io.NopCloser(strings.NewReader(""))}, nil
+			}
+			if gets.Add(1) > 1 {
+				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 			}
 			return &http.Response{StatusCode: 200, ContentLength: 1, Header: http.Header{"Etag": {`"` + strings.Repeat("a", 64) + `"`}}, Body: io.NopCloser(stagingTimeoutReader{})}, nil
 		}
@@ -62,7 +69,7 @@ func TestInputStagingTimeoutSurvivesAcknowledgementAndReopen(t *testing.T) {
 		}
 	}
 	h.mu.Unlock()
-	if r.ExecutionCause == nil || r.ExecutionCause.Operation != "input_staging" || r.ExecutionCause.Class != "timeout" || r.ExecutionCause.ExitCode != nil || r.Success || r.ReleasePending {
+	if r.ExecutionCause == nil || r.ExecutionCause.Operation != "input_staging" || r.ExecutionCause.Staging == nil || r.ExecutionCause.Staging.Error != "storage_unreachable" || r.ExecutionCause.ExitCode != nil || r.Success || r.ReleasePending || gets.Load() != 2 {
 		t.Fatalf("lost prelaunch diagnosis: %+v", r)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -96,9 +103,9 @@ func TestInputStagingTimeoutSurvivesAcknowledgementAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// #720: a prelaunch transport timeout is infrastructure, so the same
-	// retained diagnosis now belongs to a queued retry rather than a bare failure.
-	if got.Attempt != j.Attempt || got.State != "queued" || len(got.AttemptHistory) != 1 || !strings.Contains(got.AttemptHistory[0].Reason, "operation=cache_download error=timeout") || got.StartedAt != nil || got.ExecutionCause == nil || got.ExecutionCause.Operation != "input_staging" || got.ExecutionCause.Class != "timeout" || got.ExecutionCause.ExitCode != nil || got.ExecutionCause.Staging == nil {
+	// #1045: the idle stall resumes within the attempt; a subsequent completed
+	// dial failure still ends it as infrastructure and retains its exact cause.
+	if got.Attempt != j.Attempt || got.State != "queued" || got.Losses != 1 || len(got.AttemptHistory) != 1 || !strings.Contains(got.AttemptHistory[0].Reason, "operation=cache_download error=storage_unreachable") || got.StartedAt != nil || got.ExecutionCause == nil || got.ExecutionCause.Operation != "input_staging" || got.ExecutionCause.ExitCode != nil || got.ExecutionCause.Staging == nil {
 		t.Fatalf("GET lost exact prelaunch diagnosis: %+v", got)
 	}
 	data, _ := json.Marshal(got)

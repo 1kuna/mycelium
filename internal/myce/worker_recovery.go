@@ -79,6 +79,8 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
+	inputTransferRecovering atomic.Bool // Written by detached staging; read by its attempt actor.
+
 	liveEvidence          *ExecutionEvidence // Monotonic only while this exact attempt is observed.
 	liveEvidenceKey       attemptKey
 	storageObserver       *storageObserver // Exact attempt; shared with its publication callbacks.

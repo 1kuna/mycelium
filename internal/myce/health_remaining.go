@@ -61,7 +61,8 @@ func (q *Queue) detectRemainingHealth() {
 			observe(key, !intentional && r.State == "failed" && environmentFailureKind(r) == "deterministic", HealthAlert{Kind: "environment_recipe_failed", Host: hostID(m), Reason: "deterministic_recipe_failure"})
 		}
 		// Actual copy/staging refusals, never cache occupancy or mere coldness.
-		observe("cache/"+m.ID, !intentional && (m.CacheError != "" || m.FileTransferError != "" || slices.ContainsFunc(m.CopyReports, func(r CopyReport) bool { return r.State == "failed" })), HealthAlert{Kind: "staging_cache_refused", Host: hostID(m), Reason: "worker_transfer_refused"})
+		transferRefused := m.FileTransferError != "" && m.FileTransferError != inputTransferRecoveringReason
+		observe("cache/"+m.ID, !intentional && (m.CacheError != "" || transferRefused || slices.ContainsFunc(m.CopyReports, func(r CopyReport) bool { return r.State == "failed" })), HealthAlert{Kind: "staging_cache_refused", Host: hostID(m), Reason: "worker_transfer_refused"})
 	}
 	for _, j := range q.liveJobs() {
 		if terminal(j.State) || cancelled(j) {
