@@ -51,8 +51,10 @@ ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
 shared-page credit. From the next release (#1048), bounded learned/exploratory
 estimates retain their reservation and measured growth when telemetry is stale,
 without resident credit; `host_memory_charge` preserves exact-attempt growth
-across missing/smaller reports and queue restart. Host sample validity follows
-observed delivery cadence. Cold probes still protect the execution ceiling
+across missing/smaller reports, queue restart and unconfirmed release custody.
+Never-started learned allocations also keep the bounded reservation. Host sample
+validity follows delivery cadence of distinct negotiated observations; cached
+or unidentified repeated reports cannot renew resident credit. Cold probes still protect the execution ceiling
 without fresh complete evidence.
 `memory_envelope.enforcement` names the acknowledged behavior; older queues or
 workers retain the previous estimate-sized ceiling. From the next release, cold

@@ -394,6 +394,9 @@ func hostMemoryAvailableFits(m *Machine, gpu, host, available float64) bool {
 // CurrentHostMemory credits only nonreclaimable, uniquely charged cgroup RAM.
 // Peaks and RSS (shared pages on macOS) cannot safely reduce growth room.
 type CurrentHostMemory struct {
+	// Stable worker-local observation identity, not a queue-clock timestamp.
+	// Negotiated independently; cached/delayed deliveries cannot renew credit.
+	SampleID int64 `json:"sample_id,omitempty"`
 	// True only after two timed samples. An older worker's zero growth is
 	// unknown and cannot release a cold probe's physical-headroom reservation.
 	GrowthObserved bool `json:"growth_observed,omitempty"`
@@ -430,6 +433,9 @@ func (s *CurrentHostMemory) aged(now time.Time) *CurrentHostMemory {
 		return nil
 	}
 	sample := *s
+	if !sample.sampledAt.IsZero() {
+		sample.SampleID = sample.sampledAt.UnixNano()
+	}
 	if s.deviceSample != nil {
 		if device := s.deviceSample.Load(); device != nil {
 			gb := device.gb
@@ -453,6 +459,8 @@ const deviceMemorySamplePeriod = 5 * time.Second
 const deviceMemorySampleFreshFor = 2 * deviceMemorySamplePeriod
 
 type hostMemorySample struct {
+	id                       int64
+	receivedAt               time.Time
 	period                   time.Duration
 	retainedGB               float64
 	peakGB                   float64
@@ -486,11 +494,15 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 		// Native helpers acquire physical custody before main Starts. Their
 		// exact-attempt memory is occupancy evidence, never main-start evidence.
 		if sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
-			samples[key] = hostMemorySample{period: old.period, peakGB: old.peakGB, retainedGB: max(old.retainedGB, old.hostForecast(now))}
+			samples[key] = hostMemorySample{id: old.id, at: old.at, receivedAt: old.receivedAt, period: old.period, peakGB: old.peakGB, retainedGB: max(old.retainedGB, old.hostForecast(now))}
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) {
 			s.gb, s.at = sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds*float64(time.Second)))
+			s.id = sample.SampleID
+			if s.id == 0 && !sample.sampledAt.IsZero() {
+				s.id = sample.sampledAt.UnixNano()
+			}
 			s.growthGB = sample.GrowthGB
 			if sample.FootprintGB != nil && validMemoryValue(*sample.FootprintGB) {
 				// Helper occupancy can reduce pending physical growth, but cannot
@@ -505,9 +517,17 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 			s.source, s.exclusive, s.deviceRateGB = sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB
 		}
 		s.peakGB = max(old.peakGB, s.gb, s.footprintGB)
-		s.period = old.period
-		if !old.at.IsZero() && s.at.After(old.at) {
-			s.period = max(s.period, s.at.Sub(old.at))
+		s.period, s.receivedAt = old.period, now
+		if !old.at.IsZero() {
+			if s.id > 0 && old.id > 0 && s.id > old.id {
+				// Learn delivery cadence only from proven distinct observations.
+				s.period = max(s.period, now.Sub(old.receivedAt))
+			} else {
+				// Unknown identity, cached or out-of-order: retain the original
+				// expiry and credit, while still retaining larger usage below.
+				s.at, s.receivedAt, s.id = old.at, old.receivedAt, old.id
+				s.gb = min(s.gb, old.gb)
+			}
 		}
 		// Retain forecasts before replacing even a missing, flat or aged sample.
 		// This is reservation evidence, never resident credit.
@@ -536,7 +556,7 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 		forecast := max(sample.retainedGB, sample.hostForecast(now)) + exploratoryDriftMarginGB(m)
 		charge = max(charge, retainedHostCharge(j), sample.peakGB, sample.gb, sample.footprintGB, min(adaptiveCeiling, forecast))
 	}
-	if !sample.at.IsZero() && !now.Before(sample.at) && now.Sub(sample.at) < sample.freshFor() {
+	if !bounded && !sample.at.IsZero() && !now.Before(sample.at) && now.Sub(sample.at) < sample.freshFor() {
 		charge = max(charge, sample.hostForecast(now))
 	}
 	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, charge, sample, now)

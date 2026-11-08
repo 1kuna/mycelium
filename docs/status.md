@@ -1239,7 +1239,10 @@ reclaimable cache, historical peaks and process RSS do not. Missing or expired
 samples retain the full reservation, as do models and unconfirmed release custody.
 From the next release, host sample validity follows twice the longest observed
 exact-attempt sample delivery interval (one missed delivery); the five-second
-legacy window applies until cadence is measured. Cached samples do not renew it.
+legacy window applies until cadence is measured. Only distinct negotiated
+`sample_id` observations train cadence; cached, unidentified repeated and
+out-of-order deliveries keep the original expiry. Missing samples grant no
+resident credit.
 Queue restarts discard current-use credit. macOS uses the conservative fallback
 because its process-group RSS includes shared pages and is not a safe credit.
 Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
@@ -2233,7 +2236,9 @@ known-need floor and use the same physical/allowance execution ceiling.
 From the next release (#1048), bounded learned/exploratory estimates keep the
 resolved reservation plus measured growth and drift when telemetry is stale,
 missing or stopping. Exact-attempt `host_memory_charge` retains grown charges
-through smaller/missing reports and queue restarts; observed peaks remain floors.
+through smaller/missing reports, queue restarts and unconfirmed release custody;
+observed peaks remain floors. A learned allocation that has not acknowledged
+`Started` also keeps its bounded reservation without requiring telemetry.
 Stale data grants no resident credit. Forecasts cannot exceed containment, but
 actual observations and retained reservations are never lowered to that bound.
 Cold probes still retain their complete ceiling without fresh complete evidence.

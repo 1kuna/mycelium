@@ -97,10 +97,11 @@ func TestStaleLearnedHostMemoryCharge(t *testing.T) {
 func TestHostMemorySampleCadence(t *testing.T) {
 	_, clock := fixture(t)
 	footprint := 2.0
-	r := AttemptReport{Execution: Execution{ID: "job", Attempt: 1}, Session: "session", Started: true, CurrentHostMemory: &CurrentHostMemory{FootprintGB: &footprint, NonreclaimableGB: 1, GrowthObserved: true}}
+	r := AttemptReport{Execution: Execution{ID: "job", Attempt: 1}, Session: "session", Started: true, CurrentHostMemory: &CurrentHostMemory{SampleID: 1, FootprintGB: &footprint, NonreclaimableGB: 1, GrowthObserved: true}}
 	key := attemptKey{"job", 1, "session"}
 	samples := currentHostMemorySamples([]AttemptReport{r}, clock.Now())
 	clock.Advance(20 * time.Second)
+	r.CurrentHostMemory.SampleID = 2
 	samples = updateHostMemorySamples([]AttemptReport{r}, clock.Now(), samples)
 	clock.Advance(30 * time.Second)
 	if got := remainingHostGrowth(3, samples[key], clock.Now()); got != 2 {
@@ -144,6 +145,7 @@ func TestGrownHostMemoryChargeSurvivesMissingTelemetry(t *testing.T) {
 func TestHostMemoryChargeCheckinPersistsAcrossRestart(t *testing.T) {
 	q, clock := fixture(t)
 	m := cpuMachine("worker", "host", "cpu", 8, 16)
+	m.ExtensionFingerprint = "memory-v1"
 	m.HostMemoryBudgetGB = 12
 	m.CapabilityProfile.SystemMemoryBytes = 16 << 30
 	m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
@@ -152,7 +154,7 @@ func TestHostMemoryChargeCheckinPersistsAcrossRestart(t *testing.T) {
 	runMemory(t, q, clock, m, spec, 2, nil)
 	pending := submit(t, q, spec)
 	assigned := check(t, q, m, nil).Job
-	if assigned == nil || assigned.ID != pending.ID || adaptiveMemoryCeilingGB(assigned, &m) == 0 {
+	if assigned == nil || assigned.ID != pending.ID || adaptiveMemoryCeilingGB(assigned, &m) == 0 || assigned.MemoryEnvelope.Basis != "learned" || assigned.MemoryEnvelope.ProbeFloorGB > 0 {
 		t.Fatal("learned guard not assigned")
 	}
 	footprint := 6.0
