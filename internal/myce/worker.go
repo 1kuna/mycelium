@@ -416,8 +416,11 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (startedProcess *process, startErr error) {
-	ctx, cancel := context.WithCancel(ctx)
-	w.launchCtx, w.cancelStart = ctx, cancel
+	launchCtx, cancel := context.WithCancel(ctx)
+	w.launchCtx, w.cancelStart = launchCtx, cancel
+	// Input/checkpoint copies outlive a pending start observation. Their ctx
+	// remains the preparation owner's; only this call's handshakes are retired
+	// when it returns without a process.
 	defer func() {
 		if startedProcess == nil {
 			cancel()
