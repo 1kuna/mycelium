@@ -466,7 +466,11 @@ checks. See [queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/
 
 On negotiated `host-probe-v1` workers, owner/pressure status includes measured
 probe period, cost and frozen validity. Read age against that observation's
-validity; a successful check-in cannot renew a failed probe. Owner-latency holds
+validity; a successful check-in cannot renew a failed probe. From the host-health
+delivery correction (#1025), new health observations include the same learned
+report-gap allowance as shared pressure. Stopped or failed sensors still lose
+admission while worker contact continues. An unprecedented delay can exceed the
+learned prediction; read the frozen validity and age together. Owner-latency holds
 now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
