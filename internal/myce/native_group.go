@@ -28,6 +28,7 @@ const nativeBindAttempts = 3 // Whole-group preparation attempts, including the 
 type nativeMember struct {
 	memberOutcome
 	exitObservation *nativeExitObservation
+	execReleased    bool   // guarded by p.mu; true only after the payload gate opened
 	Name            string `json:"name"`
 	PID             int    `json:"pid,omitempty"`
 	Birth           string `json:"birth,omitempty"`
@@ -279,7 +280,7 @@ func (g *nativeGroup) recordInfrastructureLocked(kind, member, port string, caus
 		group = g.supervisor.Process.Pid
 	}
 	prior := g.p.outcome.Infrastructure
-	g.p.outcome.Infrastructure = append(append([]infrastructureFact(nil), prior...), infrastructureFact{Kind: kind, At: time.Now().UTC(), Member: member, Port: port, Group: group, Predicate: launchFailurePredicate(kind, cause)})
+	g.p.outcome.Infrastructure = append(append([]infrastructureFact(nil), prior...), infrastructureFact{Kind: kind, At: time.Now().UTC(), Member: member, Port: port, Group: group, Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, g.p.job)})
 	if err := g.saveLocked(); err != nil {
 		g.p.outcome.Infrastructure = prior
 		return errors.Join(cause, err)
@@ -369,9 +370,13 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		}()
 		p.waitStopGrace(w.Clock, g.supervisor.Process.Pid, g.supervisor.Process.Pid)
 		p.mu.Lock()
+		independentFailure := g.independentMemberFailureLocked()
 		forced, polite := p.killed, p.polite
 		stage = stage || g.stageFailure
 		facts := g.outcomeLocked(runErr, stage)
+		if independentFailure && errors.Is(runErr, errWorkerMemory) {
+			facts.Infrastructure = slices.DeleteFunc(facts.Infrastructure, func(f infrastructureFact) bool { return f.Kind == launchRefused && f.Predicate == "memory_capacity" })
+		}
 		priorityStop := p.priorityStop
 		p.mu.Unlock()
 		groupErr := g.cleanupProcesses(writer, false)
@@ -397,7 +402,9 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		if runErr != nil {
 			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
-			if stage && r.ExecutionCause.Class == "io_error" {
+			if errors.Is(runErr, errWorkerMemory) && !independentFailure {
+				r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit"}
+			} else if stage && r.ExecutionCause.Class == "io_error" {
 				r.ExecutionCause.Class = "stage_failed"
 			}
 		}
@@ -796,6 +803,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if err = g.releaseMember(m, writer); err != nil {
 		return err
 	}
+	m.execReleased = true
 	if m.Name == "main" {
 		g.main = m
 	}
@@ -818,20 +826,34 @@ func (g *nativeGroup) memberFailure(except ...*nativeMember) error {
 }
 
 func (g *nativeGroup) independentMemberFailure() bool {
+	g.p.mu.Lock()
+	defer g.p.mu.Unlock()
+	return g.independentMemberFailureLocked()
+}
+
+// Observe the same recorded exit snapshot as outcomeLocked. A waiter publishes
+// Exit before closing done; that channel is cleanup completion, not outcome proof.
+func (g *nativeGroup) independentMemberFailureLocked() bool {
+	// Control and persistence can hold p.mu after Wait observes an exit. Import
+	// the existing observation arbiter before deriving either outcome decision,
+	// using the same p.mu -> observation.mu order as signalLockedUsing.
 	for _, m := range g.members {
-		if m.Name == "main" || m.done == nil {
+		if m.exitObservation == nil {
 			continue
 		}
-		select {
-		case <-m.done:
-			g.p.mu.Lock()
-			r := classifyAttemptOutcome(Result{}, attemptCause{memberOutcome: m.memberOutcome})
-			g.p.mu.Unlock()
-			if r.Interrupted {
-				continue
-			}
+		m.exitObservation.mu.Lock()
+		if m.exitObservation.exit != nil {
+			m.Exit = m.exitObservation.exit
+		}
+		m.exitObservation.mu.Unlock()
+	}
+	for _, m := range g.members {
+		if m.Name == "main" || !m.execReleased || m.Exit == nil {
+			continue
+		}
+		r := classifyAttemptOutcome(Result{}, attemptCause{memberOutcome: m.memberOutcome})
+		if !r.Interrupted {
 			return true
-		default:
 		}
 	}
 	return false

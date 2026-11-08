@@ -222,7 +222,11 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 			}
 			switch fact.Kind {
 			case launchRefused, launchFailed, environmentFailed:
-				result.ExecutionCause = safeRuntimeCause(&RuntimeCause{Operation: "launch", Class: fact.Kind, Predicate: fact.Predicate, Admission: fact.Admission, PrelaunchRefused: fact.PrelaunchRefused})
+				class := fact.Kind
+				if fact.Kind == launchRefused && fact.Predicate == "memory_capacity" {
+					class = "resource_limit"
+				}
+				result.ExecutionCause = safeRuntimeCause(&RuntimeCause{Operation: "launch", Class: class, Predicate: fact.Predicate, Admission: fact.Admission, PrelaunchRefused: fact.PrelaunchRefused})
 			}
 			if result.ExecutionCause != nil {
 				break
