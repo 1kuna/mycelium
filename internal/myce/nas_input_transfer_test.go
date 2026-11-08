@@ -201,3 +201,116 @@ func TestNASInputReclaimsOwnCrashedReservation(t *testing.T) {
 		t.Fatal("owned reservation leaked", err)
 	}
 }
+
+func TestNASInputCompletedArchiveNeedsNoTransferSpace(t *testing.T) {
+	_, clock := fixture(t)
+	nas, root := t.TempDir(), t.TempDir()
+	t.Cleanup(func() {
+		if err := removeSharedEntry(root); err != nil {
+			t.Error(err)
+		}
+	})
+	input := sharedArchive(t, nas)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: root, Limit: 1 << 20, Clock: clock}, beforePublish: cancel}
+	if _, _, err := cache.Acquire(ctx, input, nas); !errors.Is(err, context.Canceled) {
+		t.Fatal("late cancellation published", err)
+	}
+	<-onlySharedStaging(t, cache).done
+	if err := os.Remove(filepath.Join(nas, input.NAS)); err != nil {
+		t.Fatal(err)
+	}
+	resumed := &SharedInputCache{
+		cache: EnvironmentCache{Root: root, Limit: 1, Clock: clock}, automatic: true,
+		diskProbe: func(string) (DiskReading, error) {
+			return DiskReading{TotalBytes: 1 << 30, FreeBytes: diskFreeFloor(1 << 30)}, nil
+		},
+		resolveNAS: func(string, string) (string, error) {
+			t.Error("completed archive touched NAS")
+			return "", os.ErrNotExist
+		},
+	}
+	path, release, err := resumed.Acquire(context.Background(), input, nas)
+	if err != nil {
+		t.Fatal("completed archive charged transfer space", err)
+	}
+	defer release()
+	if b, err := os.ReadFile(filepath.Join(path, "bin/run")); err != nil || string(b) != "hello" {
+		t.Fatalf("archive payload: %q %v", b, err)
+	}
+}
+
+func TestNASInputTornCompletionRecordRecovers(t *testing.T) {
+	for _, archive := range []bool{false, true} {
+		t.Run(map[bool]string{false: "file", true: "archive"}[archive], func(t *testing.T) {
+			_, clock := fixture(t)
+			nas, root := t.TempDir(), t.TempDir()
+			t.Cleanup(func() {
+				if err := removeSharedEntry(root); err != nil {
+					t.Error(err)
+				}
+			})
+			ref := sharedFixtureFile(t, nas, "input", "recover truncated completion metadata")
+			input := SharedInput{NAS: "input", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
+			if archive {
+				input = sharedArchive(t, nas)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cache := &SharedInputCache{cache: EnvironmentCache{Root: root, Limit: 1 << 20, Clock: clock}, beforePublish: cancel}
+			if _, _, err := cache.Acquire(ctx, input, nas); !errors.Is(err, context.Canceled) {
+				t.Fatal("late cancellation published", err)
+			}
+			<-onlySharedStaging(t, cache).done
+			stage := filepath.Join(root, identityHash("input-stage:"+input.key())+".partial")
+			// Model a pre-atomic writer's torn record. An archive interrupted before
+			// completion publication must retain the verified compressed source.
+			if archive {
+				b, err := os.ReadFile(filepath.Join(nas, input.NAS))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(stage, "archive"), b, 0400); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(filepath.Join(nas, input.NAS)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Remove(filepath.Join(stage, "ready.json")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(stage, "ready.json"), []byte(`{"files":`), 0400); err != nil {
+				t.Fatal(err)
+			}
+			var transferred int
+			resumed := &SharedInputCache{cache: EnvironmentCache{Root: root, Limit: 1 << 20, Clock: clock}, readNAS: func(f *os.File, b []byte) (int, error) {
+				n, err := f.Read(b)
+				transferred += n
+				return n, err
+			}}
+			if archive {
+				resumed.resolveNAS = func(string, string) (string, error) {
+					t.Error("retained verified archive touched NAS")
+					return "", os.ErrNotExist
+				}
+			}
+			path, release, err := resumed.Acquire(context.Background(), input, nas)
+			if err != nil {
+				t.Fatal("torn record wedged resume", err)
+			}
+			defer release()
+			if transferred != 0 {
+				t.Fatal("retransferred verified local bytes", transferred)
+			}
+			if archive {
+				path = filepath.Join(path, "bin/run")
+				ref = FileRef{SizeBytes: 5, SHA256: digestBytes([]byte("hello"))}
+			}
+			if err := verifyFile(context.Background(), path, ref); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
