@@ -231,6 +231,12 @@ func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
 	return (j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID])) && q.yieldPlacementAllows(j, m) && (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.placementPolicyAllowed(j, m, resident)
 }
 
+// Started preparation retains demand while contact is suspect. Resource,
+// reservation and policy fences still apply; this cannot grant a new assignment.
+func (q *Queue) placementDemandAllowed(j *Job, m *Machine) bool {
+	return q.yieldPlacementAllows(j, m) && (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.reservationAllows(j, m) && q.placementDemandPolicy(j, m, false)
+}
+
 // Recovery retains existing execution custody. Admission-time disk estimates
 // apply only to new work: its writes may already be reflected in observed free.
 func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {

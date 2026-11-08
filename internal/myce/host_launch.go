@@ -164,9 +164,15 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		}
 		if j := q.s.Jobs[p.Demand]; p.Kind == "environment" && j != nil && j.CommandDiscovery != nil {
 			target := allocationMachine(m, []string{p.Device})
+			var allowed bool
+			if p.Started {
+				allowed = q.placementDemandAllowed(j, target)
+			} else {
+				allowed = q.placementAllowed(j, target)
+			}
 			// A delayed offer must retain live demand for this exact frozen
 			// target/recipe, even before another heartbeat withdraws it.
-			if j.State != "queued" || cancelled(j) || j.Pause != nil || !q.placementAllowed(j, target) || !commandDiscoveryAllows(j, target) || !slices.ContainsFunc(commandEnvironmentRecipes(j, target), func(r EnvironmentRecipe) bool { return r.Key == p.Key }) {
+			if j.State != "queued" || cancelled(j) || j.Pause != nil || !allowed || !commandDiscoveryAllows(j, target) || !slices.ContainsFunc(commandEnvironmentRecipes(j, target), func(r EnvironmentRecipe) bool { return r.Key == p.Key }) {
 				reject("discovery_demand")
 				return nil
 			}
