@@ -4,26 +4,25 @@ const memoryEvidenceRecovering = "memory_evidence_recovering"
 
 const measuredOOMRecoverySource = "exploratory OOM recovery from measured demand"
 
-func measuredOOMRecovery(j *Job, m *Machine) float64 {
+func measuredOOMRecovery(j *Job) float64 {
 	bound := minimumHostMemoryGB
 	if f := j.MemoryOOMFloor; f != nil {
 		bound = max(bound, f.HostMemoryGB)
 	}
 	for _, facts := range j.MemoryAttempts {
-		if facts.LearningReason != "oom" || facts.MemoryPeak == nil {
+		if facts.LearningReason != "oom" || facts.MemoryPeak == nil || facts.MemoryPeak.HostGB == nil || !validRate(*facts.MemoryPeak.HostGB) {
 			continue
 		}
 		peak := hostMemoryPeakGB(facts.MemoryPeak)
 		previous := 0.0
 		if e := facts.MemoryEnvelope; e != nil {
 			previous = e.HostGB
-			// On unified hosts HostGB includes the independent device share.
-			if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
-				previous = max(0, previous-e.DeviceGB)
-			}
 		}
 		margin := max(memoryGrowthGB(facts.MemoryPeak), peak-previous, minimumHostMemoryGB)
-		bound = max(bound, max(peak, previous)+margin)
+		// The durable floor already retains the previous host demand. The
+		// historical envelope is a physical total, potentially including a
+		// device share; use it only to measure observed ceiling overshoot.
+		bound = max(bound, peak+margin)
 	}
 	return bound
 }

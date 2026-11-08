@@ -125,8 +125,8 @@ than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.
 From the next release, a new native extension version can start from accepted
 memory of its nearest prior version on the same platform and native identity.
-Checks also reuse workload peaks when they launch the same main command or
-retained model helpers with matching assets and environments. Measured variation
+Checks also reuse workload peaks when both versions and the check launch the
+same main command, assets and environment. Measured variation
 and growth supply headroom; a fresh accepted run replaces this prior. After a
 host OOM, native CPU/check recovery grows from measured demand and overshoot,
 independently of current free RAM. Capacity refusals retain the same logical job

@@ -335,7 +335,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		case !copy.Spec.Run.Docker && j.OOMRetries > 0 && (n.cpuOnly() || j.Spec.ExtensionCheck != nil):
 			// Recovery estimates demand. Free RAM is an admission constraint,
 			// never the next attempt's predicted demand.
-			n.HostMemoryGB = measuredOOMRecovery(j, m)
+			n.HostMemoryGB = measuredOOMRecovery(j)
 			if estimate.host != nil {
 				n.HostMemoryGB = max(n.HostMemoryGB, estimate.measuredHostGB, hostMemoryPeakGB(estimate.host)*estimate.hostFactor)
 			}

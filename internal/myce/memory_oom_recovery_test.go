@@ -95,3 +95,39 @@ func TestRecoveryRefusalKeepsSourceAndLearnsDeficit(t *testing.T) {
 		})
 	}
 }
+
+func TestOOMRecoveryWithEventOnlyPeak(t *testing.T) {
+	q, clock, m, s := coldProbeAdmissionFixture(t, true)
+	submit(t, q, s)
+	run := assignedJob(machineCheck(t, q, m))
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	r := result(run, false)
+	r.OutOfMemory = true
+	r.MemoryPeak = &AttemptMemoryPeak{Events: &MemoryEventCounts{OOM: 1}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	pending := q.s.Jobs[run.ID]
+	candidate := q.memoryCandidate(pending, q.s.Machines[m.ID])
+	if candidate.Spec.Needs.HostMemoryGB < pending.MemoryOOMFloor.HostMemoryGB {
+		t.Fatal("incomplete telemetry erased the durable OOM floor")
+	}
+}
+
+func TestOOMRecoveryDoesNotTransferHistoricalDeviceChargeToHost(t *testing.T) {
+	q, _, m, s := coldProbeAdmissionFixture(t, false)
+	queued := submit(t, q, s)
+	peak, growth := 4.0, .25
+	queued.OOMRetries = 1
+	queued.MemoryOOMFloor = &SizeHint{MemoryGB: 6, HostMemoryGB: 4 + minimumHostMemoryGB}
+	queued.MemoryAttempts = []AttemptMemoryFacts{{Attempt: 1, LearningReason: "oom", MemoryPeak: &AttemptMemoryPeak{HostGB: &peak, GrowthGB: &growth}, MemoryEnvelope: &JobMemoryEnvelope{HostGB: 10, DeviceGB: 6}}}
+	target := m.Devices[0].machine(m)
+	target.HostMemoryBudgetGB, target.EffectiveHostMemoryBudgetGB, target.FreeHostMemoryGB = 8, 8, 8
+	candidate := q.memoryCandidate(queued, &target)
+	if candidate.Spec.Needs.HostMemoryGB != 4.25 || !hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
+		t.Fatalf("historical unified vector inflated discrete host demand: %+v", candidate.MemoryEnvelope)
+	}
+}

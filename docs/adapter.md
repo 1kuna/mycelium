@@ -823,8 +823,9 @@ Use the usual pinned environments and native baselines. The standard
 uses earlier accepted checks of the same variant and work. From the next release,
 a new version also starts from its nearest prior version's accepted memory on
 the same platform and native identity. Checks include prior workload peaks when
-they launch the same main command or retained model helpers with matching assets
-and environments. Separate reference-only checks keep their own evidence.
+both versions and the check launch the same main command, assets and environment.
+Shared incidental helpers alone do not prove workload comparability. Separate
+reference-only checks keep their own evidence.
 Measured peak variation and sampling growth supply headroom. Accepted evidence
 of the new version replaces the prior; it never grants qualification. Without
 usable evidence, the first run reserves a measured physical host-memory opportunity
