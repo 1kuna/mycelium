@@ -7,8 +7,8 @@ import (
 )
 
 // Replay the incident's retained accepted range with a genuine payload failure.
-// Without observed overshoot or growth there is no finite upper estimate; the
-// physical probe and retained lower bound remain authoritative.
+// Without observed overshoot or growth, recovery retains the measured prior
+// and advances its lower bound rather than claiming all physical capacity.
 func TestMemoryEscalationMeasuredIncidentRange(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	s.Needs.Memory = "auto"
@@ -37,7 +37,7 @@ func TestMemoryEscalationMeasuredIncidentRange(t *testing.T) {
 		target := *q.s.Machines[m.ID]
 		target.EffectiveHostMemoryBudgetGB = allowance
 		e := q.memoryCandidate(&candidate, &target).MemoryEnvelope
-		if math.Abs(e.HostGB-(32-minimumHostMemoryGB)) > 1e-9 || e.Basis != "exploratory" || e.Evidence != 0 {
+		if math.Abs(e.HostGB-(peak+2*minimumHostMemoryGB)) > 1e-9 || e.Basis != "exploratory" || e.Evidence != 0 {
 			t.Fatalf("allowance %.0f changed measured bound: %+v", allowance, e)
 		}
 	}

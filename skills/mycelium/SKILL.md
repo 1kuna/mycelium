@@ -48,7 +48,14 @@ CPU `memory: auto` jobs can grow their charge from fresh measurements while the 
 pressure, exhausted measured headroom, the configured host allowance and
 explicit limits still stop growth. Linux retains a physical/allowance kernel
 ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
-shared-page credit. Missing/stale telemetry protects the execution ceiling.
+shared-page credit. From the next release (#1048), bounded learned/exploratory
+estimates retain their reservation and measured growth when telemetry is stale,
+without resident credit; `host_memory_charge` preserves exact-attempt growth
+across missing/smaller reports, queue restart and unconfirmed release custody.
+Never-started learned allocations also keep the bounded reservation. Host sample
+validity follows delivery cadence of distinct negotiated observations; cached
+or unidentified repeated reports cannot renew resident credit. Cold probes still protect the execution ceiling
+without fresh complete evidence.
 `memory_envelope.enforcement` names the acknowledged behavior; older queues or
 workers retain the previous estimate-sized ceiling. From the next release, cold
 CPU probes also use the adaptive guard, so a small residual admission envelope
@@ -64,8 +71,15 @@ refusals wait on the same job and submission key without spending infrastructure
 retries or losses, including after a helper ran or Started was authorized. Keep
 that key: Mycelium uses ordinary lower-tier preemption and exact release before
 reuse; equal-tier production waits. Unchanged capacity evidence is not re-offered.
-Generated startup windows pause for capacity; explicit `start_by`, `start_window`,
-give-up deadlines and cancellation still apply. `execution_evidence` describes
+From the next release, every relative startup window pauses for qualified memory,
+device or host-capacity waiting, including explicit `start_window: 600s` and the
+omitted `150s` default. Assignment restores the full window for preparation;
+status shows the start budget and `paused for capacity` while waiting. This also
+protects recovery windows and typed uncharged refusals after Started authorization.
+An assigned start without an accepted startup acknowledgement, stuck preparation
+or an unreachable worker still consumes the window. Absolute `start_by`,
+`give_up_at`, `deadline` and cancellation keep their existing semantics.
+`execution_evidence` describes
 component boundaries separately from cleanup; a helper that ran is never proof
 that the whole attempt stayed unlaunched.
 
@@ -123,6 +137,14 @@ supporting native guards use physical/allowance containment. Missing/stale measu
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.
+From the next release, a new native extension version can start from accepted
+memory of its nearest prior version on the same platform and native identity.
+Checks also reuse workload peaks when both versions and the check launch the
+same main command, assets and environment. Measured variation
+and growth supply headroom; a fresh accepted run replaces this prior. After a
+host OOM, native CPU/check recovery grows from measured demand and overshoot,
+independently of current free RAM. Capacity refusals retain the same logical job
+under the queue's launch-capacity waiting contract; no resubmission is needed.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
@@ -270,7 +292,11 @@ jobs. **Available from the next release:** status and inspection JSON include
 capture time. Interpret worker freshness and diagnostics at that time, allowing
 for the response age. Inspection and filtered/full status take a fresh capture;
 default status learns its cache lease from local capture/read/write costs, with immediate
-terminal/release invalidation.
+terminal/release invalidation. From the next release (#1052), status and job reads
+use immutable committed inputs, with bulk projection outside the live queue
+lock. Response fields, full-history opt-in, prefix lookup, key echo and exact
+release evidence retain their existing contracts. Use the batched wait for
+completion; a full-history read still transfers all requested retained detail.
 
 From the next release, mixed CPU/RAM waits name occupied cores on eligible
 hosts alongside the other hosts' RAM shortages. Reserved cores are admission
@@ -335,6 +361,12 @@ The static allowance still protects the envelope and observed over-use;
 missing/stale telemetry, unified-CUDA device floors and release custody remain
 binding. An aggregate refusal alone cannot identify a sibling's contribution or
 establish safe concurrency. See [live headroom](../../docs/status.md#live-headroom-and-reservations).
+
+From the declared-CPU containment correction (#1064), an enforced native cgroup
+attempt's live forecast cannot inflate its charge beyond its declaration plus
+ceiling slack. Actual larger observations remain protected; missing/stale samples
+grant no resident credit. Auto estimates, sampled RSS and accelerator accounting
+keep their separate rules.
 
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
@@ -507,3 +539,18 @@ From the next release, hardware discovery backs off independently of changing
 device usage. Discrete XPU memory/activity uses a separate shared host sample;
 missing, ambiguous or stale counters remain unknown and withhold
 telemetry-dependent sharing. A heartbeat never refreshes a cached sample's age.
+
+## Reconciled launch handshakes (next release, #1028)
+
+A slow start, launch or native-custody reply retains the same gated attempt and
+custody without spending a loss or retry. Keep the job ID and submission key.
+Workers reconcile ambiguous replies with the same identity, using completed
+control-request RTTs and jitter for retry pacing. A durable Started replay
+preserves the original start and wall-time budget. Typed refusals, cancellation
+and explicit job deadlines still apply; local cleanup must prove exact release
+before replacement. A silent control connection can remain pending until its
+owner cancels or transport returns; time alone cannot authorize execution or
+prove release. This requires the matching queue and worker release.
+Connection-establishment failure returns `control_unreachable` instead of
+retrying indefinitely. It does not revoke an earlier durable start or prove
+release: exact process cleanup and queue reconciliation still gate replacement.

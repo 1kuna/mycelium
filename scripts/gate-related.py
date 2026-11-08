@@ -24,6 +24,11 @@ for source in ('shared_clone_darwin', 'shared_clone_linux', 'shared_clone_other'
 SUPPLEMENTAL_CONSUMERS['internal/myce/engine_health.go'] = (
     'engine_recovery_test.go', 'engine_recovery_round3_test.go')
 
+# Copy-runtime authorization is exercised through its lifecycle/maintenance
+# consumers; the implementation predates the matching test filename convention.
+SUPPLEMENTAL_CONSUMERS['internal/myce/worker_sync.go'] = (
+    'sync_test.go', 'host_maintenance_work_test.go', 'server_entries_round4_test.go')
+
 # Adaptive private budgets are exercised through their observable consumers.
 SUPPLEMENTAL_CONSUMERS['internal/myce/observation_cache_budget.go'] = (
     'status_read_test.go',)

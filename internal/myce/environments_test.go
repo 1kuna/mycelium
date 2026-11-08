@@ -46,7 +46,7 @@ func TestEnvironmentReadyReportSurvivesPreparationReplay(t *testing.T) {
 	var finishOnce sync.Once
 	var calls atomic.Int32
 	rt := &environmentRuntime{dir: t.TempDir(), cache: cache, reports: map[string]EnvironmentReport{}}
-	rt.authorize = func(l HostLaunch) error {
+	rt.authorize = func(_ context.Context, l HostLaunch) error {
 		if calls.Add(1) == 1 {
 			err := q.AuthorizeLaunch(l)
 			close(entered)

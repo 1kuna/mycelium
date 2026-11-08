@@ -1265,8 +1265,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 
 			// Refresh memory together after inventory, then age through the reads.
 			w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
-			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
 			rt.mu.Lock()
+			w.hostMemorySamples = updateHostMemorySamples(reports, w.Clock.Now(), rt.batchHostMemorySamples)
 			// Replaced, never mutated: model loads share this exact-attempt
 			// snapshot and age it with their own launch-time clock read.
 			rt.batchHostMemorySamples = w.hostMemorySamples

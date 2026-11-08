@@ -14,56 +14,51 @@ import (
 	"time"
 )
 
-// #181: a control-plane timeout is an infrastructure interruption, not evidence
-// of a worker restart. Preserve its boundary and the existing retry charges.
-func TestHostLaunchTimeoutAttemptDiagnostic(t *testing.T) {
+// #1028 supersedes #181's charged transport-timeout expectation: no refusal or
+// worker restart is established. Reconcile on the same session and attempt.
+func TestHostLaunchAmbiguousTimeoutReconciles(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("one", "fake")
 	submit(t, q, spec("production"))
 	a := check(t, q, m, nil).Job
-	w := Worker{Machine: m, Client: Client{URL: "http://private.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
-		return nil, fmt.Errorf("private transport detail: %w", context.DeadlineExceeded)
+	handler := (API{Queue: q, Token: "test"}).Handler()
+	calls, pauses := 0, 0
+	identity := HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: a.ID, Attempt: "1"}
+	w := Worker{Machine: m, Clock: clock, Client: Client{URL: "http://private.invalid", Token: "test", Pause: func(_ context.Context, wait time.Duration) error {
+		pauses++
+		clock.Advance(wait)
+		return nil
+	}, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/api/workers/launch" {
+			calls++
+			var got HostLaunch
+			body, err := io.ReadAll(r.Body)
+			if err != nil || json.Unmarshal(body, &got) != nil || got.Machine != identity.Machine || got.Session != identity.Session || got.Key != identity.Key || got.Attempt != identity.Attempt {
+				t.Fatal("launch retry changed exact identity", got, err)
+			}
+			r.Body = io.NopCloser(strings.NewReader(string(body)))
+			if calls == 1 {
+				return nil, fmt.Errorf("private transport detail: %w", context.DeadlineExceeded)
+			}
+		}
+		rw := httptest.NewRecorder()
+		handler.ServeHTTP(rw, r)
+		return rw.Result(), nil
 	})}}}
-	err := w.authorizeLaunch(HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: a.ID, Attempt: "1"})
-	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errWorkerStartAuthorization) {
-		t.Fatal("authorization error lost identity", err)
+	if err := w.authorizeLaunch(identity); err != nil {
+		t.Fatal("ambiguous launch timeout was treated as refusal", err)
 	}
-	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: launchRefused, At: clock.Now()}}}
-	early := startFailureOutcome(result(a, false), &recordedStartError{cause: err, facts: facts})
-	if early.ExecutionCause == nil || early.ExecutionCause.Operation != "start_authorization" || early.ExecutionCause.Class != "timeout" {
-		t.Errorf("pre-process launch refusal lost its cause: %+v", early)
-	}
-	r := classifyAttemptOutcome(result(a, false), attemptCause{memberOutcome: facts})
-	r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", err))
-	r.Error = err.Error()
-	if err := q.Complete(r); err != nil {
+	if err := w.authorizeStart(*a, a.Session); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer server.Close()
-	got, err := (Client{URL: server.URL, Token: "test"}).GetJob(context.Background(), a.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.State != "queued" || got.Losses != 1 || got.InfrastructureRetries != 1 || len(got.AttemptHistory) != 1 {
-		t.Fatal("retry policy changed", got)
-	}
-	h := got.AttemptHistory[0]
-	if h.Reason != "execution interrupted: start_authorization: timeout" || h.ExecutionCause == nil || h.ExecutionCause.Operation != "start_authorization" || h.ExecutionCause.Class != "timeout" {
-		t.Errorf("control-plane cause mislabeled: %+v", h)
+	finish(t, q, a, true)
+	got := job(t, q, a.ID)
+	if calls != 2 || pauses != 1 || got.State != "succeeded" || got.Attempt != a.Attempt || got.Session != a.Session || got.Starts != 1 || got.Losses != 0 || got.InfrastructureRetries != 0 || len(got.AttemptHistory) != 1 {
+		t.Fatal("control retry changed execution or charged loss", calls, pauses, got)
 	}
 	data, _ := json.Marshal(got)
 	if strings.Contains(string(data), "private") || strings.Contains(string(data), "restarted") {
 		t.Error("private text or invented restart in job diagnostics", string(data))
-	}
-	// The same worker can succeed next; no fresh-session check-in is involved.
-	b := check(t, q, m, nil).Job
-	if b == nil || b.Attempt != 2 || b.Session != a.Session {
-		t.Fatal("same-session retry missing", b)
-	}
-	finish(t, q, b, true)
-	if got = job(t, q, a.ID); got.State != "succeeded" || got.Losses != 1 || got.InfrastructureRetries != 1 {
-		t.Fatal("retry did not complete", got)
 	}
 }
 
@@ -89,9 +84,12 @@ func TestHostLaunchAuthorizationControlBudget(t *testing.T) {
 					return nil, r.Context().Err()
 				})
 				started := time.Now()
+				ctx, cancel := context.WithDeadline(context.Background(), started.Add(45*time.Second))
+				defer cancel()
+				w.launchCtx = ctx
 				err := w.authorizeLaunch(HostLaunch{})
-				if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) != 10*time.Second {
-					t.Fatal("hung authorization escaped its control-request budget", time.Since(started), err)
+				if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) != 45*time.Second {
+					t.Fatal("hung authorization did not retain the owner's deadline", time.Since(started), err)
 				}
 			})
 		})

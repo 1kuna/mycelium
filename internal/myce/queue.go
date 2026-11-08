@@ -119,6 +119,13 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	readGeneration       *readGeneration
+	readRoot             *readNode // q.mu; immutable committed input generations.
+	readModels           *ModelConfig
+	readEnvironments     *EnvironmentCatalog
+	readRuntime          *observationState
+	readSamples          map[string]map[attemptKey]hostMemorySample
+	detachedRead         bool // Private immutable source: never owns the live writer mutex.
 	requestBudgets       requestBudgets
 	evidencePending      map[string]bool
 	evidenceRows         []string
@@ -367,6 +374,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 			}
 		}
 	}
+	for _, j := range q.liveJobs() {
+		if j.Timing != nil && !terminal(j.State) {
+			j.Timing.Reason = "queue restarted; occupancy unknown"
+		}
+	}
 	if err = q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}); err != nil {
 		db.Close()
 		return nil, err
@@ -387,11 +399,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		}); err != nil {
 			db.Close()
 			return nil, err
-		}
-	}
-	for _, j := range q.liveJobs() {
-		if j.Timing != nil && !terminal(j.State) {
-			j.Timing.Reason = "queue restarted; occupancy unknown"
 		}
 	}
 	q.usageReader, err = openUsageReader(path)
@@ -659,6 +666,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.invalidateCallSnapshots(oldCalls)
 		q.invalidateTerminalStatus()
 		q.commitRecords()
+		q.publishReadRuntime()
 	}
 	return err
 }
@@ -1211,7 +1219,7 @@ func (q *Queue) maintain() {
 	scan := q.placementScan()
 	scan.memory = q.memoryPlanning
 	for _, j := range q.liveJobs() {
-		if q.startupPending(j) {
+		if q.startupPending(j) || q.startCapacityPaused(j) {
 			j.Reason = q.startStatusReason(j, scan)
 		}
 	}
@@ -1282,7 +1290,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
 		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
@@ -1514,7 +1522,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		if q.hostMemorySamples == nil {
 			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{}
 		}
-		q.hostMemorySamples[m.ID] = currentHostMemorySamples(reports, memoryReceivedAt)
+		q.retainHostMemoryCharges(m.ID, q.clock.Now())
+		q.hostMemorySamples[m.ID] = updateHostMemorySamples(reports, memoryReceivedAt, q.hostMemorySamples[m.ID])
+		q.retainHostMemoryCharges(m.ID, q.clock.Now())
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)
@@ -2057,10 +2067,10 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		// A changed disk sample can withdraw an offer before exec. This is the
 		// same temporary hold as dispatch, including for production stage failures.
 		q.requeue(j, q.diskHeadroomReason(j, q.s.Machines[j.Machine]), false)
-	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "start_authorization" || j.ExecutionCause.Operation == "start_handoff") && recordedStartRefusal(j) != "" {
+	} else if !r.Success && !oomFailure && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "start_authorization" || j.ExecutionCause.Operation == "start_handoff") && startRefusalBeforeMain(j, r) {
 		// The start fence withdrew placement before exec; like launch_refused,
 		// this is a temporary hold, not lost work or an infrastructure retry.
-		q.requeue(j, "requeued: start placement refused ("+recordedStartRefusal(j)+")", false)
+		q.requeueStartRefusal(j)
 	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
 		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
@@ -2352,7 +2362,7 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 			j.Reason = "NAS checkpoint root is unreachable"
 		}
 	}
-	if q.startupPending(j) {
+	if q.startupPending(j) || q.startCapacityPaused(j) {
 		j.Reason = q.startStatusReason(j)
 	}
 	if j.State == "running" && j.ReleaseConfirmed {
@@ -2671,16 +2681,25 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 			rejected = e
 			return nil
 		}
-		if j.State != "running" || j.ReleaseConfirmed || !dependencyReady(j) || cancelled(j) || (j.Spec.StartBy != nil && j.StartedAt != nil) {
+		// An exact-current replay reconciles a lost durable Started reply. It
+		// must still pass every live fence, and markStarted never resets time or
+		// appends a second start. Acknowledgement is not a second execution.
+		if j.State != "running" || j.ReleaseConfirmed || !dependencyReady(j) || cancelled(j) {
 			rejected = ErrStale
 			return nil
 		}
 		m := q.s.Machines[r.Machine]
 		q.refreshHostMemory()
-		if !q.hostLaunchAllowed(m, r.Session) || !q.startPlacementAllowed(j) {
+		predicate := "host_launch"
+		if q.hostLaunchAllowed(m, r.Session) {
+			predicate = q.startPlacementRejection(j)
+		}
+		if predicate != "" {
+			q.recordStartRefusal(j, predicate)
 			rejected = ErrStale
 			return nil
 		}
+		q.clearStartRefusal(j)
 		q.retainAttemptResources(j, r.Resources)
 		retainInputsStagedAt(j, r.InputsStagedAt)
 		q.markStarted(j)
@@ -2825,7 +2844,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		j.ModelEnvironmentKey = recipe.Key
 		j.ModelEnvironmentNeedsSource = recipe.Binary != "" || recipe.BinaryRelative != ""
 	}
-	if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !callerStartDeadline(j) && j.Spec.StartBy != nil {
+	if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !absoluteStartBy(j) && j.Spec.StartBy != nil {
 		deadline := q.clock.Now().Add(j.StartWindow)
 		j.Spec.StartBy = &deadline
 	}

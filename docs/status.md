@@ -216,14 +216,18 @@ clock. The preservation guard requires that exact key's complete digest chain;
 another host's accepted sample alone never explains its mutation (#620).
 
 Only the unfiltered default shares the one-second cache. Filtered/full reads are
-fresh. Snapshot capture keeps scheduling inputs and dependency state under the
-queue lock; projection, usage queries, file inventory, encoding the reply and
-compression run after release. Cold retained jobs have immutable, payload-free
-observation inputs maintained by the existing committed-record journal; reads
-copy those inputs outside the lock. Mutable jobs and worker facts are still
-captured together under the lock. Each detached generation reuses one placement
-scan and memory-evidence catalog across ordering, startup and blocker diagnostics;
-derived capacity views keep their own scans. No bulk file or network I/O runs
+fresh. From the next release (#1052), status and job reads take an immutable committed
+input generation plus worker contact/private scalar facts under the queue lock.
+The commit journal publishes changed encoded records through a persistent tree;
+unchanged records and decoded inputs are shared across revisions. Traversal,
+decoding, selection, file-reference/cancellation walks, capacity accounting,
+recursive copies, projection, usage queries, file inventory, reply encoding and
+compression run after releasing the live lock. Selected started/terminal receipts
+decode only their own record and policy; queued receipts share live context,
+without materializing cold execution payloads. Cold decode capacity is charged
+before allocation. Each detached generation reuses one placement scan and
+memory-evidence planning cache across ordering, startup and blocker diagnostics,
+including a queued single-job read; derived capacity views keep their own scans. No bulk file or network I/O runs
 under `q.mu`. No jobs, curves, custody or foreign-load fields are removed.
 
 Jobs with explicitly recovered outputs expose an append-only `recovered_results`
@@ -1252,8 +1256,14 @@ physical-RAM read and rechecks exact custody afterward. Confirmed local cleanup
 removes an old actor's reservation even before its next heartbeat; stop intent
 and pending cleanup do not.
 Only this current nonreclaimable memory reduces growth;
-reclaimable cache, historical peaks and process RSS do not. Missing or five-second-old
+reclaimable cache, historical peaks and process RSS do not. Missing or expired
 samples retain the full reservation, as do models and unconfirmed release custody.
+From the next release, host sample validity follows twice the longest observed
+exact-attempt sample delivery interval (one missed delivery); the five-second
+legacy window applies until cadence is measured. Only distinct negotiated
+`sample_id` observations train cadence; cached, unidentified repeated and
+out-of-order deliveries keep the original expiry. Missing samples grant no
+resident credit.
 Queue restarts discard current-use credit. macOS uses the conservative fallback
 because its process-group RSS includes shared pages and is not a safe credit.
 Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
@@ -2255,12 +2265,29 @@ exploratory reservations as predictions. Fresh exact-attempt footprint and growt
 same forecast as cold CPU probes, including sample age and measured drift, with
 the resolved estimate as a floor for learned jobs. Cold CPU probes keep their
 known-need floor and use the same physical/allowance execution ceiling.
-Unknown/stale telemetry and stopping attempts
-retain the complete physical/explicit execution ceiling. Darwin RSS can increase
+From the next release (#1048), bounded learned/exploratory estimates keep the
+resolved reservation plus measured growth and drift when telemetry is stale,
+missing or stopping. Exact-attempt `host_memory_charge` retains grown charges
+through smaller/missing reports, queue restarts and unconfirmed release custody;
+observed peaks remain floors. A learned allocation that has not acknowledged
+`Started` also keeps its bounded reservation without requiring telemetry.
+Stale data grants no resident credit. Forecasts cannot exceed containment, but
+actual observations and retained reservations are never lowered to that bound.
+Cold probes still retain their complete ceiling without fresh complete evidence.
+Darwin RSS can increase
 the charge but grants no resident-memory credit because shared pages can appear
 in multiple processes. The reported estimate and the execution ceiling therefore
 serve different purposes. Explicit declarations, member limits and Docker keep
 their existing containment contract. See [native isolation](native-isolation.md).
+
+From the next release (#1064), declared native CPU attempts with enforced cgroup
+v2 containment reserve their complete declaration plus ceiling slack. Their live
+growth forecast cannot add bytes beyond that containment, in either the static
+charge or pending physical growth. Larger actual anonymous/footprint observations
+remain floors; only fresh uniquely charged anonymous residency reduces pending
+growth. Missing/stale observations retain the full reservation. This bound does
+not apply to auto estimates, sampled RSS, Docker or accelerator memory outside
+the cgroup; authored member limits remain binding.
 
 Native CPU auto-memory and native accelerator-check host-OOM recovery retain a
 durable lower bound from the previous reservation and killed peak, plus a
@@ -2440,7 +2467,11 @@ exact attempt's release before the logical job can run elsewhere.
 fingerprint. A changed capacity measurement, allowance, competing reservation or
 exact release permits reevaluation; heartbeat timestamps alone do not. Ordinary
 lower-tier preemption can satisfy the measured deficit; equal-tier production
-waits. `start_capacity_waiting` records a generated startup window suspended by
-qualified resource contention. Assignment renews that generated window for actual
-preparation. Caller `start_by` and `start_window`, give-up and cancellation retain
-their existing authority. No retry, reserve or timeout increase is involved.
+waits. From the next release, `start_capacity_waiting` records any relative startup
+window suspended by qualified resource contention, including explicit
+`start_window` declarations. Typed uncharged launch refusals also suspend the
+relative window. Status reasons show the original window's seconds left with
+`paused for capacity`; assignment restores that full window for actual preparation.
+An assigned start without an accepted acknowledgement continues counting down.
+Absolute `start_by`, give-up, ordering `deadline` and cancellation retain their
+existing authority. No retry, reserve or timeout increase is involved.
