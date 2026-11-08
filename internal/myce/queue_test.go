@@ -489,8 +489,7 @@ func TestThreeAttempts(t *testing.T) {
 		if r == nil || r.Attempt != i {
 			t.Fatalf("attempt %d: %+v", i, r)
 		}
-		c.Advance(LossAfter)
-		check(t, q, observer(), nil)
+		advanceReportingPeer(t, q, c, observer(), LossAfter)
 		if err := q.Tick(); err != nil {
 			t.Fatal(err)
 		}
@@ -707,8 +706,7 @@ func TestResumableThreeInfrastructureLosses(t *testing.T) {
 		if r == nil {
 			t.Fatal("no assignment")
 		}
-		c.Advance(LossAfter)
-		check(t, q, observer(), nil)
+		advanceReportingPeer(t, q, c, observer(), LossAfter)
 		// Reusing the same worker requires cleanup of its exact lost copy.
 		released := result(r, false)
 		released.ReleaseOnly = true

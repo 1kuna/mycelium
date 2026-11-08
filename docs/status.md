@@ -617,7 +617,10 @@ cancelled call has a measured reconnect opportunity; rejection and stale session
 do not refresh accepted contact. `last_seen` remains the actual accepted queue
 timestamp, so an old timestamp alone does not establish a lost machine during a
 queue stall. `suspect: true` means current-session arrivals exceeded the measured
-allowance in wall time: the machine receives no new assignments and maintenance
+wall-arrival allowance, including observed control delivery cost even when the
+worker advertises a shorter send interval. Completed response cost provides
+the initial delivery evidence before a second arrival. Confirmed loss also
+requires enough available control service. The machine receives no new assignments and maintenance
 reports `fresh: false`, while existing attempts and retry budgets remain intact.
 CLI/HTML availability says “suspect; waiting for worker contact; no new work”.
 Health reports `worker_suspect` through the existing notification channel. This

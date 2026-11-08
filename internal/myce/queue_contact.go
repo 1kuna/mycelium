@@ -20,6 +20,7 @@ type workerContact struct {
 	measured             bool
 	period               time.Duration
 	cadence              probeEstimate // Wall-time send cadence, independent of service availability.
+	delivery             probeEstimate // Completed control response cost, including queue service.
 	gap                  probeEstimate
 	path                 probeEstimate
 	retry                workerRetry // Existing legacy worker reconnect schedule.
@@ -27,6 +28,7 @@ type workerContact struct {
 	arrivalWall          time.Time
 	seenArrival          bool
 	allowance            time.Duration // Only on immutable detached observations.
+	arrivalAllowance     time.Duration // Frozen wall-delivery allowance on detached observations.
 }
 
 type checkinContact struct {
@@ -256,6 +258,9 @@ func (q *Queue) trackWorkerCheckin(machine, session string, period time.Duration
 				}
 				if cost := q.controlNow() - pending.opportunity; cost > 0 {
 					current.path.observe(cost.Seconds())
+				}
+				if cost := q.clock.Now().Sub(pending.arrived); cost > 0 {
+					current.delivery.observe(cost.Seconds())
 				}
 				current.processedArrival = maxTime(current.processedArrival, pending.arrived)
 				current.processed = q.clock.Now()

@@ -192,6 +192,67 @@ func TestControlClockHTTPAdvertisedCadence(t *testing.T) {
 	}
 }
 
+// Successive arrivals establish the wall delivery cadence. Applying only an
+// opportunity-clock allowance to wall age can otherwise withhold every offer
+// when queue processing is slower than the sender's interval.
+func TestControlClockSlowControlPathDoesNotStarveAdmission(t *testing.T) {
+	q, clock := fixture(t)
+	if err := q.SetLossTimeouts(0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	m := machine("worker", "fake")
+	j := submit(t, q, spec("production"))
+	period, service := 5*time.Millisecond, 31*time.Millisecond
+	var reply Reply
+	for range 2 {
+		contact, settle := q.trackWorkerCheckin(m.ID, m.Session, period, true)
+		q.mu.Lock()
+		clock.Advance(service)
+		q.mu.Unlock()
+		var err error
+		reply, err = q.checkinContext(context.Background(), Checkin{Machine: m, period: period, contact: contact})
+		settle(err == nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Response decoding/local reconciliation also precedes the next send.
+		// A second interval outside q.mu exercises cold recovery inference.
+		clock.Advance(2 * period)
+	}
+	if reply.Job == nil || reply.Job.ID != j.ID || !q.workerFresh(q.s.Machines[m.ID], clock.Now()) {
+		t.Fatal("measured slow control path withheld a live worker")
+	}
+	if !q.hostLaunchAllowed(q.s.Machines[m.ID], m.Session) || q.contacts[m.ID].cadence.Mean == 0 {
+		t.Fatal("cold control cost repeatedly discarded healthy arrival cadence")
+	}
+	if err := q.AuthorizeLaunch(HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(reply.Job.Attempt)}); err != nil {
+		t.Fatal("accepted slow contact could not authorize its offer", err)
+	}
+	if got := q.machineLossTimeout(m.ID); got >= service {
+		t.Fatalf("wall service cost inflated confirmed-loss opportunities: %s", got)
+	}
+	// Opportunities alone cannot confirm loss before the actual delivered
+	// cadence is missed. This is ordinary available service after a slow reply.
+	clock.Advance(q.machineLossTimeout(m.ID))
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.Machines[m.ID].Gone || q.s.Jobs[j.ID].Losses != 0 || !q.workerFresh(q.s.Machines[m.ID], clock.Now()) {
+		t.Fatal("available service charged a worker before its expected arrival")
+	}
+	// Learning this completed path must still leave a finite wall-silence
+	// bound for a sender that then dies during continuous queue saturation.
+	q.mu.Lock()
+	clock.Advance(4 * (service + period))
+	q.maintain()
+	suspect := q.workerSuspect(q.s.Machines[m.ID], clock.Now())
+	q.mu.Unlock()
+	got := q.s.Jobs[j.ID]
+	if !suspect || got.State != "running" || got.Losses != 0 || got.InfrastructureRetries != 0 {
+		t.Fatal("dead sender did not become suspect without a false charge", got)
+	}
+}
+
 func TestControlClockLegacyFirstWorkAfterOneInterval(t *testing.T) {
 	q, clock := fixture(t)
 	if err := q.SetLossTimeouts(0, 0, 0); err != nil {

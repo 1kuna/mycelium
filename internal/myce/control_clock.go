@@ -89,15 +89,37 @@ func (q *Queue) workerLossAllowance(m *Machine) time.Duration {
 	return max(allowance, 2*c.retry.delay)
 }
 
+// Wall-time suspicion and observations need the actual delivered cadence, even
+// when a current worker advertises a shorter send interval. Queue service is
+// absent from opportunity gaps but remains part of these wall arrival gaps.
+// Keeping the two clocks separate avoids both starvation under healthy slow
+// control and teaching blocked service as confirmed worker silence.
+func (q *Queue) workerArrivalAllowance(m *Machine) time.Duration {
+	allowance := q.machineLossTimeout(m.ID)
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	if c := q.contacts[m.ID]; c != nil && c.session == m.Session {
+		allowance = max(allowance, c.arrivalAllowance, time.Duration(max(2*c.cadence.Mean, c.cadence.upper())*float64(time.Second)))
+		// Before a second arrival, a completed response already measures the
+		// service the sender must wait for before its next interval can begin.
+		allowance = max(allowance, 2*c.period+time.Duration(c.delivery.upper()*float64(time.Second)))
+	}
+	return allowance
+}
+
 // workerSuspect bounds uncertainty even if no control service opportunities
 // elapse. An old in-flight request cannot prove the sender is still alive.
 // Suspicion withholds new work and alerts, but never interrupts current custody
 // or charges loss/retry. A new arrival clears it, including while waiting on mu.
 func (q *Queue) workerSuspect(m *Machine, now time.Time) bool {
+	return q.workerArrivalSuspect(m, now, true)
+}
+
+func (q *Queue) workerArrivalSuspect(m *Machine, now time.Time, includePending bool) bool {
 	if m == nil || m.Gone || m.LastSeen.IsZero() {
 		return false
 	}
-	allowance := q.machineLossTimeout(m.ID)
+	allowance := q.workerArrivalAllowance(m)
 	if q.workerLossAllowance(m) == 0 {
 		return true // Unknown cold cadence cannot qualify capacity as healthy.
 	}
@@ -105,7 +127,7 @@ func (q *Queue) workerSuspect(m *Machine, now time.Time) bool {
 	defer q.contactMu.Unlock()
 	arrival := m.LastSeen
 	if c := q.contacts[m.ID]; c != nil && c.session == m.Session {
-		if c.allowance > 0 || c.suspect { // Frozen observation.
+		if c.arrivalAllowance > 0 || c.suspect { // Frozen detached observation.
 			return c.suspect
 		}
 		arrival = c.processedArrival
@@ -113,7 +135,9 @@ func (q *Queue) workerSuspect(m *Machine, now time.Time) bool {
 			arrival = m.LastSeen // The event loop compresses continuous heartbeats.
 		}
 		for p := range c.pending {
-			arrival = maxTime(arrival, p.arrived)
+			if includePending {
+				arrival = maxTime(arrival, p.arrived)
+			}
 		}
 		if arrival.IsZero() {
 			arrival = m.LastSeen
@@ -123,12 +147,7 @@ func (q *Queue) workerSuspect(m *Machine, now time.Time) bool {
 }
 
 func (q *Queue) workerFresh(m *Machine, now time.Time) bool {
-	return q.workerContactFresh(m, now) && !q.workerSuspect(m, now)
-}
-
-// Network-outage recovery uses confirmation evidence, not wall-clock suspicion.
-func (q *Queue) workerContactFresh(m *Machine, now time.Time) bool {
-	return q.contactFresh(m, now, true)
+	return m != nil && !m.Gone && !m.LastSeen.IsZero() && !now.Before(m.LastSeen) && !q.workerSuspect(m, now)
 }
 
 func (q *Queue) contactFresh(m *Machine, now time.Time, includePending bool) bool {

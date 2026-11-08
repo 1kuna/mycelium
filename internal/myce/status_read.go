@@ -252,7 +252,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	// it, a detached fleet view turns an in-flight check-in into worker silence.
 	v.contacts = make(map[string]*workerContact, len(q.s.Machines))
 	for id, m := range q.s.Machines {
-		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now()), allowance: q.workerLossAllowance(m), suspect: q.workerSuspect(m, v.clock.Now())}
+		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now()), allowance: q.workerLossAllowance(m), arrivalAllowance: q.workerArrivalAllowance(m), suspect: q.workerSuspect(m, v.clock.Now())}
 	}
 	s := q.s
 	if id == "" {

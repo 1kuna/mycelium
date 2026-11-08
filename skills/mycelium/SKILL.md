@@ -466,10 +466,15 @@ qualifies; this cannot start a new preparation on a suspect host.
 Queue slowness alone does not charge any class a retry or infrastructure loss. A dead worker normally
 needs roughly two send intervals plus learned variation and a maintenance turn;
 overload adds actual blocked queue time. Under continuous saturation, silence
-still becomes `suspect: true` within the measured arrival allowance plus the next
+still becomes `suspect: true` within the measured wall-arrival allowance plus the next
 maintenance/observation turn. A suspect host receives no new work and is never
 shown healthy; existing attempts retain custody and spend no retry budget.
-The existing health channel raises `worker_suspect` for owner attention. A new
+The wall allowance includes observed control delivery cost even for workers
+advertising shorter send intervals, starting with measured completed-response
+cost. Confirmed loss requires both a missed wall arrival and enough available
+control service; its opportunity clock excludes blocked queue time.
+Status and NAS inspection delivery share that wall allowance. The
+existing health channel raises `worker_suspect` for owner attention. A new
 arrival clears suspicion. Confirmed loss has no finite trustworthy bound while
 control cannot process evidence. Keep the same job/key and custody while control
 recovers; ask the queue owner to inspect persistent suspicion. `last_seen` is still the last accepted wall timestamp; use the

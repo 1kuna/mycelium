@@ -1094,7 +1094,7 @@ func (q *Queue) fleetQuiet(now time.Time, includePending bool) bool {
 		if !m.Gone && !m.Leaving && q.workerLossAllowance(m) > 0 {
 			active++
 			quietFor = min(quietFor, q.machineLossTimeout(m.ID))
-			if q.contactFresh(m, now, includePending) {
+			if q.contactFresh(m, now, includePending) || !q.workerArrivalSuspect(m, now, includePending) {
 				healthy++
 			}
 		}
@@ -1149,7 +1149,7 @@ func (q *Queue) maintain() {
 		unreported := q.unreported[m.ID]
 		grace := unreported && q.inRestartGrace(now)
 		restartExpired := unreported && !grace
-		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
+		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && q.workerSuspect(m, now) && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
 			m.Gone = true
 			q.discontinueContactCadence(m.ID)
 			q.clearPreemptionPlacements(m.ID, m.Session)

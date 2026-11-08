@@ -210,7 +210,11 @@ func TestM4QueueRefusesQueuedNamesAndConflictingFences(t *testing.T) {
 	})
 	t.Run("stale", func(t *testing.T) {
 		q, clock, mapping := m4Queue(t)
-		clock.Advance(6 * time.Second)
+		var allowance time.Duration
+		for _, m := range q.s.Machines {
+			allowance = max(allowance, q.workerArrivalAllowance(m))
+		}
+		clock.Advance(allowance)
 		_, err := q.ConvertMachines(mapping, ModelConfig{}, false)
 		if err == nil {
 			t.Fatal("stale source accepted")

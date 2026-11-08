@@ -2651,8 +2651,19 @@ next maintenance turn. An observed first one-second gap initially gives three
 seconds under the estimator; further steady samples converge to the two-interval
 floor. Under overload the wall duration additionally includes actual queue
 occupancy. For example, a 31-second blocked transaction adds 31 seconds, not a
-charged infrastructure failure. Suspicion uses wall time since the last current-session arrival with the same
-measured allowance. Even during continuous mutex saturation, a dead sender
+charged infrastructure failure. Suspicion uses wall time since the last current-session arrival, with an
+allowance of at least two observed wall arrival intervals plus measured variation.
+That wall cadence includes delivered queue service cost even for a worker that
+advertises a shorter send interval. It remains separate from the opportunity
+allowance for confirmed loss; otherwise a healthy slow control path could
+withhold every new offer. Before the second arrival, the completed response's
+measured wall cost extends the advertised interval. Recovery inference excludes
+late pending arrivals but retains this completed delivery evidence, so normal
+slow delivery can establish cadence instead of repeatedly resetting it.
+Confirmed loss requires both a missed wall arrival and the opportunity
+allowance: available service alone cannot make an expected arrival overdue.
+Pending NAS inspection delivery uses the same wall
+allowance, including in detached status/resolve views. Even during continuous mutex saturation, a dead sender
 becomes **suspect** after that allowance plus the next maintenance/observation
 turn. An old in-flight request cannot suppress suspicion. Suspect workers are
 never shown as healthy, receive no new attempts or preparation launches, and
