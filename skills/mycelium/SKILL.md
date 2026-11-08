@@ -390,7 +390,7 @@ From the release containing #1074, connection reset/refusal, handshake EOF and
 TLS internal errors during a listener restart remain transient: observation
 keeps its binding and retries with measured pacing and the server's current
 `Retry-After`. A `tls:` error prefix alone does not prove an identity mismatch.
-Explicit certificate/pin refusals and invalid TLS records still stop with
+Explicit certificate/pin, TLS integrity and protocol refusals still stop with
 `observation_error: tls_identity`; report those to the installation/authority
 owner and preserve the receipt and notifier. Do not change trust or resubmit
 under a new key. Older clients can misclassify a cutover as `tls_identity`;

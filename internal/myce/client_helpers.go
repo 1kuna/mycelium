@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -125,13 +127,25 @@ func IsTLSIdentityError(err error) bool {
 	if errors.Is(err, errJoiningIdentity) || errors.As(err, &verification) || errors.As(err, &record) {
 		return true
 	}
-	// A TLS prefix alone is not identity evidence: a restarting listener can
-	// interrupt a handshake or send internal_error without changing its identity.
-	// Go's peer certificate alerts are unexported, so retain those explicit
-	// refusals alongside the typed local verification and invalid-record errors.
+	// A restart can interrupt a handshake without changing the peer's identity.
+	// Keep explicit verification/record failures above authoritative, even when
+	// an error also wraps a connection failure.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) {
+		return false
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return false
+	}
+	// Go's TLS alerts and several integrity/protocol errors are unexported.
+	// Exempt only known shutdown/internal alerts; retain every other TLS refusal
+	// (including bad record MAC, Finished hash and protocol version failures).
 	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
 		message := strings.TrimPrefix(cause.Error(), "remote error: ")
-		if strings.HasPrefix(message, "tls: ") && (strings.Contains(message, "certificate") || message == "tls: unknown PSK identity" || message == "tls: unrecognized name") {
+		if message == "tls: internal error" || message == "tls: use of closed connection" || message == "tls: user canceled" {
+			continue
+		}
+		if strings.HasPrefix(message, "tls:") {
 			return true
 		}
 	}

@@ -28,6 +28,9 @@ func TestClientRestartTransportClassification(t *testing.T) {
 		&tls.CertificateVerificationError{Err: errors.New("fixture certificate refusal")},
 		tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"},
 		errors.New("remote error: tls: bad certificate"),
+		errors.New("tls: bad record MAC"),
+		errors.New("tls: invalid server finished hash"),
+		errors.New("remote error: tls: protocol version not supported"),
 	} {
 		wrapped := fmt.Errorf("listener restart: %w", err)
 		if !IsTLSIdentityError(wrapped) || RetryStatusRead(wrapped) {
