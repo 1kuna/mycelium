@@ -185,7 +185,7 @@ func TestHostMemoryRestartReconciliation(t *testing.T) {
 	submit(t, q, s)
 	running := check(t, q, a, nil).Job
 	a.Session = "new-session"
-	r, err := q.Checkin(Checkin{Machine: a, Fresh: true, PreviousSession: running.Session})
+	r, err := q.Checkin(Checkin{Machine: a, Fresh: true, PreviousSession: running.Session, period: time.Second})
 	if err != nil || r.Job == nil {
 		t.Fatalf("%+v %v", r, err)
 	}
