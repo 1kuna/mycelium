@@ -58,6 +58,7 @@ func TestExactLaunchGrowthFitsOwnedEnvelope(t *testing.T) {
 	m := cpuMachine("worker", "host", "cpu", 8, 24)
 	clock := &fakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	j := Job{ID: "job", Attempt: 1, Session: "session", State: "running", Spec: cpuSpec(1, 3)}
+	j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB = 0, 3 // Resolved CPU host vector.
 	rt := modelRuntime{clock: clock, memoryMachine: m, batchJobs: []Job{j}}
 	sample := hostMemorySample{at: clock.Now(), gb: .1, growthGB: .5}
 	samples := map[attemptKey]hostMemorySample{jobKey(j): sample}
@@ -65,8 +66,11 @@ func TestExactLaunchGrowthFitsOwnedEnvelope(t *testing.T) {
 	if err := rt.checkHostAdmissionLocked(need, true, samples, jobKey(j)); err != nil {
 		t.Fatal("exact launch demanded more than its envelope", err)
 	}
-	if err := rt.checkHostAdmissionLocked(need, true, samples); err == nil {
-		t.Fatal("neighbor's growth forecast was discounted")
+	// A neighbor must retain its unreached reservation. Its growth forecast
+	// overlaps that bound, so do not require additive reservation + growth.
+	neighborRoom := need - sample.gb - minimumHostMemoryGB
+	if err := rt.checkHostAdmissionLocked(neighborRoom, true, samples); err == nil {
+		t.Fatal("neighbor's remaining reservation was discounted")
 	}
 }
 
