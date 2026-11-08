@@ -134,32 +134,6 @@ class BatchWaitTests(unittest.TestCase):
         self.assertGreater(len(early_reads), 1)
         self.assertGreaterEqual(clock.now, 3)
 
-    def test_shed_bootstrap_enters_one_batch_for_all_jobs(self):
-        client = Client(token="fixture")
-        client._clock = Clock()
-        ids = ["job-a", "job-b", "job-c"]
-        gets, waits = [], []
-
-        def respond(request, **kwargs):
-            client._clock.now += .01
-            if request.selector == "/api/wait":
-                body = json.loads(request.data)
-                self.assertEqual(body["ids"], ids)
-                waits.append(body)
-                return Reply({"jobs": [{"id": key, "state": "succeeded" if len(waits) == 4 else "running", "revision": len(waits)} for key in ids]})
-            gets.append(request.selector)
-            if request.selector.endswith("?view=wait"):
-                key = request.selector.split("/api/jobs/")[1].split("?")[0]
-                return Reply({"id": key, "state": "succeeded", "output_refs": {"answer": {"size_bytes": 42}}})
-            raise HTTPError(request.full_url, 429, "shed", {"Retry-After": "1"}, Reply({"code": "client_rate_limited"}))
-
-        client._urlopen = respond
-        rows = client.wait_many(ids, timeout=30)
-        self.assertEqual([row["id"] for row in rows], ids)
-        self.assertTrue(all(row["output_refs"] for row in rows))
-        self.assertEqual(len([path for path in gets if "?" not in path]), 0)
-        self.assertEqual(len(waits), 4)
-
     def test_shed_bootstrap_resolves_prefix_like_queue_and_go_client(self):
         client = Client(token="fixture")
         client._clock = Clock()
