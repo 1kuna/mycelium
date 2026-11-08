@@ -714,7 +714,7 @@ func (t *uploadTiming) window() time.Duration {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return max(time.Second, growDuration(growDuration(t.service)), t.pressure)
+	return max(clientRecoveryPeriod, growDuration(growDuration(t.service)), t.pressure)
 }
 
 type fileTransferConn struct {

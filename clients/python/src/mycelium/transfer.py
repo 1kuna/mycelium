@@ -5,7 +5,7 @@ import socket
 import select
 import ssl
 import time
-from .adaptive import Progress
+from .adaptive import Progress, RECOVERY_PERIOD
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, build_opener
 
 
@@ -25,7 +25,7 @@ class UploadTiming:
         self.pressure = max(self.pressure, pressure)
 
     def window(self):
-        return max(1, 4 * self.service, self.pressure)
+        return max(RECOVERY_PERIOD, 4 * self.service, self.pressure)
 
 
 class _ProgressSocket:
