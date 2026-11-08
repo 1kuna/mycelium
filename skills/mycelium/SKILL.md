@@ -394,6 +394,15 @@ deadlines stop recovery without retrying before the server permits it. Python
 `timeout` bounds API recovery and `transfer_timeout` bounds each file request;
 Go uses the caller context or explicitly configured HTTP timeout.
 
+## Submission advice under control pressure (next release, #1065)
+
+Submission waiting/deadline advice uses the accepted commit's immutable planner
+snapshot outside the live queue mutex. If measured memory headroom cannot fit
+its diagnostics, the response still confirms acceptance with the same job ID,
+policy and deadline-guidance fields; blocker detail explicitly says it is
+unavailable. Keep that ID and submission key and inspect the accepted job after
+headroom recovers. Do not resubmit accepted work to obtain advice.
+
 ## Adaptive model readiness (next release)
 
 Omitted model `max_wait` follows caller cancellation and actual load failures;
