@@ -2440,7 +2440,11 @@ exact attempt's release before the logical job can run elsewhere.
 fingerprint. A changed capacity measurement, allowance, competing reservation or
 exact release permits reevaluation; heartbeat timestamps alone do not. Ordinary
 lower-tier preemption can satisfy the measured deficit; equal-tier production
-waits. `start_capacity_waiting` records a generated startup window suspended by
-qualified resource contention. Assignment renews that generated window for actual
-preparation. Caller `start_by` and `start_window`, give-up and cancellation retain
-their existing authority. No retry, reserve or timeout increase is involved.
+waits. From the next release, `start_capacity_waiting` records any relative startup
+window suspended by qualified resource contention, including explicit
+`start_window` declarations. Typed uncharged launch refusals also suspend the
+relative window. Status reasons show the original window's seconds left with
+`paused for capacity`; assignment restores that full window for actual preparation.
+An assigned start without an accepted acknowledgement continues counting down.
+Absolute `start_by`, give-up, ordering `deadline` and cancellation retain their
+existing authority. No retry, reserve or timeout increase is involved.

@@ -64,8 +64,15 @@ refusals wait on the same job and submission key without spending infrastructure
 retries or losses, including after a helper ran or Started was authorized. Keep
 that key: Mycelium uses ordinary lower-tier preemption and exact release before
 reuse; equal-tier production waits. Unchanged capacity evidence is not re-offered.
-Generated startup windows pause for capacity; explicit `start_by`, `start_window`,
-give-up deadlines and cancellation still apply. `execution_evidence` describes
+From the next release, every relative startup window pauses for qualified memory,
+device or host-capacity waiting, including explicit `start_window: 600s` and the
+omitted `150s` default. Assignment restores the full window for preparation;
+status shows the start budget and `paused for capacity` while waiting. This also
+protects recovery windows and typed uncharged refusals after Started authorization.
+An assigned start without an accepted startup acknowledgement, stuck preparation
+or an unreachable worker still consumes the window. Absolute `start_by`,
+`give_up_at`, `deadline` and cancellation keep their existing semantics.
+`execution_evidence` describes
 component boundaries separately from cleanup; a helper that ran is never proof
 that the whole attempt stayed unlaunched.
 
