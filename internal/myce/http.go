@@ -614,6 +614,7 @@ type Client struct {
 	HTTP         *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
 	transferIdle  time.Duration
+	uploadTiming  *uploadTiming
 	Clock         Clock // Optional observation clock.
 	Pause         func(context.Context, time.Duration) error
 	Jitter        func() float64

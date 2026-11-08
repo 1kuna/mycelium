@@ -275,6 +275,22 @@ From the next queue release, all queue listeners share these observations;
 completed samples expire with worker-session freshness rather than a fixed
 minute. Staging still verifies the declared bytes before execution.
 
+If a file upload reports `file transfer stalled` or Python
+`TransferStalledError`, repeat `myce file put` on the unchanged source or call
+`upload_file` again. Its digest locates the same tus upload and HEAD recovers the
+server's accepted offset. Keep the same submission key and receipt when retrying
+a profile/adapter run. There is no CLI stall-timeout flag; Python's API `timeout`
+does not change the transfer detector.
+
+From the release containing #1100, Go/CLI and Python automatically resume an
+interrupted PATCH after checking publication and the accepted offset. The stall
+window follows observed request service, socket progress and server
+`Retry-After`, with TCP's retransmission timer as its protocol floor. A dead
+socket still triggers recovery. A Go context deadline or Python
+`transfer_timeout` bounds the upload and all retries; after interruption retain
+the source and the same run key/receipt for recovery. See
+[uploads](../../docs/files.md) for the protocol and error boundaries.
+
 If a profile or entry exits 69 with `input storage unconfirmed`, its intent and
 frozen inputs remain in the receipt. The diagnostic names preflight or upload,
 the input, and a sanitized HTTP status/code or transport class. Rerunning the

@@ -9,16 +9,38 @@ from .adaptive import Progress
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, build_opener
 
 
+class UploadTiming:
+    """Evidence shared by one tus upload, never unrelated requests.
+
+    RFC 6298 2.1/2.4 gives TCP a one-second initial/minimum retransmission
+    timer. Faster buffered copies cannot prove a dead peer before retransmit.
+    Four measured service periods retain Progress's jitter allowance; a server
+    Retry-After may raise the window. An owner's deadline still wins.
+    """
+    def __init__(self):
+        self.service = self.pressure = 0
+
+    def observe(self, service, pressure=0):
+        self.service = max(self.service, service)
+        self.pressure = max(self.pressure, pressure)
+
+    def window(self):
+        return max(1, 4 * self.service, self.pressure)
+
+
 class _ProgressSocket:
-    def __init__(self, sock, adaptive=False, deadline=None):
+    def __init__(self, sock, adaptive=False, deadline=None, timing=None):
         self._socket = sock
         self._adaptive = adaptive
         self._deadline = deadline
+        self._timing = timing
         self._read_progress, self._write_progress = Progress(), Progress()
         self._io_refs = 0
         self._closed = False
 
     def _set_timeout(self, budget):
+        if self._timing is not None:
+            budget = max(budget or 0, self._timing.window())
         if self._deadline is not None:
             remaining = self._deadline - time.monotonic()
             if remaining <= 0:
@@ -95,9 +117,9 @@ class _ProgressSocket:
 class _ProgressTLS:
     """Standard TLS engine with separately observable encrypted socket I/O."""
 
-    def __init__(self, sock, context, server_hostname, adaptive=False, deadline=None):
+    def __init__(self, sock, context, server_hostname, adaptive=False, deadline=None, timing=None):
         self._raw = sock
-        self._sender = _ProgressSocket(sock, adaptive, deadline)
+        self._sender = _ProgressSocket(sock, adaptive, deadline, timing)
         self._incoming = ssl.MemoryBIO()
         self._outgoing = ssl.MemoryBIO()
         self._ssl = context.wrap_bio(self._incoming, self._outgoing, server_hostname=server_hostname)
@@ -170,18 +192,20 @@ class _ProgressTLS:
 
 
 class _TLSContext:
-    def __init__(self, context, adaptive=False, deadline=None):
+    def __init__(self, context, adaptive=False, deadline=None, timing=None):
         self._context = context
+        self._timing = timing
         self._adaptive = adaptive
         self._deadline = deadline
 
     def wrap_socket(self, sock, *, server_hostname):
-        return _ProgressTLS(sock, self._context, server_hostname, self._adaptive, self._deadline)
+        return _ProgressTLS(sock, self._context, server_hostname, self._adaptive, self._deadline, self._timing)
 
 
 class ProgressConnection:
-    def __init__(self, *args, progress_deadline=None, **kwargs):
+    def __init__(self, *args, progress_deadline=None, upload_timing=None, **kwargs):
         self._progress_deadline = progress_deadline
+        self._upload_timing = upload_timing
         super().__init__(*args, **kwargs)
 
     def getresponse(self):
@@ -200,11 +224,11 @@ class ProgressConnection:
         return super().getresponse()
 
     def _transfer_context(self, context):
-        return context if isinstance(context, _TLSContext) else _TLSContext(context, self._progress_deadline is not None or self.timeout is None, self._progress_deadline)
+        return context if isinstance(context, _TLSContext) else _TLSContext(context, self._progress_deadline is not None or self.timeout is None, self._progress_deadline, self._upload_timing)
 
     def connect(self):
         super().connect()
-        self.sock = _ProgressSocket(self.sock, not isinstance(self.sock, _ProgressTLS) and (self.timeout is None or self._progress_deadline is not None), self._progress_deadline)
+        self.sock = _ProgressSocket(self.sock, not isinstance(self.sock, _ProgressTLS) and (self.timeout is None or self._progress_deadline is not None), self._progress_deadline, self._upload_timing)
 
 
 class _HTTPConnection(ProgressConnection, http.client.HTTPConnection):
@@ -247,5 +271,6 @@ def file_opener():
 
 def file_connection(connection, request):
     if getattr(request, "_mycelium_file_transfer", False):
-        return functools.partial(connection, progress_deadline=getattr(request, "_mycelium_transfer_deadline", None))
+        return functools.partial(connection, progress_deadline=getattr(request, "_mycelium_transfer_deadline", None),
+                                 upload_timing=getattr(request, "_mycelium_upload_timing", None))
     return connection
