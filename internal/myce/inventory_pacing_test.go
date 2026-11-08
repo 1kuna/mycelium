@@ -250,7 +250,7 @@ func TestWorkerTelemetryUsesInjectedHostSource(t *testing.T) {
 	var queries atomic.Int32
 	previous := extensionIdentityProbe
 	extensionIdentityProbe = func() MachineProbe {
-		return MachineProbe{OS: "linux", Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+		return MachineProbe{OS: "linux", Files: syntheticIdentityProbe().Files, Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
 			if name == "xpu-smi" {
 				queries.Add(1)
 				return []byte("0000:01:00.0,4096\n"), nil
