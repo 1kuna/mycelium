@@ -8,6 +8,7 @@ type hostLaunchMemory struct {
 	Machine   string                       `json:"machine"`
 	Session   string                       `json:"session"`
 	Samples   []hostHeadroomSample         `json:"samples"`
+	Refusals  map[string]float64           `json:"refusals,omitempty"`
 	RefusalGB float64                      `json:"refusal_gb,omitempty"`
 	Assigned  map[string]probeLaunchMargin `json:"assigned,omitempty"`
 }
@@ -40,6 +41,11 @@ func (q *Queue) recordHostLaunchMemory(m, old *Machine) {
 			h.Samples = append(h.Samples, hostHeadroomSample{old.LastSeen, old.HostAvailableMemoryGB})
 		}
 	}
+	for id := range h.Refusals {
+		if j := q.s.Jobs[id]; j == nil || terminal(j.State) {
+			delete(h.Refusals, id)
+		}
+	}
 	for id, offer := range h.Assigned {
 		j := q.s.Jobs[id]
 		if j == nil || j.Machine != m.ID || j.Session != m.Session || j.Attempt != offer.Attempt || !batchReservesCapacity(j) {
@@ -69,7 +75,7 @@ func (q *Queue) recordColdProbeAssignment(j *Job, m *Machine) {
 	if h.Assigned == nil {
 		h.Assigned = map[string]probeLaunchMargin{}
 	}
-	h.Assigned[j.ID] = probeLaunchMargin{Attempt: j.Attempt, GB: q.coldProbeDriftMarginGB(m)}
+	h.Assigned[j.ID] = probeLaunchMargin{Attempt: j.Attempt, GB: q.jobProbeDriftMarginGB(j, m)}
 }
 
 func (q *Queue) coldProbeDriftMarginGB(m *Machine) float64 {
@@ -112,7 +118,25 @@ func (q *Queue) recordColdProbeRefusal(j *Job, r Result) {
 		}
 		margin := assigned + d.Required - *d.Available + minimumHostMemoryGB
 		if validMemoryValue(margin) {
+			if h.Refusals == nil {
+				h.Refusals = map[string]float64{}
+			}
+			h.Refusals[j.ID] = max(h.Refusals[j.ID], margin)
 			h.RefusalGB = max(h.RefusalGB, margin)
 		}
 	}
+}
+
+// Adjacent inventory drops include other jobs and can be almost all host RAM.
+// For native CPU probes and extension checks, learn launch error from this
+// job's exact refused offers instead of turning unrelated history into a cap.
+func (q *Queue) jobProbeDriftMarginGB(j *Job, m *Machine) float64 {
+	if !j.Spec.Run.Docker && (j.Spec.Needs.cpuOnly() || j.Spec.ExtensionCheck != nil) {
+		margin := exploratoryDriftMarginGB(m)
+		if h := q.s.HostLaunchMemory[hostID(m)]; h != nil && h.Machine == m.ID && h.Session == m.Session {
+			margin = max(margin, h.Refusals[j.ID])
+		}
+		return margin
+	}
+	return q.coldProbeDriftMarginGB(m)
 }
