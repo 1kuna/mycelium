@@ -86,12 +86,8 @@ func TestWaitAdaptiveRetryAfterOwnerTimeout(t *testing.T) {
 			return nil
 		})
 		expectedReads := 2
-		if status == 429 {
-			// One initial GET, then the shed-exempt probe and its retry.
-			expectedReads = 3
-			if strings.Join(methods, ",") != "GET,POST,POST" {
-				t.Fatal(methods)
-			}
+		if strings.Join(methods, ",") != "POST,POST" {
+			t.Fatal(methods)
 		}
 		if exitCode(err) != 3 || reads != expectedReads || len(sleeps) != 2 || sleeps[0] < 7*time.Second || sleeps[1] >= 7*time.Second {
 			t.Fatal(status, err, reads, sleeps)
@@ -104,6 +100,9 @@ func TestWaitAdaptiveCompletedDeadlineDoesNotBoundPeer(t *testing.T) {
 	runningReads := 0
 	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
 		clock.advance(time.Millisecond)
+		if r.Method == "POST" {
+			return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}
 		body := `{"id":"done","state":"succeeded","spec":{"deadline":"2026-11-05T11:00:00Z"}}`
 		if strings.Contains(r.URL.Path, "running") {
 			runningReads++
@@ -173,22 +172,21 @@ func TestWaitAdaptiveEveryJobInitialDeadline(t *testing.T) {
 		clock.advance(time.Millisecond)
 		var body string
 		if r.Method == "GET" {
-			id := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
-			body = fmt.Sprintf(`{"id":%q,"state":"running"}`, id)
-			if len(initial) > 0 {
-				body = fmt.Sprintf(`{"id":%q,"state":"running","spec":{"deadline":%q}}`, id, deadline.Format(time.RFC3339))
+			t.Fatal("bootstrap GET", r.URL)
+		}
+		var req myce.WaitRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		reply := myce.WaitReply{}
+		for _, id := range req.IDs {
+			row := myce.WaitState{ID: id, State: "running", Revision: 1}
+			if id == "b" {
+				row.Spec = &myce.WaitSpec{Deadline: &deadline}
 			}
 			initial[id] = true
-		} else {
-			var req myce.WaitRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			reply := myce.WaitReply{}
-			for _, id := range req.IDs {
-				reply.Jobs = append(reply.Jobs, myce.WaitState{ID: id, State: "running", Revision: 1})
-			}
-			data, _ := json.Marshal(reply)
-			body = string(data)
+			reply.Jobs = append(reply.Jobs, row)
 		}
+		data, _ := json.Marshal(reply)
+		body = string(data)
 		return &http.Response{StatusCode: 200, Header: http.Header{"X-Myce-Wait": {"batch-v1"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}}
 	err := waitJobs(context.Background(), client, []string{"a", "b"}, time.Minute, io.Discard, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })

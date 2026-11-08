@@ -41,6 +41,8 @@ class AdaptiveTests(unittest.TestCase):
                     client._clock = clock
                     calls, holds = [], []
                     def respond(request, **kwargs):
+                        if request.selector == "/api/wait" and not batch:
+                            raise HTTPError(request.full_url, 404, "unsupported", {}, Reply({}))
                         calls.append(request)
                         clock.now += latency
                         state = "succeeded" if len(calls) >= 7 else "queued"

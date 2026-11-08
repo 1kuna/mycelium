@@ -36,7 +36,7 @@ class BatchWaitTests(unittest.TestCase):
                 rows = [result] if count == 1 else result
                 self.assertEqual([row["id"] for row in rows], ids)
                 self.assertTrue(all(row["output_refs"] for row in rows))
-                self.assertEqual(len(gets), 2 * count)  # Initial metadata + terminal payload only.
+                self.assertEqual(len(gets), count)  # Terminal payloads only; no bootstrap GET.
                 self.assertEqual(len(batches), 6)
 
     def test_older_queue_and_endpoint_fallback(self):
@@ -49,7 +49,7 @@ class BatchWaitTests(unittest.TestCase):
                 def respond(request, **kwargs):
                     calls.append(request.selector)
                     if request.selector == "/api/wait":
-                        raise HTTPError(request.full_url, refusal, "unsupported", {}, Reply({}))
+                        raise HTTPError(request.full_url, refusal or 404, "unsupported", {}, Reply({}))
                     key = request.selector.split("/api/jobs/")[1].split("?")[0]
                     reads[key] = reads.get(key, 0) + 1
                     return Reply({"id": key, "state": "running" if reads[key] <= 3 else "succeeded"},
@@ -58,7 +58,7 @@ class BatchWaitTests(unittest.TestCase):
                 client._urlopen = respond
                 rows = client.wait_many(["a", "b"])
                 self.assertEqual([row["state"] for row in rows], ["succeeded", "succeeded"])
-                self.assertEqual(calls.count("/api/wait"), int(refusal is not None))
+                self.assertEqual(calls.count("/api/wait"), 1)
                 self.assertIn("/api/jobs/a?view=wait", calls)
 
     def test_completed_job_deadline_does_not_bound_peer(self):
@@ -67,6 +67,8 @@ class BatchWaitTests(unittest.TestCase):
         calls = []
 
         def respond(request, **kwargs):
+            if request.selector == "/api/wait":
+                raise HTTPError(request.full_url, 404, "unsupported", {}, Reply({}))
             calls.append(request.selector)
             key = request.selector.split("/api/jobs/")[1].split("?")[0]
             state = "succeeded" if key == "done" or len(calls) > 2 else "running"
@@ -85,6 +87,8 @@ class BatchWaitTests(unittest.TestCase):
                 budgets = []
 
                 def respond(request, **kwargs):
+                    if request.selector == "/api/wait":
+                        raise HTTPError(request.full_url, 404, "unsupported", {}, Reply({}))
                     reads.append(request.selector)
                     clock.now += .01
                     if request.selector == "/api/jobs/done":
@@ -113,6 +117,8 @@ class BatchWaitTests(unittest.TestCase):
         early_reads = []
 
         def respond(request, **kwargs):
+            if request.selector == "/api/wait":
+                raise HTTPError(request.full_url, 404, "unsupported", {}, Reply({}))
             clock.now += .01
             if request.selector.startswith("/api/jobs/early"):
                 early_reads.append(clock.now)
@@ -151,7 +157,7 @@ class BatchWaitTests(unittest.TestCase):
         rows = client.wait_many(ids, timeout=30)
         self.assertEqual([row["id"] for row in rows], ids)
         self.assertTrue(all(row["output_refs"] for row in rows))
-        self.assertEqual(len([path for path in gets if "?" not in path]), 1)
+        self.assertEqual(len([path for path in gets if "?" not in path]), 0)
         self.assertEqual(len(waits), 4)
 
     def test_shed_bootstrap_resolves_prefix_like_queue_and_go_client(self):
@@ -187,8 +193,10 @@ class BatchWaitTests(unittest.TestCase):
             if request.selector == "/api/wait":
                 body = json.loads(request.data)
                 batches.append(body["ids"])
-                clock.now = max(clock.now, 1)
-                return Reply({"jobs": [{"id": key, "state": "succeeded", "revision": 1} for key in body["ids"]]})
+                if len(batches) > 1:
+                    clock.now = max(clock.now, 1)
+                return Reply({"jobs": [{"id": key, "state": "running" if len(batches) == 1 else "succeeded", "revision": len(batches),
+                                        "spec": {"deadline": "2026-11-05T12:00:02Z"} if key == "b" else {}} for key in body["ids"]]})
             key = request.selector.split("/api/jobs/")[1].split("?")[0]
             if request.selector.endswith("?view=wait"):
                 if key == "a" and clock.now < 3:
@@ -204,4 +212,4 @@ class BatchWaitTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in rows], ["a", "b"])
         self.assertEqual(len(peer_payloads), 1)
         self.assertLess(peer_payloads[0], 2)
-        self.assertTrue(all(batch == ["a"] for batch in batches[1:]))
+        self.assertTrue(all(batch == ["a"] for batch in batches[2:]))

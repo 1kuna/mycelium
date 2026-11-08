@@ -156,7 +156,7 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 	lastDetail := map[string]string{}
 	observed := map[string]bool{}
 	revisions := map[string]uint64{}
-	batchSupported := false
+	batchSupported := true
 	for _, id := range ids {
 		pending[id] = true
 	}
@@ -224,34 +224,27 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 			}
 			var j *myce.Job
 			var err error
-			if !observed[id] {
-				// A batch state omits spec metadata. Every job needs its own
-				// diagnostic read before deadlines can constrain observation.
-				var supported bool
-				j, supported, err = c.GetJobWaitCapability(requestCtx, id)
-				// Structured output also uses revision waits; fetch details only on changes.
-				batchSupported = batchSupported || supported
-				if supported && err != nil {
-					// The endpoint was negotiated even if its terminal detail read
-					// was shed. Retry through the batch path, not bootstrap GET.
-					observed[id] = true
-				}
-			} else if batchSupported {
+			if batchSupported || batchJobs != nil {
 				if batchJobs == nil {
 					batchJobs = map[string]*myce.Job{}
 					var reply myce.WaitReply
 					seconds := pace.Seconds(clock.Now(), event)
-					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, seconds)
+					reply, batchErr = c.WaitBatchOnly(requestCtx, ids, revisions, seconds)
 					if batchErr == nil {
 						held = seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0
 						for i, state := range reply.Jobs {
 							revisions[state.ID] = state.Revision
-							batchJobs[ids[i]] = &myce.Job{ID: state.ID, State: state.State, Reason: state.Reason}
+							batchJobs[ids[i]] = state.Job()
+							batchSupported = state.Revision > 0
 						}
 					}
 				}
 				j, err = batchJobs[id], batchErr
-				if err == nil && jsonOutput && j != nil {
+				if myce.WaitBatchUnsupported(err) {
+					batchSupported, batchJobs = false, nil
+					j, err = read(requestCtx, id)
+				}
+				if err == nil && batchSupported && jsonOutput && j != nil {
 					if lastDetail[j.ID] != j.State+"\x00"+j.Reason {
 						detail, detailErr := c.GetJob(requestCtx, j.ID)
 						var api *myce.HTTPError

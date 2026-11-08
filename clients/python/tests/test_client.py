@@ -146,7 +146,7 @@ class ClientTests(unittest.TestCase):
         client = Client(token="fixture")
         terminal = {"id": "job/one", "state": "succeeded", "output_refs": {"result": {"size_bytes": 10}}}
         replies = [{"id": "job/one", "state": "running"}, terminal]
-        with patch.object(client, "_call", side_effect=lambda *_args, **_kwargs: json.dumps(replies.pop(0)).encode()) as call, patch(
+        with patch.object(client, "_wait_batch", side_effect=APIError(404, "unsupported")), patch.object(client, "_call", side_effect=lambda *_args, **_kwargs: json.dumps(replies.pop(0)).encode()) as call, patch(
                 "mycelium.client.time.sleep") as pause:
             self.assertEqual(client.wait("job/one"), terminal)
             self.assertEqual([item.args for item in call.call_args_list], [
@@ -178,7 +178,7 @@ class ClientTests(unittest.TestCase):
             def read(self, *_):
                 raise http.client.IncompleteRead(b'{"id":"fixture"')
         short = b'{"id":"fixture","state":tru'
-        bodies = [Dropped(), Reply(short, len(short) + 2), Reply(b'{"id":"fixture","state":"succeeded"}')]
+        bodies = [Dropped(), Reply(short, len(short) + 2), Reply(b'{"jobs":[{"id":"fixture","state":"succeeded","revision":1}]}'), Reply(b'{"id":"fixture","state":"succeeded"}')]
         client = Client(token="test-only")
         with patch.object(client, "_urlopen", side_effect=lambda *_, **__: bodies.pop(0)), patch("mycelium.client.time.sleep"):
             self.assertEqual(client.wait("fixture")["state"], "succeeded")
@@ -217,8 +217,9 @@ class ClientTests(unittest.TestCase):
         for body in (b"404 page not found", b'{"code":"job_unknown","error":"job is unknown"}'):
             for read in (client.get, client.wait):
                 with self.subTest(body=body, read=read.__name__):
-                    response = HTTPError("http://queue/api/jobs/job", 404, "Not Found", {}, io.BytesIO(body))
-                    with patch.object(client, "_urlopen", side_effect=response):
+                    def missing(*args, **kwargs):
+                        raise HTTPError("http://queue/api/jobs/job", 404, "Not Found", {}, io.BytesIO(body))
+                    with patch.object(client, "_urlopen", side_effect=missing):
                         with self.assertRaises(APIError) as caught:
                             read("job")
                     self.assertEqual(caught.exception.status, 404)
@@ -291,7 +292,7 @@ class ClientTests(unittest.TestCase):
     def test_wait_reports_production_start_deadline(self):
         client = Client(token="test-only")
         failed = {"id": "prod", "state": "failed", "reason": "production start deadline exceeded"}
-        with patch.object(client, "_read_job", return_value=failed):
+        with patch.object(client, "_wait_batch", return_value=[dict(failed, revision=1)]), patch.object(client, "_read_job", return_value=failed):
             self.assertEqual(client.wait("prod"), failed)
 
 
@@ -651,12 +652,15 @@ class ClientIdentityTests(unittest.TestCase):
         requests = []
         def respond(request, **kwargs):
             requests.append(request)
+            if request.selector == "/api/wait":
+                return Reply(b'{"jobs":[{"id":"job","state":"succeeded","revision":1}]}')
             return Reply(b'{"id":"job","state":"succeeded"}')
         client._urlopen = respond
         client.get("job")
         client.wait("job")
-        self.assertEqual(len(requests), 2)
-        self.assertEqual(requests[1].selector, "/api/jobs/job")
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(requests[1].selector, "/api/wait")
+        self.assertEqual(requests[2].selector, "/api/jobs/job?view=wait")
         for request in requests:
             self.assertEqual(request.get_header("User-agent"), USER_AGENT)
 
@@ -684,9 +688,9 @@ class WaitFloodBackoffTests(unittest.TestCase):
         client = Client(token="fixture")
         error = APIError(429, '{"code":"client_rate_limited"}')
         terminal = {"id": "job", "state": "succeeded"}
-        # A shed bootstrap now probes /api/wait; mock that transport too.
-        with patch.object(client, "_read_job", side_effect=[error, terminal]), patch.object(
-                client, "_wait_batch", side_effect=[error, [dict(terminal, revision=1)]]), patch("mycelium.client.time.sleep") as pause:
+        # Retry the batch transport twice, retaining the existing backoff contract.
+        with patch.object(client, "_read_job", return_value=terminal), patch.object(
+                client, "_wait_batch", side_effect=[error, error, [dict(terminal, revision=1)]]), patch("mycelium.client.time.sleep") as pause:
             self.assertEqual(client.wait("job"), terminal)
         self.assertEqual(pause.call_count, 2)
         self.assertGreater(pause.call_args_list[1].args[0], 0)

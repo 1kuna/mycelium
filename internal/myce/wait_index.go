@@ -13,11 +13,41 @@ import (
 
 // WaitState is a scalar public observation, never an execution/diagnostic payload.
 type WaitState struct {
-	ID       string `json:"id"`
-	State    string `json:"state"`
-	Reason   string `json:"reason,omitempty"`
-	Revision uint64 `json:"revision"`
+	ID        string     `json:"id"`
+	State     string     `json:"state"`
+	Reason    string     `json:"reason,omitempty"`
+	Revision  uint64     `json:"revision"`
+	Spec      *WaitSpec  `json:"spec,omitempty"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
 }
+
+// WaitSpec contains only scalar observation metadata, never execution inputs.
+// It lets new clients honor deadlines without a diagnostic GET bootstrap.
+type WaitSpec struct {
+	Deadline        *time.Time `json:"deadline,omitempty"`
+	StartBy         *time.Time `json:"start_by,omitempty"`
+	ExpectedMinutes float64    `json:"expected_minutes,omitempty"`
+}
+
+func waitTimestamp(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+// Job projects bounded batch metadata for consumer observation.
+func (state WaitState) Job() *Job {
+	job := &Job{ID: state.ID, State: state.State, Reason: state.Reason, StartedAt: waitTimestamp(state.StartedAt)}
+	if state.Spec != nil {
+		job.Spec.Deadline = waitTimestamp(state.Spec.Deadline)
+		job.Spec.StartBy = waitTimestamp(state.Spec.StartBy)
+		job.Spec.ExpectedMinutes = state.Spec.ExpectedMinutes
+	}
+	return job
+}
+
 type WaitRequest struct {
 	IDs     []string          `json:"ids"`
 	After   map[string]uint64 `json:"after,omitempty"`
@@ -87,8 +117,11 @@ func (s *waitStateIndex) set(id string, j *Job) {
 		delete(s.jobs, id)
 	} else {
 		s.setIntent(id, j)
-		next := WaitState{ID: id, State: j.State, Reason: j.Reason}
-		if exists && old.State == next.State && old.Reason == next.Reason {
+		next := WaitState{ID: id, State: j.State, Reason: j.Reason, StartedAt: waitTimestamp(j.StartedAt)}
+		if j.Spec.Deadline != nil || j.Spec.StartBy != nil || j.Spec.ExpectedMinutes != 0 {
+			next.Spec = &WaitSpec{Deadline: waitTimestamp(j.Spec.Deadline), StartBy: waitTimestamp(j.Spec.StartBy), ExpectedMinutes: j.Spec.ExpectedMinutes}
+		}
+		if exists && old.State == next.State && old.Reason == next.Reason && reflect.DeepEqual(old.Spec, next.Spec) && reflect.DeepEqual(old.StartedAt, next.StartedAt) {
 			return
 		}
 		s.revision++
@@ -238,6 +271,7 @@ func (a API) registerWait(mux *requestMux) {
 	// Initialize once, before any request. All subsequent reads avoid q.mu.
 	index := a.Queue.waitIndex()
 	mux.HandleFunc("POST /api/wait", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Myce-Wait", "batch-v1")
 		var request WaitRequest
 		if !decode(w, r, &request) {
 			return

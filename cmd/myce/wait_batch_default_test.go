@@ -50,7 +50,7 @@ func TestWaitDefaultBatchUnchangedJobs(t *testing.T) {
 					body = string(data)
 				} else if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/jobs/") {
 					gets++
-					if batches > 0 && batches < 6 {
+					if batches > 1 && batches < 6 {
 						t.Fatal("per-job GET during unchanged batch", r.URL)
 					}
 					body = fmt.Sprintf(`{"id":%q,"state":%q,"spec":{"name":"full-detail"}}`, strings.TrimPrefix(r.URL.Path, "/api/jobs/"), state)
@@ -61,9 +61,9 @@ func TestWaitDefaultBatchUnchangedJobs(t *testing.T) {
 			})}}
 			var out bytes.Buffer
 			err := waitJobsReporting(context.Background(), client, nil, ids, time.Minute, &out, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil }, structured)
-			expectedGets := len(ids)
+			expectedGets := 0
 			if structured {
-				expectedGets *= 2
+				expectedGets = 2 * len(ids)
 			}
 			if err != nil || gets != expectedGets || batches != 6 {
 				t.Fatal(err, gets, batches, out.String())
@@ -100,7 +100,7 @@ func TestWaitShedBootstrapStillStartsBatch(t *testing.T) {
 				})}}
 				var out bytes.Buffer
 				err := waitJobsReporting(context.Background(), client, nil, []string{"job"}, time.Minute, &out, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil }, structured)
-				if err != nil || batches == 0 || gets > 4 || !strings.Contains(out.String(), "succeeded") {
+				if err != nil || batches == 0 || (!structured && gets != 0) || (structured && gets > 2) || !strings.Contains(out.String(), "succeeded") {
 					t.Fatal(err, batches, gets, out.String())
 				}
 			})

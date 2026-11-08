@@ -268,11 +268,10 @@ ignore these parameters and keep returning their legacy full snapshot.
 Wait for several jobs with `client.wait_many([job_a, job_b])` or
 `client.wait([job_a, job_b])`. Both return full terminal Jobs in input order.
 Use one call per agent rather than a thread per job. Supporting queues use one
-revision-based `/api/wait` after initial metadata reads; older queues fall back
-to lightweight reads. The batch-v1 limit is 256 distinct IDs. Wait timeouts never
-cancel jobs.
+revision-based `/api/wait` from the first observation, with no bootstrap GET;
+older queues fall back to lightweight reads after one unsupported-endpoint probe.
+The batch-v1 limit is 256 distinct IDs. Wait timeouts never cancel jobs.
 
-If control pressure sheds initial metadata (HTTP 429), waiting probes the
-shed-exempt batch endpoint instead of repeatedly retrying that GET. Placement
-and spec metadata may then be unavailable; queue execution deadlines and the
-caller's timeout still apply. A full terminal Job is still fetched for results.
+New queue replies include scalar deadline and start metadata. Older batch queues
+may omit it; use an owner timeout when that bound matters. Queue execution
+deadlines always apply. A full terminal Job is still fetched for results.

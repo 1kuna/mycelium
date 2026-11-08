@@ -261,13 +261,13 @@ myce wait --json JOB_A JOB_B JOB_C
 
 Python callers use `client.wait_many([job_a, job_b, job_c])` (or pass the list to
 `client.wait`); a single ID still returns one Job. Lists return full terminal
-Jobs in input order. After initial metadata reads, supporting clients keep one
-`/api/wait` request for the pending IDs, carrying revisions so it wakes when any
-job changes. Terminal payloads are fetched for results. Older queues retain
-compatible lightweight reads. If control pressure sheds the initial metadata
-GET (429), clients probe `/api/wait` directly instead of waiting for that GET to
-recover. Placement/spec metadata may then be unavailable until diagnostics can
-be read; queue execution deadlines and the caller's wait timeout still apply.
+Jobs in input order. Supporting clients start directly with one shed-exempt
+`/api/wait` request for all pending IDs, carrying revisions so it wakes when any
+job changes. No per-job capability/bootstrap GET is required. New queue replies
+include scalar deadline/start metadata; older batch queues may omit it, so use
+an owner timeout when that bound matters. Terminal payloads are fetched for
+results. Queues without the endpoint retain compatible lightweight reads after
+one unsupported-endpoint probe. Queue execution deadlines always apply.
 CLI JSON continues with scalar state/reason if a changed diagnostic read is shed;
 Python/Go result consumers still fetch a full terminal Job before returning it.
 Do not build per-job wait processes, Python wait
@@ -367,8 +367,7 @@ On releases with adaptive observation admission (#800), healthy queues accept re
 
 From the release containing #959, interrupted `myce logs JOB` prints `myce logs JOB --after SEQ` on stderr. Resume with that cursor after the reported Retry-After to avoid replaying completed pages; add `--follow` to keep following. From the release containing #890, read-only `myce policy get` resolves installed worker, then queue authority without setting or printing `MYCE_TOKEN`.
 
-**Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; each CLI job normally gets an initial diagnostic read to retain its deadline;
-a shed bootstrap uses scalar batch state as described above. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
+**Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; CLI/Python consumers use scalar batch deadline metadata without a bootstrap GET, as described above. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
 
 **Input and accepted-result recovery (next release, #831/#751):** profile/adapter input storage retries span preflight and reconciled uploads under the caller's one context deadline; each retry reports its sanitized cause and honours `Retry-After`. `myce result` uses the same transient recovery for accepted retrieval, including CI. Permanent authentication, TLS, capacity, integrity and configuration errors stop immediately. No retry count or new default deadline is imposed; without an owner deadline, interrupt to stop observation/recovery and resume the saved intent later.
 

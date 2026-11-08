@@ -622,7 +622,11 @@ class Client:
 
     def _wait_batch(self, job_ids, after, seconds, timeout):
         reply = self._call("POST", "/api/wait", {"ids": job_ids, "after": after,
-                           "seconds": seconds}, timeout=timeout, retry=False)
+                           "seconds": seconds}, timeout=timeout, retry=False, raw=True)
+        try:
+            reply = json.loads(reply.decode("utf-8"))
+        except (ValueError, AttributeError):
+            raise APIError(502, '{"code":"job_reply_invalid","error":"invalid wait reply"}') from None
         rows = reply.get("jobs") if isinstance(reply, dict) else None
         if (not isinstance(rows, list) or len(rows) != len(job_ids)
                 or any(not isinstance(row, dict) or not isinstance(row.get("id"), str)
@@ -641,8 +645,8 @@ class Client:
     def wait_many(self, job_ids, *, timeout: float | None = None) -> list[dict[str, Any]]:
         """Wait in one batch, returning full terminal Jobs in input order.
 
-        Initial reads retain each job's deadline/diagnostics. Supporting queues
-        then use one revision wait for all pending IDs; old queues use wait views.
+        Start at the batch endpoint with all IDs. New queues include scalar
+        deadline metadata; older queues fall back to diagnostic/wait-view GETs.
         At most 256 distinct IDs fit the batch-v1 protocol. No jobs are cancelled.
         """
         ids = list(job_ids)
@@ -676,7 +680,6 @@ class Client:
             return not (isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError))
 
         batch_unavailable = False
-        bootstrap_batch = False
 
         def observe(original, observed):
             nonlocal changed, ids, end, event
@@ -723,7 +726,7 @@ class Client:
             failure = None
             held = False
             changed = False
-            batched = not batch_unavailable and self._batch_supported and (bootstrap_batch or all(job_id in jobs for job_id in pending))
+            batched = not batch_unavailable
             try:
                 if batched:
                     seconds = min(20, int(pace.next(started, event)))
@@ -736,7 +739,7 @@ class Client:
                         if not (error.status == 405 or error.status == 404 and not error.code):
                             raise
                         batch_unavailable = True
-                        observations = []
+                        continue
                     for original, row in zip(list(pending), observations):
                         after[row["id"]] = row["revision"]
                         if row["state"] in TERMINAL:
@@ -756,13 +759,6 @@ class Client:
                             row = self._read_job(job_id, timeout=request_budget(),
                                                  wait=job_id in jobs, retry=False)
                         except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
-                            if isinstance(error, APIError) and error.status == 429 and not batch_unavailable:
-                                # A shed metadata GET cannot gate the shed-exempt
-                                # batch endpoint. Try all pending IDs together.
-                                self._batch_supported = True
-                                bootstrap_batch = True
-                                failure = error
-                                break
                             if not retryable(error):
                                 raise
                             failure = error
