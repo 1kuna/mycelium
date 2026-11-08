@@ -28,11 +28,15 @@ func productionStartWindow(s Spec) time.Duration {
 func initializeStartDeadline(j *Job, since time.Time) {
 	if j.Spec.ExtensionCheck != nil && j.Spec.ExtensionCheck.Timeout != "" {
 		// Reuse the startup fence without promoting qualification to production.
-		// One hour bounds unavailable-capacity/preparation waits at the existing
-		// maximum start window, independently of the execution budget.
+		// One hour bounds unavailable-route/preparation waits at the existing
+		// maximum start window. Capacity waiting pauses this startup budget,
+		// independently of the execution budget.
 		if j.Spec.StartBy == nil {
-			deadline := since.Add(MaxProductionStartWindow)
+			j.StartWindow = MaxProductionStartWindow
+			deadline := since.Add(j.StartWindow)
 			j.Spec.StartBy = &deadline
+		} else if j.StartWindow == 0 {
+			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
 		}
 		return
 	}
@@ -70,6 +74,9 @@ func (q *Queue) startupPending(j *Job) bool {
 				return false
 			}
 		}
+	}
+	if !callerStartDeadline(j) && (q.launchCapacityPending(j) || j.State == "queued" && j.StartCapacityWaiting) {
+		return false // Capacity is not failed startup; caller-owned cutoffs still bind.
 	}
 	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
 }
@@ -121,6 +128,33 @@ func (q *Queue) maintainStartDeadlines() {
 	for _, j := range q.liveJobs() {
 		if j.Spec.Priority == "production" && !terminal(j.State) && (j.Spec.StartBy != nil || dependencyReady(j)) {
 			initializeStartDeadline(j, j.Queued)
+		}
+	}
+	// Resolve the backlog in one immutable planning pass. Deadline transitions
+	// below can change jobs, so discard this evidence cache before applying them.
+	type capacityStatus struct{ waiting, ready bool }
+	capacity := func() map[*Job]capacityStatus {
+		previous := q.memoryPlanning
+		q.memoryPlanning = newMemoryPlanningCache()
+		defer func() { q.memoryPlanning = previous }()
+		status := map[*Job]capacityStatus{}
+		for _, j := range q.liveJobs() {
+			if j.State == "queued" && j.Spec.StartBy != nil && !callerStartDeadline(j) {
+				waiting, ready := q.queuedCapacityStatus(j)
+				status[j] = capacityStatus{waiting, ready}
+			}
+		}
+		return status
+	}()
+	for _, j := range q.liveJobs() {
+		if status, ok := capacity[j]; ok {
+			if j.StartCapacityWaiting && status.ready && j.Spec.StartBy != nil {
+				// Capacity recovered before dispatch. Restore startup time without
+				// hiding a later unavailable/disabled-route diagnosis.
+				deadline := now.Add(j.StartWindow)
+				j.Spec.StartBy = &deadline
+			}
+			j.StartCapacityWaiting = status.waiting
 		}
 		// Disabled-host rejection is an admission decision, independent of the
 		// relative timeout exemption for logical fan-out capacity waits.

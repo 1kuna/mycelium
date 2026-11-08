@@ -419,8 +419,11 @@ type SpecProjection struct {
 }
 
 type Job struct {
-	ExecutionEvidence *ExecutionEvidence `json:"execution_evidence,omitempty"`
-	HealthRecovery    *AlertRecovery     `json:"health_recovery,omitempty"`
+	StartCapacityWaiting bool `json:"start_capacity_waiting,omitempty"`
+
+	LaunchCapacityWait map[string]LaunchCapacityWait `json:"launch_capacity_wait,omitempty"`
+	ExecutionEvidence  *ExecutionEvidence            `json:"execution_evidence,omitempty"`
+	HealthRecovery     *AlertRecovery                `json:"health_recovery,omitempty"`
 
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`

@@ -2324,6 +2324,16 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "launch_capacity_wait": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LaunchCapacityWait"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "ledger": {
           "$ref": "#/$defs/JobLedgerInfo",
           "description": "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies.",
@@ -2605,6 +2615,10 @@
         },
         "start_by_explicit": {
           "description": "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute.",
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "start_capacity_waiting": {
           "type": "boolean",
           "x-contract": "diagnostic"
         },
@@ -2975,6 +2989,32 @@
         "positive_error",
         "multiplier",
         "enforcement"
+      ],
+      "type": "object"
+    },
+    "LaunchCapacityWait": {
+      "properties": {
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "session",
+        "attempt",
+        "evidence"
       ],
       "type": "object"
     },
