@@ -188,6 +188,27 @@ compatible environment, then resubmit changed intent. System/loader-relative
 imports and present libraries do not warn. This check does not prove dynamic
 loader resolution or application compatibility. See [packaged Darwin libraries](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#packaged-darwin-library-dependencies-next-release-866).
 
+From the release containing #1008, an all-disabled eligible-host production
+refusal has `diagnostic_code: host_unavailable` and cause
+`launch/host_unavailable/no_eligible_host_enabled` (operation/class/predicate),
+with unchanged reason text. Read optional `execution_evidence` on the Job and
+each `cancellation_scope.members[]` entry: `attempt`, `main`, `sidecars`, and
+`environment_preparation`. Each component is `not_started`, `may_have_run`, or
+`unknown`; absent/unrecognized evidence is unknown. Before assignment, attempt
+zero proves all three `not_started`. For assigned native work, main includes
+its extension wrapper; sidecars are collective; environment acquisition is
+conservatively `may_have_run` even on a cache hit. Sidecars/build hooks can run
+before main's Started acknowledgement. Memory refusals retain existing
+`launch/resource_limit/memory_capacity` with `prelaunch_refused` where applicable,
+or native-group `command/stage_failed/memory_capacity`; those fields, interruption,
+`starts` and absent `started_at` alone never prove no user code ran. A safe
+no-user-code retry needs all three `not_started` across every attempt and each
+materialized member, plus the independent release contract. Earlier independent
+preparation/qualification jobs are outside this evidence. Incomplete recovery
+and older workers remain unknown. Result/run clients return the same Job;
+artifact downloads still require accepted outputs. See
+[execution evidence](https://github.com/1kuna/mycelium/blob/main/docs/status.md#positive-execution-evidence-1008-next-release).
+
 Resolve uploads nothing; `needs-staging` for the source archive is expected:
 `run` stages it automatically. Fix actual input/environment/eligibility blockers
 before submitting. Save the receipt's `key` and `job_id`. After a lost reply,

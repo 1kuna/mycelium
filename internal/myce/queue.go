@@ -2013,6 +2013,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	outcome := attemptOutcome(j, r)
 	q.recordAttemptStorage(j, r)
 	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
+	j.ExecutionEvidence = safeExecutionEvidence(r.ExecutionEvidence, j.Attempt)
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
 	// A kernel OOM is the payload's failure even if preemption raced it.
@@ -2834,6 +2835,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	j.State = "running"
 	j.ExecutionCause, j.CleanupCause = nil, nil
+	j.ExecutionEvidence = nil
 	j.ReleaseConfirmed = false
 	j.RequeuedByOperator = false
 	j.StartedAt = nil

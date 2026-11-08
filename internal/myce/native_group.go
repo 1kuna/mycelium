@@ -297,7 +297,9 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	if j.Spec.Logs == "none" {
 		logName = ""
 	}
-	s.state.Job = &j
+	assigned := j
+	assigned.ExecutionEvidence = nil
+	s.state.Job = &assigned
 	s.state.Identity = identity
 	s.state.Log = logName
 	s.state.Offset = 0
@@ -396,7 +398,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		}
 		persist := errors.Join(syncCommandOutput(output), output.Close())
 		// Cleanup uncertainty holds custody, not the successful payload result.
-		r := Result{Resources: resources, MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
+		r := Result{ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt), Resources: resources, MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
 		if runErr != nil {
 			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
@@ -788,6 +790,15 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	}
 	if err = g.worker.authorizeLaunch(l); err != nil {
 		return g.recordInfrastructureLocked(launchRefused, m.Name, "", err)
+	}
+	// Mark before opening the gate: a failed write/handshake can still let
+	// authored code execute. Preserve this across whole-group bind retries.
+	if e := g.p.job.ExecutionEvidence; e != nil {
+		if m.Name == "main" {
+			e.Main = executionMayHaveRun
+		} else {
+			e.Sidecars = executionMayHaveRun
+		}
 	}
 	if err = g.releaseMember(m, writer); err != nil {
 		return err

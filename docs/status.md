@@ -755,6 +755,59 @@ that proof and no queue-recorded start/custody preserves ledger completeness,
 including a release-only acknowledgement before the final outcome. Missing
 process identity without this proof remains conservatively incomplete.
 
+### Positive execution evidence (#1008, next release)
+
+A production start refusal because every eligible host is disabled has
+`diagnostic_code: host_unavailable` and `execution_cause` with `operation: launch`,
+`class: host_unavailable`, `predicate: no_eligible_host_enabled`. Existing reason
+text is unchanged. It also has:
+
+```json
+"execution_evidence": {
+  "attempt": 0,
+  "main": "not_started",
+  "sidecars": "not_started",
+  "environment_preparation": "not_started"
+}
+```
+
+The same optional object is on job GET/status, returned Jobs from result/run
+clients, worker `Result` reports, exact `attempt_history` entries, and each
+`cancellation_scope.members[]` entry. A member describes its own job; parent
+proof is never inherited. Zero means rejection before assignment. Otherwise
+`attempt` identifies one physical attempt, not the entire retry history.
+
+Each component is `not_started` (positive evidence its boundary was never
+entered), `may_have_run` (boundary entered/opened; successful exec is not proved),
+or `unknown`. Missing objects, missing states and unrecognized values are unknown.
+`main` includes the submitted extension stage wrapper. `sidecars` describes all
+authored helpers collectively: `not_started` means none were released;
+`may_have_run` means at least one was allowed to execute. Framework supervisor
+and isolation/probe helpers are outside these authored-command components.
+`environment_preparation` covers attempt-local main/helper environment and
+extension-asset acquisition. It becomes `may_have_run` before acquisition, even
+on a cache hit, because acquisition can run authored build/install commands.
+Earlier independent preparation/qualification jobs are outside this evidence.
+
+Native memory refusals retain their existing cause, including
+`launch/resource_limit/memory_capacity` with `prelaunch_refused` where already
+applicable, or `command/stage_failed/memory_capacity` for native groups. Neither
+that predicate, `interrupted`, `starts`, nor absent `started_at` proves no user
+code ran. Sidecars and environment preparation can run before main's Started
+acknowledgement. Use the component evidence; a refused main can be `not_started`
+after a helper is `may_have_run`.
+
+For a no-user-code conclusion, require all three components `not_started` for
+every attempt and separately for each materialized member. Current evidence is
+cleared on assignment; history retains the prior attempt. Native live completion
+observations are persisted with their completed result. Incomplete recovery,
+older workers and unobserved daemon boundaries stay unknown. Workers negotiate
+`X-Myce-Execution-Evidence: execution-evidence-v1`; strict older queues receive
+no additive field while the durable local result retains it. These diagnostics
+change no retry or admission decisions and do not prove cleanup/release or grant
+overlap/deletion permission. Artifact-download APIs still require accepted
+results; read the Job for refusal evidence.
+
 History preserves the existing outcome classification: `launch` causes include
 `launch_refused`, `launch_failed` and `environment_failed`; `polite_stop` marks
 availability withdrawal or a queue-recorded planned stop (leaving or making

@@ -191,10 +191,11 @@ type CancellationScope struct {
 	Members []CancellationMember `json:"members"`
 }
 type CancellationMember struct {
-	JobID      string `json:"job_id"`
-	State      string `json:"state"`
-	WillNotRun bool   `json:"will_not_run"`
-	Release    string `json:"release"`
+	ExecutionEvidence *ExecutionEvidence `json:"execution_evidence,omitempty"`
+	JobID             string             `json:"job_id"`
+	State             string             `json:"state"`
+	WillNotRun        bool               `json:"will_not_run"`
+	Release           string             `json:"release"`
 }
 type CancellationPiece struct {
 	Key          string   `json:"key"`
@@ -240,7 +241,7 @@ func (q *Queue) projectCancellation(out, stored *Job) {
 	collect(stored)
 	waves := map[string]*Job{}
 	for _, child := range members {
-		scope.Members = append(scope.Members, CancellationMember{JobID: child.ID, State: child.State, WillNotRun: cancelled(child), Release: q.observedRelease(child)})
+		scope.Members = append(scope.Members, CancellationMember{ExecutionEvidence: safeExecutionEvidence(child.ExecutionEvidence, child.Attempt), JobID: child.ID, State: child.State, WillNotRun: cancelled(child), Release: q.observedRelease(child)})
 		if child.Batch != nil && child.Batch.Parent == stored.ID {
 			for _, p := range child.Batch.Pieces {
 				waves[p.Key] = child
