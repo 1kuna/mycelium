@@ -99,7 +99,12 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		}
 		m := q.s.Machines[l.Machine]
 		allowed := q.hostLaunchAllowed(m, l.Session)
-		if l.Kind == "batch" {
+		p := q.s.PreparationPlans[l.Attempt]
+		// Repeated gates within an already started preparation retain its exact
+		// custody, just as an assigned batch does. Suspicion blocks new starts;
+		// the current session, stop and preparation fences still apply below.
+		continuing := p.Started && p.Machine == l.Machine && p.Session == l.Session && p.Kind == l.Kind && p.Key == l.Key
+		if l.Kind == "batch" || continuing {
 			allowed = q.hostSessionLaunchAllowed(m, l.Session)
 		}
 		if !allowed {

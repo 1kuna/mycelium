@@ -494,6 +494,10 @@ overload adds actual blocked queue time. Under continuous saturation, silence
 still becomes `suspect: true` within the measured wall-arrival allowance plus the next
 maintenance/observation turn. A suspect host receives no new work and is never
 shown healthy; existing attempts retain custody and spend no retry budget.
+Pending native qualification checks retain useful demand during suspicion and
+resume under the same identity after fresh contact; suspicion grants no launch.
+An already started preparation retains its exact custody through later stages;
+an unstarted cached plan cannot start while suspect.
 The wall allowance includes observed control delivery cost even for workers
 advertising shorter send intervals, starting with measured completed-response
 cost. Confirmed loss requires both a missed wall arrival and enough available

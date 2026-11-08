@@ -238,6 +238,15 @@ func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
 }
 
 func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident bool) bool {
+	if q.workerSuspect(m, q.clock.Now()) && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping")) {
+		return false
+	}
+	return q.placementDemandPolicy(j, m, resident)
+}
+
+// Useful demand survives temporary contact suspicion. This predicate grants no
+// assignment or preparation authority; those paths still require fresh contact.
+func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 	if q.variantParityReason(j, m) != "" {
 		return false
 	}
@@ -259,7 +268,7 @@ func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident b
 		}
 	}
 
-	if availabilityBlocked(m) || (q.machineLimitReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || !q.jobAllowsMachine(j, m.ID) {
+	if availabilityBlocked(m) || (q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || !q.jobAllowsMachine(j, m.ID) {
 		return false
 	}
 	if j.ProductionHost != "" && j.ProductionHost != hostID(m) {

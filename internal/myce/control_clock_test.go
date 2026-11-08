@@ -253,6 +253,35 @@ func TestControlClockSlowControlPathDoesNotStarveAdmission(t *testing.T) {
 	}
 }
 
+func TestControlClockSuspectPreparationRetainsStartedCustody(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("worker", "fake")
+	check(t, q, m, nil)
+	live := q.s.Machines[m.ID]
+	launch := q.issuePreparation(live, "environment", "started")
+	if err := q.AuthorizeLaunch(launch); err != nil {
+		t.Fatal(err)
+	}
+	started := q.s.PreparationPlans[launch.Attempt].StartedAt
+	clock.Advance(q.workerArrivalAllowance(live))
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if !q.workerSuspect(live, clock.Now()) || live.Gone {
+		t.Fatal("fixture did not preserve suspect custody")
+	}
+	if err := q.AuthorizeLaunch(launch); err != nil {
+		t.Fatal("suspected contact interrupted started preparation", err)
+	}
+	if got := q.s.PreparationPlans[launch.Attempt]; !got.Started || got.StartedAt == nil || !got.StartedAt.Equal(*started) {
+		t.Fatal("continuation renewed preparation custody", got)
+	}
+	cold := q.issuePreparation(live, "environment", "unstarted")
+	if err := q.AuthorizeLaunch(cold); !errors.Is(err, ErrStale) {
+		t.Fatal("suspect contact authorized a new preparation", err)
+	}
+}
+
 func TestControlClockLegacyFirstWorkAfterOneInterval(t *testing.T) {
 	q, clock := fixture(t)
 	if err := q.SetLossTimeouts(0, 0, 0); err != nil {

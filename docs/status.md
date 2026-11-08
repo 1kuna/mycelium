@@ -622,6 +622,9 @@ worker advertises a shorter send interval. Completed response cost provides
 the initial delivery evidence before a second arrival. Confirmed loss also
 requires enough available control service. The machine receives no new assignments and maintenance
 reports `fresh: false`, while existing attempts and retry budgets remain intact.
+Started preparations retain their exact custody and original start timestamp;
+unstarted cached offers cannot launch. Pending native qualification demand is
+retained so fresh contact can resume the same check without a poisoned result.
 CLI/HTML availability says “suspect; waiting for worker contact; no new work”.
 Health reports `worker_suspect` through the existing notification channel. This
 bounds uncertainty even when continuous queue saturation prevents confirmed
