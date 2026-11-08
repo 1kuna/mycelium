@@ -3,6 +3,11 @@ import email.utils
 import random
 import sys
 
+# RFC 6298 sections 2.1/2.4: initial/minimum TCP retransmission period.
+# Fast failures do not measure recovery time. Permit one transport recovery
+# period without a server signal; slower observed service can extend it.
+RECOVERY_PERIOD = 1.0
+
 
 def retry_after(value, now):
     try:
@@ -27,9 +32,9 @@ class Pace:
         delay = self.delay
         if error is not None:
             # Failure history is not evidence of current server pressure.
-            # Follow the latest not-before signal, or measured service cost
-            # when absent, with one period of contention-avoidance jitter.
-            return (getattr(error, "retry_after", 0) or self.cost) * (1 + self.jitter())
+            # Follow the latest not-before signal. Without it, a fast failure
+            # must not drive probes faster than transport recovery permits.
+            return (getattr(error, "retry_after", 0) or max(self.cost, RECOVERY_PERIOD)) * (1 + self.jitter())
         if event is not None and event > now:
             delay = min(delay, max(self.cost, (event - now) / 2))
         return delay

@@ -12,6 +12,36 @@ from test_adaptive import Clock, Reply
 
 
 class RetryPacingTests(unittest.TestCase):
+    def test_fast_failures_allow_transport_recovery_and_owner_deadline(self):
+        for elapsed in (0, .001):
+            with self.subTest(elapsed=elapsed):
+                clock = Clock()
+                client = Client(token="fixture", timeout=3)
+                client._clock, client._jitter = clock, lambda: 0
+                attempts = []
+                sleep = clock.sleep
+
+                def pause(delay):
+                    self.assertAlmostEqual(delay, min(1.0, 3 - clock.now))
+                    sleep(delay)
+
+                clock.sleep = pause
+
+                def respond(request, **kwargs):
+                    attempts.append(clock.now)
+                    clock.now += elapsed
+                    raise HTTPError(request.full_url, 503, "busy", {}, io.BytesIO(b'{}'))
+
+                client._urlopen = respond
+                with self.assertRaises(TimeoutError):
+                    client.get("job")
+                self.assertEqual(len(attempts), 3)
+                self.assertEqual(clock.now, 3)
+                pace = Pace(jitter=lambda: 0)
+                pace.observe(elapsed)
+                self.assertEqual(pace.next(0, error=ConnectionError()), 1.0)
+                self.assertEqual(pace.next(0, error=APIError(503, "busy", .1)), .1)
+
     def test_get_and_download_follow_current_pressure(self):
         for download in (False, True):
             for signaled in (False, True):
@@ -37,7 +67,7 @@ class RetryPacingTests(unittest.TestCase):
                             clock.now += .008
                             if len(attempts) <= 19:
                                 signal = (len(attempts) - 1) % 13 + 1 if signaled else 0
-                                delay = (signal or .008) * 1.5
+                                delay = (signal or 1.0) * 1.5  # RFC 6298 without a signal.
                                 expected.append(min(delay, max(0, 17 - clock.now)) if bounded else delay)
                                 not_before = clock.now + signal
                                 raise HTTPError(request.full_url, 429, "busy",
@@ -53,7 +83,7 @@ class RetryPacingTests(unittest.TestCase):
                                     self.assertEqual(path.read_bytes(), data)
                                 else:
                                     self.assertEqual(client.get("job"), job)
-                            if bounded and signaled:
+                            if bounded:
                                 with self.assertRaises((TimeoutError, TransferStalledError)):
                                     run()
                                 self.assertAlmostEqual(clock.now, 17)
@@ -70,7 +100,7 @@ class RetryPacingTests(unittest.TestCase):
             pace.observe(.008)
         for signal in (13, 1, 0):
             self.assertAlmostEqual(pace.next(0, error=APIError(429, "busy", signal)),
-                                   (signal or .008) * 1.5)
+                                   (signal or 1.0) * 1.5)
         # A slower completed attempt changes fallback pacing without a fixed cap.
         pace.observe(8)
         self.assertAlmostEqual(pace.next(0, error=ConnectionError()), 4.004 * 1.5)
