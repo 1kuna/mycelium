@@ -51,7 +51,7 @@ func ResolveFindingBlocker(findings []ResolveFinding) *Blocker {
 }
 
 func (q *Queue) inventoryFresh(m *Machine) bool {
-	return m != nil && !m.Gone && !m.LastSeen.IsZero() && !q.clock.Now().Before(m.LastSeen) && q.clock.Now().Sub(m.LastSeen) <= q.machineLossTimeout(m.ID)
+	return q.workerFresh(m, q.clock.Now())
 }
 
 // Called only on detached observation copies. Sort by the shared closest-fit

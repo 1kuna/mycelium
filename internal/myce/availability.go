@@ -308,6 +308,9 @@ func (q *Queue) machineJobLimit(m *Machine) int {
 	return limit
 }
 func (q *Queue) machineLimitReason(m *Machine) string {
+	if q.workerSuspect(m, q.clock.Now()) {
+		return "worker suspect; waiting for contact"
+	}
 	if reason := q.hostHygieneReason(m); reason != "" {
 		return reason
 	}

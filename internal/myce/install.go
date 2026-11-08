@@ -252,7 +252,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.FileStoreBytes = 100 << 30
 	c.RestartGrace = RestartGrace
 	c.ProductionInfrastructureRetries = DefaultProductionInfrastructureRetries
-	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
+	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = 0, 0, 0
 	c.UploadSpoolDir = filepath.Join(c.State, "uploads")
 	c.UploadSpoolBytes = DefaultUploadSpoolBytes
 	c.PrivateDevices, c.NoNewPrivileges = false, true

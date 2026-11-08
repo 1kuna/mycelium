@@ -271,9 +271,9 @@ func InstallSettings() []InstallSetting {
 			}
 			return nil
 		}),
-		installSetting("production-loss-timeout", "ProductionLossTimeout", "production quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ProductionLossTimeout }, installPositiveDuration),
-		installSetting("deadline-loss-timeout", "DeadlineLossTimeout", "deadline quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.DeadlineLossTimeout }, installPositiveDuration),
-		installSetting("experiment-loss-timeout", "ExperimentLossTimeout", "experiment quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ExperimentLossTimeout }, installPositiveDuration),
+		installSetting("production-loss-timeout", "ProductionLossTimeout", "production quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ProductionLossTimeout }, installNonnegativeDuration),
+		installSetting("deadline-loss-timeout", "DeadlineLossTimeout", "deadline quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.DeadlineLossTimeout }, installNonnegativeDuration),
+		installSetting("experiment-loss-timeout", "ExperimentLossTimeout", "experiment quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ExperimentLossTimeout }, installNonnegativeDuration),
 		installEnvironmentFileSetting(),
 		installContext(installSetting("private-devices", "PrivateDevices", "queue private device namespace", func(c *ServiceConfig) *bool { return &c.PrivateDevices }, installAny[bool]), func(c ServiceConfig) error {
 			if c.Detection.OS == "linux" && c.Role == "queue" && c.PrivateDevices {

@@ -216,7 +216,7 @@ func (q *Queue) placementLiveness(scan *placementScan) map[string]bool {
 	timeouts := map[string]time.Duration{}
 	add := func(id, priority string) {
 		d := q.lossTimeouts[min(2, legacyRank(priority))]
-		if old := timeouts[id]; old == 0 || d < old {
+		if old, known := timeouts[id]; !known || d < old {
 			timeouts[id] = d
 		}
 	}
@@ -238,11 +238,15 @@ func (q *Queue) placementLiveness(scan *placementScan) map[string]bool {
 	scan.live = map[string]bool{}
 	now := q.clock.Now()
 	for _, m := range scan.machines {
-		d := timeouts[m.ID]
-		if d == 0 {
+		d, known := timeouts[m.ID]
+		if !known {
 			d = q.lossTimeouts[2]
 		}
-		scan.live[m.ID] = !m.Gone && !m.Leaving && now.Sub(m.LastSeen) < d
+		d = max(d, q.workerLossAllowance(m))
+		if d == 0 {
+			d = time.Duration(1<<63 - 1)
+		}
+		scan.live[m.ID] = !m.Gone && !m.Leaving && !q.workerSuspect(m, now) && !now.Before(m.LastSeen) && now.Sub(q.lastContact(m, now)) < d
 	}
 	return scan.live
 }

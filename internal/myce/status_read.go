@@ -245,11 +245,14 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		evidenceRetention: q.evidenceRetention, simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root}
+	if q.mu.control != nil && q.restartControlUntil > 0 {
+		v.restartUntil = v.clock.Now().Add(q.restartControlUntil - q.controlNow())
+	}
 	// Freeze session contact at capture time just like the queue clock. Without
 	// it, a detached fleet view turns an in-flight check-in into worker silence.
 	v.contacts = make(map[string]*workerContact, len(q.s.Machines))
 	for id, m := range q.s.Machines {
-		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now())}
+		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now()), allowance: q.workerLossAllowance(m), suspect: q.workerSuspect(m, v.clock.Now())}
 	}
 	s := q.s
 	if id == "" {

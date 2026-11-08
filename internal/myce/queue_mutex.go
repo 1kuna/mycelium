@@ -12,6 +12,7 @@ import (
 type queueMutex struct {
 	mu       sync.RWMutex
 	pressure atomic.Pointer[queuePressure]
+	control  *controlClock // Set before the queue is published; injected decision clock.
 
 	// Configure only while the queue is idle. The callback must not reenter
 	// the queue. Concurrent readers count as one occupied interval, since a
@@ -25,6 +26,9 @@ type queueMutex struct {
 func (m *queueMutex) Lock() {
 	p, w := m.waitPressure()
 	m.mu.Lock()
+	if m.control != nil {
+		m.control.begin()
+	}
 	m.acquirePressure(p, w)
 	m.enter()
 }
@@ -35,11 +39,17 @@ func (m *queueMutex) Unlock() {
 		p.release()
 	}
 	m.mu.Unlock()
+	if m.control != nil {
+		m.control.end()
+	}
 }
 
 func (m *queueMutex) RLock() {
 	p, w := m.waitPressure()
 	m.mu.RLock()
+	if m.control != nil {
+		m.control.begin()
+	}
 	m.acquirePressure(p, w)
 	m.enter()
 }
@@ -50,11 +60,17 @@ func (m *queueMutex) RUnlock() {
 		p.release()
 	}
 	m.mu.RUnlock()
+	if m.control != nil {
+		m.control.end()
+	}
 }
 
 func (m *queueMutex) TryLock() bool {
 	if !m.mu.TryLock() {
 		return false
+	}
+	if m.control != nil {
+		m.control.begin()
 	}
 	m.acquirePressure(m.pressure.Load(), nil)
 	m.enter()
@@ -64,6 +80,9 @@ func (m *queueMutex) TryLock() bool {
 func (m *queueMutex) TryRLock() bool {
 	if !m.mu.TryRLock() {
 		return false
+	}
+	if m.control != nil {
+		m.control.begin()
 	}
 	m.acquirePressure(m.pressure.Load(), nil)
 	m.enter()

@@ -6,35 +6,76 @@ import (
 )
 
 // workerContact is the queue's own record of one worker session's check-ins.
-// Time a check-in spends waiting behind q.mu is queue time, not worker silence
-// (#223, #343): a matching-session arrival counts for at most 30 s while in
-// flight, including when queue delay causes its client to cancel.
-// Accepted check-ins count from when the queue finished processing them.
+// Queue service time is excluded by controlClock, including cancelled requests.
+// Accepted check-ins count from processing completion; pending arrivals have a
+// measured, session-specific allowance in the same opportunity clock.
 type workerContact struct {
-	session   string
-	pending   map[*checkinContact]struct{}
-	processed time.Time
+	session              string
+	pending              map[*checkinContact]struct{}
+	processed            time.Time
+	processedArrival     time.Time
+	suspect              bool // Frozen detached observation.
+	processedOpportunity time.Duration
+	measured             bool
+	period               time.Duration
+	gap                  probeEstimate
+	path                 probeEstimate
+	retry                workerRetry // Existing legacy worker reconnect schedule.
+	arrivalOpportunity   time.Duration
+	seenArrival          bool
+	allowance            time.Duration // Only on immutable detached observations.
 }
 
-// This bounds how long an abandoned request can hide worker silence. The cost
-// is losing protection for queue stalls longer than 30 s; it is not a retry or
-// an extension of the ordinary 5 s production silence timeout.
-const pendingCheckinContactLimit = 30 * time.Second
+type checkinContact struct {
+	arrived     time.Time
+	opportunity time.Duration
+	period      time.Duration
+	advertised  bool
+	inFlight    bool
+}
 
-type checkinContact struct{ arrived time.Time }
+// Cadence qualification precedes new offers. A cold legacy sender must first
+// establish an observed interval; no job can acquire an unbounded unknown loss
+// allowance. Current workers qualify on their advertised interval immediately.
+func (q *Queue) acceptContactPeriod(m *Machine, period time.Duration) {
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	if q.contacts == nil {
+		q.contacts = map[string]*workerContact{}
+	}
+	c := q.contacts[m.ID]
+	if c == nil || c.session != m.Session {
+		c = &workerContact{session: m.Session}
+		q.contacts[m.ID] = c
+	}
+	c.period = period
+}
+
+// Reconnection gaps describe an outage, not the live sender's cadence.
+// Call with q.mu held, at the loss/outage decision rather than after a report
+// has already cleared Gone or completed the recovery epoch.
+func (q *Queue) discontinueContactCadence(id string) {
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	if c := q.contacts[id]; c != nil {
+		c.seenArrival = false
+	}
+}
 
 // beginCheckin records a check-in before it waits for q.mu. The returned
 // settle is idempotent. Only the last accepted current session gets pending
-// credit. A report later rejected under q.mu can delay loss detection by at
-// most 30 s. Rejection removes its credit; cancellation retains only the
-// original bounded arrival credit, never refreshing accepted contact. Otherwise
-// a client deadline during queue contention retroactively becomes silence.
+// credit. Rejection removes its credit; cancellation grants only a measured
+// reconnect opportunity, never refreshing accepted LastSeen. An abandoned arrival
+// cannot hide silence after the queue has had enough service opportunities.
 func (q *Queue) beginCheckin(machine, session string, contexts ...context.Context) func(accepted bool) {
+	return q.beginWorkerCheckin(machine, session, 0, false, contexts...)
+}
+
+func (q *Queue) beginWorkerCheckin(machine, session string, period time.Duration, active bool, contexts ...context.Context) func(accepted bool) {
 	q.contactMu.Lock()
 	c := q.contacts[machine]
-	var pending *checkinContact
+	pending := &checkinContact{arrived: q.clock.Now(), opportunity: q.controlNow(), period: checkinPeriod(period), advertised: period > 0, inFlight: active}
 	if c != nil && c.session == session {
-		pending = &checkinContact{arrived: q.clock.Now()}
 		if c.pending == nil {
 			c.pending = map[*checkinContact]struct{}{}
 		}
@@ -55,7 +96,16 @@ func (q *Queue) beginCheckin(machine, session string, contexts ...context.Contex
 			return
 		}
 		settled = true
-		if pending != nil && (accepted || requestContext(contexts).Err() == nil) {
+		pending.inFlight = false
+		if c != nil && requestContext(contexts).Err() != nil {
+			// The server has finished a cancelled control call. Give its retry
+			// the measured send opportunity; do not backdate queue service as
+			// silence or change the accepted LastSeen timestamp.
+			pending.opportunity = q.controlNow()
+			c.retry.failed(q.clock.Now(), pending.period)
+			pending.period = max(pending.period, c.retry.delay)
+		}
+		if c != nil && requestContext(contexts).Err() == nil {
 			delete(c.pending, pending)
 		}
 		if accepted {
@@ -69,27 +119,60 @@ func (q *Queue) beginCheckin(machine, session string, contexts ...context.Contex
 					current = &workerContact{session: session}
 					q.contacts[machine] = current
 				}
+				if current.seenArrival && !q.networkQuiet && q.s.NetworkRecoveryAt.IsZero() {
+					if gap := pending.opportunity - current.arrivalOpportunity; gap > 0 {
+						current.gap.observe(gap.Seconds())
+					}
+				}
+				current.arrivalOpportunity, current.seenArrival = pending.opportunity, true
+				current.period = 0
+				if pending.advertised {
+					current.period = pending.period
+				}
+				if requestContext(contexts).Err() == nil {
+					current.retry = workerRetry{}
+					for p := range current.pending {
+						if !p.inFlight {
+							delete(current.pending, p)
+						}
+					}
+				}
+				if cost := q.controlNow() - pending.opportunity; cost > 0 {
+					current.path.observe(cost.Seconds())
+				}
+				current.processedArrival = maxTime(current.processedArrival, pending.arrived)
 				current.processed = q.clock.Now()
+				current.processedOpportunity, current.measured = q.controlNow(), true
 			}
 		}
 	}
 }
 
 // lastContact is the later of m.LastSeen and the queue's own contact record for
-// m's current session; an unexpired in-flight arrival is contact at now.
-// Expired requests stop contributing even if settle is never called. Callers hold q.mu.
+// m's current session; active processing protects that worker from confirmed
+// loss, while wall-clock suspicion remains independent. Callers hold q.mu.
 func (q *Queue) lastContact(m *Machine, now time.Time) time.Time {
+	allowance := q.machineLossTimeout(m.ID)
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
 	c := q.contacts[m.ID]
 	if c == nil || c.session != m.Session {
 		return m.LastSeen
 	}
+	opportunity := q.controlNow()
+	contact := false
 	for pending := range c.pending {
-		if now.Before(pending.arrived.Add(pendingCheckinContactLimit)) {
-			return maxTime(now, m.LastSeen)
+		if pending.inFlight || opportunity-pending.opportunity < max(allowance, 2*pending.period) {
+			contact = true
+		} else {
+			delete(c.pending, pending)
 		}
-		delete(c.pending, pending)
+	}
+	if contact {
+		return maxTime(now, m.LastSeen)
+	}
+	if c.measured {
+		return maxTime(m.LastSeen, now.Add(-max(0, opportunity-c.processedOpportunity)))
 	}
 	if c.processed.After(m.LastSeen) {
 		return c.processed

@@ -48,6 +48,7 @@ func attemptReply(c Checkin, reply Reply) Reply {
 }
 
 func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
+	c.period = checkinPeriod(w.Interval)
 	c.AttemptProtocol = keyedAttemptProtocol
 	if c.Running != nil {
 		c.Attempts = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}

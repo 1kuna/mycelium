@@ -46,7 +46,7 @@ func TestCheckinWaitingOnQueueLockIsNotWorkerSilence(t *testing.T) {
 	}
 	requireState(t, q, j.ID, "running")
 
-	c.Advance(ProductionLossAfter)
+	c.Advance(q.machineLossTimeout(worker.ID))
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "queued")
 	if !q.s.Machines[worker.ID].Gone {
@@ -67,14 +67,15 @@ func TestCheckinAbandonedContactExpires(t *testing.T) {
 	c.Advance(4 * time.Second)
 	check(t, q, peer, nil)
 	q.beginCheckin(worker.ID, worker.Session) // Abandoned: never calls settle.
-	c.Advance(29 * time.Second)
+	allowance := q.machineLossTimeout(worker.ID)
+	c.Advance(allowance - time.Nanosecond)
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "running")
-	c.Advance(time.Second) // Exactly arrival + 30 s: no more pending credit.
+	c.Advance(time.Nanosecond) // No remaining arrival allowance.
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "queued")
 	if !q.s.Machines[worker.ID].Gone || job(t, q, j.ID).Losses != 1 {
-		t.Fatal("abandoned check-in hid a dead worker after 30 s")
+		t.Fatal("abandoned check-in hid a dead worker after its measured allowance")
 	}
 }
 
@@ -93,7 +94,7 @@ func TestCheckinCancelledWhileWaitingRetainsBoundedContact(t *testing.T) {
 	last := q.s.Machines[worker.ID].LastSeen
 	c.Advance(4 * time.Second)
 	check(t, q, peer, nil)
-	arrived := c.Now()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	q.mu.Lock()
@@ -121,16 +122,16 @@ func TestCheckinCancelledWhileWaitingRetainsBoundedContact(t *testing.T) {
 	if !q.s.Machines[worker.ID].LastSeen.Equal(last) {
 		t.Fatal("cancelled check-in refreshed LastSeen")
 	}
-	// Even after the cancelled handler has returned, keep the original window
-	// for its retry to arrive. Never grant a fresh 30 s from cancellation.
-	c.Advance(arrived.Add(pendingCheckinContactLimit - time.Nanosecond).Sub(c.Now()))
+	// After server completion, allow the measured reconnect opportunity.
+	// This does not refresh the accepted LastSeen timestamp.
+	c.Advance(q.machineLossTimeout(worker.ID) - time.Nanosecond)
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "running")
 	c.Advance(time.Nanosecond)
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "queued")
 	if !q.s.Machines[worker.ID].Gone || job(t, q, j.ID).Losses != 1 {
-		t.Fatal("cancelled arrival hid a dead worker beyond its original 30 s bound")
+		t.Fatal("cancelled arrival hid a dead worker beyond its measured opportunity allowance")
 	}
 }
 

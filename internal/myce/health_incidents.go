@@ -87,9 +87,8 @@ func (q *Queue) detectIncidentHealth() {
 		intentional := m.Leaving || mode == "disabled" || mode == "drained" || mode == "draining"
 		key := "stale-flaps/" + m.ID
 		seen[key] = true
-		freshness := min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
-		stale := m.Gone || now.Sub(q.lastContact(m, now)) >= freshness
-		cold := q.unreported[m.ID] && now.Before(q.restartUntil)
+		stale := !q.workerFresh(m, now)
+		cold := q.unreported[m.ID] && q.inRestartGrace(now)
 		c := q.s.Health.Conditions[key]
 		id := ""
 		if intentional || cold {

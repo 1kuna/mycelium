@@ -384,7 +384,7 @@ func (q *Queue) reservationPending(r Reservation) []string {
 				}
 			}
 		}
-		if m.Gone || q.unreported[m.ID] || m.LastSeen.After(now) || now.Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+		if q.unreported[m.ID] || !q.workerFresh(m, now) {
 			pending = append(pending, "worker evidence unavailable: "+m.ID)
 		}
 		ownDocker := bound != nil && bound.Spec.Run.Docker && bound.Machine == m.ID && bound.Session == m.Session && bound.State == "running" && dockerStartingOrRunning(m.DockerCleanup)

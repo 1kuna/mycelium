@@ -483,7 +483,7 @@ func (q *Queue) productionSpilloverTarget(j *Job) string {
 	var best *Machine
 	now := q.clock.Now()
 	for _, m := range scan.machines {
-		if hostID(m) == j.ProductionHost || q.unreported[m.ID] || m.LastSeen.After(now) || now.Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+		if hostID(m) == j.ProductionHost || q.unreported[m.ID] || !q.workerFresh(m, now) {
 			continue
 		}
 		candidate := q.batchCandidateWithResources(&copy, m, nil)

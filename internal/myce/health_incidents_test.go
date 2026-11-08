@@ -106,13 +106,13 @@ func TestHealthIncidentStaleFlapReplay(t *testing.T) {
 	m := machine("worker", "cuda")
 	key, kind := "stale-flaps/worker", "worker_stale_flapping"
 	check(t, q, m, nil)
-	freshness := min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
+	freshness := q.machineLossTimeout(m.ID)
 	// An ordinary healthy history, then one continuously quiet worker, is quiet.
 	for range 3 {
 		clock.Advance(freshness / 2)
 		check(t, q, m, nil)
 	}
-	clock.Advance(freshness)
+	clock.Advance(q.machineLossTimeout(m.ID))
 	for range 3 {
 		if err := q.Tick(); err != nil {
 			t.Fatal(err)
@@ -121,7 +121,7 @@ func TestHealthIncidentStaleFlapReplay(t *testing.T) {
 	requireIncident(t, q, kind, key, 0, false)
 	for i := range 2 {
 		check(t, q, m, nil) // Same session, just like #661.
-		clock.Advance(freshness)
+		clock.Advance(q.machineLossTimeout(m.ID))
 		if err := q.Tick(); err != nil {
 			t.Fatal(err)
 		}
@@ -134,7 +134,7 @@ func TestHealthIncidentStaleFlapReplay(t *testing.T) {
 	// Planned leave doesn't seed the next burst of flaps.
 	m.Leaving = true
 	check(t, q, m, nil)
-	clock.Advance(freshness)
+	clock.Advance(q.machineLossTimeout(m.ID))
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}

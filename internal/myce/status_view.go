@@ -17,6 +17,8 @@ func HyphaAvailability(m *Machine) string {
 		return "disabled by operator"
 	case m.Gone:
 		return "offline; waiting for this hypha to return"
+	case m.Suspect:
+		return "suspect; waiting for worker contact; no new work"
 	case m.Leaving:
 		return "leaving; no new work"
 	case m.Recovering:

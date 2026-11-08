@@ -44,6 +44,8 @@ func fixture(t *testing.T) (*Queue, *fakeClock) {
 	t.Cleanup(func() { q.Close() })
 	fakeCheckpointAvailability(t, q, true)
 	q.fileRetention, q.logRetention = testFileRetention, testLogRetention
+	// These fixtures exercise explicit historical operator minimums.
+	q.lossTimeouts = [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}
 	q.s.PublicationHorizon = filePublicationGrace
 	return q, c
 }
@@ -88,7 +90,7 @@ func machine(id, gpu string, host ...string) Machine {
 }
 func check(t *testing.T, q *Queue, m Machine, r *Job) Reply {
 	t.Helper()
-	c := Checkin{Machine: m}
+	c := Checkin{Machine: m, period: time.Second} // Simulate the current worker timing header.
 	if r != nil {
 		c.Running = &Execution{ID: r.ID, Attempt: r.Attempt}
 		c.Machine.FreeMemoryGB = max(0, m.FreeMemoryGB-r.Spec.Needs.MemoryGB)
