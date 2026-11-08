@@ -101,6 +101,13 @@ func TestBlobDeliveryPreparationFailurePreservesControl(t *testing.T) {
 	}
 	m := machine("builder", "fake")
 	m.EnvironmentBuilder = true
+	// Establish the old sender's cadence before the faulted preparation.
+	// The missing blob stays missing through the qualified second report.
+	first, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol})
+	if err != nil || len(first.EnvironmentPlan) != 0 || first.Job != nil || len(first.Attempts) != 0 {
+		t.Fatal("cold legacy response did not stay idle", first, err)
+	}
+	clock.Advance(time.Second)
 	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: "stale", Attempt: 1}, Session: m.Session}}}
 	reply, err := q.Checkin(c)
 	if err != nil {
@@ -116,7 +123,6 @@ func TestBlobDeliveryPreparationFailurePreservesControl(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Attempts = nil
-	clock.Advance(time.Second) // Second headerless arrival qualifies preparation.
 	reply, err = q.Checkin(c)
 	if err != nil || len(reply.EnvironmentPlan) != 1 || len(reply.EnvironmentPlan[0].Files) == 0 {
 		t.Fatal("preparation did not recover", reply, err)
