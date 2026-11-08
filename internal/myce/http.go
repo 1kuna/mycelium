@@ -366,7 +366,8 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			c.period = period
 		}
 		accepted := false
-		settle := a.Queue.beginWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, r.Context())
+		contact, settle := a.Queue.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, r.Context())
+		c.contact = contact
 		defer func() { settle(accepted) }()
 		v, err := a.Queue.checkinContext(r.Context(), c)
 		accepted = err == nil

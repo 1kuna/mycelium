@@ -59,6 +59,12 @@ func (q *Queue) issuePreparation(m *Machine, kind, key string) HostLaunch {
 	return l
 }
 func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
+	return q.hostSessionLaunchAllowed(m, session) && !q.workerSuspect(m, q.clock.Now())
+}
+
+// An already assigned batch retains its authorization/custody across suspicion.
+// New preparation launches still require live arrival evidence.
+func (q *Queue) hostSessionLaunchAllowed(m *Machine, session string) bool {
 	return m != nil && q.hostHygieneReason(m) == "" && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m) && !m.HostMemoryPolicyMismatch
 }
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
@@ -91,7 +97,12 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 				return nil
 			}
 		}
-		if !q.hostLaunchAllowed(q.s.Machines[l.Machine], l.Session) {
+		m := q.s.Machines[l.Machine]
+		allowed := q.hostLaunchAllowed(m, l.Session)
+		if l.Kind == "batch" {
+			allowed = q.hostSessionLaunchAllowed(m, l.Session)
+		}
+		if !allowed {
 			reject("host_launch")
 			return nil
 		}
@@ -146,7 +157,6 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			reject("preparation_custody")
 			return nil
 		}
-		m := q.s.Machines[l.Machine]
 		if j := q.s.Jobs[p.Demand]; p.Kind == "environment" && j != nil && j.CommandDiscovery != nil {
 			target := allocationMachine(m, []string{p.Device})
 			// A delayed offer must retain live demand for this exact frozen

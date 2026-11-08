@@ -468,7 +468,11 @@ func (q *Queue) machineLossTimeout(id string) time.Duration {
 		timeout = q.lossTimeouts[2]
 	}
 	if m := q.s.Machines[id]; m != nil {
-		timeout = max(timeout, q.workerLossAllowance(m))
+		measured := q.workerLossAllowance(m)
+		if measured == 0 {
+			return time.Duration(1<<63 - 1)
+		}
+		timeout = max(timeout, measured)
 	}
 	if timeout == 0 {
 		// No advertised/observed cadence and no operator minimum: unknown.
@@ -1079,7 +1083,7 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 	active, healthy := 0, 0
 	quietFor := time.Duration(1<<63 - 1)
 	for _, m := range q.s.Machines {
-		if !m.Gone && !m.Leaving {
+		if !m.Gone && !m.Leaving && q.workerLossAllowance(m) > 0 {
 			active++
 			quietFor = min(quietFor, q.machineLossTimeout(m.ID))
 			if q.workerContactFresh(m, now) {
@@ -1261,7 +1265,8 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 }
 
 func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
-	settle := q.beginWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, ctx)
+	contact, settle := q.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, ctx)
+	c.contact = contact
 	defer settle(false)
 	reply, err := q.checkinContext(ctx, c)
 	settle(err == nil)
@@ -1501,7 +1506,10 @@ func (q *Queue) checkinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptEnvironmentFailures(&m, old)
 		q.s.Machines[m.ID] = &m
-		q.acceptContactPeriod(&m, c.period)
+		if old != nil && (old.Gone || q.unreported[m.ID] || q.networkQuiet || !q.s.NetworkRecoveryAt.IsZero() && old.LastSeen.Before(q.s.NetworkRecoveryAt)) {
+			q.discontinueContactCadence(m.ID)
+		}
+		q.acceptContactPeriod(&m, c.period, c.contact)
 		q.recordHostLaunchMemory(&m, old)
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
@@ -2658,7 +2666,7 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 		}
 		m := q.s.Machines[r.Machine]
 		q.refreshHostMemory()
-		if !q.hostLaunchAllowed(m, r.Session) || !q.startPlacementAllowed(j) {
+		if !q.hostSessionLaunchAllowed(m, r.Session) || !q.startPlacementAllowed(j) {
 			rejected = ErrStale
 			return nil
 		}

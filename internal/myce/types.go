@@ -679,6 +679,7 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
+	contact              *checkinContact   // Queue-local request fence, never serialized.
 	period               time.Duration     // Transport header; not part of strict legacy JSON.
 	ToolInventoryHash    string            `json:"tool_inventory_hash,omitempty"`
 	ToolInventoryVersion uint64            `json:"tool_inventory_version,omitempty"`

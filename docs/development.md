@@ -1023,7 +1023,7 @@ No availability windows means always present. Windows use Monday=0 through
 Sunday=6, with start-inclusive/end-exclusive hours in a repeating synthetic
 UTC week. `departure: planned` (default) saves resumable work and restarts
 non-resumable work. `departure: loss` cuts execution without a final checkpoint;
-the real queue's priority loss timeouts and majority-silence guard determine
+the real queue's adaptive loss allowance and majority-silence guard determine
 when batch work becomes available again. Interrupted model calls fail visibly
 on abrupt loss; this simulator does not emulate HTTP response replay.
 

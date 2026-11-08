@@ -2614,8 +2614,10 @@ Loss uses the current session's send interval and observed arrival/path variatio
 measured with the injected queue Clock. Workers advertise their actual interval
 through an optional header compatible with older strict JSON decoders. An older
 worker without that header first establishes cadence from successive accepted
-arrivals; until then automatic loss is unknown and capacity is suspect, so no
-new attempt can acquire an unbounded unknown loss allowance. The allowance is at least two send intervals (the
+wall-time arrivals; queue occupancy cannot compress its expected send period.
+Until then automatic loss is unknown and capacity is suspect, even with a saved
+operator minimum, so no new attempt can acquire an unbounded unknown loss
+allowance. The allowance is at least two send intervals (the
 expected arrival and one missed-arrival confirmation), extended by the shared
 RFC 6298 mean/variation estimator. It has no class-specific default duration.
 Explicit old timeout settings remain minimums, never permission to count queue

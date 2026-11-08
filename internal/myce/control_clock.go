@@ -80,7 +80,7 @@ func (q *Queue) workerLossAllowance(m *Machine) time.Duration {
 	// learned with the shared RFC 6298 estimator, in control-opportunity time.
 	period := c.period
 	if period == 0 {
-		period = time.Duration(c.gap.Mean * float64(time.Second))
+		period = time.Duration(c.cadence.Mean * float64(time.Second))
 	}
 	if period == 0 {
 		return 0 // Unknown is not evidence of a lost worker.
@@ -98,7 +98,7 @@ func (q *Queue) workerSuspect(m *Machine, now time.Time) bool {
 		return false
 	}
 	allowance := q.machineLossTimeout(m.ID)
-	if allowance == time.Duration(1<<63-1) {
+	if q.workerLossAllowance(m) == 0 {
 		return true // Unknown cold cadence cannot qualify capacity as healthy.
 	}
 	q.contactMu.Lock()

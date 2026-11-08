@@ -305,7 +305,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 	// A pretend NAS avoids filesystem probes; persistence is disabled only here.
 	root := "/simulated-checkpoints"
 	var e error
-	q := &Queue{simulation: true, clock: clock, root: root, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, unreported: map[string]bool{}, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{simulation: true, clock: clock, root: root, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, unreported: map[string]bool{}, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	if e = q.ConfigureHosts(f.Hosts); e != nil {
 		return r, e
 	}
@@ -597,7 +597,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				for _, slot := range q.modelPlan(worker.spec.Name) {
 					reports = append(reports, ModelReport{Device: slot.Device, Name: slot.Model, Attempt: slot.Attempt, State: "unloaded"})
 				}
-				if _, e = q.Checkin(Checkin{Machine: machineReport(worker), ModelReports: reports}); e != nil {
+				if _, e = q.Checkin(Checkin{period: checkinPeriod(0), Machine: machineReport(worker), ModelReports: reports}); e != nil {
 					return r, e
 				}
 				worker.loads = map[string]*simLoad{}
@@ -611,11 +611,11 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 		// Register every newly present worker before submissions/placement.
 		for _, worker := range workers {
 			if worker.online && q.s.Machines[worker.spec.Name] == nil {
-				if _, e = q.Checkin(Checkin{Machine: machineReport(worker)}); e != nil {
+				if _, e = q.Checkin(Checkin{period: checkinPeriod(0), Machine: machineReport(worker)}); e != nil {
 					return r, e
 				}
 			} else if worker.online && (q.s.Machines[worker.spec.Name].Gone || q.s.Machines[worker.spec.Name].Session != fmt.Sprint(worker.session)) {
-				if _, e = q.Checkin(Checkin{Machine: machineReport(worker), Fresh: true, PreviousSession: q.s.Machines[worker.spec.Name].Session}); e != nil {
+				if _, e = q.Checkin(Checkin{period: checkinPeriod(0), Machine: machineReport(worker), Fresh: true, PreviousSession: q.s.Machines[worker.spec.Name].Session}); e != nil {
 					return r, e
 				}
 			}
@@ -748,7 +748,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 						}
 					}
 				}
-				c := Checkin{Machine: machineReport(worker), ModelReports: reports}
+				c := Checkin{period: checkinPeriod(0), Machine: machineReport(worker), ModelReports: reports}
 				if t := worker.task; t != nil {
 					c.Running = &Execution{ID: t.id, Attempt: t.attempt}
 					c.Started = t.downstreamOf == nil || now >= t.loadUntil // Input preparation precedes command authorization.

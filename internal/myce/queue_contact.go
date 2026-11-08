@@ -18,10 +18,12 @@ type workerContact struct {
 	processedOpportunity time.Duration
 	measured             bool
 	period               time.Duration
+	cadence              probeEstimate // Wall-time send cadence, independent of service availability.
 	gap                  probeEstimate
 	path                 probeEstimate
 	retry                workerRetry // Existing legacy worker reconnect schedule.
 	arrivalOpportunity   time.Duration
+	arrivalWall          time.Time
 	seenArrival          bool
 	allowance            time.Duration // Only on immutable detached observations.
 }
@@ -37,7 +39,7 @@ type checkinContact struct {
 // Cadence qualification precedes new offers. A cold legacy sender must first
 // establish an observed interval; no job can acquire an unbounded unknown loss
 // allowance. Current workers qualify on their advertised interval immediately.
-func (q *Queue) acceptContactPeriod(m *Machine, period time.Duration) {
+func (q *Queue) acceptContactPeriod(m *Machine, period time.Duration, pending *checkinContact) {
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
 	if q.contacts == nil {
@@ -49,6 +51,12 @@ func (q *Queue) acceptContactPeriod(m *Machine, period time.Duration) {
 		q.contacts[m.ID] = c
 	}
 	c.period = period
+	if pending != nil {
+		if c.pending == nil {
+			c.pending = map[*checkinContact]struct{}{}
+		}
+		c.pending[pending] = struct{}{}
+	}
 }
 
 // Reconnection gaps describe an outage, not the live sender's cadence.
@@ -72,6 +80,11 @@ func (q *Queue) beginCheckin(machine, session string, contexts ...context.Contex
 }
 
 func (q *Queue) beginWorkerCheckin(machine, session string, period time.Duration, active bool, contexts ...context.Context) func(accepted bool) {
+	_, settle := q.trackWorkerCheckin(machine, session, period, active, contexts...)
+	return settle
+}
+
+func (q *Queue) trackWorkerCheckin(machine, session string, period time.Duration, active bool, contexts ...context.Context) (*checkinContact, func(bool)) {
 	q.contactMu.Lock()
 	c := q.contacts[machine]
 	pending := &checkinContact{arrived: q.clock.Now(), opportunity: q.controlNow(), period: checkinPeriod(period), advertised: period > 0, inFlight: active}
@@ -83,7 +96,7 @@ func (q *Queue) beginWorkerCheckin(machine, session string, period time.Duration
 	}
 	q.contactMu.Unlock()
 	settled := false
-	return func(accepted bool) {
+	return pending, func(accepted bool) {
 		// Recheck the authoritative session before publishing a completed
 		// contact. Never acquire q.mu while holding contactMu.
 		if accepted {
@@ -97,7 +110,20 @@ func (q *Queue) beginWorkerCheckin(machine, session string, period time.Duration
 		}
 		settled = true
 		pending.inFlight = false
+		// Acceptance can attach a first/new-session request after begin. Settle
+		// the authoritative contact, not just the session captured at arrival.
+		if c != nil {
+			delete(c.pending, pending)
+		}
+		c = q.contacts[machine]
+		if c != nil && c.session != session {
+			c = nil
+		}
 		if c != nil && requestContext(contexts).Err() != nil {
+			if c.pending == nil {
+				c.pending = map[*checkinContact]struct{}{}
+			}
+			c.pending[pending] = struct{}{}
 			// The server has finished a cancelled control call. Give its retry
 			// the measured send opportunity; do not backdate queue service as
 			// silence or change the accepted LastSeen timestamp.
@@ -119,12 +145,15 @@ func (q *Queue) beginWorkerCheckin(machine, session string, period time.Duration
 					current = &workerContact{session: session}
 					q.contacts[machine] = current
 				}
-				if current.seenArrival && !q.networkQuiet && q.s.NetworkRecoveryAt.IsZero() {
+				if current.seenArrival && !q.simulation && !q.networkQuiet && q.s.NetworkRecoveryAt.IsZero() {
+					if gap := pending.arrived.Sub(current.arrivalWall); gap > 0 {
+						current.cadence.observe(gap.Seconds())
+					}
 					if gap := pending.opportunity - current.arrivalOpportunity; gap > 0 {
 						current.gap.observe(gap.Seconds())
 					}
 				}
-				current.arrivalOpportunity, current.seenArrival = pending.opportunity, true
+				current.arrivalOpportunity, current.arrivalWall, current.seenArrival = pending.opportunity, pending.arrived, true
 				current.period = 0
 				if pending.advertised {
 					current.period = pending.period

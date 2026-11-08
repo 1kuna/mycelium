@@ -1,11 +1,15 @@
 package myce
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -307,5 +311,160 @@ func TestControlClockOverlappingReadersCountOnce(t *testing.T) {
 	clock.Advance(time.Second)
 	if got := c.now(); got != 2*time.Second {
 		t.Fatalf("overlapping occupancy counted twice: %s", got)
+	}
+}
+
+type heldCheckinResponse struct {
+	header  http.Header
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w *heldCheckinResponse) Header() http.Header { return w.header }
+func (w *heldCheckinResponse) WriteHeader(int)     {}
+func (w *heldCheckinResponse) Write(p []byte) (int, error) {
+	close(w.entered)
+	<-w.release
+	return len(p), nil
+}
+
+func TestControlClockFirstSessionResponseProtected(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		t.Run(map[bool]string{false: "first", true: "replacement"}[replacement], func(t *testing.T) {
+			q, clock := fixture(t)
+			if err := q.SetLossTimeouts(0, 0, 0); err != nil {
+				t.Fatal(err)
+			}
+			m, peer := machine("worker", "fake"), machine("peer", "fake")
+			check(t, q, peer, nil)
+			c := Checkin{Machine: m}
+			if replacement {
+				check(t, q, m, nil)
+				c.Machine.Session = "replacement-session"
+				c.Fresh, c.PreviousSession = true, m.Session
+			}
+			s := spec("production")
+			s.AllowedMachines = []string{m.ID}
+			j := submit(t, q, s)
+			body, _ := json.Marshal(c)
+			r := httptest.NewRequest("POST", "/api/workers/checkin", bytes.NewReader(body))
+			r.Header.Set("Authorization", "Bearer test")
+			r.Header.Set("X-Myce-Start-Gate", startGateProtocol)
+			r.Header.Set(checkinPeriodHeader, "1s")
+			w := &heldCheckinResponse{header: http.Header{}, entered: make(chan struct{}), release: make(chan struct{})}
+			done := make(chan struct{})
+			go func() { defer close(done); (API{Queue: q, Token: "test"}.Handler()).ServeHTTP(w, r) }()
+			defer func() { close(w.release); <-done }()
+			<-w.entered
+			if q.s.Jobs[j.ID].State != "running" {
+				t.Fatal("no initial assignment")
+			}
+			clock.Advance(3 * time.Second)
+			check(t, q, peer, nil)
+			got := q.s.Jobs[j.ID]
+			if q.s.Machines[m.ID].Gone || got.Losses != 0 || got.InfrastructureRetries != 0 || got.State != "running" {
+				t.Fatalf("first-session response became worker silence: %+v", got)
+			}
+		})
+	}
+}
+
+func TestControlClockLegacyWallCadenceSurvivesContention(t *testing.T) {
+	q, clock := fixture(t)
+	if err := q.SetLossTimeouts(0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	m := machine("legacy", "fake")
+	for range 40 {
+		if _, err := q.Checkin(Checkin{Machine: m}); err != nil {
+			t.Fatal(err)
+		}
+		q.mu.Lock()
+		clock.Advance(900 * time.Millisecond)
+		q.mu.Unlock()
+		clock.Advance(100 * time.Millisecond)
+	}
+	if got := q.workerLossAllowance(q.s.Machines[m.ID]); got < 2*time.Second {
+		t.Fatalf("cadence compressed to %s", got)
+	}
+	s := spec("production")
+	s.AllowedMachines = []string{m.ID}
+	submit(t, q, s)
+	r, err := q.Checkin(Checkin{Machine: m})
+	if err != nil || r.Job == nil {
+		t.Fatal("no legacy assignment", err)
+	}
+	if err := q.Started(result(r.Job, true)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(500 * time.Millisecond)
+	check(t, q, machine("peer", "fake"), nil)
+	if q.s.Machines[m.ID].Gone || q.s.Jobs[r.Job.ID].Losses != 0 {
+		t.Fatal("contention compressed the worker's send interval")
+	}
+}
+
+func TestControlClockOperatorMinimumCannotQualifyLegacy(t *testing.T) {
+	q, clock := fixture(t) // Historical positive operator minimums.
+	m := machine("legacy", "fake")
+	s := spec("production")
+	s.AllowedMachines = []string{m.ID}
+	submit(t, q, s)
+	r, err := q.Checkin(Checkin{Machine: m})
+	if err != nil || r.Job != nil {
+		t.Fatal("operator minimum qualified unknown cadence", err)
+	}
+	clock.Advance(12 * time.Second)
+	check(t, q, machine("peer", "fake"), nil)
+	if q.s.Machines[m.ID].Gone {
+		t.Fatal("operator minimum lost an unqualified slow sender")
+	}
+	if _, err = q.Checkin(Checkin{Machine: m}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(12 * time.Second)
+	r, err = q.Checkin(Checkin{Machine: m})
+	if err != nil || r.Job == nil {
+		t.Fatal("measured slow sender did not qualify", err)
+	}
+	if q.machineLossTimeout(m.ID) < 24*time.Second {
+		t.Fatal("operator minimum overrode measured cadence")
+	}
+}
+
+func TestControlClockCachedPreparationCannotStartSuspect(t *testing.T) {
+	q, clock, worker, _, job := adaptiveLossFixture(t, "production")
+	q.mu.Lock()
+	l := q.issuePreparation(q.s.Machines[worker.ID], "environment", "cached")
+	q.mu.Unlock()
+	clock.Advance(q.machineLossTimeout(worker.ID))
+	if err := q.AuthorizeLaunch(l); err == nil {
+		t.Fatal("cached preparation started while suspect")
+	}
+	batch := HostLaunch{Kind: "batch", Machine: worker.ID, Session: worker.Session, Key: job.ID, Attempt: strconv.Itoa(job.Attempt)}
+	if err := q.AuthorizeLaunch(batch); err != nil {
+		t.Fatal("suspicion revoked an existing assigned batch", err)
+	}
+}
+
+func TestControlClockLastReconnectDoesNotLearnOutage(t *testing.T) {
+	q, clock, worker, peer, _ := adaptiveLossFixture(t, "production")
+	clock.Advance(time.Hour)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if !q.networkQuiet {
+		t.Fatal("fixture missed outage")
+	}
+	check(t, q, worker, nil)
+	check(t, q, peer, nil) // This report clears the recovery epoch.
+	allowance := q.machineLossTimeout(peer.ID)
+	if allowance > 3*time.Second {
+		t.Fatalf("last reconnect learned outage: %s", allowance)
+	}
+	clock.Advance(allowance)
+	check(t, q, worker, nil)
+	if !q.s.Machines[peer.ID].Gone {
+		t.Fatal("last reconnected worker hid a new genuine loss")
 	}
 }
