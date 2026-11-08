@@ -274,20 +274,25 @@ func (r *readRecord) decode(key string) (any, error) {
 // discards a reader's lazy decoded records. No SQLite access is used by reads.
 func (q *Queue) publishReadRecords(next map[string][]byte) {
 	for key, data := range next {
+		mutable := false
+		if len(data) > 0 {
+			if id, ok := strings.CutPrefix(key, "jobs/"); ok {
+				mutable = mutableJob(q.s.Jobs[id])
+			}
+			if id, ok := strings.CutPrefix(key, "submissions/"); ok {
+				r := q.s.Submissions[id]
+				mutable = r != nil && r.Job != nil && mutableJob(r.Job)
+			}
+		}
 		old := readGet(q.readRoot, key)
-		if old != nil && bytes.Equal(old.data, data) {
+		// Reference bytes need not change when their job's custody clears.
+		// Liveness belongs to this generation, just like its committed bytes.
+		if old != nil && old.mutable == mutable && bytes.Equal(old.data, data) {
 			continue
 		}
 		var record *readRecord
 		if len(data) > 0 {
-			record = &readRecord{data: data}
-			if id, ok := strings.CutPrefix(key, "jobs/"); ok {
-				record.mutable = mutableJob(q.s.Jobs[id])
-			}
-			if id, ok := strings.CutPrefix(key, "submissions/"); ok {
-				r := q.s.Submissions[id]
-				record.mutable = r != nil && r.Job != nil && mutableJob(r.Job)
-			}
+			record = &readRecord{data: data, mutable: mutable}
 		}
 		q.readRoot = readPut(q.readRoot, key, record)
 	}
@@ -386,11 +391,25 @@ func (g *readGeneration) inputs(ctx context.Context) (state, *queueRecords, erro
 				s.Health.Events[index] = *value.(*HealthAlert)
 			}
 		})
+		resolveReadSubmissionJobs(s)
 	})
 	if g.err != nil {
 		return state{}, nil, g.err
 	}
 	return g.state, g.records, ctx.Err()
+}
+
+// Live keyed answers share the job in this committed generation. Copy only the
+// reference wrapper: decoded records can be shared by older generations whose
+// job bytes differ. Removed-job answers already contain their retained snapshot.
+func resolveReadSubmissionJobs(s *state) {
+	for key, record := range s.Submissions {
+		if record.Job == nil && s.Jobs[record.JobID] != nil {
+			copy := *record
+			copy.Job = s.Jobs[record.JobID]
+			s.Submissions[key] = &copy
+		}
+	}
 }
 
 // Selected receipts do not materialize retained execution payloads. A queued
@@ -477,6 +496,7 @@ func (g *readGeneration) jobInputs(ctx context.Context, id string) (state, *queu
 				s.StorageObservations[name] = *value.(*StorageObservation)
 			}
 		})
+		resolveReadSubmissionJobs(s)
 	})
 	if g.liveErr != nil {
 		return state{}, nil, g.liveErr

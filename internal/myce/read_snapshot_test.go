@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -329,6 +330,112 @@ func BenchmarkReadStages(b *testing.B) {
 					b.ReportMetric(float64(size), "reply-bytes")
 				})
 			}
+		}
+	}
+}
+
+func TestReadSnapshotKeyedReferencesStayWithinGeneration(t *testing.T) {
+	q, _ := fixture(t)
+	s := spec("experiment")
+	s.SubmissionKey = "generation-reference"
+	j := submit(t, q, s)
+	key := submissionDigest(s.Project, s.SubmissionKey)
+	originalReason := q.s.Jobs[j.ID].Reason
+	before := q.readGeneration
+	if err := q.update(func() error {
+		q.touchJob(j.ID).Reason = "new generation"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current := q.readGeneration
+	for _, sample := range []struct {
+		generation *readGeneration
+		reason     string
+	}{{before, originalReason}, {current, "new generation"}} {
+		for _, selected := range []string{"", j.ID} {
+			var state state
+			var err error
+			if selected == "" {
+				state, _, err = sample.generation.inputs(context.Background())
+			} else {
+				state, _, err = sample.generation.jobInputs(context.Background(), selected)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			answer := state.Submissions[key]
+			if answer == nil || answer.Job == nil || answer.Job != state.Jobs[j.ID] || answer.Job.Reason != sample.reason {
+				t.Fatal("keyed answer escaped its committed generation", selected, answer)
+			}
+		}
+	}
+	if err := q.update(func() error { q.deleteJob(j.ID); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	removed, _, err := q.readGeneration.inputs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := removed.Submissions[key]
+	if removed.Jobs[j.ID] != nil || answer == nil || answer.Job == nil || answer.Job.Reason != "new generation" {
+		t.Fatal("removed keyed answer lost its retained snapshot", answer)
+	}
+	old, _, err := before.inputs(context.Background())
+	if err != nil || old.Submissions[key].Job.Reason != originalReason {
+		t.Fatal("later commit mutated an earlier keyed answer", err)
+	}
+}
+
+func TestReadSnapshotKeyedCompletionClearsLiveReference(t *testing.T) {
+	q, _ := fixture(t)
+	s := spec("experiment")
+	s.SubmissionKey = "released-reference"
+	j := submit(t, q, s)
+	queued := submit(t, q, spec("experiment"))
+	key := "submissions/" + submissionDigest(s.Project, s.SubmissionKey)
+	if err := q.update(func() error {
+		job := q.touchJob(j.ID)
+		job.State, job.Attempt, job.ReleaseConfirmed = "succeeded", 1, false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := q.readGeneration
+	pending := readGet(before.root, key)
+	if pending == nil || !pending.mutable {
+		t.Fatal("completion dropped pending attempt custody")
+	}
+	if err := q.update(func() error {
+		q.touchJob(j.ID).ReleaseConfirmed = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after := q.readGeneration
+	released := readGet(after.root, key)
+	if released == nil || released.mutable || !bytes.Equal(pending.data, released.data) {
+		t.Fatal("unchanged reference retained live traversal after release")
+	}
+	for _, sample := range []struct {
+		generation *readGeneration
+		want       bool
+	}{{before, true}, {after, false}} {
+		visited := false
+		readWalk(sample.generation.root, true, func(name string, _ *readRecord) {
+			if name == key {
+				visited = true
+			}
+		})
+		if visited != sample.want {
+			t.Fatal("reference liveness changed in the wrong generation", visited, sample.want)
+		}
+		live, _, err := sample.generation.jobInputs(context.Background(), queued.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (live.Submissions[submissionDigest(s.Project, s.SubmissionKey)] != nil) != sample.want {
+			t.Fatal("queued read retained released keyed history")
 		}
 	}
 }

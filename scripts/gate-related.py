@@ -37,6 +37,13 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/telemetry_budget.go'] = (
 SUPPLEMENTAL_CONSUMERS['internal/myce/diagnostic_budget.go'] = (
     'evidence_budget_test.go', 'evidence_readiness_test.go')
 
+# The non-race diagnostic benchmark has its correctness regressions here.
+SUPPLEMENTAL_CONSUMERS['internal/myce/checkin_persistence_benchmark_test.go'] = (
+    'queue_persistence_test.go',)
+SUPPLEMENTAL_CONSUMERS['internal/myce/machine_conversion_install.go'] = (
+    'machine_migration_test.go', 'machine_verified_empty_test.go',
+    'machine_migration_spool_test.go')
+
 # Platform socket helpers implement transfer progress underneath file clients.
 for source in ('file_socket_unix', 'file_socket_other'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (

@@ -63,6 +63,7 @@ func logQueueHold(duration time.Duration, operation string, fn func() error, pha
 	if len(phases) != 0 {
 		p := phases[0]
 		detail = fmt.Sprintf(" records_snapshot_ms=%.3f fn_body_ms=%.3f persist_commit_ms=%.3f usage_accounting_ms=%.3f notify_ms=%.3f", holdMS(p.phases[holdRecords]), holdMS(p.phases[holdBody]), holdMS(p.phases[holdPersist]), holdMS(p.phases[holdUsage]), holdMS(p.phases[holdNotify]))
+		detail += fmt.Sprintf(" persist_marshal_ms=%.3f persist_sql_ms=%.3f persist_sync_commit_ms=%.3f persist_payload_bytes=%d persist_records=%d", holdMS(p.persistence.Marshal), holdMS(p.persistence.SQL), holdMS(p.persistence.Commit), p.persistence.Bytes, p.persistence.Records)
 	}
 	log.Printf("event=slow_queue_mutex_hold operation=%s duration_ms=%.3f sample_every=1%s", operation, holdMS(duration), detail)
 }
@@ -78,6 +79,18 @@ type queueUpdateTiming struct {
 	// Instruction polls opt in to distinguish pool acquisition from work.
 	measureWriter bool
 	writerWait    time.Duration
+	persistence   queuePersistenceTiming
+}
+
+// Observational timings only. Commit includes SQLite's synchronous=FULL sync;
+// it is not an isolated filesystem fsync measurement. Bytes counts changed
+// queue-state payloads submitted to SQL, excluding usage rows and WAL overhead.
+type queuePersistenceTiming struct {
+	Marshal time.Duration
+	SQL     time.Duration
+	Commit  time.Duration
+	Bytes   int64
+	Records int64
 }
 
 func (t *queueUpdateTiming) writer(db *sql.DB, clock Clock) (*sql.Conn, error) {
@@ -151,6 +164,7 @@ func (t *queueUpdateTiming) observe(fn func(time.Duration, time.Duration)) {
 // Sampled timestamps only; queue decisions always use q.clock. The optional
 // telemetry clock permits deterministic slow-update tests without sleeping.
 type queueHoldPhases struct {
+	persistence   queuePersistenceTiming
 	clock         Clock
 	started, last time.Time
 	active        int
