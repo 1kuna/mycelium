@@ -352,6 +352,8 @@ func TestWaitOutageDiagnosticsAndTerminalRecovery(t *testing.T) {
 			started := clock.Now()
 			calls := 0
 			client := myce.Client{URL: "http://fixture.invalid/private-endpoint", Token: "private-token", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
+				// Adaptive retry spacing learns request cost from this clock.
+				clock.advance(time.Second)
 				if r.Method == "POST" {
 					return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 				}
