@@ -63,7 +63,11 @@ func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
 	if invalid || args[0] == "add" && (*job == "" || *owner == "" || *reason == "") || args[0] == "release" && (*revision == 0 || *reason == "") {
 		return usage
 	}
-	c, err := authority.client()
+	resolve := authority.client
+	if args[0] != "list" {
+		resolve = authority.ownerClient
+	}
+	c, err := resolve()
 	if err != nil {
 		return err
 	}

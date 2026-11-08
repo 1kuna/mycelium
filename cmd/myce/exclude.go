@@ -50,7 +50,11 @@ func excludeCommand(ctx context.Context, args []string, out io.Writer) error {
 	if invalid {
 		return usage
 	}
-	c, err := authority.client()
+	resolve := authority.client
+	if args[0] != "list" {
+		resolve = authority.ownerClient
+	}
+	c, err := resolve()
 	if err != nil {
 		return err
 	}
