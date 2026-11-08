@@ -1221,6 +1221,30 @@ This `!race` laptop regression includes real SQLite commits and uses an injected
 clock for every decision; CPU accounting includes the concurrent readers. It
 does not establish live fleet latency or native hardware qualification.
 
+`GOMAXPROCS=2 go test ./internal/myce -run '^$' -bench '^BenchmarkCheckinBodyPhases$' -benchtime=20x`
+uses the same retained-evidence shape with five occupied workers and sequential
+check-ins. It reports maintain, placement/reconciliation, deferred environment,
+qualification/model/copy plans, health, efficiency, retained-index construction,
+transaction body, persistence and record snapshot milliseconds per check-in.
+Child phases are inclusive: retained-index construction is already inside the
+planning/health phases. `all_holds-ms/op` includes the check-in's other mutex
+holds, including snapshot preparation; benchmark wall time also includes work
+outside the lock. These opt-in timers never control scheduling.
+
+Cold retained execution facts are indexed by full comparable work/configuration
+and OS, reducing only exact-attempt peaks/recovery margins with identical
+provenance and end time. Unchanged cold facts survive planning passes and
+transactions. Cold writes, collection, terminal transitions, rollback and record
+rebuilds invalidate the index; live and transaction-touched cold facts are
+reduced afresh per immutable pass. Check-in preparation copies relevant cold
+fields under the mutex and hashes/reduces outside it, installing only the same
+cold-record generation. Inventory views and lower-bound answers remain private
+to each immutable pass. Current owner identity, qualification, unreported/gone
+state and time fences are still checked, including permanent-capacity views.
+The original full-history evaluator and frozen admission/health digests provide
+decision-equivalence regressions. This optimization does not change scheduling
+policy or persistence and does not establish live latency under competing I/O.
+
 ## Backed storage admission integration
 
 The unfinished native storage implementation and its original integration/native

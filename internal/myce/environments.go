@@ -395,6 +395,7 @@ func (q *Queue) environmentPreparationAvailable(m *Machine) bool {
 }
 
 func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
+	defer q.bodyPhaseFinish("environment_plan", q.bodyPhaseStart())
 	if q.s.HostMaintenance[hostID(m)].SharedHost != nil {
 		return nil
 	}

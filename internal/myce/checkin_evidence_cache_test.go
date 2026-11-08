@@ -1,11 +1,13 @@
 package myce
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"testing"
+	"time"
 )
 
 func largeRetainedHistoryFixture(t testing.TB) (*Queue, []Machine) {
@@ -125,8 +127,41 @@ func TestCheckinRetainedEvidenceScans(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("%s: %d full-history evidence scans, %d uncached", worker.ID, scans, uncached)
-		if scans == 0 || scans > 7 || uncached != 0 {
-			t.Errorf("check-in evidence scans: %d total, %d uncached; want 1..7 total and 0 uncached", scans, uncached)
+		if scans > 1 || uncached != 0 {
+			t.Errorf("check-in evidence scans: %d total, %d uncached; want at most 1 total and 0 uncached", scans, uncached)
 		}
+	}
+}
+
+// The incident fixture uses real private SQLite commits and an injected decision
+// clock. Inclusive child phases (notably retained_index) must not be summed.
+func BenchmarkCheckinBodyPhases(b *testing.B) {
+	q, workers := largeRetainedHistoryFixture(b)
+	if err := q.update(func() error { return nil }); err != nil {
+		b.Fatal(err)
+	}
+	totals := map[string]time.Duration{}
+	q.observeBodyPhase = func(name string, elapsed time.Duration) { totals[name] += elapsed }
+	q.observeUpdatePhases = func(phases [5]time.Duration) {
+		totals["body"] += phases[holdBody]
+		totals["persist"] += phases[holdPersist]
+		totals["snapshot"] += phases[holdRecords]
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for n := range b.N {
+		i := n % len(workers)
+		m := workers[i]
+		span := &requestSpan{}
+		ctx := context.WithValue(context.Background(), requestSpanKey{}, span)
+		_, err := q.CheckinContext(ctx, Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: fmt.Sprintf("running-%d", i), Attempt: 1}, Session: m.Session, Started: true}}})
+		totals["all_holds"] += span.hold
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	for name, elapsed := range totals {
+		b.ReportMetric(float64(elapsed)/float64(b.N)/1e6, name+"-ms/op")
 	}
 }

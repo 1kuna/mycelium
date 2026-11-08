@@ -316,6 +316,7 @@ func efficiencyBasis(j *Job) string {
 	return "unknown"
 }
 func (q *Queue) refreshEfficiency() {
+	defer q.bodyPhaseFinish("efficiency", q.bodyPhaseStart())
 	now := q.clock.Now()
 	releases := map[string][]HostRelease{}
 	for _, r := range q.s.HostReleases {
