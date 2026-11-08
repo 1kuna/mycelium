@@ -190,46 +190,47 @@ type Queue struct {
 	observationLive  map[string]*Job
 
 	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
-	checkpointProbe         func() bool // Availability seam; bounded real I/O is the default.
-	simulation              bool
-	simID                   int64
-	uploadSpool             uploadSpool
-	logRetention            time.Duration
-	environments            EnvironmentCatalog
-	productionGrace         time.Duration
-	wake                    chan struct{}
-	models                  ModelConfig
-	calls                   map[string]*ModelCall
-	lock                    *os.File
-	mu                      queueMutex
-	stopping                atomic.Bool // Fence before waiting for a queue transaction or either listener.
-	shutdownOnce            sync.Once
-	shutdownContext         context.Context
-	shutdownCancel          context.CancelFunc
-	contactMu               sync.Mutex
-	contacts                map[string]*workerContact
-	holdClock               Clock // Optional observational clock; never used for queue decisions.
-	updateHolds             queueHoldSampler
-	statusHolds             queueHoldSampler
-	logCleanupHolds         queueHoldSampler
-	statusCache             statusCache
-	jobSnapshots            map[string]*jobSnapshotCache // q.mu; entries serialize their own refreshes.
-	observeRead             func(string, time.Duration, time.Duration)
+	checkpointProbe  func() bool // Availability seam; bounded real I/O is the default.
+	simulation       bool
+	simID            int64
+	uploadSpool      uploadSpool
+	logRetention     time.Duration
+	environments     EnvironmentCatalog
+	productionGrace  time.Duration
+	wake             chan struct{}
+	models           ModelConfig
+	calls            map[string]*ModelCall
+	lock             *os.File
+	mu               queueMutex
+	stopping         atomic.Bool // Fence before waiting for a queue transaction or either listener.
+	shutdownOnce     sync.Once
+	shutdownContext  context.Context
+	shutdownCancel   context.CancelFunc
+	contactMu        sync.Mutex
+	contacts         map[string]*workerContact
+	holdClock        Clock // Optional observational clock; never used for queue decisions.
+	updateHolds      queueHoldSampler
+	statusHolds      queueHoldSampler
+	logCleanupHolds  queueHoldSampler
+	statusCache      statusCache
+	jobSnapshots     map[string]*jobSnapshotCache // q.mu; entries serialize their own refreshes.
+	observeRead      func(string, time.Duration, time.Duration)
+	usageReader      *sql.DB
+	db               *sql.DB
+	persisted        map[string][]byte
+	records          *queueRecords
+	observeUpdate    func(time.Duration, time.Duration)
+	clock            Clock
+	root             string
+	restartUntil     time.Time
+	unreported       map[string]bool
+	networkQuiet     bool
+	lossTimeouts     [3]time.Duration
+	usageWrites      []usageSample
+	usageMaintenance bool
+	s                state
+
 	observeSubmissionAdvice func(submissionAdviceTiming)
-	usageReader             *sql.DB
-	db                      *sql.DB
-	persisted               map[string][]byte
-	records                 *queueRecords
-	observeUpdate           func(time.Duration, time.Duration)
-	clock                   Clock
-	root                    string
-	restartUntil            time.Time
-	unreported              map[string]bool
-	networkQuiet            bool
-	lossTimeouts            [3]time.Duration
-	usageWrites             []usageSample
-	usageMaintenance        bool
-	s                       state
 
 	observeMemoryHistory func(int, bool) // Test observer: jobs visited by a full evidence scan.
 
@@ -546,16 +547,16 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 }
 
 func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queueUpdateTiming) error {
-	return q.updateTransaction(ctx, fn, timing, false)
+	return q.updateTransaction(ctx, fn, timing, false, nil)
 }
 
 // Upload persistence may abandon a pending transaction before it owns q.mu.
 // Ordinary transactions must still run cleanup when their request is cancelled.
 func (q *Queue) updateUploadRequest(ctx context.Context, fn func() error, timing *queueUpdateTiming) error {
-	return q.updateTransaction(ctx, fn, timing, true)
+	return q.updateTransaction(ctx, fn, timing, true, nil)
 }
 
-func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool) error {
+func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool, committed func()) error {
 	if q.stopping.Load() {
 		return queueStopping()
 	}
@@ -595,7 +596,11 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.usageWrites = nil
 		q.accountUsage(q.clock.Now())
 		hold.next(holdBody)
-		return fn() // Simulation aborts on any error; it never resumes a failed mutation.
+		err := fn() // Simulation aborts on any error; it never resumes a failed mutation.
+		if err == nil && committed != nil {
+			committed()
+		}
+		return err
 	}
 	q.memoryObservationIndex = nil
 	defer func() { q.memoryObservationIndex = nil }()
@@ -668,6 +673,9 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.invalidateTerminalStatus()
 		q.commitRecords()
 		q.publishReadRuntime()
+		if committed != nil {
+			committed()
+		}
 	}
 	return err
 }
@@ -677,7 +685,12 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 
 // SubmitContext snapshots input custody before bulk verification. Key replay,
 // cancellation and job creation still serialize in the final update transaction.
-func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
+func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
+	return q.submitContext(ctx, s, nil)
+}
+
+// committed pins immutable advice inputs before releasing the commit lock.
+func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ *Job, err error) {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	defer func() {
@@ -780,7 +793,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 
 	var out Job
 	var refusedHealthDemand *Job
-	err = q.updateRequest(ctx, func() error {
+	err = q.updateTransaction(ctx, func() error {
 		if resultView != nil {
 			store.mu.Lock()
 			resultCapacity, resultPayloads = resultView.current()
@@ -968,7 +981,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		q.maintain()
 		out = cloneJob(j)
 		return nil
-	}, nil)
+	}, nil, false, committed)
 	if err != nil && refusedHealthDemand != nil {
 		// The refused submission rolls back. Record only a rechecked health
 		// observation in its own transaction, never create or admit the job.

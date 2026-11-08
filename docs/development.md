@@ -169,6 +169,30 @@ control commit must complete, proving lock separation without a machine-tuned
 timing threshold. Existing terminal-commit, cache, custody, redaction and
 contention checks remain unchanged.
 
+### Submission advice attribution (#1065)
+
+`BenchmarkSubmissionAdvice` uses the same incident-size retained history (6,500
+constrained executions, 110 queued jobs, 1,400 curves, five synthetic workers).
+It reports marginal commit-side snapshot capture mutex time separately from
+post-commit capture/decoding, waiting reasons and deadline guidance. The
+`submission_advice` telemetry event reports those advice phases after unlock;
+existing update telemetry continues to measure the durable transaction.
+
+Before isolation, a native ARM64 fixture with `GOMAXPROCS=2` and three measured
+calls spent 61.31 ms/op holding the live mutex (16.93 ms wait reason, 42.94 ms
+status waiting reason, 1.44 ms deadline guidance). After isolation, marginal
+snapshot pinning takes about 5.5 microseconds/op inside the commit, with no
+post-commit acquisition. Total advice cost increased from 61.39 to 112.58 ms/op
+because it now owns a full detached planner context. This proves lock isolation,
+not improved CPU cost or live tail latency. Cold decoding and retained facts
+remain visible in the capture phase; there is no arbitrary history cutoff.
+
+The HTTP regression blocks immutable decoding, completes a later control commit,
+and requires the original response to finish while another owner holds `q.mu`.
+Advice uses the accepted commit's policy and retained memory evidence; the
+accepted receipt and existing response fields are unchanged. Production tail
+verification belongs to the separately authorized release after deployment.
+
 ### Release upgrade compatibility
 
 Full also runs `python3 scripts/upgrade-compat.py run`. This builds race-instrumented

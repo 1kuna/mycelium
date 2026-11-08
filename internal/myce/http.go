@@ -290,10 +290,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 				return
 			}
 		}
-		j, err := a.Queue.SubmitContext(r.Context(), request.Spec)
-		if j != nil && err == nil {
-			a.Queue.submissionDeadlineGuidance(j, r.Context())
-		}
+		j, err := a.Queue.submitWithDeadlineGuidance(r.Context(), request.Spec)
 		if j != nil {
 			j.LedgerEntries = nil
 		}
