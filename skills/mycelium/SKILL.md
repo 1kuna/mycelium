@@ -414,7 +414,10 @@ thread wake. Older releases omit configuration; do not infer a cause from false.
 Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium
 resumes after measured recovery; an operator drain remains independent. Running
-attempts retain custody. From the next release, `mount_probe_slow` is advisory:
+attempts retain custody. From the worker release with the zero-pressure-baseline
+correction, an all-zero idle PSI reference learns ordinary workload variation
+while swap/local-wake signals remain within their learned bands; corroborated
+pressure still drains the host. From the next release, `mount_probe_slow` is advisory:
 successful or progressing slow metadata operations preserve admission, with
 measured evidence in `host_mount_degraded` alerts. Failed operations and
 `mount_probe_stalled` still withhold dependent work; the latter uses the unchanged
