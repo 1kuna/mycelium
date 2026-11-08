@@ -34,7 +34,7 @@ type journeyFact struct {
 }
 type journeyRecorder struct {
 	mu        sync.Mutex
-	ring      []journeyFact
+	ring      []*journeyFact
 	head      int
 	tail      int
 	count     uint64
@@ -131,7 +131,11 @@ func (r *journeyRecorder) add(kind string, data any) {
 	if index >= uint64(r.head) {
 		index = uint64(r.head) + (index-uint64(r.head))%uint64(r.tail)
 	}
-	slot := &r.ring[index]
+	slot := r.ring[index]
+	if slot == nil {
+		slot = &journeyFact{}
+		r.ring[index] = slot
+	}
 	slot.Seq = r.count
 	slot.N = copy(slot.B[:], b)
 }
@@ -272,23 +276,27 @@ func newJourneyRecorder(fixtureBudget int64) *journeyRecorder {
 	// The previous capture measured 7,332 events in the largest journey.
 	// Twice that count covers a repeat without reserving the Docker fixture's
 	// entire 96 MiB allowance for a roughly 200-event trace.
-	slots := min(2*7332, int(fixtureBudget/64/int64(unsafe.Sizeof(journeyFact{}))))
+	// Allocate a slot only when first used. Short passing Docker journeys need
+	// hundreds of facts, not the measured worst-case journey's full buffer.
+	slotBytes := unsafe.Sizeof(journeyFact{}) + unsafe.Sizeof((*journeyFact)(nil))
+	slots := min(2*7332, int(fixtureBudget/64/int64(slotBytes)))
 	if slots < 2 {
 		panic("journey fixture budget cannot retain facts")
 	}
-	return &journeyRecorder{ring: make([]journeyFact, slots), head: slots / 2, tail: slots - slots/2, kinds: map[string]int{}}
+	return &journeyRecorder{ring: make([]*journeyFact, slots), head: slots / 2, tail: slots - slots/2, kinds: map[string]int{}}
 }
 func (r *journeyRecorder) write(_ bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.t.Logf("JOURNEY recorder test=%s events=%d omitted_middle=%d oversized=%d head=%d tail=%d retained_bytes=%d", r.t.Name(), r.count, max(int64(0), int64(r.count)-int64(len(r.ring))), r.oversized, r.head, r.tail, len(r.ring)*int(unsafe.Sizeof(journeyFact{})))
+	retainedBytes := len(r.ring)*int(unsafe.Sizeof((*journeyFact)(nil))) + int(min(r.count, uint64(len(r.ring))))*int(unsafe.Sizeof(journeyFact{}))
+	r.t.Logf("JOURNEY recorder test=%s events=%d omitted_middle=%d oversized=%d head=%d tail=%d retained_bytes=%d", r.t.Name(), r.count, max(int64(0), int64(r.count)-int64(len(r.ring))), r.oversized, r.head, r.tail, retainedBytes)
 	for i := uint64(0); i < min(r.count, uint64(r.head)); i++ {
-		s := &r.ring[i]
+		s := r.ring[i]
 		r.t.Logf("JOURNEY fact seq=%d %s", s.Seq, s.B[:s.N])
 	}
 	start := max(uint64(r.head), r.count-min(r.count, uint64(r.tail)))
 	for i := start; i < r.count; i++ {
-		s := &r.ring[uint64(r.head)+(i-uint64(r.head))%uint64(r.tail)]
+		s := r.ring[uint64(r.head)+(i-uint64(r.head))%uint64(r.tail)]
 		r.t.Logf("JOURNEY fact seq=%d %s", s.Seq, s.B[:s.N])
 	}
 }

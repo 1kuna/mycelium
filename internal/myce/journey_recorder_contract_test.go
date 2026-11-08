@@ -66,7 +66,7 @@ func TestJourneyRecorderImmutableAndBounded(t *testing.T) {
 		t.Fatal("event loss accounting", r.count, r.oversized)
 	}
 	for _, v := range r.ring {
-		if v.N > journeyFactBytes {
+		if v == nil || v.N > journeyFactBytes {
 			t.Fatal("unbounded retained event")
 		}
 	}
@@ -104,7 +104,7 @@ func TestJourneyRecorderPreservesFirstTransitions(t *testing.T) {
 	if r.ring[0].Seq != 1 || !bytes.Contains(r.ring[0].B[:r.ring[0].N], []byte("first_transition")) {
 		t.Fatal("first transition overwritten")
 	}
-	last := &r.ring[uint64(r.head)+(r.count-1-uint64(r.head))%uint64(r.tail)]
+	last := r.ring[uint64(r.head)+(r.count-1-uint64(r.head))%uint64(r.tail)]
 	if last.Seq != r.count {
 		t.Fatal("latest transition lost")
 	}
@@ -201,6 +201,9 @@ func TestJourneyRecorderRPCCause(t *testing.T) {
 	}
 	found := false
 	for _, f := range r.ring {
+		if f == nil {
+			continue
+		}
 		if bytes.Contains(f.B[:f.N], []byte(`"kind":"rpc_context"`)) {
 			found = true
 			if !bytes.Contains(f.B[:f.N], []byte(`"cause":"ok"`)) {
