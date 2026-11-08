@@ -130,6 +130,14 @@ supporting native guards use physical/allowance containment. Missing/stale measu
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.
+From the next release, a new native extension version can start from accepted
+memory of its nearest prior version on the same platform and native identity.
+Checks also reuse workload peaks when both versions and the check launch the
+same main command, assets and environment. Measured variation
+and growth supply headroom; a fresh accepted run replaces this prior. After a
+host OOM, native CPU/check recovery grows from measured demand and overshoot,
+independently of current free RAM. Capacity refusals retain the same logical job
+under the queue's launch-capacity waiting contract; no resubmission is needed.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
