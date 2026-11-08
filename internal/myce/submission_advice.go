@@ -1,6 +1,11 @@
 package myce
 
-import "context"
+import (
+	"context"
+	"log"
+	"maps"
+	"reflect"
+)
 
 // Pin the committed generation inside the submission transaction. No live
 // queue lock is taken after submitContext returns, including on key replay.
@@ -14,9 +19,25 @@ func (q *Queue) submitWithDeadlineGuidance(ctx context.Context, s Spec) (*Job, e
 	defer func() { timing.finish(q.observeSubmissionAdvice) }()
 	// Acceptance is already durable. Request cancellation cannot turn it into
 	// an unaccepted submission or omit the existing response advice fields.
-	v, err := snapshot.planner(context.WithoutCancel(ctx))
+	adviceCtx, release, err := q.requestBudgets.projectionContext(context.WithoutCancel(ctx))
+	defer release()
+	var v *Queue
+	if err == nil {
+		v, err = snapshot.planner(adviceCtx)
+	}
 	if err != nil {
-		return j, err
+		// The durable receipt is authoritative even if measured headroom cannot
+		// accommodate optional diagnostics. Never encourage duplicate work with
+		// a post-commit failure. Preserve policy/guidance fields, explicitly
+		// marking unavailable blocker detail rather than implying no blockers.
+		v = snapshot.view
+		copy := *j
+		copy.State = "advice_unavailable"
+		j.PriorityPolicy = v.priorityMatch(j.Spec)
+		j.DeadlineGuidance = v.deadlineGuidance(&copy)
+		j.DeadlineGuidance.Blockers = []string{"waiting details unavailable within measured queue memory capacity; inspect this accepted job after headroom recovers"}
+		log.Print("event=submission_advice_unavailable code=projection_unavailable accepted=true")
+		return j, nil
 	}
 	v.submissionDeadlineGuidance(j, &timing)
 	return j, nil
@@ -36,6 +57,9 @@ func (q *Queue) captureSubmissionAdvice() *submissionAdviceSnapshot {
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root,
 		hostMemorySamples: q.readSamples, detachedRead: true}
+	// Policy records are replaced, never mutated. Keep this small fallback even
+	// when cold decoding cannot fit the post-commit request allowance.
+	v.s.PriorityPolicy = q.s.PriorityPolicy
 	snapshot := &submissionAdviceSnapshot{generation: q.readGeneration, view: v,
 		ledgers: make(map[string]observationMachineLedger, len(q.s.Machines))}
 	v.contacts = make(map[string]*workerContact, len(q.s.Machines))
@@ -55,8 +79,8 @@ func (q *Queue) captureSubmissionAdvice() *submissionAdviceSnapshot {
 }
 
 // Full retained execution facts matter for cold-memory advice. The selected
-// job read's minimized context is insufficient here. Own the whole diagnostic
-// view before building caches: published records must never become planner state.
+// job read's minimized context is insufficient here. Retained records remain
+// borrowed read-only; own active jobs, machine ledgers and all planner caches.
 func (s *submissionAdviceSnapshot) planner(ctx context.Context) (*Queue, error) {
 	v := s.view
 	if s.generation != nil {
@@ -64,7 +88,38 @@ func (s *submissionAdviceSnapshot) planner(ctx context.Context) (*Queue, error) 
 		if err != nil {
 			return nil, err
 		}
-		v.s = copyObservation(observationState{State: inputs}).State
+		active := 0
+		for _, j := range inputs.Jobs {
+			if mutableJob(j) {
+				active++
+			}
+		}
+		// Shared immutable payloads already belong to measured process RSS.
+		// Charge only new map storage, with the same spare-capacity/three-stage
+		// representation allowance as chargeProjectionValue, before allocating.
+		if a := projectionAllocation(ctx); a != nil {
+			width := int64(reflect.TypeFor[string]().Size() + reflect.TypeFor[*Job]().Size() + reflect.TypeFor[uintptr]().Size())
+			if !a.charge(6 * int64(len(inputs.Jobs)+active) * width) {
+				return nil, projectionRefusal(a.limit - a.held)
+			}
+		}
+		v.s = inputs
+		v.s.Jobs = maps.Clone(inputs.Jobs)
+		v.observationLive = make(map[string]*Job, active)
+		for id, j := range inputs.Jobs {
+			if !mutableJob(j) {
+				continue
+			}
+			if err := chargeProjectionValue(ctx, j); err != nil {
+				return nil, err
+			}
+			owned := copyObservationValue(reflect.ValueOf(j)).Interface().(*Job)
+			v.s.Jobs[id], v.observationLive[id] = owned, owned
+		}
+		if err := chargeProjectionValue(ctx, inputs.Machines); err != nil {
+			return nil, err
+		}
+		v.s.Machines = copyObservationValue(reflect.ValueOf(inputs.Machines)).Interface().(map[string]*Machine)
 	}
 	for key, m := range v.s.Machines {
 		l := s.ledgers[key]

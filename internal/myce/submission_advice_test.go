@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -34,31 +35,44 @@ func submissionAdviceFixture(t testing.TB) *Queue {
 
 func BenchmarkSubmissionAdvice(b *testing.B) {
 	q := submissionAdviceFixture(b)
-	var phases [4]time.Duration
-	q.observeSubmissionAdvice = func(timing submissionAdviceTiming) {
-		for i, d := range timing.phases {
-			phases[i] += d
-		}
-	}
-	var hold time.Duration
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
+	budgetHost(q, 8<<30, 1) // Synthetic headroom keeps the measured copy admitted.
+	run := func() (submissionAdviceTiming, time.Duration) {
 		j := cloneJob(q.s.Jobs["queued-081"])
 		span := &requestSpan{}
 		timing := newSubmissionAdviceTiming()
 		unlock := requestLock(context.WithValue(context.Background(), requestSpanKey{}, span), &q.mu)
 		snapshot := q.captureSubmissionAdvice()
 		unlock()
-		v, err := snapshot.planner(context.Background())
+		ctx, release, err := q.requestBudgets.projectionContext(context.Background())
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer release()
+		v, err := snapshot.planner(ctx)
 		if err != nil {
 			b.Fatal(err)
 		}
 		v.submissionDeadlineGuidance(&j, &timing)
-		timing.finish(q.observeSubmissionAdvice)
-		hold += span.hold
+		timing.next(timing.active)
+		return timing, span.hold
+	}
+	// Report the one cold generation decode separately. Unchanged retained
+	// records decode only once across commits, so steady-state advice is warm.
+	cold, _ := run()
+	var phases [4]time.Duration
+	var hold time.Duration
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		timing, locked := run()
+		hold += locked
+		for i, d := range timing.phases {
+			phases[i] += d
+		}
 	}
 	b.StopTimer()
+	b.ReportMetric(float64(cold.last.Sub(cold.started).Nanoseconds()), "cold-total-ns")
+	b.ReportMetric(float64(cold.phases[adviceCapture].Nanoseconds()), "cold-capture-ns")
 	b.ReportMetric(float64(hold.Nanoseconds())/float64(b.N), "mutex-ns/op")
 	for i, name := range []string{"capture-ns/op", "wait-reason-ns/op", "status-reason-ns/op", "deadline-ns/op"} {
 		b.ReportMetric(float64(phases[i].Nanoseconds())/float64(b.N), name)
@@ -136,6 +150,20 @@ func TestSubmissionAdviceDoesNotHoldQueueAfterCommit(t *testing.T) {
 
 func TestSubmissionAdvicePreservesFields(t *testing.T) {
 	q := submissionAdviceFixture(t)
+	inputs, _, err := q.readGeneration.inputs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	immutableBefore, err := json.Marshal(inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		after, err := json.Marshal(inputs)
+		if err != nil || !bytes.Equal(immutableBefore, after) {
+			t.Error("advice mutated published immutable inputs", err)
+		}
+	}()
 	q.mu.Lock()
 	snapshot := q.captureSubmissionAdvice()
 	q.mu.Unlock()
@@ -161,5 +189,79 @@ func TestSubmissionAdvicePreservesFields(t *testing.T) {
 		if !reflect.DeepEqual(before, cloneJob(q.s.Jobs[id])) {
 			t.Fatal("advice changed durable receipt")
 		}
+	}
+}
+
+// Cold decode and warm-copy refusal must both preserve durable acceptance,
+// including replay of the exact keyed job. No oversized copy may bypass charge.
+func TestSubmissionAdviceCapacityPreservesAcceptance(t *testing.T) {
+	for _, warm := range []bool{false, true} {
+		t.Run(fmt.Sprintf("warm=%t", warm), func(t *testing.T) {
+			q, clock := fixture(t)
+			retained := &Job{ID: "retained", State: "succeeded", ReleaseConfirmed: true, Queued: clock.Now(), Spec: spec("experiment")}
+			retained.Spec.Run.Command = []string{"echo", strings.Repeat("payload", 20000)}
+			q.s.Jobs[retained.ID] = retained
+			for i := 1; i < 1024; i++ {
+				j := *retained
+				j.ID = fmt.Sprintf("retained-%04d", i)
+				j.Spec = spec("experiment")
+				q.s.Jobs[j.ID] = &j
+			}
+			if err := q.update(func() error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			record := readGet(q.readRoot, "jobs/retained")
+			if warm {
+				if _, _, err := q.readGeneration.inputs(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			budgetHost(q, 128<<10, 1)
+			handler := API{Queue: q, Token: "test"}.Handler()
+			for _, keyed := range []bool{false, true} {
+				s := spec("experiment")
+				if keyed {
+					s.SubmissionKey = "capacity-accepted"
+				}
+				var accepted string
+				repeats := 1
+				if keyed {
+					repeats = 2
+				}
+				for i := 0; i < repeats; i++ {
+					data, err := json.Marshal(s)
+					if err != nil {
+						t.Fatal(err)
+					}
+					r := httptest.NewRequest("POST", "/api/jobs", bytes.NewReader(data))
+					r.Header.Set("Authorization", "Bearer test")
+					w := httptest.NewRecorder()
+					handler.ServeHTTP(w, r)
+					if w.Code != 200 {
+						t.Fatal("durable acceptance lost", w.Code, w.Body.String())
+					}
+					var got Job
+					if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+						t.Fatal(err)
+					}
+					if got.ID == "" || q.s.Jobs[got.ID] == nil || got.DeadlineGuidance == nil || got.PriorityPolicy.Tier == "" || !strings.Contains(strings.Join(got.DeadlineGuidance.Blockers, " "), "details unavailable") {
+						t.Fatal("accepted receipt or honest guidance missing", got.ID, got.DeadlineGuidance)
+					}
+					if i > 0 && (got.ID != accepted || !got.SubmissionReused) {
+						t.Fatal("key replay duplicated accepted work")
+					}
+					accepted = got.ID
+					if q.requestBudgets.held != 0 {
+						t.Fatal("advice leaked request capacity")
+					}
+				}
+			}
+			if record.decoded.Load() != warm {
+				t.Fatal("cold oversized history decoded without capacity")
+			}
+			if len(q.s.Jobs) != 1026 {
+				t.Fatal("advice failure duplicated accepted submissions")
+			}
+		})
 	}
 }

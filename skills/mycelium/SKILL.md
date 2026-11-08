@@ -373,6 +373,15 @@ From the release containing #959, interrupted `myce logs JOB` prints `myce logs 
 
 **Input and accepted-result recovery (next release, #831/#751):** profile/adapter input storage retries span preflight and reconciled uploads under the caller's one context deadline; each retry reports its sanitized cause and honours `Retry-After`. `myce result` uses the same transient recovery for accepted retrieval, including CI. Permanent authentication, TLS, capacity, integrity and configuration errors stop immediately. No retry count or new default deadline is imposed; without an owner deadline, interrupt to stop observation/recovery and resume the saved intent later.
 
+## Submission advice under control pressure (next release, #1065)
+
+Submission waiting/deadline advice uses the accepted commit's immutable planner
+snapshot outside the live queue mutex. If measured memory headroom cannot fit
+its diagnostics, the response still confirms acceptance with the same job ID,
+policy and deadline-guidance fields; blocker detail explicitly says it is
+unavailable. Keep that ID and submission key and inspect the accepted job after
+headroom recovers. Do not resubmit accepted work to obtain advice.
+
 ## Adaptive model readiness (next release)
 
 Omitted model `max_wait` follows caller cancellation and actual load failures;
