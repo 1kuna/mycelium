@@ -689,21 +689,43 @@ The line contains no worker identity, payload, filesystem path or transport erro
 it is written after releasing the queue lock. These timings are diagnostic wall
 time, independent of the injected scheduling clock.
 
-`event=slow_queue_mutex_hold` identifies sampled holds of at least 250 ms in
-queue updates (including Tick, check-ins and scheduling), status projection and
-batch-log retention. `operation` names the code operation, `duration_ms` measures
-time holding the lock (excluding acquisition), and `sample_every=16` means one
-in sixteen holds at each boundary is measured. Fast holds stay silent; unsampled
-holds do no clock reads. Logging and operation-name resolution happen after
-unlocking, without request identifiers. Sampling can miss an isolated slow hold;
-absence of a line does not rule out contention. These measurements also use
-diagnostic wall time, never the scheduling clock.
+`event=slow_queue_mutex_hold` identifies expensive queue updates (including Tick,
+check-ins and scheduling), status projection and batch-log retention. Every hold
+is measured; the local service distribution controls which diagnostics are
+emitted (`sample_every=1`). `operation` names the code operation and
+`duration_ms` excludes acquisition. Logging and operation-name resolution happen
+after unlocking without request identifiers. Absence of a line does not rule out
+contention. These measurements use diagnostic wall time, never the scheduling
+clock.
 
 Update holds also report `records_snapshot_ms` (undo records and in-memory
 snapshots), `usage_accounting_ms`, `fn_body_ms` (mutation plus health/maintenance),
 `persist_commit_ms` (usage writes, state serialization and SQLite commit), and
 `notify_ms` (wake notification and final commit/rollback bookkeeping). These
-non-overlapping phases cover the sampled hold, including failed updates.
+non-overlapping phases cover the measured hold, including failed updates.
+Persistence additionally reports `persist_marshal_ms` (encoding, detached-value
+comparison and fragment preparation), `persist_sql_ms` (transaction setup/usage
+writes and state statements), and `persist_sync_commit_ms` (SQLite commit with
+FULL synchronization, not isolated fsync). `persist_payload_bytes` and
+`persist_records` count changed state payloads/rows submitted to SQL; they exclude
+usage payloads, SQL keys, WAL page overhead and later checkpoint writes. Failed
+transactions can report attempted writes. These subphases do not include every
+comparison or post-commit bookkeeping step in `persist_commit_ms`.
+
+From the incremental-persistence release, normalized state v2 separates fields
+larger than the database's own page size from small control fields. Unchanged
+payload fields remain in place; keyed live answers reference their committed job
+and retain a complete answer when that job is removed. All fields, removals and
+the format marker commit atomically in the existing FULL-synchronous transaction.
+Startup reads whole-state and normalized-v1 databases and converts them once;
+older readers refuse v2 instead of silently losing fields. Preserve a compatible
+binary with the backup when planning recovery; do not open v2 with an older binary.
+
+`BenchmarkCheckinPersistence` reports control-hold and persistence phases,
+changed payload bytes and private-fixture WAL growth for retained-history and
+768-input-manifest workloads. It uses real SQLite commits and an injected queue
+clock. WAL recycling is disabled only for that disposable measurement; neither
+benchmark timings nor WAL growth establish live physical write rate or freshness.
 
 ### Opt-in live queue profiling
 

@@ -79,9 +79,7 @@ func TestCurvePreservationAcceptedLearning(t *testing.T) {
 	// Verify accepted provenance survives durable queue serialization.
 	var stored Job
 	var data []byte
-	if err = q.db.QueryRow("SELECT data FROM queue_state WHERE key=?", "jobs/"+third.ID).Scan(&data); err != nil {
-		t.Fatal(err)
-	}
+	data = durableQueueRecord(t, q.db, "jobs/"+third.ID)
 	if err = json.Unmarshal(data, &stored); err != nil {
 		t.Fatal(err)
 	}

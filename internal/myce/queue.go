@@ -223,6 +223,13 @@ type Queue struct {
 	usageMaintenance bool
 	s                state
 
+	fragmented             bool
+	persistencePageBytes   int
+	persistenceEncodings   map[string]map[string]catalogEncoding
+	persistenceFieldsCache map[string]persistenceFieldCache
+	observePersistence     func(queuePersistenceTiming)
+	observeUpdatePhases    func(queueHoldPhases)
+
 	observeMemoryHistory func(int, bool) // Test observer: jobs visited by a full evidence scan.
 
 	memoryPlanning          *memoryPlanningCache // Only while a read-only placement scan is active.
@@ -302,6 +309,10 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		}
 	}
 	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS model_intervals (seq INTEGER PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS enrollment_tickets (digest TEXT PRIMARY KEY, pin TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err = db.QueryRow("PRAGMA page_size").Scan(&q.persistencePageBytes); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -561,7 +572,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 			})
 		}
 	}
-	if timing == nil && (q.observeUpdate != nil || spanFrom(ctx) != nil) {
+	if timing == nil {
 		timing = &queueUpdateTiming{}
 	}
 	if cancelWait {
@@ -575,6 +586,10 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 	q.nasAvailable = available
 	defer func() {
 		duration := hold.finish()
+		if q.observeUpdatePhases != nil {
+			q.observeUpdatePhases(hold)
+		}
+		hold.persistence = timing.persistence
 		timing.observe(q.observeUpdate)
 		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn, &hold)

@@ -1,6 +1,8 @@
 package myce
 
 import (
+	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -87,5 +89,161 @@ func TestQueuePersistenceStorageRollbackAndRemoval(t *testing.T) {
 	q = storageRestart(t, q, clock)
 	if len(q.s.StorageObservations) != 0 {
 		t.Fatal("removed aggregate returned after restart", q.s.StorageObservations)
+	}
+}
+
+// Inspect durable logical records independently of their physical row layout.
+func durableQueueRecord(t *testing.T, db *sql.DB, key string) []byte {
+	t.Helper()
+	records, err := readQueueRecords(db, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, ok := records[key]
+	if !ok {
+		t.Fatalf("durable record %q missing", key)
+	}
+	return data
+}
+
+func TestQueuePersistenceLargeFieldsRollbackRestart(t *testing.T) {
+	q, clock := fixture(t)
+	s := spec("experiment")
+	s.Run.Env = map[string]string{"UNCHANGED": strings.Repeat("payload", 10000)}
+	j := &Job{ID: "large/record", Spec: s, State: "paused", Queued: clock.Now()}
+	if err := q.update(func() error { q.putJob(j.ID, j); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	var measured queuePersistenceTiming
+	q.observePersistence = func(p queuePersistenceTiming) { measured = p }
+	// Warm the detached serializer; a live field may mutate through an alias.
+	if err := q.update(func() error { q.touchJob(j.ID).Reason = "first"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error { q.touchJob(j.ID).Reason = "second"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if measured.Bytes >= int64(len(s.Run.Env["UNCHANGED"]))/4 {
+		t.Fatalf("unchanged payload rewritten: %+v", measured)
+	}
+	before := durableQueueRecord(t, q.db, "jobs/"+j.ID)
+	if _, err := q.db.Exec(`CREATE TRIGGER reject_fields BEFORE UPDATE ON queue_state WHEN NEW.key GLOB 'fields/*' BEGIN SELECT RAISE(ABORT,'test field failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	change := func() error {
+		live := q.touchJob(j.ID)
+		live.Reason = "accepted"
+		live.Spec.Run.Env["UNCHANGED"] = "small"
+		return nil
+	}
+	if err := q.update(change); err == nil {
+		t.Fatal("failed SQL accepted")
+	}
+	after := durableQueueRecord(t, q.db, "jobs/"+j.ID)
+	if !bytes.Equal(before, after) || q.s.Jobs[j.ID].Reason != "second" || len(q.s.Jobs[j.ID].Spec.Run.Env["UNCHANGED"]) < 10000 {
+		t.Fatal("rollback lost durable or in-memory state")
+	}
+	if _, err := q.db.Exec("DROP TRIGGER reject_fields"); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(change); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenQueue(t, q, clock)
+	got := q.s.Jobs[j.ID]
+	if got.Reason != "accepted" || got.Spec.Run.Env["UNCHANGED"] != "small" {
+		t.Fatal("restart restored stale large field")
+	}
+	if err := q.update(func() error { q.touchJob(j.ID); delete(q.s.Jobs, j.ID); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	records, err := readQueueRecords(q.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := records["jobs/"+j.ID]; ok {
+		t.Fatal("deleted record fragments survived")
+	}
+}
+
+func TestQueuePersistenceLegacyMigration(t *testing.T) {
+	q, clock := fixture(t)
+	s := spec("experiment")
+	s.SubmissionKey = "migration"
+	j := submit(t, q, s)
+	// Construct the exact previous normalized layout, including a cold record
+	// that an ordinary update would never touch. The upgrade must retain both.
+	if err := q.update(func() error {
+		cold := &Job{ID: "cold", State: "succeeded", Spec: s, Queued: clock.Now(), FinishedAt: &clock.now, ReleaseConfirmed: true}
+		q.putJob(cold.ID, cold)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := q.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("DELETE FROM queue_state"); err != nil {
+		t.Fatal(err)
+	}
+	for key, data := range q.persisted {
+		if _, err = tx.Exec("INSERT INTO queue_state(key,data) VALUES(?,?)", key, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = tx.Exec("UPDATE queue SET data=? WHERE id=1", legacyNormalizedQueueMarker); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenQueue(t, q, clock)
+	if q.s.Jobs[j.ID] == nil || q.s.Jobs["cold"] == nil {
+		t.Fatal("migration lost jobs")
+	}
+	replay := submit(t, q, s)
+	if replay.ID != j.ID {
+		t.Fatal("migration lost keyed binding")
+	}
+	var marker []byte
+	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&marker); err != nil || !bytes.Equal(marker, normalizedQueueMarker) {
+		t.Fatal("migration marker missing", err)
+	}
+	q = reopenQueue(t, q, clock)
+	if q.s.Jobs["cold"] == nil {
+		t.Fatal("cold migrated job lost on second restart")
+	}
+}
+
+func TestQueuePersistenceCachedEncodingMatchesJSON(t *testing.T) {
+	q, clock := fixture(t)
+	s := spec("experiment")
+	s.Run.Env = map[string]string{"LARGE": strings.Repeat("x", 16000)}
+	j := submit(t, q, s)
+	for range 2 {
+		if err := q.update(func() error {
+			live := q.touchJob(j.ID)
+			live.Spec.Run.Env["changed"] = "yes"
+			live.Reason = "mutated"
+			for key, value := range map[string]any{"state": q.s, "jobs/" + j.ID: live} {
+				want, err := json.Marshal(value)
+				if err != nil {
+					return err
+				}
+				got, _, err := q.marshalPersistenceValue(key, value)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(want, got) {
+					t.Fatal("cached serializer diverged from JSON")
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second)
 	}
 }
