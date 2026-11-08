@@ -391,6 +391,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 		report.ApplicationProgress = readApplicationProgress(s.dir, a.job, w.Clock.Now())
 		diagnostics := Machine{CheckpointUnavailable: s.checkpointUnavailable, FileTransferError: s.fileError}
+		if diagnostics.FileTransferError == "" && s.inputTransferRecovering.Load() {
+			diagnostics.FileTransferError = inputTransferRecoveringReason
+		}
 		if p != nil && p.docker != nil {
 			diagnostics.DockerCleanup, diagnostics.DockerCause = dockerHeartbeatDiagnostic(p.docker)
 			report.DockerCause = diagnostics.DockerCause

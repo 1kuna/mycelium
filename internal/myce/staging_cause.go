@@ -60,7 +60,7 @@ func (e *stagingCapacityError) Error() string {
 }
 
 var stagingOperations = strings.Fields("store_resolve store_open store_stat store_verify store_refresh store_sync store_seek shared_input_admission prepare cache_init cache_scan cache_admission cache_verify cache_evict cache_download cache_publish copy source_extract source_replace nas_read extension_write batch_write sync publish shared_input model_snapshot submit_verify")
-var stagingErrors = strings.Fields("io_error permission_denied timeout cancelled EOF unexpected_EOF ENOENT EACCES EPERM ENOSPC EDQUOT EIO EROFS ENOTDIR EISDIR EEXIST EMFILE ENFILE ECONNREFUSED ECONNRESET EPIPE blob_missing blob_expired blob_unavailable identity_mismatch invalid_source invalid_cache_entry cache_limit cache_space invalid_input")
+var stagingErrors = strings.Fields("io_error permission_denied timeout cancelled storage_unreachable EOF unexpected_EOF ENOENT EACCES EPERM ENOSPC EDQUOT EIO EROFS ENOTDIR EISDIR EEXIST EMFILE ENFILE ECONNREFUSED ECONNRESET EPIPE blob_missing blob_expired blob_unavailable identity_mismatch invalid_source invalid_cache_entry cache_limit cache_space invalid_input")
 
 func stagingErrorName(err error) string {
 	var se *stagingError
@@ -72,6 +72,7 @@ func stagingErrorName(err error) string {
 		name string
 	}{
 		{context.DeadlineExceeded, "timeout"}, {errFileTransferStalled, "timeout"}, {errCheckpointIOTimeout, "timeout"}, {context.Canceled, "cancelled"},
+		{errInputTransferUnreachable, "storage_unreachable"},
 		{io.ErrUnexpectedEOF, "unexpected_EOF"}, {io.EOF, "EOF"},
 		{syscall.ENOENT, "ENOENT"}, {syscall.EACCES, "EACCES"}, {syscall.EPERM, "EPERM"}, {syscall.ENOSPC, "ENOSPC"}, {syscall.EDQUOT, "EDQUOT"}, {syscall.EIO, "EIO"}, {syscall.EROFS, "EROFS"}, {syscall.ENOTDIR, "ENOTDIR"}, {syscall.EISDIR, "EISDIR"}, {syscall.EEXIST, "EEXIST"}, {syscall.EMFILE, "EMFILE"}, {syscall.ENFILE, "ENFILE"}, {syscall.ECONNREFUSED, "ECONNREFUSED"}, {syscall.ECONNRESET, "ECONNRESET"}, {syscall.EPIPE, "EPIPE"},
 	} {
