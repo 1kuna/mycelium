@@ -320,6 +320,14 @@ bounds or deadlines. Preparation/transfer remain separate and uncalibrated.
 Missing or incompatible pairs retain the raw estimate or its unknown state;
 forecasts grant no capacity, reserve no slot and do not move running work.
 
+From the next worker release (#1056), shared-input staging failures retain the
+active stage, source/cache/store path class, bytes copied and expected file size,
+plus numeric errno when the OS supplies it. A safe `timeout` identifies a
+withdrawn operation; absent errno does not establish kernel EIO. Report that
+exact attempt evidence to the storage owner; keep original inputs and cache
+custody intact. A later successful stage alone does not identify the earlier
+cause or establish a repair.
+
 If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
 repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
 independent work. Heavy local execution is never a fallback. For a Mycelium

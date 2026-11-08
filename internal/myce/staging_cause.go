@@ -16,6 +16,11 @@ import (
 // StagingCause names logical inputs and operations, never expanded worker paths
 // or untrusted transport text. The underlying error remains in the local chain.
 type StagingCause struct {
+	Stage          string `json:"stage,omitempty"`
+	PathClass      string `json:"path_class,omitempty"`
+	BytesCopied    int64  `json:"bytes_copied,omitempty"`
+	ExpectedBytes  int64  `json:"expected_bytes,omitempty"`
+	Errno          int    `json:"errno,omitempty"`
 	RequiredBytes  int64  `json:"required_bytes,omitempty"`
 	AvailableBytes int64  `json:"available_bytes,omitempty"`
 	LimitBytes     int64  `json:"limit_bytes,omitempty"`
@@ -30,6 +35,12 @@ type StagingCause struct {
 
 func (d StagingCause) String() string {
 	text := fmt.Sprintf("input=%q blob=%s operation=%s error=%s", d.Input, d.Blob, d.Operation, d.Error)
+	if d.Stage != "" {
+		text += fmt.Sprintf(" stage=%s path_class=%s bytes_copied=%d expected_bytes=%d", d.Stage, d.PathClass, d.BytesCopied, d.ExpectedBytes)
+	}
+	if d.Errno != 0 {
+		text += fmt.Sprintf(" errno=%d", d.Errno)
+	}
 	if d.Syscall != "" {
 		text += " syscall=" + d.Syscall
 	}
@@ -145,6 +156,10 @@ func withStagingCause(input string, ref FileRef, operation string, err error) er
 	if errors.As(err, &h) {
 		d.Status = h.Status
 	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		d.Errno = int(errno)
+	}
 	return &stagingError{d, err}
 }
 func safeStagingCause(d *StagingCause) *StagingCause {
@@ -158,6 +173,18 @@ func safeStagingCause(d *StagingCause) *StagingCause {
 		return nil
 	}
 	out := *d
+	if !contains(stagingStages, out.Stage) {
+		out.Stage = ""
+	}
+	if !contains(strings.Fields("source cache store"), out.PathClass) {
+		out.PathClass = ""
+	}
+	if out.BytesCopied < 0 || out.ExpectedBytes < 0 || out.BytesCopied > out.ExpectedBytes {
+		out.BytesCopied, out.ExpectedBytes = 0, 0
+	}
+	if out.Errno < 0 {
+		out.Errno = 0
+	}
 	if !contains([]string{"shared_input_cache", "disk_free_floor"}, out.Capacity) || out.RequiredBytes < 0 || out.AvailableBytes < 0 || out.LimitBytes < 0 {
 		out.Capacity = ""
 		out.RequiredBytes, out.AvailableBytes, out.LimitBytes = 0, 0, 0

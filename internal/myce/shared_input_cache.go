@@ -23,19 +23,20 @@ import (
 // Reuse the environment cache's OS locking and state-root initialization. Data
 // entries have their own integrity records and no environment/catalog lifecycle.
 type SharedInputCache struct {
-	cache         EnvironmentCache
-	Client        Client
-	mu            sync.Mutex
-	verified      map[string]string
-	staging       map[*sharedInputStaging]struct{}
-	beforeStage   func(context.Context)
-	resolveNAS    func(root, relative string) (string, error)
-	beforePublish func()
-	beforeVerify  func() // Test hook: a full re-hash of a cached entry starts.
-	hits          uint64
-	misses        uint64
-	nasBytes      uint64
-	capacity      *SharedInputCapacity
+	cache            EnvironmentCache
+	Client           Client
+	mu               sync.Mutex
+	verified         map[string]string
+	staging          map[*sharedInputStaging]struct{}
+	beforeStage      func(context.Context)
+	resolveNAS       func(root, relative string) (string, error)
+	beforePublish    func()
+	beforeVerify     func() // Test hook: a full re-hash of a cached entry starts.
+	afterStageCancel func() // Test hook: withdrawal cancellation has reached its writer.
+	hits             uint64
+	misses           uint64
+	nasBytes         uint64
+	capacity         *SharedInputCapacity
 }
 
 // sharedVerifiedRecord holds the metadata signature (size, mode, mtime, inode
@@ -67,6 +68,7 @@ func (c *SharedInputCache) nasPathContext(ctx context.Context, root, relative st
 	if err := sharedInputProgress(ctx); err != nil {
 		return "", err
 	}
+	traceSharedInput(ctx, "resolve", "source")
 	path, err := c.nasPath(root, relative)
 	if err != nil {
 		// Keep the source boundary, never the expanded worker mount path.
@@ -161,7 +163,10 @@ func (c *SharedInputCache) Acquire(ctx context.Context, s SharedInput, nasRoot s
 	}
 	return path, release, nil
 }
-func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot string) (string, error) {
+func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot string) (_ string, stageErr error) {
+	ctx = context.WithValue(ctx, sharedInputTraceKey{}, &sharedInputTrace{detail: StagingCause{Operation: "shared_input", Stage: "prepare", PathClass: "cache"}})
+	traceSharedFile(ctx, s.ref())
+	defer func() { stageErr = tracedSharedError(ctx, stageErr) }()
 	key := s.key()
 	root := filepath.Join(c.cache.Root, key)
 	payload := filepath.Join(root, "data")
@@ -180,6 +185,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		}
 	}()
 	if _, err = os.Lstat(root); err == nil {
+		traceSharedInput(ctx, "metadata", "cache")
 		var record sharedEntry
 		b, e := os.ReadFile(filepath.Join(root, "ready.json"))
 		if e != nil {
@@ -214,6 +220,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 			if c.beforeVerify != nil {
 				c.beforeVerify()
 			}
+			traceSharedInput(ctx, "verify", "cache")
 			if e = verifySharedEntry(ctx, payload, record.Files); e != nil {
 				return "", e
 			}
@@ -243,6 +250,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		need += s.SizeBytes
 	}
 	err = c.stageInput(ctx, func(ctx context.Context, stage string) error {
+		traceSharedInput(ctx, "admission", "cache")
 		// The writer owns this random stage's build lock before reserving space.
 		// Matching reservation/partial names reuse existing remaining-byte accounting.
 		gate, e := c.cache.lock(ctx, "admission", syscall.LOCK_EX)
@@ -299,9 +307,11 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 	if err != nil {
 		return "", err
 	}
+	traceSharedInput(ctx, "sync", "cache")
 	if err = syncWorkerDir(c.cache.Root); err != nil {
 		return "", err
 	}
+	traceSharedInput(ctx, "metadata", "cache")
 	signature, err := sharedSignature(payload)
 	if err == nil {
 		err = recordSharedVerification(root, signature)
@@ -338,6 +348,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if c.beforeStage != nil {
 		c.beforeStage(ctx)
 	}
+	traceSharedFile(ctx, s.ref())
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
@@ -347,13 +358,16 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 		if e != nil {
 			return e
 		}
+		traceSharedInput(ctx, "verify", "source")
 		if e = verifyFile(ctx, manifestPath, s.ref()); e != nil {
 			return e
 		}
+		traceSharedInput(ctx, "open", "source")
 		f, e := os.Open(manifestPath)
 		if e != nil {
 			return e
 		}
+		traceSharedInput(ctx, "read", "source")
 		b, e := io.ReadAll(io.LimitReader(contextReader{ctx, f}, s.SizeBytes+1))
 		e = errors.Join(e, f.Close())
 		if e != nil {
@@ -363,6 +377,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 		if int64(len(b)) != s.SizeBytes || digestBytes(b) != s.SHA256 {
 			return errors.New("shared manifest changed")
 		}
+		traceSharedInput(ctx, "manifest", "source")
 		if e = json.Unmarshal(b, &s.Manifest); e != nil {
 			return e
 		}
@@ -420,9 +435,11 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			}
 		}
 		if s.Archive != "" {
+			traceSharedInput(ctx, "extract", "cache")
 			if err = unpackSharedArchive(ctx, target, dst, s.Archive, s.UnpackedBytes); err != nil {
 				return err
 			}
+			traceSharedInput(ctx, "metadata", "cache")
 			if err = os.Remove(target); err != nil {
 				return err
 			}
@@ -453,6 +470,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			files["."] = s.ref()
 		}
 	}
+	traceSharedInput(ctx, "permissions", "cache")
 	if err = makeSharedReadOnlyContext(ctx, dst); err != nil {
 		return err
 	}
@@ -460,22 +478,28 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if err != nil {
 		return err
 	}
+	traceSharedInput(ctx, "manifest", "cache")
 	if err = os.WriteFile(filepath.Join(stage, "ready.json"), b, 0400); err != nil {
 		return err
 	}
+	traceSharedInput(ctx, "sync", "cache")
 	return syncModelDirectoryContext(ctx, stage)
 }
 
-func copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
+func copySharedFile(ctx context.Context, source, target string, ref FileRef) (stageErr error) {
+	traceSharedFile(ctx, ref)
+	defer func() { stageErr = tracedSharedError(ctx, stageErr) }()
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
+	traceSharedInput(ctx, "resolve", "source")
 	if err := noModelSymlinks(source, false); err != nil {
 		return err
 	}
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
+	traceSharedInput(ctx, "open", "source")
 	in, err := os.Open(source)
 	if err != nil {
 		return err
@@ -484,6 +508,7 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) err
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
+	traceSharedInput(ctx, "stat", "source")
 	info, err := in.Stat()
 	if err != nil {
 		return err
@@ -494,29 +519,43 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) err
 	if !info.Mode().IsRegular() || info.Size() != ref.SizeBytes {
 		return errors.New("shared NAS file size/type differs from manifest")
 	}
+	traceSharedInput(ctx, "prepare", "cache")
 	if err = os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
 	}
-	// On the same copy-on-write volume, a clone shares blocks until either side
-	// writes, so a later write to the source cannot reach the verified copy.
-	// Hard links would share the inode itself and are never used.
+	// A reflink preserves private immutable bytes without sharing a mutable inode.
+	traceSharedInput(ctx, "clone", "cache")
 	if !cloneSharedFile(in, target) {
+		traceSharedInput(ctx, "open", "cache")
 		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600|info.Mode().Perm()&0111)
 		if err != nil {
 			return err
 		}
-		// A changing NAS original cannot consume more than its admitted bytes.
-		_, err = io.CopyN(struct{ io.Writer }{out}, contextReader{ctx, in}, ref.SizeBytes)
-		err = errors.Join(err, out.Sync(), out.Close())
+		// Neither ReaderFrom nor WriteTo can bypass the operation and byte recorder.
+		_, err = io.CopyN(sharedInputWriter{ctx, out}, contextReader{ctx, sharedInputReader{ctx, in, "source"}}, ref.SizeBytes)
+		err = tracedSharedCopyError(ctx, err)
+		traceSharedInput(ctx, "sync", "cache")
+		err = errors.Join(err, tracedSharedError(ctx, out.Sync()))
+		traceSharedInput(ctx, "close", "cache")
+		err = errors.Join(err, tracedSharedError(ctx, out.Close()))
 		if err != nil {
 			return err
 		}
-	} else if err = sharedInputProgress(ctx); err != nil {
-		return err
+	} else {
+		if t, ok := ctx.Value(sharedInputTraceKey{}).(*sharedInputTrace); ok {
+			t.mu.Lock()
+			t.detail.BytesCopied = ref.SizeBytes
+			t.mu.Unlock()
+		}
+		if err = sharedInputProgress(ctx); err != nil {
+			return err
+		}
 	}
+	traceSharedInput(ctx, "permissions", "cache")
 	if err = os.Chmod(target, 0400|info.Mode().Perm()&0111); err != nil {
 		return err
 	}
+	traceSharedInput(ctx, "verify", "cache")
 	return verifyFile(ctx, target, ref)
 }
 
