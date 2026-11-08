@@ -260,7 +260,16 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		if e != nil {
 			return e
 		}
-		if e = removeSharedEntry(root + ".partial"); e == nil {
+		reservation := strings.TrimSuffix(stage, ".partial") + ".reservation"
+		// We own this persistent stage's build lock. A reservation left by its
+		// crashed writer belongs to us, never to another in-flight transfer.
+		if e = os.Remove(reservation); os.IsNotExist(e) {
+			e = nil
+		}
+		if e == nil {
+			e = removeSharedEntry(root + ".partial")
+		}
+		if e == nil {
 			// Retained local prefixes already occupy cache/free bytes. Reserve
 			// only the remainder for this stage, without double charging it.
 			var written int64
@@ -276,7 +285,6 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 				e = c.admit(ctx, key, max(0, need-written))
 			}
 		}
-		reservation := strings.TrimSuffix(stage, ".partial") + ".reservation"
 		if e == nil {
 			e = os.WriteFile(reservation, []byte(strconv.FormatInt(need, 10)), 0600)
 		}
@@ -364,6 +372,23 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if c.beforeStage != nil {
 		c.beforeStage(ctx)
 	}
+	// A cancellation after population can leave a complete read-only stage.
+	// Verify and reuse it locally; never overwrite its immutable ready record
+	// or re-read the NAS archive merely to reconstruct already verified bytes.
+	if b, err := os.ReadFile(filepath.Join(stage, "ready.json")); err == nil {
+		traceSharedInput(ctx, "verify", "cache")
+		var record sharedEntry
+		if err := json.Unmarshal(b, &record); err != nil {
+			return err
+		}
+		if err := verifySharedEntry(ctx, filepath.Join(stage, "data"), record.Files); err != nil {
+			return err
+		}
+		return ctx.Err()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
 	traceSharedFile(ctx, s.ref())
 	if err := sharedInputProgress(ctx); err != nil {
 		return err

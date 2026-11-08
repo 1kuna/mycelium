@@ -126,3 +126,78 @@ func TestNASInputCancelledPrefixSurvivesCacheRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNASInputCompletedStageSurvivesLateCancellation(t *testing.T) {
+	_, clock := fixture(t)
+	nas, root := t.TempDir(), t.TempDir()
+	ref := sharedFixtureFile(t, nas, "input", "completed stage retained before publication")
+	input := SharedInput{NAS: "input", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: root, Limit: 1 << 20, Clock: clock}, beforePublish: cancel}
+	if _, _, err := cache.Acquire(ctx, input, nas); !errors.Is(err, context.Canceled) {
+		t.Fatal("late cancellation published", err)
+	}
+	<-onlySharedStaging(t, cache).done
+	stage := filepath.Join(root, identityHash("input-stage:"+input.key())+".partial")
+	if info, err := os.Stat(filepath.Join(stage, "ready.json")); err != nil || info.Mode().Perm()&0200 != 0 {
+		t.Fatal("fixture did not retain immutable completed stage", err)
+	}
+	if err := os.Remove(filepath.Join(nas, "input")); err != nil {
+		t.Fatal(err)
+	}
+	resumed := &SharedInputCache{cache: EnvironmentCache{Root: root, Limit: 1 << 20, Clock: clock}, resolveNAS: func(string, string) (string, error) {
+		t.Error("completed stage touched NAS")
+		return "", os.ErrNotExist
+	}}
+	path, release, err := resumed.Acquire(context.Background(), input, nas)
+	if err != nil {
+		t.Fatal("completed stage could not publish", err)
+	}
+	defer release()
+	if err := verifyFile(context.Background(), path, ref); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNASInputReclaimsOwnCrashedReservation(t *testing.T) {
+	_, clock := fixture(t)
+	nas := t.TempDir()
+	body := strings.Repeat("x", 128<<10)
+	ref := sharedFixtureFile(t, nas, "input", body)
+	input := SharedInput{NAS: "input", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
+	const prefix = 32 << 10
+	disk := DiskReading{TotalBytes: 1 << 30, FreeBytes: diskFreeFloor(1<<30) + uint64(len(body)-prefix)}
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1, Clock: clock}, automatic: true, diskProbe: func(string) (DiskReading, error) { return disk, nil }}
+	if err := cache.cache.init(); err != nil {
+		t.Fatal(err)
+	}
+	stageKey := identityHash("input-stage:" + input.key())
+	stage := filepath.Join(cache.cache.Root, stageKey+".partial")
+	if err := os.Mkdir(stage, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "resume"), []byte(input.key()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "data"), []byte(body[:prefix]), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reservation := filepath.Join(cache.cache.Root, stageKey+".reservation")
+	if err := os.WriteFile(reservation, []byte("131072"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// No startup refresh: a surviving process picks up a stage left by a dead
+	// peer. Its own reservation must be reclaimed after owning the build lock.
+	path, release, err := cache.Acquire(context.Background(), input, nas)
+	if err != nil {
+		t.Fatal("counted owned crashed reservation twice", err)
+	}
+	defer release()
+	if err := verifyFile(context.Background(), path, ref); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(reservation); !os.IsNotExist(err) {
+		t.Fatal("owned reservation leaked", err)
+	}
+}

@@ -118,7 +118,7 @@ func (c *SharedInputCache) stageInputNamed(parent context.Context, key string, p
 			defer func() {
 				// Retain interrupted/space-refused prefixes for a later owner retry.
 				// Integrity/invalid-source failures cannot become reusable identity.
-				if key == "" || contains([]string{"identity_mismatch", "invalid_source", "invalid_cache_entry", "invalid_input"}, stagingErrorName(err)) {
+				if key == "" || err != nil && contains([]string{"identity_mismatch", "invalid_source", "invalid_cache_entry", "invalid_input"}, stagingErrorName(err)) {
 					_ = removeSharedEntry(stage)
 				}
 			}()
