@@ -472,9 +472,9 @@ func (q *Queue) efficiencySample(rate *efficiencyRate, machine string, key attem
 		gb := sample.deviceGB
 		rate.MeasuredDeviceGB, rate.DeviceValidUntil = &gb, sample.deviceAt.Add(deviceMemorySampleFreshFor)
 	}
-	if !sample.at.IsZero() && now.Before(sample.at.Add(hostMemorySampleFreshFor)) {
+	if !sample.at.IsZero() && now.Before(sample.at.Add(sample.freshFor())) {
 		gb := sample.gb
-		rate.MeasuredMemoryGB, rate.ValidUntil = &gb, sample.at.Add(hostMemorySampleFreshFor)
+		rate.MeasuredMemoryGB, rate.ValidUntil = &gb, sample.at.Add(sample.freshFor())
 	}
 }
 

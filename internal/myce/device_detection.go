@@ -68,7 +68,17 @@ func (p MachineProbe) detectAccelerator(ctx context.Context, device MachineDevic
 			// A PCI transport can exist inside an integrated SoC (GB10 has
 			// current_link_width=1). N/A is not topology evidence. Ask the
 			// CUDA driver for the selected PCI device's integrated property.
-			b, propertyErr := p.Command(ctx, "python3", "-c", cudaIntegratedAttribute, fact.address)
+			run := p.Command
+			if p.CommandEnv != nil {
+				bound, bindErr := WithModelDevice(Model{}, "cuda", device.Selector)
+				if bindErr != nil {
+					return d, bindErr
+				}
+				run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+					return p.CommandEnv(ctx, bound.DeviceEnv, name, args...)
+				}
+			}
+			b, propertyErr := run(ctx, "python3", "-c", cudaIntegratedAttribute, fact.address)
 			if propertyErr == nil && strings.TrimSpace(string(b)) == "1" {
 				fact.integrated, fact.topologyKnown = true, true
 				d.MemoryMode = "unified"

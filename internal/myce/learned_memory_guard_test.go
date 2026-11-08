@@ -343,16 +343,16 @@ func TestLearnedMemoryGuardChargeUsesProbeForecast(t *testing.T) {
 			}
 			clock.Advance(hostMemorySampleFreshFor)
 			charge, _ = jobHostMemoryCharge(&j, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
-			if charge != 12 {
-				t.Fatalf("stale grew attempt dropped to estimate: %g", charge)
+			if charge < want || charge >= 12 {
+				t.Fatalf("stale forecast lost growth or charged physical cap: %g", charge)
 			}
 			// A replacement cannot inherit the old sample or its released credit.
 			replacement := j
 			replacement.Attempt++
 			sample = currentHostMemorySamples([]AttemptReport{r}, clock.Now())[jobKey(replacement)]
 			charge, _ = jobHostMemoryCharge(&replacement, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
-			if charge != 12 {
-				t.Fatalf("wrong execution released charge: %g", charge)
+			if charge != j.Spec.Needs.HostMemoryGB {
+				t.Fatalf("replacement inherited old growth: %g", charge)
 			}
 		})
 	}

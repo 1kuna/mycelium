@@ -48,7 +48,14 @@ CPU `memory: auto` jobs can grow their charge from fresh measurements while the 
 pressure, exhausted measured headroom, the configured host allowance and
 explicit limits still stop growth. Linux retains a physical/allowance kernel
 ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
-shared-page credit. Missing/stale telemetry protects the execution ceiling.
+shared-page credit. From the next release (#1048), bounded learned/exploratory
+estimates retain their reservation and measured growth when telemetry is stale,
+without resident credit; `host_memory_charge` preserves exact-attempt growth
+across missing/smaller reports, queue restart and unconfirmed release custody.
+Never-started learned allocations also keep the bounded reservation. Host sample
+validity follows delivery cadence of distinct negotiated observations; cached
+or unidentified repeated reports cannot renew resident credit. Cold probes still protect the execution ceiling
+without fresh complete evidence.
 `memory_envelope.enforcement` names the acknowledged behavior; older queues or
 workers retain the previous estimate-sized ceiling. From the next release, cold
 CPU probes also use the adaptive guard, so a small residual admission envelope
@@ -285,7 +292,11 @@ jobs. **Available from the next release:** status and inspection JSON include
 capture time. Interpret worker freshness and diagnostics at that time, allowing
 for the response age. Inspection and filtered/full status take a fresh capture;
 default status learns its cache lease from local capture/read/write costs, with immediate
-terminal/release invalidation.
+terminal/release invalidation. From the next release (#1052), status and job reads
+use immutable committed inputs, with bulk projection outside the live queue
+lock. Response fields, full-history opt-in, prefix lookup, key echo and exact
+release evidence retain their existing contracts. Use the batched wait for
+completion; a full-history read still transfers all requested retained detail.
 
 From the next release, mixed CPU/RAM waits name occupied cores on eligible
 hosts alongside the other hosts' RAM shortages. Reserved cores are admission
@@ -351,6 +362,12 @@ missing/stale telemetry, unified-CUDA device floors and release custody remain
 binding. An aggregate refusal alone cannot identify a sibling's contribution or
 establish safe concurrency. See [live headroom](../../docs/status.md#live-headroom-and-reservations).
 
+From the declared-CPU containment correction (#1064), an enforced native cgroup
+attempt's live forecast cannot inflate its charge beyond its declaration plus
+ceiling slack. Actual larger observations remain protected; missing/stale samples
+grant no resident credit. Auto estimates, sampled RSS and accelerator accounting
+keep their separate rules.
+
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
 negative behind), the measured history horizon, weighted oldest project-wait
@@ -368,6 +385,15 @@ From the release containing #959, interrupted `myce logs JOB` prints `myce logs 
 **Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; each CLI job gets an initial diagnostic read to retain its deadline. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
 
 **Input and accepted-result recovery (next release, #831/#751):** profile/adapter input storage retries span preflight and reconciled uploads under the caller's one context deadline; each retry reports its sanitized cause and honours `Retry-After`. `myce result` uses the same transient recovery for accepted retrieval, including CI. Permanent authentication, TLS, capacity, integrity and configuration errors stop immediately. No retry count or new default deadline is imposed; without an owner deadline, interrupt to stop observation/recovery and resume the saved intent later.
+
+## Submission advice under control pressure (next release, #1065)
+
+Submission waiting/deadline advice uses the accepted commit's immutable planner
+snapshot outside the live queue mutex. If measured memory headroom cannot fit
+its diagnostics, the response still confirms acceptance with the same job ID,
+policy and deadline-guidance fields; blocker detail explicitly says it is
+unavailable. Keep that ID and submission key and inspect the accepted job after
+headroom recovers. Do not resubmit accepted work to obtain advice.
 
 ## Adaptive model readiness (next release)
 
@@ -518,6 +544,10 @@ now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
 [host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).
+From the next release, hardware discovery backs off independently of changing
+device usage. Discrete XPU memory/activity uses a separate shared host sample;
+missing, ambiguous or stale counters remain unknown and withhold
+telemetry-dependent sharing. A heartbeat never refreshes a cached sample's age.
 
 ## Reconciled launch handshakes (next release, #1028)
 
