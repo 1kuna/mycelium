@@ -230,12 +230,15 @@ type Queue struct {
 	usageMaintenance bool
 	s                state
 
+	observeBodyPhase        func(string, time.Duration) // Optional diagnostic observer; never changes decisions.
+	observeUpdatePhases     func([5]time.Duration)      // Optional transaction phase observer.
 	observeSubmissionAdvice func(submissionAdviceTiming)
-
-	observeMemoryHistory func(int, bool) // Test observer: jobs visited by a full evidence scan.
+	observeMemoryHistory    func(int, bool) // Test observer: jobs visited by a full evidence scan.
 
 	memoryPlanning          *memoryPlanningCache // Only while a read-only placement scan is active.
 	memoryObservationIndex  *memoryObservationCatalog
+	retainedMemoryIndex     retainedMemoryIndex // Immutable cold facts; record mutations invalidate.
+	retainedMemoryRevision  uint64
 	checkinMemoryIdentities map[*Job]string // Fenced, transaction-local planner input.
 }
 
@@ -584,6 +587,9 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 	q.nasAvailable = available
 	defer func() {
 		duration := hold.finish()
+		if q.observeUpdatePhases != nil {
+			q.observeUpdatePhases(hold.phases)
+		}
 		timing.observe(q.observeUpdate)
 		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn, &hold)
@@ -1104,6 +1110,7 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 }
 
 func (q *Queue) maintain() {
+	defer q.bodyPhaseFinish("maintain", q.bodyPhaseStart())
 	if q.stopping.Load() {
 		return
 	}
@@ -1340,6 +1347,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		identities.installRetainedMemory(q)
 		q.checkinMemoryIdentities = identities.current(q)
 		defer func() { q.checkinMemoryIdentities = nil }()
 		m := preparedMachine

@@ -120,6 +120,7 @@ func (q *Queue) pruneHealthEvents() {
 }
 
 func (q *Queue) detectHealth() {
+	defer q.bodyPhaseFinish("health", q.bodyPhaseStart())
 	q.detectHostHygiene()
 	q.detectReadinessHealth()
 	// Job-specific pressure conditions follow live demand, rather than growing

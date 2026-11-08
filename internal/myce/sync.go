@@ -98,6 +98,7 @@ func (q *Queue) modelScores(m *Machine) map[string]int {
 	return scores
 }
 func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
+	defer q.bodyPhaseFinish("copy_plan", q.bodyPhaseStart())
 	if q.maintenanceBlocked(hostID(m)) || m.Leaving || availabilityBlocked(m) || q.machineLimitReason(m) != "" {
 		return nil, nil, nil
 	}
