@@ -66,7 +66,15 @@ func profileHash(value any) string {
 	return hex.EncodeToString(h[:])
 }
 
+var profileJSONSync = (*os.File).Sync
+
 func saveProfileJSON(path string, value any) error {
+	return saveAtomicProfileJSON(path, value, true)
+}
+
+// Diagnostic snapshots need atomic replacement, but are reconstructible. Arms,
+// receipts and delivery acknowledgements retain file and directory durability.
+func saveAtomicProfileJSON(path string, value any, durable bool) error {
 	b, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
@@ -80,19 +88,25 @@ func saveProfileJSON(path string, value any) error {
 		f.Close()
 		return err
 	}
-	err = errors.Join(f.Sync(), f.Close())
+	if durable {
+		err = profileJSONSync(f)
+	}
+	err = errors.Join(err, f.Close())
 	if err != nil {
 		return err
 	}
 	if err = os.Rename(f.Name(), path); err != nil {
 		return err
 	}
+	if !durable {
+		return nil
+	}
 	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
 	defer dir.Close()
-	return dir.Sync()
+	return profileJSONSync(dir)
 }
 func readProfileJSON[T any](path string, value *T) error {
 	b, err := os.ReadFile(path)
