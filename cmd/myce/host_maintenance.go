@@ -30,7 +30,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	cpuBudget := f.Int("cpu-budget-cores", 0, "queue-owned logical CPU allowance; zero uses detected capacity minus reserve")
 	budget := f.Float64("memory-budget-gb", 0, "queue-owned host RAM allowance; requires drained/disabled host")
 	dryRun := f.Bool("dry-run", false, "suggest a measured RAM budget without changing policy")
-	headroom := f.Float64("headroom-gb", 4, "extra RAM headroom for future external peaks (GiB)")
+	headroom := f.Float64("headroom-gb", 0, "extra RAM headroom for future external peaks (GiB)")
 	queueOverhead := f.Float64("queue-overhead-gb", 0, "additional queue RAM reserve, if not already included in measurements (GiB)")
 	shared := f.Bool("shared", false, "use shared interactive host profile (profile action)")
 	reserve := f.Float64("interactive-reserve-gb", 0, "measured additional interactive RAM reserve; required with --shared=true")

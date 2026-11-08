@@ -68,7 +68,7 @@ func TestMemoryRecoveryIncident(t *testing.T) {
 				t.Fatal(err)
 			}
 			failed := job(t, q, stopped.ID)
-			if failed.MemoryOOMFloor == nil || math.Abs(failed.MemoryOOMFloor.HostMemoryGB-4.750156402587891*scale) > 1e-9 || failed.ReleaseConfirmed {
+			if failed.MemoryOOMFloor == nil || math.Abs(failed.MemoryOOMFloor.HostMemoryGB-(peak+minimumHostMemoryGB)) > 1e-9 || failed.ReleaseConfirmed {
 				t.Fatal("retry floor or custody lost", failed)
 			}
 			clock.now = time.Date(2026, 11, 6, 6, 38, 36, 0, time.UTC)
@@ -157,6 +157,10 @@ func TestMemoryRecoveryGuardUsesObservedVariance(t *testing.T) {
 	probe := *queued
 	probe.State = "queued"
 	wantRecovery := peak + (peak - 3.9251251220703125) + .125
+	ownRetry := q.memoryCandidate(job(t, q, run.ID), q.s.Machines[m.ID]).MemoryEnvelope
+	if math.Abs(ownRetry.HostGB-wantRecovery) > 1e-9 || !strings.HasPrefix(ownRetry.Source, acceptedMemoryEscalation) {
+		t.Fatal("accepted prior recovery expanded to host capacity", ownRetry)
+	}
 	if e := q.memoryCandidate(&probe, q.s.Machines[m.ID]).MemoryEnvelope; math.Abs(e.HostGB-wantRecovery) > 1e-9 {
 		t.Fatal("queued retry lost class evidence", e)
 	}

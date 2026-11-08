@@ -35,11 +35,14 @@ type HostHealthSample struct {
 }
 
 type HostMountHealth struct {
-	Adverse        bool    `json:"adverse,omitempty"`
-	Root           string  `json:"root"`
-	LatencySeconds float64 `json:"latency_seconds"`
-	PendingSeconds float64 `json:"pending_seconds"`
-	Reason         string  `json:"reason,omitempty"`
+	Adverse               bool    `json:"adverse,omitempty"`
+	Root                  string  `json:"root"`
+	LatencySeconds        float64 `json:"latency_seconds"`
+	PendingSeconds        float64 `json:"pending_seconds"`
+	OperationAgeSeconds   float64 `json:"operation_age_seconds,omitempty"`
+	SlowThresholdSeconds  float64 `json:"slow_threshold_seconds,omitempty"`
+	StallAllowanceSeconds float64 `json:"stall_allowance_seconds,omitempty"`
+	Reason                string  `json:"reason,omitempty"`
 }
 
 // Executable and Service are basenames/identities only; never argv or env.
@@ -278,6 +281,13 @@ func (m *hostHealthMonitor) record(ctx context.Context, at time.Time, r HostHeal
 		}
 		return 0
 	})
+	if observation.valid() {
+		// The sensor lane runs independently of check-ins. Freeze the measured
+		// report-path allowance into this new completion, never a cached one.
+		completed := *observation
+		completed.ValidSeconds += m.timing.delivery.upper()
+		observation = &completed
+	}
 	m.health.Probe = observation
 	m.health.observe(s)
 	if foreignDue && m.foreign != nil {
@@ -305,6 +315,22 @@ func (m *hostHealthMonitor) snapshot(disks []DiskVolume) *HostHealth {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.snapshotLocked(disks)
+}
+
+// report is called once at send time. Local admission snapshots must not train
+// report cadence or erase preparation time from the advertised sensor age.
+func (m *hostHealthMonitor) report(disks []DiskVolume) *HostHealth {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.timing.noteReport(m.clock.Now())
+	return m.snapshotLocked(disks)
+}
+
+func (m *hostHealthMonitor) snapshotLocked(disks []DiskVolume) *HostHealth {
 	m.disks = map[string]float64{}
 	for _, v := range disks {
 		if v.Error == "" && !v.Retained && (len(v.Roots) > 1 || !slices.Contains(v.Roots, "checkpoint")) {
@@ -354,7 +380,7 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 	}
 	m.done = make(chan struct{})
 	for role, path := range workerHealthMounts(w) {
-		m.mounts[role] = &hostMountProbe{root: role, path: path, probe: recoveryMountProbe(w, role, path), timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}
+		m.mounts[role] = &hostMountProbe{root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path), timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}
 	}
 	m.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go func() {

@@ -52,7 +52,7 @@ afterwards, and fix forward if full finds a problem. This workflow does not gran
 fleet/deployment authorization.
 
 Quick and full have no overall wall deadline. Each Go package runs under its
-own output-progress watchdog, keyed by package, exact selected test expression,
+own test-progress watchdog, keyed by package, exact selected test expression,
 OS/architecture, Go version and available/assigned CPU count. Timings live beside
 Go's execution-host build cache (`mycelium-gate-timings`), shared across checkouts
 on that host, and every invocation appends a sanitized record to
@@ -61,12 +61,14 @@ A new selection/toolchain/CPU configuration learns independently; a small quick
 selection cannot shorten a full-package deadline.
 
 A learned package stalls after **three times its expected package duration with
-no output**. Expected duration is the latest completed successful observation
+no test lifecycle progress**. Expected duration is the latest completed successful observation
 for that host/configuration/selection. Three intervals allow the normal expected
 completion plus two missed completions for transient contention; the cost is up
-to three expected durations to detect a silent hang. This is an operational
-tolerance, not a statistical confidence claim or a wall-time limit. Every output
-chunk resets only that package's silence clock. A run can exceed any previous
+to three expected durations to detect a test that stops advancing. This is an operational
+tolerance, not a statistical confidence claim or a wall-time limit. Go JSON lifecycle events (`start`, `run`, `pause`, `cont`, `pass`, `fail`,
+`skip`) reset only that package's progress clock. Diagnostic `output` events,
+including reconnect warnings, do not renew it; a stalled report names unfinished
+tests. Non-test commands retain output-based observation without learned deadlines. A run can exceed any previous
 wall duration while progressing, and sibling output cannot hide its hang.
 The watchdog starts at Go's JSON package-start event, after compilation: a warm
 cache measurement must not kill cold compilation. Build/vet/compatibility steps
@@ -78,7 +80,7 @@ package; one hour allows over twice that observed duration for first-run learnin
 This cold backstop can still reject an unprecedented, longer silent test; it is
 an explicit bootstrap tradeoff, not a learned throughput claim. Subsequent runs
 use `-timeout=0` and measured progress deadlines. All runs record elapsed time,
-longest output gap and status, including failed/stalled runs; only successful,
+longest progress gap, unfinished tests and status, including failed/stalled runs; only successful,
 uncensored observations train the cache. Regressions with fake time run via
 `python3 scripts/test-gate-progress.py`; custody regressions run via
 `python3 scripts/test-gate-budget.py`.
@@ -449,6 +451,11 @@ admission; gate resources, test coverage and result acceptance stay the same.
 review**, then inspect main's workflow records and latest *completed* `main-full`
 run, including its head SHA. For a docs-only change, a passing exact-head fleet
 quick gate is sufficient in place of full.
+The [2026-11-07 orchestrator default](DECISIONS.md#current-rulings) permits
+unrelated merges despite known, owned test failures or known six-hour main-run
+capacity cancellations when every other test passes without race or panic; the
+PR must name the known failure, its owning issue and the failing job ID.
+Any new or unexplained failure still blocks.
 
 ```sh
 gh api repos/1kuna/mycelium/commits/main --jq .sha
@@ -500,13 +507,40 @@ details remain in the private receipt. It does not retry an impossible allowance
 or weaken the learned memory envelope. Darwin proves the native CGO target; Linux
 proves its native builds and full race/dev suite.
 
-The deterministic `main-ci:SHA:OS` keys adopt the same jobs on a workflow rerun,
-including after an uncertain submit. A failed suite is not automatically rerun.
+The deterministic `main-ci:SHA:OS:RUN_ID:RUN_ATTEMPT` keys identify this
+workflow attempt's two jobs. Repeating a submission within that attempt adopts
+the same job, including after an uncertain submit. A workflow rerun uses fresh
+attempt keys: an older attempt's cleanup cannot cancel its replacement, and a
+cancelled key cannot poison a rerun. A failed suite is not automatically rerun.
 The CLI handles immutable source uploads, idempotent submission and reconnects;
-there is no custom watcher, cursor or status publisher. An interrupted workflow
-leaves submitted fleet jobs running; rerun it to adopt those jobs. No custom
-wall deadline kills healthy full suites. GitHub's own runner/job service limits
-still apply. Inspect failures privately with `myce logs JOB_ID`; public logs and
+there is no custom watcher, cursor or status publisher.
+
+SIGINT, SIGTERM, timeout and all normal/error exits cancel both intended keys
+using `myce cancel --project mycelium --key KEY`. This also fences a submission
+whose receipt was lost or which reaches the queue after cancellation. The
+submitter stops and reaps its active CLI child before cleanup. An `always()`
+workflow step repeats this idempotent cleanup if Actions interrupts the submitter
+before it finishes. Terminal suite results are preserved by the queue's existing
+cancellation semantics. Queued gates lose their capacity-accumulation claim;
+running gates follow normal stop/release custody. Cleanup never scans jobs by
+age or cancels PR gates, another project's jobs, another merge or another attempt.
+
+GitHub's six-hour job limit is an external owner deadline. A monotonic budget
+starts before checkout and interrupts normal submitter work after 350 minutes,
+leaving five minutes for its two cancellation requests (150 seconds each) and
+five minutes for Actions overhead. The workflow explicitly keeps the 360-minute
+job limit; its final cleanup step also has a five-minute bound. These reserves
+trade up to ten minutes of possible gate progress for cleanup before GitHub can
+kill the job. A timeout fails CI and cancels unfinished gates even if healthy;
+it is not a new general gate watchdog. Cleanup reports only fixed confirmation
+states; unconfirmed cancellation fails CI and requires private reconciliation
+with that attempt's exact keys. An unavailable queue or abruptly lost runner can
+prevent confirmation; repeat `scripts/actions-full.py --cleanup-only` with the
+original SHA, run ID and attempt environment after authority is restored.
+No coalescing or supersession of other runs is introduced. If coalescing is
+approved later, cancelling a replaced attempt uses this same ownership path.
+
+Inspect failures privately with `myce logs JOB_ID`; public logs and
 the summary contain only job IDs, fixed states and exit codes, never raw CLI
 receipts, remote reasons or host paths.
 
@@ -515,8 +549,8 @@ submitted suite reporting `failed`. Its platform row says `infrastructure failur
 and the workflow emits a `CI infrastructure failure` error annotation: that
 platform has no verified suite result. Submission may have been accepted despite
 a lost reply. Resolve the infrastructure problem privately, then
-rerun the same workflow/merge; the deterministic keys recover any jobs that were
-accepted before the outage. There is no automatic retry for a failed suite.
+repeat cleanup for the original attempt, then rerun the workflow/merge with
+fresh attempt keys. There is no automatic retry for a failed suite.
 
 ### Public repository and private authority
 
@@ -928,6 +962,13 @@ immediately previous-session cleanup rule is still required. Durable worker
 spools and queue restart retain the same key for buffered results. An exact
 non-pending native release-only acknowledgement advances its recorded stop to
 requeue or cancellation, without waiting for an omitted attempt in a heartbeat.
+
+A stale diagnostic log or publication reply is not a release acknowledgement.
+The attempt actor sends an exact release-only completion and retains its durable
+Job/Result until that request succeeds, even if replay or an earlier completion
+was stale. Failed release delivery retries through the same actor.
+An acknowledged Stop+Kill completion already proves release; its synthetic stale
+publication status does not trigger another completion.
 
 Compatibility and refusal:
 

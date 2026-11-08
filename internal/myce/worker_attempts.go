@@ -41,6 +41,8 @@ type attemptSupervisor struct {
 	preparing   context.CancelFunc // Stops preparation, never abandons a started process.
 
 	admissionBlocked bool
+	// Confirmed local cleanup; independent of result delivery.
+	admissionReleased atomic.Bool
 }
 
 // Observation retries preserve running status. Their exact cause must still
@@ -65,7 +67,15 @@ func (a *attemptSupervisor) admissionJob() Job {
 	if a.stopping.Load() {
 		j.State = "stopping"
 	}
+	j.ReleaseConfirmed = a.admissionReleased.Load()
 	return j
+}
+func (a *attemptSupervisor) releaseAdmission() {
+	if a.admissionMu != nil {
+		a.admissionMu.Lock()
+		defer a.admissionMu.Unlock()
+	}
+	a.admissionReleased.Store(true)
 }
 func (a *attemptSupervisor) stopAdmission() {
 	if a.admissionMu != nil {
@@ -91,13 +101,19 @@ func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Jo
 		// no process or sensor I/O, before applying the original sample age.
 		memory := (*CurrentHostMemory)(nil)
 		key := attemptKey{reports[i].ID, reports[i].Attempt, reports[i].Session}
-		if a := actors[key]; a != nil && reports[i].Started {
+		if a := actors[key]; a != nil {
 			a.mu.Lock()
 			latest := a.report
-			if latest.Started && latest.ID == key.job && latest.Attempt == key.attempt && latest.Session == key.session {
+			if latest.ID == key.job && latest.Attempt == key.attempt && latest.Session == key.session {
 				memory = latest.CurrentHostMemory
 			}
 			a.mu.Unlock()
+		}
+		// Freeze the independently advancing device sampler before the physical
+		// headroom read. Later aging must not fetch newer allocation counters.
+		memory = memory.aged(w.Clock.Now())
+		if memory != nil {
+			memory.deviceSample = nil
 		}
 		reports[i].CurrentHostMemory = memory
 	}
@@ -333,6 +349,8 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				a.liveness = startAttemptLiveness(ctx, w.Clock, w.Interval, p, s.dir)
 			}
 			a.mu.Unlock()
+		}
+		if p != nil && (report.Started || p.native != nil) {
 			var memory *memoryAttempt
 			switch {
 			case p.native != nil:
@@ -354,6 +372,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if p.docker == nil {
 				report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
+				if memory == nil && adaptiveMemoryCeilingGB(&a.job, &w.Machine) > 0 {
+					report.CurrentHostMemory = p.currentProcessHostMemory()
+				}
 			}
 		}
 		if s.state.Job != nil {
@@ -387,15 +408,23 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		a.mu.Lock()
 		a.report, a.diagnostics = report, diagnostics
 		a.released = p == nil && s.state.Result != nil && !s.state.Result.ReleasePending
+		releasedLocally := a.released
 		a.mu.Unlock()
+		if releasedLocally {
+			a.releaseAdmission()
+		}
 		if connected && !d.Hold {
 			var err error
+			releaseAcknowledged := false
 			if d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop) {
 				if s.state.Result != nil && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 					released := *s.state.Result
 					released.ReleaseOnly = !released.ReleasePending
 					err = w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
 					if err == nil {
+						releaseAcknowledged = true
+						// Skip obsolete publication without losing the successful
+						// release acknowledgement or sending another completion.
 						err = &HTTPError{Status: 409}
 					}
 				}
@@ -454,7 +483,20 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			if err == nil && s.state.Result != nil {
 				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 			}
-			if s.state.Result != nil && (err == nil || stale(err)) && !s.state.Result.ReleasePending {
+			releaseAcknowledged = releaseAcknowledged || err == nil
+			if !releaseAcknowledged && stale(err) && s.state.Result != nil && !s.state.Result.ReleasePending {
+				// A stale log/publication reply says nothing about release. The
+				// queue may have lost this copy while staging was still running.
+				// Retain its only sender until an exact release is acknowledged.
+				released := *s.state.Result
+				released.ReleaseOnly, released.OutputRefs = true, nil
+				releaseErr := w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
+				releaseAcknowledged = releaseErr == nil
+				if releaseErr != nil {
+					err = releaseErr
+				}
+			}
+			if s.state.Result != nil && releaseAcknowledged && !s.state.Result.ReleasePending {
 				// Release callbacks are best effort and may race result delivery.
 				// Never retire the durable owner until every cache pin is removed.
 				if e := s.releaseSharedInputPins(); e != nil {
@@ -677,7 +719,7 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 }
 
 func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
-	s := &workerStore{inputStaging: root.inputStaging, dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
+	s := &workerStore{liveEvidence: unstartedExecution(j.Attempt), liveEvidenceKey: jobKey(j), inputStaging: root.inputStaging, dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
 	// Docker identity denotes durable Docker custody, not mere assignment.
 	// Refusals before startDocker must not request container recovery (#166).
 	if j.Spec.Run.Docker {
@@ -737,6 +779,17 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		if sharedCard && unifiedCUDA(allocationMachine(&w.Machine, j.AllocatedDevices)) && !sharedDeviceSampleReady(w.hostMemorySamples[jobKey(j)], w.Clock.Now()) {
 			return errors.New(deviceUnifiedUncertain)
 		}
+		if sharedCard && fanOutDeviceSharing(&next) != fanOutDeviceSharing(&j) {
+			return errors.New("XPU fan-out sharing requires every tenant to opt in")
+		}
+		if sharedCard && (fanOutDeviceSharing(&next) || fanOutDeviceSharing(&j)) {
+			card := allocationMachine(&w.Machine, j.AllocatedDevices)
+			sample, telemetry := w.hostMemorySamples[jobKey(j)], cardTelemetry(card)
+			if card.GPU != "xpu" || card.UnifiedMemory || !deviceTelemetryReady(telemetry, w.Clock.Now()) || *telemetry.ActivePercent >= 100 ||
+				!fanOutDeviceSampleReady(sample, w.Clock.Now()) {
+				return errors.New("fan-out sharing requires fresh discrete XPU headroom evidence")
+			}
+		}
 		if !next.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }) && !(sharesDevice(&next) && sharesDevice(&j)) {
 			return refuseAdmission("local_device_reservation", "slots", 1, 0, false)
 		}
@@ -763,13 +816,15 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 			continue
 		}
 		usedGPU := deviceShareGB(&next)
+		fanOut, deviceGrowth := fanOutDeviceSharing(&next), deviceShareGB(&next)
 		for _, j := range jobs {
 			if !j.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, id) {
-				charge := deviceShareGB(&j)
-				if s := w.hostMemorySamples[jobKey(j)]; d.UnifiedMemory && d.Platform == "cuda" && sharedDeviceSampleReady(s, w.Clock.Now()) {
-					charge = max(charge, s.deviceGB+s.deviceGrowthGB)
-				}
+				card := d.machine(w.Machine)
+				charge := sampledDeviceCharge(&j, &card, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 				usedGPU += charge // A co-tenant sharing this card (#538).
+				fanOut = fanOut || fanOutDeviceSharing(&j)
+				s := w.hostMemorySamples[jobKey(j)]
+				deviceGrowth += max(0, deviceShareGB(&j)-s.deviceGB) + s.deviceGrowthGB + s.deviceRateGB*w.Clock.Now().Sub(s.deviceAt).Seconds()
 			}
 		}
 		for _, r := range models {
@@ -783,6 +838,9 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		}
 		if usedGPU > d.BudgetGB {
 			return refuseAdmission("device_budget", "GiB", usedGPU, d.BudgetGB, false)
+		}
+		if fanOut && usedGPU > deviceShareGB(&next) && (d.Telemetry == nil || d.Telemetry.FreeGB == nil || *d.Telemetry.FreeGB < deviceGrowth) {
+			return refuseAdmission("live_device_growth", "GiB", deviceGrowth, 0, true)
 		}
 	}
 	if why != "" || usedCores > cores {
@@ -855,15 +913,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	pressureProbe.lane.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go pressureProbe.run(ctx)
 	inventory := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: w.Clock, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}}
-	probeInventory := w.InventoryProbe
-	go inventory.run(ctx, func(probeCtx context.Context) ([]MachineDevice, error) {
-		devices, err := probeInventory(probeCtx)
-		for i := range devices {
-			d := &devices[i]
-			d.ExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, d.Platform, d.ID)
-		}
-		return devices, err
-	})
+	go inventory.run(ctx, w.inventorySource())
 	var cpuProbe checkpointIO[*memoryCeilings]
 	sharedCPUAllowance := 0
 	events := make(chan WorkerEvent, 16)
@@ -1171,6 +1221,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				return c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
 			m.Capabilities = append(m.Capabilities, w.nativeIsolationCapabilities()...)
+			if w.memoryCeilings != nil || w.processMemory != nil && w.processMemory.OwnedResident != nil {
+				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
+			}
 			if w.DockerEndpoint != "" {
 				// Refresh without allowing a slow daemon to block heartbeats.
 				if supported, err := dockerQualification.run("docker-envelope", func() (bool, error) { return probeWorker.dockerEnvelopeSupported(), nil }); err == nil {
@@ -1220,15 +1273,15 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			if m.IOPressure != nil {
 				m.IOPressure.AgeSeconds = max(0, w.Clock.Now().Sub(m.IOPressure.SampledAt).Seconds())
 			}
-			m.HostHealth = health.snapshot(m.DiskVolumes)
-			applyHostMountHealth(w, &m)
-			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			if m.CapabilityProfile != nil {
 				a := w.availability.snapshot()
 				m.CapabilityProfile.Availability = &a
 			}
 			// Snapshot at send time: preparation must not disappear from the
 			// sensor age, and report-gap learning includes the entire control path.
+			m.HostHealth = health.report(m.DiskVolumes)
+			applyHostMountHealth(w, &m)
+			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
 			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()

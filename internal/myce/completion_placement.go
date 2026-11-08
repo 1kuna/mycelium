@@ -2,22 +2,28 @@ package myce
 
 import (
 	"fmt"
-	"time"
 )
-
-const workCurveMaxAge = 30 * 24 * time.Hour
 
 // A forecast ranks already eligible placements. It grants no resources or slots.
 type completionEstimate struct {
-	group                    string
-	service, setup, transfer float64
-	samples                  int
-	count                    int
+	calibration                *ServiceEstimate
+	comparability, uncertainty string
+	group                      string
+	service, setup, transfer   float64
+	samples                    int
+	count                      int
 }
 
 func (e completionEstimate) seconds() float64 { return e.service + e.setup + e.transfer }
 func (e completionEstimate) reason() string {
-	return fmt.Sprintf("measured completion %.2fs (service %.2fs + setup %.2fs + transfer %.2fs; %d samples; concurrency %d)", e.seconds(), e.service, e.setup, e.transfer, e.samples, max(1, e.count))
+	reason := fmt.Sprintf("measured completion %.2fs (service %.2fs + setup %.2fs + transfer %.2fs; %d samples; concurrency %d)", e.seconds(), e.service, e.setup, e.transfer, e.samples, max(1, e.count))
+	if e.comparability != "" {
+		reason += "; " + e.comparability + "; " + e.uncertainty
+	}
+	if e.calibration != nil {
+		reason += "; " + e.calibration.text()
+	}
+	return reason
 }
 
 func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool) {
@@ -28,6 +34,9 @@ func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool
 		return completionEstimate{group: j.Batch.Parent, service: j.Batch.Seconds, count: j.Batch.Concurrency}, true
 	}
 	if j.Spec.Workload == nil || !j.Spec.extensionJob() {
+		if plainCommandWork(j.Spec) {
+			return q.estimateRepeatedCompletion(j, m)
+		}
 		return completionEstimate{}, false
 	}
 	// Queued retries still carry the preceding attempt number. No remaining
@@ -51,7 +60,7 @@ func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool
 			continue
 		}
 		point, ok := q.s.WorkObservations[identityHash(key)]
-		if !ok || point.Key != *key || point.Samples <= 0 || point.Forbidden || point.StaleReason != "" || q.clock.Now().Before(point.RecordedAt) || q.clock.Now().Sub(point.RecordedAt) > workCurveMaxAge {
+		if !ok || point.Key != *key || point.Samples <= 0 || point.Forbidden || point.StaleReason != "" || q.clock.Now().Before(point.RecordedAt) {
 			continue
 		}
 		rate := point.Rate
@@ -70,6 +79,7 @@ func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool
 			service: copy.Spec.Workload.Units / rate,
 			setup:   environmentSeconds(&copy, m), transfer: transfer + q.loadSeconds(copy.Spec.Needs.Model, m), samples: point.Samples,
 		}
+		e.service, e.calibration = q.calibratedService(key, e.service, copy.Spec.Workload.Units)
 		if validRate(e.seconds()) && validMemoryValue(e.setup) && validMemoryValue(e.transfer) {
 			return e, true
 		}

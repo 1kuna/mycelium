@@ -45,6 +45,7 @@ type state struct {
 	EfficiencyHosts        map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
 	EfficiencyHealth       map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
 	StrandedDemand         []StrandedDemand              `json:"stranded_demand,omitempty"`
+	PublicationHorizon     time.Duration                 `json:"publication_horizon,omitempty"`
 	ToolInventories        map[string]toolInventoryFence `json:"tool_inventories,omitempty"`
 	FileInputClaims        map[string]FileInputClaim     `json:"file_input_claims,omitempty"`
 	ModelIntervalSince     *time.Time                    `json:"model_interval_since,omitempty"`
@@ -118,11 +119,22 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	requestBudgets      requestBudgets
-	efficiencyView      *EfficiencyReport // immutable maintenance projection; published only after commit.
-	waitStates          *waitStateIndex   // scalar committed wait observations; separate reader mutex.
-	nasInspections      *resolveNASCache  // ephemeral evidence shared by every listener for this queue.
-	modelIntervalWrites []ModelIntervalEvent
+	requestBudgets       requestBudgets
+	evidencePending      map[string]bool
+	evidenceRows         []string
+	evidenceBytes        uint64
+	evidenceDeferred     map[string]bool
+	evidenceLearned      map[string]bool
+	evidenceLedgerCounts map[string]int
+
+	observationCacheBudget observationCacheBudget
+	evidenceGeneration     uint64
+	evidenceMaintenance    evidenceMaintenance
+	evidenceRetention      *EvidenceRetention
+	waitStates             *waitStateIndex // scalar committed wait observations; separate reader mutex.
+	modelIntervalWrites    []ModelIntervalEvent
+	efficiencyView         *EfficiencyReport // immutable maintenance projection; published only after commit.
+	nasInspections         *resolveNASCache  // ephemeral evidence shared by every listener for this queue.
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin *Queue
 	// Only detached observation views set this page selection.
@@ -210,6 +222,8 @@ type Queue struct {
 	usageWrites      []usageSample
 	usageMaintenance bool
 	s                state
+
+	observeMemoryHistory func(int, bool) // Test observer: jobs visited by a full evidence scan.
 
 	memoryPlanning          *memoryPlanningCache // Only while a read-only placement scan is active.
 	memoryObservationIndex  *memoryObservationCatalog
@@ -624,6 +638,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 	}
 	if err == nil {
 		q.fileReferenceRevision++
+		q.observationCacheBudget.mutation(q.clock.Now())
 	}
 	hold.next(holdNotify)
 	if err == nil && q.wake != nil {
@@ -991,7 +1006,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		}
 		return
 	}
-	if automaticExtensionCheck(j) != nil {
+	if automaticExtensionCheck(j) != nil && why != launchCapacityWaitReason {
 		now := q.clock.Now()
 		j.State, j.Reason, j.FinishedAt = "failed", "native check interrupted: "+why, &now
 		j.StopAt = nil
@@ -1009,7 +1024,9 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 			j.FinishedAt = &now
 			return
 		}
-		q.renewRecoveryStartWindow(j)
+		if why != launchCapacityWaitReason {
+			q.renewRecoveryStartWindow(j)
+		}
 		if chargeInfrastructure {
 			j.InfrastructureRetries++
 		}
@@ -1120,6 +1137,16 @@ func (q *Queue) maintain() {
 					if cancelled(j) {
 						q.finishCancellation(j)
 					} else {
+						if q.launchCapacityPending(j) {
+							// A validated refusal may still be verifying diagnostics
+							// outside the lock. Its stopped execution is known; quiet
+							// contact adds no infrastructure loss or release proof.
+							for i := range j.Copies {
+								j.Copies[i].Recoverable = false
+							}
+							q.retainRelease(j)
+							continue
+						}
 						for i := range j.Copies {
 							if j.Copies[i].Attempt == j.Attempt {
 								j.Copies[i].Recoverable = j.State == "running"
@@ -1225,7 +1252,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 		return err
 	}
 	q.publishEfficiencyDiagnostics(diagnostics)
-	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
+	return errors.Join(q.maintainEvidence(requestCtx), q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)
@@ -1255,7 +1282,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
 		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
@@ -1416,6 +1443,10 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 				if j.Machine == m.ID && j.Session == old.Session && (j.State == "running" || j.State == "stopping") {
 					if cancelled(j) {
 						q.finishCancellation(j)
+						continue
+					}
+					if q.launchCapacityPending(j) {
+						q.requeueLaunchCapacity(j)
 						continue
 					}
 					if j.State == "running" {
@@ -1703,6 +1734,16 @@ func (q *Queue) Complete(r Result) error {
 func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
+	// Retain validated admission evidence durably before unlocking for bulk
+	// diagnostic verification. Maintenance during that I/O must see the wait.
+	if launchCapacityRefusal(r) && !r.ReleaseOnly {
+		if err := q.updateRequest(ctx, func() error {
+			q.retainLaunchCapacityRefusal(r)
+			return nil
+		}, nil); err != nil {
+			return err
+		}
+	}
 	quotaFailure := attemptDiskLimitFailure(r)
 	unlockRequest := requestLock(ctx, &q.mu)
 	j, err := q.wallTimeVerificationJob(r)
@@ -1787,6 +1828,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 			}
 		}
 		if verify {
+			q.retainLaunchCapacityRefusal(r)
 			q.maintainStartDeadlines()
 			j, err := q.wallTimeVerificationJob(r)
 			m := q.s.Machines[r.Machine]
@@ -1815,7 +1857,18 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	return rejected
 }
+func (q *Queue) retainLaunchCapacityRefusal(r Result) {
+	// A refusal can race the generated startup cutoff. Validate identity before
+	// retaining it, then let caller deadlines/cancellation and custody run normally.
+	if launchCapacityRefusal(r) && !r.ReleaseOnly {
+		if j, err := q.current(r); err == nil {
+			q.recordLaunchCapacityWait(j, r)
+		}
+	}
+}
+
 func (q *Queue) complete(r Result, filesVerified bool) error {
+	q.retainLaunchCapacityRefusal(r)
 	q.maintainWallTimeLimits()
 	if r.MemoryPeak.constrained() && !r.MemoryPeak.Constrained {
 		peak := *r.MemoryPeak
@@ -1951,6 +2004,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	outcome := attemptOutcome(j, r)
 	q.recordAttemptStorage(j, r)
 	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
+	j.ExecutionEvidence = safeExecutionEvidence(r.ExecutionEvidence, j.Attempt)
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
 	// A kernel OOM is the payload's failure even if preemption raced it.
@@ -1982,7 +2036,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 			}
 		}
 	}
-	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) {
+	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) {
 		if cancelled(j) {
 			q.finishCancellation(j)
 		} else {
@@ -1993,6 +2047,8 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
 	} else if diskFailure {
 		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
+	} else if launchCapacityRefusal(r) {
+		q.waitLaunchCapacity(j, r)
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.storageRootReason(j, q.s.Machines[j.Machine]) != "" {
@@ -2111,7 +2167,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	for _, s := range q.s.ModelSlots {
 		copy := *s
@@ -2769,8 +2825,14 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		j.ModelEnvironmentKey = recipe.Key
 		j.ModelEnvironmentNeedsSource = recipe.Binary != "" || recipe.BinaryRelative != ""
 	}
+	if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !callerStartDeadline(j) && j.Spec.StartBy != nil {
+		deadline := q.clock.Now().Add(j.StartWindow)
+		j.Spec.StartBy = &deadline
+	}
+	j.StartCapacityWaiting = false
 	j.State = "running"
 	j.ExecutionCause, j.CleanupCause = nil, nil
+	j.ExecutionEvidence = nil
 	j.ReleaseConfirmed = false
 	j.RequeuedByOperator = false
 	j.StartedAt = nil

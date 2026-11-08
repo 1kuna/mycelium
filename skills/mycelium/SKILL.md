@@ -16,6 +16,8 @@ connection settings, submits a real CPU command and a fake-GPU command, waits
 and fetches verified output. No installed fleet or token setup is needed.
 The queue and workers stop automatically; `quickstart-result/result.txt` remains.
 Plain `myce dev` retains its existing persistent, foreground behavior.
+From the next release, command-scoped dev waits for both local workers to check
+in before starting your command, so a target-required profile can run first.
 
 From the next release, a worker fleet proof may report `slot_mismatch` with
 separate running and `installed_slot` hashes after a failed update. This does not
@@ -29,12 +31,44 @@ Follow returned page cursors and retain the same submission key after a refusal.
 Custom peers can negotiate `capacity-v1` through HTTP headers without changing
 legacy JSON. See [request budgets](https://github.com/1kuna/mycelium/blob/main/docs/request-budgets.md).
 
+From the next release (#891), extension reports distinguish “not yet checked
+on this device” from a changed hardware/driver fingerprint, changed extension
+fingerprint (digest), or unavailable fingerprint. Run the extension check for
+unchecked versions; a missing fingerprint is unknown identity, not evidence of
+a change. Qualification still requires a successful check.
+
 ## First run: adapter to verified result
 
 Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
+After upgrading both queue and worker, learned and exploratory native
+CPU `memory: auto` jobs can grow their charge from fresh measurements while the host has room. OS
+pressure, exhausted measured headroom, the configured host allowance and
+explicit limits still stop growth. Linux retains a physical/allowance kernel
+ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
+shared-page credit. Missing/stale telemetry protects the execution ceiling.
+`memory_envelope.enforcement` names the acknowledged behavior; older queues or
+workers retain the previous estimate-sized ceiling. From the next release, cold
+CPU probes also use the adaptive guard, so a small residual admission envelope
+is not their execution limit. Native CPU auto-memory OOMs and native accelerator-check host cgroup OOMs
+retain killed-peak floors and retry against usable physical headroom;
+exploratory under-sizing does not spend a fixed attempt budget.
+Growth/overshoot stays replaceable uncertainty, rather than a permanent floor.
+If the measured lower bound exceeds every eligible capacity, the job reports
+a capacity refusal. Inspect each attempt's envelope and learning reason. Declared numeric limits,
+explicit member caps and Docker behavior are unchanged.
+From the release containing #1011, typed `launch/resource_limit/memory_capacity`
+refusals wait on the same job and submission key without spending infrastructure
+retries or losses, including after a helper ran or Started was authorized. Keep
+that key: Mycelium uses ordinary lower-tier preemption and exact release before
+reuse; equal-tier production waits. Unchanged capacity evidence is not re-offered.
+Generated startup windows pause for capacity; explicit `start_by`, `start_window`,
+give-up deadlines and cancellation still apply. `execution_evidence` describes
+component boundaries separately from cleanup; a helper that ran is never proof
+that the whole attempt stayed unlaunched.
+
 From the next release, `host_capacity_accumulation` means new CPU work is waiting
 so ready CPU or accelerator work can acquire host RAM/cores as running CPU
 attempts finish. Mycelium chooses one fitting target; earlier fair turns,
@@ -77,18 +111,40 @@ YAML
 The tiny declared memory bounds this fixture; real work can omit memory to learn
 it. From the next release, cold auto-memory work reserves measured physical
 headroom on one host.
-Cold ceilings leave the host's measured check-in/launch drift unused; strict
-worker launch checks still refuse a larger unseen drop and teach the next probe.
+Native CPU probes and extension checks leave this job's measured launch-error
+reserve unused; unrelated inventory drops and other jobs' old refusals do not
+shrink their envelopes. Strict worker checks refuse unseen drops and teach
+the same job's next offer. Unknown accelerator checks wait for a physical
+opportunity rather than starting with a tiny leftover ledger reservation.
 A running CPU probe can share after fresh complete cgroup
 measurements establish its live footprint and growth over a sampling horizon,
 extended by the measured growth rate through the sample's age;
-its containment ceiling stays fixed. Missing/stale measurements retain the full
+supporting native guards use physical/allowance containment. Missing/stale measurements retain the full
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.
 Comparable peaks use observed variability and sampling growth; cross-target
 estimates need paired accepted runs and measured transfer error. Unknown pressure
 and incomplete counters remain conservative. From the next release, a submission blocked only by learned or exploratory memory sizing is accepted and waits with `diagnostic_code: memory_evidence_recovering`. Fresh comparable evidence or eligible capacity re-evaluates the same job; do not resubmit. Declared impossible needs still refuse. Constrained recovery uses the observed peak and overshoot headroom, bounded by eligible allowances without lowering measured need, explicit containment or the job's OOM retry floor. See [memory sizing](advanced.md#submit).
+From the next release, constrained recovery pairs each failed run's growth or
+overshoot margin with that run's peak. A different constrained run contributes
+its peak as a lower bound, without inheriting that margin. Replaceable uncertainty
+uses the candidate target's allowance and measured usable headroom, leaving launch
+slack and measured drift unused. Measured peaks, authored/member requirements,
+job-local OOM floors and release custody still bind. A newer accepted same-host
+completion can replace an older constrained class prior; it cannot erase a later
+constrained peak or a job-local OOM floor. Retained matching evidence does not
+expire merely with elapsed age. A smaller recovery attempt
+remains guarded and can fail on unseen growth; sampled Darwin RSS cannot contain
+a burst between observations. Keep the same queued job rather than resubmitting.
+
+From the next release (#954), Darwin process growth pairs each RSS increment
+with its own interval. Flat live samples report zero growth/rate; retained peak
+growth is historical sizing evidence. Positive slopes still extend through
+sample age. Measured physical RAM bounds forecast charges while retaining actual
+RSS and known floors; RSS grants no resident credit. A forecast is not measured
+allocation or proof of a historical refusal. See [process growth](../../docs/process-memory-growth.md).
+
 Plain native commands default to **unsandboxed** under MY-25; explicitly set
 `isolation: sandboxed` to opt in. New native extension registrations default to
 sandboxing; retained registrations keep their frozen policy.
@@ -127,6 +183,41 @@ myce spec check --resolve --entry ease-audit .mycelium/adapter.yaml
 key="ease-audit-$(date -u +%Y%m%dT%H%M%SZ)"
 myce run --entry ease-audit --key "$key"
 ```
+
+From the release containing #866, resolve and adapter portability reports warn
+about missing absolute non-system Mach-O dylib install names in directory-source
+runtime candidates, naming the packaged binary and library. This is submitter-local
+evidence; Git/snapshot source inspection stays unknown until worker staging.
+New profile submissions extract source and apply explicit inputs during worker
+staging, as adapters do, so Darwin prelaunch can inspect packaged helpers before
+launch. Existing saved receipts retain their original intent; use a new key for
+changed intent. Darwin prelaunch checks the staged payload again. `payload_library_missing` is a
+payload/environment failure with `execution_cause.linkage.binary` and `.library`,
+not an infrastructure loss/retry. Bundle and relink the dependency or choose a
+compatible environment, then resubmit changed intent. System/loader-relative
+imports and present libraries do not warn. This check does not prove dynamic
+loader resolution or application compatibility. See [packaged Darwin libraries](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#packaged-darwin-library-dependencies-next-release-866).
+
+From the release containing #1008, an all-disabled eligible-host production
+refusal has `diagnostic_code: host_unavailable` and cause
+`launch/host_unavailable/no_eligible_host_enabled` (operation/class/predicate),
+with unchanged reason text. Read optional `execution_evidence` on the Job and
+each `cancellation_scope.members[]` entry: `attempt`, `main`, `sidecars`, and
+`environment_preparation`. Each component is `not_started`, `may_have_run`, or
+`unknown`; absent/unrecognized evidence is unknown. Before assignment, attempt
+zero proves all three `not_started`. For assigned native work, main includes
+its extension wrapper; sidecars are collective; environment acquisition is
+conservatively `may_have_run` even on a cache hit. Sidecars/build hooks can run
+before main's Started acknowledgement. Memory refusals retain existing
+`launch/resource_limit/memory_capacity` with `prelaunch_refused` where applicable,
+or native-group `command/stage_failed/memory_capacity`; those fields, interruption,
+`starts` and absent `started_at` alone never prove no user code ran. A safe
+no-user-code retry needs all three `not_started` across every attempt and each
+materialized member, plus the independent release contract. Earlier independent
+preparation/qualification jobs are outside this evidence. Incomplete recovery
+and older workers remain unknown. Result/run clients return the same Job;
+artifact downloads still require accepted outputs. See
+[execution evidence](https://github.com/1kuna/mycelium/blob/main/docs/status.md#positive-execution-evidence-1008-next-release).
 
 Resolve uploads nothing; `needs-staging` for the source archive is expected:
 `run` stages it automatically. Fix actual input/environment/eligibility blockers
@@ -167,7 +258,7 @@ symlinks below the chosen output directory remain refused.
 
 Success means `result` verified output hashes and sizes **and** `cmp` exited 0:
 the exact result is 23 bytes including newline. A wake or command exit alone is
-insufficient. Download within retention (default seven days).
+insufficient. On a release containing #811, omitted retention protects results until explicit release; saved positive operator windows still apply.
 
 On releases with the mixed-version cache correction, workers without an optional
 shared-input cache-capacity report retain staging-time admission. Reporting workers
@@ -178,7 +269,7 @@ jobs. **Available from the next release:** status and inspection JSON include
 `freshness.captured_at`, `served_at`, `age_seconds` and `cached`; `now` remains
 capture time. Interpret worker freshness and diagnostics at that time, allowing
 for the response age. Inspection and filtered/full status take a fresh capture;
-default status can reuse a generation for up to one second, with immediate
+default status learns its cache lease from local capture/read/write costs, with immediate
 terminal/release invalidation.
 
 From the next release, mixed CPU/RAM waits name occupied cores on eligible
@@ -192,6 +283,27 @@ reports host PSI. Read the exact attempt/session, source, age and unavailable
 reason. Missing means unknown. macOS sampled CPU is a lower bound and I/O PSI
 is explicitly unavailable. These observations do not grant capacity or change
 admission. See [CPU and I/O fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
+
+From the next release, repeated native plain commands can learn seconds/job
+without `workload` units. Status work curves and attempt timing explain the exact
+command/source/input/environment comparison, clean sample count and observed
+range. A single sample leaves variability unknown; ranges are not deadlines.
+Changed source/input bytes, resumptions, overlapping work, pressure and missing
+CPU scheduling-pressure/I/O counters leave speed unknown. Quota throttling alone
+does not establish a clean CPU comparison. Legacy unversioned inputs and external
+work directories/runtimes do not establish a comparison. Describe frozen work
+normally: Mycelium uses learned speed after admission and least-valuable fit,
+and never waits for a busy faster machine. This does not qualify a platform or
+replace output-parity checks.
+
+From the next release (#879), comparable completion forecasts expose
+`timing.service_estimate`: raw service seconds, signed correction seconds,
+accepted pair count, uncertainty and a fallback reason. `predicted_seconds`
+includes that correction. CLI/HTML placement reasons explain it too. Pair count
+is distinct from raw timing sample count; observed error ranges are not confidence
+bounds or deadlines. Preparation/transfer remain separate and uncalibrated.
+Missing or incompatible pairs retain the raw estimate or its unknown state;
+forecasts grant no capacity, reserve no slot and do not move running work.
 
 If waiting or failed, read `myce status JOB_ID` and `myce logs JOB_ID`; keep
 repeated job observation on the per-job/wait interface. Record a hold with its next owner and continue
@@ -219,7 +331,9 @@ allocation completes. Unknown reconnect/restart gaps add no observed service.
 Tiers, eligibility and explicit
 caps/quotas still bind; running same-tier work is not stopped to repay debt.
 
-On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. During measured control pressure, expensive/lower-value nonproduction reads can return 429; honor `Retry-After` and prefer batched waits. Production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
+On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. HTTP 429 `client_rate_limited` means **fleet-wide control pressure**, not a per-client quota. Supporting queues also return `code_alias: observation_shed_control_pressure`. `Retry-After` is the running queue's measured delay rounded up to seconds, typically a few seconds: follow that signal rather than waiting minutes. Installed CLI GETs already retry with positive jitter (#819), bounded by caller cancellation or an explicit deadline, without a fixed retry count. From the release containing #960, stopping recovery prints the last interval. Prefer batched waits; production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
+
+From the release containing #959, interrupted `myce logs JOB` prints `myce logs JOB --after SEQ` on stderr. Resume with that cursor after the reported Retry-After to avoid replaying completed pages; add `--follow` to keep following. From the release containing #890, read-only `myce policy get` resolves installed worker, then queue authority without setting or printing `MYCE_TOKEN`.
 
 **Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; each CLI job gets an initial diagnostic read to retain its deadline. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
 
@@ -285,8 +399,13 @@ thread wake. Older releases omit configuration; do not infer a cause from false.
 Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium
 resumes after measured recovery; an operator drain remains independent. Running
-attempts retain custody. NAS/checkpoint degradation withholds dependent work;
-independent local work can remain eligible. Existing OS automounts are re-triggered
+attempts retain custody. From the next release, `mount_probe_slow` is advisory:
+successful or progressing slow metadata operations preserve admission, with
+measured evidence in `host_mount_degraded` alerts. Failed operations and
+`mount_probe_stalled` still withhold dependent work; the latter uses the unchanged
+measured per-operation no-progress allowance, not whole-sequence elapsed time.
+`host_mount_unavailable` wakes if an advisory becomes a stall/failure. Cold access
+still requires proof. Independent local work can remain eligible. Existing OS automounts are re-triggered
 with backoff. `mount_linux_operator_required` needs the storage operator to
 restore the configured mount; `mount_macos_approval_required` needs the owner to
 restore it and approve Keychain if requested. `host_mount_action_required` uses
@@ -311,10 +430,12 @@ still withholds dependent jobs under the unchanged measured thresholds.
 
 - **Long or multi-stage jobs:** [stage progress and honest ETA](advanced.md#stage-progress-and-honest-eta), including a credential-free reporting example. Checkpoints are separate recovery evidence.
 - **Benchmark host telemetry:** [bounded local capture and receipt schema](advanced.md#benchmark-telemetry-receipts) for queue/worker RSS, external RAM and per-card memory/activity; missing samples remain unknown.
-- **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
+- **Unified CUDA sharing (next release):** small declared or learned jobs can share with fresh, reconciled RSS/cgroup evidence even when CUDA reports `N/A`. Helper occupancy is sampled before main but does not mean main started; device counter sums do not prove unique physical residency or release device growth reservations. Uncertain or stale attribution keeps execution exclusive; [sharing and growth rules](advanced.md#submit) explain the estimate and planned stops.
+- **Discrete XPU fan-out sharing (next supporting release, default off):** explicitly set `fan_out.share_xpu: true`; every co-tenant must opt in and have fresh card/host/attempt headroom. Compare off/on at experiment class on the same release before owner-accepted production use. No allowance increase is implied. See [sharing and growth rules](advanced.md#submit).
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
-- **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits.
+- **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits. From the next release, `myce wait --observer-status` reports local observer progress; newer clients request cooperative upgrades. Legacy shared-observer recovery belongs to its operator.
 - **Large outputs, diagnostics, quotas or early release:** [results and custody](advanced.md#results). Release only your own terminal results after all downstream uses and verified copies are complete.
+- **Reservation confirmation (#979, next release):** `reserve add` fails on rejected or unconfirmed writes instead of printing an empty record. Keep an explicit `--id`, inspect `reserve list` after uncertain confirmation, and retry the same binding.
 - **Urgency, reservations or pausing:** [class and validation rules](advanced.md#urgency-and-pausing). Class is the only urgency lever; shared policy changes belong to the queue owner.
 - **Blocked preparation or placement:** [diagnosis](advanced.md#when-a-job-waits).
 - **Real adapters, native variants or legacy formats:** [adapter contract](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md), [project setup and profile compatibility](setup-project.md), [harness routing](harness-binding.md).
@@ -355,7 +476,11 @@ checks. See [queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/
 
 On negotiated `host-probe-v1` workers, owner/pressure status includes measured
 probe period, cost and frozen validity. Read age against that observation's
-validity; a successful check-in cannot renew a failed probe. Owner-latency holds
+validity; a successful check-in cannot renew a failed probe. From the host-health
+delivery correction (#1025), new health observations include the same learned
+report-gap allowance as shared pressure. Stopped or failed sensors still lose
+admission while worker contact continues. An unprecedented delay can exceed the
+learned prediction; read the frozen validity and age together. Owner-latency holds
 now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See

@@ -352,7 +352,30 @@ def downgrade(previous, candidate, scratch, tools):
         # installer validation, without running a system service manager.
         env = {k:v for k,v in os.environ.items() if not k.startswith("MYCE_")}
         env["HOME"] = str(install_root)
-        command([str(previous[1]), "install", "worker", "--config", config, "--dry-run"], env=env, timeout=30)
+        install_command = [str(previous[1]), "install", "worker", "--config", config, "--dry-run"]
+        config_path = Path(config)
+        saved_bytes = config_path.read_bytes()
+        saved = json.loads(saved_bytes)
+        if saved["file_retention"] == 0 or saved["log_retention"] == 0:
+            # s071 cannot represent retain-until-release. Refusing is required:
+            # defaulting an omitted zero would silently restore age-based loss.
+            try:
+                command(install_command, env=env, timeout=30)
+            except RuntimeError as error:
+                field = "file-retention" if saved["file_retention"] == 0 else "log-retention"
+                assert f"{field}: duration must be positive" in str(error), error
+            else:
+                raise AssertionError("s071 accepted unsupported retain-until-release policy")
+            assert config_path.read_bytes() == saved_bytes, "refused downgrade changed saved policy"
+            print("upgrade-compat: PASS s071 refuses retain-until-release without changing config", flush=True)
+            # Separately exercise the existing supported downgrade contract with
+            # explicit operator policies; these are fixture intent, not defaults.
+            saved["file_retention"] = 11 * 60 * 60 * 1_000_000_000
+            saved["log_retention"] = 13 * 60 * 60 * 1_000_000_000
+            config_path.write_text(json.dumps(saved))
+        command(install_command, env=env, timeout=30)
+        restored = json.loads(config_path.read_bytes())
+        assert all(restored[field] == saved[field] for field in ("file_retention", "log_retention")), "downgrade changed explicit retention"
         with process(previous[0], "worker", root / "worker", queue=url, config=config, tools=tools):
             await_file(root / "queue/receipts.json", queue, lambda value: len(json.loads(value)) >= 2)
             rows = json.loads((root / "queue/receipts.json").read_text())

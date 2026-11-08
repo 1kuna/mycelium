@@ -97,6 +97,9 @@
         "attempt": {
           "type": "integer"
         },
+        "cadence_seconds": {
+          "type": "number"
+        },
         "completed": {
           "type": "number"
         },
@@ -154,6 +157,9 @@
         },
         "periods": {
           "type": "integer"
+        },
+        "pressure": {
+          "$ref": "#/$defs/IOPressure"
         },
         "source": {
           "type": "string"
@@ -359,6 +365,9 @@
         },
         "execution_cause": {
           "$ref": "#/$defs/RuntimeCause"
+        },
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence"
         },
         "forced": {
           "type": "boolean"
@@ -659,6 +668,9 @@
         },
         "seconds": {
           "type": "number"
+        },
+        "share_xpu": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -744,6 +756,9 @@
     },
     "CancellationMember": {
       "properties": {
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence"
+        },
         "job_id": {
           "type": "string"
         },
@@ -1320,6 +1335,29 @@
       ],
       "type": "object"
     },
+    "ExecutionEvidence": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "environment_preparation": {
+          "type": "string"
+        },
+        "main": {
+          "type": "string"
+        },
+        "sidecars": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "main",
+        "sidecars",
+        "environment_preparation"
+      ],
+      "type": "object"
+    },
     "ExecutionMember": {
       "properties": {
         "command": {
@@ -1817,6 +1855,9 @@
             "array",
             "null"
           ]
+        },
+        "share_xpu": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -2075,11 +2116,10 @@
           "x-contract": "stable"
         },
         "attempt_history": {
-          "description": "Latest four ended attempts, persisted with the job. Existing classifier facts and queue decisions, not release proof or retry charges. Older planned requeues roll off; historical causes are not reconstructed.",
+          "description": "Ended-attempt diagnostic evidence. Open work is pinned; capacity-aware maintenance may compact redundant closed-attempt diagnoses. Immutable custody/learning ledgers remain separate. Historical causes are not reconstructed.",
           "items": {
             "$ref": "#/$defs/AttemptOutcome"
           },
-          "maxItems": 4,
           "type": [
             "array",
             "null"
@@ -2197,6 +2237,10 @@
           "$ref": "#/$defs/RuntimeCause",
           "x-contract": "diagnostic"
         },
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence",
+          "x-contract": "diagnostic"
+        },
         "extension": {
           "$ref": "#/$defs/ExtensionSelection",
           "x-contract": "diagnostic"
@@ -2280,6 +2324,16 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "launch_capacity_wait": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LaunchCapacityWait"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "ledger": {
           "$ref": "#/$defs/JobLedgerInfo",
           "description": "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies.",
@@ -2308,11 +2362,10 @@
           "x-contract": "diagnostic"
         },
         "memory_attempts": {
-          "description": "Persisted memory facts, independent of learning and the four-entry diagnostic history. Retains the first and latest 31 rows; memory_attempts_dropped counts evicted rows. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
+          "description": "Persisted memory facts, independent of learning and diagnostic history. Retention follows local capacity and evidence dependencies; open attempts and distinct measurements are preserved. memory_attempts_dropped counts historical evictions. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
           "items": {
             "$ref": "#/$defs/AttemptMemoryFacts"
           },
-          "maxItems": 32,
           "type": [
             "array",
             "null"
@@ -2320,7 +2373,7 @@
           "x-contract": "diagnostic"
         },
         "memory_attempts_dropped": {
-          "description": "Number of memory attempt rows evicted by the 32-row limit. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count.",
+          "description": "Number of historical memory attempt rows evicted by earlier releases. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count.",
           "minimum": 0,
           "type": "integer",
           "x-contract": "diagnostic"
@@ -2482,11 +2535,10 @@
           "x-contract": "diagnostic"
         },
         "resource_attempts": {
-          "description": "Per-attempt cumulative CPU and block I/O counters, with latest I/O PSI. Exact attempt/machine/session fenced. Retains first and latest 31 rows, matching memory facts; resource_attempts_dropped counts evictions. Missing counters are unknown. Process-tree CPU is a sampled lower bound. Observational only.",
+          "description": "Per-attempt cumulative CPU and block I/O counters with latest I/O PSI, retaining every distinct attempt. resource_attempts_dropped reports historical evictions. Exact attempt/machine/session fenced; missing counters unknown; process-tree CPU a sampled lower bound. Observational only.",
           "items": {
             "$ref": "#/$defs/AttemptResourceFacts"
           },
-          "maxItems": 32,
           "type": [
             "array",
             "null"
@@ -2563,6 +2615,10 @@
         },
         "start_by_explicit": {
           "description": "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute.",
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "start_capacity_waiting": {
           "type": "boolean",
           "x-contract": "diagnostic"
         },
@@ -2761,6 +2817,9 @@
     },
     "JobMemoryEnvelope": {
       "properties": {
+        "available_host_gb": {
+          "type": "number"
+        },
         "basis": {
           "type": "string"
         },
@@ -2777,6 +2836,9 @@
           "type": "integer"
         },
         "host_gb": {
+          "type": "number"
+        },
+        "launch_drift_gb": {
           "type": "number"
         },
         "learned": {
@@ -2930,6 +2992,32 @@
       ],
       "type": "object"
     },
+    "LaunchCapacityWait": {
+      "properties": {
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "session",
+        "attempt",
+        "evidence"
+      ],
+      "type": "object"
+    },
     "LearnedMemory": {
       "properties": {
         "device_gb": {
@@ -2978,6 +3066,21 @@
         "compared",
         "advancing",
         "idle_seconds"
+      ],
+      "type": "object"
+    },
+    "MachOLinkage": {
+      "properties": {
+        "binary": {
+          "type": "string"
+        },
+        "library": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "binary",
+        "library"
       ],
       "type": "object"
     },
@@ -3212,6 +3315,9 @@
         },
         "reference": {
           "$ref": "#/$defs/WorkReference"
+        },
+        "repeated_work": {
+          "type": "string"
         },
         "server_digest": {
           "type": "string"
@@ -4245,6 +4351,9 @@
         "host": {
           "type": "string"
         },
+        "linkage": {
+          "$ref": "#/$defs/MachOLinkage"
+        },
         "missing_tools": {
           "items": {
             "type": "string"
@@ -4369,6 +4478,36 @@
       },
       "required": [
         "reason"
+      ],
+      "type": "object"
+    },
+    "ServiceEstimate": {
+      "properties": {
+        "correction_seconds": {
+          "type": "number"
+        },
+        "estimator": {
+          "type": "string"
+        },
+        "raw_seconds": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "uncertainty": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "estimator",
+        "raw_seconds",
+        "correction_seconds",
+        "samples",
+        "uncertainty"
       ],
       "type": "object"
     },
@@ -5131,6 +5270,9 @@
         "actual_seconds": {
           "type": "number"
         },
+        "comparability": {
+          "type": "string"
+        },
         "execution": {
           "$ref": "#/$defs/Execution"
         },
@@ -5159,10 +5301,19 @@
         "reason": {
           "type": "string"
         },
+        "repeated_key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
         "samples": {
           "type": "integer"
         },
+        "service_estimate": {
+          "$ref": "#/$defs/ServiceEstimate"
+        },
         "session": {
+          "type": "string"
+        },
+        "uncertainty": {
           "type": "string"
         }
       },

@@ -171,8 +171,8 @@ func TestStorageEnvelopeColdPriorIdentityAndAge(t *testing.T) {
 		t.Fatal("evidence pinned a host", got)
 	}
 	clock.Advance(workCurveMaxAge + time.Nanosecond)
-	if got := q.storageEnvelope(q.s.Jobs[first.ID], &m); got.Samples != 0 || got.ScratchBytes != nil {
-		t.Fatal("expired evidence reused", got)
+	if got := q.storageEnvelope(q.s.Jobs[first.ID], &m); got.Samples != 1 || got.ScratchBytes == nil {
+		t.Fatal("age alone expired comparable evidence", got)
 	}
 }
 func TestStorageEnvelopeStatusAndUngatedWriter(t *testing.T) {

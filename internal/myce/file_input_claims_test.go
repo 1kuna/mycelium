@@ -242,6 +242,11 @@ func TestProjectFileStoreSettlementKeepsConcurrentClaimValid(t *testing.T) {
 	s.Project = "owner"
 	s.Files = FileManifest{"input": ref}
 	submit(t, q, s)
+	// A separate transfer starts after settlement while a sibling still holds
+	// the shared original receipt. Creating its claim must not revoke that HEAD.
+	if _, err := q.claimFileInput(context.Background(), Spec{Project: "another"}, ref); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.WithValue(owner, fileInputClaimKey{}, claim.ID)
 	if err = c.hasFile(ctx, ref, jobInputUploadPurpose); err != nil {
 		t.Fatal("sibling submission invalidated transfer", err)
@@ -250,8 +255,8 @@ func TestProjectFileStoreSettlementKeepsConcurrentClaimValid(t *testing.T) {
 		t.Fatal("settlement double charged", u)
 	}
 	clock.Advance(filePublicationGrace + time.Second)
-	if _, err = q.inputClaimContext(ctx, ref, false); err == nil {
-		t.Fatal("settled validation receipt never expired")
+	if _, err = q.inputClaimContext(ctx, ref, false); err != nil {
+		t.Fatal("elapsed time invalidated a concurrent transfer receipt", err)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -175,7 +176,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	if e != nil {
 		return e
 	}
-	output := &modelReadinessOutput{output: l.log, progress: progress}
+	output := &modelReadinessOutput{output: l.log, progress: progress, line: diagnosticLine{tail: diagnosticTail{dir: l.Dir}}}
 	if m.Logs == "none" {
 		// Preserve null OS descriptors. OS activity still supplies progress;
 		// stdout progress records require captured output.
@@ -214,7 +215,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		l.custody.Cgroup = l.memoryAttempt.path
 	}
 	l.exited = make(chan struct{})
-	go func() { l.waitErr = l.cmd.Wait(); close(l.exited) }()
+	go func() { l.waitErr = l.cmd.Wait(); output.close(); close(l.exited) }()
 	if e = l.memoryAttempt.attach(l.cmd.Process.Pid); e != nil {
 		_ = l.Unload()
 		return fmt.Errorf("memory ceiling attach: %w", e)
@@ -993,10 +994,40 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	}
 }
 
+// Capture actor samples before reading physical availability: crediting a newer
+// resident allocation against an older free-RAM read would spend it twice.
+// Actor publications are small in-memory snapshots, with no process/sensor I/O.
+func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySample {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	now := time.Time{}
+	if rt.clock != nil {
+		now = rt.clock.Now()
+	}
+	samples := maps.Clone(rt.batchHostMemorySamples)
+	if samples == nil {
+		samples = map[attemptKey]hostMemorySample{}
+	}
+	for key, actor := range rt.batchSupervisors {
+		actor.mu.Lock()
+		report := actor.report
+		actor.mu.Unlock()
+		if report.ID != key.job || report.Attempt != key.attempt || report.Session != key.session {
+			continue
+		}
+		report.CurrentHostMemory = report.CurrentHostMemory.aged(now)
+		delete(samples, key)
+		for key, sample := range currentHostMemorySamples([]AttemptReport{report}, now) {
+			samples[key] = sample
+		}
+	}
+	return samples
+}
+
 // All blocking sensors run before this exact-attempt accounting snapshot.
 // Call with rt.mu and rt.admissionMu held. Stop publication shares this ledger;
 // actor reads never acquire process/control locks or perform receipt I/O.
-func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool) error {
+func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool, samples map[attemptKey]hostMemorySample, launching ...attemptKey) error {
 	cores, ram, growth := 0, 0.0, 0.0
 	now := time.Time{}
 	if rt.clock != nil {
@@ -1008,9 +1039,18 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		if a := rt.batchSupervisors[jobKey(j)]; a != nil {
 			j = a.admissionJob()
 		}
+		if j.ReleaseConfirmed {
+			continue
+		}
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], now)
+		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now)
+		if slices.Contains(launching, jobKey(j)) && adaptiveMemoryCeilingGB(&j, owner) > 0 {
+			// This exact command has not executed yet. Its offered reservation
+			// must fit; a stale running neighbor still retains the physical cap.
+			charge = hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+			pending = charge
+		}
 		ram += charge
 		growth += pending
 	}
@@ -1038,6 +1078,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 // Queue authorization can outlast preparation or any sensor read. Revalidate
 // the exact local reservation after those reads and before releasing a batch.
 func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostLaunch) error {
+	samples := rt.admissionMemorySnapshot()
 	hostFree, measured := 0.0, rt.hostMemorySource != nil
 	if measured {
 		var err error
@@ -1052,10 +1093,10 @@ func (rt *modelRuntime) checkBatchLaunchMemory(ctx context.Context, launch HostL
 	defer rt.admissionMu.Unlock()
 	attempt, err := strconv.Atoi(launch.Attempt)
 	actor := rt.batchSupervisors[attemptKey{launch.Key, attempt, launch.Session}]
-	if err != nil || actor == nil || launch.Machine != rt.machine || actor.admissionJob().State == "stopping" {
+	if err != nil || actor == nil || launch.Machine != rt.machine || actor.admissionJob().State == "stopping" || actor.admissionJob().ReleaseConfirmed {
 		return fmt.Errorf("%w: batch admission custody changed", errWorkerMemory)
 	}
-	return rt.checkHostAdmissionLocked(hostFree, measured)
+	return rt.checkHostAdmissionLocked(hostFree, measured, samples, jobKey(actor.job))
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {
@@ -1077,6 +1118,7 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 	}
 
 	hostMeasured, hostFree := false, 0.0
+	samples := rt.admissionMemorySnapshot()
 	if loading.model.HostMemoryGB > 0 || unifiedCUDA(&machine) && loading.model.MemoryGB > 0 {
 		if rt.hostMemorySource == nil {
 			return errors.New("model load requires host RAM source")
@@ -1120,7 +1162,7 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 		}
 	}
 	rt.admissionMu.Lock()
-	hostErr := rt.checkHostAdmissionLocked(hostFree, hostMeasured)
+	hostErr := rt.checkHostAdmissionLocked(hostFree, hostMeasured, samples)
 	rt.admissionMu.Unlock()
 	rt.mu.Unlock()
 	if hostErr != nil {

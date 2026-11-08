@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Learn host/selection timings and stop silent commands, not progressing work."""
+"""Learn host/selection timings and stop commands without semantic progress."""
 import hashlib
 import importlib.util
 import json
@@ -116,6 +116,7 @@ def run(label, command, cache, report, clock=time.monotonic):
     # measurement must not become a deadline for a cold compiler/linker.
     progress = Progress(None, clock())
     pending = b''
+    active_tests = set()
     package_scratch = None
     child_env = None
     if is_test:
@@ -136,8 +137,11 @@ def run(label, command, cache, report, clock=time.monotonic):
                 remaining = progress.remaining(clock())
                 if remaining == 0:
                     status = 124
-                    print(f'gate stall {label}: no output for {STALL_INTERVALS * expected:.3f}s',
+                    kind = 'test progress' if is_test else 'output'
+                    print(f'gate stall {label}: no {kind} for {STALL_INTERVALS * expected:.3f}s',
                           file=sys.stderr, flush=True)
+                    for name in sorted(active_tests):
+                        print(f'gate stalled test: {name}', file=sys.stderr, flush=True)
                     # Stop this package below before releasing its execution
                     # slot; sibling progress must not postpone custody cleanup.
                     break
@@ -150,8 +154,7 @@ def run(label, command, cache, report, clock=time.monotonic):
                     if status < 0:
                         status = 128 - status
                     break
-                progress.output(clock())
-                if is_test and progress.expected is None and expected is not None:
+                if is_test:
                     pending += data
                     lines = pending.split(b'\n')
                     pending = lines.pop()
@@ -160,9 +163,25 @@ def run(label, command, cache, report, clock=time.monotonic):
                             event = json.loads(line)
                         except (ValueError, UnicodeDecodeError):
                             continue
-                        if event.get('Action') == 'start':
+                        if not isinstance(event, dict):
+                            continue
+                        action = event.get('Action')
+                        # Diagnostic output (including reconnect warnings) is
+                        # not evidence that a test advanced. Only test2json
+                        # lifecycle transitions renew the learned watchdog.
+                        if action not in ('start', 'run', 'pause', 'cont', 'pass', 'fail', 'skip'):
+                            continue
+                        if action == 'start':
                             progress.expected = expected
-                            break
+                        name = event.get('Test')
+                        if isinstance(name, str):
+                            if action == 'run':
+                                active_tests.add(name)
+                            elif action in ('pass', 'fail', 'skip'):
+                                active_tests.discard(name)
+                        progress.output(clock())
+                else:
+                    progress.output(clock())
                 sys.stdout.buffer.write(data)
                 sys.stdout.buffer.flush()
     except (KeyboardInterrupt, SystemExit) as error:
@@ -183,7 +202,9 @@ def run(label, command, cache, report, clock=time.monotonic):
         elapsed = clock() - progress.started
         record = dict(label=label, cpu=cpu_count(), elapsed_seconds=elapsed,
                       longest_gap_seconds=max(progress.longest_gap, clock() - progress.last),
-                      expected_seconds=expected, exit=status)
+                      expected_seconds=expected, exit=status,
+                      progress_kind='test lifecycle' if is_test else 'output',
+                      active_tests=sorted(active_tests))
         # Every run is evidence, including failures, but censored/failed runs
         # must not teach a shorter timeout or ratchet a hang into the baseline.
         with report.open('a') as output:
