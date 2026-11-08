@@ -916,6 +916,13 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	pressureProbe.lane.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go pressureProbe.run(ctx)
 	inventory := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: w.Clock, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}}
+	// Telemetry shares the injectable OS/driver source used by fingerprints.
+	telemetryProbe := extensionIdentityProbe()
+	telemetryWorker := Worker{Clock: w.Clock}
+	inventory.sampleTelemetry = func(ctx context.Context, devices []MachineDevice) ([]MachineDevice, error) {
+		telemetryWorker.sampleXPUTelemetry(ctx, telemetryProbe, devices)
+		return devices, nil
+	}
 	go inventory.run(ctx, w.inventorySource())
 	var cpuProbe checkpointIO[*memoryCeilings]
 	sharedCPUAllowance := 0
@@ -1259,8 +1266,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 
 			// Refresh memory together after inventory, then age through the reads.
 			w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
-			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
 			rt.mu.Lock()
+			w.hostMemorySamples = updateHostMemorySamples(reports, w.Clock.Now(), rt.batchHostMemorySamples)
 			// Replaced, never mutated: model loads share this exact-attempt
 			// snapshot and age it with their own launch-time clock read.
 			rt.batchHostMemorySamples = w.hostMemorySamples

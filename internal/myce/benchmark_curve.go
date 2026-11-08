@@ -262,14 +262,18 @@ func measureCurveReference(ctx context.Context, c BenchmarkConfig, e Extension, 
 	if runErr != nil {
 		return CurveMeasurement{}, runErr
 	}
+	limit, err := extensionByteLimit()
+	if err != nil {
+		return CurveMeasurement{}, err
+	}
 	for i := 0; i < count; i++ {
 		output, err := os.Open(filepath.Join(env["MYCE_CHECK_OUTPUT_DIR"], fmt.Sprint(i)))
 		if err != nil {
 			return CurveMeasurement{}, err
 		}
-		data, err = io.ReadAll(io.LimitReader(output, int64(extensionByteLimit())+1))
+		data, err = io.ReadAll(io.LimitReader(output, int64(limit)+1))
 		output.Close()
-		if err != nil || len(data) > extensionByteLimit() {
+		if err != nil || len(data) > limit {
 			return CurveMeasurement{}, errors.New("reference output unavailable")
 		}
 		if err = compareExtensionOutput(data, e.Files[baseline.Output], baseline); err != nil {

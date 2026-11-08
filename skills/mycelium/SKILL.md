@@ -27,7 +27,10 @@ and preserve the refusal and identities for that owner.
 
 From the next queue release, request bodies, wait batches and status history pages
 follow current queue capacity; 413 refusals name the cause and fitting size.
-Follow returned page cursors and retain the same submission key after a refusal.
+Default status is a partial history page: absence does not mean a job was lost
+or is incomplete. Use `myce status JOB_ID` or a batched wait for known jobs,
+`myce status --history` for all retained jobs, and follow `jobs_page.next_before`
+when paging the API. Retain the same submission key after a refusal.
 Custom peers can negotiate `capacity-v1` through HTTP headers without changing
 legacy JSON. See [request budgets](https://github.com/1kuna/mycelium/blob/main/docs/request-budgets.md).
 
@@ -48,7 +51,14 @@ CPU `memory: auto` jobs can grow their charge from fresh measurements while the 
 pressure, exhausted measured headroom, the configured host allowance and
 explicit limits still stop growth. Linux retains a physical/allowance kernel
 ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
-shared-page credit. Missing/stale telemetry protects the execution ceiling.
+shared-page credit. From the next release (#1048), bounded learned/exploratory
+estimates retain their reservation and measured growth when telemetry is stale,
+without resident credit; `host_memory_charge` preserves exact-attempt growth
+across missing/smaller reports, queue restart and unconfirmed release custody.
+Never-started learned allocations also keep the bounded reservation. Host sample
+validity follows delivery cadence of distinct negotiated observations; cached
+or unidentified repeated reports cannot renew resident credit. Cold probes still protect the execution ceiling
+without fresh complete evidence.
 `memory_envelope.enforcement` names the acknowledged behavior; older queues or
 workers retain the previous estimate-sized ceiling. From the next release, cold
 CPU probes also use the adaptive guard, so a small residual admission envelope
@@ -313,7 +323,11 @@ jobs. **Available from the next release:** status and inspection JSON include
 capture time. Interpret worker freshness and diagnostics at that time, allowing
 for the response age. Inspection and filtered/full status take a fresh capture;
 default status learns its cache lease from local capture/read/write costs, with immediate
-terminal/release invalidation.
+terminal/release invalidation. From the next release (#1052), status and job reads
+use immutable committed inputs, with bulk projection outside the live queue
+lock. Response fields, full-history opt-in, prefix lookup, key echo and exact
+release evidence retain their existing contracts. Use the batched wait for
+completion; a full-history read still transfers all requested retained detail.
 
 From the next release, mixed CPU/RAM waits name occupied cores on eligible
 hosts alongside the other hosts' RAM shortages. Reserved cores are admission
@@ -387,6 +401,12 @@ missing/stale telemetry, unified-CUDA device floors and release custody remain
 binding. An aggregate refusal alone cannot identify a sibling's contribution or
 establish safe concurrency. See [live headroom](../../docs/status.md#live-headroom-and-reservations).
 
+From the declared-CPU containment correction (#1064), an enforced native cgroup
+attempt's live forecast cannot inflate its charge beyond its declaration plus
+ceiling slack. Actual larger observations remain protected; missing/stale samples
+grant no resident credit. Auto estimates, sampled RSS and accelerator accounting
+keep their separate rules.
+
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
 negative behind), the measured history horizon, weighted oldest project-wait
@@ -412,6 +432,36 @@ preparation attempt retained` is pending work and spends no infrastructure retry
 Keep the job; cancellation still withdraws preparation. A completed failed dial
 returns `storage_unreachable`; permanent storage, authentication and integrity
 refusals still stop preparation. Execution waits for verified staging.
+
+From the release containing #1074, connection reset/refusal, handshake EOF and
+TLS internal errors during a listener restart remain transient: observation
+keeps its binding and retries with measured pacing and the server's current
+`Retry-After`. A `tls:` error prefix alone does not prove an identity mismatch.
+Explicit certificate/pin, TLS integrity and protocol refusals still stop with
+`observation_error: tls_identity`; report those to the installation/authority
+owner and preserve the receipt and notifier. Do not change trust or resubmit
+under a new key. Older clients can misclassify a cutover as `tls_identity`;
+only after the authority owner verifies unchanged trust and identity, replay
+the original saved command/key with its notifier and current installed
+authority, serialized. Updating a candidate binary does not update the installed
+CLI or the image of an existing shared observer; check its reported commit.
+
+From the release containing #1072, Go and Python GET/HEAD, download and
+replay-safe retries follow the current positive `Retry-After` plus jitter;
+previous errors and unchanged reads cannot stretch that pause. Without a server
+signal, retry spacing follows measured request service cost plus jitter. Caller
+deadlines stop recovery without retrying before the server permits it. Python
+`timeout` bounds API recovery and `transfer_timeout` bounds each file request;
+Go uses the caller context or explicitly configured HTTP timeout.
+
+## Submission advice under control pressure (next release, #1065)
+
+Submission waiting/deadline advice uses the accepted commit's immutable planner
+snapshot outside the live queue mutex. If measured memory headroom cannot fit
+its diagnostics, the response still confirms acceptance with the same job ID,
+policy and deadline-guidance fields; blocker detail explicitly says it is
+unavailable. Keep that ID and submission key and inspect the accepted job after
+headroom recovers. Do not resubmit accepted work to obtain advice.
 
 ## Adaptive model readiness (next release)
 
@@ -562,3 +612,22 @@ now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
 [host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).
+From the next release, hardware discovery backs off independently of changing
+device usage. Discrete XPU memory/activity uses a separate shared host sample;
+missing, ambiguous or stale counters remain unknown and withhold
+telemetry-dependent sharing. A heartbeat never refreshes a cached sample's age.
+
+## Reconciled launch handshakes (next release, #1028)
+
+A slow start, launch or native-custody reply retains the same gated attempt and
+custody without spending a loss or retry. Keep the job ID and submission key.
+Workers reconcile ambiguous replies with the same identity, using completed
+control-request RTTs and jitter for retry pacing. A durable Started replay
+preserves the original start and wall-time budget. Typed refusals, cancellation
+and explicit job deadlines still apply; local cleanup must prove exact release
+before replacement. A silent control connection can remain pending until its
+owner cancels or transport returns; time alone cannot authorize execution or
+prove release. This requires the matching queue and worker release.
+Connection-establishment failure returns `control_unreachable` instead of
+retrying indefinitely. It does not revoke an earlier durable start or prove
+release: exact process cleanup and queue reconciliation still gate replacement.

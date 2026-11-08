@@ -504,7 +504,7 @@ type modelRuntime struct {
 	batchHostMemorySamples map[attemptKey]hostMemorySample
 	verifyDevice           func() error
 	deviceEnv              map[string]string
-	authorize              func(HostLaunch) error
+	authorize              func(context.Context, HostLaunch) error
 	copyResults            map[string]CopyReport
 	localApprovals         map[string]string
 	localApprovalStates    map[string]ModelApprovalState
@@ -792,15 +792,16 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if rt.availability != nil {
 			parent = rt.availability.workContext()
 		}
+		ctx, cancel := context.WithCancel(parent)
 		if authorize := rt.authorize; authorize != nil {
 			// Capture the exact plan under rt.mu; heartbeats update rt.session.
 			launch := HostLaunch{Machine: rt.machine, Session: s.Session, Kind: "engine", Key: s.Model, Device: s.Device, Attempt: s.Attempt}
 			rootWorker := rt.worker
-			parent = withLaunchGate(parent, func() error {
+			ctx = withLaunchGate(ctx, func(ctx context.Context) error {
 				if rootWorker != nil {
 					probe := *rootWorker
 					probe.Machine = probe.storageMachine()
-					probe.Machine.UnavailableRoots = probe.sampleStorageRoots(parent, probe.CheckpointRoot)
+					probe.Machine.UnavailableRoots = probe.sampleStorageRoots(ctx, probe.CheckpointRoot)
 					dependency := &Job{Spec: Spec{Priority: "production", Needs: ResourceNeeds{Model: model.Name}}}
 					if reason := storageRootReasonForModel(dependency, &probe.Machine, model, s.EnvironmentRecipe); reason != "" {
 						return errors.New(reason)
@@ -811,10 +812,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 						return err
 					}
 				}
-				return authorize(launch)
+				return authorize(ctx, launch)
 			})
 		}
-		ctx, cancel := context.WithCancel(parent)
 		m := &workerModel{device: s.Device, bound: bound, model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
 		rt.models[engineKey(s.Model, s.Device)] = m
 		rt.wg.Add(1)
@@ -849,11 +849,12 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 			owned.memoryMachine = bound.Machine
 		}
 		parent := ctx
-		ctx = withLaunchGate(parent, func() error {
+		priorGate := launchGateFrom(parent)
+		ctx = withLaunchGate(parent, func(ctx context.Context) error {
 			if err := bound.verifyDevice(); err != nil {
 				return err
 			}
-			return checkLaunchGate(parent)
+			return priorGate(ctx)
 		})
 	}
 	if owned, ok := m.engine.(*LlamaEngine); ok {
@@ -898,11 +899,12 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	// Authorization and preparation may block while a batch receives a stop.
 	// Recheck current admission after authorization at every engine launch gate.
 	parent := ctx
-	ctx = withLaunchGate(parent, func() error {
-		if err := checkLaunchGate(parent); err != nil {
+	priorGate := launchGateFrom(parent)
+	ctx = withLaunchGate(parent, func(ctx context.Context) error {
+		if err := priorGate(ctx); err != nil {
 			return err
 		}
-		return rt.checkLoadMemory(parent, m)
+		return rt.checkLoadMemory(ctx, m)
 	})
 	deviceEnv := rt.deviceEnv
 	platform, device = rt.platform, rt.device
@@ -1016,11 +1018,11 @@ func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySampl
 			continue
 		}
 		report.CurrentHostMemory = report.CurrentHostMemory.aged(now)
-		delete(samples, key)
-		for key, sample := range currentHostMemorySamples([]AttemptReport{report}, now) {
+		for key, sample := range updateHostMemorySamples([]AttemptReport{report}, now, samples) {
 			samples[key] = sample
 		}
 	}
+	rt.batchHostMemorySamples = maps.Clone(samples)
 	return samples
 }
 
@@ -1047,9 +1049,10 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
 		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now)
-		if slices.Contains(launching, jobKey(j)) && adaptiveMemoryCeilingGB(&j, owner) > 0 {
-			// This exact command has not executed yet. Its offered reservation
-			// must fit; a stale running neighbor still retains the physical cap.
+		if slices.Contains(launching, jobKey(j)) && adaptiveMemoryCeilingGB(&j, owner) > 0 && j.MemoryEnvelope.ProbeFloorGB > 0 {
+			// This cold command has not executed yet. Its offered reservation
+			// must fit. Bounded estimates already use the offer plus retained
+			// growth; launch must not discard their observed helper occupancy.
 			charge = hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 			pending = charge
 		}

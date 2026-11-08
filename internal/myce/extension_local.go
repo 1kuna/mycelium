@@ -157,6 +157,10 @@ func ExtensionFingerprint(ctx context.Context, platform, device string) (string,
 }
 
 func extensionFingerprintFrom(ctx context.Context, platform, device string, identity func() MachineProbe) (string, error) {
+	return extensionFingerprintWithInventory(ctx, platform, device, identity, nil)
+}
+
+func extensionFingerprintWithInventory(ctx context.Context, platform, device string, identity func() MachineProbe, inventory func(context.Context) ([]MachineDevice, error)) (string, error) {
 	if platform == "cpu" {
 		device = ""
 	}
@@ -195,7 +199,10 @@ func extensionFingerprintFrom(ctx context.Context, platform, device string, iden
 		// Runtime ordinals select a component; they are not its identity. Reuse
 		// the shared PCI/Level Zero probe instead of hashing incidental OpenCL
 		// enumeration (which can differ between a shell and the worker).
-		devices, err := probe.Accelerators(ctx)
+		if inventory == nil {
+			inventory = probe.Accelerators
+		}
+		devices, err := inventory(ctx)
 		var selected *MachineDevice
 		for i := range devices {
 			d := &devices[i]
@@ -530,8 +537,13 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 			if e2 != nil {
 				r.Reason = "check command failed"
 			} else {
-				output, e3 := readCapacityFile(env["MYCE_CHECK_OUTPUT"], int64(extensionByteLimit()))
-				if e3 != nil || len(output) > extensionByteLimit() {
+				limit, e3 := extensionByteLimit()
+				if e3 != nil {
+					_ = os.RemoveAll(tmp)
+					return reports, e3
+				}
+				output, e3 := readCapacityFile(env["MYCE_CHECK_OUTPUT"], int64(limit))
+				if e3 != nil || len(output) > limit {
 					r.Reason = "check output missing or too large"
 				} else if e3 = compareExtensionOutput(output, e.Files[b.Output], b); e3 != nil {
 					r.Reason = e3.Error()
@@ -673,8 +685,8 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 		if j.ExecutionEvidence != nil {
 			j.ExecutionEvidence.EnvironmentPreparation = executionMayHaveRun
 		}
-		root, release, err := w.environmentCache.Acquire(withLaunchGate(context.Background(), func() error {
-			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: w.Machine.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
+		root, release, err := w.environmentCache.Acquire(withLaunchGate(w.launchContext(), func(ctx context.Context) error {
+			return w.authorizeLaunchContext(ctx, HostLaunch{Machine: w.Machine.ID, Session: w.Machine.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), EnvironmentRecipe{Key: key, readyOnly: true})
 		if err != nil {
 			unlock()

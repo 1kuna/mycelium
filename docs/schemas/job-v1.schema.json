@@ -196,6 +196,32 @@
       ],
       "type": "object"
     },
+    "AttemptHostMemoryCharge": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "gib": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "session",
+        "gib"
+      ],
+      "type": "object"
+    },
     "AttemptIO": {
       "properties": {
         "pressure": {
@@ -2293,6 +2319,10 @@
         },
         "health_recovery": {
           "$ref": "#/$defs/AlertRecovery",
+          "x-contract": "diagnostic"
+        },
+        "host_memory_charge": {
+          "$ref": "#/$defs/AttemptHostMemoryCharge",
           "x-contract": "diagnostic"
         },
         "id": {

@@ -234,12 +234,19 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	// Serialize just the memory copy. Parallel read-locked captures can all
 	// consume CPU while a waiting heartbeat writer must wait for every one.
 	// Projection/encoding below remain concurrent outside the queue lock.
-	unlockRequest, lockErr := requestObservationLock(requestContext(contexts), &q.mu)
+	unlockRequest := func() {}
+	var lockErr error
+	if !q.detachedRead {
+		unlockRequest, lockErr = requestObservationLock(requestContext(contexts), &q.mu)
+	}
 	if lockErr != nil {
 		return nil, fileStoreObservation{}, lockErr
 	}
 	locked := readWallStart(q.observeRead)
-	hold := q.statusHolds.start()
+	var hold time.Time
+	if !q.detachedRead {
+		hold = q.statusHolds.start()
+	}
 	var files fileStoreObservation
 	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
 		evidenceRetention: q.evidenceRetention, simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
@@ -431,7 +438,9 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		v.efficiencyView = copyObservationValue(reflect.ValueOf(v.efficiencyView)).Interface().(*EfficiencyReport)
 	}
 	observeRead(q.observeRead, id, started, locked)
-	logQueueHold(duration, "captureObservation", nil)
+	if !q.detachedRead {
+		logQueueHold(duration, "captureObservation", nil)
+	}
 	if err == nil {
 		err = requestContext(contexts).Err()
 	}
@@ -513,6 +522,11 @@ func (q *Queue) findObservationJob(id string) (*Job, error) {
 }
 
 func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error) {
+	resolved, err := q.resolveReadJobID(requestContext(contexts), id)
+	if err != nil {
+		return nil, err
+	}
+	id = resolved
 	for {
 		if err := requestContext(contexts).Err(); err != nil {
 			return nil, err
@@ -594,7 +608,7 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 }
 
 func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*Job, error) {
-	v, _, err := q.captureObservation(id, contexts...)
+	v, _, err := q.captureReadObservation(id, nil, contexts...)
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +621,11 @@ func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*
 		// The detached generation's observations are immutable. Reuse one
 		// index across waiting, eligibility and deadline diagnostics rather
 		// than copying every curve again for each target comparison.
+		v.memoryPlanning = newMemoryPlanningCache()
 		v.memoryObservationIndex = v.memoryObservationCatalog()
+		v.observationScan = v.placementScan()
+		v.observationScan.observationOwner = v
+		v.observationScan.memory = v.memoryPlanning
 		// A receipt explains this job; full fleet ordering belongs to status.
 		reasons = map[string]string{j.ID: v.waitReason(j)}
 	}
@@ -648,10 +666,9 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	}
 	defer finishBudget()
 	contexts = []context.Context{ctx}
-	started := q.clock.Now()
 	if options != nil {
 		owned := *options
-		limit, err := q.requestBudgets.pageLimit(requestContext(contexts), reflect.TypeFor[Job]())
+		limit, err := q.requestBudgets.pageLimit(requestContext(contexts), reflect.TypeFor[Job](), owned.limit)
 		if err != nil {
 			return Snapshot{}, err
 		}
@@ -662,7 +679,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 		}
 		options = &owned
 	}
-	v, files, err := q.captureStatusObservation("", options, contexts...)
+	v, files, err := q.captureReadObservation("", options, contexts...)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -675,7 +692,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	v.observationScan = v.placementScan()
 	v.observationScan.observationOwner = v
 	v.observationScan.memory = v.memoryPlanning
-	out := v.projectSnapshot(true)
+	out := v.projectSnapshot(true, &q.requestBudgets)
 	out.RequestLatencies = q.requestLatencies.snapshot()
 	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
 	if err == nil {
@@ -683,12 +700,6 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 		err = ctx.Err()
 	}
 	out.Freshness = q.snapshotFreshness(out.Now, false)
-	if err == nil {
-		data, encodeErr := json.Marshal(out)
-		if encodeErr == nil {
-			q.requestBudgets.recordProjection(len(out.Jobs), len(data), q.clock.Now().Sub(started))
-		}
-	}
 	return out, err
 }
 

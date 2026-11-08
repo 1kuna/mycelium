@@ -15,14 +15,16 @@ func TestXPUTelemetryIdentityAndUnknown(t *testing.T) {
 	for _, output := range []string{"0000:01:00.0, 2048\n", "0000:02:00.0, 2048\n", "0000:01:00.0, N/A\n"} {
 		d := MachineDevice{Platform: "xpu", pciAddress: "0000:01:00.0", FreeMemoryGB: 8, ReserveMemoryGB: 1}
 		p := MachineProbe{OS: "linux", Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
-			if n != "xpu-smi" || strings.Join(args, " ") != "--id=0000:01:00.0 --query-gpu=pci.bus_id,memory.free --format=csv,noheader,nounits" {
+			if n != "xpu-smi" || strings.Join(args, " ") != "--query-gpu=pci.bus_id,memory.free --format=csv,noheader,nounits" {
 				t.Fatal("unexpected native query", n, args)
 			}
 			return []byte(output), nil
 		}, XeActivity: func(context.Context, string) (float64, error) { return 25, nil }}
-		(Worker{Clock: clock}).sampleXPUTelemetry(context.Background(), p, &d)
+		devices := []MachineDevice{d}
+		(Worker{Clock: clock}).sampleXPUTelemetry(context.Background(), p, devices)
+		d = devices[0]
 		if output == "0000:01:00.0, 2048\n" {
-			if !deviceTelemetryReady(d.Telemetry, clock.Now()) || *d.Telemetry.FreeGB != 1 || d.FreeMemoryGB != 1 || *d.Telemetry.ActivePercent != 25 {
+			if !deviceTelemetryReady(d.Telemetry, clock.Now()) || *d.Telemetry.FreeGB != 1 || *d.Telemetry.ActivePercent != 25 {
 				t.Fatal("valid native counters not retained within allowance", d)
 			}
 		} else if d.Telemetry.FreeGB != nil || deviceTelemetryReady(d.Telemetry, clock.Now()) {

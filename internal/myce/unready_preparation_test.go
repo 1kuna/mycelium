@@ -102,7 +102,7 @@ func TestRepeatedCPUPreparationWithOldReadyReceipt(t *testing.T) {
 		t.Fatal("missing replacement preparation", reply)
 	}
 	next := reply.EnvironmentPlan[0].Launch.Attempt
-	rt := &environmentRuntime{dir: t.TempDir(), cache: &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}, reports: map[string]EnvironmentReport{r.Key: old}, authorize: q.AuthorizeLaunch}
+	rt := &environmentRuntime{dir: t.TempDir(), cache: &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}, reports: map[string]EnvironmentReport{r.Key: old}, authorize: q.authorizeLaunchContext}
 	defer rt.stop()
 	rt.sync(reply.EnvironmentPlan, false)
 	rt.mu.Lock()

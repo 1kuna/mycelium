@@ -37,12 +37,12 @@ func TestProductionStartGateSingleDurableWinner(t *testing.T) {
 					wins++
 				}
 			}
-			want := 1
+			want := 2
 			if boundary {
 				want = 0
 			}
 			if wins != want {
-				t.Fatalf("accepted %d starts, want %d", wins, want)
+				t.Fatalf("acknowledged %d replays, want %d", wins, want)
 			}
 			path := strings.TrimSuffix(q.lock.Name(), ".lock")
 			if e := q.Close(); e != nil {
@@ -62,8 +62,20 @@ func TestProductionStartGateSingleDurableWinner(t *testing.T) {
 				if got.StartedAt == nil || got.State != "running" {
 					t.Fatalf("lost durable start: %+v", got)
 				}
-				if e := reopened.Started(result(a, true)); e == nil {
-					t.Fatal("restarted queue accepted duplicate start")
+				// Reconnect restores the exact custody before replaying its lost reply.
+				check(t, reopened, machine("b70", "xpu"), a)
+				if e := reopened.Started(result(a, true)); e != nil {
+					t.Fatal("restarted queue refused exact replay", e)
+				}
+				replayed := job(t, reopened, a.ID)
+				starts := 0
+				for _, e := range replayed.LedgerEntries {
+					if e.Kind == "started" {
+						starts++
+					}
+				}
+				if starts != 1 || !replayed.StartedAt.Equal(*got.StartedAt) || len(reopened.s.ProductionStarts) != 1 {
+					t.Fatal("replay duplicated durable start", replayed)
 				}
 			}
 		})
@@ -139,10 +151,12 @@ func TestProductionStartGateUnreachableDoesNotExecute(t *testing.T) {
 	}
 	defer store.close()
 	store.state.Session = a.Session
+	retries := 0
+	w.Client.Pause = func(context.Context, time.Duration) error { retries++; return errors.New("unexpected outage retry") }
 	p, e := startAfterFixtureInputs(t, w, store, *a)
 	// The durable custody gate precedes supervisor creation and Started.
-	if p != nil || !errors.Is(e, errWorkerStartAuthorization) {
-		t.Fatalf("unreachable queue did not refuse before execution: process=%v err=%v", p, e)
+	if p != nil || !errors.Is(e, errWorkerStartAuthorization) || !errors.Is(e, errWorkerControlUnreachable) || retries != 0 {
+		t.Fatalf("unreachable queue did not refuse execution immediately: process=%v err=%v", p, e)
 	}
 
 	if _, e = os.Stat(filepath.Join(w.StateDir, "job-files", a.ID, "1", "ran")); !os.IsNotExist(e) {
