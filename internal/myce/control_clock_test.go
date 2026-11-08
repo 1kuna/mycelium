@@ -762,3 +762,77 @@ func TestControlClockNetworkRecoveryExcludesQueueStall(t *testing.T) {
 		})
 	}
 }
+
+func TestControlClockDetachedSourcesPreserveContact(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("worker", "fake")
+	check(t, q, m, nil)
+	capture := func() []*Queue {
+		t.Helper()
+		read, _, err := q.captureReadObservation("", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q.mu.Lock()
+		advice := q.captureSubmissionAdvice()
+		q.mu.Unlock()
+		view, err := advice.planner(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return []*Queue{read, view}
+	}
+	if q.readGeneration == nil || !q.workerFresh(q.s.Machines[m.ID], clock.Now()) {
+		t.Fatal("healthy committed worker required")
+	}
+	before := capture()
+	for _, view := range before {
+		if !view.workerFresh(view.s.Machines[m.ID], view.clock.Now()) {
+			t.Fatal("detached source discarded healthy contact")
+		}
+	}
+	q.mu.Lock()
+	clock.Advance(q.workerArrivalAllowance(q.s.Machines[m.ID]))
+	q.mu.Unlock()
+	if !q.workerSuspect(q.s.Machines[m.ID], clock.Now()) {
+		t.Fatal("wall suspicion required")
+	}
+	for _, view := range capture() {
+		if !view.workerSuspect(view.s.Machines[m.ID], view.clock.Now()) {
+			t.Fatal("detached source renewed old contact")
+		}
+	}
+	for _, view := range before {
+		if !view.workerFresh(view.s.Machines[m.ID], view.clock.Now()) {
+			t.Fatal("later wall time changed frozen contact")
+		}
+	}
+}
+
+func TestControlClockDetachedSourcesPreserveRestartGrace(t *testing.T) {
+	q, clock := fixture(t)
+	check(t, q, machine("worker", "fake"), nil)
+	q = reopenQueue(t, q, clock)
+	q.mu.Lock()
+	clock.Advance(2 * RestartGrace)
+	q.mu.Unlock()
+	if !q.inRestartGrace(clock.Now()) {
+		t.Fatal("blocked service consumed live restart grace")
+	}
+	read, _, err := q.captureReadObservation("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.mu.Lock()
+	advice := q.captureSubmissionAdvice()
+	q.mu.Unlock()
+	view, err := advice.planner(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []*Queue{read, view} {
+		if !v.inRestartGrace(v.clock.Now()) {
+			t.Fatal("detached source lost remaining service grace")
+		}
+	}
+}

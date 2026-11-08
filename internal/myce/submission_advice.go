@@ -62,11 +62,10 @@ func (q *Queue) captureSubmissionAdvice() *submissionAdviceSnapshot {
 	v.s.PriorityPolicy = q.s.PriorityPolicy
 	snapshot := &submissionAdviceSnapshot{generation: q.readGeneration, view: v,
 		ledgers: make(map[string]observationMachineLedger, len(q.s.Machines))}
-	v.contacts = make(map[string]*workerContact, len(q.s.Machines))
 	for key, m := range q.s.Machines {
 		snapshot.ledgers[key] = observationMachineLedger{m.toolInventory, m.cpuLedger, m.hostBudgetGB, m.modelReservationDebtGB, m.hostReservationDebtGB}
-		v.contacts[key] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now())}
 	}
+	q.freezeContactView(v)
 	if q.simulation {
 		// Simulators bypass persistence and own no immutable record generation.
 		owned := copyObservation(observationState{State: q.s, Models: q.models, Environments: q.environments, Calls: q.calls, Unreported: q.unreported})

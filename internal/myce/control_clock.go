@@ -111,3 +111,17 @@ func (q *Queue) inRestartGrace(now time.Time) bool {
 	}
 	return now.Before(q.restartUntil)
 }
+
+// freezeContactView preserves accepted cadence, suspicion and remaining service
+// grace in a detached observation. The caller owns q.mu or an immutable source.
+func (q *Queue) freezeContactView(v *Queue) {
+	if q.mu.control != nil && q.restartControlUntil > 0 {
+		v.restartUntil = v.clock.Now().Add(q.restartControlUntil - q.controlNow())
+	}
+	// Freeze session contact at capture time just like the queue clock. Without
+	// it, a detached fleet view turns an in-flight check-in into worker silence.
+	v.contacts = make(map[string]*workerContact, len(q.s.Machines))
+	for id, m := range q.s.Machines {
+		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now()), allowance: q.workerLossAllowance(m), arrivalAllowance: q.workerArrivalAllowance(m), suspect: q.workerSuspect(m, v.clock.Now())}
+	}
+}

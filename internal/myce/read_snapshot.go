@@ -525,12 +525,11 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 		unreported bool
 	}
 	fresh := make(map[string]freshness, len(q.s.Machines))
-	source.contacts = make(map[string]*workerContact, len(q.s.Machines))
 	for key, m := range q.s.Machines {
 		ledgers[key] = observationMachineLedger{m.toolInventory, m.cpuLedger, m.hostBudgetGB, m.modelReservationDebtGB, m.hostReservationDebtGB}
 		fresh[key] = freshness{m.LastSeen, q.unreported[key]}
-		source.contacts[key] = &workerContact{session: m.Session, processed: q.lastContact(m, source.clock.Now())}
 	}
+	q.freezeContactView(source)
 	unlock()
 	observeRead(q.observeRead, id, started, locked)
 	if err := ctx.Err(); err != nil {
