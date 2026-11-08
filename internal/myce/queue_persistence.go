@@ -122,7 +122,10 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 		if splitPersistenceKey(key) && !q.fragmented {
 			return nil
 		}
-		if splitPersistenceKey(key) && q.fragmented {
+		// Ordinary records fit one page and retain the original compact row.
+		// No fragment preparation or extra B-tree keys are needed for them.
+		compact := len(data) <= q.persistencePageBytes && len(q.persisted[key]) <= q.persistencePageBytes
+		if splitPersistenceKey(key) && q.fragmented && !compact {
 			var prepared map[string]json.RawMessage
 			if len(fields) > 0 {
 				prepared = fields[0]
@@ -267,9 +270,6 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 					return nil, err
 				}
 			}
-			if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
-				return nil, err
-			}
 		}
 	}
 	if !q.fragmented {
@@ -374,6 +374,25 @@ func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersist
 	q.persistenceFieldsCache[key] = persistenceFieldCache{data: data, fields: next}
 	measured.Marshal += holdNow(q.holdClock).Sub(started)
 	if err != nil {
+		return err
+	}
+	if len(next) == 1 {
+		// There is no multi-page field to isolate. Keep the ordinary logical row,
+		// including when a formerly large field shrinks or is removed.
+		if err := deleteFields(key, exec); err != nil {
+			return err
+		}
+		measured.Bytes += int64(len(data))
+		measured.Records++
+		_, err := exec("INSERT INTO queue_state(key,data) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data", key, data)
+		return err
+	}
+	// A one-piece old encoding lived in the ordinary logical row, so none of
+	// these field rows exists yet. Publish the root along with its large fields.
+	if len(before) == 1 {
+		before = nil
+	}
+	if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
 		return err
 	}
 	prefix := fieldPrefix(key)

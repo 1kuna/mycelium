@@ -127,7 +127,7 @@ func TestQueuePersistenceLargeFieldsRollbackRestart(t *testing.T) {
 		t.Fatalf("unchanged payload rewritten: %+v", measured)
 	}
 	before := durableQueueRecord(t, q.db, "jobs/"+j.ID)
-	if _, err := q.db.Exec(`CREATE TRIGGER reject_fields BEFORE UPDATE ON queue_state WHEN NEW.key GLOB 'fields/*' BEGIN SELECT RAISE(ABORT,'test field failure'); END`); err != nil {
+	if _, err := q.db.Exec(`CREATE TRIGGER reject_fields BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'test field failure'); END`); err != nil {
 		t.Fatal(err)
 	}
 	change := func() error {
