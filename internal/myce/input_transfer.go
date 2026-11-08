@@ -56,10 +56,15 @@ func (c Client) recoverInputTransfer(ctx context.Context, ref FileRef, operation
 		if err == nil {
 			return nil
 		}
+		// Local writes and syncs never become advisory remote-read recovery,
+		// even when their errno also occurs in a transient network failure.
+		if errors.Is(err, errFileTransferLocal) {
+			return err
+		}
 		// Do not turn a real queue outage into an endless preparation wait.
 		// Unlike a reset/lost body, a completed dial failure has no live peer.
 		var transport *net.OpError
-		if errors.As(err, &transport) && transport.Op == "dial" {
+		if errors.Is(err, errFileTransferDial) || errors.As(err, &transport) && transport.Op == "dial" {
 			return fmt.Errorf("%w: %w", errInputTransferUnreachable, err)
 		}
 		if !retryTransient(err) {

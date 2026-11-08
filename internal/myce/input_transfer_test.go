@@ -9,10 +9,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -292,6 +294,96 @@ func TestInputTransferPermanentRefusalsDoNotRecover(t *testing.T) {
 			}
 			if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("published refused bytes", err)
+			}
+		})
+	}
+}
+
+func TestInputTransferRefusingProxyDoesNotRecover(t *testing.T) {
+	for _, phase := range []string{"HEAD", "GET"} {
+		t.Run(phase, func(t *testing.T) {
+			ref := sharedFixtureFile(t, t.TempDir(), "input", "dependency")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("ETag", fmt.Sprintf("%q", ref.SHA256))
+				w.Header().Set("Content-Length", fmt.Sprint(ref.SizeBytes))
+			}))
+			defer server.Close()
+			proxy := httptest.NewServer(http.NotFoundHandler())
+			proxyURL, err := url.Parse(proxy.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxy.Close()
+			var refused atomic.Int32
+			transport := &http.Transport{Proxy: func(r *http.Request) (*url.URL, error) {
+				if r.Method == phase {
+					refused.Add(1)
+					return proxyURL, nil
+				}
+				return nil, nil
+			}}
+			defer transport.CloseIdleConnections()
+			c := Client{URL: server.URL, HTTP: &http.Client{Transport: transport}, Pause: func(context.Context, time.Duration) error {
+				t.Error("recovered a completed proxy dial refusal")
+				return context.Canceled
+			}}
+			cache := FileCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Client: c}
+			dest := filepath.Join(t.TempDir(), "input")
+			err = cache.copyTo(context.Background(), ref, dest)
+			var op *net.OpError
+			if !errors.Is(err, errInputTransferUnreachable) || !errors.As(err, &op) || op.Op != "proxyconnect" || !errors.Is(err, syscall.ECONNREFUSED) || stagingErrorName(err) != "storage_unreachable" || refused.Load() != 1 {
+				t.Fatal("proxy outage lost identity", refused.Load(), err)
+			}
+			if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("published on proxy outage", err)
+			}
+		})
+	}
+}
+
+type inputTransferFaultSink struct {
+	data              bytes.Buffer
+	writeErr, syncErr error
+	syncs             int
+}
+
+func (s *inputTransferFaultSink) Write(p []byte) (int, error) {
+	if s.writeErr != nil {
+		return 0, s.writeErr
+	}
+	return s.data.Write(p)
+}
+func (s *inputTransferFaultSink) Sync() error { s.syncs++; return s.syncErr }
+
+type inputTransferReadError struct{ err error }
+
+func (r inputTransferReadError) Read([]byte) (int, error) { return 0, r.err }
+
+func TestInputTransferLocalFailureDoesNotRecover(t *testing.T) {
+	for _, phase := range []string{"sync_after_stall", "write"} {
+		t.Run(phase, func(t *testing.T) {
+			sink := &inputTransferFaultSink{syncErr: syscall.EIO}
+			want := syscall.EIO
+			wantName := "EIO"
+			if phase == "write" {
+				sink = &inputTransferFaultSink{writeErr: syscall.EPIPE}
+				want = syscall.EPIPE
+				wantName = "EPIPE"
+			}
+			var recovering atomic.Bool
+			ctx := context.WithValue(context.Background(), inputTransferRecoveryKey{}, &recovering)
+			c := Client{Pause: func(context.Context, time.Duration) error {
+				t.Error("recovered a terminal local storage failure")
+				return context.Canceled
+			}}
+			calls := 0
+			err := c.recoverInputTransfer(ctx, FileRef{}, "cache_download", func(Client) error {
+				calls++
+				_, err := copyFileDownload(sink, io.MultiReader(strings.NewReader("partial"), inputTransferReadError{errFileTransferStalled}))
+				return err
+			})
+			if !errors.Is(err, want) || stagingErrorName(err) != wantName || recovering.Load() || calls != 1 || sink.syncs != 1 {
+				t.Fatalf("local failure hidden: calls=%d syncs=%d pending=%v err=%v", calls, sink.syncs, recovering.Load(), err)
 			}
 		})
 	}
