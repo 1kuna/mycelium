@@ -335,6 +335,11 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 	complete := func(run *Job, peak float64, constrained bool) {
 		t.Helper()
 		clock.Advance(time.Second)
+		if run.Machine != linux.ID {
+			// The accepted source-platform prior is still from a live worker;
+			// keep its advertised one-second reports flowing during peer runs.
+			check(t, q, linux, nil)
+		}
 		r := result(run, true)
 		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: constrained}
 		if run.Machine == linux.ID {
