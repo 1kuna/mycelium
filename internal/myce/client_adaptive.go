@@ -18,11 +18,27 @@ import (
 // the spacing, without an installation-specific ceiling.
 // A change resets it to the measured service cost. Event times and owner
 // deadlines can shorten healthy spacing. Failures use the current Retry-After
-// or measured service cost, independently of unchanged-observation history.
+// or measured service cost with the transport recovery floor, independently
+// of unchanged-observation history.
 // The factors express exponential search and randomized contention avoidance,
 // not a duration calibrated to one installation.
 type ClientPace struct {
 	cost, delay time.Duration
+}
+
+// RFC 6298 sections 2.1 and 2.4 specify a one-second initial/minimum TCP
+// retransmission timeout. A fast refusal is not evidence that the failed
+// service can recover in that RTT. Without a server signal, allow at least
+// one transport recovery period; the cost is up to one second before probing
+// a fast recovery. Slower measured service still extends it, without a cap.
+const clientRecoveryPeriod = time.Second
+
+func (p *ClientPace) recoveryDelay(failure error) time.Duration {
+	var api *HTTPError
+	if errors.As(failure, &api) && api.RetryAfter > 0 {
+		return api.RetryAfter // The current server signal remains authoritative.
+	}
+	return max(p.cost, clientRecoveryPeriod)
 }
 
 func growDuration(d time.Duration) time.Duration {
@@ -51,11 +67,7 @@ func (p *ClientPace) Delay(now time.Time, event time.Time, failure error, jitter
 	}
 	// Positive jitter never retries before the server's not-before signal.
 	if failure != nil {
-		delay = p.cost
-		var api *HTTPError
-		if errors.As(failure, &api) && api.RetryAfter > 0 {
-			delay = api.RetryAfter
-		}
+		delay = p.recoveryDelay(failure)
 		delay = time.Duration(min(float64(math.MaxInt64), float64(delay)*(1+jitter())))
 	} else if !event.IsZero() && event.After(now) {
 		// Approach an expected event geometrically, down to the measured read cost.
@@ -64,24 +76,28 @@ func (p *ClientPace) Delay(now time.Time, event time.Time, failure error, jitter
 	return max(delay, time.Nanosecond)
 }
 
-// ServiceDelay bounds a shared observer's next read by measured service cost
-// and the current server not-before signal. Unchanged long-polls can accumulate
+// ServiceDelay bounds a shared observer's next read by measured service cost,
+// the current server signal, or the no-signal transport recovery period.
+// Unchanged long-polls can accumulate
 // exponential search history for choosing a protocol hold, but that history is
 // not evidence of pressure and must never become a retry or scalar-read timer.
 func (p *ClientPace) ServiceDelay(failure error, jitter func() float64) time.Duration {
 	cost := max(p.cost, time.Nanosecond)
 	delay := cost
 	if failure != nil {
+		delay = p.recoveryDelay(failure)
+		jitterPeriod := cost
 		var api *HTTPError
-		if errors.As(failure, &api) {
-			delay = max(delay, api.RetryAfter)
+		if !errors.As(failure, &api) || api.RetryAfter <= 0 {
+			// No-signal retries also spread across the recovery period.
+			jitterPeriod = max(cost, clientRecoveryPeriod)
 		}
 		if jitter == nil {
 			jitter = rand.Float64
 		}
 		// Spread contenders over one measured service period, never over the
 		// accumulated failure count. Integer headroom prevents jitter overflow.
-		extra := time.Duration(float64(cost) * min(1, max(0, jitter())))
+		extra := time.Duration(float64(jitterPeriod) * min(1, max(0, jitter())))
 		delay += min(max(0, extra), time.Duration(math.MaxInt64)-delay)
 	}
 	return delay

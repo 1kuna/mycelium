@@ -1239,7 +1239,13 @@ Unreadable, missing or malformed timeouts log a warning and also leave the wait
 to systemd, retaining caller cancellation without a guessed client deadline.
 An unavailable manager deadline can therefore leave the installer waiting until
 systemd completes the job or the operator cancels it. This fallback is Linux-only;
-launchd commands retain their ordinary setup probe allowance. Recovery ignores the
+launchd stop waits read the loaded job's effective `exit timeout` from
+`launchctl print`, including the system-defined default when the plist omits
+`ExitTimeOut`. Bootout and subsequent label-removal observation share that exit
+allowance, two measured manager round trips and one observation tick. Unknown
+or infinite exit timeouts leave the wait to launchd with caller cancellation;
+unknown values log a warning. Other launchd commands retain their ordinary
+setup probe allowance. Recovery ignores the
 failed install's cancellation, gives each command its own fresh allowance, and
 inspects final manager state with an unexpired context. A failed manager itself
 can still prevent inspection; that error is reported rather than claiming a
