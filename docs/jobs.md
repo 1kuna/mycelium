@@ -703,6 +703,15 @@ No preparation step or unstarted retry renews a physical child's cutoff.
 Retained jobs from before this declaration existed preserve their stored cutoff
 as absolute: older records did not record whether it was generated or submitted.
 
+From the release containing #1011, qualified resource contention and typed
+launch-capacity refusals suspend a **generated** startup window. The same logical
+job remains queued without spending infrastructure retries or losses. Assignment
+renews that generated window for command preparation; unchanged capacity evidence
+cannot cause repeated offers. Explicit caller `start_by` and `start_window`,
+`give_up_at` and cancellation still apply. Missing or incompatible inventory keeps
+its existing startup diagnosis. This supersedes the capacity-expiry behavior
+above for generated windows; it adds no timeout or retry-budget increase.
+
 Job GET exposes the authored duration at `spec.start_window`, the current cutoff
 at `spec.start_by`, and the effective original length at top-level `start_window`
 in **nanoseconds** (`600000000000` for 600 seconds). The effective length is

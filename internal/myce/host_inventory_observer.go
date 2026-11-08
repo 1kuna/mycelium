@@ -8,6 +8,21 @@ import (
 	"time"
 )
 
+func (w Worker) inventorySource() func(context.Context) ([]MachineDevice, error) {
+	probeInventory := w.InventoryProbe
+	// Pending OS probes may outlive worker shutdown. Keep this worker's source
+	// while still probing fresh identity on each scan, without rereading defaults.
+	identity := extensionIdentityProbe
+	return func(ctx context.Context) ([]MachineDevice, error) {
+		devices, err := probeInventory(ctx)
+		for i := range devices {
+			d := &devices[i]
+			d.ExtensionFingerprint, _ = extensionFingerprintFrom(ctx, d.Platform, d.ID, identity)
+		}
+		return devices, err
+	}
+}
+
 // Inventory is an observation lane, not an attempt sampler. No per-host driver
 // latency default kills a progressing scan; cancellation owns its lifetime.
 // A pending scan retains identity but never indefinitely retains live capacity.

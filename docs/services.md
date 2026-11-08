@@ -258,7 +258,10 @@ and appears in status. Lower-priority resumable batches may save and pause for
 calls, following the batch stop-grace rule: production grants 10 seconds and
 also stops non-resumable lower-priority batches immediately; deadlines grant
 2 minutes and preserve non-resumable work. Pinned models never idle-unload
-or surrender their memory to other work.
+or surrender their memory to other work. A healthy resident pinned engine keeps
+its existing assignment when device-memory evidence is temporarily unavailable;
+unknown memory still blocks new engine placement. Leave, session replacement,
+health loss and authorized stops retain their existing release fences.
 
 `max_wait` is omitted by default; queue/load waiting then ends on caller
 cancellation or a real load failure. A positive value bounds the caller's queue

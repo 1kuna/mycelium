@@ -30,6 +30,10 @@ func TestProductionStartDeadlineQualifiedRouteDiagnostic(t *testing.T) {
 	m.HostAvailableMemoryGB = .05
 	check(t, q, m, nil)
 	s.Priority = "production"
+	// This diagnostic tests caller-owned expiry. Generated startup windows
+	// now wait through real capacity shortages under #1011.
+	deadline := clock.Now().Add(ProductionStartTimeout)
+	s.StartBy = &deadline
 	j := submit(t, q, s)
 	var logs bytes.Buffer
 	previous := log.Writer()
