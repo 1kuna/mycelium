@@ -16,6 +16,11 @@ SUPPLEMENTAL_CONSUMERS = {
                    'gpu_host_memory', 'capability_placement', 'work_observation', 'queue')
 }
 
+# Candidate-cost fixtures retain their direct observable consumers after
+# private planner digest tests were removed (#1086).
+SUPPLEMENTAL_CONSUMERS['internal/myce/checkin_candidate_cost_test.go'] = (
+    'status_read_test.go', 'memory_planning_test.go', 'host_backfill_cost_test.go')
+
 # Platform clone helpers are exercised through model snapshot staging.
 for source in ('shared_clone_darwin', 'shared_clone_linux', 'shared_clone_other'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('model_snapshots_test.go',)
