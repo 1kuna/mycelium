@@ -338,7 +338,7 @@ func TestWaitTransientHTTPAndInterrupted(t *testing.T) {
 					w.WriteHeader(code)
 					return
 				}
-				fmt.Fprint(w, `{"id":"job","state":"succeeded"}`)
+				fmt.Fprint(w, `{"jobs":[{"id":"job","state":"succeeded","revision":1}]}`)
 			}))
 			defer server.Close()
 			err := waitJobs(context.Background(), myce.Client{URL: server.URL}, []string{"job"}, 0, &bytes.Buffer{}, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
@@ -374,6 +374,10 @@ func TestWaitOutageDiagnosticsAndTerminalRecovery(t *testing.T) {
 			started := clock.Now()
 			calls := 0
 			client := myce.Client{URL: "http://fixture.invalid/private-endpoint", Token: "private-token", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
+				if r.Method == "POST" {
+					return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+				}
+
 				calls++
 				status, body := http.StatusOK, `{"id":"job","state":"running"}`
 				if calls > 1 && clock.Now().Sub(started) < 75*time.Second {
@@ -416,7 +420,7 @@ func TestWaitRequestTimeoutRetriesUntilOverallDeadline(t *testing.T) {
 		if calls == 1 {
 			return nil, context.DeadlineExceeded
 		}
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"job","state":"succeeded"}`))}, nil
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"jobs":[{"id":"job","state":"succeeded","revision":1}]}`))}, nil
 	})}}
 	err := waitJobs(context.Background(), client, []string{"job"}, time.Minute, &bytes.Buffer{}, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
 	if err != nil || calls != 2 {
@@ -449,6 +453,10 @@ func TestWaitUsesLightweightReadsAfterInitial(t *testing.T) {
 	clock := &waitClock{now: time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)}
 	var queries []string
 	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method == "POST" {
+			return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}
+
 		queries = append(queries, r.URL.RawQuery)
 		state := "running"
 		if len(queries) == 4 {
@@ -608,8 +616,16 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 			reason := strings.Repeat("scheduler explanation ", 60) + "\nfull reason"
 			states := []string{"queued", "queued", "running", "succeeded"}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !structured && r.Method == "POST" {
+					http.NotFound(w, r)
+					return
+				}
 				if structured {
 					w.Header().Set("X-Myce-Wait", "batch-v1")
+					if r.Method == "POST" && r.URL.Path == "/api/wait" {
+						json.NewEncoder(w).Encode(myce.WaitReply{Jobs: []myce.WaitState{{ID: "job", State: states[step], Reason: fmt.Sprintf("%s %d", reason, step), Revision: uint64(step + 1)}}})
+						return
+					}
 					if r.URL.Path != "/api/jobs/job" || r.URL.RawQuery != "" {
 						projectedReads.Add(1)
 						http.Error(w, "JSON must use full job reads", http.StatusBadRequest)
@@ -649,6 +665,11 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 	}
 	// The public flag must select the structured renderer too.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This legacy queue fixture has no batch endpoint.
+		if r.Method == http.MethodPost && r.URL.Path == "/api/wait" {
+			http.NotFound(w, r)
+			return
+		}
 		fmt.Fprint(w, `{"id":"job","state":"succeeded","reason":"full terminal reason"}`)
 	}))
 	defer server.Close()

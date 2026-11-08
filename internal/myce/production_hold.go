@@ -186,6 +186,7 @@ func (q *Queue) retainRelease(j *Job) {
 		r.Until = *j.StopAt
 	}
 	old := q.s.HostReleases[releaseKey(r)]
+	r.HostChargeGB = max(r.HostChargeGB, q.hostJobCharge(j), retainedHostCharge(j), old.HostChargeGB)
 	r.CleanupFailed = old.CleanupFailed
 	r.CleanupSince = old.CleanupSince
 	r.EscalatedAt = old.EscalatedAt

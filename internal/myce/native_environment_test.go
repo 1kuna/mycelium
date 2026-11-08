@@ -50,15 +50,20 @@ func TestEnvironmentRecipeStoreSubmissionAndSweep(t *testing.T) {
 			}
 			for _, key := range []string{"jobs/" + j.ID, "submissions/" + submissionDigest(s.Project, s.SubmissionKey)} {
 				var data []byte
-				if err := q.db.QueryRow("SELECT data FROM queue_state WHERE key=?", key).Scan(&data); err != nil {
-					t.Fatal(err)
-				}
+				data = durableQueueRecord(t, q.db, key)
 				var stored Job
 				if key == "jobs/"+j.ID {
 					err = json.Unmarshal(data, &stored)
 				} else {
 					var answer submissionRecord
 					err = json.Unmarshal(data, &answer)
+					if err != nil {
+						t.Fatal("invalid keyed recipe answer", err)
+					}
+					if answer.Job == nil && answer.JobID != "" {
+						jobData := durableQueueRecord(t, q.db, "jobs/"+answer.JobID)
+						err = json.Unmarshal(jobData, &answer.Job)
+					}
 					if err != nil || answer.Job == nil {
 						t.Fatal("missing keyed recipe job", err)
 					}

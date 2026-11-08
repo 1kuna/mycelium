@@ -156,7 +156,7 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 	lastDetail := map[string]string{}
 	observed := map[string]bool{}
 	revisions := map[string]uint64{}
-	batchSupported := false
+	batchSupported := true
 	for _, id := range ids {
 		pending[id] = true
 	}
@@ -169,6 +169,7 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 	}
 	deadline := ownerDeadline
 	pace := myce.ClientPace{}
+	var diagnosticNotBefore time.Time
 	c = c.WithoutRetries()
 	c.Clock = clock
 	failed, retrying := false, false
@@ -192,6 +193,8 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 		unavailable := false
 		var readErr error
 		var batchJobs map[string]*myce.Job
+		batchMetadata := map[string]bool{}
+		var diagnosticDeadline time.Time
 		var batchErr error
 		held := false
 		for _, id := range ids {
@@ -224,28 +227,64 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 			}
 			var j *myce.Job
 			var err error
-			if !observed[id] {
-				// A batch state omits spec metadata. Every job needs its own
-				// diagnostic read before deadlines can constrain observation.
-				var supported bool
-				j, supported, err = c.GetJobWaitCapability(requestCtx, id)
-				// Structured output requires full diagnostics on every observation.
-				batchSupported = (batchSupported || supported) && !jsonOutput
-			} else if batchSupported {
+			if batchSupported || batchJobs != nil {
 				if batchJobs == nil {
 					batchJobs = map[string]*myce.Job{}
 					var reply myce.WaitReply
 					seconds := pace.Seconds(clock.Now(), event)
-					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, seconds)
+					reply, batchErr = c.WaitBatchOnly(requestCtx, ids, revisions, seconds)
+					diagnosticDeadline = clock.Now().Add(myce.WaitBatchMaxSeconds * time.Second)
 					if batchErr == nil {
 						held = seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0
 						for i, state := range reply.Jobs {
 							revisions[state.ID] = state.Revision
-							batchJobs[ids[i]] = &myce.Job{ID: state.ID, State: state.State, Reason: state.Reason}
+							batchJobs[ids[i]] = state.Job()
+							batchMetadata[ids[i]] = state.Spec != nil
+							if state.Spec != nil {
+								metadata[ids[i]] = state.Job()
+							} else if known := metadata[ids[i]]; known != nil {
+								known.State = state.State
+							}
+							batchSupported = state.Revision > 0
 						}
 					}
 				}
 				j, err = batchJobs[id], batchErr
+				if myce.WaitBatchUnsupported(err) {
+					batchSupported, batchJobs = false, nil
+					j, err = read(requestCtx, id)
+				}
+				if err == nil && batchSupported && j != nil && !clock.Now().Before(diagnosticNotBefore) &&
+					(jsonOutput && lastDetail[j.ID] != j.State+"\x00"+j.Reason || !observed[j.ID] && !batchMetadata[id] && j.State != "succeeded" && j.State != "failed" && j.State != "cancelled") {
+					// Spend at most one protocol hold interval on optional diagnostics
+					// across this whole batch, not one interval per job. This bounds the
+					// extra observation delay without an installation-specific timeout.
+					// A slow/shed read leaves details unknown; scalar progress continues.
+					deadline, event = waitPendingTimes(pending, metadata, ownerDeadline, clock.Now())
+					detailBudget := max(0, diagnosticDeadline.Sub(clock.Now()))
+					if !deadline.IsZero() {
+						detailBudget = min(detailBudget, max(0, deadline.Sub(clock.Now())))
+					}
+					if waitReadBudget > 0 {
+						detailBudget = min(detailBudget, waitReadBudget)
+					}
+					detailCtx, detailCancel := context.WithTimeout(requestCtx, detailBudget)
+					detail, detailErr := c.GetJob(detailCtx, j.ID)
+					if detailCtx.Err() == context.DeadlineExceeded {
+						diagnosticDeadline = clock.Now()
+					}
+					detailCancel()
+					if detailErr == nil {
+						j = detail
+					} else if !myce.RetryStatusRead(detailErr) {
+						err = detailErr
+					} else {
+						var api *myce.HTTPError
+						if errors.As(detailErr, &api) {
+							diagnosticNotBefore = clock.Now().Add(api.RetryAfter)
+						}
+					}
+				}
 			} else {
 				j, err = read(requestCtx, id)
 			}
@@ -399,7 +438,7 @@ func waitPendingTimes(pending map[string]bool, metadata map[string]*myce.Job, ow
 	var event time.Time
 	for id := range pending {
 		j := metadata[id]
-		if j == nil {
+		if j == nil || j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
 			continue
 		}
 		if end := j.Spec.Deadline; end != nil && (deadline.IsZero() || end.Before(deadline)) {

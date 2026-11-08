@@ -85,6 +85,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		if w.unifiedMemoryWire != nil {
 			w.unifiedMemoryWire.supported = false
+			w.unifiedMemoryWire.sampleSupported = false
 			w.unifiedMemoryWire.probeSupported = false
 			w.unifiedMemoryWire.telemetrySupported = false
 		}
@@ -111,6 +112,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	w.acceptHygieneReply(reply)
 	if w.unifiedMemoryWire != nil {
 		w.unifiedMemoryWire.supported = reply.UnifiedMemoryProtocol == unifiedMemoryProtocol
+		w.unifiedMemoryWire.sampleSupported = reply.HostMemorySampleProtocol == hostMemorySampleProtocol
 		w.unifiedMemoryWire.probeSupported = reply.ProbeMemoryProtocol == probeMemoryProtocol
 		w.unifiedMemoryWire.telemetrySupported = reply.DeviceTelemetryProtocol == deviceTelemetryProtocol
 	}

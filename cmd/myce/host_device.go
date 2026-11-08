@@ -46,7 +46,7 @@ func hostDeviceCommand(ctx context.Context, args []string, out io.Writer) error 
 	if args[0] == "enable" && reasonSet {
 		return errors.New("--reason requires device disable")
 	}
-	c, err := authority.client()
+	c, err := authority.ownerClient()
 	if err != nil {
 		return err
 	}

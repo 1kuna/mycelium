@@ -32,6 +32,11 @@ func openConversionQueue(c ServiceConfig, clock Clock) (*Queue, error) {
 		return nil, err
 	}
 	q := &Queue{db: db, lock: lock, clock: clock, root: c.Checkpoints, unreported: map[string]bool{}, calls: map[string]*ModelCall{}}
+	if err = db.QueryRow("PRAGMA page_size").Scan(&q.persistencePageBytes); err != nil {
+		q.Close()
+		return nil, err
+	}
+
 	var data []byte
 	if err = db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data); err == nil {
 		data, err = readQueueState(db, data)

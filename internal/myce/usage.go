@@ -212,6 +212,16 @@ func maxTime(a, b time.Time) time.Time {
 	return b
 }
 func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
+	measured := queuePersistenceTiming{}
+	defer func() {
+		if timing != nil {
+			timing.persistence = measured
+		}
+		if q.observePersistence != nil {
+			q.observePersistence(measured)
+		}
+	}()
+	started := holdNow(q.holdClock)
 	var tx *sql.Tx
 	var e error
 	if timing != nil && timing.measureWriter {
@@ -240,13 +250,18 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if e = q.persistModelIntervals(tx); e != nil {
 		return e
 	}
-	next, e := q.persistState(tx)
+	measured.SQL += holdNow(q.holdClock).Sub(started)
+	next, e := q.persistState(tx, &measured)
 	if e != nil {
 		return e
 	}
-	if e = timing.commit(tx); e != nil {
+	started = holdNow(q.holdClock)
+	e = timing.commit(tx)
+	measured.Commit = holdNow(q.holdClock).Sub(started)
+	if e != nil {
 		return e
 	}
+	q.fragmented = true
 	if q.persisted == nil {
 		q.persisted = map[string][]byte{}
 	}
@@ -262,6 +277,8 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 		}
 		if value == nil {
 			delete(q.persisted, key)
+			delete(q.persistenceEncodings, key)
+			delete(q.persistenceFieldsCache, key)
 			delete(q.records.catalog, key)
 		} else {
 			q.persisted[key] = value
@@ -270,10 +287,23 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 			}
 		}
 	}
+	for key := range next {
+		if id, ok := strings.CutPrefix(key, "jobs/"); ok {
+			if job := q.s.Jobs[id]; job == nil || !mutableJob(job) {
+				delete(q.persistenceEncodings, key)
+				delete(q.persistenceFieldsCache, key)
+			}
+		}
+	}
 	if changedJobs {
 		// Preserve immediate cancellation-custody and blocker transitions even
 		// when the selected job's own durable envelope did not change.
 		q.invalidateDependentSnapshots()
+	}
+	if q.readRoot == nil {
+		q.publishReadRecords(q.persisted)
+	} else {
+		q.publishReadRecords(next)
 	}
 	return nil
 }

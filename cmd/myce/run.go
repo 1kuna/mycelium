@@ -223,8 +223,7 @@ func runMemory(value string) (float64, error) {
 	return n * scale, nil
 }
 
-// Explicit credentials select the existing direct client; otherwise reuse the
-// installation's authority, including its certificate pin. A queue override
+// Reuse installed trust even when credentials are supplied explicitly. A queue override
 // changes only the endpoint, never removes installed trust.
 func runClient(config, joining, address, token string) (myce.Client, error) {
 	authority := runAuthority{Config: config, Joining: joining}
@@ -237,7 +236,7 @@ type runAuthority struct{ Config, Joining string }
 
 func (authority *runAuthority) client(address, token string) (myce.Client, error) {
 	config, joining := authority.Config, authority.Joining
-	if config != "" || joining == "" && token == "" {
+	if config != "" || joining == "" {
 		paths := []string{config}
 		if config == "" {
 			home, err := os.UserHomeDir()
@@ -256,6 +255,9 @@ func (authority *runAuthority) client(address, token string) (myce.Client, error
 					return myce.Client{}, err
 				}
 				break
+			}
+			if config == "" && token != "" && os.IsNotExist(err) {
+				continue // Explicit credentials still support an uninstalled dev client.
 			}
 			if !os.IsNotExist(err) || i == len(paths)-1 {
 				return myce.Client{}, errors.New("cannot read installed config; use --config, --joining-file or MYCE_QUEUE/MYCE_TOKEN")

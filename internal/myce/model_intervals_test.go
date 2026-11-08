@@ -199,14 +199,15 @@ func TestModelIntervalsReupgradeAfterOlderStateRewrite(t *testing.T) {
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Emulate the prior binary rewriting the known state and slot fields. Its
+	// Emulate a retained legacy whole-state serializer rewriting state/slots. Its
 	// serializer drops unknown fields but leaves unrelated SQLite tables intact.
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var raw []byte
-	if err := db.QueryRow("SELECT data FROM queue_state WHERE key='state'").Scan(&raw); err != nil {
+	raw, err = readQueueState(db, normalizedQueueMarker)
+	if err != nil {
 		t.Fatal(err)
 	}
 	var base map[string]json.RawMessage
@@ -230,7 +231,7 @@ func TestModelIntervalsReupgradeAfterOlderStateRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("UPDATE queue_state SET data=? WHERE key='state'", raw); err != nil {
+	if _, err := db.Exec("UPDATE queue SET data=? WHERE id=1", raw); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {

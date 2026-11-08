@@ -547,9 +547,7 @@ func TestFileRetentionCatalogReleasesMarker(t *testing.T) {
 				t.Error("catalog asset still marked before next tick")
 			}
 			var data []byte
-			if err := q.db.QueryRow("SELECT data FROM queue_state WHERE key='state'").Scan(&data); err != nil {
-				t.Fatal(err)
-			}
+			data = durableQueueRecord(t, q.db, "state")
 			var durable state
 			if err := json.Unmarshal(data, &durable); err != nil {
 				t.Fatal(err)

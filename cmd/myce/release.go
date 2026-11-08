@@ -187,7 +187,7 @@ func releaseApproveCommand(args []string) error {
 	if *verifyOnly {
 		return json.NewEncoder(os.Stdout).Encode(map[string]string{"verified_version": m.Version, "origin": approval.Origin})
 	}
-	client, err := authority.client()
+	client, err := authority.ownerClient()
 	if err != nil {
 		return err
 	}

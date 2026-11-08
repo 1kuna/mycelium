@@ -47,7 +47,7 @@ func TestUnifiedMacPageSizesAndCap(t *testing.T) {
 		t.Run(pageSize, func(t *testing.T) {
 			calls := 0
 			source, err := newMemorySource("metal", 2, 1, "auto", "darwin", nil, func(ctx context.Context, name string, args ...string) ([]byte, error) {
-				if name != "vm_stat" || len(args) != 0 {
+				if name != "/usr/bin/vm_stat" || len(args) != 0 {
 					t.Fatalf("command %s %v", name, args)
 				}
 				if _, ok := ctx.Deadline(); !ok {

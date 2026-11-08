@@ -144,6 +144,11 @@ Old CLIs continue to decode the existing fields.
 From s072, machine `shared_input_cache` reports `capacity_bytes`, `free_bytes`
 and `evictable_bytes`. Free space excludes cache allocation and outstanding
 staging reservations; evictable space contains only inactive reproducible entries.
+From #1061, automatic capacity follows current headroom during admission and the
+existing worker retention sweep. Free bytes exclude unwritten reservation bytes,
+without charging already written prefixes twice. Inactive resumable prefixes are
+evictable; a detached writer keeps its build lock and remaining-byte reservation.
+Explicit cache ceilings and the filesystem control-space floor still bind.
 `protected` maps cache identities to allocated bytes held by readers/custody, so
 placement can reuse an already held input without charging it twice. Check-ins
 copy an in-memory snapshot; cache discovery does not run under the queue mutex.
@@ -172,7 +177,7 @@ boolean verdicts. No record does not establish a hardware change.
 
 Default status keeps the existing JSON fields and job shape, but includes all
 nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
-100 other terminal jobs by submission time. Work curves remain included for
+capacity-sized page of other terminal jobs by submission time. Work curves remain included for
 existing consumer audits and release-preservation guards.
 This bounds retained-history detail without hiding control-plane custody.
 `jobs_page` ([schema](schemas/status-jobs-page-v1.schema.json)) reports the
@@ -181,8 +186,8 @@ filtered `total`, `returned`, `mode`, and optional `next_before` job ID.
 - `GET /api/status?jobs=active` returns all active/cleanup-pending jobs.
 - `?jobs=all&limit=100` pages all history, newest submission first; append
   `&before=NEXT_BEFORE` from each reply until that field is absent. `limit` is
-  positive and bounded by current queue memory and measured projection cost from
-  the next release; omission chooses an adaptive page. See [request budgets](request-budgets.md). The normal status presentation order is retained
+  positive and capped by current queue memory. Explicit page intent sets the
+  projection-service floor; omission chooses a page from measured job-row cost. See [request budgets](request-budgets.md). The normal status presentation order is retained
   within each page; use the returned cursor rather than the last displayed ID.
 - `?project=example&since=2026-10-30T00:00:00Z` filters jobs by project and
   inclusive submission timestamp. Filters do not alter fleet health, eligibility
@@ -216,14 +221,18 @@ clock. The preservation guard requires that exact key's complete digest chain;
 another host's accepted sample alone never explains its mutation (#620).
 
 Only the unfiltered default shares the one-second cache. Filtered/full reads are
-fresh. Snapshot capture keeps scheduling inputs and dependency state under the
-queue lock; projection, usage queries, file inventory, encoding the reply and
-compression run after release. Cold retained jobs have immutable, payload-free
-observation inputs maintained by the existing committed-record journal; reads
-copy those inputs outside the lock. Mutable jobs and worker facts are still
-captured together under the lock. Each detached generation reuses one placement
-scan and memory-evidence catalog across ordering, startup and blocker diagnostics;
-derived capacity views keep their own scans. No bulk file or network I/O runs
+fresh. From the next release (#1052), status and job reads take an immutable committed
+input generation plus worker contact/private scalar facts under the queue lock.
+The commit journal publishes changed encoded records through a persistent tree;
+unchanged records and decoded inputs are shared across revisions. Traversal,
+decoding, selection, file-reference/cancellation walks, capacity accounting,
+recursive copies, projection, usage queries, file inventory, reply encoding and
+compression run after releasing the live lock. Selected started/terminal receipts
+decode only their own record and policy; queued receipts share live context,
+without materializing cold execution payloads. Cold decode capacity is charged
+before allocation. Each detached generation reuses one placement scan and
+memory-evidence planning cache across ordering, startup and blocker diagnostics,
+including a queued single-job read; derived capacity views keep their own scans. No bulk file or network I/O runs
 under `q.mu`. No jobs, curves, custody or foreign-load fields are removed.
 
 Jobs with explicitly recovered outputs expose an append-only `recovered_results`
@@ -745,7 +754,15 @@ it resolves the actual managed workspace and symlinks on that host.
 
 Input-staging failures carry `execution_cause.staging` on the job and exact
 attempt history: `input`, `blob` (SHA-256), `operation`, `error`, optional
-`syscall`, and optional HTTP `status`. Capacity failures also name `capacity`
+`syscall`, and optional HTTP `status`. From the next worker release, shared-input
+failures also retain `stage` (for example read, write, sync, verify or headers),
+`path_class` (source, cache or store), `bytes_copied`, `expected_bytes`, and
+numeric OS `errno` when supplied. A timeout snapshots the currently active
+operation even if its private writer finishes later. Byte counts describe the
+active file's materialization, including a resumed prefix or successful clone;
+verification does not add copied bytes. Missing errno means no OS errno was
+observed, rather than EIO. Zero fields may be omitted; older workers omit these
+fields entirely. Capacity failures also name `capacity`
 and byte comparisons (`required_bytes`, `available_bytes`, `limit_bytes`;
 zero values may be omitted). Names are bound to declared and resolved dependency inputs;
 expanded worker paths and raw upstream text are excluded. `myce logs JOB_ID`
@@ -1278,8 +1295,14 @@ physical-RAM read and rechecks exact custody afterward. Confirmed local cleanup
 removes an old actor's reservation even before its next heartbeat; stop intent
 and pending cleanup do not.
 Only this current nonreclaimable memory reduces growth;
-reclaimable cache, historical peaks and process RSS do not. Missing or five-second-old
+reclaimable cache, historical peaks and process RSS do not. Missing or expired
 samples retain the full reservation, as do models and unconfirmed release custody.
+From the next release, host sample validity follows twice the longest observed
+exact-attempt sample delivery interval (one missed delivery); the five-second
+legacy window applies until cadence is measured. Only distinct negotiated
+`sample_id` observations train cadence; cached, unidentified repeated and
+out-of-order deliveries keep the original expiry. Missing samples grant no
+resident credit.
 Queue restarts discard current-use credit. macOS uses the conservative fallback
 because its process-group RSS includes shared pages and is not a safe credit.
 Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
@@ -2009,6 +2032,13 @@ jitter (#819). Retry bounds belong to caller cancellation or an explicit owner
 deadline; no fixed retry count or fleet-tuned timeout is added. From #960,
 interruption retains the last HTTP error and prints its Retry-After interval.
 Follow the seconds-scale server signal rather than guessing minutes of backoff.
+From the release containing #1072, generic Go and Python GET/HEAD retries,
+downloads and replay-safe recovery use the current positive Retry-After plus
+positive jitter, independent of earlier errors or unchanged reads. Without that
+signal they use measured request service cost plus jitter, rather than accumulating
+exponential error pauses. The caller's deadline may end a pause before retry is
+permitted; it stops recovery instead of starting an early request. No fixed cap
+or retry count is introduced.
 From #959, `myce logs JOB --after SEQ` resumes strictly after a log sequence.
 An interrupted read prints the continuation command on stderr; stdout remains
 ordered raw log text. The cursor advances after each successfully written chunk,
@@ -2281,12 +2311,29 @@ exploratory reservations as predictions. Fresh exact-attempt footprint and growt
 same forecast as cold CPU probes, including sample age and measured drift, with
 the resolved estimate as a floor for learned jobs. Cold CPU probes keep their
 known-need floor and use the same physical/allowance execution ceiling.
-Unknown/stale telemetry and stopping attempts
-retain the complete physical/explicit execution ceiling. Darwin RSS can increase
+From the next release (#1048), bounded learned/exploratory estimates keep the
+resolved reservation plus measured growth and drift when telemetry is stale,
+missing or stopping. Exact-attempt `host_memory_charge` retains grown charges
+through smaller/missing reports, queue restarts and unconfirmed release custody;
+observed peaks remain floors. A learned allocation that has not acknowledged
+`Started` also keeps its bounded reservation without requiring telemetry.
+Stale data grants no resident credit. Forecasts cannot exceed containment, but
+actual observations and retained reservations are never lowered to that bound.
+Cold probes still retain their complete ceiling without fresh complete evidence.
+Darwin RSS can increase
 the charge but grants no resident-memory credit because shared pages can appear
 in multiple processes. The reported estimate and the execution ceiling therefore
 serve different purposes. Explicit declarations, member limits and Docker keep
 their existing containment contract. See [native isolation](native-isolation.md).
+
+From the next release (#1064), declared native CPU attempts with enforced cgroup
+v2 containment reserve their complete declaration plus ceiling slack. Their live
+growth forecast cannot add bytes beyond that containment, in either the static
+charge or pending physical growth. Larger actual anonymous/footprint observations
+remain floors; only fresh uniquely charged anonymous residency reduces pending
+growth. Missing/stale observations retain the full reservation. This bound does
+not apply to auto estimates, sampled RSS, Docker or accelerator memory outside
+the cgroup; authored member limits remain binding.
 
 Native CPU auto-memory and native accelerator-check host-OOM recovery retain a
 durable lower bound from the previous reservation and killed peak, plus a

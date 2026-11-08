@@ -57,6 +57,13 @@ func hostFitFailure(m *Machine, gpu, host float64) string {
 	return ""
 }
 func (q *Queue) refreshHostMemory() {
+	// Only committed scheduling passes grow durable reservations; detached
+	// observation views compute the same charge without mutating source jobs.
+	if q.records != nil && q.records.updating {
+		for machine := range q.s.Machines {
+			q.retainHostMemoryCharges(machine, q.clock.Now())
+		}
+	}
 	q.refreshHostCPU()
 	for _, m := range q.s.Machines {
 		available := m.HostAvailableMemoryGB
@@ -387,6 +394,9 @@ func hostMemoryAvailableFits(m *Machine, gpu, host, available float64) bool {
 // CurrentHostMemory credits only nonreclaimable, uniquely charged cgroup RAM.
 // Peaks and RSS (shared pages on macOS) cannot safely reduce growth room.
 type CurrentHostMemory struct {
+	// Stable worker-local observation identity, not a queue-clock timestamp.
+	// Negotiated independently; cached/delayed deliveries cannot renew credit.
+	SampleID int64 `json:"sample_id,omitempty"`
 	// True only after two timed samples. An older worker's zero growth is
 	// unknown and cannot release a cold probe's physical-headroom reservation.
 	GrowthObserved bool `json:"growth_observed,omitempty"`
@@ -424,6 +434,9 @@ func (s *CurrentHostMemory) aged(now time.Time) *CurrentHostMemory {
 		return nil
 	}
 	sample := *s
+	if !sample.sampledAt.IsZero() {
+		sample.SampleID = sample.sampledAt.UnixNano()
+	}
 	if s.deviceSample != nil {
 		if device := s.deviceSample.Load(); device != nil {
 			gb := device.gb
@@ -439,8 +452,8 @@ func (s *CurrentHostMemory) aged(now time.Time) *CurrentHostMemory {
 	return &sample
 }
 
-// Actors refresh every <=100 ms. Five seconds bounds cached credit through a
-// delayed heartbeat; losing credit costs utilization, never envelope protection.
+// Legacy bootstrap credit window until this exact attempt has a measured
+// delivery interval. Losing resident credit never reduces its reservation.
 const hostMemorySampleFreshFor = 5 * time.Second
 
 // Device samples arrive every period; one missed sample makes them stale.
@@ -448,6 +461,11 @@ const deviceMemorySamplePeriod = 5 * time.Second
 const deviceMemorySampleFreshFor = 2 * deviceMemorySamplePeriod
 
 type hostMemorySample struct {
+	id                       int64
+	receivedAt               time.Time
+	period                   time.Duration
+	retainedGB               float64
+	peakGB                   float64
 	growthObserved           bool
 	footprintGB              float64
 	source                   string
@@ -460,7 +478,7 @@ type hostMemorySample struct {
 }
 
 func (s hostMemorySample) hostGrowth(now time.Time) (float64, bool) {
-	if s.at.IsZero() || now.Before(s.at) || now.Sub(s.at) >= hostMemorySampleFreshFor || !validMemoryValue(s.gb) {
+	if s.at.IsZero() || now.Before(s.at) || now.Sub(s.at) >= s.freshFor() || !validMemoryValue(s.gb) {
 		return 0, false
 	}
 	growth := s.growthGB + s.rateGB*now.Sub(s.at).Seconds()
@@ -479,16 +497,27 @@ func remainingHostGrowth(reservation float64, sample hostMemorySample, now time.
 }
 
 func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemptKey]hostMemorySample {
+	return updateHostMemorySamples(reports, now, nil)
+}
+
+func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous map[attemptKey]hostMemorySample) map[attemptKey]hostMemorySample {
 	samples := map[attemptKey]hostMemorySample{}
 	for _, r := range reports {
+		key := attemptKey{r.ID, r.Attempt, r.Session}
+		old := previous[key]
 		sample, s := r.CurrentHostMemory, hostMemorySample{}
 		// Native helpers acquire physical custody before main Starts. Their
 		// exact-attempt memory is occupancy evidence, never main-start evidence.
 		if sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
+			samples[key] = hostMemorySample{id: old.id, at: old.at, receivedAt: old.receivedAt, period: old.period, peakGB: old.peakGB, retainedGB: old.retainedGB}
 			continue
 		}
-		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) && sample.AgeSeconds < hostMemorySampleFreshFor.Seconds() {
+		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) {
 			s.gb, s.at = sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds*float64(time.Second)))
+			s.id = sample.SampleID
+			if s.id == 0 && !sample.sampledAt.IsZero() {
+				s.id = sample.sampledAt.UnixNano()
+			}
 			s.growthGB = sample.GrowthGB
 			if sample.FootprintGB != nil && validMemoryValue(*sample.FootprintGB) {
 				// Helper occupancy can reduce pending physical growth, but cannot
@@ -503,47 +532,179 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 			s.source, s.exclusive, s.deviceRateGB = sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB
 			s.residentGB = sample.deviceResidentGB
 		}
-		if !s.at.IsZero() || !s.deviceAt.IsZero() {
-			samples[attemptKey{r.ID, r.Attempt, r.Session}] = s
+		s.peakGB = max(old.peakGB, s.gb, s.footprintGB)
+		s.period, s.receivedAt = old.period, now
+		if !old.at.IsZero() {
+			if s.id > 0 && old.id == 0 {
+				// Anchor the first negotiated identity. It might name the same
+				// cached observation as the unidentified bootstrap, so retain its
+				// expiry until a distinct identity arrives. A local sampler's
+				// timestamp can independently prove a newer observation.
+				if sample.sampledAt.IsZero() || !sample.sampledAt.After(old.at) {
+					s.at, s.gb = old.at, min(s.gb, old.gb)
+				}
+			} else if s.id > 0 && old.id > 0 && s.id > old.id {
+				// Learn delivery cadence only from proven distinct observations.
+				s.period = max(s.period, now.Sub(old.receivedAt))
+			} else {
+				// Unknown identity, cached or out-of-order: retain the original
+				// expiry and credit, while still retaining larger usage below.
+				s.at, s.receivedAt, s.id = old.at, old.receivedAt, old.id
+				s.gb = min(s.gb, old.gb)
+				// A cached/unknown observation cannot replace the slope while
+				// borrowing an earlier observation's identity and validity.
+				s.growthGB, s.rateGB = old.growthGB, old.rateGB
+				s.growthObserved = old.growthObserved
+			}
+		}
+		// Only fresh identified observations can revise a prediction. Keep an
+		// accepted prediction through missing/stale data, but let a distinct
+		// observation replace it; measured peaks are retained independently.
+		forecast, fresh := s.identifiedHostForecast(now)
+		s.retainedGB = max(old.retainedGB, forecast)
+		if fresh && (old.id == 0 || s.id > old.id) {
+			s.retainedGB = forecast
+		}
+		if !s.at.IsZero() || !s.deviceAt.IsZero() || s.retainedGB > 0 {
+			samples[key] = s
 		}
 	}
 	return samples
 }
 
-// A CPU probe's ceiling contains an unknown run; it is not measured demand.
-// Once its exact attempt supplies fresh, uniquely charged resident usage and a
-// measured growth horizon, account for that forecast instead of holding the
-// whole initial ceiling. Estimated native CPU jobs reuse that forecast, with the
-// resolved reservation as a floor. RSS increases the charge but grants no
-// resident credit. No GPU attribution earns probe credit. Unknown/stale samples and stopping attempts
-// retain the complete ceiling, including after restart or worker downgrade.
+// Bounded learned/exploratory estimates are admission reservations; their
+// wider execution ceiling contains unseen growth but is not measured demand.
+// Cold probes still need complete fresh evidence before releasing their ceiling.
 func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
-	charge = ceiling
-	adaptiveCeiling := adaptiveMemoryCeilingGB(j, m)
-	if adaptiveCeiling > 0 {
-		// Unknown/stale telemetry retains the physical/explicit execution
-		// ceiling, including while stopping. It cannot release a grown charge.
-		charge = adaptiveCeiling
+	if m != nil && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" &&
+		!j.Spec.Run.Docker && j.Spec.Needs.cpuOnly() && j.Spec.Needs.Memory != "auto" && j.Spec.Needs.HostMemoryGB > 0 {
+		// The native attempt's parent cgroup contains main and all helpers at
+		// hostNeed (declaration plus slack). Its complete reservation already
+		// covers every possible growth forecast. Preserve contradictory actual
+		// observations, but do not invent use beyond kernel containment. This
+		// does not apply to RSS or accelerator memory outside the cgroup.
+		charge = max(ceiling, retainedHostCharge(j), sample.peakGB, sample.gb, sample.footprintGB)
+		if _, fresh := sample.hostGrowth(now); fresh {
+			return charge, max(0, charge-sample.gb)
+		}
+		return charge, charge // Missing/stale data grants no resident credit.
 	}
-	if forecast, fresh := sample.hostGrowth(now); fresh {
-		// An envelope is not proof that current occupancy or observed growth
-		// stayed below it. The static allowance must cover that larger bound too.
-		charge = max(charge, sample.gb+forecast)
+	adaptiveCeiling := adaptiveMemoryCeilingGB(j, m)
+	e := j.MemoryEnvelope
+	bounded := adaptiveCeiling > 0 && e.ProbeFloorGB <= 0
+	charge = max(ceiling, retainedHostCharge(j))
+	if adaptiveCeiling > 0 && !bounded {
+		charge = max(charge, adaptiveCeiling)
+	}
+	if bounded {
+		charge = boundedHostMemoryCharge(j, m, ceiling, adaptiveCeiling, sample, now)
+	}
+	if !bounded && !sample.at.IsZero() && !now.Before(sample.at) && now.Sub(sample.at) < sample.freshFor() {
+		charge = max(charge, sample.hostForecast(now))
 	}
 	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, charge, sample, now)
-	e := j.MemoryEnvelope
-	if e == nil || (e.ProbeFloorGB <= 0 && adaptiveCeiling <= 0) || j.Spec.Needs.Memory != "auto" || !j.Spec.Needs.cpuOnly() || j.State != "running" || !sample.growthObserved || sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= hostMemorySampleFreshFor || !validMemoryValue(sample.gb) || !validMemoryValue(sample.growthGB) {
+	if e == nil || (e.ProbeFloorGB <= 0 && adaptiveCeiling <= 0) || j.Spec.Needs.Memory != "auto" || !j.Spec.Needs.cpuOnly() || j.State != "running" || !sample.growthObserved || sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= sample.freshFor() || !validMemoryValue(sample.gb) || !validMemoryValue(sample.growthGB) {
 		return
 	}
-	forecast := sample.growthGB + sample.rateGB*now.Sub(sample.at).Seconds()
 	floor := e.ProbeFloorGB
-	if adaptiveCeiling > 0 && e.ProbeFloorGB <= 0 {
-		floor = max(floor, ceiling) // Estimates can grow, never earn probe credit.
+	if bounded {
+		floor = charge // Estimates can grow, never earn probe credit.
 	}
-	charge = max(floor, sample.footprintGB+forecast+exploratoryDriftMarginGB(m))
+	charge = floor
+	if !bounded {
+		charge = max(floor, sample.hostForecast(now)+exploratoryDriftMarginGB(m))
+	}
 	charge = boundedProcessMemoryCharge(m, floor, sample.footprintGB, charge)
 	growth = max(0, charge-sample.gb)
 	return
+}
+
+// Two observed delivery intervals allow one missed delivery. Until an interval
+// is measured, preserve the legacy credit window. Receipt of the same cached
+// sample cannot extend validity. Device attribution keeps its separate fence.
+func (s hostMemorySample) freshFor() time.Duration {
+	if s.period > 0 {
+		return 2 * s.period
+	}
+	return hostMemorySampleFreshFor
+}
+
+func (s hostMemorySample) hostForecast(now time.Time) float64 {
+	if s.at.IsZero() || now.Before(s.at) {
+		return 0
+	}
+	return max(s.gb, s.footprintGB) + s.growthGB + s.rateGB*now.Sub(s.at).Seconds()
+}
+
+func (s hostMemorySample) identifiedHostForecast(now time.Time) (float64, bool) {
+	if s.id <= 0 || !s.growthObserved {
+		return 0, false
+	}
+	if _, fresh := s.hostGrowth(now); !fresh {
+		return 0, false
+	}
+	return s.hostForecast(now), true
+}
+
+func boundedHostMemoryCharge(j *Job, m *Machine, ceiling, containment float64, sample hostMemorySample, now time.Time) float64 {
+	retained := retainedHostCharge(j)
+	forecast, fresh := sample.identifiedHostForecast(now)
+	observed := max(sample.peakGB, sample.gb, sample.footprintGB)
+	if c := j.HostMemoryCharge; retained > 0 && c != nil && c.ObservedGB != nil {
+		observed = max(observed, *c.ObservedGB)
+		if fresh && sample.id > c.SampleID {
+			// A genuinely newer observation replaces forecast uncertainty. The
+			// durable observed peak cannot be released, even across restart.
+			retained = *c.ObservedGB
+		}
+	}
+	drift := exploratoryDriftMarginGB(m)
+	return max(ceiling, retained, observed+drift, min(containment, max(sample.retainedGB, forecast)+drift))
+}
+
+// Durable exact-attempt demand and replaceable forecast survive restart without
+// preserving resident credit. Nil ObservedGB means a pre-provenance opaque floor:
+// it cannot safely be attributed to forecast, so it remains conservative.
+type AttemptHostMemoryCharge struct {
+	Execution
+	Session    string   `json:"session"`
+	GiB        float64  `json:"gib"`
+	ObservedGB *float64 `json:"observed_gb,omitempty"`
+	SampleID   int64    `json:"sample_id,omitempty"`
+}
+
+func retainedHostCharge(j *Job) float64 {
+	if c := j.HostMemoryCharge; c != nil && c.ID == j.ID && c.Attempt == j.Attempt && c.Session == j.Session {
+		return c.GiB
+	}
+	return 0
+}
+
+func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
+	for _, j := range q.liveJobs() {
+		m := q.s.Machines[j.Machine]
+		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || adaptiveMemoryCeilingGB(j, m) <= 0 || j.MemoryEnvelope.ProbeFloorGB > 0 {
+			continue
+		}
+		sample := q.hostMemorySamples[machine][jobKey(*j)]
+		charge, _ := jobHostMemoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), sample, now)
+		observed, id := 0.0, int64(0)
+		if old := j.HostMemoryCharge; retainedHostCharge(j) > 0 && old != nil {
+			observed, id = old.GiB, old.SampleID
+			if old.ObservedGB != nil {
+				observed = *old.ObservedGB
+			}
+		}
+		observed = max(observed, sample.peakGB, sample.gb, sample.footprintGB)
+		if _, fresh := sample.identifiedHostForecast(now); fresh {
+			id = max(id, sample.id)
+		}
+		old := j.HostMemoryCharge
+		if charge != retainedHostCharge(j) || old == nil || old.ObservedGB == nil || observed != *old.ObservedGB || id != old.SampleID {
+			j = q.touchJob(j.ID)
+			j.HostMemoryCharge = &AttemptHostMemoryCharge{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, GiB: charge, ObservedGB: &observed, SampleID: id}
+		}
+	}
 }
 
 func (q *Queue) hostJobCharge(j *Job) float64 {

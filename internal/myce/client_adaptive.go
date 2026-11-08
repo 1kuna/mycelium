@@ -14,10 +14,11 @@ import (
 	"time"
 )
 
-// ClientPace learns the cost of an observation. Unchanged observations and
-// failed attempts double the spacing, without an installation-specific ceiling.
+// ClientPace learns the cost of an observation. Unchanged observations double
+// the spacing, without an installation-specific ceiling.
 // A change resets it to the measured service cost. Event times and owner
-// deadlines can shorten healthy spacing; they never override Retry-After.
+// deadlines can shorten healthy spacing. Failures use the current Retry-After
+// or measured service cost, independently of unchanged-observation history.
 // The factors express exponential search and randomized contention avoidance,
 // not a duration calibrated to one installation.
 type ClientPace struct {
@@ -50,9 +51,10 @@ func (p *ClientPace) Delay(now time.Time, event time.Time, failure error, jitter
 	}
 	// Positive jitter never retries before the server's not-before signal.
 	if failure != nil {
+		delay = p.cost
 		var api *HTTPError
-		if errors.As(failure, &api) {
-			delay = max(delay, api.RetryAfter)
+		if errors.As(failure, &api) && api.RetryAfter > 0 {
+			delay = api.RetryAfter
 		}
 		delay = time.Duration(min(float64(math.MaxInt64), float64(delay)*(1+jitter())))
 	} else if !event.IsZero() && event.After(now) {
@@ -60,6 +62,29 @@ func (p *ClientPace) Delay(now time.Time, event time.Time, failure error, jitter
 		delay = min(delay, max(p.cost, event.Sub(now)/2))
 	}
 	return max(delay, time.Nanosecond)
+}
+
+// ServiceDelay bounds a shared observer's next read by measured service cost
+// and the current server not-before signal. Unchanged long-polls can accumulate
+// exponential search history for choosing a protocol hold, but that history is
+// not evidence of pressure and must never become a retry or scalar-read timer.
+func (p *ClientPace) ServiceDelay(failure error, jitter func() float64) time.Duration {
+	cost := max(p.cost, time.Nanosecond)
+	delay := cost
+	if failure != nil {
+		var api *HTTPError
+		if errors.As(failure, &api) {
+			delay = max(delay, api.RetryAfter)
+		}
+		if jitter == nil {
+			jitter = rand.Float64
+		}
+		// Spread contenders over one measured service period, never over the
+		// accumulated failure count. Integer headroom prevents jitter overflow.
+		extra := time.Duration(float64(cost) * min(1, max(0, jitter())))
+		delay += min(max(0, extra), time.Duration(math.MaxInt64)-delay)
+	}
+	return delay
 }
 
 // Seconds is the existing batch-v1 protocol's whole-second, at-most-20s hold.
@@ -86,10 +111,34 @@ func (c Client) clock() Clock {
 	return RealClock{}
 }
 func (c Client) pause(ctx context.Context, d time.Duration) error {
-	if c.Pause != nil {
-		return c.Pause(ctx, d)
+	if err := c.ownerError(ctx); err != nil {
+		return err
 	}
-	return waitStatusPause(ctx, d)
+	if end, ok := ctx.Deadline(); ok {
+		d = min(d, max(0, end.Sub(c.clock().Now())))
+	}
+	var err error
+	if c.Pause != nil {
+		err = c.Pause(ctx, d)
+	} else {
+		err = waitStatusPause(ctx, d)
+	}
+	if err != nil {
+		return err
+	}
+	return c.ownerError(ctx)
+}
+
+func (c Client) ownerError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Pause and owner timers can become ready together. Consult the injected
+	// clock as well, so a shortened pause stops instead of retrying early.
+	if end, ok := ctx.Deadline(); ok && !c.clock().Now().Before(end) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 // An explicit HTTP timeout belongs to the API operation, including overload
@@ -116,19 +165,8 @@ func (c Client) RetryTransient(ctx context.Context, operation func(context.Conte
 	pace := ClientPace{}
 	one := c.WithoutRetries()
 	var last error
-	ownerError := func() error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// A pause timer and owner timer can become ready together. Do not
-		// start another attempt before context cancellation is scheduled.
-		if end, ok := ctx.Deadline(); ok && !c.clock().Now().Before(end) {
-			return context.DeadlineExceeded
-		}
-		return nil
-	}
 	for {
-		if err := ownerError(); err != nil {
+		if err := c.ownerError(ctx); err != nil {
 			if last != nil {
 				return &clientRetryStopped{last, err}
 			}
@@ -142,7 +180,7 @@ func (c Client) RetryTransient(ctx context.Context, operation func(context.Conte
 		if retryTransient(err) {
 			last = err
 		}
-		if stopped := ownerError(); stopped != nil {
+		if stopped := c.ownerError(ctx); stopped != nil {
 			if last != nil {
 				return &clientRetryStopped{last, stopped}
 			}

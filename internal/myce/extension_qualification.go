@@ -81,6 +81,7 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 }
 
 func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationPlan {
+	defer q.bodyPhaseFinish("qualification_plan", q.bodyPhaseStart())
 	if !q.reservationAllows(nil, m) || q.deviceAdmissionBlocked(m) || !q.hostLaunchAllowed(m, m.Session) {
 		return nil
 	}

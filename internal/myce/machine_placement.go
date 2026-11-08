@@ -394,6 +394,7 @@ func allocationMachine(m *Machine, devices []string) *Machine {
 }
 
 func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, progresses []attemptProgress, recovering bool, reply *Reply) {
+	defer q.bodyPhaseFinish("placement", q.bodyPhaseStart())
 	seen := map[attemptKey]bool{}
 	cleanup := false
 	for i := range reports {
