@@ -153,17 +153,18 @@ type ServiceConfig struct {
 	MemoryMax             string         `json:"memory_max"`
 	TasksMax              string         `json:"tasks_max"`
 
-	RequireMemoryCeilings bool    `json:"require_memory_ceilings"`
-	RequireMountedNAS     bool    `json:"require_mounted_nas"`
-	Force                 bool    `json:"-"`
-	CPUReserveCores       int     `json:"cpu_reserve_cores"`
-	CPUBudgetCores        int     `json:"cpu_budget_cores"`
-	HostMemoryBudgetGB    float64 `json:"host_memory_budget_gb"`
-	MemoryCeilingSlackGB  float64 `json:"memory_ceiling_slack_gb"`
-	MemorySwapMaxBytes    int64   `json:"memory_swap_max_bytes"`
-	GPUTelemetryHelper    string  `json:"gpu_telemetry_helper,omitempty"`
-	AllowDeviceless       bool    `json:"allow_deviceless"`
-	Device                string  `json:"device"`
+	RequireMemoryCeilings    bool    `json:"require_memory_ceilings"`
+	RequireMountedNAS        bool    `json:"require_mounted_nas"`
+	Force                    bool    `json:"-"`
+	CPUReserveCores          int     `json:"cpu_reserve_cores"`
+	CPUBudgetCores           int     `json:"cpu_budget_cores"`
+	HostMemoryBudgetGB       float64 `json:"host_memory_budget_gb"`
+	HostMemoryBudgetMeasured bool    `json:"host_memory_budget_measured,omitempty"`
+	MemoryCeilingSlackGB     float64 `json:"memory_ceiling_slack_gb"`
+	MemorySwapMaxBytes       int64   `json:"memory_swap_max_bytes"`
+	GPUTelemetryHelper       string  `json:"gpu_telemetry_helper,omitempty"`
+	AllowDeviceless          bool    `json:"allow_deviceless"`
+	Device                   string  `json:"device"`
 
 	NativeReadRoots    []string `json:"native_read_roots"`
 	NativeExecuteRoots []string `json:"native_execute_roots"`
@@ -906,6 +907,9 @@ func (c ServiceConfig) Args() []string {
 			args = append(args, "--joining-file", c.JoiningFile)
 		} else if c.EnvironmentFile == "" {
 			args = append(args, "--queue", c.Queue)
+		}
+		if c.HostMemoryBudgetMeasured {
+			args = append(args, "--host-memory-budget-measured")
 		}
 		args = append(args, "--host-id", c.HostID, "--reserve-host-memory-gb", strconv.FormatFloat(c.ReserveHostMemoryGB, 'f', -1, 64), "--heartbeat", c.Heartbeat.String())
 		if c.RequireMemoryCeilings {

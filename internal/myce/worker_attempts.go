@@ -846,7 +846,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 	if why != "" || usedCores > cores {
 		return refuseAdmission("aggregate_cpu_allowance", "cores", float64(usedCores), float64(cores), why != "")
 	}
-	if w.Machine.HostMemoryBudgetGB > 0 && usedRAM > w.Machine.HostMemoryBudgetGB {
+	if (w.Machine.HostMemoryBudgetGB > 0 || w.Machine.HostMemoryBudgetMeasured) && usedRAM > w.Machine.HostMemoryBudgetGB {
 		return refuseAdmission("aggregate_host_allowance", "GiB", usedRAM, w.Machine.HostMemoryBudgetGB, false)
 	}
 	if err := w.checkHostMemoryBudget(next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB); err != nil {
@@ -1258,6 +1258,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 
 			// Refresh memory together after inventory, then age through the reads.
 			w.sampleHeartbeatMemory(ctx, &m, jobs, reports, actors)
+			if m.MemoryObservation != nil {
+				m.MemoryObservation.Quiescent = !recovering && !leaving && len(actors) == 0 && len(modelReports) == 0 && environments.cores() == 0 && !hostPreparing(&m)
+			}
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
 			rt.mu.Lock()
 			// Replaced, never mutated: model loads share this exact-attempt
@@ -1305,6 +1308,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				}
 				if reply.HostMemoryBudget != nil {
 					w.Machine.HostMemoryBudgetGB = reply.HostMemoryBudget.GiB
+					w.Machine.HostMemoryBudgetMeasured = reply.HostMemoryBudget.Measured
 				}
 				fresh = false
 				qualificationWorker := w

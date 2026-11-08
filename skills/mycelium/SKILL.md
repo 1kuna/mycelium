@@ -49,6 +49,14 @@ pressure, exhausted measured headroom, the configured host allowance and
 explicit limits still stop growth. Linux retains a physical/allowance kernel
 ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
 shared-page credit. Missing/stale telemetry protects the execution ceiling.
+On releases supporting opt-in measured host allowances, machine JSON
+`host_memory_derivation` explains the qualified idle baseline, protected reserve
+and effective allowance, or the existing authored fallback while evidence is
+unknown. `external_memory.quiescent_v1` reports qualified samples and observed
+idle windows; legacy RSS-residual peaks cannot establish that ownership or
+coverage. A derived zero is exhausted capacity. Keep the same waiting job;
+host configuration and mode changes belong to the maintenance owner. See
+[host allowances](../../docs/operations.md#host-ram-admission-and-ceilings).
 `memory_envelope.enforcement` names the acknowledged behavior; older queues or
 workers retain the previous estimate-sized ceiling. From the next release, cold
 CPU probes also use the adaptive guard, so a small residual admission envelope

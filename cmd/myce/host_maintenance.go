@@ -29,6 +29,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	timeout := f.Duration("timeout", 30*time.Second, "bounded wait; timeout never releases custody")
 	cpuBudget := f.Int("cpu-budget-cores", 0, "queue-owned logical CPU allowance; zero uses detected capacity minus reserve")
 	budget := f.Float64("memory-budget-gb", 0, "queue-owned host RAM allowance; requires drained/disabled host")
+	measured := f.Bool("memory-budget-measured", false, "derive RAM allowance from qualified idle observations; retain authored fallback")
 	dryRun := f.Bool("dry-run", false, "suggest a measured RAM budget without changing policy")
 	headroom := f.Float64("headroom-gb", 0, "extra RAM headroom for future external peaks (GiB)")
 	queueOverhead := f.Float64("queue-overhead-gb", 0, "additional queue RAM reserve, if not already included in measurements (GiB)")
@@ -85,6 +86,9 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		if v.Name == "memory-budget-gb" {
 			request.MemoryBudgetGB = budget
 		}
+		if v.Name == "memory-budget-measured" {
+			request.MemoryBudgetMeasured = measured
+		}
 	})
 	if action == "profile" {
 		if !sharedSet || *shared && (!reserveSet || *reserve <= 0) || !*shared && reserveSet {
@@ -103,13 +107,13 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if request.LastResort != nil && action != "placement" {
 		return errors.New("--last-resort requires placement")
 	}
-	if action == "status" && (request.MemoryBudgetGB != nil || request.CPUBudgetCores != nil) {
+	if action == "status" && (request.MemoryBudgetGB != nil || request.MemoryBudgetMeasured != nil || request.CPUBudgetCores != nil) {
 		return errors.New("status cannot change host policy")
 	}
-	if *dryRun && (action != "budget" || request.MemoryBudgetGB != nil || request.CPUBudgetCores != nil) {
+	if *dryRun && (action != "budget" || request.MemoryBudgetGB != nil || request.MemoryBudgetMeasured != nil || request.CPUBudgetCores != nil) {
 		return errors.New("--dry-run requires budget without explicit policy changes")
 	}
-	if action == "budget" && !*dryRun && request.MemoryBudgetGB == nil && request.CPUBudgetCores == nil {
+	if action == "budget" && !*dryRun && request.MemoryBudgetGB == nil && request.MemoryBudgetMeasured == nil && request.CPUBudgetCores == nil {
 		return errors.New("budget requires --memory-budget-gb GiB or --cpu-budget-cores N")
 	}
 	c, err := authority.client()

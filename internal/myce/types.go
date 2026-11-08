@@ -606,65 +606,67 @@ type Machine struct {
 	SharedInputEvidence *SharedInputEvidence `json:"shared_input_evidence,omitempty"`
 	SharedInputCache    *SharedInputCapacity `json:"shared_input_cache,omitempty"`
 
-	Capabilities                []string            `json:"capabilities,omitempty"`
-	NativeIsolationWarning      string              `json:"native_isolation_warning,omitempty"`
-	MaxJobs                     int                 `json:"max_jobs,omitempty"`
-	AdmissionReason             string              `json:"admission_reason,omitempty"`
-	FileTransferError           string              `json:"file_transfer_error,omitempty"`
-	FaultMonitorError           string              `json:"fault_monitor_error,omitempty"`
-	CapabilityProfile           *CapabilityProfile  `json:"capability_profile,omitempty"`
-	CPUExtensionFingerprint     string              `json:"cpu_extension_fingerprint,omitempty"`
-	ExtensionFingerprint        string              `json:"extension_fingerprint,omitempty"`
-	ExtensionReports            []ExtensionReport   `json:"extension_reports,omitempty"`
-	HostMemoryAllowanceBytes    int64               `json:"memory_allowance_bytes,omitempty"`
-	HostMemoryQualification     string              `json:"memory_allowance_qualification,omitempty"`
-	HostMemoryPolicyMismatch    bool                `json:"host_memory_policy_mismatch,omitempty"`
-	EffectiveHostMemoryBudgetGB float64             `json:"effective_host_memory_budget_gb,omitempty"`
-	HostMemoryInUseGB           float64             `json:"host_memory_in_use_gb,omitempty"`
-	hostBudgetGB                float64             // Effective shared-host queue allowance; compared against every device report.
-	modelReservationDebtGB      float64             // Reservation deficit hidden by clamping scheduler free GPU memory to zero.
-	hostReservationDebtGB       float64             // Same deficit for the shared host allowance.
-	MemoryEnforcement           string              `json:"memory_enforcement,omitempty"`
-	HostMemoryBudgetGB          float64             `json:"host_memory_budget_gb,omitempty"`
-	MemoryCeilingSlackGB        float64             `json:"memory_ceiling_slack_gb,omitempty"`
-	DockerCleanup               string              `json:"docker_cleanup,omitempty"`
-	Disabled                    string              `json:"disabled,omitempty"`    // Status-only queue maintenance projection.
-	LastResort                  bool                `json:"last_resort,omitempty"` // Status-only queue placement policy.
-	HostID                      string              `json:"host_id,omitempty"`
-	HostAvailableMemoryGB       float64             `json:"host_available_memory_gb"`
-	FreeHostMemoryGB            float64             `json:"free_host_memory_gb"`
-	HostMemoryMeasured          bool                `json:"host_memory_measured,omitempty"`
-	HostMemoryError             string              `json:"host_memory_error,omitempty"`
-	UnifiedMemory               bool                `json:"unified_memory,omitempty"`
-	MemoryUsedGB                float64             `json:"memory_used_gb"`
-	TotalMemoryGB               float64             `json:"total_memory_gb"`
-	ReservedMemoryGB            float64             `json:"reserved_memory_gb"`
-	Device                      string              `json:"device,omitempty"`
-	EnvironmentBuilder          bool                `json:"environment_builder,omitempty"`
-	EnvironmentReports          []EnvironmentReport `json:"environment_reports,omitempty"`
-	EnvironmentBuildSeconds     map[string]float64  `json:"environment_build_seconds,omitempty"`
-	ModelCopySeconds            map[string]float64  `json:"model_copy_seconds,omitempty"`
-	CopyReports                 []CopyReport        `json:"copy_reports,omitempty"`
-	CopyBytesPerSecond          float64             `json:"copy_bytes_per_second,omitempty"`
-	ApprovedModels              map[string]string   `json:"approved_models,omitempty"`
-	CachedModels                []string            `json:"cached_models,omitempty"`
-	CacheFreeBytes              int64               `json:"cache_free_bytes"`
-	CacheError                  string              `json:"cache_error,omitempty"`
-	MemoryError                 string              `json:"memory_error,omitempty"`
-	MemoryMeasured              bool                `json:"memory_measured,omitempty"`
-	ModelConfigHash             string              `json:"model_config_hash,omitempty"`
-	ModelURL                    string              `json:"model_url,omitempty"`
-	UnavailableRoots            []UnavailableRoot   `json:"unavailable_roots,omitempty"`
-	CheckpointUnavailable       bool                `json:"checkpoint_unavailable"`
-	ID                          string              `json:"id"`
-	Session                     string              `json:"session"`
-	GPU                         string              `json:"gpu"`
-	FreeMemoryGB                float64             `json:"free_memory_gb"`
-	Models                      []string            `json:"models,omitempty"`
-	Environments                []string            `json:"environments,omitempty"`
-	LastSeen                    time.Time           `json:"last_seen"`
-	Leaving                     bool                `json:"leaving"`
-	Gone                        bool                `json:"gone"`
+	Capabilities                []string              `json:"capabilities,omitempty"`
+	NativeIsolationWarning      string                `json:"native_isolation_warning,omitempty"`
+	MaxJobs                     int                   `json:"max_jobs,omitempty"`
+	AdmissionReason             string                `json:"admission_reason,omitempty"`
+	FileTransferError           string                `json:"file_transfer_error,omitempty"`
+	FaultMonitorError           string                `json:"fault_monitor_error,omitempty"`
+	CapabilityProfile           *CapabilityProfile    `json:"capability_profile,omitempty"`
+	CPUExtensionFingerprint     string                `json:"cpu_extension_fingerprint,omitempty"`
+	ExtensionFingerprint        string                `json:"extension_fingerprint,omitempty"`
+	ExtensionReports            []ExtensionReport     `json:"extension_reports,omitempty"`
+	HostMemoryAllowanceBytes    int64                 `json:"memory_allowance_bytes,omitempty"`
+	HostMemoryQualification     string                `json:"memory_allowance_qualification,omitempty"`
+	HostMemoryPolicyMismatch    bool                  `json:"host_memory_policy_mismatch,omitempty"`
+	HostMemoryBudgetMeasured    bool                  `json:"host_memory_budget_measured,omitempty"`
+	HostMemoryDerivation        *HostMemoryDerivation `json:"host_memory_derivation,omitempty"`
+	EffectiveHostMemoryBudgetGB float64               `json:"effective_host_memory_budget_gb,omitempty"`
+	HostMemoryInUseGB           float64               `json:"host_memory_in_use_gb,omitempty"`
+	hostBudgetGB                float64               // Effective shared-host queue allowance; compared against every device report.
+	modelReservationDebtGB      float64               // Reservation deficit hidden by clamping scheduler free GPU memory to zero.
+	hostReservationDebtGB       float64               // Same deficit for the shared host allowance.
+	MemoryEnforcement           string                `json:"memory_enforcement,omitempty"`
+	HostMemoryBudgetGB          float64               `json:"host_memory_budget_gb,omitempty"`
+	MemoryCeilingSlackGB        float64               `json:"memory_ceiling_slack_gb,omitempty"`
+	DockerCleanup               string                `json:"docker_cleanup,omitempty"`
+	Disabled                    string                `json:"disabled,omitempty"`    // Status-only queue maintenance projection.
+	LastResort                  bool                  `json:"last_resort,omitempty"` // Status-only queue placement policy.
+	HostID                      string                `json:"host_id,omitempty"`
+	HostAvailableMemoryGB       float64               `json:"host_available_memory_gb"`
+	FreeHostMemoryGB            float64               `json:"free_host_memory_gb"`
+	HostMemoryMeasured          bool                  `json:"host_memory_measured,omitempty"`
+	HostMemoryError             string                `json:"host_memory_error,omitempty"`
+	UnifiedMemory               bool                  `json:"unified_memory,omitempty"`
+	MemoryUsedGB                float64               `json:"memory_used_gb"`
+	TotalMemoryGB               float64               `json:"total_memory_gb"`
+	ReservedMemoryGB            float64               `json:"reserved_memory_gb"`
+	Device                      string                `json:"device,omitempty"`
+	EnvironmentBuilder          bool                  `json:"environment_builder,omitempty"`
+	EnvironmentReports          []EnvironmentReport   `json:"environment_reports,omitempty"`
+	EnvironmentBuildSeconds     map[string]float64    `json:"environment_build_seconds,omitempty"`
+	ModelCopySeconds            map[string]float64    `json:"model_copy_seconds,omitempty"`
+	CopyReports                 []CopyReport          `json:"copy_reports,omitempty"`
+	CopyBytesPerSecond          float64               `json:"copy_bytes_per_second,omitempty"`
+	ApprovedModels              map[string]string     `json:"approved_models,omitempty"`
+	CachedModels                []string              `json:"cached_models,omitempty"`
+	CacheFreeBytes              int64                 `json:"cache_free_bytes"`
+	CacheError                  string                `json:"cache_error,omitempty"`
+	MemoryError                 string                `json:"memory_error,omitempty"`
+	MemoryMeasured              bool                  `json:"memory_measured,omitempty"`
+	ModelConfigHash             string                `json:"model_config_hash,omitempty"`
+	ModelURL                    string                `json:"model_url,omitempty"`
+	UnavailableRoots            []UnavailableRoot     `json:"unavailable_roots,omitempty"`
+	CheckpointUnavailable       bool                  `json:"checkpoint_unavailable"`
+	ID                          string                `json:"id"`
+	Session                     string                `json:"session"`
+	GPU                         string                `json:"gpu"`
+	FreeMemoryGB                float64               `json:"free_memory_gb"`
+	Models                      []string              `json:"models,omitempty"`
+	Environments                []string              `json:"environments,omitempty"`
+	LastSeen                    time.Time             `json:"last_seen"`
+	Leaving                     bool                  `json:"leaving"`
+	Gone                        bool                  `json:"gone"`
 
 	// Explicit per-local_source tri-state; omission never authorizes use.
 	ModelApprovalStates map[string]ModelApprovalState `json:"model_approval_states,omitempty"`

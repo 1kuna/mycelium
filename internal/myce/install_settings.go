@@ -204,6 +204,12 @@ func InstallSettings() []InstallSetting {
 			return err
 		}),
 		installSetting("memory-ceiling-slack-gb", "MemoryCeilingSlackGB", "extra GiB per declared RAM ceiling", func(c *ServiceConfig) *float64 { return &c.MemoryCeilingSlackGB }, installNonnegative),
+		installContext(installSetting("host-memory-budget-measured", "HostMemoryBudgetMeasured", "derive RAM allowance from qualified idle observations; retain positive authored fallback", func(c *ServiceConfig) *bool { return &c.HostMemoryBudgetMeasured }, installAny[bool]), func(c ServiceConfig) error {
+			if c.HostMemoryBudgetMeasured && c.HostMemoryBudgetGB <= 0 {
+				return errors.New("measured host allowance requires a positive authored fallback")
+			}
+			return nil
+		}),
 		installSetting("memory-swap-max-bytes", "MemorySwapMaxBytes", "swap allowance per ceiling", func(c *ServiceConfig) *int64 { return &c.MemorySwapMaxBytes }, func(v int64) error {
 			if v < 0 {
 				return errors.New("must be nonnegative")

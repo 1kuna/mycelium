@@ -1343,6 +1343,16 @@ See [adaptive retention](retention.md) for budgets and dependency protection.
 
 ### Suggesting a host allowance
 
+From the measured-allowance release, `external_memory.quiescent_v1` separately
+reports physical used RAM when both local and queue custody prove an idle host.
+It subtracts no RSS. Its `24h`/`7d` sample and `windows` counts expose actual
+learning opportunities; legacy history has no such provenance, so cannot tell
+how many idle windows occurred. Missing qualified history remains unknown.
+Machine `host_memory_derivation` names the opt-in allowance's evidence or authored
+fallback. See [measured host allowances](operations.md#host-ram-admission-and-ceilings).
+The legacy suggestion below continues to be a diagnostic estimate; it does not
+activate measured policy or convert residual peaks into qualified baselines.
+
 ```sh
 myce host budget HOST --dry-run
 myce host budget HOST --dry-run --headroom-gb 4 --queue-overhead-gb 2

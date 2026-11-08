@@ -1816,6 +1816,52 @@ including child cgroups; an elapsed stop deadline cannot release memory.
   Both cards receive it through checkin and must agree before new starts.
   Retain all attempt/model charges, slack and unconfirmed releases.
 
+- `--host-memory-budget-measured`: opt in to a measured allowance (next
+  supporting queue and worker release). Keep a positive `--host-memory-budget-gb`
+  as the authored fallback. Zero keeps its legacy uncapped meaning when this
+  mode is off. On an existing host, queue policy remains authoritative: drain
+  and confirm idle custody, then use
+  `myce host budget HOST --memory-budget-measured=true` to retain the existing
+  positive budget as fallback. `--memory-budget-measured=false` restores that
+  fixed fallback. A numeric `--memory-budget-gb` sets a fixed budget unless
+  measured mode is also explicitly selected in the same command.
+
+  Update saved configuration only through the supported installer overlay:
+  `myce install worker --config WORKER_CONFIG --host-memory-budget-gb FALLBACK_GIB --host-memory-budget-measured=true --dry-run`,
+  inspect the plan, then repeat without `--dry-run` during an authorized idle
+  restart. Preserve version pins, reserves, device maintenance and quarantine.
+  Changing saved configuration alone never overrides existing queue policy.
+
+  The measured allowance is detected physical RAM minus the seven-day maximum
+  qualified idle physical usage minus a reserve. The reserve is the larger of
+  the worker's existing host reserve and observed idle peak-to-typical variation.
+  Raw availability already excludes unavailable OS pages: Linux `MemAvailable`
+  preserves kernel low watermarks; Darwin excludes active, wired and compressed
+  pages. Idle usage includes Mycelium control overhead, so RSS subtraction cannot
+  double-credit shared pages. This deliberately leaves observed burst room
+  unused, while preserving the operator's protection floor and live pressure,
+  growth, execution-ceiling and release-custody guards. It does not bound unseen
+  future external demand or make sampled Darwin containment a kernel guarantee.
+
+  Only new `external_memory.quiescent_v1` history qualifies. The worker must
+  report no local attempts (including cleanup), models or preparation, and the
+  queue must reconcile zero whole-host obligations and no live sibling worker.
+  Existing RSS-residual history cannot establish ownership of GPU/driver pages,
+  detached processes or multiply counted shared pages; it remains diagnostic.
+  Its old peaks and histograms cannot reconstruct historical idle-window counts.
+  The new `24h`/`7d` summaries report qualified sample and observed window counts;
+  a window starts on an observed idle transition or after lost contact, not at
+  every heartbeat. Their absence means unknown coverage, not no historical idle.
+
+  While qualified history or the current versioned physical observation is
+  unavailable (including history expiry), the existing authored budget remains
+  active; learning never requires stopping admission to force an idle window.
+  `host_memory_derivation` in machine JSON names `authored_fallback` and its
+  reason, or `quiescent_v1` with baseline, reserve, allowance and coverage.
+  A genuinely derived zero means exhausted capacity, never uncapped. Queue and
+  worker must acknowledge the effective allowance before new starts. Existing
+  work retains custody if a new observation tightens the allowance.
+
 - `--memory-ceiling-slack-gb`: extra memory per declared allocation; default
   `0.125` GiB (128 MiB). Slack counts against the aggregate budget. Unified
   machines enforce `memory_gb + host_memory_gb + slack` once; dedicated cards
