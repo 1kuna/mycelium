@@ -1172,10 +1172,10 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) (sta
 		t.mu.Lock()
 		t.detail.BytesCopied = offset
 		t.mu.Unlock()
-		output, input = sharedInputWriter{ctx, f}, sharedInputReader{ctx, res.Body}
+		output, input = sharedInputWriter{ctx, f}, sharedInputReader{ctx, res.Body, "store"}
 	}
 	n, copyErr := io.Copy(output, io.LimitReader(contextReader{ctx, input}, ref.SizeBytes-offset+1))
-	copyErr = tracedSharedError(ctx, copyErr)
+	copyErr = tracedSharedCopyError(ctx, copyErr)
 	traceSharedInput(ctx, "sync", "cache")
 	err = errors.Join(copyErr, tracedSharedError(ctx, f.Sync()))
 	if err != nil {

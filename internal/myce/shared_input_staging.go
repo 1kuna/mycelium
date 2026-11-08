@@ -76,6 +76,9 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 		b.withdrawn = true
 		cancel()
 		c.mu.Unlock()
+		if c.afterStageCancel != nil {
+			c.afterStageCancel()
+		}
 	}()
 	progress := func() { b.progress.Store(c.cache.Clock.Now().UnixNano()) }
 	progress()
@@ -136,7 +139,7 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 			return publish(stage)
 		case <-tick.C:
 			if c.cache.Clock.Now().Sub(time.Unix(0, b.progress.Load())) >= checkpointAvailabilityStallBudget {
-				return errCheckpointIOTimeout
+				return tracedSharedError(ctx, errCheckpointIOTimeout)
 			}
 		}
 	}

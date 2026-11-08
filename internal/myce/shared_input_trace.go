@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-var stagingStages = strings.Fields("prepare admission resolve open stat clone read write sync close verify permissions manifest metadata publish headers")
+var stagingStages = strings.Fields("prepare admission resolve open stat clone read write sync close verify permissions manifest metadata publish headers extract")
 
 type sharedInputTraceKey struct{}
 
@@ -55,13 +55,31 @@ func tracedSharedError(ctx context.Context, err error) error {
 	return err
 }
 
+// io.Copy writes a Read's returned bytes before returning its accompanying error.
+// Preserve that read boundary, but freeze its final committed byte count before
+// sync/close can move the active operation. Never mutate an earlier snapshot.
+func tracedSharedCopyError(ctx context.Context, err error) error {
+	err = tracedSharedError(ctx, err)
+	var se *stagingError
+	t, ok := ctx.Value(sharedInputTraceKey{}).(*sharedInputTrace)
+	if !ok || !errors.As(err, &se) {
+		return err
+	}
+	detail := se.detail
+	t.mu.Lock()
+	detail.BytesCopied, detail.ExpectedBytes = t.detail.BytesCopied, t.detail.ExpectedBytes
+	t.mu.Unlock()
+	return &stagingError{detail, err}
+}
+
 type sharedInputReader struct {
-	ctx    context.Context
-	reader io.Reader
+	ctx       context.Context
+	reader    io.Reader
+	pathClass string
 }
 
 func (r sharedInputReader) Read(p []byte) (int, error) {
-	traceSharedInput(r.ctx, "read", "source")
+	traceSharedInput(r.ctx, "read", r.pathClass)
 	n, err := r.reader.Read(p)
 	if err == io.EOF {
 		return n, err

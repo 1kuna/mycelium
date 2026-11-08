@@ -23,19 +23,20 @@ import (
 // Reuse the environment cache's OS locking and state-root initialization. Data
 // entries have their own integrity records and no environment/catalog lifecycle.
 type SharedInputCache struct {
-	cache         EnvironmentCache
-	Client        Client
-	mu            sync.Mutex
-	verified      map[string]string
-	staging       map[*sharedInputStaging]struct{}
-	beforeStage   func(context.Context)
-	resolveNAS    func(root, relative string) (string, error)
-	beforePublish func()
-	beforeVerify  func() // Test hook: a full re-hash of a cached entry starts.
-	hits          uint64
-	misses        uint64
-	nasBytes      uint64
-	capacity      *SharedInputCapacity
+	cache            EnvironmentCache
+	Client           Client
+	mu               sync.Mutex
+	verified         map[string]string
+	staging          map[*sharedInputStaging]struct{}
+	beforeStage      func(context.Context)
+	resolveNAS       func(root, relative string) (string, error)
+	beforePublish    func()
+	beforeVerify     func() // Test hook: a full re-hash of a cached entry starts.
+	afterStageCancel func() // Test hook: withdrawal cancellation has reached its writer.
+	hits             uint64
+	misses           uint64
+	nasBytes         uint64
+	capacity         *SharedInputCapacity
 }
 
 // sharedVerifiedRecord holds the metadata signature (size, mode, mtime, inode
@@ -357,13 +358,16 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 		if e != nil {
 			return e
 		}
+		traceSharedInput(ctx, "verify", "source")
 		if e = verifyFile(ctx, manifestPath, s.ref()); e != nil {
 			return e
 		}
+		traceSharedInput(ctx, "open", "source")
 		f, e := os.Open(manifestPath)
 		if e != nil {
 			return e
 		}
+		traceSharedInput(ctx, "read", "source")
 		b, e := io.ReadAll(io.LimitReader(contextReader{ctx, f}, s.SizeBytes+1))
 		e = errors.Join(e, f.Close())
 		if e != nil {
@@ -373,6 +377,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 		if int64(len(b)) != s.SizeBytes || digestBytes(b) != s.SHA256 {
 			return errors.New("shared manifest changed")
 		}
+		traceSharedInput(ctx, "manifest", "source")
 		if e = json.Unmarshal(b, &s.Manifest); e != nil {
 			return e
 		}
@@ -430,9 +435,11 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			}
 		}
 		if s.Archive != "" {
+			traceSharedInput(ctx, "extract", "cache")
 			if err = unpackSharedArchive(ctx, target, dst, s.Archive, s.UnpackedBytes); err != nil {
 				return err
 			}
+			traceSharedInput(ctx, "metadata", "cache")
 			if err = os.Remove(target); err != nil {
 				return err
 			}
@@ -525,8 +532,8 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) (st
 			return err
 		}
 		// Neither ReaderFrom nor WriteTo can bypass the operation and byte recorder.
-		_, err = io.CopyN(sharedInputWriter{ctx, out}, contextReader{ctx, sharedInputReader{ctx, in}}, ref.SizeBytes)
-		err = tracedSharedError(ctx, err)
+		_, err = io.CopyN(sharedInputWriter{ctx, out}, contextReader{ctx, sharedInputReader{ctx, in, "source"}}, ref.SizeBytes)
+		err = tracedSharedCopyError(ctx, err)
 		traceSharedInput(ctx, "sync", "cache")
 		err = errors.Join(err, tracedSharedError(ctx, out.Sync()))
 		traceSharedInput(ctx, "close", "cache")
