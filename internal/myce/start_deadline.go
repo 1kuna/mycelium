@@ -129,15 +129,32 @@ func (q *Queue) maintainStartDeadlines() {
 		if j.Spec.Priority == "production" && !terminal(j.State) && (j.Spec.StartBy != nil || dependencyReady(j)) {
 			initializeStartDeadline(j, j.Queued)
 		}
-		if j.State == "queued" && !callerStartDeadline(j) {
-			waiting, ready := q.queuedCapacityStatus(j)
-			if j.StartCapacityWaiting && ready && j.Spec.StartBy != nil {
+	}
+	// Resolve the backlog in one immutable planning pass. Deadline transitions
+	// below can change jobs, so discard this evidence cache before applying them.
+	type capacityStatus struct{ waiting, ready bool }
+	capacity := func() map[*Job]capacityStatus {
+		previous := q.memoryPlanning
+		q.memoryPlanning = newMemoryPlanningCache()
+		defer func() { q.memoryPlanning = previous }()
+		status := map[*Job]capacityStatus{}
+		for _, j := range q.liveJobs() {
+			if j.State == "queued" && j.Spec.StartBy != nil && !callerStartDeadline(j) {
+				waiting, ready := q.queuedCapacityStatus(j)
+				status[j] = capacityStatus{waiting, ready}
+			}
+		}
+		return status
+	}()
+	for _, j := range q.liveJobs() {
+		if status, ok := capacity[j]; ok {
+			if j.StartCapacityWaiting && status.ready && j.Spec.StartBy != nil {
 				// Capacity recovered before dispatch. Restore startup time without
 				// hiding a later unavailable/disabled-route diagnosis.
 				deadline := now.Add(j.StartWindow)
 				j.Spec.StartBy = &deadline
 			}
-			j.StartCapacityWaiting = waiting
+			j.StartCapacityWaiting = status.waiting
 		}
 		// Disabled-host rejection is an admission decision, independent of the
 		// relative timeout exemption for logical fan-out capacity waits.
