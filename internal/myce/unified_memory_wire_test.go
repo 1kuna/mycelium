@@ -110,3 +110,25 @@ func TestUnifiedMemoryWireLegacyWithholdsNewWork(t *testing.T) {
 		t.Fatal("negotiated recovery failed to resume sharing", r)
 	}
 }
+
+func TestHostMemorySampleIdentityNegotiation(t *testing.T) {
+	c := Checkin{Machine: Machine{ID: "worker", Session: "session"}, Attempts: []AttemptReport{{CurrentHostMemory: &CurrentHostMemory{SampleID: 123}}}}
+	w := Worker{unifiedMemoryWire: &workerUnifiedMemoryWire{machine: "worker", session: "session", supported: true, probeSupported: true}}
+	if got := w.unifiedMemoryCheckin(c).Attempts[0].CurrentHostMemory.SampleID; got != 0 {
+		t.Fatal("unnegotiated observation identity sent")
+	}
+	w.unifiedMemoryWire.sampleSupported = true
+	if got := w.unifiedMemoryCheckin(c).Attempts[0].CurrentHostMemory.SampleID; got != 123 {
+		t.Fatal("negotiated identity omitted")
+	}
+	if got := legacyUnifiedMemoryCheckin(c).Attempts[0].CurrentHostMemory.SampleID; got != 0 {
+		t.Fatal("strict downgrade retained identity")
+	}
+	if c.Attempts[0].CurrentHostMemory.SampleID != 123 {
+		t.Fatal("wire stripping mutated observation")
+	}
+	c.Machine.Session = "replacement"
+	if got := w.unifiedMemoryCheckin(c).Attempts[0].CurrentHostMemory.SampleID; got != 0 {
+		t.Fatal("replacement inherited negotiation")
+	}
+}

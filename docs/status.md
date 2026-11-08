@@ -1256,8 +1256,14 @@ physical-RAM read and rechecks exact custody afterward. Confirmed local cleanup
 removes an old actor's reservation even before its next heartbeat; stop intent
 and pending cleanup do not.
 Only this current nonreclaimable memory reduces growth;
-reclaimable cache, historical peaks and process RSS do not. Missing or five-second-old
+reclaimable cache, historical peaks and process RSS do not. Missing or expired
 samples retain the full reservation, as do models and unconfirmed release custody.
+From the next release, host sample validity follows twice the longest observed
+exact-attempt sample delivery interval (one missed delivery); the five-second
+legacy window applies until cadence is measured. Only distinct negotiated
+`sample_id` observations train cadence; cached, unidentified repeated and
+out-of-order deliveries keep the original expiry. Missing samples grant no
+resident credit.
 Queue restarts discard current-use credit. macOS uses the conservative fallback
 because its process-group RSS includes shared pages and is not a safe credit.
 Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
@@ -2259,8 +2265,16 @@ exploratory reservations as predictions. Fresh exact-attempt footprint and growt
 same forecast as cold CPU probes, including sample age and measured drift, with
 the resolved estimate as a floor for learned jobs. Cold CPU probes keep their
 known-need floor and use the same physical/allowance execution ceiling.
-Unknown/stale telemetry and stopping attempts
-retain the complete physical/explicit execution ceiling. Darwin RSS can increase
+From the next release (#1048), bounded learned/exploratory estimates keep the
+resolved reservation plus measured growth and drift when telemetry is stale,
+missing or stopping. Exact-attempt `host_memory_charge` retains grown charges
+through smaller/missing reports, queue restarts and unconfirmed release custody;
+observed peaks remain floors. A learned allocation that has not acknowledged
+`Started` also keeps its bounded reservation without requiring telemetry.
+Stale data grants no resident credit. Forecasts cannot exceed containment, but
+actual observations and retained reservations are never lowered to that bound.
+Cold probes still retain their complete ceiling without fresh complete evidence.
+Darwin RSS can increase
 the charge but grants no resident-memory credit because shared pages can appear
 in multiple processes. The reported estimate and the execution ceiling therefore
 serve different purposes. Explicit declarations, member limits and Docker keep
