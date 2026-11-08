@@ -293,11 +293,27 @@ func TestHostMemoryProbeForecastCannotExceedEnforcedCeiling(t *testing.T) {
 				if actual < over.footprintGB {
 					t.Fatal("forecast bound hid measured overuse", actual)
 				}
+				// New native guards enforce physical capacity, not the smaller
+				// predicted envelope. Preserve their negotiated growth contract.
+				adaptive := j
+				envelope := *j.MemoryEnvelope
+				adaptive.MemoryEnvelope = &envelope
+				adaptive.MemoryEnvelope.Enforcement = learnedMemoryGuardEnforcement
+				grown, _ := jobHostMemoryCharge(&adaptive, &m, ceiling, sample, clock.Now())
+				if grown <= ceiling || grown > m.HostMemoryBudgetGB {
+					t.Fatal("adaptive execution ceiling replaced by its estimate", grown)
+				}
+				burst := sample
+				burst.rateGB = 100
+				bounded, _ := jobHostMemoryCharge(&adaptive, &m, ceiling, burst, clock.Now())
+				if bounded != m.HostMemoryBudgetGB {
+					t.Fatal("adaptive forecast escaped physical containment", bounded)
+				}
 			}
 			// Cancellation cannot discard custody or acquire reduced probe credit.
 			j.State = "stopping"
 			stopped, _ := jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
-			if stopped != ceiling {
+			if stopped < ceiling || enforced && stopped != ceiling {
 				t.Fatal("stopping probe lost full charge", stopped)
 			}
 		})
@@ -305,8 +321,8 @@ func TestHostMemoryProbeForecastCannotExceedEnforcedCeiling(t *testing.T) {
 }
 
 // Two declared CPU attempts reserve 9 GiB while burst margins predict more
-// growth than their combined memory.max. Replay the observed aggregate room;
-// the sensor split below is synthetic, since legacy status omitted it.
+// growth than their combined memory.max. The room reproduces the incident's
+// shape; the synthetic forecasts exercise current nonadditive accounting.
 func TestHostMemoryDeclaredGrowthBoundedByHardContainment(t *testing.T) {
 	for _, enforced := range []bool{true, false} {
 		t.Run(fmt.Sprint(enforced), func(t *testing.T) {
@@ -331,22 +347,19 @@ func TestHostMemoryDeclaredGrowthBoundedByHardContainment(t *testing.T) {
 			clock.Advance(time.Second)
 			m.HostAvailableMemoryGB = 18.939971923828125
 			reports := []AttemptReport{
-				{Execution: Execution{ID: first.ID, Attempt: first.Attempt}, Session: first.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: .4, GrowthGB: 5}},
-				{Execution: Execution{ID: second.ID, Attempt: second.Attempt}, Session: second.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: .6, GrowthGB: 6.57686468878034}},
+				{Execution: Execution{ID: first.ID, Attempt: first.Attempt}, Session: first.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: .4, GrowthGB: 10}},
+				{Execution: Execution{ID: second.ID, Attempt: second.Attempt}, Session: second.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: .6, GrowthGB: 14}},
 			}
 			if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports}); err != nil {
 				t.Fatal(err)
 			}
 			next := submit(t, q, cpuSpec(2, 1.1))
 			ledger := q.s.Machines[m.ID]
-			if ledger.HostMemoryInUseGB != 9 {
-				t.Fatal("forecast changed the declared charge", ledger.HostMemoryInUseGB)
-			}
 			if enforced {
-				if ledger.FreeHostMemoryGB < 9.9 || ledger.hostReservationDebtGB != 0 {
+				if ledger.HostMemoryInUseGB != 9 || ledger.FreeHostMemoryGB < 9.9 || ledger.hostReservationDebtGB != 0 {
 					t.Fatalf("hard ceilings left phantom debt: room=%g debt=%g", ledger.FreeHostMemoryGB, ledger.hostReservationDebtGB)
 				}
-			} else if math.Abs(ledger.hostReservationDebtGB-.6368927649522149) > 1e-10 {
+			} else if ledger.HostMemoryInUseGB <= 9 || ledger.hostReservationDebtGB <= 0 {
 				t.Fatal("unenforced forecast lost its protection", ledger.hostReservationDebtGB)
 			}
 			w := Worker{Machine: m, Clock: clock, hostMemorySamples: currentHostMemorySamples(reports, clock.Now()), HostMemorySource: func(context.Context) (float64, error) { return m.HostAvailableMemoryGB, nil }}

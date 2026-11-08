@@ -594,6 +594,8 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 		return charge, charge // Missing/stale data grants no resident credit.
 	}
 	adaptiveCeiling := adaptiveMemoryCeilingGB(j, m)
+	hardCeiling := max(ceiling, adaptiveCeiling)
+	hardContained := j.Spec.Needs.cpuOnly() && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)"
 	e := j.MemoryEnvelope
 	bounded := adaptiveCeiling > 0 && e.ProbeFloorGB <= 0
 	charge = max(ceiling, retainedHostCharge(j))
@@ -614,10 +616,10 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 		charge = max(charge, sample.hostForecast(now))
 	}
 	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, charge, sample, now)
-	if j.Spec.Needs.cpuOnly() && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
+	if hardContained {
 		// Bound burst forecasts by the complete physical execution ceiling,
 		// without assuming sampled residency remains present at admission.
-		growth = min(growth, max(ceiling, adaptiveCeiling))
+		growth = min(growth, hardCeiling)
 	}
 	if e == nil || (e.ProbeFloorGB <= 0 && adaptiveCeiling <= 0) || j.Spec.Needs.Memory != "auto" || !j.Spec.Needs.cpuOnly() || j.State != "running" || !sample.growthObserved || sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= sample.freshFor() || !validMemoryValue(sample.gb) || !validMemoryValue(sample.growthGB) {
 		return
@@ -635,7 +637,7 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	if m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
 		// Adaptive guards use their physical execution ceiling, not the
 		// admission estimate. Retain measured footprint and known floors.
-		charge = max(floor, sample.footprintGB, min(charge, max(ceiling, adaptiveCeiling)))
+		charge = max(floor, sample.gb, sample.footprintGB, min(charge, hardCeiling))
 	}
 	charge = boundedProcessMemoryCharge(m, floor, sample.footprintGB, charge)
 	growth = max(0, charge-sample.gb)

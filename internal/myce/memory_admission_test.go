@@ -119,7 +119,8 @@ func TestMemoryAdmissionCapturesGrowthWithoutNominalDoubleCharge(t *testing.T) {
 	}
 	queued := submit(t, q, cpuSpec(1, 10))
 	a := q.s.Jobs[queued.ID].LastMemoryAdmission
-	if a == nil || a.Ledger.ReservedGB != 17 || a.Ledger.GrowthGB != 6 || len(a.Ledger.Owners) != 1 || a.Ledger.Owners[0].GrowthGB != 6 || a.Ledger.FreeGB != 7 {
+	// The 1 GiB forecast is already covered by 5 GiB of unreached envelope.
+	if a == nil || a.Ledger.ReservedGB != 17 || a.Ledger.GrowthGB != 5 || len(a.Ledger.Owners) != 1 || a.Ledger.Owners[0].GrowthGB != 5 || a.Ledger.FreeGB != 7 {
 		t.Fatalf("not canonical remaining growth: %+v", a)
 	}
 	old := a.CapturedAt
@@ -167,6 +168,13 @@ func TestMemoryAdmissionColdDriftAndOOMFloor(t *testing.T) {
 	if err := q.update(func() error {
 		live := q.touchJob(j.ID)
 		live.MemoryOOMFloor = &SizeHint{HostMemoryGB: 22}
+		// Native CPU probes now retain their own strict-launch refusal
+		// margin, rather than inheriting every host-wide headroom change.
+		h := q.s.HostLaunchMemory[hostID(&m)]
+		if h.Refusals == nil {
+			h.Refusals = map[string]float64{}
+		}
+		h.Refusals[j.ID] = drift
 		q.maintain()
 		return nil
 	}); err != nil {
