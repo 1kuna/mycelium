@@ -117,7 +117,7 @@ func waitStatusPause(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// IsTLSIdentityError identifies permanent TLS identity/handshake failures without
+// IsTLSIdentityError identifies permanent TLS identity/protocol failures without
 // exposing certificate, endpoint or credential diagnostics to notifications.
 func IsTLSIdentityError(err error) bool {
 	var verification *tls.CertificateVerificationError
@@ -125,10 +125,13 @@ func IsTLSIdentityError(err error) bool {
 	if errors.Is(err, errJoiningIdentity) || errors.As(err, &verification) || errors.As(err, &record) {
 		return true
 	}
-	// Go also emits unexported TLS alert/handshake errors. Network timeouts
-	// (including net/http's TLS handshake timeout) retain their retry policy.
+	// A TLS prefix alone is not identity evidence: a restarting listener can
+	// interrupt a handshake or send internal_error without changing its identity.
+	// Go's peer certificate alerts are unexported, so retain those explicit
+	// refusals alongside the typed local verification and invalid-record errors.
 	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
-		if strings.HasPrefix(cause.Error(), "tls:") || strings.HasPrefix(cause.Error(), "remote error: tls:") {
+		message := strings.TrimPrefix(cause.Error(), "remote error: ")
+		if strings.HasPrefix(message, "tls: ") && (strings.Contains(message, "certificate") || message == "tls: unknown PSK identity" || message == "tls: unrecognized name") {
 			return true
 		}
 	}
