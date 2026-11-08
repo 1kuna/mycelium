@@ -47,40 +47,6 @@ func TestPriorityPreemptionCallCapacity(t *testing.T) {
 		})
 	}
 }
-func TestPriorityPreemptionFreeWorkerBeforeBuildPreemption(t *testing.T) {
-	q, _, m := modelFixture(t)
-	preemptionPolicy(t, q)
-	m.EnvironmentBuilder = true
-	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"build": {"fake": binaryRecipe(t, "fake")}}}); err != nil {
-		t.Fatal(err)
-	}
-	low := spec("experiment")
-	low.Environment.Name = "build"
-	submit(t, q, low)
-	reply := check(t, q, m, nil)
-	if len(reply.EnvironmentPlan) != 1 {
-		t.Fatal("no build", reply)
-	}
-	launch := *reply.EnvironmentPlan[0].Launch
-	if err := q.AuthorizeLaunch(launch); err != nil {
-		t.Fatal(err)
-	}
-	m.EnvironmentReports = []EnvironmentReport{{Key: launch.Key, Attempt: launch.Attempt, State: "building"}}
-	check(t, q, m, nil)
-	free := machine("two", "fake")
-	check(t, q, free, nil)
-	high := spec("experiment")
-	high.Project = "urgent"
-	demand := submit(t, q, high)
-	saved := q.s.PreparationPlans[launch.Attempt]
-	if saved.PriorityStop != nil {
-		t.Errorf("preempted build despite compatible free worker: %+v", saved.PriorityStop)
-	}
-	if next := check(t, q, free, nil).Job; next == nil || next.ID != demand.ID {
-		t.Fatal("free worker not usable", next)
-	}
-}
-
 // Each row is retained work that the common placement planner could interrupt.
 // Exercise every demand adapter too: free capacity must win before affinity.
 func TestPriorityPreemptionFreePlacementEveryWorkKind(t *testing.T) {

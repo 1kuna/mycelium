@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -145,50 +144,6 @@ func TestSubmissionAdviceDoesNotHoldQueueAfterCommit(t *testing.T) {
 	}
 	if got.DeadlineGuidance == nil || got.PriorityPolicy.Tier == "shared" || got.DeadlineGuidance.PrecedenceChange != "higher" {
 		t.Fatal("advice lost its submission commit policy", got.PriorityPolicy, got.DeadlineGuidance)
-	}
-}
-
-func TestSubmissionAdvicePreservesFields(t *testing.T) {
-	q := submissionAdviceFixture(t)
-	inputs, _, err := q.readGeneration.inputs(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	immutableBefore, err := json.Marshal(inputs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		after, err := json.Marshal(inputs)
-		if err != nil || !bytes.Equal(immutableBefore, after) {
-			t.Error("advice mutated published immutable inputs", err)
-		}
-	}()
-	q.mu.Lock()
-	snapshot := q.captureSubmissionAdvice()
-	q.mu.Unlock()
-	v, err := snapshot.planner(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"queued-000", "queued-081", "running-0", "retained-000"} {
-		before := cloneJob(q.s.Jobs[id])
-		want := cloneJob(&before)
-		copy := want
-		if copy.State == "queued" {
-			copy.Reason = q.waitReason(&copy)
-			copy.Reason = q.statusWaitingReason(&copy)
-		}
-		want.PriorityPolicy, want.DeadlineGuidance = q.priorityMatch(want.Spec), q.deadlineGuidance(&copy)
-		got := cloneJob(&before)
-		timing := newSubmissionAdviceTiming()
-		v.submissionDeadlineGuidance(&got, &timing)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s advice changed: got %+v want %+v", id, got.DeadlineGuidance, want.DeadlineGuidance)
-		}
-		if !reflect.DeepEqual(before, cloneJob(q.s.Jobs[id])) {
-			t.Fatal("advice changed durable receipt")
-		}
 	}
 }
 

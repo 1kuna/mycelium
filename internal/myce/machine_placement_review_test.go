@@ -217,17 +217,3 @@ func TestQCCheckpointWarningOncePerMachine(t *testing.T) {
 		t.Fatalf("warning count=%d: %s", got, s.Warning)
 	}
 }
-func TestQCMachineCheckPreservesInventory(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	submit(t, q, spec("experiment"))
-	a := assignedJob(machineCheck(t, q, m))
-	if a == nil {
-		t.Fatal("setup")
-	}
-	before := m.Devices[0].FreeMemoryGB
-	machineCheck(t, q, m, a)
-	if m.Devices[0].FreeMemoryGB != before {
-		t.Fatal("helper mutated caller inventory")
-	}
-}

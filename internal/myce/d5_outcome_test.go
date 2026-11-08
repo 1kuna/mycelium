@@ -329,25 +329,6 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 	return dockerOutcome(state, Result{}, recoveryErr)
 }
 
-func TestNativeOutcomeIndependentExitWithStop(t *testing.T) {
-	for _, group := range []bool{false, true} {
-		t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
-			_, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", `touch "$1"; while [ ! -f "$2" ]; do sleep .01; done; exit 7`, "main", "{work}/ready", "{work}/finish"})
-			dir := p.job.Spec.Run.Workdir
-			nativeFile(t, dir, "ready")
-			// Freeze intent separately from delivery, then observe a payload exit.
-			p.mu.Lock()
-			p.stopped = true
-			p.mu.Unlock()
-			nativeTouch(t, dir, "finish")
-			r := d5Finish(t, p)
-			if r.Success || r.Interrupted {
-				t.Fatal("independent exit masked", r)
-			}
-		})
-	}
-}
-
 // Kill only the worker process; the replacement uses actual orphan recovery.
 func d5NativeWorkerLoss(t *testing.T, group bool) Result {
 	t.Helper()

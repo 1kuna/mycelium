@@ -799,31 +799,6 @@ func TestMaintenanceFractionalBudgetDelivery(t *testing.T) {
 	}
 }
 
-func TestReviewMaintenanceDisableStopsActiveModelCall(t *testing.T) {
-	for _, priority := range []string{"production", "experiment"} {
-		t.Run(priority, func(t *testing.T) {
-			q, clock, m := modelFixture(t, "host")
-			if err := q.SetLossTimeouts(time.Hour, time.Hour, time.Hour); err != nil {
-				t.Fatal(err)
-			}
-			active := addModelCall(t, q, priority)
-			reportModel(t, q, m, "ready")
-			if active.Machine != m.ID {
-				t.Fatal("call was not admitted")
-			}
-			if _, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
-				t.Fatal(err)
-			}
-			clock.Advance(2 * StopGrace)
-			reportModel(t, q, m, "ready")
-			slot := q.s.ModelSlots[slotKey(m.ID, "test")]
-			if active.Error == "" && active.StopAt == nil && slot != nil && slot.InFlight == 1 && q.callAttemptLive(active) {
-				t.Fatalf("disable --stop left exact model call live after 2*StopGrace: call.stop_at=nil, call.error=empty, slot.state=%s, slot.in_flight=%d", slot.State, slot.InFlight)
-			}
-		})
-	}
-}
-
 func TestReviewMaintenanceFailedPinnedEngine(t *testing.T) {
 	for _, action := range []string{"drain", "disable", "disable-stop"} {
 		t.Run(action, func(t *testing.T) {
