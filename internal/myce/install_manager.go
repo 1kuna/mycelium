@@ -329,7 +329,12 @@ func (m installManager) stop(ctx context.Context, u installUnit) error {
 		}
 		return err
 	}
-	_, err := m.command(ctx, "launchctl", "bootout", u.target())
+	wait, cancel := m.launchdStopContext(ctx, u)
+	defer cancel()
+	if err := wait.Err(); err != nil {
+		return err
+	}
+	_, err := m.command(wait, "launchctl", "bootout", u.target())
 	if installExit(err, 113) {
 		return nil
 	}
@@ -338,9 +343,7 @@ func (m installManager) stop(ctx context.Context, u installUnit) error {
 	}
 	// bootout acknowledges the request before launchd necessarily removes the
 	// label. Reusing it sooner races bootstrap (EIO), including during rollback.
-	wait, cancel := SetupTimeout(ctx)
-	defer cancel()
-	ticker := time.NewTicker(20 * time.Millisecond)
+	ticker := time.NewTicker(launchdStopPoll)
 	defer ticker.Stop()
 	for {
 		state, err := m.inspect(wait, u)
