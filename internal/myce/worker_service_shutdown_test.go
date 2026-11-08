@@ -4,14 +4,77 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestWorkerServiceShutdownCancelsInventoryAndSilentCheckin(t *testing.T) {
+	entered, canceled, inventoryCanceled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	var probes atomic.Int32
+	w := Worker{EnvironmentLimit: 1 << 20, StateDir: t.TempDir(), Interval: time.Millisecond,
+		Machine: machine("service", "fake"), ServiceConfig: &ServiceConfig{Role: "worker"}}
+	w.Client = Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/api/workers/checkin" {
+			once.Do(func() { close(entered) })
+			<-r.Context().Done()
+			close(canceled)
+			return nil, r.Context().Err()
+		}
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}}
+	probeEntered := make(chan struct{})
+	w.InventoryProbe = func(ctx context.Context) ([]MachineDevice, error) {
+		if probes.Add(1) == 1 { // ordinary startup inventory
+			return []MachineDevice{{ID: "0", Platform: "fake", Identity: "fake-0", Selector: "0", Fingerprint: "fake"}}, nil
+		}
+		close(probeEntered)
+		<-ctx.Done()
+		close(inventoryCanceled)
+		return nil, ctx.Err()
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer stop()
+	for _, ready := range []<-chan struct{}{entered, probeEntered} {
+		select {
+		case <-ready:
+		case err := <-done:
+			t.Fatalf("worker exited before the blocked calls: %v", err)
+		case <-time.After(3 * time.Second):
+			t.Fatal("worker did not enter the blocked calls")
+		}
+	}
+	stop() // signal.NotifyContext delivers installed SIGTERM by canceling this context.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("idle installed worker requires a queue reply to exit after TERM")
+	}
+	for _, canceled := range []<-chan struct{}{canceled, inventoryCanceled} {
+		select {
+		case <-canceled:
+		case <-time.After(time.Second):
+			t.Fatal("shutdown left checkin or GPU inventory alive")
+		}
+	}
+	if probes.Load() != 2 {
+		t.Fatal("inventory restarted after cancellation")
+	}
+}
 
 // Model the service manager's TERM targets from the generated unit. With the
 // old control-group unit the payload receives TERM without a Mycelium delivery
@@ -46,21 +109,26 @@ func TestWorkerServiceShutdownRequeuesNative(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- w.Run(ctx) }()
+			stopped := false
+			waitStopped := func() bool {
+				clock.Advance(time.Second)
+				select {
+				case err := <-done:
+					stopped = true
+					if err != nil {
+						t.Error(err)
+					}
+					return true
+				default:
+					return false
+				}
+			}
 			defer func() {
 				cancel()
 				_ = q.Cancel(j.ID)
-				await(t, func() bool {
-					clock.Advance(time.Second)
-					select {
-					case err := <-done:
-						if err != nil {
-							t.Error(err)
-						}
-						return true
-					default:
-						return false
-					}
-				})
+				if !stopped {
+					await(t, waitStopped)
+				}
 			}()
 			await(t, func() bool {
 				logs, _ := q.Logs(j.ID, 0)
@@ -86,16 +154,26 @@ func TestWorkerServiceShutdownRequeuesNative(t *testing.T) {
 				}
 			}
 			cancel() // mixed: only the worker receives the manager's initial TERM.
-			await(t, func() bool { return len(job(t, q, j.ID).AttemptHistory) > 0 })
-			got := job(t, q, j.ID)
-			if got.State != "queued" || got.Losses != 1 || !got.AttemptHistory[0].Interrupted {
-				t.Fatalf("service stop charged payload failure instead of requeue: %+v", got)
-			}
+			await(t, waitStopped)
 			// Recovery must replay the same durable interruption after a lost ack.
 			if files, err := filepath.Glob(filepath.Join(w.StateDir, "*.result.json")); err != nil || len(files) != 1 {
 				t.Fatalf("missing durable interruption result: %v %v", files, err)
 			} else if data, err := os.ReadFile(files[0]); err != nil || !strings.Contains(string(data), `"interrupted":true`) {
 				t.Fatalf("restart would lose interruption: %s %v", data, err)
+			} else {
+				// Installed shutdown no longer waits for queue acknowledgement.
+				// Deliver its exact durable receipt through recovery's API.
+				var result Result
+				if err := json.Unmarshal(data, &result); err != nil {
+					t.Fatal(err)
+				}
+				if err := w.Client.Call(context.Background(), "POST", "/api/workers/complete", result, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := job(t, q, j.ID)
+			if got.State != "queued" || got.Losses != 1 || !got.AttemptHistory[0].Interrupted {
+				t.Fatalf("service stop charged payload failure instead of requeue: %+v", got)
 			}
 		})
 	}

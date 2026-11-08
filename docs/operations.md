@@ -1170,6 +1170,11 @@ reporting infrastructure interruptions. Installed shutdown also stops
 non-resumable CPU attempts; an interactive `join` still lets those finish.
 After 45 seconds systemd retains a final group-wide KILL, including delegated
 attempt cgroups. Payload failures observed before worker stop remain failures.
+From the next release (#1081), installed TERM cancels GPU inventory, host
+observations and pending queue I/O immediately. After local attempt cleanup is
+durable, exit does not require a queue reply or a remote model plan; unacknowledged
+results retain their exact attempt identity for startup replay. Interactive leave
+continues to use the existing graceful queue handshake.
 macOS uses the generated launchd service. Configuration and secret files stay
 private. Never run the ordinary binary as root.
 
@@ -1202,6 +1207,17 @@ drop-ins that override execution, credentials or containment block activation,
 except queue `ExecStart` overrides: these are preserved with a warning so their
 settings can be migrated before removal. Consumer files are preserved. Check
 health and exact cleanup before resuming.
+
+From the next release (#1081), Linux installer stop/start/restart waits read the
+unit's effective `TimeoutStopUSec` and `TimeoutStartUSec` from systemd, including
+drop-ins. Starts/restarts allow both a pending stop and the start phase, plus two
+measured manager round trips for dispatch/completion. Zero/infinite manager
+timeouts retain operator cancellation without an artificial client deadline.
+Unreadable/malformed timeouts refuse the lifecycle call. Recovery ignores the
+failed install's cancellation, gives each command its own fresh allowance, and
+inspects final manager state with an unexpired context. A failed manager itself
+can still prevent inspection; that error is reported rather than claiming a
+known state.
 
 For a signed-release deployment, installing the queue/worker bytes alone leaves
 the default onboarding approval unchanged. After verifying the updated queue,
@@ -2198,7 +2214,8 @@ An indefinitely blocked CIFS call therefore refuses after 30 seconds, while
 completed operations taking at least 10 seconds report `NAS slow`, their operation
 and elapsed seconds. These incident samples are not a supported-load percentile
 or latency qualification. Mount inventory retains its
-5-second bound, and installer subprocesses retain a 15-second bound per command.
+5-second bound, and ordinary installer subprocesses retain a 15-second bound per
+command; systemd lifecycle waits use the effective unit timeouts described above.
 Cancellation remains active throughout setup. Logs report operation and root
 progress with elapsed time, without paths or mount credentials. A stalled syscall
 stays owned until it returns, so retries cannot start overlapping NAS sequences;

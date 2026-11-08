@@ -171,12 +171,22 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	a.mu.Lock()
 	initial := a.worker
 	a.mu.Unlock()
+	ioCtx, cancelIO := context.WithCancel(ctx)
+	defer cancelIO()
+	if initial.serviceStop != nil {
+		stopIO := context.AfterFunc(initial.serviceStop, cancelIO)
+		defer stopIO()
+	}
 	defer initial.control.remove(a.job)
 	s := a.store
 	// A short observation retry must not cancel the operation it will consume.
 	// Stop cancels this attempt context directly, including between start retries.
 	prepareCtx, cancelPreparation := context.WithCancel(ctx)
 	defer cancelPreparation()
+	if initial.serviceStop != nil {
+		stopPreparation := context.AfterFunc(initial.serviceStop, cancelPreparation)
+		defer stopPreparation()
+	}
 	a.mu.Lock()
 	a.preparing = cancelPreparation
 	if a.directive.Stop {
@@ -280,6 +290,18 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 			}
 		}
+		if initial.serviceStop != nil && initial.serviceStop.Err() != nil {
+			// Local process cleanup and durable result custody survive queue
+			// loss. An unstarted assignment must also remain replayable.
+			connected = false
+			if p == nil && s.state.Result == nil {
+				s.state.Result = &Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Interrupted: true, Error: "worker service stopping before command started"}
+				if err := s.save(); err != nil {
+					finish(err)
+					return
+				}
+			}
+		}
 		if connected {
 			if p == nil && s.state.Result == nil {
 				if d.Stop {
@@ -317,7 +339,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 			}
 			if p != nil && d.Stop && !d.UserCancel && scarceYieldStop(d.PriorityStop) && s.state.PriorityStop == nil {
-				if allowed, e := a.authorizeYieldStop(ctx, w); e != nil || !allowed {
+				if allowed, e := a.authorizeYieldStop(ioCtx, w); e != nil || !allowed {
 					d.Stop = false
 				}
 			}
@@ -423,7 +445,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				if s.state.Result != nil && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 					released := *s.state.Result
 					released.ReleaseOnly = !released.ReleasePending
-					err = w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
+					err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", released, nil)
 					if err == nil {
 						releaseAcknowledged = true
 						// Skip obsolete publication without losing the successful
@@ -432,7 +454,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 				}
 			} else {
-				err = w.replay(ctx, s)
+				err = w.replay(ioCtx, s)
 			}
 			if err == nil && (a.job.storedFileResults() || s.state.Result != nil && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
@@ -441,7 +463,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						released := *s.state.Result
 						released.ReleaseOnly = true
 						released.OutputRefs = nil
-						err = w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
+						err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", released, nil)
 						if stale(err) {
 							err = nil
 						}
@@ -484,7 +506,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 			}
 			if err == nil && s.state.Result != nil {
-				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
+				err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", s.state.Result, nil)
 			}
 			releaseAcknowledged = releaseAcknowledged || err == nil
 			if !releaseAcknowledged && stale(err) && s.state.Result != nil && !s.state.Result.ReleasePending {
@@ -493,7 +515,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				// Retain its only sender until an exact release is acknowledged.
 				released := *s.state.Result
 				released.ReleaseOnly, released.OutputRefs = true, nil
-				releaseErr := w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
+				releaseErr := w.Client.Call(ioCtx, "POST", "/api/workers/complete", released, nil)
 				releaseAcknowledged = releaseErr == nil
 				if releaseErr != nil {
 					err = releaseErr
@@ -512,7 +534,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					continue
 				}
 				if err == nil {
-					published, e := w.publishedAttemptFiles(ctx, s.state)
+					published, e := w.publishedAttemptFiles(ioCtx, s.state)
 					if e != nil {
 						s.fileError = "result confirmation pending; local files retained"
 						// Keep custody and replay until the queue can confirm the result.
@@ -901,7 +923,15 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	w.batchAdmission = rt.checkBatchLaunchMemory
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	health, err := startWorkerHealth(ctx, w, root)
+	// Interactive leave can finish work. Installed TERM must not depend on a
+	// queue reply to exit once local custody is durably released.
+	observeCtx, cancelObservations := context.WithCancel(ctx)
+	defer cancelObservations()
+	if w.serviceStop != nil {
+		stopObservations := context.AfterFunc(w.serviceStop, cancelObservations)
+		defer stopObservations()
+	}
+	health, err := startWorkerHealth(observeCtx, w, root)
 	if err != nil {
 		return err
 	}
@@ -914,7 +944,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	}
 	pressureProbe := &sharedPressureMonitor{clock: w.Clock, source: source, enabled: w.Machine.SharedHost != nil}
 	pressureProbe.lane.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
-	go pressureProbe.run(ctx)
+	go pressureProbe.run(observeCtx)
 	inventory := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: w.Clock, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}}
 	// Telemetry shares the injectable OS/driver source used by fingerprints.
 	telemetryProbe := extensionIdentityProbe()
@@ -923,7 +953,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		telemetryWorker.sampleXPUTelemetry(ctx, telemetryProbe, devices)
 		return devices, nil
 	}
-	go inventory.run(ctx, w.inventorySource())
+	inventoryDone := make(chan struct{})
+	go func() { defer close(inventoryDone); inventory.run(observeCtx, w.inventorySource()) }()
+	defer func() { cancelObservations(); <-inventoryDone }()
 	var cpuProbe checkpointIO[*memoryCeilings]
 	sharedCPUAllowance := 0
 	events := make(chan WorkerEvent, 16)
@@ -932,7 +964,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	go func() { defer close(controlDone); w.control.run(ctx, stop, events) }()
 	defer func() { cancel(); <-controlDone }()
 	startEvents := func() context.CancelFunc {
-		eventCtx, cancel := context.WithCancel(ctx)
+		eventCtx, cancel := context.WithCancel(observeCtx)
 		go w.watchStops(eventCtx, events)
 		return cancel
 	}
@@ -1056,6 +1088,19 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 		}
 		w.batchMemory.Store(math.Float64bits(batch))
+		if w.serviceStop != nil && w.serviceStop.Err() != nil {
+			// Actors retain unacknowledged results for startup replay. Waiting
+			// for remote leave/model plans here kept an idle worker's inventory
+			// alive until systemd's SIGKILL, even with no local custody.
+			if len(jobs) == 0 {
+				return nil
+			}
+			select {
+			case <-tick.C:
+			case <-w.control.wake:
+			}
+			continue
+		}
 		if recovering && len(actors) == 0 {
 			recovering = false
 			if w.sharedInputs != nil {
@@ -1071,6 +1116,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			fresh = true
 		}
 		if retry.ready(now) {
+			ctx := observeCtx
 			m := cloneMachine(&w.Machine)
 			m.HygieneCollection = w.hygieneCollector.snapshot()
 			if w.sharedInputs != nil {
@@ -1293,7 +1339,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
 			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()
-			reply, err := w.checkin(ctx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
+			reply, err := w.checkin(observeCtx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			health.noteHeartbeat(w.Clock.Now().Sub(heartbeatStarted))
 			if err == nil {
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {
@@ -1437,7 +1483,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				rt.mu.Unlock()
 				rt.sync(reply.ModelPlan)
 				if leaving && !leaveSent {
-					err = w.Client.Call(ctx, "POST", "/api/workers/"+m.ID+"/leave", map[string]bool{"now": false}, nil)
+					err = w.Client.Call(observeCtx, "POST", "/api/workers/"+m.ID+"/leave", map[string]bool{"now": false}, nil)
 					leaveSent = err == nil
 				}
 				if err == nil && leaving && len(actors) == 0 && !recovering && len(reply.ModelPlan) == 0 {
