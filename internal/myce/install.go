@@ -655,7 +655,7 @@ func Uninstall(ctx context.Context, c ServiceConfig, dry bool, command func(cont
 	if c.Detection.OS == "linux" {
 		_, e = command(ctx, "systemctl", "--user", "disable", "--now", filepath.Base(c.Service))
 	} else {
-		_, e = command(ctx, "launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid()), c.Service)
+		e = (installManager{os: "darwin", command: command}).stop(ctx, installUnit{path: c.Service, label: "local.mycelium." + c.Role})
 	}
 	if e != nil {
 		return fmt.Errorf("stop service before removing setup: %w", e)
