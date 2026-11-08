@@ -34,7 +34,7 @@ func TestReviewOfflineInstallDoesNotDownloadTools(t *testing.T) {
 	http.DefaultTransport = offlineOnboardingTransport{&downloads}
 	defer func() { http.DefaultTransport = old }()
 	p := myce.MachineProbe{OS: "linux", Arch: "arm64", Glob: func(string) ([]string, error) { return nil, nil }, ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}
-	p.Command = func(_ context.Context, n string, args ...string) ([]byte, error) {
+	p.Command = func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		switch n {
 		case "cat":
 			return []byte("fixture " + home + " nfs rw 0 0\n"), nil
@@ -44,7 +44,7 @@ func TestReviewOfflineInstallDoesNotDownloadTools(t *testing.T) {
 			if len(args) > 1 && args[1] == "is-active" {
 				return nil, installFixtureExit(3)
 			}
-			return nil, nil
+			return fakeSetupManager(ctx, n, args...)
 		case "systemd-run":
 			return json.Marshal(myce.HardwarePreflight{Detection: myce.Detection{OS: "linux", Arch: "arm64", Platform: "cpu", MemoryMode: "fixed"}})
 		case "uv", "pixi":
