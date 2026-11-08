@@ -324,6 +324,13 @@ notifier setup is needed. Later progress does not establish a causal repair.
 From the host-growth accounting correction, fresh exact-attempt anonymous
 residency reduces the unreached envelope once. Pending host growth is the larger
 of that remainder and the live growth forecast, extended through sample age.
+From the helper-residency correction, the exact native launch on unified CUDA
+can also credit its own fresh direct single-process device occupancy against
+its complete physical envelope. Shared process counters are not summed for
+credit, anonymous overlap is counted once, and measured overshoot increases the
+charge. Neighbors, stale/unknown counters and RSS estimates retain their bounds;
+discrete device memory never credits host RAM. This does not reduce learned
+envelopes or promise concurrent throughput.
 The static allowance still protects the envelope and observed over-use;
 missing/stale telemetry, unified-CUDA device floors and release custody remain
 binding. An aggregate refusal alone cannot identify a sibling's contribution or
