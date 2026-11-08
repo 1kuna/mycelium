@@ -386,6 +386,14 @@ From the release containing #959, interrupted `myce logs JOB` prints `myce logs 
 
 **Input and accepted-result recovery (next release, #831/#751):** profile/adapter input storage retries span preflight and reconciled uploads under the caller's one context deadline; each retry reports its sanitized cause and honours `Retry-After`. `myce result` uses the same transient recovery for accepted retrieval, including CI. Permanent authentication, TLS, capacity, integrity and configuration errors stop immediately. No retry count or new default deadline is imposed; without an owner deadline, interrupt to stop observation/recovery and resume the saved intent later.
 
+From the release containing #1072, Go and Python GET/HEAD, download and
+replay-safe retries follow the current positive `Retry-After` plus jitter;
+previous errors and unchanged reads cannot stretch that pause. Without a server
+signal, retry spacing follows measured request service cost plus jitter. Caller
+deadlines stop recovery without retrying before the server permits it. Python
+`timeout` bounds API recovery and `transfer_timeout` bounds each file request;
+Go uses the caller context or explicitly configured HTTP timeout.
+
 ## Adaptive model readiness (next release)
 
 Omitted model `max_wait` follows caller cancellation and actual load failures;
