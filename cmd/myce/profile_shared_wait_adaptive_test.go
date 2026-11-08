@@ -244,12 +244,15 @@ func TestSharedProfileAdaptiveNextReadBoundedByServiceAndPressure(t *testing.T) 
 	for _, count := range []int{1, 257} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			clock := &waitClock{now: time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)}
+			var mu sync.Mutex
 			var failure int
 			var disconnect bool
 			var retryAfter time.Duration
 			terminal := false
 			const service = time.Second
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
 				clock.advance(service)
 				if disconnect {
 					conn, _, err := w.(http.Hijacker).Hijack()
@@ -295,18 +298,24 @@ func TestSharedProfileAdaptiveNextReadBoundedByServiceAndPressure(t *testing.T) 
 			}
 			// A transient transport failure must not turn the previous healthy
 			// read count into a backoff timer (the retained incident was timeout).
+			mu.Lock()
 			disconnect = true
+			mu.Unlock()
 			read()
 			if d := group.next.Sub(clock.Now()); !group.retrying || d <= 0 || d > 2*time.Duration((count+255)/256)*service {
 				t.Fatalf("failure inherited unchanged-read history: %s", d)
 			}
+			mu.Lock()
 			disconnect = false
+			mu.Unlock()
 			for _, signal := range []struct {
 				status int
 				after  time.Duration
 			}{{429, 7 * time.Second}, {503, 3 * time.Second}, {503, time.Second}} {
 				clock.advance(group.next.Sub(clock.Now()))
+				mu.Lock()
 				failure, retryAfter = signal.status, signal.after
+				mu.Unlock()
 				read()
 				d := group.next.Sub(clock.Now())
 				// Each rejection ends the pass at its first batch. Earlier
@@ -317,7 +326,9 @@ func TestSharedProfileAdaptiveNextReadBoundedByServiceAndPressure(t *testing.T) 
 				}
 			}
 			clock.advance(group.next.Sub(clock.Now()))
+			mu.Lock()
 			failure, terminal = 0, true
+			mu.Unlock()
 			result := read()
 			if group.retrying || len(result.finished) != count {
 				t.Fatalf("authority failed to resume: retrying=%v completions=%d", group.retrying, len(result.finished))
