@@ -1031,7 +1031,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		}
 		return
 	}
-	if automaticExtensionCheck(j) != nil {
+	if automaticExtensionCheck(j) != nil && why != launchCapacityWaitReason {
 		now := q.clock.Now()
 		j.State, j.Reason, j.FinishedAt = "failed", "native check interrupted: "+why, &now
 		j.StopAt = nil
@@ -1049,7 +1049,9 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 			j.FinishedAt = &now
 			return
 		}
-		q.renewRecoveryStartWindow(j)
+		if why != launchCapacityWaitReason {
+			q.renewRecoveryStartWindow(j)
+		}
 		if chargeInfrastructure {
 			j.InfrastructureRetries++
 		}
@@ -1162,6 +1164,16 @@ func (q *Queue) maintain() {
 					if cancelled(j) {
 						q.finishCancellation(j)
 					} else {
+						if q.launchCapacityPending(j) {
+							// A validated refusal may still be verifying diagnostics
+							// outside the lock. Its stopped execution is known; quiet
+							// contact adds no infrastructure loss or release proof.
+							for i := range j.Copies {
+								j.Copies[i].Recoverable = false
+							}
+							q.retainRelease(j)
+							continue
+						}
 						for i := range j.Copies {
 							if j.Copies[i].Attempt == j.Attempt {
 								j.Copies[i].Recoverable = j.State == "running"
@@ -1467,6 +1479,10 @@ func (q *Queue) checkinContext(ctx context.Context, c Checkin) (Reply, error) {
 						q.finishCancellation(j)
 						continue
 					}
+					if q.launchCapacityPending(j) {
+						q.requeueLaunchCapacity(j)
+						continue
+					}
 					if j.State == "running" {
 						j.Losses++
 						q.chargeLoss(j)
@@ -1767,6 +1783,16 @@ func (q *Queue) Complete(r Result) error {
 func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
+	// Retain validated admission evidence durably before unlocking for bulk
+	// diagnostic verification. Maintenance during that I/O must see the wait.
+	if launchCapacityRefusal(r) && !r.ReleaseOnly {
+		if err := q.updateRequest(ctx, func() error {
+			q.retainLaunchCapacityRefusal(r)
+			return nil
+		}, nil); err != nil {
+			return err
+		}
+	}
 	quotaFailure := attemptDiskLimitFailure(r)
 	unlockRequest := requestLock(ctx, &q.mu)
 	j, err := q.wallTimeVerificationJob(r)
@@ -1851,6 +1877,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 			}
 		}
 		if verify {
+			q.retainLaunchCapacityRefusal(r)
 			q.maintainStartDeadlines()
 			j, err := q.wallTimeVerificationJob(r)
 			m := q.s.Machines[r.Machine]
@@ -1879,7 +1906,18 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	return rejected
 }
+func (q *Queue) retainLaunchCapacityRefusal(r Result) {
+	// A refusal can race the generated startup cutoff. Validate identity before
+	// retaining it, then let caller deadlines/cancellation and custody run normally.
+	if launchCapacityRefusal(r) && !r.ReleaseOnly {
+		if j, err := q.current(r); err == nil {
+			q.recordLaunchCapacityWait(j, r)
+		}
+	}
+}
+
 func (q *Queue) complete(r Result, filesVerified bool) error {
+	q.retainLaunchCapacityRefusal(r)
 	q.maintainWallTimeLimits()
 	if r.MemoryPeak.constrained() && !r.MemoryPeak.Constrained {
 		peak := *r.MemoryPeak
@@ -2047,7 +2085,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 			}
 		}
 	}
-	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) {
+	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure && !wallFailure && !wallTimeStopped(j) && !launchCapacityRefusal(r) {
 		if cancelled(j) {
 			q.finishCancellation(j)
 		} else {
@@ -2058,6 +2096,8 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
 	} else if diskFailure {
 		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
+	} else if launchCapacityRefusal(r) {
+		q.waitLaunchCapacity(j, r)
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.storageRootReason(j, q.s.Machines[j.Machine]) != "" {
@@ -2835,6 +2875,11 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		j.ModelEnvironmentKey = recipe.Key
 		j.ModelEnvironmentNeedsSource = recipe.Binary != "" || recipe.BinaryRelative != ""
 	}
+	if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !callerStartDeadline(j) && j.Spec.StartBy != nil {
+		deadline := q.clock.Now().Add(j.StartWindow)
+		j.Spec.StartBy = &deadline
+	}
+	j.StartCapacityWaiting = false
 	j.State = "running"
 	j.ExecutionCause, j.CleanupCause = nil, nil
 	j.ExecutionEvidence = nil

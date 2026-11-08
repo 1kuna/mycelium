@@ -99,6 +99,11 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 				t.Fatal(err)
 			}
 			clock.Advance(time.Second)
+			// #1011 requires changed capacity before another launch offer.
+			if got := check(t, q, m, nil).Job; got != nil {
+				t.Fatal("unchanged refusal re-offered", got)
+			}
+			m.HostAvailableMemoryGB++
 			next := check(t, q, m, nil).Job
 			if next == nil || next.Attempt != 2 {
 				t.Fatal("no retry", next)

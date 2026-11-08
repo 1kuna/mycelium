@@ -2424,3 +2424,21 @@ limits are evidence limits, not authorization to release custody or shrink needs
 soft budget, retained/protected bytes, reclamation and unavailable/over-budget
 state. Status does no measurement or collection. See [retention rules and the
 complete replacement inventory](retention.md).
+
+### Launch capacity waits (#1011, next release)
+
+A typed `launch/resource_limit/memory_capacity` refusal requeues the same logical
+job without charging infrastructure retries or losses. `execution_cause.admission`
+retains the failed subcheck and compared safe values. Component
+`execution_evidence` remains independent: helper custody can exist while main is
+`not_started`, including after Started authorization. Cleanup still requires the
+exact attempt's release before the logical job can run elsewhere.
+
+`launch_capacity_wait` retains per-target admission evidence and an opaque capacity
+fingerprint. A changed capacity measurement, allowance, competing reservation or
+exact release permits reevaluation; heartbeat timestamps alone do not. Ordinary
+lower-tier preemption can satisfy the measured deficit; equal-tier production
+waits. `start_capacity_waiting` records a generated startup window suspended by
+qualified resource contention. Assignment renews that generated window for actual
+preparation. Caller `start_by` and `start_window`, give-up and cancellation retain
+their existing authority. No retry, reserve or timeout increase is involved.
