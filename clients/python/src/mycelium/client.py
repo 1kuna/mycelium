@@ -622,31 +622,113 @@ class Client:
             "project": project, "submission_key": submission_key,
         })
 
-    def _wait_batch(self, job_id, after, seconds, timeout):
-        reply = self._call("POST", "/api/wait", {"ids": [job_id], "after": after,
-                           "seconds": seconds}, timeout=timeout, retry=False)
+    def _wait_batch(self, job_ids, after, seconds, timeout):
+        reply = self._call("POST", "/api/wait", {"ids": job_ids, "after": after,
+                           "seconds": seconds}, timeout=timeout, retry=False, raw=True)
+        try:
+            reply = json.loads(reply.decode("utf-8"))
+        except (ValueError, AttributeError):
+            raise APIError(502, '{"code":"job_reply_invalid","error":"invalid wait reply"}') from None
         rows = reply.get("jobs") if isinstance(reply, dict) else None
-        if (not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict)
-                or rows[0].get("id") != job_id or not isinstance(rows[0].get("revision"), int)
-                or rows[0]["revision"] <= 0):
+        if (not isinstance(rows, list) or len(rows) != len(job_ids)
+                or any(not isinstance(row, dict) or not isinstance(row.get("id"), str)
+                       or not (row["id"] == job_id or len(job_id) >= 8 and row["id"].startswith(job_id))
+                       or type(row.get("revision")) is not int or row["revision"] <= 0
+                       for job_id, row in zip(job_ids, rows))):
             raise APIError(502, '{"code":"job_reply_invalid","error":"invalid wait reply"}')
-        return _job_reply(rows[0])
+        return [_job_reply(row) for row in rows]
 
-    def wait(self, job_id: str, *, timeout: float | None = None) -> dict[str, Any]:
-        """Adapt to revisions and server backpressure; timeout never cancels work."""
-        end = None if timeout is None else self._clock.monotonic() + timeout
-        job = None
+    def wait(self, job_id: str | list[str], *, timeout: float | None = None):
+        """Wait for one ID, or batch a list of IDs; timeout never cancels work."""
+        if isinstance(job_id, str):
+            return self.wait_many([job_id], timeout=timeout)[0]
+        return self.wait_many(job_id, timeout=timeout)
+
+    def wait_many(self, job_ids, *, timeout: float | None = None) -> list[dict[str, Any]]:
+        """Wait in one batch, returning full terminal Jobs in input order.
+
+        Start at the batch endpoint with all IDs. New queues include scalar
+        deadline metadata; older queues fall back to diagnostic/wait-view GETs.
+        At most 256 distinct IDs fit the batch-v1 protocol. No jobs are cancelled.
+        """
+        ids = list(job_ids)
+        if any(not isinstance(job_id, str) or not job_id for job_id in ids):
+            raise ValueError("job IDs must be nonempty strings")
+        pending = dict.fromkeys(ids)
+        if len(pending) > 256:
+            raise ValueError("wait accepts at most 256 distinct job IDs")
+        jobs, metadata, results = {}, {}, {}
+        owner_end = None if timeout is None else self._clock.monotonic() + timeout
+        end = owner_end
         after = {}
         pace = Pace(self.poll_interval or 0, self._jitter)
         event = None
-        metadata = {}
         def timed_out():
+            job_id = next(iter(pending))
+            job = jobs.get(job_id)
             if job is None:
                 return TimeoutError(f"timed out waiting for job {job_id}; status unavailable; job was not cancelled")
             fallback = "waiting for a hypha to take this job" if job["state"] == "queued" else "still in progress"
             reason = job.get("reason") or fallback
             return TimeoutError(f"timed out waiting for job {job['id']}; job is still {job['state']}: {reason}")
-        while True:
+        def request_budget():
+            remaining = None if end is None else end - self._clock.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise timed_out()
+            return remaining if self.timeout is None else (self.timeout if remaining is None else min(self.timeout, remaining))
+        def retryable(error):
+            if isinstance(error, APIError):
+                return error.code != "job_reply_invalid" and (error.status in {408, 429} or error.status >= 500)
+            return not (isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError))
+
+        batch_unavailable = False
+
+        def observe(original, observed):
+            nonlocal changed, ids, end, event
+            job_id = observed["id"]
+            job = jobs.get(job_id)
+            changed = changed or job is None or any(observed.get(k) != job.get(k) for k in ("state", "reason", "revision"))
+            jobs[job_id] = observed
+            metadata.setdefault(job_id, dict(observed))
+            saved = metadata[job_id]
+            saved["state"] = observed["state"]
+            if "spec" in observed:
+                saved["spec"] = observed["spec"]
+            if observed.get("started_at"):
+                saved["started_at"] = observed["started_at"]
+            if observed["state"] == "running" and not saved.get("started_at"):
+                saved["started_at"] = dt.datetime.fromtimestamp(self._clock.time(), dt.timezone.utc).isoformat()
+            if observed["state"] in TERMINAL or original != job_id:
+                del pending[original]
+            if observed["state"] in TERMINAL:
+                results[job_id] = observed
+            else:
+                pending[job_id] = None
+            # Preserve aliases for the input-order result below.
+            if original != job_id:
+                ids = [job_id if key == original else key for key in ids]
+            refresh_times()
+
+        def refresh_times():
+            nonlocal end, event
+            event = None
+            end = owner_end
+            for job_id in pending:
+                saved = metadata.get(job_id, {})
+                if saved.get("state") in TERMINAL:
+                    continue
+                spec = saved.get("spec") or {}
+                if spec.get("deadline"):
+                    until = dt.datetime.fromisoformat(spec["deadline"].replace("Z", "+00:00")).timestamp() - self._clock.time()
+                    deadline = self._clock.monotonic() + until
+                    end = deadline if end is None else min(end, deadline)
+                if saved.get("started_at") and spec.get("expected_minutes"):
+                    expected = dt.datetime.fromisoformat(saved["started_at"].replace("Z", "+00:00")).timestamp() + spec["expected_minutes"] * 60
+                    next_event = self._clock.monotonic() + expected - self._clock.time()
+                    if next_event > self._clock.monotonic():
+                        event = next_event if event is None else min(event, next_event)
+
+        while pending:
             started = self._clock.monotonic()
             remaining = None if end is None else end - started
             if remaining is not None and remaining <= 0:
@@ -656,54 +738,81 @@ class Client:
                 budget = remaining if budget is None else min(budget, remaining)
             failure = None
             held = False
-            batched = self._batch_supported and job is not None
+            changed = False
+            batched = not batch_unavailable
             try:
                 if batched:
                     seconds = min(20, int(pace.next(started, event)))
                     if budget is not None:
                         seconds = min(seconds, int(budget / 2))
                     try:
-                        observed = self._wait_batch(job_id, after, seconds, budget)
-                        held = seconds > 0 and observed.get("revision", 0) > 0
+                        observations = self._wait_batch(list(pending), after, seconds, budget)
+                        diagnostic_end = self._clock.monotonic() + 20  # One batch-v1 hold across all legacy metadata reads.
+                        held = seconds > 0
                     except APIError as error:
-                        if error.status not in {404, 405} or error.code:
+                        if not (error.status == 405 or error.status == 404 and not error.code):
                             raise
-                        self._batch_supported = False
-                        observed = self._read_job(job_id, timeout=budget, wait=True)
-                    after = {observed["id"]: observed.get("revision", 0)}
-                    if observed["state"] in TERMINAL:
-                        if end is not None:
-                            budget = max(0, end - self._clock.monotonic()) if self.timeout is None else min(self.timeout, max(0, end - self._clock.monotonic()))
-                        observed = self._read_job(job_id, timeout=budget, wait=True)
+                        batch_unavailable = True
+                        continue
+                    # Apply all available scalar metadata before any optional/full GET.
+                    # A slow payload read cannot delay learning a peer's deadline.
+                    for original, row in zip(list(pending), observations):
+                        saved = metadata.setdefault(original, {})
+                        saved["state"] = row["state"]
+                        if "spec" in row:
+                            saved["spec"] = row["spec"]
+                        if row.get("started_at"):
+                            saved["started_at"] = row["started_at"]
+                    refresh_times()
+                    for original, row in zip(list(pending), observations):
+                        after[row["id"]] = row["revision"]
+                        full_payload = False
+                        if original not in jobs and "spec" not in row and row["state"] not in TERMINAL:
+                            # Older batch queues omit deadline metadata. Try it once,
+                            # bounded by one shared protocol hold so bootstrap cannot stall.
+                            detail_budget = max(0, diagnostic_end - self._clock.monotonic())
+                            owner_budget = request_budget()
+                            if owner_budget is not None:
+                                detail_budget = min(detail_budget, owner_budget)
+                            try:
+                                detail = self._read_job(row["id"], timeout=detail_budget, retry=False)
+                                row = dict(detail, revision=row["revision"])
+                                full_payload = True
+                            except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
+                                if not retryable(error):
+                                    raise
+                                if isinstance(error, TimeoutError):
+                                    diagnostic_end = self._clock.monotonic()
+                        if row["state"] in TERMINAL and not full_payload:
+                            try:
+                                row = self._read_job(row["id"], timeout=request_budget(), wait=True)
+                            except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
+                                if not retryable(error):
+                                    raise
+                                failure = error
+                                continue
+                        observe(original, row)
                 else:
-                    observed = self._read_job(job_id, timeout=budget, wait=job is not None, retry=False)
-            except APIError as error:
-                if error.code == "job_reply_invalid" or (error.status not in {408, 429} and error.status < 500):
+                    # Apply each read immediately and keep observing healthy peers
+                    # even when another ID has a transient visibility/read failure.
+                    for job_id in list(pending):
+                        try:
+                            row = self._read_job(job_id, timeout=request_budget(),
+                                                 wait=job_id in jobs, retry=False)
+                        except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
+                            if not retryable(error):
+                                raise
+                            failure = error
+                            continue
+                        observe(job_id, row)
+            except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
+                if not retryable(error):
                     raise
                 failure = error
-            except (TimeoutError, URLError, IncompleteReplyError) as error:
-                if isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError):
-                    raise
-                failure = error
-            else:
-                changed = job is None or any(observed.get(k) != job.get(k) for k in ("state", "reason", "revision"))
+            if not pending:
+                return [results[job_id] for job_id in ids]
+            if failure is None:
                 pace.observe(self._clock.monotonic() - started, changed)
-                job = observed
-                job_id = job["id"]
-                if not metadata:
-                    metadata = dict(job)
-                spec = job.get("spec") or metadata.get("spec") or {}
-                if job["state"] == "running" and not metadata.get("started_at"):
-                    metadata["started_at"] = dt.datetime.fromtimestamp(self._clock.time(), dt.timezone.utc).isoformat()
-                if spec.get("deadline"):
-                    until = dt.datetime.fromisoformat(spec["deadline"].replace("Z", "+00:00")).timestamp() - self._clock.time()
-                    deadline = self._clock.monotonic() + until
-                    end = deadline if end is None else min(end, deadline)
-                if metadata.get("started_at") and spec.get("expected_minutes"):
-                    expected = dt.datetime.fromisoformat(metadata["started_at"].replace("Z", "+00:00")).timestamp() + spec["expected_minutes"] * 60
-                    event = self._clock.monotonic() + expected - self._clock.time()
-                if job["state"] in TERMINAL:
-                    return job
             if failure is not None:
                 pace.observe(self._clock.monotonic() - started)
             delay = pace.next(self._clock.monotonic(), event, failure)
@@ -714,6 +823,8 @@ class Client:
             if end is not None:
                 delay = min(delay, max(0, end - self._clock.monotonic()))
             self._clock.sleep(delay)
+
+        return []
 
     def logs(self, job_id: str, *, follow: bool = False,
              after: int = 0) -> Iterator[dict[str, Any]]:
