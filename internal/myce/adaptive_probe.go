@@ -56,9 +56,19 @@ type probeTiming struct {
 	cores      int
 	cost       probeEstimate
 	delivery   probeEstimate // Measured consumer/report gap, when the lane crosses that path.
+	reported   time.Time
 	lastChange time.Time
 	change     probeEstimate
 	next       time.Time
+}
+
+func (p *probeTiming) noteReport(now time.Time) {
+	if !p.reported.IsZero() && now.After(p.reported) {
+		// Includes the previous queue round trip and this report's preparation.
+		// Only subsequently completed observations may use the prediction.
+		p.delivery.observe(now.Sub(p.reported).Seconds())
+	}
+	p.reported = now
 }
 
 func (p *probeTiming) controlPeriod() time.Duration {
