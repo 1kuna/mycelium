@@ -194,7 +194,6 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	}
 	a.mu.Unlock()
 	p := a.recovering
-	pendingInputWriter := false
 	defer func() {
 		a.mu.Lock()
 		if a.liveness != nil {
@@ -269,30 +268,25 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		// A failed inventory/cleanup keeps custody, but must not freeze the
 		// finished actor until a worker restart. Reuse recovery's exact process
 		// identity checks; only confirmed cleanup can clear pending release.
-		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !s.extensionFiles.inFlight() && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
+		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !s.extensionFiles.inFlight() && (!a.job.Spec.Run.Docker || s.state.Preparation != "" || s.inputWriterOnly()) {
 			var fs memoryFS = osMemoryFS{}
 			if w.memoryCeilings != nil {
 				fs = w.memoryCeilings.fs
 			}
-			var cleanupErr error
-			if pendingInputWriter && s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending && len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == "" {
-				// This actor witnessed the only remaining writer finish before
-				// launch. No process custody was ever acquired; release its pins.
-				s.releaseSharedInputs()
-				cleanupErr = s.releaseSharedInputPins()
-			} else {
-				cleanupErr = s.cleanupOrphan(w.Clock, fs)
-			}
+			cleanupErr := s.cleanupOrphan(w.Clock, fs)
 			if cleanupErr == nil {
 				released := *s.state.Result
 				released.ReleasePending = false
 				// Recovery reloads this receipt before state. Record confirmed
 				// release there before discarding the ordinary PID custody.
-				if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", released); err != nil {
-					finish(err)
-					return
+				if s.state.Identity != "" {
+					if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", released); err != nil {
+						finish(err)
+						return
+					}
 				}
 				s.state.Result = &released
+				s.state.InputWriterPending = false
 				s.state.PID = 0
 				if err := s.save(); err != nil {
 					finish(err)
@@ -305,9 +299,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			// loss. An unstarted assignment must also remain replayable.
 			connected = false
 			if p == nil && s.state.Result == nil {
-				pendingInputWriter = s.extensionFiles.inFlight()
+				s.state.InputWriterPending = s.extensionFiles.inFlight()
 				cause := s.startFailureAt(a.job, launchRefused, context.Canceled, now)
-				result := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, ReleasePending: pendingInputWriter, Error: "worker service stopping before command started"}, cause)
+				result := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, ReleasePending: s.state.InputWriterPending, Error: "worker service stopping before command started"}, cause)
 				s.state.Result = &result
 				if err := s.save(); err != nil {
 					finish(err)
@@ -347,7 +341,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							// and detached-writer custody until cleanup is confirmed.
 							err = s.startFailureAt(a.job, launchRefused, err, now)
 							if s.extensionFiles.inFlight() {
-								pendingInputWriter = true
+								s.state.InputWriterPending = true
 								err = errors.Join(err, errWorkerReleasePending)
 							}
 						}
@@ -628,6 +622,7 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 			return nil, err
 		}
 	}
+	inputWriterOnly := s.inputWriterOnly()
 	if err := s.cleanupOrphan(w.Clock, fs); err != nil {
 		return nil, err
 	}
@@ -655,8 +650,9 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 		s.state.Result = &r
 	}
 	released := *s.state.Result
-	if !s.state.Job.Spec.Run.Docker {
+	if !s.state.Job.Spec.Run.Docker || inputWriterOnly {
 		released.ReleasePending = false
+		s.state.InputWriterPending = false
 	}
 	if s.state.OperatorStopped {
 		released = operatorOutcome(released, true)

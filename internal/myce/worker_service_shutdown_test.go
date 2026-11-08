@@ -77,6 +77,20 @@ func TestWorkerServiceShutdownCancelsInventoryAndSilentCheckin(t *testing.T) {
 }
 
 func TestWorkerServiceShutdownDuringStagingRetainsInterruption(t *testing.T) {
+	for _, backend := range []string{"native", "docker"} {
+		for _, restart := range []bool{false, true} {
+			name := "drain"
+			if restart {
+				name = "reopen"
+			}
+			t.Run(backend+"/"+name, func(t *testing.T) {
+				testWorkerServiceStagingShutdown(t, backend == "docker", restart)
+			})
+		}
+	}
+}
+
+func testWorkerServiceStagingShutdown(t *testing.T, docker, restart bool) {
 	w := recoveryWorker(t)
 	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 	w.CPUIsolationProbe = func(context.Context) error { return nil }
@@ -88,10 +102,22 @@ func TestWorkerServiceShutdownDuringStagingRetainsInterruption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer root.close()
+	defer func() {
+		if root != nil {
+			root.close()
+		}
+	}()
 	j := recoveryJob(t, []string{"true"})
 	j.Spec = cpuSpec(1, 1)
 	j.Spec.Run.Command = []string{"true"}
+	j.Spec.Run.Docker = docker
+	if docker {
+		j.Spec.Run.Command = []string{"docker", "run", "fixture-image", "true"}
+		w.dockerCommand = func(context.Context, ...string) ([]byte, error) {
+			t.Error("unlaunched input staging reached the Docker daemon")
+			return nil, fmt.Errorf("unexpected Docker operation")
+		}
+	}
 	j.Spec.Inputs = map[string]string{"input": "input"}
 	if err := normalizeResources(&j.Spec); err != nil {
 		t.Fatal(err)
@@ -139,14 +165,45 @@ func TestWorkerServiceShutdownDuringStagingRetainsInterruption(t *testing.T) {
 	if released {
 		t.Fatal("detached input writer was released before it stopped")
 	}
-	unblock()
-	await(t, func() bool {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		return a.released
-	})
+	if restart {
+		// End the old actor before its writer is released. A real process exit
+		// also destroys that in-process writer; no release confirmation is saved.
+		cancel()
+		<-a.done
+		unblock()
+		await(t, func() bool { return !s.extensionFiles.inFlight() })
+		if r := readResult(); r == nil || !r.ReleasePending {
+			t.Fatal("old actor confirmed release before reopen")
+		}
+		root.close()
+		root = nil
+		root, err = w.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stores, err := root.attemptStores()
+		if err != nil || len(stores) != 1 {
+			t.Fatalf("reopen lost staging custody: %d %v", len(stores), err)
+		}
+		recovered := stores[0]
+		if p, err := w.recoverAttempt(recovered); err != nil || p != nil {
+			t.Fatalf("recover unlaunched staging: %v %v", p, err)
+		}
+	} else {
+		unblock()
+		await(t, func() bool {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.released
+		})
+	}
 	if r := readResult(); r == nil || !r.Interrupted || r.ReleasePending {
 		t.Fatalf("cleanup lost the durable shutdown interruption: %+v", r)
+	}
+	if docker {
+		if _, err := os.Stat(filepath.Join(s.dir, ".result.json")); !os.IsNotExist(err) {
+			t.Fatalf("unlaunched Docker wrote a shared unnamed result: %v", err)
+		}
 	}
 }
 
