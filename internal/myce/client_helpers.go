@@ -196,7 +196,7 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 				state := reply.Jobs[0]
 				held = seconds > 0 && state.Revision > 0
 				revisions[state.ID] = state.Revision
-				j = &Job{ID: state.ID, State: state.State, Reason: state.Reason}
+				j = state.Job()
 				if terminal(j.State) {
 					j, err = c.GetJobForWait(requestCtx, state.ID)
 				}
