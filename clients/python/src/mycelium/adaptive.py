@@ -26,7 +26,10 @@ class Pace:
     def next(self, now, event=None, error=None):
         delay = self.delay
         if error is not None:
-            return max(delay, getattr(error, "retry_after", 0)) * (1 + self.jitter())
+            # Failure history is not evidence of current server pressure.
+            # Follow the latest not-before signal, or measured service cost
+            # when absent, with one period of contention-avoidance jitter.
+            return (getattr(error, "retry_after", 0) or self.cost) * (1 + self.jitter())
         if event is not None and event > now:
             delay = min(delay, max(self.cost, (event - now) / 2))
         return delay
