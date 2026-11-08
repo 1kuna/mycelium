@@ -336,11 +336,15 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 	for id := range q.records.removed {
 		q.touchSubmission(q.records.bindings[id])
 	}
+	healthDeliveries := make(map[string]*hostHealthDelivery, len(q.s.Machines))
 	inventories := make(map[string]*toolInventory, len(q.s.Machines))
 	for id, m := range q.s.Machines {
 		inventories[id] = m.toolInventory
+		if m.HostHealth != nil {
+			healthDeliveries[id] = m.HostHealth.delivery
+		}
 	}
-	return recordUndo{base: old, catalogs: catalogs, inventories: inventories, health: q.s.Health.Events}, nil
+	return recordUndo{healthDeliveries: healthDeliveries, base: old, catalogs: catalogs, inventories: inventories, health: q.s.Health.Events}, nil
 }
 func (q *Queue) rollbackRecords(old recordUndo) {
 	q.invalidateRetainedMemory()
@@ -355,6 +359,9 @@ func (q *Queue) rollbackRecords(old recordUndo) {
 	q.s = base
 	for id, m := range q.s.Machines {
 		m.toolInventory = old.inventories[id]
+		if m.HostHealth != nil {
+			m.HostHealth.delivery = old.healthDeliveries[id]
+		}
 	}
 	for id, j := range q.records.jobs {
 		if j == nil {

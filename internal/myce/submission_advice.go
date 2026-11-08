@@ -63,7 +63,9 @@ func (q *Queue) captureSubmissionAdvice() *submissionAdviceSnapshot {
 	snapshot := &submissionAdviceSnapshot{generation: q.readGeneration, view: v,
 		ledgers: make(map[string]observationMachineLedger, len(q.s.Machines))}
 	for key, m := range q.s.Machines {
-		snapshot.ledgers[key] = observationMachineLedger{m.toolInventory, m.cpuLedger, m.hostBudgetGB, m.modelReservationDebtGB, m.hostReservationDebtGB}
+		snapshot.ledgers[key] = observationMachineLedger{healthDelivery: q.freezeHostHealthDelivery(m),
+			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger, hostBudgetGB: m.hostBudgetGB,
+			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB}
 	}
 	q.freezeContactView(v)
 	if q.simulation {
@@ -122,6 +124,9 @@ func (s *submissionAdviceSnapshot) planner(ctx context.Context) (*Queue, error) 
 	}
 	for key, m := range v.s.Machines {
 		l := s.ledgers[key]
+		if m.HostHealth != nil {
+			m.HostHealth.delivery = l.healthDelivery
+		}
 		m.toolInventory, m.cpuLedger, m.hostBudgetGB = l.toolInventory, l.cpuLedger, l.hostBudgetGB
 		m.modelReservationDebtGB, m.hostReservationDebtGB = l.modelReservationDebtGB, l.hostReservationDebtGB
 	}
