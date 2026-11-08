@@ -223,6 +223,8 @@ type Queue struct {
 	usageMaintenance bool
 	s                state
 
+	observeMemoryHistory func(int, bool) // Test observer: jobs visited by a full evidence scan.
+
 	memoryPlanning          *memoryPlanningCache // Only while a read-only placement scan is active.
 	memoryObservationIndex  *memoryObservationCatalog
 	checkinMemoryIdentities map[*Job]string // Fenced, transaction-local planner input.

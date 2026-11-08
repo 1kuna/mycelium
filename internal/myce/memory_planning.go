@@ -25,7 +25,7 @@ type memoryHistoryCache struct {
 func (c *memoryPlanningCache) retainedMemoryJobs(q *Queue, key memoryLowerKey) []*Job {
 	if c.history.jobs == nil {
 		c.history.jobs = map[memoryHistoryKey][]*Job{}
-		for _, j := range q.memoryHistory().s.Jobs {
+		for _, j := range q.memoryHistoryJobs(true) {
 			if j.Timing == nil || j.Timing.Key == nil || len(j.MemoryAttempts) == 0 {
 				continue
 			}
