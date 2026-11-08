@@ -673,8 +673,8 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 		if j.ExecutionEvidence != nil {
 			j.ExecutionEvidence.EnvironmentPreparation = executionMayHaveRun
 		}
-		root, release, err := w.environmentCache.Acquire(withLaunchGate(context.Background(), func() error {
-			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: w.Machine.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
+		root, release, err := w.environmentCache.Acquire(withLaunchGate(w.launchContext(), func(ctx context.Context) error {
+			return w.authorizeLaunchContext(ctx, HostLaunch{Machine: w.Machine.ID, Session: w.Machine.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), EnvironmentRecipe{Key: key, readyOnly: true})
 		if err != nil {
 			unlock()

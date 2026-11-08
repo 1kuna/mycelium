@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"net/http/httptest"
 	"os"
@@ -62,13 +63,13 @@ func TestMaintenanceDelayedEnvironmentLaunch(t *testing.T) {
 				worker := Worker{Machine: m, Client: Client{URL: server.URL, Token: "test"}}
 				entered, release := make(chan struct{}), make(chan struct{})
 				calls := 0
-				authorize := func(l HostLaunch) error {
+				authorize := func(ctx context.Context, l HostLaunch) error {
 					calls++
 					if delayed == "command" && calls == 2 {
 						close(entered)
 						<-release
 					}
-					return worker.authorizeLaunch(l)
+					return worker.authorizeLaunchContext(ctx, l)
 				}
 				rt := &environmentRuntime{authorize: authorize, dir: t.TempDir(), cache: &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}}, reports: map[string]EnvironmentReport{}}
 				defer rt.stop()

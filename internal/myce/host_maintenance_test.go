@@ -488,8 +488,8 @@ func TestMaintenanceQueueOutageAndWithdrawnStart(t *testing.T) {
 	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
 	w := Worker{Machine: a, Client: Client{URL: server.URL, Token: "test"}}
 	server.Close()
-	if err := w.authorizeStart(*j, a.Session); err == nil {
-		t.Fatal("queue outage authorized payload")
+	if err := w.authorizeStart(*j, a.Session); !errors.Is(err, errWorkerControlUnreachable) {
+		t.Fatal("queue outage did not return its typed cause", err)
 	}
 	maintenanceChange(t, q, "disable", true)
 	maintenanceChange(t, q, "resume", false)
