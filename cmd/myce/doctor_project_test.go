@@ -40,8 +40,8 @@ func doctorCPUProject(t *testing.T) string {
 
 func TestProjectDoctorReadyCPUReadOnly(t *testing.T) {
 	root := doctorCPUProject(t)
-	q, _, _, _ := waitQueue(t)
-	_, err := q.Checkin(myce.Checkin{Machine: myce.Machine{ID: "cpu-worker", Session: "session", GPU: "cpu", CPUIsolation: "select-none", CapabilityProfile: &myce.CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 16 << 30}, Capabilities: []string{"native_isolation_landlock", "native_isolation_seatbelt"}, HostMemoryMeasured: true, HostAvailableMemoryGB: 12}})
+	q, clock, _, _ := waitQueue(t)
+	_, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{ID: "cpu-worker", Session: "session", GPU: "cpu", CPUIsolation: "select-none", CapabilityProfile: &myce.CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 16 << 30}, Capabilities: []string{"native_isolation_landlock", "native_isolation_seatbelt"}, HostMemoryMeasured: true, HostAvailableMemoryGB: 12}})
 	if err != nil {
 		t.Fatal(err)
 	}

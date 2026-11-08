@@ -22,7 +22,7 @@ func maintenanceCLIWorker(id string) myce.Machine {
 
 func TestHostMaintenancePlacementCLI(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
-	if _, err := q.Checkin(myce.Checkin{Machine: maintenanceCLIWorker("worker")}); err != nil {
+	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: maintenanceCLIWorker("worker")}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
@@ -60,7 +60,7 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	a, b := maintenanceCLIWorker("gpu0"), maintenanceCLIWorker("gpu1")
 	submitted := waitSubmit(t, q)
-	reply, err := q.Checkin(myce.Checkin{Machine: a})
+	reply, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: a})
 	if err != nil || reply.Job == nil {
 		t.Fatal(reply, err)
 	}
@@ -68,7 +68,7 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	if err = q.Started(execution); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = q.Checkin(myce.Checkin{Machine: b}); err != nil {
+	if _, err = legacyCLICheckin(q, clock, myce.Checkin{Machine: b}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
@@ -96,7 +96,7 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range []myce.Machine{a, b} {
-		if _, err = q.Checkin(myce.Checkin{Machine: m}); err != nil {
+		if _, err = legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -200,11 +200,11 @@ func TestHostMaintenanceInstalledAuthority(t *testing.T) {
 }
 
 func TestHostMaintenanceBudgetDryRun(t *testing.T) {
-	q, _, _, _ := waitQueue(t)
+	q, clock, _, _ := waitQueue(t)
 	m := maintenanceCLIWorker("worker")
 	m.HostMemoryBudgetGB = 6.5
 	m.MemoryObservation = &myce.HostMemoryObservation{TotalGB: 32, UsedGB: 12, MyceliumGB: 2}
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := q.HostMaintenanceStatus("host")
@@ -240,10 +240,10 @@ func TestHostMaintenanceBudgetDryRun(t *testing.T) {
 }
 
 func TestHostMaintenanceSharedProfileCLI(t *testing.T) {
-	q, _, _, _ := waitQueue(t)
+	q, clock, _, _ := waitQueue(t)
 	m := maintenanceCLIWorker("worker")
 	m.CPUBudgetCores, m.HostMemoryBudgetGB = 2, 8
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())

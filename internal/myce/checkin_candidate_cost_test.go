@@ -31,7 +31,7 @@ func candidateCostFixture(t testing.TB) (*Queue, []Machine) {
 			m.Devices = []MachineDevice{{ID: "0", Platform: "cuda", CapabilityProfile: &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", MemoryLayout: "separate", Accelerators: []AcceleratorProfile{{Type: "cuda", MemoryBytes: 48 << 30}}}, MemoryMode: "fixed", Selector: "0", TotalMemoryGB: 48, BudgetGB: 48, FreeMemoryGB: 48, Identity: "synthetic-card", ExtensionFingerprint: "synthetic-cuda"}}
 		}
 		workers[i] = m
-		if _, err := q.Checkin(Checkin{Machine: m}); err != nil {
+		if _, err := q.Checkin(Checkin{Machine: m, period: time.Second}); err != nil {
 			t.Fatal(err)
 		}
 	}

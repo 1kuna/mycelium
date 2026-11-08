@@ -48,6 +48,27 @@ func waitOpenQueue(t *testing.T, db, checkpoints string, clock *waitClock) *myce
 	return q
 }
 
+// legacyCLICheckin preserves the headerless wire contract in CLI fixtures.
+// Unknown first arrivals are idle; a real old worker sends again after its
+// default one-second interval. Already qualified reports do not advance time.
+func legacyCLICheckin(q *myce.Queue, clock *waitClock, report myce.Checkin) (myce.Reply, error) {
+	reply, err := q.Checkin(report)
+	if err != nil {
+		return reply, err
+	}
+	snapshot, err := q.Snapshot()
+	if err != nil {
+		return reply, err
+	}
+	for _, m := range snapshot.Machines {
+		if m.ID == report.Machine.ID && m.Session == report.Machine.Session && m.Suspect && reply.Job == nil && len(reply.Attempts) == 0 {
+			clock.advance(time.Second)
+			return q.Checkin(report)
+		}
+	}
+	return reply, nil
+}
+
 // Read the status API without running another mutation/probe that could hide
 // the availability observed by the failed check-in.
 func waitAssignmentDiagnostics(q *myce.Queue) string {
@@ -70,14 +91,14 @@ func waitAssignmentDiagnostics(q *myce.Queue) string {
 }
 
 func TestWaitQueueIgnoresCheckpointStorage(t *testing.T) {
-	q, _, _, checkpoints := waitQueue(t)
+	q, clock, _, checkpoints := waitQueue(t)
 	// CLI outcome fixtures do not prepare checkpoints. A missing real root
 	// must not turn their synthetic assignment into a host I/O timing check.
 	if err := os.Rename(checkpoints, checkpoints+".offline"); err != nil {
 		t.Fatal(err)
 	}
 	waitSubmit(t, q)
-	waitFinish(t, q, true)
+	waitFinish(t, q, clock, true)
 }
 func waitSubmit(t *testing.T, q *myce.Queue) *myce.Job {
 	t.Helper()
@@ -93,7 +114,7 @@ func waitSubmit(t *testing.T, q *myce.Queue) *myce.Job {
 }
 
 // A fake worker uses the real queue assignment/result protocol, without processes/GPU.
-func waitFinish(t *testing.T, q *myce.Queue, success bool) {
+func waitFinish(t *testing.T, q *myce.Queue, clock *waitClock, success bool) {
 	t.Helper()
 	defer func() {
 		if t.Failed() {
@@ -101,13 +122,14 @@ func waitFinish(t *testing.T, q *myce.Queue, success bool) {
 		}
 	}()
 	// Observe assignment before completing it, just as a real worker does.
-	// Keep the scheduling clock fixed while waiting.
+	// Advance only the old worker's first measured send interval; later
+	// assignment retries keep the scheduling clock fixed.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	var reply myce.Reply
 	wait(t, ctx, func() bool {
 		var err error
-		reply, err = q.Checkin(myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+		reply, err = legacyCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -151,7 +173,7 @@ func TestWaitQueueOutcomes(t *testing.T) {
 						t.Fatal(e)
 					}
 				} else {
-					waitFinish(t, q, tc.states[step] == "succeeded")
+					waitFinish(t, q, clock, tc.states[step] == "succeeded")
 				}
 				step++
 				return nil
@@ -256,7 +278,7 @@ func TestWaitQueueRestartAndNetworkRecovery(t *testing.T) {
 			// Completion precedes restored HTTP availability: the original
 			// waiter must discover it on its first successful retry, without
 			// needing a fresh process or another job state transition (#278).
-			waitFinish(t, q, true)
+			waitFinish(t, q, clock, true)
 			listener, e := net.Listen("tcp", address)
 			if e != nil {
 				t.Fatal(e)
@@ -276,9 +298,9 @@ func TestWaitQueueRestartAndNetworkRecovery(t *testing.T) {
 	}
 }
 func TestWaitHelpUsageAuthAndEnvironment(t *testing.T) {
-	q, _, _, _ := waitQueue(t)
+	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
-	waitFinish(t, q, true)
+	waitFinish(t, q, clock, true)
 	server := httptest.NewServer(myce.API{Queue: q, Token: "private-test-token"}.Handler())
 	defer server.Close()
 	t.Setenv("MYCE_QUEUE", server.URL)
@@ -450,7 +472,7 @@ func TestWaitUsesLightweightReadsAfterInitial(t *testing.T) {
 func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
-	reply, err := q.Checkin(myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+	reply, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
 	if err != nil || reply.Job == nil {
 		t.Fatalf("assignment: %v %+v %s", err, reply, waitAssignmentDiagnostics(q))
 	}
@@ -564,7 +586,7 @@ func TestWaitReconnectsAfterQueueRestartWithoutProgress(t *testing.T) {
 				t.Fatal(e)
 			}
 			q = waitOpenQueue(t, db, checkpoints, clock)
-			waitFinish(t, q, true)
+			waitFinish(t, q, clock, true)
 			restarted = httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
 			t.Cleanup(restarted.Close)
 		}
