@@ -643,6 +643,11 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 	}
 	// The public flag must select the structured renderer too.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This legacy queue fixture has no batch endpoint.
+		if r.Method == http.MethodPost && r.URL.Path == "/api/wait" {
+			http.NotFound(w, r)
+			return
+		}
 		fmt.Fprint(w, `{"id":"job","state":"succeeded","reason":"full terminal reason"}`)
 	}))
 	defer server.Close()
