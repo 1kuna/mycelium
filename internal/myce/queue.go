@@ -2057,10 +2057,10 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		// A changed disk sample can withdraw an offer before exec. This is the
 		// same temporary hold as dispatch, including for production stage failures.
 		q.requeue(j, q.diskHeadroomReason(j, q.s.Machines[j.Machine]), false)
-	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "start_authorization" || j.ExecutionCause.Operation == "start_handoff") && recordedStartRefusal(j) != "" {
+	} else if !r.Success && !oomFailure && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "start_authorization" || j.ExecutionCause.Operation == "start_handoff") && startRefusalBeforeMain(j, r) {
 		// The start fence withdrew placement before exec; like launch_refused,
 		// this is a temporary hold, not lost work or an infrastructure retry.
-		q.requeue(j, "requeued: start placement refused ("+recordedStartRefusal(j)+")", false)
+		q.requeueStartRefusal(j)
 	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
 		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
@@ -2680,10 +2680,16 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 		}
 		m := q.s.Machines[r.Machine]
 		q.refreshHostMemory()
-		if !q.hostLaunchAllowed(m, r.Session) || !q.startPlacementAllowed(j) {
+		predicate := "host_launch"
+		if q.hostLaunchAllowed(m, r.Session) {
+			predicate = q.startPlacementRejection(j)
+		}
+		if predicate != "" {
+			q.recordStartRefusal(j, predicate)
 			rejected = ErrStale
 			return nil
 		}
+		q.clearStartRefusal(j)
 		q.retainAttemptResources(j, r.Resources)
 		retainInputsStagedAt(j, r.InputsStagedAt)
 		q.markStarted(j)
