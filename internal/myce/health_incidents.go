@@ -179,7 +179,13 @@ func (q *Queue) learnedEnvelopeOversized(j *Job) bool {
 			// Assignment's existing comparison excludes declared member caps,
 			// hints and retry floors. Only accepted learning is this incident.
 			learnedProbe := *candidate
-			capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q}
+			capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: newMemoryPlanningCache()}
+			if q.memoryPlanning != nil {
+				// This view removes occupancy, but retained evidence still uses
+				// the enclosing immutable pass's origin and identity fences.
+				// Keep admission-dependent estimates private to this view.
+				capacity.memoryPlanning.history = q.memoryPlanning.history
+			}
 			capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 			capacity.s.Machines = map[string]*Machine{m.ID: m}
 			capacity.recordLearnedMemory(&learnedProbe, m)

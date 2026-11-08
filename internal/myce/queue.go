@@ -229,6 +229,8 @@ type Queue struct {
 	restartControlUntil time.Duration       // Available startup service, not blocked wall time.
 	contactTransaction  *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
 
+	observeMemoryHistory func(int, bool) // Test observer: jobs visited by a full evidence scan.
+
 	memoryPlanning          *memoryPlanningCache // Only while a read-only placement scan is active.
 	memoryObservationIndex  *memoryObservationCatalog
 	checkinMemoryIdentities map[*Job]string // Fenced, transaction-local planner input.

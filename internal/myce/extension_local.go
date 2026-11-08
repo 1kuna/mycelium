@@ -153,6 +153,10 @@ func LocalExtensions(root string) ([]Extension, error) {
 // Fingerprints are only hashes. Rejoining after a hardware/driver/OS change
 // invalidates cached qualification. A failed identity probe fails closed.
 func ExtensionFingerprint(ctx context.Context, platform, device string) (string, error) {
+	return extensionFingerprintFrom(ctx, platform, device, extensionIdentityProbe)
+}
+
+func extensionFingerprintFrom(ctx context.Context, platform, device string, identity func() MachineProbe) (string, error) {
 	if platform == "cpu" {
 		device = ""
 	}
@@ -164,7 +168,7 @@ func ExtensionFingerprint(ctx context.Context, platform, device string) (string,
 	if platform == "fake" && device == "" {
 		device = "0"
 	}
-	probe := extensionIdentityProbe()
+	probe := identity()
 	data := []byte(runtime.GOOS + "/" + runtime.GOARCH + "/" + platform + "/" + device)
 	commands := [][]string{}
 	switch platform {
