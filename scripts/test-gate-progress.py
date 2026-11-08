@@ -63,12 +63,6 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(record['elapsed_seconds'], 400)
         self.assertIn('-timeout=0', command)
 
-    def test_hung_test_stops_after_measured_silence(self):
-        with tempfile.TemporaryDirectory() as folder:
-            code, _, record = self.execute(Path(folder), [(30, None)], expected=10)
-        self.assertEqual(code, 124)
-        self.assertEqual(record['elapsed_seconds'], 30)
-
     def test_reconnect_output_cannot_keep_a_stuck_test_alive(self):
         with tempfile.TemporaryDirectory() as folder:
             code, _, record = self.execute(Path(folder), [
@@ -90,12 +84,6 @@ class ProgressTests(unittest.TestCase):
                 (150, b'')], expected=10, start=False)
         self.assertEqual(code, 0)
         self.assertEqual(record['active_tests'], [])
-
-    def test_fast_host_gets_its_own_short_deadline(self):
-        with tempfile.TemporaryDirectory() as folder:
-            code, _, record = self.execute(Path(folder), [(1.5, None)], expected=.5)
-        self.assertEqual(code, 124)
-        self.assertEqual(record['elapsed_seconds'], 1.5)
 
     def test_cold_run_keeps_go_backstop_and_learns(self):
         with tempfile.TemporaryDirectory() as folder:

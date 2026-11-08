@@ -19,6 +19,9 @@ class GoTestProfileTests(unittest.TestCase):
                 'else printf "%s\\n" "$*" > go-args; fi\n')
             (root / 'go').chmod(0o755)
             (root / 'scripts').mkdir()
+            (root / 'scripts/upgrade-compat.py').write_text(
+                'from pathlib import Path\nimport sys\n'
+                'Path("compat-args").write_text("\\n".join(sys.argv[1:]))\n')
             (root / 'scripts/gate.sh').write_text(
                 '#!/bin/sh\nprintf "%s\\n" "$@" > gate-args\nexit 0\n')
             (root / 'scripts/gate.sh').chmod(0o755)
@@ -27,12 +30,15 @@ class GoTestProfileTests(unittest.TestCase):
                                  capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual((root / 'go-args').read_text(), 'mod download\n')
+            self.assertEqual((root / 'compat-args').read_text(), 'prepare')
             self.assertEqual((root / 'gate-args').read_text(), 'full\n')
             self.assertEqual((root / 'gate-result.txt').read_text(), 'gate full: exit=0\n')
+            (root / 'compat-args').unlink()
             run = subprocess.run(['bash', str(script), 'quick'], cwd=root,
                                  env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH']),
                                  capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertFalse((root / 'compat-args').exists())
             self.assertEqual((root / 'gate-args').read_text(), 'quick\n--selection\ngate-selection.tsv\n')
             self.assertEqual((root / 'gate-result.txt').read_text(), 'gate quick: exit=0\n')
             (root / 'scripts/gate.sh').write_text('#!/bin/sh\nexit 7\n')
