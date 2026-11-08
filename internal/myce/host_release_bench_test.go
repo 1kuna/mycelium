@@ -99,58 +99,6 @@ func BenchmarkR1ReleaseCheckin(b *testing.B) {
 	}
 }
 
-// Equal running/stopping victims exercise deterministic release selection.
-func BenchmarkR1TiedReleaseCheckin(b *testing.B) {
-	for _, need := range []int{6} {
-		for _, stopping := range []bool{false, true} {
-			b.Run(fmt.Sprintf("stopping=%v-need%d", stopping, need), func(b *testing.B) {
-				clock := &fakeClock{now: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)}
-				q, err := Open(filepath.Join(b.TempDir(), "queue.db"), b.TempDir(), clock)
-				if err != nil {
-					b.Fatal(err)
-				}
-				b.Cleanup(func() { q.Close() })
-				q.checkpointProbe = func() bool { return true }
-				q.nasAvailable = true
-				target := cpuMachine("target", "shared", "fake", 12, 48)
-				target.LastSeen = clock.Now()
-				q.s.Machines[target.ID] = &target
-				until := clock.now.Add(time.Hour)
-				for i := 0; i < 12; i++ {
-					id := fmt.Sprintf("victim-%02d", i)
-					m := cpuMachine(id, "shared", "fake", 12, 48)
-					m.LastSeen = clock.Now()
-					q.s.Machines[m.ID] = &m
-					s := spec("experiment")
-					s.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 4, Platform: Platform{Required: []string{"cpu"}}}
-					j := &Job{ID: id, Spec: s, State: "running", Machine: m.ID, Session: m.Session, Attempt: 1, StartedAt: &clock.now}
-					if stopping {
-						j.State, j.StopAt = "stopping", &until
-					}
-					q.s.Jobs[id] = j
-				}
-				for i := 0; i < 20; i++ {
-					id := fmt.Sprintf("demand-%02d", i)
-					s := spec("production")
-					s.Needs = ResourceNeeds{CPUCores: need, HostMemoryGB: float64(4 * need), MemoryGB: 16, Platform: Platform{Any: true}}
-					q.s.Jobs[id] = &Job{ID: id, Spec: s, State: "queued", Queued: clock.Now()}
-				}
-				checkin := func() {
-					reply, err := q.Checkin(Checkin{Machine: target})
-					if err != nil || reply.Job != nil {
-						b.Fatal("blocked check-in admitted work", err, reply.Job)
-					}
-				}
-				checkin()
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					checkin()
-				}
-			})
-		}
-	}
-}
-
 // Round-6 reviewer performance scenarios: tie and mixed check-ins, optionally with started builds
 // on victim workers and a large job history.
 func BenchmarkR1BuildHistoryCheckin(b *testing.B) {
