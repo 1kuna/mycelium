@@ -362,6 +362,12 @@ missing/stale telemetry, unified-CUDA device floors and release custody remain
 binding. An aggregate refusal alone cannot identify a sibling's contribution or
 establish safe concurrency. See [live headroom](../../docs/status.md#live-headroom-and-reservations).
 
+From the declared-CPU containment correction (#1064), an enforced native cgroup
+attempt's live forecast cannot inflate its charge beyond its declaration plus
+ceiling slack. Actual larger observations remain protected; missing/stale samples
+grant no resident credit. Auto estimates, sampled RSS and accelerator accounting
+keep their separate rules.
+
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
 negative behind), the measured history horizon, weighted oldest project-wait

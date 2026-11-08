@@ -2280,6 +2280,15 @@ in multiple processes. The reported estimate and the execution ceiling therefore
 serve different purposes. Explicit declarations, member limits and Docker keep
 their existing containment contract. See [native isolation](native-isolation.md).
 
+From the next release (#1064), declared native CPU attempts with enforced cgroup
+v2 containment reserve their complete declaration plus ceiling slack. Their live
+growth forecast cannot add bytes beyond that containment, in either the static
+charge or pending physical growth. Larger actual anonymous/footprint observations
+remain floors; only fresh uniquely charged anonymous residency reduces pending
+growth. Missing/stale observations retain the full reservation. This bound does
+not apply to auto estimates, sampled RSS, Docker or accelerator memory outside
+the cgroup; authored member limits remain binding.
+
 Native CPU auto-memory and native accelerator-check host-OOM recovery retain a
 durable lower bound from the previous reservation and killed peak, plus a
 physical page to require progress. Growth/overshoot remains replaceable sizing
