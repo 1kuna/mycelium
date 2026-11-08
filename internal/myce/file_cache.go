@@ -55,7 +55,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	// Never replace corrupt cache bytes as if they were complete. They are disposable
 	// only after the durable authoritative copy has been checked.
 	operation = "cache_verify"
-	if err = c.Client.HasFile(ctx, ref); err != nil {
+	if err = c.Client.recoverInputTransfer(ctx, ref, operation, func(one Client) error { return one.HasFile(ctx, ref) }); err != nil {
 		return err
 	}
 	if _, err = os.Lstat(p); err == nil {
@@ -136,7 +136,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 		return errors.New("insufficient local file cache space")
 	}
 	operation = "cache_download"
-	if err = c.Client.DownloadFile(ctx, ref, partial); err != nil {
+	if err = c.Client.recoverInputTransfer(ctx, ref, operation, func(one Client) error { return one.DownloadFile(ctx, ref, partial) }); err != nil {
 		return err
 	}
 	operation = "cache_publish"

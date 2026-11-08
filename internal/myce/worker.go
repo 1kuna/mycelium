@@ -507,7 +507,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 				defer s.inputStaging.Store(false)
 			}
 			return captureStagedInputs(w.Clock, func() (string, error) {
-				err := w.prepareExtensionFilesContext(ctx, &value, s.dir)
+				transferCtx := context.WithValue(ctx, inputTransferRecoveryKey{}, &s.inputTransferRecovering)
+				err := w.prepareExtensionFilesContext(transferCtx, &value, s.dir)
 				return value.Spec.Run.Workdir, err
 			})
 		}, false)

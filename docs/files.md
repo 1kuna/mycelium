@@ -240,7 +240,20 @@ Go `DialTLSContext`, `DialTLS`, or custom `http.RoundTripper` retains its author
 and protocol handling and owns its I/O deadlines; custom dial setup is bounded.
 A stalled result reports `result_download_failed`; Python raises
 `TransferStalledError`. Size/SHA-256 verification and atomic publication still
-apply. For partial cache eviction, the worker reads the full blob size from
+apply.
+
+From the worker release containing #1045, ordinary queue-stored job inputs
+recover transient reads within the same preparation attempt. An idle expiry or
+interrupted body retains the partial blob and resumes with Range, ETag and final
+size/SHA-256 verification. Recovery uses measured, jittered pacing and honours
+`Retry-After`, cancellation and the preparation owner's deadline. Worker status
+reports `input transfer recovering; same preparation attempt retained`; this is
+pending work, not a staging refusal or an infrastructure retry. A completed
+failed dial returns `storage_unreachable` rather than waiting forever. Permanent
+authentication, typed storage and integrity refusals still end preparation with
+their retained cause. Payload execution remains fenced until staging succeeds.
+
+For partial cache eviction, the worker reads the full blob size from
 `GET /api/files/blobs/{hash}/metadata`, then performs a verified HEAD using that
 size's budget. Metadata alone never authorizes eviction; an unavailable size
 leaves the partial in place and reports the lookup error.

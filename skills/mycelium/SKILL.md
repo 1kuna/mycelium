@@ -389,6 +389,14 @@ From the release containing #959, interrupted `myce logs JOB` prints `myce logs 
 
 **Input and accepted-result recovery (next release, #831/#751):** profile/adapter input storage retries span preflight and reconciled uploads under the caller's one context deadline; each retry reports its sanitized cause and honours `Retry-After`. `myce result` uses the same transient recovery for accepted retrieval, including CI. Permanent authentication, TLS, capacity, integrity and configuration errors stop immediately. No retry count or new default deadline is imposed; without an owner deadline, interrupt to stop observation/recovery and resume the saved intent later.
 
+From the worker release containing #1045, ordinary queue-stored dependency and
+source inputs resume transient transfer stalls inside the same preparation
+attempt, retaining and verifying partial bytes. `input transfer recovering; same
+preparation attempt retained` is pending work and spends no infrastructure retry.
+Keep the job; cancellation still withdraws preparation. A completed failed dial
+returns `storage_unreachable`; permanent storage, authentication and integrity
+refusals still stop preparation. Execution waits for verified staging.
+
 From the release containing #1074, connection reset/refusal, handshake EOF and
 TLS internal errors during a listener restart remain transient: observation
 keeps its binding and retries with measured pacing and the server's current
