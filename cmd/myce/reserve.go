@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/url"
 	"strings"
@@ -12,6 +13,8 @@ import (
 
 	"mycelium/internal/myce"
 )
+
+var errReservationResponseInvalid = errors.New("reservation_response_invalid")
 
 func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
 	usage := errors.New("usage: myce reserve add SELECTOR --job ID --owner OWNER --reason TEXT [--whole-host] [--id ID] [--max-lifetime 2h] | list | release ID --if-revision N --reason TEXT")
@@ -90,7 +93,16 @@ func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
 			*id = myce.ID()
 		}
 		request := myce.ReservationRequest{ReservationOptions: myce.ReservationOptions{ID: *id, Selector: selector, Owner: *owner, Reason: *reason, MaxLifetime: lifetime.String()}, Job: *job}
-		err = c.Call(ctx, "POST", "/api/reservations", request, &record)
+		if err := c.Call(ctx, "POST", "/api/reservations", request, &record); err != nil {
+			var api *myce.HTTPError
+			if errors.As(err, &api) {
+				return err
+			}
+			return fmt.Errorf("%w: reservation add was not confirmed: %v", errReservationResponseInvalid, err)
+		}
+		if record.ID != request.ID || record.Selector == "" || record.Job != bound.ID || record.Revision < 1 || record.State == "" {
+			return fmt.Errorf("%w: queue did not return the persisted reservation for this binding", errReservationResponseInvalid)
+		}
 	} else {
 		err = c.Call(ctx, "POST", "/api/reservations/"+url.PathEscape(positional[0])+"/release", map[string]any{"if_revision": *revision, "reason": *reason}, &record)
 	}
