@@ -335,9 +335,19 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		case !copy.Spec.Run.Docker && j.OOMRetries > 0 && (n.cpuOnly() || j.Spec.ExtensionCheck != nil):
 			// Recovery estimates demand. Free RAM is an admission constraint,
 			// never the next attempt's predicted demand.
-			n.HostMemoryGB = measuredOOMRecovery(j)
+			bound, lower := measuredOOMRecovery(j)
 			if estimate.host != nil {
-				n.HostMemoryGB = max(n.HostMemoryGB, estimate.measuredHostGB, hostMemoryPeakGB(estimate.host)*estimate.hostFactor)
+				peak := hostMemoryPeakGB(estimate.host)
+				bound = max(bound, estimate.measuredHostGB, peak*estimate.hostFactor)
+				lower = max(lower, peak)
+			}
+			// A long sampling horizon can forecast more growth than a target
+			// can ever contain. Bound that uncertainty by permanent capacity;
+			// preserve every measured lower bound and durable retry floor.
+			room, why := q.recoveryMemoryRoom(j, m)
+			n.HostMemoryGB = max(min(bound, room), lower, q.constrainedMemoryLowerFor(j, estimate, !n.cpuOnly() && !m.UnifiedMemory))
+			if why != "" {
+				refusal = why
 			}
 			source, basis = measuredOOMRecoverySource, "exploratory"
 			if estimate.escalation {

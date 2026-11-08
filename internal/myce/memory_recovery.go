@@ -4,16 +4,18 @@ const memoryEvidenceRecovering = "memory_evidence_recovering"
 
 const measuredOOMRecoverySource = "exploratory OOM recovery from measured demand"
 
-func measuredOOMRecovery(j *Job) float64 {
-	bound := minimumHostMemoryGB
+func measuredOOMRecovery(j *Job) (bound, lower float64) {
+	bound, lower = minimumHostMemoryGB, minimumHostMemoryGB
 	if f := j.MemoryOOMFloor; f != nil {
 		bound = max(bound, f.HostMemoryGB)
+		lower = max(lower, f.HostMemoryGB)
 	}
 	for _, facts := range j.MemoryAttempts {
 		if facts.LearningReason != "oom" || facts.MemoryPeak == nil || facts.MemoryPeak.HostGB == nil || !validRate(*facts.MemoryPeak.HostGB) {
 			continue
 		}
 		peak := hostMemoryPeakGB(facts.MemoryPeak)
+		lower = max(lower, peak)
 		margin := max(memoryGrowthGB(facts.MemoryPeak), minimumHostMemoryGB)
 		if e := facts.MemoryEnvelope; e != nil && validRate(e.HostGB) {
 			margin = max(margin, peak-e.HostGB)
@@ -23,7 +25,7 @@ func measuredOOMRecovery(j *Job) float64 {
 		// device share; use it only to measure observed ceiling overshoot.
 		bound = max(bound, peak+margin)
 	}
-	return bound
+	return bound, lower
 }
 
 // Qualification may defer uncertain sizing, never the author's requirements,

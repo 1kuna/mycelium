@@ -117,6 +117,42 @@ func TestOOMRecoveryWithEventOnlyPeak(t *testing.T) {
 	}
 }
 
+func TestOOMRecoveryClipsForecastNotMeasuredNeed(t *testing.T) {
+	q, clock, m, s := coldProbeAdmissionFixture(t, true)
+	submit(t, q, s)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil {
+		t.Fatal("not assigned")
+	}
+	// A retained small execution can OOM while a delayed sampling horizon
+	// forecasts more growth than the physical allowance (#884).
+	run.Spec.Needs.HostMemoryGB, run.MemoryEnvelope.HostGB = 3.9, 3.9
+	q.s.Jobs[run.ID].Spec.Needs.HostMemoryGB = 3.9
+	q.s.Jobs[run.ID].MemoryEnvelope = run.MemoryEnvelope
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	peak, growth := 4.0, 12.0
+	r := result(run, false)
+	r.OutOfMemory = true
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, GrowthGB: &growth, Events: &MemoryEventCounts{OOM: 1}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	pending := q.s.Jobs[run.ID]
+	target := *q.s.Machines[m.ID]
+	profile := *target.CapabilityProfile
+	profile.SystemMemoryBytes = 8 << 30
+	target.CapabilityProfile = &profile
+	target.HostMemoryBudgetGB, target.EffectiveHostMemoryBudgetGB = 8, 8
+	target.FreeHostMemoryGB, target.HostAvailableMemoryGB = 8, 8
+	candidate := q.memoryCandidate(pending, &target)
+	if pending.State != "queued" || candidate.Spec.Needs.HostMemoryGB <= peak || candidate.MemoryEnvelope.HostGB > 8 {
+		t.Fatalf("forecast stranded a physically fitting recovery: state=%s envelope=%+v", pending.State, candidate.MemoryEnvelope)
+	}
+}
+
 func TestOOMRecoveryDoesNotTransferHistoricalDeviceChargeToHost(t *testing.T) {
 	q, _, m, s := coldProbeAdmissionFixture(t, false)
 	queued := submit(t, q, s)
@@ -131,7 +167,7 @@ func TestOOMRecoveryDoesNotTransferHistoricalDeviceChargeToHost(t *testing.T) {
 		t.Fatalf("historical unified vector inflated discrete host demand: %+v", candidate.MemoryEnvelope)
 	}
 	queued.MemoryAttempts[0].MemoryEnvelope = nil
-	if got := measuredOOMRecovery(queued); got != 4.25 {
+	if got, _ := measuredOOMRecovery(queued); got != 4.25 {
 		t.Fatalf("missing historical ceiling invented measured overshoot: %g", got)
 	}
 }
