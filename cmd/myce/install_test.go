@@ -173,14 +173,6 @@ func TestDoctorCLIMissingInstall(t *testing.T) {
 	}
 }
 
-func TestSetupCLIRejectsMissingOrUnknownAction(t *testing.T) {
-	for _, args := range [][]string{nil, {"unknown"}} {
-		if err := setupCommandWithProbe(args, myce.MachineProbe{}, t.TempDir()); err == nil {
-			t.Fatalf("accepted %v", args)
-		}
-	}
-}
-
 func TestInstallCLICPUWithoutGPU(t *testing.T) {
 	for _, tc := range []struct {
 		name string

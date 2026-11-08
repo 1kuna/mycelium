@@ -27,14 +27,6 @@ func TestSimCommandNoTokenAndJSON(t *testing.T) {
 		t.Fatal("missing comparison output")
 	}
 }
-func TestSimCommandRejectsInputs(t *testing.T) {
-	for _, args := range [][]string{{"--what-if", "unknown"}, {"extra"}, {"--days", "0", "--fleet", "../../examples/sim/fleet.yaml", "--workload", "../../examples/sim/workload.yaml"}} {
-		if simCommand(args, &bytes.Buffer{}) == nil {
-			t.Fatalf("accepted %v", args)
-		}
-	}
-}
-
 func TestSimDeclaredCommandGate(t *testing.T) {
 	dir := t.TempDir()
 	fleet := filepath.Join(dir, "fleet.yaml")

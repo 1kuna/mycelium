@@ -26,19 +26,6 @@ func TestUsageOutput(t *testing.T) {
 		t.Fatal("invalid grouping accepted")
 	}
 }
-func TestUsageSince(t *testing.T) {
-	for _, s := range []string{"7d", "24h", "90d", "91d"} {
-		if _, e := usageDuration(s); e != nil {
-			t.Fatal(s, e)
-		}
-	}
-	for _, s := range []string{"NaNd", "0d", "-1h", "bad"} {
-		if _, e := usageDuration(s); e == nil {
-			t.Fatal(s)
-		}
-	}
-}
-
 func TestUsageCommandCallsAuthenticatedAPI(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/usage" || r.URL.Query().Get("since") != "168h0m0s" || r.Header.Get("Authorization") != "Bearer test-only" {

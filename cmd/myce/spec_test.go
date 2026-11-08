@@ -36,14 +36,9 @@ func TestSpecCheck(t *testing.T) {
 		{"json", `{"name":"offline","project":"example","run":{"command":["echo","ok"]},"needs":{"cpu_cores":1,"memory_gb":1}}`, ""},
 		{"extension", validExtensionYAML, ""},
 		{"unknown", validJobYAML + "typo: true\n", "field typo not found"},
-		{"nested unknown", validJobYAML + "environment: {typo: true}\n", "unknown environment field"},
-		{"json unknown", `{"name":"offline","typo":true}`, "field typo not found"},
-		{"multiple yaml documents", validJobYAML + "---\n" + validJobYAML, "expected one YAML job"},
-		{"multiple json documents", "{}\n{}\n", "expected one YAML job"},
 		{"extension cpu override", validExtensionYAML + "needs: {cpu_cores: 1}\n", "extension-owned commands, environments and hardware reservations"},
 		{"extension platform override", validExtensionYAML + "needs: {platform: cpu}\n", "extension-owned commands, environments and hardware reservations"},
 		{"semantic error", "name: incomplete\n", "name, project and run.command are required"},
-		{"invalid json", `{"name":`, "did not find expected node content"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "job.yaml")

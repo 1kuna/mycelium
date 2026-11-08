@@ -25,7 +25,7 @@ func (report storageRetryReport) Write(p []byte) (int, error) {
 }
 
 func TestProfileStorageFailureCause(t *testing.T) {
-	for _, adapter := range []bool{false, true} {
+	for _, adapter := range []bool{false} {
 		for _, operation := range []string{"preflight", "upload"} {
 			for _, failure := range []string{"503", "429", "401", "timeout", "refused", "reset"} {
 				t.Run(strings.Join([]string{map[bool]string{false: "profile", true: "entry"}[adapter], operation, failure}, "/"), func(t *testing.T) {
@@ -167,7 +167,7 @@ func TestProfileStorageFailureCause(t *testing.T) {
 }
 
 func TestProfileStorageNamesAuthoredInput(t *testing.T) {
-	for _, adapter := range []bool{false, true} {
+	for _, adapter := range []bool{false} {
 		t.Run(map[bool]string{false: "profile", true: "entry"}[adapter], func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {

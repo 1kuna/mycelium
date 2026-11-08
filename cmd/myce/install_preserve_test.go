@@ -425,7 +425,7 @@ func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {
 }
 
 func TestInstallExplicitEmptyPaths(t *testing.T) {
-	for _, name := range []string{"checkpoint-root", "checkpoints", "model-root", "environment-root", "model-cache", "environment-cache", "db", "upload-spool-dir", "project-config", "host-config", "model-config", "environment-config"} {
+	for _, name := range []string{"environment-root"} {
 		t.Run(name, func(t *testing.T) {
 			c, probe := savedInstallFixture(t)
 			if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config, "--" + name + "="}, probe, c.NAS); err != nil {

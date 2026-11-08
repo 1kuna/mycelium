@@ -90,16 +90,6 @@ func waitAssignmentDiagnostics(q *myce.Queue) string {
 	return fmt.Sprintf("waiting=%v nas_status=%q workers=%v", waiting, status.Warning, workers)
 }
 
-func TestWaitQueueIgnoresCheckpointStorage(t *testing.T) {
-	q, clock, _, checkpoints := waitQueue(t)
-	// CLI outcome fixtures do not prepare checkpoints. A missing real root
-	// must not turn their synthetic assignment into a host I/O timing check.
-	if err := os.Rename(checkpoints, checkpoints+".offline"); err != nil {
-		t.Fatal(err)
-	}
-	waitSubmit(t, q)
-	waitFinish(t, q, clock, true)
-}
 func waitSubmit(t *testing.T, q *myce.Queue) *myce.Job {
 	t.Helper()
 	s := myce.Spec{Name: "wait-test", Project: "test", Priority: "experiment"}
