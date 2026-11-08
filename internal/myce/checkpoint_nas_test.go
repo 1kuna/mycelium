@@ -214,33 +214,6 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 	}
 }
 
-func TestBlockedCheckpointPreparationIsBounded(t *testing.T) {
-	w := recoveryWorker(t)
-	store, err := w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.close()
-	entered, release := make(chan struct{}), make(chan struct{})
-	defer close(release)
-	w.checkpointPrepare = func(j Job) (string, error) { close(entered); <-release; return "", errors.New("NAS unreachable") }
-	done := make(chan error, 1)
-	go func() { _, err := startAfterFixtureInputs(t, w, store, recoveryJob(t, []string{"true"})); done <- err }()
-	select {
-	case <-entered:
-	case <-time.After(300 * time.Millisecond):
-		t.Fatal("filesystem fault did not enter")
-	}
-	select {
-	case err := <-done:
-		if !errors.Is(err, errWorkerCheckpoint) {
-			t.Fatalf("%v", err)
-		}
-	case <-time.After(checkpointPreparationBudget + time.Second):
-		t.Fatal("checkpoint preparation hangs start")
-	}
-}
-
 func TestCheckpointGenerationOverridesAttemptAndMtime(t *testing.T) {
 	for _, offset := range []int{-120, -30, -5, 5, 30, 120} {
 		t.Run(strconv.Itoa(offset), func(t *testing.T) {

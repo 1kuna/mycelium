@@ -17,13 +17,9 @@ func refusedStateFiles() map[string][]byte {
 
 func TestStateRootFormats(t *testing.T) {
 	files := refusedStateFiles()
-	// Default and explicitly configured roots, including independent caches and
-	// queue data locations. All use exactly the same gate, regardless of contents.
-	for _, relative := range []string{
-		"queue/state", "worker/state", "worker-gpu0/state", "worker-gpu1/state",
-		"environment-cache", "model-cache",
-		"file-cache", "upload-spool", "file-store", "joining-identity", "benchmark-state",
-	} {
+	// Root names do not affect the marker gate. Real startup paths are covered
+	// separately by TestStateStartupRefusalNoWrites and TestDevStartupRefusalNoWrites.
+	for _, relative := range []string{"worker/state"} {
 		t.Run(relative, func(t *testing.T) {
 			for _, mode := range []string{"absent", "empty", "marked"} {
 				t.Run(mode, func(t *testing.T) {

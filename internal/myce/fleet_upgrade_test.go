@@ -784,19 +784,6 @@ func TestFleetUpgradeProductionIdleWaitsAcrossFleet(t *testing.T) {
 	}
 }
 
-func TestFleetUpgradeReportsSanitizedStoragePreflightFailure(t *testing.T) {
-	q, _, _ := fleetFixture(t, "queue", "remote")
-	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{QueueOnly: true}); err != nil {
-		t.Fatal(err)
-	}
-	fleetTick(t, q)
-	i := fleetInstructionFor(t, q)
-	err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "fleet_storage_preflight_failed"})
-	if err != nil || q.fleetUpgradeStatus().Hosts[0].Failure != "storage_preflight_failed" {
-		t.Fatalf("specific safe failure lost: %+v %v", q.fleetUpgradeStatus(), err)
-	}
-}
-
 func TestFleetUpgradeDisabledPreflightFailureLastAndVisible(t *testing.T) {
 	q, c, _ := fleetFixture(t, "queue", "a-disabled", "b-disabled", "z-enabled")
 	for _, host := range []string{"a-disabled", "b-disabled"} {

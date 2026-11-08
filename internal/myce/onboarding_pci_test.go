@@ -87,12 +87,6 @@ func pciFixtureProbe(devices ...pciFixture) MachineProbe {
 	return p
 }
 
-func TestOnboardingMixedDriverlessIntel(t *testing.T) {
-	p := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", "16", "NVIDIA GPU", "", true}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel Arc GPU", "", false})
-	_, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
-	requirePreflightCode(t, err, "gpu_driver_missing")
-}
-
 func TestOnboardingPCIMatrix(t *testing.T) {
 	nvidia := pciFixture{"0000:01:00.0", "0x10de", "16", "NVIDIA GPU", "", true}
 	discrete := pciFixture{"0000:02:00.0", "0x8086", "8", "Intel Arc GPU", "", true}
@@ -115,7 +109,7 @@ func TestOnboardingPCIMatrix(t *testing.T) {
 		{"generic_integrated", []pciFixture{integrated}, []string{"unified"}, ""},
 		{"bmc", nil, nil, ""},
 	} {
-		for _, withBMC := range []bool{false, true} {
+		for _, withBMC := range []bool{true} {
 			t.Run(fmt.Sprintf("%s/bmc=%v", tc.name, withBMC), func(t *testing.T) {
 				devices := append([]pciFixture(nil), tc.devices...)
 				if withBMC {

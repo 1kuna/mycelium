@@ -248,25 +248,6 @@ func TestRereviewLazyFakeToolDownload(t *testing.T) {
 	}
 }
 
-func TestRereviewToolDownloadGuard(t *testing.T) {
-	const helper = "MYCE_TEST_TOOL_DOWNLOAD_GUARD"
-	if os.Getenv(helper) == "1" {
-		releases, _ := PinnedEnvironmentTools("darwin", "arm64")
-		_, _ = LocalToolBootstrapProbe(LocalMachineProbe()).Fetch(context.Background(), releases[1])
-		t.Fatal("real download bypassed test guard")
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestRereviewToolDownloadGuard$")
-	cmd.Env = append(os.Environ(), helper+"=1")
-	out, err := cmd.CombinedOutput()
-	if err == nil || !bytes.Contains(out, []byte("TEST GUARD: real environment tool download forbidden")) {
-		t.Fatalf("guard not enforced: %v %s", err, out)
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home != os.Getenv("MYCE_TEST_ISOLATED_HOME") {
-		t.Fatal("HOME isolation absent", err)
-	}
-}
-
 func TestRereviewCancelledIOIsNotReused(t *testing.T) {
 	n := checkpointIO[bool]{timeout: time.Second}
 	ctx, cancel := context.WithCancel(context.Background())

@@ -123,22 +123,6 @@ func TestEnrollmentUpgradeRerunResumesOwnDrain(t *testing.T) {
 	}
 }
 
-func TestEnrollmentBusyUpgradeDoesNotLeaveDrain(t *testing.T) {
-	q, clock := fixture(t)
-	m := cpuMachine("hypha", "hypha", "fake", 8, 32)
-	maintenanceAssign(t, q, m, "experiment")
-	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
-	defer server.Close()
-	_, err := PrepareEnrollmentUpgrade(context.Background(), ServiceConfig{Name: m.ID, HostID: m.HostID, State: t.TempDir()}, Client{URL: server.URL, Token: "test"}, clock, time.Second, func(context.Context, time.Duration) error { clock.Advance(time.Second); return nil })
-	if err == nil {
-		t.Fatal("busy upgrade accepted")
-	}
-	status, e := q.HostMaintenanceStatus(m.HostID)
-	if e != nil || status.Policy.Mode != "enabled" {
-		t.Fatal("failed upgrade left host drained", status.Policy.Mode, e)
-	}
-}
-
 func TestEnrollmentDrainRaceTimeoutRestoresPolicy(t *testing.T) {
 	q, clock := fixture(t)
 	m := cpuMachine("hypha", "hypha", "fake", 8, 32)

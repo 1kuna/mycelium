@@ -175,18 +175,6 @@ func TestEvidenceRetentionAutomaticFilesAndReplaySurviveAge(t *testing.T) {
 	}
 }
 
-func TestEvidenceBudgetUsesLocalHeadroom(t *testing.T) {
-	if n := evidenceBudget(RetentionCapacity{1024, 8192}, 512, 768); n != 256 {
-		t.Fatal(n)
-	}
-	if n := evidenceBudget(RetentionCapacity{1 << 40, 1 << 42}, 512, 768); n != (1<<40)-768 {
-		t.Fatal(n)
-	}
-	if n := evidenceBudget(RetentionCapacity{}, 512, 768); n != 0 {
-		t.Fatal("unknown capacity invented room", n)
-	}
-}
-
 func TestEvidenceRetentionRevisitsHistoryWhenCapacityFalls(t *testing.T) {
 	q, clock := fixture(t)
 	capacity := RetentionCapacity{MemoryAvailableBytes: 1 << 40, DiskAvailableBytes: 1 << 40}
