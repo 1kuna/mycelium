@@ -43,15 +43,21 @@ Mycelium runs CPU and GPU work through one queue. Describe needs and verified
 targets; Mycelium chooses placement. Use the installed `myce` CLI, which resolves
 authority internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is a setup hold for the installation owner.
-After upgrading both queue and worker, learned and bounded exploratory native
+After upgrading both queue and worker, learned and exploratory native
 CPU `memory: auto` jobs can grow their charge from fresh measurements while the host has room. OS
 pressure, exhausted measured headroom, the configured host allowance and
 explicit limits still stop growth. Linux retains a physical/allowance kernel
 ceiling; macOS uses sampled RSS and pressure with no kernel ceiling or
 shared-page credit. Missing/stale telemetry protects the execution ceiling.
 `memory_envelope.enforcement` names the acknowledged behavior; older queues or
-workers retain the previous estimate-sized ceiling. Cold physical probes keep
-their initial execution ceilings. Declared numeric limits,
+workers retain the previous estimate-sized ceiling. From the next release, cold
+CPU probes also use the adaptive guard, so a small residual admission envelope
+is not their execution limit. Native CPU auto-memory OOMs and native accelerator-check host cgroup OOMs
+retain killed-peak floors and retry against usable physical headroom;
+exploratory under-sizing does not spend a fixed attempt budget.
+Growth/overshoot stays replaceable uncertainty, rather than a permanent floor.
+If the measured lower bound exceeds every eligible capacity, the job reports
+a capacity refusal. Inspect each attempt's envelope and learning reason. Declared numeric limits,
 explicit member caps and Docker behavior are unchanged.
 From the release containing #1011, typed `launch/resource_limit/memory_capacity`
 refusals wait on the same job and submission key without spending infrastructure
@@ -105,12 +111,15 @@ YAML
 The tiny declared memory bounds this fixture; real work can omit memory to learn
 it. From the next release, cold auto-memory work reserves measured physical
 headroom on one host.
-Cold ceilings leave the host's measured check-in/launch drift unused; strict
-worker launch checks still refuse a larger unseen drop and teach the next probe.
+Native CPU probes and extension checks leave this job's measured launch-error
+reserve unused; unrelated inventory drops and other jobs' old refusals do not
+shrink their envelopes. Strict worker checks refuse unseen drops and teach
+the same job's next offer. Unknown accelerator checks wait for a physical
+opportunity rather than starting with a tiny leftover ledger reservation.
 A running CPU probe can share after fresh complete cgroup
 measurements establish its live footprint and growth over a sampling horizon,
 extended by the measured growth rate through the sample's age;
-its containment ceiling stays fixed. Missing/stale measurements retain the full
+supporting native guards use physical/allowance containment. Missing/stale measurements retain the full
 charge. Protected attempts block only capacity they actually reserve, rather
 than excluding every exploratory job. A clean accepted completion teaches a
 reusable bound.
@@ -426,6 +435,7 @@ still withholds dependent jobs under the unchanged measured thresholds.
 - **GPU, memory, portability, dependencies or models:** [submission contracts](advanced.md#submit), including hard-requirement pins, native qualification, output parity and checkpoints.
 - **Many jobs, detached completion or observer recovery:** [waiting contracts](advanced.md#wait-and-check-status); optional [T3 binding](t3-binding.md). Use one foreground batched wait on supporting clients; never construct per-job background waits. From the next release, `myce wait --observer-status` reports local observer progress; newer clients request cooperative upgrades. Legacy shared-observer recovery belongs to its operator.
 - **Large outputs, diagnostics, quotas or early release:** [results and custody](advanced.md#results). Release only your own terminal results after all downstream uses and verified copies are complete.
+- **Reservation confirmation (#979, next release):** `reserve add` fails on rejected or unconfirmed writes instead of printing an empty record. Keep an explicit `--id`, inspect `reserve list` after uncertain confirmation, and retry the same binding.
 - **Urgency, reservations or pausing:** [class and validation rules](advanced.md#urgency-and-pausing). Class is the only urgency lever; shared policy changes belong to the queue owner.
 - **Blocked preparation or placement:** [diagnosis](advanced.md#when-a-job-waits).
 - **Real adapters, native variants or legacy formats:** [adapter contract](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md), [project setup and profile compatibility](setup-project.md), [harness routing](harness-binding.md).
