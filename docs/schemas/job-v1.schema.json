@@ -366,6 +366,9 @@
         "execution_cause": {
           "$ref": "#/$defs/RuntimeCause"
         },
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence"
+        },
         "forced": {
           "type": "boolean"
         },
@@ -753,6 +756,9 @@
     },
     "CancellationMember": {
       "properties": {
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence"
+        },
         "job_id": {
           "type": "string"
         },
@@ -1326,6 +1332,29 @@
       "required": [
         "id",
         "attempt"
+      ],
+      "type": "object"
+    },
+    "ExecutionEvidence": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "environment_preparation": {
+          "type": "string"
+        },
+        "main": {
+          "type": "string"
+        },
+        "sidecars": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "main",
+        "sidecars",
+        "environment_preparation"
       ],
       "type": "object"
     },
@@ -2206,6 +2235,10 @@
         },
         "execution_cause": {
           "$ref": "#/$defs/RuntimeCause",
+          "x-contract": "diagnostic"
+        },
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence",
           "x-contract": "diagnostic"
         },
         "extension": {

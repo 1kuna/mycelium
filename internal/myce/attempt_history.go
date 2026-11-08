@@ -10,24 +10,25 @@ import (
 // taxonomy. State is the queue decision after this attempt (queued or terminal).
 // It is diagnostic evidence, never release proof or a retry/accounting input.
 type AttemptOutcome struct {
-	StopObservation *AttemptStopObservation `json:"stop_observation,omitempty"`
-	inputsStaged    bool                    // transient positive staging evidence; not part of the wire/history shape.
-	Placement       *PlacementDecision      `json:"placement,omitempty"`
-	Diagnostics     *AttemptDiagnostics     `json:"diagnostics,omitempty"`
-	Attempt         int                     `json:"attempt"`
-	Machine         string                  `json:"machine"`
-	Session         string                  `json:"session"`
-	EndedAt         time.Time               `json:"ended_at"`
-	State           string                  `json:"state"`
-	Reason          string                  `json:"reason,omitempty"`
-	ExecutionCause  *RuntimeCause           `json:"execution_cause,omitempty"`
-	CleanupCause    *RuntimeCause           `json:"cleanup_cause,omitempty"`
-	Forced          bool                    `json:"forced,omitempty"`
-	Interrupted     bool                    `json:"interrupted,omitempty"`
-	OutOfMemory     bool                    `json:"out_of_memory,omitempty"`
-	PoliteStop      bool                    `json:"polite_stop,omitempty"`
-	OperatorStop    bool                    `json:"operator_stop,omitempty"`
-	PriorityStop    *PriorityPreemption     `json:"priority_stop,omitempty"`
+	ExecutionEvidence *ExecutionEvidence      `json:"execution_evidence,omitempty"`
+	StopObservation   *AttemptStopObservation `json:"stop_observation,omitempty"`
+	inputsStaged      bool                    // transient positive staging evidence; not part of the wire/history shape.
+	Placement         *PlacementDecision      `json:"placement,omitempty"`
+	Diagnostics       *AttemptDiagnostics     `json:"diagnostics,omitempty"`
+	Attempt           int                     `json:"attempt"`
+	Machine           string                  `json:"machine"`
+	Session           string                  `json:"session"`
+	EndedAt           time.Time               `json:"ended_at"`
+	State             string                  `json:"state"`
+	Reason            string                  `json:"reason,omitempty"`
+	ExecutionCause    *RuntimeCause           `json:"execution_cause,omitempty"`
+	CleanupCause      *RuntimeCause           `json:"cleanup_cause,omitempty"`
+	Forced            bool                    `json:"forced,omitempty"`
+	Interrupted       bool                    `json:"interrupted,omitempty"`
+	OutOfMemory       bool                    `json:"out_of_memory,omitempty"`
+	PoliteStop        bool                    `json:"polite_stop,omitempty"`
+	OperatorStop      bool                    `json:"operator_stop,omitempty"`
+	PriorityStop      *PriorityPreemption     `json:"priority_stop,omitempty"`
 }
 
 // These are queue-written stop records, not worker error text. This diagnostic
@@ -39,9 +40,10 @@ func historyPlannedStop(j *Job) bool {
 
 func attemptOutcome(j *Job, r Result) AttemptOutcome {
 	return AttemptOutcome{
-		inputsStaged: r.Success || j.StartedAt != nil || j.InputsStagedAt != nil || r.InputsStagedAt != nil,
-		Placement:    j.Placement,
-		Attempt:      j.Attempt, Machine: j.Machine, Session: j.Session,
+		ExecutionEvidence: safeExecutionEvidence(r.ExecutionEvidence, j.Attempt),
+		inputsStaged:      r.Success || j.StartedAt != nil || j.InputsStagedAt != nil || r.InputsStagedAt != nil,
+		Placement:         j.Placement,
+		Attempt:           j.Attempt, Machine: j.Machine, Session: j.Session,
 		ExecutionCause: safeAttemptRuntimeCause(j, r.ExecutionCause), CleanupCause: safeRuntimeCause(r.CleanupCause),
 		Forced: r.Forced, Interrupted: r.Interrupted, OutOfMemory: r.OutOfMemory,
 		PoliteStop: r.PoliteStop, OperatorStop: r.OperatorStop || plannedMaintenanceStop(j),

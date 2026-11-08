@@ -222,6 +222,10 @@ func statusJobValue(job *Job) Job {
 			j.Reason = "never started: " + extensionCheckAdmissionReason(strings.TrimPrefix(j.Reason, "never started: "))
 		case j.Spec.ExtensionCheck != nil && j.Reason == "check execution timeout exceeded":
 			// Fixed queue-owned execution timeout, with no worker error suffix.
+		case j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "host_unavailable" && strings.HasPrefix(j.Reason, "production cannot start: no eligible host is enabled;"):
+			j.Reason = "production cannot start: no eligible host is enabled"
+		case j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "host_unavailable" && strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
+			j.Reason = "production start deadline exceeded"
 		case j.ExecutionCause != nil && (j.ExecutionCause.Operation == "input_staging" || j.ExecutionCause.Class == machoLibraryMissing || j.ExecutionCause.Predicate != ""):
 			j.Reason = "execution failed: " + j.ExecutionCause.String()
 		case j.Reason == "command failed: "+execFormatMessage || j.Reason == "native check failed: "+execFormatMessage:

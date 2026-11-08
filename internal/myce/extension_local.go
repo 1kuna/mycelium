@@ -666,6 +666,9 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 			unlock()
 			return nil, nil, errors.New("extension assets are not prepared")
 		}
+		if j.ExecutionEvidence != nil {
+			j.ExecutionEvidence.EnvironmentPreparation = executionMayHaveRun
+		}
 		root, release, err := w.environmentCache.Acquire(withLaunchGate(context.Background(), func() error {
 			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: w.Machine.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), EnvironmentRecipe{Key: key, readyOnly: true})
