@@ -1029,6 +1029,8 @@ func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySampl
 // actor reads never acquire process/control locks or perform receipt I/O.
 func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool, samples map[attemptKey]hostMemorySample, launching ...attemptKey) error {
 	cores, ram, growth := 0, 0.0, 0.0
+	anon, ownResident, ownCharge, ownAnon, ownForecast, ownPending := 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+	ownDevicePending := 0.0
 	now := time.Time{}
 	if rt.clock != nil {
 		now = rt.clock.Now()
@@ -1051,11 +1053,29 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 			charge = hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 			pending = charge
 		}
+		sample := samples[jobKey(j)]
+		forecast, fresh := sample.hostGrowth(now)
+		if fresh {
+			anon += sample.gb
+		}
 		if slices.Contains(launching, jobKey(j)) {
-			// The exact attempt already owns this complete reservation. Its
-			// sampled helper growth cannot require more unallocated RAM than
-			// the envelope before main has executed. Neighbors keep forecasts.
+			// The exact launch owns this complete reservation (#1033). Helpers
+			// cannot demand more unallocated RAM than that bound.
 			pending = min(pending, charge)
+			if len(launching) == 1 {
+				expanded := helperHostCharge(&j, owner, sample, now, charge)
+				ownResident = helperDeviceResident(owner, sample, now)
+				// Anonymous occupancy does not prove that future CUDA demand is
+				// already allocated. Preserve the device component, including its
+				// forecast/overshoot, after crediting only direct device occupancy.
+				ownDevicePending = max(0, helperDeviceCharge(&j, sample, now)-ownResident)
+				pending += expanded - charge
+				charge = expanded
+				ownCharge, ownPending = charge, pending
+				if fresh {
+					ownAnon, ownForecast = sample.gb, forecast
+				}
+			}
 		}
 		ram += charge
 		growth += pending
@@ -1067,6 +1087,13 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 			ram += need
 			growth += need
 		}
+	}
+	if ownResident > 0 {
+		// Host anon is uniquely charged across attempt cgroups, but can also
+		// contain CUDA pages. Credit only the union lower bound max(all anon,
+		// one process's CUDA counter), never their sum or two process counters.
+		additional := max(0, ownResident-anon)
+		growth += max(0, ownCharge-ownAnon-additional, ownForecast, ownDevicePending) - ownPending
 	}
 	capacity, reason := cpuCapacity(&rt.memoryMachine)
 	if reason == "" && cores > capacity {

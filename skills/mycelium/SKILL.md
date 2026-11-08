@@ -64,8 +64,15 @@ refusals wait on the same job and submission key without spending infrastructure
 retries or losses, including after a helper ran or Started was authorized. Keep
 that key: Mycelium uses ordinary lower-tier preemption and exact release before
 reuse; equal-tier production waits. Unchanged capacity evidence is not re-offered.
-Generated startup windows pause for capacity; explicit `start_by`, `start_window`,
-give-up deadlines and cancellation still apply. `execution_evidence` describes
+From the next release, every relative startup window pauses for qualified memory,
+device or host-capacity waiting, including explicit `start_window: 600s` and the
+omitted `150s` default. Assignment restores the full window for preparation;
+status shows the start budget and `paused for capacity` while waiting. This also
+protects recovery windows and typed uncharged refusals after Started authorization.
+An assigned start without an accepted startup acknowledgement, stuck preparation
+or an unreachable worker still consumes the window. Absolute `start_by`,
+`give_up_at`, `deadline` and cancellation keep their existing semantics.
+`execution_evidence` describes
 component boundaries separately from cleanup; a helper that ran is never proof
 that the whole attempt stayed unlaunched.
 
@@ -329,6 +336,21 @@ ID and submission key. Do not raise shared budgets, clear custody or resubmit to
 bypass the finding. It uses the existing health notification channel; no new
 notifier setup is needed. Later progress does not establish a causal repair.
 
+From the host-growth accounting correction, fresh exact-attempt anonymous
+residency reduces the unreached envelope once. Pending host growth is the larger
+of that remainder and the live growth forecast, extended through sample age.
+From the helper-residency correction, the exact native launch on unified CUDA
+can also credit its own fresh direct single-process device occupancy against
+its complete physical envelope. Shared process counters are not summed for
+credit, anonymous overlap is counted once, and measured overshoot increases the
+charge. Neighbors, stale/unknown counters and RSS estimates retain their bounds;
+discrete device memory never credits host RAM. This does not reduce learned
+envelopes or promise concurrent throughput.
+The static allowance still protects the envelope and observed over-use;
+missing/stale telemetry, unified-CUDA device floors and release custody remain
+binding. An aggregate refusal alone cannot identify a sibling's contribution or
+establish safe concurrency. See [live headroom](../../docs/status.md#live-headroom-and-reservations).
+
 On a release containing #813, a projected queued job's waiting reason explains
 retained resource-seconds, weighted share, signed fair-share debt (positive ahead,
 negative behind), the measured history horizon, weighted oldest project-wait
@@ -407,7 +429,10 @@ thread wake. Older releases omit configuration; do not infer a cause from false.
 Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium
 resumes after measured recovery; an operator drain remains independent. Running
-attempts retain custody. From the next release, `mount_probe_slow` is advisory:
+attempts retain custody. From the worker release with the zero-pressure-baseline
+correction, an all-zero idle PSI reference learns ordinary workload variation
+while swap/local-wake signals remain within their learned bands; corroborated
+pressure still drains the host. From the next release, `mount_probe_slow` is advisory:
 successful or progressing slow metadata operations preserve admission, with
 measured evidence in `host_mount_degraded` alerts. Failed operations and
 `mount_probe_stalled` still withhold dependent work; the latter uses the unchanged
