@@ -233,8 +233,10 @@ func snapshotInstall(ctx context.Context, c ServiceConfig, files installFiles, c
 // restore is the one recovery path on both platforms: files, manager reload,
 // registration, activity, then independent verification of the whole snapshot.
 func (tx *installTransaction) restore(ctx context.Context) error {
-	recovery, cancel := SetupTimeout(context.WithoutCancel(ctx))
-	defer cancel()
+	// Each command owns a fresh allowance, including systemd's effective
+	// lifecycle budgets. A total probe deadline can expire mid-stop and then
+	// poison every subsequent recovery operation and final inspection.
+	recovery := context.WithoutCancel(ctx)
 	result := tx.restoreFiles()
 	reloadErr := tx.manager.reload(recovery, tx.units)
 	result = errors.Join(result, reloadErr)

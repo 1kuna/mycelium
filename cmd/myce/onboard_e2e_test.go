@@ -80,6 +80,7 @@ test "$1" = --user && shift
 case "$1" in
   show)
     case "$*" in
+      *--property=TimeoutStopUSec*) printf 'TimeoutStopUSec=45s\nTimeoutStartUSec=1min 30s\n';;
       *--property=UnitFileState*) if test -f "$base/config.json"; then echo enabled; fi;;
       *--property=DropInPaths*) :;;
       *--property=ActiveState*) test -f "$pidfile"; printf 'ActiveState=active\nSubState=running\nMainPID=%s\nNRestarts=0\nResult=success\n' "$(cat "$pidfile")";;
