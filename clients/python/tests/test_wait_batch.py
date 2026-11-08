@@ -213,3 +213,41 @@ class BatchWaitTests(unittest.TestCase):
         self.assertEqual(len(peer_payloads), 1)
         self.assertLess(peer_payloads[0], 2)
         self.assertTrue(all(batch == ["a"] for batch in batches[2:]))
+
+    def test_older_batch_queue_retains_deadline_during_outage(self):
+        client = Client(token="fixture")
+        clock = client._clock = Clock()
+        calls, reads = [], []
+        def batch(ids, after, seconds, timeout):
+            calls.append(ids)
+            clock.now += .01
+            if len(calls) > 1:
+                raise HTTPError("http://fixture.invalid/api/wait", 503, "busy", {}, Reply({}))
+            return [{"id": "job", "state": "running", "revision": 1}]
+        def read(job_id, **kwargs):
+            reads.append(job_id)
+            return {"id": job_id, "state": "running", "spec": {"deadline": "2026-11-05T12:00:01Z"}}
+        client._wait_batch, client._read_job = batch, read
+        with self.assertRaises(TimeoutError):
+            client.wait("job")
+        self.assertEqual(reads, ["job"])
+        self.assertAlmostEqual(clock.now, 1, places=6)
+
+    def test_slow_older_batch_metadata_cannot_block_observation(self):
+        client = Client(token="fixture")
+        clock = client._clock = Clock()
+        calls, budgets = [], []
+        def batch(ids, after, seconds, timeout):
+            calls.append(ids)
+            clock.now += .01
+            return [{"id": "job", "state": "running" if len(calls) < 3 else "succeeded", "revision": len(calls)}]
+        def read(job_id, *, wait=False, timeout=None, **kwargs):
+            if wait:
+                return {"id": job_id, "state": "succeeded"}
+            budgets.append(timeout)
+            clock.now += timeout
+            raise TimeoutError("slow legacy metadata")
+        client._wait_batch, client._read_job = batch, read
+        self.assertEqual(client.wait("job")["state"], "succeeded")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(budgets, [20])

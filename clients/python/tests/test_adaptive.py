@@ -27,6 +27,9 @@ class Clock:
 
 class Reply(io.BytesIO):
     def __init__(self, value, headers=None):
+        if isinstance(value, dict) and isinstance(value.get("jobs"), list):
+            for row in value["jobs"]:
+                row.setdefault("spec", {})
         super().__init__(json.dumps(value).encode())
         self.headers = headers or {}
 

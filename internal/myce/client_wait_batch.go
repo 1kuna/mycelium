@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// WaitBatchMaxSeconds is the batch-v1 maximum observation hold.
+const WaitBatchMaxSeconds = 20
+
 // WaitBatch observes up to 256 IDs in one transport wait. After is the previous
 // reply's revisions; nil returns immediately. Older queues fall back to their
 // wait-view GETs. It never fetches full diagnostic/terminal payloads.
@@ -31,7 +34,7 @@ func WaitBatchUnsupported(err error) bool {
 func (c Client) waitBatch(ctx context.Context, ids []string, after map[string]uint64, seconds int, fallback bool) (WaitReply, error) {
 	// batch-v1 defines a maximum 20-second hold. Caller budgets reserve a
 	// proportional share for transit rather than a fixed one-second margin.
-	seconds = min(20, max(0, seconds))
+	seconds = min(WaitBatchMaxSeconds, max(0, seconds))
 	if c.HTTP != nil && c.HTTP.Timeout > 0 {
 		seconds = min(seconds, int(c.HTTP.Timeout/2/time.Second))
 	}
@@ -98,7 +101,7 @@ func (c Client) GetJobWaitCapability(ctx context.Context, id string) (*Job, bool
 			// signal rather than mistaking that reply for batch support.
 			return nil, false, err
 		}
-		j = &Job{ID: state.ID, State: state.State, Reason: state.Reason}
+		j = state.Job()
 		if terminal(state.State) {
 			j, waitErr = c.GetJobForWait(ctx, state.ID)
 		}

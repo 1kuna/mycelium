@@ -118,9 +118,7 @@ func (s *waitStateIndex) set(id string, j *Job) {
 	} else {
 		s.setIntent(id, j)
 		next := WaitState{ID: id, State: j.State, Reason: j.Reason, StartedAt: waitTimestamp(j.StartedAt)}
-		if j.Spec.Deadline != nil || j.Spec.StartBy != nil || j.Spec.ExpectedMinutes != 0 {
-			next.Spec = &WaitSpec{Deadline: waitTimestamp(j.Spec.Deadline), StartBy: waitTimestamp(j.Spec.StartBy), ExpectedMinutes: j.Spec.ExpectedMinutes}
-		}
+		next.Spec = &WaitSpec{Deadline: waitTimestamp(j.Spec.Deadline), StartBy: waitTimestamp(j.Spec.StartBy), ExpectedMinutes: j.Spec.ExpectedMinutes}
 		if exists && old.State == next.State && old.Reason == next.Reason && reflect.DeepEqual(old.Spec, next.Spec) && reflect.DeepEqual(old.StartedAt, next.StartedAt) {
 			return
 		}

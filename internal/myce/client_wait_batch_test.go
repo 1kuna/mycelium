@@ -80,3 +80,22 @@ func TestClientWaitShedBootstrapAndTransientProbe(t *testing.T) {
 		}
 	}
 }
+
+func TestClientShedBootstrapRetainsBatchDeadline(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
+	deadline := clock.Now().Add(time.Second)
+	gets := 0
+	c := Client{URL: "http://fixture.invalid", Clock: clock, Pause: func(_ context.Context, d time.Duration) error { clock.Advance(d); return nil }, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		clock.Advance(time.Millisecond)
+		status, body := 200, `{"jobs":[{"id":"job","state":"running","revision":1,"spec":{"deadline":"2026-11-08T12:00:01Z"}}]}`
+		if r.Method == "GET" {
+			gets++
+			status, body = 429, `{"code":"client_rate_limited"}`
+		}
+		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}}
+	_, err := c.Wait(context.Background(), "job")
+	if !errors.Is(err, context.DeadlineExceeded) || gets != 1 || !clock.Now().Equal(deadline) {
+		t.Fatal(err, gets, clock.Now())
+	}
+}

@@ -178,7 +178,7 @@ func TestWaitAdaptiveEveryJobInitialDeadline(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		reply := myce.WaitReply{}
 		for _, id := range req.IDs {
-			row := myce.WaitState{ID: id, State: "running", Revision: 1}
+			row := myce.WaitState{ID: id, State: "running", Revision: 1, Spec: &myce.WaitSpec{}}
 			if id == "b" {
 				row.Spec = &myce.WaitSpec{Deadline: &deadline}
 			}

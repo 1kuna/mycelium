@@ -273,5 +273,8 @@ older queues fall back to lightweight reads after one unsupported-endpoint probe
 The batch-v1 limit is 256 distinct IDs. Wait timeouts never cancel jobs.
 
 New queue replies include scalar deadline and start metadata. Older batch queues
-may omit it; use an owner timeout when that bound matters. Queue execution
+may omit it: the client tries one metadata read within a shared batch-v1 hold interval (at most 20 seconds
+for all metadata reads in that reply). Successful reads retain the job deadline; slow/shed reads leave metadata
+unavailable so batch observation continues. Use an owner timeout when that bound
+matters. Queue execution
 deadlines always apply. A full terminal Job is still fetched for results.

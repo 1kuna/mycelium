@@ -265,10 +265,16 @@ Jobs in input order. Supporting clients start directly with one shed-exempt
 `/api/wait` request for all pending IDs, carrying revisions so it wakes when any
 job changes. No per-job capability/bootstrap GET is required. New queue replies
 include scalar deadline/start metadata; older batch queues may omit it, so use
-an owner timeout when that bound matters. Terminal payloads are fetched for
-results. Queues without the endpoint retain compatible lightweight reads after
+an owner timeout when that bound matters. Clients try one bounded metadata read
+for an older batch queue: a successful read retains its deadline, while a
+slow/shed read leaves that metadata unavailable and observation continues. Optional reads share one batch-v1 hold interval
+(at most 20 seconds) per reply,
+not per job; caller deadlines can shorten it.
+Terminal payloads are fetched for results. Queues without the endpoint retain compatible lightweight reads after
 one unsupported-endpoint probe. Queue execution deadlines always apply.
-CLI JSON continues with scalar state/reason if a changed diagnostic read is shed;
+CLI JSON continues with scalar state/reason if a changed diagnostic read is slow
+or transiently unavailable; these optional reads use that same shared budget,
+and explicit Retry-After suppresses further diagnostic requests until eligible.
 Python/Go result consumers still fetch a full terminal Job before returning it.
 Do not build per-job wait processes, Python wait
 threads, repeated `get` calls or status loops. Use status once when diagnosing

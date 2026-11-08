@@ -689,6 +689,11 @@ class Client:
             jobs[job_id] = observed
             metadata.setdefault(job_id, dict(observed))
             saved = metadata[job_id]
+            saved["state"] = observed["state"]
+            if "spec" in observed:
+                saved["spec"] = observed["spec"]
+            if observed.get("started_at"):
+                saved["started_at"] = observed["started_at"]
             if observed["state"] == "running" and not saved.get("started_at"):
                 saved["started_at"] = dt.datetime.fromtimestamp(self._clock.time(), dt.timezone.utc).isoformat()
             if observed["state"] in TERMINAL or original != job_id:
@@ -700,10 +705,16 @@ class Client:
             # Preserve aliases for the input-order result below.
             if original != job_id:
                 ids = [job_id if key == original else key for key in ids]
+            refresh_times()
+
+        def refresh_times():
+            nonlocal end, event
             event = None
             end = owner_end
             for job_id in pending:
                 saved = metadata.get(job_id, {})
+                if saved.get("state") in TERMINAL:
+                    continue
                 spec = saved.get("spec") or {}
                 if spec.get("deadline"):
                     until = dt.datetime.fromisoformat(spec["deadline"].replace("Z", "+00:00")).timestamp() - self._clock.time()
@@ -734,15 +745,43 @@ class Client:
                         seconds = min(seconds, int(budget / 2))
                     try:
                         observations = self._wait_batch(list(pending), after, seconds, budget)
+                        diagnostic_end = self._clock.monotonic() + 20  # One batch-v1 hold across all legacy metadata reads.
                         held = seconds > 0
                     except APIError as error:
                         if not (error.status == 405 or error.status == 404 and not error.code):
                             raise
                         batch_unavailable = True
                         continue
+                    # Apply all available scalar metadata before any optional/full GET.
+                    # A slow payload read cannot delay learning a peer's deadline.
+                    for original, row in zip(list(pending), observations):
+                        saved = metadata.setdefault(original, {})
+                        saved["state"] = row["state"]
+                        if "spec" in row:
+                            saved["spec"] = row["spec"]
+                        if row.get("started_at"):
+                            saved["started_at"] = row["started_at"]
+                    refresh_times()
                     for original, row in zip(list(pending), observations):
                         after[row["id"]] = row["revision"]
-                        if row["state"] in TERMINAL:
+                        full_payload = False
+                        if original not in jobs and "spec" not in row and row["state"] not in TERMINAL:
+                            # Older batch queues omit deadline metadata. Try it once,
+                            # bounded by one shared protocol hold so bootstrap cannot stall.
+                            detail_budget = max(0, diagnostic_end - self._clock.monotonic())
+                            owner_budget = request_budget()
+                            if owner_budget is not None:
+                                detail_budget = min(detail_budget, owner_budget)
+                            try:
+                                detail = self._read_job(row["id"], timeout=detail_budget, retry=False)
+                                row = dict(detail, revision=row["revision"])
+                                full_payload = True
+                            except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
+                                if not retryable(error):
+                                    raise
+                                if isinstance(error, TimeoutError):
+                                    diagnostic_end = self._clock.monotonic()
+                        if row["state"] in TERMINAL and not full_payload:
                             try:
                                 row = self._read_job(row["id"], timeout=request_budget(), wait=True)
                             except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
