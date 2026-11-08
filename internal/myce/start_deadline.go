@@ -246,11 +246,15 @@ func (q *Queue) startupReleaseDetail(host string) HoldDetail {
 	return detail
 }
 
+func pausedStartBudget(j *Job) string {
+	return fmt.Sprintf("%.0fs left to start (paused for capacity)", j.StartWindow.Seconds())
+}
+
 func (q *Queue) startStatusReason(j *Job, scans ...*placementScan) string {
 	if q.startCapacityPaused(j) {
 		// Assignment restores the original relative window. The old saved
 		// cutoff is suspended, so subtracting wall time would report zero.
-		return q.startWaitingReason(j, scans...) + fmt.Sprintf("; %.0fs left to start (paused for capacity)", j.StartWindow.Seconds())
+		return q.startWaitingReason(j, scans...) + "; " + pausedStartBudget(j)
 	}
 	return q.startWaitingReason(j, scans...) + fmt.Sprintf("; %.0fs left to start", max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds()))
 }

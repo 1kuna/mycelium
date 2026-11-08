@@ -147,3 +147,35 @@ func TestStartWindowCapacityAbsoluteCutoffs(t *testing.T) {
 		})
 	}
 }
+
+func TestStartWindowCapacityPreparationDisplay(t *testing.T) {
+	for _, observation := range []string{"building", "stale"} {
+		t.Run(observation, func(t *testing.T) {
+			q, clock := fixture(t)
+			r := binaryRecipe(t, "cpu")
+			if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}); err != nil {
+				t.Fatal(err)
+			}
+			m := cpuMachine("worker", "worker", "cpu", 8, 0.5)
+			m.EnvironmentBuilder = true
+			check(t, q, m, nil)
+			s := cpuSpec(1, 4)
+			s.Priority, s.StartWindow, s.Environment.Name = "production", "600s", "tools"
+			j := submit(t, q, s)
+			clock.Advance(30 * time.Minute)
+			want := "unknown_observation"
+			if observation == "building" {
+				m.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "building"}}
+				check(t, q, m, nil)
+				want = "building"
+			}
+			got, err := q.jobSnapshot(j.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Blocker == nil || got.Blocker.Code != want || !strings.Contains(JobReason(got), "600s left to start (paused for capacity)") {
+				t.Fatalf("preparation observation hid paused budget: blocker=%+v display=%s", got.Blocker, JobReason(got))
+			}
+		})
+	}
+}
