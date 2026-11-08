@@ -119,6 +119,13 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	readGeneration       *readGeneration
+	readRoot             *readNode // q.mu; immutable committed input generations.
+	readModels           *ModelConfig
+	readEnvironments     *EnvironmentCatalog
+	readRuntime          *observationState
+	readSamples          map[string]map[attemptKey]hostMemorySample
+	detachedRead         bool // Private immutable source: never owns the live writer mutex.
 	requestBudgets       requestBudgets
 	evidencePending      map[string]bool
 	evidenceRows         []string
@@ -223,12 +230,13 @@ type Queue struct {
 	usageMaintenance bool
 	s                state
 
-	fragmented             bool
-	persistencePageBytes   int
-	persistenceEncodings   map[string]map[string]catalogEncoding
-	persistenceFieldsCache map[string]persistenceFieldCache
-	observePersistence     func(queuePersistenceTiming)
-	observeUpdatePhases    func(queueHoldPhases)
+	fragmented              bool
+	persistencePageBytes    int
+	persistenceEncodings    map[string]map[string]catalogEncoding
+	persistenceFieldsCache  map[string]persistenceFieldCache
+	observePersistence      func(queuePersistenceTiming)
+	observeUpdatePhases     func(queueHoldPhases)
+	observeSubmissionAdvice func(submissionAdviceTiming)
 
 	observeMemoryHistory func(int, bool) // Test observer: jobs visited by a full evidence scan.
 
@@ -378,6 +386,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 			}
 		}
 	}
+	for _, j := range q.liveJobs() {
+		if j.Timing != nil && !terminal(j.State) {
+			j.Timing.Reason = "queue restarted; occupancy unknown"
+		}
+	}
 	if err = q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}); err != nil {
 		db.Close()
 		return nil, err
@@ -398,11 +411,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		}); err != nil {
 			db.Close()
 			return nil, err
-		}
-	}
-	for _, j := range q.liveJobs() {
-		if j.Timing != nil && !terminal(j.State) {
-			j.Timing.Reason = "queue restarted; occupancy unknown"
 		}
 	}
 	q.usageReader, err = openUsageReader(path)
@@ -549,16 +557,16 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 }
 
 func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queueUpdateTiming) error {
-	return q.updateTransaction(ctx, fn, timing, false)
+	return q.updateTransaction(ctx, fn, timing, false, nil)
 }
 
 // Upload persistence may abandon a pending transaction before it owns q.mu.
 // Ordinary transactions must still run cleanup when their request is cancelled.
 func (q *Queue) updateUploadRequest(ctx context.Context, fn func() error, timing *queueUpdateTiming) error {
-	return q.updateTransaction(ctx, fn, timing, true)
+	return q.updateTransaction(ctx, fn, timing, true, nil)
 }
 
-func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool) error {
+func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool, committed func()) error {
 	if q.stopping.Load() {
 		return queueStopping()
 	}
@@ -602,7 +610,11 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.usageWrites = nil
 		q.accountUsage(q.clock.Now())
 		hold.next(holdBody)
-		return fn() // Simulation aborts on any error; it never resumes a failed mutation.
+		err := fn() // Simulation aborts on any error; it never resumes a failed mutation.
+		if err == nil && committed != nil {
+			committed()
+		}
+		return err
 	}
 	q.memoryObservationIndex = nil
 	defer func() { q.memoryObservationIndex = nil }()
@@ -674,6 +686,10 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.invalidateCallSnapshots(oldCalls)
 		q.invalidateTerminalStatus()
 		q.commitRecords()
+		q.publishReadRuntime()
+		if committed != nil {
+			committed()
+		}
 	}
 	return err
 }
@@ -683,7 +699,12 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 
 // SubmitContext snapshots input custody before bulk verification. Key replay,
 // cancellation and job creation still serialize in the final update transaction.
-func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
+func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
+	return q.submitContext(ctx, s, nil)
+}
+
+// committed pins immutable advice inputs before releasing the commit lock.
+func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ *Job, err error) {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	defer func() {
@@ -786,7 +807,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 
 	var out Job
 	var refusedHealthDemand *Job
-	err = q.updateRequest(ctx, func() error {
+	err = q.updateTransaction(ctx, func() error {
 		if resultView != nil {
 			store.mu.Lock()
 			resultCapacity, resultPayloads = resultView.current()
@@ -974,7 +995,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		q.maintain()
 		out = cloneJob(j)
 		return nil
-	}, nil)
+	}, nil, false, committed)
 	if err != nil && refusedHealthDemand != nil {
 		// The refused submission rolls back. Record only a rechecked health
 		// observation in its own transaction, never create or admit the job.
@@ -1297,7 +1318,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
 		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
@@ -1529,7 +1550,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		if q.hostMemorySamples == nil {
 			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{}
 		}
-		q.hostMemorySamples[m.ID] = currentHostMemorySamples(reports, memoryReceivedAt)
+		q.retainHostMemoryCharges(m.ID, q.clock.Now())
+		q.hostMemorySamples[m.ID] = updateHostMemorySamples(reports, memoryReceivedAt, q.hostMemorySamples[m.ID])
+		q.retainHostMemoryCharges(m.ID, q.clock.Now())
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)

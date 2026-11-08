@@ -180,6 +180,48 @@ func holdNow(clock Clock) time.Time {
 func holdMS(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 
 const (
+	adviceCapture = iota
+	adviceWaitReason
+	adviceStatusReason
+	adviceDeadline
+)
+
+// Submission advice is a separate post-commit phase, absent from update holds.
+// Wall timestamps are telemetry only, never scheduling inputs. Log after unlock
+// using the same measured diagnostic budget as transaction telemetry.
+type submissionAdviceTiming struct {
+	started, last time.Time
+	active        int
+	phases        [4]time.Duration
+}
+
+func newSubmissionAdviceTiming() submissionAdviceTiming {
+	now := time.Now()
+	return submissionAdviceTiming{started: now, last: now}
+}
+
+func (t *submissionAdviceTiming) next(phase int) {
+	now := time.Now()
+	t.phases[t.active] += now.Sub(t.last)
+	t.last, t.active = now, phase
+}
+
+func (t *submissionAdviceTiming) finish(observer func(submissionAdviceTiming)) {
+	t.next(t.active)
+	if observer != nil {
+		observer(*t)
+	}
+	duration := t.last.Sub(t.started)
+	budget := holdTelemetry("submission_advice")
+	if !budget.admit(duration) {
+		return
+	}
+	started := time.Now()
+	defer func() { budget.spent(time.Since(started)) }()
+	log.Printf("event=submission_advice duration_ms=%.3f capture_ms=%.3f wait_reason_ms=%.3f status_waiting_reason_ms=%.3f deadline_guidance_ms=%.3f", holdMS(duration), holdMS(t.phases[adviceCapture]), holdMS(t.phases[adviceWaitReason]), holdMS(t.phases[adviceStatusReason]), holdMS(t.phases[adviceDeadline]))
+}
+
+const (
 	holdRecords = iota
 	holdUsage
 	holdBody

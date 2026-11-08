@@ -300,6 +300,11 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 		// when the selected job's own durable envelope did not change.
 		q.invalidateDependentSnapshots()
 	}
+	if q.readRoot == nil {
+		q.publishReadRecords(q.persisted)
+	} else {
+		q.publishReadRecords(next)
+	}
 	return nil
 }
 func (q *Queue) Usage(since time.Time, requestContexts ...context.Context) (UsageReport, error) {
