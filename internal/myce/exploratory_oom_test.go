@@ -149,7 +149,7 @@ func TestExploratoryOOMColdGuardFinalLaunch(t *testing.T) {
 	if err := rt.checkBatchLaunchMemory(context.Background(), HostLaunch{Machine: m.ID, Session: run.Session, Key: run.ID, Attempt: "1"}); err != nil {
 		t.Fatal("launch charged unexecuted cap", err)
 	}
-	if err := rt.checkHostAdmissionLocked(22.7, true); err == nil {
+	if err := rt.checkHostAdmissionLocked(22.7, true, nil); err == nil {
 		t.Fatal("unknown running neighbor released physical cap")
 	}
 }
