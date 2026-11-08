@@ -97,9 +97,9 @@ func TestLearnedMemoryGuardLinuxCeiling(t *testing.T) {
 	if err != nil || bytes != 12<<30 {
 		t.Fatalf("bounded exploratory cap: %d %v", bytes, err)
 	}
-	j.MemoryEnvelope.ProbeFloorGB = 1 // A cold physical probe keeps its launch ceiling.
+	j.MemoryEnvelope.ProbeFloorGB = 1 // Cold probes also use physical containment.
 	bytes, err = w.jobCeilingBytes(j)
-	if err != nil || bytes != 4214571008 {
+	if err != nil || bytes != 12<<30 {
 		t.Fatalf("cold physical cap changed: %d %v", bytes, err)
 	}
 	j.Spec.Needs.Memory, j.MemoryEnvelope.Basis = "", "declared"

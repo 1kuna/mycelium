@@ -168,16 +168,18 @@ func mergeMemoryEvents(old, next *MemoryEventCounts) *MemoryEventCounts {
 }
 
 type JobMemoryEnvelope struct {
-	// Cold CPU ceiling stays fixed for containment. Fresh attempt telemetry may
-	// reduce its admission charge, never below this known need including slack.
-	ProbeFloorGB float64 `json:"probe_floor_gb,omitempty"`
-	Source       string  `json:"source"`
-	Refusal      string  `json:"refusal,omitempty"`
-	Machine      string  `json:"machine"`
-	Device       string  `json:"device,omitempty"`
-	HostGB       float64 `json:"host_gb"`
-	DeviceGB     float64 `json:"device_gb"`
-	Enforcement  string  `json:"enforcement"`
+	// Cold CPU probes retain known need including slack as their charge floor.
+	// Supporting native guards contain growth at physical/allowance capacity.
+	ProbeFloorGB    float64 `json:"probe_floor_gb,omitempty"`
+	LaunchDriftGB   float64 `json:"launch_drift_gb,omitempty"`
+	AvailableHostGB float64 `json:"available_host_gb,omitempty"`
+	Source          string  `json:"source"`
+	Refusal         string  `json:"refusal,omitempty"`
+	Machine         string  `json:"machine"`
+	Device          string  `json:"device,omitempty"`
+	HostGB          float64 `json:"host_gb"`
+	DeviceGB        float64 `json:"device_gb"`
+	Enforcement     string  `json:"enforcement"`
 	// Basis is declared, learned, hint or exploratory; Evidence counts the
 	// accepted attempts behind a learned or bounded figure (#585).
 	Basis    string `json:"basis,omitempty"`
@@ -405,7 +407,14 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			} else if bound, bounded, similar, ok := q.coldMemoryBound(j, m, estimate, hostFloor); ok {
 				host, source, evidence = bound, bounded, similar
 			} else {
-				host, why = q.exploratoryMemory(j, m)
+				if !n.cpuOnly() && j.Spec.ExtensionCheck != nil && !copy.Spec.Run.Docker {
+					physical := *m
+					physical.FreeHostMemoryGB = min(m.HostAvailableMemoryGB, q.qualificationCapacity(m).FreeHostMemoryGB)
+					physical.hostReservationDebtGB = 0
+					host, why = q.exploratoryMemory(j, &physical)
+				} else {
+					host, why = q.exploratoryMemory(j, m)
+				}
 				if q.learnedMemory() && n.cpuOnly() {
 					probeFloor = hostFloor
 				}
@@ -433,6 +442,20 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			// retained constrained requirement. Admission refuses when less
 			// room is currently free, including the first constrained attempt.
 			n.HostMemoryGB = max(minimumHostMemoryGB, host, q.constrainedMemoryLowerFor(j, estimate, !n.cpuOnly() && !m.UnifiedMemory))
+		}
+		if !copy.Spec.Run.Docker && j.OOMRetries > 0 && estimate.host == nil && (n.cpuOnly() || j.Spec.ExtensionCheck != nil) {
+			// An OOM disproves a small exploratory bound. Re-probe usable
+			// headroom, keeping the measured retry lower bound below. Old
+			// launch-drift maxima are not a workload-demand ceiling; strict
+			// worker launch checks still refuse an intervening loss of RAM.
+			margin := q.jobProbeDriftMarginGB(j, m)
+			host, why := q.exploratoryMemoryWithDrift(j, m, margin)
+			n.HostMemoryGB = max(n.HostMemoryGB, host)
+			source, basis, evidence = "exploratory OOM recovery; measured peak + growth; physical headroom", "exploratory", 0
+			refusal = why
+			if n.cpuOnly() {
+				probeFloor = max(hostFloor, q.constrainedMemoryLowerFor(j, estimate, false))
+			}
 		}
 		n.HostMemoryGB = max(n.HostMemoryGB, hostFloor)
 		if probeFloor > 0 {
@@ -467,6 +490,10 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		}
 	}
 	copy.MemoryEnvelope = &JobMemoryEnvelope{Source: source, Refusal: refusal, Machine: m.ID, Device: m.Device, HostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), DeviceGB: n.MemoryGB, Enforcement: enforcement, Basis: basis, Evidence: evidence}
+	if basis == "exploratory" && evidence == 0 && estimatePhysicalSource(source) {
+		copy.MemoryEnvelope.LaunchDriftGB = q.jobProbeDriftMarginGB(j, m)
+		copy.MemoryEnvelope.AvailableHostGB = m.FreeHostMemoryGB
+	}
 	if probeFloor > 0 {
 		copy.MemoryEnvelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
 	}
@@ -831,6 +858,10 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 // Telemetry already excludes the operator/driver reserve. Use the shared ledger
 // and release predicates; the normal planner alone can authorize stops.
 func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
+	return q.exploratoryMemoryWithDrift(j, m, q.jobProbeDriftMarginGB(j, m))
+}
+
+func (q *Queue) exploratoryMemoryWithDrift(j *Job, m *Machine, drift float64) (float64, string) {
 	allowance := m.EffectiveHostMemoryBudgetGB
 	if allowance <= 0 && m.CapabilityProfile != nil {
 		allowance = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
@@ -873,7 +904,7 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 	room = min(room, allowance)
 	// hostNeed adds ceiling slack back. Leave the named drift margin unused
 	// between the inventory snapshot and the strict launch check.
-	slack := m.MemoryCeilingSlackGB + q.coldProbeDriftMarginGB(m)
+	slack := m.MemoryCeilingSlackGB + drift
 	if room <= slack {
 		return 0, fmt.Sprintf("exploratory first run needs physical headroom above launch slack (%.1f GiB available; %.1f GiB allowance)", room, allowance)
 	}
@@ -934,4 +965,8 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 		return ""
 	}
 	return "waiting for RAM envelope: " + strings.Join(reasons, "; ")
+}
+
+func estimatePhysicalSource(source string) bool {
+	return source == "exploratory first run" || strings.Contains(source, "physical headroom") || source == "exploratory (previous peak constrained)"
 }
