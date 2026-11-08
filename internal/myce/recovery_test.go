@@ -119,7 +119,7 @@ func TestWorkerFreshRestartRetriesCleanedSession(t *testing.T) {
 	r := check(t, q, m, nil).Job
 	c.Advance(time.Second)
 	m.Session = "fresh"
-	reply, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: r.Session})
+	reply, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: r.Session, period: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

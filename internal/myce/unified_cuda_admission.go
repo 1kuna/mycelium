@@ -119,7 +119,7 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 				}
 				if hostID(target) != host {
 					now := q.clock.Now()
-					if q.unreported[target.ID] || target.LastSeen.After(now) || now.Sub(target.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+					if q.unreported[target.ID] || !q.workerFresh(target, now) {
 						continue
 					}
 					// Reuse #401's immediate-admission proof, forecasting only the

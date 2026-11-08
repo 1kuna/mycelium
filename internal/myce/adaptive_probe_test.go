@@ -188,12 +188,16 @@ func TestAdaptiveProbeStallFailureAndOriginalAge(t *testing.T) {
 	if lane.at != original.Add(time.Second) {
 		t.Fatal("late completion stamped fresh at consume time")
 	}
-	clock.Advance(time.Duration(lane.observation.PeriodSeconds * float64(time.Second)))
-	lane.step(ctx, source)
+	// Consuming the overdue completion can already start the next probe. Do
+	// not advance past its failure and accidentally consume a fourth success.
+	if lane.pending == nil {
+		clock.Advance(lane.timing.next.Sub(clock.Now()))
+		lane.step(ctx, source)
+	}
 	await(t, func() bool { return len(lane.pending) == 1 })
-	lane.step(ctx, source)
-	if lane.known || lane.fresh(clock.Now()) {
-		t.Fatal("failure retained good fact")
+	completed, err := lane.step(ctx, source)
+	if !completed || err == nil || lane.known || lane.fresh(clock.Now()) {
+		t.Fatal("failure retained good fact", completed, err, lane.known)
 	}
 }
 

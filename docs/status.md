@@ -630,6 +630,32 @@ is advisory naming, not authenticated identity or continuous monitoring.
 Inspect worker logs for endpoint details. Later or other-network-namespace
 listeners remain outside that snapshot and do not strengthen the residual.
 
+From the release containing #661's adaptive loss correction, worker freshness in
+maintenance, fleet, inventory and placement follows the same session contact
+calculation as loss detection, with a separate wall-time suspicion check. It measures missed expected check-ins while the
+queue can serve control traffic; queue transaction time does not imply worker
+silence. A current-session in-flight check-in protects only that worker. A
+cancelled call has a measured reconnect opportunity; rejection and stale sessions
+do not refresh accepted contact. `last_seen` remains the actual accepted queue
+timestamp, so an old timestamp alone does not establish a lost machine during a
+queue stall. `suspect: true` means current-session arrivals exceeded the measured
+wall-arrival allowance, including observed control delivery cost even when the
+worker advertises a shorter send interval. Completed response cost provides
+the initial delivery evidence before a second arrival. Confirmed loss also
+requires enough available control service. The machine receives no new assignments and maintenance
+reports `fresh: false`, while existing attempts and retry budgets remain intact.
+Started preparations retain their exact custody and original start timestamp;
+unstarted cached offers cannot launch. Pending native qualification demand is
+retained so fresh contact can resume the same check without a poisoned result.
+CLI/HTML availability says “suspect; waiting for worker contact; no new work”.
+Health reports `worker_suspect` through the existing notification channel. This
+bounds uncertainty even when continuous queue saturation prevents confirmed
+loss; it does not prove that the worker died. Evaluate the view at
+`freshness.captured_at`. Physical probe/sample
+validity remains independent and can still withhold admission. See
+[adaptive worker loss](design-proposal.md#adaptive-worker-loss-661-my-31my-34) for
+normal/overloaded detection latency and retained operator minimums.
+
 Availability explains owner use, battery power, heat, missing readings,
 disabling, leaving, and loss of contact. An available hypha can still be busy.
 Running jobs show their hypha and attempt. Every waiting job has an explanation,
@@ -1882,7 +1908,7 @@ separate from the retired #768 thresholds.
   transport errors without recorded fence evidence do not count. It clears
   once fewer than three refusals remain in that window.
 - `worker_stale_flapping`: three fresh-to-stale transitions on one worker within
-  an hour, using the same shortest loss timeout as maintenance freshness. A
+  an hour, using the same contact/suspicion calculation as maintenance freshness. A
   continuous outage counts once. Cold restart grace, leave and maintenance do
   not seed flaps. It clears as the transitions age out, or on planned maintenance.
 - `xpu_repeated_teardown_faults`: the worker's existing quarantine classifier

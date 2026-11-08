@@ -41,6 +41,9 @@ type batchRelease struct {
 }
 
 type state struct {
+	// Frozen accepted-contact validity is only for stopped-queue conversion.
+	// A running/restarted queue always requires live session contact evidence.
+	ContactEvidence        map[string]contactEvidence    `json:"contact_evidence,omitempty"`
 	EfficiencyAt           time.Time                     `json:"efficiency_at,omitempty"`
 	EfficiencyHosts        map[string]EfficiencyHost     `json:"efficiency_hosts,omitempty"`
 	EfficiencyHealth       map[string]efficiencyBaseline `json:"efficiency_health,omitempty"`
@@ -230,6 +233,9 @@ type Queue struct {
 	usageMaintenance bool
 	s                state
 
+	restartControlUntil time.Duration       // Available startup service, not blocked wall time.
+	contactTransaction  *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
+
 	fragmented              bool
 	persistencePageBytes    int
 	persistenceEncodings    map[string]map[string]catalogEncoding
@@ -305,7 +311,8 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q.mu.control = &controlClock{clock: func() time.Time { return q.clock.Now() }, at: clock.Now()}
 	q.healthStoreProbe.timeout = heartbeatFilesystemBudget
 	q.nasProbe.timeout = heartbeatFilesystemBudget
 	q.nasProgress.timeout = heartbeatFilesystemBudget
@@ -383,6 +390,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	}
 	if len(data) > 0 {
 		q.restartUntil = clock.Now().Add(RestartGrace)
+		q.restartControlUntil = q.controlNow() + RestartGrace
 		for id, m := range q.s.Machines {
 			if !m.Gone {
 				q.unreported[id] = true
@@ -431,6 +439,7 @@ func (q *Queue) SetRestartGrace(d time.Duration) {
 	defer q.mu.Unlock()
 	if len(q.unreported) > 0 {
 		q.restartUntil = q.clock.Now().Add(d)
+		q.restartControlUntil = q.controlNow() + d
 	}
 }
 
@@ -449,10 +458,11 @@ func (q *Queue) SetProductionInfrastructureRetries(n int) error {
 	return nil
 }
 
-// SetLossTimeouts sets the quiet-worker thresholds by workload priority.
+// SetLossTimeouts sets optional operator minimums. Zero uses measured timing.
+// A minimum can delay detection; it can never override queue-delay protection.
 func (q *Queue) SetLossTimeouts(production, deadline, experiment time.Duration) error {
-	if production <= 0 || deadline <= 0 || experiment <= 0 {
-		return errors.New("loss timeouts must be positive")
+	if production < 0 || deadline < 0 || experiment < 0 {
+		return errors.New("loss timeout minimums must be nonnegative")
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -460,10 +470,10 @@ func (q *Queue) SetLossTimeouts(production, deadline, experiment time.Duration) 
 	return nil
 }
 func (q *Queue) machineLossTimeout(id string) time.Duration {
-	timeout := time.Duration(0)
+	timeout := time.Duration(-1)
 	add := func(priority string) {
 		d := q.lossTimeouts[min(2, legacyRank(priority))]
-		if timeout == 0 || d < timeout {
+		if timeout < 0 || d < timeout {
 			timeout = d
 		}
 	}
@@ -482,8 +492,19 @@ func (q *Queue) machineLossTimeout(id string) time.Duration {
 			add(slot.Priority)
 		}
 	}
+	if timeout < 0 {
+		timeout = q.lossTimeouts[2]
+	}
+	if m := q.s.Machines[id]; m != nil {
+		measured := q.workerLossAllowance(m)
+		if measured == 0 {
+			return time.Duration(1<<63 - 1)
+		}
+		timeout = max(timeout, measured)
+	}
 	if timeout == 0 {
-		return q.lossTimeouts[2]
+		// No advertised/observed cadence and no operator minimum: unknown.
+		return time.Duration(1<<63 - 1)
 	}
 	return timeout
 }
@@ -638,6 +659,9 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		oldUnreported[id] = v
 	}
 	oldQuiet := q.networkQuiet
+	contacts := &contactTransaction{}
+	q.contactTransaction = contacts
+	defer func() { q.contactTransaction = nil }()
 	oldModels, oldEnvironments := q.models, q.environments
 	oldEnvironmentRevision := q.environmentRevision
 	hold.next(holdUsage)
@@ -684,6 +708,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.calls = oldCalls
 		q.unreported = oldUnreported
 		q.networkQuiet = oldQuiet
+		q.rollbackContacts(contacts)
 		q.rollbackRecords(old)
 	}
 
@@ -1108,19 +1133,21 @@ func (q *Queue) stop(j *Job, why string) {
 	j.State = "stopping"
 	j.Reason = why
 }
-func (q *Queue) fleetQuiet(now time.Time) bool {
+func (q *Queue) fleetQuiet(now time.Time, includePending bool) bool {
 	active, healthy := 0, 0
+	quietFor := time.Duration(1<<63 - 1)
 	for _, m := range q.s.Machines {
-		if !m.Gone && !m.Leaving {
+		if !m.Gone && !m.Leaving && q.workerLossAllowance(m) > 0 {
 			active++
-			if now.Sub(q.lastContact(m, now)) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+			quietFor = min(quietFor, q.machineLossTimeout(m.ID))
+			if q.contactFresh(m, now, includePending) || !q.workerArrivalSuspect(m, now, includePending) {
 				healthy++
 			}
 		}
 	}
 	// Cached contact can identify a continuously reporting minority, but cannot
 	// replace a currently healthy worker when the entire active fleet is quiet.
-	return q.s.NetworkRecoveryAt.IsZero() && active > 0 && (healthy == 0 || healthy*2 < active && now.Sub(q.s.LastWorkerContact) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])))
+	return q.s.NetworkRecoveryAt.IsZero() && active > 0 && (healthy == 0 || healthy*2 < active && now.Sub(q.s.LastWorkerContact) >= quietFor)
 }
 
 func (q *Queue) maintain() {
@@ -1164,14 +1191,14 @@ func (q *Queue) maintain() {
 			delete(q.s.BatchReleases, machine)
 		}
 	}
-	q.networkQuiet = q.fleetQuiet(now)
+	q.networkQuiet = q.fleetQuiet(now, true)
 	for _, m := range q.s.Machines {
 		unreported := q.unreported[m.ID]
-		outageGrace := !q.s.NetworkRecoveryAt.IsZero() && m.LastSeen.Before(q.s.NetworkRecoveryAt) && now.Before(q.s.NetworkRecoveryAt.Add(q.machineLossTimeout(m.ID)))
-		grace := !unreported && outageGrace || unreported && now.Before(q.restartUntil)
+		grace := unreported && q.inRestartGrace(now)
 		restartExpired := unreported && !grace
-		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
+		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && q.workerSuspect(m, now) && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
 			m.Gone = true
+			q.discontinueContactCadence(m.ID)
 			q.clearPreemptionPlacements(m.ID, m.Session)
 			delete(q.unreported, m.ID)
 			m.Models = nil
@@ -1302,6 +1329,17 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 }
 
 func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
+	contact, settle := q.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, ctx)
+	c.contact = contact
+	defer settle(false)
+	reply, err := q.checkinContext(ctx, c)
+	settle(err == nil)
+	return reply, err
+}
+
+// HTTP owns the same contact through response completion, rather than counting
+// two arrivals and two reconnect failures for one wire request.
+func (q *Queue) checkinContext(ctx context.Context, c Checkin) (Reply, error) {
 	memoryReceivedAt := q.clock.Now()
 	if err := ctx.Err(); err != nil {
 		return Reply{}, err
@@ -1314,10 +1352,6 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	if err := validateCurrentCheckin(c); err != nil {
 		return Reply{}, err
 	}
-	settle := q.beginCheckin(c.Machine.ID, c.Machine.Session, ctx)
-	defer settle(false) // No-op once settled; a panicking check-in stops counting as contact.
-	stopCancellation := context.AfterFunc(ctx, func() { settle(false) })
-	defer stopCancellation()
 	preparedInventory, err := prepareCheckinToolInventory(c)
 	if err != nil {
 		return Reply{}, err
@@ -1540,7 +1574,18 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			}
 		}
 		q.acceptEnvironmentFailures(&m, old)
+		// Assess the previous fleet before this arrival or replacement can
+		// conceal the outage. Pending reconnects are new evidence, not accepted
+		// survivors from before recovery, even when several arrive together.
+		if old != nil && !old.Gone && !q.inRestartGrace(m.LastSeen) && q.s.NetworkRecoveryAt.IsZero() &&
+			(q.networkQuiet || q.fleetQuiet(m.LastSeen, false)) {
+			q.startNetworkRecovery(m.LastSeen)
+		}
 		q.s.Machines[m.ID] = &m
+		if old != nil && (old.Gone || q.unreported[m.ID] || q.networkQuiet || !q.s.NetworkRecoveryAt.IsZero() && old.LastSeen.Before(q.s.NetworkRecoveryAt)) {
+			q.discontinueContactCadence(m.ID)
+		}
+		q.acceptContactPeriod(&m, c.period, c.contact)
 		q.recordHostLaunchMemory(&m, old)
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
@@ -1564,13 +1609,6 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)
-		// Count this worker as healthy, but detect majority silence before
-		// replacing the previous fleet contact. Otherwise the first reconnect
-		// looks like a continuously reporting survivor and expires its peers.
-		// Keep actual peer heartbeats and the active recovery deadline unchanged.
-		if (q.networkQuiet || q.fleetQuiet(m.LastSeen)) && old != nil && !old.Gone && !m.LastSeen.Before(q.restartUntil) && q.s.NetworkRecoveryAt.IsZero() {
-			q.s.NetworkRecoveryAt = m.LastSeen
-		}
 		q.s.LastWorkerContact = m.LastSeen
 		delete(q.s.BatchReleases, m.ID) // This report supersedes acknowledgement credit.
 		for _, d := range m.Devices {
@@ -1605,7 +1643,19 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			}
 			// Onboarding reports health and exact custody before any ordinary
 			// admission. Do not return offers that this startup phase cannot run.
-			if c.Recovering {
+			if c.Recovering || q.workerSuspect(&m, q.clock.Now()) {
+				// Preserve retained engines and deliver their cleanup deadlines.
+				// A retention-only plan cannot start a missing engine: the worker
+				// starts only loading plans. New launch authorization also refuses
+				// suspect sessions, including cached preparation plans.
+				if !c.Recovering {
+					for _, slot := range q.modelPlan(m.ID) {
+						if slot.State == "loading" {
+							slot.State = "ready"
+						}
+						reply.ModelPlan = append(reply.ModelPlan, slot)
+					}
+				}
 				q.cancelUnofferedPreparations(&m, reply)
 				return
 			}
@@ -1737,7 +1787,6 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		q.maintain()
 		return nil
 	}, nil)
-	settle(err == nil)
 	if reply.Job != nil {
 		relative, e := filepath.Rel(q.root, reply.Job.Checkpoint)
 		if e != nil {
@@ -2232,7 +2281,7 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	if q.networkQuiet {
 		warnings = append(warnings, "most workers quiet: waiting for the network to return")
 	}
-	if q.clock.Now().Before(q.restartUntil) && len(q.unreported) > 0 {
+	if q.inRestartGrace(q.clock.Now()) && len(q.unreported) > 0 {
 		warnings = append(warnings, "queue restarted: waiting for workers to report")
 	}
 	if !q.checkpointsAvailable() {
@@ -2343,6 +2392,7 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	finishJobWork()
 	for _, m := range q.s.Machines {
 		copy := cloneMachine(m)
+		copy.Suspect = q.workerSuspect(m, q.clock.Now())
 		copy.ExternalMemory = q.externalMemoryStatus(hostID(m))
 		if copy.IOPressure != nil {
 			copy.IOPressure.AgeSeconds += max(0, q.clock.Now().Sub(copy.IOPressure.ReceivedAt).Seconds())
@@ -2733,7 +2783,7 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 		m := q.s.Machines[r.Machine]
 		q.refreshHostMemory()
 		predicate := "host_launch"
-		if q.hostLaunchAllowed(m, r.Session) {
+		if q.hostSessionLaunchAllowed(m, r.Session) {
 			predicate = q.startPlacementRejection(j)
 		}
 		if predicate != "" {

@@ -90,7 +90,7 @@ func TestFleetUpgradeFixForwardPreservesNewerOperatorDrain(t *testing.T) {
 	m.Fleet = fleetTestProof(c, m.Session, 201, true)
 	m.Fleet.Version = manifest.Version
 	m.CPUBudgetCores, m.HostMemoryBudgetGB = cpu, ram
-	if _, err = q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: i.Session}); err != nil {
+	if _, err = q.Checkin(Checkin{Machine: m, period: time.Second, Fresh: true, PreviousSession: i.Session}); err != nil {
 		t.Fatal(err)
 	}
 	request := FleetUpgradeRequest{Release: manifest.Version}
@@ -179,7 +179,7 @@ func fleetActivate(t *testing.T, q *Queue, c *fakeClock) string {
 		m := cloneMachine(q.s.Machines[i.Machine])
 		m.Session = "new-" + m.Session
 		m.Fleet = fleetTestProof(c, m.Session, h.Before.Fleet.PID+1000, true)
-		if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: i.Session}); err != nil {
+		if _, err := q.Checkin(Checkin{Machine: m, period: time.Second, Fresh: true, PreviousSession: i.Session}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -194,9 +194,19 @@ func fleetHeartbeatAdvance(t *testing.T, q *Queue, c *fakeClock) {
 	t.Helper()
 	c.Advance(time.Second)
 	for _, m := range q.s.Machines {
-		m.LastSeen = c.Now()
 		if m.Fleet != nil {
 			m.Fleet.ObservedAt = c.Now()
+		}
+		// Exercise a current-worker contact, not just a fresher inventory date.
+		checkin := Checkin{Machine: *m, period: time.Second}
+		for _, j := range q.liveJobs() {
+			if j.Machine == m.ID && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") {
+				checkin.AttemptProtocol = keyedAttemptProtocol
+				checkin.Attempts = append(checkin.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: j.StartedAt != nil})
+			}
+		}
+		if _, err := q.Checkin(checkin); err != nil {
+			t.Fatal(err)
 		}
 	}
 	q.s.LastWorkerContact = c.Now()
@@ -621,7 +631,7 @@ func TestFleetUpgradeRunnerSmokeFailureStopsCurrentProcess(t *testing.T) {
 	m.Fleet = fleetTestProof(c, m.Session, 999, true)
 	m.Fleet.RunnerSmoke = false
 	m.Fleet.Failure = "runner_smoke_failed"
-	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: i.Session}); err != nil {
+	if _, err := q.Checkin(Checkin{Machine: m, period: time.Second, Fresh: true, PreviousSession: i.Session}); err != nil {
 		t.Fatal(err)
 	}
 	// An explicit rerun cannot erase a definitive failure by bumping revision.
@@ -1011,7 +1021,7 @@ func TestFleetUpgradeDisabledRetryPreservesRuntimeMismatchFailure(t *testing.T) 
 	m := cloneMachine(q.s.Machines[i.Machine])
 	m.Session = "unexpected-process"
 	m.Fleet = fleetTestProof(c, m.Session, 999, false)
-	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: i.Session}); err != nil {
+	if _, err := q.Checkin(Checkin{Machine: m, period: time.Second, Fresh: true, PreviousSession: i.Session}); err != nil {
 		t.Fatal(err)
 	}
 	fleetTick(t, q)

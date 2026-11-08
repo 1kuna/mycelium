@@ -242,6 +242,36 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 	}
 }
 
+func TestExtensionQualificationSuspectRetainsDemand(t *testing.T) {
+	q, w, _, demand, _, plans := qualificationFixture(t)
+	reconcileQualification(t, w, plans[0])
+	checkID := qualificationJob(t, q, plans[0].Report.CheckID).ID
+	clock := q.clock.(*fakeClock)
+	clock.Advance(q.workerArrivalAllowance(q.s.Machines[w.Machine.ID]))
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	m := q.s.Machines[w.Machine.ID]
+	if !q.workerSuspect(m, clock.Now()) || m.Gone {
+		t.Fatal("fixture did not preserve suspect custody")
+	}
+	if got := qualificationJob(t, q, plans[0].Report.CheckID); got.State != "queued" && got.State != "waiting" {
+		t.Fatal("temporary suspicion destroyed useful qualification", got.State)
+	}
+	if len(q.extensionQualificationPlan(m)) != 0 {
+		t.Fatal("suspect worker received new qualification offers")
+	}
+	for _, id := range []string{demand.ID, checkID} {
+		if j := q.s.Jobs[id]; j.Losses != 0 || j.InfrastructureRetries != 0 || j.Attempt != 0 {
+			t.Fatal("suspicion charged or assigned work", j)
+		}
+	}
+	w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
+	if got := check(t, q, w.Machine, nil).Job; got == nil || got.ID != checkID {
+		t.Fatal("fresh contact did not resume the original check", got)
+	}
+}
+
 func TestExtensionQualificationMixedBacklog(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)}
 	m := machine("worker", "fake")
@@ -275,6 +305,9 @@ func TestExtensionQualificationMixedBacklog(t *testing.T) {
 	useful := job("useful", other)
 	plain := &Job{ID: "plain", State: "queued", Spec: spec("experiment")}
 	q := &Queue{clock: clock, s: state{Jobs: map[string]*Job{}, Extensions: map[string]Extension{extensionKey(e): e, extensionKey(other): other}, Machines: map[string]*Machine{m.ID: &m}}}
+	// This planning-only fixture bypasses check-in; supply the current worker's
+	// advertised cadence as an accepted report would before offering work.
+	q.acceptContactPeriod(&m, time.Second, nil)
 	for _, j := range []*Job{host, disk, device, resume, useful, plain} {
 		q.s.Jobs[j.ID] = j
 	}

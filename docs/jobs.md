@@ -340,8 +340,13 @@ Upgrade queue and workers together; first stop and drain incompatible work.
 Do not downgrade while `logs: none` jobs or server entries are live; first stop
 and drain them with the compatible versions.
 
-Priority loss timeouts are `production: 5s`, `deadline: 20s`, `experiment: 60s`.
-They apply when a worker stops checking in; they are not job execution limits.
+From the adaptive-loss release (#661), automatic loss follows the current
+session's measured check-in allowance in available control-service time, with
+no class-specific default seconds. Queue service delay never charges a loss or
+retry. Wall-time silence separately marks capacity suspect and withholds new
+work without interrupting existing attempts. Saved explicit timeout settings
+remain minimums. These allowances are not job execution limits; see
+[adaptive worker loss](design-proposal.md#adaptive-worker-loss-661-my-31my-34).
 A strict-majority worker outage retains assignments, and queue restart allows a three-minute
 recovery grace. Partitioned copies can overlap until connectivity returns:
 checkpoint isolation and reconciliation do not guarantee exactly-once side effects.

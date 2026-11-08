@@ -168,7 +168,7 @@ func (q *Queue) machineConversionPlan(mapping []MachineRename, models ModelConfi
 			if !seen[m.ID] {
 				return nil, migrationError("machine_migration_incomplete", "missing source "+m.ID)
 			}
-			if (!q.productionSourceSettled(m) && !verifiedEmptySource(drains, m) && (m.Gone || m.LastSeen.After(q.clock.Now()) || q.clock.Now().Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])))) || m.DockerCleanup != "" {
+			if (!q.productionSourceSettled(m) && !verifiedEmptySource(drains, m) && (!q.workerFresh(m, q.clock.Now()))) || m.DockerCleanup != "" {
 				return nil, migrationError("machine_migration_incomplete", "source is stale, missing or has cleanup")
 			}
 			for _, j := range q.s.Jobs {

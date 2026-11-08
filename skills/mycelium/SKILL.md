@@ -673,6 +673,41 @@ device usage. Discrete XPU memory/activity uses a separate shared host sample;
 missing, ambiguous or stale counters remain unknown and withhold
 telemetry-dependent sharing. A heartbeat never refreshes a cached sample's age.
 
+## Adaptive worker loss (next release, #661)
+
+Worker loss and status freshness follow the session's observed check-in cadence
+and control-path variation. Queue transaction time does not count as worker
+silence, and an in-flight check-in protects only its worker. During a queue-first
+upgrade, headerless
+sessions qualify on their second accepted arrival, adding at most one observed
+send interval plus control-path delay to the first offer. Startup reports can
+qualify earlier; existing attempts retain custody through this idle response.
+Existing model engines retain their plans and cleanup deadlines while cadence
+qualifies; this cannot start a new preparation on a suspect host.
+Queue slowness alone does not charge any class a retry or infrastructure loss. A dead worker normally
+needs roughly two send intervals plus learned variation and a maintenance turn;
+overload adds actual blocked queue time. Under continuous saturation, silence
+still becomes `suspect: true` within the measured wall-arrival allowance plus the next
+maintenance/observation turn. A suspect host receives no new work and is never
+shown healthy; existing attempts retain custody and spend no retry budget.
+Pending native qualification checks retain useful demand during suspicion and
+resume under the same identity after fresh contact; suspicion grants no launch.
+An already started preparation retains its exact custody through later stages;
+an unstarted cached plan cannot start while suspect.
+The wall allowance includes observed control delivery cost even for workers
+advertising shorter send intervals, starting with measured completed-response
+cost. Confirmed loss requires both a missed wall arrival and enough available
+control service; its opportunity clock excludes blocked queue time.
+Status and NAS inspection delivery share that wall allowance. The
+existing health channel raises `worker_suspect` for owner attention. A new
+arrival clears suspicion. Confirmed loss has no finite trustworthy bound while
+control cannot process evidence. Keep the same job/key and custody while control
+recovers; ask the queue owner to inspect persistent suspicion. `last_seen` is still the last accepted wall timestamp; use the
+reported freshness at snapshot capture time. Physical pressure, memory and disk
+sample validity remains independent and can withhold new work. Saved operator
+timeouts are minimums; default zero learns timing. No class upgrade is needed to
+protect work from control delay. See [loss timing](../../docs/design-proposal.md#adaptive-worker-loss-661-my-31my-34).
+
 ## Reconciled launch handshakes (next release, #1028)
 
 A slow start, launch or native-custody reply retains the same gated attempt and

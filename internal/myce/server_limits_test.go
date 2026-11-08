@@ -96,7 +96,7 @@ func TestModelLimitUsesFreeCopyAndFreshCleanupClearsLostCapacity(t *testing.T) {
 	// the new session's capacity or release its slots later.
 	previous := m.Session
 	m.Session = ID()
-	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous}); err != nil {
+	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous, period: time.Second}); err != nil {
 		t.Fatal(err)
 	}
 	reportModel(t, q, m, "ready")

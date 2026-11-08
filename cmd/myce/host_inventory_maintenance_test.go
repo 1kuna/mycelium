@@ -10,10 +10,10 @@ import (
 )
 
 func TestHostDisableStopWaitDegradedInventory(t *testing.T) {
-	q, _, _, _ := waitQueue(t)
+	q, clock, _, _ := waitQueue(t)
 	m := maintenanceCLIWorker("machine")
 	m.Devices, m.MemoryError, m.InventoryReason = []myce.MachineDevice{}, "device_probe_unavailable", "device_probe_unavailable"
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())

@@ -48,6 +48,7 @@ func attemptReply(c Checkin, reply Reply) Reply {
 }
 
 func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
+	c.period = checkinPeriod(w.Interval)
 	c.AttemptProtocol = keyedAttemptProtocol
 	if c.Running != nil {
 		c.Attempts = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
@@ -147,6 +148,11 @@ func workerAttemptReply(c Checkin, reply Reply) (Reply, error) {
 	}
 	if reply.Job != nil || reply.Stop || reply.Kill || reply.Hold || reply.PriorityStop != nil || reply.GraceSeconds != 0 || reply.UserCancel {
 		return Reply{}, currentProtocolError("keyed-attempt-v1 queue returned unkeyed attempt decisions")
+	}
+	// A cold legacy session can be idle while the queue learns its cadence.
+	// Empty is a complete idle response, with no assignment to index or launch.
+	if len(reply.Attempts) == 0 {
+		return reply, nil
 	}
 	seen := map[attemptKey]bool{}
 	for _, a := range reply.Attempts {

@@ -180,8 +180,10 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		if hostID(m) != host || m.Replacement != nil || q.migrationHistoricalMachine(m) {
 			continue
 		}
-		fresh := !m.Gone && !q.unreported[m.ID] && !m.LastSeen.After(now) && now.Sub(q.lastContact(m, now)) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
-		out.Workers = append(out.Workers, MaintenanceWorker{Machine: cloneMachine(m), Fresh: fresh})
+		fresh := !q.unreported[m.ID] && q.workerFresh(m, now)
+		copy := cloneMachine(m)
+		copy.Suspect = q.workerSuspect(m, now)
+		out.Workers = append(out.Workers, MaintenanceWorker{Machine: copy, Fresh: fresh})
 		freshEvidence = freshEvidence && fresh
 		operational = operational && fresh && !m.HostMemoryPolicyMismatch && m.MemoryError == "" && m.HostMemoryError == "" && m.InventoryReason == "" && (out.Policy.SharedHost == nil || q.sharedPressureFresh(m))
 		out.Healthy = out.Healthy && operational && len(m.UnavailableRoots) == 0

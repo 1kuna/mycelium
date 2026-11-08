@@ -321,11 +321,11 @@ func (q *Queue) resolveTargets(j *Job) []ResolveTarget {
 		live := q.s.Machines[m.ID]
 		if live != nil {
 			row.session = live.Session
-			row.freshUntil = live.LastSeen.Add(q.machineLossTimeout(m.ID))
+			row.freshUntil = q.lastContact(live, q.clock.Now()).Add(q.workerArrivalAllowance(live))
 		}
 		if live == nil || live.LastSeen.IsZero() {
 			row.Freshness = "unknown"
-		} else if live.Gone || q.clock.Now().Before(live.LastSeen) || q.clock.Now().Sub(live.LastSeen) > q.machineLossTimeout(m.ID) {
+		} else if !q.workerFresh(live, q.clock.Now()) {
 			row.Freshness = "stale"
 		}
 		if row.Freshness != "fresh" && row.Eligible {

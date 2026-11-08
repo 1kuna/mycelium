@@ -208,8 +208,10 @@ func (c *accountingInterleaveClock) Now() time.Time {
 	value := c.base.Now()
 	// Arrival contact also reads the clock before q.mu. Pause specifically at
 	// locked accounting, whose serialization with advance this test proves.
-	if c.queue.mu.TryRLock() {
-		c.queue.mu.RUnlock()
+	// Inspect the underlying lock: its control-time observer itself calls Now.
+	// Reentering the observed wrapper here would recursively read this clock.
+	if c.queue.mu.mu.TryRLock() {
+		c.queue.mu.mu.RUnlock()
 		return value
 	}
 	c.once.Do(func() { close(c.entered); <-c.release })

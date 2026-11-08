@@ -20,6 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 # No v3 release tag was published. This is the verified deployed s071 source.
 PREVIOUS = "100840b4094d77bbc69a80d807dba58722db877c"
 INVENTORY_BASELINE = "8b2585e1d7edaff376e96430bc614daa9f788342"
+CADENCE_BASELINE = "9b1180db3fe2c6e580e1565352c263aceb020932"
 OLD_VERSION = "v3.1.0-rc.20261104.s071.100840b"
 VERSION = "v3.1.0-rc.20261104.s072.abce497.1"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
@@ -88,7 +89,7 @@ def extract(source, destination):
 
 
 def prepare():
-    for revision in (PREVIOUS, INVENTORY_BASELINE):
+    for revision in (PREVIOUS, INVENTORY_BASELINE, CADENCE_BASELINE):
         source = archive(revision)
         with tempfile.TemporaryDirectory(prefix="upgrade-modules-", dir=cache_root()) as tmp:
             extract(source, tmp)
@@ -171,9 +172,15 @@ def process(binary, mode, root, *, queue="", config="", tools=None, expected_ref
                 try:
                     child.wait(timeout=8)
                 except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait(timeout=5)
-                    raise RuntimeError(f"{mode} fixture required kill")
+                    # Preserve Go's stacks before failing a stuck shutdown.
+                    child.send_signal(signal.SIGQUIT)
+                    try:
+                        child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=5)
+                    log.seek(0)
+                    raise RuntimeError(f"{mode} fixture shutdown stalled:\n{log.read()}")
             if expected_refusal and active_error is None:
                 log.seek(0)
                 output = log.read()
@@ -243,6 +250,7 @@ def run(args):
         scratch = Path(tmp)
         previous = binaries(archive(PREVIOUS, offline=True), PREVIOUS, OLD_VERSION, scratch)
         baseline = binaries(archive(INVENTORY_BASELINE, offline=True), INVENTORY_BASELINE, VERSION, scratch)
+        legacy = binaries(archive(CADENCE_BASELINE, offline=True), CADENCE_BASELINE, VERSION, scratch)
         source = REPO
         if args.candidate:
             source = scratch / "candidate"
@@ -259,6 +267,7 @@ def run(args):
         cases = [
             ("candidate queue + candidate worker", lambda: pairing("same-source suffix", candidate[0], candidate[0], scratch / "same", tools, large=True)),
             ("candidate queue + previous worker", lambda: pairing("previous worker", candidate[0], previous[0], scratch / "old-worker", tools)),
+            ("legacy worker first work", lambda: legacy_first_work(candidate, legacy, scratch, tools)),
             ("previous queue + candidate worker", lambda: reverse(previous, candidate, scratch, tools)),
             ("saved config downgrade", lambda: downgrade(previous, candidate, scratch, tools)),
             ("full-inventory worker + candidate queue", lambda: pairing("#790 full worker", candidate[0], baseline[0], scratch / "full-worker", tools, full_only=True)),
@@ -337,6 +346,63 @@ def inventory_restarts(candidate, baseline, scratch, tools):
                        and not row["hash"] and not row["version"] for row in rows[1:]), "legacy full fallback did not rejoin"
             assert all(row["session"] == session and row["attempt_protocol"] == "keyed-attempt-v1" for row in rows), "fallback changed session or attempt protocol"
     print("upgrade-compat: PASS hash-only -> queue restart -> explicit full refresh -> #790 strict fallback", flush=True)
+
+
+def legacy_first_work(candidate, previous, scratch, tools):
+    root = scratch / "legacy-first-work"
+    # Status-only workers never needed a process-table tool. Real command
+    # completion must verify process-group release, using the host's real ps.
+    worker_tools = root / "worker-tools"
+    shutil.copytree(tools, worker_tools)
+    ps = shutil.which("ps")
+    if not ps:
+        raise RuntimeError("legacy execution fixture requires ps for custody cleanup")
+    (worker_tools / "ps").symlink_to(ps)
+    with process(candidate[0], "queue-work", root / "queue") as queue:
+        url = await_file(root / "queue/url", queue)
+        job_id = (root / "queue/job-id").read_text()
+        with process(previous[0], "worker", root / "worker", queue=url, tools=worker_tools) as worker:
+            request = urllib.request.Request(url + "/api/jobs/" + job_id, headers={"Authorization": "Bearer upgrade-fixture"})
+            def offered(value):
+                rows = json.loads(value)
+                assert all(row["status"] == 200 and not row["period"] for row in rows), rows
+                return any(row["offered"] for row in rows)
+            try:
+                rows = json.loads(await_file(root / "queue/receipts.json", worker, offered))
+            except RuntimeError as error:
+                rows = json.loads((root / "queue/receipts.json").read_text())
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    job = json.load(response)
+                detail = {field: job.get(field) for field in ("state", "reason", "diagnostic_code", "blocker")}
+                status_request = urllib.request.Request(url + "/api/status", headers={"Authorization": "Bearer upgrade-fixture"})
+                with urllib.request.urlopen(status_request, timeout=10) as response:
+                    detail["machines"] = json.load(response).get("machines")
+                raise RuntimeError(f"{error}; check-ins={len(rows)} recent={rows[-3:]} job={detail}") from error
+            # Startup recovery can qualify cadence before ordinary admission.
+            # Otherwise at most the first ordinary idle report needs a sample.
+            eligible = [row for row in rows if not row["recovering"]]
+            offer = next(i for i, row in enumerate(eligible) if row["offered"])
+            assert offer <= 1, "legacy admission waited beyond one observed send interval"
+            deadline = time.monotonic() + 30
+            while True:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    job = json.load(response)
+                if job["state"] in ("succeeded", "failed", "cancelled"):
+                    assert job["state"] == "succeeded" and job.get("losses", 0) == 0, job["state"]
+                    if job.get("release_confirmed"):
+                        break
+                if time.monotonic() >= deadline:
+                    local = json.loads((root / "worker/worker/state.json").read_text())
+                    detail = {field: job.get(field) for field in ("state", "reason", "release_confirmed", "losses", "copies")}
+                    attempts = [json.loads((root / "worker/worker" / name).read_text()).get("result")
+                                for name in local.get("attempts", [])]
+                    raise RuntimeError(f"legacy command did not finish/release: job={detail} attempts={attempts}")
+                time.sleep(.2)
+            # Queue completion can be visible before the actor consumes its
+            # reply and drops local custody. Join that real lifecycle too.
+            await_file(root / "worker/worker/state.json", worker,
+                       lambda value: not json.loads(value).get("attempts"))
+            print("upgrade-compat: PASS legacy worker empty idle reply -> measured cadence -> completed first work", flush=True)
 
 
 def downgrade(previous, candidate, scratch, tools):

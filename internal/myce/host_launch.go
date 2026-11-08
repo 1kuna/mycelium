@@ -59,6 +59,12 @@ func (q *Queue) issuePreparation(m *Machine, kind, key string) HostLaunch {
 	return l
 }
 func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
+	return q.hostSessionLaunchAllowed(m, session) && !q.workerSuspect(m, q.clock.Now())
+}
+
+// An already assigned batch retains its authorization/custody across suspicion.
+// New preparation launches still require live arrival evidence.
+func (q *Queue) hostSessionLaunchAllowed(m *Machine, session string) bool {
 	return m != nil && q.hostHygieneReason(m) == "" && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m) && !m.HostMemoryPolicyMismatch
 }
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
@@ -91,7 +97,17 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 				return nil
 			}
 		}
-		if !q.hostLaunchAllowed(q.s.Machines[l.Machine], l.Session) {
+		m := q.s.Machines[l.Machine]
+		allowed := q.hostLaunchAllowed(m, l.Session)
+		p := q.s.PreparationPlans[l.Attempt]
+		// Repeated gates within an already started preparation retain its exact
+		// custody, just as an assigned batch does. Suspicion blocks new starts;
+		// the current session, stop and preparation fences still apply below.
+		continuing := p.Started && p.Machine == l.Machine && p.Session == l.Session && p.Kind == l.Kind && p.Key == l.Key
+		if l.Kind == "batch" || continuing {
+			allowed = q.hostSessionLaunchAllowed(m, l.Session)
+		}
+		if !allowed {
 			reject("host_launch")
 			return nil
 		}
@@ -146,12 +162,17 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			reject("preparation_custody")
 			return nil
 		}
-		m := q.s.Machines[l.Machine]
 		if j := q.s.Jobs[p.Demand]; p.Kind == "environment" && j != nil && j.CommandDiscovery != nil {
 			target := allocationMachine(m, []string{p.Device})
+			var allowed bool
+			if p.Started {
+				allowed = q.placementDemandAllowed(j, target)
+			} else {
+				allowed = q.placementAllowed(j, target)
+			}
 			// A delayed offer must retain live demand for this exact frozen
 			// target/recipe, even before another heartbeat withdraws it.
-			if j.State != "queued" || cancelled(j) || j.Pause != nil || !q.placementAllowed(j, target) || !commandDiscoveryAllows(j, target) || !slices.ContainsFunc(commandEnvironmentRecipes(j, target), func(r EnvironmentRecipe) bool { return r.Key == p.Key }) {
+			if j.State != "queued" || cancelled(j) || j.Pause != nil || !allowed || !commandDiscoveryAllows(j, target) || !slices.ContainsFunc(commandEnvironmentRecipes(j, target), func(r EnvironmentRecipe) bool { return r.Key == p.Key }) {
 				reject("discovery_demand")
 				return nil
 			}

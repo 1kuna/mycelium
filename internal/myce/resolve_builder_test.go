@@ -57,7 +57,6 @@ func TestResolveOldInterpreterBuilderJourney(t *testing.T) {
 					}
 					m := cpuMachine("builder", "builder", "cpu", 4, 8)
 					m.LastSeen, m.EnvironmentBuilder = clock.Now(), true
-					q.s.Machines[m.ID] = &m
 					client := Client{URL: testServerForEnvironments(t, q), Token: "test"}
 					input := filepath.Join(t.TempDir(), "data")
 					if err := os.WriteFile(input, []byte("portable input\n"), 0600); err != nil {
@@ -76,6 +75,7 @@ func TestResolveOldInterpreterBuilderJourney(t *testing.T) {
 					s.SharedInputs = map[string]SharedInput{"data": {SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}}
 					m.Capabilities = append(m.Capabilities, "shared_inputs_v1")
 					m.SharedInputCache = &SharedInputCapacity{CapacityBytes: 1 << 20, FreeBytes: 1 << 20}
+					check(t, q, m, nil)
 					before := string(wireJSON(t, q.s))
 					var report ResolveReport
 					if err = client.Call(context.Background(), "POST", "/api/resolve", ResolveRequest{Spec: s}, &report); err != nil {

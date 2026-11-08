@@ -354,7 +354,20 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		if !decode(w, r, &c) {
 			return
 		}
-		v, err := a.Queue.CheckinContext(r.Context(), c)
+		if value := r.Header.Get(checkinPeriodHeader); value != "" {
+			period, err := time.ParseDuration(value)
+			if err != nil || period <= 0 || period > time.Duration(1<<63-1)/2 {
+				respondOperation(w, nil, errors.New("invalid worker check-in period"), "worker_checkin_invalid")
+				return
+			}
+			c.period = period
+		}
+		accepted := false
+		contact, settle := a.Queue.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, r.Context())
+		c.contact = contact
+		defer func() { settle(accepted) }()
+		v, err := a.Queue.checkinContext(r.Context(), c)
+		accepted = err == nil
 		if err == nil {
 			v.NASPathChecks = nas.checkin(c)
 		}
@@ -665,6 +678,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	fileStoreSubmissionHeaders(ctx, req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "myce/"+BuildVersion)
+	if checkin, ok := in.(Checkin); ok && path == "/api/workers/checkin" && checkin.period > 0 {
+		req.Header.Set(checkinPeriodHeader, checkin.period.String())
+	}
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 	}

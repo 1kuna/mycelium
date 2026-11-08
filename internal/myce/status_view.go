@@ -21,6 +21,9 @@ func HyphaAvailability(m *Machine) string {
 		return "leaving; no new work"
 	case m.Recovering:
 		state := "recovering saved attempts; no new work"
+		if m.Suspect {
+			state = "suspect; waiting for worker contact; " + state
+		}
 		if m.RecoveringSince != nil {
 			state += " since " + m.RecoveringSince.UTC().Format(time.RFC3339)
 		}
@@ -28,6 +31,8 @@ func HyphaAvailability(m *Machine) string {
 			state += "; needs attention (recovery longer than 2 minutes)"
 		}
 		return state
+	case m.Suspect:
+		return "suspect; waiting for worker contact; no new work"
 	}
 	if m.CPUCapacityReason != "" && m.GPU == "cpu" {
 		return m.CPUCapacityReason

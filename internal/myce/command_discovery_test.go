@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -135,6 +136,43 @@ func TestCommandDiscoveryFailureIsolationReplayAndChangedRecipe(t *testing.T) {
 	defer reopened.Close()
 	if replay := submit(t, reopened, s); replay.ID != changed.ID || replay.CommandDiscovery == nil || replay.State != "cancelled" {
 		t.Fatal(replay)
+	}
+}
+
+func TestCommandDiscoveryStartedPreparationSurvivesSuspicion(t *testing.T) {
+	q, clock := fixture(t)
+	discoveryCatalog(t, q, breadthRecipe("linux-64"))
+	m := cpuMachine("worker", "linux", "cpu", 8, 32)
+	m.EnvironmentBuilder = true
+	check(t, q, m, nil)
+	j := submit(t, q, discoverySpec())
+	plan := check(t, q, m, nil).EnvironmentPlan
+	if len(plan) != 1 || plan[0].Launch == nil || plan[0].Launch.Demand != j.ID {
+		t.Fatal("missing discovery preparation", plan)
+	}
+	launch := *plan[0].Launch
+	if err := q.AuthorizeLaunch(launch); err != nil {
+		t.Fatal(err)
+	}
+	started := q.s.PreparationPlans[launch.Attempt].StartedAt
+	clock.Advance(q.workerArrivalAllowance(q.s.Machines[m.ID]))
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if !q.workerSuspect(q.s.Machines[m.ID], clock.Now()) {
+		t.Fatal("fixture did not become suspect")
+	}
+	if err := q.AuthorizeLaunch(launch); err != nil {
+		t.Fatal("discovery freshness interrupted started preparation", err)
+	}
+	if got := q.s.PreparationPlans[launch.Attempt]; got.StartedAt == nil || !got.StartedAt.Equal(*started) {
+		t.Fatal("continuation renewed discovery custody", got)
+	}
+	if err := q.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AuthorizeLaunch(launch); !errors.Is(err, ErrStale) {
+		t.Fatal("cancelled discovery continued preparation", err)
 	}
 }
 
