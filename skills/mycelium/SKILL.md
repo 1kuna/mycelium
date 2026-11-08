@@ -285,7 +285,11 @@ jobs. **Available from the next release:** status and inspection JSON include
 capture time. Interpret worker freshness and diagnostics at that time, allowing
 for the response age. Inspection and filtered/full status take a fresh capture;
 default status learns its cache lease from local capture/read/write costs, with immediate
-terminal/release invalidation.
+terminal/release invalidation. From the next release (#1052), status and job reads
+use immutable committed inputs, with bulk projection outside the live queue
+lock. Response fields, full-history opt-in, prefix lookup, key echo and exact
+release evidence retain their existing contracts. Use the batched wait for
+completion; a full-history read still transfers all requested retained detail.
 
 From the next release, mixed CPU/RAM waits name occupied cores on eligible
 hosts alongside the other hosts' RAM shortages. Reserved cores are admission
