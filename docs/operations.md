@@ -1235,7 +1235,11 @@ unit's effective `TimeoutStopUSec` and `TimeoutStartUSec` from systemd, includin
 drop-ins. Starts/restarts allow both a pending stop and the start phase, plus two
 measured manager round trips for dispatch/completion. Zero/infinite manager
 timeouts retain operator cancellation without an artificial client deadline.
-Unreadable/malformed timeouts refuse the lifecycle call. Recovery ignores the
+Unreadable, missing or malformed timeouts log a warning and also leave the wait
+to systemd, retaining caller cancellation without a guessed client deadline.
+An unavailable manager deadline can therefore leave the installer waiting until
+systemd completes the job or the operator cancels it. This fallback is Linux-only;
+launchd commands retain their ordinary setup probe allowance. Recovery ignores the
 failed install's cancellation, gives each command its own fresh allowance, and
 inspects final manager state with an unexpired context. A failed manager itself
 can still prevent inspection; that error is reported rather than claiming a

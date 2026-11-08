@@ -3,7 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -46,8 +46,19 @@ func BoundSetupCommand(command func(context.Context, string, ...string) ([]byte,
 		data, err := command(query, name, "--user", "show", unit, "--property=TimeoutStopUSec", "--property=TimeoutStartUSec")
 		elapsed := time.Since(began)
 		cancel()
+		// When the manager cannot describe its deadline, no guessed client
+		// deadline is safe: it could expire while systemd still owns the job.
+		// Use the same manager-owned wait as an infinite unit timeout, keeping
+		// caller cancellation. Do not log manager output (it may be private).
+		managerWait := func() ([]byte, error) {
+			log.Print("warning: effective systemd service timeout unavailable or invalid; waiting for systemd completion with caller cancellation and no additional client deadline")
+			return command(ctx, name, args...)
+		}
 		if err != nil {
-			return nil, fmt.Errorf("cannot read effective service timeouts: %w", err)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return managerWait()
 		}
 		budget := time.Duration(0)
 		unbounded := false
@@ -71,7 +82,7 @@ func BoundSetupCommand(command func(context.Context, string, ...string) ([]byte,
 			// systemctl formats timespans as e.g. "1min 30s" or "45s".
 			duration, err := systemdTimeout(value)
 			if err != nil || duration < 0 || duration > time.Duration(1<<63-1)-budget {
-				return nil, errors.New("invalid effective service timeout")
+				return managerWait()
 			}
 			unbounded = unbounded || duration == 0
 			budget += duration
@@ -85,7 +96,7 @@ func BoundSetupCommand(command func(context.Context, string, ...string) ([]byte,
 		// This scales with this manager's latency rather than a fleet-tuned grace.
 		margin := 2 * elapsed
 		if margin > time.Duration(1<<63-1)-budget {
-			return nil, errors.New("effective service timeout overflow")
+			return managerWait()
 		}
 		bounded, cancel := context.WithTimeout(ctx, budget+margin)
 		defer cancel()
