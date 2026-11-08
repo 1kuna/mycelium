@@ -5,8 +5,56 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 )
+
+func TestWorkerInventoryRetainsIdentitySourceAfterDefaultsReset(t *testing.T) {
+	previous := extensionIdentityProbe
+	defer func() { extensionIdentityProbe = previous }()
+	identity := func(label string) func() MachineProbe {
+		return func() MachineProbe {
+			return MachineProbe{
+				Files: fstest.MapFS{"proc/cpuinfo": {Data: []byte("model name : " + label + "\n")}},
+				Command: func(context.Context, string, ...string) ([]byte, error) {
+					return []byte(label), nil
+				},
+			}
+		}
+	}
+	extensionIdentityProbe = identity("original inventory source")
+	want, err := ExtensionFingerprint(t.Context(), "cpu", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	w := Worker{InventoryProbe: func(context.Context) ([]MachineDevice, error) {
+		close(entered)
+		<-release // A pending OS probe can outlive worker cancellation.
+		return []MachineDevice{{Platform: "cpu"}}, nil
+	}}
+	source := w.inventorySource()
+	type result struct {
+		devices []MachineDevice
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		devices, err := source(t.Context())
+		done <- result{devices, err}
+	}()
+	<-entered
+	// Match teardown restoring defaults while the old scan is still pending.
+	extensionIdentityProbe = identity("replacement inventory source")
+	close(release)
+	got := <-done
+	if got.err != nil || len(got.devices) != 1 {
+		t.Fatal("inventory scan failed", got.err, len(got.devices))
+	}
+	if got.devices[0].ExtensionFingerprint != want {
+		t.Fatal("pending inventory scan used replacement identity defaults")
+	}
+}
 
 func TestHostInventoryObserverSlowPartialAndStale(t *testing.T) {
 	clock := &workerFakeClock{now: time.Unix(1000, 0)}
