@@ -207,7 +207,13 @@
         "id": {
           "type": "string"
         },
+        "observed_gb": {
+          "type": "number"
+        },
         "progress": {
+          "type": "integer"
+        },
+        "sample_id": {
           "type": "integer"
         },
         "session": {

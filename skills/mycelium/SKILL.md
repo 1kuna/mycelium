@@ -365,6 +365,15 @@ missing/stale telemetry, unified-CUDA device floors and release custody remain
 binding. An aggregate refusal alone cannot identify a sibling's contribution or
 establish safe concurrency. See [live headroom](../../docs/status.md#live-headroom-and-reservations).
 
+From the stale-forecast correction (#1077), bounded native CPU auto jobs only
+raise forecast reservations from fresh identified samples. A newer observation
+can replace forecast uncertainty; observed peaks, accepted envelopes and exact
+release custody remain protected. Missing/stale samples retain the last accepted
+reservation without resident credit. Older workers without sample IDs cannot
+raise forecast-only floors. Pre-correction opaque attempt charges stay conservative
+until exact release, because their original measured/forecast split is unknown.
+Worker rollout alone does not repair the queue's forecast retention.
+
 From the declared-CPU containment correction (#1064), an enforced native cgroup
 attempt's live forecast cannot inflate its charge beyond its declaration plus
 ceiling slack. Actual larger observations remain protected; missing/stale samples
