@@ -264,3 +264,10 @@ Work curves remain included in default status. `client.status(full=True)` restor
 page history. `since` accepts an inclusive submission timestamp in RFC3339.
 `client.list(project="example")` collects all pages automatically. Older queues
 ignore these parameters and keep returning their legacy full snapshot.
+
+Wait for several jobs with `client.wait_many([job_a, job_b])` or
+`client.wait([job_a, job_b])`. Both return full terminal Jobs in input order.
+Use one call per agent rather than a thread per job. Supporting queues use one
+revision-based `/api/wait` after initial metadata reads; older queues fall back
+to lightweight reads. The batch-v1 limit is 256 distinct IDs. Wait timeouts never
+cancel jobs.

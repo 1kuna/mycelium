@@ -229,8 +229,8 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				// diagnostic read before deadlines can constrain observation.
 				var supported bool
 				j, supported, err = c.GetJobWaitCapability(requestCtx, id)
-				// Structured output requires full diagnostics on every observation.
-				batchSupported = (batchSupported || supported) && !jsonOutput
+				// Structured output also uses revision waits; fetch details only on changes.
+				batchSupported = batchSupported || supported
 			} else if batchSupported {
 				if batchJobs == nil {
 					batchJobs = map[string]*myce.Job{}
@@ -246,6 +246,11 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 					}
 				}
 				j, err = batchJobs[id], batchErr
+				if err == nil && jsonOutput && j != nil {
+					if lastDetail[j.ID] != j.State+"\x00"+j.Reason {
+						j, err = c.GetJob(requestCtx, j.ID)
+					}
+				}
 			} else {
 				j, err = read(requestCtx, id)
 			}

@@ -250,6 +250,24 @@ printf 'mycelium-ease-audit-ok\n' > expected.txt
 cmp expected.txt accepted/result.txt
 ```
 
+From the release containing #1053, use **one batched wait per agent** for all
+of its pending jobs (up to 256 distinct IDs):
+
+```sh
+myce wait JOB_A JOB_B JOB_C
+# Full diagnostics on changes, using the same batched observation:
+myce wait --json JOB_A JOB_B JOB_C
+```
+
+Python callers use `client.wait_many([job_a, job_b, job_c])` (or pass the list to
+`client.wait`); a single ID still returns one Job. Lists return full terminal
+Jobs in input order. After initial metadata reads, supporting clients keep one
+`/api/wait` request for the pending IDs, carrying revisions so it wakes when any
+job changes. Terminal payloads are fetched for results. Older queues retain
+compatible lightweight reads. Do not build per-job wait processes, Python wait
+threads, repeated `get` calls or status loops. Use status once when diagnosing
+an actual blocker; a timeout leaves the jobs alive.
+
 From the next release, `wait` prints one short line per state change (progress
 on stderr, terminal states on stdout). Use `myce wait --json JOB_ID` for full
 reasons and initial diagnostics, or `myce status JOB_ID` for current details.

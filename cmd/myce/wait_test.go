@@ -588,6 +588,10 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if structured {
 					w.Header().Set("X-Myce-Wait", "batch-v1")
+					if r.Method == "POST" && r.URL.Path == "/api/wait" {
+						json.NewEncoder(w).Encode(myce.WaitReply{Jobs: []myce.WaitState{{ID: "job", State: states[step], Reason: fmt.Sprintf("%s %d", reason, step), Revision: uint64(step + 1)}}})
+						return
+					}
 					if r.URL.Path != "/api/jobs/job" || r.URL.RawQuery != "" {
 						projectedReads.Add(1)
 						http.Error(w, "JSON must use full job reads", http.StatusBadRequest)
