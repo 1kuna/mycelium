@@ -111,11 +111,17 @@ On macOS, the full supervisor holds one of two cross-checkout filesystem locks
 for its entire lifetime, independent of package commands or test expressions. It also
 accounts for older standalone full race commands before entering a slot. The
 slot also has a `mycelium-full-gate-N.custody` record beside its lock in
-`GOCACHE`, containing the run marker and scratch directory. Only verified fixture
-exit removes that record; failed inventory or supervisor death retains occupancy
-after the OS releases the lock. Recovery requires verifying the recorded run's
-fixtures have exited before removing its custody record. Never clear another
-owner's record merely to admit more work.
+`GOCACHE`, containing the holder PID and process start identity, then the run
+marker and scratch directory before fixtures start. Records publish atomically.
+Verified fixture exit removes the record on normal cleanup. After supervisor
+death, a new supervisor holding both admission and slot locks checks the recorded
+holder identity and verifies that no marked, descendant or scratch-holding
+fixtures remain. It then archives the abandoned record as `.reconciled-UUID`
+and reuses the slot. Legacy marker/scratch records receive the same fixture-exit
+check. Live holders, live fixtures, malformed records and inventory uncertainty
+retain occupancy; elapsed age never releases custody. Reconciliation never
+signals another run or removes its scratch. Never clear another owner's record
+merely to admit more work.
 The
 two-suite boundary preserves the repository's observed Mac safety rule: more
 concurrent full suites caused false failures. Linux fleet gates rely on the
