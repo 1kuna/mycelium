@@ -571,6 +571,10 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 				t.Errorf("read exact job %s: %v", id, readErr)
 				continue
 			}
+			if observed == nil {
+				t.Errorf("job %s lost", id)
+				continue
+			}
 			if observed.Attempt != initial.Attempt || observed.Starts != 1 || observed.Losses != 0 || observed.InfrastructureRetries != 0 || observed.Session != initial.Session || observed.Machine != initial.Machine || observed.StartedAt == nil || !observed.StartedAt.Equal(*initial.StartedAt) {
 				t.Errorf("attempt identity or continuity changed: before=%+v after=%+v", initial, observed)
 			}

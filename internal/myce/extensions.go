@@ -22,13 +22,16 @@ import (
 
 // Eight representations can coexist during extension read, clone, YAML/JSON,
 // base64 transport and fingerprinting. Each gets a physical memory share.
-func extensionByteLimit() int {
-	b := &requestBudgets{}
+func extensionByteLimit() (int, error) {
+	return extensionByteLimitFrom(&requestBudgets{})
+}
+
+func extensionByteLimitFrom(b *requestBudgets) (int, error) {
 	n, err := b.capacity(context.Background())
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return int(min(int64(math.MaxInt), n/8))
+	return int(min(int64(math.MaxInt), n/8)), nil
 }
 
 var extensionName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -231,7 +234,10 @@ func (e Extension) validateBaselines(baselines map[string]ExtensionBaseline) err
 	return nil
 }
 func extensionFromFiles(files map[string][]byte) (Extension, error) {
-	limit := extensionByteLimit()
+	limit, err := extensionByteLimit()
+	if err != nil {
+		return Extension{}, err
+	}
 	var totalBytes int64
 	for _, b := range files {
 		totalBytes += int64(len(b))
@@ -280,7 +286,11 @@ func extensionFromFiles(files map[string][]byte) (Extension, error) {
 	return e, nil
 }
 func ReadExtension(folder string) (Extension, error) {
-	files, err := readExtensionFolder(folder, int64(extensionByteLimit()), readCapacityFile)
+	limit, err := extensionByteLimit()
+	if err != nil {
+		return Extension{}, err
+	}
+	files, err := readExtensionFolder(folder, int64(limit), readCapacityFile)
 	if err != nil {
 		return Extension{}, err
 	}

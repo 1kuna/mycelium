@@ -541,8 +541,10 @@ class Client:
     def status(self, *, full: bool = False, jobs: str | None = None,
                project: str | None = None, since: str | None = None,
                limit: int | None = None, before: str | None = None) -> dict[str, Any]:
-        """Return active jobs plus 100 recent terminal jobs and fleet health.
+        """Return active jobs plus a capacity-sized history page and fleet health.
 
+        Absence from a page does not prove a job is missing or incomplete. Use
+        get(job_id) or wait(job_id) for known jobs, or list() for all history.
         Work curves remain included. full=True restores all jobs. jobs="all" pages history;
         jobs="active" includes nonterminal work and pending cleanup. Optional
         project/since (queued-at RFC3339) filters apply only to jobs.

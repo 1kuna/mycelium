@@ -230,6 +230,8 @@ type Queue struct {
 	usageMaintenance bool
 	s                state
 
+	observeSubmissionAdvice func(submissionAdviceTiming)
+
 	observeMemoryHistory func(int, bool) // Test observer: jobs visited by a full evidence scan.
 
 	memoryPlanning          *memoryPlanningCache // Only while a read-only placement scan is active.
@@ -545,16 +547,16 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 }
 
 func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queueUpdateTiming) error {
-	return q.updateTransaction(ctx, fn, timing, false)
+	return q.updateTransaction(ctx, fn, timing, false, nil)
 }
 
 // Upload persistence may abandon a pending transaction before it owns q.mu.
 // Ordinary transactions must still run cleanup when their request is cancelled.
 func (q *Queue) updateUploadRequest(ctx context.Context, fn func() error, timing *queueUpdateTiming) error {
-	return q.updateTransaction(ctx, fn, timing, true)
+	return q.updateTransaction(ctx, fn, timing, true, nil)
 }
 
-func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool) error {
+func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool, committed func()) error {
 	if q.stopping.Load() {
 		return queueStopping()
 	}
@@ -594,7 +596,11 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.usageWrites = nil
 		q.accountUsage(q.clock.Now())
 		hold.next(holdBody)
-		return fn() // Simulation aborts on any error; it never resumes a failed mutation.
+		err := fn() // Simulation aborts on any error; it never resumes a failed mutation.
+		if err == nil && committed != nil {
+			committed()
+		}
+		return err
 	}
 	q.memoryObservationIndex = nil
 	defer func() { q.memoryObservationIndex = nil }()
@@ -667,6 +673,9 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.invalidateTerminalStatus()
 		q.commitRecords()
 		q.publishReadRuntime()
+		if committed != nil {
+			committed()
+		}
 	}
 	return err
 }
@@ -676,7 +685,12 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 
 // SubmitContext snapshots input custody before bulk verification. Key replay,
 // cancellation and job creation still serialize in the final update transaction.
-func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
+func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
+	return q.submitContext(ctx, s, nil)
+}
+
+// committed pins immutable advice inputs before releasing the commit lock.
+func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ *Job, err error) {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	defer func() {
@@ -779,7 +793,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 
 	var out Job
 	var refusedHealthDemand *Job
-	err = q.updateRequest(ctx, func() error {
+	err = q.updateTransaction(ctx, func() error {
 		if resultView != nil {
 			store.mu.Lock()
 			resultCapacity, resultPayloads = resultView.current()
@@ -967,7 +981,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		q.maintain()
 		out = cloneJob(j)
 		return nil
-	}, nil)
+	}, nil, false, committed)
 	if err != nil && refusedHealthDemand != nil {
 		// The refused submission rolls back. Record only a rechecked health
 		// observation in its own transaction, never create or admit the job.
@@ -2176,7 +2190,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 }
 
 // Projection runs against either the locked queue or a fully detached read view.
-func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
+func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
 	out := Snapshot{EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	for _, s := range q.s.ModelSlots {
@@ -2290,6 +2304,8 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
 	order, reasons := q.queueProjection()
+	projectionSample := startStatusProjection(budgets)
+	finishJobWork := projectionSample.measure()
 	for _, stored := range q.s.Jobs {
 		if q.observationSelection != nil && !q.observationSelection.ids[stored.ID] {
 			continue
@@ -2302,6 +2318,7 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		}
 		out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
 	}
+	finishJobWork()
 	for _, m := range q.s.Machines {
 		copy := cloneMachine(m)
 		copy.ExternalMemory = q.externalMemoryStatus(hostID(m))
@@ -2338,9 +2355,12 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		}
 		out.Machines = append(out.Machines, &copy)
 	}
+	finishJobWork = projectionSample.measure()
 	for _, j := range out.Jobs {
 		q.projectJobDiagnostics(j, forStatus, false)
 	}
+	finishJobWork()
+	projectionSample.finish(out.Jobs)
 	sort.SliceStable(out.Jobs, func(i, k int) bool { return statusBefore(out.Jobs[i], out.Jobs[k]) })
 	sort.Slice(out.Machines, func(i, k int) bool { return out.Machines[i].ID < out.Machines[k].ID })
 	return out

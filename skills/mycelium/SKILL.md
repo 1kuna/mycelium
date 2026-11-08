@@ -27,7 +27,10 @@ and preserve the refusal and identities for that owner.
 
 From the next queue release, request bodies, wait batches and status history pages
 follow current queue capacity; 413 refusals name the cause and fitting size.
-Follow returned page cursors and retain the same submission key after a refusal.
+Default status is a partial history page: absence does not mean a job was lost
+or is incomplete. Use `myce status JOB_ID` or a batched wait for known jobs,
+`myce status --history` for all retained jobs, and follow `jobs_page.next_before`
+when paging the API. Retain the same submission key after a refusal.
 Custom peers can negotiate `capacity-v1` through HTTP headers without changing
 legacy JSON. See [request budgets](https://github.com/1kuna/mycelium/blob/main/docs/request-budgets.md).
 
@@ -394,6 +397,23 @@ Keep the job; cancellation still withdraws preparation. A completed failed dial
 returns `storage_unreachable`; permanent storage, authentication and integrity
 refusals still stop preparation. Execution waits for verified staging.
 
+From the release containing #1072, Go and Python GET/HEAD, download and
+replay-safe retries follow the current positive `Retry-After` plus jitter;
+previous errors and unchanged reads cannot stretch that pause. Without a server
+signal, retry spacing follows measured request service cost plus jitter. Caller
+deadlines stop recovery without retrying before the server permits it. Python
+`timeout` bounds API recovery and `transfer_timeout` bounds each file request;
+Go uses the caller context or explicitly configured HTTP timeout.
+
+## Submission advice under control pressure (next release, #1065)
+
+Submission waiting/deadline advice uses the accepted commit's immutable planner
+snapshot outside the live queue mutex. If measured memory headroom cannot fit
+its diagnostics, the response still confirms acceptance with the same job ID,
+policy and deadline-guidance fields; blocker detail explicitly says it is
+unavailable. Keep that ID and submission key and inspect the accepted job after
+headroom recovers. Do not resubmit accepted work to obtain advice.
+
 ## Adaptive model readiness (next release)
 
 Omitted model `max_wait` follows caller cancellation and actual load failures;
@@ -543,6 +563,10 @@ now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
 [host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).
+From the next release, hardware discovery backs off independently of changing
+device usage. Discrete XPU memory/activity uses a separate shared host sample;
+missing, ambiguous or stale counters remain unknown and withhold
+telemetry-dependent sharing. A heartbeat never refreshes a cached sample's age.
 
 ## Reconciled launch handshakes (next release, #1028)
 
