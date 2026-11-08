@@ -64,6 +64,19 @@ recovery. Adverse samples never teach a new healthy baseline. Load requires
 increased wake latency; heartbeat delay also requires local wake latency, so
 ordinary useful CPU work or a slow queue alone does not drain a host. Memory
 pressure, swap growth with wake latency, and low free disk use the host's bands.
+On Linux, pressure is host-wide memory PSI `some avg10` (percent). With the
+zero-baseline correction, an all-zero idle pressure band requires corroborating
+swap-growth or local wake-latency deterioration before pressure
+alone is classified as adverse. Otherwise healthy observations can establish a
+positive workload reference through the normal baseline path, including the
+three-sample recovery of a retained zero-baseline drain. Once that reference is
+positive, pressure outliers trigger independently again. The reference and its
+adjacent-sample resolution come from this host; there is no absolute PSI cutoff.
+Positive PSI with a swap-growth outlier remains adverse even within the learned
+pressure band, so a widened decay-tail reference cannot hide renewed swapping.
+These calibration/corroboration rules apply to Linux PSI. Darwin retains raw OS
+pressure levels (`1` is normal) and its learned pressure-outlier rule; normal
+pressure plus swap growth alone does not drain it. Persisted units are unchanged.
 Disk pressure also requires exhaustion against measured consumption over the
 confirmation horizon. `disk_recovery` retains that measured reserve until space
 actually recovers; aging history alone cannot clear it. Pending adverse mount
@@ -2226,6 +2239,17 @@ precedence remain binding; active same-tier work is not stopped to repay debt.
 
 ## Learned native CPU memory growth (next release)
 
+At an exact native batch launch, fresh worker-local direct CUDA process memory
+can establish already occupied physical RAM on a unified host. Admission credits
+at most the largest process counter, avoiding duplicate shared allocations in a
+process sum. Across the aggregate, total anonymous credit and this counter use
+their maximum, protecting possible overlap even with another attempt's cgroup.
+Only the launching attempt receives additional device credit. The full static
+envelope remains reserved and measured device overshoot increases it. Missing,
+stale, fallback/RSS and remotely supplied counters grant no new physical credit;
+discrete device memory never reduces host growth. These counters cover helpers
+and main in the same exact attempt subtree. Envelope calibration is separate.
+
 An acknowledged `adaptive native CPU memory guard` treats learned and
 exploratory reservations as predictions. Fresh exact-attempt footprint and growth measurements use the
 same forecast as cold CPU probes, including sample age and measured drift, with
@@ -2416,7 +2440,11 @@ exact attempt's release before the logical job can run elsewhere.
 fingerprint. A changed capacity measurement, allowance, competing reservation or
 exact release permits reevaluation; heartbeat timestamps alone do not. Ordinary
 lower-tier preemption can satisfy the measured deficit; equal-tier production
-waits. `start_capacity_waiting` records a generated startup window suspended by
-qualified resource contention. Assignment renews that generated window for actual
-preparation. Caller `start_by` and `start_window`, give-up and cancellation retain
-their existing authority. No retry, reserve or timeout increase is involved.
+waits. From the next release, `start_capacity_waiting` records any relative startup
+window suspended by qualified resource contention, including explicit
+`start_window` declarations. Typed uncharged launch refusals also suspend the
+relative window. Status reasons show the original window's seconds left with
+`paused for capacity`; assignment restores that full window for actual preparation.
+An assigned start without an accepted acknowledgement continues counting down.
+Absolute `start_by`, give-up, ordering `deadline` and cancellation retain their
+existing authority. No retry, reserve or timeout increase is involved.
