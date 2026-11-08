@@ -360,8 +360,8 @@ func TestWorkerHandshakeRefusalAfterLostStarted(t *testing.T) {
 	}
 }
 
-// A native member's final gate runs under p.mu. Stop must cancel its exact
-// request before waiting for that mutex; the replacement has a different cancel.
+// A held final native gate must leave the actual control loop runnable. An
+// ordinary tick precedes cancellation, reproducing the independent review finding.
 func TestWorkerNativeHandshakeCancellation(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("worker", "fake")
@@ -407,13 +407,26 @@ func TestWorkerNativeHandshakeCancellation(t *testing.T) {
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
-	stopped := make(chan struct{})
-	go func() { p.stopDirective(clock.Now(), 0, true, true); close(stopped) }()
+
+	ticked := make(chan struct{}, 1)
+	control := &processControl{clock: handshakeControlClock{Clock: clock, ticked: ticked}, processes: map[attemptKey]*process{jobKey(*j): p}, wake: make(chan struct{}, 1)}
+	controlCtx, stopControl := context.WithCancel(context.Background())
+	controlDone := make(chan struct{})
+	events := make(chan WorkerEvent)
+	go func() { defer close(controlDone); control.run(controlCtx, context.Background(), events) }()
+	defer func() { stopControl(); p.cancelStarting(); <-controlDone }()
 	select {
-	case <-stopped:
+	case <-ticked:
 	case <-time.After(testWaitTimeout):
-		t.Fatal("stop blocked behind handshake mutex")
+		t.Fatal("ordinary control tick did not run")
 	}
+	event := WorkerEvent{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, deadline: clock.Now(), UserCancel: true, Kill: true}
+	select {
+	case events <- event:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("normal control tick blocked later cancellation delivery")
+	}
+
 	select {
 	case f := <-p.done:
 		if f.result.ReleasePending || f.result.Success || f.err != nil {
@@ -467,4 +480,19 @@ func TestWorkerPreparationHandshakeCancellation(t *testing.T) {
 	if report.State != "paused" || report.Attempt != "exact-preparation" {
 		t.Fatal("cancel lost preparation identity", report)
 	}
+}
+
+// Only the control loop uses this clock; its first ordinary tick is a named
+// synchronization signal, independent of worker/queue activity or wall sleeps.
+type handshakeControlClock struct {
+	Clock
+	ticked chan struct{}
+}
+
+func (c handshakeControlClock) Now() time.Time {
+	select {
+	case c.ticked <- struct{}{}:
+	default:
+	}
+	return c.Clock.Now()
 }

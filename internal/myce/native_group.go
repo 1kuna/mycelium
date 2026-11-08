@@ -118,8 +118,9 @@ func (g *nativeGroup) saveLocked() error {
 	}{g.identity, g.members, g.p.outcome})
 }
 
-// Called under p.mu, also held across fork/persistence/exec approval. A stop
-// cannot race another member into execution. CPU main keeps its checkpoint
+// Called under p.mu, also held across fork/persistence and opening the exec
+// gate. Network approval releases it and rechecks cancellation on reacquiring.
+// A stop cannot race another member into execution. CPU main keeps its checkpoint
 // helpers; non-user accelerator stops terminate all members together.
 func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	p := g.p
@@ -453,6 +454,21 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	return p, nil
 }
 
+// Network handshakes must not occupy the process mutex: the control loop and
+// actor need it even on an ordinary grace tick, before a stop event arrives.
+// This owner alone changes launch identity. After reacquiring, a stop that
+// arrived during the request fences fork/exec and the owner cleans its exact
+// locally retained process custody before returning.
+func (g *nativeGroup) handshakeLocked(call func() error) error {
+	g.p.mu.Unlock()
+	err := call()
+	g.p.mu.Lock()
+	if err != nil {
+		return err
+	}
+	return g.ctx.Err()
+}
+
 // Start a new anchor only after the previous group has been verified empty.
 // Persist intent and kernel birth custody before permitting any member exec.
 // Only the initial launch updates worker state; later groups remain in the same
@@ -491,7 +507,9 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		err = saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody)
 	}
 	if err == nil {
-		err = g.worker.authorizeLaunch(HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)})
+		err = g.handshakeLocked(func() error {
+			return g.worker.authorizeLaunch(HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)})
+		})
 		if err != nil {
 			if s != nil {
 				err = s.startFailure(g.p.job, launchRefused, err)
@@ -504,7 +522,9 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		g.custody.CustodyID = ID()
 		err = g.saveLocked()
 		if err == nil {
-			err = g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "reserved")
+			err = g.handshakeLocked(func() error {
+				return g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "reserved")
+			})
 		}
 	}
 	if err == nil {
@@ -545,7 +565,9 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	if err = saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil {
 		return abort(err)
 	}
-	if err = g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "started", cmd.Process.Pid); err != nil {
+	if err = g.handshakeLocked(func() error {
+		return g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "started", cmd.Process.Pid)
+	}); err != nil {
 		return abort(err)
 	}
 	if err = g.control.attach(cmd.Process.Pid); err != nil {
@@ -795,7 +817,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if err = g.saveLocked(); err != nil {
 		return err
 	}
-	if err = g.worker.authorizeLaunch(l); err != nil {
+	if err = g.handshakeLocked(func() error { return g.worker.authorizeLaunch(l) }); err != nil {
 		return g.recordInfrastructureLocked(launchRefused, m.Name, "", err)
 	}
 	// Mark before opening the gate: a failed write/handshake can still let
