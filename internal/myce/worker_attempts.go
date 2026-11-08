@@ -913,7 +913,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	pressureProbe.lane.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go pressureProbe.run(ctx)
 	inventory := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: w.Clock, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}}
-	telemetryProbe := workerMachineProbe()
+	// Telemetry shares the injectable OS/driver source used by fingerprints.
+	telemetryProbe := extensionIdentityProbe()
 	telemetryWorker := Worker{Clock: w.Clock}
 	inventory.sampleTelemetry = func(ctx context.Context, devices []MachineDevice) ([]MachineDevice, error) {
 		telemetryWorker.sampleXPUTelemetry(ctx, telemetryProbe, devices)

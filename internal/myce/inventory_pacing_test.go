@@ -245,6 +245,33 @@ func TestHostInventoryTelemetryIdentityAndExpiry(t *testing.T) {
 	}
 }
 
+func TestWorkerTelemetryUsesInjectedHostSource(t *testing.T) {
+	q, _ := fixture(t)
+	var queries atomic.Int32
+	previous := extensionIdentityProbe
+	extensionIdentityProbe = func() MachineProbe {
+		return MachineProbe{OS: "linux", Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+			if name == "xpu-smi" {
+				queries.Add(1)
+				return []byte("0000:01:00.0,4096\n"), nil
+			}
+			return []byte("fixture kernel"), nil
+		}, XeActivity: func(context.Context, string) (float64, error) { return 10, nil }}
+	}
+	t.Cleanup(func() { extensionIdentityProbe = previous })
+	card := MachineDevice{ID: "0", Platform: "xpu", Identity: "card", Selector: "0", Fingerprint: "driver", pciAddress: "0000:01:00.0", MemoryMode: "dedicated", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}
+	runInventoryReviewWorker(t, q, Worker{Machine: machine("telemetry", "xpu"), InventoryProbe: func(context.Context) ([]MachineDevice, error) {
+		return []MachineDevice{card}, nil
+	}})
+	awaitInventoryReview(t, func() bool {
+		s, err := q.publicSnapshot()
+		return err == nil && len(s.Machines) == 1 && len(s.Machines[0].Devices) == 1 && deviceTelemetryReady(s.Machines[0].Devices[0].Telemetry, q.clock.Now())
+	})
+	if queries.Load() == 0 {
+		t.Fatal("worker bypassed injected telemetry")
+	}
+}
+
 func TestHostInventoryDrainsTelemetryAfterDeviceRemoval(t *testing.T) {
 	clock := &workerFakeClock{now: time.Unix(1000, 0)}
 	observer := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: clock, timing: probeTiming{base: time.Millisecond, cores: 2}}}
