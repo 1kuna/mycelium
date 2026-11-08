@@ -41,6 +41,8 @@ type attemptSupervisor struct {
 	preparing   context.CancelFunc // Stops preparation, never abandons a started process.
 
 	admissionBlocked bool
+	// Confirmed local cleanup; independent of result delivery.
+	admissionReleased atomic.Bool
 }
 
 // Observation retries preserve running status. Their exact cause must still
@@ -65,7 +67,15 @@ func (a *attemptSupervisor) admissionJob() Job {
 	if a.stopping.Load() {
 		j.State = "stopping"
 	}
+	j.ReleaseConfirmed = a.admissionReleased.Load()
 	return j
+}
+func (a *attemptSupervisor) releaseAdmission() {
+	if a.admissionMu != nil {
+		a.admissionMu.Lock()
+		defer a.admissionMu.Unlock()
+	}
+	a.admissionReleased.Store(true)
 }
 func (a *attemptSupervisor) stopAdmission() {
 	if a.admissionMu != nil {
@@ -91,13 +101,19 @@ func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Jo
 		// no process or sensor I/O, before applying the original sample age.
 		memory := (*CurrentHostMemory)(nil)
 		key := attemptKey{reports[i].ID, reports[i].Attempt, reports[i].Session}
-		if a := actors[key]; a != nil && reports[i].Started {
+		if a := actors[key]; a != nil {
 			a.mu.Lock()
 			latest := a.report
-			if latest.Started && latest.ID == key.job && latest.Attempt == key.attempt && latest.Session == key.session {
+			if latest.ID == key.job && latest.Attempt == key.attempt && latest.Session == key.session {
 				memory = latest.CurrentHostMemory
 			}
 			a.mu.Unlock()
+		}
+		// Freeze the independently advancing device sampler before the physical
+		// headroom read. Later aging must not fetch newer allocation counters.
+		memory = memory.aged(w.Clock.Now())
+		if memory != nil {
+			memory.deviceSample = nil
 		}
 		reports[i].CurrentHostMemory = memory
 	}
@@ -333,6 +349,8 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				a.liveness = startAttemptLiveness(ctx, w.Clock, w.Interval, p, s.dir)
 			}
 			a.mu.Unlock()
+		}
+		if p != nil && (report.Started || p.native != nil) {
 			var memory *memoryAttempt
 			switch {
 			case p.native != nil:
@@ -390,7 +408,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		a.mu.Lock()
 		a.report, a.diagnostics = report, diagnostics
 		a.released = p == nil && s.state.Result != nil && !s.state.Result.ReleasePending
+		releasedLocally := a.released
 		a.mu.Unlock()
+		if releasedLocally {
+			a.releaseAdmission()
+		}
 		if connected && !d.Hold {
 			var err error
 			releaseAcknowledged := false
@@ -1251,15 +1273,15 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			if m.IOPressure != nil {
 				m.IOPressure.AgeSeconds = max(0, w.Clock.Now().Sub(m.IOPressure.SampledAt).Seconds())
 			}
-			m.HostHealth = health.snapshot(m.DiskVolumes)
-			applyHostMountHealth(w, &m)
-			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			if m.CapabilityProfile != nil {
 				a := w.availability.snapshot()
 				m.CapabilityProfile.Availability = &a
 			}
 			// Snapshot at send time: preparation must not disappear from the
 			// sensor age, and report-gap learning includes the entire control path.
+			m.HostHealth = health.report(m.DiskVolumes)
+			applyHostMountHealth(w, &m)
+			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
 			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()

@@ -27,12 +27,17 @@ kernel-journal deadline.
 
 `probe.period_seconds`, `cost_seconds`, and `valid_seconds` describe the completed
 observation. Validity is the period plus the measured service-cost prediction
-(mean plus four absolute-deviation estimates). Shared-pressure reports also
-include the prediction of their observed control/report gap: the preceding
+(mean plus four absolute-deviation estimates). Host-health and shared-pressure reports also
+include the same prediction of their observed control/report gap: the preceding
 queue round trip plus the next report's preparation. Cheap OS sensing does not
 imply cheap delivery to a launch fence. This gap trains before profile activation
 and affects only newly completed probes; later slow reports cannot renew old
-evidence. Pressure age is captured at send time, after report preparation.
+evidence. Both ages are captured at send time, after report preparation. Local
+health admission reads do not train report cadence. During initial learning or
+an unprecedented delivery delay, evidence can still expire: contact alone never
+proves that a sensor is healthy. A stopped sensor expires at its last completed
+observation's frozen period, cost prediction and learned report-gap prediction,
+even if the worker continues checking in.
 The prediction uses RFC 6298's
 1/8 mean and 1/4 deviation smoothing. These dimensionless coefficients supply
 statistical memory and a jitter allowance; they are not fleet latency thresholds.

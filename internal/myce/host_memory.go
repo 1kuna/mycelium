@@ -467,14 +467,18 @@ func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemp
 	samples := map[attemptKey]hostMemorySample{}
 	for _, r := range reports {
 		sample, s := r.CurrentHostMemory, hostMemorySample{}
-		if !r.Started || sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
+		// Native helpers acquire physical custody before main Starts. Their
+		// exact-attempt memory is occupancy evidence, never main-start evidence.
+		if sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) && sample.AgeSeconds < hostMemorySampleFreshFor.Seconds() {
 			s.gb, s.at = sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds*float64(time.Second)))
 			s.growthGB = sample.GrowthGB
 			if sample.FootprintGB != nil && validMemoryValue(*sample.FootprintGB) {
-				s.growthObserved = sample.GrowthObserved && (sample.GrowthGB == 0 || sample.GrowthRateGB > 0)
+				// Helper occupancy can reduce pending physical growth, but cannot
+				// release a CPU probe's whole future main-execution reservation.
+				s.growthObserved = r.Started && sample.GrowthObserved && (sample.GrowthGB == 0 || sample.GrowthRateGB > 0)
 				s.footprintGB, s.rateGB = *sample.FootprintGB, sample.GrowthRateGB
 			}
 		}
