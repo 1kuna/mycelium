@@ -121,6 +121,7 @@ func (q *Queue) CancelSubmission(project, key string, requestContexts ...context
 // even for failed jobs that an operator loss refund could otherwise requeue.
 func (q *Queue) cancelJob(j *Job) {
 	q.touchJob(j.ID)
+	q.closeAdmissionWait(j, "cancelled")
 	for _, child := range q.cancellationMembers(j) {
 		if !cancelled(child) {
 			q.cancelJob(child)

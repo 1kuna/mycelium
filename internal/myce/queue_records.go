@@ -216,7 +216,14 @@ func (q *Queue) touchJob(id string) *Job {
 		if _, ok := q.records.jobs[id]; !ok {
 			var old *Job
 			if j != nil {
-				v := cloneJob(j)
+				// Admission evidence is immutable and replaced on publication or
+				// closure. The undo journal can share it, like immutable ledger
+				// entries, instead of JSON-copying every retained explanation on
+				// each heartbeat. Public job copies still own their nested data.
+				input := *j
+				input.AdmissionWait = nil
+				v := cloneJob(&input)
+				v.AdmissionWait = j.AdmissionWait
 				old = &v
 			}
 			q.records.jobs[id] = old

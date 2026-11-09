@@ -423,6 +423,8 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	AdmissionWait *AdmissionWaitEvidence `json:"admission_wait,omitempty"`
+
 	DeviceFaultStartWait *DeviceFaultStartWait `json:"device_fault_start_wait,omitempty"`
 	StartCapacityWaiting bool                  `json:"start_capacity_waiting,omitempty"`
 	// Preserve a fault pause's unused budget through subsequent capacity waits.

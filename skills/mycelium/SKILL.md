@@ -40,6 +40,20 @@ runs real commands with fake GPU inventory, waits and fetches verified output.
 It needs no installed fleet or token setup. Plain `myce dev` stays foreground
 until stopped. This local fixture does not qualify native hardware.
 
+From the release containing #868's admission-wait evidence, production job
+status includes `admission_wait`: first/latest blockers, candidate targets,
+exact capacity holders, memory forecasts and sample ages, and actual scheduler
+preemption decisions. Check `device_fault` before attributing RAM pressure to
+tests; a quarantined device cannot serve work after CPU holders stop. Missing
+values and dropped history remain unknown. `preemption.source` identifies an
+actual planner decision versus a diagnostic projection; the separate target
+field `release_commitment` reports retained releases still pending.
+It clears once those exact releases are acknowledged, even if RAM or another
+blocker still prevents admission.
+`last_planner_decision` keeps its original timestamp and wave vector.
+Read `latest.closed_at`/`latest.closed_reason` for ended waits and `capture_gaps`/`deferred_at`
+for capture deferred to protect control service. See [wait evidence](../../docs/status.md#retained-production-admission-waits-next-release-868).
+
 ## First run: adapter to verified result
 
 For an existing project, use its reviewed adapter entry or compatibility profile;

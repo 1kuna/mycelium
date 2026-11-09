@@ -126,13 +126,38 @@ func candidateCostFixture(t testing.TB) (*Queue, []Machine) {
 
 func BenchmarkCheckinCandidateCost(b *testing.B) {
 	q, workers := candidateCostFixture(b)
+	benchmarkCheckinCandidateCost(b, q, workers)
+}
+
+func BenchmarkCheckinCandidateCostIdle(b *testing.B) {
+	q, workers := candidateCostFixture(b)
+	if err := q.update(func() error {
+		for id, j := range q.s.Jobs {
+			if j.State == "queued" {
+				q.deleteJob(id)
+			}
+		}
+		return nil
+	}); err != nil {
+		b.Fatal(err)
+	}
+	benchmarkCheckinCandidateCost(b, q, workers)
+}
+
+func benchmarkCheckinCandidateCost(b *testing.B, q *Queue, workers []Machine) {
+	// Measure stable check-ins separately from the one-time explanation of a
+	// newly observed wait. Both baseline and candidate use the same warm-up.
+	m := workers[0]
+	request := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: "running-0", Attempt: 1}, Session: m.Session, Started: true}}}
+	if _, err := q.CheckinContext(context.Background(), request); err != nil {
+		b.Fatal(err)
+	}
 	var total, maximum time.Duration
 	q.observeUpdate = func(_, hold time.Duration) { total += hold; maximum = max(maximum, hold) }
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		m := workers[0]
-		_, err := q.CheckinContext(context.Background(), Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: "running-0", Attempt: 1}, Session: m.Session, Started: true}}})
+		_, err := q.CheckinContext(context.Background(), request)
 		if err != nil {
 			b.Fatal(err)
 		}

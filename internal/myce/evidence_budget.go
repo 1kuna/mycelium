@@ -292,9 +292,22 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 			}
 			if !mutableJob(&job) {
 				compactRedundantAttemptEvidence(&job)
-				replacement, _ = json.Marshal(job)
-				if len(replacement) < len(data) {
-					apply = func() { q.touchJob(job.ID).AttemptHistory = job.AttemptHistory }
+			}
+			// Optional wait transitions yield under measured pressure even
+			// after a job leaves the waiting set. Preserve endpoint facts and
+			// exact planner decisions; normal history retention owns lifetime.
+			if e := job.AdmissionWait; e != nil && len(e.Transitions) > 0 {
+				e.Dropped += uint64(len(e.Transitions))
+				e.Transitions = nil
+				e.HistoryBytes = 0
+				e.HistoryBudgetBytes = 0
+			}
+			replacement, _ = json.Marshal(job)
+			if len(replacement) < len(data) {
+				apply = func() {
+					live := q.touchJob(job.ID)
+					live.AttemptHistory = job.AttemptHistory
+					live.AdmissionWait = job.AdmissionWait
 				}
 			}
 		case strings.HasPrefix(key, "external_memory/") && err == nil:

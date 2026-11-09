@@ -159,6 +159,9 @@ type Queue struct {
 	deliveryActive       *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
 	deliveryPublish      func(Job, *FileStore, string, func()) error // Test seam; set before use.
 	// Ephemeral exact-attempt samples: restart cannot renew a cached credit.
+	admissionWaitDecisions map[string]map[string]admissionWaitDecision // transient actual planner decisions
+	admissionWaitPending   bool                                        // committed maintenance requests an off-lock observation
+	admissionWaitLast      atomic.Pointer[admissionWaitCapture]        // completed observation inputs; one retained generation
 	hostMemorySamples      map[string]map[attemptKey]hostMemorySample
 	hostMemoryLedgers      map[string]*HostMemoryLedger // Immutable after each refresh; shared by diagnostics.
 	memoryLedgerGeneration uint64
@@ -601,9 +604,14 @@ func (q *Queue) updateUploadRequest(ctx context.Context, fn func() error, timing
 }
 
 func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool, committed func()) error {
+	return q.updateTransactionMode(ctx, fn, timing, cancelWait, committed, true)
+}
+
+func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timing *queueUpdateTiming, cancelWait bool, committed func(), captureWait bool) error {
 	if q.stopping.Load() {
 		return queueStopping()
 	}
+	var waitCapture *admissionWaitCapture
 	available := true
 	if !q.simulation {
 		if q.checkpointProbe != nil {
@@ -638,6 +646,9 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		timing.observe(q.observeUpdate)
 		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn, &hold)
+		if waitCapture != nil {
+			q.finishAdmissionWait(waitCapture)
+		}
 	}()
 	if q.stopping.Load() {
 		return queueStopping()
@@ -653,6 +664,8 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		}
 		return err
 	}
+	q.admissionWaitPending = false
+	q.admissionWaitDecisions = nil
 	q.memoryObservationIndex = nil
 	defer func() { q.memoryObservationIndex = nil }()
 	old, err := q.beginRecords()
@@ -698,6 +711,7 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.invalidateWorkCurves()
 	}
 	if err == nil {
+		q.closeChangedAdmissionWaits()
 		q.maintainSubmissions()
 		q.releaseFileUploadMarkers()
 		hold.next(holdPersist)
@@ -732,6 +746,9 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		// retained history for callers that may mutate records directly.
 		q.publishReadRuntime()
 		q.commitRecords()
+		if captureWait && q.admissionWaitPending {
+			waitCapture = q.freezeAdmissionWait()
+		}
 		if committed != nil {
 			committed()
 		}
@@ -1301,6 +1318,7 @@ func (q *Queue) maintain() {
 	defer func() { q.memoryPlanning = previous }()
 	scan := q.placementScan()
 	scan.memory = q.memoryPlanning
+	q.admissionWaitPending = true
 	for _, j := range q.liveJobs() {
 		if q.startupPending(j) || q.startCapacityPaused(j) {
 			j.Reason = q.startStatusReason(j, scan)
@@ -3000,6 +3018,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		j.Spec.StartBy = &deadline
 	}
 	j.StartCapacityWaiting = false
+	q.closeAdmissionWait(j, "assigned")
 	j.State = "running"
 	j.ExecutionCause, j.CleanupCause = nil, nil
 	j.ExecutionEvidence = nil
