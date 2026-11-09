@@ -297,6 +297,17 @@ func TestInstallExplicitQueueNASName(t *testing.T) {
 		role, field := tc.role, tc.field
 		t.Run(role+"/"+field, func(t *testing.T) {
 			c, p := savedInstallFixture(t, role)
+			if role == "queue" {
+				// Omitted credential flags preserve an unread reference on upgrade.
+				c.EnvironmentFile = filepath.Join(c.NAS, "private-environment-reference")
+				data, err := json.Marshal(c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(c.Config, data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			before := map[string][]byte{}
 			for _, path := range []string{c.Config, c.Service} {
 				data, err := os.ReadFile(path)
@@ -416,7 +427,7 @@ func TestInstallExplicitEmptyPaths(t *testing.T) {
 	}
 
 	for _, role := range []string{"queue"} {
-		for _, withToken := range []bool{false} {
+		for _, withToken := range []bool{false, true} {
 			name := role + "/without-token"
 			if withToken {
 				name = role + "/with-token"

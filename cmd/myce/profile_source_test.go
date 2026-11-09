@@ -68,7 +68,9 @@ func TestProfileSourceKeepsInTreeSymlinks(t *testing.T) {
 	}
 	type entry struct{ name, link string }
 	for label, entries := range map[string][]entry{
-		"case alias escape": {{"s", "."}, {"l", "S/.."}},
+		"case alias escape":    {{"s", "."}, {"l", "S/.."}},
+		"Unicode alias escape": {{"é", "."}, {"l", "e\u0301/.."}},
+		"entry beneath link":   {{"d", "sub"}, {"d/f", ""}},
 	} {
 		snapshot := filepath.Join(t.TempDir(), "snapshot.tar")
 		raw, err := os.Create(snapshot)
