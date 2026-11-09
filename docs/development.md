@@ -51,6 +51,23 @@ separate dev run. For an authorized urgent hotfix: run quick, deploy, run full
 afterwards, and fix forward if full finds a problem. This workflow does not grant
 fleet/deployment authorization.
 
+Full partitions the dominant `internal/myce` package across up to eight test
+processes while the CLI package runs concurrently. The process limit is the
+available CPU count, capped at nine, with `GOMAXPROCS=1` and `-parallel=1` per
+process to retain workstation headroom. Smaller allocations reduce the shard
+count. Quick selection and its parallelism are unchanged.
+
+The planner asks Go for the current race-enabled inventory, including runnable
+examples and fuzz seed tests, under the same fixture watchdog used for tests.
+Every root runs in exactly one anchored `-run` partition; descendants stay with
+their root. `scripts/gate-test-durations.json` contains measured scheduling hints
+for balancing work, never a coverage list. New or unmeasured roots always run.
+Each partition retains independent HOME, temporary files, process custody and
+progress learning; the shared Go build cache avoids recompiling the package for
+each partition. The scheduler writes its native selection manifest beside the
+temporary selection file, and prints each partition in the gate log. Run
+`python3 scripts/test-gate-shards.py` for the planner regression checks.
+
 Quick and full have no overall wall deadline. Each Go package runs under its
 own test-progress watchdog, keyed by package, exact selected test expression,
 OS/architecture, Go version and available/assigned CPU count. Timings live beside

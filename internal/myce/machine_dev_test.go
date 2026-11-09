@@ -172,7 +172,8 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 
 func TestM3DevModelEnginesPerDevice(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "model-machine", MemoryGB: 8, Interval: 10 * time.Millisecond})
+	// Model/device custody is independent of host scheduling and loss timing.
+	d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "model-machine", MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) { q.clock = &workerFakeClock{now: q.clock.Now()} })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +183,8 @@ func TestM3DevModelEnginesPerDevice(t *testing.T) {
 	c := d.Client()
 	await(t, func() bool {
 		var snap Snapshot
-		if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
+		// The fixed decision clock does not expire the default status cache.
+		if err := c.Call(ctx, "GET", "/api/status?jobs=recent", nil, &snap); err != nil {
 			t.Fatal(err)
 		}
 		return len(snap.Machines) > 0
@@ -195,7 +197,7 @@ func TestM3DevModelEnginesPerDevice(t *testing.T) {
 	var slots []ModelSlot
 	await(t, func() bool {
 		var snap Snapshot
-		if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
+		if err := c.Call(ctx, "GET", "/api/status?jobs=recent", nil, &snap); err != nil {
 			t.Fatal(err)
 		}
 		slots = snap.LoadedModels
