@@ -479,11 +479,22 @@ virtualization, needs no Docker Desktop UI and can be stopped without changing
 fleet services:
 
 ```sh
-limactl create --name=mycelium-gates --vm-type=vz --cpus=8 --memory=24 --disk=100 \
-  --mount-none --containerd=none --rosetta=false --tty=false template:ubuntu-24.04
+limactl create --name=mycelium-gates --tty=false .mycelium/lima-gates.yaml
+limactl start --tty=false mycelium-gates
+# First provision installs HWE; boot the installed kernel before any test work.
+limactl stop mycelium-gates
 limactl start --tty=false mycelium-gates
 limactl autostart enable --condition=login mycelium-gates
 ```
+
+The checked-in template installs Ubuntu's supported HWE kernel, `bubblewrap`
+and `nsenter` from the start. The GA 6.8 kernel is insufficient: native
+isolation requires **Landlock ABI >= 6**, plus the actual confinement probe
+described in [operations](operations.md#native-payload-isolation). A kernel
+version alone does not qualify confinement. Keep the previous kernel; only
+restart an existing VM after verifying it is idle. Never weaken isolation or
+disable the global AppArmor restriction to make a gate pass. Subsequent starts
+reuse the installed prerequisites without repeating package installation.
 
 The 100 GiB disk is sparse. Provision Go 1.25.6+, GCC, Git, Python 3, uv and
 `uv python install 3.11` inside the VM; install Docker separately for real-daemon
