@@ -264,15 +264,16 @@ capacity returns. Avoiding the assembly copy for a single-chunk upload is a
 follow-up. Runtime cost measurements await admitted gate/benchmark execution.
 No bulk I/O runs under the queue mutex.
 
-Completed blobs remain compatible. Older interrupted tus uploads are adopted
-transparently under the upload lock: the queue snapshots and hashes the existing
-regular-file prefix into a durable immutable chunk, commits the new checksummed
-progress record, then reclaims the redundant old prefix. The unchanged client
-continues from that offset, including an in-flight PATCH after an upgrade.
-Interrupted adoption retries safely; no operator archive or client reset is
-required. Old metadata cannot prove the sender's historical prefix bytes, so
-the final complete SHA-256 check remains mandatory and detects old corruption.
-See [operations](operations.md#file-store-crash-recovery).
+Completed blobs remain compatible. Older interrupted tus uploads have no
+sender-side prefix evidence and are treated as missing sessions (HTTP 404), not
+adopted or certified. The existing missing/expired-session recovery path
+(#1170/#1173) restarts them from zero automatically. POST retires the old partial
+through upload cleanup and creates fresh progress; an atomic retirement marker
+lets cleanup resume after a crash. The unchanged client resends the entire file,
+including any surviving prefix, and final SHA-256 verification checks the new
+bytes. No operator archive or manual re-upload step is required. The accepted
+upgrade cost is resending one in-flight upload. See
+[operations](operations.md#file-store-crash-recovery).
 
 From the release containing #1100, Go/CLI and Python reconcile an interrupted
 PATCH automatically, including a lost final acknowledgement. They first check

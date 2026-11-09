@@ -84,7 +84,7 @@ func (s *FileStore) uploadOps() durableFileOps {
 func (s *FileStore) uploadPath(id string) string { return filepath.Join(s.root, "uploads", id) }
 
 // This reads constant-size progress metadata. Legacy FileInfo is only an
-// allocation/identity hint until adoption under the upload lock below.
+// allocation/identity hint; it never grants resume authority.
 func (s *FileStore) uploadRecord(id string) (durableUploadRecord, error) {
 	var record durableUploadRecord
 	if err := (FileRef{SHA256: id}).validate(); err != nil {
@@ -129,7 +129,7 @@ func (s *FileStore) verifiedUpload(ctx context.Context, id string) (*durableUplo
 		return nil, err
 	}
 	if record.Version == 0 {
-		return s.adoptLegacyUpload(ctx, record)
+		return nil, tus.ErrNotFound // No sender evidence: clients must resend from zero.
 	}
 	s.uploadCacheMu.Lock()
 	cached, ok := s.uploadCache[id]
@@ -203,54 +203,78 @@ func (s *FileStore) verifyUploadChunk(ctx context.Context, path string, ref File
 	return nil
 }
 
-// The old store has no prefix digest. Snapshot and hash its actual regular-file
-// bytes into an immutable chunk, then atomically commit new progress. Preserve
-// the old payload until that commit succeeds. The final whole-file SHA-256 is
-// still required; adoption never invents proof of the original sender's bytes.
-// Caller owns tus's identity lock (or the isolated fixture's sole writer).
-func (s *FileStore) adoptLegacyUpload(ctx context.Context, record durableUploadRecord) (*durableUpload, error) {
-	path := s.uploadPath(record.ID)
+// Retirement is a cleanup intent, never resume evidence. Its exact expected
+// identity/length is checked on read; the atomic marker survives a crash between
+// removing old metadata and removing the old payload. A new POST can then finish
+// cleanup instead of becoming stranded on an unindexed legacy payload.
+func (s *FileStore) retiredUpload(ref FileRef) (bool, error) {
+	path := s.uploadPath(ref.SHA256) + ".retired"
 	if err := noModelSymlinks(path, false); err != nil {
-		return nil, err
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !st.Mode().IsRegular() || st.Size() > record.Size {
-		return nil, uploadIntegrity("invalid legacy upload payload")
-	}
-	if err := s.uploadOps().mkdir(path + ".parts"); err != nil {
-		return nil, err
-	}
-	info := record.FileInfo
-	info.Offset, info.Storage = 0, nil
-	record = durableUploadRecord{FileInfo: info, Version: 2}
-	u := &durableUpload{store: s, record: record}
-	if st.Size() > 0 {
-		n, err := u.WriteChunk(ctx, 0, io.LimitReader(f, st.Size()))
-		if err != nil || n != st.Size() {
-			if err == nil {
-				err = io.ErrUnexpectedEOF
-			}
-			return nil, err
+		if os.IsNotExist(err) {
+			return false, nil
 		}
-	} else if err := u.commit(record); err != nil {
-		return nil, err
+		return false, err
 	}
-	// The new chunk owns this prefix durably. Reclaim only the redundant old
-	// copy; a failed cleanup can be retried or left for final publication.
-	if st.Size() < record.Size {
-		if err := s.uploadOps().bytes(path, nil); err != nil {
-			return nil, err
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	if string(data) != legacyRetirement(ref) {
+		return false, uploadIntegrity("upload retirement identity mismatch")
+	}
+	return true, nil
+}
+func legacyRetirement(ref FileRef) string {
+	return "legacy-upload-retired-v1\n" + ref.SHA256 + "\n" + strconv.FormatInt(ref.SizeBytes, 10) + "\n"
+}
+
+// Caller owns the creation and tus identity locks, outside q.mu. The consumer
+// resends these unverified legacy bytes; retaining them cannot restore intent.
+func (s *FileStore) retireLegacyUpload(ctx context.Context, ref FileRef) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	pending, err := s.retiredUpload(ref)
+	if err != nil {
+		return err
+	}
+	path := s.uploadPath(ref.SHA256)
+	if !pending {
+		record, err := s.uploadRecord(ref.SHA256)
+		if err != nil {
+			return err
 		}
+		if record.Version != 0 || record.Size != ref.SizeBytes {
+			return inputClaimError()
+		}
+		if err := s.uploadOps().bytes(path+".retired", []byte(legacyRetirement(ref))); err != nil {
+			return err
+		}
+	} else if err := s.uploadOps().directory(filepath.Dir(path)); err != nil {
+		// A preceding request may have failed after marker rename but before
+		// its name barrier. Persist that cleanup authority before unlinking.
+		return err
 	}
-	return u, nil
+	if err := os.Remove(path + ".info"); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := s.uploadOps().directory(filepath.Dir(path)); err != nil {
+		return err
+	}
+	s.forgetUpload(ref.SHA256)
+	if err := os.RemoveAll(path + ".parts"); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := s.uploadOps().directory(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if err := os.Remove(path + ".retired"); err != nil {
+		return err
+	}
+	return s.uploadOps().directory(filepath.Dir(path))
 }
 
 func (s *FileStore) uploadChunkPath(id string, offset int64) string {
@@ -259,7 +283,7 @@ func (s *FileStore) uploadChunkPath(id string, offset int64) string {
 
 // Allocation metadata is a hint, not a certificate of content or resume offset.
 // Accept previous filestore size hints so legacy partials do not block unrelated
-// uploads; only verifiedUpload can make their bytes authoritative.
+// uploads. verifiedUpload refuses legacy sessions and verifies only new ones.
 func (s *FileStore) uploadAllocation(id string) (tus.FileInfo, error) {
 	var info tus.FileInfo
 	if err := noModelSymlinks(s.uploadPath(id)+".info", false); err != nil {
@@ -287,6 +311,11 @@ func uploadIntegrity(message string) error {
 }
 
 func uploadHTTPError(w http.ResponseWriter, err error) {
+	var api *HTTPError
+	if errors.As(err, &api) {
+		respond(w, nil, api)
+		return
+	}
 	var refusal tus.Error
 	if errors.As(err, &refusal) {
 		http.Error(w, refusal.Error(), refusal.HTTPResponse.StatusCode)

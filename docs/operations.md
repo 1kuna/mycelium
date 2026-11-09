@@ -830,22 +830,24 @@ Abrupt death can
 leave these disposable files using space; with the service stopped, preserve a
 copy before operator cleanup. Never remove files of an active upload.
 
-Legacy interrupted tus uploads are adopted transparently under the same
-per-upload identity lock used by PATCH. The original metadata and payload stay
-intact until the existing prefix has been copied, hashed, flushed and named as
-an immutable chunk and the new progress record is durably committed. A crash
-before that commit retries adoption; after it, restart verifies the new chunk
-chain. The old payload copy is reclaimed only after the durable commit. Death
-between that commit and cleanup can temporarily retain an extra prefix copy.
-An unchanged Go/Python client or an in-flight PATCH continues at the preserved
-offset; there is no manual archive/re-upload step during a rolling upgrade.
-Legacy metadata alone cannot prove the sender's historical byte sequence. Final
-whole-file SHA-256 verification is mandatory and refuses pre-existing corruption
-rather than publishing it. Damaged new-format records/descriptors/chunks also
-fail closed. Preserve genuinely corrupt state for explicit recovery; do not edit
-offsets or synthesize checksums. Preserve queue and store together under the
-normal backup procedure. Avoiding the additional assembly copy for a
-single-chunk upload remains a follow-up.
+Legacy interrupted tus uploads carry no sender-side evidence for their prefix.
+They are treated as missing sessions (HTTP 404) rather than adopted. The existing
+missing/expired upload recovery path (#1170/#1173) restarts the unchanged client
+at zero; no terminal integrity error is introduced for legacy partials. POST
+retires the old bytes through upload cleanup and starts a new session. A small
+atomic, identity-checked retirement marker persists cleanup intent before the
+old metadata is removed, so interruption midway through cleanup can retry
+without an unindexed-payload refusal. Normal interrupted-upload retention also
+removes this marker. Old bytes are never read as accepted progress or used to
+build the new blob; the client resends the complete source and final whole-file
+SHA-256 verification remains mandatory. No manual archive or re-upload step is
+needed. The orchestrator accepts resending one in-flight upload per upgrade.
+
+Damaged new-format records/descriptors/chunks still fail closed. Preserve
+genuinely corrupt new-format state for explicit recovery; do not edit offsets
+or synthesize checksums. Preserve queue and store together under the normal
+backup procedure. Avoiding the additional assembly copy for a single-chunk
+upload remains a follow-up.
 
 SIGKILL fixtures and torn-temp/name-loss injections live in
 `internal/myce/file_store_fault_test.go`; normal laptop gates include them on

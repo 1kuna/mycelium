@@ -7,9 +7,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tus/tusd/v2/pkg/filestore"
 	tus "github.com/tus/tusd/v2/pkg/handler"
@@ -110,70 +110,84 @@ func seedLegacyUpload(t *testing.T, root, prefix string) FileRef {
 	return ref
 }
 
-func TestFileStoreLegacyUpgradeContinues(t *testing.T) {
-	for _, route := range []string{"client", "inflight-patch", "legacy-chunk-file", "legacy-manifest-before-rename", "legacy-manifest-after-rename"} {
-		t.Run(route, func(t *testing.T) {
+func TestFileStoreLegacyUpgradeRestartsFromZero(t *testing.T) {
+	for _, fault := range []string{"upgrade", "torn-prefix", "retire-file", "retire-after-rename", "retire-cleanup-dir"} {
+		t.Run(fault, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "store")
-			ref := seedLegacyUpload(t, root, "prefix")
-			if strings.HasPrefix(route, "legacy-") {
-				fileFaultKill(t, root, route)
+			prefix := "prefix"
+			if fault == "torn-prefix" {
+				prefix = "broken" // Same surviving length; no sender-prefix evidence.
+			}
+			ref := seedLegacyUpload(t, root, prefix)
+			if strings.HasPrefix(fault, "retire-") {
+				fileFaultKill(t, root, fault)
 			}
 			q, _ := fixture(t)
 			if err := q.ConfigureFileStore(root, 1<<20, false); err != nil {
 				t.Fatal(err)
 			}
-			if route == "inflight-patch" {
-				w := fileFaultRequest(q.files, http.MethodPatch, ref, 6, "-suffix")
-				if w.Code != 204 {
-					t.Fatalf("in-flight legacy PATCH needs no manual step: %d %s", w.Code, w.Body.String())
-				}
-			} else {
-				api := API{Queue: q, Token: "fixture"}.Handler()
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.Method == http.MethodPatch && r.Header.Get("Upload-Offset") != strconv.Itoa(len("prefix")) {
-						t.Errorf("legacy prefix was discarded: offset %q", r.Header.Get("Upload-Offset"))
+			type patch struct{ offset, body string }
+			patches := make(chan patch, 2)
+			api := API{Queue: q, Token: "fixture"}.Handler()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPatch && r.Header.Get("Upload-Offset") == "0" {
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						http.Error(w, "fixture body read", 500)
+						return
 					}
-					api.ServeHTTP(w, r)
-				}))
-				defer server.Close()
-				source := filepath.Join(t.TempDir(), "source")
-				if err := os.WriteFile(source, []byte(fileFaultContent), 0600); err != nil {
+					r.Body.Close()
+					r.Body = io.NopCloser(strings.NewReader(string(body)))
+					select {
+					case patches <- patch{r.Header.Get("Upload-Offset"), string(body)}:
+					default:
+						t.Error("unexpected repeated restart PATCHes")
+					}
+				}
+				api.ServeHTTP(w, r)
+			}))
+			defer server.Close()
+			client := Client{URL: server.URL, Token: "fixture"}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			// Requests from a pre-upgrade session see missing session, never a
+			// certified surviving prefix or a terminal integrity error.
+			for _, method := range []string{http.MethodHead, http.MethodPatch} {
+				res, err := client.fileRequest(ctx, method, "/api/files/uploads/"+ref.SHA256, strings.NewReader("-suffix"), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "6", "Content-Type": "application/offset+octet-stream"}, ref.SizeBytes)
+				if err != nil {
 					t.Fatal(err)
 				}
-				client := Client{URL: server.URL, Token: "fixture", singleAttempt: true}
-				if err := client.UploadFile(context.Background(), source, ref); err != nil {
-					t.Fatal("unchanged client failed transparent upgrade", err)
+				io.Copy(io.Discard, res.Body)
+				res.Body.Close()
+				if res.StatusCode != 404 || res.Header.Get("Upload-Offset") != "" {
+					t.Fatalf("legacy session was not missing: %s %d", method, res.StatusCode)
 				}
 			}
-			if err := q.files.verify(context.Background(), ref); err != nil {
-				t.Fatal("legacy completion did not verify final SHA-256", err)
+			source := filepath.Join(t.TempDir(), "source")
+			if err := os.WriteFile(source, []byte(fileFaultContent), 0600); err != nil {
+				t.Fatal(err)
+			}
+			// Production client code is unchanged. Its normal create/reconcile
+			// path must replace the missing legacy session and resend ALL bytes.
+			if err := client.UploadFile(ctx, source, ref); err != nil {
+				t.Fatal("unchanged client exposed a terminal upgrade error", err)
+			}
+			select {
+			case got := <-patches:
+				if got.offset != "0" || got.body != fileFaultContent {
+					t.Fatal("legacy bytes were reused instead of resent", got)
+				}
+			default:
+				t.Fatal("client did not restart the upload")
+			}
+			if err := q.files.verify(ctx, ref); err != nil {
+				t.Fatal("restarted upload final SHA-256 mismatch", err)
+			}
+			for _, suffix := range []string{"", ".info", ".parts", ".retired"} {
+				if _, err := os.Lstat(q.files.uploadPath(ref.SHA256) + suffix); !os.IsNotExist(err) {
+					t.Fatal("legacy/session cleanup incomplete", suffix, err)
+				}
 			}
 		})
-	}
-}
-
-func TestFileStoreLegacyAdoptionDoesNotCertifyCorruptFinalBytes(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "store")
-	ref := seedLegacyUpload(t, root, "broken")
-	s := fileFaultStore(t, root)
-	u, err := s.verifiedUpload(context.Background(), ref.SHA256)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reader, err := u.GetReader(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := io.ReadAll(reader)
-	reader.Close()
-	if err != nil || string(got) != "broken" {
-		t.Fatal("adoption did not preserve the actual legacy bytes", err)
-	}
-	fileFaultWrite(t, u, "-suffix")
-	if err := u.FinishUpload(context.Background()); err == nil {
-		t.Fatal("legacy corruption bypassed final SHA-256 check")
-	}
-	if err := s.verify(context.Background(), ref); err == nil {
-		t.Fatal("corrupt legacy bytes published")
 	}
 }

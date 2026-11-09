@@ -431,6 +431,9 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
 			}
+			if err := os.Remove(path + ".retired"); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 			if err := store.syncDir(filepath.Join(store.root, "uploads")); err != nil {
 				return err
 			}
