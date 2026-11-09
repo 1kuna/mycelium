@@ -220,6 +220,17 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
 
+    def test_empty_userspace_arguments_cannot_hide_a_live_dockerd(self):
+        rows = '1 0 /sbin/init\n20 1 dockerd\n'
+        with self.stable_instances(lambda: rows), \
+                patch.object(runtime.subprocess, 'check_output', return_value=rows), \
+                patch.object(runtime, 'process_arguments', side_effect=lambda pid:
+                    (0, ['/sbin/init']) if pid == 1 else (1, [])), \
+                patch.object(runtime, 'process_executable', side_effect=lambda pid, *args:
+                    '/sbin/init' if pid == 1 else '/usr/bin/dockerd'):
+            with self.assertRaisesRegex(RuntimeError, 'userspace process argument inventory is empty: dockerd'):
+                REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
+
     def test_desktop_binding_and_lima_configuration_are_positive_evidence(self):
         rows = ('1 0 /sbin/init\n20 1 /Applications/Docker.app/com.docker.backend\n'
                 '21 20 /Applications/Docker.app/com.docker.backend services\n'

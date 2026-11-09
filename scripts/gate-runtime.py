@@ -402,9 +402,11 @@ def _daemon_process_inventory(endpoints, guest, executable_evidence):
         proof.append(dict(pid=pid, kind=kind, endpoints=sorted(candidates),
                           birth=rows[pid][3], parent_birth=rows[pid][4], **extra))
     for pid, (parent, argv, executable, birth, parent_birth) in rows.items():
-        if not argv or executable is None or pid in covered:
+        if executable is None or pid in covered:
             continue
         name = Path(executable).name.lower()
+        if not argv:
+            raise RuntimeError('userspace process argument inventory is empty: ' + name)
         if name == 'dockerd':
             hosts, config = [], Path('/etc/docker/daemon.json')
             for index, arg in enumerate(argv[1:], 1):
