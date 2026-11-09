@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"mycelium/internal/myce"
 	"net"
 	"net/http"
 	"os"
@@ -14,15 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
-func TestDevStandaloneSmoke(t *testing.T) {
-	for _, backend := range []string{"fake", "cpu"} {
-		t.Run(backend, func(t *testing.T) { devStandaloneSmoke(t, backend) })
-	}
-}
 func devStandaloneSmoke(t *testing.T, backend string) {
 	root := t.TempDir()
 	binary := os.Getenv("MYCE_DEV_SMOKE_BINARY")

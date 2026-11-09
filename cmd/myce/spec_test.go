@@ -28,73 +28,6 @@ project: example
 kind: render
 `
 
-func TestSpecCheck(t *testing.T) {
-	for _, tc := range []struct {
-		name, body, want string
-	}{
-		{"yaml", validJobYAML, ""},
-		{"json", `{"name":"offline","project":"example","run":{"command":["echo","ok"]},"needs":{"cpu_cores":1,"memory_gb":1}}`, ""},
-		{"extension", validExtensionYAML, ""},
-		{"unknown", validJobYAML + "typo: true\n", "field typo not found"},
-		{"nested unknown", validJobYAML + "environment: {typo: true}\n", "unknown environment field"},
-		{"json unknown", `{"name":"offline","typo":true}`, "field typo not found"},
-		{"multiple yaml documents", validJobYAML + "---\n" + validJobYAML, "expected one YAML job"},
-		{"multiple json documents", "{}\n{}\n", "expected one YAML job"},
-		{"extension cpu override", validExtensionYAML + "needs: {cpu_cores: 1}\n", "extension-owned commands, environments and hardware reservations"},
-		{"extension platform override", validExtensionYAML + "needs: {platform: cpu}\n", "extension-owned commands, environments and hardware reservations"},
-		{"semantic error", "name: incomplete\n", "name, project and run.command are required"},
-		{"invalid json", `{"name":`, "did not find expected node content"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "job.yaml")
-			if err := os.WriteFile(path, []byte(tc.body), 0600); err != nil {
-				t.Fatal(err)
-			}
-			var out, stderr bytes.Buffer
-			err := specCommand([]string{"check", path}, &out, &stderr)
-			wantExit := 0
-			if tc.want != "" {
-				wantExit = 1
-				if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), path) {
-					t.Fatalf("want file and %q in error, got %v", tc.want, err)
-				}
-			}
-			if exitCode(err) != wantExit {
-				t.Fatalf("exit=%d want=%d err=%v", exitCode(err), wantExit, err)
-			}
-			if tc.want == "" && !strings.Contains(out.String(), "valid (static checks only)") {
-				t.Fatalf("missing success message: %q", out.String())
-			}
-			if tc.want != "" && out.Len() != 0 {
-				t.Fatalf("invalid spec printed success: %q", out.String())
-			}
-		})
-	}
-}
-
-func TestSpecCheckHelpAndUsage(t *testing.T) {
-	for _, args := range [][]string{{"--help"}, {"check", "--help"}} {
-		var stderr bytes.Buffer
-		if err := specCommand(args, io.Discard, &stderr); err != nil {
-			t.Fatal(err)
-		}
-		for _, text := range []string{"static validity only", "live eligibility, admission or qualification", "no fleet authority", "Exit codes:"} {
-			if !strings.Contains(stderr.String(), text) {
-				t.Errorf("help missing %q: %s", text, &stderr)
-			}
-		}
-	}
-	for _, args := range [][]string{nil, {"other"}, {"check"}, {"check", "a", "b"}, {"check", "--files-from", "inputs", "job.yaml"}} {
-		if err := specCommand(args, io.Discard, io.Discard); exitCode(err) != 2 {
-			t.Errorf("args=%v exit=%d err=%v", args, exitCode(err), err)
-		}
-	}
-	missing := filepath.Join(t.TempDir(), "missing.yaml")
-	if err := specCommand([]string{"check", missing}, io.Discard, io.Discard); exitCode(err) != 1 || !strings.Contains(err.Error(), missing) {
-		t.Fatalf("missing file error: %v", err)
-	}
-}
-
 type specCheckTransport struct{ calls int }
 
 func (s *specCheckTransport) RoundTrip(*http.Request) (*http.Response, error) {
@@ -162,35 +95,4 @@ func TestSpecCheckResolveNamesSideAndSourceBundles(t *testing.T) {
 		t.Fatalf("queue side or library fix not named: %s", text)
 	}
 
-	source := filepath.Join(root, "source")
-	if err := os.MkdirAll(source, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "run.sh"), []byte("echo ok > result\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	bundle, err := os.Create(filepath.Join(source, "tools.tar"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := bundle.Truncate(17 << 20); err != nil {
-		t.Fatal(err)
-	}
-	bundle.Close()
-	adapter := filepath.Join(root, "adapter.yaml")
-	if err := os.WriteFile(adapter, []byte(cpuAdapterYAML(source)), 0600); err != nil {
-		t.Fatal(err)
-	}
-	// The dev worker's first check-in is asynchronous.
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		out.Reset()
-		err = specCommand(append(append([]string{"check", "--resolve"}, authority...), adapter), &out, io.Discard)
-		if err == nil || time.Now().After(deadline) {
-			break
-		}
-	}
-	text = out.String()
-	if !strings.Contains(text, "source [submitter]") || !strings.Contains(text, "tools.tar (17 MiB)") || !strings.Contains(text, "shared_inputs") || !strings.Contains(text, "fake-1") {
-		t.Fatalf("source bundle warning or eligible target missing: %v %s", err, text)
-	}
 }

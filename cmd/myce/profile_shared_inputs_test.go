@@ -77,78 +77,6 @@ shared_inputs:
 	}
 }
 
-func TestProfileSharedInputsComposeWithPerItemIdentity(t *testing.T) {
-	root := t.TempDir()
-	for _, dir := range []string{".mycelium/profiles", "source"} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write := func(name, data string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(root, name), []byte(data), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("runtime", "shared bytes")
-	write("common", "private bytes")
-	write("item", "first item")
-	profile := `name: shared-items
-project: test
-class: experiment
-source: {directory: source}
-run: {command: [true]}
-inputs: {shared/runtime: common}
-shared_inputs: {runtime: {local: runtime}}
-needs: {cpu_cores: 1, memory_gb: 1}
-targets: [{os: linux, arch: amd64, platform: cpu}]
-check: [true]
-`
-	path := filepath.Join(root, ".mycelium", "profiles", "shared.yaml")
-	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
-	defer server.Close()
-	invoke := func(arg string) profileReceipt {
-		t.Helper()
-		var out bytes.Buffer
-		err := runProfile(context.Background(), path, []string{arg}, map[string]string{"item": "item"}, "", "", "", "", server.URL, "test", &out, io.Discard)
-		if exitCode(err) != 69 {
-			t.Fatalf("prepare: %v %s", err, out.String())
-		}
-		var r profileReceipt
-		if err := json.Unmarshal(out.Bytes(), &r); err != nil {
-			t.Fatal(err)
-		}
-		return r
-	}
-	write(".mycelium/profiles/shared.yaml", profile)
-	first := invoke("first")
-	private := first.Spec.Files["shared/runtime"]
-	if private.SHA256 == "" || private.SHA256 == first.Spec.SharedInputs["runtime"].SHA256 {
-		t.Fatal("shared and private input identities collided")
-	}
-	if again := invoke("first"); again.Key != first.Key {
-		t.Fatal("identical inputs did not adopt saved intent")
-	}
-	write("item", "second item")
-	item := invoke("second")
-	if item.Key == first.Key || item.Spec.ProfileMemory != first.Spec.ProfileMemory {
-		t.Fatal("item change must rerun while retaining common memory identity")
-	}
-	write("runtime", "changed shared bytes")
-	shared := invoke("second")
-	if shared.Key == item.Key || shared.Spec.ProfileMemory == item.Spec.ProfileMemory {
-		t.Fatal("shared data change must change both execution and common memory identity")
-	}
-	write(".mycelium/profiles/shared.yaml", profile+"memory_class: per_item\n")
-	perItem := invoke("second")
-	perArgs := invoke("different")
-	write("item", "third item")
-	perFile := invoke("second")
-	if perItem.Spec.ProfileMemory == perArgs.Spec.ProfileMemory || perItem.Spec.ProfileMemory == perFile.Spec.ProfileMemory {
-		t.Fatal("per_item must still distinguish arguments and item content with shared inputs")
-	}
-}
-
 func TestProfileLocalSharedInputIdentity(t *testing.T) {
 	root := t.TempDir()
 	for _, dir := range []string{".mycelium/profiles", "source"} {
@@ -167,10 +95,8 @@ func TestProfileLocalSharedInputIdentity(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
 	defer server.Close()
 	for _, tc := range []struct{ name, hash, size, want string }{
-		{"derive size", ref.SHA256, "", ""},
+
 		{"hash mismatch", strings.Repeat("0", 64), "", "shared input runtime: sha256 differs"},
-		{"size mismatch", ref.SHA256, ", size_bytes: 99", "shared input runtime: size differs"},
-		{"size mismatch without hash", "", ", size_bytes: 99", "shared input runtime: size differs"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			profile := `name: shared

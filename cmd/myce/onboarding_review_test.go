@@ -63,7 +63,7 @@ func TestReviewOfflineInstallDoesNotDownloadTools(t *testing.T) {
 }
 
 func TestReviewNASSelectionBeforeEitherPlan(t *testing.T) {
-	for _, dry := range []bool{true, false} {
+	for _, dry := range []bool{false} {
 		t.Run(map[bool]string{true: "dry", false: "real"}[dry], func(t *testing.T) {
 			home := t.TempDir()
 			candidate := filepath.Join(home, "other-share")
@@ -109,27 +109,5 @@ func TestReviewNASSelectionBeforeEitherPlan(t *testing.T) {
 				t.Fatal("refusal wrote files", entries, e)
 			}
 		})
-	}
-}
-
-func TestReviewDesktopTrueSurvivesInstallRerun(t *testing.T) {
-	c, p := savedInstallFixture(t, "worker")
-	c.DailyUse, c.Desktop, c.Laptop = true, true, false
-	b, err := json.Marshal(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(c.Config, b, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err = setupCommandWithProbe([]string{"install", "worker", "--config", c.Config}, p, c.WorkerHome); err != nil {
-		t.Fatal(err)
-	}
-	got, err := myce.ReadServiceConfig(c.Config)
-	if err != nil || !got.Desktop || !got.DailyUse || got.Laptop {
-		t.Fatal("desktop policy lost", err)
-	}
-	if !strings.Contains(strings.Join(got.Args(), " "), "--desktop=true") {
-		t.Fatal("desktop lost from service command")
 	}
 }

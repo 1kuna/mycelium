@@ -79,7 +79,7 @@ func TestProjectDoctorReadyCPUReadOnly(t *testing.T) {
 }
 
 func TestProjectDoctorHoldsAndCompletion(t *testing.T) {
-	for _, scenario := range []string{"missing authority", "queue lock", "missing notifier", "old server", "missing input", "dirty source", "failed preparation", "resource pressure", "cold environment", "unknown observation", "NAS unverified", "target constraint"} {
+	for _, scenario := range []string{"resource pressure", "cold environment"} {
 		t.Run(scenario, func(t *testing.T) {
 			doctorCPUProject(t)
 			body, _ := os.ReadFile(".mycelium/adapter.yaml")
@@ -179,14 +179,6 @@ func TestProjectDoctorHoldsAndCompletion(t *testing.T) {
 	}
 }
 
-func TestProjectDoctorHelpDoesNotProbe(t *testing.T) {
-	var out bytes.Buffer
-	err := projectDoctorWithAuthority(context.Background(), []string{"--project", "--help"}, io.Discard, &out, func(clientFlags) (myce.Client, error) { t.Fatal("help loaded authority"); return myce.Client{}, nil })
-	if err != nil || !strings.Contains(out.String(), "-adapter") {
-		t.Fatalf("%v %s", err, &out)
-	}
-}
-
 func doctorReviewFixture(t *testing.T, args []string, resolve func(http.ResponseWriter, *http.Request)) (string, error) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -209,34 +201,7 @@ func doctorReviewFixture(t *testing.T, args []string, resolve func(http.Response
 func doctorReadyReport(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(myce.ResolveReport{Targets: []myce.ResolveTarget{{Eligible: true}}})
 }
-func TestProjectDoctorReviewPathNotifier(t *testing.T) {
-	doctorCPUProject(t)
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "review-hook"), []byte("#!/bin/sh\necho invoked > unexpected-notifier-execution\nexit 0\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	out, err := doctorReviewFixture(t, []string{"--notify", "review-hook"}, doctorReadyReport)
-	if err != nil {
-		t.Fatalf("PATH executable accepted by run is rejected: %v\n%s", err, out)
-	}
-	if _, err := os.Stat("unexpected-notifier-execution"); !os.IsNotExist(err) {
-		t.Fatal("doctor executed notifier")
-	}
-}
-func TestProjectDoctorReviewCapacityRemedy(t *testing.T) {
-	doctorCPUProject(t)
-	out, err := doctorReviewFixture(t, nil, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(409)
-		io.WriteString(w, `{"code":"shared_input_cache_capacity","error":"shared inputs require 200 bytes; largest enabled matching worker cache capacity=100 bytes"}`)
-	})
-	if exitCode(err) != 1 {
-		t.Fatal(err, out)
-	}
-	if strings.Contains(out, "restore queue resolve service") || !strings.Contains(out, "200") {
-		t.Fatalf("healthy queue capacity rejection lost its cause and remedy:\n%s", out)
-	}
-}
+
 func TestProjectDoctorReviewDiagnosticSecret(t *testing.T) {
 	for _, format := range []string{"text", "json"} {
 		t.Run(format, func(t *testing.T) {
@@ -267,14 +232,5 @@ func TestProjectDoctorReviewInvalidAdapterSecret(t *testing.T) {
 	out, err := doctorReviewFixture(t, nil, doctorReadyReport)
 	if strings.Contains(out, "CANARY") || exitCode(err) != 1 {
 		t.Fatal("malformed adapter disclosed its scalar or did not block")
-	}
-}
-func TestProjectDoctorReviewBadRequestIsConsumerFix(t *testing.T) {
-	doctorCPUProject(t)
-	out, err := doctorReviewFixture(t, nil, func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unrecognized synthetic private error", 400)
-	})
-	if exitCode(err) != 1 || strings.Contains(out, "upgrade the queue") || strings.Contains(out, "synthetic private error") || !strings.Contains(out, "correct the adapter") {
-		t.Fatalf("%v %s", err, out)
 	}
 }

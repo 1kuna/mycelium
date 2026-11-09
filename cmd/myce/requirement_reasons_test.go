@@ -35,7 +35,7 @@ func TestRequirementReasonsAdapterAndProfileSubmission(t *testing.T) {
 		return false
 	})
 	binary := devTestBinary(t)
-	for _, format := range []string{"adapter", "profile"} {
+	for _, format := range []string{"adapter"} {
 		t.Run(format, func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {

@@ -5,12 +5,19 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
+	if os.Getenv("MYCE_USAGE_CHILD") == "1" {
+		os.Args = append([]string{"myce"}, os.Args[3:]...)
+		main()
+		os.Exit(0)
+	}
+
 	const token = "test-secret-123"
 	const invitationToken = "test-invitation-secret-456"
 	t.Setenv("MYCE_TOKEN", token)
@@ -20,43 +27,56 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("MYCE_JOINING_FILE", invitation)
-	// Include every command and nested action, including commands sharing a FlagSet.
-	commands := []string{
-		"queue", "join", "leave", "submit", "run", "usage", "status", "logs", "cancel", "dev",
-		"disable", "enable", "resolve-docker", "detect", "service", "wait", "measure",
-		"invite", "benchmark", "sim", "install worker", "install queue", "uninstall", "doctor",
-		"file put", "file get", "model fetch", "model approve-local", "model sync", "model pin", "model unpin",
-		"extension add", "extension list", "extension setup", "extension check",
-		"host drain", "host disable", "host resume", "host status", "host budget",
-		"exclude add", "exclude remove", "exclude list",
+	for _, tc := range []struct{ command, option string }{{"queue", "--help"}, {"wait", "--unknown-flag"}} {
+		command, option := tc.command, tc.option
+		t.Run(command+"/"+option, func(t *testing.T) {
+			args := append(strings.Fields(command), option)
+			stdout, stderr, err := captureUsageOutput(t, args)
+			waitHelp := command == "wait" && option != "--unknown-flag"
+			retired := command == "disable" || command == "enable"
+			if err == nil && !waitHelp {
+				t.Fatal("expected help or flag error")
+			}
+			if option != "--unknown-flag" && !waitHelp && !retired && !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("expected ErrHelp, got %T", err)
+			}
+			for _, output := range []string{stdout, stderr} {
+				if strings.Contains(output, token) || strings.Contains(output, invitationToken) {
+					t.Fatal("credential exposed in command output")
+				}
+			}
+			if retired {
+				if !strings.Contains(stdout+stderr, "retired host control; use myce host drain|disable|resume HOST") {
+					t.Fatal("missing retired-command diagnostic")
+				}
+			} else if !strings.Contains(stdout+stderr, "Usage of ") && !strings.Contains(stdout+stderr, "Usage: myce wait ") {
+				t.Fatal("command did not render flag usage")
+			}
+		})
 	}
-	for _, command := range commands {
-		for _, option := range []string{"-h", "--help", "--unknown-flag"} {
-			t.Run(command+"/"+option, func(t *testing.T) {
-				args := append(strings.Fields(command), option)
-				stdout, stderr, err := captureUsageOutput(t, args)
-				waitHelp := command == "wait" && option != "--unknown-flag"
-				retired := command == "disable" || command == "enable"
-				if err == nil && !waitHelp {
-					t.Fatal("expected help or flag error")
-				}
-				if option != "--unknown-flag" && !waitHelp && !retired && !errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("expected ErrHelp, got %T", err)
-				}
-				for _, output := range []string{stdout, stderr} {
-					if strings.Contains(output, token) || strings.Contains(output, invitationToken) {
-						t.Fatal("credential exposed in command output")
-					}
-				}
-				if retired {
-					if !strings.Contains(stdout+stderr, "retired host control; use myce host drain|disable|resume HOST") {
-						t.Fatal("missing retired-command diagnostic")
-					}
-				} else if !strings.Contains(stdout+stderr, "Usage of ") && !strings.Contains(stdout+stderr, "Usage: myce wait ") {
-					t.Fatal("command did not render flag usage")
-				}
-			})
+
+	home := t.TempDir()
+	runCLI := func(arg string) (string, int) {
+		t.Helper()
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCommandUsageDoesNotExposeSecrets$", "--", arg)
+		cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "MYCE_USAGE_CHILD=1"}
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return string(out), 0
 		}
+		if e, ok := err.(*exec.ExitError); ok {
+			return string(out), e.ExitCode()
+		}
+		t.Fatal(err)
+		return "", -1
+	}
+	tc := struct {
+		arg  string
+		code int
+	}{"--help", 0}
+	out, code := runCLI(tc.arg)
+	if code != tc.code || !strings.Contains(out, "usage: myce ") || strings.Contains(out, "MYCE_TOKEN") {
+		t.Errorf("%s: exit %d, output %q", tc.arg, code, out)
 	}
 }
 

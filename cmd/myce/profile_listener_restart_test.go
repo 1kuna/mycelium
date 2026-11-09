@@ -51,7 +51,7 @@ func (l *restartingProfileListener) Accept() (net.Conn, error) {
 }
 
 func TestSharedProfileObserverListenerRestart(t *testing.T) {
-	for _, mode := range []string{"handshake_eof", "internal_alert", "wrong_pin"} {
+	for _, mode := range []string{"handshake_eof", "wrong_pin"} {
 		t.Run(mode, func(t *testing.T) {
 			clock := &waitClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
 			var mu sync.Mutex

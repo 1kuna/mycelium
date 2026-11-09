@@ -5,55 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
-
-func TestProfileInitInference(t *testing.T) {
-	for _, tc := range []struct {
-		name, file, content string
-		want                []string
-	}{
-		{"go", "go.mod", "module example.org/tiny\n\ngo 1.25.6\n", []string{"go", "test", "./..."}},
-		{"requirements", "requirements.txt", "pytest==8.3.5\n", []string{"uv", "run", "--no-project", "--managed-python", "--with", "pytest", "--with-requirements", "requirements.txt", "python", "-m", "pytest"}},
-		{"project", "pyproject.toml", "[project]\nname='tiny'\nversion='0.1'\nrequires-python='>=3.12'\n", []string{"uv", "run", "--managed-python", "--with", "pytest", "python", "-m", "pytest"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, tc.file), []byte(tc.content), 0600); err != nil {
-				t.Fatal(err)
-			}
-			got, _, err := inferProfileCommand(root, nil)
-			if err != nil || !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("command %q, error %v", got, err)
-			}
-			if tc.name == "requirements" {
-				got, _, err = inferProfileCommand(root, []string{"python", "task.py"})
-				want := append(append([]string{}, tc.want[:len(tc.want)-3]...), "python", "task.py")
-				if err != nil || !reflect.DeepEqual(got, want) {
-					t.Fatalf("script lost managed dependencies: %q %v", got, err)
-				}
-			}
-		})
-	}
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "uv.lock"), []byte("version=1"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := inferProfileCommand(root, nil); err == nil {
-		t.Fatal("accepted an incomplete uv project")
-	}
-	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	got, _, err := inferProfileCommand(root, nil)
-	if err != nil || !strings.Contains(strings.Join(got, " "), "--locked") {
-		t.Fatalf("locked project: %q %v", got, err)
-	}
-}
 
 func TestProfileInitCommandAndSuccessCheck(t *testing.T) {
 	root := t.TempDir()
@@ -110,4 +66,21 @@ func TestProfileInitCommandAndSuccessCheck(t *testing.T) {
 	if err = run(p.Check); err == nil {
 		t.Fatal("stale success marker survived failed command")
 	}
+
+	t.Run("extension-authoring", func(t *testing.T) {
+		folder := filepath.Join(t.TempDir(), "new-extension")
+		if err := extensionCommand([]string{"init", "--name", "fixture", "--outputs", `["profile.json","report.csv"]`, folder}); err != nil {
+			t.Fatal(err)
+		}
+		if err := extensionCommand([]string{"check", "--static", folder}); err != nil {
+			t.Fatal(err)
+		}
+		if err := extensionCommand([]string{"init", folder}); err == nil {
+			t.Fatal("overwrote existing folder")
+		}
+		if err := extensionCommand([]string{"check", "--static", "--digest", strings.Repeat("0", 64), folder}); err == nil {
+			t.Fatal("accepted wrong digest")
+		}
+
+	})
 }

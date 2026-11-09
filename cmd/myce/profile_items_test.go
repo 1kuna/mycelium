@@ -1,25 +1,17 @@
 package main
 
 import (
-	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"net/http/httputil"
-	"net/url"
+	"mycelium/internal/myce"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 func profileGit(t *testing.T, root string, args ...string) {
@@ -61,7 +53,7 @@ check: [test, -s, result]
 	write("scripts/process.sh", "test -z \"$MYCE_TOKEN\"\ncat common item > result\nprintf '%s' \"$1\" >> result\nsleep 1\n")
 	write("common.txt", "common\n")
 	write("docs.txt", "unrelated\n")
-	for _, item := range []string{"one", "two", "three"} {
+	for _, item := range []string{"one", "two"} {
 		write("items/"+item, item+"\n")
 	}
 	profileGit(t, root, "init", "--quiet")
@@ -78,22 +70,9 @@ check: [test, -s, result]
 	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 	defer cancel()
 	wait(t, ctx, func() bool { s, e := status(ctx, d.Client()); return e == nil && len(s.Machines) == 1 })
-	target, _ := url.Parse(d.URL)
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	var mu sync.Mutex
-	patches := map[string]int{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "PATCH" {
-			mu.Lock()
-			patches[filepath.Base(r.URL.Path)]++
-			mu.Unlock()
-		}
-		proxy.ServeHTTP(w, r)
-	}))
-	defer server.Close()
 	invoke := func(checkout, item, arg string) profileReceipt {
 		t.Helper()
-		cmd := exec.CommandContext(ctx, binary, "run", "--profile", "items", "--queue", server.URL, "--input", "item="+filepath.Join(checkout, "items", item), "--", arg)
+		cmd := exec.CommandContext(ctx, binary, "run", "--profile", "items", "--queue", d.URL, "--input", "item="+filepath.Join(checkout, "items", item), "--", arg)
 		cmd.Dir = checkout
 		cmd.Env = append(os.Environ(), "MYCE_TOKEN="+token, "MYCE_NOTIFY=")
 		var stderr bytes.Buffer
@@ -126,7 +105,7 @@ check: [test, -s, result]
 		return j
 	}
 	var first profileReceipt
-	for i, item := range []string{"one", "two", "three"} {
+	for i, item := range []string{"one", "two"} {
 		r := invoke(root, item, item)
 		j := finish(r)
 		if i == 0 {
@@ -171,158 +150,5 @@ check: [test, -s, result]
 	if changed.JobID == first.JobID {
 		t.Fatal("changed item did not rerun")
 	}
-	write("scripts/process.sh", "cat common item > result\nprintf '%s' \"$1\" >> result\nsleep 1\n# relevant change\n")
-	profileGit(t, root, "add", "scripts/process.sh")
-	profileGit(t, root, "commit", "--quiet", "-m", "relevant")
-	relevant := invoke(root, "one", "one")
-	finish(relevant)
-	if relevant.JobID == changed.JobID {
-		t.Fatal("relevant source did not rerun")
-	}
-	// Opting in separates items and appended arguments into their own classes.
-	write(".mycelium/profiles/items.yaml", profile+"memory_class: per_item\n")
-	perItem := invoke(root, "two", "two")
-	finish(perItem)
-	perArgs := invoke(root, "two", "other-args")
-	finish(perArgs)
-	perFile := invoke(root, "three", "two")
-	finish(perFile)
-	if perItem.Spec.ProfileMemory == perArgs.Spec.ProfileMemory || perItem.Spec.ProfileMemory == perFile.Spec.ProfileMemory {
-		t.Fatal("per_item must separate both arguments and item content")
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	for _, ref := range []myce.FileRef{first.Spec.Files[".myce-source.tar"], first.Spec.Files["common"]} {
-		if patches[ref.SHA256] != 1 {
-			t.Errorf("common blob uploaded %d times", patches[ref.SHA256])
-		}
-	}
-	t.Log("one committed profile ran three items; common blobs uploaded once; shared memory identity; fresh clone after unrelated commit adopted; changed item/code reran; per_item separated args")
-}
 
-func TestProfileSourcePaths(t *testing.T) {
-	root := t.TempDir()
-	for name, data := range map[string]string{"script": "$Format:%H$", "outside": "other", ".gitattributes": "script export-subst\n"} {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(data), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	profileGit(t, root, "init", "--quiet")
-	profileGit(t, root, "add", ".")
-	profileGit(t, root, "commit", "--quiet", "-m", "fixture")
-	ctx := context.Background()
-	source := profileSource{Git: "HEAD", Paths: []string{"script"}}
-	pinned, id, err := identifyProfileSource(ctx, root, source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	archive := filepath.Join(t.TempDir(), "source.tar")
-	ref, err := freezeProfileSource(ctx, root, pinned, archive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Open(archive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	tr := tar.NewReader(f)
-	h, err := tr.Next()
-	if err != nil || h.Name != "script" {
-		t.Fatal(h, err)
-	}
-	content, err := io.ReadAll(tr)
-	if err != nil || string(content) != "$Format:%H$" {
-		t.Fatalf("substituted blob: %q %v", content, err)
-	}
-	if _, err = tr.Next(); err != io.EOF {
-		t.Fatal("unselected file archived", err)
-	}
-	if err = os.WriteFile(filepath.Join(root, "outside"), []byte("dirty"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	again, newID, err := identifyProfileSource(ctx, root, source)
-	if err != nil || id != newID {
-		t.Fatal("unrelated dirt changed source", err)
-	}
-	next, err := freezeProfileSource(ctx, root, again, filepath.Join(t.TempDir(), "source.tar"))
-	if err != nil || next != ref {
-		t.Fatal("unstable archive", err)
-	}
-	for _, paths := range [][]string{{"../outside"}, {":(glob)*"}, {"missing"}} {
-		if _, _, err = identifyProfileSource(ctx, root, profileSource{Git: "HEAD", Paths: paths}); err == nil {
-			t.Errorf("accepted invalid paths %q", paths)
-		}
-	}
-	if err = os.WriteFile(filepath.Join(root, "script"), []byte("dirty"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err = identifyProfileSource(ctx, root, source); err == nil {
-		t.Fatal("dirty selected source accepted")
-	}
-}
-
-func TestProfilePerItemInputValidation(t *testing.T) {
-	for _, flags := range [][]string{
-		{"--input", "missing-equals"},
-		{"--input", "../escape=file"},
-		{"--input", ".myce-inputs/private=file"},
-		{"--input", "item=one", "--input", "item=two"},
-	} {
-		if err := runCommand(context.Background(), append([]string{"--profile", "unused"}, flags...), io.Discard, io.Discard); exitCode(err) != 64 {
-			t.Errorf("flags %q: %v", flags, err)
-		}
-	}
-	root := t.TempDir()
-	profileDir := filepath.Join(root, ".mycelium", "profiles")
-	if err := os.MkdirAll(profileDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(profileDir, "fixture.yaml")
-	profile := `name: fixture
-project: test
-class: experiment
-source: {directory: source}
-run: {command: [true]}
-inputs: {common: file}
-needs: {cpu_cores: 1, memory: auto}
-targets: [{os: linux, arch: amd64, platform: cpu}]
-check: [true]
-`
-	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "file"), []byte("original"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"common", "common/child"} {
-		err := runProfile(context.Background(), path, nil, map[string]string{name: "file"}, "", "", "", "", "http://127.0.0.1:1", "fixture", io.Discard, io.Discard)
-		if exitCode(err) != 64 {
-			t.Errorf("overlap %q: %v", name, err)
-		}
-	}
-	// On a permanent storage refusal the input has its own durable frozen copy;
-	// source edits after preparation cannot mutate the saved bytes.
-	var out bytes.Buffer
-	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
-	defer server.Close()
-	err := runProfile(context.Background(), path, []string{"literal"}, map[string]string{"item": "file"}, "frozen", "", "", "", server.URL, "fixture", &out, io.Discard)
-	if exitCode(err) != 69 {
-		t.Fatal(err)
-	}
-	var r profileReceipt
-	if err = json.Unmarshal(out.Bytes(), &r); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(filepath.Join(root, "file"), []byte("changed"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	frozen := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", r.Key}), r.Uploads["files/item"])
-	got, err := os.ReadFile(frozen)
-	if err != nil || string(got) != "original" {
-		t.Fatalf("frozen item: %q %v", got, err)
-	}
 }

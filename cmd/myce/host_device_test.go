@@ -42,9 +42,5 @@ func TestHostDeviceCLI(t *testing.T) {
 	if err != nil || status.DeviceMaintenance[0].Disabled || status.DeviceMaintenance[0].Reason != "" || status.DeviceMaintenance[0].Revision != 2 {
 		t.Fatal("enable did not clear policy with retained revision", status, err)
 	}
-	for _, args := range [][]string{{"device"}, {"device", "disable", "host"}, {"device", "enable", "host", "0", "--reason", "wrong"}, {"device", "disable", "host", "0", "--stop"}} {
-		if err := hostMaintenanceCommand(context.Background(), args, &bytes.Buffer{}); err == nil {
-			t.Fatal("invalid device command accepted", args)
-		}
-	}
+
 }

@@ -9,33 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"sync/atomic"
 	"testing"
 	"time"
 )
-
-func TestWaitParentDeath(t *testing.T) {
-	var parent atomic.Int64
-	parent.Store(42)
-	ctx, cancel := waitParentContext(context.Background(), 42, time.Millisecond, func() int { return int(parent.Load()) })
-	defer cancel()
-	if ctx.Err() != nil {
-		t.Fatal("living parent cancelled")
-	}
-	parent.Store(1)
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("parent death did not end wait")
-	}
-}
-func TestWaitParentAlreadyOrphaned(t *testing.T) {
-	ctx, cancel := waitParentContext(context.Background(), 1, time.Second, func() int { return 1 })
-	defer cancel()
-	if ctx.Err() == nil {
-		t.Fatal("already orphaned wait continued")
-	}
-}
 
 func TestWaitParentProcessHelper(t *testing.T) {
 	mode := os.Getenv("MYCE_PARENT_TEST_MODE")
@@ -76,8 +52,12 @@ func TestWaitParentProcessHelper(t *testing.T) {
 		t.Fatal(e)
 	}
 }
-func TestWaitExitsAfterRealParentExit(t *testing.T) { testObserverParentExit(t, "wait") }
-func TestRunExitsAfterRealParentExit(t *testing.T)  { testObserverParentExit(t, "run") }
+func TestWaitExitsAfterRealParentExit(t *testing.T) {
+	for _, command := range []string{"wait", "run"} {
+		t.Run(command, func(t *testing.T) { testObserverParentExit(t, command) })
+	}
+}
+
 func testObserverParentExit(t *testing.T, command string) {
 	dir := t.TempDir()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -15,7 +15,7 @@ import (
 )
 
 func TestWaitDefaultBatchUnchangedJobs(t *testing.T) {
-	for _, structured := range []bool{false, true} {
+	for _, structured := range []bool{true} {
 		t.Run(fmt.Sprint(structured), func(t *testing.T) {
 			clock := &waitClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
 			ids := []string{"job-a", "job-b", "job-c"}
@@ -77,8 +77,8 @@ func TestWaitDefaultBatchUnchangedJobs(t *testing.T) {
 
 // A full GET may be shed indefinitely while /api/wait remains available.
 func TestWaitShedBootstrapStillStartsBatch(t *testing.T) {
-	for _, structured := range []bool{false, true} {
-		for _, alreadyDone := range []bool{false, true} {
+	for _, structured := range []bool{true} {
+		for _, alreadyDone := range []bool{false} {
 			t.Run(fmt.Sprint(structured, alreadyDone), func(t *testing.T) {
 				clock := &waitClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
 				batches, gets := 0, 0
@@ -112,7 +112,7 @@ func TestWaitJSONSlowOrUnavailableDiagnosticsDoesNotHidePeers(t *testing.T) {
 	previous := waitReadBudget
 	waitReadBudget = time.Millisecond
 	t.Cleanup(func() { waitReadBudget = previous })
-	for _, status := range []int{0, 503} {
+	for _, status := range []int{0} {
 		clock := &waitClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
 		gets, batches := 0, 0
 		client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {

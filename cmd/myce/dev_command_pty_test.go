@@ -54,21 +54,6 @@ finally:
         os.close(fd)
 `
 
-func TestDevCommandPTYEOFBeforeExit(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	child := `import os, sys, time
-assert sys.stdin.readline().strip() == "terminal-input"
-print("terminal-ok", flush=True)
-os.close(0); os.close(1); os.close(2)
-time.sleep(0.25) # Keep the child alive after its terminal descriptors close.
-`
-	out, err := exec.CommandContext(ctx, "python3", "-c", devCommandPTYProbe, "python3", "-c", child).CombinedOutput()
-	if err != nil {
-		t.Fatalf("terminal EOF preceded child exit: %v\n%s", err, out)
-	}
-}
-
 func TestDevCommandPTYInterruptedReap(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

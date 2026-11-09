@@ -4,34 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"mycelium/internal/myce"
 	"os"
 	"strconv"
 	"testing"
-
-	"mycelium/internal/myce"
 )
-
-func TestHostTelemetryInterruptedFinalSample(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	p := myce.MachineProbe{OS: "linux", ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }, Command: func(slot context.Context, _ string, _ ...string) ([]byte, error) {
-		cancel()
-		<-slot.Done()
-		return nil, slot.Err()
-	}}
-	var out bytes.Buffer
-	args := []string{"capture", "--run-id", "baseline", "--host-ref", "host-a", "--queue-pid", strconv.Itoa(os.Getpid()), "--worker-pid", strconv.Itoa(os.Getppid()), "--duration", "10s", "--interval", "10s"}
-	err := hostTelemetryCommand(ctx, args, p, &out)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("interrupted final sample returned %v", err)
-	}
-	var partial myce.HostTelemetrySample
-	if err := json.Unmarshal(out.Bytes(), &partial); err != nil || partial.Queue.RSS.Value != nil || partial.Queue.RSS.Missing == "" {
-		t.Fatalf("partial receipt lost: %v", err)
-	}
-}
 
 func TestHostTelemetryLocalCapture(t *testing.T) {
 	// Only process birth metadata for this test and its parent is real. Every

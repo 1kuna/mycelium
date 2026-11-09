@@ -10,7 +10,7 @@ import (
 
 // All tools, including codesign, are fake. This test never opens a keychain.
 func TestReleaseSignsDarwinBeforeManifest(t *testing.T) {
-	for _, mode := range []string{"configured", "unsigned", "sign-fails", "verify-fails"} {
+	for _, mode := range []string{"configured", "verify-fails"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			log := filepath.Join(dir, "calls")

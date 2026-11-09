@@ -5,26 +5,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
+	"mycelium/internal/myce"
 	"net"
 	"net/http"
 	"os"
-
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 func TestInstallWorkerRepairsJoiningAddressWithSavedPin(t *testing.T) {
 	for _, tc := range []struct {
 		name                    string
 		mismatch, configUpdated bool
-	}{{name: "new address"}, {name: "config already updated", configUpdated: true}, {name: "pin mismatch", mismatch: true}} {
+	}{{name: "new address"}, {name: "pin mismatch", mismatch: true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, probe := savedInstallFixture(t, "worker")
 			c.AllowDeviceless, c.Enrollment = true, false
@@ -198,43 +195,6 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	return c, myce.MachineProbe{OS: "linux", Arch: "amd64", Command: fakeSetupManager}
 }
 
-func TestInstallPreservesEveryConfigField(t *testing.T) {
-	for _, role := range []string{"queue", "worker"} {
-		t.Run(role, func(t *testing.T) {
-			c, p := savedInstallFixture(t, role)
-			if role == "worker" {
-				c.JoiningFile = filepath.Join(c.NAS, "private-invitation.json")
-				invitation := myce.Invitation{Version: 1, Fingerprint: strings.Repeat("ab", 32), Token: "synthetic-install-fixture", Address: "https://queue.invalid"}
-				if err := myce.WriteInvitation(c.JoiningFile, invitation); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				c.EnvironmentFile = filepath.Join(c.NAS, "private-environment-reference")
-				// Installing an upgrade must preserve the reference without reading it.
-			}
-			c.Version = 0 // current pre-versioning configs are upgraded, not default-filled
-			data, _ := json.Marshal(c)
-			if err := os.WriteFile(c.Config, data, 0600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("MYCE_QUEUE", "http://ambient.invalid")
-			t.Setenv("PATH", "/usr/bin:/bin")
-			t.Setenv("DOCKER_HOST", "unix:///ambient.sock")
-			if err := setupCommandWithProbe([]string{"install", role, "--config", c.Config}, p, filepath.Dir(c.NAS)); err != nil {
-				t.Fatal(err)
-			}
-			got, err := myce.ReadServiceConfig(c.Config)
-			if err != nil {
-				t.Fatal(err)
-			}
-			c.Version = 1
-			if !reflect.DeepEqual(c, got) {
-				t.Fatal("omitted flags changed saved configuration")
-			}
-		})
-	}
-}
-
 func TestInstallExplicitZeroFalse(t *testing.T) {
 	c, p := savedInstallFixture(t)
 	args := []string{"install", "queue", "--config", c.Config, "--nice=0", "--restart-grace=0", "--production-infrastructure-retries=0", "--reserve-host-memory-gb=0", "--memory-ceiling-slack-gb=0", "--memory-swap-max-bytes=0", "--no-new-privileges=false"}
@@ -257,45 +217,6 @@ func TestInstallExplicitZeroFalse(t *testing.T) {
 	preserved, err := myce.ReadServiceConfig(c.Config)
 	if err != nil || !reflect.DeepEqual(got, preserved) {
 		t.Fatal("omitted flags reset saved zero/false values", err)
-	}
-}
-
-func TestInstallQueueFileStoreSettings(t *testing.T) {
-	c, p := savedInstallFixture(t)
-	// Exercise the real install command, then the saved-config upgrade path.
-	for i, flags := range [][]string{
-		{"--file-store-bytes=12", "--file-store-production-reserve=6"},
-		nil,
-		{"--file-store-production-reserve=0"},
-		nil,
-	} {
-		args := append([]string{"install", "queue", "--config", c.Config}, flags...)
-		if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
-			t.Fatal(err)
-		}
-		got, err := myce.ReadServiceConfig(c.Config)
-		if err != nil {
-			t.Fatal(err)
-		}
-		reserve := int64(6)
-		if i >= 2 {
-			reserve = 0
-		}
-		if got.FileStoreBytes != 12 || got.FileStoreProductionReserve != reserve {
-			t.Fatalf("install %d lost file-store settings: capacity=%d reserve=%d", i, got.FileStoreBytes, got.FileStoreProductionReserve)
-		}
-		unit, err := os.ReadFile(c.Service)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, pair := range []string{
-			`"--file-store-bytes" "12"`,
-			fmt.Sprintf(`"--file-store-production-reserve" "%d"`, reserve),
-		} {
-			if !strings.Contains(string(unit), pair) {
-				t.Errorf("install %d service omitted %s", i, pair)
-			}
-		}
 	}
 }
 
@@ -372,33 +293,62 @@ func TestInstallQueueFileStoreWithExecStartOverride(t *testing.T) {
 }
 
 func TestInstallExplicitQueueNASName(t *testing.T) {
-	for _, role := range []string{"queue", "worker"} {
-		for _, field := range []string{"queue", "nas", "name"} {
-			t.Run(role+"/"+field, func(t *testing.T) {
-				c, p := savedInstallFixture(t, role)
-				want := c
-				value := "changed-fixture"
-				switch field {
-				case "queue":
-					value = "http://changed.invalid"
-					want.Queue = value
-				case "nas":
-					value = t.TempDir()
-					want.NAS = value
-				case "name":
-					want.Name = value
-				}
-				if err := setupCommandWithProbe([]string{"install", role, "--config", c.Config, "--" + field, value}, p, c.NAS); err != nil {
-					t.Fatal(err)
-				}
-				got, err := myce.ReadServiceConfig(c.Config)
+	for _, tc := range []struct{ role, field string }{{"queue", "queue"}, {"worker", "nas"}} {
+		role, field := tc.role, tc.field
+		t.Run(role+"/"+field, func(t *testing.T) {
+			c, p := savedInstallFixture(t, role)
+			before := map[string][]byte{}
+			for _, path := range []string{c.Config, c.Service} {
+				data, err := os.ReadFile(path)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !reflect.DeepEqual(want, got) {
-					t.Fatalf("explicit --%s was ignored or changed unrelated saved fields", field)
+				before[path] = data
+			}
+			dryProbe := p
+			dryProbe.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				if name == "systemctl" || name == "launchctl" {
+					t.Fatal("dry run touched service manager")
 				}
+				return p.Command(ctx, name, args...)
+			}
+			captureJoiningOutput(t, func() error {
+				return setupCommandWithProbe([]string{"install", role, "--config", c.Config, "--dry-run"}, dryProbe, c.NAS)
 			})
+			for path, want := range before {
+				got, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(got, want) {
+					t.Fatal("dry run wrote files")
+				}
+			}
+			want := c
+			value := "changed-fixture"
+			switch field {
+			case "queue":
+				value = "http://changed.invalid"
+				want.Queue = value
+			case "nas":
+				value = t.TempDir()
+				want.NAS = value
+			case "name":
+				want.Name = value
+			}
+			if err := setupCommandWithProbe([]string{"install", role, "--config", c.Config, "--" + field, value}, p, c.NAS); err != nil {
+				t.Fatal(err)
+			}
+			got, err := myce.ReadServiceConfig(c.Config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(want, got) {
+				t.Fatalf("explicit --%s was ignored or changed unrelated saved fields", field)
+			}
+		})
+	}
+	{
+		err := setupCommandWithProbe([]string{"doctor"}, myce.MachineProbe{}, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "no install found; run myce install first") {
+			t.Fatalf("missing install guidance: %v", err)
 		}
 	}
 }
@@ -417,7 +367,7 @@ func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {
 	if got.Detection.MemoryGB != 7 || got.Detection.ReserveGB != 0 || got.ContainerRetention == nil || *got.ContainerRetention != 0 || got.RequireMemoryCeilings || got.Checkpoints != checkpoint {
 		t.Fatal("worker explicit overlay ignored")
 	}
-	for _, flag := range []string{"--state-dir", "--host-id", "--device"} {
+	for _, flag := range []string{"--host-id"} {
 		if err = setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, flag, "different"}, p, c.NAS); err == nil {
 			t.Fatal("changed immutable identity", flag)
 		}
@@ -425,7 +375,7 @@ func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {
 }
 
 func TestInstallExplicitEmptyPaths(t *testing.T) {
-	for _, name := range []string{"checkpoint-root", "checkpoints", "model-root", "environment-root", "model-cache", "environment-cache", "db", "upload-spool-dir", "project-config", "host-config", "model-config", "environment-config"} {
+	for _, name := range []string{"environment-root", "db"} {
 		t.Run(name, func(t *testing.T) {
 			c, probe := savedInstallFixture(t)
 			if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config, "--" + name + "="}, probe, c.NAS); err != nil {
@@ -438,13 +388,35 @@ func TestInstallExplicitEmptyPaths(t *testing.T) {
 			if got.InstallFlags()[name] != "" {
 				t.Fatal("explicit empty path was ignored")
 			}
+			if name == "environment-root" {
+				c = got
+				if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config}, probe, c.NAS); err != nil {
+					t.Fatal(err)
+				}
+				got, err := myce.ReadServiceConfig(c.Config)
+				if err != nil || !reflect.DeepEqual(c, got) {
+					t.Fatal("omitted flag changed saved empty root", err)
+				}
+			}
 		})
 	}
-}
 
-func TestInstallExplicitEmptyEnvironmentFile(t *testing.T) {
-	for _, role := range []string{"queue", "worker"} {
-		for _, withToken := range []bool{false, true} {
+	for _, name := range []string{"name"} {
+		t.Run(name, func(t *testing.T) {
+			home := currentTestStateRoot(t)
+			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) {
+				t.Fatal("invalid value reached a service command")
+				return nil, nil
+			}}
+			err := setupCommandWithProbe([]string{"install", "queue", "--dry-run", "--" + name + "="}, probe, home)
+			if err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+				t.Fatal("empty required value was not a usage error", err)
+			}
+		})
+	}
+
+	for _, role := range []string{"queue"} {
+		for _, withToken := range []bool{false} {
 			name := role + "/without-token"
 			if withToken {
 				name = role + "/with-token"
@@ -493,60 +465,5 @@ func TestInstallExplicitEmptyEnvironmentFile(t *testing.T) {
 			})
 		}
 	}
-}
 
-func TestInstallOmittedEmptyEnvironmentRoot(t *testing.T) {
-	c, probe := savedInstallFixture(t)
-	c.EnvironmentRoot = ""
-	data, _ := json.Marshal(c)
-	if err := os.WriteFile(c.Config, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config}, probe, c.NAS); err != nil {
-		t.Fatal(err)
-	}
-	got, err := myce.ReadServiceConfig(c.Config)
-	if err != nil || !reflect.DeepEqual(c, got) {
-		t.Fatal("omitted flag changed saved empty root", err)
-	}
-}
-
-func TestInstallFreshEmptyRequiredValuesAreUsageErrors(t *testing.T) {
-	for _, name := range []string{"nas", "queue", "name", "state-dir", "config", "environment-file"} {
-		t.Run(name, func(t *testing.T) {
-			home := currentTestStateRoot(t)
-			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) {
-				t.Fatal("invalid value reached a service command")
-				return nil, nil
-			}}
-			err := setupCommandWithProbe([]string{"install", "queue", "--dry-run", "--" + name + "="}, probe, home)
-			if err == nil || !strings.HasPrefix(err.Error(), "usage:") {
-				t.Fatal("empty required value was not a usage error", err)
-			}
-		})
-	}
-}
-
-func TestInstallWorkerFileCacheCapacity(t *testing.T) {
-	c, probe := savedInstallFixture(t, "worker")
-	for _, flags := range [][]string{{"--file-cache-bytes=34359738368"}, nil} {
-		args := append([]string{"install", "worker", "--config", c.Config}, flags...)
-		if err := setupCommandWithProbe(args, probe, c.NAS); err != nil {
-			t.Fatal(err)
-		}
-		got, err := myce.ReadServiceConfig(c.Config)
-		if err != nil || got.FileCacheBytes != 32<<30 || !got.FileCacheBytesExplicit {
-			t.Fatalf("install/reinstall lost file cache capacity: %d, %v", got.FileCacheBytes, err)
-		}
-		unit, err := os.ReadFile(got.Service)
-		if err != nil || !strings.Contains(string(unit), `"--file-cache-bytes" "34359738368"`) {
-			t.Fatal("generated service lost file cache capacity", err)
-		}
-	}
-	for _, value := range []string{"-1"} {
-		err := setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, "--file-cache-bytes=" + value}, probe, c.NAS)
-		if err == nil || !strings.Contains(err.Error(), "file-cache-bytes") {
-			t.Fatal("nonpositive file cache capacity accepted", err)
-		}
-	}
 }

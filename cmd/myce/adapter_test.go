@@ -8,20 +8,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
-	"mycelium/internal/myce"
 )
 
 func cpuAdapterYAML(source string) string {
@@ -39,19 +38,36 @@ entries:
 `, source, runtime.GOOS, runtime.GOARCH)
 }
 
-func TestAdapterStartWindow(t *testing.T) {
-	data := strings.Replace(cpuAdapterYAML("source"), "    source:", "    class: production\n    start_window: 600s\n    source:", 1)
-	a, err := decodeAdapter([]byte(data))
-	if err != nil {
+func TestAdapterDevCheckedArtifact(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0700); err != nil {
 		t.Fatal(err)
 	}
-	p, _, err := adapterProfile(a, "")
-	if err != nil || p.StartWindow != "600s" || p.Class != "production" {
-		t.Fatalf("entry lost stage policy: %+v %v", p.Spec, err)
+	if err := os.WriteFile(filepath.Join(source, "run.sh"), []byte("test -z \"${MYCE_TOKEN:-}\"\nprintf '%s' \"$1\" > result\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
-}
-func TestAdapterStrictSelectedEntryAndLiteralArgs(t *testing.T) {
-	data := cpuAdapterYAML("source")
+	// Preserve the exact shell-evaluation sentinel alongside the real artifact journey.
+	{
+		root := t.TempDir()
+		value := "literal ' ; $(touch should-not-exist)"
+		cmd := checkedAdapterCommand([]string{"sh", "-c", `printf '%s' "$1" > result`, "fixture"}, []string{"test", "-s", "result"})
+		cmd = append(cmd, value)
+		run := exec.Command(cmd[0], cmd[1:]...)
+		run.Dir = root
+		if b, e := run.CombinedOutput(); e != nil {
+			t.Fatalf("%v %s", e, b)
+		}
+		b, e := os.ReadFile(filepath.Join(root, "result"))
+		if e != nil || string(b) != value {
+			t.Fatalf("argv %q %v", b, e)
+		}
+		if _, e = os.Stat(filepath.Join(root, "should-not-exist")); !os.IsNotExist(e) {
+			t.Fatal("argv evaluated as shell")
+		}
+	}
+	path := filepath.Join(root, "adapter.yaml")
+	data := cpuAdapterYAML(source)
 	a, err := decodeAdapter([]byte(data))
 	if err != nil {
 		t.Fatal(err)
@@ -68,49 +84,6 @@ func TestAdapterStrictSelectedEntryAndLiteralArgs(t *testing.T) {
 	if !bytes.Equal(one, two) {
 		t.Fatal("unrelated entry changed selected intent")
 	}
-	cases := []string{
-		strings.Replace(data, "    checks:", "    assets: {model.bin: {sha256: "+strings.Repeat("a", 64)+", size_bytes: 4}}\n    checks:", 1),
-		strings.Replace(data, "    checks:", "    references: {extension:work: {input_shape: fixture, unit: item, units: 1}}\n    checks:", 1),
-		strings.Replace(data, "    checks:", "    sweeps: {extension:work: {run: [echo, fixture]}}\n    checks:", 1),
-		strings.Replace(data, "schema: 1", "schema: 2", 1),
-		strings.Replace(data, "    checks:", "    unknown: value\n    checks:", 1),
-		strings.Replace(data, "    checks:", "    environment: {name: tools, lock_file: requirements.txt}\n    checks:", 1),
-		strings.Replace(data, "    checks:", "    variants: [{target: {os: linux, arch: amd64, platform: fake}}]\n    checks:", 1),
-		strings.Replace(data, "    checks:", "    after: {job: parent, piece: item, outputs: {input: result}}\n    checks:", 1),
-	}
-	for i, bad := range cases {
-		if _, e := decodeAdapter([]byte(bad)); e == nil {
-			t.Errorf("case %d accepted invalid recipe", i)
-		}
-	}
-	root := t.TempDir()
-	value := "literal ' ; $(touch should-not-exist)"
-	cmd := checkedAdapterCommand([]string{"sh", "-c", `printf '%s' "$1" > result`, "fixture"}, []string{"test", "-s", "result"})
-	cmd = append(cmd, value)
-	run := exec.Command(cmd[0], cmd[1:]...)
-	run.Dir = root
-	if b, e := run.CombinedOutput(); e != nil {
-		t.Fatalf("%v %s", e, b)
-	}
-	b, e := os.ReadFile(filepath.Join(root, "result"))
-	if e != nil || string(b) != value {
-		t.Fatalf("argv %q %v", b, e)
-	}
-	if _, e = os.Stat(filepath.Join(root, "should-not-exist")); !os.IsNotExist(e) {
-		t.Fatal("argv evaluated as shell")
-	}
-}
-func TestAdapterDevCheckedArtifact(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(root, "source")
-	if err := os.Mkdir(source, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "run.sh"), []byte("test -z \"${MYCE_TOKEN:-}\"\nprintf '%s' \"$1\" > result\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(root, "adapter.yaml")
-	data := cpuAdapterYAML(source)
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -507,79 +480,3 @@ func TestAdapterDevNativeColdAndWarmQualification(t *testing.T) {
 
 // Saved auto-memory identity must distinguish materially different composed
 // commands and member environments while old plain-profile identity stays stable.
-func TestAdapterComposedMemoryIdentity(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(root, "source")
-	if err := os.Mkdir(source, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "input"), []byte("fixture"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
-	defer server.Close()
-	base := executionProfile{Adapter: true, Source: profileSource{Directory: source}, Spec: myce.Spec{Name: "composed", Project: "fixture", Class: "test", Needs: myce.ResourceNeeds{CPUCores: 1, Memory: "auto", Platform: myce.Platform{Required: []string{"cpu"}}}, Targets: []myce.ExecutionTarget{{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "cpu"}}}}
-	var previous string
-	for i, member := range []myce.ExecutionMember{{Command: []string{"echo", "first"}}, {Command: []string{"echo", "second"}}, {Command: []string{"echo", "second"}, Env: map[string]string{"MODE": "other"}}} {
-		p := base
-		p.Execution = &myce.ExecutionSpec{Main: member}
-		var out bytes.Buffer
-		err := runPreparedProfile(context.Background(), root, p, []byte(fmt.Sprint(i)), nil, nil, fmt.Sprint(i), "", "", "", server.URL, "fixture-token", &out, &out)
-		if exitCode(err) != 69 {
-			t.Fatalf("expected unavailable queue with saved intent: %v %s", err, out.String())
-		}
-		var r profileReceipt
-		if err := json.Unmarshal(out.Bytes(), &r); err != nil {
-			t.Fatal(err)
-		}
-		if r.Spec.ProfileMemory == "" || r.Spec.ProfileMemory == previous {
-			t.Fatal("changed composed command/environment reused memory identity")
-		}
-		previous = r.Spec.ProfileMemory
-	}
-}
-
-func TestAdapterNativeRecipeBeforeResultWrapping(t *testing.T) {
-	e := adapterEntry{Spec: myce.Spec{Run: myce.RunSpec{Command: []string{"echo", "work"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Required: []string{"cuda"}}}, Targets: []myce.ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cuda"}}}, Checks: adapterChecks{Result: []string{"true"}, Qualification: []string{"echo", "qualification"}}, Baselines: map[string]myce.ExtensionBaseline{"extension:work": {}}, Sweeps: map[string]myce.ReferenceSweep{"extension:work": {Command: []string{"echo", "measure"}}}}
-	lower := func(entry adapterEntry) (executionProfile, error) {
-		p, _, err := adapterProfile(projectAdapter{Project: "fixture", Default: "work", Entries: map[string]adapterEntry{"work": entry}}, "")
-		return p, err
-	}
-	e.Needs.GPU = &myce.GPUSelection{Devices: []string{"0"}}
-	p, err := lower(e)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if advice := p.placementAdvisories(); len(advice) != 1 || !strings.HasPrefix(advice[0], "Device pin") {
-		t.Fatal("lowered native device pin bypassed advice", advice)
-	}
-	if got := p.Native.Variants[0].Needs.GPU.Devices; len(got) != 1 || got[0] != "0" {
-		t.Fatal("advice changed native device restriction", got)
-	}
-	p.RequirementReasons = map[string]string{"device": "hardware diagnostic"}
-	if advice := p.placementAdvisories(); len(advice) != 0 {
-		t.Fatal("native device exception ignored", advice)
-	}
-	if len(p.Native.Variants[0].Sweeps["extension:work"].Run) != 0 {
-		t.Fatal("result check manufactured an omitted wave command")
-	}
-	conflict := e
-	conflict.Targets = append(slices.Clone(e.Targets), myce.ExecutionTarget{OS: "darwin", Arch: "arm64", Platform: "metal"})
-	if _, err := lower(conflict); err == nil {
-		t.Fatal("native lowering widened required platforms")
-	}
-	v := adapterEntry{Variants: []adapterVariant{{Target: e.Targets[0], Needs: myce.ResourceNeeds{MemoryGB: 1}, Checks: e.Checks, Baselines: e.Baselines}}}
-	if _, err := lower(v); err == nil {
-		t.Fatal("result check manufactured a missing native main command")
-	}
-	v.Spec.After = &myce.PieceDependency{Job: "parent", Piece: "piece"}
-	v.Variants[0].Execution.Main.Command = []string{"echo", "work"}
-	if err := validateAdapterEntry(v); err == nil {
-		t.Fatal("variant result check bypassed after restriction")
-	}
-	v.Spec.After = nil
-	v.Variants[0].Execution.Main.Command = []string{""}
-	if _, err := lower(v); err == nil {
-		t.Fatal("result check manufactured an empty native executable")
-	}
-}

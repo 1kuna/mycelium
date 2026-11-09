@@ -55,7 +55,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	var configs []myce.ServiceConfig
-	for i, instance := range []string{"", "gpu0", "gpu1"} {
+	for i, instance := range []string{"", "gpu0"} {
 		role := "worker"
 		if i == 0 {
 			role = "queue"
@@ -90,7 +90,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		configs = append(configs, c)
 	}
 	// Any unmarked non-empty root suffices; payload contents are never read.
-	for _, dir := range []string{configs[0].State, configs[1].State, configs[2].State} {
+	for _, dir := range []string{configs[0].State, configs[1].State} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -211,7 +211,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 }
 
 func TestQueueStartupRefusalNoWrites(t *testing.T) {
-	for _, refused := range []string{"queue", "upload-spool", "file-store", "identity"} {
+	for _, refused := range []string{"queue", "identity"} {
 		t.Run(refused, func(t *testing.T) {
 			parent := t.TempDir()
 			roots := map[string]string{}

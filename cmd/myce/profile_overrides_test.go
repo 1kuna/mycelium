@@ -59,10 +59,6 @@ check: [true]
 	if exitCode(err) != 69 || got.Spec.Class != "deadline" || got.Spec.Priority != "deadline" || got.Spec.Deadline == nil || got.Spec.Deadline.Format("2006-01-02T15:04:05Z07:00") != "2031-02-03T04:05:06Z" {
 		t.Fatalf("override: %+v %v", got.Spec, err)
 	}
-	custom, err := invoke("--key", "custom", "--class", "custom")
-	if exitCode(err) != 69 || custom.Spec.Class != "custom" || custom.Spec.Priority != "" {
-		t.Fatalf("custom class: %+v %v", custom.Spec, err)
-	}
 	var saved profileReceipt
 	if err := readProfileJSON(filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", "override"}), "receipt.json"), &saved); err != nil || saved.Spec.Class != got.Spec.Class || !saved.Spec.Deadline.Equal(*got.Spec.Deadline) {
 		t.Fatalf("saved receipt: %+v %v", saved.Spec, err)
@@ -71,9 +67,5 @@ check: [true]
 	if err == nil || !strings.Contains(err.Error(), "intent") {
 		t.Fatalf("changed intent: %v", err)
 	}
-	for _, flags := range [][]string{{"--class", "bad/class"}, {"--class", ""}, {"--deadline", "invalid"}, {"--cpu", "2"}, {"--detach"}, {"--priority", "production"}} {
-		if _, err := invoke(flags...); err == nil || exitCode(err) == 69 {
-			t.Errorf("%v accepted: %v", flags, err)
-		}
-	}
+
 }

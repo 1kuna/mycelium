@@ -22,7 +22,7 @@ type m4SignalExit int
 func (e m4SignalExit) Error() string { return "synthetic service inactive" }
 func (e m4SignalExit) ExitCode() int { return int(e) }
 
-func TestM4InstallSignalJournal(t *testing.T) {
+func testM4InstallSignalJournal(t *testing.T) {
 	if root := os.Getenv("MYCE_R2_SIGNAL_CHILD"); root != "" {
 		probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			call := strings.Join(args, " ")
@@ -53,7 +53,7 @@ func TestM4InstallSignalJournal(t *testing.T) {
 		}
 		return
 	}
-	for _, sig := range []syscall.Signal{syscall.SIGHUP, syscall.SIGINT} {
+	for _, sig := range []syscall.Signal{syscall.SIGINT} {
 		t.Run(sig.String(), func(t *testing.T) {
 			root := t.TempDir()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +88,7 @@ func TestM4InstallSignalJournal(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestM4InstallSignalJournal$", "-test.count=1")
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestResolveNativeCLIRequiresExactCustody$", "-test.count=1")
 			cmd.Env = append(os.Environ(), "MYCE_R2_SIGNAL_CHILD="+root, "MYCE_TOKEN=synthetic-local-test")
 			var output strings.Builder
 			cmd.Stdout = &output

@@ -50,27 +50,26 @@ func TestMachOLinkageResolveAndPortability(t *testing.T) {
 	defer server.Close()
 	t.Setenv("MYCE_QUEUE", server.URL)
 	t.Setenv("MYCE_TOKEN", "fixture")
-	for _, json := range []bool{false, true} {
-		for _, kind := range []string{"resolve", "portability"} {
-			var output bytes.Buffer
-			var err error
-			if kind == "resolve" {
-				args := []string{"check", "--resolve"}
-				if json {
-					args = append(args, "--json")
-				}
-				args = append(args, adapter)
-				err = specCommand(args, &output, &output)
-			} else {
-				args := []string{"--adapter", adapter}
-				if json {
-					args = append(args, "--json")
-				}
-				err = portabilityCommand(context.Background(), args, &output)
+	for _, kind := range []string{"resolve", "portability"} {
+		json := kind == "resolve"
+		var output bytes.Buffer
+		var err error
+		if kind == "resolve" {
+			args := []string{"check", "--resolve"}
+			if json {
+				args = append(args, "--json")
 			}
-			if err != nil || !strings.Contains(output.String(), missing) || !strings.Contains(output.String(), "tool") {
-				t.Fatalf("%s json=%t: %v %s", kind, json, err, output.String())
+			args = append(args, adapter)
+			err = specCommand(args, &output, &output)
+		} else {
+			args := []string{"--adapter", adapter}
+			if json {
+				args = append(args, "--json")
 			}
+			err = portabilityCommand(context.Background(), args, &output)
+		}
+		if err != nil || !strings.Contains(output.String(), missing) || !strings.Contains(output.String(), "tool") {
+			t.Fatalf("%s json=%t: %v %s", kind, json, err, output.String())
 		}
 	}
 }

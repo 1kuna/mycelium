@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -19,8 +21,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 func TestInstalledClientDevResult(t *testing.T) {

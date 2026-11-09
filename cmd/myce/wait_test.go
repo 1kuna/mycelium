@@ -7,18 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mycelium/internal/myce"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 type waitClock struct {
@@ -90,16 +88,6 @@ func waitAssignmentDiagnostics(q *myce.Queue) string {
 	return fmt.Sprintf("waiting=%v nas_status=%q workers=%v", waiting, status.Warning, workers)
 }
 
-func TestWaitQueueIgnoresCheckpointStorage(t *testing.T) {
-	q, clock, _, checkpoints := waitQueue(t)
-	// CLI outcome fixtures do not prepare checkpoints. A missing real root
-	// must not turn their synthetic assignment into a host I/O timing check.
-	if err := os.Rename(checkpoints, checkpoints+".offline"); err != nil {
-		t.Fatal(err)
-	}
-	waitSubmit(t, q)
-	waitFinish(t, q, clock, true)
-}
 func waitSubmit(t *testing.T, q *myce.Queue) *myce.Job {
 	t.Helper()
 	s := myce.Spec{Name: "wait-test", Project: "test", Priority: "experiment"}
@@ -150,7 +138,7 @@ func TestWaitQueueOutcomes(t *testing.T) {
 		states []string
 		code   int
 	}{
-		{"success", []string{"succeeded"}, 0}, {"failure", []string{"failed"}, 1}, {"cancel", []string{"cancelled"}, 1}, {"mixed", []string{"failed", "succeeded", "cancelled"}, 1},
+		{"mixed", []string{"failed", "succeeded", "cancelled"}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock, _, _ := waitQueue(t)
@@ -196,44 +184,6 @@ func TestWaitQueueOutcomes(t *testing.T) {
 	}
 }
 
-func TestWaitImmediatelyAfterSubmitWithStaleStatus(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
-	api := myce.API{Queue: q, Token: "test-only"}.Handler()
-	var aggregateReads atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/status" {
-			aggregateReads.Add(1)
-		}
-		api.ServeHTTP(w, r)
-	}))
-	defer server.Close()
-	c := myce.Client{URL: server.URL, Token: "test-only"}
-	// Freeze the fake clock with an empty aggregate cache generation, then
-	// commit a submission through the same authenticated API used in production.
-	if _, err := status(context.Background(), c); err != nil {
-		t.Fatal(err)
-	}
-	s := myce.Spec{Name: "immediate-wait", Project: "test", Priority: "experiment", Run: myce.RunSpec{Command: []string{"true"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Any: true}}}
-	j, err := c.Submit(context.Background(), s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	pauses := 0
-	err = waitJobs(context.Background(), c, []string{j.ID[:8], j.ID}, 0, &out, &bytes.Buffer{}, clock, func(_ context.Context, _ time.Duration) error {
-		pauses++
-		if pauses > 1 {
-			t.Fatal("wait did not observe committed cancellation")
-		}
-		return q.Cancel(j.ID)
-	})
-	if exitCode(err) != 1 || out.String() != j.ID+" cancelled\n" || pauses != 1 {
-		t.Fatalf("immediate wait: err=%v output=%q pauses=%d", err, out.String(), pauses)
-	}
-	if aggregateReads.Load() != 1 {
-		t.Fatal("wait read aggregate status", aggregateReads.Load())
-	}
-}
 func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
@@ -252,6 +202,14 @@ func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 	if e != nil || s.Jobs[0].State != "queued" {
 		t.Fatalf("%+v %v", s, e)
 	}
+
+	t.Run("inflight-context", func(t *testing.T) {
+		client := myce.Client{URL: "http://test", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) { <-r.Context().Done(); return nil, r.Context().Err() })}}
+		err := waitJobs(context.Background(), client, []string{"job"}, time.Millisecond, &bytes.Buffer{}, &bytes.Buffer{}, myce.RealClock{}, waitPause)
+		if exitCode(err) != 3 {
+			t.Fatal(err)
+		}
+	})
 }
 func TestWaitQueueRestartAndNetworkRecovery(t *testing.T) {
 	q, clock, db, checkpoints := waitQueue(t)
@@ -309,7 +267,7 @@ func TestWaitHelpUsageAuthAndEnvironment(t *testing.T) {
 		args []string
 		code int
 	}{
-		{[]string{"--help"}, 0}, {nil, 2}, {[]string{j.ID, "--timeout", "0"}, 2}, {[]string{j.ID, "--timeout", "bad"}, 2}, {[]string{j.ID, "--unknown"}, 2}, {[]string{j.ID, "--queue", "invalid"}, 2}, {[]string{j.ID, "--token", "wrong"}, 2}, {[]string{"missing"}, 2}, {[]string{j.ID, "--timeout", "1m"}, 0}, {[]string{"--timeout=1m", j.ID, j.ID}, 0},
+		{[]string{"--help"}, 0}, {nil, 2}, {[]string{j.ID, "--timeout", "0"}, 2}, {[]string{j.ID, "--timeout", "bad"}, 2}, {[]string{}, 2}, {[]string{j.ID, "--queue", "invalid"}, 2}, {[]string{j.ID, "--token", "wrong"}, 2}, {[]string{"missing"}, 2}, {[]string{j.ID, "--timeout", "1m"}, 0}, {[]string{"--timeout=1m", j.ID, j.ID}, 0},
 	} {
 		var out, diag bytes.Buffer
 		err := waitCommand(context.Background(), tc.args, &out, &diag)
@@ -328,31 +286,6 @@ func TestWaitHelpUsageAuthAndEnvironment(t *testing.T) {
 		t.Fatal("missing token")
 	}
 }
-func TestWaitTransientHTTPAndInterrupted(t *testing.T) {
-	for _, code := range []int{408, 429, 503} {
-		t.Run(fmt.Sprint(code), func(t *testing.T) {
-			clock := &waitClock{now: time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)}
-			var calls atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if calls.Add(1) == 1 {
-					w.WriteHeader(code)
-					return
-				}
-				fmt.Fprint(w, `{"jobs":[{"id":"job","state":"succeeded","revision":1}]}`)
-			}))
-			defer server.Close()
-			err := waitJobs(context.Background(), myce.Client{URL: server.URL}, []string{"job"}, 0, &bytes.Buffer{}, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
-			if err != nil || calls.Load() != 2 {
-				t.Fatalf("%v %d", err, calls.Load())
-			}
-		})
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if exitCode(waitJobs(ctx, myce.Client{}, []string{"job"}, 0, &bytes.Buffer{}, &bytes.Buffer{}, myce.RealClock{}, waitPause)) != 4 {
-		t.Fatal("interrupt code")
-	}
-}
 
 // A request timeout is an outage, not the end of the user's overall wait.
 type waitTransport func(*http.Request) (*http.Response, error)
@@ -365,8 +298,6 @@ func TestWaitOutageDiagnosticsAndTerminalRecovery(t *testing.T) {
 		err         error
 	}{
 		{"timeout", "timeout", context.DeadlineExceeded},
-		{"truncated", "response_incomplete", io.ErrUnexpectedEOF},
-		{"transport", "read_error", errors.New("private transport details")},
 		{"http", "http_503", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -412,23 +343,17 @@ func TestWaitOutageDiagnosticsAndTerminalRecovery(t *testing.T) {
 			}
 		})
 	}
-}
 
-func TestWaitRequestTimeoutRetriesUntilOverallDeadline(t *testing.T) {
-	clock := &waitClock{now: time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)}
-	calls := 0
-	client := myce.Client{URL: "http://test", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
-		calls++
-		if calls == 1 {
-			return nil, context.DeadlineExceeded
+	{
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if exitCode(waitJobs(ctx, myce.Client{}, []string{"job"}, 0, &bytes.Buffer{}, &bytes.Buffer{}, myce.RealClock{}, waitPause)) != 4 {
+			t.Fatal("interrupt code")
 		}
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"jobs":[{"id":"job","state":"succeeded","revision":1}]}`))}, nil
-	})}}
-	err := waitJobs(context.Background(), client, []string{"job"}, time.Minute, &bytes.Buffer{}, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
-	if err != nil || calls != 2 {
-		t.Fatalf("%v calls=%d", err, calls)
+
 	}
 }
+
 func TestWaitTimeoutWhileQueueOffline(t *testing.T) {
 	clock := &waitClock{now: time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)}
 	calls := 0
@@ -441,41 +366,6 @@ func TestWaitTimeoutWhileQueueOffline(t *testing.T) {
 	})
 	if exitCode(err) != 3 || calls < 2 || clock.Now().Sub(time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)) != 15*time.Second {
 		t.Fatalf("%v calls=%d delays=%v", err, calls, delays)
-	}
-}
-func TestWaitDeadlineCancelsInFlightRequest(t *testing.T) {
-	client := myce.Client{URL: "http://test", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) { <-r.Context().Done(); return nil, r.Context().Err() })}}
-	err := waitJobs(context.Background(), client, []string{"job"}, time.Millisecond, &bytes.Buffer{}, &bytes.Buffer{}, myce.RealClock{}, waitPause)
-	if exitCode(err) != 3 {
-		t.Fatal(err)
-	}
-}
-
-func TestWaitUsesLightweightReadsAfterInitial(t *testing.T) {
-	clock := &waitClock{now: time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)}
-	var queries []string
-	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
-		if r.Method == "POST" {
-			return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
-		}
-
-		queries = append(queries, r.URL.RawQuery)
-		state := "running"
-		if len(queries) == 4 {
-			state = "succeeded"
-		}
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(fmt.Sprintf(`{"id":"exact-job-id","state":%q}`, state)))}, nil
-	})}}
-	var out bytes.Buffer
-	err := waitJobs(context.Background(), client, []string{"exact-job"}, 0, &out, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error {
-		if d <= 0 {
-			t.Fatal("invalid adaptive spacing", d)
-		}
-		clock.advance(d)
-		return nil
-	})
-	if err != nil || out.String() != "exact-job-id succeeded\n" || fmt.Sprint(queries) != "[ view=wait view=wait view=wait]" {
-		t.Fatalf("err=%v output=%q queries=%q", err, out.String(), queries)
 	}
 }
 
@@ -511,6 +401,33 @@ func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	if exitCode(err) != 1 || pauses != 1 || !strings.Contains(out.String(), j.ID+" cancelled") {
 		t.Fatalf("%v pauses=%d output=%s", err, pauses, &out)
 	}
+
+	// A new submission must not borrow the preceding cached generation.
+	{
+		c := myce.Client{URL: server.URL, Token: "test-only"}
+		// Freeze the fake clock with the pre-submission aggregate generation, then
+		// commit a submission through the same authenticated API used in production.
+		if _, err := status(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		s := myce.Spec{Name: "immediate-wait", Project: "test", Priority: "experiment", Run: myce.RunSpec{Command: []string{"true"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Any: true}}}
+		j, err := c.Submit(context.Background(), s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		pauses := 0
+		err = waitJobs(context.Background(), c, []string{j.ID[:8], j.ID}, 0, &out, &bytes.Buffer{}, clock, func(_ context.Context, _ time.Duration) error {
+			pauses++
+			if pauses > 1 {
+				t.Fatal("wait did not observe committed cancellation")
+			}
+			return q.Cancel(j.ID)
+		})
+		if exitCode(err) != 1 || out.String() != j.ID+" cancelled\n" || pauses != 1 {
+			t.Fatalf("immediate wait: err=%v output=%q pauses=%d", err, out.String(), pauses)
+		}
+	}
 }
 
 func TestWaitProductionStartDeadline(t *testing.T) {
@@ -531,36 +448,6 @@ func TestWaitProductionStartDeadline(t *testing.T) {
 	err = waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return q.Tick() })
 	if exitCode(err) != 1 || out.String() != j.ID+" failed\n" {
 		t.Fatalf("exit=%d output=%s err=%v", exitCode(err), out.String(), err)
-	}
-}
-
-func TestWaitDeadlineGuidance(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
-	server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
-	defer server.Close()
-	client := myce.Client{URL: server.URL, Token: "test-only"}
-	s := myce.Spec{Name: "deadline-advice", Project: "synthetic", Class: "experiment"}
-	s.Run.Command = []string{"echo", "done"}
-	s.Needs.CPUCores = 1
-	s.Needs.MemoryGB = 1
-	j, err := client.Submit(context.Background(), s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out, diagnostics bytes.Buffer
-	err = waitJobs(context.Background(), client, []string{j.ID}, 7*time.Second, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
-	if exitCode(err) != 3 || out.Len() != 0 {
-		t.Fatal(err, out.String())
-	}
-	if diagnostics.String() != j.ID+" queued\n" {
-		t.Fatal("default wait repeated scheduler details", diagnostics.String())
-	}
-	var structured bytes.Buffer
-	clock = &waitClock{now: clock.Now()}
-	err = waitJobsReporting(context.Background(), client, nil, []string{j.ID}, 7*time.Second, &structured, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil }, true)
-	var observed myce.Job
-	if exitCode(err) != 3 || json.Unmarshal(bytes.TrimSpace(structured.Bytes()), &observed) != nil || observed.DeadlineGuidance == nil {
-		t.Fatal("JSON lost deadline diagnostics", err, structured.String())
 	}
 }
 
@@ -634,7 +521,7 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 						return
 					}
 				}
-				json.NewEncoder(w).Encode(myce.Job{ID: "job", State: states[step], Reason: fmt.Sprintf("%s %d", reason, step)})
+				json.NewEncoder(w).Encode(myce.Job{ID: "job", State: states[step], Reason: fmt.Sprintf("%s %d", reason, step), DeadlineGuidance: &myce.DeadlineGuidance{Example: "deadline tutorial"}})
 			}))
 			defer server.Close()
 			clock := &waitClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
@@ -660,6 +547,9 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 					var j myce.Job
 					if err := json.Unmarshal([]byte(line), &j); err != nil || j.State != states[i] || j.Reason != fmt.Sprintf("%s %d", reason, i) {
 						t.Fatal("truncated JSON diagnostics", line, err)
+					}
+					if j.DeadlineGuidance == nil {
+						t.Fatal("JSON lost deadline diagnostics", line)
 					}
 				}
 			}

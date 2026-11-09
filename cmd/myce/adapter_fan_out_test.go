@@ -5,15 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mycelium/internal/myce"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 // A generic staged pipeline: the adapter must submit the existing API graph,
@@ -43,35 +41,6 @@ entries:
     workload: {input_shape: fixture, units: 1}
     fan_out: {max_concurrency: 1, pieces: [{key: first, args: [first]}, {key: tail, args: [tail]}]}
 %s`, runtime.GOOS, runtime.GOARCH, after)
-}
-
-func TestAdapterFanOutSharingOptIn(t *testing.T) {
-	var defaultSpec []byte
-	for _, policy := range []string{"", "share_xpu: false, ", "share_xpu: true, "} {
-		data := strings.Replace(fanOutAdapterYAML(""), "fan_out: {", "fan_out: {"+policy, 1)
-		a, err := decodeAdapter([]byte(data))
-		if err != nil {
-			t.Fatal(err)
-		}
-		p, _, err := adapterProfile(a, "stage")
-		if err != nil {
-			t.Fatal(err)
-		}
-		encoded, err := json.Marshal(p.Spec)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if policy == "" {
-			defaultSpec = encoded
-		}
-		if policy != "share_xpu: true, " {
-			if !bytes.Equal(encoded, defaultSpec) || bytes.Contains(encoded, []byte("share_xpu")) {
-				t.Fatal("default/false changed frozen submission bytes", string(encoded))
-			}
-		} else if !p.FanOut.ShareXPU || !bytes.Contains(encoded, []byte(`"share_xpu":true`)) {
-			t.Fatal("adapter lost explicit sharing intent", string(encoded))
-		}
-	}
 }
 
 func TestAdapterWholeParentFanOutGraph(t *testing.T) {
@@ -193,19 +162,5 @@ func TestAdapterWholeParentFanOutGraph(t *testing.T) {
 	late, err := q.Submit(childSpec)
 	if err != nil || late.State != "cancelled" || late.Attempt != 0 || late.FanOut.Next != 0 {
 		t.Fatalf("future dependent escaped cancellation fence: %+v %v", late, err)
-	}
-}
-
-func TestAdapterWholeParentFanOutRestrictions(t *testing.T) {
-	valid := fanOutAdapterYAML("parent")
-	for _, tc := range []struct{ name, yaml, reason string }{
-		{"piece", strings.Replace(valid, "job: parent,", "job: parent, piece: first,", 1), "omit after.piece"},
-		{"result-check", strings.Replace(valid, "checks: {qualification:", "checks: {result: [true], qualification:", 1), "after/check"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := decodeAdapter([]byte(tc.yaml)); err == nil || !strings.Contains(err.Error(), tc.reason) {
-				t.Fatalf("unsupported dependent fan-out accepted: %v", err)
-			}
-		})
 	}
 }

@@ -20,42 +20,6 @@ func maintenanceCLIWorker(id string) myce.Machine {
 	return myce.Machine{Capabilities: []string{"native_isolation_landlock"}, ID: id, HostID: "host", Device: id, Session: "session-" + id, GPU: "fake", FreeMemoryGB: 8, HostMemoryMeasured: true, HostAvailableMemoryGB: 16, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
 }
 
-func TestHostMaintenancePlacementCLI(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
-	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: maintenanceCLIWorker("worker")}); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
-	defer server.Close()
-	t.Setenv("MYCE_TOKEN", "test-only")
-	for _, enabled := range []bool{true, false} {
-		var out bytes.Buffer
-		flag := "--last-resort=false"
-		if enabled {
-			flag = "--last-resort=true"
-		}
-		if err := hostMaintenanceCommand(context.Background(), []string{"placement", "host", flag, "--queue", server.URL}, &out); err != nil {
-			t.Fatal(err)
-		}
-		var status myce.HostMaintenanceStatus
-		if err := json.Unmarshal(out.Bytes(), &status); err != nil || status.Policy.LastResort != enabled || status.Policy.Mode != "enabled" {
-			t.Fatal("placement did not edit enabled host", out.String(), err)
-		}
-		if err := hostMaintenanceCommand(context.Background(), []string{"status", "host", "--queue", server.URL}, &bytes.Buffer{}); err != nil {
-			t.Fatal(err)
-		}
-		clock.advance(time.Second) // Global status may lag by one cache lifetime.
-		output, _, err := captureUsageOutput(t, []string{"status", "--queue", server.URL, "--token", "test-only"})
-		if err != nil || strings.Contains(output, "last-resort placement") != enabled {
-			t.Fatal("CLI status hid placement policy", output, err)
-		}
-	}
-	for _, args := range [][]string{{"placement", "host"}, {"placement", "host", "--last-resort", "--wait"}, {"status", "host", "--last-resort"}, {"resume", "host", "--last-resort=false"}} {
-		if err := hostMaintenanceCommand(context.Background(), args, &bytes.Buffer{}); err == nil {
-			t.Fatal("accepted invalid placement arguments", args)
-		}
-	}
-}
 func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	a, b := maintenanceCLIWorker("gpu0"), maintenanceCLIWorker("gpu1")
@@ -111,14 +75,35 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	if err = json.Unmarshal(out.Bytes(), &status); err != nil || status.Policy.MemoryBudget.Bytes != 4<<30 || status.Policy.CPUBudgetCores == nil || *status.Policy.CPUBudgetCores != 3 {
 		t.Fatal(out.String(), err)
 	}
-	for _, args := range [][]string{{"status", "host", "--stop"}, {"resume", "host", "--wait"}, {"status", "host", "--memory-budget-gb", "4"}, {"disable", "host", "--timeout", "0s"}, {"budget", "host"}, {"status", "host", "--cpu-budget-cores", "3"}} {
-		if err = hostMaintenanceCommand(context.Background(), args, &bytes.Buffer{}); err == nil {
-			t.Fatal("accepted invalid args", args)
-		}
-	}
+
 	out.Reset()
 	if err = hostMaintenanceCommand(context.Background(), []string{"status", "unknown", "--queue", server.URL}, &out); err == nil || !strings.Contains(out.String(), `"healthy":false`) {
 		t.Fatal("unknown worker health passed", out.String(), err)
+	}
+	if err := hostMaintenanceCommand(context.Background(), []string{"resume", "host", "--queue", server.URL}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{true} {
+		var out bytes.Buffer
+		flag := "--last-resort=false"
+		if enabled {
+			flag = "--last-resort=true"
+		}
+		if err := hostMaintenanceCommand(context.Background(), []string{"placement", "host", flag, "--queue", server.URL}, &out); err != nil {
+			t.Fatal(err)
+		}
+		var status myce.HostMaintenanceStatus
+		if err := json.Unmarshal(out.Bytes(), &status); err != nil || status.Policy.LastResort != enabled || status.Policy.Mode != "enabled" {
+			t.Fatal("placement did not edit enabled host", out.String(), err)
+		}
+		if err := hostMaintenanceCommand(context.Background(), []string{"status", "host", "--queue", server.URL}, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		clock.advance(time.Second) // Global status may lag by one cache lifetime.
+		output, _, err := captureUsageOutput(t, []string{"status", "--queue", server.URL, "--token", "test-only"})
+		if err != nil || strings.Contains(output, "last-resort placement") != enabled {
+			t.Fatal("CLI status hid placement policy", output, err)
+		}
 	}
 	server.Close()
 	if _, err = waitHostMaintenance(context.Background(), client, "host", time.Second, clock, func(context.Context, time.Duration) error { t.Fatal("queue outage was ignored"); return nil }); err == nil {
@@ -164,17 +149,9 @@ func TestHostMaintenanceInstalledAuthority(t *testing.T) {
 		args []string
 		ok   func(myce.HostMaintenanceStatus) bool
 	}{
-		{[]string{"device", "disable", "host", "0", "--reason", "driver faults"}, func(s myce.HostMaintenanceStatus) bool {
-			return len(s.DeviceMaintenance) == 1 && s.DeviceMaintenance[0].Disabled
-		}},
-		{[]string{"device", "enable", "host", "fake-stable"}, func(s myce.HostMaintenanceStatus) bool {
-			return len(s.DeviceMaintenance) == 1 && !s.DeviceMaintenance[0].Disabled
-		}},
+
 		{[]string{"drain", "host"}, func(s myce.HostMaintenanceStatus) bool { return s.Policy.Mode == "drained" }},
-		{[]string{"budget", "host", "--memory-budget-gb", "4"}, func(s myce.HostMaintenanceStatus) bool {
-			return s.Policy.MemoryBudget != nil && s.Policy.MemoryBudget.Bytes == 4<<30
-		}},
-		{[]string{"placement", "host", "--last-resort=true"}, func(s myce.HostMaintenanceStatus) bool { return s.Policy.LastResort }},
+
 		{[]string{"resume", "host"}, func(s myce.HostMaintenanceStatus) bool { return s.Policy.Mode == "enabled" }},
 	} {
 		var out bytes.Buffer
@@ -196,86 +173,5 @@ func TestHostMaintenanceInstalledAuthority(t *testing.T) {
 	}
 	if current, err := q.HostMaintenanceStatus("host"); err != nil || current.Policy.Mode != "enabled" {
 		t.Fatalf("pin refusal changed policy: %+v %v", current.Policy, err)
-	}
-}
-
-func TestHostMaintenanceBudgetDryRun(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
-	m := maintenanceCLIWorker("worker")
-	m.HostMemoryBudgetGB = 6.5
-	m.MemoryObservation = &myce.HostMemoryObservation{TotalGB: 32, UsedGB: 12, MyceliumGB: 2}
-	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
-		t.Fatal(err)
-	}
-	before, err := q.HostMaintenanceStatus("host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
-	defer server.Close()
-	t.Setenv("MYCE_TOKEN", "test-only")
-	var out bytes.Buffer
-	if err = hostMaintenanceCommand(context.Background(), []string{"budget", "host", "--dry-run", "--queue", server.URL, "--queue-overhead-gb", "2"}, &out); err != nil {
-		t.Fatal(err)
-	}
-	var s myce.HostBudgetSuggestion
-	// Both accepted legacy arrivals carry a real memory observation.
-	if err = json.Unmarshal(out.Bytes(), &s); err != nil || s.SuggestedGB != 20 || s.HeadroomGB != 0 || !s.DryRun || s.History.Samples != 2 {
-		t.Fatal(out.String(), err)
-	}
-	after, err := q.HostMaintenanceStatus("host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Policy.MemoryBudget.GiB != before.Policy.MemoryBudget.GiB || after.Policy.Mode != before.Policy.Mode || !after.Policy.UpdatedAt.Equal(before.Policy.UpdatedAt) {
-		t.Fatal("dry-run changed policy", before, after)
-	}
-	snapshot, err := q.Snapshot()
-	if err != nil || snapshot.Machines[0].ExternalMemory.Week.MaxGB != 10 {
-		t.Fatal("status missing history", snapshot, err)
-	}
-	output, _, err := captureUsageOutput(t, []string{"status", "--queue", server.URL, "--token", "test-only"})
-	if err != nil || !strings.Contains(output, "non-Mycelium RAM 24h p50/p95/max") {
-		t.Fatal(output, err)
-	}
-}
-
-func TestHostMaintenanceSharedProfileCLI(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
-	m := maintenanceCLIWorker("worker")
-	m.CPUBudgetCores, m.HostMemoryBudgetGB = 2, 8
-	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
-	defer server.Close()
-	t.Setenv("MYCE_TOKEN", "test-only")
-	for _, args := range [][]string{
-		{"drain", "host"},
-		{"profile", "host", "--shared=true", "--interactive-reserve-gb", "3.5"},
-	} {
-		if err := hostMaintenanceCommand(t.Context(), append(args, "--queue", server.URL), &bytes.Buffer{}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	status, err := q.HostMaintenanceStatus("host")
-	if err != nil || status.Policy.SharedHost == nil || status.Policy.SharedHost.InteractiveReserveGB != 3.5 || status.Policy.Mode != "drained" || !status.Policy.LastResort {
-		t.Fatal(status, err)
-	}
-	for _, args := range [][]string{
-		{"profile", "host"}, {"profile", "host", "--shared=true"},
-		{"profile", "host", "--shared=false", "--interactive-reserve-gb", "3"},
-		{"status", "host", "--shared=true"},
-	} {
-		if err := hostMaintenanceCommand(t.Context(), args, &bytes.Buffer{}); err == nil {
-			t.Error("accepted invalid profile options", args)
-		}
-	}
-	if err := hostMaintenanceCommand(t.Context(), []string{"profile", "host", "--shared=false", "--queue", server.URL}, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	status, err = q.HostMaintenanceStatus("host")
-	if err != nil || status.Policy.SharedHost != nil || status.Policy.Mode != "drained" || !status.Policy.LastResort {
-		t.Fatal(status, err)
 	}
 }

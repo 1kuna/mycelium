@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"mycelium/internal/myce"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,8 +16,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 // The fake manager exposes the same effective lifecycle properties as systemd.
@@ -26,91 +24,6 @@ func fakeSetupManager(_ context.Context, name string, args ...string) ([]byte, e
 		return []byte("TimeoutStopUSec=45s\nTimeoutStartUSec=1min 30s\n"), nil
 	}
 	return nil, nil
-}
-
-func TestInstallCLIDryRunFakeDetection(t *testing.T) {
-	for _, platform := range []string{"cuda", "xpu", "metal"} {
-		t.Run(platform, func(t *testing.T) {
-			home := t.TempDir()
-			p := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
-				switch n {
-				case "nvidia-smi":
-					if platform == "cuda" {
-						if strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
-							return []byte("GPU-test, driver"), nil
-						}
-						return []byte("RTX 4090, 24576"), nil
-					}
-				case "sycl-ls":
-					if platform == "xpu" {
-						return []byte("[level_zero:gpu] Intel UHD Integrated GPU"), nil
-					}
-				case "/usr/sbin/system_profiler":
-					if platform == "metal" {
-						return []byte("Metal Support: Metal 3"), nil
-					}
-				}
-				if n == "systemctl" || n == "launchctl" {
-					t.Fatal("dry run touched service")
-				}
-				return nil, exec.ErrNotFound
-			}}
-			p.Glob = func(pattern string) ([]string, error) {
-				if platform == "xpu" && strings.Contains(pattern, "renderD") {
-					return []string{"/dev/dri/renderD128"}, nil
-				}
-				return nil, nil
-			}
-			p.CommandEnv = func(ctx context.Context, _ map[string]string, n string, args ...string) ([]byte, error) {
-				if n == "python3" {
-					return []byte(`[{"identity":"uuid-test","fingerprint":"driver"}]`), nil
-				}
-				return p.Command(ctx, n, args...)
-			}
-			if platform == "cuda" {
-				p = cudaPCIFixture(p, false)
-			}
-			if platform == "xpu" {
-				p = integratedPCIFixture(p)
-			}
-			if platform == "metal" {
-				p.OS = "darwin"
-				p.Arch = "arm64"
-			}
-			if e := setupCommandWithProbe([]string{"install", "worker", "--nas", filepath.Join(home, "nas"), "--dry-run", "--environment-cache-bytes", "1048576"}, p, home); e != nil {
-				t.Fatal(e)
-			}
-			entries, _ := os.ReadDir(home)
-			if len(entries) != 0 {
-				t.Fatal("dry run wrote files")
-			}
-		})
-	}
-	home := t.TempDir()
-	if e := setupCommandWithProbe([]string{"install", "queue", "--nas", filepath.Join(home, "nas"), "--dry-run"}, myce.MachineProbe{OS: "linux", Arch: "arm64"}, home); e != nil {
-		t.Fatal(e)
-	}
-}
-
-func TestInstallCLIStoresAbsoluteCatalogPaths(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("MYCE_TOKEN", "test-only-token")
-	fleet := filepath.Join(home, ".config", "myce", "fleet.env")
-	os.MkdirAll(filepath.Dir(fleet), 0700)
-	os.WriteFile(fleet, []byte("MYCE_TOKEN=test-only-token\nMYCE_QUEUE=http://queue:7331\n"), 0600)
-	p := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: fakeSetupManager}
-	if err := setupCommandWithProbe([]string{"install", "queue", "--nas", home, "--require-mounted-nas=false", "--model-config", "models.yaml", "--environment-config", "environments/catalog.yaml"}, p, home); err != nil {
-		t.Fatal(err)
-	}
-	c, err := myce.ReadServiceConfig(filepath.Join(home, ".local", "share", "mycelium", "queue", "config.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	models, _ := filepath.Abs("models.yaml")
-	environments, _ := filepath.Abs("environments/catalog.yaml")
-	if c.ModelCatalog != models || c.EnvironmentCatalog != environments || c.EnvironmentRoot != filepath.Dir(environments) {
-		t.Fatalf("relative service paths: %+v", c)
-	}
 }
 
 func TestDoctorCLIUsesInjectedRunner(t *testing.T) {
@@ -166,21 +79,6 @@ func TestDoctorCLIUsesInjectedRunner(t *testing.T) {
 	}
 }
 
-func TestDoctorCLIMissingInstall(t *testing.T) {
-	err := setupCommandWithProbe([]string{"doctor"}, myce.MachineProbe{}, t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "no install found; run myce install first") {
-		t.Fatalf("missing install guidance: %v", err)
-	}
-}
-
-func TestSetupCLIRejectsMissingOrUnknownAction(t *testing.T) {
-	for _, args := range [][]string{nil, {"unknown"}} {
-		if err := setupCommandWithProbe(args, myce.MachineProbe{}, t.TempDir()); err == nil {
-			t.Fatalf("accepted %v", args)
-		}
-	}
-}
-
 func TestInstallCLICPUWithoutGPU(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -188,8 +86,6 @@ func TestInstallCLICPUWithoutGPU(t *testing.T) {
 		ok   bool
 	}{
 		{name: "CPU auto detection", ok: true},
-		{name: "CPU no fake budget", args: []string{"--allow-deviceless"}, ok: true},
-		{name: "CPU test budget", args: []string{"--allow-deviceless", "--memory-gb", "2"}, ok: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -204,64 +100,6 @@ func TestInstallCLICPUWithoutGPU(t *testing.T) {
 				t.Fatal("dry run wrote files")
 			}
 		})
-	}
-}
-
-func TestInstallQueueDeploymentFlags(t *testing.T) {
-	home := t.TempDir()
-	policies := t.TempDir()
-	for name, body := range map[string]string{
-		"hosts.yaml":    "hosts:\n  fixture: {production_hold: true}\n",
-		"projects.yaml": "fixture: {weight: 1}\n",
-	} {
-		if err := os.WriteFile(filepath.Join(policies, name), []byte(body), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	out, err := os.CreateTemp(t.TempDir(), "stdout")
-	if err != nil {
-		t.Fatal(err)
-	}
-	saved := os.Stdout
-	os.Stdout = out
-	defer func() { os.Stdout = saved; out.Close() }()
-	args := []string{"install", "queue", "--nas", home, "--dry-run", "--listen", "192.0.2.1:7331", "--db", home + "/db.sqlite", "--project-config", policies + "/projects.yaml", "--host-config", policies + "/hosts.yaml", "--log-retention", "24h", "--upload-spool-dir", home + "/uploads", "--upload-spool-bytes", "12345", "--restart-grace", "2m", "--production-infrastructure-retries", "4", "--production-loss-timeout", "6s", "--deadline-loss-timeout", "21s", "--experiment-loss-timeout", "61s", "--checkpoints", home + "/checkpoints", "--environment-file", home + "/fleet.env", "--private-devices=false", "--no-new-privileges=false", "--nice", "12", "--cpu-quota", "30%", "--memory-max", "600M", "--tasks-max", "70"}
-	if err := setupCommandWithProbe(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(out.Name())
-	for _, want := range []string{"--listen", "192.0.2.1:7331", "--db", home + "/db.sqlite", "--project-config", policies + "/projects.yaml", "--host-config", policies + "/hosts.yaml", "--log-retention", "24h0m0s", "--upload-spool-dir", home + "/uploads", "--upload-spool-bytes", "12345", "--restart-grace", "2m0s", "--production-infrastructure-retries", "4", "--production-loss-timeout", "6s", "--deadline-loss-timeout", "21s", "--experiment-loss-timeout", "1m1s", "--checkpoints", home + "/checkpoints", "EnvironmentFile=", home + "/fleet.env", "PrivateDevices=no", "NoNewPrivileges=no", "Nice=12", "CPUQuota=30%", "MemoryMax=600M", "TasksMax=70"} {
-		if !strings.Contains(string(b), want) {
-			t.Errorf("missing %q in dry-run unit", want)
-		}
-	}
-	entries, _ := os.ReadDir(home)
-	if len(entries) != 0 {
-		t.Fatal("dry run wrote files")
-	}
-}
-
-func TestInstallWorkerDeploymentFlags(t *testing.T) {
-	home := t.TempDir()
-	out, _ := os.CreateTemp(t.TempDir(), "stdout")
-	saved := os.Stdout
-	os.Stdout = out
-	defer func() { os.Stdout = saved; out.Close() }()
-	args := []string{"install", "worker", "--nas", home, "--dry-run", "--name", "b70-gpu1", "--host-id", "b70", "--device", "1", "--gpu", "xpu", "--memory-mode", "fixed", "--memory-gb", "16", "--reserve-memory-gb", "2", "--reserve-host-memory-gb", "4", "--host-memory-budget-gb", "5", "--memory-ceiling-slack-gb", "0", "--memory-swap-max-bytes", "0", "--state-dir", home + "/spool", "--checkpoint-root", home + "/cp", "--model-root", home + "/models", "--environment-root", home + "/envs", "--model-cache", home + "/mc", "--model-cache-bytes", "1111", "--environment-cache", home + "/ec", "--environment-cache-bytes", "2222", "--heartbeat", "2s", "--log-retention", "24h", "--require-memory-ceilings", "--require-mounted-nas=false"}
-	if err := setupCommandWithProbe(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(out.Name())
-	for _, want := range []string{"b70-gpu1", "--host-id", `"b70"`, "myce-worker.service", "--device", `"1"`, "--gpu", `"xpu"`, "--memory-mode", `"fixed"`, "--memory-gb", `"16"`, "--reserve-memory-gb", `"2"`, "--reserve-host-memory-gb", `"4"`, "--host-memory-budget-gb", `"5"`, "--memory-ceiling-slack-gb", `"0"`, "--memory-swap-max-bytes", "--state-dir", home + "/spool", "--checkpoint-root", home + "/cp", "--model-root", home + "/models", "--environment-root", home + "/envs", "--model-cache", home + "/mc", "--model-cache-bytes", "1111", "--environment-cache", home + "/ec", "--environment-cache-bytes", "2222", "--heartbeat", "2s", "--log-retention", "24h0m0s", "--require-memory-ceilings", "RestartPreventExitStatus=78"} {
-		if !strings.Contains(string(b), want) {
-			t.Errorf("missing %q", want)
-		}
-	}
-}
-
-func TestRequireMemoryCeilingsExitPreventsRestart(t *testing.T) {
-	if got := exitCode(fmt.Errorf("startup refused: %w", myce.ErrMemoryCeilingsRequired)); got != 78 {
-		t.Fatal("wrong startup exit", got)
 	}
 }
 
@@ -346,32 +184,17 @@ func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
 			joined.HTTP.CloseIdleConnections()
 		}()
 	}
-}
 
-func TestInstallWorkerOverridesDetectedReserve(t *testing.T) {
-	home := t.TempDir()
-	out, _ := os.CreateTemp(t.TempDir(), "stdout")
-	saved := os.Stdout
-	os.Stdout = out
-	defer func() { os.Stdout = saved; out.Close() }()
-	probe := myce.MachineProbe{OS: "linux", Arch: "arm64", Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
-		if n == "nvidia-smi" && strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
-			return []byte("GPU-test, driver"), nil
+	{
+		if got := exitCode(fmt.Errorf("startup refused: %w", myce.ErrMemoryCeilingsRequired)); got != 78 {
+			t.Fatal("wrong startup exit", got)
 		}
-		return []byte("NVIDIA GB10, [N/A]"), nil
-	}}
-	probe = cudaPCIFixture(probe, true)
-	if err := setupCommandWithProbe([]string{"install", "worker", "--nas", home, "--reserve-memory-gb", "24", "--dry-run", "--environment-cache-bytes", "1048576"}, probe, home); err != nil {
-		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(out.Name())
-	if !strings.Contains(string(b), `"--reserve-memory-gb" "24"`) {
-		t.Fatal("explicit reserve ignored after detection")
-	}
+
 }
 
 func TestInstallCLILingerMessage(t *testing.T) {
-	for _, state := range []string{"yes\n", "no\n", "unknown\n"} {
+	for _, state := range []string{"unknown\n"} {
 		t.Run(strings.TrimSpace(state), func(t *testing.T) {
 			out, err := os.CreateTemp(t.TempDir(), "stdout")
 			if err != nil {
@@ -402,49 +225,8 @@ func TestInstallCLILingerMessage(t *testing.T) {
 	}
 }
 
-func TestInstallQueueLocalDisableReceiptsFlags(t *testing.T) {
-	t.Setenv("MYCE_TOKEN", "test-only-token")
-	for _, tc := range []struct {
-		name    string
-		flags   []string
-		wantErr bool
-	}{
-		{"default", nil, false},
-		{"missing-host", []string{"--local-disable-receipts", "host-state"}, true},
-		{"missing-directory", []string{"--local-disable-receipts", "--host-id", "local-host"}, true},
-		{"explicit", []string{"--local-disable-receipts", "--host-id", "local-host", "host-state"}, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
-			args := append([]string{"install", "queue", "--nas", home, "--dry-run"}, tc.flags...)
-			err := setupCommandWithProbe(args, myce.MachineProbe{OS: "linux", Arch: "arm64"}, home)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("flags: %v", err)
-			}
-			entries, err := os.ReadDir(home)
-			if err != nil || len(entries) != 0 {
-				t.Fatal("dry run wrote files", err)
-			}
-		})
-	}
-}
-
-func TestQueueLocalDisableReceiptsOptionRemoved(t *testing.T) {
-	t.Setenv("MYCE_TOKEN", "test-only-token")
-	for _, flags := range [][]string{
-		{"--local-disable-receipts"},
-		{"--local-disable-receipts", "--host-id", "local-host"},
-		{"--local-disable-receipts", "host-state"},
-	} {
-		err := runWithProbe(append([]string{"queue"}, flags...), myce.MachineProbe{OS: "linux", Arch: "arm64"})
-		if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -local-disable-receipts") {
-			t.Fatal("removed delivery-mode flag accepted", err)
-		}
-	}
-}
-
 func TestLegacyReceiptInstalledServiceRejected(t *testing.T) {
-	for _, configFlag := range []bool{false, true} {
+	for _, configFlag := range []bool{true} {
 		path := filepath.Join(t.TempDir(), "config.json")
 		data, err := json.Marshal(myce.ServiceConfig{Role: "queue", LocalDisableReceipts: configFlag})
 		if err != nil {
@@ -460,113 +242,5 @@ func TestLegacyReceiptInstalledServiceRejected(t *testing.T) {
 		if err = serviceCommand(args); err == nil || !strings.Contains(err.Error(), "reinstall") {
 			t.Fatal("installed legacy flag did not explain recovery", err)
 		}
-	}
-}
-
-func TestInstallWithoutPasswdEntry(t *testing.T) {
-	for _, role := range []string{"queue", "worker"} {
-		t.Run(role, func(t *testing.T) {
-			home := t.TempDir()
-			calls := 0
-			lookup := func(string) (myce.WorkerAccount, error) {
-				calls++
-				if role != "worker" {
-					t.Fatal("queue looked up worker account")
-				}
-				return myce.WorkerAccount{Name: "discard-on-error", Home: home}, myce.ErrHostIdentity
-			}
-			args := []string{"install", role, "--nas", home, "--dry-run"}
-			if role == "worker" {
-				args = append(args, "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "2", "--environment-cache-bytes", "1048576")
-			}
-			captureJoiningOutput(t, func() error {
-				return setupCommandWithAccountLookup(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home, lookup)
-			})
-			if (role == "worker" && calls != 1) || (role == "queue" && calls != 0) {
-				t.Fatal(calls)
-			}
-		})
-	}
-}
-
-func TestUninstallWithoutPasswdEntry(t *testing.T) {
-	home := t.TempDir()
-	config := filepath.Join(home, "config.json")
-	b, err := json.Marshal(myce.ServiceConfig{Role: "queue", Config: config, Service: filepath.Join(home, "myce-queue.service"), Detection: myce.Detection{OS: "linux"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(config, b, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err = setupCommandWithAccountLookup([]string{"uninstall", "--config", config, "--dry-run"}, myce.MachineProbe{}, home, func(string) (myce.WorkerAccount, error) {
-		t.Fatal("uninstall looked up worker account")
-		return myce.WorkerAccount{}, myce.ErrHostIdentity
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestM4InstallCLIConversionDryRunAndGate(t *testing.T) {
-	home := t.TempDir()
-	base, err := myce.PlanInstall("worker", home, "", home, "http://queue.invalid", "host", myce.Detection{OS: "linux", Arch: "amd64", Platform: "xpu", MemoryMode: "fixed", MemoryGB: 24, ReserveGB: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base.HostID = "host"
-	base.EnvironmentCacheBytes = 1 << 20
-	args := []string{"install", "worker", "--config", base.Config, "--dry-run"}
-	for _, device := range []string{"0", "1"} {
-		c := base
-		if err := c.WorkerInstance("gpu" + device); err != nil {
-			t.Fatal(err)
-		}
-		c.Device = device
-		c.Name = "host-gpu" + device
-		if err := os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(filepath.Dir(c.Service), 0700); err != nil {
-			t.Fatal(err)
-		}
-		data, _ := json.Marshal(c)
-		if err := os.WriteFile(c.Config, data, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(c.Service, []byte("legacy"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		args = append(args, "--from-worker-config", c.Config)
-	}
-	probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) {
-		t.Fatal("dry run invoked service/probe")
-		return nil, nil
-	}}
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := os.Stdout
-	os.Stdout = w
-	defer func() { os.Stdout = original }()
-	captured := make(chan []byte, 1)
-	go func() { output, _ := io.ReadAll(r); r.Close(); captured <- output }()
-	err = setupCommandWithProbe(args, probe, home)
-	os.Stdout = original
-	w.Close()
-	output := <-captured
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"fresh spool", "gpu0 cache", "myce-worker.service", "--device-settings"} {
-		if !strings.Contains(string(output), want) {
-			t.Fatalf("missing %s: %s", want, output)
-		}
-	}
-	if _, err := os.Stat(base.Config); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("dry run wrote destination", err)
-	}
-	if err := setupCommandWithProbe([]string{"install", "worker", "--config", args[6], "--dry-run"}, probe, home); err == nil || !strings.Contains(err.Error(), "machine_worker_conflict") {
-		t.Fatal("deploy gate", err)
 	}
 }

@@ -290,4 +290,11 @@ func TestReleaseVerifiedAssemblySigning(t *testing.T) {
 			}
 		})
 	}
+
+	{
+		args := []string{"--expect-attempt-protocol", "wrong-protocol"}
+		if err := versionCommand(args); err == nil {
+			t.Fatal("wrong artifact accepted", args)
+		}
+	}
 }

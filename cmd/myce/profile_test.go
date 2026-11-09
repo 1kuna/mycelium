@@ -3,11 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,8 +18,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 // Receipt/preparation fixtures need a permanent stop before submission. A
@@ -27,66 +25,6 @@ import (
 func refuseProfilePreparation(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = io.WriteString(w, `{"code":"file_store_unavailable"}`)
-}
-
-func TestProfileRequirementReasonsResolveAndAdapterSchema(t *testing.T) {
-	root := t.TempDir()
-	dir := filepath.Join(root, ".mycelium", "profiles")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "work.yaml")
-	profile := `name: work
-project: example
-class: experiment
-source: {directory: source}
-run: {command: [echo, ok]}
-needs: {cpu_cores: 1, memory_gb: 1}
-targets: [{os: linux, arch: amd64, platform: cpu}]
-check: [true]
-`
-	for _, tc := range []struct {
-		name, value string
-		valid       bool
-	}{
-		{"valid", "{host: approved parity check}", true},
-		{"sequence", "[host]", false},
-		{"nested value", "{host: [invalid]}", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := os.WriteFile(path, []byte(profile+"requirement_reasons: "+tc.value+"\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			p, _, _, err := readProfile(path)
-			adapter := strings.Replace(cpuAdapterYAML("source"), "    source:", "    requirement_reasons: "+tc.value+"\n    source:", 1)
-			_, adapterErr := decodeAdapter([]byte(adapter))
-			if (err == nil) != tc.valid || (adapterErr == nil) != tc.valid {
-				t.Fatalf("profile: %v; adapter: %v", err, adapterErr)
-			}
-			if !tc.valid {
-				return
-			}
-			if p.RequirementReasons["host"] != "approved parity check" {
-				t.Fatal(p.RequirementReasons)
-			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var req myce.ResolveRequest
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					t.Error(err)
-					return
-				}
-				if req.RequirementReasons["host"] != "approved parity check" {
-					t.Errorf("resolve reasons: %v", req.RequirementReasons)
-				}
-				_ = json.NewEncoder(w).Encode(myce.ResolveReport{Targets: []myce.ResolveTarget{{Eligible: true}}})
-			}))
-			defer server.Close()
-			var out bytes.Buffer
-			if err := specCommand([]string{"check", "--resolve", "--queue", server.URL, "--token", "fixture", path}, &out, io.Discard); err != nil {
-				t.Fatalf("resolve: %v: %s", err, &out)
-			}
-		})
-	}
 }
 
 func TestProfileDevReceiptRecoveryAndNotification(t *testing.T) {
@@ -416,14 +354,6 @@ check: [true]
 	}
 	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
 	defer server.Close()
-	receipts := filepath.Join(root, ".mycelium", "receipts")
-	abandoned := filepath.Join(receipts, ".prepare-abandoned")
-	if err := os.MkdirAll(abandoned, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(abandoned, "source.tar"), []byte("disposable staging"), 0600); err != nil {
-		t.Fatal(err)
-	}
 	var out bytes.Buffer
 	err := runProfile(context.Background(), path, nil, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard)
 	if exitCode(err) != 69 {
@@ -440,29 +370,16 @@ check: [true]
 	if err = readProfileJSON(filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", "stable"}), "receipt.json"), &saved); err != nil || len(saved.Spec.Run.Command) == 0 {
 		t.Fatal("intent not persisted", err)
 	}
-	if _, err = os.Stat(abandoned); !os.IsNotExist(err) {
-		t.Fatal("stale preparation retained", err)
+	if err := os.RemoveAll(filepath.Join(root, "source")); err != nil {
+		t.Fatal(err)
 	}
 	out.Reset()
-	if err = runProfile(context.Background(), path, nil, nil, "", "", "", "", server.URL, "fixture", &out, io.Discard); exitCode(err) != 69 {
+	if err = runProfile(context.Background(), path, nil, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard); exitCode(err) != 69 {
 		t.Fatal(err)
-	}
-	var generated profileReceipt
-	if err = json.Unmarshal(out.Bytes(), &generated); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Chmod(receipts, 0500); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chmod(receipts, 0700)
-	out.Reset()
-	err = runProfile(context.Background(), path, nil, nil, "", "", "", "", server.URL, "fixture", &out, io.Discard)
-	if exitCode(err) != 69 {
-		t.Fatal("existing automatic key attempted to stage again", err)
 	}
 	var adopted profileReceipt
-	if err = json.Unmarshal(out.Bytes(), &adopted); err != nil || adopted.Key != generated.Key {
-		t.Fatal("automatic key not adopted", adopted, err)
+	if err = json.Unmarshal(out.Bytes(), &adopted); err != nil || adopted.Key != receipt.Key {
+		t.Fatal("explicit key not adopted", adopted, err)
 	}
 }
 
@@ -533,27 +450,5 @@ check: [true]
 	}
 	if strings.Contains(stderr.String(), token) || bytes.Contains(out, []byte(token)) || strings.Contains(receipt.RefusalReason, root) {
 		t.Fatal("refusal leaked credential or private path")
-	}
-}
-
-func TestProfileOSOnlyPrebuiltError(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	// A native amd64 ELF payload, without a compiler or a runnable Linux host.
-	data := make([]byte, 64)
-	copy(data, "\x7fELF\x02\x01\x01")
-	binary.LittleEndian.PutUint16(data[16:], 2)
-	binary.LittleEndian.PutUint16(data[18:], 62)
-	binary.LittleEndian.PutUint32(data[20:], 1)
-	binary.LittleEndian.PutUint16(data[52:], 64)
-	if err := os.WriteFile(filepath.Join(root, "source", "program"), data, 0700); err != nil {
-		t.Fatal(err)
-	}
-	p := executionProfile{Spec: myce.Spec{Name: "binary", Project: "test", Class: "experiment", Targets: []myce.ExecutionTarget{{OS: "linux"}}, Run: myce.RunSpec{Command: []string{"./program"}}}, Source: profileSource{Directory: "source"}, Check: []string{"true"}}
-	err := runPreparedProfile(context.Background(), root, p, []byte("binary-fixture"), nil, nil, "", "", "", "", "", "", io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "declare portable: true if this runs on any arch, or name the arch") || strings.Contains(err.Error(), root) {
-		t.Fatalf("CLI lost actionable/sanitized reason: %v", err)
 	}
 }

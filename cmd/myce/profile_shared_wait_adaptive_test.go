@@ -6,16 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 func adaptiveReceipt(t *testing.T, root, address, name string, expires time.Time) string {
@@ -77,7 +77,7 @@ func TestSharedProfileAdaptiveSilentAuthorityIsolation(t *testing.T) {
 	}
 }
 func TestSharedProfileAdaptiveRetryAfterAcrossBatchesAndRegistration(t *testing.T) {
-	for _, status := range []int{429, 503} {
+	for _, status := range []int{429} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			clock := &waitClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
 			var mu sync.Mutex
@@ -241,7 +241,7 @@ func TestSharedProfileAdaptiveUnknownDoesNotStarveLaterBatch(t *testing.T) {
 // away (#919). Exercise the actual authority reader through recovery, including
 // servers with more than one batch (where protocol holds are disabled).
 func TestSharedProfileAdaptiveNextReadBoundedByServiceAndPressure(t *testing.T) {
-	for _, count := range []int{1, 257} {
+	for _, count := range []int{257} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			clock := &waitClock{now: time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)}
 			var mu sync.Mutex

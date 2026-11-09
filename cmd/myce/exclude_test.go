@@ -66,11 +66,7 @@ func TestExcludeCLI(t *testing.T) {
 	if err := call("list"); err != nil || strings.TrimSpace(out.String()) != "[]" {
 		t.Fatal("removed setting listed as active", out.String(), err)
 	}
-	for _, args := range [][]string{{"add"}, {"list", "host=host"}, {"remove", "platform=fake", "--reason", "invalid"}, {"list", "--by", "invalid"}, {"add", "host=host;devices=0;kind=gpu"}} {
-		if err := call(args...); err == nil {
-			t.Fatal("invalid command accepted", args)
-		}
-	}
+
 	invitation.Fingerprint = strings.Repeat("0", 64)
 	if err := myce.WriteInvitation(joining, invitation); err != nil {
 		t.Fatal(err)

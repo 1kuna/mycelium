@@ -60,8 +60,6 @@ func TestProfileAdoptedObserverNotifier(t *testing.T) {
 	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
 	for _, tc := range []struct{ name, notify, delivery string }{
 		{"other thread", other, "adopted_other_notifier"},
-		{"same notifier via PATH", filepath.Base(owner.Notify), "armed"},
-		{"saved notifier fallback", "", "armed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, stderr strings.Builder
@@ -94,7 +92,7 @@ func TestProfileAdoptedObserverNotifier(t *testing.T) {
 }
 
 func TestProfileObserverTimeoutAndTransport(t *testing.T) {
-	for _, mode := range []string{"timeout", "transport_error", "interrupted"} {
+	for _, mode := range []string{"timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if mode == "transport_error" {

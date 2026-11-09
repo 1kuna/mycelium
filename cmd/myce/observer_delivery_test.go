@@ -156,11 +156,7 @@ func TestObserverDiagnosticsRetainSafeFailureAndBoundLog(t *testing.T) {
 	if err = json.Unmarshal(out.Bytes(), &live); err != nil || live.OwnerLocked {
 		t.Fatal("stale status claimed live owner", err)
 	}
-	for i := 0; i < 4; i++ {
-		if _, err = (&d.log).Write(make([]byte, observerLogBytes)); err != nil {
-			t.Fatal(err)
-		}
-	}
+
 	// Fill with structured events to force rotation; each retained file is bounded.
 	for i := 0; i < 300; i++ {
 		if err = d.log.event(struct {

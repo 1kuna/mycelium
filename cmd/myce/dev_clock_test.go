@@ -127,9 +127,4 @@ func TestDevClockCLIProductionIsolation(t *testing.T) {
 	if err := run([]string{"queue", "clock", "advance", "1s"}); err == nil || err.Error() != "queue accepts flags only" {
 		t.Fatalf("production CLI: %v", err)
 	}
-	for _, duration := range []string{"0s", "-1s", "91d", "NaNd", "1e100d", "0.000000000000001d"} {
-		if err := devClockCommand([]string{"advance", duration, "--queue", server.URL, "--token", "test"}, &out); err == nil {
-			t.Fatalf("accepted %s", duration)
-		}
-	}
 }

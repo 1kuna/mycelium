@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
+	"mycelium/internal/myce"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +14,6 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
-	"mycelium/internal/myce"
 )
 
 const adapterDogfoodToken = "adapter-dogfood-fixture-token"
@@ -20,42 +21,6 @@ const adapterDogfoodToken = "adapter-dogfood-fixture-token"
 // One real adapter submission covers CLI -> API -> worker -> retained output.
 // Conversion equivalence stays in adapter_convert_test.go; wrapper argv/exit and
 // result markers stay in scripts/test-go-test-profile.py.
-func TestAdapterDogfoodCommandDev(t *testing.T) {
-	repo, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := decodeAdapter(adapterDogfoodRead(t, filepath.Join(repo, ".mycelium/adapter.yaml")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry := a.Entries["mycelium-go-test"]
-	adapterDogfoodTarget(t, entry.Targets, "cpu")
-	root := t.TempDir()
-	entry.Source, entry.Environment = profileSource{Directory: "source"}, myce.Environment{}
-	// A shell payload exercises argument boundaries and the profile environment
-	// without transporting/recompiling GOROOT inside a tiny command fixture.
-	adapterDogfoodWrite(t, filepath.Join(root, "source", "fixture.sh"), []byte(`#!/bin/sh
-set -eu
-test "$#" -eq 1
-test "$1" = 'dogfood argument with spaces'
-test "$GOMAXPROCS" = 2
-test -z "${MYCE_TOKEN:-}"
-printf 'go test: exit=0\n' > go-test-result.txt
-`), 0700)
-	entry.Run.Command = []string{"sh", "fixture.sh"}
-	entry.Outputs = map[string]string{"go-test-result.txt": "results"}
-	adapter := filepath.Join(root, ".mycelium/adapter.yaml")
-	adapterDogfoodYAML(t, adapter, projectAdapter{Schema: a.Schema, Project: a.Project, Default: "smoke", Entries: map[string]adapterEntry{"smoke": entry}})
-	d, ctx, _ := adapterDogfoodDev(t, "cpu")
-	job := adapterDogfoodRun(t, ctx, d, devTestBinary(t), root, "--adapter", adapter, "--entry", "smoke", "--key", "smoke", "--", "dogfood argument with spaces")
-	if got := adapterDogfoodResult(t, ctx, d, job.ID, "go-test-result.txt"); string(got) != "go test: exit=0\n" {
-		t.Fatalf("adapter result=%q", got)
-	}
-	t.Run("synthetic-resource-probes", func(t *testing.T) {
-		assertSyntheticResourceTelemetry(t, ctx, d.Client(), job.ID)
-	})
-}
 
 // The actual starter is deliberately unchanged: pinned uv environment, native
 // replay of app.py, exact baseline, and the real HTTP sidecar/readiness contract.

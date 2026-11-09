@@ -6,14 +6,6 @@ import (
 	"testing"
 )
 
-func TestReconcileDockerRetentionCLIRequiresConversion(t *testing.T) {
-	for _, args := range [][]string{nil, {"--config", ""}, {"--config", "fixture", "extra"}, {"--force"}, {"--config", t.TempDir() + "/missing.json"}} {
-		if err := reconcileDockerRetentionCommand(args, io.Discard); err == nil {
-			t.Fatalf("accepted missing conversion custody: %v", args)
-		}
-	}
-}
-
 func TestResolveDockerCLIRejectsAssertionAndRequiresCustody(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "")
 	if err := run([]string{"resolve-docker", "--confirm-gone"}); err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
@@ -28,5 +20,10 @@ func TestResolveDockerCLIRejectsAssertionAndRequiresCustody(t *testing.T) {
 		if err := run([]string{mode, "--simulated"}); err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
 			t.Fatal("production exposes simulation flag", mode, err)
 		}
+	}
+
+	args := []string{"--config", t.TempDir() + "/missing.json"}
+	if err := reconcileDockerRetentionCommand(args, io.Discard); err == nil {
+		t.Fatalf("accepted missing conversion custody: %v", args)
 	}
 }

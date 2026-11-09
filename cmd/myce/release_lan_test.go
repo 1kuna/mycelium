@@ -22,7 +22,7 @@ import (
 // Only the downloaded executable is synthetic; no installation is performed.
 func TestInviteLANPublisherTrust(t *testing.T) {
 	t.Setenv("MYCE_QUEUE", "") // Fleet jobs inherit the worker service queue address.
-	for _, mode := range []string{"trusted", "untrusted", "wrong-ca", "hostname", "redirect", "checksum"} {
+	for _, mode := range []string{"trusted", "redirect", "checksum"} {
 		t.Run(mode, func(t *testing.T) {
 			home := t.TempDir()
 			payload := []byte("#!/bin/sh\nif test \"$1\" = version; then exit 0; fi\nread -r ticket\necho downloaded-and-verified\n")

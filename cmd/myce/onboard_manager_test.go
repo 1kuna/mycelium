@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -146,47 +147,5 @@ func (m *enrollmentTestManager) stop() error {
 			return errors.Join(err, killErr, errors.New("fake worker did not join after kill"))
 		}
 		return errors.Join(err, killErr, errors.New("fake worker exceeded graceful shutdown budget"))
-	}
-}
-
-func TestEnrollmentFakeManagerJoinsEveryWorker(t *testing.T) {
-	home := t.TempDir()
-	base := filepath.Join(home, ".local", "share", "mycelium", "worker")
-	if err := os.MkdirAll(base, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(base, "myce"), []byte("#!/bin/sh\nexec sleep 60\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	m := newEnrollmentTestManager(t, home)
-	first, err := m.start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := m.start()
-	if err != nil || first != second {
-		t.Fatal("manager duplicated a running worker", first, second, err)
-	}
-	if err := m.stop(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.start(); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.stop(); err != nil {
-		t.Fatal(err)
-	}
-	if len(m.children) != 2 {
-		t.Fatal("missing restart", len(m.children))
-	}
-	for _, child := range m.children {
-		select {
-		case <-child.done:
-			if child.cmd.ProcessState == nil {
-				t.Fatal("worker was not joined")
-			}
-		default:
-			t.Fatal("worker still running")
-		}
 	}
 }

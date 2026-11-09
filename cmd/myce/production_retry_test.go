@@ -3,14 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"mycelium/internal/myce"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 // Crash the real dev process, without deferred queue or worker shutdown. The

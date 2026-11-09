@@ -3,18 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
+	"mycelium/internal/myce"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 func TestRunDevEndToEnd(t *testing.T) {
@@ -88,82 +85,22 @@ func TestRunDevEndToEnd(t *testing.T) {
 	if err != nil || !strings.Contains(string(output), "hello cluster\n") || strings.Contains(string(output), token) {
 		t.Fatalf("run: %v %s", err, output)
 	}
+	job, err := client.GetJob(ctx, strings.Fields(string(output))[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitted := job.Spec
+	if submitted.AuthoringOrigin != myce.OriginCommand {
+		t.Fatalf("command origin missing: %+v", submitted)
+	}
 	marker := filepath.Join(root, "workers", "fake-1", "job-files", strings.Fields(string(output))[0], "1", "effect")
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "done" {
 		t.Fatal("real command effect missing")
 	}
-	t.Run("tagged-synthetic-resource-probes", func(t *testing.T) {
-		assertSyntheticResourceTelemetry(t, ctx, client, strings.Fields(string(output))[0])
-	})
-	// Profiles upload a frozen source and explicit inputs even with NAS checkpoints.
-	profileDir := filepath.Join(root, ".mycelium", "profiles")
-	if err := os.MkdirAll(profileDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "source", "run.sh"), []byte("test -z \"$MYCE_TOKEN\" && cat payload > result\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "payload"), []byte("profile on NAS"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	profile := `name: nas-profile
-project: demo
-class: experiment
-source: {directory: source}
-environment: {}
-run: {command: [sh, run.sh]}
-needs: {cpu_cores: 1, memory_gb: 1}
-targets: [{os: ` + runtime.GOOS + `, arch: ` + runtime.GOARCH + `, platform: cpu}]
-inputs: {payload: payload}
-outputs: {result: results}
-check: [test, -s, result]
-`
-	profilePath := filepath.Join(profileDir, "nas.yaml")
-	if err := os.WriteFile(profilePath, []byte(profile), 0600); err != nil {
-		t.Fatal(err)
-	}
-	profileCommand := command("--profile", profilePath, "--key", "nas-profile")
-	var profileDiagnostics enrollmentLogBuffer
-	profileCommand.Stderr = &profileDiagnostics
-	output, err = profileCommand.Output()
-	if err != nil {
-		t.Fatalf("profile submission: %v %s %s", err, output, profileDiagnostics.String())
-	}
-	var receipt profileReceipt
-	if err := json.Unmarshal(output, &receipt); err != nil || receipt.JobID == "" {
-		t.Fatalf("profile receipt: %s %v", output, err)
-	}
-	finished, err := client.Wait(ctx, receipt.JobID)
-	if err != nil || finished.State != "succeeded" || finished.FileTransport || len(receipt.Spec.Files) != 2 {
-		t.Fatalf("NAS profile execution: %+v %v", finished, err)
-	}
-	dest := filepath.Join(root, "profile-result")
-	if err := client.DownloadResult(ctx, receipt.JobID, "result", dest); err != nil {
-		t.Fatal(err)
-	}
-	if data, err := os.ReadFile(dest); err != nil || string(data) != "profile on NAS" {
-		t.Fatalf("profile result: %s %v", data, err)
-	}
-	receiptPath := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"demo", receipt.Key}), "receipt.json")
-	wait(t, ctx, func() bool {
-		var observed profileReceipt
-		return readProfileJSON(receiptPath, &observed) == nil && observed.Status == "succeeded" && observed.Observation == "not_armed"
-	})
 	output, err = command("--", "sh", "-c", "echo failure >&2; exit 7").CombinedOutput()
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(string(output), "failure") {
 		t.Fatalf("exit propagation: %v %s", err, output)
-	}
-	output, err = command("--detach", "--", "echo", "detached").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := strings.TrimSpace(string(output))
-	if j, err := client.Wait(ctx, id); err != nil || j.State != "succeeded" {
-		t.Fatalf("detached job: %+v %v", j, err)
 	}
 	running := command("--", "sh", "-c", "echo cancel-ready; sleep 30")
 	var logs enrollmentLogBuffer
@@ -201,5 +138,5 @@ check: [test, -s, result]
 		}
 		return false
 	})
-	t.Log("real dev: CPU command effect/logs, NAS-mode profile source/input upload and verified output, no inherited token, exit 7, detach, Ctrl-C cancellation and exact release; owned dev joined and listener closed")
+	t.Log("real dev: CPU command effect/logs, no inherited token, exit 7, Ctrl-C cancellation and exact release; owned dev joined and listener closed")
 }

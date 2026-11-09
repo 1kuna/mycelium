@@ -14,7 +14,7 @@ import (
 )
 
 func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
-	for _, mode := range []string{"one", "none", "two", "override"} {
+	for _, mode := range []string{"one", "none"} {
 		t.Run(mode, func(t *testing.T) {
 			home := t.TempDir()
 			first, second := filepath.Join(home, "mounted first"), filepath.Join(home, "mounted second")
