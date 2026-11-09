@@ -532,6 +532,12 @@ only after the authority owner verifies unchanged trust and identity, replay
 the original saved command/key with its notifier and current installed
 authority, serialized. Updating a candidate binary does not update the installed
 CLI or the image of an existing shared observer; check its reported commit.
+From the queue release containing #1074's established-response shutdown fix,
+cutover closes interrupted TLS sockets without sending another encrypted
+record after a failed write. Earlier queues can generate a real bad-record-MAC
+refusal during shutdown even with unchanged trust. Keep that integrity refusal
+permanent: report it to the authority owner rather than weakening TLS checks;
+same-key recovery still requires the owner's unchanged-identity verification.
 
 From the release containing #1072, Go and Python GET/HEAD, download and
 replay-safe retries follow the current positive `Retry-After` plus jitter;
