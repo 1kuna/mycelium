@@ -3999,7 +3999,9 @@ after sync; they do not replace a physical power-cut drill. See
 [SQLite's synchronous and fullfsync semantics](https://sqlite.org/pragma.html#pragma_synchronous).
 Darwin fullfsync deliberately costs more than ordinary fsync; see the
 [fixture measurements](research/sqlite-durability-measurements.md) for observed
-commit latency and check-in throughput before choosing it for a new workload.
+commit latency and check-in throughput. The orchestrator accepted that measured
+cost on 2026-11-09 (agent default under MY-34) to retain power-loss durability;
+recover latency through #1066's check-in write-volume work, not weaker sync.
 
 Synchronization and automatic checkpoints can delay other control calls.
 Unlocking before commit would break durable publication/rollback semantics.

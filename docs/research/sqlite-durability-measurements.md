@@ -7,8 +7,12 @@ change the measured implementation.
 
 Darwin fullfsync has a material measured cost: the retained-history fixture's
 median commit rises from 3.60 to 23.82 ms and check-in throughput falls 28%.
-This tradeoff needs the orchestrator/maintainer's decision before merge. Linux
-keeps FULL/WAL and receives no fullfsync request.
+The orchestrator's 2026-11-09 decision (agent default under MY-34, based on the
+maintainer's power-loss direction) is to **keep Darwin fullfsync and accept this
+measured cost**. The production queue runs on Linux. Recovering check-in latency
+belongs to [#1066](https://github.com/1kuna/mycelium/issues/1066), by reducing write
+volume rather than weakening synchronization. Linux keeps FULL/WAL and receives
+no fullfsync request. This worker received and applied that ruling in review round 1.
 
 ## Method
 
@@ -114,3 +118,33 @@ SQLite can fall back to ordinary fsync when Darwin fullfsync is unsupported.
 They do not qualify a filesystem, drive cache or storage controller. The other
 write families in #1179, directory publication and the physical drill remain
 separate work. Inventory [PR #1184](https://github.com/1kuna/mycelium/pull/1184) remains a draft.
+
+## Review round 1: added recovery boundaries
+
+The round-1 review confirmed the writer implementation and requested two missing
+fixture families. Added ordinary package tests cover:
+
+- Checkpoint kills after a database-page write, after database sync and after WAL
+  truncation/recycling. A priming checkpoint and every observed sync assert the
+  Darwin FULL VFS request on both WAL and database files (Linux NORMAL VFS flags
+  with SQL synchronous=FULL). Reopen checks the last acknowledged large fragmented
+  update, cancellation, keyed answer, integrity, effective settings and new writes.
+- Legacy-normalized migration kills before its frame/commit sync (discarding the
+  unsynced suffix) and immediately after that sync. Inspect the raw recovered
+  marker and fragments before startup can migrate them: the former must remain
+  wholly legacy and the latter wholly migrated. Restart/replay and writes follow.
+- Stopped-database backup and restore copying interrupted halfway, a copied DB
+  interrupted before its hash manifest, and completed generations followed by
+  SIGKILL. The fixture rejects absent/mismatched manifests, restores the good
+  generation, and verifies logical fragments and writer durability settings.
+  Removing a required field root from a SQL-integrity-valid restored DB must
+  also make the real queue opener refuse it.
+
+The backup helper is a DB-only rehearsal of the documented manual copy/hash
+procedure. It is not a runtime backup/restore API, full referenced-root snapshot,
+or proof that the queue itself validates a generation manifest. New tests remain
+unverified until admitted gate execution. The orchestrator reported a gate
+custody wedge under repair; this worker's normal-priority quick attempt refused
+`STOP local gate: host memory pressure is not normal; no work started` before
+compilation or tests. The operation stopped without bypass; direct Go runs remain
+suspended. Formatting and `git diff --check` passed; runtime proof is pending.

@@ -71,6 +71,24 @@ func TestQueueSQLiteRefusesUnavailableWAL(t *testing.T) {
 	}
 }
 
+func assertQueueSQLiteSettings(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var mode string
+	var sync, full int
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("PRAGMA synchronous").Scan(&sync); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("PRAGMA fullfsync").Scan(&full); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "wal" || sync != 2 || runtime.GOOS == "darwin" && full != 1 {
+		t.Fatalf("restored durability: journal=%s sync=%d fullfsync=%d", mode, sync, full)
+	}
+}
+
 type ignoredSQLitePragma struct{ sqlite.ExecQuerierContext }
 
 func (c ignoredSQLitePragma) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {

@@ -180,37 +180,7 @@ func TestQueuePersistenceLegacyMigration(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Genuine v1 keyed answers embed the complete last durable job.
-	legacy := make(map[string][]byte, len(q.persisted))
-	for key, data := range q.persisted {
-		legacy[key] = data
-	}
-	for key, record := range q.s.Submissions {
-		data, err := json.Marshal(record)
-		if err != nil {
-			t.Fatal(err)
-		}
-		legacy["submissions/"+key] = data
-	}
-	tx, err := q.db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	if _, err = tx.Exec("DELETE FROM queue_state"); err != nil {
-		t.Fatal(err)
-	}
-	for key, data := range legacy {
-		if _, err = tx.Exec("INSERT INTO queue_state(key,data) VALUES(?,?)", key, data); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err = tx.Exec("UPDATE queue SET data=? WHERE id=1", legacyNormalizedQueueMarker); err != nil {
-		t.Fatal(err)
-	}
-	if err = tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
+	legacy := writeLegacyQueueFixture(t, q)
 	// Resume the old layout in this fixture without a startup write, then
 	// force the marker's final write to fail after all field writes ran.
 	q.fragmented = false
@@ -249,6 +219,44 @@ func TestQueuePersistenceLegacyMigration(t *testing.T) {
 	if q.s.Jobs["cold"] == nil {
 		t.Fatal("cold migrated job lost on second restart")
 	}
+}
+
+// writeLegacyQueueFixture builds the previous normalized layout from the live
+// logical records. Both SQL-error and process-death migration tests use it.
+func writeLegacyQueueFixture(t *testing.T, q *Queue) map[string][]byte {
+	t.Helper()
+	// Genuine v1 keyed answers embed the complete last durable job.
+	legacy := make(map[string][]byte, len(q.persisted))
+	for key, data := range q.persisted {
+		legacy[key] = data
+	}
+	for key, record := range q.s.Submissions {
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy["submissions/"+key] = data
+	}
+	tx, err := q.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("DELETE FROM queue_state"); err != nil {
+		t.Fatal(err)
+	}
+	for key, data := range legacy {
+		if _, err = tx.Exec("INSERT INTO queue_state(key,data) VALUES(?,?)", key, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = tx.Exec("UPDATE queue SET data=? WHERE id=1", legacyNormalizedQueueMarker); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return legacy
 }
 
 func TestQueuePersistenceCachedEncodingMatchesJSON(t *testing.T) {

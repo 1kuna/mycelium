@@ -31,10 +31,7 @@ func TestQueueSQLiteFaultRecovery(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestQueueSQLiteFaultRecovery$")
 			cmd.Env = append(os.Environ(), "MYCE_TEST_SQLITE_FAULT="+mode, "MYCE_TEST_SQLITE_DIR="+dir)
 			out, err := cmd.CombinedOutput()
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) || exit.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL || !strings.Contains(string(out), "fault reached: "+mode) {
-				t.Fatalf("helper did not reach kill point: %v\n%s", err, out)
-			}
+			assertSQLiteKilled(t, err, out, mode)
 			q, err := Open(filepath.Join(dir, "queue.db"), dir, &fakeClock{now: time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC)})
 			if err != nil {
 				t.Fatal(err)
@@ -146,6 +143,14 @@ func runQueueSQLiteFault(t *testing.T, mode, dir string) {
 	killSQLiteFaultHelper()
 }
 
+func assertSQLiteKilled(t *testing.T, err error, out []byte, mode string) {
+	t.Helper()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL || !strings.Contains(string(out), "fault reached: "+mode) {
+		t.Fatalf("helper did not reach kill point: %v\n%s", err, out)
+	}
+}
+
 func killSQLiteFaultHelper() {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
 		panic(err)
@@ -153,7 +158,20 @@ func killSQLiteFaultHelper() {
 	select {} // No writes, Close, checkpoint, or defers after the crash point.
 }
 
+// Hooks are installed only in a disposable helper process. Database writes and
+// WAL truncation expose checkpoint/recycling boundaries as well as WAL commits.
+type sqliteFileFault func(kind, operation string, next func() int32, value int64) int32
+
 func installSQLiteSyncFault(t *testing.T, sync func(func() int32, int32) int32) {
+	installSQLiteFileFault(t, func(kind, operation string, next func() int32, value int64) int32 {
+		if kind == "wal" && operation == "sync" {
+			return sync(next, int32(value))
+		}
+		return next()
+	})
+}
+
+func installSQLiteFileFault(t *testing.T, fault sqliteFileFault) {
 	t.Helper()
 	tls := libc.NewTLS()
 	// Allocations deliberately survive until this helper is killed. SQLite's
@@ -164,31 +182,50 @@ func installSQLiteSyncFault(t *testing.T, sync func(func() int32, int32) int32) 
 	vfs := (*sqlite3.Tsqlite3_vfs)(unsafe.Pointer(p))
 	*vfs = original
 	var callbacks []any
+	keep := func(callback any) uintptr {
+		callbacks = append(callbacks, callback)
+		return (*[2]uintptr)(unsafe.Pointer(&callbacks[len(callbacks)-1]))[1]
+	}
 	open := func(tls *libc.TLS, v, name, file uintptr, flags int32, out uintptr) int32 {
 		fn := *(*func(*libc.TLS, uintptr, uintptr, uintptr, int32, uintptr) int32)(unsafe.Pointer(&original.FxOpen))
 		rc := fn(tls, v, name, file, flags, out)
-		if rc != sqlite3.SQLITE_OK || flags&sqlite3.SQLITE_OPEN_WAL == 0 {
+		if rc != sqlite3.SQLITE_OK || flags&(sqlite3.SQLITE_OPEN_WAL|sqlite3.SQLITE_OPEN_MAIN_DB) == 0 {
 			return rc
+		}
+		kind := "database"
+		if flags&sqlite3.SQLITE_OPEN_WAL != 0 {
+			kind = "wal"
 		}
 		f := (*sqlite3.Tsqlite3_file)(unsafe.Pointer(file))
 		methods := *(*sqlite3.Tsqlite3_io_methods)(unsafe.Pointer(f.FpMethods))
 		mp := libc.Xmalloc(tls, uint64(unsafe.Sizeof(methods)))
 		copy := (*sqlite3.Tsqlite3_io_methods)(unsafe.Pointer(mp))
 		*copy = methods
-		callback := func(tls *libc.TLS, file uintptr, flags int32) int32 {
+		copy.FxSync = keep(func(tls *libc.TLS, file uintptr, flags int32) int32 {
 			next := func() int32 {
 				fn := *(*func(*libc.TLS, uintptr, int32) int32)(unsafe.Pointer(&methods.FxSync))
 				return fn(tls, file, flags)
 			}
-			return sync(next, flags)
-		}
-		callbacks = append(callbacks, callback)
-		copy.FxSync = (*[2]uintptr)(unsafe.Pointer(&callbacks[len(callbacks)-1]))[1]
+			return fault(kind, "sync", next, int64(flags))
+		})
+		copy.FxWrite = keep(func(tls *libc.TLS, file, buf uintptr, amount int32, offset sqlite3.Tsqlite3_int64) int32 {
+			next := func() int32 {
+				fn := *(*func(*libc.TLS, uintptr, uintptr, int32, sqlite3.Tsqlite3_int64) int32)(unsafe.Pointer(&methods.FxWrite))
+				return fn(tls, file, buf, amount, offset)
+			}
+			return fault(kind, "write", next, int64(offset))
+		})
+		copy.FxTruncate = keep(func(tls *libc.TLS, file uintptr, size sqlite3.Tsqlite3_int64) int32 {
+			next := func() int32 {
+				fn := *(*func(*libc.TLS, uintptr, sqlite3.Tsqlite3_int64) int32)(unsafe.Pointer(&methods.FxTruncate))
+				return fn(tls, file, size)
+			}
+			return fault(kind, "truncate", next, int64(size))
+		})
 		f.FpMethods = mp
 		return rc
 	}
-	callbacks = append(callbacks, open)
-	vfs.FxOpen = (*[2]uintptr)(unsafe.Pointer(&callbacks[0]))[1]
+	vfs.FxOpen = keep(open)
 	if rc := sqlite3.Xsqlite3_vfs_register(tls, p, 1); rc != sqlite3.SQLITE_OK {
 		t.Fatal(rc)
 	}
