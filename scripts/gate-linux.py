@@ -59,6 +59,10 @@ class Transport:
         self.current = subprocess.Popen(command, start_new_session=True,
             stdin=subprocess.PIPE if heartbeat else kwargs.pop('stdin', None), **kwargs)
         child = self.current
+        if self.cancelled:
+            # TERM can arrive between the precheck and assignment by Popen.
+            # Revoke this new transport too, before waiting or allowing writes.
+            self.stop(signal.SIGTERM, None)
         sender_done = threading.Event()
         def sender():
             try:

@@ -18,6 +18,15 @@ Reviewed: 2026-11-09 (MY-37). Owner: project maintainer. This records sanitized 
   fleet-gate merge requirement for Mycelium development. Independent review,
   real race coverage, custody and native platform proof remain required.
 
+- **Orchestrator default (not a maintainer ruling), 2026-11-09 — Measured local admission.**
+  Received by the local-runner worker after calibration: admit fulls from
+  measured per-leg CPU/RAM and live worker usage rather than fixed N=1;
+  reserve all local capacity for explicitly exclusive timing runs. Basis:
+  four-core native peak 7.01 GiB and passing Linux/VM peak 10.57 GiB, plus
+  measured workstation headroom. Fleet-worker jobs remain background and
+  their custody is not modified by local gates. This is an implementation
+  default, separate from Zach's MY-37 local-development ruling.
+
 - **Implementation agent default — 2026-11-09 — Device-fault cascade protection and measured recovery (#1142).** A relayed consumer request asks that one faulting job not consume a host's last healthy accelerator of the same backend, and that proven-healthy quarantined devices return automatically. This is not a maintainer ruling. The implementation worker received the relay and applies it generically to every host and project. Queue placement uses attempt-specific fault history and current healthy capacity; worker recovery requires positive vendor evidence and a quiet window derived from observed fault-to-normal latency, local probe gaps and prior recovery evidence. Repeated-teardown escalation retains operator ownership. See [the mechanism and evidence fields](operations.md#accelerator-driver-fault-quarantine). MY-34 governs the adaptive window; no deployment-specific duration or host policy is introduced.
 
 - **MY-36 — 2026-11-08 — Stage every NAS input locally before processing.** The default for every NAS input, whatever its size, is a transfer to the executing machine's local disk before processing. Processing must use that local copy so its bottleneck is local compute and local benchmarks remain meaningful. Source: maintainer, 2026-11-08, relayed by the Mycelium orchestrator and recorded on [#1061](https://github.com/1kuna/mycelium/issues/1061), verbatim: “i think any files should transfer to the machines it's being processed on from the nas because processing bottleneck shouldn't be network because then local benchmarks become entirely irrelevant.” This widens #1061 from large files to all input files. Agent implementation boundary: existing declared shared and job-file inputs can stage automatically; raw paths embedded in payload code are undeclared and need an input declaration/local path. Mutable checkpoint saves retain their separate durability and custody contract; this ruling does not authorize silently treating mutable checkpoint state as an immutable cache entry. MY-34 governs headroom, eviction and recovery; no size threshold selects local staging.

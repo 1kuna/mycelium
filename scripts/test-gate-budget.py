@@ -23,6 +23,36 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def test_host_resource_admission_replaces_legacy_count_only_for_owned_source_and_ancestor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder).resolve()
+            control = home / '.cache/mycelium-gates/control'
+            control.mkdir(parents=True)
+            lane = control / 'local-go-slot-3'
+            lane.mkdir()
+            owner = dict(admission_protocol=2, resource_group='group', run_id='run',
+                         source_root=str(home), pid=os.getpid())
+            (lane / 'owner.json').write_text(json.dumps(owner))
+            (control / 'local-go-resource-group.custody').write_text(json.dumps(
+                dict(admission_protocol=2, resource_group='group')))
+            for name in ('local-go-slot', 'local-go-slot-2'):
+                (control / name).mkdir()
+                (control / name / 'owner.json').write_text(json.dumps(
+                    dict(protocol_guard=True, resource_group='group')))
+            with (patch.object(budget.Path, 'home', return_value=home),
+                  patch.object(budget.Path, 'cwd', return_value=home),
+                  patch.dict(os.environ, GATE_LOCAL_SLOT=str(lane), GATE_LOCAL_SLOT_ID='run')):
+                self.assertTrue(budget.local_resource_admission())
+                owner['pid'] = 999999999
+                (lane / 'owner.json').write_text(json.dumps(owner))
+                with self.assertRaisesRegex(RuntimeError, 'ancestor'):
+                    budget.local_resource_admission()
+                owner['pid'] = os.getpid()
+                owner['source_root'] = '/another-source'
+                (lane / 'owner.json').write_text(json.dumps(owner))
+                with self.assertRaisesRegex(RuntimeError, 'identity'):
+                    budget.local_resource_admission()
+
     def test_abandoned_slots_reconcile_but_live_fixtures_keep_custody(self):
         with tempfile.TemporaryDirectory() as folder:
             cache = Path(folder)

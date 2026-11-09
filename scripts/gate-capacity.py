@@ -96,6 +96,54 @@ def occupied_lanes(directory):
     return [p for p in directory.glob('local-go-slot*') if p.is_dir()]
 
 
+def execution_lanes(directory):
+    """Protocol guards occupy both old lane names so frozen older clients wait."""
+    group = directory / 'local-go-resource-group.custody'
+    if not group.exists():
+        return occupied_lanes(directory)
+    record = json.loads(group.read_text())
+    expected = dict(protocol_guard=True, resource_group=record['resource_group'])
+    guards = [directory / name for name in ('local-go-slot', 'local-go-slot-2')]
+    if record.get('admission_protocol') != 2 or any(
+            not (p / 'owner.json').exists() or
+            json.loads((p / 'owner.json').read_text()) != expected for p in guards):
+        raise RuntimeError('resource admission compatibility custody changed; retained')
+    return [p for p in occupied_lanes(directory) if p not in guards]
+
+
+def resource_qualification(config):
+    """Check the private measurement before enabling concurrent full admission."""
+    qualification = config.get('resource_admission')
+    if qualification is None:
+        return None
+    measured = config['memory_measurement']
+    if qualification.get('schema') != 1:
+        raise ValueError('unknown resource qualification schema')
+    for key in ('measured_cores', 'vm_cores', 'vm_memory_bytes'):
+        if type(qualification.get(key)) is not int or qualification[key] <= 0:
+            raise ValueError('invalid measured resource capacity')
+    rows = []
+    for evidence in measured['evidence']:
+        rows.extend(json.loads(line) for line in _memory.evidence_bytes(evidence).splitlines())
+    native = [r for r in rows if r.get('mode') == 'full' and
+              r.get('phase') in (None, 'native') and r.get('status') in (0, 1) and not r.get('refusal') and
+              r.get('max_tree_rss_sum_bytes')]
+    linux = [r for r in rows if r.get('mode') == 'full' and r.get('phase') == 'host'
+             and r.get('status') == 0 and not r.get('refusal') and r.get('samples') and
+             any(g.get('phase') == 'linux' and g.get('mode') == 'full' and
+                 g.get('status') == 0 and not g.get('refusal') and
+                 g.get('run_id') == r.get('run_id') for g in rows)]
+    if not native or not linux:
+        raise ValueError('concurrent admission requires completed native and Linux measurements')
+    if measured['native_peak_bytes'] != max(r['max_tree_rss_sum_bytes'] for r in native):
+        raise ValueError('native resource peak does not match its evidence')
+    if not any(r['max_tree_rss_sum_bytes'] == measured['linux_peak_bytes'] and
+               max(s.get('host_memory', {}).get('all_vz_rss_sum_bytes', 0)
+                   for s in r['samples']) == measured['vm_peak_bytes'] for r in linux):
+        raise ValueError('Linux/VM resource peaks do not match their evidence')
+    return qualification
+
+
 def native_full_custody(*, include_fleet=False):
     """Local custody binds local admission; installed-worker custody is separate.
 
@@ -141,21 +189,34 @@ def check_pressure():
 
 
 class Slot:
-    def __init__(self, directory, owner, full):
-        self.directory, self.owner, self.full = directory, owner, full
+    def __init__(self, directory, owner, full, group=None):
+        self.directory, self.owner, self.full, self.group = directory, owner, full, group
 
     def release(self, stopped=True):
         if not stopped:
             print('gate: custody uncertain; local capacity retained', flush=True)
             return
         with admission_lock(self.directory.parent):
+            if self.group:
+                execution_lanes(self.directory.parent)  # Verify guards before any removal.
+                group_path = self.directory.parent / 'local-go-resource-group.custody'
+                if json.loads(group_path.read_text()) != self.group:
+                    raise RuntimeError('resource group custody changed; retained')
             path = self.directory / 'owner.json'
             if json.loads(path.read_text()) != self.owner:
                 raise RuntimeError('local gate slot ownership changed; retained')
+            if self.full and json.loads(self.full.read_text()) != self.owner:
+                raise RuntimeError('local full custody changed; retained')
             path.unlink()
             self.directory.rmdir()
             if self.full:
                 self.full.unlink()
+            if self.group and not execution_lanes(self.directory.parent):
+                for name in ('local-go-slot', 'local-go-slot-2'):
+                    guard = self.directory.parent / name
+                    (guard / 'owner.json').unlink()
+                    guard.rmdir()
+                group_path.unlink()
 
 
 
@@ -184,12 +245,13 @@ def memory_requirement(config, platform):
     return max(native, linux + vm) + headroom
 
 
-def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platform='native', after_pid=None):
-    """Conservative initial 2 heavy/1 full slots; legacy mkdir owners still bind.
+def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platform='native',
+            after_pid=None, exclusive=False, source_root=None):
+    """Admit measured CPU/RAM demand; preserve unqualified and legacy custody.
 
-    Increasing full concurrency requires a recorded measurement in gate-capacity.json.
-    A release waiter takes the next free heavy slot ahead of normal gates.
-    No stale owner is removed automatically, including after supervisor death.
+    Reserve each active run's entire peak in addition to live available memory:
+    this deliberately overcounts its current RSS to cover future working-set
+    growth without confusing shared pages with reclaimable private memory.
     """
     if type(cores) is not int or cores <= 0:
         raise ValueError('local gate cores must be a positive integer')
@@ -200,19 +262,20 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     prefix = 'local-go-calibration-wait-' if priority == 'calibration' else 'local-go-release-wait-'
     ticket = directory / (prefix + uuid.uuid4().hex)
     queue_ticket = None
+    checked_config, resources = None, None
     try:
         if priority in ('release', 'calibration'):
             with admission_lock(directory):
                 publish_waiting(ticket, json.dumps(dict(pid=os.getpid(),
                     process_identity=process_identity(os.getpid()))) + '\n')
-        if mode == 'full':
+        if mode == 'full' or exclusive:
             with admission_lock(directory):
                 sequence_path = directory / 'queue-sequence'
                 sequence = int(sequence_path.read_text()) + 1 if sequence_path.exists() else 1
                 publish_waiting(sequence_path, str(sequence))
                 queue_ticket = directory / ('local-go-wait-' + uuid.uuid4().hex + '.json')
                 publish_waiting(queue_ticket, json.dumps(dict(pid=os.getpid(), process_identity=process_identity(os.getpid()),
-                    priority=priority, sequence=sequence)) + '\n')
+                    priority=priority, sequence=sequence, exclusive=exclusive)) + '\n')
         after_identity = process_identity(after_pid) if after_pid else None
         announced = None
         while True:
@@ -223,19 +286,35 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 legacy = [p for folder in legacy_directories(repo) for p in occupied_lanes(folder)]
                 config_path = directory / 'gate-capacity.json'
                 config = json.loads(config_path.read_text()) if config_path.exists() else {}
-                # Two legacy lanes are authorized; full remains serialized until measured.
-                slots = min(2, max(1, int(config.get('heavy_slots', 2))))
+                if config != checked_config:
+                    resources = resource_qualification(config)
+                    checked_config = config
+                if not resources and (directory / 'local-go-resource-group.custody').exists():
+                    raise RuntimeError('resource qualification removed during active custody; retained')
+                if resources and cores > resources['measured_cores']:
+                    raise RuntimeError('requested cores exceed the measured local gate budget')
+                if exclusive and not resources:
+                    raise RuntimeError('exclusive timing requires qualified resource admission')
+                # Unqualified hosts preserve the previous two-heavy/one-full rule.
+                slots = ((os.cpu_count() or 1) + 2 if resources else
+                         min(2, max(1, int(config.get('heavy_slots', 2)))))
                 fulls = min(2, max(1, int(config.get('full_slots', 1))))
                 release_waiting = priority_waiting(directory, 'release')
                 calibration_waiting = priority_waiting(directory, 'calibration')
                 pending_release = priority not in ('release', 'calibration') and release_waiting
                 pending_calibration = (mode == 'full' and priority != 'calibration'
                                        and calibration_waiting)
-                queue = full_waiters(directory) if mode == 'full' else []
-                queue_first = not queue or queue[0] == queue_ticket
+                queue = full_waiters(directory)
+                queue_first = not queue_ticket or not queue or queue[0] == queue_ticket
+                front = json.loads(queue[0].read_text()) if queue else {}
+                rank = {'calibration': 0, 'release': 1, 'normal': 2}
+                exclusive_waiting = (front.get('exclusive') and
+                                     rank[priority] >= rank[front['priority']])
+                if exclusive_waiting and queue_ticket != queue[0]:
+                    queue_first = False
                 batch_done = not after_identity or process_identity(after_pid) != after_identity
                 full_marker = None
-                if mode == 'full' and not legacy and not native_full_custody():
+                if not resources and mode == 'full' and not legacy and not native_full_custody():
                     for index in range(fulls):
                         candidate = directory / f'local-go-full-{index}.custody'
                         if not candidate.exists():
@@ -245,24 +324,72 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 memory_ok = available_memory() >= needed_memory
                 if not memory_ok:
                     raise RuntimeError(f'available memory below {needed_memory / GIB:.2f} GiB entry requirement; no work started')
-                occupied = len(legacy) + len(occupied_lanes(directory))
+                lanes = legacy + execution_lanes(directory)
+                occupied = len(lanes)
                 worker = local_worker_usage()
-                lanes = legacy + occupied_lanes(directory)
                 reserved_cores = 0
+                reserved_memory, vm_cores, vm_memory = 0, 0, 0
+                owners = []
                 for lane in lanes:
                     owner_path = lane / 'owner.json'
                     # Preserve unknown legacy occupancy and its four-core allowance.
-                    demand = json.loads(owner_path.read_text()).get('cores', 4) if owner_path.exists() else 4
+                    row = json.loads(owner_path.read_text()) if owner_path.exists() else {}
+                    owners.append(row)
+                    demand = row.get('cores', 4)
                     if type(demand) is not int or demand <= 0:
                         raise RuntimeError('recorded local lane has invalid CPU demand; retained')
                     reserved_cores += demand
+                    if resources and row.get('admission_protocol') == 2:
+                        peak = row.get('peak_bytes')
+                        if type(peak) is not int or peak <= 0:
+                            raise RuntimeError('recorded local lane has invalid memory demand; retained')
+                        reserved_memory += peak
+                        if row.get('platform') != 'native':
+                            vm_cores += demand
+                            vm_memory += peak
                 worker_cores = math.ceil((worker or {}).get('cpu_cores', 0))
                 reserve = int(config.get('workstation_cpu_reserve_cores', 0))
+                if reserve < 0:
+                    raise ValueError('workstation CPU reserve must not be negative')
                 cpu_ok = reserved_cores + worker_cores + cores + reserve <= (os.cpu_count() or 1)
+                group, resource_ok = None, True
+                if resources:
+                    headroom = config['memory_measurement']['headroom_bytes']
+                    peak = needed_memory - headroom
+                    group_path = directory / 'local-go-resource-group.custody'
+                    existing_group = json.loads(group_path.read_text()) if group_path.exists() else {}
+                    expected_fulls = {directory / ('local-go-full-' + row['run_id'] + '.custody'): row
+                                      for row in owners if row.get('admission_protocol') == 2
+                                      and row.get('mode') == 'full'}
+                    full_custody_ok = (set(directory.glob('local-go-full-*.custody')) == set(expected_fulls)
+                        and all(json.loads(p.read_text()) == row for p, row in expected_fulls.items()))
+                    resource_ok = (not legacy and not native_full_custody() and
+                        full_custody_ok and
+                        all(row.get('admission_protocol') == 2 and
+                            row.get('resource_group') == existing_group.get('resource_group')
+                            for row in owners) and
+                        not any(row.get('exclusive') for row in owners) and
+                        (not exclusive or not owners) and
+                        available_memory() >= needed_memory + reserved_memory)
+                    if platform != 'native':
+                        resource_ok = (resource_ok and vm_cores + cores <= resources['vm_cores']
+                                       and vm_memory + peak <= resources['vm_memory_bytes'])
                 if (not pending_release and not pending_calibration and queue_first and batch_done and occupied < slots
-                        and cpu_ok
-                        and (mode != 'full' or full_marker)):
-                    for index in range(slots):
+                        and cpu_ok and resource_ok
+                        and (resources or mode != 'full' or full_marker)):
+                    if resources:
+                        group_path = directory / 'local-go-resource-group.custody'
+                        if group_path.exists():
+                            group = json.loads(group_path.read_text())
+                        else:
+                            group = dict(admission_protocol=2, resource_group=uuid.uuid4().hex)
+                            group_path.write_text(json.dumps(group) + '\n')
+                            for name in ('local-go-slot', 'local-go-slot-2'):
+                                guard = directory / name
+                                guard.mkdir(mode=0o700)
+                                (guard / 'owner.json').write_text(json.dumps(dict(
+                                    protocol_guard=True, resource_group=group['resource_group'])) + '\n')
+                    for index in range(2 if resources else 0, slots):
                         slot = directory / ('local-go-slot' + (f'-{index + 1}' if index else ''))
                         try:
                             slot.mkdir(mode=0o700)
@@ -271,10 +398,16 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         owner = dict(pid=os.getpid(), run_id=uuid.uuid4().hex,
                                      mode=mode, priority=priority, cores=cores,
                                      local_worker_usage_at_entry=worker)
+                        if resources:
+                            owner.update(admission_protocol=2, resource_group=group['resource_group'],
+                                         platform=platform, peak_bytes=peak, exclusive=exclusive,
+                                         source_root=str(source_root.resolve()) if source_root else None)
+                            if mode == 'full':
+                                full_marker = directory / ('local-go-full-' + owner['run_id'] + '.custody')
                         (slot / 'owner.json').write_text(json.dumps(owner) + '\n')
                         if full_marker:
                             full_marker.write_text(json.dumps(owner) + '\n')
-                        return Slot(slot, owner, full_marker)
+                        return Slot(slot, owner, full_marker, group)
             if not wait:
                 reason = (f'available memory below {needed_memory / GIB:.2f} GiB measured entry requirement'
                           if not memory_ok else 'capacity busy or reserved for release/calibration')

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Protect admission, disk refusal, and eviction boundaries on shared hosts."""
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -29,6 +30,23 @@ capacity = load('gate-capacity')
 local = load('gate-local')
 linux = load('gate-linux')
 measurement = load('gate-measure')
+
+
+def qualified_config(root):
+    native, host, vm, headroom = 7 * capacity.GIB, capacity.GIB // 8, 10 * capacity.GIB, 5 * capacity.GIB
+    evidence = root / 'resource-measurements.jsonl'
+    evidence.write_text(''.join(json.dumps(row) + '\n' for row in [
+        dict(mode='full', status=1, phase='native', max_tree_rss_sum_bytes=native),
+        dict(mode='full', status=0, phase='host', run_id='linux-measurement',
+             max_tree_rss_sum_bytes=host, samples=[dict(host_memory=dict(all_vz_rss_sum_bytes=vm))]),
+        dict(mode='full', status=0, phase='linux', run_id='linux-measurement')]))
+    config = dict(workstation_cpu_reserve_cores=6, full_slots=1,
+        resource_admission=dict(schema=1, measured_cores=4, vm_cores=8, vm_memory_bytes=24 * capacity.GIB),
+        memory_measurement=dict(native_peak_bytes=native, linux_peak_bytes=host,
+            vm_peak_bytes=vm, headroom_bytes=headroom,
+            evidence=[dict(path=str(evidence), sha256=hashlib.sha256(evidence.read_bytes()).hexdigest())]))
+    (root / 'gate-capacity.json').write_text(json.dumps(config))
+    return config
 
 
 class LocalGateTests(unittest.TestCase):
@@ -70,6 +88,132 @@ class LocalGateTests(unittest.TestCase):
                 self.assertTrue(first.directory.exists())
                 self.assertTrue(first.full.exists())
                 first.release()
+
+    def test_measured_fulls_share_resources_and_old_clients_see_both_lanes_reserved(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            qualified_config(root)
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                runs = [capacity.acquire(root, mode='full') for _ in range(3)]
+                try:
+                    # Three fulls fit 18 CPUs with six reserved and no worker
+                    # demand; the old fixed full/slot counts no longer apply.
+                    self.assertEqual(len(capacity.execution_lanes(root)), 3)
+                    self.assertTrue(all(run.directory.name not in ('local-go-slot', 'local-go-slot-2') for run in runs))
+                    # Frozen old clients count both these directories as occupied.
+                    for name in ('local-go-slot', 'local-go-slot-2'):
+                        self.assertTrue((root / name / 'owner.json').exists())
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, mode='full')
+                    runs[0].release(stopped=False)
+                    self.assertTrue(runs[0].directory.exists())
+                    runs[0].release()
+                    self.assertTrue((root / 'local-go-slot').exists())
+                    config_path = root / 'gate-capacity.json'
+                    original = config_path.read_text()
+                    config = json.loads(original)
+                    del config['resource_admission']
+                    config_path.write_text(json.dumps(config))
+                    with self.assertRaisesRegex(RuntimeError, 'qualification removed'):
+                        capacity.acquire(root)
+                    config_path.write_text(original)
+                finally:
+                    for run in runs:
+                        if run.directory.exists(): run.release()
+                self.assertFalse(capacity.occupied_lanes(root))
+                self.assertFalse((root / 'local-go-resource-group.custody').exists())
+                orphan = root / 'local-go-full-0.custody'
+                orphan.write_text('unknown former full owner')
+                with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                    capacity.acquire(root, mode='full')
+                self.assertEqual(orphan.read_text(), 'unknown former full owner')
+
+    def test_resource_admission_reserves_future_memory_growth_and_vm_capacity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            qualified_config(root)
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=18 * capacity.GIB)):
+                first = capacity.acquire(root, mode='full')
+                try:
+                    # Current free RAM covers the new run alone but not the
+                    # still-growing first run's reserved peak as well.
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, mode='full')
+                finally: first.release()
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                runs = [capacity.acquire(root, mode='full', platform='linux') for _ in range(2)]
+                try:
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, mode='full', platform='linux', cores=1)
+                    with self.assertRaisesRegex(RuntimeError, 'measured local gate budget'):
+                        capacity.acquire(root, cores=5)
+                finally:
+                    for run in runs: run.release()
+
+    def test_exclusive_waiter_drains_local_work_and_blocks_new_quick_runs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            qualified_config(root)
+            script = '''import importlib.util,pathlib,signal,sys,time
+p,folder=sys.argv[1:];s=importlib.util.spec_from_file_location('c',p);c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+r=pathlib.Path(folder);c.root=lambda _:r;c.legacy_directories=lambda _:[];c.native_full_custody=lambda:False
+c.available_memory=lambda:64*c.GIB;c.check_pressure=lambda:None;c.local_worker_usage=lambda:None;c.os.cpu_count=lambda:18
+def stop(*_): raise SystemExit(143)
+signal.signal(signal.SIGTERM,stop)
+slot=c.acquire(r,mode='full',exclusive=True,wait=True)
+try:
+ (r/'exclusive-ready').write_text('ready');time.sleep(30)
+finally: slot.release()
+'''
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                held = capacity.acquire(root, mode='full')
+                child = subprocess.Popen([sys.executable, '-c', script, capacity.__file__, str(root)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not list(root.glob('local-go-wait-*.json')):
+                        if time.monotonic() > deadline: self.fail('exclusive did not queue')
+                        time.sleep(.01)
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root)
+                    self.assertFalse((root / 'exclusive-ready').exists())
+                    # Higher-priority release assembly goes before the ordinary
+                    # exclusive waiter; it still respects an active exclusive.
+                    release = capacity.acquire(root, priority='release')
+                    release.release()
+                    held.release()
+                    deadline = time.monotonic() + 5
+                    while not (root / 'exclusive-ready').exists():
+                        if time.monotonic() > deadline: self.fail('exclusive did not acquire')
+                        time.sleep(.01)
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root)
+                    child.terminate()
+                    out, err = child.communicate(timeout=5)
+                    self.assertEqual(child.returncode, 143, err)
+                    self.assertIn(b'queue position', out)
+                    self.assertFalse(capacity.occupied_lanes(root))
+                finally:
+                    if held.directory.exists(): held.release()
+                    if child.poll() is None: child.kill(); child.wait()
+                    child.stdout.close(); child.stderr.close()
+
+    def test_concurrent_capacity_requires_digest_bound_complete_measurements(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            self.assertIsNotNone(capacity.resource_qualification(config))
+            config['memory_measurement']['native_peak_bytes'] += 1
+            with self.assertRaisesRegex(ValueError, 'native resource peak'):
+                capacity.resource_qualification(config)
+            config = qualified_config(root)
+            (root / 'resource-measurements.jsonl').write_text('{}\n')
+            with self.assertRaisesRegex(ValueError, 'digest changed'):
+                capacity.resource_qualification(config)
 
     def test_release_waiter_gets_next_lane_before_normal_work(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -345,6 +489,19 @@ sys.exit(m.main())
             self.assertIsNone(transport.current)  # Owned local child was reaped.
         finally:
             timer.join()
+        transport = linux.Transport('vm', 'remote', 'nonce')
+        original = subprocess.Popen
+        launched = []
+        def cancelled_handoff(*args, **kwargs):
+            transport.stop(signal.SIGTERM, None)
+            child = original(*args, **kwargs)
+            launched.append(child)
+            return child
+        with patch.object(linux.subprocess, 'Popen', side_effect=cancelled_handoff):
+            with self.assertRaises(linux.Cancelled):
+                transport.run([sys.executable, '-c', 'import time; time.sleep(60)'])
+        self.assertIsNotNone(launched[0].poll())
+        self.assertIsNone(transport.current)
 
     def test_linux_receives_frozen_helpers_even_after_live_helper_changes(self):
         with tempfile.TemporaryDirectory() as folder:

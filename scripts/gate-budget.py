@@ -264,6 +264,38 @@ def release_full_slot(slot, stopped):
     slot.close()
 
 
+def local_resource_admission():
+    """Only the canonical host admission can replace the legacy suite count."""
+    path = os.environ.get('GATE_LOCAL_SLOT')
+    if not path:
+        return False
+    lane = Path(path).resolve()
+    control = (Path.home() / '.cache/mycelium-gates/control').resolve()
+    row = json.loads((lane / 'owner.json').read_text())
+    group = json.loads((control / 'local-go-resource-group.custody').read_text())
+    guards = [control / name / 'owner.json' for name in ('local-go-slot', 'local-go-slot-2')]
+    expected_guard = dict(protocol_guard=True, resource_group=group.get('resource_group'))
+    if (lane.parent != control or not lane.name.startswith('local-go-slot-') or
+            row.get('admission_protocol') != 2 or
+            group.get('admission_protocol') != 2 or
+            row.get('resource_group') != group.get('resource_group') or
+            row.get('run_id') != os.environ.get('GATE_LOCAL_SLOT_ID') or
+            row.get('source_root') != str(Path.cwd().resolve()) or
+            any(json.loads(p.read_text()) != expected_guard for p in guards)):
+        raise RuntimeError('local resource admission identity is unconfirmed')
+    # The admitting owner must still be an ancestor, not a reused/dead PID.
+    parents = dict(map(int, line.split()) for line in subprocess.check_output(
+        ['ps', '-axo', 'pid=,ppid='], text=True).splitlines() if line.strip())
+    pid = os.getpid()
+    visited = set()
+    while pid in parents and pid != row['pid'] and pid not in visited:
+        visited.add(pid)
+        pid = parents[pid]
+    if pid != row['pid']:
+        raise RuntimeError('local resource owner is not an execution ancestor')
+    return True
+
+
 def main():
     signal.signal(signal.SIGTERM, interrupted)
     started = time.monotonic()
@@ -272,7 +304,12 @@ def main():
     # The repository's two-suite safety rule is specific to Macs. Linux fleet
     # jobs are already admitted against declared CPU and learned host memory;
     # an additional fixed suite count would strand those allocated resources.
-    slot = acquire_full_slot() if mode == 'full' and sys.platform == 'darwin' else None
+    try:
+        admitted = local_resource_admission() if sys.platform == 'darwin' else False
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print('STOP gate: local resource admission unconfirmed:', error, file=sys.stderr)
+        return 125
+    slot = acquire_full_slot() if mode == 'full' and sys.platform == 'darwin' and not admitted else None
     root = Path(sys.argv[1]).resolve().parent.parent / '.gate'
     root.mkdir(exist_ok=True)
     scratch = tempfile.mkdtemp(prefix='run.', dir=root)
@@ -280,6 +317,8 @@ def main():
     if slot is not None:
         write_full_custody(slot, marker, scratch)
     child_env = dict(os.environ, MYCE_GATE_BUDGET='1', GATE_SCRATCH=scratch)
+    child_env.pop('GATE_LOCAL_SLOT', None)
+    child_env.pop('GATE_LOCAL_SLOT_ID', None)
     child_env['GATE_RUN_ID'] = marker.split('=', 1)[1]
     # Receipt authority belongs only to this supervisor, never nested fixtures.
     receipt_path = child_env.pop('GATE_CLEANUP_RECEIPT', None)

@@ -126,8 +126,21 @@ Local development admission uses an atomic directory per heavy run, shared
 across Git worktrees and ordinary clones under
 `~/.cache/mycelium-gates/control`. It registers legacy checkout report roots,
 recognizes both existing `local-go-slot` lanes and
-preserves unknown/abandoned ownership. Full runs remain serialized until measured
-capacity is recorded; two heavy lanes permit a release build alongside diagnosis.
+preserves unknown/abandoned ownership. Qualified hosts admit full and quick runs
+from their measured per-leg CPU/RAM and live capacity, rather than a fixed full
+count. The four-core qualification observed native peak 7.01 GiB and Linux/VM
+peak 10.57 GiB. With the measured 5.43 GiB host-memory variation reserve, single-run
+entry requirements are 12.45 GiB native and 16.01 GiB Linux. These observations
+are host qualification, not constants for other installations.
+Admission reserves each active run's entire measured peak on top of the new
+run's peak and shared headroom. This conservatively counts current RSS again
+to cover later growth without assuming shared pages are reclaimable. CPU budgets
+sum across runs; Linux demand also fits the VM's configured CPU/RAM capacity.
+Requests above the qualified CPU budget require a new measurement.
+Unqualified hosts retain two heavy lanes and one full. Frozen older helpers see
+both old lane directories reserved while the measured allocator is active;
+new helpers wait for old/unknown execution owners to finish. Protocol guards
+leave only after every admitted run has affirmative cleanup.
 The installed local fleet worker can coexist with local gates. Admission reads
 its process-tree CPU/RSS from launchd and the OS, without queue access or
 credentials, and counts live worker CPU alongside the declared local lane
@@ -147,6 +160,11 @@ and unknown fixture custody are never removed by that queue cleanup. There is
 no queue timeout; disk, memory-pressure and measured-memory entry refusals remain
 real stops. A reserved calibration full can wait for an identified comparison
 batch to exit without entering gaps between that batch's runs.
+For comparable timings, `./scripts/gate.sh full --exclusive` (or
+`gate-local.py full --exclusive`) drains all local gate work and reserves all
+local capacity until verified cleanup. An exclusive waiter at the front also
+blocks new quick work, so it can drain. Permanent fleet jobs and other projects
+remain measured background; exclusive is not a promise of an idle workstation.
 Release waiters take the next free lane through `GATE_PRIORITY=release` for a
 gate, or the supported release command wrapper (use an absolute output path
 because source runs in a snapshot):
@@ -177,8 +195,11 @@ module downloads, compatibility sources and timing history are retained. Linux
 uses persistent guest build/module caches and the same idle eviction policy.
 No other project's cache is trimmed. Qualified hosts use a private
 `gate-capacity.json` memory measurement: native sampled peak plus observed
-available-memory variation as headroom; Linux/both use the larger leg peak plus
-VM residency and the same headroom. Keep the evidence paths/digests private.
+available-memory variation as headroom; Linux/both use the larger of native
+peak or VM residency plus host supervision, and the same headroom. Guest RSS
+is already inside VM residency and is not added again. Concurrent admission
+verifies digest-bound completed native/Linux measurement evidence. Keep the
+evidence paths/digests private.
 A profile-declared Linux need is explicitly provisional until a real four-core
 Linux measurement replaces it. Unqualified hosts retain the initial 22 GiB
 entry value (16 GiB starting reserve plus profile-declared 6 GiB); that fallback
@@ -193,6 +214,9 @@ idle merely by releasing a descriptor. An unknown marker prevents automatic
 trimming until its exact cleanup is reconciled. Helpers are frozen once with
 product/test sources; both legs receive those identical helper bytes.
 
+Host-admitted native runs verify their canonical lane, source identity and
+admitting ancestor before replacing the legacy suite-count lock with measured
+resource custody. The admission identity is removed from fixture environments.
 Native-only legacy/fleet Mac gates retain the following custody mechanism.
 On macOS, the full supervisor holds one of two cross-checkout filesystem locks
 for its entire lifetime, independent of package commands or test expressions. It also

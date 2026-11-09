@@ -99,6 +99,9 @@ def execute(path):
             native_id = uuid.uuid4().hex
             native_receipt = folder / 'native-cleanup.json'
             native_env = dict(env, GATE_CLEANUP_ID=native_id, GATE_CLEANUP_RECEIPT=str(native_receipt))
+            if manifest.get('capacity_owner', {}).get('admission_protocol') == 2:
+                native_env.update(GATE_LOCAL_SLOT=manifest['capacity_slot'],
+                                  GATE_LOCAL_SLOT_ID=manifest['capacity_owner']['run_id'])
             mode = manifest['mode']
             payload = manifest['command'] or ['bash', 'scripts/gate-leg.sh', mode]
             if not manifest['command'] and mode == 'quick':
@@ -157,6 +160,8 @@ def main():
     parser.add_argument('--platform', choices=('native', 'linux', 'both'))
     parser.add_argument('--priority', choices=('normal', 'release', 'calibration'), default=os.environ.get('GATE_PRIORITY', 'normal'))
     parser.add_argument('--cores', type=int, default=4)
+    parser.add_argument('--exclusive', action='store_true',
+                        help='wait for all local gate work; reserve it for isolated timing')
     parser.add_argument('--after-pid', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--command', nargs=argparse.REMAINDER, default=[])
     parser.add_argument('--execute', type=Path, help=argparse.SUPPRESS)
@@ -176,13 +181,15 @@ def main():
             raise SystemExit(128 + signum)
     handlers = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
+        identity = uuid.uuid4().hex
+        planned_folder = repo / '.reports/local-gates' / identity
         slot = capacity.acquire(repo, mode=args.mode, priority=args.priority, cores=args.cores,
                                 wait=True, after_pid=args.after_pid,
+                                exclusive=args.exclusive, source_root=planned_folder / 'source',
                                 platform=args.platform or ('native' if args.command else 'both'))
         cache = Path.home() / 'Library/Caches/mycelium/gates/go-build'
         cache.mkdir(parents=True, exist_ok=True)
-        identity = uuid.uuid4().hex
-        folder = repo / '.reports/local-gates' / identity
+        folder = planned_folder
         folder.mkdir(parents=True)
         report = repo / '.reports/gate-local.jsonl'
         manifest = dict(repo=str(repo), mode=args.mode, base=args.base, ref=args.ref,
@@ -190,12 +197,13 @@ def main():
                         command=args.command, cores=args.cores, identity=identity,
                         platform=args.platform or ('native' if args.command else 'both'),
                         cache=str(cache), report=str(report),
+                        capacity_slot=str(slot.directory), capacity_owner=slot.owner,
                         local_worker_usage_at_entry=slot.owner.get('local_worker_usage_at_entry'))
         path = folder / 'manifest.json'
         path.write_text(json.dumps(manifest) + '\n')
         with capacity.admission_lock(capacity.root(repo)):
             legacy = [p for d in capacity.legacy_directories(repo) for p in capacity.occupied_lanes(d)]
-            others = [p for p in capacity.occupied_lanes(capacity.root(repo)) if p != slot.directory]
+            others = [p for p in capacity.execution_lanes(capacity.root(repo)) if p != slot.directory]
             if not others and not legacy and not capacity.native_full_custody(include_fleet=True):
                 trim_cache(cache)
         env = dict(os.environ, GOCACHE=str(cache))
