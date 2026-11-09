@@ -266,7 +266,9 @@ func TestMachineWorkerParallelReadinessUploadAndControl(t *testing.T) {
 	h.jobs = []Job{harnessJob(t, "slow", "0", `echo ready; touch {work}/slow-ready; while :; do sleep 1; done`), harnessJob(t, "neighbor", "1", `touch {work}/neighbor; while :; do sleep 1; done`)}
 	w := harnessWorker(t, h)
 	startHarness(t, w, h)
-	t.Cleanup(func() { close(h.unblock) })
+	var unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(h.unblock) }) }
+	t.Cleanup(unblock)
 	// The upload assertion starts after the payload has emitted its log, rather
 	// than charging profile/store/process startup against the upload budget.
 	awaitFile(t, filepath.Join(w.StateDir, "job-files", "slow", "1", "slow-ready"))
@@ -282,6 +284,10 @@ func TestMachineWorkerParallelReadinessUploadAndControl(t *testing.T) {
 		t.Fatal("blocked neighbor was affected")
 	}
 	h.stop("slow")
+	// Release the deliberately blocked upload, then observe its terminal
+	// report before cancelling the worker's control transport in cleanup.
+	unblock()
+	await(t, func() bool { return h.completed("slow") })
 }
 
 func TestMachineWorkerIdentityMismatchAndCPUIsolationRefused(t *testing.T) {

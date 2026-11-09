@@ -179,7 +179,10 @@ func TestDevHostHealthReportCadence(t *testing.T) {
 				}
 				j := d.Queue.s.Jobs[job.ID]
 				completed = j != nil && j.State == "succeeded" && j.Attempt == 1 && j.Losses == 0 && j.ReleaseConfirmed
-				return time.Now().After(until)
+				// Three reporting intervals prove continuing sensor delivery;
+				// process launch/finalization must also finish within the outer
+				// context, rather than an unrelated three-heartbeat deadline.
+				return time.Now().After(until) && completed && last.After(first)
 			})
 			if !completed || !last.After(first) {
 				t.Fatalf("healthy admission/completion=%v, sensor advanced=%v", completed, last.After(first))

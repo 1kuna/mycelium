@@ -24,7 +24,14 @@ func TestScarceHostYieldDev(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "files"), Token: "local-fixture", Workers: 1, Devices: 2, HostID: "scarce", CPUBudgetCores: 2, MemoryGB: 8, Interval: 20 * time.Millisecond})
+	const fixtureBudget = 45 * time.Second
+	d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "files"), Token: "local-fixture", Workers: 1, Devices: 2, HostID: "scarce", CPUBudgetCores: 2, MemoryGB: 8, Interval: defaultWorkerInterval}, func(q *Queue) {
+		// This journey tests yield, not loss; TestControlClockDeadWorkerDetection
+		// covers loss. Keep scheduler jitter within the existing outer budget.
+		if err := q.SetLossTimeouts(fixtureBudget, fixtureBudget, fixtureBudget); err != nil {
+			t.Fatal(err)
+		}
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +40,7 @@ func TestScarceHostYieldDev(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), fixtureBudget)
 	defer cancel()
 	c := d.Client()
 	get := func(id string) *Job {
@@ -57,7 +64,6 @@ def save(g):
         out.flush();os.fsync(out.fileno())
     os.replace(temp,f)
     fd=os.open(p,os.O_RDONLY);os.fsync(fd);os.close(fd)
-with open('main.pid','w') as out:out.write(str(os.getpid()))
 if old:
     assert old['myce_checkpoint']['generation']>=2
     with open('answer.json','w') as out:json.dump({'job':os.environ['MYCE_JOB_ID'],'attempt':int(os.environ['MYCE_ATTEMPT']),'restored':old['value']['step']},out)
@@ -67,7 +73,8 @@ def stop(sig,frame):
     save(2)
     sys.exit(0)
 signal.signal(signal.SIGTERM,stop)
-while True:time.sleep(.01)
+with open('main.pid','w') as out:out.write(str(os.getpid()))
+while True:signal.pause()
 `
 	s := cpuSpec(2, .25)
 	s.SubmissionKey = "dev-portable-counter"
@@ -87,13 +94,25 @@ while True:time.sleep(.01)
 	s.Files = FileManifest{"counter.py": ref}
 	s.Run.Command = []string{python, "-u", "counter.py"}
 	s.Run.MemoryGB = .125
-	s.Run.Sidecars = []NativeSidecar{{Name: "helper", MemoryGB: .125, Command: []string{"sh", "-c", `echo $$ > helper.pid; trap 'exit 0' TERM; while :; do sleep .01; done`}}}
+	s.Run.Sidecars = []NativeSidecar{{Name: "helper", MemoryGB: .125, Command: []string{"sh", "-c", `echo $$ > helper.pid; trap 'exit 0' TERM; while :; do sleep 1; done`}}}
 	s.Outputs = map[string]string{"answer.json": "results"}
 	j, err := c.Submit(ctx, s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	await(t, func() bool { j = get(j.ID); return j.StartedAt != nil && len(j.FileCheckpoints) > 0 })
+	await(t, func() bool {
+		j = get(j.ID)
+		if j.StartedAt == nil || len(j.FileCheckpoints) == 0 {
+			return false
+		}
+		// Both commands must publish readiness before demand can preempt them.
+		for _, name := range []string{"main.pid", "helper.pid"} {
+			if _, err := os.Stat(filepath.Join(root, "workers", "fake-1", "job-files", j.ID, "1", name)); err != nil {
+				return false
+			}
+		}
+		return true
+	})
 	first := *j
 	if first.Machine != "scarce" || first.Attempt != 1 {
 		t.Fatal("initial placement", first.Machine, first.Attempt)
@@ -117,7 +136,7 @@ while True:time.sleep(.01)
 	general.Devices = []MachineDevice{}
 	general.CapabilityProfile.OS = runtime.GOOS
 	general.CapabilityProfile.Arch = runtime.GOARCH
-	w := Worker{EnvironmentLimit: 1 << 20, sharedCPUDev: true, CPUIsolationProbe: func(context.Context) error { return nil }, Machine: general, StateDir: filepath.Join(root, "general"), Client: c, ModelConfig: d.Queue.models, Clock: d.Queue.clock, Interval: 20 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 8, nil }}
+	w := Worker{EnvironmentLimit: 1 << 20, sharedCPUDev: true, CPUIsolationProbe: func(context.Context) error { return nil }, Machine: general, StateDir: filepath.Join(root, "general"), Client: c, ModelConfig: d.Queue.models, Clock: d.Queue.clock, Interval: defaultWorkerInterval, HostMemorySource: func(context.Context) (float64, error) { return 8, nil }}
 	go func() { done <- w.Run(workerCtx) }()
 	defer func() {
 		stopWorker()
