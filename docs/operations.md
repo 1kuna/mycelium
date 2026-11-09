@@ -2490,11 +2490,16 @@ unchanged pending measured native shutdown evidence (#889); laptop cancellation
 tests do not qualify a native stop duration.
 
 Tested fixes deploy without a separate task, bundled one release at a time; roll
-back if the queue is not healthy. Do not patch during a successful production
-run. Fixing a run failing because of Mycelium is allowed and expected. Keep the
+back if the queue is not healthy. Critical updates may deploy during a production
+consumer's run (MY-39); patch time is weighed and is being made quick, but it is
+not a precondition. Ordinary updates wait during a successful run. Fixing a run failing because of Mycelium is allowed and expected.
+Orchestrator application: announce rollouts to consumer orchestrators and prefer
+quick rolling updates through existing supported paths that preserve running
+attempts and resumable checkpoints. This authority does not bypass custody,
+health checks or the supported rollout's current idle waits. Keep the
 fleet on a healthy, tested release before each scheduled production window. There is
 no pre-production freeze, consumer canary deploy gate, or need to ask about
-deploy timing (MY-33).
+deploy timing (MY-33, amended by MY-39).
 
 > **Before deploying bounded status (#439), migrate preservation checks.**
 > Default `GET /api/status` includes active/cleanup-pending jobs and only the
@@ -2514,7 +2519,7 @@ operation ID. It can exit immediately: the queue owns progress. Watch phases,
 wait reasons and failures with `myce status`. An approval from before signed
 envelope retention needs identical verified reapproval first.
 
-For a queue hotfix, use
+For a queue hotfix that should wait for production to finish, use
 `myce fleet upgrade --release vX.Y.Z --queue-only --wait-production-idle`.
 `--queue-only` selects only the queue service, including when workers share its
 host or installed binary. It still drains that host and waits for fresh exact
