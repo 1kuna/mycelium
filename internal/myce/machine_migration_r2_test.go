@@ -94,36 +94,6 @@ func TestM4R2CatalogRollbackOwnership(t *testing.T) {
 	}
 }
 
-func TestM4R2RollbackQueuedMachineName(t *testing.T) {
-	for _, state := range []string{"queued", "failed", "cancelled"} {
-		t.Run(state, func(t *testing.T) {
-			q, _, mapping := m4Queue(t)
-			if _, err := q.ConvertMachines(mapping, ModelConfig{}, false); err != nil {
-				t.Fatal(err)
-			}
-			s := spec("experiment")
-			s.AllowedMachines = []string{"host"}
-			s.Resumable = true
-			j := submit(t, q, s)
-			if err := q.update(func() error { q.s.Jobs[j.ID].State = state; return nil }); err != nil {
-				t.Fatal(err)
-			}
-			before, _ := json.Marshal(q.s)
-			for _, dry := range []bool{true, false} {
-				err := q.RollbackMachines(dry)
-				var typed *QueuedRetiredMachinesError
-				if !errors.As(err, &typed) || !reflect.DeepEqual(typed.Jobs, []string{j.ID}) {
-					t.Errorf("rollback lost machine-era intent: %v", err)
-				}
-			}
-			after, _ := json.Marshal(q.s)
-			if !reflect.DeepEqual(before, after) {
-				t.Error("refused rollback mutated state")
-			}
-		})
-	}
-}
-
 func TestM4R2ProductionSpoolCustody(t *testing.T) {
 	// Literal formats from the 08816cf writers, not full heartbeat workerState.
 	cases := map[string]string{

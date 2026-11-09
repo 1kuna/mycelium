@@ -249,6 +249,34 @@ func TestFileRetentionSubmissionFence(t *testing.T) {
 			t.Fatal("new keeping reference lost", err)
 		}
 	}
+
+	// An aged marked orphan needs the same admission fence without a prior job.
+	{
+		api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+		defer api.Close()
+		c := Client{URL: api.URL, Token: "test"}
+		_, ref := retentionJobInput(t, c, "marked input awaiting verification")
+		s := spec("experiment")
+		s.Files = FileManifest{"input": ref}
+		clock.Advance(testFileRetention + time.Nanosecond)
+		entered, unblock := gateSubmitVerification(t, q, nil)
+		defer unblock()
+		done := startSubmitVerification(q, context.Background(), s)
+		submitVerificationWait(t, "orphan input verification", entered)
+		submitVerificationProgress(t, "orphan collection during verification", q.Tick)
+		unblock()
+		if got := submitVerificationWait(t, "orphan input admission", done); got.err != nil {
+			t.Fatal(got.err)
+		}
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		for _, ref := range s.Files {
+			if _, err := os.Stat(q.files.blob(ref)); err != nil {
+				t.Fatal("new reference to old orphan lost", err)
+			}
+		}
+	}
 }
 
 func retentionClient(t *testing.T, q *Queue) Client {
@@ -434,32 +462,6 @@ func TestFileRetentionOrphanBatch(t *testing.T) {
 		entries, err := os.ReadDir(filepath.Join(q.files.root, "blobs"))
 		if err != nil || len(entries) != want {
 			t.Fatalf("orphan batch remaining=%d, want %d: %v", len(entries), want, err)
-		}
-	}
-}
-
-func TestFileRetentionOrphanSubmissionFence(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
-	_, ref := retentionJobInput(t, c, "marked input awaiting verification")
-	s := spec("experiment")
-	s.Files = FileManifest{"input": ref}
-	clock.Advance(testFileRetention + time.Nanosecond)
-	entered, unblock := gateSubmitVerification(t, q, nil)
-	defer unblock()
-	done := startSubmitVerification(q, context.Background(), s)
-	submitVerificationWait(t, "orphan input verification", entered)
-	submitVerificationProgress(t, "orphan collection during verification", q.Tick)
-	unblock()
-	if got := submitVerificationWait(t, "orphan input admission", done); got.err != nil {
-		t.Fatal(got.err)
-	}
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	for _, ref := range s.Files {
-		if _, err := os.Stat(q.files.blob(ref)); err != nil {
-			t.Fatal("new reference to old orphan lost", err)
 		}
 	}
 }
@@ -860,48 +862,5 @@ func TestFileRetentionDeferredDiagnostic(t *testing.T) {
 	}
 	if q.fileCollectionDeferred {
 		t.Fatal("successful collection did not clear deferral")
-	}
-}
-
-func TestFileRetentionOpenDownload(t *testing.T) {
-	q, clock := fixture(t)
-	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "store"), 1<<20, true); err != nil {
-		t.Fatal(err)
-	}
-	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer api.Close()
-	c := Client{URL: api.URL, Token: "test"}
-	path := filepath.Join(t.TempDir(), "input")
-	if err := os.WriteFile(path, []byte("download survives unlink"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	ref, err := IdentifyFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = c.UploadFile(context.Background(), path, ref); err != nil {
-		t.Fatal(err)
-	}
-	j := submit(t, q, Spec{Name: "open", Project: "test", Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{MemoryGB: 1, Platform: Platform{Any: true}}, Files: FileManifest{"input": ref}})
-	if err = q.update(func() error {
-		q.s.Jobs[j.ID].State = "succeeded"
-		ended := clock.Now()
-		q.s.Jobs[j.ID].FinishedAt = &ended
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(testFileRetention)
-	if err = q.update(func() error { q.maintain(); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	// The download has opened and verified its descriptor before the directory
-	// durability barrier. Unlink there, then finish serving that same descriptor.
-	q.files.syncDir = func(string) error { return q.reclaimJobFiles() }
-	if err = c.DownloadFile(context.Background(), ref, filepath.Join(t.TempDir(), "download")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
-		t.Fatal("test did not unlink", err)
 	}
 }

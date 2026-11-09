@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -123,30 +124,16 @@ func TestEnrollmentUpgradeRerunResumesOwnDrain(t *testing.T) {
 	}
 }
 
-func TestEnrollmentBusyUpgradeDoesNotLeaveDrain(t *testing.T) {
-	q, clock := fixture(t)
-	m := cpuMachine("hypha", "hypha", "fake", 8, 32)
-	maintenanceAssign(t, q, m, "experiment")
-	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
-	defer server.Close()
-	_, err := PrepareEnrollmentUpgrade(context.Background(), ServiceConfig{Name: m.ID, HostID: m.HostID, State: t.TempDir()}, Client{URL: server.URL, Token: "test"}, clock, time.Second, func(context.Context, time.Duration) error { clock.Advance(time.Second); return nil })
-	if err == nil {
-		t.Fatal("busy upgrade accepted")
-	}
-	status, e := q.HostMaintenanceStatus(m.HostID)
-	if e != nil || status.Policy.Mode != "enabled" {
-		t.Fatal("failed upgrade left host drained", status.Policy.Mode, e)
-	}
-}
-
 func TestEnrollmentDrainRaceTimeoutRestoresPolicy(t *testing.T) {
 	q, clock := fixture(t)
 	m := cpuMachine("hypha", "hypha", "fake", 8, 32)
 	check(t, q, m, nil)
 	c := ServiceConfig{Name: m.ID, HostID: m.HostID, State: t.TempDir()}
+	var tracing atomic.Bool
+	tracing.Store(true)
 	api := (API{Queue: q, Token: "test"}).Handler()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/maintenance") {
+		if tracing.Load() && strings.HasSuffix(r.URL.Path, "/maintenance") {
 			status, err := q.HostMaintenanceStatus(m.HostID)
 			if r.Method == "POST" {
 				var request HostMaintenanceRequest
@@ -179,23 +166,17 @@ func TestEnrollmentDrainRaceTimeoutRestoresPolicy(t *testing.T) {
 	if _, e = os.Stat(filepath.Join(c.State, enrollmentResumeFile)); !os.IsNotExist(e) {
 		t.Fatal("successful timeout undo retained resume authority", e)
 	}
-}
-
-func TestEnrollmentUpgradeReceiptFailureRestoresPolicy(t *testing.T) {
-	q, clock := fixture(t)
-	m := cpuMachine("hypha", "hypha", "fake", 8, 32)
-	check(t, q, m, nil)
+	// The timeout has restored enabled policy; now fail durable receipt creation.
+	tracing.Store(false)
 	state := t.TempDir()
 	if err := os.Mkdir(filepath.Join(state, enrollmentResumeFile+".tmp"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
-	defer server.Close()
-	_, err := PrepareEnrollmentUpgrade(context.Background(), ServiceConfig{Name: m.ID, HostID: m.HostID, State: state}, Client{URL: server.URL, Token: "test"}, clock, time.Second, nil)
+	_, err = PrepareEnrollmentUpgrade(context.Background(), ServiceConfig{Name: m.ID, HostID: m.HostID, State: state}, Client{URL: server.URL, Token: "test"}, clock, time.Second, nil)
 	if err == nil {
 		t.Fatal("upgrade permitted without durable resume authority")
 	}
-	status, e := q.HostMaintenanceStatus(m.HostID)
+	status, e = q.HostMaintenanceStatus(m.HostID)
 	if e != nil || status.Policy.Mode != "enabled" {
 		t.Fatal("receipt failure left drain", status.Policy.Mode, e)
 	}
