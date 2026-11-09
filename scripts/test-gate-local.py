@@ -311,8 +311,14 @@ finally: slot.release()
                         capacity.acquire(root, mode='full')
                     config['fleet_worker_cpu_reserve_cores'] = 4
                     (root / 'gate-capacity.json').write_text(json.dumps(config))
-                    with self.assertRaisesRegex(RuntimeError, 'configuration changed'):
-                        capacity.acquire(root, mode='full')
+                    existing_group = (root / 'local-go-resource-group.custody').read_bytes()
+                    with self.assertRaisesRegex(RuntimeError, 'configuration changed') as refused:
+                        capacity.acquire(root, mode='full', wait=True)
+                    self.assertIn('no work started', str(refused.exception))
+                    self.assertNotIn('retained', str(refused.exception))
+                    self.assertEqual(capacity.execution_lanes(root), [first.directory])
+                    self.assertEqual((root / 'local-go-resource-group.custody').read_bytes(), existing_group)
+                    self.assertFalse(list(root.glob('local-go-wait-*.json')))
                     del config['fleet_worker_cpu_reserve_cores']
                     config['memory_measurement']['headroom_bytes'] = 1
                     (root / 'gate-capacity.json').write_text(json.dumps(config))
@@ -645,6 +651,31 @@ sys.exit(m.main())
             with tarfile.open(archives[0]) as tar:
                 self.assertIn('go.mod', tar.getnames())
                 self.assertIn('internal/myce/source.go', tar.getnames())
+
+    def test_preparation_failures_confirm_no_payload_and_allow_capacity_release(self):
+        for phase in ('source', 'selection'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                path = root / 'manifest.json'
+                path.write_text(json.dumps(dict(repo=str(root), cache=str(root / 'cache'), cores=4,
+                    report=str(root / 'report'), mode='quick', command=[], platform='both', identity='run')))
+                failure = (RuntimeError('source refused') if phase == 'source' else
+                           subprocess.CalledProcessError(2, ['gate-related.py']))
+                with (patch.object(local.sources, 'freeze', side_effect=failure if phase == 'source' else None,
+                                   return_value={'source_sha': 'test'}),
+                      patch.object(local.sources, 'extract', side_effect=lambda a, d: (d / 'scripts').mkdir()),
+                      patch.object(local.sources, 'runtime_archive'),
+                      patch.object(local.subprocess, 'run', side_effect=failure),
+                      patch.object(local.subprocess, 'Popen') as launch):
+                    with self.assertRaises(type(failure)):
+                        local.execute(path)
+                launch.assert_not_called()
+                self.assertTrue(local.receipts.confirmed(root / 'overall-cleanup.json', 'run'))
+                receipt = json.loads((root / 'overall-cleanup.json').read_text())
+                self.assertTrue(receipt['no_payload_started'])
+                self.assertEqual(receipt['status'], 125)
+                self.assertFalse((root / 'native-cleanup.json').exists())
+                self.assertFalse((root / 'linux-cleanup.json').exists())
 
     def test_unknown_native_exit_never_starts_linux_or_confirms_capacity(self):
         for code in (-9, 255):

@@ -27,8 +27,8 @@ HELPERS = ('gate-budget.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh'
            'gate-cache.py', 'gate-measure.py', 'gate-memory.py', 'gate-guest.py', 'gate-receipt.py')
 
 
-def execute(path):
-    """Child orchestration; parent measures host disk across every phase."""
+def prepare(path):
+    """Synchronous preparation starts no native or guest payload."""
     manifest = json.loads(path.read_text())
     repo, folder = Path(manifest['repo']), path.parent
     source = folder / 'source'
@@ -77,6 +77,22 @@ def execute(path):
         verify.unlink()
         if checked != {k: v for k, v in identity.items() if k not in ('instrumentation_sha256', 'admission')}:
             raise RuntimeError('source changed during quick selection; no test started')
+    return manifest, repo, folder, source, identity, env, report, selection, runtime, info, predecessor_files
+
+
+def execute(path):
+    """Child orchestration; parent measures host disk across every phase."""
+    try:
+        (manifest, repo, folder, source, identity, env, report, selection,
+         runtime, info, predecessor_files) = prepare(path)
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError):
+        # All preparation commands use run/check_output, which reap on these
+        # failures. No payload/transport has been launched. Signal death and
+        # unknown exceptions still leave no positive receipt and retain custody.
+        manifest = json.loads(path.read_text())
+        receipts.publish(path.parent / 'overall-cleanup.json', manifest['identity'],
+                         stopped=True, status=125, phase='preparation', no_payload_started=True)
+        raise
     started_receipts = []
     current = None
     interrupted = []

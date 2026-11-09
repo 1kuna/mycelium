@@ -331,7 +331,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 group_path = directory / 'local-go-resource-group.custody'
                 if group_path.exists() and json.loads(group_path.read_text()).get(
                         'admission_config_sha256') != config_digest:
-                    raise RuntimeError('capacity configuration changed during active custody; retained')
+                    raise RuntimeError('capacity configuration changed during active custody; no work started; '
+                                       'waiting ticket removed, retry after active group cleanup with current helpers')
                 if resources and cores > resources['measured_cores']:
                     raise RuntimeError('requested cores exceed the measured local gate budget')
                 if exclusive and not resources:
