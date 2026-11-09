@@ -1,10 +1,12 @@
 """Laptop integration tests: all helper invocations use temporary fake sysfs."""
 from pathlib import Path
 import argparse
+import os
 import runpy
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -112,6 +114,8 @@ class TimeoutTest(unittest.TestCase):
 
     def test_worker_reports_unapplied_policy_without_failure(self):
         self.assertIn("expected 1280000, read 640000", self.invoke("verify"))
+        self.assertIn("verification: mismatch, status=1, continuing", self.invoke("verify"))
+        self.assertIn("verification: child failure, status=1, continuing", self.invoke("startup"))
         self.assertIn("continuing worker startup", self.invoke("verify"))
         self.invoke()
         self.invoke("verify")
@@ -124,7 +128,7 @@ class TimeoutTest(unittest.TestCase):
 
     def test_startup_settle_is_conditional_bounded_and_report_only(self):
         helper = runpy.run_path(str(HELPER))
-        args = argparse.Namespace(action="startup", config=self.config,
+        args = argparse.Namespace(action="startup-check", config=self.config,
                                   sysfs_root=self.root, card=None, state_dir=self.state)
         with mock.patch.object(helper["subprocess"], "run") as settle, \
                 mock.patch.object(helper["syslog"], "syslog") as journal:
@@ -149,9 +153,27 @@ class TimeoutTest(unittest.TestCase):
                     ["/usr/bin/udevadm", "settle", "--timeout=5"], timeout=5, check=False)
             messages = [call.args[1] for call in journal.call_args_list]
             self.assertTrue(any("expected 1280000, read 640000" in m for m in messages))
+            self.assertTrue(any("verification: mismatch, status=1, continuing" in m for m in messages))
             self.assertTrue(any("udev settle failed" in m for m in messages))
             self.assertTrue(any("udev settle exited 1" in m for m in messages))
         self.assertEqual(self.target.read_text(), "640000\n")
+        self.assertFalse(self.state.exists())
+
+    def test_whole_startup_bounds_stalled_attribute_read(self):
+        # A FIFO with no writer blocks Path.read_text just like a stalled sysfs
+        # read. Use the real supervisor/deadlines, without mocking read or wait.
+        self.target.unlink()
+        os.mkfifo(self.target)
+        started = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, str(HELPER), "startup", "--config", str(self.config),
+             "--sysfs-root", str(self.root)], capture_output=True, text=True, timeout=15)
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("verification: timeout, status=124, continuing", result.stderr)
+        self.assertGreaterEqual(elapsed, 10)
+        # One second allows interpreter startup and test-host scheduling jitter.
+        self.assertLess(elapsed, 13)
         self.assertFalse(self.state.exists())
 
     def test_no_xe_and_invalid_card(self):

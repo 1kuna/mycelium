@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import syslog
@@ -78,12 +79,12 @@ def write_verified(target: Path, value: int) -> None:
         raise ValueError(f"{target}: readback mismatch")
 
 
-def run(args: argparse.Namespace) -> None:
+def run(args: argparse.Namespace) -> int | None:
     value = configured(args.config) if args.action != "restore" else None
     if args.action != "restore" and value is None:
         log("PREEMPT_TIMEOUT_US unset: leaving kernel/administrator values unchanged")
         return
-    if args.action == "startup" and xe_cards(args.sysfs_root, args.card):
+    if args.action == "startup-check" and xe_cards(args.sysfs_root, args.card):
         # Best-effort ordering only. Five seconds is the startup latency budget,
         # not a claim about normal udev completion time. Never wait indefinitely.
         try:
@@ -94,16 +95,22 @@ def run(args: argparse.Namespace) -> None:
         except (OSError, subprocess.TimeoutExpired) as error:
             log(f"WARNING: udev settle failed: {error}; continuing worker startup")
     targets = engines(args.sysfs_root, args.card)
-    if args.action in ("verify", "startup"):
+    if args.action in ("verify", "startup-check"):
+        status = 0
         for _, target in targets:
             try:
                 actual = checked(target, value)
                 if actual != value:
-                    raise ValueError(f"expected {value}, read {actual}")
-                log(f"{target}: verified {actual}")
+                    status = max(status, 1)
+                    log(f"WARNING: {target}: expected {value}, read {actual}; "
+                        "verification: mismatch, status=1, continuing worker startup (report-only)")
+                else:
+                    log(f"{target}: verified {actual}; verification: match, status=0")
             except (OSError, ValueError) as error:
-                log(f"WARNING: {target}: {error}; report-only, continuing worker startup")
-        return
+                status = 2
+                log(f"WARNING: {target}: {error}; verification: error, status=2, "
+                    "continuing worker startup (report-only)")
+        return status
     args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Serialize device-add callbacks, manual apply and rollback. Never unlink
     # the lock while callbacks can still be running.
@@ -144,9 +151,40 @@ def run(args: argparse.Namespace) -> None:
             log("no xe CCS attributes present; no writes")
 
 
+def startup(args: argparse.Namespace) -> None:
+    # The parent does no config/sysfs reads. Bound the entire child, including
+    # discovery, logging and reads after settle, rather than individual calls.
+    command = [sys.executable, str(Path(__file__).absolute()), "startup-check",
+               "--config", str(args.config), "--sysfs-root", str(args.sysfs_root)]
+    if args.card is not None:
+        command.extend(["--card", args.card])
+    child = subprocess.Popen(command, start_new_session=True)
+    try:
+        status = child.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        log("WARNING: verification: timeout, status=124, continuing worker startup; "
+            "terminating check (at most 2 seconds grace)")
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Never wait indefinitely for a kernel-blocked child after SIGKILL.
+            log("WARNING: verification: killed, status=137, continuing worker startup")
+        return
+    if status:
+        log(f"WARNING: verification: child failure, status={status}, continuing worker startup")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("apply", "verify", "startup", "restore"))
+    parser.add_argument("action", choices=("apply", "verify", "startup", "startup-check", "restore"))
     parser.add_argument("--card")
     parser.add_argument("--config", type=Path, default=Path("/etc/myce-xe-preempt-timeout.conf"))
     parser.add_argument("--sysfs-root", type=Path, default=Path("/sys"))
@@ -154,11 +192,17 @@ def main() -> int:
     args = parser.parse_args()
     syslog.openlog("myce-xe-preempt-timeout")
     try:
-        run(args)
+        if args.action == "startup":
+            startup(args)
+        else:
+            status = run(args)
+            if args.action == "startup-check":
+                return status or 0
     except (OSError, ValueError, TypeError) as error:
-        if args.action in ("verify", "startup"):
-            log(f"WARNING: {error}; report-only, continuing worker startup")
-            return 0
+        if args.action in ("verify", "startup", "startup-check"):
+            log(f"WARNING: {error}; verification: error, status=2, "
+                "continuing worker startup (report-only)")
+            return 2 if args.action == "startup-check" else 0
         log(f"FAILED: {error}")
         return 1
     return 0

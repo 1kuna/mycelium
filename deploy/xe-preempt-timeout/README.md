@@ -18,14 +18,32 @@ Only when a value is configured and an xe primary card is present does it run
 `udevadm settle --timeout=5`, with a matching five-second subprocess deadline.
 Five seconds is an explicit best-effort startup latency budget to avoid the
 120-second default delay; it is not measured device-initialization latency.
-The cost is up to five seconds of startup delay, possibly for unrelated udev
-work; unfinished device initialization can outlast that budget. With an unset
+That wait can cost up to five seconds, possibly for unrelated udev work;
+unfinished device initialization can outlast that budget. With an unset
 value or no xe card it does not invoke udevadm or wait.
 
-After that attempt it reads back and logs the configured value. Mismatches,
+The **entire** startup inspection runs in a supervised child: configuration
+reads, discovery, udev settling and all sysfs reads share a **10-second deadline**.
+On expiry the supervisor sends SIGTERM to the child process group, allows at
+most **2 seconds** for termination, then sends SIGKILL and returns without an
+unbounded reap wait. Total startup-check budget is **12 seconds**, including the
+five-second udev wait (not added to it), plus normal process scheduling overhead.
+This uses the same Python dependency as the helper, so laptop tests exercise
+the actual supervisor without requiring a separate GNU timeout installation.
+These are explicit startup latency budgets, not measured driver timings. The
+cost of enforcing them is incomplete verification when a read stalls. The
+supervisor performs no config/sysfs reads itself; a kernel-blocked child cannot
+hold the worker pre-start command waiting for it to exit.
+
+After the settle attempt the child reads back and logs the configured value. Mismatches,
 unreadable attributes, invalid configuration, missing udevadm, settle failures
 and timeouts produce clear warnings on stderr (the worker journal) and through
-syslog. **They never prevent the worker from starting.** The drop-in's systemd
+syslog. A mismatch explicitly logs `verification: mismatch, status=1,
+continuing worker startup`; successful verification uses status 0, read/config
+errors status 2, whole-check timeout status 124 and forced kill status 137.
+The internal child returns its verification status; the startup supervisor logs
+nonzero child exits and returns success. Standalone `verify` also remains
+report-only and returns success. **These statuses never prevent worker startup.** The drop-in's systemd
 `-` prefix also ignores a missing helper/interpreter or another nonzero exit.
 This works with the normal **user** worker unit; ordering a root system unit
 `Before=` a user unit would not order the two managers. This is best-effort
@@ -54,7 +72,9 @@ boot/hotplug/udev ordering remains to be
 qualified on an authorized idle host; fake sysfs does not prove it.
 Review round 1 requirement (received by the implementation worker): startup
 verification is report-only, and ordering waits are conditional, bounded and
-never block startup. Applying this template still requires a clean confirmation
+never block startup. The narrow re-review requirement (also received by the
+implementation worker) bounds the whole inspection and requires explicit
+mismatch status evidence. Applying this template still requires a clean confirmation
 batch and separate authorization.
 
 ## Install after separate authorization
