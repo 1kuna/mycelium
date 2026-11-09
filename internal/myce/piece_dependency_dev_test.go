@@ -182,14 +182,14 @@ func TestPieceDependencyDevCPU(t *testing.T) {
 			}
 			probeWait(t, ctx, func() bool { ack, err := d.Client().Cancel(ctx, p.ID); return err == nil && *ack.Release != "pending" })
 			stopped, err := d.Client().GetJob(ctx, running.ID)
-			if err != nil || stopped.State != "cancelled" || !stopped.ReleaseConfirmed {
+			if err != nil || stopped.State != "cancelled" || !stopped.ReleaseConfirmed || stopped.DiagnosticCode != "upstream_cancelled" || stopped.Reason != "upstream parent cancelled" {
 				t.Fatal("downstream cleanup", stopped, err)
 			}
 			future := consumer
 			future.SubmissionKey = "after-abort"
-			excluded, err := d.Client().Submit(ctx, future)
-			if err != nil || excluded.State != "cancelled" {
-				t.Fatal("late consumer escaped abort", err)
+			bound, err := d.Client().SubmitAndWait(ctx, future)
+			if err != nil || bound.State != "succeeded" || !dependencyReady(bound) || bound.Dependency.Execution != accepted || cancelled(bound) {
+				t.Fatal("late consumer lost succeeded parent's outputs", bound, err)
 			}
 			t.Logf("%s: consumed %q before gather; bound execution %s attempt %d survived restart/replay; parent abort confirmed downstream cleanup", transport, data, accepted.ID, accepted.Attempt)
 		})

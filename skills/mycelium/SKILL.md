@@ -110,6 +110,12 @@ Success requires a succeeded job, verified output size/SHA-256 from `result`,
 and this application comparison (23 bytes including newline). A wake, terminal
 receipt or command exit alone is insufficient.
 
+From the queue release containing #1164, a new `after:` consumer can bind
+retained, unexpired accepted outputs from a succeeded fan-out parent even if
+the parent later received a cancellation intent. A parent cancelled before
+success still cancels its dependents with `upstream_cancelled` and reason
+`upstream parent cancelled`; expired outputs return `result_expired`.
+
 ## Observe and recover
 
 Keep owned waits in the foreground. Supporting clients accept one batch of up
