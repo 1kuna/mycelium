@@ -461,7 +461,8 @@ with `python3 scripts/test-gate-budget.py`.
 ## Automatic main full gates
 
 The [`main-full` workflow](../.github/workflows/main-full.yml) is eligible only on
-pushes to `main`; there are no PR, manual-dispatch or schedule triggers. It uses
+pushes to `main` and explicit named-tree recovery dispatches on `main`; there
+are no PR or schedule triggers. It uses
 `[self-hosted, mycelium-ci]`, never GitHub-hosted runners. Its workflow/ref
 concurrency group keeps the running member and replaces an older pending member
 with the latest queued member (`cancel-in-progress: false`). Started workflows
@@ -482,8 +483,10 @@ preserves every distinct landed tree even when GitHub reorders events.
 
 Uncovered trees receive both existing full gates. Successful CI coverage records
 avoid repeating a previously tested tree, including on reruns. Every other
-outcome is `error`: incomplete coverage, eligible for recovery by a later
-automatic workflow. A terminal failed job does not prove that the gate ran; the
+outcome is `error`: incomplete coverage, eligible for one automatic recovery
+attempt after the initial attempt. After that, the tree stays **UNPROVEN** and
+requires explicit named-tree recovery authorization. A terminal failed job does
+not prove that the gate ran; the
 current receipt format cannot establish a completed failing suite. An incomplete
 outcome on either platform prevents successful tree proof. A workflow with an
 incomplete tree fails even if newer trees succeed.
@@ -492,10 +495,63 @@ An explicit retry executes each distinct tree at most once per batch. Identical
 trees reuse that batch's success or incompleteness before
 consulting old commit statuses. This prevents a failed C retry from running both
 fulls again for a later identical-tree commit. An incomplete outcome is never
-retried repeatedly within that batch and remains recoverable in a later workflow. Interrupted work or failed status publication can need
+retried repeatedly within that batch. Recovery across workflows follows the
+persistent bound below. Interrupted work or failed status publication can need
 recovery; this is deduplication of recorded results, not an exactly-once execution
 transaction across GitHub and Mycelium. Pre-protocol history is not retroactively
 tested. Pre-existing runs outside the concurrency group are not cancelled.
+
+### Bounded recovery
+
+The round-4 review brief (2026-11-09), received by the CI implementation
+worker, requires one automatic recovery retry per tree after its initial attempt.
+This bounds repeated compute on persistently failing trees: N such trees receive
+at most N extra two-platform attempts across any number of later automatic
+workflows. The cost is that an outage can leave coverage unproven until someone
+explicitly authorizes recovery; exhaustion is never a successful proof.
+
+`mycelium/main-full-attempts-v1` stores `tree:TREE_ID attempts:COUNT owner:RUN:ATTEMPT`
+on the **first landed main commit with that tree**. Identical later commits share
+this counter. The workflow/ref concurrency group serializes push and dispatch
+reservations. Before either platform submission, the submitter persists an
+`error` status reserving the next count. An interrupted attempt or uncertain
+status reply consumes that reservation conservatively; it is not refunded.
+An unavailable or malformed counter fails closed without submissions. No new
+state store is used; this channel has the same trusted-writer assumptions as
+proof statuses. Re-entering the same owner cannot reserve another attempt.
+After verified success and cleanup, the counter status becomes `success` with
+the same count, so it does not leave a proven commit red. This counter context
+is never read as proof; coverage still requires the separate verified proof status.
+
+Counts 1 and 2 permit the initial automatic attempt and its one recovery retry.
+Once exhausted, later main runs report **UNPROVEN**, publish `error`, submit no
+more work for that tree, and fail even if every newer tree succeeds. They still
+process newer uncovered trees. A workflow rerun does not reset the counter or
+provide recovery authorization. Missing proof remains visible; no failed job
+state or exhausted budget can become proof.
+
+After diagnosing the failure and reconciling the previous attempt's cleanup,
+an authorized maintainer may request **one** further attempt for a full, lowercase
+40-character tree ID already landed on main:
+
+```sh
+gh workflow run main-full.yml --repo 1kuna/mycelium --ref main \
+  -f recovery_tree=TREE_ID
+```
+
+The required `workflow_dispatch` input is `recovery_tree`. This dispatch processes
+only that named tree (including identical landed commits); it does not retry other
+unproven trees or reset any counter. The counter increases even for an authorized
+attempt, so later automatic runs remain bounded. A dispatch rerun is rejected;
+another attempt requires a fresh named-tree dispatch. Already proven trees reuse
+success without another submission. A tree absent from main, an invalid ID or
+an input supplied outside a dispatch is rejected. A successful recovery dispatch
+proves only its named tree, not the remaining backlog. A pending dispatch can be
+replaced by the shared concurrency group; an unexecuted dispatch grants no durable
+budget. Redispatch explicitly if it is still needed.
+
+The workflow is intentionally disabled. This documented interface does not
+authorize enabling or invoking it as part of this change.
 
 ### Frozen CI source and inputs
 
@@ -517,14 +573,15 @@ timeouts and unknown outcomes cannot prove a completed full suite. Only both
 accepted success markers, frozen source checks and confirmed owned cleanup permit
 `success`. The existing gate format provides no negative receipt proving source
 identity, completed failing tests and cleanup, so **even genuine test failures
-remain recoverable and may run again in a later workflow**. No `failure` status
+remain unproven and may run again within the recovery contract**. No `failure` status
 is published or reused. Failure reuse is deferred until a follow-up on #1149 can
 verify that evidence, rather than treating a job exit as a verdict. Within one
 batch each distinct tree is still attempted at most once, regardless of outcome.
 Only v4 is read: v1 had unsound source/instrumentation provenance, and v2/v3 could
 mislabel incomplete work as a completed failure and suppress recovery. Their
-records cannot suppress recovery. A different tree or missing successful CI record keeps
-the full. The newest status in the context is authoritative. Logs and the step
+records cannot suppress recovery. A different tree or missing successful CI
+record requires full proof; exhausted trees remain unproven until authorized
+recovery succeeds. The newest status in the context is authoritative. Logs and the step
 summary name each tested/skipped tree and the source of any reused CI result.
 
 **Trust rests on upstream GitHub commit-status writers: maintainers and authorized
@@ -659,7 +716,7 @@ workflow attempt's two jobs. Repeating a submission within that attempt adopts
 the same job, including after an uncertain submit. A workflow rerun uses fresh
 attempt keys: an older attempt's cleanup cannot cancel its replacement, and a
 cancelled key cannot poison a rerun. An outcome without verified successful proof
-remains eligible for later recovery.
+remains eligible for recovery within the persistent attempt budget.
 The CLI handles immutable source uploads, idempotent submission and reconnects;
 there is no custom watcher, cursor or status publisher.
 
@@ -698,9 +755,9 @@ submitted suite reporting `failed`. Its platform row says `infrastructure failur
 and the workflow emits a `CI infrastructure failure` error annotation: that
 platform has no verified suite result. Submission may have been accepted despite
 a lost reply. Resolve the infrastructure problem privately, then
-repeat cleanup for the original attempt, then rerun the workflow/merge with
-fresh attempt keys. Later main workflows automatically recover trees without
-verified successful proof, including jobs reported as failed. A job failure alone
+repeat cleanup for the original attempt. A later main workflow may spend the
+one automatic recovery retry, including for jobs reported as failed. After
+exhaustion, use a fresh named-tree recovery dispatch with new attempt keys. A job failure alone
 does not establish that the suite ran.
 
 ### Public repository and private authority

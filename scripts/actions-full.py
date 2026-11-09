@@ -204,20 +204,41 @@ def verify_checkout(root, sha, tree):
     subprocess.run(['git', '-C', str(root), '-c', 'core.fileMode=true', 'diff', '--exit-code', '--quiet', 'HEAD'], check=True)
 
 
+def recovery_tree():
+    """A fresh main dispatch grants one attempt for exactly one landed tree."""
+    tree = os.environ.get('MYCELIUM_RECOVERY_TREE', '')
+    if os.environ.get('GITHUB_EVENT_NAME', 'push') == 'workflow_dispatch':
+        if not re.fullmatch('[0-9a-f]{40}', tree):
+            raise ValueError('manual recovery requires a full lowercase tree ID')
+        if os.environ['GITHUB_RUN_ATTEMPT'] != '1':
+            raise ValueError('manual recovery reruns need a new named-tree dispatch')
+        return tree
+    if tree:
+        raise ValueError('recovery authorization requires workflow_dispatch')
+    return None
+
+
 def run_pending(root, sha, scratch, owner):
     api = proof.GitHub()
-    known, processed, outcomes = {}, set(), {}
+    known, processed, outcomes, anchors = {}, set(), {}, {}
+    authorized = recovery_tree()
     failed = False
     evidence = f'https://github.com/{proof.REPOSITORY}/actions/runs/{owner.split(":")[0]}'
     # GITHUB_SHA can be a delayed B event after C replaced it in the pending
     # slot. Reconcile main itself, never the event's obsolete upper bound.
     tip = proof.fetch_main(api)
+    if authorized and authorized not in {proof.git('rev-parse', commit + '^{tree}')
+                                        for commit in proof.main_history(tip)}:
+        raise ValueError('recovery tree has not landed on main')
     while True:
         for candidate in proof.main_history(tip):
             if candidate in processed:
                 continue
             processed.add(candidate)
             tree = proof.git('rev-parse', candidate + '^{tree}')
+            anchor = anchors.setdefault(tree, candidate)
+            if authorized and tree != authorized:
+                continue
             # Current-batch outcomes take precedence over durable history. An
             # explicit retry is once per distinct tree, even when it fails.
             if tree in outcomes:
@@ -238,6 +259,17 @@ def run_pending(root, sha, scratch, owner):
                     api.publish(candidate, tree, recorded['target_url'])
                 known[tree] = recorded
                 continue
+            # History is oldest first, so identical trees always share the same
+            # first landed commit's persistent budget, across workflow invocations.
+            count, previous_owner = api.attempts(anchor, tree)
+            if previous_owner == owner or (count >= 2 and not authorized):
+                proof.report(candidate, tree,
+                             'UNPROVEN: attempt budget exhausted or already reserved; '
+                             'named-tree manual recovery required', evidence)
+                api.publish(candidate, tree, evidence, 'error')
+                outcomes[tree] = {'state': 'error', 'target_url': evidence, 'source_sha': candidate}
+                failed = True
+                continue
             proof.report(candidate, tree, 'RUN: no matching successful full-tree proof')
             # Persist before submission: final Actions cleanup must fence this exact
             # earlier commit too if the workflow was coalesced across several merges.
@@ -254,6 +286,7 @@ def run_pending(root, sha, scratch, owner):
             subprocess.run(['git', '-C', str(checkout), 'checkout', '--quiet', '--detach', candidate],
                            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             verify_checkout(checkout, candidate, tree)
+            api.record_attempt(anchor, tree, count + 1, owner, evidence)
             result = run(checkout, candidate, destination, owner)
             verify_checkout(checkout, candidate, tree)
             cleaned = cleanup(candidate, owner)
@@ -262,12 +295,18 @@ def run_pending(root, sha, scratch, owner):
             # No verified negative receipt exists yet: every non-success is
             # recoverable, including terminal command/test failures.
             state = 'success' if result == 0 else 'error'
+            if state == 'success':
+                api.record_attempt(anchor, tree, count + 1, owner, evidence, state='success')
             api.publish(candidate, tree, evidence, state)
             recorded = {'state': state, 'target_url': evidence, 'source_sha': candidate}
             outcomes[tree] = recorded
             known[tree] = recorded
             failed = failed or bool(result)
-            label = 'INCOMPLETE: no two-platform verdict; later runs must recover' if state == 'error' else 'full ' + state
+            if state == 'error':
+                label = ('UNPROVEN: automatic budget exhausted; named-tree manual recovery required'
+                         if count + 1 >= 2 else 'INCOMPLETE: one automatic recovery attempt remains')
+            else:
+                label = 'full success'
             proof.report(candidate, tree, label, evidence)
 
         current = proof.fetch_main(api)

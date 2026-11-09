@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 # v1 had unbound provenance; v2/v3 could suppress recovery without a suite receipt.
 CONTEXT = 'mycelium/main-full-tree-v4'
+ATTEMPT_CONTEXT = 'mycelium/main-full-attempts-v1'
 REPOSITORY = '1kuna/mycelium'
 
 
@@ -53,6 +54,28 @@ class GitHub:
             if row['context'] == CONTEXT:
                 return dict(row, source_sha=sha) if row['description'] == f'tree:{tree}' else None
         return None
+
+    def attempts(self, sha: str, tree: str) -> tuple[int, str | None]:
+        # The oldest landed commit with this tree is its durable counter anchor.
+        # Workflow/ref concurrency serializes reservations across pushes/dispatches.
+        for row in self.pages(f'commits/{sha}/statuses'):
+            if row['context'] == ATTEMPT_CONTEXT:
+                match = re.fullmatch(r'tree:' + re.escape(tree) +
+                                     r' attempts:([1-9][0-9]*) owner:([1-9][0-9]*:[1-9][0-9]*)',
+                                     row['description'])
+                if match is None:
+                    raise ValueError('invalid tree attempt counter; inspect trusted statuses')
+                return int(match[1]), match[2]
+        return 0, None
+
+    def record_attempt(self, sha: str, tree: str, count: int, owner: str, url: str, state: str = 'error') -> None:
+        # Charge before submission: a lost reply/interruption cannot refund work.
+        # This context is never proof. Clear its error only after verified
+        # success, retaining the same count so the combined commit can go green.
+        if state not in ('success', 'error'):
+            raise ValueError('invalid counter status')
+        self.request(f'statuses/{sha}', {'context': ATTEMPT_CONTEXT, 'state': state,
+                     'description': f'tree:{tree} attempts:{count} owner:{owner}', 'target_url': url})
 
     def publish(self, sha: str, tree: str, url: str, state: str = 'success') -> None:
         if state not in ('success', 'error'):

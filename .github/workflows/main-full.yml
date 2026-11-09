@@ -3,6 +3,12 @@ name: main-full
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      recovery_tree:
+        description: 'Authorize one recovery attempt for this full landed tree ID'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -34,6 +40,7 @@ jobs:
       - name: Prove uncovered main trees or report existing full proof
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MYCELIUM_RECOVERY_TREE: ${{ inputs.recovery_tree }}
         run: python3 scripts/actions-full.py
       - name: Cancel any unfinished gates owned by this attempt
         if: always()

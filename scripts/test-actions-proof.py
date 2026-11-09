@@ -23,12 +23,21 @@ class FakeGitHub:
         self.tip = tip
         self.statuses = {}
         self.published = []
+        self.counters = {}
+        self.counter_states = {}
 
     def main_tip(self):
         return self.tip
 
     def status(self, sha, tree):
         return self.statuses.get((sha, tree))
+
+    def attempts(self, sha, tree):
+        return self.counters.get((sha, tree), (0, None))
+
+    def record_attempt(self, sha, tree, count, owner, url, state='error'):
+        self.counters[sha, tree] = count, owner
+        self.counter_states[sha, tree] = state
 
     def publish(self, sha, tree, url, state='success'):
         self.statuses[sha, tree] = {'state': state, 'target_url': url, 'source_sha': sha}
@@ -70,7 +79,8 @@ class ActionsProofTest(unittest.TestCase):
         self.git('clone', '--bare', '--quiet', str(self.root), str(remote))
         self.git('remote', 'add', 'origin', str(remote))
         self.api = FakeGitHub(self.repeat)
-        self.env = dict(RUNNER_TEMP=self.temp.name, GITHUB_RUN_ATTEMPT='1')
+        self.env = dict(RUNNER_TEMP=self.temp.name, GITHUB_RUN_ATTEMPT='1',
+                        GITHUB_EVENT_NAME='push', MYCELIUM_RECOVERY_TREE='')
         self.scratch = Path(self.temp.name) / 'scratch'
         self.scratch.mkdir()
 
@@ -264,6 +274,140 @@ class ActionsProofTest(unittest.TestCase):
             self.assertEqual(ci.run_pending(self.root, self.repeat, self.scratch, '123:2'), 1)
         self.assertEqual(retried, [self.first, self.second, self.third])
         self.assertEqual(self.api.statuses[self.repeat, tree]['state'], 'error')
+
+    def test_persistent_failures_get_only_one_automatic_recovery_across_workflows(self):
+        submissions = []
+        def unavailable(*args, cwd=None):
+            self.assertEqual(args[0], 'run')
+            submissions.append(args[-1].split(':')[1:3])
+            return subprocess.CompletedProcess(args, 69, '', '')
+        # Three distinct trees (plus an identical successor), initial attempt
+        # followed by four independent workflows: only one extra attempt/tree.
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'command', unavailable), \
+                patch.object(ci, 'cleanup', return_value=True), patch.dict(os.environ, self.env), \
+                redirect_stdout(io.StringIO()) as output:
+            for number in range(5):
+                scratch = Path(self.temp.name) / f'batch-{number}'
+                scratch.mkdir()
+                self.assertEqual(ci.run_pending(self.root, self.repeat, scratch, f'{123 + number}:1'), 1)
+        self.assertEqual(len(submissions), 12)  # 6 initial + 6 recovery platform submissions
+        self.assertEqual(len(self.api.counters), 3)
+        self.assertTrue(all(count == 2 for count, owner in self.api.counters.values()))
+        self.assertTrue(all(row['state'] == 'error' for row in self.api.statuses.values()))
+        self.assertIn('UNPROVEN:', output.getvalue())
+        # Exhausted history must still fail while a newly landed tree gets proof.
+        (self.root / 'source').write_text('D')
+        new = self.commit('D new tree')
+        self.git('push', '--quiet', 'origin', 'HEAD:refs/heads/main')
+        self.api.tip = new
+        later = Path(self.temp.name) / 'new-tree'
+        later.mkdir()
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'run', return_value=0) as run, \
+                patch.object(ci, 'cleanup', return_value=True), patch.dict(os.environ, self.env), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(ci.run_pending(self.root, new, later, '128:1'), 1)
+        self.assertEqual([call.args[1] for call in run.call_args_list], [new])
+        self.assertEqual(self.api.statuses[new, self.git('rev-parse', new + '^{tree}')]['state'], 'success')
+
+    def test_named_tree_dispatch_grants_one_attempt_without_resetting_other_budgets(self):
+        trees = {sha: self.git('rev-parse', sha + '^{tree}')
+                 for sha in (self.first, self.second, self.third)}
+        for sha, tree in trees.items():
+            self.api.counters[sha, tree] = 2, '122:1'
+        env = dict(self.env, GITHUB_EVENT_NAME='workflow_dispatch',
+                   MYCELIUM_RECOVERY_TREE=trees[self.third])
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'run', return_value=ci.INCOMPLETE) as run, \
+                patch.object(ci, 'cleanup', return_value=True), patch.dict(os.environ, env), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(ci.run_pending(self.root, self.repeat, self.scratch, '123:1'), 1)
+            # Re-entering the same dispatch cannot grant a second attempt.
+            self.assertEqual(ci.run_pending(self.root, self.repeat, self.scratch, '123:1'), 1)
+        self.assertEqual([call.args[1] for call in run.call_args_list], [self.third])
+        self.assertEqual(self.api.counters[self.third, trees[self.third]], (3, '123:1'))
+        self.assertEqual(self.api.counters[self.first, trees[self.first]], (2, '122:1'))
+        later = Path(self.temp.name) / 'after-dispatch'
+        later.mkdir()
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'run') as run, \
+                patch.dict(os.environ, self.env), redirect_stdout(io.StringIO()):
+            self.assertEqual(ci.run_pending(self.root, self.repeat, later, '124:1'), 1)
+            run.assert_not_called()
+        # A fresh explicit authorization may recover exactly the named tree.
+        success = Path(self.temp.name) / 'authorized-success'
+        success.mkdir()
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'run', return_value=0) as run, \
+                patch.object(ci, 'cleanup', return_value=True), patch.dict(os.environ, env), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(ci.run_pending(self.root, self.repeat, success, '125:1'), 0)
+        self.assertEqual([call.args[1] for call in run.call_args_list], [self.third])
+        self.assertEqual(self.api.counters[self.third, trees[self.third]], (4, '125:1'))
+        self.assertEqual(self.api.statuses[self.third, trees[self.third]]['state'], 'success')
+        self.assertEqual(self.api.counter_states[self.third, trees[self.third]], 'success')
+        self.assertEqual(self.api.statuses[self.repeat, trees[self.third]]['state'], 'success')
+        self.assertEqual(self.api.statuses[self.first, trees[self.first]]['state'], 'error')
+
+    def test_counter_is_reserved_before_interruption_or_uncertain_status_write(self):
+        self.api.tip = self.first
+        tree = self.git('rev-parse', self.first + '^{tree}')
+        def interrupt(*args):
+            self.assertEqual(self.api.counters[self.first, tree], (1, '123:1'))
+            raise ci.SubmitterStopped()
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'run', interrupt), \
+                patch.dict(os.environ, self.env), redirect_stdout(io.StringIO()):
+            with self.assertRaises(ci.SubmitterStopped):
+                ci.run_pending(self.root, self.first, self.scratch, '123:1')
+        # A reserve accepted upstream then reported as failed must not submit.
+        other = Path(self.temp.name) / 'lost-status-reply'
+        other.mkdir()
+        reserve = self.api.record_attempt
+        def lost_reply(*args):
+            reserve(*args)
+            raise OSError('synthetic lost status reply')
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(self.api, 'record_attempt', lost_reply), \
+                patch.object(ci, 'run') as run, patch.dict(os.environ, self.env), redirect_stdout(io.StringIO()):
+            with self.assertRaises(OSError):
+                ci.run_pending(self.root, self.first, other, '124:1')
+            run.assert_not_called()
+        self.assertEqual(self.api.counters[self.first, tree], (2, '124:1'))
+
+    def test_dispatch_requires_valid_landed_tree_and_fresh_authorization(self):
+        cases = [
+            dict(GITHUB_EVENT_NAME='push', MYCELIUM_RECOVERY_TREE='a' * 40),
+            dict(GITHUB_EVENT_NAME='workflow_dispatch', MYCELIUM_RECOVERY_TREE=''),
+            dict(GITHUB_EVENT_NAME='workflow_dispatch', MYCELIUM_RECOVERY_TREE='main'),
+            dict(GITHUB_EVENT_NAME='workflow_dispatch', MYCELIUM_RECOVERY_TREE='a' * 40, GITHUB_RUN_ATTEMPT='2'),
+            dict(GITHUB_EVENT_NAME='workflow_dispatch', MYCELIUM_RECOVERY_TREE='a' * 40),
+        ]
+        for settings in cases:
+            with self.subTest(settings=settings), patch.object(proof, 'GitHub', return_value=self.api), \
+                    patch.object(ci, 'run') as run, patch.dict(os.environ, dict(self.env, **settings)):
+                with self.assertRaises(ValueError):
+                    ci.run_pending(self.root, self.repeat, self.scratch, '123:1')
+                run.assert_not_called()
+        self.assertEqual(self.api.counters, {})
+
+    def test_attempt_counter_uses_trusted_status_channel_and_rejects_malformed_records(self):
+        api = object.__new__(proof.GitHub)
+        sha, tree = 'a' * 40, 'b' * 40
+        row = dict(context=proof.ATTEMPT_CONTEXT,
+                   description=f'tree:{tree} attempts:2 owner:123:1', state='error')
+        with patch.object(api, 'pages', return_value=[row]):
+            self.assertEqual(api.attempts(sha, tree), (2, '123:1'))
+        with patch.object(api, 'pages', return_value=[]):
+            self.assertEqual(api.attempts(sha, tree), (0, None))
+        for description in ('malformed', f'tree:{tree} attempts:0 owner:123:1',
+                            f'tree:{sha} attempts:2 owner:123:1'):
+            with patch.object(api, 'pages', return_value=[dict(row, description=description)]):
+                with self.assertRaises(ValueError):
+                    api.attempts(sha, tree)
+        with patch.object(api, 'request') as request:
+            url = 'https://github.com/1kuna/mycelium/actions/runs/123'
+            api.record_attempt(sha, tree, 2, '123:1', url)
+            self.assertEqual(request.call_args.args, (f'statuses/{sha}',
+                dict(context=proof.ATTEMPT_CONTEXT, state='error',
+                     description=row['description'], target_url=url)))
+            api.record_attempt(sha, tree, 2, '123:1', url, state='success')
+            self.assertEqual(request.call_args.args[1]['state'], 'success')
+            self.assertEqual(request.call_args.args[1]['description'], row['description'])
 
     def test_old_local_context_is_ignored_and_latest_CI_status_is_authoritative(self):
         api = object.__new__(proof.GitHub)
