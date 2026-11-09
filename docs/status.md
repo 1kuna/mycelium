@@ -147,7 +147,7 @@ inspection or other in-flight projection therefore cannot shed these cheap
 reads behind it. Their response copies still consume the queue's measured
 memory allowance; a cache hit is not an exemption from physical capacity.
 Negotiated default-status reads reuse a published page when its history rows
-fit the peer's page-planning allowance. A miss, expiry or invalidation still
+fit the peer's page-planning allowance. A default-status miss, expiry or invalidation still
 uses control-pressure admission before projection. Legacy scalar wait admission
 and the independent batch-wait index retain their existing behavior.
 Status snapshots do
@@ -155,7 +155,8 @@ not drive start authorization, cancellation or result publication.
 Terminal job commits and their release acknowledgements invalidate the shared
 snapshot immediately. If one commits while status is projecting or waiting for
 usage/file-store I/O, status recaptures before returning, including uncached
-filtered and full views and per-job GET. This can repeat observation work during
+filtered and full views. Per-job GETs follow the committed-capture contract below.
+Status recapture can repeat observation work during
 completions; discarded response allocations are released before retrying rather
 than accumulating as if every discarded generation were still in flight.
 Cold immutable-decode allowances remain charged through the request because
