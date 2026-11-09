@@ -147,7 +147,7 @@ inspection or other in-flight projection therefore cannot shed these cheap
 reads behind it. Their response copies still consume the queue's measured
 memory allowance; a cache hit is not an exemption from physical capacity.
 Negotiated default-status reads reuse a published page when its history rows
-fit the peer's page-planning allowance. A miss, expiry or invalidation still
+fit the peer's page-planning allowance. A default-status miss, expiry or invalidation still
 uses control-pressure admission before projection. Legacy scalar wait admission
 and the independent batch-wait index retain their existing behavior.
 Status snapshots do
@@ -155,7 +155,8 @@ not drive start authorization, cancellation or result publication.
 Terminal job commits and their release acknowledgements invalidate the shared
 snapshot immediately. If one commits while status is projecting or waiting for
 usage/file-store I/O, status recaptures before returning, including uncached
-filtered and full views and per-job GET. This can repeat observation work during
+filtered and full views. Per-job GETs follow the committed-capture contract below.
+Status recapture can repeat observation work during
 completions; discarded response allocations are released before retrying rather
 than accumulating as if every discarded generation were still in flight.
 Cold immutable-decode allowances remain charged through the request because
@@ -168,6 +169,7 @@ Every status and inspection response includes additive `freshness` metadata:
 assembled; `age_seconds` is their nonnegative difference; and `cached` says
 whether this request reused a previously completed default-status generation.
 The age includes projection and observation I/O, even for an uncached response.
+The injected read clock is frozen before off-lock projection and observation I/O.
 It excludes JSON encoding and network transfer after assembly. Interpret a
 cached or slow observation at its capture time, including worker freshness.
 Old CLIs continue to decode the existing fields.
@@ -615,6 +617,15 @@ use the worker's existing permissions; no settings, driver or privileges change.
 An unsupported, multiplexed, incomplete or nonadvancing counter remains unknown.
 Sensor ages are rebased onto queue time; cached inventory cannot refresh them.
 Strict older queues receive the existing inventory shape after negotiation.
+
+With `device-recovery-v1` support (#1142), `devices[].quarantine_recovery`
+records an automatic clear's fault hash, healthy interval, observation window,
+vendor probe and queue-owned transition receipt (`observed_at`). Older queues
+receive inventory without this optional field. `attempt_history[].device_fault`
+is queue-owned host/backend loss evidence, and `blocker.code:
+device_fault_last_healthy` explains a held retry. See
+[device quarantine](operations.md#accelerator-driver-fault-quarantine) for
+recovery conditions and mixed-version behavior.
 
 Fan-out execution may share a discrete XPU card only when every tenant opts in
 with `fan_out.share_xpu: true`; omission or `false` preserves existing admission.
@@ -2006,6 +2017,22 @@ most 1 MiB, mode 0600. Structured lifecycle, delivery and failure events exclude
 authority, raw transport errors, notifier paths/targets and environment values.
 The last-error timestamp distinguishes an old refusal from present progress.
 Legacy observers have no diagnostic record; absence cannot establish a cause.
+
+Interpret owner existence, observation and delivery separately. A current
+successful read establishes that observation advanced at that time; a held
+lock or a stale phase alone does not. A quiet long-poll can legitimately wait
+without job changes. Use the recorded read/hold/retry evidence rather than an
+invented fixed age cutoff; missing timing remains unknown. Queue/job status
+and local completion-observer status are separate observations. Job execution
+`liveness` does not establish completion-observer or receiver liveness.
+
+The raw-output fallback is intended to retain only approved aggregate fields:
+event time, `process_output` and byte count, never raw output/error bytes.
+Structured lifecycle records have their separately documented safe fields.
+Verification must include startup/error capture, malformed input and direct
+stdout/stderr paths with synthetic sentinels; bounded log size alone does not
+prove this privacy boundary. Keep expanded paths, authority and notifier
+configuration in their authorized private custody, outside diagnostic output.
 Status snapshots use atomic temporary-file replacement without durable syncs;
 observer progress reconstructs them after an unclean host stop. Receipt, arm
 registration and delivery acknowledgement saves still sync both the file and
@@ -2579,6 +2606,8 @@ observation inputs from an atomically published generation. Cold reads, expired
 responses and fan-out parents do not wait for the live queue transaction mutex.
 An in-flight response completes at its captured generation; later commits
 invalidate subsequent cache lookups instead of repeatedly restarting that read.
+Terminal state and release confirmation come from the same captured generation;
+the next read after an invalidating publication sees the committed update.
 A read is a point-in-time observation, not a fence asserting that no commit
 finished while the response was being built. Elapsed runtime is evaluated with
 the injected read clock. Policy, custody and worker evidence remain from the

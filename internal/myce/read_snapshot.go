@@ -592,6 +592,14 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 		capture = q.freezeReadCapture()
 		unlock()
 	}
+	// Capture the read clock before any off-lock projection or observation I/O.
+	// Freshness includes that work; sampling afterward would report a delayed
+	// uncached status as age zero. Published job inputs still use the current
+	// injected read time rather than the older commit's runtime clock.
+	readAt := q.clock.Now()
+	if id == "" {
+		readAt = capture.source.clock.Now()
+	}
 	observeRead(q.observeRead, id, started, started)
 	if err := ctx.Err(); err != nil {
 		return nil, fileStoreObservation{}, err
@@ -600,7 +608,7 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 		return q.captureStatusObservation(id, options, ctx)
 	}
 	base := capture.source
-	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, efficiencyView: base.efficiencyView,
+	source := &Queue{clock: observationClock{readAt}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, efficiencyView: base.efficiencyView,
 		simulation: base.simulation, productionGrace: base.productionGrace, lossTimeouts: base.lossTimeouts, productionInfrastructureRetries: base.productionInfrastructureRetries,
 		restartUntil: base.restartUntil, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
 		contacts: base.contacts, detachedRead: true}

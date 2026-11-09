@@ -759,8 +759,27 @@ func TestStatusReadTerminalCommitDuringJobProjection(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != 200 || got.State != "succeeded" || !got.ReleaseConfirmed {
-		t.Fatalf("delayed job GET returned pre-completion state: status=%d state=%s released=%t", w.Code, got.State, got.ReleaseConfirmed)
+	// Point-in-time completion contract: orchestrator decision, 2026-11-09.
+	// The terminal/release commit occurs after this request captured running
+	// inputs. Its response must retain that generation's matching custody state.
+	if w.Code != 200 || got.ID != j.ID || got.State != "running" || got.ReleaseConfirmed {
+		t.Fatalf("delayed job GET mixed captured lifecycle/custody: status=%d state=%s released=%t", w.Code, got.State, got.ReleaseConfirmed)
+	}
+	if !captured {
+		t.Fatal("job projection did not cross terminal/release commit")
+	}
+	// No additional commit, expiry or retry: the very next read must see the
+	// completed/released generation, never cache the old in-flight response.
+	r = httptest.NewRequest("GET", "/api/jobs/"+j.ID, nil)
+	r.Header.Set("Authorization", "Bearer test")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	got = Job{}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || got.ID != j.ID || got.State != "succeeded" || !got.ReleaseConfirmed {
+		t.Fatalf("next job GET missed terminal/release commit: status=%d state=%s released=%t", w.Code, got.State, got.ReleaseConfirmed)
 	}
 	r = httptest.NewRequest("GET", "/api/hosts/status-host/maintenance", nil)
 	r.Header.Set("Authorization", "Bearer test")
