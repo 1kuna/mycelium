@@ -165,7 +165,9 @@ func TestAdaptiveMemoryTransferUsesPairedError(t *testing.T) {
 				s.Run.Command = []string{"echo", "new-work"}
 				s.AllowedMachines = []string{source.ID}
 				runMemory(t, q, clock, source, s, 3*unit, nil)
-				s.AllowedMachines = nil
+				// Exercise transfer admission on its destination, rather than letting
+				// the scheduler prefer the source that already ran this workload.
+				s.AllowedMachines = []string{destination.ID}
 				queued := submit(t, q, s)
 				candidate := check(t, q, destination, nil).Job
 				if candidate == nil || candidate.ID != queued.ID || candidate.MemoryEnvelope.Basis != "learned" {
