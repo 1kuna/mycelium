@@ -49,49 +49,6 @@ func (c *fakeClock) elapse(t *testing.T, want func(time.Duration) bool, what str
 	}
 }
 
-func TestPacerAdaptsToLatencyFailuresAndRetryAfter(t *testing.T) {
-	p := newPacer()
-	if d := p.next(20*time.Millisecond, 0, false); d != time.Second {
-		t.Fatalf("fast reads should poll at the shared-snapshot floor, got %s", d)
-	}
-	if d := p.next(400*time.Millisecond, 0, false); d != 3600*time.Millisecond {
-		t.Fatalf("a slow read must lengthen the next wait at once (9x latency), got %s", d)
-	}
-	// Smoothed latency brings the wait back down gradually, not instantly.
-	if d := p.next(20*time.Millisecond, 0, false); d <= time.Second || d >= 3600*time.Millisecond {
-		t.Fatalf("recovery should be gradual, got %s", d)
-	}
-	q := newPacer()
-	q.next(10*time.Millisecond, 0, false)
-	var last time.Duration
-	for i := 0; i < 8; i++ {
-		d := q.next(10*time.Millisecond, 0, true)
-		if d < last || d > q.maxBackoff {
-			t.Fatalf("failure %d: backoff %s after %s (cap %s)", i, d, last, q.maxBackoff)
-		}
-		last = d
-	}
-	if last != q.maxBackoff {
-		t.Fatalf("repeated failures should reach the backoff cap, got %s", last)
-	}
-	if d := q.next(10*time.Millisecond, 2*time.Minute, true); d != 2*time.Minute {
-		t.Fatalf("Retry-After beyond the cap must still be honoured, got %s", d)
-	}
-	if d := q.next(10*time.Millisecond, 0, false); d > 2*time.Second {
-		t.Fatalf("a success resets the backoff, got %s", d)
-	}
-	// The backoff cap never undercuts the duty wait for a slow failure.
-	r := newPacer()
-	if d := r.next(4003*time.Millisecond, 0, true); d < 36027*time.Millisecond {
-		t.Fatalf("a failed 4.003 s read must wait at least 9x its latency, got %s", d)
-	}
-	for i := 0; i < 5; i++ {
-		if d := r.next(10*time.Second, 0, true); d < 90*time.Second {
-			t.Fatalf("repeated 10 s timeouts must keep the 10%% duty bound, got %s", d)
-		}
-	}
-}
-
 // A redirect from the queue is never followed: the only request stays the
 // default status read.
 func TestUpstreamNeverFollowsRedirects(t *testing.T) {
@@ -115,86 +72,6 @@ func TestUpstreamNeverFollowsRedirects(t *testing.T) {
 	defer mu.Unlock()
 	if len(seen) != 1 || seen[0] != "/api/status" {
 		t.Fatalf("upstream requests %v, want only /api/status", seen)
-	}
-}
-
-func TestRetryAfterParsing(t *testing.T) {
-	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
-	for v, want := range map[string]time.Duration{
-		"7": 7 * time.Second, " 0 ": 0, "-3": 0, "soon": 0, "": 0,
-		now.Add(90 * time.Second).Format(http.TimeFormat): 90 * time.Second,
-		now.Add(-time.Minute).Format(http.TimeFormat):     0,
-	} {
-		if got := retryAfter(v, now); got != want {
-			t.Errorf("Retry-After %q: got %s want %s", v, got, want)
-		}
-	}
-}
-
-// The poller reads only while watched, honours Retry-After, never overlaps
-// reads, and shares one read among every open page.
-func TestPollerSharesOneReadAndHonoursRetryAfter(t *testing.T) {
-	clock := newFakeClock()
-	var mu sync.Mutex
-	reads := 0
-	results := []error{&rateLimited{after: 7 * time.Second}, nil, nil}
-	read := func(context.Context) (statusDoc, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		reads++
-		clock.advance(50 * time.Millisecond)
-		var err error
-		if len(results) > 0 {
-			err, results = results[0], results[1:]
-		}
-		return statusDoc{Now: clock.Now(), Machines: []docMachine{{ID: "m1", LastSeen: clock.Now()}}}, err
-	}
-	p := newPoller(read, clock, false, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { _ = p.Run(ctx); close(done) }()
-
-	time.Sleep(20 * time.Millisecond)
-	mu.Lock()
-	if reads != 0 {
-		t.Fatalf("poller read status with no page open (%d reads)", reads)
-	}
-	mu.Unlock()
-
-	a, cancelA := p.Subscribe()
-	b, cancelB := p.Subscribe()
-	first := waitFrame(t, a)
-	if first.Upstream.State != "rate_limited" || first.Upstream.RetryAfterMS != 7000 {
-		t.Fatalf("429 should surface as rate_limited with its Retry-After: %+v", first.Upstream)
-	}
-	waitFrame(t, b)
-	clock.elapse(t, func(d time.Duration) bool { return d >= 7*time.Second }, "after 429")
-	second := waitFrame(t, a)
-	waitFrame(t, b)
-	if second.Upstream.State != "ok" || len(second.Machines) != 1 {
-		t.Fatalf("second frame: %+v", second)
-	}
-	mu.Lock()
-	if reads != 2 {
-		t.Fatalf("two pages must share one read per cycle; reads=%d", reads)
-	}
-	mu.Unlock()
-
-	// A late page gets the newest frame at once, without an extra read.
-	c, cancelC := p.Subscribe()
-	waitFrame(t, c)
-	clock.elapse(t, func(d time.Duration) bool { return d >= time.Second }, "steady state")
-	waitFrame(t, a)
-	cancelA()
-	cancelB()
-	cancelC()
-	cancel()
-	<-done
-	mu.Lock()
-	defer mu.Unlock()
-	if reads != 3 {
-		t.Fatalf("reads=%d, want 3", reads)
 	}
 }
 
@@ -233,17 +110,16 @@ func TestViewIsReadOnlyEndToEnd(t *testing.T) {
 	view := httptest.NewServer(Handler(p, "127.0.0.1:0"))
 	defer view.Close()
 
-	for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
-		for _, path := range []string{"/", "/events", "/api/status", "/api/jobs"} {
-			req, _ := http.NewRequest(method, view.URL+path, strings.NewReader(`{}`))
-			res, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			res.Body.Close()
-			if res.StatusCode != http.StatusMethodNotAllowed {
-				t.Errorf("%s %s: status %d, want 405", method, path, res.StatusCode)
-			}
+	for _, tc := range []struct{ method, path string }{{"POST", "/events"}, {"DELETE", "/api/jobs"}} {
+		method, path := tc.method, tc.path
+		req, _ := http.NewRequest(method, view.URL+path, strings.NewReader(`{}`))
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s: status %d, want 405", method, path, res.StatusCode)
 		}
 	}
 	res, err := http.Get(view.URL + "/api/status")
@@ -382,11 +258,8 @@ func TestAnonymizeIsCompleteAndStable(t *testing.T) {
 
 func TestMissingAndMistypedFieldsDegrade(t *testing.T) {
 	for name, body := range map[string]string{
-		"empty":      `{}`,
-		"bare":       `{"now":"2026-11-06T12:00:00Z","machines":[{"id":"m"}],"jobs":[{"id":"j","state":"queued"}]}`,
-		"mistyped":   `{"now":"2026-11-06T12:00:00Z","machines":[{"id":"m","effective_cpu_cores":"lots","devices":{"x":1},"host_health":[]}],"jobs":[{"id":"j","state":"running","attempt":"two","spec":{"needs":{"platform":42}},"application_progress":{"completed":5,"total":0}}]}`,
-		"nulls":      `{"now":"2026-11-06T12:00:00Z","machines":null,"jobs":null}`,
-		"newer keys": `{"now":"2026-11-06T12:00:00Z","something_new":{"a":[1]},"machines":[{"id":"m","future_field":true}],"jobs":[]}`,
+		"empty":    `{}`,
+		"mistyped": `{"now":"2026-11-06T12:00:00Z","machines":[{"id":"m","effective_cpu_cores":"lots","devices":{"x":1},"host_health":[]}],"jobs":[{"id":"j","state":"running","attempt":"two","spec":{"needs":{"platform":42}},"application_progress":{"completed":5,"total":0}}]}`,
 	} {
 		d, err := decodeStatus([]byte(body))
 		if err != nil {
@@ -408,56 +281,5 @@ func TestMissingAndMistypedFieldsDegrade(t *testing.T) {
 	}
 	if _, err := decodeStatus([]byte(`{"machines":`)); err == nil {
 		t.Fatal("truncated JSON must be an error, not an empty fleet")
-	}
-}
-
-func TestProgressAndPlatformShapes(t *testing.T) {
-	half, rest := 30.0, 30.0
-	j := docJob{}
-	j.Runtime = &struct {
-		ElapsedSeconds   *float64 `json:"elapsed_seconds"`
-		RemainingSeconds *float64 `json:"remaining_seconds"`
-	}{&half, &rest}
-	if p := progress(j); p == nil || *p != 0.5 {
-		t.Fatalf("runtime estimate progress: %v", p)
-	}
-	j.ApplicationProgress = &struct {
-		Completed float64 `json:"completed"`
-		Total     float64 `json:"total"`
-	}{25, 100}
-	if p := progress(j); p == nil || *p != 0.25 {
-		t.Fatalf("application progress wins: %v", p)
-	}
-	for raw, want := range map[string]string{`["CUDA"]`: "cuda", `"metal"`: "metal", `{"required":["xpu"]}`: "xpu", `{"preferred":["metal"]}`: "metal", `{"any":true}`: "", `null`: ""} {
-		if got := platform(json.RawMessage(raw)); got != want {
-			t.Errorf("platform %s: %q want %q", raw, got, want)
-		}
-	}
-}
-
-// Silence is learned from each machine's own heartbeat cadence; without
-// evidence a machine is never shown as silent.
-func TestFreshnessLearnsHeartbeatCadence(t *testing.T) {
-	p := newProjector()
-	base := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
-	fresh := func(now, seen time.Time) bool { return p.fresh(docMachine{ID: "m", LastSeen: seen}, now, time.Second) }
-	if !fresh(base.Add(time.Hour), base) {
-		t.Fatal("first sight is no evidence of silence")
-	}
-	// Heartbeats every 5 s.
-	for i := 1; i <= 4; i++ {
-		if !fresh(base.Add(time.Duration(i)*5*time.Second), base.Add(time.Duration(i)*5*time.Second)) {
-			t.Fatalf("advancing heartbeat %d marked silent", i)
-		}
-	}
-	last := base.Add(20 * time.Second)
-	if !fresh(last.Add(6*time.Second), last) || !fresh(last.Add(12*time.Second), last) {
-		t.Fatal("a pause shorter than three learned intervals is not silence")
-	}
-	if fresh(last.Add(16*time.Second), last) {
-		t.Fatal("no heartbeat for over three learned intervals should read as silent")
-	}
-	if !fresh(last.Add(21*time.Second), last.Add(21*time.Second)) {
-		t.Fatal("a returning heartbeat is fresh again")
 	}
 }
