@@ -328,6 +328,13 @@ func TestAttemptStorageCheckpointPublicationLifetime(t *testing.T) {
 			w := Worker{Client: Client{URL: api.URL}, storageObserver: o}
 			var peak *AttemptStoragePeak
 			if final {
+				// Keep the transient upload failure and its deadline without wall-clock retry sleeps.
+				clock := &workerFakeClock{now: time.Now()}
+				w.Client.Clock = clock
+				w.Client.Pause = func(_ context.Context, delay time.Duration) error {
+					clock.Advance(delay)
+					return nil
+				}
 				// Model final/recovered publication after the live sampler stops.
 				w.storageObserver = nil
 				result, err := w.finishFileResult(j, Result{StoragePeak: o.finish()}, state, "review-owned.result.json")
