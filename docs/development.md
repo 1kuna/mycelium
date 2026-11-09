@@ -140,6 +140,10 @@ run's peak and shared headroom. This conservatively counts current RSS again
 to cover later growth without assuming shared pages are reclaimable. CPU budgets
 sum across runs; Linux demand also fits the VM's configured CPU/RAM capacity.
 Requests above the qualified CPU budget require a new measurement.
+Before enabling or re-enabling measured admission, any never-admitted waiter
+started with a pre-change helper must have exited or been restarted by its owner
+with the current helper. Preserve admitted and unknown execution custody;
+restarting a waiter never authorizes clearing that custody.
 Unqualified hosts retain two heavy lanes and one full. Frozen older helpers see
 both old lane directories reserved while the measured allocator is active;
 new helpers wait for old/unknown execution owners to finish. Protocol guards
