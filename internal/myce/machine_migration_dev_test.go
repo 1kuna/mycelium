@@ -94,7 +94,12 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 		// Model the legacy sender's default send interval. Its first report above
 		// and this second arrival must not share the same frozen fake instant:
 		// the old wire format needs this observed cadence before new work.
-		clock.Advance(time.Second)
+		// Serialize this modeled send interval with queue decisions. Background
+		// dev workers have no service opportunity during the synthetic jump;
+		// the two singular legacy reports still teach their real 1s cadence.
+		if err := d.Queue.update(func() error { clock.Advance(time.Second); return nil }); err != nil {
+			t.Fatal(err)
+		}
 		reply = checkAPI(m)
 		if reply.Job == nil || reply.Job.ID != j.ID {
 			d.Queue.mu.Lock()
