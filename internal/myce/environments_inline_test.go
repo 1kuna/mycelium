@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -97,5 +98,49 @@ func TestEnvironmentInlinePixiMissingCompanion(t *testing.T) {
 	d := apiErr.PathDiagnostic
 	if d == nil || d.Cause != "companion_absent" || d.Companion != "pixi.toml" || d.Side != "queue" {
 		t.Fatalf("submit diagnostic: %+v, %v", d, err)
+	}
+}
+
+func TestEnvironmentInlineOversizedInput(t *testing.T) {
+	for _, input := range []struct{ backend, lock, oversized, field, companion string }{
+		{"pixi", "pixi.lock", "pixi.lock", "environment.lock_file", ""},
+		{"pixi", "pixi.lock", "pixi.toml", "environment.manifest", "pixi.toml"},
+		{"uv", "uv.lock", "uv.lock", "environment.lock_file", ""},
+		{"uv", "uv.lock", "pyproject.toml", "environment.lock_file", "pyproject.toml"},
+		{"", "requirements.txt", "requirements.txt", "environment.lock_file", ""},
+	} {
+		t.Run(input.oversized, func(t *testing.T) {
+			q, _ := fixture(t)
+			dir := t.TempDir()
+			for _, name := range []string{"pixi.lock", "pixi.toml", "uv.lock", "pyproject.toml", "requirements.txt"} {
+				data := "fixture"
+				if name == input.oversized {
+					data = strings.Repeat("x", (1<<20)+1)
+				}
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := cpuResolveSpec()
+			s.Environment = Environment{Backend: input.backend, LockFile: filepath.Join(dir, input.lock), Python: "3.12", Platforms: []string{"cpu"}}
+			c := Client{URL: testServerForEnvironments(t, q), Token: "test"}
+			want := PathDiagnostic{Field: input.field, Side: "queue", Path: s.Environment.LockFile, ResolutionBase: "queue-working-directory", Cause: "too_large", Companion: input.companion}
+			var report ResolveReport
+			if err := c.Call(context.Background(), "POST", "/api/resolve", ResolveRequest{Spec: s}, &report); err != nil {
+				t.Fatal(err)
+			}
+			f := resolveFinding(report, input.field)
+			if f == nil || f.PathDiagnostic == nil || *f.PathDiagnostic != want {
+				t.Fatalf("resolve: %+v", report.Findings)
+			}
+			_, err := c.Submit(context.Background(), s)
+			var apiErr *HTTPError
+			if !errors.As(err, &apiErr) || apiErr.Code != "job_environment_invalid" || apiErr.PathDiagnostic == nil || *apiErr.PathDiagnostic != want {
+				t.Fatalf("submit: %+v, %v", apiErr, err)
+			}
+			if len(q.s.Jobs) != 0 {
+				t.Fatal("oversized input accepted")
+			}
+		})
 	}
 }

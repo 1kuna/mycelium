@@ -315,8 +315,8 @@ queue-readable storage before submitting, or ask the queue operator to register 
 not need the original lock path.
 
 A missing, unreadable, oversized (over 1 MiB), or unsupported lock input is
-rejected before acceptance with HTTP 400 `job_environment_invalid`. Actual failed
-reads carry a `path_diagnostic` with `field`, `side`, `path`, `resolution_base`,
+rejected before acceptance with HTTP 400 `job_environment_invalid`. Failed reads and oversized inputs (`cause: too_large`)
+carry a `path_diagnostic` with `field`, `side`, `path`, `resolution_base`,
 `cause` and, when required, `companion`. The CLI renders the same information.
 For example, a caller-supplied `locks/uv.lock` missing its adjacent manifest gives:
 
