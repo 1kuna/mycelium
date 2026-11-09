@@ -62,12 +62,6 @@ func TestEnvironmentPrune(t *testing.T) {
 	s := spec("experiment")
 	s.Environment.Name = "needed"
 	submit(t, q, s)
-	if err := q.update(func() error {
-		q.s.ModelSlots = map[string]*ModelSlot{"loading": {EnvironmentRecipe: &EnvironmentRecipe{Key: referenced}}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test"}
@@ -130,5 +124,28 @@ func TestEnvironmentPrune(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(c.Root, "prune-audit.jsonl"))
 	if err != nil || !strings.Contains(string(b), eligible) || !strings.Contains(string(b), `"removed":true`) || !strings.Contains(string(b), fmt.Sprintf(`"reclaimed_bytes":%d`, report.ReclaimedBytes)) {
 		t.Fatal(string(b), err)
+	}
+
+	modelKey := strings.Repeat("b", 64)
+	if err := q.update(func() error {
+		q.s.ModelSlots = map[string]*ModelSlot{"loading": {EnvironmentRecipe: &EnvironmentRecipe{Key: modelKey}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if referenced, err := refs(context.Background(), modelKey); err != nil || !referenced {
+		t.Fatal("loading model environment unprotected", err)
+	}
+	if err := q.update(func() error {
+		q.s.ModelSlots = nil
+		q.models.Models = []Model{{Name: "queued", Environment: "runtime"}}
+		q.environments.Environments = map[string]map[string]EnvironmentRecipe{"runtime": {"fake": {Key: modelKey}}}
+		q.calls = map[string]*ModelCall{"call": {Model: "queued"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if referenced, err := refs(context.Background(), modelKey); err != nil || !referenced {
+		t.Fatal("queued call environment unprotected", err)
 	}
 }

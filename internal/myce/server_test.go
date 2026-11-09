@@ -314,3 +314,19 @@ func TestStopCommandExpiredGraceStillCleansServer(t *testing.T) {
 		t.Fatal("expired grace left server alive", members, err)
 	}
 }
+
+func TestResolveCUDAUsesStableUUID(t *testing.T) {
+	seen := ""
+	uuid, err := resolveCUDADevice(context.Background(), "0", func(_ context.Context, name string, args ...string) ([]byte, error) {
+		seen = name + " " + strings.Join(args, " ")
+		return []byte("GPU-1234-abcd\n"), nil
+	})
+	if err != nil || uuid != "GPU-1234-abcd" || !strings.Contains(seen, "--id=0 --query-gpu=uuid") {
+		t.Fatal(uuid, seen, err)
+	}
+	for _, bad := range []string{"", "GPU-one\nGPU-two", "[N/A]"} {
+		if _, err = resolveCUDADevice(context.Background(), "0", func(context.Context, string, ...string) ([]byte, error) { return []byte(bad), nil }); err == nil {
+			t.Fatal("accepted invalid physical identity")
+		}
+	}
+}

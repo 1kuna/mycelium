@@ -168,7 +168,7 @@ func TestReconcileRetiredDockerCustody(t *testing.T) {
 	now := time.Unix(200000, 0)
 	clock := &dockerTestClock{now: now}
 	f := &retentionDaemon{t: t, containers: map[string]dockerInspection{}}
-	for _, attempt := range []string{"settled", "no-ack", "unreleased", "wrong-owner", "recent", "no-evidence", "owned-consumer-name", "active"} {
+	for _, attempt := range []string{"settled", "no-ack", "unreleased", "wrong-owner", "recent", "no-evidence", "owned-consumer-name", "owned-render-name", "active"} {
 		code := 143
 		st := dockerExecution{Identity: attempt, Endpoint: "fake", Released: true, EvidenceSaved: true, Containers: map[string]dockerMember{attempt: {Name: "main", ExitCode: &code, StderrTail: "private stderr"}}}
 		if attempt == "unreleased" {

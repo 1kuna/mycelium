@@ -40,7 +40,7 @@ func TestNativeIsolationDeclaredRoots(t *testing.T) {
 	}
 	base.CheckpointRoot = filepath.Join(nas, "checkpoints")
 	base.SecretRoot = filepath.Join(spool, "secrets")
-	for _, private := range []string{filepath.Join(base.CheckpointRoot, "sibling/attempt-1/save"), filepath.Join(base.SecretRoot, "nested/credential")} {
+	for _, private := range []string{filepath.Join(spool, "file-checkpoints", "sibling/attempt-1/save"), filepath.Join(base.CheckpointRoot, "sibling/attempt-1/save"), filepath.Join(base.SecretRoot, "nested/credential")} {
 		if err := os.MkdirAll(filepath.Dir(private), 0700); err != nil {
 			t.Fatal(err)
 		}

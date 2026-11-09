@@ -44,7 +44,8 @@ func TestReviewCurrentCapacityFailureUnhealthy(t *testing.T) {
 	healthy := append([]MachineDevice(nil), devices...)
 	healthy[0] = w.Machine.Devices[0]
 	w.Machine.Devices = healthy
-	w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return healthy, nil }
+	currentProbe := func(context.Context) ([]MachineDevice, error) { return healthy, nil }
+	w.InventoryProbe = func(ctx context.Context) ([]MachineDevice, error) { return currentProbe(ctx) }
 	bound := make([]Worker, len(healthy))
 	for i, device := range healthy {
 		bound[i], err = w.forAttempt(Job{AllocatedDevices: []string{device.ID}})
@@ -52,7 +53,7 @@ func TestReviewCurrentCapacityFailureUnhealthy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	w.InventoryProbe = probe
+	currentProbe = probe
 	for i, device := range healthy {
 		err := bound[i].verifyDevice()
 		if device.Platform == "cuda" {
@@ -64,13 +65,13 @@ func TestReviewCurrentCapacityFailureUnhealthy(t *testing.T) {
 			t.Fatalf("healthy sibling launch refused: %v", err)
 		}
 	}
-	w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return healthy, nil }
+	currentProbe = func(context.Context) ([]MachineDevice, error) { return healthy, nil }
 	for _, member := range bound {
 		if err := member.verifyDevice(); err != nil {
 			t.Fatalf("recovered family launch refused: %v", err)
 		}
 	}
-	w.InventoryProbe = probe
+	currentProbe = probe
 	w.Machine.Devices = devices
 	if _, err := w.forAttempt(Job{AllocatedDevices: []string{"0"}}); err == nil {
 		t.Fatal("launch accepted stale healthy CUDA device despite current capacity-detection failure")

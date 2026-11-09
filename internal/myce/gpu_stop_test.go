@@ -15,6 +15,7 @@ import (
 )
 
 func TestGPUStopTermExitNeverKilled(t *testing.T) {
+	t.Run("docker-infrastructure", func(t *testing.T) { testGPUStopDocker(t, true) })
 	t.Run("native", func(t *testing.T) { testGPUStopNative(t, true, "") })
 
 	t.Run("maintenance", func(t *testing.T) {
