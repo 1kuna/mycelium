@@ -51,6 +51,10 @@ class TransferStalledError(TimeoutError):
         self.code = code
 
 
+class _UploadPendingError(ConnectionError):
+    """A missing session whose blob is not published yet; retry only uploads."""
+
+
 class APIError(RuntimeError):
     """The queue rejected a request; status and response body are retained."""
 
@@ -435,10 +439,16 @@ class Client:
         elif project:
             claim = self._call("POST", "/api/files/input-claims", {"project": project, "class": class_, "file": ref})
             headers["X-Myce-Input-Claim"] = claim["id"]
-        def attempt():
+        def verified_blob():
+            with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size) as response:
+                if (response.headers.get("Content-Length") != str(size) or
+                        response.headers.get("ETag") != '"' + ref["sha256"] + '"'):
+                    raise ValueError("stored file identity mismatch")
+            return ref
+
+        def attempt(read):
             try:
-                with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-                    return ref
+                return verified_blob()
             except APIError as error:
                 if error.status not in (404, 410):
                     raise
@@ -449,45 +459,82 @@ class Client:
                 pass
             # A lost final acknowledgement may already have published the blob.
             try:
-                with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-                    return ref
+                return verified_blob()
             except APIError as error:
                 if error.status not in (404, 410):
                     raise
-            try:
-                with request("HEAD", endpoint, headers=headers) as response:
-                    offset = int(response.headers["Upload-Offset"])
-                    length = int(response.headers["Upload-Length"])
-            except APIError as error:
-                if error.status not in (404, 410):
-                    raise
-                # Final publication can race the blob probe, then remove tus
-                # metadata before this HEAD acquires the original upload lock.
-                with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-                    return ref
+            with request("HEAD", endpoint, headers=headers) as response:
+                offset = int(response.headers["Upload-Offset"])
+                length = int(response.headers["Upload-Length"])
             if length != size or not 0 <= offset <= size:
                 raise ValueError("invalid upload offset/length")
+            prefix = offset
+            while prefix:
+                chunk = read(min(1024 * 1024, prefix))
+                if not chunk:
+                    raise ValueError("input changed during upload")
+                prefix -= len(chunk)
+            while offset < size:
+                chunk = read(min(1024 * 1024, size - offset))
+                if not chunk:
+                    raise ValueError("input changed during upload")
+                with request("PATCH", endpoint, chunk, {
+                        **headers, "Content-Type": "application/offset+octet-stream",
+                        "Upload-Offset": str(offset)}, size) as response:
+                    if int(response.headers["Upload-Offset"]) != offset + len(chunk):
+                        raise ValueError("invalid upload acknowledgement")
+                offset += len(chunk)
+            return verified_blob()
+
+        def reconciled_attempt():
+            # Hash the exact prefix/chunks read by this attempt. Reopening and
+            # hashing after a 404 would miss a changed PATCH if the file had
+            # already been restored to its original bytes by then.
+            digest = hashlib.sha256()
+            actual_size = 0
+            short_source = False
             with source.open("rb") as stream:
-                stream.seek(offset)
-                while offset < size:
-                    chunk = stream.read(min(1024 * 1024, size - offset))
-                    if not chunk:
-                        raise ValueError("input changed during upload")
-                    with request("PATCH", endpoint, chunk, {
-                            **headers, "Content-Type": "application/offset+octet-stream",
-                            "Upload-Offset": str(offset)}, size) as response:
-                        if int(response.headers["Upload-Offset"]) != offset + len(chunk):
-                            raise ValueError("invalid upload acknowledgement")
-                    offset += len(chunk)
-            with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-                pass
-            return ref
+                def read(count):
+                    nonlocal actual_size, short_source
+                    if end is not None and self._clock.monotonic() >= end:
+                        raise TransferStalledError("file transfer owner timeout")
+                    chunk = stream.read(count)
+                    digest.update(chunk)
+                    actual_size += len(chunk)
+                    short_source = short_source or (len(chunk) < count and actual_size < size)
+                    return chunk
+
+                def verify_source():
+                    while read(1024 * 1024):
+                        pass
+                    if short_source or actual_size != size or digest.hexdigest() != ref["sha256"]:
+                        raise ValueError("upload source size or SHA-256 mismatch")
+
+                try:
+                    result = attempt(read)
+                except (TransferStalledError, URLError, ConnectionError, APIError) as error:
+                    if isinstance(error, APIError) and error.status not in (404, 410) and not (
+                            error.status in (408, 429, 500, 502, 503, 504) and error.code in (
+                                None, "", "request_failed", "queue_stopping", "client_rate_limited", "observation_shed_control_pressure")):
+                        raise
+                    verify_source()
+                    if not isinstance(error, APIError) or error.status not in (404, 410):
+                        raise
+                    # A verified blob plus verified source proves completion.
+                    try:
+                        return verified_blob()
+                    except APIError as missing:
+                        if missing.status not in (404, 410):
+                            raise
+                        raise _UploadPendingError(str(error)) from error
+                verify_source()
+                return result
 
         pace = Pace(jitter=self._jitter)
         while True:
             started = self._clock.monotonic()
             try:
-                return attempt()
+                return reconciled_attempt()
             except (TransferStalledError, URLError, ConnectionError, APIError) as error:
                 if isinstance(error, APIError) and (error.status not in (408, 429, 500, 502, 503, 504) or
                         error.code not in (None, "", "request_failed", "queue_stopping", "client_rate_limited", "observation_shed_control_pressure")):
