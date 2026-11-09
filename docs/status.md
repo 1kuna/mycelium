@@ -1615,9 +1615,8 @@ Application progress is advisory. It is separate from durable checkpoint
 `job.progress` generations and accepted `fan_out.results`. A report of 100% may
 still be finalizing outputs: it never verifies results, releases custody, proves
 portable recovery, qualifies an extension or contributes throughput history.
-The CPU case of `TestDevStandaloneSmoke` exercises credential-free reporting
-through `myce dev`, observes it in Job/status replies, then completes the command
-through the normal result and release path.
+Credential-free reporting through `myce dev` appears in Job/status replies;
+command completion still follows the normal result and release path.
 
 ### Authored intent and retained placement
 

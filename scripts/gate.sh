@@ -131,7 +131,7 @@ fi
     elif (( result != 0 && related_status != 124 )); then related_status=1; fi
   }
   if [[ ! -s $scratch/selection ]]; then
-    printf 'cmd/myce\t^TestDevStandaloneSmoke$\n' > "$scratch/selection"
+    printf 'cmd/myce\t^TestDevCommandQuickstart$\n' > "$scratch/selection"
   fi
   while IFS=$'\t' read -r dir names; do
     if [[ $mode == full ]]; then package=$dir

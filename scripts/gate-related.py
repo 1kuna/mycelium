@@ -92,7 +92,7 @@ def select(base):
         # Tagged worker defaults run in the standalone CLI smoke fixture, not
         # the core package's in-process synthetic host.
         if name == 'internal/myce/worker_probes_fake.go':
-            packages.setdefault(pathlib.Path('cmd/myce'), set()).add('TestDevStandaloneSmoke')
+            packages.setdefault(pathlib.Path('cmd/myce'), set()).add('TestDevCheckpointEndToEnd')
             continue
         # The shared fixture lifecycle is exercised through both real TestMains.
         if name == 'internal/testenv/lifecycle.go':

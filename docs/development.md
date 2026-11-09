@@ -292,8 +292,9 @@ The committed `release-build` profile reuses this environment for Linux release
 artifacts, with literal version and commit arguments and build receipts. The
 single fleet build command and local signed Darwin step are documented in
 [release operations](operations.md#publish-and-approve-an-onboarding-release).
-Release script regressions run inside `TestReleaseBuildProfile`; their tools
-are fake and never access a signing key or keychain.
+Release script fixtures can run with `python3 scripts/release-build-test.py`;
+their tools are fake and never access a signing key or keychain. The signed
+assembly journey remains in `TestReleaseVerifiedAssemblySigning`.
 
 The `gate-quick` profile runs the quick gate the same way. A submitted source
 archive has no Git history, so compute the related-test selection locally and
@@ -748,14 +749,13 @@ a load run.
 ## Laptop component probes
 
 Use the real queue, API and command runner with fake GPU inventory. Bare
-`myce dev` is a long-running server. The bounded standalone test starts an exact
-binary with isolated HOME/state, authenticates, verifies one command's file
-effect and exact release, drains through queue maintenance, then joins the child
-and confirms its listener closed:
+`myce dev` is a long-running server. The checkpoint journey builds the test
+binary, starts an isolated dev queue and real command runner, then verifies
+production preemption, saved progress, attempt-specific resume and confirmed
+cancellation release:
 
 ```sh
-go build -o .reports/myce ./cmd/myce
-MYCE_DEV_SMOKE_BINARY="$PWD/.reports/myce" go test -race -count=3 ./cmd/myce -run '^TestDevStandaloneSmoke$'
+go test -race -count=1 ./cmd/myce -run '^TestDevCheckpointEndToEnd$'
 ```
 
 `TestMaintenance*` covers two-device admission/Started, drain versus stop,
