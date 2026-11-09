@@ -2,6 +2,7 @@
 """Coverage and balance contracts for full-gate process partitions."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
@@ -9,6 +10,9 @@ from unittest.mock import Mock, patch
 spec = importlib.util.spec_from_file_location('shards', Path(__file__).with_name('gate-shards.py'))
 shards = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(shards)
+spec = importlib.util.spec_from_file_location('scheduler', Path(__file__).with_name('gate-scheduler.py'))
+scheduler = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(scheduler)
 
 
 class ShardTests(unittest.TestCase):
@@ -77,6 +81,28 @@ class ShardTests(unittest.TestCase):
         self.assertEqual(stopped.exception.code, 125)
         child.terminate.assert_called_once()
         self.assertEqual(child.communicate.call_count, 2)
+
+    def test_full_nested_builds_inherit_shard_budget_and_quick_keeps_allocation(self):
+        from tempfile import TemporaryDirectory
+        import sys
+        with TemporaryDirectory() as directory:
+            selection = Path(directory) / 'selection'
+            selection.write_text('mycelium/cmd/myce\t.*\n')
+            with patch.dict(os.environ, GOFLAGS='-p=18', GOMAXPROCS='18'):
+                with patch.object(sys, 'argv', ['scheduler', 'full', '18', str(selection)]), \
+                     patch.object(scheduler, 'run', return_value=0) as run:
+                    self.assertEqual(scheduler.main(), 0)
+                entries, slots, command, environment = run.call_args.args
+                self.assertEqual(slots, 9)
+                self.assertEqual(environment['GOFLAGS'], '-p=1')
+                self.assertEqual(environment['GOMAXPROCS'], '1')
+                self.assertIn('-parallel', command(entries[0])[1])
+                with patch.object(sys, 'argv', ['scheduler', 'quick', '18', str(selection)]), \
+                     patch.object(scheduler, 'run', return_value=0) as run:
+                    self.assertEqual(scheduler.main(), 0)
+                self.assertEqual(run.call_args.args[1], 18)
+                self.assertIsNone(run.call_args.args[3])
+                self.assertEqual(os.environ['GOFLAGS'], '-p=18')
 
 
 if __name__ == '__main__':
