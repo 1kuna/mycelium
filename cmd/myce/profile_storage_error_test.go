@@ -8,11 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type storageRetryReport func([]byte)
@@ -26,7 +28,7 @@ func TestProfileStorageFailureCause(t *testing.T) {
 	for _, tc := range []struct {
 		adapter            bool
 		operation, failure string
-	}{{false, "preflight", "503"}, {true, "upload", "401"}} {
+	}{{false, "preflight", "503"}, {true, "upload", "401"}, {false, "upload", "timeout"}} {
 		adapter, operation, failure := tc.adapter, tc.operation, tc.failure
 		t.Run(strings.Join([]string{map[bool]string{false: "profile", true: "entry"}[adapter], operation, failure}, "/"), func(t *testing.T) {
 			root := t.TempDir()
@@ -52,7 +54,8 @@ func TestProfileStorageFailureCause(t *testing.T) {
 				SHA256    string `json:"sha256"`
 				SizeBytes int64  `json:"size_bytes"`
 			}
-			var reached atomic.Bool
+			var reached, preflightDone atomic.Bool
+			release := make(chan struct{})
 			var server *httptest.Server
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if namedInput.Load() {
@@ -83,10 +86,18 @@ func TestProfileStorageFailureCause(t *testing.T) {
 					return
 				}
 				if operation == "upload" && r.URL.Path == "/api/files/preflight" {
+					preflightDone.Store(true)
 					w.WriteHeader(200)
 					return
 				}
 				reached.Store(true)
+				if failure == "timeout" {
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+					return
+				}
 				status := 503
 				if failure == "401" {
 					status = 401
@@ -96,9 +107,21 @@ func TestProfileStorageFailureCause(t *testing.T) {
 
 			}))
 			defer server.Close()
-			ctx, cancel := context.WithCancel(t.Context())
+			defer close(release)
+			ctx, cancel := context.WithTimeout(t.Context(), devTestTimeout)
 			defer cancel()
-			want := map[string]string{"503": "HTTP 503 code=request_failed", "401": "HTTP 401 code=request_failed"}[failure]
+			if failure == "timeout" {
+				// Bound the upload connection only after preflight succeeds.
+				// Staging and preflight must not consume the upload's 150ms budget.
+				ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+					if preflightDone.Load() {
+						if err := info.Conn.SetDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+							t.Error(err)
+						}
+					}
+				}})
+			}
+			want := map[string]string{"503": "HTTP 503 code=request_failed", "401": "HTTP 401 code=request_failed", "timeout": "timeout"}[failure]
 			reports := 0
 			report := storageRetryReport(func(p []byte) {
 				reports++
@@ -150,7 +173,7 @@ func TestProfileStorageFailureCause(t *testing.T) {
 			if !reached.Load() {
 				t.Fatal("fake server not reached")
 			}
-			if !adapter {
+			if !adapter && failure == "503" {
 				input := filepath.Join(root, "private-local-file")
 				if err := os.WriteFile(input, []byte("fixture"), 0600); err != nil {
 					t.Fatal(err)
