@@ -19,50 +19,9 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 				t.Fatal("not assigned")
 			}
 
-			// Preserve the original refused-offer fixture: its demand is the
-			// cold offer, carrying the recovery source through worker results.
-			// This is not the smaller post-OOM recovery assignment below.
-			source := measuredOOMRecoverySource
-			run.MemoryEnvelope.Source = source
-			q.s.Jobs[run.ID].MemoryEnvelope.Source = source
-			h := &machineHarness{jobs: []Job{*run}, controls: map[string]AttemptDirective{}}
-			w := harnessWorker(t, h)
-			w.Machine = m
-			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return []MachineDevice{}, nil }
-			w.HostMemorySource = func(context.Context) (float64, error) { return 19, nil }
-			w.EnvironmentLimit = 1 << 20
-			store, err := w.openStore()
-			if err != nil {
-				t.Fatal(err)
-			}
-			store.state.Session, store.state.Fresh = run.Session, true
-			err = store.save()
-			store.close()
-			if err != nil {
-				t.Fatal(err)
-			}
-			stop, _ := startHarness(t, w, h)
-			await(t, func() bool { return h.completed(run.ID) })
-			refused := h.result(run.ID)
-			stop()
-			if !refused.Interrupted || refused.ExecutionCause == nil || !refused.ExecutionCause.PrelaunchRefused || refused.ExecutionCause.Predicate != "memory_capacity" {
-				t.Fatalf("worker did not report a prelaunch memory refusal: %+v", refused)
-			}
-			d := refused.ExecutionCause.Admission
-			if d == nil || d.EnvelopeSource != source {
-				t.Fatalf("recovery source stripped: %+v", d)
-			}
-			if err := q.Complete(refused); err != nil {
-				t.Fatal(err)
-			}
-			clock.Advance(time.Second)
-			run = assignedJob(machineCheck(t, q, m))
-			if run == nil || run.ID != queued.ID || run.Attempt != refused.Attempt+1 {
-				t.Fatal("refused offer did not retry", run)
-			}
-			if run.MemoryEnvelope.LaunchDriftGB < .48 {
-				t.Fatal("exact recovery deficit did not teach launch drift")
-			}
+			// Retain the original observed 19.49 -> 19 GiB launch deficit.
+			// Apply that same deficit to the actual smaller recovery below.
+			launchDeficit := m.HostAvailableMemoryGB - 19
 
 			// Replay the original frozen pre-fix OOM offer and telemetry.
 			run.Spec.Needs.HostMemoryGB, run.MemoryEnvelope.HostGB = 2.582660675048828, 2.582660675048828
@@ -91,9 +50,54 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 			if candidate.Spec.Needs.HostMemoryGB != bound || bound <= peak || bound >= 4 {
 				t.Fatalf("recovery follows availability: %+v", candidate.MemoryEnvelope)
 			}
-			w = Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return free - .4, nil }}
+			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return free - .4, nil }}
 			if err := localAttemptAdmission(w, nil, *candidate, nil); err != nil {
 				t.Fatal(err)
+			}
+
+			source := measuredOOMRecoverySource
+			if candidate.MemoryEnvelope.Source != source {
+				t.Fatal("assigned recovery lost its source", candidate.MemoryEnvelope)
+			}
+			h := &machineHarness{jobs: []Job{*candidate}, controls: map[string]AttemptDirective{}}
+			w = harnessWorker(t, h)
+			w.Machine = m
+			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return []MachineDevice{}, nil }
+			w.HostMemorySource = func(context.Context) (float64, error) {
+				return candidate.Spec.Needs.HostMemoryGB - launchDeficit, nil
+			}
+			w.EnvironmentLimit = 1 << 20
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.state.Session, store.state.Fresh = candidate.Session, true
+			err = store.save()
+			store.close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stop, _ := startHarness(t, w, h)
+			await(t, func() bool { return h.completed(candidate.ID) })
+			refused := h.result(candidate.ID)
+			stop()
+			if !refused.Interrupted || refused.ExecutionCause == nil || !refused.ExecutionCause.PrelaunchRefused || refused.ExecutionCause.Predicate != "memory_capacity" {
+				t.Fatalf("worker did not report a prelaunch memory refusal: %+v", refused)
+			}
+			d := refused.ExecutionCause.Admission
+			if d == nil || d.EnvelopeSource != source {
+				t.Fatalf("recovery source stripped: %+v", d)
+			}
+			if err := q.Complete(refused); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			next := assignedJob(machineCheck(t, q, m))
+			if next == nil || next.ID != queued.ID || next.Attempt != refused.Attempt+1 {
+				t.Fatal("refused recovery did not retry", next)
+			}
+			if next.MemoryEnvelope.LaunchDriftGB < .48 {
+				t.Fatal("exact recovery deficit did not teach launch drift")
 			}
 		})
 	}
