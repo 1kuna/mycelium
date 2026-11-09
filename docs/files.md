@@ -253,6 +253,11 @@ absent, clients retry with existing pacing within the same Go context deadline
 or Python `transfer_timeout`, recreating/resuming the same digest as needed.
 Missing upload metadata alone never proves either completion or lost content.
 Integrity and typed authority/storage refusals still stop recovery immediately.
+Completion also requires the source identity to match: clients hash each
+attempt's resumed prefix and the bytes read for PATCH, then verify the remaining
+tail and total size. A changed source fails even when another uploader published
+the original blob, including when the source is restored before its 404 arrives.
+Keep input files unchanged until the upload finishes.
 
 File transfers have no default whole-request deadline. The per-socket progress
 window learns byte service time and gaps. Upload PATCH windows additionally use

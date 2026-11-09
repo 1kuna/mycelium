@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -269,5 +270,87 @@ func TestFilesMissingUploadReconcilesPublication(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestUploadCompletedRetryRejectsChangedSource(t *testing.T) {
+	for _, changed := range []string{"evil", "dat", "data!"} {
+		t.Run(changed, func(t *testing.T) {
+			q, s := creationStore(t, 8)
+			ref := creationRef("data")
+			path := filepath.Join(t.TempDir(), "input")
+			if err := os.WriteFile(path, []byte("data"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			backend := API{Queue: q, Token: "fixture"}.Handler()
+			sent := make(chan []byte, 1)
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/files/uploads/"+ref.SHA256 {
+					if r.Method == "HEAD" {
+						if err := os.WriteFile(path, []byte(changed), 0600); err != nil {
+							t.Error(err)
+							w.WriteHeader(500)
+							return
+						}
+					}
+					if r.Method == "PATCH" {
+						body, err := io.ReadAll(r.Body)
+						if err != nil {
+							t.Error(err)
+						}
+						sent <- body
+						// Restore the source after sending changed bytes: rehashing
+						// the file now would lose the failed PATCH's identity.
+						if changed != "data!" {
+							if err := os.WriteFile(path, []byte("data"), 0600); err != nil {
+								t.Error(err)
+							}
+						}
+						finish := httptest.NewRequest("PATCH", r.URL.Path, strings.NewReader("data"))
+						finish.Header.Set("Tus-Resumable", "1.0.0")
+						finish.Header.Set("Content-Type", "application/offset+octet-stream")
+						finish.Header.Set("Upload-Offset", "0")
+						finished := httptest.NewRecorder()
+						s.serveUpload(finished, finish)
+						if finished.Code != 204 {
+							t.Error(finished.Code, finished.Body.String())
+						}
+						late := httptest.NewRecorder()
+						backend.ServeHTTP(late, r)
+						assertUploadError(t, late, 404, "file_upload_not_found")
+						for key, values := range late.Header() {
+							w.Header()[key] = values
+						}
+						w.WriteHeader(late.Code)
+						_, _ = w.Write(late.Body.Bytes())
+						return
+					}
+				}
+				backend.ServeHTTP(w, r)
+			}))
+			defer api.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var pauses atomic.Int32
+			c := Client{URL: api.URL, Token: "fixture", Pause: func(context.Context, time.Duration) error {
+				pauses.Add(1)
+				return context.DeadlineExceeded
+			}}
+			err := c.UploadJobInput(ctx, path, ref)
+			if err == nil || !strings.Contains(err.Error(), "source size or SHA-256 mismatch") || pauses.Load() != 0 {
+				t.Fatal("changed source reconciled or retried", err, pauses.Load())
+			}
+			select {
+			case body := <-sent:
+				if string(body) != changed[:min(len(changed), 4)] {
+					t.Fatalf("sent %q", body)
+				}
+			default:
+				t.Fatal("concurrent completion was not exercised")
+			}
+			if err := c.HasFile(ctx, ref); err != nil {
+				t.Fatal("original blob missing", err)
+			}
+		})
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"net"
@@ -1188,6 +1189,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 // Every retry rechecks publication and the server's accepted tus offset. Never
 // replay a PATCH whose acknowledgement was lost, even if socket writes succeeded.
 func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref FileRef, purpose string) (result error) {
+	source := &uploadSource{ctx: ctx, reader: f, digest: sha256.New(), expected: ref.SizeBytes}
 	if s, ok := ctx.Value(fileStoreSubmissionKey{}).(Spec); ok && ctx.Value(fileStoreAttemptKey{}) == nil {
 		var claim FileInputClaim
 		err := c.Call(ctx, "POST", "/api/files/input-claims", map[string]any{"project": s.Project, "class": s.Class, "file": ref}, &claim)
@@ -1201,6 +1203,14 @@ func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref File
 		headPurpose = fileImportUploadPurpose
 	}
 	defer func() {
+		if result == nil || missingUpload(result) || retryTransient(result) {
+			// Verify the bytes this attempt actually read, not a fresh read that
+			// could hide a changed PATCH after the source was restored in place.
+			if err := source.verify(ref); err != nil {
+				result = err
+				return
+			}
+		}
 		if !missingUpload(result) {
 			return
 		}
@@ -1244,17 +1254,17 @@ func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref File
 	if err != nil {
 		return err
 	}
+	if err = source.start(offset); err != nil {
+		return err
+	}
 	for {
 		if err := c.ownerError(ctx); err != nil {
-			return err
-		}
-		if _, err = f.Seek(offset, io.SeekStart); err != nil {
 			return err
 		}
 		n := min(int64(4<<20), ref.SizeBytes-offset)
 		// Close synchronizes with any late net/http body reader before a retry
 		// seeks the caller's handle. A failed response may race the writer goroutine.
-		body := &uploadBody{reader: io.LimitReader(f, n)}
+		body := &uploadBody{reader: io.LimitReader(source, n)}
 		res, err = c.fileRequest(ctx, "PATCH", endpoint, body, map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": strconv.FormatInt(offset, 10), "Content-Type": "application/offset+octet-stream"}, ref.SizeBytes)
 		body.Close()
 		if err != nil {
@@ -1274,6 +1284,59 @@ func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref File
 	}
 
 	return c.hasFile(ctx, ref, headPurpose)
+}
+
+// One attempt hashes its resumed prefix and the exact bytes read by HTTP. After
+// uploadBody.Close fences late transport reads, verify consumes any unread tail
+// (including unexpected growth). This is client I/O, never queue-mutex work.
+type uploadSource struct {
+	ctx      context.Context
+	reader   io.ReadSeeker
+	digest   hash.Hash
+	size     int64
+	expected int64
+	short    bool
+	started  bool
+}
+
+func (s *uploadSource) Read(p []byte) (int, error) {
+	n, err := io.ReadFull(contextReader{s.ctx, s.reader}, p)
+	_, _ = s.digest.Write(p[:n])
+	s.size += int64(n)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		s.short = s.short || s.size < s.expected
+		err = io.EOF
+	}
+	return n, err
+}
+
+func (s *uploadSource) start(offset int64) error {
+	if _, err := s.reader.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	s.started = true
+	if _, err := io.CopyN(io.Discard, s, offset); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return errors.New("upload source size or SHA-256 mismatch")
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *uploadSource) verify(ref FileRef) error {
+	if !s.started {
+		if err := s.start(0); err != nil {
+			return err
+		}
+	}
+	if _, err := io.Copy(io.Discard, s); err != nil {
+		return err
+	}
+	if s.short || s.size != ref.SizeBytes || hex.EncodeToString(s.digest.Sum(nil)) != ref.SHA256 {
+		return errors.New("upload source size or SHA-256 mismatch")
+	}
+	return nil
 }
 
 func missingUpload(err error) bool {

@@ -123,6 +123,45 @@ class ExtensionClientTests(unittest.TestCase):
                                 self.assertEqual(len(clock.sleeps), int(outcome in ("pending", "probe_interrupted")))
                     self.assertEqual(calls[-1][0], "HEAD")
 
+    def test_completed_retry_rejects_changed_source_even_if_restored_after_send(self):
+        for changed, restore in ((b"evil", True), (b"dat", True), (b"data!", False)):
+            with self.subTest(changed=changed, restore=restore), tempfile.TemporaryDirectory() as folder:
+                source = Path(folder, "input")
+                source.write_bytes(b"data")
+                digest = hashlib.sha256(b"data").hexdigest()
+                client = Client(token="fixture")
+                published = False
+                sent = []
+
+                def request(method, endpoint, data=None, headers=None, size=0, **_):
+                    nonlocal published
+                    reply = io.BytesIO()
+                    reply.headers = {"Content-Length": "4", "ETag": '"' + digest + '"',
+                                     "Upload-Length": "4", "Upload-Offset": "0"}
+                    if "/blobs/" in endpoint:
+                        if not published:
+                            raise APIError(404, "missing")
+                    elif method == "HEAD":
+                        # Identity was computed before any requests. Change the
+                        # opened source before its PATCH body is captured.
+                        source.write_bytes(changed)
+                    elif method == "PATCH":
+                        sent.append(data)
+                        self.assertEqual(data, changed[:4])
+                        # Another uploader completes the original bytes. A fresh
+                        # rehash after the 404 must not hide what this one sent.
+                        published = True
+                        if restore:
+                            source.write_bytes(b"data")
+                        raise APIError(404, '{"code":"file_upload_not_found","error":"missing"}')
+                    return reply
+
+                with patch.object(client, "_file_request", side_effect=request), \
+                     self.assertRaisesRegex(ValueError, "source size or SHA-256 mismatch"):
+                    client.upload_file(source)
+                self.assertEqual(sent, [changed[:4]])
+                self.assertTrue(published)
+
     def test_keyed_submit_wait_and_terminal_failure(self):
         client = Client(token="fixture")
         with self.assertRaisesRegex(ValueError, "submission_key"):

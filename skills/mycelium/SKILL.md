@@ -163,6 +163,9 @@ is also absent, the same upload retries within its existing owner deadline
 submission key. A late retry after completion is safe. Typed integrity,
 authority and storage-policy refusals still need their owner. Upload errors use
 the standard JSON code/error envelope; HEAD carries `X-Myce-Error-Code`.
+Keep source files unchanged during upload. Clients bind completion to the source
+size and SHA-256, including bytes read for the failed PATCH; another uploader's
+matching blob cannot turn a changed-source retry into success.
 See [file transfer recovery](../../docs/files.md#transfer-behavior).
 
 ## Read for the relevant branch
