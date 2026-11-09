@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"mycelium/internal/myce"
 	"os"
 	"os/exec"

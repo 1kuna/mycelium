@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"mycelium/internal/myce"
 	"net"
 	"net/http"

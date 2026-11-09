@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log"
 	"mycelium/internal/myce"
 	"os"
 	"os/exec"
