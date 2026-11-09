@@ -833,6 +833,9 @@ A launch-capacity refusal with positive `main: not_started` evidence never spend
 losses or infrastructure retries, including an older worker's `launch/io_error`
 classification. Queue Started authorization alone is not main execution; existing
 supervisor custody still requires exact release before retry.
+If a predecessor queue rejects the additive contributors with `request_invalid`,
+completion delivery retries once with contributors removed from a wire copy;
+the durable local diagnostic and exact release evidence remain intact.
 
 A modern worker also records `prelaunch_refused: true` only for a persisted
 native refusal before custody or launch intent. An exact released copy with
