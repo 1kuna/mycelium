@@ -119,14 +119,33 @@ func TestModelDeclaredCallMeasurementAuthorityHTTP(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("no upstream call")
 			}
-			if changed {
-				clock.Advance(time.Second)
-			}
 			var second *httptest.ResponseRecorder
-			select {
-			case second = <-responses:
-			case <-ctx.Done():
-				t.Fatal("second response stalled")
+			if changed {
+				// An admitted peer can expire before proxying, so observe its
+				// queued state before advancing to the wait deadline.
+				await(t, func() bool {
+					select {
+					case second = <-responses:
+						return true
+					default:
+					}
+					for _, j := range inspect().Jobs {
+						if j.State == "queued" {
+							return true
+						}
+					}
+					return false
+				})
+				if second == nil {
+					clock.Advance(time.Second)
+				}
+			}
+			if second == nil {
+				select {
+				case second = <-responses:
+				case <-ctx.Done():
+					t.Fatal("second response stalled")
+				}
 			}
 			if changed {
 				if second.Code != 504 || !strings.Contains(second.Body.String(), "maximum model wait exceeded") {
