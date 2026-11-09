@@ -54,6 +54,7 @@ func TestColdProbePrestartKeepsOfferedCharge(t *testing.T) {
 		// Both worker admission paths must protect the full offered envelope,
 		// admitting a fitting neighbor but refusing static overcommit.
 		next := Job{ID: "neighbor", Spec: cpuSpec(1, 2)}
+		next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB = 0, 2
 		if !hostFits(q.s.Machines[m.ID], 0, 2) {
 			t.Fatal("offered probe blocked fitting neighbor")
 		}
