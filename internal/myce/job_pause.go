@@ -69,6 +69,7 @@ func (q *Queue) pauseJob(j *Job, pause JobPause) {
 		until := *pause.Until
 		pause.Until = &until
 	}
+	q.closeAdmissionWait(j, "paused")
 	j.State, j.Pause, j.Reason = "paused", &pause, pause.Reason
 	j.PauseRevision++
 	j.ProductionHost = "" // Derived placement demand is selected anew on resume.

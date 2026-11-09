@@ -511,11 +511,67 @@ type persistenceFieldCache struct {
 	fields map[string]json.RawMessage
 }
 
-// Cache only detached encodings of multi-page fields. Equality never relies on
-// a live pointer or on caller dirty tracking. Speculative encodings confer no
-// durability: writeFields always compares against the last committed bytes.
+type waitPersistenceInput struct {
+	evidence *AdmissionWaitEvidence
+	base     []byte
+}
+
+// Cache detached multi-page fields and immutable admission evidence. Ordinary
+// mutable fields compare against owned values, never dirty tracking. Immutable
+// evidence can compare by identity. Speculative encodings confer no durability:
+// writeFields always compares against the last committed bytes.
 func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[string]json.RawMessage, error) {
-	if !splitPersistenceKey(key) || len(q.persisted[key]) <= q.persistencePageBytes {
+	if j, ok := value.(*Job); ok && j != nil && j.AdmissionWait != nil {
+		// Immutable wait history must not turn every small live job into a
+		// full per-field reflection/cache walk on every heartbeat. Encode the
+		// ordinary job at its own size and reuse the immutable evidence bytes.
+		if q.persistenceEncodings == nil {
+			q.persistenceEncodings = map[string]map[string]catalogEncoding{}
+		}
+		if q.persistenceEncodings[key] == nil {
+			q.persistenceEncodings[key] = map[string]catalogEncoding{}
+		}
+		cache := q.persistenceEncodings[key]
+		entry := cache["admission_wait"]
+		if entry.value != j.AdmissionWait {
+			raw, err := json.Marshal(j.AdmissionWait)
+			if err != nil {
+				return nil, nil, err
+			}
+			entry = catalogEncoding{value: j.AdmissionWait, data: raw}
+			cache["admission_wait"] = entry
+		}
+		input := *j
+		input.AdmissionWait = nil
+		// These entries describe the excluded immutable evidence, not fields
+		// in input. Keep them outside the ordinary field-cache cleanup below.
+		whole := cache["$admission_wait_job"]
+		rest, _, err := q.marshalPersistenceSized(key, &input, max(0, len(q.persisted[key])-len(entry.data)))
+		cache["admission_wait"] = entry
+		if whole.value != nil {
+			cache["$admission_wait_job"] = whole
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if old, ok := whole.value.(waitPersistenceInput); ok && old.evidence == j.AdmissionWait && bytes.Equal(old.base, rest) {
+			return whole.data, nil, nil
+		}
+		data := make([]byte, 0, len(rest)+len(entry.data)+18)
+		data = append(data, `{"admission_wait":`...)
+		data = append(data, entry.data...)
+		if len(rest) > 2 {
+			data = append(data, ',')
+		}
+		data = append(data, rest[1:]...)
+		cache["$admission_wait_job"] = catalogEncoding{value: waitPersistenceInput{j.AdmissionWait, rest}, data: data}
+		return data, nil, nil
+	}
+	return q.marshalPersistenceSized(key, value, len(q.persisted[key]))
+}
+
+func (q *Queue) marshalPersistenceSized(key string, value any, previousBytes int) ([]byte, map[string]json.RawMessage, error) {
+	if !splitPersistenceKey(key) || previousBytes <= q.persistencePageBytes {
 		data, err := json.Marshal(value)
 		return data, nil, err
 	}

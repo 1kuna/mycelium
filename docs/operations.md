@@ -1751,7 +1751,7 @@ The broker contract is:
    collection window. Do not serve a cached or periodically refreshed
    snapshot and do not timestamp old data as fresh.
 
-The exact JSON schema is:
+The required JSON fields are:
 
 ```json
 {
@@ -1767,6 +1767,15 @@ The exact JSON schema is:
 host clock as the worker. `gtt_mm` maps each full lowercase PCI address to its
 unmodified debugfs text. Include every card an attempt can use: the worker
 requires its selected card and every other card present in its DRM clients.
+The reference broker also supplies optional `vram` entries keyed by the same PCI
+identities, each with unsigned `total_bytes` and `used_bytes`. These come from a
+read-only Xe memory-regions query with uncensored usage evidence;
+GTT storage is never used as VRAM. Missing, censored or invalid entries withhold
+telemetry-dependent sharing and never trigger vendor-tool fallback. Ordinary
+configured-budget admission is unchanged. The [broker installation guide](../deploy/gpu-telemetry/README.md)
+describes the read-only DRM policy and older-kernel accounting limitations of
+this additive source. Existing GTT-only brokers remain usable for host RAM accounting.
+
 The helper forwards the broker's timestamp and text unchanged. A timestamp
 before the current helper invocation or after it finishes is rejected, so a
 cached snapshot is not accepted even when recent. A malformed, absent or stale
@@ -2412,6 +2421,33 @@ job reports `blocker.code: device_fault_last_healthy` and waits on the same job 
 and submission key. This protection is queue-side and works with older workers;
 it does not require new recovery fields. Existing pre-upgrade fault history is
 recognized when its retained copy identifies the backend on that worker.
+
+The typed last-healthy hold pauses a relative production start or recovery
+budget without spending more infrastructure retries. It saves the time remaining
+at entry and resumes that amount when an eligible route returns; status keeps
+`device_fault_last_healthy` and shows `paused for device recovery`. The original
+`start_window` remains unchanged for a later started-attempt loss. Explicit
+absolute `start_by` and queued-only `give_up_at` still bind.
+The saved amount survives any capacity wait after clearance and queue restart;
+capacity recovery cannot refund startup time spent before the device-fault hold.
+
+An unrecoverable quarantine must not strand a job forever. The hold expires one
+`MaxProductionStartWindow` (the existing one-hour maximum availability window)
+after the latest queue-recorded device-fault loss, including across queue
+restarts. It fails with `diagnostic_code: device_fault_recovery_timeout` and a
+launch timeout even when the first report after the bound clears quarantine;
+an active hold expires before its budget can resume. The timeout is a sanitized
+launch cause with the same predicate. This bounds withheld capacity and
+caller latency when recovery never arrives; its cost is giving up on a recovery
+that takes longer than the existing maximum start window. Earlier caller
+cutoffs win. This bound applies to held jobs of every priority and never clears
+quarantine or releases old attempt custody. If the route disappears altogether,
+ordinary unavailable-route startup accounting resumes.
+
+After an operator clear, fresh inventory reporting both cards usable releases
+the two-card guard and either card can run the retry. An operator request alone
+is not health evidence and cannot authorize a sole surviving card; that case
+still requires new health-proven recovery or another healthy device/host.
 
 From the worker release containing #1142, non-escalated quarantine also clears
 automatically after positive vendor health evidence and uninterrupted kernel
@@ -4086,6 +4122,28 @@ use job GET times and the paginated job ledger described in [status](status.md).
 ## Completion observer upgrade and recovery (next release)
 
 Managed observers adopt all armed registrations in their private user registry.
+From the release containing #1160, caller-started shared owners have their own
+session/process group and start from `/`, so starter exit and process-group
+cleanup do not remove unrelated callers' observation. Their environment is an
+allowlist: HOME/USER/LOGNAME, XDG config/cache/data paths, TLS certificate paths,
+the starter's PATH and locale, and explicit dev/managed-attempt custody markers.
+Runner tracking identities, job-scoped variables, inherited temporary directories,
+unrelated secrets and MYCE_TOKEN are excluded. An allowlist also excludes future
+CI providers' tracking variables without needing a provider-specific denylist.
+Notifier delivery retains its separately saved caller environment with MYCE_TOKEN
+removed; legacy registrations without that snapshot keep the owner's PATH/locale
+fallback. Dev sessions and managed attempts retain their existing cleanup custody.
+
+There is no automatic supervisor in this release. A dead owner is recovered by
+the next ordinary keyed command, which adopts retained armed registrations.
+[Canonical per-user CLI supervision](https://github.com/1kuna/mycelium/issues/1166)
+is a separate follow-up; this release installs no observer unit/plist, publishes
+no independent client image and adds no observer service install/uninstall path.
+Ordinary startup and cooperative handoff hold startup.lock through socket
+replacement/readiness; old-owner cleanup serializes its identity check and unlink
+under the same lock. Broken owner startup records a bounded
+`observer_start_failed` event in `observer.log` without raw errors or authority.
+
 An ordinary keyed profile/adapter command starts one when the lifetime lock is
 free. Updating a CLI symlink does not change the image of an existing process.
 Supporting newer clients write a versioned upgrade request when arming or

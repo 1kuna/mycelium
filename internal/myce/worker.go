@@ -56,6 +56,7 @@ type Worker struct {
 	faultRecovery       map[string]deviceRecoveryObservation
 	faultHealth         map[string]deviceHealthObservation
 	faultHealthAfter    time.Time // A monitoring gap invalidates older in-flight health readings.
+	faultHealthDue      map[string]deviceHealthDue
 	InventoryProbe      func(context.Context) ([]MachineDevice, error)
 	CPUIsolationProbe   func(context.Context) error
 	cpuRuntimeProbe     *MachineProbe // Runtime/OS seam; tests still exercise real verification rules.

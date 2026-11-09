@@ -261,6 +261,8 @@ func TestQueuePersistenceCachedEncodingMatchesJSON(t *testing.T) {
 			live := q.touchJob(j.ID)
 			live.Spec.Run.Env["changed"] = "yes"
 			live.Reason = "mutated"
+			live.AdmissionWait = retainAdmissionWait(live.AdmissionWait,
+				&AdmissionWaitSnapshot{At: clock.Now(), Attempt: live.Attempt, Predicate: "admission"}, 0, true)
 			for key, value := range map[string]any{"state": q.s, "jobs/" + j.ID: live} {
 				want, err := json.Marshal(value)
 				if err != nil {
@@ -272,6 +274,17 @@ func TestQueuePersistenceCachedEncodingMatchesJSON(t *testing.T) {
 				}
 				if !bytes.Equal(want, got) {
 					t.Fatal("cached serializer diverged from JSON")
+				}
+				if key == "jobs/"+j.ID {
+					// Unchanged large jobs must reuse their immutable encoding;
+					// ordinary field-cache cleanup used to discard wait evidence.
+					again, _, err := q.marshalPersistenceValue(key, value)
+					if err != nil {
+						return err
+					}
+					if len(got) == 0 || len(again) == 0 || &got[0] != &again[0] {
+						t.Fatal("unchanged large job re-encoded its admission evidence")
+					}
 				}
 			}
 			return nil

@@ -229,6 +229,10 @@ func retryTransient(err error) bool {
 	if err == nil || IsTLSIdentityError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	var pending *uploadPendingError
+	if errors.As(err, &pending) {
+		return true
+	}
 	var api *HTTPError
 	if errors.As(err, &api) {
 		// Typed storage, integrity and configuration refusals need owner repair.

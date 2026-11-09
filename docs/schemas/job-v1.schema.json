@@ -45,6 +45,300 @@
       ],
       "type": "object"
     },
+    "AdmissionWaitEvidence": {
+      "properties": {
+        "budget_unknown": {
+          "type": "boolean"
+        },
+        "capture_gaps": {
+          "type": "integer"
+        },
+        "deferred_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "dropped": {
+          "type": "integer"
+        },
+        "first": {
+          "$ref": "#/$defs/AdmissionWaitSnapshot"
+        },
+        "history_budget_bytes": {
+          "type": "integer"
+        },
+        "history_bytes": {
+          "type": "integer"
+        },
+        "latest": {
+          "$ref": "#/$defs/AdmissionWaitSnapshot"
+        },
+        "transitions": {
+          "items": {
+            "$ref": "#/$defs/AdmissionWaitSnapshot"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "history_budget_bytes",
+        "history_bytes"
+      ],
+      "type": "object"
+    },
+    "AdmissionWaitHolder": {
+      "properties": {
+        "admission_host_gb": {
+          "type": "number"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "charged_host_gb": {
+          "type": "number"
+        },
+        "cores": {
+          "type": "integer"
+        },
+        "declared_host_gb": {
+          "type": "number"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "enforced_host_gb": {
+          "type": "number"
+        },
+        "enforcement_basis": {
+          "type": "string"
+        },
+        "engine_attempt": {
+          "type": "string"
+        },
+        "forecast_host_gb": {
+          "type": "number"
+        },
+        "job": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "preemptible": {
+          "type": "boolean"
+        },
+        "preemption_reason": {
+          "type": "string"
+        },
+        "remaining_growth_gb": {
+          "type": "number"
+        },
+        "sample_age_seconds": {
+          "type": "number"
+        },
+        "sample_fresh": {
+          "type": "boolean"
+        },
+        "session": {
+          "type": "string"
+        },
+        "tier": {
+          "$ref": "#/$defs/PriorityMatch"
+        }
+      },
+      "required": [
+        "key",
+        "kind",
+        "machine",
+        "session",
+        "cores",
+        "sample_fresh",
+        "enforcement_basis",
+        "preemptible",
+        "preemption_reason"
+      ],
+      "type": "object"
+    },
+    "AdmissionWaitPlan": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "concurrency": {
+          "type": "integer"
+        },
+        "preemption": {
+          "$ref": "#/$defs/WaitPreemption"
+        },
+        "required_cores": {
+          "type": "integer"
+        },
+        "required_device_gb": {
+          "type": "number"
+        },
+        "required_host_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "at",
+        "preemption",
+        "required_cores",
+        "required_host_gb",
+        "required_device_gb"
+      ],
+      "type": "object"
+    },
+    "AdmissionWaitSnapshot": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "closed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "closed_reason": {
+          "type": "string"
+        },
+        "next_piece": {
+          "type": "integer"
+        },
+        "predicate": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/AdmissionWaitTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "attempt",
+        "predicate"
+      ],
+      "type": "object"
+    },
+    "AdmissionWaitTarget": {
+      "properties": {
+        "available_cores": {
+          "type": "integer"
+        },
+        "available_device_gb": {
+          "type": "number"
+        },
+        "available_host_gb": {
+          "type": "number"
+        },
+        "concurrency": {
+          "type": "integer"
+        },
+        "device": {
+          "type": "string"
+        },
+        "device_fault": {
+          "type": "string"
+        },
+        "device_memory_known": {
+          "type": "boolean"
+        },
+        "holders": {
+          "items": {
+            "$ref": "#/$defs/AdmissionWaitHolder"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "host_debt_gb": {
+          "type": "number"
+        },
+        "host_memory_known": {
+          "type": "boolean"
+        },
+        "last_planner_decision": {
+          "$ref": "#/$defs/AdmissionWaitPlan"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "predicates": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "preemption": {
+          "$ref": "#/$defs/WaitPreemption"
+        },
+        "release_commitment": {
+          "type": "boolean"
+        },
+        "required_cores": {
+          "type": "integer"
+        },
+        "required_device_gb": {
+          "type": "number"
+        },
+        "required_host_gb": {
+          "type": "number"
+        },
+        "resolution": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "machine",
+        "session",
+        "resolution",
+        "required_cores",
+        "available_cores",
+        "required_host_gb",
+        "available_host_gb",
+        "host_memory_known",
+        "host_debt_gb",
+        "required_device_gb",
+        "available_device_gb",
+        "device_memory_known",
+        "preemption"
+      ],
+      "type": "object"
+    },
     "AlertRecovery": {
       "properties": {
         "action": {
@@ -1064,6 +1358,22 @@
       ],
       "type": "object"
     },
+    "DeviceFaultStartWait": {
+      "properties": {
+        "remaining": {
+          "type": "integer"
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "remaining"
+      ],
+      "type": "object"
+    },
     "DiagnosticReport": {
       "properties": {
         "format": {
@@ -1297,6 +1607,9 @@
     },
     "Environment": {
       "properties": {
+        "backend": {
+          "type": "string"
+        },
         "lock_file": {
           "type": "string"
         },
@@ -2298,6 +2611,10 @@
     },
     "Job": {
       "properties": {
+        "admission_wait": {
+          "$ref": "#/$defs/AdmissionWaitEvidence",
+          "x-contract": "diagnostic"
+        },
         "allocated_devices": {
           "items": {
             "type": "string"
@@ -2389,6 +2706,10 @@
         "dependency": {
           "$ref": "#/$defs/PieceBinding",
           "x-contract": "stable"
+        },
+        "device_fault_start_wait": {
+          "$ref": "#/$defs/DeviceFaultStartWait",
+          "x-contract": "diagnostic"
         },
         "device_memory_floor_gb": {
           "type": "number",
@@ -2832,6 +3153,10 @@
         "start_by_explicit": {
           "description": "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute.",
           "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "start_capacity_budget": {
+          "type": "integer",
           "x-contract": "diagnostic"
         },
         "start_capacity_waiting": {
@@ -5544,6 +5869,29 @@
         "qualified",
         "eligible",
         "reasons"
+      ],
+      "type": "object"
+    },
+    "WaitPreemption": {
+      "properties": {
+        "considered": {
+          "type": "boolean"
+        },
+        "planned": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "considered",
+        "planned",
+        "reason"
       ],
       "type": "object"
     },

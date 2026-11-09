@@ -36,42 +36,14 @@
 - `deploy`: manual service templates; `docs/operations.md`: old-state archives.
 - `docs/files.md`: checkpoint contract and Python example.
 
-## Build and verify
+## Merge and verify
 
-```sh
-./scripts/gate.sh quick BASE   # per change (default); build, vet, targets, related race tests
-./scripts/gate.sh full         # once per batch before a fleet deploy; dev e2e + one race suite
-./myce dev # long-running local API and fake workers; Ctrl-C to stop
-```
+Merge when quick plus targeted tests pass. Run the full gate once per release
+batch and fix breakage forward. No independent review is required (MY-41).
+Development and test tooling may be changed, reset or cleared when it blocks work;
+see `docs/development.md#local-merge-proof`.
 
-Quick and full gates run on the development host: Darwin natively and Linux
-inside the local VM invoked by the gate. Fleet gates are optional extra evidence.
-Hotfix: quick, deploy, then full, fixing forward. The 2026-11-02/03 local cache
-and disk saturation incident is mitigated by persistent gate-owned caches,
-automatic idle cache trimming, a 45 GiB entry/42 GiB stop floor and capacity-aware
-admission; preserve other owners' slots. Full admission follows measured CPU/RAM
-(four-core peaks: native 7.01 GiB, Linux/VM 10.57 GiB), workstation headroom and
-a configured static fleet-worker CPU share. Use `--exclusive` for isolated local timing; release
-builds take priority over ordinary waiters. Details: `docs/development.md`.
-
-Test behavior, security invariants and real incidents; add a focused regression
-per observed bug. No speculative edge-case matrices, implementation-detail pins,
-duplicate journeys or process self-audits (maintainer, 2026-10-22). Native GPU/daemon/identity/boot checks are separate
-from laptop proof; see `docs/development.md`.
-
-Before merging, follow `docs/development.md#local-merge-proof`: require independent
-review and the PR's exact-head local full gate (quick for docs-only). Fleet gates
-and automatic main runs provide optional extra evidence; node availability does
-not gate development or merges. Inspect known failures and fix new failures forward.
-
-Stage explicit paths and commit completed changes; push your own branches.
-Tested fixes deploy to the fleet without a separate task (MY-28, MY-32, MY-33):
-bundle them into one release at a time and roll back if the queue isn't healthy.
-Critical patches may deploy during production runs so other work can proceed
-(MY-39); keep making patch time quick. Ordinary updates wait. Fix runs failing
-because of Mycelium.
-Keep a healthy, tested release ready before each scheduled production window.
-Fleet hardware changes still need a task that authorizes them.
-
-This repository is public: keep host names, addresses, fleet layout, private
-paths and other projects' details out of commits, issues and docs.
+Keep process rules only where they protect production customers or secrets:
+never expose the fleet token or let jobs inherit `MYCE_TOKEN`; keep this public
+repository free of private host details, paths and secrets; do not break running
+production customer jobs.

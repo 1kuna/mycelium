@@ -211,7 +211,7 @@ func (c *accountingInterleaveClock) Now() time.Time {
 	// clock. Pause only the transaction's direct clock read for usage accounting,
 	// after it owns q.mu and before the heartbeat updates LastSeen.
 	pc, _, _, ok := runtime.Caller(1)
-	if !ok || !strings.HasSuffix(runtime.FuncForPC(pc).Name(), ".(*Queue).updateTransaction") {
+	if !ok || !strings.HasSuffix(runtime.FuncForPC(pc).Name(), ".(*Queue).updateTransactionMode") {
 		return value
 	}
 	// Inspect physical ownership directly: the instrumented lock reads this
@@ -235,7 +235,11 @@ func TestDevClockAdvanceDuringCheckin(t *testing.T) {
 	q.clock = gate
 	done := make(chan error, 1)
 	go func() { _, err := q.Checkin(Checkin{Machine: m}); done <- err }()
-	<-gate.entered
+	select {
+	case <-gate.entered:
+	case err := <-done:
+		t.Fatalf("check-in completed without reaching the accounting interleave: %v", err)
+	}
 	// The next transaction has reached the availability seam, but the
 	// in-flight heartbeat still owns the queue and its old accounting time.
 	probeEntered := make(chan struct{})

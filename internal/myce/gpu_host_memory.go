@@ -234,7 +234,26 @@ func validateGPUTelemetryHelper(path string) error {
 // The operator supplies an executable, not a command line. A local wrapper can
 // exec the unprivileged broker client; neither job input nor worker credentials
 // are sent to it. The timestamp must belong to this invocation, not a cache.
+type gpuDeviceMemory struct {
+	TotalBytes *uint64 `json:"total_bytes"`
+	UsedBytes  *uint64 `json:"used_bytes"`
+}
+
+type gpuTelemetrySnapshot struct {
+	SampledAt time.Time                  `json:"sampled_at"`
+	GTTMM     map[string]string          `json:"gtt_mm"`
+	VRAM      map[string]gpuDeviceMemory `json:"vram"`
+}
+
 func readGPUTelemetryHelper(ctx context.Context, clock Clock, path string) (map[string]string, error) {
+	s, err := readGPUTelemetrySnapshot(ctx, clock, path)
+	if err != nil {
+		return nil, err
+	}
+	return s.GTTMM, nil
+}
+
+func readGPUTelemetrySnapshot(ctx context.Context, clock Clock, path string) (*gpuTelemetrySnapshot, error) {
 	if err := validateGPUTelemetryHelper(path); err != nil || path == "" {
 		return nil, errAttemptMemoryUnsupported
 	}
@@ -252,14 +271,15 @@ func readGPUTelemetryHelper(ctx context.Context, clock Clock, path string) (map[
 		return nil, errAttemptMemoryUnsupported
 	}
 	finished := clock.Now()
-	var sample struct {
-		SampledAt time.Time         `json:"sampled_at"`
-		GTTMM     map[string]string `json:"gtt_mm"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &sample); err != nil || sample.SampledAt.IsZero() || sample.SampledAt.Before(started) || sample.SampledAt.After(finished) || finished.Sub(started) > attemptMemorySamplePeriod || len(sample.GTTMM) == 0 {
+	return decodeGPUTelemetrySnapshot(out.Bytes(), started, finished)
+}
+
+func decodeGPUTelemetrySnapshot(data []byte, started, finished time.Time) (*gpuTelemetrySnapshot, error) {
+	var sample gpuTelemetrySnapshot
+	if err := json.Unmarshal(data, &sample); err != nil || sample.SampledAt.IsZero() || sample.SampledAt.Before(started) || sample.SampledAt.After(finished) || finished.Sub(started) > attemptMemorySamplePeriod || len(sample.GTTMM) == 0 {
 		return nil, errAttemptMemoryUnsupported
 	}
-	return sample.GTTMM, nil
+	return &sample, nil
 }
 
 func (a *memoryAttempt) gpuHostMemory(ctx context.Context, clock Clock, helper, pci string) (float64, bool, error) {
