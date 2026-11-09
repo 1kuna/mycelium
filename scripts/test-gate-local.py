@@ -960,7 +960,7 @@ sys.exit(m.main())
             slot.release.assert_called_once_with(stopped=True)
 
     def test_memory_guard_stops_owned_work_on_pressure_or_new_swapouts(self):
-        for current in (dict(pressure_level=2, swapouts=0),
+        for current in (dict(pressure_level=4, swapouts=0),
                         dict(pressure_level=1, swapouts=1)):
             with self.subTest(current=current), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
@@ -999,8 +999,40 @@ sys.exit(m.main())
         guard = measurement.memory.SwapGuard(sample(0), baseline)
         for index in range(1, 4):
             self.assertIsNone(guard.check(sample(index * 2, 28 + index * 24, index * 10, 200)))
-        current = sample(6.1); current['pressure_level'] = 2
+        current = sample(6.1); current['pressure_level'] = 4
         self.assertIn('pressure', guard.check(current))  # Never wait for a rate window.
+
+    def test_warning_pressure_without_swap_growth_is_allowed(self):
+        before = dict(pressure_level=1, swapouts=52, swap_used_bytes=100)
+        warning = dict(before, pressure_level=2)
+        self.assertIsNone(measurement.memory.refusal(before, warning))
+        self.assertIn('swapping', measurement.memory.refusal(before, dict(warning, swapouts=53)))
+        self.assertIn('pressure', measurement.memory.refusal(before, dict(warning, pressure_level=4)))
+
+    def test_quick_memory_uses_measured_selection_peak(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            evidence = root / 'quick.jsonl'
+            evidence.write_text(json.dumps(dict(mode='quick', status=0, max_tree_rss_sum_bytes=capacity.GIB)) + '\n')
+            config['quick_memory_measurement'] = dict(peak_bytes=capacity.GIB,
+                evidence=[dict(path=str(evidence), sha256=hashlib.sha256(evidence.read_bytes()).hexdigest())])
+            self.assertEqual(capacity.memory_requirement(config, 'native', 'quick'), 6 * capacity.GIB)
+            self.assertEqual(capacity.memory_requirement(config, 'native'), 12 * capacity.GIB)
+            (root / 'gate-capacity.json').write_text(json.dumps(config))
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                full = capacity.acquire(root, mode='full', cores=4)
+                try:
+                    with patch.object(capacity, 'available_memory', return_value=6 * capacity.GIB):
+                        quick = capacity.acquire(root, mode='quick', platform='native', cores=1)
+                        self.assertEqual(quick.owner['peak_bytes'], capacity.GIB)
+                        self.assertEqual(quick.owner['memory_requirement_at_entry_bytes'], 6 * capacity.GIB)
+                        quick.release()
+                finally: full.release()
+            config['quick_memory_measurement']['peak_bytes'] += 1
+            with self.assertRaisesRegex(RuntimeError, 'quick memory qualification'):
+                capacity.memory_requirement(config, 'native', 'quick')
 
     def test_measured_sustained_swap_guard_terminates_owned_supervisor(self):
         with tempfile.TemporaryDirectory() as folder:

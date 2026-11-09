@@ -155,7 +155,7 @@ class SwapGuard:
 
     Windows use the measured idle sampling period. Two windows are the minimum
     evidence of continuation; the cost is two sampling periods before a swap-only
-    stop. Elevated memory pressure remains an immediate stop.
+    stop. Critical or unknown memory pressure remains an immediate stop (MY-41).
     """
 
     def __init__(self, before: Optional[dict], baseline: Optional[dict] = None):
@@ -171,8 +171,8 @@ class SwapGuard:
             return None  # The guest's outer host supervisor owns memory safety.
         if current is None:
             return 'host memory measurement unavailable'
-        if current['pressure_level'] != 1:
-            return 'host memory pressure is not normal'
+        if current['pressure_level'] not in (1, 2):
+            return 'host memory pressure is critical or unknown'
         if self.baseline is None:
             return refusal(self.before, current)  # Unqualified hosts fail closed.
         elapsed = current['monotonic_seconds'] - self.previous['monotonic_seconds']
@@ -204,9 +204,10 @@ def refusal(before, current):
         return None
     if current is None:
         return 'host memory measurement unavailable'
-    if current['pressure_level'] != 1:
-        return 'host memory pressure is not normal'
-    if current['swapouts'] > before['swapouts']:
+    if current['pressure_level'] not in (1, 2):
+        return 'host memory pressure is critical or unknown'
+    if (current['swapouts'] > before['swapouts'] or
+            current.get('swap_used_bytes', 0) > before.get('swap_used_bytes', 0)):
         return 'host began swapping during gate'
     return None
 

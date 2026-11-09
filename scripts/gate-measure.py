@@ -92,7 +92,7 @@ def measure(command, report, mode, source_sha, *, floor=42 * GIB,
                 current = sample['host_memory']
                 # Pressure/unqualified-host stops do not wait on RSS probes.
                 reason = (guard.check(current) if guard.baseline is None or
-                          current is None or current['pressure_level'] != 1 else None)
+                          current is None or current['pressure_level'] not in (1, 2) else None)
                 if not reason:
                     sample['tree_rss_sum_bytes'] = tree_rss(child.pid)
                     if guard.baseline is not None:

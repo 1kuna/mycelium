@@ -152,11 +152,31 @@ are host qualification, not constants for other installations. These requirement
 are checked against live available RAM, which already reflects fleet-worker
 and other background residency. No fleet-worker RAM allowance is added, and no
 worker RSS is subtracted again. Live pressure and swap guards remain active.
-Admission reserves each active run's entire measured peak on top of the new
+Full admission reserves each active run's entire measured peak on top of the new
 run's peak and shared headroom. This conservatively counts current RSS again
 to cover later growth without assuming shared pages are reclaimable. CPU budgets
 sum across runs; Linux demand also fits the VM's configured CPU/RAM capacity.
 Requests above the qualified CPU budget require a new measurement.
+
+Under MY-41, warning memory pressure alone does not stop admission or running
+work. Critical/unknown pressure, actual swap growth and the disk floors still
+stop work. Quick and focused requests can use a separate
+`quick_memory_measurement` containing digest-bound successful quick observations
+and their maximum `peak_bytes`. The development-host observations peak at
+2.78 GiB across 37 successful quick phase records, versus 7.01 GiB for fulls.
+Native quick charges that measured peak plus shared host headroom; Linux also
+charges measured VM residency. Live available memory already reflects other
+running processes, so quick does not charge their entire peaks again. This
+avoids the roughly 30 GiB reservation for a small selection. Missing quick
+evidence falls back to the full envelope. This optional quick envelope may be
+refreshed while runs are active: existing reservations keep their original
+charges and only new requests use the new measurement.
+
+MY-41 supersedes the development-custody recovery restrictions below. Operators
+may stop the gate-owned VM and move stale gate custody into a dated backup when
+it blocks iteration. Preserve source, logs and real verdicts; production job
+custody is outside this development-tool reset authority.
+
 Before enabling or re-enabling measured admission, any never-admitted waiter
 started with a pre-change helper must have exited or been restarted by its owner
 with the current helper. Preserve admitted and unknown execution custody;

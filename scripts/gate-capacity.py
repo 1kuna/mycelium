@@ -213,8 +213,8 @@ def check_pressure():
     if os.uname().sysname == 'Darwin':
         level = int(subprocess.check_output(['sysctl', '-n',
                     'kern.memorystatus_vm_pressure_level'], text=True, timeout=5))
-        if level != 1:
-            raise RuntimeError('host memory pressure is not normal; no work started')
+        if level not in (1, 2):
+            raise RuntimeError('host memory pressure is critical or unknown; no work started')
 
 
 class Slot:
@@ -257,7 +257,19 @@ def admission_lock(directory):
         yield
 
 
-def memory_requirement(config, platform):
+def memory_requirement(config, platform, mode='full'):
+    # MY-41: quick/focused work uses its own measured envelope, not a full peak.
+    if mode == 'quick' and config.get('quick_memory_measurement'):
+        measured = config['quick_memory_measurement']
+        rows = [json.loads(line) for item in measured['evidence']
+                for line in _memory.evidence_bytes(item).splitlines()]
+        peaks = [r['max_tree_rss_sum_bytes'] for r in rows
+                 if r.get('mode') == 'quick' and r.get('status') == 0
+                 and not r.get('refusal') and r.get('max_tree_rss_sum_bytes')]
+        if not peaks or measured['peak_bytes'] != max(peaks):
+            raise RuntimeError('quick memory qualification does not match evidence')
+        vm = config.get('memory_measurement', {}).get('vm_peak_bytes', 0) if platform != 'native' else 0
+        return measured['peak_bytes'] + vm + config['memory_measurement']['headroom_bytes']
     measured = config.get('memory_measurement')
     if not measured:
         return 22 * GIB  # Unqualified hosts retain the initial conservative value.
@@ -368,7 +380,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         if not candidate.exists():
                             full_marker = candidate
                             break
-                gate_memory = memory_requirement(config, platform)
+                gate_memory = memory_requirement(config, platform, mode)
                 needed_memory = gate_memory
                 if needed_memory > host_memory:
                     raise RuntimeError(f'{needed_memory / GIB:.2f} GiB entry requirement exceeds '
@@ -401,7 +413,9 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                     raise ValueError('workstation CPU reserve must not be negative')
                 cpu_ok = reserved_cores + worker_cores + cores + reserve <= (os.cpu_count() or 1)
                 group, resource_ok = None, True
-                admission_memory = needed_memory + (reserved_memory if resources else 0)
+                # Available RAM already reflects active RSS. Quick's measured peak plus
+                # shared host headroom covers its growth without recharging other runs.
+                admission_memory = needed_memory + (reserved_memory if resources and mode == 'full' else 0)
                 memory_ok = available >= admission_memory
                 if resources:
                     headroom = config['memory_measurement']['headroom_bytes']
