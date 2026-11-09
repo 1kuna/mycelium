@@ -13,6 +13,18 @@ installed command's help. Optional contracts name their required components in
 [release behavior](references/release-behavior.md#capability-evidence).
 A merged change or a “next release” note does not establish installed support.
 
+From the queue release enforcing explicit production parity lists, a configured
+project/work `production_parity_hosts` entry bounds all production placements,
+including fan-out and recovery. Native qualification, measured quality and old
+registrations cannot admit an unlisted host. The owner must add an approved host
+to widen the list; an explicitly empty list holds that production work. Checks
+and experiments remain available for collecting comparison evidence.
+The typed `production_parity_hosts` blocker identifies this hold even for
+extensions without variants. A removed host's queued binding is placed again;
+running execution and release custody remain with its current attempt.
+Parity-held production cannot withhold another project's environment preparation
+on an unapproved host. Eligible production retains its tier/preemption priority.
+
 Use the installed CLI or Python `Client.from_installed()`, which resolve
 credentials internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is an installation-owner hold. Preserve its
@@ -33,6 +45,11 @@ until stopped. This local fixture does not qualify native hardware.
 For an existing project, use its reviewed adapter entry or compatibility profile;
 [setup](setup-project.md) covers authoring and installation. For an empty project,
 this dependency-free CPU fixture uses only worker PATH tools:
+
+From the release containing #909, per-job JSON retains `last_memory_admission`
+for a blocked RAM comparison: envelope, drift, signed headroom and charge/growth
+owners. It survives startup failure and restart. Read its timestamp as historical
+evidence, not live usage or the job's only blocker; a retry starts a new episode.
 
 ```sh
 mkdir -p source .mycelium
@@ -65,6 +82,12 @@ learn it; consult [submission contracts](advanced.md#submit) before changing
 resources, targets or isolation. Plain native commands default to unsandboxed
 under MY-25; new native extension registrations have their separate sandbox
 policy. Declare `isolation: sandboxed` when that boundary is needed.
+
+On releases with the contained-forecast correction, CPU forecast reservations
+stay within their actual hard cgroup ceiling; measured demand and probe floors
+remain protected. Hard-contained CPU remaining-growth forecasts also stay within
+the full ceiling; live RAM and allowance checks still apply. See
+[memory sizing](advanced.md#submit).
 
 Prepare directory source deliberately: ignored files are included except `.git`
 and `.mycelium/receipts`; links are refused. A Git source such as
@@ -99,6 +122,20 @@ Success requires a succeeded job, verified output size/SHA-256 from `result`,
 and this application comparison (23 bytes including newline). A wake, terminal
 receipt or command exit alone is insufficient.
 
+From the queue release containing #1164, a new `after:` consumer can bind
+retained, unexpired accepted outputs from a succeeded fan-out parent even if
+the parent later received a cancellation intent. A parent cancelled before
+success still cancels its dependents with `upstream_cancelled` and reason
+`upstream parent cancelled`; expired outputs return `result_expired`.
+
+From the worker release containing #1168, opt-in XPU fan-out sharing requires
+fresh VRAM counters from the separately administered read-only telemetry broker.
+An older GTT-only broker still supports host RAM accounting; missing VRAM
+evidence withholds extra sharing. Ask the installation owner to qualify the
+[updated broker](../../deploy/gpu-telemetry/README.md), rather than starting GPU
+vendor-tool samplers to unblock placement. Ordinary exclusive admission remains
+available within its configured budget.
+
 ## Observe and recover
 
 Keep owned waits in the foreground. Supporting clients accept one batch of up
@@ -117,6 +154,12 @@ owner to verify identity before same-key replay.
 For detached completion, bind a notifier to your own thread with
 [T3 binding](t3-binding.md). Supporting clients expose local observer diagnostics
 through `myce wait --observer-status`; a PID/lock proves ownership, not delivery.
+From the release containing #1160, shared owners use their own session and a
+clean allowlist environment, excluding runner/job tracking and MYCE_TOKEN while
+preserving PATH/locale for legacy notifiers. Managed attempts/dev sessions keep
+their existing cleanup custody. A dead owner still recovers on the next keyed
+command; automatic supervision is deferred to [#1166](https://github.com/1kuna/mycelium/issues/1166).
+See [upgrade and recovery](../../docs/operations.md#completion-observer-upgrade-and-recovery-next-release).
 Legacy or stalled shared-observer recovery belongs to its operator. Keep stable
 receipts and delivery IDs; do not kill a shared observer or edit its registry.
 
@@ -130,13 +173,32 @@ From the queue release containing #1142, `device_fault_last_healthy` holds a
 job that lost an attempt to a driver fault before it can consume that host's
 last healthy accelerator of the same backend. Keep the job ID and submission
 key: another host, spare healthy capacity or a health-proven recovery can make
-it eligible. This queue protection works with older workers. Automatic
-quarantine clearance additionally needs the supporting worker release and its
+it eligible. This queue protection works with older workers.
+
+The typed hold pauses the remaining relative start/recovery budget; status says
+`paused for device recovery`. The saved amount persists through capacity waiting
+after clearance and restart. Explicit absolute `start_by` and queued-only
+`give_up_at` still bind. If recovery never becomes eligible, the hold terminates
+one existing maximum start window (one hour) after the queue-recorded fault loss
+with `diagnostic_code: device_fault_recovery_timeout`. Preserve that terminal
+result; a late clear cannot revive it. Fresh inventory showing both cards
+healthy releases the guard after an operator clear as well as automatic recovery.
+
+Automatic quarantine clearance additionally needs the supporting worker release and its
 vendor health tool; unsupported/unknown health keeps quarantine. Status
 `devices[].quarantine_recovery` records the fault event, healthy interval,
 measured observation window and clear evidence. Repeated-fault escalation still
 needs the maintenance owner. Do not resubmit to bypass the hold or clear real
 devices as a consumer. See [device quarantine](../../docs/operations.md#accelerator-driver-fault-quarantine).
+
+From the queue release containing #1162, inline jobs accept
+`environment: {backend: pixi, lock_file: /queue/shared/project/pixi.lock, platforms: [cpu]}`.
+The queue must read both `pixi.lock` and adjacent `pixi.toml` at submission;
+`python` is optional. Each input is limited to 1 MiB; oversized Python/Pixi inputs report
+`path_diagnostic.cause: too_large`, naming any required companion. Profile inputs/source do
+not upload these files. Workers build the frozen snapshots through Pixi.
+See [project lock files](../../docs/environments.md#project-lock-files) for
+queue-relative paths and typed read diagnostics.
 
 ## Read for the relevant branch
 

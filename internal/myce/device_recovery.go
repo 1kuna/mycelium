@@ -101,6 +101,11 @@ type deviceRecoveryObservation struct {
 	window      time.Duration
 }
 
+type deviceHealthDue struct {
+	event string
+	at    time.Time
+}
+
 func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[string]deviceHealthObservation {
 	for key, h := range w.faultHealth {
 		f := w.faults.Devices[key]
@@ -115,6 +120,20 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 		return nil
 	}
 	devices, faults, probe, clock := slices.Clone(w.Machine.Devices), maps.Clone(w.faults.Devices), w.DeviceHealthProbe, w.Clock
+	devices = slices.DeleteFunc(devices, func(d MachineDevice) bool {
+		key := deviceFaultKey(d)
+		fault, due := faults[key], w.faultHealthDue[key]
+		return fault.Reason == "" || fault.RepeatedTeardown ||
+			due.event == fault.Event && clock.Now().Before(due.at)
+	})
+	// Collect an already completed asynchronous read even if no new card is
+	// due. A nil devices slice otherwise prevents empty health retry loops.
+	root.deviceHealth.mu.Lock()
+	pending := root.deviceHealth.pending != nil
+	root.deviceHealth.mu.Unlock()
+	if len(devices) == 0 && !pending {
+		return nil
+	}
 	read := func() (map[string]deviceHealthObservation, error) {
 		out := map[string]deviceHealthObservation{}
 		for _, d := range devices {
@@ -133,6 +152,27 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 		return nil
 	}
 	w.faultHealth = health
+	if w.faultHealthDue == nil {
+		w.faultHealthDue = map[string]deviceHealthDue{}
+	}
+	for key, h := range health {
+		fault := w.faults.Devices[key]
+		if fault.Event != h.event {
+			continue
+		}
+		// No clear can occur before its existing quiet window. Rechecking
+		// inside that span buys no recovery decision. Failed observations
+		// extend it by the measured time still unrecovered, without a host-
+		// tuned retry duration or a maximum recovery delay.
+		window := max(teardownFaultWindow, time.Duration(w.faults.RecoveryWindows[key]*float64(time.Second)))
+		if !fault.At.IsZero() && h.at.After(fault.At) {
+			window = max(window, h.at.Sub(fault.At))
+		}
+		if r := w.faultRecovery[key]; r.event == fault.Event {
+			window = max(window, r.window)
+		}
+		w.faultHealthDue[key] = deviceHealthDue{event: h.event, at: h.at.Add(window)}
+	}
 	return w.faultHealth
 }
 

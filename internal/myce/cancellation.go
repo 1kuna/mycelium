@@ -124,6 +124,9 @@ func (q *Queue) cancelJob(j *Job) {
 	for _, child := range q.cancellationMembers(j) {
 		if !cancelled(child) {
 			q.cancelJob(child)
+			if child.Spec.After != nil && child.Spec.After.Job == j.ID && child.Reason == "cancel requested" {
+				child.DiagnosticCode, child.Reason = "upstream_cancelled", "upstream parent cancelled"
+			}
 		}
 	}
 	if j.CancelledAt == nil {

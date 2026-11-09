@@ -44,6 +44,9 @@ type MachineProbe struct {
 	ReadFile   func(string) ([]byte, error)
 	// XeActivity reads every enumerated hardware engine without changing GPU settings.
 	XeActivity func(context.Context, string) (float64, error)
+	// XPUFreeMemory is a read-only, PCI-keyed kernel/broker source. It must
+	// never initialize a vendor runtime; nil means unsupported, not fallback.
+	XPUFreeMemory func(context.Context) (map[string]float64, error)
 }
 
 func LocalMachineProbe() MachineProbe {
