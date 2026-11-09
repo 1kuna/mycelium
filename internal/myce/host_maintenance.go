@@ -27,16 +27,17 @@ type HostMaintenance struct {
 }
 
 type HostMaintenanceRequest struct {
-	SharedHost     *SharedHostProfile `json:"shared_host,omitempty"`
-	LastResort     *bool              `json:"last_resort,omitempty"`
-	DrainOwner     string             `json:"drain_owner,omitempty"`
-	IfDrainOwner   string             `json:"if_drain_owner,omitempty"`
-	IfMode         string             `json:"if_mode,omitempty"`
-	IfUpdatedAt    *time.Time         `json:"if_updated_at,omitempty"`
-	CPUBudgetCores *int               `json:"cpu_budget_cores,omitempty"`
-	Action         string             `json:"action"`
-	Stop           bool               `json:"stop,omitempty"`
-	MemoryBudgetGB *float64           `json:"memory_budget_gb,omitempty"`
+	SharedHost           *SharedHostProfile `json:"shared_host,omitempty"`
+	LastResort           *bool              `json:"last_resort,omitempty"`
+	DrainOwner           string             `json:"drain_owner,omitempty"`
+	IfDrainOwner         string             `json:"if_drain_owner,omitempty"`
+	IfMode               string             `json:"if_mode,omitempty"`
+	IfUpdatedAt          *time.Time         `json:"if_updated_at,omitempty"`
+	CPUBudgetCores       *int               `json:"cpu_budget_cores,omitempty"`
+	Action               string             `json:"action"`
+	Stop                 bool               `json:"stop,omitempty"`
+	MemoryBudgetGB       *float64           `json:"memory_budget_gb,omitempty"`
+	MemoryBudgetMeasured *bool              `json:"memory_budget_measured,omitempty"`
 }
 
 type MaintenanceWorker struct {
@@ -108,6 +109,10 @@ func (q *Queue) registerMaintenanceHost(m *Machine) error {
 		// Preserve the reported admission precision; Bytes uses the existing
 		// floor conversion for kernel enforcement and status.
 		budget.GiB = m.HostMemoryBudgetGB
+		budget.Measured = m.HostMemoryBudgetMeasured
+		if budget.Measured && budget.GiB <= 0 {
+			return errors.New("measured host allowance requires a positive authored fallback")
+		}
 		policy.MemoryBudget = &budget
 		policy.UpdatedAt = q.clock.Now()
 	}
@@ -386,7 +391,7 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 		policy.Mode = "enabled"
 	case "budget":
 	case "profile":
-		if request.SharedHost == nil || request.LastResort != nil || request.MemoryBudgetGB != nil || request.CPUBudgetCores != nil {
+		if request.SharedHost == nil || request.LastResort != nil || request.MemoryBudgetGB != nil || request.MemoryBudgetMeasured != nil || request.CPUBudgetCores != nil {
 			return errors.New("profile requires shared_host and no other policy edits")
 		}
 		if policy.Mode == "enabled" {
@@ -429,7 +434,7 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 	if request.Stop && request.Action != "disable" {
 		return errors.New("--stop requires disable")
 	}
-	if request.Action == "budget" && request.MemoryBudgetGB == nil && request.CPUBudgetCores == nil {
+	if request.Action == "budget" && request.MemoryBudgetGB == nil && request.MemoryBudgetMeasured == nil && request.CPUBudgetCores == nil {
 		return errors.New("budget requires RAM GiB or CPU cores")
 	}
 	if request.CPUBudgetCores != nil {
@@ -453,6 +458,17 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 		if err != nil || budget.Bytes <= 0 {
 			return errors.New("host allowance must be positive finite GiB")
 		}
+		policy.MemoryBudget = &budget
+	}
+	if request.MemoryBudgetMeasured != nil {
+		if request.Action != "budget" || policy.Mode == "enabled" {
+			return errors.New("measured memory mode requires a drained or disabled host budget action")
+		}
+		if policy.MemoryBudget == nil || policy.MemoryBudget.GiB <= 0 {
+			return errors.New("measured memory mode requires a positive authored fallback")
+		}
+		budget := *policy.MemoryBudget
+		budget.Measured = *request.MemoryBudgetMeasured
 		policy.MemoryBudget = &budget
 	}
 	if request.Action == "resume" || request.Action == "drain" {
