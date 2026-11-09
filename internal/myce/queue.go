@@ -723,8 +723,11 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.publishWaitStates(oldCalls)
 		q.invalidateCallSnapshots(oldCalls)
 		q.invalidateTerminalStatus()
-		q.commitRecords()
+		// Freeze contact while the transaction's active-job index is still
+		// selected. After commitRecords ends the journal, liveJobs includes
+		// retained history for callers that may mutate records directly.
 		q.publishReadRuntime()
+		q.commitRecords()
 		if committed != nil {
 			committed()
 		}
