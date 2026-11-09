@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -280,4 +281,88 @@ func TestQuarantinePendingHealthDoesNotProbeBusySibling(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestQuarantineCustodyAtVendorLaunch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "starts")
+	// The production runner permits fake service-manager executables in tests.
+	// This absolute script cannot resolve or execute an installed vendor tool.
+	script := filepath.Join(dir, "systemctl")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'started\\n' >> \"$1\"\nprintf '%s\\n' '{\"core_temperature\":{\"status\":\"OK\"},\"power\":{\"status\":\"OK\"},\"memory\":{\"status\":\"OK\"}}'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	entered, resume := make(chan struct{}), make(chan struct{})
+	releaseFactory := sync.OnceFunc(func() { close(resume) })
+	defer releaseFactory()
+	var factories atomic.Int32
+	previous := workerMachineProbe
+	workerMachineProbe = func() MachineProbe {
+		if factories.Add(1) == 1 {
+			close(entered)
+			<-resume // Custody arrives after selection, before process creation.
+		}
+		p := LocalMachineProbe()
+		run := p.Command
+		p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			if name != "xpu-smi" || strings.Join(args, " ") != "health -d 0000:03:00.0 -j" {
+				return nil, fmt.Errorf("unexpected health command %q", name)
+			}
+			return run(ctx, script, marker)
+		}
+		return p
+	}
+	defer func() { workerMachineProbe = previous }()
+	w := Worker{Clock: RealClock{}, Interval: time.Second,
+		Machine: Machine{Devices: []MachineDevice{{ID: "0", Identity: "card", Platform: "xpu", pciAddress: "0000:03:00.0"}}},
+		DeviceFaultSource: func(context.Context, time.Time) (KernelLogSnapshot, error) {
+			return KernelLogSnapshot{BootID: "boot"}, nil
+		}}
+	root := &workerStore{dir: t.TempDir()}
+	if err := w.initDeviceFaults(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	key := deviceFaultKey(w.Machine.Devices[0])
+	w.faults.Devices[key] = deviceFault{Reason: "device_fault_xe", Event: "fault", At: w.Clock.Now().Add(-time.Second)}
+	w.quarantineHealth(ctx, root)
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("health probe did not reach production factory", ctx.Err())
+	}
+	w.vendorGPUActive = true
+	w.quarantineHealth(ctx, root)
+	releaseFactory()
+	waitHealth := func() {
+		t.Helper()
+		root.deviceHealth.mu.Lock()
+		pending := root.deviceHealth.pending
+		root.deviceHealth.mu.Unlock()
+		if pending != nil {
+			select {
+			case <-pending.done:
+			case <-ctx.Done():
+				t.Fatal("health query did not finish", ctx.Err())
+			}
+		}
+	}
+	waitHealth()
+	if data, err := os.ReadFile(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("vendor process started after custody acquisition: %q, %v", data, err)
+	}
+	if health := w.quarantineHealth(ctx, root); len(health) != 0 || len(w.faultHealthDue) != 0 {
+		t.Fatal("deferred process became a health observation or retry delay", health, w.faultHealthDue)
+	}
+	w.vendorGPUActive = false
+	w.quarantineHealth(ctx, root)
+	waitHealth()
+	health := w.quarantineHealth(ctx, root)
+	if !health[key].normal {
+		t.Fatal("idle vendor health did not resume", health)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "started\n" {
+		t.Fatalf("idle probe invocation count: %q, %v", data, err)
+	}
 }
