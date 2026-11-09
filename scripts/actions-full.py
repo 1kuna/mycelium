@@ -95,6 +95,11 @@ def failure_state(job):
 
 
 def run(root, sha, scratch, owner):
+    line = f'Main full source: {sha} (github.sha)'
+    print(line, flush=True)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+            stream.write(line + '\n\n')
     jobs, states, refusals = {}, {}, {}
     failed, wait_error = False, False
     # Submit both before waiting. An error on one platform must not skip the other.
@@ -157,59 +162,6 @@ def run(root, sha, scratch, owner):
     return int(failed or wait_error)
 
 
-def active_file(owner):
-    return Path(os.environ['RUNNER_TEMP']) / ('mycelium-ci-active-' + owner.replace(':', '-') + '.json')
-
-
-def active_sha(owner, fallback):
-    path = active_file(owner)
-    if not path.exists():
-        return fallback
-    sha = json.loads(path.read_text())['sha']
-    if not re.fullmatch('[0-9a-f]{40}', sha):
-        raise ValueError('invalid active source')
-    return sha
-
-
-def verify_checkout(root, sha, tree):
-    """Bind profile, relative inputs and suite helpers to the selected main commit."""
-    identity = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD', 'HEAD^{tree}'],
-                                       text=True).splitlines()
-    if identity != [sha, tree]:
-        raise ValueError('selected checkout identity changed')
-    subprocess.run(['git', '-C', str(root), '-c', 'core.fileMode=true', 'diff', '--exit-code', '--quiet', 'HEAD'], check=True)
-
-
-def run_current(root, event_sha, scratch, owner):
-    # A delayed B event can replace pending C. Fetch main once at startup,
-    # rather than testing the event SHA or walking intermediate commits.
-    subprocess.run(['git', '-C', str(root), 'fetch', '--no-tags', 'origin', 'refs/heads/main'],
-                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    sha = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'FETCH_HEAD^{commit}'], text=True).strip()
-    if not re.fullmatch('[0-9a-f]{40}', sha):
-        raise ValueError('invalid main tip')
-    line = f'Main full source: {sha} (triggering event: {event_sha})'
-    print(line, flush=True)
-    if os.environ.get('GITHUB_STEP_SUMMARY'):
-        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
-            stream.write(line + '\n\n')
-    # The final cleanup step must use the selected tip's keys, not the event SHA.
-    path = active_file(owner)
-    pending = path.with_suffix('.tmp')
-    pending.write_text(json.dumps({'sha': sha}))
-    pending.replace(path)
-    checkout = scratch / 'source'
-    subprocess.run(['git', 'clone', '--shared', '--no-checkout', '--quiet', str(root), str(checkout)],
-                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(['git', '-C', str(checkout), 'checkout', '--quiet', '--detach', sha],
-                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    tree = subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
-    verify_checkout(checkout, sha, tree)
-    status = run(checkout, sha, scratch, owner)
-    verify_checkout(checkout, sha, tree)
-    return status
-
-
 def main(work_seconds=WORK_SECONDS):
     sha = os.environ['GITHUB_SHA']
     if not re.fullmatch(r'[0-9a-f]{40}', sha):
@@ -219,7 +171,7 @@ def main(work_seconds=WORK_SECONDS):
         raise ValueError('invalid workflow attempt')
     owner = f'{run_id}:{attempt}'
     if sys.argv[1:] == ['--cleanup-only']:
-        return int(not cleanup(active_sha(owner, sha), owner))
+        return int(not cleanup(sha, owner))
     if sys.argv[1:]:
         raise ValueError('unexpected arguments')
     root = Path.cwd()
@@ -232,9 +184,9 @@ def main(work_seconds=WORK_SECONDS):
         deadline = float(os.environ.get('MYCELIUM_CI_DEADLINE', time.monotonic() + work_seconds))
         remaining = min(work_seconds, deadline - time.monotonic())
         signal.setitimer(signal.ITIMER_REAL, max(0.001, remaining))
-        # The frozen tip checkout, generated profiles and accepted markers live here.
+        # Generated profiles and accepted markers live here.
         with tempfile.TemporaryDirectory(prefix='mycelium-ci-', dir=os.environ['RUNNER_TEMP']) as scratch:
-            status = run_current(root, sha, Path(scratch), owner)
+            status = run(root, sha, Path(scratch), owner)
     except SubmitterStopped:
         print('CI submitter interrupted or timed out; cancelling owned gates', flush=True)
     finally:
@@ -242,7 +194,7 @@ def main(work_seconds=WORK_SECONDS):
         for sig in watched:
             signal.signal(sig, signal.SIG_IGN)
         try:
-            cleaned = cleanup(active_sha(owner, sha), owner)
+            cleaned = cleanup(sha, owner)
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)

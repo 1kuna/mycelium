@@ -461,7 +461,7 @@ with `python3 scripts/test-gate-budget.py`.
 ## Automatic main full gates
 
 The [`main-full` workflow](../.github/workflows/main-full.yml) provides
-**coalesced, optional evidence of the current main tip**. It runs only on pushes
+**coalesced, optional evidence of main commits**. It runs only on pushes
 to `main`, on `[self-hosted, mycelium-ci]`; there are no PR, manual-dispatch or
 schedule triggers. Its workflow/ref concurrency group keeps the running member
 and replaces an older pending member with the newest pending member
@@ -473,12 +473,14 @@ runner cancellation cleanup previously killed shared helpers
 The deliberately disabled server-side workflow remains disabled; this change
 does not authorize enabling it or triggering a run.
 
-At submitter startup, each retained run fetches authoritative `refs/heads/main`
-once and freezes that commit for both platform gates. GitHub does not guarantee
-event order: if A runs, C goes pending, then a delayed B event replaces C, the
-retained run tests current tip C rather than event B. The summary records the
-actual tested SHA separately from the triggering event SHA. Later main advances
-belong to later workflows; the active run does not chase them.
+Each retained run checks out and tests its event's own commit (`github.sha`),
+so GitHub attaches the result to the same SHA that was tested. The summary
+records that tested SHA, always equal to the event SHA. The concurrency group
+retains the newest pending **arrival**, not necessarily the newest commit:
+GitHub does not guarantee event order. In the rare case that a delayed B event
+replaces pending C, B may be the last commit tested. The orchestrator explicitly
+accepts this because main CI is optional evidence; pre-merge exact-head proof
+remains the per-PR guarantee. Runs do not resolve or chase the current main tip.
 
 Zach, 2026-11-09, relayed by the orchestrator and received by the CI implementation
 worker: “yes skip CI runs i think. we should be running the tests where it makes
@@ -545,14 +547,13 @@ gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main \
 Queued or running main runs do not block a merge. Inspect optional results for
 useful failure evidence and fix regressions forward; nobody waits on, polls or
 wakes for main CI. Coalescing means an intermediate merge may have no main run.
-Inspect the summary's actual tested SHA, since GitHub associates the workflow
-check with the triggering event even when a newer tip was selected.
+The summary's tested SHA matches the event commit carrying the workflow check.
 
 The workflow's own check reports success/failure. No commit-status writer or
 personal access token is needed.
 
 [`scripts/actions-full.py`](../scripts/actions-full.py) freezes the corresponding
-platform full-gate profile to the selected main tip and submits it once for
+platform full-gate profile to the event SHA and submits it once for
 Darwin arm64 and once for Linux, eligible on either amd64 or arm64. CI preserves
 the profile's targets, resources, environment, output contract and check. Linux is one chosen
 target per run, not an architecture matrix. The temporary architecture
@@ -566,10 +567,8 @@ There are no host pins; Mycelium chooses each worker and
 provides the existing `mycelium-gate` environment. Both submissions happen
 before `myce wait` waits for all jobs, even if one fails. Successful jobs also
 require `myce result` to download the accepted, verified `gate-result.txt` marker.
-A private detached checkout supplies the selected commit's profiles, relative
-inputs and helpers together; its commit/tree and tracked bytes/modes are checked
-before and after submission. The runner freezes source/inputs, waits and verifies
-small accepted results; full suites never run on it directly. A profile exit 78 with `no_qualified_target`
+The event checkout supplies its profiles, relative inputs and helpers together.
+The runner freezes source/inputs, waits and verifies small accepted results; full suites never run on it directly. A profile exit 78 with `no_qualified_target`
 is a qualification/total-allowance refusal, not a busy-worker indication. Busy
 qualified hosts accept queued jobs and `myce wait` waits for them. CI reports
 host-memory need and allowance numerically for that refusal; other qualification
@@ -578,7 +577,7 @@ or weaken the learned memory envelope. Darwin proves the native CGO target; Linu
 proves its native builds and full race/dev suite.
 
 The deterministic `main-ci:SHA:OS:RUN_ID:RUN_ATTEMPT` keys identify this
-workflow attempt's two jobs for the selected tip. Repeating a submission within
+workflow attempt's two jobs for the event SHA. Repeating a submission within
 that attempt adopts the same job, including after an uncertain submit. A workflow rerun uses fresh
 attempt keys: an older attempt's cleanup cannot cancel its replacement, and a
 cancelled key cannot poison a rerun. There is no automatic retry loop.
@@ -607,9 +606,8 @@ states; unconfirmed cancellation fails CI and requires private reconciliation
 with that attempt's exact keys. An unavailable queue or abruptly lost runner can
 prevent confirmation; repeat `scripts/actions-full.py --cleanup-only` with the
 original SHA, run ID and attempt environment after authority is restored.
-Only never-started concurrency-pending workflows are replaced. The active
-commit is persisted before each submission, so the final cleanup step fences
-the selected tip rather than the workflow's original event SHA.
+Only never-started concurrency-pending workflows are replaced. Both the submitter
+and final cleanup step use the event SHA for this attempt's keys.
 
 Inspect failures privately with `myce logs JOB_ID`; public logs and
 the summary contain only job IDs, fixed states and exit codes, never raw CLI
@@ -621,7 +619,7 @@ and the workflow emits a `CI infrastructure failure` error annotation: that
 platform has no verified suite result. Submission may have been accepted despite
 a lost reply. Resolve the infrastructure problem privately, then
 repeat cleanup for the original attempt. Optional CI failures are reported on
-that run; later pushes select main anew rather than retrying historical failures.
+that run; later pushes test their own event commits rather than retrying historical failures.
 
 ### Public repository and private authority
 
@@ -685,9 +683,8 @@ policy or enable CI admission on such a runner. Use an authorized Linux fleet
 host or leave approval to the host owner. Repository registration and an `online`
 runner alone do not prove queue reachability.
 
-The frozen tip checkout, generated profiles and result markers live in job
-temp and are deleted after owned work settles. Only small CLI recovery receipts
-from commands outside those temporary checkouts remain in the event checkout;
+Generated profiles and result markers live in job temp and are deleted after
+owned work settles. Only small CLI recovery receipts remain in the event checkout;
 GitHub terminates job-owned observers at job completion, then the next checkout
 cleans old workspace state. Source-upload staging is removed by the CLI after
 confirmed submission. Runner diagnostic logs stay private; do not upload them
@@ -696,7 +693,7 @@ as public artifacts. Use normal queue artifact retention for fleet outputs.
 Validate offline with `python3 scripts/test-actions-full.py` and the quick gate. After independent
 review and merge, verify the push-to-main run
 uses the registered self-hosted runner and reports both accepted platform
-results and the actual tested tip SHA before calling activation complete. No full
+results and the tested event SHA before calling activation complete. No full
 suite runs on a PR push.
 
 ## Native acceptance checklist

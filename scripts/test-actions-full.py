@@ -73,6 +73,8 @@ class ActionsFullTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()) as public, patch.object(ci, 'command', command), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(scratch / 'summary')}):
                 status = ci.run(ROOT, SHA, scratch, '123:1')
             summary = (scratch / 'summary').read_text()
+            self.assertIn(f'Main full source: {SHA} (github.sha)', summary)
+            self.assertIn(f'Main full source: {SHA} (github.sha)', public.getvalue())
             self.assertNotIn('coverage is deferred', public.getvalue())
             self.assertNotIn('PRIVATE', summary + public.getvalue())
             if submission_failure:
@@ -107,63 +109,6 @@ class ActionsFullTest(unittest.TestCase):
             ]}), (1, ['darwin', 'linux'], ['darwin']))
         self.assertEqual(self.exercise(submission_failure=True), (1, ['linux'], ['linux']))
         self.assertEqual(self.exercise(linux='cancelled')[0], 1)
-
-    def test_delayed_B_event_tests_current_C_tip_once_and_cleans_C(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / 'repo'
-            root.mkdir()
-            def git(*args):
-                return subprocess.check_output(['git', '-C', str(root), *args], text=True,
-                                               stderr=subprocess.DEVNULL).strip()
-            git('init', '-q')
-            git('config', 'user.name', 'Fixture')
-            git('config', 'user.email', 'fixture@example.invalid')
-            adapter = root / '.mycelium/adapter.yaml'
-            adapter.parent.mkdir()
-            commits = []
-            for letter in ('A', 'B', 'C'):
-                adapter.write_text('adapter: ' + letter)
-                git('add', '.mycelium/adapter.yaml')
-                git('commit', '-qm', letter)
-                commits.append(git('rev-parse', 'HEAD'))
-            remote = Path(directory) / 'origin.git'
-            git('clone', '--bare', '--quiet', str(root), str(remote))
-            git('remote', 'add', 'origin', str(remote))
-            git('push', '--quiet', 'origin', 'HEAD:refs/heads/main')
-            # The event checkout is B, while authoritative main is already C.
-            git('checkout', '--quiet', '--detach', commits[1])
-            env = dict(GITHUB_SHA=commits[1], GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1',
-                       RUNNER_TEMP=directory, GITHUB_STEP_SUMMARY=str(Path(directory) / 'summary'))
-            executed = []
-            def run(checkout, sha, scratch, owner):
-                executed.append(sha)
-                self.assertEqual(sha, commits[2])
-                self.assertEqual((checkout / '.mycelium/adapter.yaml').read_text(), 'adapter: C')
-                self.assertEqual(ci.active_sha(owner, ''), commits[2])
-                # Later main advances are evidence for a later workflow, not a loop.
-                git('checkout', '--quiet', '--detach', commits[2])
-                adapter.write_text('adapter: D')
-                git('add', '.mycelium/adapter.yaml')
-                git('commit', '-qm', 'D')
-                git('push', '--quiet', 'origin', 'HEAD:refs/heads/main')
-                return 0
-            previous = Path.cwd()
-            try:
-                os.chdir(root)
-                with patch.dict(os.environ, env), patch.object(ci.sys, 'argv', ['actions-full.py']), \
-                        patch.object(ci, 'run', run), patch.object(ci, 'cleanup', return_value=True) as cleanup, \
-                        redirect_stdout(io.StringIO()) as output:
-                    self.assertEqual(ci.main(), 0)
-                    cleanup.assert_called_once_with(commits[2], '123:1')
-                    cleanup.reset_mock()
-                    with patch.object(ci.sys, 'argv', ['actions-full.py', '--cleanup-only']):
-                        self.assertEqual(ci.main(), 0)
-                    cleanup.assert_called_once_with(commits[2], '123:1')
-                self.assertEqual(executed, [commits[2]])
-                self.assertIn('Main full source: ' + commits[2], output.getvalue())
-                self.assertIn(commits[2], Path(env['GITHUB_STEP_SUMMARY']).read_text())
-            finally:
-                os.chdir(previous)
 
     def test_oom_requires_current_attempt_and_readable_status(self):
         for output, code in [
@@ -256,7 +201,7 @@ else: sys.exit(2)
                     script = str(ROOT / 'scripts/actions-full.py')
                     wrapper = ("import importlib.util; "
                                f"s=importlib.util.spec_from_file_location('ci', {script!r}); "
-                               "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.run_current=m.run; "
+                               "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
                                f"raise SystemExit(m.main(work_seconds={1 if signum is None else 10}))")
                     process = subprocess.Popen([sys.executable, '-c', wrapper], cwd=ROOT, env=env,
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
