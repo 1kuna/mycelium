@@ -2428,6 +2428,9 @@ at entry and resumes that amount when an eligible route returns; status keeps
 `device_fault_last_healthy` and shows `paused for device recovery`. The original
 `start_window` remains unchanged for a later started-attempt loss. Explicit
 absolute `start_by` and queued-only `give_up_at` still bind.
+A started infrastructure interruption renews the original first-start window,
+including one derived from explicit `start_by`. That renewed cutoff keeps its
+absolute semantics during the hold; an unstarted loss cannot renew it.
 The saved amount survives any capacity wait after clearance and queue restart;
 capacity recovery cannot refund startup time spent before the device-fault hold.
 

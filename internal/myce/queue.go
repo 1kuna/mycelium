@@ -2906,8 +2906,10 @@ func (q *Queue) renewRecoveryStartWindow(j *Job) {
 	// Planned leave keeps its original deadline; queue maintenance stops retain
 	// the recovery window for already-started attempts.
 	recovering := j.State == "running" || j.State == "stopping" && plannedStop(j)
-	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil && !absoluteStartBy(j) {
-		// Recovery is bounded from loss detection, using the original first-start window.
+	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
+		// A started interruption gets the original first-start window, even
+		// when its length came from an explicit first-start cutoff. Waiting
+		// alone never renews an absolute cutoff.
 		if j.StartWindow == 0 {
 			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
 		}

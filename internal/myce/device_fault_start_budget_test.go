@@ -210,6 +210,11 @@ func TestDeviceFaultStartBudgetLateClear(t *testing.T) {
 				s.GiveUpAt = &cutoff
 			}
 			m, j := deviceFaultStartBudgetFixture(t, q, clock, s, true)
+			if cutoffKind == "start_by" {
+				// Started loss renews the original two-minute window. The
+				// subsequent wait must still honor that absolute recovery cutoff.
+				cutoff = clock.Now().Add(2 * time.Minute)
+			}
 			if cutoffKind == "recovery_bound" {
 				clock.Advance(MaxProductionStartWindow - time.Second)
 				machineCheck(t, q, m)
@@ -243,20 +248,23 @@ func TestDeviceFaultStartBudgetLateClear(t *testing.T) {
 }
 
 func TestDeviceFaultStartBudgetAbsoluteCutoffs(t *testing.T) {
-	for _, kind := range []string{"start_by", "give_up_at"} {
+	for _, kind := range []string{"start_by", "unstarted_start_by", "give_up_at"} {
 		t.Run(kind, func(t *testing.T) {
 			s := spec("production")
 			s.StartWindow = "600s"
 			q, clock := fixture(t)
 			cutoff := clock.Now().Add(2 * time.Minute)
-			if kind == "start_by" {
+			if kind != "give_up_at" {
 				s.StartBy = &cutoff
 			} else {
 				s.GiveUpAt = &cutoff
 			}
-			m, j := deviceFaultStartBudgetFixture(t, q, clock, s, true)
-			if kind == "start_by" && !j.Spec.StartBy.Equal(cutoff) {
-				t.Fatal("loss renewed caller-owned StartBy", j.Spec.StartBy, cutoff)
+			m, j := deviceFaultStartBudgetFixture(t, q, clock, s, kind != "unstarted_start_by")
+			if kind == "start_by" {
+				cutoff = clock.Now().Add(2 * time.Minute)
+			}
+			if kind != "give_up_at" && !j.Spec.StartBy.Equal(cutoff) {
+				t.Fatal("loss did not preserve the started or unstarted absolute window", j.Spec.StartBy, cutoff)
 			}
 			clock.Advance(cutoff.Sub(clock.Now()))
 			machineCheck(t, q, m)
