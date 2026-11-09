@@ -544,7 +544,7 @@ func TestStorageFaultModelLaunchUsesSharedResolver(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	rt.authorize = func(HostLaunch) error { return nil }
+	rt.authorize = func(context.Context, HostLaunch) error { return nil }
 	// The engine captured its Worker already; the subsequently observed fault
 	// must remain live through that shared owner despite healthy mount inventory.
 	w.observeStorageError(&os.PathError{Op: "read", Path: "/share/inputs/source", Err: syscall.EIO})
