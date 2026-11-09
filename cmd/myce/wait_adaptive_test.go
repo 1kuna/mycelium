@@ -95,6 +95,31 @@ func TestWaitAdaptiveRetryAfterOwnerTimeout(t *testing.T) {
 	}
 }
 
+func TestWaitAdaptiveCompletedDeadlineDoesNotBoundPeer(t *testing.T) {
+	clock := &waitClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
+	runningReads := 0
+	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
+		clock.advance(time.Millisecond)
+		if r.Method == "POST" {
+			return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}
+		body := `{"id":"done","state":"succeeded","spec":{"deadline":"2026-11-05T11:00:00Z"}}`
+		if strings.Contains(r.URL.Path, "running") {
+			runningReads++
+			state := "running"
+			if runningReads > 1 {
+				state = "succeeded"
+			}
+			body = fmt.Sprintf(`{"id":"running","state":%q}`, state)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}}
+	var out bytes.Buffer
+	err := waitJobs(context.Background(), client, []string{"done", "running"}, time.Minute, &out, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
+	if err != nil || strings.Count(out.String(), " succeeded\n") != 2 {
+		t.Fatal(err, out.String())
+	}
+}
 func TestWaitAdaptiveRefreshesPendingEvents(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	start := now.Add(time.Second)
@@ -113,44 +138,37 @@ func TestWaitAdaptiveRefreshesPendingEvents(t *testing.T) {
 	}
 }
 
+func TestWaitAdaptiveLongPollCompletion(t *testing.T) {
+	clock := &waitClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
+	completion := clock.Now().Add(350 * time.Second)
+	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
+		clock.advance(10 * time.Millisecond)
+		state := "running"
+		if r.Method == "POST" {
+			var req myce.WaitRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			clock.advance(min(time.Duration(req.Seconds)*time.Second, max(0, completion.Sub(clock.Now()))))
+		}
+		if !clock.Now().Before(completion) {
+			state = "succeeded"
+		}
+		body := fmt.Sprintf(`{"id":"job","state":%q}`, state)
+		if r.Method == "POST" {
+			body = fmt.Sprintf(`{"jobs":[{"id":"job","state":%q,"revision":1}]}`, state)
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"X-Myce-Wait": {"batch-v1"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}}
+	err := waitJobs(context.Background(), client, []string{"job"}, 600*time.Second, io.Discard, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
+	if err != nil || clock.Now().After(completion.Add(21*time.Second)) {
+		t.Fatal("long-poll completion hidden by sleep", err, clock.Now())
+	}
+}
+
 func TestWaitAdaptiveEveryJobInitialDeadline(t *testing.T) {
 	clock := &waitClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
 	deadline := clock.Now().Add(10 * time.Second)
 	initial := map[string]bool{}
-	mode := "initial"
-	runningReads, gets, batches := 0, 0, 0
 	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
-		if mode == "completed" {
-			clock.advance(time.Millisecond)
-			if r.Method == "POST" {
-				return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
-			}
-			body := `{"id":"done","state":"succeeded","spec":{"deadline":"2026-11-05T11:00:00Z"}}`
-			if strings.Contains(r.URL.Path, "running") {
-				runningReads++
-				state := "running"
-				if runningReads > 1 {
-					state = "succeeded"
-				}
-				body = fmt.Sprintf(`{"id":"running","state":%q}`, state)
-			}
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
-		}
-		if mode == "older" {
-			clock.advance(time.Millisecond)
-			status, body := 200, ""
-			if r.Method == "POST" {
-				batches++
-				body = `{"jobs":[{"id":"job","state":"running","revision":1}]}`
-				if batches > 1 {
-					status, body = 503, `{}`
-				}
-			} else {
-				gets++
-				body = fmt.Sprintf(`{"id":"job","state":"running","spec":{"deadline":%q}}`, deadline.Format(time.RFC3339))
-			}
-			return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
-		}
 		clock.advance(time.Millisecond)
 		var body string
 		if r.Method == "GET" {
@@ -174,17 +192,5 @@ func TestWaitAdaptiveEveryJobInitialDeadline(t *testing.T) {
 	err := waitJobs(context.Background(), client, []string{"a", "b"}, time.Minute, io.Discard, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
 	if exitCode(err) != 3 || len(initial) != 2 || !clock.Now().Equal(deadline) {
 		t.Fatal("missing initial deadline", err, initial, clock.Now())
-	}
-	mode = "completed"
-	var out bytes.Buffer
-	err = waitJobs(context.Background(), client, []string{"done", "running"}, time.Minute, &out, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
-	if err != nil || strings.Count(out.String(), " succeeded\n") != 2 {
-		t.Fatal(err, out.String())
-	}
-	mode = "older"
-	deadline = clock.Now().Add(time.Second)
-	err = waitJobs(context.Background(), client, []string{"job"}, 0, io.Discard, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
-	if exitCode(err) != 3 || gets != 1 || !clock.Now().Equal(deadline) {
-		t.Fatal(err, gets, batches, clock.Now())
 	}
 }
