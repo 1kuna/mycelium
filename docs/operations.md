@@ -831,17 +831,23 @@ leave these disposable files using space; with the service stopped, preserve a
 copy before operator cleanup. Never remove files of an active upload.
 
 Legacy interrupted tus uploads carry no sender-side evidence for their prefix.
-They are treated as missing sessions (HTTP 404) rather than adopted. The existing
-missing/expired upload recovery path (#1170/#1173) restarts the unchanged client
-at zero; no terminal integrity error is introduced for legacy partials. POST
-retires the old bytes through upload cleanup and starts a new session. A small
-atomic, identity-checked retirement marker persists cleanup intent before the
-old metadata is removed, so interruption midway through cleanup can retry
-without an unindexed-payload refusal. Normal interrupted-upload retention also
-removes this marker. Old bytes are never read as accepted progress or used to
-build the new blob; the client resends the complete source and final whole-file
-SHA-256 verification remains mandatory. No manual archive or re-upload step is
-needed. The orchestrator accepts resending one in-flight upload per upgrade.
+The server resets them in place: same session ID, fresh durable progress at zero,
+and HEAD returns `Upload-Offset: 0`. Old bytes are retired through crash-safe
+cleanup and are never accepted as progress. A checksummed atomic reset intent
+retains identity, length and metadata until replacement progress is durable;
+a crash after old metadata removal can therefore resume the same session. Valid
+replacement progress always wins over stale cleanup intent, protecting new
+chunks from delayed cleanup. Normal interrupted-upload retention removes the
+intent as well.
+
+Neither deployed client retries a session 404 or tus offset conflict. No such
+response is used for a legacy session. A PATCH with a stale pre-reset offset
+receives retryable HTTP 503 (`request_failed`), causing the unchanged client's
+existing transient retry to HEAD the same ID and resend from zero within its
+active upload call. No manual archive, re-upload or client update is required.
+The final whole-file SHA-256 check remains mandatory. The orchestrator accepts
+resending one in-flight upload per upgrade (server-side recovery decision,
+2026-11-09, received by the #1179 file-store worker).
 
 Damaged new-format records/descriptors/chunks still fail closed. Preserve
 genuinely corrupt new-format state for explicit recovery; do not edit offsets

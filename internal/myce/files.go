@@ -370,7 +370,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid upload", 400)
 			return
 		}
-		record, err := s.uploadRecord(id)
+		record, err := s.uploadSessionRecord(id)
 		if err != nil {
 			s.handler.ServeHTTP(w, r)
 			return
@@ -381,7 +381,11 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			respond(w, nil, err)
 			return
 		}
-		r = r.WithContext(context.WithValue(claimCtx, recoverUploadKey{}, true))
+		claimCtx = context.WithValue(claimCtx, recoverUploadKey{}, true)
+		if r.Method == http.MethodPatch {
+			claimCtx = context.WithValue(claimCtx, uploadPatchOffsetKey{}, r.Header.Get("Upload-Offset"))
+		}
+		r = r.WithContext(claimCtx)
 		s.handler.ServeHTTP(w, r)
 		return
 	}
@@ -451,13 +455,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	if uploadCancelled(w, r.Context()) {
 		return
 	}
-	retired, retirementErr := s.retiredUpload(ref)
-	if retirementErr != nil {
-		uploadHTTPError(w, retirementErr)
-		return
-	}
-	st, statErr := os.Stat(s.uploadPath(hash) + ".info")
-	if retired || statErr == nil && st.Mode().IsRegular() {
+	if _, lookupErr := s.uploadSessionRecord(hash); !errors.Is(lookupErr, tus.ErrNotFound) {
 		lock, e := s.uploadLocker.NewLock(hash)
 		if e != nil {
 			uploadHTTPError(w, e)
@@ -467,54 +465,40 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			uploadHTTPError(w, e)
 			return
 		}
-		record, e := s.uploadRecord(hash)
-		if retired || e == nil && record.Version == 0 {
-			// An old partial is a missing session, not certified progress.
-			// POST is the existing request to create that session afresh.
-			claimCtx, claimErr := s.inputClaim(r.Context(), ref, true)
-			if claimErr == nil {
-				r = r.WithContext(claimCtx)
-				claimErr = s.retireLegacyUpload(r.Context(), ref)
-			}
-			lock.Unlock()
-			if claimErr != nil {
-				uploadHTTPError(w, claimErr)
-				return
-			}
-		} else {
-			defer lock.Unlock()
-			// A repeated create must match the immutable stored upload length.
-			upload, e := (durableUploadStore{store: s}).GetUpload(r.Context(), hash)
-			if e != nil {
-				uploadHTTPError(w, e)
-				return
-			}
-			info, e := upload.GetInfo(r.Context())
-			if e != nil {
-				uploadHTTPError(w, e)
-				return
-			}
-			if info.Size != length {
-				respond(w, nil, inputClaimError())
-				return
-			}
-			if _, err := s.inputClaim(r.Context(), ref, true); err != nil {
-				respond(w, nil, err)
-				return
-			}
-			if e := s.refreshUpload(hash); e != nil {
-				http.Error(w, "storage freshness unavailable", 503)
-				return
-			}
-			if e := s.recordUpload(hash, purpose, false, r.Context()); e != nil {
-				http.Error(w, "upload purpose persistence unavailable", 503)
-				return
-			}
-			w.Header().Set("Tus-Resumable", "1.0.0")
-			w.Header().Set("Location", "/api/files/uploads/"+hash)
-			w.WriteHeader(201)
+		defer lock.Unlock()
+		record, e := s.uploadSessionRecord(hash)
+		if e != nil {
+			uploadHTTPError(w, e)
 			return
 		}
+		// Check stored length and current authority before resetting legacy data.
+		if record.Size != length {
+			respond(w, nil, inputClaimError())
+			return
+		}
+		claimCtx, e := s.inputClaim(r.Context(), ref, true)
+		if e != nil {
+			respond(w, nil, e)
+			return
+		}
+		r = r.WithContext(claimCtx)
+		upload, e := (durableUploadStore{store: s}).GetUpload(r.Context(), hash)
+		if e != nil {
+			uploadHTTPError(w, e)
+			return
+		}
+		if _, e := upload.GetInfo(r.Context()); e != nil {
+			uploadHTTPError(w, e)
+			return
+		}
+		if e := s.recordUpload(hash, purpose, false, r.Context()); e != nil {
+			http.Error(w, "upload purpose persistence unavailable", 503)
+			return
+		}
+		w.Header().Set("Tus-Resumable", "1.0.0")
+		w.Header().Set("Location", "/api/files/uploads/"+hash)
+		w.WriteHeader(201)
+		return
 	}
 	// Disk work happens before queue acquisition. The queue admission checks
 	// current in-memory allocations and commits this reservation atomically.

@@ -62,7 +62,7 @@ func TestFileStoreCrashHelper(t *testing.T) {
 		os.Exit(99)
 	}
 	ops := durableFileOps{}
-	blobRenamed := false
+	blobRenamed, replacementRenamed := false, false
 	retirementDirs := 0
 	ops.syncFile = func(f *os.File) error {
 		parent := filepath.Base(filepath.Dir(f.Name()))
@@ -105,6 +105,12 @@ func TestFileStoreCrashHelper(t *testing.T) {
 		if kind == "blob" {
 			blobRenamed = true
 		}
+		if kind == "manifest" {
+			replacementRenamed = true
+			if boundary == "retire-replacement-info" {
+				kill()
+			}
+		}
 		if boundary == kind+"-after-rename" {
 			kill()
 		}
@@ -115,7 +121,9 @@ func TestFileStoreCrashHelper(t *testing.T) {
 		if base == "uploads" {
 			retirementDirs++
 		}
-		if boundary == "retire-cleanup-dir" && base == "uploads" && retirementDirs == 2 {
+		if base == "uploads" && (boundary == "retire-cleanup-dir" && retirementDirs == 2 ||
+			boundary == "retire-payload-dir" && retirementDirs == 3 ||
+			boundary == "retire-replacement-dir" && replacementRenamed) {
 			kill()
 		}
 		if (boundary == "chunk-dir" && strings.HasSuffix(base, ".parts")) ||
@@ -136,7 +144,7 @@ func TestFileStoreCrashHelper(t *testing.T) {
 		s := fileFaultStore(t, root)
 		if strings.HasPrefix(point, "retire-") {
 			s.durable, s.syncDir = ops, ops.syncDir
-			if err := s.retireLegacyUpload(context.Background(), creationRef(fileFaultContent)); err != nil {
+			if _, err := s.resetLegacyUpload(context.Background(), creationRef(fileFaultContent).SHA256); err != nil {
 				t.Fatal(err)
 			}
 			t.Fatal("retirement fault boundary was not reached")

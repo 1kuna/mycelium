@@ -265,14 +265,20 @@ follow-up. Runtime cost measurements await admitted gate/benchmark execution.
 No bulk I/O runs under the queue mutex.
 
 Completed blobs remain compatible. Older interrupted tus uploads have no
-sender-side prefix evidence and are treated as missing sessions (HTTP 404), not
-adopted or certified. The existing missing/expired-session recovery path
-(#1170/#1173) restarts them from zero automatically. POST retires the old partial
-through upload cleanup and creates fresh progress; an atomic retirement marker
-lets cleanup resume after a crash. The unchanged client resends the entire file,
-including any surviving prefix, and final SHA-256 verification checks the new
-bytes. No operator archive or manual re-upload step is required. The accepted
-upgrade cost is resending one in-flight upload. See
+sender-side prefix evidence and are never adopted or certified. The server
+resets them **in place**, keeping the same session ID and durably committing
+fresh progress at offset zero before HEAD returns `Upload-Offset: 0`. An atomic,
+checksummed reset intent preserves identity and metadata through cleanup and
+replacement, including a crash while the old `.info` is absent. Cleanup always
+rechecks for valid replacement progress before deleting anything.
+
+The unchanged Go and Python clients resend the entire source within the same
+active upload call. If a PATCH already carries the old offset, the server resets
+the session and returns retryable HTTP 503 (`request_failed`); their existing
+transient retry reconciles HEAD and sends from zero. Legacy sessions do not
+return missing-session or integrity errors. No client update, operator archive
+or manual re-upload is required. Final SHA-256 verification checks the new bytes.
+The accepted upgrade cost is resending one in-flight upload. See
 [operations](operations.md#file-store-crash-recovery).
 
 From the release containing #1100, Go/CLI and Python reconcile an interrupted

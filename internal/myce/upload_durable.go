@@ -40,6 +40,7 @@ func (c durableUploadChunk) digest() (string, error) {
 type durableUploadRecord struct {
 	tus.FileInfo
 	Version    int                  `json:"myce_version"`
+	Restarted  bool                 `json:"myce_legacy_reset,omitempty"`
 	Count      int64                `json:"myce_chunk_count"`
 	TailOffset int64                `json:"myce_tail_offset"`
 	Tail       string               `json:"myce_tail_sha256,omitempty"`
@@ -111,7 +112,7 @@ func (s *FileStore) uploadRecord(id string) (durableUploadRecord, error) {
 	if record.ID != id || record.MetaData["sha256"] != id || record.SizeIsDeferred || record.IsPartial || record.IsFinal || record.Offset < 0 || record.Size < record.Offset {
 		return record, uploadIntegrity("upload metadata identity mismatch")
 	}
-	if record.Version == 0 && record.Checksum == "" && record.Count == 0 && record.Tail == "" && record.TailOffset == 0 {
+	if record.Version == 0 && !record.Restarted && record.Checksum == "" && record.Count == 0 && record.Tail == "" && record.TailOffset == 0 {
 		return record, nil // Upstream tus metadata; never trust its Offset/Storage.
 	}
 	checksum, err := record.digest()
@@ -124,12 +125,29 @@ func (s *FileStore) uploadRecord(id string) (durableUploadRecord, error) {
 }
 
 func (s *FileStore) verifiedUpload(ctx context.Context, id string) (*durableUpload, error) {
-	record, err := s.uploadRecord(id)
+	record, err := s.uploadSessionRecord(id)
 	if err != nil {
 		return nil, err
 	}
 	if record.Version == 0 {
-		return nil, tus.ErrNotFound // No sender evidence: clients must resend from zero.
+		record, err = s.resetLegacyUpload(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+	} else if record.Restarted {
+		if err := s.finishLegacyReset(id); err != nil {
+			return nil, err
+		}
+	}
+	if record.Restarted {
+		// An active old client can already have sent its next PATCH. A tus
+		// offset conflict is terminal in deployed clients; their existing
+		// transient retry instead reconciles HEAD and resends from zero.
+		if offset, ok := ctx.Value(uploadPatchOffsetKey{}).(string); ok {
+			if n, err := strconv.ParseInt(offset, 10, 64); err == nil && n > record.Offset {
+				return nil, tus.NewError("request_failed", "upload reset; reconcile the same session with HEAD", http.StatusServiceUnavailable)
+			}
+		}
 	}
 	s.uploadCacheMu.Lock()
 	cached, ok := s.uploadCache[id]
@@ -203,75 +221,136 @@ func (s *FileStore) verifyUploadChunk(ctx context.Context, path string, ref File
 	return nil
 }
 
-// Retirement is a cleanup intent, never resume evidence. Its exact expected
-// identity/length is checked on read; the atomic marker survives a crash between
-// removing old metadata and removing the old payload. A new POST can then finish
-// cleanup instead of becoming stranded on an unindexed legacy payload.
-func (s *FileStore) retiredUpload(ref FileRef) (bool, error) {
-	path := s.uploadPath(ref.SHA256) + ".retired"
+// The reset intent contains only identity/allocation metadata, never legacy
+// prefix evidence. It survives until fresh zero-offset progress is durable, so
+// even death after unlinking .info can recover HEAD on the SAME session ID.
+func (s *FileStore) legacyResetRecord(id string) (durableUploadRecord, error) {
+	var record durableUploadRecord
+	if err := (FileRef{SHA256: id}).validate(); err != nil {
+		return record, err
+	}
+	path := s.uploadPath(id) + ".retired"
 	if err := noModelSymlinks(path, false); err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return record, tus.ErrNotFound
 		}
-		return false, err
+		return record, err
 	}
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return record, tus.ErrNotFound
+	}
 	if err != nil {
-		return false, err
+		return record, err
 	}
-	if string(data) != legacyRetirement(ref) {
-		return false, uploadIntegrity("upload retirement identity mismatch")
+	if err := json.Unmarshal(data, &record); err != nil {
+		return record, uploadIntegrity("upload reset intent is corrupt")
 	}
-	return true, nil
-}
-func legacyRetirement(ref FileRef) string {
-	return "legacy-upload-retired-v1\n" + ref.SHA256 + "\n" + strconv.FormatInt(ref.SizeBytes, 10) + "\n"
+	checksum, err := record.digest()
+	if err != nil || checksum != record.Checksum || record.Version != 2 || !record.Restarted ||
+		record.ID != id || record.MetaData["sha256"] != id || record.Size < 0 || record.Offset != 0 ||
+		record.SizeIsDeferred || record.IsPartial || record.IsFinal || record.Storage != nil ||
+		record.Count != 0 || record.TailOffset != 0 || record.Tail != "" {
+		return record, uploadIntegrity("upload reset intent integrity mismatch")
+	}
+	return record, nil
 }
 
-// Caller owns the creation and tus identity locks, outside q.mu. The consumer
-// resends these unverified legacy bytes; retaining them cannot restore intent.
-func (s *FileStore) retireLegacyUpload(ctx context.Context, ref FileRef) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func (s *FileStore) uploadSessionRecord(id string) (durableUploadRecord, error) {
+	record, err := s.uploadRecord(id)
+	if !errors.Is(err, tus.ErrNotFound) {
+		return record, err
 	}
-	pending, err := s.retiredUpload(ref)
-	if err != nil {
-		return err
+	record, err = s.legacyResetRecord(id)
+	// An intent grants no accepted offset; the locked loader must finish reset.
+	record.Version = 0
+	return record, err
+}
+
+// Caller owns the lifecycle and tus identity locks, outside q.mu. Never acquire
+// the creation lock here: POST takes creation before identity. Inventory cannot
+// observe the temporary absence of the existing allocation during reset.
+func (s *FileStore) resetLegacyUpload(ctx context.Context, id string) (durableUploadRecord, error) {
+	if err := lockUploadContext(ctx, s.uploadFilesMu.Lock, s.uploadFilesMu.Unlock); err != nil {
+		return durableUploadRecord{}, err
 	}
-	path := s.uploadPath(ref.SHA256)
-	if !pending {
-		record, err := s.uploadRecord(ref.SHA256)
+	defer s.uploadFilesMu.Unlock()
+	current, err := s.uploadRecord(id)
+	if err == nil && current.Version == 2 {
+		// A delayed cleanup must NEVER unlink replacement progress or chunks.
+		return current, s.finishLegacyReset(id)
+	}
+	if err != nil && !errors.Is(err, tus.ErrNotFound) {
+		return current, err
+	}
+	record, intentErr := s.legacyResetRecord(id)
+	if errors.Is(intentErr, tus.ErrNotFound) {
 		if err != nil {
-			return err
+			return current, err
 		}
-		if record.Version != 0 || record.Size != ref.SizeBytes {
-			return inputClaimError()
+		info := current.FileInfo
+		info.Offset, info.Storage = 0, nil
+		record = durableUploadRecord{FileInfo: info, Version: 2, Restarted: true}
+		record.Checksum, err = record.digest()
+		if err != nil {
+			return record, err
 		}
-		if err := s.uploadOps().bytes(path+".retired", []byte(legacyRetirement(ref))); err != nil {
-			return err
+		data, err := json.Marshal(record)
+		if err != nil {
+			return record, err
 		}
-	} else if err := s.uploadOps().directory(filepath.Dir(path)); err != nil {
-		// A preceding request may have failed after marker rename but before
-		// its name barrier. Persist that cleanup authority before unlinking.
-		return err
+		if err := s.uploadOps().bytes(s.uploadPath(id)+".retired", data); err != nil {
+			return record, err
+		}
+	} else if intentErr != nil {
+		return record, intentErr
+	} else {
+		if err == nil && current.Size != record.Size {
+			return record, inputClaimError()
+		}
+		// The previous request may have failed after intent rename but before
+		// its directory barrier. Persist cleanup authority before unlinking.
+		if err := s.uploadOps().directory(filepath.Dir(s.uploadPath(id))); err != nil {
+			return record, err
+		}
 	}
+	path := s.uploadPath(id)
 	if err := os.Remove(path + ".info"); err != nil && !os.IsNotExist(err) {
-		return err
+		return record, err
 	}
 	if err := s.uploadOps().directory(filepath.Dir(path)); err != nil {
+		return record, err
+	}
+	s.forgetUpload(id)
+	if err := os.RemoveAll(path + ".parts"); err != nil {
+		return record, err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return record, err
+	}
+	if err := s.uploadOps().directory(filepath.Dir(path)); err != nil {
+		return record, err
+	}
+	u, err := (durableUploadStore{store: s}).newUpload(ctx, record.FileInfo, true)
+	if err != nil {
+		return record, err
+	}
+	return u.(*durableUpload).record, s.finishLegacyReset(id)
+}
+
+// Only the intent is removed. The caller has already loaded valid replacement
+// metadata; complete its barriers before forgetting the last reset authority.
+func (s *FileStore) finishLegacyReset(id string) error {
+	path := s.uploadPath(id) + ".retired"
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
 		return err
 	}
-	s.forgetUpload(ref.SHA256)
-	if err := os.RemoveAll(path + ".parts"); err != nil {
+	if err := s.refreshUpload(id); err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := s.uploadOps().directory(filepath.Dir(path)); err != nil {
-		return err
-	}
-	if err := os.Remove(path + ".retired"); err != nil {
 		return err
 	}
 	return s.uploadOps().directory(filepath.Dir(path))
@@ -283,7 +362,7 @@ func (s *FileStore) uploadChunkPath(id string, offset int64) string {
 
 // Allocation metadata is a hint, not a certificate of content or resume offset.
 // Accept previous filestore size hints so legacy partials do not block unrelated
-// uploads. verifiedUpload refuses legacy sessions and verifies only new ones.
+// uploads. Legacy bytes are reset, never accepted as progress.
 func (s *FileStore) uploadAllocation(id string) (tus.FileInfo, error) {
 	var info tus.FileInfo
 	if err := noModelSymlinks(s.uploadPath(id)+".info", false); err != nil {
@@ -325,10 +404,15 @@ func uploadHTTPError(w http.ResponseWriter, err error) {
 }
 
 type recoverUploadKey struct{}
+type uploadPatchOffsetKey struct{}
 
 type durableUploadStore struct{ store *FileStore }
 
 func (d durableUploadStore) NewUpload(ctx context.Context, info tus.FileInfo) (tus.Upload, error) {
+	return d.newUpload(ctx, info, false)
+}
+
+func (d durableUploadStore) newUpload(ctx context.Context, info tus.FileInfo, restarted bool) (tus.Upload, error) {
 	ref := FileRef{SHA256: info.ID, SizeBytes: info.Size}
 	if err := ref.validate(); err != nil || info.MetaData["sha256"] != info.ID || info.SizeIsDeferred || info.IsPartial || info.IsFinal {
 		return nil, errors.New("invalid durable upload identity")
@@ -363,7 +447,7 @@ func (d durableUploadStore) NewUpload(ctx context.Context, info tus.FileInfo) (t
 		return nil, err
 	}
 	info.Offset, info.Storage = 0, nil // Never follow metadata-supplied paths.
-	upload := &durableUpload{store: d.store, record: durableUploadRecord{FileInfo: info, Version: 2}}
+	upload := &durableUpload{store: d.store, record: durableUploadRecord{FileInfo: info, Version: 2, Restarted: restarted}}
 	if err := upload.commit(upload.record); err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tus "github.com/tus/tusd/v2/pkg/handler"
@@ -123,6 +124,44 @@ func (s *FileStore) inventoryUnlocked(ctx context.Context) (map[string]storedPay
 				}
 			}
 			out[hash] = p
+		}
+		if dir == "uploads" {
+			// A crashed reset may have removed both legacy names. Its durable
+			// intent still reserves the original length, so another upload
+			// cannot consume that capacity before same-ID recovery completes.
+			for _, entry := range entries {
+				hash := strings.TrimSuffix(entry.Name(), ".retired")
+				if hash == entry.Name() || (FileRef{SHA256: hash}).validate() != nil {
+					continue
+				}
+				p, exists := out[hash]
+				if exists && !p.upload {
+					continue // A published blob supersedes any cleanup intent.
+				}
+				record, err := s.uploadSessionRecord(hash)
+				if errors.Is(err, tus.ErrNotFound) {
+					continue // Concurrent completion removed the intent too.
+				}
+				if err != nil {
+					return nil, err
+				}
+				p.upload, p.length = true, uint64(record.Size)
+				p.size = max(p.size, uint64(record.Offset))
+				if p.size > p.length {
+					return nil, errors.New("invalid upload reset allocation")
+				}
+				if !exists {
+					st, err := entry.Info()
+					if os.IsNotExist(err) {
+						continue
+					}
+					if err != nil {
+						return nil, err
+					}
+					p.modified = st.ModTime()
+				}
+				out[hash] = p
+			}
 		}
 	}
 	return out, nil

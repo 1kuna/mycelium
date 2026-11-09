@@ -100,10 +100,13 @@ binding when one was supplied. See [recovery](advanced.md#wait-and-check-status)
 On releases with the #1179 file-store durability fix, interrupted uploads resume
 from a checksummed, verified chunk generation. Keep the unchanged source and
 retry the same upload; a complete generation can finish publication during HEAD
-reconciliation. Older partials are treated as missing sessions; the existing
-missing/expired upload recovery restarts automatically from zero and resends the
-whole file. POST cleans up the unverified old partial; no adoption, manual
-archive or reset is needed. Final full-file SHA-256 checks the newly sent bytes.
+reconciliation. The server resets older partials in place to durable offset zero
+under the same session ID; it never adopts unverified old bytes. HEAD reports
+zero, and the unchanged Go/Python clients resend the whole source. A PATCH
+already carrying an old offset receives retryable 503, so the existing transient
+retry reconciles HEAD within the same active call. No missing-session retry,
+client update, manual archive or reset is needed. Final full-file SHA-256 checks
+the newly sent bytes.
 Genuinely corrupt new-format state needs the queue owner's [recovery](../../docs/operations.md#file-store-crash-recovery).
 Completed verified blobs remain compatible. Completion temporarily needs one
 extra payload-sized assembly copy.
