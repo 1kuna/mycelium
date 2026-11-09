@@ -2867,7 +2867,7 @@ func (q *Queue) renewRecoveryStartWindow(j *Job) {
 	// Planned leave keeps its original deadline; queue maintenance stops retain
 	// the recovery window for already-started attempts.
 	recovering := j.State == "running" || j.State == "stopping" && plannedStop(j)
-	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
+	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil && !absoluteStartBy(j) {
 		// Recovery is bounded from loss detection, using the original first-start window.
 		if j.StartWindow == 0 {
 			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
@@ -2992,7 +2992,9 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		j.ModelEnvironmentKey = recipe.Key
 		j.ModelEnvironmentNeedsSource = recipe.Binary != "" || recipe.BinaryRelative != ""
 	}
-	if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !absoluteStartBy(j) && j.Spec.StartBy != nil {
+	if j.DeviceFaultStartWait != nil {
+		q.resumeDeviceFaultStartBudget(j)
+	} else if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !absoluteStartBy(j) && j.Spec.StartBy != nil {
 		deadline := q.clock.Now().Add(j.StartWindow)
 		j.Spec.StartBy = &deadline
 	}

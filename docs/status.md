@@ -2638,6 +2638,14 @@ window suspended by qualified resource contention, including explicit
 relative window. Status reasons show the original window's seconds left with
 `paused for capacity`; assignment restores that full window for actual preparation.
 An assigned start without an accepted acknowledgement continues counting down.
+
+The separate `device_fault_start_wait` records queue `since` and the saved
+`remaining` budget in nanoseconds for `device_fault_last_healthy`. Its relative
+countdown says `paused for device recovery`; clearance resumes that saved amount.
+An unrecoverable hold fails with `diagnostic_code: device_fault_recovery_timeout`
+one hour (the existing maximum start window) after queue-recorded fault loss.
+Caller-owned absolute cutoffs remain authoritative.
+
 Absolute `start_by`, give-up, ordering `deadline` and cancellation retain their
 existing authority. No retry, reserve or timeout increase is involved.
 

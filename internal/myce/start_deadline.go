@@ -83,7 +83,7 @@ func (q *Queue) startupPending(j *Job) bool {
 
 func (q *Queue) startCapacityPaused(j *Job) bool {
 	return j.Spec.StartBy != nil && !absoluteStartBy(j) && !terminal(j.State) && !cancelled(j) &&
-		(q.launchCapacityPending(j) || j.State == "queued" && j.StartCapacityWaiting)
+		(q.launchCapacityPending(j) || j.State == "queued" && (j.StartCapacityWaiting || j.DeviceFaultStartWait != nil))
 }
 
 func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
@@ -152,7 +152,8 @@ func (q *Queue) maintainStartDeadlines() {
 		return status
 	}()
 	for _, j := range q.liveJobs() {
-		if status, ok := capacity[j]; ok {
+		faultWaiting := q.maintainDeviceFaultStartWait(j)
+		if status, ok := capacity[j]; ok && !faultWaiting {
 			if j.StartCapacityWaiting && status.ready && j.Spec.StartBy != nil {
 				// Capacity recovered before dispatch. Restore startup time without
 				// hiding a later unavailable/disabled-route diagnosis.
@@ -247,6 +248,9 @@ func (q *Queue) startupReleaseDetail(host string) HoldDetail {
 }
 
 func pausedStartBudget(j *Job) string {
+	if wait := j.DeviceFaultStartWait; wait != nil {
+		return fmt.Sprintf("%.0fs left to start (paused for device recovery)", wait.Remaining.Seconds())
+	}
 	return fmt.Sprintf("%.0fs left to start (paused for capacity)", j.StartWindow.Seconds())
 }
 

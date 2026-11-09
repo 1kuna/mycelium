@@ -1064,6 +1064,22 @@
       ],
       "type": "object"
     },
+    "DeviceFaultStartWait": {
+      "properties": {
+        "remaining": {
+          "type": "integer"
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "remaining"
+      ],
+      "type": "object"
+    },
     "DiagnosticReport": {
       "properties": {
         "format": {
@@ -2389,6 +2405,10 @@
         "dependency": {
           "$ref": "#/$defs/PieceBinding",
           "x-contract": "stable"
+        },
+        "device_fault_start_wait": {
+          "$ref": "#/$defs/DeviceFaultStartWait",
+          "x-contract": "diagnostic"
         },
         "device_memory_floor_gb": {
           "type": "number",

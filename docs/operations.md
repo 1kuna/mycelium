@@ -2413,6 +2413,29 @@ and submission key. This protection is queue-side and works with older workers;
 it does not require new recovery fields. Existing pre-upgrade fault history is
 recognized when its retained copy identifies the backend on that worker.
 
+The typed last-healthy hold pauses a relative production start or recovery
+budget without spending more infrastructure retries. It saves the time remaining
+at entry and resumes that amount when an eligible route returns; status keeps
+`device_fault_last_healthy` and shows `paused for device recovery`. The original
+`start_window` remains unchanged for a later started-attempt loss. Explicit
+absolute `start_by` and queued-only `give_up_at` still bind.
+
+An unrecoverable quarantine must not strand a job forever. The hold expires one
+`MaxProductionStartWindow` (the existing one-hour maximum availability window)
+after the latest queue-recorded device-fault loss, including across queue
+restarts. It fails with `diagnostic_code: device_fault_recovery_timeout` and a
+launch timeout cause with the same predicate. This bounds withheld capacity and
+caller latency when recovery never arrives; its cost is giving up on a recovery
+that takes longer than the existing maximum start window. Earlier caller
+cutoffs win. This bound applies to held jobs of every priority and never clears
+quarantine or releases old attempt custody. If the route disappears altogether,
+ordinary unavailable-route startup accounting resumes.
+
+After an operator clear, fresh inventory reporting both cards usable releases
+the two-card guard and either card can run the retry. An operator request alone
+is not health evidence and cannot authorize a sole surviving card; that case
+still requires new health-proven recovery or another healthy device/host.
+
 From the worker release containing #1142, non-escalated quarantine also clears
 automatically after positive vendor health evidence and uninterrupted kernel
 observation. Intel uses `xpu-smi health -d PCI-BDF -j`: core temperature, power

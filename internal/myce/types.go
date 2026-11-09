@@ -419,7 +419,8 @@ type SpecProjection struct {
 }
 
 type Job struct {
-	StartCapacityWaiting bool `json:"start_capacity_waiting,omitempty"`
+	DeviceFaultStartWait *DeviceFaultStartWait `json:"device_fault_start_wait,omitempty"`
+	StartCapacityWaiting bool                  `json:"start_capacity_waiting,omitempty"`
 
 	LaunchCapacityWait map[string]LaunchCapacityWait `json:"launch_capacity_wait,omitempty"`
 	ExecutionEvidence  *ExecutionEvidence            `json:"execution_evidence,omitempty"`
