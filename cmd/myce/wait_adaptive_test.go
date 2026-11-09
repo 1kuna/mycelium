@@ -118,7 +118,7 @@ func TestWaitAdaptiveEveryJobInitialDeadline(t *testing.T) {
 	deadline := clock.Now().Add(10 * time.Second)
 	initial := map[string]bool{}
 	mode := "initial"
-	runningReads, gets, batches := 0, 0
+	runningReads, gets, batches := 0, 0, 0
 	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
 		if mode == "completed" {
 			clock.advance(time.Millisecond)
