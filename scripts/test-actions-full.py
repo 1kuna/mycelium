@@ -25,7 +25,7 @@ class ActionsFullTest(unittest.TestCase):
     def exercise(self, linux='succeeded', submission_failure=False, bad_marker=False, refusal=None, status_record=None):
         submitted, waited, results = [], [], []
 
-        def command(*args):
+        def command(*args, cwd=None):
             code, output = 0, ''
             if args[0] == 'run':
                 profile = Path(args[2]).read_text()

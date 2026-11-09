@@ -472,63 +472,69 @@ dispatch order. See [GitHub's concurrency contract](https://docs.github.com/en/a
 This change leaves the workflow's deliberately disabled server-side state alone;
 merging this file does not authorize enabling it or triggering a test run.
 
-A retained run checks every first-parent main commit from the merge introducing
-`scripts/actions-proof.py` through its own push SHA. Replaced pending runs thus
-do not discard distinct trees. Each unproven tree gets the existing Darwin and
-Linux full gates; repeated trees reuse their verified proof. A failed proof
-stays failed and needs an explicit workflow rerun; it is never called a pass.
-Historical failures stay visible but do not poison every later fixed tree; a
-failed current tree fails the workflow.
-Interrupted attempts or a failed proof-publication request can require recovery;
-this is deduplication of recorded successful proof, not an exactly-once execution
-transaction across GitHub and Mycelium. Historical commits before protocol
-activation are not retroactively retested. Pre-existing runs outside the group
-are neither adopted nor cancelled.
+A retained run resolves GitHub's authoritative `refs/heads/main`, fetches that
+immutable commit, and checks every first-parent main commit from the merge
+introducing `scripts/actions-proof.py` through that tip. `GITHUB_SHA` identifies
+the triggering event, not the coverage boundary. For example, if A runs, C goes
+pending, and delayed B replaces C, B's workflow still covers B and C. After each
+batch it resolves main again and covers any new commits before exiting. This
+preserves every distinct landed tree even when GitHub reorders events.
 
-### Identical-tree full proof
+Uncovered trees receive both existing full gates. Successful CI coverage records
+avoid repeating a previously tested tree, including on reruns. A failed tree
+stays failed and needs an explicit rerun; it is never called a pass. Historical
+failures stay visible without poisoning every later fixed tree; a failed current
+tree fails the workflow. Interrupted work or failed status publication can need
+recovery; this is deduplication of recorded results, not an exactly-once execution
+transaction across GitHub and Mycelium. Pre-protocol history is not retroactively
+tested. Pre-existing runs outside the concurrency group are not cancelled.
+
+### Frozen CI source and inputs
+
+For each uncovered commit, the submitter creates a private detached checkout of
+that exact commit. Profiles, relative inputs (including `.mycelium/adapter.yaml`),
+and suite helpers all come from that checkout. Both submissions run with that
+checkout as their working directory, while generated profiles and results live
+outside it. Before submission and before status publication, CI verifies the
+checkout's commit/tree IDs and unchanged tracked bytes/modes. It publishes a
+success record only after both accepted result markers, those source checks and
+owned cleanup pass. It never pairs historical profiles with the event checkout's
+newer adapter or helpers.
+
+The `mycelium/main-full-tree-v2` commit status records `tree:TREE_ID` and its
+public Actions run URL. Only this new context is read; earlier
+`mycelium/full-tree-v1` statuses are ignored because their source/instrumentation
+provenance was unsound. A different tree or missing successful CI record keeps
+the full. The newest status in the context is authoritative. Logs and the step
+summary name each tested/skipped tree and the source of any reused CI result.
+
+**Trust rests on upstream GitHub commit-status writers: maintainers and authorized
+tokens. This is not spoof-resistant attestation.** Anyone with status-write
+authority can publish an apparently successful status; the consumer cannot prove
+that writer actually ran the suite. The built-in CI token receives `statuses:
+write`; Mycelium children never inherit it. No personal token is installed on
+runners. API lookup/fetch failure fails CI without claiming coverage. History
+lookup cost grows with commits since activation. Multiple trees share the existing
+six-hour Actions budget; completed records survive a timeout for later recovery.
+
+### Deferred local-full reuse
 
 Zach, 2026-11-09, relayed by the orchestrator and received by the CI implementation
 worker: “yes skip CI runs i think. we should be running the tests where it makes
-sense not repetitive nonsense that just wastes compute for no gain.” Application:
-reuse a successful two-platform full only when the Git tree ID is identical,
-including file bytes, executable modes and the test/workflow files. A merged PR's
-head is found through GitHub's commit-associated PR API, including squash/rebase
-merges; the PR must be merged into this repository's main. A different tree,
-missing/quick/failed/dirty proof or changed PR head cannot suppress a full.
+sense not repetitive nonsense that just wastes compute for no gain.” The desired
+next step is to skip post-merge CI when the landed tree matches a locally proven
+PR tree, but this PR deliberately ships coalescing and CI backlog coverage first.
+It does not accept or publish local receipt proof.
 
-A maintainer publishes existing local proof with:
-
-```sh
-python3 scripts/actions-proof.py .reports/local-gates/RECEIPT_ID \
-  --evidence https://github.com/1kuna/mycelium/pull/NUMBER
-```
-
-This requires the local runner receipts introduced by #1149: an ordinary full,
-both platforms, matching host/native/Linux successful measurements, positive
-overall cleanup, a clean immutable source and the recorded content digest
-matching `git archive` of that commit. Quick gates, custom commands, native-only
-runs and accepted gate exceptions do not qualify. Keep the raw receipts private;
-only commit/tree IDs and the public evidence URL are published. Publish before
-merging to avoid racing CI. Missing historical machine-readable proof means the
-full runs; free-form PR comments are not proof for this detector.
-
-The `mycelium/full-tree-v1` commit status records `tree:TREE_ID` and the public
-PR/run evidence URL. The newest status in that context is authoritative; an old
-success cannot override a newer failure. Existing repository status writers are
-the trust boundary, as with main writers; this is not a cryptographic attestation
-against a malicious maintainer. CI publishes the same status only after both
-accepted result markers and owned cleanup pass. Its token needs `statuses: write`
-and `pull-requests: read`; the token stays in the submitter and is excluded from
-Mycelium children. No personal token is installed on runners.
-
-Every skipped tree is named in the run log and step summary with its existing
-proof URL. Successful workflow reruns and identical-tree commits are also
-redundant and use that proof. Coalescing removes pending workflow shells; the
-retained run preserves their unproven source coverage. Proof lookup/API failure
-fails the workflow without claiming coverage. API lookups grow with the number
-of main commits since activation; no suite is submitted merely to refresh proof.
-If several trees need fulls, they share the existing six-hour Actions budget;
-a timeout retains already published proof and a rerun continues uncovered work.
+Local reuse must be a follow-up stacked on #1149's actual receipt format. That
+runner freezes source identity and then overlays current helpers, including
+`gate-leg.sh` and `gate-measure.py`. A shared aggregate instrumentation hash is
+insufficient to establish an approved normal full or to bind every suite-affecting
+helper to the tested tree. The follow-up must record and verify approved harness
+provenance, bind each suite-affecting helper's bytes/mode to that tree, and reject
+unknown, custom or mismatched instrumentation. Until that is reviewed and proven,
+local results and old v1 statuses cannot suppress CI. The removed local publisher
+and its fabricated-hash acceptance test are not retained as valid proof.
 
 Historical runner-capacity evidence (before tree deduplication): the change in [#751](https://github.com/1kuna/mycelium/issues/751)
 adds two lightweight submitter-role runner services to the fleet pool.
@@ -563,8 +569,8 @@ runner. A passing exact-head quick suffices for docs-only changes; it does not
 qualify for identical-tree full reuse. Fleet gates and automatic main runs are
 optional additional evidence; their backlog or availability must not hold local
 iteration or an otherwise proven merge. Record the source SHA and actual verdict.
-Publishing reusable full proof is separate from independent review and does not
-waive it.
+CI coverage records are separate from independent review and do not waive it.
+Local-full reuse remains deferred as described above.
 
 For an exception, apply the [evidence-based acceptance proposal](DECISIONS.md#current-rulings):
 identify the relevant baseline's same failure, the exact candidate result,
@@ -620,7 +626,7 @@ There are no host pins; Mycelium chooses each worker and
 provides the existing `mycelium-gate` environment. Both submissions happen
 before `myce wait` waits for all jobs, even if one fails. Successful jobs also
 require `myce result` to download the accepted, verified `gate-result.txt` marker.
-The runner does only source transport, waiting and small-result verification;
+The runner freezes source/inputs, waits and verifies small accepted results;
 full suites never run on it directly. A profile exit 78 with `no_qualified_target`
 is a qualification/total-allowance refusal, not a busy-worker indication. Busy
 qualified hosts accept queued jobs and `myce wait` waits for them. CI reports
@@ -686,7 +692,7 @@ contributors** (`approval_policy: all_external_contributors`). Keep that setting
 when changing workflows. Repository administrators and main writers remain
 trusted: review any workflow or submitter change before merging it.
 
-The workflow grants `contents: read`, `pull-requests: read` and `statuses: write`
+The workflow grants `contents: read` and `statuses: write`
 to the built-in `GITHUB_TOKEN` and
 pins checkout to an immutable action SHA, with `persist-credentials: false`.
 The service environment contains **no fleet token**. `myce` reads the host's
@@ -738,8 +744,9 @@ policy or enable CI admission on such a runner. Use an authorized Linux fleet
 host or leave approval to the host owner. Repository registration and an `online`
 runner alone do not prove queue reachability.
 
-Generated platform profiles and downloaded result markers live in job temp and
-are deleted on exit. Only small CLI recovery receipts remain in the checkout;
+Frozen historical checkouts, generated profiles and result markers live in job
+temp and are deleted after owned work settles. Only small CLI recovery receipts
+from commands outside those temporary checkouts remain in the event checkout;
 GitHub terminates job-owned observers at job completion, then the next checkout
 cleans old workspace state. Source-upload staging is removed by the CLI after
 confirmed submission. Runner diagnostic logs stay private; do not upload them

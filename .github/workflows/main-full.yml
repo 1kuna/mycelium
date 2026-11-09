@@ -7,7 +7,6 @@ on:
 permissions:
   contents: read
   statuses: write
-  pull-requests: read
 
 # Replace superseded pending runs; keep started runs to avoid runner cleanup
 # terminating shared helpers (#919, #1159).
