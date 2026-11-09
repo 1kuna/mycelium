@@ -144,31 +144,43 @@ def main():
     parser.add_argument('--repo', type=Path, default=REPO)
     parser.add_argument('--ref')
     parser.add_argument('--platform', choices=('native', 'linux', 'both'))
-    parser.add_argument('--priority', choices=('normal', 'release'), default=os.environ.get('GATE_PRIORITY', 'normal'))
+    parser.add_argument('--priority', choices=('normal', 'release', 'calibration'), default=os.environ.get('GATE_PRIORITY', 'normal'))
     parser.add_argument('--cores', type=int, default=4)
+    parser.add_argument('--after-pid', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--command', nargs=argparse.REMAINDER, default=[])
     parser.add_argument('--execute', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.execute:
         return execute(args.execute)
+    if args.after_pid and args.priority != 'calibration':
+        parser.error('--after-pid is only for the reserved calibration full')
     repo = args.repo.resolve()
-    slot = capacity.acquire(repo, mode=args.mode, priority=args.priority, cores=args.cores,
-                            wait=args.priority == 'release',
-                            platform=args.platform or ('native' if args.command else 'both'))
-    cache = Path.home() / 'Library/Caches/mycelium/gates/go-build'
-    cache.mkdir(parents=True, exist_ok=True)
-    identity = uuid.uuid4().hex
-    folder = repo / '.reports/local-gates' / identity
-    folder.mkdir(parents=True)
-    report = repo / '.reports/gate-local.jsonl'
-    manifest = dict(repo=str(repo), mode=args.mode, base=args.base, ref=args.ref,
-                    selection=str(args.selection.resolve()) if args.selection else None,
-                    command=args.command, cores=args.cores, identity=identity,
-                    platform=args.platform or ('native' if args.command else 'both'),
-                    cache=str(cache), report=str(report))
-    path = folder / 'manifest.json'
-    path.write_text(json.dumps(manifest) + '\n')
+    slot, folder, child = None, None, None
+    interrupted = []
+    def interrupt(signum, frame):
+        interrupted.append(signum)
+        if child is not None and child.poll() is None:
+            child.send_signal(signum)
+        else:
+            raise SystemExit(128 + signum)
+    handlers = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
+        slot = capacity.acquire(repo, mode=args.mode, priority=args.priority, cores=args.cores,
+                                wait=True, after_pid=args.after_pid,
+                                platform=args.platform or ('native' if args.command else 'both'))
+        cache = Path.home() / 'Library/Caches/mycelium/gates/go-build'
+        cache.mkdir(parents=True, exist_ok=True)
+        identity = uuid.uuid4().hex
+        folder = repo / '.reports/local-gates' / identity
+        folder.mkdir(parents=True)
+        report = repo / '.reports/gate-local.jsonl'
+        manifest = dict(repo=str(repo), mode=args.mode, base=args.base, ref=args.ref,
+                        selection=str(args.selection.resolve()) if args.selection else None,
+                        command=args.command, cores=args.cores, identity=identity,
+                        platform=args.platform or ('native' if args.command else 'both'),
+                        cache=str(cache), report=str(report))
+        path = folder / 'manifest.json'
+        path.write_text(json.dumps(manifest) + '\n')
         with capacity.admission_lock(capacity.root(repo)):
             legacy = [p for d in capacity.legacy_directories(repo) for p in capacity.occupied_lanes(d)]
             others = [p for p in capacity.occupied_lanes(capacity.root(repo)) if p != slot.directory]
@@ -180,16 +192,21 @@ def main():
                    '--source-info', str(folder / 'source-identity.json'), '--mode', args.mode,
                    '--phase', 'host', '--disk-root', str(Path.home()), '--',
                    sys.executable, str(__file__), '--execute', str(path)]
-        result = subprocess.run(command, cwd=repo, env=env)
+        child = subprocess.Popen(command, cwd=repo, env=env)
+        status = child.wait()
         confirmed = receipts.confirmed(folder / 'overall-cleanup.json', identity)
-        if confirmed and result.returncode == 0:
+        if confirmed and status == 0:
             shutil.rmtree(folder / 'source')
             (folder / 'source.tar').unlink()
             (folder / 'runtime.tar').unlink()
-        return result.returncode if confirmed else 125
+        return status if confirmed else 125
     finally:
-        slot.release(stopped=receipts.confirmed(folder / 'overall-cleanup.json', identity))
-        print('local gate receipts:', folder, flush=True)
+        if slot is not None:
+            slot.release(stopped=bool(folder) and receipts.confirmed(folder / 'overall-cleanup.json', identity))
+        if folder:
+            print('local gate receipts:', folder, flush=True)
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == '__main__':

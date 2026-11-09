@@ -13,6 +13,7 @@ import tarfile
 import signal
 import threading
 import shutil
+import time
 import unittest
 from unittest.mock import patch, Mock
 
@@ -32,7 +33,7 @@ measurement = load('gate-measure')
 
 class LocalGateTests(unittest.TestCase):
     def setUp(self):
-        for name, value in [('legacy_directories', []), ('native_full_custody', False)]:
+        for name, value in [('legacy_directories', []), ('native_full_custody', False), ('check_pressure', None)]:
             mock = patch.object(capacity, name, return_value=value)
             mock.start()
             self.addCleanup(mock.stop)
@@ -79,6 +80,20 @@ class LocalGateTests(unittest.TestCase):
                 release.release()
             self.assertTrue(waiter.exists())
 
+    def test_calibration_gets_next_full_lane_ahead_of_release_full(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'local-go-calibration-wait-owner').touch()
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                with self.assertRaisesRegex(RuntimeError, 'reserved'):
+                    capacity.acquire(root, mode='full', priority='release')
+                # The full reservation does not block native release assembly.
+                build = capacity.acquire(root, priority='release')
+                build.release()
+                full = capacity.acquire(root, mode='full', priority='calibration')
+                full.release()
+
     def test_disk_refusal_starts_nothing(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -88,6 +103,80 @@ class LocalGateTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'entry floor'):
                     capacity.acquire(root)
             self.assertFalse(any(root.glob('local-go-slot*')))
+
+    def test_full_waiters_are_fifo_and_killed_queue_ticket_does_not_hold_execution_capacity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            script = """import importlib.util,pathlib,sys
+p,folder,label=sys.argv[1:]
+s=importlib.util.spec_from_file_location('cap',p);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+r=pathlib.Path(folder)
+m.root=lambda _:r;m.legacy_directories=lambda _:[];m.native_full_custody=lambda:False
+m.available_memory=lambda:64*m.GIB;m.check_pressure=lambda:None
+slot=m.acquire(r,mode='full',wait=True)
+with (r/'order').open('a') as out:out.write(label+'\\n')
+slot.release()
+"""
+            children = []
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                held = capacity.acquire(root, mode='full')
+                try:
+                    for label in ('first', 'second', 'killed'):
+                        child = subprocess.Popen([sys.executable, '-c', script, capacity.__file__,
+                            str(root), label], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        children.append(child)
+                        deadline = time.monotonic() + 5
+                        while len(list(root.glob('local-go-wait-*.json'))) < len(children):
+                            if time.monotonic() > deadline:
+                                self.fail('waiter did not register')
+                            time.sleep(.01)
+                    children[-1].kill(); children[-1].wait()
+                    with capacity.admission_lock(root):
+                        self.assertEqual(len(capacity.full_waiters(root)), 2)
+                    self.assertTrue(held.directory.exists())  # Never clear execution custody.
+                    held.release()
+                    for child in children[:-1]:
+                        output, error = child.communicate(timeout=8)
+                        self.assertEqual(child.returncode, 0, error)
+                        self.assertIn(b'full queue position', output)
+                    self.assertEqual((root / 'order').read_text().splitlines(), ['first', 'second'])
+                finally:
+                    for child in children:
+                        if child.poll() is None: child.kill(); child.wait()
+                        child.stdout.close(); child.stderr.close()
+
+    def test_ordinary_full_cli_waits_by_default_and_term_cleans_queue(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            script = """import importlib.util,pathlib,sys
+p,folder=sys.argv[1:]
+s=importlib.util.spec_from_file_location('local',p);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+r=pathlib.Path(folder);c=m.capacity
+c.root=lambda _:r;c.legacy_directories=lambda _:[];c.native_full_custody=lambda:False
+c.available_memory=lambda:64*c.GIB;c.check_pressure=lambda:None
+sys.argv=[p,'full','--platform','native','--repo',str(r)]
+sys.exit(m.main())
+"""
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                held = capacity.acquire(root, mode='full')
+                child = subprocess.Popen([sys.executable, '-c', script, local.__file__, str(root)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not list(root.glob('local-go-wait-*.json')):
+                        if time.monotonic() > deadline: self.fail('ordinary full did not queue')
+                        time.sleep(.01)
+                    self.assertIsNone(child.poll())
+                    child.terminate()
+                    child.communicate(timeout=5)
+                    self.assertEqual(child.returncode, 143)
+                    self.assertFalse(list(root.glob('local-go-wait-*.json')))
+                    self.assertTrue(held.directory.exists())
+                finally:
+                    if child.poll() is None: child.kill(); child.wait()
+                    held.release()
 
     def test_measured_native_and_linux_memory_replace_initial_guard(self):
         config = dict(memory_measurement=dict(native_peak_bytes=4919132160,
@@ -367,7 +456,9 @@ class LocalGateTests(unittest.TestCase):
                 self.assertIn('--disk-root', command)
                 local.receipts.publish(manifest_path.parent / 'overall-cleanup.json',
                     manifest['identity'], stopped=True, status=0)
-                return Mock(returncode=0)
+                child = Mock()
+                child.wait.return_value = 0
+                return child
             with (patch.object(sys, 'argv', ['gate-local.py', '--repo', str(root), '--priority',
                     'release', '--command', 'go', 'build', '-o', str(output)]),
                   patch.object(local.capacity, 'acquire', return_value=slot) as admission,
@@ -376,7 +467,7 @@ class LocalGateTests(unittest.TestCase):
                   patch.object(local.capacity, 'native_full_custody', return_value=False),
                   patch.object(local, 'trim_cache'), patch.object(local.shutil, 'rmtree'),
                   patch.object(Path, 'unlink'),
-                  patch.object(local.subprocess, 'run', side_effect=supervised)):
+                  patch.object(local.subprocess, 'Popen', side_effect=supervised)):
                 self.assertEqual(local.main(), 0)
             self.assertEqual(admission.call_args.kwargs['priority'], 'release')
             self.assertTrue(admission.call_args.kwargs['wait'])

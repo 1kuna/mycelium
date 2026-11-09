@@ -128,6 +128,14 @@ across Git worktrees and ordinary clones under
 recognizes both existing `local-go-slot` lanes and
 preserves unknown/abandoned ownership. Full runs remain serialized until measured
 capacity is recorded; two heavy lanes permit a release build alongside diagnosis.
+Ordinary fulls wait in FIFO order by default and print their queue position;
+no polling or relay is needed. Release and calibration fulls take priority over
+ordinary waiters. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is
+removed only after OS process identity proves it has exited. Execution slots
+and unknown fixture custody are never removed by that queue cleanup. There is
+no queue timeout; disk, memory-pressure and measured-memory entry refusals remain
+real stops. A reserved calibration full can wait for an identified comparison
+batch to exit without entering gaps between that batch's runs.
 Release waiters take the next free lane through `GATE_PRIORITY=release` for a
 gate, or the supported release command wrapper (use an absolute output path
 because source runs in a snapshot):
