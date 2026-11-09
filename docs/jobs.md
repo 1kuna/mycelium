@@ -189,7 +189,7 @@ already registered evidence.
 | `require_target` | `false` | Refuse a new submission without an online qualified target of sufficient total admitted capacity; busy qualified targets may queue |
 | `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
 | `excluded_machines` | Empty: no exclusions | Machine-name exclusions, intersected with job and project allow-lists; never widens eligibility |
-| `start_by` | Production: submission + effective start window (readiness for dependents); absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; takes precedence over `start_window`; remains an absolute cutoff across loss recovery |
+| `start_by` | Production: submission + effective start window (readiness for dependents); absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; takes precedence over `start_window`; a started infrastructure interruption renews its original-length window, while waits and unstarted retries cannot extend it |
 | `start_window` | Production: `150s`; absent for other priorities | Relative Go duration string, `0 < duration <= 1h`, production batch only; inherited by physical fan-out children |
 | `give_up_at` | Absent: wait indefinitely | RFC3339 expiry while queued; not a running-job timeout |
 | `expected_minutes` | `0` | Rough planning hint, never enforced |
@@ -699,6 +699,10 @@ reporting margin. This is a bounded availability policy, not a native startup
 latency guarantee. A shorter caller-owned deadline can trigger fallback sooner.
 Ordinary unstarted retries, re-delivery and queue restarts never renew it. Older unfinished
 production records without the field receive the same default from their original submission.
+A started infrastructure interruption receives the original-length window from
+interruption detection, including when an explicit first-start `start_by` supplied
+that length. Its renewed absolute cutoff is not paused by capacity or device
+recovery waiting; `give_up_at` is unchanged.
 For a dependent job, its generated window starts at dependency readiness; for
 each physical fan-out child it starts at that child's assignment. The declared
 length survives both transitions. A logical fan-out parent's generated cutoff
@@ -1562,7 +1566,9 @@ the cap bounds unavailable-worker and stuck-preparation detection. Qualified
 capacity waiting pauses the budget, even for an explicit declaration; after
 capacity recovers, assignment restores the full window. Longer budgets delay
 stuck-start failure accordingly.
-Explicit `start_by`, `give_up_at` and `deadline` remain absolute. Accepted pieces
+Explicit `start_by` remains absolute during waiting and unstarted retries; a
+started infrastructure interruption renews its original-length recovery window.
+`give_up_at` and `deadline` remain absolute. Accepted pieces
 survive sibling failure; consumers of unaccepted pieces fail with structured
 `diagnostic_code: upstream_failed`. Cancelling the parent is a pipeline abort,
 including after gather: unfinished consumers stop, future consumers are cancelled,
