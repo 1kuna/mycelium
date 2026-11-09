@@ -227,7 +227,7 @@ func (c EnvironmentCatalog) resolveEnvironment(e Environment) (map[string]Enviro
 		if len(e.Platforms) > 0 && !slices.Contains(e.Platforms, p) {
 			continue
 		}
-		r, err := snapshotEnvironment(EnvironmentRecipe{LockFile: e.LockFile, Python: e.Python}, p)
+		r, err := snapshotEnvironment(EnvironmentRecipe{Backend: e.Backend, LockFile: e.LockFile, Python: e.Python}, p)
 		if err != nil {
 			return nil, err
 		}

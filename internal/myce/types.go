@@ -113,6 +113,7 @@ func (p *Platform) UnmarshalYAML(n *yaml.Node) error {
 }
 
 type Environment struct {
+	Backend   string   `json:"backend,omitempty" yaml:"backend,omitempty"`
 	Name      string   `json:"name,omitempty" yaml:"name,omitempty"`
 	LockFile  string   `json:"lock_file,omitempty" yaml:"lock_file,omitempty"`
 	Python    string   `json:"python,omitempty" yaml:"python,omitempty"`
@@ -126,7 +127,7 @@ func (e *Environment) UnmarshalYAML(n *yaml.Node) error {
 	}
 	type plain Environment
 	for i := 0; i < len(n.Content); i += 2 {
-		if !slices.Contains([]string{"name", "lock_file", "python", "platforms"}, n.Content[i].Value) {
+		if !slices.Contains([]string{"name", "lock_file", "backend", "python", "platforms"}, n.Content[i].Value) {
 			return fmt.Errorf("unknown environment field %q", n.Content[i].Value)
 		}
 	}
@@ -364,10 +365,13 @@ func (s Spec) Validate() error {
 	if s.Environment.Name != "" && s.Environment.LockFile != "" {
 		return reject("job_environment_invalid", errors.New("environment must name an environment or a lock_file, not both"))
 	}
-	if s.Environment.LockFile == "" && (s.Environment.Python != "" || len(s.Environment.Platforms) > 0) {
-		return reject("job_environment_invalid", errors.New("python and platforms belong to a lock_file environment"))
+	if s.Environment.Backend != "" && s.Environment.Backend != "uv" && s.Environment.Backend != "pixi" {
+		return reject("job_environment_invalid", errors.New("unsupported environment backend"))
 	}
-	if s.Environment.LockFile != "" && s.Environment.Python == "" {
+	if s.Environment.LockFile == "" && (s.Environment.Backend != "" || s.Environment.Python != "" || len(s.Environment.Platforms) > 0) {
+		return reject("job_environment_invalid", errors.New("backend, python and platforms belong to a lock_file environment"))
+	}
+	if s.Environment.LockFile != "" && s.Environment.Backend != "pixi" && s.Environment.Python == "" {
 		return reject("job_environment_invalid", errors.New("lock_file environment requires python version"))
 	}
 	for _, p := range s.Environment.Platforms {

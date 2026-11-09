@@ -104,7 +104,7 @@ machines with different NAS mount paths, set worker `--environment-root` to its
 local catalog directory. The binary's content digest is checked before copying;
 a changed NAS executable fails clearly. Absolute binary paths require the same
 path on every eligible worker. Named Python/Pixi inputs are read when the queue loads the catalog; submission
-retains those immutable bytes. Inline Python inputs are read by the queue during
+retains those immutable bytes. Inline Python/Pixi inputs are read by the queue during
 submission. Workers build from those snapshots and do not read the submitter's
 lock paths. Neither route requires identical absolute NAS mounts for lock files.
 Binary recipes still require the worker-readable binary described above.
@@ -295,7 +295,10 @@ The lock file's basename must be exactly `uv.lock`, `pyproject.toml`, or
 The queue process must be able to read the input files at submission time,
 using its own filesystem paths and permissions. For `requirements.txt`, only
 that file is read; for `uv.lock` or `pyproject.toml`, both adjacent files are
-required. Use an absolute path visible to the queue, such as
+required. For `backend: pixi`, `pixi.lock` and its adjacent `pixi.toml` are
+required; `python` is optional because Pixi owns the interpreter. Omit `backend`
+or use `backend: uv` for the existing Python lock path, which requires `python`.
+Use an absolute path visible to the queue, such as
 `/queue/nas/project/requirements.txt`. A NAS path must use the queue's mount
 path, which may differ from the submitter's or worker's mount path. Relative
 inline paths resolve from the queue process's working directory, not beside the
@@ -308,7 +311,7 @@ path. The snapshot-at-submission behavior included in s062 (#526) freezes inputs
 already readable by the queue; it does **not** upload arbitrary submitter-local
 lock files, their companions, or a dependency workspace. Put the lock on
 queue-readable storage before submitting, or ask the queue operator to register a named catalog recipe and select it with
-`environment: NAME`. The queue snapshots Python inputs for workers; workers do
+`environment: NAME`. The queue snapshots Python/Pixi inputs for workers; workers do
 not need the original lock path.
 
 A missing, unreadable, oversized (over 1 MiB), or unsupported lock input is
