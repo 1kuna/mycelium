@@ -691,6 +691,54 @@ func TestFleetInstallStopsAfterFailedManagerHealth(t *testing.T) {
 	if f.apply() == nil || f.restarts != 1 {
 		t.Fatal("failed startup automatically retried")
 	}
+	for _, mode := range []string{"interrupted-health", "previous-pid", "changed-restarts"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFleetInstallFixture(t, "linux")
+			observations := 0
+			base := f.deps.command
+			f.deps.command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				observations++
+				data, err := base(ctx, name, args...)
+				if observations == 11 || observations == 26 {
+					if mode == "interrupted-health" {
+						data = bytes.ReplaceAll(data, []byte("ActiveState=active"), []byte("ActiveState=activating"))
+					}
+					if mode == "previous-pid" {
+						data = bytes.ReplaceAll(data, []byte(fmt.Sprintf("MainPID=%d", f.managerPID)), []byte(fmt.Sprintf("MainPID=%d", f.managerPID-1)))
+					}
+				}
+				if mode == "changed-restarts" {
+					restarts := 0
+					if observations >= 11 {
+						restarts++
+					}
+					if observations >= 26 {
+						restarts++
+					}
+					data = bytes.ReplaceAll(data, []byte("NRestarts=0"), []byte(fmt.Sprintf("NRestarts=%d", restarts)))
+				}
+				return data, err
+			}
+			var verdicts []bool
+			f.deps.health.Timeout = 90 * time.Second
+			f.deps.health.HealthObserved = func(healthy bool) { verdicts = append(verdicts, healthy) }
+			if err := waitFleetManager(context.Background(), f.c, f.managerPID-1, f.deps); err != nil {
+				t.Fatal("healthy replacement never earned a fresh stable window", err)
+			}
+			want := 57
+			if mode == "changed-restarts" {
+				want = 56
+			}
+			if observations != want || len(verdicts) != want {
+				t.Fatal("helper retained interrupted stable time", observations, len(verdicts), want)
+			}
+			for i, healthy := range verdicts {
+				if healthy != (mode == "changed-restarts" || i != 10 && i != 25) {
+					t.Fatal("helper health bypassed parser or old-PID fence", i, healthy)
+				}
+			}
+		})
+	}
 }
 
 func TestFleetInstallActiveApplyLockIsBenign(t *testing.T) {

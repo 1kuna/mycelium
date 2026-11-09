@@ -41,6 +41,7 @@ type fleetUpgrade struct {
 	CreatedAt          time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
+	stability      fleetStability
 	RetryPhase     string    `json:"retry_phase,omitempty"`
 	HealthSince    time.Time `json:"health_since,omitempty"`
 	HealthIdentity string    `json:"health_identity,omitempty"`
@@ -285,7 +286,9 @@ func (q *Queue) fleetProofFresh(p *FleetRuntimeProof) bool {
 // before restoring admission; its cost is 30 seconds per updated service.
 func (q *Queue) fleetStable(h *fleetUpgradeHost, p *FleetRuntimeProof) bool {
 	identity := fmt.Sprintf("%s/%d/%s", p.Session, p.PID, p.SHA256)
-	now := q.clock.Now()
+	// Only synthetic child builds model this window; proof freshness and all
+	// queue decisions continue to use q.clock. Identity changes reset the model.
+	now := h.stability.clock(q.clock, h.HealthIdentity != identity || h.HealthSince.IsZero()).Now()
 	if h.HealthIdentity != identity || h.HealthSince.IsZero() {
 		h.HealthIdentity = identity
 		h.HealthSince = now
