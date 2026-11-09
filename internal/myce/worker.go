@@ -1042,6 +1042,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			result.ExecutionCause = &RuntimeCause{Operation: "command", Class: "resource_limit"}
 		} else if launchErr != nil {
 			result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("launch", launchErr))
+			if errors.Is(launchErr, errWorkerMemory) {
+				// Started authorizes the exec gate; a later local comparison can
+				// still refuse without main ever running. Match early/group starts.
+				result.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit"}
+			}
 		} else if waitErr != nil {
 			result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", waitErr))
 		}

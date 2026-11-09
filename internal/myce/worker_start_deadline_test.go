@@ -22,6 +22,74 @@ import (
 
 // #225: exercise the production worker's complete gate/exec receipt path
 // against the HTTP Started handler delayed behind the real queue mutex.
+// #1011: a final local capacity check can refuse after queue Started commits,
+// while the native supervisor still holds main behind its exec gate.
+func TestWorkerStartHandoffCapacity(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("worker", "fake")
+	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 96
+	s := spec("production")
+	s.Run.Command = []string{"sh", "-c", `printf x > "$MARKER"`}
+	s.Run.Env = map[string]string{"MARKER": "{work}/main-ran"}
+	submit(t, q, s)
+	a := check(t, q, m, nil).Job
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	w := recoveryWorker(t)
+	w.Clock, w.Machine, w.Client = clock, m, Client{URL: server.URL, Token: "test"}
+	w.batchAdmission = func(context.Context, HostLaunch) error {
+		if job(t, q, a.ID).StartedAt != nil {
+			return refuseAdmission("live_host_growth", "GiB", 85.2073, 67.6324, false)
+		}
+		return nil
+	}
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	store.state.Session = a.Session
+	p, err := startAfterFixtureInputs(t, w, store, *a)
+	if err != nil || p == nil {
+		t.Fatalf("missing gated supervisor: %v", err)
+	}
+	var r Result
+	select {
+	case f := <-p.done:
+		if f.err != nil {
+			t.Fatal(f.err)
+		}
+		r = f.result
+	case <-time.After(testWaitTimeout):
+		p.stop(clock.Now(), 0, true)
+		t.Fatal("refused supervisor did not finish")
+	}
+	if job(t, q, a.ID).StartedAt == nil || r.ExecutionEvidence == nil || r.ExecutionEvidence.Main != executionNotStarted {
+		t.Fatalf("did not exercise authorized but unexecuted main: %+v", r)
+	}
+	if _, err := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "main-ran")); !os.IsNotExist(err) {
+		t.Fatal("refused main executed", err)
+	}
+	if !launchCapacityRefusal(r) || r.ExecutionCause.Class != "resource_limit" || r.ExecutionCause.Admission == nil || r.ExecutionCause.Admission.Subcheck != "live_host_growth" || r.ExecutionCause.PrelaunchRefused {
+		t.Fatalf("late refusal lost type or supervisor custody: %+v", r.ExecutionCause)
+	}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	got := job(t, q, a.ID)
+	if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Copies[0].LossCharged {
+		t.Fatalf("capacity refusal charged: %+v", got)
+	}
+	if next := check(t, q, m, nil).Job; next != nil {
+		t.Fatal("unchanged capacity reoffered", next)
+	}
+	m.HostAvailableMemoryGB++
+	if next := check(t, q, m, nil).Job; next == nil || next.ID != a.ID || next.Attempt != 2 {
+		t.Fatal("changed capacity did not retry same logical job", next)
+	}
+}
+
 func TestWorkerStartHandoffQueueWait(t *testing.T) {
 	for _, state := range []string{"current", "cancelled", "lost-reply", "cancel-after-commit", "outage-after-commit"} {
 		t.Run(state, func(t *testing.T) {
