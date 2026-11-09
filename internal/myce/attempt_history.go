@@ -8,8 +8,10 @@ import (
 
 // AttemptOutcome preserves the existing classifier's facts, not a new cause
 // taxonomy. State is the queue decision after this attempt (queued or terminal).
-// It is diagnostic evidence, never release proof or a retry/accounting input.
+// DeviceFault is queue-owned retry eligibility evidence. Other fields remain
+// diagnostic evidence, never release proof or a retry/accounting input.
 type AttemptOutcome struct {
+	DeviceFault       *DeviceFaultLoss        `json:"device_fault,omitempty"`
 	ExecutionEvidence *ExecutionEvidence      `json:"execution_evidence,omitempty"`
 	StopObservation   *AttemptStopObservation `json:"stop_observation,omitempty"`
 	inputsStaged      bool                    // transient positive staging evidence; not part of the wire/history shape.
@@ -67,6 +69,7 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	for _, old := range j.AttemptHistory {
 		if old.Attempt == outcome.Attempt && old.Machine == outcome.Machine && old.Session == outcome.Session {
 			outcome.StopObservation = old.StopObservation
+			outcome.DeviceFault = old.DeviceFault
 			break
 		}
 	}

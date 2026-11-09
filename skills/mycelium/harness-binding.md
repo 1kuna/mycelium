@@ -24,7 +24,10 @@ IDs, re-reads authoritative job state, downloads/verifies outputs and applies th
 project's acceptance check. An `observation_failed` wake calls for observer
 recovery, not a failed-job verdict. A wake is not a successful result or confirmed
 resource release. Retry after ambiguous delivery can send the same ID again;
-receivers must deduplicate. The existing positional `job-notify` protocol needs
+receivers must deduplicate. Record transport acceptance, supported durable
+receiving-thread arrival and owner disposition separately; a local delivered
+receipt is notifier success, not proof of those downstream states. Report any
+unsupported receipt boundary to the runtime owner. The existing positional `job-notify` protocol needs
 a wrapper: an exit-zero missing-config path cannot satisfy this contract.
 
 Command matching is cooperative routing, not an OS security boundary. Nested

@@ -71,13 +71,20 @@ func (q *Queue) workerArrivalSuspect(m *Machine, now time.Time, includePending b
 	if q.workerLossAllowance(m) == 0 {
 		return true // Unknown cold cadence cannot qualify capacity as healthy.
 	}
+	arrival, suspect := q.workerArrival(m, includePending)
+	return suspect || !arrival.IsZero() && now.Sub(arrival) >= allowance
+}
+
+// Preserve the wall arrival as well as its measured allowance when freezing
+// contact. A later published read ages that evidence at its own capture time;
+// an already detached view keeps its original clock and suspicion.
+func (q *Queue) workerArrival(m *Machine, includePending bool) (time.Time, bool) {
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
 	arrival := m.LastSeen
+	suspect := false
 	if c := q.contacts[m.ID]; c != nil && c.session == m.Session {
-		if c.arrivalAllowance > 0 || c.suspect { // Frozen detached observation.
-			return c.suspect
-		}
+		suspect = c.suspect
 		arrival = c.processedArrival
 		if q.simulation {
 			arrival = m.LastSeen // The event loop compresses continuous heartbeats.
@@ -91,7 +98,7 @@ func (q *Queue) workerArrivalSuspect(m *Machine, now time.Time, includePending b
 			arrival = m.LastSeen
 		}
 	}
-	return !arrival.IsZero() && now.Sub(arrival) >= allowance
+	return arrival, suspect
 }
 
 func (q *Queue) workerFresh(m *Machine, now time.Time) bool {
@@ -125,6 +132,7 @@ func (q *Queue) freezeContactView(v *Queue) {
 	// it, a detached fleet view turns an in-flight check-in into worker silence.
 	v.contacts = make(map[string]*workerContact, len(q.s.Machines))
 	for id, m := range q.s.Machines {
-		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now()), allowance: q.workerLossAllowance(m), arrivalAllowance: q.workerArrivalAllowance(m), suspect: q.workerSuspect(m, v.clock.Now())}
+		arrival, _ := q.workerArrival(m, true)
+		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now()), processedArrival: arrival, allowance: q.workerLossAllowance(m), arrivalAllowance: q.workerArrivalAllowance(m), suspect: q.workerSuspect(m, v.clock.Now())}
 	}
 }

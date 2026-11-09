@@ -89,6 +89,7 @@ type workerStore struct {
 	sharedRelease         func()           // Idempotent; retained until exact process cleanup.
 	faultTiming           probeTiming
 	deviceFaults          checkpointIO[KernelLogSnapshot]
+	deviceHealth          checkpointIO[map[string]deviceHealthObservation]
 	stateName             string
 	environmentLogs       checkpointIO[bool]
 	inventory             checkpointIO[[]MachineDevice]

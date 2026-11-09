@@ -388,6 +388,9 @@
         "cleanup_cause": {
           "$ref": "#/$defs/RuntimeCause"
         },
+        "device_fault": {
+          "$ref": "#/$defs/DeviceFaultLoss"
+        },
         "diagnostics": {
           "$ref": "#/$defs/AttemptDiagnostics"
         },
@@ -1019,6 +1022,36 @@
         "example",
         "next_action",
         "message"
+      ],
+      "type": "object"
+    },
+    "DeviceFaultLoss": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "platform",
+        "devices",
+        "at"
       ],
       "type": "object"
     },

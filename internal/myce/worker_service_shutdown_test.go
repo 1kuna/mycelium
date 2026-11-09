@@ -221,13 +221,15 @@ func TestWorkerInteractiveLeaveKeepsAvailabilitySampling(t *testing.T) {
 	defer server.Close()
 	var samples atomic.Int32
 	w := Worker{EnvironmentLimit: 1 << 20, StateDir: t.TempDir(), Clock: clock, Interval: time.Millisecond,
-		Machine: machine("interactive", "fake"), DailyUse: true, Client: Client{URL: server.URL, Token: "test"},
+		Machine: machine("interactive", "fake"), Client: Client{URL: server.URL, Token: "test"},
 		OwnerSignals: func(context.Context) OwnerSignals {
 			// Give the synthetic OS observation a nonzero measured cost;
 			// a zero-cost probe teaches a sub-tick freshness allowance.
 			clock.Advance(100 * time.Millisecond)
 			samples.Add(1)
-			return idleSignals()
+			// Exercise observer lifetime independently of daily-use freshness.
+			// Queue-delay expiry is covered by TestAdaptiveProbeQueueDelayCannotRenewEvidence.
+			return OwnerSignals{Power: "desktop"}
 		}}
 	ctx, leave := context.WithCancel(context.Background())
 	done := make(chan struct{})

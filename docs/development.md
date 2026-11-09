@@ -632,11 +632,15 @@ evidence: their queue, worker availability or backlog must not hold local
 iteration or an otherwise proven merge. Preserve the recorded result and source
 SHA; acceptance is the gate verdict, not successful process launch.
 
-The [2026-11-07 orchestrator default](DECISIONS.md#current-rulings) permits
-unrelated merges despite known, owned test failures or known six-hour main-run
-capacity cancellations when every other test passes without race or panic; the
-PR must name the known failure, its owning issue and the failing job ID.
-Any new or unexplained failure still blocks.
+For an exception, apply the [evidence-based acceptance proposal](DECISIONS.md#current-rulings):
+identify the relevant baseline's same failure, the exact candidate result,
+evidence that the change does not worsen it, and the existing scoped authority.
+Issue ownership alone is insufficient. Keep the original gate verdict and
+exception disposition separate; a changed or unexplained failure is unresolved.
+An interrupted or unsubmitted run has no suite verdict. Existing scoped
+substitutes keep their own conditions and expiry; elapsed queue time alone does
+not create an exception. Independent review and the normal exact-head proof
+requirements above remain.
 
 ```sh
 gh api repos/1kuna/mycelium/commits/main --jq .sha
@@ -1556,3 +1560,30 @@ cgroup/proc data and an injected clock. The initial implementation ran that nati
 check on macOS (CPU readings and explicit unsupported I/O); native Linux delegated
 cgroup CPU/stat/PSI and Linux host PSI were not run. No daemon, GPU, I/O isolation
 or loaded queue-latency qualification follows from these measurements.
+
+
+## Existing test-suite pruning record
+
+[#1086](https://github.com/1kuna/mycelium/issues/1086) owns the measured suite
+reduction and assertion-transfer ledger; [#1128](https://github.com/1kuna/mycelium/pull/1128)
+owns package-slot scheduling. Keep their current proof and failure-backed coverage
+on those records rather than starting a parallel pruning effort. A source-function
+count or measured idle slot is not wall-time/fleet-cost savings. Compare accepted
+before artifacts with the first combined after full, recording exact source,
+platform/toolchain, package overlap, wall and resource-cost coverage. Preserve
+original verdicts, retained incident/security assertions and unproved donors;
+no runtime target by itself waives the existing gates.
+
+The 50% function-count target influenced #1086 planning; it is not acceptance under this v2.1 assignment. Do not delete or consolidate an additional test merely to reach a number. For every removed or replaced test, retain the duplicate/obsolete reason, any incident/security behavior, named surviving assertions and independent review disposition. Keep uncertain donors. Treat the existing 21m30s figure as #1086's historical work-plan goal, not a v2.1 budget or gate exception; retaining an operational time budget requires a measured cost rationale and its source authority. Report actual before/after wall and fleet resource cost, with missing measurements explicit. A final count or passing full alone does not prove retained behavior.
+
+Dated inventory: the November 9, 2026 06:10 UTC common-base projection was
+3,396 → 1,698 Go Test functions at `67a487f3`, superseding the earlier
+3,377 → 1,680 snapshot. These are historical draft-source inventories, not
+merged counts, passing cases or measured speedup. The issue’s 06:20 UTC update
+withdraws the numeric target and records a per-cut rationale audit in progress.
+
+Next action: the #1086 coordinator retains each cut’s reason, surviving assertions
+and independent review, keeps uncertain donors, and reports actual wall and
+fleet resource cost for the identified combined source. Missing measurements
+and unresolved behavior remain explicit; the final count or a passing full
+alone does not complete acceptance.
