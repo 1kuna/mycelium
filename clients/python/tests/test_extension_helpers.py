@@ -14,7 +14,7 @@ class ExtensionClientTests(unittest.TestCase):
     def test_project_upload_carries_claim_through_resume(self):
         client = Client(token="fixture")
         calls = []
-        def request(method, endpoint, data=None, headers=None, size=0):
+        def request(method, endpoint, data=None, headers=None, size=0, **_):
             self.assertEqual(headers["X-Myce-Input-Claim"], "issued")
             calls.append(method)
             if method == "HEAD" and "/blobs/" in endpoint and calls.count("HEAD") <= 2:
@@ -39,7 +39,7 @@ class ExtensionClientTests(unittest.TestCase):
         upload = "/api/files/uploads/" + sha
         calls = []
 
-        def request(method, endpoint, data=None, headers=None, size=0):
+        def request(method, endpoint, data=None, headers=None, size=0, **_):
             calls.append((method, endpoint))
             if method == "POST":
                 self.assertIn("purpose am9iLWlucHV0", headers["Upload-Metadata"])
