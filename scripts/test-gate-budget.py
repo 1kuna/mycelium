@@ -37,7 +37,7 @@ class GateBudgetTests(unittest.TestCase):
         fakebin = Path(home.name) / 'bin'
         fakebin.mkdir()
         docker = fakebin / 'docker'
-        docker.write_text('#!/bin/sh\nif [ "$3" = info ]; then printf \'"fixture-daemon"\\n\'; fi\n')
+        docker.write_text('#!/bin/sh\nif [ "$1:$2" = context:inspect ]; then printf \'"unix:///var/run/docker.sock"\\n\';\nelif [ "$1:$2" = context:ls ]; then printf \'"default"\\n\';\nelif [ "$3" = info ]; then printf \'"fixture-daemon"\\n\'; fi\n')
         docker.chmod(0o755)
         os.environ['PATH'] = str(fakebin) + os.pathsep + os.environ['PATH']
         for name in ('GATE_LOCAL_SLOT', 'GATE_LOCAL_SLOT_ID', 'MYCE_GATE_BUDGET',

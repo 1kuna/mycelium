@@ -55,6 +55,34 @@ class RegionPath(c.Structure):
     _fields_ = [('region', RegionInfo), ('vnode', VnodePath)]
 
 
+class StatFS(c.Structure):
+    _fields_ = [('block_size', c.c_uint32), ('io_size', c.c_int32),
+                ('blocks', c.c_uint64 * 5), ('fsid', c.c_int32 * 2),
+                ('owner', c.c_uint32), ('type', c.c_uint32),
+                ('flags', c.c_uint32), ('subtype', c.c_uint32),
+                ('type_name', c.c_char * 16), ('mount_on', c.c_char * 1024),
+                ('mount_from', c.c_char * 1024), ('flags_ext', c.c_uint32),
+                ('reserved', c.c_uint32 * 7)]
+
+
+def sealed_residency(executable):
+    if executable == '/System/Volumes' or executable.startswith('/System/Volumes/'):
+        raise RuntimeError('protected executable is on a writable or auxiliary volume')
+    lib = c.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    statfs = lib.statfs64
+    statfs.argtypes = [c.c_char_p, c.POINTER(StatFS)]
+    statfs.restype = c.c_int
+    info = StatFS()
+    if statfs(os.fsencode(executable), c.byref(info)) != 0:
+        raise OSError(c.get_errno(), 'protected executable mount inventory failed')
+    mount = os.fsdecode(info.mount_on)
+    readonly = bool(info.flags & 1)  # MNT_RDONLY from sys/mount.h.
+    if mount != '/' or not readonly:
+        raise RuntimeError('protected executable is not on the read-only system root')
+    return dict(mount_on=mount, readonly=readonly, flags=info.flags,
+                filesystem=os.fsdecode(info.type_name))
+
+
 def process_table():
     output = subprocess.check_output(
         ['ps', 'eww', '-axo', 'pid=,ppid=,comm=,args='], text=True, timeout=5)
@@ -84,6 +112,7 @@ def protected_process(pid, scratch, roots, rows=None):
     prefixes = ('/System/', '/usr/libexec/', '/usr/bin/', '/usr/sbin/', '/sbin/', '/bin/')
     if not executable.startswith(prefixes):
         raise RuntimeError('EPERM process is not a protected system executable')
+    residency = sealed_residency(executable)
     # Include every known live gate supervisor as well as persisted identities.
     roots = set(roots)
     for candidate, (_, _, command) in rows.items():
@@ -105,7 +134,7 @@ def protected_process(pid, scratch, roots, rows=None):
                  '/scripts/gate.sh', scratch)
     if any(value in arguments for value in forbidden):
         raise RuntimeError('EPERM process has a gate marker or path')
-    return dict(pid=pid, executable=executable, ancestry=chain,
+    return dict(pid=pid, executable=executable, ancestry=chain, residency=residency,
                 gate_markers_or_paths=False, reason='EPERM protected system process')
 
 

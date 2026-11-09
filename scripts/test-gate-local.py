@@ -55,7 +55,7 @@ class LocalGateTests(unittest.TestCase):
         self.addCleanup(fakehome.cleanup)
         fakebin = Path(fakehome.name)
         docker = fakebin / 'docker'
-        docker.write_text('#!/bin/sh\nif [ "$3" = info ]; then printf \'"fixture-daemon"\\n\'; fi\n')
+        docker.write_text('#!/bin/sh\nif [ "$1:$2" = context:inspect ]; then printf \'"unix:///var/run/docker.sock"\\n\';\nelif [ "$1:$2" = context:ls ]; then printf \'"default"\\n\';\nelif [ "$3" = info ]; then printf \'"fixture-daemon"\\n\'; fi\n')
         docker.chmod(0o755)
         environment = patch.dict(os.environ, PATH=str(fakebin) + os.pathsep + os.environ['PATH'])
         environment.start()

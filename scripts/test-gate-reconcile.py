@@ -309,6 +309,7 @@ def scratch_processes(*args, **kwargs): return set()
                 return line.split(None, 3)[2] if 'comm=' in args else base + line
             with self.subTest(line=line), patch.object(handles.subprocess, 'check_output', side_effect=ps), \
                     patch.object(handles.c, 'CDLL'), \
+                    patch.object(handles, 'sealed_residency', return_value=dict(mount_on='/', readonly=True)), \
                     patch.object(handles, 'inventory_pid', side_effect=PermissionError(errno.EPERM, 'restricted')):
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
@@ -324,6 +325,27 @@ def scratch_processes(*args, **kwargs): return set()
         with patch.object(handles.subprocess, 'check_output', side_effect=PermissionError('ps unavailable')):
             with self.assertRaises(PermissionError):
                 handles.protected_process(409, '/retained/source', set())
+
+    def test_protected_executable_requires_readonly_root_not_data_volume(self):
+        spec = importlib.util.spec_from_file_location('mounts', Path(recovery.__file__).with_name('gate-handles.py'))
+        handles = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(handles)
+        with patch.object(handles.c, 'CDLL') as load:
+            with self.assertRaisesRegex(RuntimeError, 'writable or auxiliary volume'):
+                handles.sealed_residency('/System/Volumes/Data/fixture')
+            load.assert_not_called()
+            for mount, flags, accepts in ((b'/', 1, True), (b'/', 0, False),
+                                           (b'/System/Volumes/Data', 1, False)):
+                def observe(path, pointer):
+                    info = handles.c.cast(pointer, handles.c.POINTER(handles.StatFS)).contents
+                    info.mount_on, info.flags = mount, flags
+                    return 0
+                load.return_value.statfs64.side_effect = observe
+                if accepts:
+                    self.assertTrue(handles.sealed_residency('/usr/bin/fixture')['readonly'])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'read-only system root'):
+                        handles.sealed_residency('/usr/bin/fixture')
 
 
 if __name__ == '__main__':

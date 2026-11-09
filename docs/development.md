@@ -204,26 +204,54 @@ default, not a maintainer ruling (2026-11-09).
 Daemon-backed fixtures require separate positive evidence: Docker containers,
 volumes and networks can outlive their test and run outside the gate UID. Before
 creating resources, the real-Docker fixtures journal their endpoint and label
-resources with `myce.gate=RUN_MARKER`. The budget records daemon availability and
-identity before launching work. Normal cleanup and recovery query each recorded
+resources with `myce.gate=RUN_MARKER`. Before launching work, the budget journals
+the effective endpoint selected by `DOCKER_CONTEXT`, `DOCKER_HOST` or Docker's
+configured current context, together with daemon availability and identity.
+Normal cleanup and recovery query each recorded
 daemon for remaining labelled containers, volumes and networks; a changed daemon,
 unreachable configured daemon, malformed journal or failed listing retains
-custody. A missing Docker CLI and default socket can establish absent prerequisites
-only when no entry observation or fixture journal requires that daemon. Older
-sources without labels additionally require the Mycelium fixture label/name
-namespace to be empty. Recovery applies the same runtime checks inside the guest,
+custody. For new runs, a missing Docker CLI and default socket can establish absent
+prerequisites only when no entry observation or fixture journal requires that
+daemon. Older sources without labels additionally require the Mycelium fixture
+label/name namespace to be empty. Recovery applies the same checks inside the guest,
 alongside its source-bound, nonce-bound positive cleanup. It never removes Docker
 resources or assumes a killed client stopped its containers.
+
+Legacy endpoint recovery is an orchestrator agent default (2026-11-09, received
+by the landing worker), not a maintainer ruling. Old helpers inherited their
+environment; retained bytes do not prove that Docker overrides were absent.
+Recovery therefore enumerates every configured Docker context and known local
+Docker socket, resolves every endpoint to its daemon ID, and requires every
+endpoint reachable and each distinct daemon empty of Mycelium fixture resources.
+Known socket locations include system and rootless sockets and the user socket
+locations for common local Docker runtimes; context endpoints supplement them.
+Unknown contexts, unreachable endpoints, dangling socket links or failed
+inventories retain custody. Missing current prerequisites cannot qualify an old run.
+
+Readable same-UID launch ancestors are inspected with `ps eww`; Docker endpoint
+overrides refuse legacy recovery. Command arguments are removed before examining
+the appended environment, so a shell command mentioning a variable is not an
+environment observation. The receipt records inspected and unreadable ancestors
+and any inventory uncertainty. Historical launch environments were not retained:
+even when current ancestors show no overrides, a historical non-local or TCP
+`DOCKER_HOST` outside this host may be undiscoverable from its current local
+contexts and sockets. This residual risk is explicitly accepted by the
+orchestrator's legacy default and recorded in every legacy daemon proof. Host and
+guest both apply this discovery and positive-inventory rule. New runs use their
+journaled endpoint instead.
 
 Orchestrator default (2026-11-09): macOS can deny `libproc` inspection of
 platform-protected processes even under the same UID. Gate binaries, Python,
 shell fixtures and VM helpers are not platform-protected. An `EPERM` process may
 therefore be excluded only with independent, readable `ps` evidence proving all
 three conditions: its executable realpath is under `/System/`, `/usr/libexec/`,
-`/usr/bin/`, `/usr/sbin/`, `/sbin/` or `/bin/` (never `/usr/local/`); its complete
+`/usr/bin/`, `/usr/sbin/`, `/sbin/` or `/bin/` (never `/usr/local/`), and `statfs64`
+positively reports mount `/` with `MNT_RDONLY`; its complete
 parent chain contains no recorded or known gate supervisor; and its command line
 has no gate marker, gate path or retained source/scratch path. Every exclusion
-and its executable/ancestry evidence is recorded in the recovery receipt. An
+and its executable/mount/ancestry evidence is recorded in the recovery receipt.
+All `/System/Volumes/` paths are refused, including the writable Data volume;
+a `/System/` prefix alone proves nothing about sealed-volume residency. An
 unknown ancestry, non-system executable, gate descendant or failed `ps` inventory
 retains occupancy. This is a narrow ownership-model application, not a maintainer
 ruling or a privileged recovery path.
