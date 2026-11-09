@@ -240,8 +240,9 @@ func TestMemoryCgroupChildrenLinuxIntegration(t *testing.T) {
 
 type memberMemoryFS struct {
 	fakeMemoryFS
-	fault string
-	trip  atomic.Bool
+	fault        string
+	trip         atomic.Bool
+	beforeRemove func(string)
 }
 
 func (f *memberMemoryFS) WriteFile(p string, b []byte) error {
@@ -255,6 +256,13 @@ func (f *memberMemoryFS) ReadFile(p string) ([]byte, error) {
 		return nil, os.ErrPermission
 	}
 	return f.fakeMemoryFS.ReadFile(p)
+}
+
+func (f *memberMemoryFS) Remove(path string) error {
+	if f.beforeRemove != nil {
+		f.beforeRemove(path)
+	}
+	return f.fakeMemoryFS.Remove(path)
 }
 
 func d5NativeStart(t *testing.T, group bool, fs *memberMemoryFS, command []string) (Worker, *workerStore, *process) {
