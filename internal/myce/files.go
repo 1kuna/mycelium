@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/tus/tusd/v2/pkg/filelocker"
-	"github.com/tus/tusd/v2/pkg/filestore"
 	tus "github.com/tus/tusd/v2/pkg/handler"
 	"golang.org/x/exp/slog"
 )
@@ -143,6 +142,7 @@ type FileStore struct {
 	handler                     http.Handler
 	uploadLocker                tus.Locker
 	syncDir                     func(string) error // Durability failure injection.
+	durable                     durableFileOps
 	expired                     func(string, ...context.Context) bool
 	lifecycle                   *sync.RWMutex
 	clock                       Clock
@@ -185,7 +185,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	if err != nil {
 		return err
 	}
-	if err = PrepareStateRoots(root); err != nil {
+	if err = prepareFileStoreRoot(root, durableFileOps{}); err != nil {
 		return err
 	}
 	root, err = filepath.EvalSymlinks(root)
@@ -195,23 +195,15 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	if err = noModelSymlinks(root, false); err != nil {
 		return err
 	}
-	for _, dir := range []string{root, filepath.Join(root, "blobs"), filepath.Join(root, "uploads")} {
-		if err = os.MkdirAll(dir, 0700); err != nil {
-			return err
-		}
-	}
-	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+
+	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncLocalDirectory, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	if q.lock != nil {
 		database := strings.TrimSuffix(q.lock.Name(), ".lock")
 		s.controlFiles = controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
 	}
-	fs := filestore.New(filepath.Join(root, "uploads"))
-	fs.DirModePerm = 0700
-	fs.FileModePerm = 0600
 	composer := tus.NewStoreComposer()
-	fs.UseIn(composer)
-	composer.UseCore(creationDataStore{DataStore: fs, mu: &s.uploadFilesMu, store: s})
-	locker := filelocker.New(fs.Path)
+	composer.UseCore(creationDataStore{DataStore: durableUploadStore{store: s}, mu: &s.uploadFilesMu, store: s})
+	locker := filelocker.New(filepath.Join(root, "uploads"))
 	s.uploadLocker = locker
 	locker.UseIn(composer)
 	h, err := tus.NewHandler(tus.Config{
@@ -232,17 +224,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return tus.HTTPResponse{}, tus.FileInfoChanges{ID: ref.SHA256}, nil
 		},
 		PreFinishResponseCallback: func(e tus.HookEvent) (tus.HTTPResponse, error) {
-			ctx := creationContext(e.Context)
-			ref := FileRef{e.Upload.MetaData["sha256"], e.Upload.Size}
-			if err := s.publish(ctx, ref); err != nil {
-				return tus.HTTPResponse{}, err
-			}
-			// An internal writer may have created the same blob after this
-			// upload's POST. Publication must still honor the import's custody.
-			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], false, ctx); err != nil {
-				return tus.HTTPResponse{}, err
-			}
-			return tus.HTTPResponse{}, s.publishUpload(ref.SHA256, ctx)
+			return tus.HTTPResponse{}, s.completeUpload(creationContext(e.Context), e.Upload)
 		},
 	})
 	if err != nil {
@@ -283,45 +265,84 @@ func (s *FileStore) refreshBlob(path string) error {
 	if err != nil {
 		return err
 	}
-	return errors.Join(f.Sync(), f.Close())
+	return errors.Join(s.uploadOps().flush(f), f.Close())
 }
 func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	if err := ref.validate(); err != nil {
 		return err
 	}
-	source := filepath.Join(s.root, "uploads", ref.SHA256)
-	if err := verifyFile(ctx, source, ref); err != nil {
-		return errors.New("uploaded file size or SHA-256 mismatch")
+	source := s.uploadPath(ref.SHA256)
+	// A retry may find the rename durable but the old tus metadata still
+	// present. Keep a verified existing blob; never copy partial bytes over it.
+	if err := s.verify(ctx, ref); err != nil {
+		if err = verifyFile(ctx, source, ref); err != nil {
+			return errors.New("uploaded file size or SHA-256 mismatch")
+		}
+		f, err := os.Open(source)
+		if err != nil {
+			return err
+		}
+		if err = errors.Join(s.uploadOps().flush(f), f.Close()); err != nil {
+			return err
+		}
+		if err = s.uploadOps().move(source, s.blob(ref)); err != nil {
+			return err
+		}
 	}
-	f, err := os.OpenFile(source, os.O_RDWR, 0600)
-	if err != nil {
+	if err := s.verify(ctx, ref); err != nil {
 		return err
 	}
-	if err = errors.Join(f.Sync(), f.Close()); err != nil {
+	if err := s.refreshBlob(s.blob(ref)); err != nil {
 		return err
 	}
-	if err = os.Link(source, s.blob(ref)); err != nil && !os.IsExist(err) {
+	if err := s.uploadOps().directory(filepath.Join(s.root, "blobs")); err != nil {
 		return err
 	}
-	if err = s.verify(ctx, ref); err != nil {
+	// Cross-directory rename persists both names before reference publication.
+	if err := s.uploadOps().directory(filepath.Join(s.root, "uploads")); err != nil {
 		return err
 	}
-	if err = s.refreshBlob(s.blob(ref)); err != nil {
+	// Remove progress authority durably before deleting the chunks it names.
+	if err := os.Remove(source + ".info"); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err = s.syncDir(filepath.Join(s.root, "blobs")); err != nil {
+	if err := s.uploadOps().directory(filepath.Join(s.root, "uploads")); err != nil {
 		return err
 	}
-	// Keep only the authoritative link after publication. A later tus creation
-	// must never truncate a surviving hard link to the immutable blob.
-	if err = os.Remove(source); err != nil && !os.IsNotExist(err) {
+	if err := os.RemoveAll(source + ".parts"); err != nil {
 		return err
 	}
-	if err = os.Remove(source + ".info"); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(source); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return s.syncDir(filepath.Join(s.root, "uploads"))
+	return s.uploadOps().directory(filepath.Join(s.root, "uploads"))
 }
+
+// Caller holds the lifecycle fence and the creation or tus identity lock. Queue callbacks do
+// their own short transactions; all verification/publication stays outside q.mu.
+func (s *FileStore) completeUpload(ctx context.Context, info tus.FileInfo) error {
+	ref := FileRef{SHA256: info.ID, SizeBytes: info.Size}
+	if err := s.publish(ctx, ref); err != nil {
+		return err
+	}
+	if err := s.recordUpload(ref.SHA256, info.MetaData["purpose"], false, ctx); err != nil {
+		return err
+	}
+	return s.publishUpload(ref.SHA256, ctx)
+}
+
+func prepareFileStoreRoot(root string, ops durableFileOps) error {
+	if err := prepareStateRoots(ops, root); err != nil {
+		return err
+	}
+	for _, name := range []string{"blobs", "uploads"} {
+		if err := ops.mkdir(filepath.Join(root, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	var err error
 	r, err = fileStoreSubmissionRequest(r)
@@ -345,30 +366,19 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid upload", 400)
 			return
 		}
-		upload, err := filestore.New(filepath.Join(s.root, "uploads")).GetUpload(r.Context(), id)
+		record, err := s.uploadRecord(id)
 		if err != nil {
 			s.handler.ServeHTTP(w, r)
 			return
 		}
-		info, err := upload.GetInfo(r.Context())
-		if err != nil {
-			http.Error(w, "upload metadata unavailable", 503)
-			return
-		}
+		info := record.FileInfo
 		claimCtx, err := s.inputClaim(r.Context(), FileRef{SHA256: id, SizeBytes: info.Size}, true)
 		if err != nil {
 			respond(w, nil, err)
 			return
 		}
-		r = r.WithContext(claimCtx)
-		response := &uploadResponse{ResponseWriter: w}
-		s.handler.ServeHTTP(response, r)
-		if response.status >= 400 {
-			return
-		}
-		if err := s.refreshUpload(id); err != nil {
-			log.Printf("upload freshness unavailable: %v", err)
-		}
+		r = r.WithContext(context.WithValue(claimCtx, recoverUploadKey{}, true))
+		s.handler.ServeHTTP(w, r)
 		return
 	}
 	if r.Method != "POST" {
@@ -439,14 +449,14 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if st, e := os.Stat(filepath.Join(s.root, "uploads", hash+".info")); e == nil && st.Mode().IsRegular() {
 		// A repeated create must match the immutable stored upload length.
-		upload, e := filestore.New(filepath.Join(s.root, "uploads")).GetUpload(r.Context(), hash)
+		upload, e := (durableUploadStore{store: s}).GetUpload(r.Context(), hash)
 		if e != nil {
-			http.Error(w, "upload metadata unavailable", 503)
+			uploadHTTPError(w, e)
 			return
 		}
 		info, e := upload.GetInfo(r.Context())
 		if e != nil {
-			http.Error(w, "upload metadata unavailable", 503)
+			uploadHTTPError(w, e)
 			return
 		}
 		if info.Size != length {
@@ -479,8 +489,9 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, err)
 		return
 	}
-	if _, e := os.Lstat(filepath.Join(s.root, "uploads", hash)); e == nil {
-		// No .info means no resumable upload authority; do not silently overwrite.
+	if st, e := os.Lstat(filepath.Join(s.root, "uploads", hash)); e == nil && (!st.Mode().IsRegular() || st.Size() != 0) {
+		// Empty pre-metadata creation is rebuildable; nonempty data with no
+		// progress authority is preserved for operator recovery.
 		http.Error(w, "unindexed upload requires operator recovery", 409)
 		return
 	}
@@ -497,9 +508,6 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(response, r)
 	if response.status == http.StatusCreated {
 		s.unidentifiedReserveAdmitted.Add(unidentified)
-	}
-	if err := s.refreshUpload(hash); err != nil {
-		log.Printf("upload freshness unavailable: %v", err)
 	}
 }
 

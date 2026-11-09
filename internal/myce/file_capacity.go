@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/tus/tusd/v2/pkg/filestore"
 	tus "github.com/tus/tusd/v2/pkg/handler"
 )
 
@@ -70,7 +69,7 @@ func (s *FileStore) inventoryUnlocked(ctx context.Context) (map[string]storedPay
 			if !st.Mode().IsRegular() {
 				return nil, errors.New("invalid store payload")
 			}
-			// Published uploads can briefly retain a second hard link. Count once.
+			// Publication and cleanup can briefly retain both names. Count once.
 			if _, ok := out[hash]; ok {
 				continue
 			}
@@ -85,16 +84,13 @@ func (s *FileStore) inventoryUnlocked(ctx context.Context) (map[string]storedPay
 				} else if err != nil {
 					return nil, err
 				}
-				upload, err := filestore.New(filepath.Join(s.root, dir)).GetUpload(ctx, hash)
+				info, err := s.uploadAllocation(hash)
 				if err == nil {
-					info, err := upload.GetInfo(ctx)
-					if err != nil {
-						return nil, err
-					}
 					if info.Size < st.Size() {
 						return nil, errors.New("invalid upload length")
 					}
 					p.length = uint64(info.Size)
+					p.size = uint64(max(st.Size(), info.Offset))
 					meta, err := os.Lstat(filepath.Join(s.root, dir, hash+".info"))
 					if os.IsNotExist(err) {
 						if blob, e := os.Lstat(s.blob(FileRef{SHA256: hash})); e == nil && blob.Mode().IsRegular() {
@@ -346,7 +342,7 @@ func (s *FileStore) refreshUpload(hash string) error {
 			return err
 		}
 	}
-	return nil
+	return s.uploadOps().directory(filepath.Join(s.root, "uploads"))
 }
 
 // Only positively marked job-input uploads are disposable. Unknown/imported
@@ -422,10 +418,17 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			}
 			// Remove metadata first: leftover data cannot be resumed or refreshed,
 			// and a later sweep can finish cleanup after a crash.
-			for _, suffix := range []string{".info", ""} {
-				if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
-					return err
-				}
+			if err := os.Remove(path + ".info"); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			if err := store.uploadOps().directory(filepath.Dir(path)); err != nil {
+				return err
+			}
+			if err := os.RemoveAll(path + ".parts"); err != nil {
+				return err
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
 			}
 			if err := store.syncDir(filepath.Join(store.root, "uploads")); err != nil {
 				return err

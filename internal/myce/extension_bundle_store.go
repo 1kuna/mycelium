@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 )
 
 // Bundle maps use the same canonical JSON as Extension.Digest. The existing
@@ -73,28 +72,10 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	if err != nil {
 		s.uploadFilesMu.Lock()
 		defer s.uploadFilesMu.Unlock()
-		// A private temporary name cannot truncate or consume an interrupted tus
-		// upload of the same bytes. Preserve any existing verified blob.
-		f, e := os.CreateTemp(filepath.Join(s.root, "uploads"), ".bundle-")
-		if e != nil {
+		// Use the same atomic publication barriers as tus, without consuming
+		// a partial upload or mutating a descriptor already open by a reader.
+		if e := s.uploadOps().bytes(s.blob(next), data); e != nil {
 			return e
-		}
-		defer os.Remove(f.Name())
-		_, writeErr := f.Write(data)
-		if e = errors.Join(writeErr, f.Sync(), f.Close()); e != nil {
-			return e
-		}
-		if missing {
-			if e = os.Link(f.Name(), s.blob(next)); e != nil && !os.IsExist(e) {
-				return e
-			}
-		} else {
-			// The embedded bytes have passed the digest/reference checks above.
-			// Replace an unreadable or corrupt stored copy atomically; never
-			// truncate a blob that another reader may already have open.
-			if e = os.Rename(f.Name(), s.blob(next)); e != nil {
-				return e
-			}
 		}
 		s.noteAllocation(next.SHA256, uint64(next.SizeBytes))
 	}

@@ -790,6 +790,57 @@ because it forces a collection. Stop the SSH tunnel when finished.
 Reading these runtime statistics can itself briefly pause the process; they are
 collected only on a debug request, never under the queue mutex.
 
+### File-store crash recovery
+
+From the release containing the #1179 file-store durability fix, upload chunks,
+progress manifests, final blobs and fresh store markers use temporary writes,
+file flush, rename and directory flush before success. Fresh ancestor names are
+also flushed. A killed initializer can leave only private temporary marker
+files; restart ignores their contents and safely retries initialization. Invalid
+final markers and unknown unmarked state still stop startup without repair.
+The marker helper is shared with queue/worker/cache initialization; this change
+does not certify those components' other write paths.
+
+Keep the store on local storage that honors flushes. Darwin uses `F_FULLFSYNC`
+for files in addition to `fsync`; directory `fsync` errors refuse publication.
+The protocol depends on filesystem/device promises, not merely atomic rename:
+see [Apple's fsync/F_FULLFSYNC documentation](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html),
+[Apple's APFS crash-protection description](https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/APFS_Guide/Features/Features.html),
+and [Linux fsync(2), including the directory-entry requirement](https://man7.org/linux/man-pages/man2/fsync.2.html).
+
+After process death, panic or power loss, rerun the same upload from its unchanged
+source. The normal client first verifies the final blob, then reconciles tus
+HEAD. Only a checksummed manifest and verified referenced chunks can certify
+progress. Complete progress left before final publication is assembled and
+published by HEAD/PATCH before a full offset is returned. Queue references are
+committed after blob/name barriers. Failures return before HTTP success; a lost
+reply may still have completed the operation, so reconcile rather than resetting
+its identity. Readers verify blob content before serving it.
+
+During completion, retain physical headroom for one extra payload-sized assembly
+copy plus metadata; concurrent writers may still exhaust the filesystem. A
+space or flush error retains the last progress generation, and capacity repair
+followed by the same upload retries completion. Private `.myce-write-*` files
+and chunks absent from the manifest grant no resume authority. Abrupt death can
+leave these disposable files using space; with the service stopped, preserve a
+copy before operator cleanup. Never remove files of an active upload.
+
+Legacy interrupted tus uploads have no verified progress checksum. Corrupt
+metadata/chunks and these legacy partials fail closed; completed verified blobs
+are unaffected. Stop the queue and preserve the affected upload's exact
+`uploads/DIGEST`, `uploads/DIGEST.info`, and `uploads/DIGEST.parts` (if present)
+together in an offline archive outside the active store. Do not edit offsets or
+synthesize checksums. After preserving those entries and moving them out of the
+active store, restart and re-upload the unchanged source. Preserve the queue
+and store together under the normal backup procedure. If the source no longer
+exists, keep the archive for explicit recovery rather than treating its length
+as accepted progress. No automatic migration invents integrity evidence.
+
+SIGKILL fixtures and torn-temp/name-loss injections live in
+`internal/myce/file_store_fault_test.go`; normal laptop gates include them on
+Darwin and Linux. They model publication order and refusal under lost barriers;
+they do not replace the separately required real power-cut drill in #1179.
+
 ### Stored job file retention
 
 Frozen extension bundle bytes and their snapshotted environment files live in

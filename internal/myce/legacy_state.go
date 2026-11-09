@@ -3,7 +3,6 @@ package myce
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,25 +32,25 @@ func CheckStateRoots(roots ...string) error {
 		if root == "" {
 			continue
 		}
-		f, err := os.Open(root)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		_, err = f.Readdirnames(1)
-		f.Close()
-		if err == io.EOF {
-			continue
-		}
-		if err != nil {
-			return err
-		}
 		marker := filepath.Join(root, FormatMarker)
 		st, err := os.Lstat(marker)
 		if errors.Is(err, os.ErrNotExist) {
-			return legacyState(root)
+			entries, err := os.ReadDir(root)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			for _, entry := range entries {
+				// Interrupted fresh marker writes have only private temporary
+				// names. Never decode them or mistake them for durable state.
+				suffix, own := strings.CutPrefix(entry.Name(), ".myce-write-")
+				if !own || suffix == "" || strings.Trim(suffix, "0123456789") != "" || !entry.Type().IsRegular() {
+					return legacyState(root)
+				}
+			}
+			continue
 		}
 		if err != nil {
 			return err
@@ -73,6 +72,10 @@ func CheckStateRoots(roots ...string) error {
 // PrepareStateRoots writes and fsyncs the format marker before any other state
 // file. The directory sync makes the marker durable before startup proceeds.
 func PrepareStateRoots(roots ...string) error {
+	return prepareStateRoots(durableFileOps{}, roots...)
+}
+
+func prepareStateRoots(ops durableFileOps, roots ...string) error {
 	if err := CheckStateRoots(roots...); err != nil {
 		return err
 	}
@@ -80,29 +83,29 @@ func PrepareStateRoots(roots ...string) error {
 		if root == "" {
 			continue
 		}
-		if err := os.MkdirAll(root, 0700); err != nil {
+		if err := ops.mkdir(root); err != nil {
 			return err
 		}
 		marker := filepath.Join(root, FormatMarker)
-		f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if errors.Is(err, os.ErrExist) {
-			if err = CheckStateRoots(root); err != nil {
+		if _, err := os.Lstat(marker); os.IsNotExist(err) {
+			if err = ops.bytes(marker, []byte(stateFormat)); err != nil {
 				return err
 			}
-			continue
+		} else if err != nil {
+			return err
+		} else if err = CheckStateRoots(root); err != nil {
+			return err
 		}
+		// An earlier attempt may have renamed successfully and then failed its
+		// directory barrier. Verify and repeat the barrier before any state I/O.
+		f, err := os.Open(marker)
 		if err != nil {
 			return err
 		}
-		_, err = f.WriteString(stateFormat)
-		if err == nil {
-			err = f.Sync()
-		}
-		err = errors.Join(err, f.Close())
-		if err != nil {
+		if err = errors.Join(ops.flush(f), f.Close()); err != nil {
 			return err
 		}
-		if err = syncWorkerDir(root); err != nil {
+		if err = ops.directory(root); err != nil {
 			return err
 		}
 	}

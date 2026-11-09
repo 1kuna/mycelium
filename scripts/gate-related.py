@@ -55,6 +55,14 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/xe_activity_other.go'] = (
     'xe_activity_linux_test.go', 'device_telemetry_test.go', 'discrete_fanout_sharing_test.go')
 
 
+# Shared atomic-file primitives and the tus datastore are exercised through real
+# HTTP, subprocess-death and lost-barrier fixtures rather than filename twins.
+for source in ('durable_files', 'durable_files_darwin', 'durable_files_other',
+               'upload_durable'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
+        'file_store_fault_test.go',)
+
+
 def changed_symbols(diff):
     symbols = set()
     for receiver, method in re.findall(

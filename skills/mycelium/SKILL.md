@@ -97,6 +97,15 @@ Save the receipt's job ID and key. Changed intent needs a new key; a lost reply,
 original command/key and receipt. Keep frozen inputs and the original notifier
 binding when one was supplied. See [recovery](advanced.md#wait-and-check-status).
 
+On releases with the #1179 file-store durability fix, interrupted uploads resume
+only from a checksummed, verified chunk generation. Keep the unchanged source
+and retry the same upload; a complete generation can finish publication during
+HEAD reconciliation. A legacy-partial or integrity refusal needs the queue
+owner's [offline recovery](../../docs/operations.md#file-store-crash-recovery),
+not an edited offset or an automatic reset. Completed verified blobs are
+compatible. Completion temporarily needs one extra payload-sized assembly copy.
+
+
 Replace JOB_ID with that receipt's ID. No notifier or harness setup is needed:
 
 ```sh
