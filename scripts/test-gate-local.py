@@ -1010,15 +1010,22 @@ sys.exit(m.main())
         self.assertIn('pressure', measurement.memory.refusal(before, dict(warning, pressure_level=4)))
 
     def test_missing_memory_observation_does_not_stop_payload(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            with (patch.object(measurement.subprocess, 'check_output', return_value=str(root)),
-                  patch.object(measurement, 'cache_bytes', return_value=0),
-                  patch.object(measurement, 'tree_rss', return_value=1),
-                  patch.object(measurement.memory, 'snapshot', side_effect=subprocess.TimeoutExpired(['ps'], 5))):
-                self.assertEqual(measurement.measure([sys.executable, '-c', 'import time; time.sleep(.1)'],
-                    root / 'metrics', 'quick', 'test', phase='host'), 0)
-            self.assertFalse(json.loads((root / 'metrics').read_text())['refusal'])
+        for initial_failure in (True, False):
+            with self.subTest(initial_failure=initial_failure), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                timeout = subprocess.TimeoutExpired(['ps'], 5)
+                before = dict(pressure_level=1, swapouts=52)
+                observations = timeout if initial_failure else [before, timeout]
+                with (patch.object(measurement.subprocess, 'check_output', return_value=str(root)),
+                      patch.object(measurement, 'cache_bytes', return_value=0),
+                      patch.object(measurement, 'tree_rss', return_value=1),
+                      patch.object(measurement.memory, 'idle_baseline', return_value=None),
+                      patch.object(measurement.memory, 'snapshot', side_effect=observations)):
+                    self.assertEqual(measurement.measure([sys.executable, '-c', 'import time; time.sleep(.7)'],
+                        root / 'metrics', 'quick', 'test', phase='host'), 0)
+                row = json.loads((root / 'metrics').read_text())
+                self.assertFalse(row['refusal'])
+                self.assertTrue(any('memory_observation_warning' in sample for sample in row['samples']))
         guard = measurement.memory.SwapGuard(None)
         self.assertIsNone(guard.check(None))
         self.assertIsNone(guard.check(dict(pressure_level=2, swapouts=1)))
