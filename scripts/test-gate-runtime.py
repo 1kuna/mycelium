@@ -8,6 +8,8 @@ import subprocess
 import socket
 import sys
 import errno
+import contextlib
+import shlex
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -21,6 +23,23 @@ REAL_DAEMON_PROCESS_INVENTORY = runtime.daemon_process_inventory
 
 
 class RuntimeTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def stable_instances(self, table):
+        def arguments(pid):
+            for line in table().splitlines():
+                fields = line.split(None, 2)
+                if int(fields[0]) == pid:
+                    return int(fields[1]), shlex.split(fields[2])
+            return None
+        def birth(pid, *args):
+            row = arguments(pid)
+            if row is None:
+                raise ProcessLookupError(errno.ESRCH, 'gone')
+            return dict(parent=row[0], birth=pid)
+        with patch.object(runtime, 'process_arguments', side_effect=arguments), \
+                patch.object(runtime, 'process_birth', side_effect=birth):
+            yield
+
     def setUp(self):
         self.marker = 'a' * 32
         self.endpoint = 'unix:///fixture/docker.sock'
@@ -186,13 +205,13 @@ class RuntimeTests(unittest.TestCase):
             if pid == 20:
                 evidence.append(dict(pid=pid, guest_sudo_noninteractive=True, status='verified'))
             return identities[pid]
-        with patch.object(runtime.subprocess, 'check_output', return_value=rows), \
+        with self.stable_instances(lambda: rows), patch.object(runtime.subprocess, 'check_output', return_value=rows), \
                 patch.object(runtime, 'process_executable', side_effect=identity):
             with self.assertRaisesRegex(RuntimeError, 'unresolved Docker-API daemon') as failure:
                 REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
             self.assertEqual(failure.exception.runtime_evidence['executable_observations'][0]['pid'], 20)
         rows = '1 0 /sbin/init\n20 1 /usr/bin/dockerd -H ' + self.endpoint + '\n21 20 /usr/bin/containerd\n'
-        with patch.object(runtime.subprocess, 'check_output', return_value=rows), \
+        with self.stable_instances(lambda: rows), patch.object(runtime.subprocess, 'check_output', return_value=rows), \
                 patch.object(runtime, 'process_executable', side_effect=identity):
             proof = REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
             self.assertEqual(proof['runtimes'][0]['endpoints'], [self.endpoint])
@@ -211,7 +230,7 @@ class RuntimeTests(unittest.TestCase):
         identities = {1: '/sbin/init', 20: '/Applications/Docker.app/com.docker.backend',
                       21: '/Applications/Docker.app/com.docker.backend', 30: '/bin/limactl',
                       40: '/usr/bin/dockerd'}
-        with patch.object(runtime.sys, 'platform', 'darwin'), \
+        with self.stable_instances(lambda: rows), patch.object(runtime.sys, 'platform', 'darwin'), \
                 patch.object(runtime, 'process_executable', side_effect=lambda pid, *args: identities[pid]), \
                 patch.object(runtime.subprocess, 'check_output', side_effect=observe), \
                 patch.object(runtime, 'native_socket_paths', return_value={self.endpoint[7:]}):
@@ -230,10 +249,47 @@ class RuntimeTests(unittest.TestCase):
             if args[0] == 'ps':
                 return rows
             return '20' if args[2] == 'docker.service' else self.endpoint[7:] + ' (Stream)'
-        with patch.object(runtime.subprocess, 'check_output', side_effect=socket_activated), \
+        with self.stable_instances(lambda: rows), patch.object(runtime.subprocess, 'check_output', side_effect=socket_activated), \
                 patch.object(runtime, 'process_executable', side_effect=lambda pid, *args: '/sbin/init' if pid == 1 else '/usr/bin/dockerd'):
             proof = REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
             self.assertEqual(proof['runtimes'][0]['endpoints'], [self.endpoint])
+
+    def test_pid_reuse_refreshes_arguments_and_unstable_birth_refuses(self):
+        rows = '1 0 /sbin/init\n20 1 /bin/sleep 300\n'
+        births = iter([10, 11, 11, 11])
+        calls = {20: 0}
+        def birth(pid, *args):
+            return dict(parent=0 if pid == 1 else 1,
+                        birth=1 if pid == 1 else next(births))
+        def arguments(pid):
+            if pid == 1:
+                return 0, ['/sbin/init']
+            calls[20] += 1
+            return (1, ['/bin/sleep', '300']) if calls[20] == 1 else (1, ['engine-alias', '-H', 'unix:///unknown/engine.sock'])
+        with patch.object(runtime.subprocess, 'check_output', return_value=rows), \
+                patch.object(runtime, 'process_birth', side_effect=birth, create=True), \
+                patch.object(runtime, 'process_arguments', side_effect=arguments, create=True), \
+                patch.object(runtime, 'process_executable', side_effect=lambda pid, *args: '/sbin/init' if pid == 1 else '/usr/bin/dockerd'):
+            with self.assertRaisesRegex(RuntimeError, 'unresolved Docker-API daemon') as failure:
+                REAL_DAEMON_PROCESS_INVENTORY({self.endpoint, 'unix:///var/run/docker.sock'})
+            self.assertGreaterEqual(calls[20], 2)
+            self.assertTrue(any(e.get('reason') == 'process or parent birth changed'
+                                for e in failure.exception.runtime_evidence['executable_observations']))
+            births = iter(range(20, 30))
+            with self.assertRaisesRegex(RuntimeError, 'unstable after three'):
+                REAL_DAEMON_PROCESS_INVENTORY({self.endpoint, 'unix:///var/run/docker.sock'})
+        # Stable child identity does not make a reused parent the same
+        # ancestor. Re-observe the child/parent pair together.
+        parents = iter([100, 101, 101, 101])
+        def parent_birth(pid, *args):
+            return dict(parent=0 if pid == 1 else 1,
+                        birth=next(parents) if pid == 1 else 20)
+        with patch.object(runtime, 'process_birth', side_effect=parent_birth), \
+                patch.object(runtime, 'process_arguments', return_value=(1, ['sleep', '300'])), \
+                patch.object(runtime, 'process_executable', return_value='/bin/sleep'):
+            evidence = []
+            self.assertEqual(runtime.observe_process(20, False, evidence)[4], 101)
+            self.assertEqual(evidence[0]['reason'], 'process or parent birth changed')
 
     def test_executable_identity_resolves_a_real_alias(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -247,6 +303,11 @@ class RuntimeTests(unittest.TestCase):
                 self.assertNotEqual(executable, str(alias))
                 # Framework Python can re-exec its app binary after launch.
                 self.assertEqual(executable, runtime.process_executable(os.getpid()))
+                observation = runtime.observe_process(child.pid, False, [])
+                self.assertEqual(observation[0], os.getpid())
+                self.assertEqual(observation[2], executable)
+                self.assertEqual(observation[3], runtime.process_birth(child.pid)['birth'])
+                self.assertEqual(observation[4], runtime.process_birth(os.getpid())['birth'])
             finally:
                 child.communicate('\n', timeout=5)
 

@@ -167,29 +167,138 @@ def native_socket_paths(pids):
     return paths
 
 
+def guest_proc_read(pid, command, path, guest, evidence):
+    if (not guest or not sys.platform.startswith('linux') or
+            command not in ('cat', 'readlink') or
+            path != '/proc/' + str(pid) + ('/stat' if command == 'cat' else '/exe')):
+        raise RuntimeError('guest executable attestation is unavailable')
+    row = dict(pid=pid, operation=command, guest_sudo_noninteractive=True, status='requested')
+    evidence.append(row)
+    try:
+        result = subprocess.check_output(['sudo', '-n', command, path], text=True, timeout=5).strip()
+        row['status'] = 'verified'
+        return result
+    except Exception as error:
+        row['status'] = 'failed'
+        error.guest_attestation_failed = True
+        raise
+
+
+def process_birth(pid, guest=False, evidence=None):
+    evidence = evidence if evidence is not None else []
+    if sys.platform.startswith('linux'):
+        path = '/proc/' + str(pid) + '/stat'
+        try:
+            text = Path(path).read_text()
+        except PermissionError:
+            text = guest_proc_read(pid, 'cat', path, guest, evidence)
+        fields = text[text.rfind(')') + 2:].split()
+        if not text.startswith(str(pid) + ' (') or len(fields) < 20:
+            raise RuntimeError('process birth identity is malformed')
+        return dict(parent=int(fields[1]), birth=int(fields[19]))  # field22.
+    if sys.platform == 'darwin':
+        import ctypes as c
+        lib = c.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+        lib.proc_pidinfo.argtypes = [c.c_int, c.c_int, c.c_uint64, c.c_void_p, c.c_int]
+        # proc_bsdinfo ABI: pbi_pid/ppid at12/16, start sec/usec at120/128.
+        info = c.create_string_buffer(136)
+        if lib.proc_pidinfo(pid, 3, 0, info, 136) != 136:
+            error = c.get_errno()
+            if error != errno.EPERM:
+                raise OSError(error, 'process birth identity unavailable')
+            # KERN_PROC_PID exports the same microsecond birth time to ps
+            # without libproc's cross-UID restriction. Public 64-bit
+            # kinfo_proc ABI: sizeof=648, timeval=0, pid=40, e_ppid=560.
+            if c.sizeof(c.c_void_p) != 8:
+                raise RuntimeError('process birth sysctl ABI unsupported')
+            system = c.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+            system.sysctl.argtypes = [c.POINTER(c.c_int), c.c_uint, c.c_void_p,
+                                      c.POINTER(c.c_size_t), c.c_void_p, c.c_size_t]
+            mib = (c.c_int * 4)(1, 14, 1, pid)  # CTL_KERN/KERN_PROC/PID.
+            record, size = c.create_string_buffer(648), c.c_size_t(648)
+            if system.sysctl(mib, 4, record, c.byref(size), None, 0) != 0:
+                raise OSError(c.get_errno(), 'process birth sysctl unavailable')
+            if size.value == 0:
+                raise ProcessLookupError(errno.ESRCH, 'process absent from sysctl')
+            if size.value != 648 or int.from_bytes(record.raw[40:44], sys.byteorder) != pid:
+                raise RuntimeError('process birth sysctl record malformed')
+            evidence.append(dict(pid=pid, birth_source='unprivileged KERN_PROC_PID'))
+            return dict(parent=int.from_bytes(record.raw[560:564], sys.byteorder),
+                        birth=[int.from_bytes(record.raw[:8], sys.byteorder),
+                               int.from_bytes(record.raw[8:12], sys.byteorder)])
+        number = lambda offset, size: int.from_bytes(info.raw[offset:offset + size], sys.byteorder)
+        if number(12, 4) != pid:
+            raise RuntimeError('process birth PID changed')
+        return dict(parent=number(16, 4), birth=[number(120, 8), number(128, 8)])
+    raise RuntimeError('process birth identity unsupported')
+
+
+def process_arguments(pid):
+    if sys.platform.startswith('linux'):
+        try:
+            # ps prints a display string, not shell-escaped argv. In
+            # particular a Python -c argument can contain unmatched quotes.
+            # procfs preserves the actual argument boundaries.
+            parent = process_birth(pid)['parent']
+            raw = Path('/proc/' + str(pid) + '/cmdline').read_bytes()
+            if raw and not raw.endswith(b'\0'):
+                raise RuntimeError('process argument inventory malformed')
+            return parent, [os.fsdecode(arg) for arg in raw.split(b'\0')[:-1]]
+        except FileNotFoundError:
+            absence = subprocess.run(['ps', '-p', str(pid), '-o', 'pid='],
+                                     capture_output=True, text=True, timeout=5)
+            if absence.returncode == 1 and not absence.stdout.strip():
+                return None
+            raise RuntimeError('live process argument inventory unavailable')
+    result = subprocess.run(['ps', '-ww', '-p', str(pid), '-o', 'ppid=,args='],
+                            capture_output=True, text=True, timeout=5)
+    if result.returncode == 1 and not result.stdout.strip():
+        return None
+    lines = result.stdout.strip().splitlines()
+    if result.returncode or len(lines) != 1:
+        raise RuntimeError('fresh process argument inventory incomplete')
+    fields = lines[0].split(None, 1)
+    if len(fields) != 2:
+        raise RuntimeError('fresh process arguments malformed')
+    return int(fields[0]), shlex.split(fields[1])
+
+
+def observe_process(pid, guest, evidence):
+    for attempt in range(3):
+        try:
+            before = process_birth(pid, guest, evidence)
+            parent = process_birth(before['parent'], guest, evidence) if before['parent'] else None
+            args = process_arguments(pid)
+            if args is None:
+                evidence.append(dict(pid=pid, excluded='positive PID absence on re-observation'))
+                return None
+            executable = process_executable(pid, guest, evidence)
+            after = process_birth(pid, guest, evidence)
+            parent_after = process_birth(before['parent'], guest, evidence) if before['parent'] else None
+            if before == after and parent == parent_after and args[0] == before['parent']:
+                return (args[0], args[1], executable, before['birth'], parent['birth'] if parent else None)
+            evidence.append(dict(pid=pid, reobserve=attempt + 1, reason='process or parent birth changed'))
+        except OSError as error:
+            if error.errno not in (errno.ESRCH, errno.ENOENT) or getattr(error, 'guest_attestation_failed', False):
+                raise
+            # A vanished PID gets a fresh observation, never stale argv.
+            if process_arguments(pid) is None:
+                evidence.append(dict(pid=pid, excluded='positive PID absence on re-observation'))
+                return None
+            evidence.append(dict(pid=pid, reobserve=attempt + 1, reason='process changed during observation'))
+    raise RuntimeError('process birth identity remained unstable after three observations')
+
+
 def process_executable(pid, guest=False, evidence=None):
     """Kernel executable identity, never argv[0] (which can be an alias)."""
     evidence = evidence if evidence is not None else []
-    def guest_read(command, path):
-        if not guest or not sys.platform.startswith('linux'):
-            raise RuntimeError('guest executable attestation is unavailable')
-        row = dict(pid=pid, operation=command, guest_sudo_noninteractive=True, status='requested')
-        evidence.append(row)
-        try:
-            result = subprocess.check_output(['sudo', '-n', command, path], text=True, timeout=5).strip()
-            row['status'] = 'verified'
-            return result
-        except Exception as error:
-            row['status'] = 'failed'
-            error.guest_attestation_failed = True
-            raise
     try:
         if sys.platform.startswith('linux'):
             path = '/proc/' + str(pid)
             try:
                 record = Path(path + '/stat').read_text()
             except PermissionError:
-                record = guest_read('cat', path + '/stat')
+                record = guest_proc_read(pid, 'cat', path + '/stat', guest, evidence)
             fields = record[record.rfind(')') + 2:].split()
             if not record.startswith(str(pid) + ' (') or len(fields) < 7:
                 raise RuntimeError('process stat identity is malformed')
@@ -200,7 +309,7 @@ def process_executable(pid, guest=False, evidence=None):
             try:
                 executable = os.readlink(path + '/exe')
             except PermissionError:
-                executable = guest_read('readlink', path + '/exe')
+                executable = guest_proc_read(pid, 'readlink', path + '/exe', guest, evidence)
             if executable.endswith(' (deleted)'):
                 executable = executable[:-10]
         elif sys.platform == 'darwin':
@@ -261,16 +370,38 @@ def _daemon_process_inventory(endpoints, guest, executable_evidence):
         if len(fields) != 3:
             raise RuntimeError('Docker daemon process inventory incomplete')
         pid = int(fields[0])
-        executable = process_executable(pid, guest, executable_evidence)
-        rows[pid] = (int(fields[1]), shlex.split(fields[2]), executable)
+        if pid <= 0 or pid in rows:
+            raise RuntimeError('Docker process PID inventory malformed')
+        observation = observe_process(pid, guest, executable_evidence)
+        if observation is not None:
+            rows[pid] = observation
+    # A parent reused between different PID observations must not connect two
+    # unrelated instances into one runtime group. Re-observe both ends, bounded.
+    for attempt in range(4):
+        mismatches = [pid for pid, row in rows.items() if row[0] and
+                      (row[0] not in rows or rows[row[0]][3] != row[4])]
+        if not mismatches:
+            break
+        if attempt == 3:
+            raise RuntimeError('Docker parent birth linkage remained unstable')
+        for pid in mismatches:
+            if pid not in rows:
+                continue
+            for candidate in (pid, rows[pid][0]):
+                observation = observe_process(candidate, guest, executable_evidence)
+                if observation is None:
+                    rows.pop(candidate, None)
+                else:
+                    rows[candidate] = observation
     known = {os.path.realpath(e[7:]): e for e in endpoints if e.startswith('unix://')}
     proof, covered, lima = [], set(), None
     def require(pid, kind, candidates, **extra):
         candidates = set(candidates)
         if not candidates or not candidates <= set(endpoints):
             raise RuntimeError('unresolved Docker-API daemon process: ' + str(pid) + ' (' + kind + ')')
-        proof.append(dict(pid=pid, kind=kind, endpoints=sorted(candidates), **extra))
-    for pid, (parent, argv, executable) in rows.items():
+        proof.append(dict(pid=pid, kind=kind, endpoints=sorted(candidates),
+                          birth=rows[pid][3], parent_birth=rows[pid][4], **extra))
+    for pid, (parent, argv, executable, birth, parent_birth) in rows.items():
         if not argv or executable is None or pid in covered:
             continue
         name = Path(executable).name.lower()

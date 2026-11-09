@@ -244,6 +244,16 @@ Classification uses each process's real executable identity, resolved through
 `proc_pidpath` on Darwin and `/proc/PID/exe` on Linux, including parent/child
 checks. An argv basename or symlink alias is never executable proof. Unresolved
 identities refuse; Darwin retains only the reviewed sealed-system EPERM rule.
+The process instance is bound by its birth identity before and after reading
+fresh arguments and the executable, rather than combining a `ps` snapshot's
+arguments with a later PID lookup. Darwin uses `PROC_PIDTBSDINFO` start seconds
+and microseconds; where libproc denies cross-UID access, the unprivileged
+`KERN_PROC_PID` sysctl supplies the same timeval. Linux uses `/proc/PID/stat`
+field22. Parent/child links also require the same captured parent birth.
+Changed or vanished instances are re-observed, with refusal after three
+unstable observations; a failed birth lookup for a still-live PID refuses.
+The unprivileged sysctl route is an orchestrator implementation default
+(2026-11-09), not an expansion of the protected-process exclusion.
 A process that exits after the snapshot may be omitted only after a new `ps`
 positively confirms that PID is absent; an unresolvable live process still refuses.
 `dockerd` hosts and daemon configuration must all resolve to inventoried endpoints;

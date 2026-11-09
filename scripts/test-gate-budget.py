@@ -31,7 +31,13 @@ class GateBudgetTests(unittest.TestCase):
         self.addCleanup(mock.stop)
         # Path.home() mocks stay in this process; fixture subprocesses must
         # also use the private coordinator and never inherit a real gate lane.
-        environment = patch.dict(os.environ, HOME=home.name)
+        fixture_environment = {name: value for name, value in os.environ.items()
+                               if not name.startswith(('GATE_', 'MYCE_', 'DOCKER_', 'XDG_'))}
+        fixture_environment.update(HOME=home.name, USERPROFILE=home.name,
+                                   XDG_CONFIG_HOME=home.name + '/.config',
+                                   XDG_CACHE_HOME=home.name + '/.cache',
+                                   XDG_DATA_HOME=home.name + '/.local/share')
+        environment = patch.dict(os.environ, fixture_environment, clear=True)
         environment.start()
         self.addCleanup(environment.stop)
         fakebin = Path(home.name) / 'bin'
@@ -40,10 +46,6 @@ class GateBudgetTests(unittest.TestCase):
         docker.write_text('#!/bin/sh\nif [ "$1:$2" = context:inspect ]; then printf \'"unix:///var/run/docker.sock"\\n\';\nelif [ "$1:$2" = context:ls ]; then printf \'"default"\\n\';\nelif [ "$3" = info ]; then printf \'"fixture-daemon"\\n\'; fi\n')
         docker.chmod(0o755)
         os.environ['PATH'] = str(fakebin) + os.pathsep + os.environ['PATH']
-        for name in ('GATE_LOCAL_SLOT', 'GATE_LOCAL_SLOT_ID', 'MYCE_GATE_BUDGET',
-                     'GATE_SCRATCH', 'GATE_RUN_ID', 'GATE_CLEANUP_ID',
-                     'GATE_CLEANUP_RECEIPT', 'GATE_EXECUTION_CUSTODY', 'GATE_CUSTODY_ID', 'GATE_RUNTIME_DIR'):
-            os.environ.pop(name, None)
 
     def test_native_only_full_obeys_resource_group_but_fleet_remains_background(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -592,6 +594,12 @@ with patch.object(subprocess.Popen, 'wait', wait):
             shutil.copyfile(scripts / "gate-handles.py", root / "scripts/gate-handles.py")
             shutil.copyfile(scripts / "gate-runtime.py", root / "scripts/gate-runtime.py")
             shutil.copyfile(scripts / "test-gate-progress.py", root / "scripts/test-gate-progress.py")
+            # This fixture exercises shell/budget termination, not nested
+            # regression suites. Their real child-process timing consumes the
+            # readiness/cleanup deadline before the fake build is reached.
+            # The suites run independently in the gate and validation batch.
+            for name in ("test-gate-progress.py", "test-gate-scheduler.py"):
+                (root / "scripts" / name).write_text('# isolated termination fixture\n')
             (root / "scripts/gate-related.py").write_text("")
             go = root / "bin/go"
             go.write_text(f'''#!{sys.executable}
