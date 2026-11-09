@@ -19,12 +19,14 @@ type LaunchCapacityWait struct {
 const launchCapacityWaitReason = "waiting for launch capacity"
 
 func launchCapacityRefusal(r Result) bool {
-	if e := safeExecutionEvidence(r.ExecutionEvidence, r.Attempt); e != nil && e.Main != executionNotStarted {
+	e := safeExecutionEvidence(r.ExecutionEvidence, r.Attempt)
+	if e != nil && e.Main != executionNotStarted {
 		return false
 	}
 	c := r.ExecutionCause
 	return !r.Success && !r.OutOfMemory && r.Interrupted && c != nil &&
-		c.Operation == "launch" && c.Class == "resource_limit" && c.Predicate == "memory_capacity"
+		c.Operation == "launch" && c.Predicate == "memory_capacity" &&
+		(c.Class == "resource_limit" || c.Class == "io_error" && e != nil && e.Main == executionNotStarted)
 }
 
 // Only capacity values and exact competing custody identities participate.

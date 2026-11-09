@@ -260,6 +260,57 @@ func TestProductionAdmissionCachedPreparationAndQueuedDemand(t *testing.T) {
 	}
 }
 
+func TestProductionAdmissionParityDoesNotBlockOtherProjectPreparation(t *testing.T) {
+	for _, approved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("approved=%t", approved), func(t *testing.T) {
+			q, _, _, target, production, experiment := productionAdmissionFixture(t)
+			production.AllowedMachines, production.FanOut = []string{target.ID}, nil
+			experiment.Project = "another"
+			policy := q.PriorityPolicy()
+			policy.Policy.Hosts = map[string]HostPolicy{hostID(&target): {ProductionHold: false}}
+			hosts := []string{}
+			if approved {
+				hosts = []string{hostID(&target)}
+			}
+			project := policy.Policy.Projects[production.Project]
+			project.ProductionParityHosts = map[string][]string{production.workType(): hosts}
+			policy.Policy.Projects[production.Project] = project
+			policy.Policy.Projects[experiment.Project] = ProjectPolicy{Weight: 1}
+			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
+				t.Fatal(err)
+			}
+			demand := submit(t, q, production)
+			job := submit(t, q, experiment)
+			reason := runtimeJob(t, q, job.ID).Reason
+			reply := check(t, q, target, nil)
+			if q.held(hostID(&target)) {
+				t.Fatal("disabled production hold activated")
+			}
+			if approved {
+				if !strings.Contains(reason, "predictable production demand "+demand.ID+" in ~0s") {
+					t.Fatal("eligible production lost preparation lookahead", reason)
+				}
+				if reply.Job != nil && reply.Job.ID == demand.ID {
+					return
+				}
+				if len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Launch == nil || reply.EnvironmentPlan[0].Launch.Demand != demand.ID {
+					t.Fatal("eligible production lost tier priority", reply.Job)
+				}
+				return
+			}
+			if reply.Job != nil || len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Launch == nil || reply.EnvironmentPlan[0].Launch.Demand != job.ID {
+				t.Fatal("parity-held demand blocked another project's preparation", reason)
+			}
+			if err := q.AuthorizeLaunch(*reply.EnvironmentPlan[0].Launch); err != nil {
+				t.Fatal("parity-held demand refused preparation launch", err)
+			}
+			if got := runtimeJob(t, q, demand.ID); got.State != "queued" || got.Attempt != 0 {
+				t.Fatal("preparation bypassed the production parity hold", got)
+			}
+		})
+	}
+}
+
 func TestProductionAdmissionPreparationPreemptionUsesMeasuredBackoff(t *testing.T) {
 	for _, component := range []bool{false, true} {
 		t.Run(fmt.Sprint("component=", component), func(t *testing.T) {

@@ -1,0 +1,15 @@
+[Unit]
+Description=Optional xe CCS preemption timeout application and readback
+After=systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/myce-xe-preempt-timeout apply
+TimeoutStartSec=12
+TimeoutStopSec=2
+KillMode=control-group
+SendSIGKILL=yes
+UnsetEnvironment=MYCE_TOKEN
+
+[Install]
+WantedBy=multi-user.target

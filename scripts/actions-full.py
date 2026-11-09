@@ -38,13 +38,13 @@ def frozen_profile(text, sha):
     return text
 
 
-def command(*args, timeout=None):
+def command(*args, timeout=None, cwd=None):
     # Authority is reopened from the host's private installed configuration.
     # No GitHub credentials, MYCE_TOKEN, notifier or other caller settings cross
     # into myce or its observers. Never relay raw receipts/errors to public logs.
     env = {key: value for key, value in os.environ.items()
            if key in ('HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'RUNNER_TRACKING_ID')}
-    return subprocess.run(['myce', *args], env=env, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(['myce', *args], env=env, capture_output=True, text=True, timeout=timeout, cwd=cwd)
 
 
 def cleanup(sha, owner):
@@ -95,15 +95,20 @@ def failure_state(job):
 
 
 def run(root, sha, scratch, owner):
+    line = f'Main full source: {sha} (github.sha)'
+    print(line, flush=True)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+            stream.write(line + '\n\n')
     jobs, states, refusals = {}, {}, {}
-    failed = False
+    failed, wait_error = False, False
     # Submit both before waiting. An error on one platform must not skip the other.
     for platform in PLATFORMS:
         name = 'gate-full-darwin' if platform == 'darwin' else 'gate-full'
         profile = (root / f'.mycelium/profiles/{name}.yaml').read_text()
         path = scratch / f'{platform}.yaml'
         path.write_text(frozen_profile(profile, sha))
-        reply = command('run', '--profile', str(path), '--key', submission_key(sha, platform, owner))
+        reply = command('run', '--profile', str(path), '--key', submission_key(sha, platform, owner), cwd=root)
         try:
             receipt = json.loads(reply.stdout)
             job = receipt['job_id']
@@ -122,7 +127,7 @@ def run(root, sha, scratch, owner):
         # The standard CLI waits for every job, including after one fails, and
         # handles reconnects. No model callback, custom polling or wall deadline.
         reply = command('wait', *jobs.values())
-        failed = failed or reply.returncode != 0
+        wait_error = reply.returncode != 0
         for line in reply.stdout.splitlines():
             fields = line.split()
             if len(fields) >= 2 and fields[0] in jobs.values() and fields[1] in TERMINAL:
@@ -153,9 +158,8 @@ def run(root, sha, scratch, owner):
             stream.write('\n'.join(rows) + '\n')
     if refusals:
         print('::error title=CI infrastructure failure::At least one platform submission is unconfirmed; '
-              'no suite result was verified for that platform. Rerun this workflow to recover '
-              'the merge with fresh attempt keys.', flush=True)
-    return int(failed)
+              'no suite result was verified for that platform.', flush=True)
+    return int(failed or wait_error)
 
 
 def main(work_seconds=WORK_SECONDS):
@@ -180,7 +184,7 @@ def main(work_seconds=WORK_SECONDS):
         deadline = float(os.environ.get('MYCELIUM_CI_DEADLINE', time.monotonic() + work_seconds))
         remaining = min(work_seconds, deadline - time.monotonic())
         signal.setitimer(signal.ITIMER_REAL, max(0.001, remaining))
-        # Only generated profiles and verified small result markers live here.
+        # Generated profiles and accepted markers live here.
         with tempfile.TemporaryDirectory(prefix='mycelium-ci-', dir=os.environ['RUNNER_TEMP']) as scratch:
             status = run(root, sha, Path(scratch), owner)
     except SubmitterStopped:
@@ -200,6 +204,6 @@ def main(work_seconds=WORK_SECONDS):
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         print('CI infrastructure unavailable; inspect private runner/queue state', flush=True)
         raise SystemExit(1)

@@ -83,12 +83,12 @@ func TestEnvironmentCPURecipes(t *testing.T) {
 
 func TestEnvironmentCPUWorkerBuildAndExecute(t *testing.T) {
 	fakePixi(t) // Existing offline installer fixture, no package downloads.
-	for _, kind := range []string{"inline-uv", "catalog-pixi"} {
+	for _, kind := range []string{"inline-uv", "catalog-pixi", "inline-pixi"} {
 		t.Run(kind, func(t *testing.T) {
 			q, _ := fixture(t)
 			s := cpuSpec(1, .1)
 			s.Run.Command = []string{"env-check"}
-			if kind == "catalog-pixi" {
+			if kind != "inline-uv" {
 				r := pixiRecipe(t, "cpu-lock")
 				catalogFile := filepath.Join(filepath.Dir(r.LockFile), "catalog.yaml")
 				if err := os.WriteFile(catalogFile, []byte("environments:\n  tools:\n    cpu: {backend: pixi, lock_file: pixi.lock}\n"), 0600); err != nil {
@@ -102,6 +102,9 @@ func TestEnvironmentCPUWorkerBuildAndExecute(t *testing.T) {
 					t.Fatal(err)
 				}
 				s.Environment.Name = "tools"
+				if kind == "inline-pixi" {
+					s.Environment = Environment{Backend: "pixi", LockFile: r.LockFile, Platforms: []string{"cpu"}}
+				}
 				s.Run.Command = []string{"sh", "-c", `test "${PATH%%:*}" = "$CONDA_PREFIX/bin" && test "$MYCE_PLATFORM" = cpu && tool`}
 			} else {
 				lock := filepath.Join(t.TempDir(), "requirements.txt")
@@ -151,7 +154,7 @@ func TestEnvironmentCPUWorkerBuildAndExecute(t *testing.T) {
 			}
 			logs, err := q.Logs(j.ID, 0)
 			want := "cpu-env-ok"
-			if kind == "catalog-pixi" {
+			if kind != "inline-uv" {
 				want = "activated:yes"
 			}
 			if err != nil || !strings.Contains(fmt.Sprint(logs), want) {
