@@ -198,7 +198,7 @@ else: sys.exit(2)
                     script = str(ROOT / 'scripts/actions-full.py')
                     wrapper = ("import importlib.util; "
                                f"s=importlib.util.spec_from_file_location('ci', {script!r}); "
-                               "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                               "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.run_pending=m.run; "
                                f"raise SystemExit(m.main(work_seconds={1 if signum is None else 10}))")
                     process = subprocess.Popen([sys.executable, '-c', wrapper], cwd=ROOT, env=env,
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: read
+  statuses: write
+  pull-requests: read
 
 # Replace superseded pending runs; keep started runs to avoid runner cleanup
 # terminating shared helpers (#919, #1159).
@@ -29,7 +31,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Submit and wait for Darwin and Linux full gates
+          fetch-depth: 0
+      - name: Prove uncovered main trees or report existing full proof
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/actions-full.py
       - name: Cancel any unfinished gates owned by this attempt
         if: always()

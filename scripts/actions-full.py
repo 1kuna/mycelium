@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Lightweight Actions submitter; full suites run through Mycelium only."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -9,6 +10,10 @@ import subprocess
 import sys
 import tempfile
 import time
+
+_spec = importlib.util.spec_from_file_location('actions_proof', Path(__file__).with_name('actions-proof.py'))
+proof = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(proof)
 
 PLATFORMS = ('darwin', 'linux')
 TERMINAL = {'succeeded', 'failed', 'cancelled'}
@@ -158,6 +163,76 @@ def run(root, sha, scratch, owner):
     return int(failed)
 
 
+def active_file(owner):
+    return Path(os.environ['RUNNER_TEMP']) / ('mycelium-ci-active-' + owner.replace(':', '-') + '.json')
+
+
+def active_sha(owner, fallback):
+    path = active_file(owner)
+    if not path.exists():
+        return fallback
+    sha = json.loads(path.read_text())['sha']
+    if not re.fullmatch('[0-9a-f]{40}', sha):
+        raise ValueError('invalid active source')
+    return sha
+
+
+def run_pending(root, sha, scratch, owner):
+    api = proof.GitHub()
+    known = {}
+    failed = False
+    evidence = f'https://github.com/{proof.REPOSITORY}/actions/runs/{owner.split(":")[0]}'
+    for candidate in proof.main_history(sha):
+        tree = proof.git('rev-parse', candidate + '^{tree}')
+        recorded = proof.proof_for_commit(api, candidate, tree)
+        if recorded is None:
+            recorded = known.get(tree)
+        if recorded and recorded['state'] == 'success':
+            proof.report(candidate, tree, 'SKIP: identical tree already passed Darwin and Linux full',
+                         recorded['target_url'])
+            # Copy evidence to this main commit so later runs need not depend on
+            # the PR staying open or its branch remaining present.
+            if recorded.get('source_sha') != candidate:
+                api.publish(candidate, tree, recorded['target_url'])
+            known[tree] = recorded
+            continue
+        if recorded and recorded['state'] == 'failure' and os.environ['GITHUB_RUN_ATTEMPT'] == '1':
+            proof.report(candidate, tree, 'FAIL: previous full failed; explicit rerun required',
+                         recorded['target_url'])
+            # A historical failed tree remains visible without poisoning every
+            # later fixed tree. A repeated current tree still fails this run.
+            failed = failed or candidate == sha
+            known[tree] = recorded
+            continue
+        proof.report(candidate, tree, 'RUN: no matching successful full-tree proof')
+        # Persist before submission: final Actions cleanup must fence this exact
+        # earlier commit too if the workflow was coalesced across several merges.
+        path = active_file(owner)
+        pending = path.with_suffix('.tmp')
+        pending.write_text(json.dumps({'sha': candidate}))
+        pending.replace(path)
+        destination = scratch / candidate
+        destination.mkdir()
+        # The historical tree's profile defines its suite, resources and output
+        # contract. Do not apply the newest checkout's profile to older source.
+        profiles = destination / '.mycelium/profiles'
+        profiles.mkdir(parents=True)
+        for name in ('gate-full-darwin', 'gate-full'):
+            (profiles / (name + '.yaml')).write_text(proof.git(
+                'show', f'{candidate}:.mycelium/profiles/{name}.yaml') + '\n')
+        result = run(destination, candidate, destination, owner)
+        cleaned = cleanup(candidate, owner)
+        if not cleaned:
+            return 1
+        state = 'failure' if result else 'success'
+        api.publish(candidate, tree, evidence, state)
+        recorded = {'state': state, 'target_url': evidence, 'source_sha': candidate}
+        known[tree] = recorded
+        failed = failed or bool(result)
+        proof.report(candidate, tree, 'full ' + state, evidence)
+    return int(failed)
+
+
 def main(work_seconds=WORK_SECONDS):
     sha = os.environ['GITHUB_SHA']
     if not re.fullmatch(r'[0-9a-f]{40}', sha):
@@ -167,7 +242,7 @@ def main(work_seconds=WORK_SECONDS):
         raise ValueError('invalid workflow attempt')
     owner = f'{run_id}:{attempt}'
     if sys.argv[1:] == ['--cleanup-only']:
-        return int(not cleanup(sha, owner))
+        return int(not cleanup(active_sha(owner, sha), owner))
     if sys.argv[1:]:
         raise ValueError('unexpected arguments')
     root = Path.cwd()
@@ -182,7 +257,7 @@ def main(work_seconds=WORK_SECONDS):
         signal.setitimer(signal.ITIMER_REAL, max(0.001, remaining))
         # Only generated profiles and verified small result markers live here.
         with tempfile.TemporaryDirectory(prefix='mycelium-ci-', dir=os.environ['RUNNER_TEMP']) as scratch:
-            status = run(root, sha, Path(scratch), owner)
+            status = run_pending(root, sha, Path(scratch), owner)
     except SubmitterStopped:
         print('CI submitter interrupted or timed out; cancelling owned gates', flush=True)
     finally:
@@ -190,7 +265,7 @@ def main(work_seconds=WORK_SECONDS):
         for sig in watched:
             signal.signal(sig, signal.SIG_IGN)
         try:
-            cleaned = cleanup(sha, owner)
+            cleaned = cleanup(active_sha(owner, sha), owner)
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
