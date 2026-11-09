@@ -147,7 +147,7 @@ inspection or other in-flight projection therefore cannot shed these cheap
 reads behind it. Their response copies still consume the queue's measured
 memory allowance; a cache hit is not an exemption from physical capacity.
 Negotiated default-status reads reuse a published page when its history rows
-fit the peer's page-planning allowance. A miss, expiry or invalidation still
+fit the peer's page-planning allowance. A default-status miss, expiry or invalidation still
 uses control-pressure admission before projection. Legacy scalar wait admission
 and the independent batch-wait index retain their existing behavior.
 Status snapshots do
@@ -155,7 +155,8 @@ not drive start authorization, cancellation or result publication.
 Terminal job commits and their release acknowledgements invalidate the shared
 snapshot immediately. If one commits while status is projecting or waiting for
 usage/file-store I/O, status recaptures before returning, including uncached
-filtered and full views and per-job GET. This can repeat observation work during
+filtered and full views. Per-job GETs follow the committed-capture contract below.
+Status recapture can repeat observation work during
 completions; discarded response allocations are released before retrying rather
 than accumulating as if every discarded generation were still in flight.
 Cold immutable-decode allowances remain charged through the request because
@@ -168,6 +169,7 @@ Every status and inspection response includes additive `freshness` metadata:
 assembled; `age_seconds` is their nonnegative difference; and `cached` says
 whether this request reused a previously completed default-status generation.
 The age includes projection and observation I/O, even for an uncached response.
+The injected read clock is frozen before off-lock projection and observation I/O.
 It excludes JSON encoding and network transfer after assembly. Interpret a
 cached or slow observation at its capture time, including worker freshness.
 Old CLIs continue to decode the existing fields.
@@ -2604,6 +2606,8 @@ observation inputs from an atomically published generation. Cold reads, expired
 responses and fan-out parents do not wait for the live queue transaction mutex.
 An in-flight response completes at its captured generation; later commits
 invalidate subsequent cache lookups instead of repeatedly restarting that read.
+Terminal state and release confirmation come from the same captured generation;
+the next read after an invalidating publication sees the committed update.
 A read is a point-in-time observation, not a fence asserting that no commit
 finished while the response was being built. Elapsed runtime is evaluated with
 the injected read clock. Policy, custody and worker evidence remain from the
