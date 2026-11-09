@@ -50,7 +50,7 @@ and disk saturation incident is mitigated by persistent gate-owned caches,
 automatic idle cache trimming, a 45 GiB entry/42 GiB stop floor and capacity-aware
 admission; preserve other owners' slots. Full admission follows measured CPU/RAM
 (four-core peaks: native 7.01 GiB, Linux/VM 10.57 GiB), workstation headroom and
-the fleet worker's admitted allowance. Use `--exclusive` for isolated local timing; release
+a configured static fleet-worker CPU share. Use `--exclusive` for isolated local timing; release
 builds take priority over ordinary waiters. Details: `docs/development.md`.
 
 Test behavior, security invariants and real incidents; add a focused regression

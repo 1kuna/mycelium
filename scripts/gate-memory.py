@@ -10,7 +10,6 @@ import re
 import subprocess
 import sys
 import time
-import uuid
 from typing import Optional
 
 
@@ -48,83 +47,6 @@ def local_worker_usage() -> Optional[dict]:
         rss_sum_bytes=sum(int(row[2]) * 1024 for row in selected),
         cpu_cores=sum(float(row[3]) / 100 for row in selected),
         accounting='OS process-tree RSS sum and ps averaged CPU; shared pages may repeat')
-
-
-def worker_allowance_from_status(status: dict) -> dict:
-    policy = status['policy']
-    workers = [row['machine'] for row in status['workers']]
-    cores = max([policy.get('cpu_budget_cores') or 0] +
-                [row.get('effective_cpu_cores', 0) for row in workers])
-    budget = policy.get('memory_budget') or {}
-    memory_bytes = max([budget.get('memory_allowance_bytes') or int(budget.get('gib', 0) * 1024 ** 3)] +
-                       [row.get('memory_allowance_bytes', 0) for row in workers])
-    if type(cores) is not int or cores <= 0 or type(memory_bytes) is not int or memory_bytes <= 0:
-        raise ValueError('local fleet worker admitted allowance is unknown')
-    return dict(cpu_cores=cores, memory_bytes=memory_bytes)
-
-
-def cached_worker_allowance(control: Path, worker: Optional[dict]) -> dict:
-    """Local-only preview for readiness; never qualifies fresh admission."""
-    cache_path = control / 'worker-allowance.json'
-    if not cache_path.exists():
-        if worker and worker.get('pid'):
-            raise RuntimeError('local worker allowance requires supported host-status qualification')
-        return dict(cpu_cores=0, memory_bytes=0, allowance_stale=False,
-                    refresh_status='no_installed_worker')
-    cached = json.loads(cache_path.read_text())
-    status = json.loads(evidence_bytes(cached['evidence']))
-    allowance = worker_allowance_from_status(status)
-    if allowance != {key: cached[key] for key in ('cpu_cores', 'memory_bytes')}:
-        raise ValueError('cached worker allowance does not match supported status evidence')
-    return dict(cached, allowance_stale=True, refresh_status='cached_candidate')
-
-
-def local_worker_allowance(control: Path, worker: Optional[dict]) -> dict:
-    """Read once when eligible, outside the FIFO lock; cache only for fallback.
-
-    The caller rechecks queue/ledger identity before granting. Queue-owned
-    policy can change without process/config changes. Failure reserves the last
-    full allowance, explicitly stale, retaining local availability under MY-37.
-    """
-    cached = cached_worker_allowance(control, worker)
-    if 'host' not in cached:
-        return cached
-    cache_path = control / 'worker-allowance.json'
-    pid = (worker or {}).get('pid')
-    identity = None
-    if pid:
-        result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat=,lstart='],
-                                capture_output=True, text=True, check=False)
-        fields = result.stdout.strip().split(None, 1)
-        if result.returncode not in (0, 1) or (fields and len(fields) != 2):
-            raise ValueError('local worker process identity is unknown')
-        identity = fields[1].strip() if fields and not fields[0].startswith('Z') else None
-    binding = dict(pid=pid, process_identity=identity)
-    try:
-        # Bound the fleet's effect on starting local work to five seconds;
-        # there is no retry or queue-availability prerequisite for execution.
-        result = subprocess.run(['myce', 'host', 'status', cached['host']],
-            capture_output=True, timeout=5,
-            env={k: v for k, v in os.environ.items() if not k.startswith('MYCE_')})
-        if result.returncode != 0:
-            raise ValueError('supported worker allowance refresh failed')
-        observed = json.loads(result.stdout)
-        if observed['host'] != cached['host']:
-            raise ValueError('worker allowance host identity changed')
-        allowance = worker_allowance_from_status(observed)
-        evidence = control / ('worker-allowance-status-' + uuid.uuid4().hex + '.json')
-        evidence.write_bytes(result.stdout)
-        cached = dict(schema=1, host=cached['host'], **allowance, binding=binding,
-            evidence=dict(path=str(evidence), sha256=hashlib.sha256(result.stdout).hexdigest()))
-    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
-        return dict(cached, allowance_stale=True, refresh_status='allowance_stale',
-                    observed_binding=binding)
-    # Eligible quick requests may read concurrently outside the admission lock.
-    pending = cache_path.with_name(cache_path.name + '.' + uuid.uuid4().hex + '.pending')
-    pending.write_text(json.dumps(cached) + '\n')
-    pending.replace(cache_path)
-    return dict(cached, allowance_stale=False, refresh_status='refreshed_fully_reserved',
-                observed_binding=binding)
 
 
 def snapshot():

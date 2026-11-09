@@ -131,11 +131,10 @@ from their measured per-leg CPU/RAM and live capacity, rather than a fixed full
 count. The four-core qualification observed native peak 7.01 GiB and Linux/VM
 peak 10.57 GiB. With the measured 5.43 GiB host-memory variation reserve, single-run
 gate-memory requirements are 12.45 GiB native and 16.01 GiB Linux. These observations
-are host qualification, not constants for other installations. Admission adds
-the installed fleet worker's full admitted RAM allowance once, even when idle.
-With an 8 GiB worker allowance, first-entry requirements become 20.45 GiB native
-and 24.01 GiB Linux. This deliberately reserves future fleet growth as well as
-the gate; live pressure and swap guards remain active throughout execution.
+are host qualification, not constants for other installations. These requirements
+are checked against live available RAM, which already reflects fleet-worker
+and other background residency. No fleet-worker RAM allowance is added, and no
+worker RSS is subtracted again. Live pressure and swap guards remain active.
 Admission reserves each active run's entire measured peak on top of the new
 run's peak and shared headroom. This conservatively counts current RSS again
 to cover later growth without assuming shared pages are reclaimable. CPU budgets
@@ -147,33 +146,24 @@ new helpers wait for old/unknown execution owners to finish. Protocol guards
 leave only after every admitted run has affirmative cleanup. Active resource
 custody binds the normalized capacity configuration and evidence digest;
 configuration changes refuse new admission until that group has cleaned up.
-The installed local fleet worker can coexist with local gates. Admission records
-its process-tree CPU/RSS from launchd and the OS for observation, but reserves
-its admitted CPU and RAM allowance rather than its current use. Supported
-`myce host status` supplies the current allowance when a full or quick request
-is at the front and otherwise ready to enter, with a five-second read budget to
-bound the fleet's effect on local iteration. The read runs outside the FIFO lock;
-admission then reacquires the lock and rechecks the queue and resource ledger.
-Changed custody or lost capacity invalidates that attempt; a later eligible
-attempt reads again. Waiting itself never polls the queue. A supported drain/budget/resume
-can change this allowance without a worker restart or config rewrite, so process
-identity alone cannot qualify freshness. The cache is fallback only: if the queue
-is unreachable, admission reserves the full last-known allowance and records
-`allowance_stale`, keeping local development independent of fleet availability.
-Each receipt includes the allowance, evidence digest, observed worker identity
-and refresh/staleness outcome. Configuration contents and credentials are never
-read by the gate helpers. Pressure and sustained-swap stops remain live even
-with stale allowance evidence. The CPU
-ledger adds admitted worker cores, declared local lane budgets and the
-host-qualified workstation reserve. The memory ledger adds the full admitted
-worker budget once, without separately subtracting observed worker RSS.
-If an unreachable queue conceals a budget increase, stale CPU reservation can
-overcommit the host and slow work; the orchestrator accepts this outage-fallback
-tradeoff to preserve local availability under MY-37. Live memory-pressure and
-sustained-swap guards remain binding. Installed-worker fleet custody is separate
-from local gate lanes and is never modified by local
-admission. Unknown/local native full custody remains binding; all custody still
-blocks idle cache eviction. Ordinary admission does not require an idle host.
+The installed local fleet worker can coexist with local gates. CPU admission
+adds the static `fleet_worker_cpu_reserve_cores` from private local gate config,
+declared local gate cores and the host-qualified workstation reserve. The
+configured fleet share is 4 cores on the qualified development host, matching
+its admitted worker CPU budget when set. An operator updates this share when
+changing that worker budget; do so after local resource custody has cleaned up,
+under the host admission lock. Drift can overcommit CPU and slow work; the
+orchestrator accepts that tradeoff because CPU overcommit is not a safety hazard.
+Admission performs no fleet status reads, allowance caching or generation fencing.
+There is no queue/network dependency in this path. Receipts record the static
+fleet/workstation CPU shares and available/required/physical RAM. Worker
+process-tree CPU/RSS may be recorded as observations and do not determine demand.
+RAM admission uses measured per-leg requirements against live available memory,
+with normal-pressure waiting and live pressure, sustained-swap and disk stops.
+Installed-worker fleet custody is separate from local gate lanes and is never
+modified by local admission. Unknown/local native full custody remains binding;
+all custody still blocks idle cache eviction. Ordinary admission does not require
+an idle host.
 Swap-baseline calibration excludes local gate lanes, while the fleet worker and
 its current job remain measured background. Record that job and its usage with
 the baseline; do not wait for the fleet worker to become idle.

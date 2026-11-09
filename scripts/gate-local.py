@@ -49,7 +49,7 @@ def execute(path):
     owner = manifest.get('capacity_owner', {})
     identity['admission'] = dict(cores=manifest['cores'], exclusive=owner.get('exclusive', False),
         configuration_sha256=owner.get('admission_config_sha256'),
-        worker_allowance=owner.get('worker_allowance_at_entry'),
+        fleet_worker_cpu_reserve_cores=owner.get('fleet_worker_cpu_reserve_cores'),
         workstation_cpu_reserve_cores=owner.get('workstation_cpu_reserve_cores'))
     runtime = folder / 'runtime.tar'
     sources.runtime_archive(archive, runtime, source, HELPERS)
