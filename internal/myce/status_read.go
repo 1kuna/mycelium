@@ -16,10 +16,17 @@ import (
 
 type jobSnapshotCache struct {
 	hitCost       time.Duration
-	mu            sync.Mutex // Never acquired by a queue writer.
+	mu            sync.Mutex // Completed response metadata only; never held during projection.
+	refresh       sync.Mutex // Never acquired by a queue writer or a cache hit.
 	data          string     // Immutable public JSON; each caller decodes its own copy.
 	expires       time.Time
 	dependsOnJobs bool // q.mu; queued guidance and descendant custody use other jobs.
+}
+
+func (q *Queue) invalidateJobSnapshot(id string) {
+	q.jobSnapshotsMu.Lock()
+	delete(q.jobSnapshots, id)
+	q.jobSnapshotsMu.Unlock()
 }
 
 // Calls are ephemeral rather than persisted job records. Match their existing
@@ -28,13 +35,13 @@ func (q *Queue) invalidateCallSnapshots(old map[string]*ModelCall) {
 	changed := false
 	for id, before := range old {
 		if !reflect.DeepEqual(before, q.calls[id]) {
-			delete(q.jobSnapshots, id)
+			q.invalidateJobSnapshot(id)
 			changed = true
 		}
 	}
 	for id := range q.calls {
 		if old[id] == nil {
-			delete(q.jobSnapshots, id)
+			q.invalidateJobSnapshot(id)
 			changed = true
 		}
 	}
@@ -46,6 +53,8 @@ func (q *Queue) invalidateCallSnapshots(old map[string]*ModelCall) {
 // q.mu is held. Both calls and batch jobs contribute to project caps and
 // pending receipts; unchanged transactions leave their cached views intact.
 func (q *Queue) invalidateDependentSnapshots() {
+	q.jobSnapshotsMu.Lock()
+	defer q.jobSnapshotsMu.Unlock()
 	for id, entry := range q.jobSnapshots {
 		if entry.dependsOnJobs {
 			delete(q.jobSnapshots, id)
@@ -65,10 +74,12 @@ func (c Client) inspectionSnapshot(ctx context.Context) (Snapshot, error) {
 type statusCache struct {
 	hitCost          time.Duration
 	mu               sync.Mutex
+	refresh          sync.Mutex
 	data             string
 	expires          time.Time
 	capturedAt       time.Time
 	generation       uint64
+	historyRows      int
 	terminalRevision atomic.Uint64
 }
 
@@ -114,32 +125,60 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 	}
 	defer finishBudget()
 	contexts = []context.Context{ctx}
+	c := &q.statusCache
+	// Peer capacity is a page-planning allowance, not a reason to rebuild an
+	// otherwise fitting published response on every negotiated request.
+	limit := int(^uint(0) >> 1)
 	if _, negotiated := ctx.Value(peerResponseBudgetKey{}).(int64); negotiated {
-		snapshot, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent"}, ctx)
+		var err error
+		limit, err = q.requestBudgets.pageLimit(ctx, reflect.TypeFor[Job]())
 		if err != nil {
 			return "", err
 		}
-		encoded, err := json.Marshal(snapshot)
-		return string(encoded), err
 	}
-	c := &q.statusCache
-	unlock, err := requestObservationLock(requestContext(contexts), &c.mu)
+	cached := func() (string, bool, error) {
+		c.mu.Lock()
+		revision := c.terminalRevision.Load()
+		data, captured := c.data, c.capturedAt
+		hit := data != "" && c.generation == revision && q.clock.Now().Before(c.expires) && c.historyRows <= limit
+		c.mu.Unlock()
+		if !hit {
+			return "", false, nil
+		}
+		allocation := projectionAllocation(ctx)
+		mark := allocation.held
+		if int64(len(data)) > (allocation.limit-allocation.held)/6 || !allocation.charge(6*int64(len(data))) {
+			return "", true, projectionRefusal(allocation.limit - allocation.held)
+		}
+		started := q.clock.Now()
+		out, err := q.statusJSONFreshness(data, captured, true)
+		if c.terminalRevision.Load() != revision {
+			allocation.rewind(mark)
+			return "", false, nil
+		}
+		c.mu.Lock()
+		c.hitCost = q.clock.Now().Sub(started)
+		c.mu.Unlock()
+		return out, true, err
+	}
+	if data, hit, err := cached(); hit || err != nil {
+		return data, err
+	}
+	if err := admitObservationProjection(ctx); err != nil {
+		return "", err
+	}
+	unlock, err := requestObservationLock(ctx, &c.refresh)
 	if err != nil {
 		return "", err
 	}
 	defer unlock()
+	if data, hit, err := cached(); hit || err != nil {
+		return data, err
+	}
+	allocation := projectionAllocation(ctx)
+	mark := allocation.held
 	for {
 		revision := c.terminalRevision.Load()
-		if c.data != "" && c.generation == revision && q.clock.Now().Before(c.expires) {
-			allocation := projectionAllocation(ctx)
-			if int64(len(c.data)) > (allocation.limit-allocation.held)/6 || !allocation.charge(6*int64(len(c.data))) {
-				return "", projectionRefusal(allocation.limit - allocation.held)
-			}
-			started := q.clock.Now()
-			data, err := q.statusJSONFreshness(c.data, c.capturedAt, true)
-			c.hitCost = q.clock.Now().Sub(started)
-			return data, err
-		}
 		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent"}, contexts...)
 		if err != nil {
 			return "", err
@@ -150,14 +189,23 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 			return "", err
 		}
 		if c.terminalRevision.Load() != revision {
-			if err := requestContext(contexts).Err(); err != nil {
+			allocation.rewind(mark)
+			if err := ctx.Err(); err != nil {
 				return "", err
 			}
 			continue
 		}
+		historyRows := 0
+		for _, j := range s.Jobs {
+			if !mutableJob(j) {
+				historyRows++
+			}
+		}
+		c.mu.Lock()
 		c.data, c.expires, c.generation = string(data), q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(s.Now), c.hitCost)), revision
-		c.capturedAt = s.Now
-		return q.statusJSONFreshness(c.data, c.capturedAt, false)
+		c.capturedAt, c.historyRows = s.Now, historyRows
+		c.mu.Unlock()
+		return q.statusJSONFreshness(string(data), s.Now, false)
 	}
 }
 
@@ -518,70 +566,79 @@ func (q *Queue) findObservationJob(id string) (*Job, error) {
 }
 
 func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error) {
-	resolved, err := q.resolveReadJobID(requestContext(contexts), id)
+	ctx := requestContext(contexts)
+	resolved, err := q.resolveReadJobID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	id = resolved
+	allocation := projectionAllocation(ctx)
+	mark := int64(0)
+	if allocation != nil {
+		mark = allocation.held
+	}
 	for {
-		if err := requestContext(contexts).Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		unlock := requestLock(requestContext(contexts), &q.mu)
-		job, err := q.findObservationJob(id)
-		if err != nil {
-			unlock()
-			return nil, err
-		}
-		key := job.ID
+		q.jobSnapshotsMu.Lock()
 		if q.jobSnapshots == nil {
 			q.jobSnapshots = map[string]*jobSnapshotCache{}
 		}
-		entry := q.jobSnapshots[key]
+		entry := q.jobSnapshots[id]
 		if entry == nil {
-			call := q.calls[key]
-			pendingCall := call != nil && call.Machine == "" && call.Error == ""
-			entry = &jobSnapshotCache{dependsOnJobs: pendingCall || job.State == "queued" || job.FanOut != nil || job.CancelledAt != nil}
-			q.jobSnapshots[key] = entry
+			entry = &jobSnapshotCache{dependsOnJobs: true}
+			q.jobSnapshots[id] = entry
 		}
-		unlock()
+		q.jobSnapshotsMu.Unlock()
 		entry.mu.Lock()
-		unlock = requestLock(requestContext(contexts), &q.mu)
-		valid := q.jobSnapshots[key] == entry
-		now := q.clock.Now()
-		data := entry.data
-		hit := valid && data != "" && now.Before(entry.expires)
-		unlock()
-		if !valid {
-			entry.mu.Unlock()
-			continue
-		}
+		data, hit := entry.data, entry.data != "" && q.clock.Now().Before(entry.expires)
+		entry.mu.Unlock()
 		if !hit {
-			out, captureErr := q.jobSnapshotGeneration(key, contexts...)
-			var encoded []byte
-			if captureErr == nil {
-				encoded, captureErr = json.Marshal(out)
+			if err := admitObservationProjection(ctx); err != nil {
+				return nil, err
 			}
-			unlock = requestLock(requestContext(contexts), &q.mu)
-			valid = q.jobSnapshots[key] == entry
-			if valid && captureErr == nil {
-				data = string(encoded)
-				entry.data, entry.expires = data, q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(now), entry.hitCost))
+			unlock, lockErr := requestObservationLock(ctx, &entry.refresh)
+			if lockErr != nil {
+				return nil, lockErr
 			}
-			unlock()
+			entry.mu.Lock()
+			data, hit = entry.data, entry.data != "" && q.clock.Now().Before(entry.expires)
 			entry.mu.Unlock()
-			if !valid {
-				continue
+			if !hit {
+				now := q.clock.Now()
+				out, captureErr := q.jobSnapshotGeneration(id, contexts...)
+				var encoded []byte
+				if captureErr == nil {
+					encoded, captureErr = json.Marshal(out)
+				}
+				q.jobSnapshotsMu.Lock()
+				valid := q.jobSnapshots[id] == entry
+				if valid && captureErr == nil {
+					entry.dependsOnJobs = out.State == "queued" || out.FanOut != nil || out.CancelledAt != nil
+					entry.mu.Lock()
+					data = string(encoded)
+					entry.data, entry.expires = data, q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(now), entry.hitCost))
+					entry.mu.Unlock()
+				}
+				q.jobSnapshotsMu.Unlock()
+				unlock()
+				if !valid {
+					if allocation != nil {
+						allocation.rewind(mark)
+					}
+					continue
+				}
+				if captureErr != nil {
+					return nil, captureErr
+				}
+			} else {
+				unlock()
 			}
-			if captureErr != nil {
-				return nil, captureErr
-			}
-		} else {
-			entry.mu.Unlock()
 		}
-		if allocation := projectionAllocation(requestContext(contexts)); allocation != nil {
-			// Cached receipts still decode a variable-sized Job and encode a
-			// public reply; keep their capacity charged through the handler.
+		if allocation != nil {
+			// Charge only this response's decode/encoding, never another
+			// request's completed projection or resident source generation.
 			if int64(len(data)) > (allocation.limit-allocation.held)/6 || !allocation.charge(6*int64(len(data))) {
 				return nil, projectionRefusal(allocation.limit - allocation.held)
 			}
@@ -590,10 +647,18 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 				return nil, projectionRefusal(allocation.limit - allocation.held)
 			}
 		}
-
 		started := q.clock.Now()
 		var out Job
 		err = json.Unmarshal([]byte(data), &out)
+		q.jobSnapshotsMu.Lock()
+		valid := q.jobSnapshots[id] == entry
+		q.jobSnapshotsMu.Unlock()
+		if !valid {
+			if allocation != nil {
+				allocation.rewind(mark)
+			}
+			continue
+		}
 		if hit {
 			entry.mu.Lock()
 			entry.hitCost = q.clock.Now().Sub(started)
@@ -643,15 +708,25 @@ func (q *Queue) statusSnapshot(contexts ...context.Context) (Snapshot, error) {
 }
 
 func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
+	ctx, finishBudget, budgetErr := q.requestBudgets.projectionContext(requestContext(contexts))
+	if budgetErr != nil {
+		return Snapshot{}, budgetErr
+	}
+	defer finishBudget()
+	allocation := projectionAllocation(ctx)
+	mark := allocation.held
 	for {
 		revision := q.statusCache.terminalRevision.Load()
-		out, err := q.statusSnapshotGeneration(options, contexts...)
+		out, err := q.statusSnapshotGeneration(options, ctx)
 		if err != nil || q.statusCache.terminalRevision.Load() == revision {
 			return out, err
 		}
 		if err := requestContext(contexts).Err(); err != nil {
 			return Snapshot{}, err
 		}
+		// A terminal fence discarded this response. Its temporary copies are
+		// no longer in flight; do not accumulate them as simultaneous work.
+		allocation.rewind(mark)
 	}
 }
 

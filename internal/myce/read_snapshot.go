@@ -312,11 +312,19 @@ func (q *Queue) publishReadRuntime() {
 	}
 	value := copyObservation(observationState{Calls: q.calls, Unreported: q.unreported})
 	q.readRuntime = &value
+	q.publishedReads.Store(&publishedReadIndex{root: q.readRoot, calls: value.Calls})
 	q.readGeneration = &readGeneration{root: q.readRoot}
 	q.readSamples = make(map[string]map[attemptKey]hostMemorySample, len(q.hostMemorySamples))
 	for id, samples := range q.hostMemorySamples {
 		q.readSamples[id] = maps.Clone(samples)
 	}
+}
+
+// Prefix resolution needs only immutable committed identities. A cache hit
+// must not queue behind the writer merely to resolve the same job again.
+type publishedReadIndex struct {
+	root  *readNode
+	calls map[string]*ModelCall
 }
 
 // A generation materializes the immutable input maps once, off the writer path.
@@ -571,6 +579,17 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 // Prefix resolution walks the immutable key range outside q.mu. Cache/commit
 // fences still recheck the resolved exact ID before publishing a receipt.
 func (q *Queue) resolveReadJobID(ctx context.Context, id string) (string, error) {
+	if index := q.publishedReads.Load(); index != nil {
+		resolved, err := resolveReadIndex(ctx, index.root, index.calls, id)
+		if err == nil {
+			return resolved, nil
+		}
+		// Offline import/test callers can install unpublished jobs. Preserve
+		// that path; ordinary committed IDs never enter the live mutex.
+	}
+	if err := admitObservationProjection(ctx); err != nil {
+		return "", err
+	}
 	unlock, err := requestObservationLock(ctx, &q.mu)
 	if err != nil {
 		return "", err
@@ -586,10 +605,18 @@ func (q *Queue) resolveReadJobID(ctx context.Context, id string) (string, error)
 		return j.ID, nil
 	}
 	unlock()
+	var calls map[string]*ModelCall
+	if runtime != nil {
+		calls = runtime.Calls
+	}
+	return resolveReadIndex(ctx, root, calls, id)
+}
+
+func resolveReadIndex(ctx context.Context, root *readNode, calls map[string]*ModelCall, id string) (string, error) {
 	if readGet(root, "jobs/"+id) != nil {
 		return id, nil
 	}
-	if runtime != nil && runtime.Calls[id] != nil {
+	if calls[id] != nil {
 		return id, nil
 	}
 	var matches []*Job
@@ -611,8 +638,8 @@ func (q *Queue) resolveReadJobID(ctx context.Context, id string) (string, error)
 			}
 		}
 		visit(root)
-		if runtime != nil {
-			for key := range runtime.Calls {
+		if calls != nil {
+			for key := range calls {
 				if strings.HasPrefix(key, id) {
 					matches = append(matches, &Job{ID: key})
 				}

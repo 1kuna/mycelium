@@ -1,9 +1,9 @@
 package myce
 
 import (
+	"context"
 	"math"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -111,11 +111,20 @@ func (l *observationLimit) better(a, b *observationRead) bool {
 }
 
 func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func(), bool) {
+	done, err := l.acquire(r)
+	if err != nil {
+		respond(w, nil, err)
+		return nil, false
+	}
+	return done, true
+}
+
+func (l *observationLimit) acquire(r *http.Request) (func(), error) {
 	route := observationRouteClass(r)
 	// Batch waits use the independent scalar index, never the queue mutex.
 	// Shedding these would push compatible clients back to expensive polling.
 	if route == "" || route == "batch_wait" {
-		return func() {}, true
+		return func() {}, nil
 	}
 	tier, production := l.index.observationPriority("")
 	if id, ok := strings.CutPrefix(r.URL.Path, "/api/jobs/"); ok {
@@ -123,7 +132,7 @@ func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func()
 		tier, production = l.index.observationPriority(id)
 	}
 	if production {
-		return func() {}, true
+		return func() {}, nil
 	}
 	read := &observationRead{route: route, tier: tier, scope: observationScope(route), started: l.clock.Now()}
 	l.mu.Lock()
@@ -141,10 +150,7 @@ func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func()
 		l.mu.Unlock()
 		// Retry-After is integer seconds; round the measured live wait up to
 		// the protocol's smallest positive unit, rather than a refill schedule.
-		seconds := max(int64(1), int64(math.Ceil(delay.Seconds())))
-		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
-		respond(w, nil, &HTTPError{Status: 429, Code: "client_rate_limited", Message: "fleet-wide control pressure; retry observation after Retry-After"})
-		return nil, false
+		return nil, &HTTPError{Status: 429, Code: "client_rate_limited", RetryAfter: max(time.Nanosecond, delay), Message: "fleet-wide control pressure; retry observation after Retry-After"}
 	}
 	read.healthy = !pressure
 	read.epoch = epoch
@@ -161,5 +167,41 @@ func (l *observationLimit) admit(w http.ResponseWriter, r *http.Request) (func()
 			cost.mean += (float64(d) - cost.mean) / float64(cost.samples)
 			l.costs[route] = cost
 		}
-	}, true
+	}, nil
+}
+
+type observationProjectionKey struct{}
+type observationProjection struct {
+	limit    *observationLimit
+	request  *http.Request
+	finish   func()
+	rejected func()
+}
+
+// Completed responses own only decode/encoding allocations and never take
+// q.mu. Apply control-pressure admission when a request actually needs a new
+// projection, so a slow inspector cannot shed an already-published receipt.
+func admitObservationProjection(ctx context.Context) error {
+	p, _ := ctx.Value(observationProjectionKey{}).(*observationProjection)
+	if p == nil || p.finish != nil {
+		return nil
+	}
+	finish, err := p.limit.acquire(p.request)
+	if err != nil {
+		p.rejected()
+		return err
+	}
+	p.finish = finish
+	return nil
+}
+
+func deferredObservationProjection(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if r.URL.Path == "/api/status" && len(r.URL.Query()) == 0 {
+		return true
+	}
+	id, ok := strings.CutPrefix(r.URL.Path, "/api/jobs/")
+	return ok && id != "" && !strings.Contains(id, "/") && r.URL.Query().Get("view") != "wait"
 }
