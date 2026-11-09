@@ -29,6 +29,54 @@ type restartingProfileListener struct {
 	first bool
 }
 
+// Observe the actual transport interruption before allowing the response write.
+// This makes the old expired-write-deadline/close_notify corruption deterministic.
+type shutdownProfileConn struct {
+	net.Conn
+	interrupted chan struct{}
+	once        *sync.Once
+}
+
+func (c *shutdownProfileConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { close(c.interrupted) })
+	return err
+}
+func (c *shutdownProfileConn) SetWriteDeadline(deadline time.Time) error {
+	err := c.Conn.SetWriteDeadline(deadline)
+	if !deadline.IsZero() && !deadline.After(time.Now()) {
+		c.once.Do(func() { close(c.interrupted) })
+	}
+	return err
+}
+
+type shutdownProfileListener struct {
+	net.Listener
+	interrupted chan struct{}
+	once        sync.Once
+}
+
+func (l *shutdownProfileListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &shutdownProfileConn{Conn: c, interrupted: l.interrupted, once: &l.once}, nil
+}
+
+type shutdownProfileResponse struct {
+	http.ResponseWriter
+	queue       *myce.Queue
+	interrupted <-chan struct{}
+}
+
+func (w shutdownProfileResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w shutdownProfileResponse) Write(p []byte) (int, error) {
+	w.queue.BeginShutdown()
+	<-w.interrupted
+	return w.ResponseWriter.Write(p)
+}
+
 func (l *restartingProfileListener) Accept() (net.Conn, error) {
 	for {
 		conn, err := l.Listener.Accept()
@@ -51,20 +99,42 @@ func (l *restartingProfileListener) Accept() (net.Conn, error) {
 }
 
 func TestSharedProfileObserverListenerRestart(t *testing.T) {
-	for _, mode := range []string{"handshake_eof", "wrong_pin"} {
+	for _, mode := range []string{"handshake_eof", "established_shutdown", "wrong_pin"} {
 		t.Run(mode, func(t *testing.T) {
 			clock := &waitClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
 			var mu sync.Mutex
 			var notBefore time.Time
 			requests := 0
+			interrupted := make(chan struct{})
+			names := []string{"first", "second"}
+			var queue *myce.Queue
+			var queueHandler http.Handler
+			if mode == "established_shutdown" {
+				queue = waitOpenQueue(t, filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), clock)
+				queueHandler = (myce.API{Queue: queue, Token: "fixture"}).Handler()
+				for i := range names {
+					job, err := queue.Submit(myce.Spec{Name: names[i], Project: "restart", Class: "experiment", Run: myce.RunSpec{Command: []string{"true"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Any: true}}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					names[i] = job.ID
+				}
+			}
 			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
 				requests++
+				if mode == "established_shutdown" && requests == 1 {
+					// A real accepted queue response is interrupted at its first
+					// write. Subsequent requests model the replacement queue with
+					// the unchanged certificate and current pressure signal.
+					queueHandler.ServeHTTP(shutdownProfileResponse{w, queue, interrupted}, r)
+					return
+				}
 				if mode == "wrong_pin" {
 					t.Error("HTTP credential sent before identity verification")
 				}
-				if requests == 1 {
+				if requests == 1 || mode == "established_shutdown" && requests == 2 {
 					notBefore = clock.Now().Add(7 * time.Second)
 					w.Header().Set("Retry-After", "7")
 					w.WriteHeader(http.StatusServiceUnavailable)
@@ -75,7 +145,10 @@ func TestSharedProfileObserverListenerRestart(t *testing.T) {
 				}
 				adaptiveReply(w, r, "succeeded")
 			}))
-			if mode != "wrong_pin" {
+			if mode == "established_shutdown" {
+				server.Listener = &shutdownProfileListener{Listener: server.Listener, interrupted: interrupted}
+				server.Config.ConnContext = myce.QueueConnectionContext
+			} else if mode != "wrong_pin" {
 				server.Listener = &restartingProfileListener{Listener: server.Listener, alert: mode == "internal_alert"}
 			}
 			server.StartTLS()
@@ -97,7 +170,7 @@ func TestSharedProfileObserverListenerRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 			var dirs []string
-			for _, name := range []string{"first", "second"} {
+			for _, name := range names {
 				dir := adaptiveReceipt(t, root, server.URL, name, time.Time{})
 				dirs = append(dirs, dir)
 				reg := sharedProfileRegistration{Directory: dir, Observer: profileObserver{Queue: server.URL, Joining: joining, Notify: hook}}

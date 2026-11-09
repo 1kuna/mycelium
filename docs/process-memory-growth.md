@@ -55,3 +55,19 @@ grant no resident credit. Queue restart retains both the observed peak and the
 last accepted prediction/identity; cached or older IDs cannot correct it.
 Pre-correction opaque charges remain conservative until exact release. Cold
 probes, declared containment and exact release custody retain their own rules.
+
+## Cold-probe admission and containment (#1116)
+
+A cold CPU probe without fresh complete Started telemetry keeps its full assigned
+admission envelope. The adaptive execution ceiling may be wider so an unknown
+command can grow under the physical-headroom/pressure guard; that containment
+ceiling is not additional reserved demand. Substituting it for an offered residual
+envelope can exceed the host allowance beside existing work and hold startup
+before the first sample. Missing/stale samples grant no resident credit; fresh
+Started observations and exact-release custody retain their existing rules.
+
+Cold probes also retain exact-attempt measured high water across expiry, missing
+reports and queue restart. Fresh complete Started samples can release unused
+offer capacity, but cannot release an observed peak. Cold forecasts remain live
+predictions rather than durable measured floors; a later flat sample can correct
+them. Admission, worker checks and final launch use the same measured floor.
