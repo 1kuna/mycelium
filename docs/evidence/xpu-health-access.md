@@ -38,4 +38,3 @@ manages permissions; it does not mediate or restrict those channel operations.
 A narrower helper that exposes only qualified health queries remains
 unimplemented and unqualified future work. Native rollout must still verify
 the worker-identity temperature evidence and real-fault automatic clearance.
-
