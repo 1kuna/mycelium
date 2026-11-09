@@ -2,11 +2,24 @@ package myce
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"time"
 )
+
+type queueConnectionKey struct{}
+
+// QueueConnectionContext gives shutdown access to the underlying socket. TLS
+// must not send another encrypted record after an interrupted response write.
+func QueueConnectionContext(ctx context.Context, conn net.Conn) context.Context {
+	if secured, ok := conn.(*tls.Conn); ok {
+		conn = secured.NetConn()
+	}
+	return context.WithValue(ctx, queueConnectionKey{}, conn)
+}
 
 func (q *Queue) initShutdown() {
 	q.shutdownOnce.Do(func() {
@@ -29,13 +42,19 @@ func (q *Queue) shutdownRequests(next http.Handler) http.Handler {
 		interrupted := make(chan struct{})
 		stop := context.AfterFunc(q.shutdownContext, func() {
 			defer close(interrupted)
+			// Close the raw socket before waking the handler. An expired TLS
+			// write deadline can discard an encrypted record after advancing its
+			// sequence; tls.Conn.Close then sends close_notify at the next
+			// sequence, causing a genuine bad-record-MAC refusal at the client.
+			if conn, ok := r.Context().Value(queueConnectionKey{}).(net.Conn); ok {
+				_ = conn.Close()
+			} else {
+				// Embedded handlers without QueueConnectionContext can interrupt
+				// reads safely. ShutdownServers owns their bounded write drain.
+				controller := http.NewResponseController(w)
+				_ = controller.SetReadDeadline(time.Now()) // Socket I/O only.
+			}
 			cancel()
-			// Context cancellation alone cannot unblock a request body read or
-			// response write. Transport deadlines interrupt both without a kill.
-			controller := http.NewResponseController(w)
-			now := time.Now() // Socket I/O only; never a scheduling decision.
-			_ = controller.SetReadDeadline(now)
-			_ = controller.SetWriteDeadline(now)
 		})
 		defer func() {
 			if !stop() {

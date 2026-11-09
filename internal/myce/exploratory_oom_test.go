@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -155,8 +156,14 @@ func TestExploratoryOOMColdGuardFinalLaunch(t *testing.T) {
 	if err := rt.checkBatchLaunchMemory(context.Background(), HostLaunch{Machine: m.ID, Session: run.Session, Key: run.ID, Attempt: "1"}); err != nil {
 		t.Fatal("launch charged unexecuted cap", err)
 	}
-	if err := rt.checkHostAdmissionLocked(22.7, true, nil); err == nil {
-		t.Fatal("unknown running neighbor released physical cap")
+	// This attempt has not Started: its offered demand still fits without
+	// charging the wider execution containment as an unknown neighbor's use.
+	offered := hostNeed(&m, run.Spec.Needs.MemoryGB, run.Spec.Needs.HostMemoryGB)
+	if err := rt.checkHostAdmissionLocked(offered, true, nil); err != nil {
+		t.Fatal("unstarted probe exceeded its offered reservation", err)
+	}
+	if err := rt.checkHostAdmissionLocked(math.Nextafter(offered, 0), true, nil); err == nil {
+		t.Fatal("unstarted probe released pending physical demand")
 	}
 }
 

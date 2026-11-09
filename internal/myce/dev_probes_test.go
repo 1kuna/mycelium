@@ -280,11 +280,13 @@ func TestDevProbeRebootResume(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Assert the same snapshot that certified recovery. A later observation can
+		// legitimately expire between worker arrivals under the adaptive cadence.
+		var after HostMaintenanceStatus
 		probeWait(t, ctx, func() bool {
-			s, err := d.Queue.HostMaintenanceStatus("dev-host")
-			return err == nil && s.Healthy && s.Quiescent
+			after, err = d.Queue.HostMaintenanceStatus("dev-host")
+			return err == nil && after.Healthy && after.Quiescent
 		})
-		after, err := d.Queue.HostMaintenanceStatus("dev-host")
 		if err != nil || after.Policy.Mode != "disabled" || len(after.Workers) != 1 || !after.Workers[0].Fresh || after.Workers[0].Machine.Session == before.Workers[0].Machine.Session {
 			t.Fatal("fresh session did not restore disabled host", after, err)
 		}

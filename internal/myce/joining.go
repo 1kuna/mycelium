@@ -398,7 +398,7 @@ func ServeJoining(listener net.Listener, handler http.Handler, identity JoiningI
 	if err != nil {
 		return nil, nil, err
 	}
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ConnContext: QueueConnectionContext}
 	errs := make(chan error, 1)
 	go func() {
 		errs <- server.Serve(tls.NewListener(listener, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}))
