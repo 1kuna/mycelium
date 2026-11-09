@@ -25,13 +25,11 @@ func TestDockerRPCDrainsBufferedOutputWithinLatencyEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &dockerAttempt{dir: root, binary: binary, env: withoutToken(os.Environ()), state: dockerExecution{Endpoint: "fake"}}
-	if _, err := d.callWithTimeout(testWaitTimeout, "inspect"); err != nil {
-		t.Fatal(err)
-	}
-	cadence := d.rpcCadence("inspect")
-	if err := os.Remove(pidFile); err != nil {
-		t.Fatal(err)
-	}
+	// Give the fixture a controlled completed response sample. Learning from
+	// this tiny shell's incidental speed could leave less than await's poll
+	// interval for reap observation and resumed consumption on a fast host.
+	const responseLatency = time.Second
+	d.noteRPCLatency("inspect", responseLatency)
 	entered, resume := make(chan struct{}, 1), make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(resume) })
 	old := queueHostMemorySource
@@ -74,8 +72,9 @@ func TestDockerRPCDrainsBufferedOutputWithinLatencyEnvelope(t *testing.T) {
 	})
 	// The first completed sample has a three-mean allowance (mean + four
 	// half-mean deviations). Two means exceed the old cutoff but fit that
-	// measured allowance; no installation-specific duration is imposed.
-	<-time.After(2 * cadence)
+	// allowance. The controlled one-second sample leaves a full second for
+	// reap observation, timer overshoot and resumed consumption.
+	<-time.After(2 * responseLatency)
 	unblock()
 	<-joined
 	if rpcErr != nil {
