@@ -1431,6 +1431,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		defer func() { q.checkinMemoryIdentities = nil }()
 		m := preparedMachine
 		m.ExternalMemory = nil // Summary is queue-owned, never worker-supplied.
+		m.HostMemoryDerivation = nil
 		// Worker clocks are unrelated to queue time. Translate local proof age
 		// into a queue-owned receipt timestamp; cached observations keep aging.
 		if m.Fleet != nil {
@@ -1658,6 +1659,8 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.maintain()
 		q.guardSharedGPU(&m)
 		defer func() {
+			budget, _ := q.measuredHostMemoryBudget(&m, *q.s.HostMaintenance[hostID(&m)].MemoryBudget)
+			reply.HostMemoryBudget = &budget
 			m.AdmissionReason = q.machineLimitReason(&m)
 			if a := machineAvailability(&m); a != nil && !a.Available {
 				m.AdmissionReason = a.Reason
