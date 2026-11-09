@@ -1320,13 +1320,7 @@ Drain or disable and verify exact release before an authorized uninstall. Inspec
 `myce uninstall --config CONFIG --dry-run` first. The selected service is stopped
 and disabled and role files move to recoverable Trash; preserve active spools,
 checkpoints, archives and data needed by sibling workers. No fleet action is
-implied by these instructions. From the release containing #1159, role uninstall
-retains the independent per-user completion client and supervision while another
-role is installed or shared registrations remain armed. Removing the last role
-with no armed registrations also removes observer supervision and its client.
-Registry/receipt data and diagnostic history remain. A later install restores
-supervision automatically. `myce service observer uninstall` explicitly removes
-supervision and the client; it refuses while registrations are armed.
+implied by these instructions.
 
 ## Convert split workers to one machine worker (M4)
 
@@ -4087,72 +4081,30 @@ use job GET times and the paginated job ledger described in [status](status.md).
 ## Completion observer upgrade and recovery (next release)
 
 Managed observers adopt all armed registrations in their private user registry.
-From the release containing #1159, the installed queue/worker service automatically
-installs and enables per-user completion supervision on startup. Normal installs,
-enrollment and fleet upgrades all enter this path; an existing host acquires it
-when its upgraded service starts, without an extra operator command. Setup
-atomically publishes a byte-identical executable at
-`~/.local/share/mycelium/client/myce` and points supervision at this independent
-per-user client. It survives queue/worker uninstall while another role or armed
-registration still needs it. A subsequent install or upgraded service startup
-refreshes it without downgrading: release ordering follows the existing semver
-upgrade rules, and equal releases must have identical build bytes. Older,
-unordered or reused releases cannot replace a published client. Publication
-compares the complete staged image under the existing startup lock, so concurrent
-role starts cannot reverse that ordering.
-Consumer-only installations can use `myce service observer install`, which
-publishes the invoking CLI into the same durable client slot. Neither path
-requires manual unit/plist setup.
-macOS uses `local.mycelium.observer` in the user's launchd GUI domain;
-Linux uses `myce-observer.service` in the systemd user manager. The manager's
-native restart policy/pacing applies; no Mycelium retry timer is added. Under
-MY-34 the operational basis is the user manager's own crash/spawn-pressure
-admission: repeated broken starts must not consume an unbounded process/CPU
-budget on a shared account. The cost is recovery latency or withheld restart.
-launchd normally throttles respawn to ten seconds; systemd inherits the account's
-start-rate limits and can enter `start-limit-hit` until the operator repairs the
-cause and resets the failed unit. These are OS defaults/policy, not measured
-Mycelium recovery timings or a guarantee of unlimited retries.
-A user manager must be running: macOS requires a
-GUI login, and Linux logout/boot persistence follows the user's existing lingering
-policy. This command does not enable lingering or change account policy.
+From the release containing #1160, caller-started shared owners have their own
+session/process group and start from `/`, so starter exit and process-group
+cleanup do not remove unrelated callers' observation. Their environment is an
+allowlist: HOME/USER/LOGNAME, XDG config/cache/data paths, TLS certificate paths,
+the starter's PATH and locale, and explicit dev/managed-attempt custody markers.
+Runner tracking identities, job-scoped variables, inherited temporary directories,
+unrelated secrets and MYCE_TOKEN are excluded. An allowlist also excludes future
+CI providers' tracking variables without needing a provider-specific denylist.
+Notifier delivery retains its separately saved caller environment with MYCE_TOKEN
+removed; legacy registrations without that snapshot keep the owner's PATH/locale
+fallback. Dev sessions and managed attempts retain their existing cleanup custody.
 
-The shared owner has its own session/process group when spawned by a caller.
-Its environment is an allowlist: HOME/USER/LOGNAME, XDG config/cache/data paths,
-TLS certificate paths, the starter's PATH and locale, and internal observer/custody
-markers. Job-scoped variables, runner tracking identities, inherited temporary
-directories, unrelated secrets and MYCE_TOKEN are excluded. An allowlist covers
-future CI providers without enumerating their tracking variables. Installed
-service startup applies its saved tool PATH before capturing the owner environment.
-Each notifier still uses its registration's saved caller environment with
-MYCE_TOKEN removed. Legacy registrations without that snapshot retain the owner's
-PATH/locale fallback, so notifier dependencies that passed preflight remain usable.
-The service definition starts with `env -i`, and the service re-execs with the
-same clean policy, so user-manager environment cannot reintroduce job tracking.
+There is no automatic supervisor in this release. A dead owner is recovered by
+the next ordinary keyed command, which adopts retained armed registrations.
+[Canonical per-user CLI supervision](https://github.com/1kuna/mycelium/issues/1166)
+is a separate follow-up; this release installs no observer unit/plist, publishes
+no independent client image and adds no observer service install/uninstall path.
+Ordinary startup and cooperative handoff hold startup.lock through socket
+replacement/readiness; old-owner cleanup serializes its identity check and unlink
+under the same lock. Broken owner startup records a bounded
+`observer_start_failed` event in `observer.log` without raw errors or authority.
 
-A supervised owner remains idle when no registrations are armed. On owner death
-the manager relaunches it and it re-adopts durable arms without another caller.
-The lifetime lock still permits exactly one owner. If an on-demand or handed-off
-owner holds that lock, the supervised process waits in the kernel and takes over
-when the lock is released, then acquires startup.lock through socket replacement
-and readiness. This serializes old-owner socket cleanup with replacement startup.
-Service group cleanup preserves cooperative handoff
-children. Dev sessions and managed worker attempts retain session cleanup custody
-and never install a user supervisor.
-
-If the manager is unavailable, installation diagnoses the missing supervision;
-ordinary keyed profile/adapter commands still start an owner when the lifetime
-lock is free. This fallback recovers only on a subsequent keyed command. Run
-`myce service observer install` for the explicit unavailable-manager diagnostic.
-Updating a CLI symlink does not change the image of an existing process.
-Broken owner startup writes a bounded `supervisor_start_failed` event to
-`observer.log` without raw errors or authority. Failures before the executable
-can initialize are retained by systemd's user journal or launchd's private
-`observer-supervisor.log`. Inspect `systemctl --user status myce-observer.service`
-and `journalctl --user -u myce-observer.service`, or
-`launchctl print gui/$(id -u)/local.mycelium.observer`, for native restart admission.
-Repair the cause before `systemctl --user reset-failed myce-observer.service`
-and starting it again; do not treat a suppressed service as healthy observation.
+An ordinary keyed profile/adapter command starts one when the lifetime lock is
+free. Updating a CLI symlink does not change the image of an existing process.
 Supporting newer clients write a versioned upgrade request when arming or
 adopting a receipt. The owner verifies the requesting image and handles it
 between deliveries: it cancels and joins outstanding authority readers, releases
@@ -4181,13 +4133,7 @@ Terminal-detail requests survive those pressure passes and resume before another
 batch read, so learning a terminal state cannot repeatedly consume the credit
 needed to retrieve its result reference.
 
-A legacy owner has neither upgrade support nor diagnostics. Before deliberate
-recovery of a supervised owner, its operator must stop the supervisor through
-`launchctl bootout gui/$(id -u)/local.mycelium.observer` or
-`systemctl --user stop myce-observer.service`; otherwise it will restart the owner
-or take over the lifetime lock. Preserve the definition and restore it after
-recovery with `myce service observer install` (Linux: `systemctl --user start
-myce-observer.service` if already enabled). Recovery of a shared
+A legacy owner has neither upgrade support nor diagnostics. Recovery of a shared
 owner requires the owner's authorization and consideration of the wake volume:
 
 1. Refresh the private receipt/registration snapshot and process identities.

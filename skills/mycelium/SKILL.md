@@ -128,20 +128,12 @@ owner to verify identity before same-key replay.
 For detached completion, bind a notifier to your own thread with
 [T3 binding](t3-binding.md). Supporting clients expose local observer diagnostics
 through `myce wait --observer-status`; a PID/lock proves ownership, not delivery.
-From the release containing #1159, normal install/enrollment and upgraded service
-startup automatically enable per-user launchd/systemd completion supervision.
-Consumer-only installs use `myce service observer install`. Both paths publish
-an independent per-user client. Role uninstall retains it and supervision while
-another role is installed or registrations remain armed. Removing the last idle
-role also removes supervision/client; reinstall restores them. Older role
-restarts cannot downgrade the client. `myce service observer uninstall` explicitly
-removes supervision/client and refuses while registrations are armed; receipt
-and registry data remain.
-A dead shared owner then restarts and adopts armed registrations without another
-keyed command.
-Without an available user manager, the installer reports on-demand fallback:
-the next keyed command recovers a dead owner. Managed attempts/dev sessions keep
-their own cleanup custody. See [supervision and recovery](../../docs/operations.md#completion-observer-upgrade-and-recovery-next-release).
+From the release containing #1160, shared owners use their own session and a
+clean allowlist environment, excluding runner/job tracking and MYCE_TOKEN while
+preserving PATH/locale for legacy notifiers. Managed attempts/dev sessions keep
+their existing cleanup custody. A dead owner still recovers on the next keyed
+command; automatic supervision is deferred to [#1166](https://github.com/1kuna/mycelium/issues/1166).
+See [upgrade and recovery](../../docs/operations.md#completion-observer-upgrade-and-recovery-next-release).
 Legacy or stalled shared-observer recovery belongs to its operator. Keep stable
 receipts and delivery IDs; do not kill a shared observer or edit its registry.
 

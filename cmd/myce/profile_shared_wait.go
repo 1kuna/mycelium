@@ -161,7 +161,14 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 	defer lock.Close()
 	ready := os.NewFile(4, "ready")
 	defer ready.Close()
-	return serveSharedProfiles(ctx, root, lock, func() error { _, err := ready.Write([]byte{1}); return err })
+	err := serveSharedProfiles(ctx, root, lock, func() error { _, err := ready.Write([]byte{1}); return err })
+	if err != nil && ctx.Err() == nil {
+		_ = (&observerLogWriter{root: root}).event(struct {
+			At    time.Time `json:"at"`
+			Event string    `json:"event"`
+		}{time.Now(), "observer_start_failed"})
+	}
+	return err
 }
 
 func serveSharedProfiles(ctx context.Context, root string, lock *os.File, ready func() error) error {
@@ -463,7 +470,7 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 				}
 			}
 		}
-		if len(watches) == 0 && os.Getenv("MYCE_SUPERVISED_OBSERVER") != "1" {
+		if len(watches) == 0 {
 			// Serialize idle exit with registration/startup. Release the lifetime lock
 			// while holding startup.lock so a submission cannot mistake an exiting
 			// process for its observer.
@@ -480,21 +487,6 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 		}
 
 		diagnostics.update(func(state *observerDiagnostic) { state.Registrations = len(watches) })
-		if len(watches) == 0 && os.Getenv("MYCE_SUPERVISED_OBSERVER") == "1" {
-			quiesce()
-			groups = map[string]*sharedProfileGroup{}
-			if err := diagnostics.record("idle", "", nil, false); err != nil {
-				return err
-			}
-			// An installed service has no idle-exit/restart loop and no idle poll.
-			// Registration and upgrade writers both wake this existing socket.
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-wake:
-				continue
-			}
-		}
 		byAuthority := map[string][]string{}
 		for entry, w := range watches {
 			if w.finishing {

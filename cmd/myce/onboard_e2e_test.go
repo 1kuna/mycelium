@@ -52,26 +52,6 @@ if test "$(basename "$0")" = codesign; then
   esac
   exit
 fi
-# The observer is a separate per-user service, not another worker. These
-# fixtures record manager admission without installing a native user service.
-if test "$(basename "$0")" = launchctl; then
-  case "$*" in
-    *local.mycelium.observer*)
-      case "$1" in
-        print) test -f "$HOME/fake-observer.enabled" || exit 113;;
-        bootstrap) touch "$HOME/fake-observer.enabled"; echo start >> "$HOME/fake-observer.log";;
-        *) exit 99;;
-      esac
-      exit;;
-  esac
-  if test "$1" = print && test "$2" = "gui/$(id -u)"; then exit; fi
-fi
-if test "$(basename "$0")" = systemctl; then
-  case "$*" in
-    '--user show-environment') exit;;
-    '--user enable --now myce-observer.service') touch "$HOME/fake-observer.enabled"; echo start >> "$HOME/fake-observer.log"; exit;;
-  esac
-fi
 base="$HOME/.local/share/mycelium/worker"
 pidfile="$HOME/fake-manager.pid"
 start() {
@@ -287,7 +267,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 		cmd := exec.CommandContext(ctx, "sh", "-c", script)
 		for _, entry := range os.Environ() {
 			k, _, _ := strings.Cut(entry, "=")
-			if k != "HOME" && k != "PATH" && k != "MYCE_TOKEN" && k != "MYCE_QUEUE" && k != "MYCE_JOINING_FILE" && k != "CURL_CA_BUNDLE" && k != "MYCE_PROCESS_SESSION" && k != "MYCE_DEV_SESSION_ROOT" && !strings.HasPrefix(k, "XDG_") {
+			if k != "HOME" && k != "PATH" && k != "MYCE_TOKEN" && k != "MYCE_QUEUE" && k != "MYCE_JOINING_FILE" && k != "CURL_CA_BUNDLE" {
 				cmd.Env = append(cmd.Env, entry)
 			}
 		}
@@ -321,9 +301,6 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	output := runCommand(command, host, true)
 	if !strings.Contains(output, " · ready · ") || !strings.Contains(output, "CPU ") || !strings.Contains(output, "RAM ") || rangeCount.Load() == 0 {
 		t.Fatal("missing ready/capabilities/resume", output)
-	}
-	if _, err := os.Stat(filepath.Join(host, "fake-observer.enabled")); err != nil {
-		t.Fatal("ordinary enrollment did not automatically enable observer supervision", err)
 	}
 	if _, e := os.Stat(filepath.Join(cache, "invitation.json")); !os.IsNotExist(e) {
 		t.Error("bootstrap left a second credential copy", e)

@@ -161,16 +161,7 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		}
 		if action == "uninstall" {
 			fmt.Printf("Uninstall %s: stop boot service, move %s and %s to recoverable Trash\n", c.Role, c.Service, filepath.Dir(c.Config))
-			if err := myce.Uninstall(ctx, c, *dry, probe.Command); err != nil {
-				return err
-			}
-			if *dry {
-				return nil
-			}
-			return retireUnusedObserver(ctx, c, home, func(ctx context.Context, name string, args ...string) error {
-				_, err := probe.Command(ctx, name, args...)
-				return err
-			})
+			return myce.Uninstall(ctx, c, *dry, probe.Command)
 		}
 		token := os.Getenv("MYCE_TOKEN")
 		if token == "" {
@@ -536,13 +527,6 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	return nil
 }
 func serviceCommand(args []string) error {
-	return serviceCommandWithObserver(args, ensureInstalledObserver)
-}
-
-func serviceCommandWithObserver(args []string, ensureObserver func(context.Context, myce.ServiceConfig) error) error {
-	if len(args) > 0 && args[0] == "observer" {
-		return observerServiceCommand(args[1:])
-	}
 	f := flag.NewFlagSet("service", flag.ContinueOnError)
 	path := f.String("config", "", "private installed configuration")
 	if e := f.Parse(args); e != nil {
@@ -563,17 +547,6 @@ func serviceCommandWithObserver(args []string, ensureObserver func(context.Conte
 	if c.LocalDisableReceipts {
 		return myce.ErrLegacyLocalDisableReceipts
 	}
-	if c.Path != "" {
-		if e = os.Setenv("PATH", c.Path); e != nil {
-			return e
-		}
-	}
-	// Every supported installer and fleet upgrade starts this entry point from
-	// the durable installed slot. Existing hosts acquire supervision on their
-	// first upgraded start, without relying on the old installer/helper version.
-	if err := ensureObserver(context.Background(), c); err != nil {
-		fmt.Fprintln(os.Stderr, "observer_supervision_unavailable: automatic setup failed; keyed commands retain on-demand recovery")
-	}
 	if c.EnvironmentFile != "" {
 		_, queue, err := myce.ReadFleetEnvironment(c.EnvironmentFile)
 		if err != nil {
@@ -588,6 +561,11 @@ func serviceCommandWithObserver(args []string, ensureObserver func(context.Conte
 		return e
 	}
 	// Keep credentials out of argv. run/worker removes MYCE_TOKEN from jobs/builds.
+	if c.Path != "" {
+		if e = os.Setenv("PATH", c.Path); e != nil {
+			return e
+		}
+	}
 	if e = os.Setenv("MYCE_TOKEN", token); e != nil {
 		return e
 	}
