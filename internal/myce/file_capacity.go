@@ -424,6 +424,7 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			if err := store.uploadOps().directory(filepath.Dir(path)); err != nil {
 				return err
 			}
+			store.forgetUpload(hash)
 			if err := os.RemoveAll(path + ".parts"); err != nil {
 				return err
 			}

@@ -810,8 +810,12 @@ and [Linux fsync(2), including the directory-entry requirement](https://man7.org
 
 After process death, panic or power loss, rerun the same upload from its unchanged
 source. The normal client first verifies the final blob, then reconciles tus
-HEAD. Only a checksummed manifest and verified referenced chunks can certify
-progress. Complete progress left before final publication is assembled and
+HEAD. Only a checksummed progress record and verified linked chunk descriptors
+can certify new-format progress. During uninterrupted service, the queue retains
+verification evidence for its immutable accepted chunks and performs constant
+metadata work per PATCH. After a restart, it verifies the chain and all accepted
+bytes once before resuming, then keeps that evidence for subsequent requests.
+Complete progress left before final publication is assembled and
 published by HEAD/PATCH before a full offset is returned. Queue references are
 committed after blob/name barriers. Failures return before HTTP success; a lost
 reply may still have completed the operation, so reconcile rather than resetting
@@ -821,20 +825,27 @@ During completion, retain physical headroom for one extra payload-sized assembly
 copy plus metadata; concurrent writers may still exhaust the filesystem. A
 space or flush error retains the last progress generation, and capacity repair
 followed by the same upload retries completion. Private `.myce-write-*` files
-and chunks absent from the manifest grant no resume authority. Abrupt death can
+and chunks absent from the committed descriptor chain grant no resume authority.
+Abrupt death can
 leave these disposable files using space; with the service stopped, preserve a
 copy before operator cleanup. Never remove files of an active upload.
 
-Legacy interrupted tus uploads have no verified progress checksum. Corrupt
-metadata/chunks and these legacy partials fail closed; completed verified blobs
-are unaffected. Stop the queue and preserve the affected upload's exact
-`uploads/DIGEST`, `uploads/DIGEST.info`, and `uploads/DIGEST.parts` (if present)
-together in an offline archive outside the active store. Do not edit offsets or
-synthesize checksums. After preserving those entries and moving them out of the
-active store, restart and re-upload the unchanged source. Preserve the queue
-and store together under the normal backup procedure. If the source no longer
-exists, keep the archive for explicit recovery rather than treating its length
-as accepted progress. No automatic migration invents integrity evidence.
+Legacy interrupted tus uploads are adopted transparently under the same
+per-upload identity lock used by PATCH. The original metadata and payload stay
+intact until the existing prefix has been copied, hashed, flushed and named as
+an immutable chunk and the new progress record is durably committed. A crash
+before that commit retries adoption; after it, restart verifies the new chunk
+chain. The old payload copy is reclaimed only after the durable commit. Death
+between that commit and cleanup can temporarily retain an extra prefix copy.
+An unchanged Go/Python client or an in-flight PATCH continues at the preserved
+offset; there is no manual archive/re-upload step during a rolling upgrade.
+Legacy metadata alone cannot prove the sender's historical byte sequence. Final
+whole-file SHA-256 verification is mandatory and refuses pre-existing corruption
+rather than publishing it. Damaged new-format records/descriptors/chunks also
+fail closed. Preserve genuinely corrupt state for explicit recovery; do not edit
+offsets or synthesize checksums. Preserve queue and store together under the
+normal backup procedure. Avoiding the additional assembly copy for a
+single-chunk upload remains a follow-up.
 
 SIGKILL fixtures and torn-temp/name-loss injections live in
 `internal/myce/file_store_fault_test.go`; normal laptop gates include them on

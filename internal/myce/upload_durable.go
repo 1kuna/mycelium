@@ -15,19 +15,36 @@ import (
 	tus "github.com/tus/tusd/v2/pkg/handler"
 )
 
-// Immutable PATCH chunks precede a checksummed atomic progress manifest. The
-// conventional data name is only an allocation marker/final assembly target;
-// stat.Size never grants resume authority. FileInfo keeps existing field names.
+// Each immutable PATCH has a constant-size checksummed descriptor linked to
+// its predecessor. The atomic .info record names only the tail and count. A
+// live process remembers verified immutable chunks; restart verifies the chain
+// and bytes once. Neither payload nor metadata work rescans a live prefix.
 type durableUploadChunk struct {
-	Offset int64   `json:"offset"`
-	Ref    FileRef `json:"file"`
+	Offset           int64   `json:"offset"`
+	Ref              FileRef `json:"file"`
+	Previous         int64   `json:"previous"`
+	PreviousChecksum string  `json:"previous_sha256,omitempty"`
+	Checksum         string  `json:"sha256,omitempty"`
+}
+
+func (c durableUploadChunk) digest() (string, error) {
+	c.Checksum = ""
+	data, err := json.Marshal(c)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 type durableUploadRecord struct {
 	tus.FileInfo
-	Version  int                  `json:"myce_version"`
-	Chunks   []durableUploadChunk `json:"myce_chunks"`
-	Checksum string               `json:"myce_metadata_sha256,omitempty"`
+	Version    int                  `json:"myce_version"`
+	Count      int64                `json:"myce_chunk_count"`
+	TailOffset int64                `json:"myce_tail_offset"`
+	Tail       string               `json:"myce_tail_sha256,omitempty"`
+	Checksum   string               `json:"myce_metadata_sha256,omitempty"`
+	Chunks     []durableUploadChunk `json:"-"` // Process-local verified prefix only.
 }
 
 func (r durableUploadRecord) digest() (string, error) {
@@ -40,6 +57,25 @@ func (r durableUploadRecord) digest() (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+func (s *FileStore) noteUploadWork(kind string, bytes int64) {
+	if s.uploadWork != nil {
+		s.uploadWork(kind, bytes)
+	}
+}
+func (s *FileStore) rememberUpload(record durableUploadRecord) {
+	s.uploadCacheMu.Lock()
+	defer s.uploadCacheMu.Unlock()
+	if s.uploadCache == nil {
+		s.uploadCache = map[string]durableUploadRecord{}
+	}
+	s.uploadCache[record.ID] = record
+}
+func (s *FileStore) forgetUpload(id string) {
+	s.uploadCacheMu.Lock()
+	defer s.uploadCacheMu.Unlock()
+	delete(s.uploadCache, id)
+}
+
 func (s *FileStore) uploadOps() durableFileOps {
 	ops := s.durable
 	ops.syncDir = s.syncDir
@@ -47,8 +83,8 @@ func (s *FileStore) uploadOps() durableFileOps {
 }
 func (s *FileStore) uploadPath(id string) string { return filepath.Join(s.root, "uploads", id) }
 
-// Inventory needs declared allocations, not bulk payload reads. Resume/read
-// authority additionally verifies the prefix through verifiedUpload below.
+// This reads constant-size progress metadata. Legacy FileInfo is only an
+// allocation/identity hint until adoption under the upload lock below.
 func (s *FileStore) uploadRecord(id string) (durableUploadRecord, error) {
 	var record durableUploadRecord
 	if err := (FileRef{SHA256: id}).validate(); err != nil {
@@ -68,25 +104,21 @@ func (s *FileStore) uploadRecord(id string) (durableUploadRecord, error) {
 	if err != nil {
 		return record, err
 	}
+	s.noteUploadWork("metadata", int64(len(data)))
 	if err = json.Unmarshal(data, &record); err != nil {
 		return record, uploadIntegrity("upload metadata is corrupt")
 	}
-	if record.Version != 1 || record.Checksum == "" {
-		return record, uploadIntegrity("upload has no verified durable progress; preserve it for operator recovery")
+	if record.ID != id || record.MetaData["sha256"] != id || record.SizeIsDeferred || record.IsPartial || record.IsFinal || record.Offset < 0 || record.Size < record.Offset {
+		return record, uploadIntegrity("upload metadata identity mismatch")
+	}
+	if record.Version == 0 && record.Checksum == "" && record.Count == 0 && record.Tail == "" && record.TailOffset == 0 {
+		return record, nil // Upstream tus metadata; never trust its Offset/Storage.
 	}
 	checksum, err := record.digest()
-	if err != nil || checksum != record.Checksum || record.ID != id || record.MetaData["sha256"] != id || record.SizeIsDeferred || record.IsPartial || record.IsFinal || record.Offset < 0 || record.Size < record.Offset {
+	if err != nil || record.Version != 2 || checksum != record.Checksum || record.Count < 0 || record.Count > record.Offset ||
+		(record.Count == 0 && (record.Offset != 0 || record.Tail != "" || record.TailOffset != 0)) ||
+		(record.Count > 0 && (record.Tail == "" || record.TailOffset < 0 || record.TailOffset >= record.Offset)) {
 		return record, uploadIntegrity("upload metadata integrity mismatch")
-	}
-	var offset int64
-	for _, chunk := range record.Chunks {
-		if err := chunk.Ref.validate(); err != nil || chunk.Ref.SizeBytes <= 0 || chunk.Offset != offset || chunk.Ref.SizeBytes > record.Size-offset {
-			return record, uploadIntegrity("invalid upload chunk generation")
-		}
-		offset += chunk.Ref.SizeBytes
-	}
-	if offset != record.Offset {
-		return record, uploadIntegrity("upload chunk generation is incomplete")
 	}
 	return record, nil
 }
@@ -96,17 +128,129 @@ func (s *FileStore) verifiedUpload(ctx context.Context, id string) (*durableUplo
 	if err != nil {
 		return nil, err
 	}
-	// Publication can outlive cleanup. A verified final blob supersedes chunks,
-	// including a crash between removing metadata and removing their directory.
+	if record.Version == 0 {
+		return s.adoptLegacyUpload(ctx, record)
+	}
+	s.uploadCacheMu.Lock()
+	cached, ok := s.uploadCache[id]
+	s.uploadCacheMu.Unlock()
+	if ok && cached.Checksum == record.Checksum {
+		return &durableUpload{store: s, record: cached}, nil
+	}
+	// A verified final blob supersedes chunks during interrupted cleanup.
 	if record.Offset == record.Size && s.verify(ctx, FileRef{SHA256: id, SizeBytes: record.Size}) == nil {
 		return &durableUpload{store: s, record: record}, nil
 	}
-	for _, chunk := range record.Chunks {
-		if err := verifyFile(ctx, s.uploadChunkPath(id, chunk.Offset), chunk.Ref); err != nil {
-			return nil, uploadIntegrity("upload durable chunk integrity mismatch")
+	end, offset, checksum := record.Offset, record.TailOffset, record.Tail
+	for count := record.Count; count > 0; count-- {
+		path := s.uploadChunkPath(id, offset) + ".json"
+		if err := noModelSymlinks(path, false); err != nil {
+			return nil, uploadIntegrity("upload chunk descriptor unavailable")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		s.noteUploadWork("metadata", int64(len(data)))
+		var chunk durableUploadChunk
+		if err = json.Unmarshal(data, &chunk); err != nil {
+			return nil, uploadIntegrity("upload chunk descriptor is corrupt")
+		}
+		digest, err := chunk.digest()
+		if err != nil || digest != checksum || chunk.Checksum != checksum || chunk.Offset != offset || chunk.Ref.validate() != nil || chunk.Ref.SizeBytes <= 0 || chunk.Ref.SizeBytes > end || chunk.Offset != end-chunk.Ref.SizeBytes ||
+			(count == 1 && (chunk.Offset != 0 || chunk.Previous != -1 || chunk.PreviousChecksum != "")) ||
+			(count > 1 && (chunk.Previous < 0 || chunk.Previous >= offset || chunk.PreviousChecksum == "")) {
+			return nil, uploadIntegrity("upload chunk chain integrity mismatch")
+		}
+		if err := s.verifyUploadChunk(ctx, s.uploadChunkPath(id, offset), chunk.Ref); err != nil {
+			return nil, err
+		}
+		record.Chunks = append(record.Chunks, chunk)
+		end, offset, checksum = chunk.Offset, chunk.Previous, chunk.PreviousChecksum
+	}
+	for left, right := 0, len(record.Chunks)-1; left < right; left, right = left+1, right-1 {
+		record.Chunks[left], record.Chunks[right] = record.Chunks[right], record.Chunks[left]
+	}
+	s.rememberUpload(record)
+	return &durableUpload{store: s, record: record}, nil
+}
+
+func (s *FileStore) verifyUploadChunk(ctx context.Context, path string, ref FileRef) error {
+	if err := noModelSymlinks(path, false); err != nil {
+		return uploadIntegrity("upload durable chunk unavailable")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() || st.Size() != ref.SizeBytes {
+		return uploadIntegrity("upload durable chunk size mismatch")
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, contextReader{ctx, f})
+	s.noteUploadWork("verify", n)
+	if err != nil {
+		return err
+	}
+	if n != ref.SizeBytes || hex.EncodeToString(h.Sum(nil)) != ref.SHA256 {
+		return uploadIntegrity("upload durable chunk integrity mismatch")
+	}
+	return nil
+}
+
+// The old store has no prefix digest. Snapshot and hash its actual regular-file
+// bytes into an immutable chunk, then atomically commit new progress. Preserve
+// the old payload until that commit succeeds. The final whole-file SHA-256 is
+// still required; adoption never invents proof of the original sender's bytes.
+// Caller owns tus's identity lock (or the isolated fixture's sole writer).
+func (s *FileStore) adoptLegacyUpload(ctx context.Context, record durableUploadRecord) (*durableUpload, error) {
+	path := s.uploadPath(record.ID)
+	if err := noModelSymlinks(path, false); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() || st.Size() > record.Size {
+		return nil, uploadIntegrity("invalid legacy upload payload")
+	}
+	if err := s.uploadOps().mkdir(path + ".parts"); err != nil {
+		return nil, err
+	}
+	info := record.FileInfo
+	info.Offset, info.Storage = 0, nil
+	record = durableUploadRecord{FileInfo: info, Version: 2}
+	u := &durableUpload{store: s, record: record}
+	if st.Size() > 0 {
+		n, err := u.WriteChunk(ctx, 0, io.LimitReader(f, st.Size()))
+		if err != nil || n != st.Size() {
+			if err == nil {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, err
+		}
+	} else if err := u.commit(record); err != nil {
+		return nil, err
+	}
+	// The new chunk owns this prefix durably. Reclaim only the redundant old
+	// copy; a failed cleanup can be retried or left for final publication.
+	if st.Size() < record.Size {
+		if err := s.uploadOps().bytes(path, nil); err != nil {
+			return nil, err
 		}
 	}
-	return &durableUpload{store: s, record: record}, nil
+	return u, nil
 }
 
 func (s *FileStore) uploadChunkPath(id string, offset int64) string {
@@ -115,7 +259,7 @@ func (s *FileStore) uploadChunkPath(id string, offset int64) string {
 
 // Allocation metadata is a hint, not a certificate of content or resume offset.
 // Accept previous filestore size hints so legacy partials do not block unrelated
-// uploads; only verifiedUpload can make their bytes authoritative (and refuses).
+// uploads; only verifiedUpload can make their bytes authoritative.
 func (s *FileStore) uploadAllocation(id string) (tus.FileInfo, error) {
 	var info tus.FileInfo
 	if err := noModelSymlinks(s.uploadPath(id)+".info", false); err != nil {
@@ -190,7 +334,7 @@ func (d durableUploadStore) NewUpload(ctx context.Context, info tus.FileInfo) (t
 		return nil, err
 	}
 	info.Offset, info.Storage = 0, nil // Never follow metadata-supplied paths.
-	upload := &durableUpload{store: d.store, record: durableUploadRecord{FileInfo: info, Version: 1}}
+	upload := &durableUpload{store: d.store, record: durableUploadRecord{FileInfo: info, Version: 2}}
 	if err := upload.commit(upload.record); err != nil {
 		return nil, err
 	}
@@ -215,6 +359,7 @@ func (u *durableUpload) commit(record durableUploadRecord) error {
 	if err != nil {
 		return err
 	}
+	u.store.noteUploadWork("metadata", int64(len(data)))
 	if err = u.store.uploadOps().bytes(u.store.uploadPath(record.ID)+".info", data); err != nil {
 		return err
 	}
@@ -222,6 +367,7 @@ func (u *durableUpload) commit(record durableUploadRecord) error {
 		return err
 	}
 	u.record = record
+	u.store.rememberUpload(record)
 	return nil
 }
 func (u *durableUpload) GetInfo(ctx context.Context) (tus.FileInfo, error) {
@@ -239,7 +385,8 @@ func (u *durableUpload) GetInfo(ctx context.Context) (tus.FileInfo, error) {
 		}
 	} else {
 		// Referenced chunks already passed file and name barriers before this
-		// manifest was written. GetUpload reverified their bytes; only progress
+		// manifest was written. GetUpload loaded verified immutable evidence;
+		// it rehashes the prefix once after a restart. Only progress
 		// metadata/freshness barriers can still be uncertain here.
 		if err := u.store.refreshUpload(u.record.ID); err != nil {
 			return tus.FileInfo{}, err
@@ -285,8 +432,27 @@ func (u *durableUpload) WriteChunk(ctx context.Context, offset int64, src io.Rea
 	if err != nil {
 		return 0, err
 	}
+	u.store.noteUploadWork("accept", n)
+	chunk := durableUploadChunk{Offset: offset, Ref: FileRef{SHA256: hex.EncodeToString(h.Sum(nil)), SizeBytes: n}, Previous: -1}
+	if u.record.Count > 0 {
+		chunk.Previous, chunk.PreviousChecksum = u.record.TailOffset, u.record.Tail
+	}
+	chunk.Checksum, err = chunk.digest()
+	if err != nil {
+		return 0, err
+	}
+	data, err := json.Marshal(chunk)
+	if err != nil {
+		return 0, err
+	}
+	u.store.noteUploadWork("metadata", int64(len(data)))
+	if err := u.store.uploadOps().bytes(path+".json", data); err != nil {
+		return 0, err
+	}
 	next := u.record
-	next.Chunks = append(append([]durableUploadChunk(nil), u.record.Chunks...), durableUploadChunk{Offset: offset, Ref: FileRef{SHA256: hex.EncodeToString(h.Sum(nil)), SizeBytes: n}})
+	next.Chunks = append(next.Chunks, chunk)
+	next.Count++
+	next.TailOffset, next.Tail = offset, chunk.Checksum
 	next.Offset += n
 	if err = u.commit(next); err != nil {
 		return 0, err
@@ -333,6 +499,7 @@ func (u *durableUpload) FinishUpload(ctx context.Context) error {
 	return u.store.uploadOps().replace(u.store.uploadPath(u.record.ID), func(f *os.File) error {
 		h := sha256.New()
 		n, err := io.Copy(io.MultiWriter(f, h), reader)
+		u.store.noteUploadWork("assemble", n)
 		if err != nil {
 			return err
 		}
@@ -372,6 +539,7 @@ func (r *uploadChunkReader) Read(p []byte) (int, error) {
 				return 0, err
 			}
 			ref, err := IdentifyOpenFile(r.ctx, f)
+			r.store.noteUploadWork("verify", ref.SizeBytes)
 			if err != nil || ref != chunk.Ref {
 				f.Close()
 				return 0, uploadIntegrity("upload chunk integrity mismatch")

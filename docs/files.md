@@ -236,34 +236,43 @@ submission key and receipt. There is no CLI stall-timeout override.
 From the release containing the #1179 file-store durability fix, a successful
 POST or PATCH confirms locally flushed bytes and directory names. Each PATCH
 writes an immutable chunk to a private temporary name, flushes it, renames it,
-and flushes its directory before atomically replacing a checksummed progress
-manifest with the same barriers. HEAD verifies the manifest and referenced
-chunk sizes/digests before certifying an offset. File size alone is never resume
-authority. An interrupted, unacknowledged PATCH may be discarded or recovered;
-previously acknowledged chunks remain the resume boundary. A complete manifest
-left by a crash finishes assembly/publication on the next authenticated HEAD or
-PATCH, under the upload identity and current claim/attempt fences.
+and flushes its directory. A fixed-size checksummed descriptor links it to the
+previous chunk. A fixed-size atomic progress record names the tail and count;
+both metadata publications use the same barriers. The running queue retains
+verification evidence for its own immutable accepted chunks. An uninterrupted
+transfer hashes incoming bytes once and performs constant metadata work per
+PATCH, without re-reading the accepted prefix. After restart, the first resume
+verifies the descriptor chain and all referenced sizes/digests once. File size
+alone is never resume authority for this format.
 
-Completion assembles once into a temporary file, verifies the complete size and
-SHA-256, flushes it, renames it into the blob store and flushes both affected
-directories before publishing queue references. Blob reads continue to verify
-size/SHA-256. This requires working local filesystem/device flush semantics;
-Darwin file barriers include `F_FULLFSYNC`. A device that falsely reports a flush
-or later corrupts acknowledged bytes cannot be repaired by this protocol:
+An interrupted, unacknowledged PATCH may be discarded or recovered; previously
+acknowledged chunks remain the resume boundary. A complete progress record left
+by a crash finishes assembly/publication on the next authenticated HEAD or
+PATCH, under the upload identity and current claim/attempt fences. Completion
+assembles once into a temporary file, verifies the complete size and SHA-256,
+flushes it, renames it into the blob store and flushes both affected directories
+before publishing queue references. Blob reads continue to verify size/SHA-256.
+This requires working local filesystem/device flush semantics; Darwin file
+barriers include `F_FULLFSYNC`. A device that falsely reports a flush or later
+corrupts acknowledged bytes cannot be repaired by this protocol: final
 verification refuses those bytes rather than silently serving them.
 
-Costs: each resume/PATCH verifies the existing prefix, and its manifest grows
-with chunk count. Completion needs temporary headroom for one additional full
-copy alongside the chunks (approximately twice the payload at peak). It checks
-measured physical headroom first; an I/O/space failure keeps durable chunks for
-retry after capacity returns. These costs remain unmeasured until the admitted
-gate/benchmark runs. No bulk I/O runs under the queue mutex.
+Completion needs temporary headroom for one additional full copy alongside the
+chunks (approximately twice the payload at peak). It checks measured physical
+headroom first; an I/O/space failure keeps durable chunks for retry after
+capacity returns. Avoiding the assembly copy for a single-chunk upload is a
+follow-up. Runtime cost measurements await admitted gate/benchmark execution.
+No bulk I/O runs under the queue mutex.
 
-Existing completed blobs remain compatible. Older interrupted tus uploads lack
-a checksummed manifest, so this release refuses their resume with
-`upload has no verified durable progress`; it never infers a trustworthy offset
-from their data length. Preserve them for operator recovery and re-upload from
-the unchanged source as described in [operations](operations.md#file-store-crash-recovery).
+Completed blobs remain compatible. Older interrupted tus uploads are adopted
+transparently under the upload lock: the queue snapshots and hashes the existing
+regular-file prefix into a durable immutable chunk, commits the new checksummed
+progress record, then reclaims the redundant old prefix. The unchanged client
+continues from that offset, including an in-flight PATCH after an upgrade.
+Interrupted adoption retries safely; no operator archive or client reset is
+required. Old metadata cannot prove the sender's historical prefix bytes, so
+the final complete SHA-256 check remains mandatory and detects old corruption.
+See [operations](operations.md#file-store-crash-recovery).
 
 From the release containing #1100, Go/CLI and Python reconcile an interrupted
 PATCH automatically, including a lost final acknowledgement. They first check

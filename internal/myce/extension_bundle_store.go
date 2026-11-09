@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 )
 
 // Bundle maps use the same canonical JSON as Extension.Digest. The existing

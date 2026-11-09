@@ -52,6 +52,7 @@ func fileFaultWrite(t *testing.T, u *durableUpload, data string) {
 // descriptor first; name-loss modeling is covered separately below.
 func TestFileStoreCrashHelper(t *testing.T) {
 	root, point := os.Getenv("MYCE_FILE_FAULT_ROOT"), os.Getenv("MYCE_FILE_FAULT_POINT")
+	boundary := strings.TrimPrefix(point, "legacy-")
 	if root == "" {
 		return
 	}
@@ -64,10 +65,10 @@ func TestFileStoreCrashHelper(t *testing.T) {
 	blobRenamed := false
 	ops.syncFile = func(f *os.File) error {
 		parent := filepath.Base(filepath.Dir(f.Name()))
-		match := (point == "chunk-file" && strings.HasSuffix(parent, ".parts")) ||
-			(point == "manifest-file" && parent == "uploads") ||
-			(point == "assembly-file" && parent == "uploads") ||
-			(point == "marker-file" && filepath.Dir(f.Name()) == root)
+		match := (boundary == "chunk-file" && strings.HasSuffix(parent, ".parts")) ||
+			(boundary == "manifest-file" && parent == "uploads") ||
+			(boundary == "assembly-file" && parent == "uploads") ||
+			(boundary == "marker-file" && filepath.Dir(f.Name()) == root)
 		if match {
 			if err := f.Truncate(1); err != nil {
 				t.Fatal(err)
@@ -91,7 +92,7 @@ func TestFileStoreCrashHelper(t *testing.T) {
 		case dir == "uploads":
 			kind = "assembly"
 		}
-		if point == kind+"-before-rename" {
+		if boundary == kind+"-before-rename" {
 			kill()
 		}
 		if err := os.Rename(from, to); err != nil {
@@ -100,29 +101,32 @@ func TestFileStoreCrashHelper(t *testing.T) {
 		if kind == "blob" {
 			blobRenamed = true
 		}
-		if point == kind+"-after-rename" {
+		if boundary == kind+"-after-rename" {
 			kill()
 		}
 		return nil
 	}
 	ops.syncDir = func(path string) error {
 		base := filepath.Base(path)
-		if (point == "chunk-dir" && strings.HasSuffix(base, ".parts")) ||
-			((point == "manifest-dir" || point == "assembly-dir") && base == "uploads") ||
-			(point == "blob-dir" && base == "blobs") ||
-			(point == "source-dir" && base == "uploads" && blobRenamed) ||
-			(point == "marker-dir" && path == root) ||
-			(point == "child-dir" && base == "blobs") {
+		if (boundary == "chunk-dir" && strings.HasSuffix(base, ".parts")) ||
+			((boundary == "manifest-dir" || boundary == "assembly-dir") && base == "uploads") ||
+			(boundary == "blob-dir" && base == "blobs") ||
+			(boundary == "source-dir" && base == "uploads" && blobRenamed) ||
+			(boundary == "marker-dir" && path == root) ||
+			(boundary == "child-dir" && base == "blobs") {
 			kill()
 		}
 		return syncLocalDirectory(path)
 	}
-	if strings.HasPrefix(point, "marker-") || point == "child-dir" {
+	if strings.HasPrefix(point, "marker-") || boundary == "child-dir" {
 		if err := prepareFileStoreRoot(root, ops); err != nil {
 			t.Fatal(err)
 		}
 	} else {
 		s := fileFaultStore(t, root)
+		if strings.HasPrefix(point, "legacy-") {
+			s.durable, s.syncDir = ops, ops.syncDir
+		}
 		u, err := s.verifiedUpload(context.Background(), creationRef(fileFaultContent).SHA256)
 		if err != nil {
 			t.Fatal(err)
@@ -358,7 +362,7 @@ func TestFileStoreDurabilityFailuresPrecedeHTTPAck(t *testing.T) {
 }
 
 func TestFileStoreLostNamesAndCorruptGenerations(t *testing.T) {
-	for _, fault := range []string{"lost-chunk-name", "lost-manifest-name", "torn-chunk", "torn-manifest", "legacy-metadata"} {
+	for _, fault := range []string{"lost-chunk-name", "lost-manifest-name", "torn-chunk", "torn-manifest", "torn-descriptor"} {
 		t.Run(fault, func(t *testing.T) {
 			s := fileFaultStore(t, filepath.Join(t.TempDir(), "store"))
 			u := fileFaultCreate(t, s)
@@ -392,8 +396,8 @@ func TestFileStoreLostNamesAndCorruptGenerations(t *testing.T) {
 			case "torn-manifest":
 				// Valid JSON with an altered acknowledged offset must still fail.
 				err = os.WriteFile(meta, []byte(strings.Replace(string(old), `"Offset":6`, `"Offset":5`, 1)), 0600)
-			case "legacy-metadata":
-				err = os.WriteFile(meta, []byte(fmt.Sprintf(`{"ID":%q,"Size":13,"Offset":6}`, ref.SHA256)), 0600)
+			case "torn-descriptor":
+				err = os.WriteFile(s.uploadChunkPath(ref.SHA256, 0)+".json", []byte(`{"offset":0}`), 0600)
 			}
 			if err != nil {
 				t.Fatal(err)

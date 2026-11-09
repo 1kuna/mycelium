@@ -143,6 +143,9 @@ type FileStore struct {
 	uploadLocker                tus.Locker
 	syncDir                     func(string) error // Durability failure injection.
 	durable                     durableFileOps
+	uploadCacheMu               sync.Mutex
+	uploadCache                 map[string]durableUploadRecord
+	uploadWork                  func(string, int64) // Fixture byte accounting, nil in production.
 	expired                     func(string, ...context.Context) bool
 	lifecycle                   *sync.RWMutex
 	clock                       Clock
@@ -306,6 +309,7 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	if err := os.Remove(source + ".info"); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	s.forgetUpload(ref.SHA256)
 	if err := s.uploadOps().directory(filepath.Join(s.root, "uploads")); err != nil {
 		return err
 	}
@@ -448,6 +452,17 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if st, e := os.Stat(filepath.Join(s.root, "uploads", hash+".info")); e == nil && st.Mode().IsRegular() {
+		// Adoption and resume share tus's per-identity lock, including POST.
+		lock, e := s.uploadLocker.NewLock(hash)
+		if e != nil {
+			uploadHTTPError(w, e)
+			return
+		}
+		if e = lock.Lock(r.Context(), func() {}); e != nil {
+			uploadHTTPError(w, e)
+			return
+		}
+		defer lock.Unlock()
 		// A repeated create must match the immutable stored upload length.
 		upload, e := (durableUploadStore{store: s}).GetUpload(r.Context(), hash)
 		if e != nil {
