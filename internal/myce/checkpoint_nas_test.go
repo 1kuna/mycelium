@@ -18,6 +18,8 @@ import (
 func TestProductionDuringMissingNAS(t *testing.T) {
 	q, clock := fixture(t)
 	{
+		// Keep the concurrent-outage scenario independent of production admission.
+		q, clock := fixture(t)
 		first := submit(t, q, spec("experiment"))
 		running := check(t, q, machine("worker", "fake"), nil).Job
 		if running == nil {

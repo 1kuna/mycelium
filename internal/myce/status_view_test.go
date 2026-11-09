@@ -103,6 +103,8 @@ func TestStatusViewReadOnlyAndTokenProtected(t *testing.T) {
 	}
 
 	{
+		// Portability freshness starts with its own inventory, not the stale privacy fixture.
+		q, _ := fixture(t)
 		m := machine("private-api-worker", "cpu")
 		check(t, q, m, nil)
 		server := httptest.NewServer(API{Queue: q, Token: "private-test-token"}.Handler())
