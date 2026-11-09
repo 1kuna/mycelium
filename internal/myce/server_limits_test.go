@@ -139,6 +139,9 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 		case <-release:
 			fmt.Fprint(w, "ok")
 		case <-r.Context().Done():
+			// A remote server may still be stopping inference after its client
+			// observes cancellation. Capacity must cover that teardown too.
+			time.Sleep(100 * time.Millisecond)
 		}
 	}))
 	defer upstream.Close()
@@ -147,6 +150,19 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 	seed := addModelCall(t, q, "experiment")
 	reportModel(t, q, m, "ready")
 	q.finishCall(seed.ID)
+	// Exercise both HTTP hops: queue -> worker -> the engine HTTP adapter.
+	// A queue-only fake cannot establish when the engine has actually stopped.
+	rt := &modelRuntime{
+		models: map[string]*workerModel{"test": {
+			model: q.models.Models[0], engine: &LlamaEngine{url: upstream.URL},
+			state: "ready", attempt: q.s.ModelSlots[slotKey(m.ID, "test")].Attempt,
+		}},
+		session: m.Session, token: "test",
+	}
+	worker := workerTestServer(http.HandlerFunc(rt.serve))
+	defer worker.Close()
+	m.ModelURL = worker.URL
+	check(t, q, m, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	handler := API{Queue: q, Token: "test"}.Handler()
@@ -174,13 +190,15 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 		}()
 		return stop, done
 	}
-	receive := func(want string) {
+	receive := func(want string, done <-chan response) {
 		t.Helper()
 		select {
 		case got := <-entered:
 			if got != want {
 				t.Fatalf("got %s, want %s", got, want)
 			}
+		case result := <-done:
+			t.Fatalf("%s did not reach upstream: status=%d body=%s overlap=%d", result.name, result.code, result.body, overlap.Load())
 		case <-ctx.Done():
 			t.Fatal("request did not reach upstream")
 		}
@@ -188,7 +206,7 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 	// Keep capacity occupied until stop() below. A production waiter can
 	// preempt an active experiment before the three-call state is observed.
 	stop, first := start("active", "production")
-	receive("active")
+	receive("active", first)
 	_, experiment := start("experiment", "experiment")
 	_, production := start("production", "production")
 	// Wait until both calls are actually queued, using queue state under its lock.
@@ -211,21 +229,15 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 		case <-time.After(time.Millisecond):
 		}
 	}
-	// Transport cancellation can return before the fake upstream has stopped.
-	// Fence finishCall until its teardown is acknowledged, so the next handler
-	// cannot spend released capacity while the fake still counts this request.
-	q.mu.Lock()
 	stop()
 	select {
 	case <-exited:
 	case <-ctx.Done():
-		q.mu.Unlock()
 		t.Fatal("cancel did not reach upstream")
 	}
-	q.mu.Unlock()
-	receive("production")
+	receive("production", production)
 	release <- struct{}{}
-	receive("experiment")
+	receive("experiment", experiment)
 	release <- struct{}{}
 	for _, done := range []<-chan response{first, production, experiment} {
 		select {
