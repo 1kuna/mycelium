@@ -1320,7 +1320,10 @@ Drain or disable and verify exact release before an authorized uninstall. Inspec
 `myce uninstall --config CONFIG --dry-run` first. The selected service is stopped
 and disabled and role files move to recoverable Trash; preserve active spools,
 checkpoints, archives and data needed by sibling workers. No fleet action is
-implied by these instructions.
+implied by these instructions. From the release containing #1159, ordinary role
+uninstall retains the independent per-user completion client, its supervision
+and armed registrations, so callers of remote queues remain observed. A later
+install or upgraded service startup refreshes that client automatically.
 
 ## Convert split workers to one machine worker (M4)
 
@@ -4084,10 +4087,14 @@ Managed observers adopt all armed registrations in their private user registry.
 From the release containing #1159, the installed queue/worker service automatically
 installs and enables per-user completion supervision on startup. Normal installs,
 enrollment and fleet upgrades all enter this path; an existing host acquires it
-when its upgraded service starts, without an extra operator command. Definitions
-reference the durable installed binary slot. Consumer-only installations can use
-`myce service observer install` with a durable CLI path, not a disposable build.
-Neither path requires manual unit/plist setup.
+when its upgraded service starts, without an extra operator command. Setup
+atomically publishes a byte-identical executable at
+`~/.local/share/mycelium/client/myce` and points supervision at this independent
+per-user client. It survives ordinary queue/worker uninstall along with shared
+registrations; a subsequent install or upgraded service startup refreshes it.
+Consumer-only installations can use `myce service observer install`, which
+publishes the invoking CLI into the same durable client slot. Neither path
+requires manual unit/plist setup.
 macOS uses `local.mycelium.observer` in the user's launchd GUI domain;
 Linux uses `myce-observer.service` in the systemd user manager. The manager's
 native restart policy/pacing applies; no Mycelium retry timer is added. Under

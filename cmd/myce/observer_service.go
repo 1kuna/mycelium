@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -46,6 +47,53 @@ func observerEnvironment() []string {
 const observerServiceLabel = "local.mycelium.observer"
 
 type observerServiceRunner func(context.Context, string, ...string) error
+
+func observerClientBinary(home string) string {
+	return filepath.Join(home, ".local", "share", "mycelium", "client", "myce")
+}
+
+// The per-user client outlives queue/worker role directories. Publish complete
+// executable bytes atomically, preserving signed bytes and active executions;
+// ordinary role uninstall can then move its entire directory to Trash safely.
+func publishObserverClient(source, target string) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	info, err := input.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		return errors.New("observer client source must be an executable regular file")
+	}
+	if current, err := os.Stat(target); err == nil && os.SameFile(info, current) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+		return err
+	}
+	output, err := os.CreateTemp(filepath.Dir(target), ".myce-client-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(output.Name())
+	_, copyErr := io.Copy(output, input)
+	err = errors.Join(copyErr, output.Chmod(0700), output.Sync(), output.Close())
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(output.Name(), target); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(target))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
 
 func ensureInstalledObserver(ctx context.Context, c myce.ServiceConfig) error {
 	if os.Getenv("MYCE_DEV_SESSION_ROOT") != "" || os.Getenv("MYCE_PROCESS_SESSION") != "" {
@@ -197,6 +245,7 @@ func installObserverService(ctx context.Context, platform, home, executable, roo
 		return errors.New("observer service requires absolute home, executable and registry paths")
 	}
 	var path, definition string
+	client := observerClientBinary(home)
 	switch platform {
 	case "darwin":
 		if err := command(ctx, "launchctl", "print", "gui/"+strconv.Itoa(os.Getuid())); err != nil {
@@ -204,7 +253,7 @@ func installObserverService(ctx context.Context, platform, home, executable, roo
 		}
 		path = filepath.Join(home, "Library", "LaunchAgents", observerServiceLabel+".plist")
 		args := ""
-		for _, arg := range append(append([]string{"/usr/bin/env", "-i"}, env...), executable, "service", "observer", "run", "--root", root) {
+		for _, arg := range append(append([]string{"/usr/bin/env", "-i"}, env...), client, "service", "observer", "run", "--root", root) {
 			args += "<string>" + html.EscapeString(arg) + "</string>"
 		}
 		// Retain native crash-spawn admission (MY-34): protects the shared user
@@ -222,7 +271,7 @@ func installObserverService(ctx context.Context, platform, home, executable, roo
 		}
 		path = filepath.Join(config, "systemd", "user", "myce-observer.service")
 		var argv []string
-		for _, arg := range append(append([]string{"/usr/bin/env", "-i"}, env...), executable, "service", "observer", "run", "--root", root) {
+		for _, arg := range append(append([]string{"/usr/bin/env", "-i"}, env...), client, "service", "observer", "run", "--root", root) {
 			argv = append(argv, strconv.Quote(strings.ReplaceAll(arg, "%", "%%")))
 		}
 		// ':' disables systemd's dollar expansion; argv is literal, not a shell.
@@ -235,6 +284,9 @@ func installObserverService(ctx context.Context, platform, home, executable, roo
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	if err := publishObserverClient(executable, client); err != nil {
 		return err
 	}
 	if err := os.WriteFile(path, []byte(definition), 0600); err != nil {

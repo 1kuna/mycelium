@@ -112,7 +112,10 @@ func TestObserverStarterCleanup(t *testing.T) {
 func TestObserverServiceInstall(t *testing.T) {
 	for _, platform := range []string{"darwin", "linux"} {
 		t.Run(platform, func(t *testing.T) {
-			home := t.TempDir()
+			home := filepath.Join(t.TempDir(), "home $literal% &")
+			if err := os.Mkdir(home, 0700); err != nil {
+				t.Fatal(err)
+			}
 			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
 			var calls []string
 			run := func(_ context.Context, name string, args ...string) error {
@@ -123,6 +126,9 @@ func TestObserverServiceInstall(t *testing.T) {
 				return nil
 			}
 			binary, root := filepath.Join(home, "myce $literal% &"), filepath.Join(home, "cache")
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
 			if err := installObserverService(context.Background(), platform, home, binary, root, []string{"HOME=" + home}, run); err != nil {
 				t.Fatal(err)
 			}
@@ -136,7 +142,7 @@ func TestObserverServiceInstall(t *testing.T) {
 			}
 			text := string(data)
 			if platform == "darwin" {
-				for _, part := range []string{"<key>KeepAlive</key><true/>", "<key>AbandonProcessGroup</key><true/>", "<key>StandardErrorPath</key>", "<string>/usr/bin/env</string><string>-i</string>", html.EscapeString(binary), "bootstrap gui/"} {
+				for _, part := range []string{"<key>KeepAlive</key><true/>", "<key>AbandonProcessGroup</key><true/>", "<key>StandardErrorPath</key>", "<string>/usr/bin/env</string><string>-i</string>", html.EscapeString(observerClientBinary(home)), "bootstrap gui/"} {
 					if !strings.Contains(text+strings.Join(calls, "\n"), part) {
 						t.Fatalf("missing service behavior %s", part)
 					}
