@@ -129,10 +129,6 @@ def select(base):
             if not path.exists():
                 continue
             raise ValueError(f'no related tests for {name}')
-        # The reflected Job schema includes nested types across this package.
-        # Textual references miss field-only edits and indirect definitions (#413).
-        if path.parent == pathlib.Path('internal/myce') and not name.endswith('_test.go'):
-            tests.add('TestWireSchemas')
         packages.setdefault(path.parent, set()).update(tests)
     # Fixture paths are relative to the Go package's working directory. Match
     # direct literals in test bodies, including docs/examples-only changes.

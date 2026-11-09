@@ -28,10 +28,10 @@ as `Read` and `Close`, which otherwise select unrelated readers and entire dev
 journeys. Changed non-Go files, including
 docs/examples, also select tests with direct quoted paths relative to their Go
 package. Helper-only or computed paths still need explicit focused testing or
-`full`. Production Go edits in
-`internal/myce` always include `TestWireSchemas`, since the reflected Job/Spec
-schema includes nested types across that package. Edits to the shared memory
-writers `attempt_memory.go`, `memory_learning.go`, `memory_envelope.go`,
+`full`. Field and nested-type changes use the same conventional and direct-reference
+selection; the removed reflection/schema audit is no longer forced for every
+core edit (#1086). Edits to the shared memory writers `attempt_memory.go`,
+`memory_learning.go`, `memory_envelope.go`,
 `gpu_host_memory.go`, `capability_placement.go`, `work_observation.go` and
 `queue.go` also include the tests in `process_memory_test.go` and
 `attempt_memory_facts_test.go`: their private-method consumers escape direct
