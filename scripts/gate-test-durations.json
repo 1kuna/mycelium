@@ -1,5 +1,5 @@
 {
-  "description": "Median passed-root execution seconds from retained full race logs. The two newer local logs refresh older hints where available; those fulls had unrelated failures and are not passing proof. Hints order work only; current native Go inventory determines coverage.",
+  "description": "Retained full-race passed-root medians, refreshed by newer local full logs and focused clock-fixture measurements. Some fulls had unrelated failures and are not passing proof. Hints order work only; current native Go inventory determines coverage.",
   "packages": {
     "mycelium/internal/myce": {
       "TestAPIAuthenticationAndFlow": 0.15,
@@ -79,7 +79,7 @@
       "TestAttemptReportsAndReleasesDuringAdmissionDrain": 1.15,
       "TestAttemptResourceQueueFencesAndRetention": 0.155,
       "TestAttemptRetriesNativeCleanupWithoutRestart": 2.895,
-      "TestAttemptStorageCheckpointPublicationLifetime": 30.115,
+      "TestAttemptStorageCheckpointPublicationLifetime": 0.09,
       "TestAttemptStorageNativeRunnerAndGroup": 0.915,
       "TestAuthoringOriginGeneratedRecords": 0.345,
       "TestAuthoringOriginRetentionReplayAndPrivacy": 0.35,
@@ -1801,7 +1801,7 @@
       "TestEnrollmentEqualVersionDifferentBytesRefused": 0.28,
       "TestEnrollmentLegacyEnvironmentFileUpgradePath": 0.3,
       "TestEnrollmentPreflightRefusalLeavesHostUnchanged": 0.425,
-      "TestEnrollmentPreflightsBeforeDrain": 120.645,
+      "TestEnrollmentPreflightsBeforeDrain": 0.57,
       "TestExcludeCLI": 0.23,
       "TestExtensionAgentDevEndToEnd": 10.725,
       "TestExtensionCLIComposition": 3.715,
@@ -1923,6 +1923,16 @@
     {
       "log_sha256": "b5cd95fd84dc9d750fcc83144de8f5e652ef60a72a71c72247d53f97f781df95",
       "source": "2a0cf83c986c6a297a09ae9d74274330f39c010d"
+    },
+    {
+      "log_sha256": "cd91cb162b50e3e46f358d38c449eadedae4818f7189669f831358c0382c62fb",
+      "source": "13bba3eb6edd51324aa193396f1779fa8e787784",
+      "scope": "focused one-core race; refresh only the named passed root"
+    },
+    {
+      "log_sha256": "3c1b3a873978d99deb1b176c6b7da9ffc4fd6ac8e608b934dab00e77883e93b7",
+      "source": "13bba3eb6edd51324aa193396f1779fa8e787784",
+      "scope": "focused one-core race; refresh only the named passed root"
     }
   ]
 }
