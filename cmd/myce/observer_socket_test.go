@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -66,5 +72,86 @@ func TestObserverSocketRetirementSerializesStartup(t *testing.T) {
 	var message [1]byte
 	if n, _, err := replacement.ReadFromUnix(message[:]); err != nil || n != 1 {
 		t.Fatal("replacement lost registration wake", err)
+	}
+}
+
+func TestObserverStartupWaitsForOldSocketCleanup(t *testing.T) {
+	binary := devTestBinary(t)
+	root := t.TempDir()
+	path, err := sharedProfileSocket(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	defer os.Remove(path)
+	identity, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/wait" {
+			fmt.Fprint(w, `{"jobs":[{"id":"job","state":"running","revision":1}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"job","state":"running"}`)
+	}))
+	defer server.Close()
+	_, _, prior := sharedWatchFixture(t, root, server.URL, &waitClock{now: time.Now()})
+	prior.Close() // The idle old owner already released lifetime ownership.
+	checked, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(resume) }) }
+	defer release()
+	cleaned := make(chan error, 1)
+	go func() {
+		cleaned <- retireSharedProfileSocket(root, path, identity, func() { close(checked); <-resume })
+	}()
+	<-checked // Pause after the old identity check, while startup.lock is held.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	started := make(chan error, 1)
+	go func() {
+		// Same caller contract as registration/handoff: startup.lock stays held
+		// through the child's socket replacement and readiness acknowledgement.
+		startup, err := sharedProfileLock(ctx, filepath.Join(root, "startup.lock"))
+		if err != nil {
+			started <- err
+			return
+		}
+		defer startup.Close()
+		owner, err := profileLock(filepath.Join(root, "observer.lock"))
+		if err != nil {
+			started <- err
+			return
+		}
+		defer owner.Close()
+		started <- startSharedObserver(ctx, binary, root, owner)
+	}()
+	if err := waitPause(ctx, 50*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := <-cleaned; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	var owner observerDiagnostic
+	if err := readProfileJSON(filepath.Join(root, "observer.status"), &owner); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Kill(owner.PID, syscall.SIGKILL)
+	wake, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: path, Net: "unixgram"})
+	if err != nil {
+		t.Fatal("old cleanup unlinked ordinary replacement", err)
+	}
+	defer wake.Close()
+	if _, err := wake.Write([]byte{1}); err != nil {
+		t.Fatal(err)
 	}
 }

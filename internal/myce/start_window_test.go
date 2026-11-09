@@ -69,8 +69,8 @@ func TestStartWindowDependentFanOut(t *testing.T) {
 				}
 				return
 			}
-			// Started losses renew exactly the original length, even after restart
-			// and a second loss; an unstarted retry does not renew again.
+			// Relative started losses renew exactly the original length, even
+			// after restart; an absolute cutoff never moves.
 			for range 2 {
 				if err := q.Started(result(child, true)); err != nil {
 					t.Fatal(err)
@@ -82,7 +82,11 @@ func TestStartWindowDependentFanOut(t *testing.T) {
 					t.Fatal(err)
 				}
 				recovery := job(t, q, child.ID)
-				if recovery.State != "queued" || recovery.StartWindow != tc.window || !recovery.Spec.StartBy.Equal(clock.Now().Add(tc.window)) {
+				want := clock.Now().Add(tc.window)
+				if tc.absolute {
+					want = cutoff
+				}
+				if recovery.State != "queued" || recovery.StartWindow != tc.window || !recovery.Spec.StartBy.Equal(want) {
 					t.Fatalf("loss changed original window: %+v", recovery)
 				}
 				q = reopenCancellationQueue(t, q, clock)

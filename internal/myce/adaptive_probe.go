@@ -132,6 +132,12 @@ type hostProbeLane[T any] struct {
 }
 
 func (p *hostProbeLane[T]) step(ctx context.Context, source func(context.Context) (T, error)) (bool, error) {
+	return p.stepWhen(ctx, source, true)
+}
+
+// A demand-driven consumer must collect completed work after withdrawal
+// without allowing collection itself to launch the next probe.
+func (p *hostProbeLane[T]) stepWhen(ctx context.Context, source func(context.Context) (T, error), demand bool) (bool, error) {
 	if ctx.Err() != nil {
 		return false, ctx.Err()
 	}
@@ -158,7 +164,7 @@ func (p *hostProbeLane[T]) step(ctx context.Context, source func(context.Context
 		default:
 		}
 	}
-	if p.pending == nil && !p.clock.Now().Before(p.timing.next) {
+	if demand && p.pending == nil && !p.clock.Now().Before(p.timing.next) {
 		out := make(chan hostProbeResult[T], 1)
 		done := make(chan struct{})
 		p.done = done

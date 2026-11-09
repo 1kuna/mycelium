@@ -2,6 +2,8 @@
 """Socket-activated, fixed-inventory xe telemetry; no queue authority or cache."""
 
 import datetime as dt
+import array
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ import re
 import signal
 import socket
 import socketserver
+import struct
 import sys
 import time
 
@@ -40,10 +43,67 @@ def manager(text: str) -> None:
         raise ValueError('invalid manager usage')
 
 
+def vram_regions(raw: bytes) -> dict[str, int]:
+    # include/uapi/drm/xe_drm.h: drm_xe_query_mem_regions and 88-byte
+    # drm_xe_mem_region. The placement mask addresses at most 32 regions.
+    if len(raw) < 8:
+        raise ValueError('incomplete memory regions')
+    count, pad = struct.unpack_from('=II', raw)
+    if pad or not 0 < count <= 32 or len(raw) != 8 + count * 88:
+        raise ValueError('invalid memory regions')
+    total = used = 0
+    seen: set[int] = set()
+    for offset in range(8, len(raw), 88):
+        kind, instance, _, size, usage = struct.unpack_from('=HHIQQ', raw, offset)
+        if instance >= 32 or instance in seen or usage > size:
+            raise ValueError('invalid memory region')
+        seen.add(instance)
+        if kind == 1:  # DRM_XE_MEM_REGION_CLASS_VRAM; never system/GTT.
+            total += size
+            used += usage
+    if not total or total > (1 << 64) - 1:
+        raise ValueError('VRAM unavailable')
+    return {'total_bytes': total, 'used_bytes': used}
+
+
+def collect_vram(card: str) -> dict[str, int]:
+    # Older kernels silently return used=0 without either capability. Newer
+    # kernels expose usage to unprivileged callers. Positive usage proves the
+    # counter is uncensored; ambiguous zero needs privilege, even as root.
+    status = Path('/proc/self/status').read_text()
+    caps = int(next(line.split()[1] for line in status.splitlines()
+                    if line.startswith('CapEff:')), 16)
+    accounting = bool(caps & ((1 << 38) | (1 << 21)))  # PERFMON / SYS_ADMIN.
+    nodes = list((Path('/sys/bus/pci/devices') / card / 'drm').glob('renderD*'))
+    if len(nodes) != 1:
+        raise ValueError('render identity unavailable')
+    fd = os.open(Path('/dev/dri') / nodes[0].name, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        # DRM_IOCTL_XE_DEVICE_QUERY, query MEM_REGIONS=1. No GPU objects,
+        # contexts, work submission, vendor runtime or configuration writes.
+        query = bytearray(struct.pack('=QIIQQQ', 0, 1, 0, 0, 0, 0))
+        fcntl.ioctl(fd, 0xc0286440, query, True)
+        size = struct.unpack_from('=I', query, 12)[0]
+        if not 8 < size <= 8 + 32 * 88:
+            raise ValueError('invalid memory query size')
+        data = array.array('B', bytes(size))
+        struct.pack_into('=Q', query, 16, data.buffer_info()[0])
+        fcntl.ioctl(fd, 0xc0286440, query, True)
+        if struct.unpack_from('=I', query, 12)[0] != size:
+            raise ValueError('memory query changed size')
+        memory = vram_regions(data.tobytes())
+        if not accounting and not memory['used_bytes']:
+            raise ValueError('zero VRAM usage may be censored')
+        return memory
+    finally:
+        os.close(fd)
+
+
 def collect(cards: list[str], root: Path = DEBUGFS) -> bytes:
     # Only called AFTER request EOF. Timestamp precedes every debugfs read.
     started = dt.datetime.now(dt.timezone.utc)
     readings: dict[str, str] = {}
+    vram: dict[str, dict[str, int]] = {}
     for card in cards:
         fd = os.open(root / card / 'gtt_mm', os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, 'rb') as stream:
@@ -53,8 +113,14 @@ def collect(cards: list[str], root: Path = DEBUGFS) -> bytes:
         text = data.decode('ascii')
         manager(text)
         readings[card] = text
+        try:
+            vram[card] = collect_vram(card)
+        except TimeoutError:
+            raise  # Keep the single connection deadline authoritative.
+        except (OSError, ValueError, StopIteration):
+            pass  # Optional VRAM cannot invalidate mandatory GTT accounting.
     reply = json.dumps({'sampled_at': started.isoformat().replace('+00:00', 'Z'),
-                        'gtt_mm': readings}, separators=(',', ':')).encode() + b'\n'
+                        'gtt_mm': readings, 'vram': vram}, separators=(',', ':')).encode() + b'\n'
     if len(reply) > MAX_BYTES:
         raise ValueError('oversized reply')
     return reply

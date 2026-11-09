@@ -99,9 +99,12 @@ func variantQuality(e Extension, s Spec, m *Machine) (measured bool, reason stri
 }
 
 // Existing production bindings require positive parity evidence even for legacy
-// registrations. A host approval is the fallback only when measurements lack.
+// registrations. Measurements cannot widen an explicit owner host list.
 func (q *Queue) productionParityKnown(j *Job, m *Machine) bool {
 	if !j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil {
+		return false
+	}
+	if !q.productionParityHostAllowed(j, hostID(m)) {
 		return false
 	}
 	for _, e := range j.Extensions {
