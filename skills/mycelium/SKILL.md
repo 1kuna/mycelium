@@ -480,6 +480,13 @@ caps/quotas still bind; running same-tier work is not stopped to repay debt.
 
 On releases with adaptive observation admission (#800), healthy queues accept reads at any rate. HTTP 429 `client_rate_limited` means **fleet-wide control pressure**, not a per-client quota. Supporting queues also return `code_alias: observation_shed_control_pressure`. `Retry-After` is the running queue's measured delay rounded up to seconds, typically a few seconds: follow that signal rather than waiting minutes. Installed CLI GETs already retry with positive jitter (#819), bounded by caller cancellation or an explicit deadline, without a fixed retry count. From the release containing #960, stopping recovery prints the last interval. Prefer batched waits; production-class job observations and scalar batch waits remain available. Earlier releases retain the fixed-rate stopgap.
 
+From the next queue read correction (#1052), default status and per-job GETs
+reuse completed projections under control pressure, including fitting negotiated
+status pages. Their copies remain memory-accounted. A cold, expired or
+invalidated projection still uses pressure admission; keep following its
+Retry-After signal and the existing batched-wait guidance. This requires no
+consumer flags or identity changes.
+
 From the release containing #959, interrupted `myce logs JOB` prints `myce logs JOB --after SEQ` on stderr. Resume with that cursor after the reported Retry-After to avoid replaying completed pages; add `--follow` to keep following. From the release containing #890, read-only `myce policy get` resolves installed worker, then queue authority without setting or printing `MYCE_TOKEN`.
 
 **Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; CLI/Python consumers use scalar batch deadline metadata without a bootstrap GET, as described above. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
@@ -680,9 +687,15 @@ probe period, cost and frozen validity. Read age against that observation's
 validity; a successful check-in cannot renew a failed probe. From the host-health
 delivery correction (#1025), new health observations include the same learned
 report-gap allowance as shared pressure. Stopped or failed sensors still lose
-admission while worker contact continues. An unprecedented delay can exceed the
-learned prediction; read the frozen validity and age together. Owner-latency holds
-now require fresh healthy evidence spanning the attempt's measured interference
+admission while worker contact continues. From the queue-delay correction,
+host-health decisions exclude actual incoming queue processing and mutex
+occupancy from delivery aging. A fresh replacement currently preparing outside
+the mutex pauses only its own session's previous evidence; stale/failed input
+cannot renew it, and cancellation or rejection removes that credit. Diagnostic
+`age_seconds` still includes that wall time; age above validity alone does not establish sensor staleness. A stopped
+sensor's worker-local age still expires, and continuous queue unavailability has
+no finite wall-time detection bound while its control path remains unavailable.
+Owner-latency holds now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
 [host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).

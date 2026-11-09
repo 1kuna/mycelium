@@ -273,7 +273,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 		// ordinary check-ins that merely journal an unchanged live job.
 		if id, ok := strings.CutPrefix(key, "jobs/"); ok && (len(value) == 0 || len(q.persisted[key]) == 0 || &value[0] != &q.persisted[key][0]) {
 			changedJobs = true
-			delete(q.jobSnapshots, id)
+			q.invalidateJobSnapshot(id)
 		}
 		if value == nil {
 			delete(q.persisted, key)

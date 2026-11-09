@@ -123,12 +123,14 @@ type state struct {
 }
 type Queue struct {
 	readGeneration       *readGeneration
+	publishedReads       atomic.Pointer[publishedReadIndex]
 	readRoot             *readNode // q.mu; immutable committed input generations.
 	readModels           *ModelConfig
 	readEnvironments     *EnvironmentCatalog
 	readRuntime          *observationState
 	readSamples          map[string]map[attemptKey]hostMemorySample
-	detachedRead         bool // Private immutable source: never owns the live writer mutex.
+	detachedRead         bool          // Private immutable source: never owns the live writer mutex.
+	hostHealthReports    atomic.Uint64 // Queue receipt order; never worker wall time.
 	requestBudgets       requestBudgets
 	evidencePending      map[string]bool
 	evidenceRows         []string
@@ -211,12 +213,14 @@ type Queue struct {
 	shutdownCancel   context.CancelFunc
 	contactMu        sync.Mutex
 	contacts         map[string]*workerContact
-	holdClock        Clock // Optional observational clock; never used for queue decisions.
+	healthPreparing  map[string]map[*hostHealthPreparation]struct{} // contactMu; request lifecycle, not transactional.
+	holdClock        Clock                                          // Optional observational clock; never used for queue decisions.
 	updateHolds      queueHoldSampler
 	statusHolds      queueHoldSampler
 	logCleanupHolds  queueHoldSampler
 	statusCache      statusCache
-	jobSnapshots     map[string]*jobSnapshotCache // q.mu; entries serialize their own refreshes.
+	jobSnapshotsMu   sync.Mutex // Only cache metadata; never acquired across projection or q.mu acquisition.
+	jobSnapshots     map[string]*jobSnapshotCache
 	observeRead      func(string, time.Duration, time.Duration)
 	usageReader      *sql.DB
 	db               *sql.DB
@@ -1337,10 +1341,37 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	return reply, err
 }
 
-// HTTP owns the same contact through response completion, rather than counting
-// two arrivals and two reconnect failures for one wire request.
+// Callers already own contact tracking, including HTTP and direct queue calls.
 func (q *Queue) checkinContext(ctx context.Context, c Checkin) (Reply, error) {
-	memoryReceivedAt := q.clock.Now()
+	return q.checkinResponseContext(ctx, c, nil)
+}
+
+// The HTTP caller keeps the same request lifecycle through NAS instructions
+// and response encoding. Direct queue callers complete it when their reply is
+// ready. The synchronous response callback runs outside q.mu. Neither path
+// can leave pending credit after error, panic or cancellation.
+func (q *Queue) checkinResponseContext(ctx context.Context, c Checkin, respond func(Reply, error)) (Reply, error) {
+	healthReportOrder := q.hostHealthReports.Add(1)
+	receivedAt := q.clock.Now()
+	healthPreparation := q.beginHostHealthPreparation(ctx, c.Machine, healthReportOrder)
+	defer q.finishHostHealthPreparation(healthPreparation, false)
+	if healthPreparation != nil {
+		stopCancellation := context.AfterFunc(ctx, func() { q.finishHostHealthPreparation(healthPreparation, false) })
+		defer stopCancellation()
+	}
+	reply, err := q.processCheckinContext(ctx, c, healthReportOrder, receivedAt, healthPreparation)
+	if respond != nil {
+		respond(reply, err)
+	}
+	q.finishHostHealthPreparation(healthPreparation, err == nil)
+	return reply, err
+}
+
+func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthReportOrder uint64, memoryReceivedAt time.Time, healthPreparation *hostHealthPreparation) (Reply, error) {
+	var reportedHealthAge float64
+	if c.Machine.HostHealth != nil {
+		reportedHealthAge = c.Machine.HostHealth.AgeSeconds
+	}
 	if err := ctx.Err(); err != nil {
 		return Reply{}, err
 	}
@@ -1553,6 +1584,7 @@ func (q *Queue) checkinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptExtensionQualifications(&m)
 		ageHostObservations(&m, memoryReceivedAt, q.clock.Now())
+		q.acceptHostHealthDelivery(&m, old, healthReportOrder, reportedHealthAge, healthPreparation)
 		acceptHostAvailability(&m, q.clock.Now())
 		q.acceptSharedPressure(&m, old)
 		m.IOPressure = safeIOPressure(m.IOPressure)
@@ -2724,6 +2756,9 @@ func cloneMachine(m *Machine) Machine {
 	var out Machine
 	_ = json.Unmarshal(data, &out)
 	out.toolInventory = m.toolInventory
+	if out.HostHealth != nil {
+		out.HostHealth.delivery = m.HostHealth.delivery
+	}
 	return out
 }
 

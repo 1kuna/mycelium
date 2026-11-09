@@ -20,6 +20,73 @@ func budgetHost(q *Queue, memory int64, cpus int) {
 	q.requestBudgets.lanes = cpus + 1
 }
 
+// Match the retained-job count in upgrade-compat. Cold status reads preflight
+// each immutable record before decoding it; field metadata must not be rebuilt
+// for every JSON key in every retained execution.
+func BenchmarkJSONAllocationCostHistory(b *testing.B) {
+	job := &Job{ID: "retained-00000", Spec: Spec{Name: "retained", Project: "upgrade-compat", Priority: "experiment"}, State: "succeeded", Attempt: 1, ReleaseConfirmed: true}
+	job.Spec.Run.Command = []string{"echo", "retained"}
+	data, err := json.Marshal(job)
+	if err != nil {
+		b.Fatal(err)
+	}
+	target := reflect.TypeFor[*Job]()
+	b.ReportAllocs()
+	b.SetBytes(6286 * int64(len(data)))
+	b.ResetTimer()
+	var charged int64
+	for range b.N {
+		charged = 0
+		for range 6286 {
+			cost, err := jsonAllocationCost(data, target, math.MaxInt64)
+			if err != nil {
+				b.Fatal(err)
+			}
+			charged += cost
+		}
+	}
+	b.ReportMetric(float64(charged), "charged-B")
+}
+
+func TestJSONAllocationCostFieldMetadata(t *testing.T) {
+	type Item struct{ Payload [64]byte }
+	type Embedded struct {
+		Items []Item `json:"items,omitempty"`
+	}
+	type Shape struct {
+		*Embedded
+		// Accounting has always used the first EqualFold match, including an
+		// earlier anonymous field, rather than preferring a later exact spelling.
+		Other   []byte `json:"ITEMS"`
+		Ignored []Item `json:"-"`
+		hidden  []Item
+		Kelvin  []Item `json:"K"`
+	}
+	base := int64(reflect.TypeFor[Shape]().Size())
+	item := int64(reflect.TypeFor[Item]().Size())
+	for _, tc := range []struct {
+		name, data string
+		cost       int64
+	}{
+		{"anonymous", `{"items":[{},{}]}`, base + 4*item},
+		{"case collision", `{"ITEMS":[{}]}`, base + 2*item},
+		{"anonymous name", `{"Embedded":{"items":[{}]}}`, base + int64(reflect.TypeFor[Embedded]().Size()) + 2*item},
+		{"ignored", `{"Ignored":[{}],"hidden":[{}],"unknown":[{}]}`, base},
+		{"unicode fold", `{"K":[{}]}`, base + 2*item},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cost, err := jsonAllocationCost([]byte(tc.data), reflect.TypeFor[*Shape](), math.MaxInt64)
+			if err != nil || cost != tc.cost {
+				t.Fatalf("charge=%d, want %d: %v", cost, tc.cost, err)
+			}
+			if _, err := jsonAllocationCost([]byte(tc.data), reflect.TypeFor[*Shape](), tc.cost-1); err == nil {
+				t.Fatal("underfunded allocation accepted")
+			}
+		})
+	}
+}
+
 func TestRequestBudgetInventoryGrowthAndOlderPeer(t *testing.T) {
 	for _, host := range []struct {
 		name        string

@@ -32,7 +32,7 @@ func (q *Queue) detectHostHygiene() {
 		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
 			continue
 		}
-		reason := hostHygieneReasonAt(m, q.clock.Now())
+		reason := q.hostHygieneReasonAt(m, q.clock.Now())
 		q.observeHealth("hygiene/"+m.ID, reason != "", 0, HealthAlert{Kind: "host_degraded", Host: hostID(m), Reason: reason})
 		if m.HostHealth == nil || len(m.HostHealth.History) == 0 {
 			continue
