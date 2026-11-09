@@ -185,3 +185,43 @@ func (c coldProbeAdvancingClock) Now() time.Time {
 	c.now = c.now.Add(time.Nanosecond)
 	return c.now
 }
+
+func TestColdProbeAdmissionRefusalRetainsReserveAtHistoryRollover(t *testing.T) {
+	q, clock, m, s := coldProbeAdmissionFixture(t, true)
+	m.HostAvailableMemoryGB -= .5
+	// The next check-in fills the history; another sample during assignment
+	// would evict the oldest pair, which contains the only availability drop.
+	for i := 1; i < hostHealthHistorySize-1; i++ {
+		clock.Advance(time.Second)
+		machineCheck(t, q, m)
+	}
+	submit(t, q, s)
+	q.clock = coldProbeAdvancingClock{clock}
+	probe := assignedJob(machineCheck(t, q, m))
+	if probe == nil || math.Abs(probe.MemoryEnvelope.HostGB-(m.HostAvailableMemoryGB-minimumHostMemoryGB)) > 1e-9 {
+		t.Fatal("cold offer did not reserve the observed drop", probe)
+	}
+	free := probe.MemoryEnvelope.HostGB - .1
+	w := Worker{Machine: m, Clock: q.clock, HostMemorySource: func(context.Context) (float64, error) { return free, nil }}
+	err := localAttemptAdmission(w, nil, *probe, nil)
+	if !errors.Is(err, errWorkerMemory) {
+		t.Fatal("additional launch drop did not refuse the offer", err)
+	}
+	r := result(probe, false)
+	r.Interrupted = true
+	r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit", Predicate: "memory_capacity", PrelaunchRefused: true, Admission: admissionDetail(err, *probe)}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	margin := q.jobProbeDriftMarginGB(q.s.Jobs[probe.ID], &m)
+	if margin < .1 || margin > .1+3*minimumHostMemoryGB {
+		t.Fatal("refusal forgot the reserve used for admission", margin)
+	}
+	probe = assignedJob(machineCheck(t, q, m))
+	if probe == nil || probe.Attempt != 2 {
+		t.Fatal("cold probe did not retry", probe)
+	}
+	if err := localAttemptAdmission(w, nil, *probe, nil); err != nil {
+		t.Fatal("history rollover allowed another oversized retry", err)
+	}
+}

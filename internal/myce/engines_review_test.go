@@ -203,3 +203,53 @@ func TestBundleRecoveryClosesEachSourceFile(t *testing.T) {
 		t.Fatalf("recovered=%d err=%v", len(entries), err)
 	}
 }
+
+func TestWithModelDeviceDropsOtherPlatformSelectors(t *testing.T) {
+	base := Model{DeviceEnv: map[string]string{
+		"CUDA_VISIBLE_DEVICES":   "cuda-stale",
+		"ZE_AFFINITY_MASK":       "xpu-stale",
+		"ONEAPI_DEVICE_SELECTOR": "level_zero:xpu-stale",
+	}}
+	xpu, err := WithModelDevice(base, "xpu", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := xpu.DeviceEnv["CUDA_VISIBLE_DEVICES"]; !ok || value != "" || xpu.DeviceEnv["ZE_AFFINITY_MASK"] != "1" || xpu.DeviceEnv["ONEAPI_DEVICE_SELECTOR"] != "level_zero:0" {
+		t.Fatalf("XPU isolation=%v", xpu.DeviceEnv)
+	}
+	cuda, err := WithModelDevice(base, "cuda", "GPU-selected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cuda.DeviceEnv["CUDA_VISIBLE_DEVICES"] != "GPU-selected" || cuda.DeviceEnv["ZE_AFFINITY_MASK"] != "2147483647" || cuda.DeviceEnv["ONEAPI_DEVICE_SELECTOR"] != "!*:*" {
+		t.Fatalf("CUDA isolation=%v", cuda.DeviceEnv)
+	}
+}
+
+func TestBoundServerDropsInheritedOtherBackendSelectors(t *testing.T) {
+	t.Setenv("CUDA_VISIBLE_DEVICES", "inherited-cuda")
+	t.Setenv("ZE_AFFINITY_MASK", "inherited-xpu")
+	t.Setenv("ONEAPI_DEVICE_SELECTOR", "inherited-oneapi")
+	for _, platform := range []string{"cuda", "xpu", "metal"} {
+		m := Model{Engine: "server", StartCommand: []string{"unused"}, HealthURL: "http://127.0.0.1:{port}/health"}
+		bound, e := WithModelDevice(m, platform, "0")
+		if e != nil {
+			t.Fatal(e)
+		}
+		_, _, _, env, e := serverCommand(bound, 1234)
+		if e != nil {
+			t.Fatal(e)
+		}
+		got := map[string]string{}
+		for _, entry := range env {
+			k, v, _ := strings.Cut(entry, "=")
+			got[k] = v
+		}
+		if platform != "cuda" && got["CUDA_VISIBLE_DEVICES"] != "" {
+			t.Fatal(platform, got["CUDA_VISIBLE_DEVICES"])
+		}
+		if platform != "xpu" && (got["ZE_AFFINITY_MASK"] != "2147483647" || got["ONEAPI_DEVICE_SELECTOR"] != "!*:*") {
+			t.Fatal(platform, "inherited XPU selector")
+		}
+	}
+}
