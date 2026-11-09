@@ -64,11 +64,39 @@ class ShardTests(unittest.TestCase):
             package, expression = entry.split('\t')
             loads.append(sum(weight for name, weight in hints[package].items() if re.fullmatch(expression, name)))
         self.assertEqual(loads, sorted(loads, reverse=True))
-        self.assertEqual(len(entries), 3 * 4)
+        self.assertLessEqual(max(loads), 120.1)  # The largest root is the lower bound.
+        self.assertGreater(len(entries), 4)
         # CLI work is admitted before the last core chunk, even though core
         # came first in the package list. Each gets refills, not one long slot.
         packages = [entry.split('\t')[0] for entry in entries]
         self.assertLess(packages.index('cli'), max(i for i, package in enumerate(packages) if package == 'core'))
+
+    def test_measured_tail_is_split_without_splitting_queue_history_root(self):
+        import re
+        from collections import Counter
+        # Fresh history timing dominates one old, coarsely packed chunk. Keep
+        # that root whole while providing enough smaller jobs to refill slots.
+        names = ['TestQueueHistoryBurst'] + [f'TestShort{i}' for i in range(120)]
+        hints = dict(packages={'core': {name: 1 for name in names}},
+                     platform_packages={'darwin': {'core': {
+                         name: 84 if name == 'TestQueueHistoryBurst' else 10 for name in names}}})
+        with patch.object(shards.Path, 'read_text', return_value=json.dumps(hints)), \
+             patch.object(shards, 'native_roots', return_value=names), \
+             patch.object(shards.sys, 'platform', 'darwin'):
+            entries = shards.plan(['core\t.*'], 4)
+        selected = Counter()
+        loads = []
+        for entry in entries:
+            expression = entry.split('\t')[1]
+            chosen = [name for name in names if re.fullmatch(expression, name)]
+            selected.update(chosen)
+            loads.append(sum(hints['platform_packages']['darwin']['core'][name] for name in chosen))
+            if 'TestQueueHistoryBurst' in chosen:
+                self.assertEqual(chosen, ['TestQueueHistoryBurst'])
+        self.assertEqual(selected, Counter(names))
+        self.assertGreater(len(entries), 3 * 4)
+        self.assertLessEqual(max(loads), 90)
+        self.assertEqual(loads, sorted(loads, reverse=True))
 
     def test_native_inventory_includes_examples_and_seeds_but_no_benchmarks(self):
         package = 'mycelium/internal/myce'

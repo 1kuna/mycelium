@@ -170,6 +170,15 @@ uncertain custody. Both-platform elapsed time measures their overlap, rather
 than adding the two leg walls. Concurrent wall improvement is measured in the
 next release full, not inferred from individual peak RSS.
 
+Full-gate chunk weights use platform-specific passed-root timings when available,
+with the generic hints and a default weight for new roots. The planner targets
+eight refill waves, stopping at the longest root's measured duration: smaller
+chunks than that cannot shorten the indivisible root and add process startup
+cost. Whole root names remain anchored exactly once, including their subtests;
+`QueueHistoryBurst` keeps its shared 1k/10k comparison in one process. Hints never
+remove coverage. Chunk counts adapt to current inventory and measured work.
+
+
 
 Under MY-41, warning memory pressure alone does not stop admission or running
 work. Missing observations log a warning and continue; they are not evidence of

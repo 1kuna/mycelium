@@ -76,7 +76,10 @@ def plan(entries: list[str], cores: int) -> list[str]:
         raise ValueError('core allocation must be positive')
     if cores == 1:
         return entries
-    hints = json.loads(Path(__file__).with_name('gate-test-durations.json').read_text())['packages']
+    timing = json.loads(Path(__file__).with_name('gate-test-durations.json').read_text())
+    hints = {package: dict(values) for package, values in timing['packages'].items()}
+    for package, values in timing.get('platform_packages', {}).get(sys.platform, {}).items():
+        hints.setdefault(package, {}).update(values)
     inventories = {}
     for entry in entries:
         package, expression = entry.split('\t', 1)
@@ -87,18 +90,18 @@ def plan(entries: list[str], cores: int) -> list[str]:
             raise ValueError('empty native inventory for sharded package ' + package)
         inventories[package] = names
 
-    # Three chunks per slot leave refill work when timing estimates differ
-    # from this host. Keep the total a multiple of the slots: independently
-    # rounding each package up can add a nearly empty final scheduling wave.
+    # Aim for eight refill waves instead of three coarse waves. Stop splitting
+    # when the longest indivisible root sets the lower bound: more processes
+    # beyond that point add compilation/TestMain overhead without shortening it.
     weights = {package: {name: max(.1, hints[package].get(name, .1)) for name in names}
                for package, names in inventories.items()}
     totals = {package: sum(values.values()) for package, values in weights.items()}
-    counts = {package: 1 for package in inventories}
-    budget = min(3 * min(9, cores), sum(len(names) for names in inventories.values()))
-    for _ in range(budget - len(counts)):
-        candidates = [package for package in counts if counts[package] < len(inventories[package])]
-        package = max(candidates, key=lambda package: totals[package] / counts[package])
-        counts[package] += 1
+    if not totals:
+        return entries
+    longest = max(value for package in weights.values() for value in package.values())
+    target = max(longest, sum(totals.values()) / (8 * min(9, cores)))
+    counts = {package: min(len(inventories[package]), max(1, math.ceil(total / target)))
+              for package, total in totals.items()}
     expanded = []
     for entry in entries:
         package, expression = entry.split('\t', 1)
@@ -114,4 +117,4 @@ def plan(entries: list[str], cores: int) -> list[str]:
         print(f'gate shards {package}: {len(names)} roots in {len(groups)} processes', flush=True)
     # Longest chunks first, across packages. Package ordering would otherwise
     # strand the CLI behind the whole core workload (or the reverse).
-    return [entry for _, entry in sorted(expanded, key=lambda row: -row[0])]
+    return [entry for _, entry in sorted(expanded, key=lambda row: (-row[0], row[1]))]
