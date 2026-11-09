@@ -196,7 +196,7 @@ def main():
         with capacity.admission_lock(capacity.root(repo)):
             legacy = [p for d in capacity.legacy_directories(repo) for p in capacity.occupied_lanes(d)]
             others = [p for p in capacity.occupied_lanes(capacity.root(repo)) if p != slot.directory]
-            if not others and not legacy and not capacity.native_full_custody():
+            if not others and not legacy and not capacity.native_full_custody(include_fleet=True):
                 trim_cache(cache)
         env = dict(os.environ, GOCACHE=str(cache))
         command = [sys.executable, str(REPO / 'scripts/gate-measure.py'), '--report', str(report),

@@ -96,10 +96,25 @@ def occupied_lanes(directory):
     return [p for p in directory.glob('local-go-slot*') if p.is_dir()]
 
 
-def native_full_custody():
+def native_full_custody(*, include_fleet=False):
+    """Local custody binds local admission; installed-worker custody is separate.
+
+    Never alter either kind. Cache eviction asks for both kinds, since custody
+    scope must not silently shrink the shared-cache idle boundary.
+    """
     caches = {Path.home() / 'Library/Caches/mycelium/gates/go-build'}
     caches.add(Path(subprocess.check_output(['go', 'env', 'GOCACHE'], text=True).strip()))
-    return any(list(cache.glob('mycelium-full-gate-[0-9].custody')) for cache in caches)
+    worker_files = Path.home() / '.local/share/mycelium/worker/state/job-files'
+    for cache in caches:
+        for path in cache.glob('mycelium-full-gate-[0-9].custody'):
+            try:
+                row = json.loads(path.read_text())
+                fleet = Path(row['scratch']).resolve().is_relative_to(worker_files.resolve())
+            except (OSError, ValueError, KeyError, TypeError):
+                fleet = False  # Unknown custody remains binding.
+            if include_fleet or not fleet:
+                return True
+    return False
 
 
 def available_memory():
@@ -176,6 +191,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     A release waiter takes the next free heavy slot ahead of normal gates.
     No stale owner is removed automatically, including after supervisor death.
     """
+    if type(cores) is not int or cores <= 0:
+        raise ValueError('local gate cores must be a positive integer')
     directory = root(repo)
     directory.mkdir(parents=True, exist_ok=True)
     if priority == 'calibration' and mode != 'full':
@@ -235,7 +252,10 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 for lane in lanes:
                     owner_path = lane / 'owner.json'
                     # Preserve unknown legacy occupancy and its four-core allowance.
-                    reserved_cores += int(json.loads(owner_path.read_text()).get('cores', 4)) if owner_path.exists() else 4
+                    demand = json.loads(owner_path.read_text()).get('cores', 4) if owner_path.exists() else 4
+                    if type(demand) is not int or demand <= 0:
+                        raise RuntimeError('recorded local lane has invalid CPU demand; retained')
+                    reserved_cores += demand
                 worker_cores = math.ceil((worker or {}).get('cpu_cores', 0))
                 reserve = int(config.get('workstation_cpu_reserve_cores', 0))
                 cpu_ok = reserved_cores + worker_cores + cores + reserve <= (os.cpu_count() or 1)

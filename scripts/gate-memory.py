@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Host memory observations, without treating compressed pages as free bytes."""
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -76,15 +77,77 @@ def idle_baseline() -> Optional[dict]:
         return None
     baseline = json.loads(path.read_text()).get('swap_baseline')
     if baseline is not None:
-        values = [baseline[key] for key in ('window_seconds', 'peak_swapout_bytes_per_second',
-                                            'peak_swap_use_growth_bytes_per_second')]
-        if (not all(isinstance(value, (int, float)) and math.isfinite(value) for value in values) or
-                baseline.get('schema') != 1 or not baseline.get('evidence') or
-                baseline['window_seconds'] <= 0 or
-                baseline['peak_swapout_bytes_per_second'] < 0 or
-                baseline['peak_swap_use_growth_bytes_per_second'] < 0):
-            raise ValueError('invalid idle swap qualification')
+        verify_baseline(baseline)
     return baseline
+
+
+def measured_rates(rows: list) -> dict:
+    """Derive the rate envelope from locally gate-free measured intervals."""
+    if len(rows) < 3:
+        raise ValueError('swap baseline needs two measured intervals')
+    periods, rates, growth = [], [], []
+    for row in rows:
+        if (row.get('local_gate_owners') != [] or row.get('local_native_custody') is not False
+                or row.get('observation_only') is not True or row['memory']['pressure_level'] != 1):
+            raise ValueError('swap baseline contains local work or non-normal pressure')
+        for key in ('page_bytes', 'swapouts', 'swap_used_bytes'):
+            if type(row['memory'][key]) is not int or row['memory'][key] < 0:
+                raise ValueError('invalid swap baseline counter')
+    for previous, current in zip(rows, rows[1:]):
+        elapsed = current['monotonic_seconds'] - previous['monotonic_seconds']
+        a, b = previous['memory'], current['memory']
+        if (not math.isfinite(elapsed) or elapsed <= 0 or
+                type(b['page_bytes']) is not int or b['page_bytes'] <= 0 or
+                b['page_bytes'] != a['page_bytes'] or b['swapouts'] < a['swapouts']):
+            raise ValueError('invalid swap baseline interval')
+        periods.append(elapsed)
+        rates.append((b['swapouts'] - a['swapouts']) * b['page_bytes'] / elapsed)
+        growth.append(max(0, b['swap_used_bytes'] - a['swap_used_bytes']) / elapsed)
+    return dict(window_seconds=max(periods), peak_swapout_bytes_per_second=max(rates),
+                peak_swap_use_growth_bytes_per_second=max(growth),
+                sample_count=len(rows), duration_seconds=sum(periods),
+                mean_swapout_bytes_per_second=sum(
+                    (b['memory']['swapouts'] - a['memory']['swapouts']) * b['memory']['page_bytes']
+                    for a, b in zip(rows, rows[1:])) / sum(periods))
+
+
+def evidence_bytes(evidence: dict) -> bytes:
+    if not isinstance(evidence, dict) or not evidence.get('sha256') or not evidence.get('path'):
+        raise ValueError('swap qualification lacks digest-bound measurement evidence')
+    data = Path(evidence['path']).read_bytes()
+    if hashlib.sha256(data).hexdigest() != evidence['sha256']:
+        raise ValueError('swap qualification evidence digest changed')
+    return data
+
+
+def verify_baseline(baseline: dict) -> None:
+    """Verify samples and fleet-background identity, never querying the queue."""
+    if not isinstance(baseline, dict) or baseline.get('schema') != 1:
+        raise ValueError('invalid idle swap qualification schema')
+    rows = [json.loads(line) for line in evidence_bytes(baseline.get('evidence')).splitlines()]
+    expected = measured_rates(rows)
+    for key, value in expected.items():
+        actual = baseline.get(key)
+        if not isinstance(actual, (int, float)) or not math.isfinite(actual) or actual != value:
+            raise ValueError('swap qualification rates do not match measurement samples')
+    background = baseline.get('fleet_background')
+    if not isinstance(background, dict) or not isinstance(background.get('job_ids'), list):
+        raise ValueError('swap qualification lacks fleet-background job identity')
+    worker_pids = sorted({row['memory']['local_worker_usage']['pid'] for row in rows
+                          if row['memory'].get('local_worker_usage', {}).get('pid') is not None})
+    if worker_pids != sorted(background.get('worker_pids', [])):
+        raise ValueError('fleet-background worker does not match measured samples')
+    observed = set()
+    snapshots = background.get('status_snapshots', [])
+    if worker_pids and not snapshots:
+        raise ValueError('swap qualification lacks worker-background evidence')
+    for evidence in snapshots:
+        status = json.loads(evidence_bytes(evidence))
+        observed.update(job['id'] for job in status['jobs']
+                        if job.get('machine') == background.get('machine_id')
+                        and job.get('state') in ('starting', 'running'))
+    if sorted(observed) != sorted(background['job_ids']):
+        raise ValueError('fleet-background jobs do not match measured status evidence')
 
 
 class SwapGuard:

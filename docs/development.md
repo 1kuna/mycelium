@@ -132,10 +132,13 @@ The installed local fleet worker can coexist with local gates. Admission reads
 its process-tree CPU/RSS from launchd and the OS, without queue access or
 credentials, and counts live worker CPU alongside the declared local lane
 budgets and the host-qualified workstation reserve. Available RAM already
-reflects worker residency; do not subtract its RSS a second time. A fleet full
-race suite counts toward full concurrency through its native custody record.
-Ordinary admission does not require an idle host. Idle-only swap calibration
-is separate and must not sample while another gate is running.
+reflects worker residency; do not subtract its RSS a second time. Installed-worker
+fleet custody is separate from local gate lanes and is never modified by local
+admission. Unknown/local native full custody remains binding; all custody still
+blocks idle cache eviction. Ordinary admission does not require an idle host.
+Swap-baseline calibration excludes local gate lanes, while the fleet worker and
+its current job remain measured background. Record that job and its usage with
+the baseline; do not wait for the fleet worker to become idle.
 Ordinary fulls wait in FIFO order by default and print their queue position;
 no polling or relay is needed. Release and calibration fulls take priority over
 ordinary waiters. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is

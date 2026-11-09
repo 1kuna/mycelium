@@ -634,6 +634,70 @@ sys.exit(m.main())
         self.assertEqual(usage['process_count'], 3)
         self.assertAlmostEqual(usage['cpu_cores'], 2.405)
 
+    def test_fleet_custody_is_separate_but_still_prevents_cache_eviction(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cache = root / 'Library/Caches/mycelium/gates/go-build'
+            cache.mkdir(parents=True)
+            path = cache / 'mycelium-full-gate-0.custody'
+            scratch = root / '.local/share/mycelium/worker/state/job-files/job/1/.gate/run.x'
+            original = json.dumps(dict(marker='fleet', scratch=str(scratch)))
+            path.write_text(original)
+            with (patch.object(Path, 'home', return_value=root),
+                  patch.object(capacity.subprocess, 'check_output', return_value=str(cache))):
+                # setUp mocks the public function, so exercise its real definition.
+                real = load('gate-capacity')
+                self.assertFalse(real.native_full_custody())
+                self.assertTrue(real.native_full_custody(include_fleet=True))
+                self.assertEqual(path.read_text(), original)
+                path.write_text('{unknown')
+                self.assertTrue(real.native_full_custody())
+
+    def test_nonpositive_requested_or_recorded_cpu_demand_cannot_bypass_ledger(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                for cores in (0, -1):
+                    with self.subTest(cores=cores), self.assertRaisesRegex(ValueError, 'positive integer'):
+                        capacity.acquire(root, cores=cores)
+                lane = root / 'local-go-slot'; lane.mkdir()
+                owner = lane / 'owner.json'; owner.write_text(json.dumps(dict(cores=0)))
+                with self.assertRaisesRegex(RuntimeError, 'invalid CPU demand'):
+                    capacity.acquire(root, cores=4)
+                self.assertTrue(owner.exists())
+
+    def test_swap_baseline_requires_samples_digest_local_exclusion_and_background_jobs(self):
+        import hashlib
+        memory = measurement.memory
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            samples = root / 'samples.jsonl'; status = root / 'status.json'
+            status.write_text(json.dumps(dict(jobs=[dict(id='fleet-job', machine='worker', state='running')])))
+            rows = [dict(monotonic_seconds=i * 2, local_gate_owners=[], local_native_custody=False,
+                         observation_only=True, memory=dict(pressure_level=1, page_bytes=16384,
+                         swapouts=0, swap_used_bytes=0, local_worker_usage=dict(pid=661))) for i in range(3)]
+            samples.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            def evidence(path):
+                return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+            baseline = dict(schema=1, evidence=evidence(samples), **memory.measured_rates(rows),
+                            fleet_background=dict(machine_id='worker', worker_pids=[661],
+                                job_ids=['fleet-job'], status_snapshots=[evidence(status)]))
+            memory.verify_baseline(baseline)
+            for change in ('fabricated', 'rates', 'digest', 'local', 'job'):
+                with self.subTest(change=change):
+                    candidate = json.loads(json.dumps(baseline))
+                    if change == 'fabricated': candidate['evidence'] = ['truthy']
+                    elif change == 'rates': candidate['peak_swapout_bytes_per_second'] = 1024**3
+                    elif change == 'digest': candidate['evidence']['sha256'] = 'wrong'
+                    elif change == 'job': candidate['fleet_background']['job_ids'] = ['unobserved-job']
+                    else:
+                        rows[0]['local_gate_owners'] = ['another-local-lane']
+                        samples.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+                        candidate['evidence'] = evidence(samples)
+                    with self.assertRaises(ValueError): memory.verify_baseline(candidate)
+                    samples.write_text(''.join(json.dumps(dict(row, local_gate_owners=[])) + '\n' for row in rows))
+
 
 if __name__ == '__main__':
     unittest.main()

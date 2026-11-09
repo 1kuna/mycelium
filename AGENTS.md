@@ -48,7 +48,7 @@ inside the local VM invoked by the gate. Fleet gates are optional extra evidence
 Hotfix: quick, deploy, then full, fixing forward. The 2026-11-02/03 local cache
 and disk saturation incident is mitigated by persistent gate-owned caches,
 automatic idle cache trimming, a 45 GiB entry/42 GiB stop floor and capacity-aware
-admission; preserve other owners' slots. Full concurrency stays at one until
+admission; preserve other owners' slots. Local full concurrency stays at one until
 measured; release builds take the next free lane. Details: `docs/development.md`.
 
 Test behavior, security invariants and real incidents; add a focused regression
