@@ -383,3 +383,34 @@ func TestStagingCauseRejectsUndeclaredNames(t *testing.T) {
 
 // #720's incident shape: a shared input larger than an explicit cache limit fails
 // admission before any source archive, plan blob, NAS read or environment launch.
+
+func TestStagingSharedInputCapacityBeforeSourceReads(t *testing.T) {
+	_, clock := fixture(t)
+	w := Worker{StateDir: newTestStateRoot(t), Clock: clock, FileCacheLimit: 10 << 30}
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	if err := w.initFileTransfers(context.Background(), store); err != nil {
+		t.Fatal(err)
+	}
+	input := SharedInput{NAS: "media/large", SHA256: strings.Repeat("a", 64), SizeBytes: 11 << 30}
+	j := Job{Spec: Spec{Files: FileManifest{".myce-source.tar": {SHA256: strings.Repeat("b", 64), SizeBytes: 10}, "plan.json": {SHA256: strings.Repeat("c", 64), SizeBytes: 10}}, SharedInputs: map[string]SharedInput{"large": input}}}
+	w.sharedInputs.resolveNAS = func(string, string) (string, error) {
+		t.Error("NAS read reached before impossible admission")
+		return "", syscall.EIO
+	}
+	_, release, err := w.acquireSharedInputs(context.Background(), j)
+	if release != nil {
+		release()
+	}
+	if err == nil {
+		t.Fatal("oversized shared input admitted")
+	}
+	cause := runtimeDiagnostic(runtimeErrorFor("input_staging", err))
+	d := cause.Staging
+	if cause.Class != "resource_limit" || d == nil || d.Input != "shared_inputs/large" || d.Blob != input.SHA256 || d.Operation != "shared_input_admission" || d.Error != "cache_space" || d.RequiredBytes != 11<<30 || d.LimitBytes != 10<<30 || d.AvailableBytes > 10<<30 || !stagingRetryable(err) {
+		t.Fatalf("lost actual capacity failure: %+v %v", d, err)
+	}
+}
