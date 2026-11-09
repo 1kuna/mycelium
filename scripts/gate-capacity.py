@@ -138,6 +138,13 @@ def resource_qualification(config):
              any(g.get('phase') == 'linux' and g.get('mode') == 'full' and
                  g.get('status') == 0 and not g.get('refusal') and
                  g.get('run_id') == r.get('run_id') for g in rows)]
+    native_cores = qualification.get('native_measured_cores', qualification['measured_cores'])
+    if type(native_cores) is not int or native_cores < qualification['measured_cores']:
+        raise ValueError('invalid native measured core count')
+    if native_cores > qualification['measured_cores'] and not any(
+            r.get('admission', {}).get('cores') == native_cores and
+            r.get('admission', {}).get('exclusive') is True for r in native):
+        raise ValueError('native core profile lacks its exclusive calibration')
     if not native or not linux:
         raise ValueError('concurrent admission requires completed native and Linux measurements')
     if measured['native_peak_bytes'] != max(r['max_tree_rss_sum_bytes'] for r in native):
@@ -349,7 +356,12 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         'admission_config_sha256') != config_digest:
                     raise RuntimeError('capacity configuration changed during active custody; no work started; '
                                        'waiting ticket removed, retry after active group cleanup with current helpers')
-                if resources and cores > resources['measured_cores']:
+                qualified_cores = (resources.get('native_measured_cores', resources['measured_cores'])
+                                   if resources and platform == 'native' else
+                                   resources['measured_cores'] if resources else cores)
+                calibration = (resources and mode == 'full' and platform == 'native'
+                               and priority == 'calibration' and exclusive and cores > qualified_cores)
+                if resources and cores > qualified_cores and not calibration:
                     raise RuntimeError('requested cores exceed the measured local gate budget')
                 if exclusive and not resources:
                     raise RuntimeError('exclusive timing requires qualified resource admission')
@@ -385,6 +397,11 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             full_marker = candidate
                             break
                 gate_memory = memory_requirement(config, platform, mode)
+                if calibration:
+                    # Candidate process count scales the measured peak conservatively.
+                    # This is a labelled measurement, not an enabled resource profile.
+                    measured = config['memory_measurement']
+                    gate_memory = (measured['native_peak_bytes'] * cores + qualified_cores - 1) // qualified_cores + measured['headroom_bytes']
                 needed_memory = gate_memory
                 if needed_memory > host_memory:
                     raise RuntimeError(f'{needed_memory / GIB:.2f} GiB entry requirement exceeds '
@@ -477,6 +494,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             owner.update(admission_protocol=2, uid=os.getuid(), resource_group=group['resource_group'],
                                          admission_config_sha256=config_digest,
                                          platform=platform, peak_bytes=peak, exclusive=exclusive,
+                                         calibration=bool(calibration),
                                          source_root=str((source_root or repo).resolve()),
                                          process_identity=process_identity(os.getpid()), run_marker=marker,
                                          scratch=str((source_root or repo).resolve() / '.gate' / ('run.' + marker)))
