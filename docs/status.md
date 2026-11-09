@@ -2615,3 +2615,52 @@ committed capture; mutation acknowledgements and accepted results retain their
 separate authority. Allocation accounting still refuses work that cannot fit
 measured memory headroom. Transport cancellation returns retryable 503
 `status_unavailable`, rather than classifying an unavailable read as bad input.
+
+## Retained production admission waits (next release, #868)
+
+`admission_wait` on a production Job retains queue-clock first/latest waiting
+snapshots and a capacity-sized history of distinct transitions. Snapshot construction
+runs on immutable committed inputs outside the writer mutex. Unchanged waiting
+sets and placement inputs reuse the previous explanation without building it;
+sample expiry and minimum-runtime/release-credit boundaries force refresh. Only changed
+blocker/holder/policy sets are published; scalar telemetry and ages describe
+that snapshot's `at`, rather than every heartbeat. Publication rechecks the
+committed generation; a competing mutation wins and records a capture gap. Each target
+records its host/session/device, typed failed predicates, resource demand and
+room, exact holders with current policy tiers, declaration/admission/charge/
+forecast values and sample age. `preemption.considered` is captured from the
+actual scheduler; diagnostic status reads never manufacture a decision.
+`preemption.source` distinguishes `planner`, `diagnostic_projection` and an
+existing `release_commitment`. `planned` is stop intent, not delivery or release
+proof. `last_planner_decision` preserves the last actual decision's timestamp
+and resource vector for this exact attempt/next piece/target, even when later
+passes only wait for releases. It never labels a new projection as a past
+planner decision. `resolution` separates `planner_candidate` from
+`candidate_projection`, `serial_diagnostic_projection`, and
+`retained_wave_diagnostic_projection`; `concurrency` identifies measured waves. `device_fault` distinguishes known driver
+quarantine from host RAM pressure. Several predicates may apply together.
+
+`enforced_host_gb` with `enforcement_basis=started_worker_contract_not_direct_read`
+comes from the successful Started native-cgroup contract, not a new controller
+read. Other/older/prestart/Docker enforcement remains unknown; sampled RSS is
+not kernel containment. Missing forecasts/ages mean unknown, while numeric zero
+is measured zero. Interpret available memory with `host_memory_known` and
+`device_memory_known`; unknown telemetry is not measured zero. Current reservation,
+available RAM and physical use are separate
+values and need not agree.
+
+First/latest are retained as semantic endpoints. Additional transitions share
+measured unused queue evidence headroom across waiting production jobs; unavailable
+capacity grants no optional history. `dropped` and `budget_unknown` expose incomplete
+coverage. `history_bytes` and `history_budget_bytes` report optional transition
+cost and its grant. Under measured pressure the ordinary retention path can
+shed optional history on closed jobs too. A capture that consumes one measured
+ordinary-control service interval yields remaining snapshots; `capture_gaps`
+and `deferred_at` expose that gap. Oldest observations are refreshed first.
+No timer, sample-count cap or deployment-specific reserve is added.
+`latest.closed_at` and `closed_reason` close the last wait on assignment, wave
+admission, pause, cancellation or failure. Resume/retry can open another snapshot
+while keeping the first endpoint. Parent evidence is not copied into a new
+child's execution history. This is an observation-only record, including for parents before any
+child exists. Retained samples survive assignment/retry and queue restart with
+the job; existing job history retention still owns their lifetime.

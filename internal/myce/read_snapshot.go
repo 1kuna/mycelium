@@ -607,6 +607,15 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 	if imported || capture.generation == nil {
 		return q.captureStatusObservation(id, options, ctx)
 	}
+	source, err := capture.observationQueue(ctx, id, readAt)
+	if err != nil {
+		return nil, fileStoreObservation{}, err
+	}
+	return source.captureStatusObservation(id, options, ctx)
+}
+
+// Materialize immutable committed inputs without taking the writer mutex.
+func (capture *committedReadCapture) observationQueue(ctx context.Context, id string, readAt time.Time) (*Queue, error) {
 	base := capture.source
 	source := &Queue{clock: observationClock{readAt}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, efficiencyView: base.efficiencyView,
 		simulation: base.simulation, productionGrace: base.productionGrace, lossTimeouts: base.lossTimeouts, productionInfrastructureRetries: base.productionInfrastructureRetries,
@@ -624,7 +633,7 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 		source.s, source.records, err = generation.jobInputs(ctx, id)
 	}
 	if err != nil {
-		return nil, fileStoreObservation{}, err
+		return nil, err
 	}
 	source.models, source.environments, source.calls = *models, *environments, runtime.Calls
 	source.unreported = make(map[string]bool, len(fresh))
@@ -648,7 +657,7 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 		copy.hostReservationDebtGB = l.hostReservationDebtGB
 		source.s.Machines[key] = &copy
 	}
-	return source.captureStatusObservation(id, options, ctx)
+	return source, nil
 }
 
 // Prefix resolution walks the immutable key range outside q.mu. Cache/commit

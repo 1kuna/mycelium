@@ -261,6 +261,8 @@ func TestQueuePersistenceCachedEncodingMatchesJSON(t *testing.T) {
 			live := q.touchJob(j.ID)
 			live.Spec.Run.Env["changed"] = "yes"
 			live.Reason = "mutated"
+			live.AdmissionWait = retainAdmissionWait(live.AdmissionWait,
+				&AdmissionWaitSnapshot{At: clock.Now(), Attempt: live.Attempt, Predicate: "admission"}, 0, true)
 			for key, value := range map[string]any{"state": q.s, "jobs/" + j.ID: live} {
 				want, err := json.Marshal(value)
 				if err != nil {

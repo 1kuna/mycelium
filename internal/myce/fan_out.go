@@ -328,6 +328,9 @@ func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 		}
 		initializeStartDeadline(&copy, copy.Queued)
 	}
+	// Parent evidence belongs to the demand before child materialization.
+	q.closeAdmissionWait(parent, "wave_admitted")
+	copy.AdmissionWait = nil
 	parent.FanOut.Next += len(copy.Batch.Pieces)
 	parent.FanOut.Children = append(parent.FanOut.Children, copy.ID)
 	q.putJob(copy.ID, &copy)

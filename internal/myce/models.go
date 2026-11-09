@@ -438,6 +438,8 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 	}
 }
 func (q *Queue) maintainModels() {
+	q.admissionWaitDecisions = nil
+
 	if q.s.ModelSlots == nil {
 		q.s.ModelSlots = map[string]*ModelSlot{}
 	}
@@ -1230,11 +1232,23 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidat
 		}
 		winner := set.pick(handled)
 		if winner == nil || winner.ID != j.ID {
+			for _, c := range set.jobs {
+				if c.ID == j.ID {
+					q.noteWaitPreemption(c, m, WaitPreemption{Reason: "not_scheduler_turn"})
+					break
+				}
+			}
 			continue
 		}
-		if p := set.batchPlan(winner); p != nil && q.completionPlanBetter(winner, p, best, scan) {
-			best, selected = p, winner
+		p := set.batchPlan(winner)
+		decision := WaitPreemption{Considered: true, Reason: "no_feasible_release_plan"}
+		if p != nil {
+			decision.Reason = "feasible_other_target_selected"
+			if q.completionPlanBetter(winner, p, best, scan) {
+				best, selected = p, winner
+			}
 		}
+		q.noteWaitPreemption(winner, m, decision)
 	}
 	if best == nil {
 		return ""
@@ -1246,6 +1260,11 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidat
 		}
 	}
 	q.applyPlacement(best, selected)
+	decision := WaitPreemption{Considered: true, Planned: best.stops > 0, Reason: "no_new_stop_needed"}
+	if best.stops > 0 {
+		decision.Reason = "selected_release_plan"
+	}
+	q.noteWaitPreemption(selected, best.machine, decision)
 	q.retainPlacementReleases(best, q.touchJob(j.ID))
 	return targetKey(best.machine)
 }

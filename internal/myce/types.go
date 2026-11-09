@@ -419,6 +419,8 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	AdmissionWait *AdmissionWaitEvidence `json:"admission_wait,omitempty"`
+
 	StartCapacityWaiting bool `json:"start_capacity_waiting,omitempty"`
 
 	LaunchCapacityWait map[string]LaunchCapacityWait `json:"launch_capacity_wait,omitempty"`
