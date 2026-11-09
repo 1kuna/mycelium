@@ -25,25 +25,30 @@ func TestActionableBlockerPreparationObservationsAgree(t *testing.T) {
 			j := submit(t, q, s)
 			live := q.s.Machines[m.ID]
 			want := "unprepared"
-			switch state {
-			case "offered":
-				q.s.PreparationPlans = map[string]HostLaunch{"offer": {Machine: m.ID, Session: live.Session, Key: r.Key, Kind: "environment"}}
-				want = "waiting_for_builder"
-			case "building":
-				live.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "building"}}
-				want = "building"
-			case "failed", "uploading":
-				live.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "failed", FailureKind: "deterministic", Error: "build exit 1", Log: "No solution found: package absent from first index"}}
-				if state == "uploading" {
-					live.EnvironmentReports[0].State = "uploading"
+			if err := q.update(func() error {
+				switch state {
+				case "offered":
+					q.s.PreparationPlans = map[string]HostLaunch{"offer": {Machine: m.ID, Session: live.Session, Key: r.Key, Kind: "environment"}}
+					want = "waiting_for_builder"
+				case "building":
+					live.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "building"}}
+					want = "building"
+				case "failed", "uploading":
+					live.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "failed", FailureKind: "deterministic", Error: "build exit 1", Log: "No solution found: package absent from first index"}}
+					if state == "uploading" {
+						live.EnvironmentReports[0].State = "uploading"
+					}
+					want = "deterministically_failed"
+				case "busy":
+					live.CPUCapacityReason = "no preparation core available"
+					want = "waiting_for_builder"
+				case "stale":
+					clock.Advance(24 * time.Hour)
+					want = "unknown_observation"
 				}
-				want = "deterministically_failed"
-			case "busy":
-				live.CPUCapacityReason = "no preparation core available"
-				want = "waiting_for_builder"
-			case "stale":
-				clock.Advance(24 * time.Hour)
-				want = "unknown_observation"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
 			}
 			got, err := q.jobSnapshot(j.ID)
 			if err != nil {
