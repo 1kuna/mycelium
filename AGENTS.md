@@ -4,7 +4,8 @@
   `docs/DECISIONS.md` holds the maintainer's rulings.
 - Keep every feature easy to use and testable on a laptop with no GPU.
 - One binary, one SQLite queue, plain-command workers. No peer network,
-  leases, replicated registry, or restored v1 architecture.
+  leases, replicated registry, or restored v1 architecture. MY-40 records a
+  maintainer-directed shared-queue design study; the approved design still binds.
 - Batch commands, model calls/servers, and environments are implemented; keep them laptop-testable.
 - Queue and scheduling decisions use an injected `Clock`. Never call
   `time.Now` or `time.Sleep` directly in queue or scheduling logic.
@@ -35,37 +36,14 @@
 - `deploy`: manual service templates; `docs/operations.md`: old-state archives.
 - `docs/files.md`: checkpoint contract and Python example.
 
-## Build and verify
+## Merge and verify
 
-```sh
-./scripts/gate.sh quick BASE   # per change (default); build, vet, targets, related race tests
-./scripts/gate.sh full         # once per batch before a fleet deploy; dev e2e + one race suite
-myce run --profile gate-quick --input gate-selection.tsv=FILE  # quick on a fleet CPU host, not the T3 Mac; docs/development.md
-./myce dev # long-running local API and fake workers; Ctrl-C to stop
-```
+Merge when quick plus targeted tests pass. Run the full gate once per release
+batch and fix breakage forward. No independent review is required (MY-41).
+Development and test tooling may be changed, reset or cleared when it blocks work;
+see `docs/development.md#local-merge-proof`.
 
-Hotfix: quick, deploy, then full, fixing forward. Run full gates on the fleet
-(`myce run --profile gate-full`, or `gate-full-darwin`), not on the T3 Mac: local
-full gates there fill its shared Go build cache and disk, which blocks other work
-on that host (2026-11-03). At most two full race suites at
-once on one Mac (more causes false failures). Details: `docs/development.md`.
-
-Test behavior, security invariants and real incidents; add a focused regression
-per observed bug. No speculative edge-case matrices, implementation-detail pins,
-duplicate journeys or process self-audits (maintainer, 2026-10-22). Native GPU/daemon/identity/boot checks are separate
-from laptop proof; see `docs/development.md`.
-
-Before merging, follow `docs/development.md#automatic-main-full-gates`: require
-independent review and the PR's exact-head fleet full gate (quick for docs-only),
-inspect main's latest completed run, and fix red or missing runs forward. Queued
-or running main CI does not block; the sequential runner can lag behind merges.
-
-Stage explicit paths and commit completed changes; push your own branches.
-Tested fixes deploy to the fleet without a separate task (MY-28, MY-32, MY-33):
-bundle them into one release at a time and roll back if the queue isn't healthy.
-Do not patch during a successful production run; fix a run failing because of
-Mycelium. Keep a healthy, tested release ready before each scheduled production window.
-Fleet hardware changes still need a task that authorizes them.
-
-This repository is public: keep host names, addresses, fleet layout, private
-paths and other projects' details out of commits, issues and docs.
+Keep process rules only where they protect production customers or secrets:
+never expose the fleet token or let jobs inherit `MYCE_TOKEN`; keep this public
+repository free of private host details, paths and secrets; do not break running
+production customer jobs.

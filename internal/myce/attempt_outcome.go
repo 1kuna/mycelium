@@ -286,6 +286,7 @@ func operatorOutcome(result Result, stopped bool) Result {
 // Only these fixed predicates/messages cross the worker boundary. Never derive
 // public text from Error(), paths, submitted commands or environment values.
 var launchPredicateMessages = map[string]string{
+	deviceFaultRecoveryTimeout:              "no eligible device recovery within the maximum production start window",
 	"no_eligible_host_enabled":              "no eligible host is enabled",
 	"native_workdir_containment":            rejectionMessages["native_workdir_containment"],
 	"native_isolation":                      "native isolation setup refused; check managed workspace and isolation support",
