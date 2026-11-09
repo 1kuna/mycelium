@@ -1,0 +1,263 @@
+package myce
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// An accepting peer pauses inside the first PATCH, after persisting a prefix.
+// Small send buffers make the pause visible at the socket rather than merely
+// queueing the complete request in loopback TCP. 12 MiB matches the incident's
+// scale without depending on any production data or queue storage.
+func TestUploadFilePausedPATCH(t *testing.T) {
+	for _, scenario := range []struct {
+		name               string
+		pause              time.Duration
+		lostAck            bool
+		delayedPublication bool
+		closedTransport    bool
+	}{
+		{"tolerates", 700 * time.Millisecond, false, false, false},
+		{"resumes", 1500 * time.Millisecond, false, false, false},
+		{"published-without-ack", 0, true, false, false},
+		{"publication-races-offset-probe", 0, true, true, false},
+		{"transport-closed-after-accept", 0, false, false, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			pause := scenario.pause
+			body := bytes.Repeat([]byte("source"), 2<<20)
+			path := filepath.Join(t.TempDir(), "source")
+			if err := os.WriteFile(path, body, 0600); err != nil {
+				t.Fatal(err)
+			}
+			ref, err := IdentifyFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mu sync.Mutex
+			var accepted []byte
+			patches := 0
+			publicationRaced := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				if r.Method == "HEAD" {
+					defer mu.Unlock()
+					if r.URL.Path == "/api/files/blobs/"+ref.SHA256 {
+						if len(accepted) != len(body) || scenario.delayedPublication && !publicationRaced {
+							w.WriteHeader(404)
+							return
+						}
+						w.Header().Set("ETag", `"`+ref.SHA256+`"`)
+						w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+					} else {
+						if scenario.delayedPublication && len(accepted) == len(body) {
+							publicationRaced = true
+							w.WriteHeader(404)
+							return
+						}
+						w.Header().Set("Upload-Offset", strconv.Itoa(len(accepted)))
+						w.Header().Set("Upload-Length", strconv.Itoa(len(body)))
+					}
+					return
+				}
+				if r.Method == "POST" {
+					mu.Unlock()
+					w.WriteHeader(201)
+					return
+				}
+				patches++
+				first := patches == 1
+				offset, _ := strconv.Atoi(r.Header.Get("Upload-Offset"))
+				if offset != len(accepted) {
+					current := len(accepted)
+					mu.Unlock()
+					t.Errorf("replayed offset %d, accepted %d", offset, current)
+					w.WriteHeader(409)
+					return
+				}
+				mu.Unlock()
+				if first {
+					prefix := make([]byte, 64<<10)
+					n, _ := io.ReadFull(r.Body, prefix)
+					mu.Lock()
+					accepted = append(accepted, prefix[:n]...)
+					mu.Unlock()
+					time.Sleep(pause)
+					// For the longer pause the first connection must have stalled. Do not
+					// append its unacknowledged buffered bytes after a resume starts.
+					if pause > time.Second {
+						return
+					}
+				}
+				rest, e := io.ReadAll(r.Body)
+				if e != nil {
+					return
+				}
+				mu.Lock()
+				accepted = append(accepted, rest...)
+				next := len(accepted)
+				mu.Unlock()
+				if scenario.lostAck && next == len(body) {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					conn.Close()
+					return
+				}
+				w.Header().Set("Upload-Offset", strconv.Itoa(next))
+				w.WriteHeader(204)
+			}))
+			defer server.Close()
+			transport := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+				if tcp, ok := conn.(*net.TCPConn); ok {
+					tcp.SetWriteBuffer(4096)
+				}
+				return conn, err
+			}}
+			defer transport.CloseIdleConnections()
+			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+			defer cancel()
+			var roundTrip http.RoundTripper = transport
+			if scenario.closedTransport {
+				roundTrip = &uploadClosedAckTransport{base: transport}
+			}
+			client := Client{URL: server.URL, HTTP: &http.Client{Transport: roundTrip}, Jitter: func() float64 { return 0 }}
+			// Force the interrupted branch independently of warm-up request
+			// timing; the default-window branch above proves pause tolerance.
+			if scenario.name == "resumes" {
+				client.transferIdle = 250 * time.Millisecond
+			}
+			if err := client.UploadFile(ctx, path, ref); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !bytes.Equal(accepted, body) {
+				t.Fatal("resumed content differs", len(accepted))
+			}
+			expected := 3
+			if pause > time.Second {
+				expected = 4
+			}
+			if patches != expected {
+				t.Fatalf("PATCH count %d, want %d", patches, expected)
+			}
+		})
+	}
+}
+
+// A timeout can close the shared socket before the writer updates its deadline.
+// net/http may return that closed-connection error instead of the read timeout.
+// Lose an accepted PATCH acknowledgement with the exact error identity observed
+// in the full gate, so recovery must probe the accepted offset before continuing.
+type uploadClosedAckTransport struct {
+	base   http.RoundTripper
+	closed bool
+}
+
+func (t *uploadClosedAckTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(r)
+	if err == nil && r.Method == "PATCH" && !t.closed {
+		t.closed = true
+		response.Body.Close()
+		return nil, &net.OpError{Op: "set", Net: "tcp", Err: net.ErrClosed}
+	}
+	return response, err
+}
+
+func TestUploadTimingProtocolAndPressure(t *testing.T) {
+	timing := &uploadTiming{}
+	if got := timing.window(); got != time.Second {
+		t.Fatal("TCP retransmission floor", got)
+	}
+	timing.observe(131*time.Millisecond, 0)
+	if got := timing.window(); got != time.Second {
+		t.Fatal("fast wire sample shrank floor", got)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Retry-After", "13"); w.WriteHeader(503) }))
+	defer server.Close()
+	client := Client{URL: server.URL, uploadTiming: timing}
+	response, err := client.fileRequestOnce(context.Background(), "HEAD", "/upload", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if got := timing.window(); got != 13*time.Second {
+		t.Fatal("ignored server pressure", got)
+	}
+	timing.observe(4*time.Second, 0)
+	if got := timing.window(); got != 16*time.Second {
+		t.Fatal("ignored service time", got)
+	}
+}
+
+func TestUploadDeadConnectionDetected(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)}
+	source := &adaptiveTransferConn{clock: clock, stalled: true}
+	conn := &fileTransferConn{Conn: source, clock: clock, timing: &uploadTiming{}}
+	start := clock.Now()
+	if _, err := conn.Read(make([]byte, 256)); !errors.Is(err, errFileTransferStalled) {
+		t.Fatal("dead peer", err)
+	}
+	if clock.Now().Sub(start) != time.Second {
+		t.Fatal("unbounded dead connection")
+	}
+}
+
+// Hold a pre-body response reader inside its clear-deadline operation, then
+// complete the request body. The phase transition must leave a finite response
+// deadline even when that earlier clear resumes after the transition starts.
+func TestUploadResponseDeadlineTransition(t *testing.T) {
+	source := &uploadDeadlineConn{entered: make(chan struct{}), release: make(chan struct{})}
+	var reading, awaiting atomic.Bool
+	conn := &fileTransferConn{Conn: source, timing: &uploadTiming{}, reading: &reading, awaiting: &awaiting}
+	cleared := make(chan error, 1)
+	go func() { cleared <- conn.deadline(true, 256) }()
+	<-source.entered
+	armed := make(chan struct{})
+	go func() { conn.awaitResponse(); close(armed) }()
+	await(t, func() bool { return awaiting.Load() })
+	close(source.release)
+	if err := <-cleared; err != nil {
+		t.Fatal(err)
+	}
+	<-armed
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.deadline.IsZero() {
+		t.Fatal("pre-body reader erased the response deadline")
+	}
+}
+
+type uploadDeadlineConn struct {
+	net.Conn
+	mu               sync.Mutex
+	deadline         time.Time
+	entered, release chan struct{}
+}
+
+func (c *uploadDeadlineConn) SetReadDeadline(end time.Time) error {
+	if end.IsZero() {
+		close(c.entered)
+		<-c.release
+	}
+	c.mu.Lock()
+	c.deadline = end
+	c.mu.Unlock()
+	return nil
+}

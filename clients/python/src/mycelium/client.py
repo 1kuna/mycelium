@@ -346,16 +346,28 @@ class Client:
             self.download_result(job["id"], name, destination)
         return job
 
-    def _file_request(self, method, path, data=None, headers=None, size=0):
+    def _file_request(self, method, path, data=None, headers=None, size=0, *, timing=None, deadline=None):
         pace = Pace(jitter=self._jitter)
-        end = None if self.transfer_timeout is None else self._clock.monotonic() + self.transfer_timeout
+        end = deadline if deadline is not None else (None if self.transfer_timeout is None else self._clock.monotonic() + self.transfer_timeout)
         while True:
             started = self._clock.monotonic()
             remaining = None if end is None else end - started
             if remaining is not None and remaining <= 0:
                 raise TransferStalledError("file transfer owner timeout")
             try:
-                return self._file_request_once(method, path, data, headers, size, remaining)
+                if timing is None:
+                    return self._file_request_once(method, path, data, headers, size, remaining)
+                try:
+                    response = self._file_request_once(method, path, data, headers, size, remaining, timing)
+                except APIError as error:
+                    timing.observe(self._clock.monotonic() - started, error.retry_after)
+                    raise
+                except (TransferStalledError, URLError, ConnectionError):
+                    timing.observe(self._clock.monotonic() - started)
+                    raise
+                timing.observe(self._clock.monotonic() - started,
+                               retry_after(response.headers.get("Retry-After"), self._clock.time()))
+                return response
             except APIError as error:
                 if method not in {"GET", "HEAD"} or error.status not in {429, 503} or error.code == "file_blob_unavailable":
                     raise
@@ -366,7 +378,7 @@ class Client:
                 self._clock.sleep(delay)
 
     def _file_request_once(self, method: str, path: str, data: bytes | None = None,
-                      headers: Mapping[str, str] | None = None, size: int = 0, owner_timeout=None):
+                      headers: Mapping[str, str] | None = None, size: int = 0, owner_timeout=None, timing=None):
         """size is the blob the queue may verify before replying; 0 when none."""
         budget = self._transfer_idle
         headers = dict(headers or {})
@@ -377,6 +389,7 @@ class Client:
         request = Request(self.url + path, data=None if data is None else io.BytesIO(data),
                           method=method, headers={"Authorization": "Bearer " + self.token, **headers})
         request._mycelium_file_transfer = True
+        request._mycelium_upload_timing = timing if method == "PATCH" else None
         if owner_timeout is not None:
             request._mycelium_transfer_deadline = time.monotonic() + owner_timeout
             budget = owner_timeout if budget is None else min(budget, owner_timeout)
@@ -402,6 +415,11 @@ class Client:
 
     def upload_file(self, source: str | Path, *, project: str = "", class_: str = "", recovery: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Upload a job input, eligible for retention if never submitted."""
+        from .transfer import UploadTiming
+        timing = UploadTiming()
+        end = None if self.transfer_timeout is None else self._clock.monotonic() + self.transfer_timeout
+        def request(*args, **kwargs):
+            return self._file_request(*args, **kwargs, timing=timing, deadline=end)
         source = Path(source)
         digest = hashlib.sha256()
         size = 0
@@ -417,44 +435,72 @@ class Client:
         elif project:
             claim = self._call("POST", "/api/files/input-claims", {"project": project, "class": class_, "file": ref})
             headers["X-Myce-Input-Claim"] = claim["id"]
-        try:
-            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-                return ref
-        except APIError as error:
-            if error.status not in (404, 410):
-                raise
-        with self._file_request("POST", "/api/files/uploads/", b"", size=size, headers={
-                **headers, "Upload-Length": str(size),
-                "Upload-Metadata": "sha256 " + base64.b64encode(ref["sha256"].encode()).decode()
-                + ",purpose " + base64.b64encode(b"job-input").decode()}):
-            pass
-        # A repeated create may refer to an already published blob.
-        try:
-            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-                return ref
-        except APIError as error:
-            if error.status not in (404, 410):
-                raise
-        with self._file_request("HEAD", endpoint, headers=headers) as response:
-            offset = int(response.headers["Upload-Offset"])
-            length = int(response.headers["Upload-Length"])
-        if length != size or not 0 <= offset <= size:
-            raise ValueError("invalid upload offset/length")
-        with source.open("rb") as stream:
-            stream.seek(offset)
-            while offset < size:
-                chunk = stream.read(min(1024 * 1024, size - offset))
-                if not chunk:
-                    raise ValueError("input changed during upload")
-                with self._file_request("PATCH", endpoint, chunk, {
-                        **headers, "Content-Type": "application/offset+octet-stream",
-                        "Upload-Offset": str(offset)}, size) as response:
-                    if int(response.headers["Upload-Offset"]) != offset + len(chunk):
-                        raise ValueError("invalid upload acknowledgement")
-                offset += len(chunk)
-        with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-            pass
-        return ref
+        def attempt():
+            try:
+                with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
+                    return ref
+            except APIError as error:
+                if error.status not in (404, 410):
+                    raise
+            with request("POST", "/api/files/uploads/", b"", size=size, headers={
+                    **headers, "Upload-Length": str(size),
+                    "Upload-Metadata": "sha256 " + base64.b64encode(ref["sha256"].encode()).decode()
+                    + ",purpose " + base64.b64encode(b"job-input").decode()}):
+                pass
+            # A lost final acknowledgement may already have published the blob.
+            try:
+                with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
+                    return ref
+            except APIError as error:
+                if error.status not in (404, 410):
+                    raise
+            try:
+                with request("HEAD", endpoint, headers=headers) as response:
+                    offset = int(response.headers["Upload-Offset"])
+                    length = int(response.headers["Upload-Length"])
+            except APIError as error:
+                if error.status not in (404, 410):
+                    raise
+                # Final publication can race the blob probe, then remove tus
+                # metadata before this HEAD acquires the original upload lock.
+                with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
+                    return ref
+            if length != size or not 0 <= offset <= size:
+                raise ValueError("invalid upload offset/length")
+            with source.open("rb") as stream:
+                stream.seek(offset)
+                while offset < size:
+                    chunk = stream.read(min(1024 * 1024, size - offset))
+                    if not chunk:
+                        raise ValueError("input changed during upload")
+                    with request("PATCH", endpoint, chunk, {
+                            **headers, "Content-Type": "application/offset+octet-stream",
+                            "Upload-Offset": str(offset)}, size) as response:
+                        if int(response.headers["Upload-Offset"]) != offset + len(chunk):
+                            raise ValueError("invalid upload acknowledgement")
+                    offset += len(chunk)
+            with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
+                pass
+            return ref
+
+        pace = Pace(jitter=self._jitter)
+        while True:
+            started = self._clock.monotonic()
+            try:
+                return attempt()
+            except (TransferStalledError, URLError, ConnectionError, APIError) as error:
+                if isinstance(error, APIError) and (error.status not in (408, 429, 500, 502, 503, 504) or
+                        error.code not in (None, "", "request_failed", "queue_stopping", "client_rate_limited", "observation_shed_control_pressure")):
+                    raise
+                if isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError):
+                    raise
+                pace.observe(self._clock.monotonic() - started)
+                delay = pace.next(self._clock.monotonic(), error=error)
+                if end is not None:
+                    delay = min(delay, max(0, end - self._clock.monotonic()))
+                self._clock.sleep(delay)
+                if end is not None and self._clock.monotonic() >= end:
+                    raise TransferStalledError("file transfer owner timeout") from error
 
     def recover_result(self, job_id: str, *, files: Mapping[str, str | Path],
                        key: str, requested_by: str, reason: str,
