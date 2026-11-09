@@ -133,8 +133,14 @@ func TestDeclaredHostMemoryCapRequiresNativeCPUContainment(t *testing.T) {
 				job.Spec.Needs.Platform = Platform{Required: []string{"cuda"}}
 			}
 			charge, pending := jobHostMemoryCharge(&job, &machine, 6.125, sample, clock.Now())
-			if charge != 64 || pending != 62 {
-				t.Fatal("changed non-declared/native/contained CPU semantics", charge, pending)
+			wantPending := 62.0
+			if kind == "Docker" || kind == "auto" {
+				// These CPU attempts retain their forecast reservation, but
+				// future growth cannot exceed the complete hard cgroup ceiling.
+				wantPending = 6.125
+			}
+			if charge != 64 || pending != wantPending {
+				t.Fatal("lost forecast charge or physical growth bound", charge, pending)
 			}
 		})
 	}
