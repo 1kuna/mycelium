@@ -1,1 +1,41 @@
 package myce
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestInstallMeasuredHostMemoryPreservesFallback(t *testing.T) {
+	c, err := PlanInstall("worker", t.TempDir(), "", t.TempDir(), "http://queue.invalid", "worker", Detection{OS: "linux", Arch: "amd64", Platform: "cpu"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.HostMemoryBudgetMeasured, c.HostMemoryBudgetGB = true, 12
+	if err := c.ValidateInstall(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(c.ServiceText(), "--host-memory-budget-measured") {
+		t.Fatal("measured mode lost in service invocation")
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.Config, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadServiceConfig(c.Config)
+	if err != nil || !got.HostMemoryBudgetMeasured || got.HostMemoryBudgetGB != 12 {
+		t.Fatal(got.HostMemoryBudgetMeasured, got.HostMemoryBudgetGB, err)
+	}
+	c.HostMemoryBudgetGB = 0
+	if err := c.ValidateInstall(); err == nil {
+		t.Fatal("measured mode accepted uncapped fallback")
+	}
+}
