@@ -221,6 +221,9 @@ func (q *Queue) yieldPlacementAllows(j *Job, m *Machine) bool {
 // ordinary comparator preserves ready work's fair turn. Projections for several
 // selected victims debit only this local plan, never queue admission capacity.
 func (q *Queue) yieldAlternative(v *Job, scarce string, loads map[string][]*Job) (*Machine, *Job) {
+	previousCapture := q.memoryAdmissionCapture
+	q.memoryAdmissionCapture = nil // Hypothetical destinations cannot replace durable waiting evidence.
+	defer func() { q.memoryAdmissionCapture = previousCapture }()
 	copy := *v
 	copy.State = "queued"
 	copy.Machine = ""

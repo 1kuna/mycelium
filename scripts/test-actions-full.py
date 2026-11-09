@@ -25,7 +25,7 @@ class ActionsFullTest(unittest.TestCase):
     def exercise(self, linux='succeeded', submission_failure=False, bad_marker=False, refusal=None, status_record=None):
         submitted, waited, results = [], [], []
 
-        def command(*args):
+        def command(*args, cwd=None):
             code, output = 0, ''
             if args[0] == 'run':
                 profile = Path(args[2]).read_text()
@@ -73,6 +73,8 @@ class ActionsFullTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()) as public, patch.object(ci, 'command', command), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(scratch / 'summary')}):
                 status = ci.run(ROOT, SHA, scratch, '123:1')
             summary = (scratch / 'summary').read_text()
+            self.assertIn(f'Main full source: {SHA} (github.sha)', summary)
+            self.assertIn(f'Main full source: {SHA} (github.sha)', public.getvalue())
             self.assertNotIn('coverage is deferred', public.getvalue())
             self.assertNotIn('PRIVATE', summary + public.getvalue())
             if submission_failure:
@@ -106,6 +108,7 @@ class ActionsFullTest(unittest.TestCase):
                 {'attempt': 2, 'out_of_memory': True, 'reason': 'PRIVATE'},
             ]}), (1, ['darwin', 'linux'], ['darwin']))
         self.assertEqual(self.exercise(submission_failure=True), (1, ['linux'], ['linux']))
+        self.assertEqual(self.exercise(linux='cancelled')[0], 1)
 
     def test_oom_requires_current_attempt_and_readable_status(self):
         for output, code in [

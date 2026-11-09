@@ -1033,6 +1033,8 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 	cores, ram, growth := 0, 0.0, 0.0
 	anon, ownResident, ownCharge, ownAnon, ownForecast, ownPending := 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 	ownDevicePending := 0.0
+	var contributors []HostGrowthContributor
+	ownContributor := -1
 	now := time.Time{}
 	if rt.clock != nil {
 		now = rt.clock.Now()
@@ -1082,6 +1084,15 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		}
 		ram += charge
 		growth += pending
+		c := HostGrowthContributor{ID: j.ID, Attempt: j.Attempt, Kind: "attempt", Launching: slices.Contains(launching, jobKey(j)), ChargeGB: charge, PendingGB: pending, SampleFresh: fresh}
+		if !sample.at.IsZero() && !now.Before(sample.at) {
+			age := now.Sub(sample.at).Seconds()
+			c.SampleAgeSeconds = &age
+		}
+		if c.Launching && len(launching) == 1 {
+			ownContributor = len(contributors)
+		}
+		contributors = append(contributors, c)
 	}
 	for _, other := range rt.models {
 		if other.state != "unloaded" && other.state != "failed" {
@@ -1089,6 +1100,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 			need := hostNeed(allocationMachine(&rt.memoryMachine, []string{other.device}), other.model.MemoryGB, other.model.HostMemoryGB)
 			ram += need
 			growth += need
+			contributors = append(contributors, HostGrowthContributor{Kind: "model", ChargeGB: need, PendingGB: need})
 		}
 	}
 	if ownResident > 0 {
@@ -1096,7 +1108,11 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		// contain CUDA pages. Credit only the union lower bound max(all anon,
 		// one process's CUDA counter), never their sum or two process counters.
 		additional := max(0, ownResident-anon)
-		growth += max(0, ownCharge-ownAnon-additional, ownForecast, ownDevicePending) - ownPending
+		pending := max(0, ownCharge-ownAnon-additional, ownForecast, ownDevicePending)
+		growth += pending - ownPending
+		if ownContributor >= 0 {
+			contributors[ownContributor].PendingGB = pending
+		}
 	}
 	capacity, reason := cpuCapacity(&rt.memoryMachine)
 	if reason == "" && cores > capacity {
@@ -1106,7 +1122,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		return fmt.Errorf("aggregate engine CPU/RAM allowance: %w", refuseAdmission("aggregate_host_allowance", "GiB", ram, rt.memoryMachine.HostMemoryBudgetGB, false))
 	}
 	if hostMeasured && hostFree < growth {
-		return fmt.Errorf("insufficient host RAM for launch and pending growth: %w", refuseAdmission("live_host_growth", "GiB", growth, hostFree, false))
+		return fmt.Errorf("insufficient host RAM for launch and pending growth: %w", refuseAdmission("live_host_growth", "GiB", growth, hostFree, false, contributors...))
 	}
 	return nil
 }

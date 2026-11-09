@@ -1,0 +1,11 @@
+[Unit]
+Description=Optional xe CCS preemption timeout application and readback for %I
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/myce-xe-preempt-timeout apply --nonblocking-lock --card %I
+TimeoutStartSec=12
+TimeoutStopSec=2
+KillMode=control-group
+SendSIGKILL=yes
+UnsetEnvironment=MYCE_TOKEN

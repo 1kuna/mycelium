@@ -178,4 +178,11 @@ func TestAdmissionDiagnosticUnavailableAndPrivacy(t *testing.T) {
 			t.Fatal("invalid diagnostic accepted")
 		}
 	}
+	private := &AdmissionDetail{Subcheck: "live_host_growth", Unit: "GiB", Required: 1, Contributors: []HostGrowthContributor{
+		{ID: "private-secret/path", Kind: "attempt", Attempt: 1, PendingGB: 1},
+		{Kind: "private-secret/path", PendingGB: 1},
+	}}
+	if got := safeAdmissionDetail(private); len(got.Contributors) != 0 {
+		t.Fatal("untrusted contributor identity leaked", got)
+	}
 }

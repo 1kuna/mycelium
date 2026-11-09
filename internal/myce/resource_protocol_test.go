@@ -12,14 +12,14 @@ import (
 )
 
 func TestResourceProtocolCompatibility(t *testing.T) {
-	for _, shape := range []string{"checkin", "result", "saved-result", "saved-log"} {
+	for _, shape := range []string{"checkin", "result", "saved-result", "saved-log", "contributors-only"} {
 		t.Run(shape, func(t *testing.T) {
 			wire := &resourceWire{}
 			old := false
 			sent := []bool{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)
-				has := bytes.Contains(b, []byte(`"resources"`)) || bytes.Contains(b, []byte(`"io_pressure"`))
+				has := bytes.Contains(b, []byte(`"resources"`)) || bytes.Contains(b, []byte(`"io_pressure"`)) || bytes.Contains(b, []byte(`"contributors"`))
 				sent = append(sent, has)
 				if old && has {
 					w.WriteHeader(400)
@@ -37,7 +37,13 @@ func TestResourceProtocolCompatibility(t *testing.T) {
 			input := any(Checkin{Machine: Machine{IOPressure: &IOPressure{}}, Attempts: []AttemptReport{{Resources: resources}}})
 			path := "/api/workers/checkin"
 			if shape != "checkin" {
-				r := Result{Resources: resources}
+				r := Result{Resources: resources, ExecutionCause: &RuntimeCause{Operation: "launch", Class: "resource_limit", Predicate: "memory_capacity", Admission: &AdmissionDetail{
+					Subcheck: "live_host_growth", Unit: "GiB", Required: 4,
+					Contributors: []HostGrowthContributor{{ID: ID(), Attempt: 1, Kind: "attempt", ChargeGB: 4, PendingGB: 4}},
+				}}}
+				if shape == "contributors-only" {
+					r.Resources = nil // No other additive field can trigger the retry.
+				}
 				input = r
 				if shape == "saved-result" {
 					input = &r
@@ -47,6 +53,7 @@ func TestResourceProtocolCompatibility(t *testing.T) {
 				}
 				path = "/api/workers/complete"
 			}
+			before, _ := json.Marshal(input)
 			for i := 0; i < 4; i++ {
 				if i == 2 {
 					old = true
@@ -61,11 +68,21 @@ func TestResourceProtocolCompatibility(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if !reflect.DeepEqual(sent, []bool{false, true, true, false, false}) {
+			want := []bool{false, true, true, false, false}
+			if shape != "checkin" {
+				// Contributor support is not negotiated: each strict old-queue
+				// rejection gets the existing single copied-body fallback.
+				want = []bool{true, true, true, false, true, false}
+			}
+			if !reflect.DeepEqual(sent, want) {
 				t.Fatal(sent)
 			}
-			if !hasResourceFields(input) {
+			if shape != "contributors-only" && !hasResourceFields(input) {
 				t.Fatal("negotiation mutated durable telemetry")
+			}
+			after, _ := json.Marshal(input)
+			if !bytes.Equal(before, after) {
+				t.Fatal("fallback mutated durable diagnostics")
 			}
 		})
 	}
