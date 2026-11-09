@@ -2585,3 +2585,20 @@ relative window. Status reasons show the original window's seconds left with
 An assigned start without an accepted acknowledgement continues counting down.
 Absolute `start_by`, give-up, ordering `deadline` and cancellation retain their
 existing authority. No retry, reserve or timeout increase is involved.
+
+### Committed job reads under queue load (#1052)
+
+Point-in-time completion contract: orchestrator decision, 2026-11-09.
+
+From the release containing this correction, per-job GETs capture committed
+observation inputs from an atomically published generation. Cold reads, expired
+responses and fan-out parents do not wait for the live queue transaction mutex.
+An in-flight response completes at its captured generation; later commits
+invalidate subsequent cache lookups instead of repeatedly restarting that read.
+A read is a point-in-time observation, not a fence asserting that no commit
+finished while the response was being built. Elapsed runtime is evaluated with
+the injected read clock. Policy, custody and worker evidence remain from the
+committed capture; mutation acknowledgements and accepted results retain their
+separate authority. Allocation accounting still refuses work that cannot fit
+measured memory headroom. Transport cancellation returns retryable 503
+`status_unavailable`, rather than classifying an unavailable read as bad input.

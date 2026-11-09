@@ -148,3 +148,13 @@ installation details.
 - **Mycelium repository changes or release maintenance:**
   [repository gates](advanced.md#mycelium-repository-merge-gates) and
   [owner operations](references/owner-operations.md).
+
+Point-in-time completion contract: orchestrator decision, 2026-11-09.
+From the queue release containing the #1052 committed-capture correction, a
+per-job GET completes from one published committed observation, including cold
+and parent reads, without waiting for the live control transaction mutex. A
+commit during encoding affects the next read; it does not restart the current
+one. Treat the response as a point-in-time observation, and retain mutation
+acknowledgements and accepted-result checks as the authority for those actions.
+Canceled reads return retryable 503 `status_unavailable`; use the client's
+existing backoff and the same job/key rather than resubmitting work.
