@@ -351,32 +351,60 @@ func jsonAllocationCost(data []byte, target reflect.Type, limit int64) (int64, e
 	}
 	return cost, err
 }
-func jsonFieldType(t reflect.Type, name string) reflect.Type {
+
+type jsonBudgetField struct {
+	name           string
+	typ, anonymous reflect.Type
+}
+
+// Only type metadata is cached, never request keys or queue data. Keep field
+// order and anonymous-field traversal identical to the accounting walk: its
+// first case-insensitive match determines the charge, including name collisions.
+var jsonBudgetFields sync.Map // reflect.Type -> []jsonBudgetField
+
+func budgetFields(t reflect.Type) []jsonBudgetField {
+	if fields, ok := jsonBudgetFields.Load(t); ok {
+		return fields.([]jsonBudgetField)
+	}
+	fields := make([]jsonBudgetField, 0, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if f.PkgPath != "" {
 			continue
 		}
-		tag := strings.Split(f.Tag.Get("json"), ",")[0]
+		tag, _, _ := strings.Cut(f.Tag.Get("json"), ",")
 		if tag == "-" {
 			continue
 		}
+		field := jsonBudgetField{typ: f.Type}
 		if tag == "" && f.Anonymous {
 			nested := f.Type
 			for nested.Kind() == reflect.Pointer {
 				nested = nested.Elem()
 			}
 			if nested.Kind() == reflect.Struct {
-				if typ := jsonFieldType(nested, name); typ != nil {
-					return typ
-				}
+				field.anonymous = nested
 			}
 		}
 		if tag == "" {
 			tag = f.Name
 		}
-		if strings.EqualFold(tag, name) {
-			return f.Type
+		field.name = tag
+		fields = append(fields, field)
+	}
+	stored, _ := jsonBudgetFields.LoadOrStore(t, fields)
+	return stored.([]jsonBudgetField)
+}
+
+func jsonFieldType(t reflect.Type, name string) reflect.Type {
+	for _, field := range budgetFields(t) {
+		if field.anonymous != nil {
+			if typ := jsonFieldType(field.anonymous, name); typ != nil {
+				return typ
+			}
+		}
+		if strings.EqualFold(field.name, name) {
+			return field.typ
 		}
 	}
 	return nil
