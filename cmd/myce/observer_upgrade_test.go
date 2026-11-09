@@ -24,7 +24,7 @@ func TestObserverNewerCLIHandoff(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(next), 0700); err != nil {
 		t.Fatal(err)
 	}
-	build := exec.Command("go", "build", "-tags=myce_test", "-race", "-ldflags", "-X mycelium/internal/myce.BuildVersion=v3.1.0", "-o", next, ".")
+	build := exec.Command("go", "build", "-p", "1", "-tags=myce_test", "-race", "-ldflags", "-X mycelium/internal/myce.BuildVersion=v3.1.0", "-o", next, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build upgrade image: %v %s", err, out)
 	}
