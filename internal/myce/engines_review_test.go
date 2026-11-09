@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 
 	"strings"
 	"sync"
@@ -171,5 +174,32 @@ func TestGenericDiskSpoolReplaysTransportRetry(t *testing.T) {
 	}
 	if res.StatusCode != http.StatusAccepted || string(data) != "accepted" || firstCalls.Load() != 1 || secondCalls.Load() != 1 || got.body != payload || got.length != int64(len(payload)) {
 		t.Fatalf("status=%d response=%q calls=%d/%d body=%q length=%d", res.StatusCode, data, firstCalls.Load(), secondCalls.Load(), got.body, got.length)
+	}
+}
+
+func TestBundleRecoveryClosesEachSourceFile(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "source")
+	destination := filepath.Join(root, "recovery")
+	if err = os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// macOS commonly limits a process to 256 open files. The old WalkDir defer
+	// kept every source open and failed a perfectly ordinary many-file bundle.
+	for i := 0; i < 300; i++ {
+		if err = os.WriteFile(filepath.Join(source, strconv.Itoa(i)), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := &ModelCache{}
+	if err = cache.recoverModelDirectory(context.Background(), source, destination); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(destination)
+	if err != nil || len(entries) != 300 {
+		t.Fatalf("recovered=%d err=%v", len(entries), err)
 	}
 }

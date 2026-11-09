@@ -113,13 +113,7 @@ func TestModelBundleRejectsCorruptionAndSymlinks(t *testing.T) {
 			case "identity":
 				m.SizeBytes++
 			case "hash":
-				partial := filepath.Join(c.Root, cacheKey(m)+".partial")
-				if e := os.MkdirAll(partial, 0700); e != nil {
-					t.Fatal(e)
-				}
-				if e := os.WriteFile(filepath.Join(partial, "config.json"), []byte("xx"), 0600); e != nil {
-					t.Fatal(e)
-				}
+				os.WriteFile(filepath.Join(c.NASRoot, m.Path, "config.json"), []byte("xx"), 0600)
 			case "symlink-file":
 				// Rename preserves the original fixture rather than deleting it.
 				p := filepath.Join(c.NASRoot, m.Path, "config.json")
@@ -151,20 +145,7 @@ func TestModelBundleRejectsCorruptionAndSymlinks(t *testing.T) {
 			if names, _, e := c.Report([]Model{m}); e == nil && len(names) != 0 {
 				t.Fatal("unsafe bundle advertised", names)
 			}
-			if mode == "hash" {
-				trash, _ := filepath.Glob(filepath.Join(c.NASRoot, ".Trash", "myce-model-cache", "*"))
-				if len(trash) != 1 {
-					t.Fatal("corrupt prefix not recoverable", trash)
-				}
-				data, e := os.ReadFile(filepath.Join(trash[0], "config.json"))
-				if e != nil || string(data) != "xx" {
-					t.Fatal("corrupt evidence lost", e)
-				}
-				if _, e = c.Prepare(context.Background(), m); e != nil {
-					t.Fatal("fresh retry failed", e)
-				}
-				return
-			}
+
 		})
 	}
 }
@@ -265,5 +246,31 @@ func TestModelBundleActiveReservationAndActualResume(t *testing.T) {
 	}
 	if e = verifyModel(p, m); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestModelBundleCorruptPrefixPreservedAndRetry(t *testing.T) {
+	c := modelBundleCacheFixture(t)
+	m := bundleFixture(t, c, "bundle")
+	partial := filepath.Join(c.Root, cacheKey(m)+".partial")
+	if e := os.MkdirAll(partial, 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(filepath.Join(partial, "config.json"), []byte("xx"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := c.Prepare(context.Background(), m); e == nil {
+		t.Fatal("corrupt prefix accepted")
+	}
+	trash, _ := filepath.Glob(filepath.Join(c.NASRoot, ".Trash", "myce-model-cache", "*"))
+	if len(trash) != 1 {
+		t.Fatal("corrupt prefix not recoverable", trash)
+	}
+	data, e := os.ReadFile(filepath.Join(trash[0], "config.json"))
+	if e != nil || string(data) != "xx" {
+		t.Fatal("corrupt evidence lost", e)
+	}
+	if _, e = c.Prepare(context.Background(), m); e != nil {
+		t.Fatal("fresh retry failed", e)
 	}
 }

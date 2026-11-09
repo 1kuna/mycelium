@@ -196,7 +196,7 @@ func TestAdaptiveReadinessSharedSensorHorizon(t *testing.T) {
 func TestAdaptiveReadinessSingleProcessResidentGrowth(t *testing.T) {
 	birth := "original-model"
 	probe := &processMemoryProbe{}
-	birthOf := func(int) (string, error) { return birth }
+	birthOf := func(int) (string, error) { return birth, nil }
 
 	probe.Resident = func(map[int]bool) (uint64, int, error) {
 		birth = "reused"

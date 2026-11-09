@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 
 	"testing"
 	"time"
