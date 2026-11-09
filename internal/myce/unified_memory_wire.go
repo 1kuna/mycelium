@@ -12,6 +12,7 @@ type workerUnifiedMemoryWire struct {
 	sampleSupported    bool
 	probeSupported     bool
 	telemetrySupported bool
+	recoverySupported  bool
 }
 
 func (w Worker) unifiedMemoryCheckin(c Checkin) Checkin {

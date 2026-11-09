@@ -395,7 +395,9 @@ func TestAdaptiveProbeQueueDelayCannotRenewEvidence(t *testing.T) {
 	await(t, func() bool {
 		q.contactMu.Lock()
 		defer q.contactMu.Unlock()
-		return len(q.contacts[m.ID].pending) > 0
+		// Contact registration precedes receipt-age capture. Wait until that
+		// capture and health preparation exist before advancing delivery time.
+		return len(q.healthPreparing[m.ID]) > 0
 	})
 	clock.Advance(3 * time.Second)
 	q.mu.Unlock()

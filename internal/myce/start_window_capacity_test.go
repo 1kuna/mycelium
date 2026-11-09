@@ -162,7 +162,16 @@ func TestStartWindowCapacityPreparationDisplay(t *testing.T) {
 			s := cpuSpec(1, 4)
 			s.Priority, s.StartWindow, s.Environment.Name = "production", "600s", "tools"
 			j := submit(t, q, s)
+			frozen, _, err := q.captureReadObservation(j.ID, nil)
+			if err != nil || !frozen.inventoryFresh(frozen.s.Machines[m.ID]) {
+				t.Fatal("initial preparation inventory was not fresh", err)
+			}
 			clock.Advance(30 * time.Minute)
+			// The old response is point-in-time; a new job read must age the
+			// same committed contact even without another queue transaction.
+			if !frozen.inventoryFresh(frozen.s.Machines[m.ID]) {
+				t.Fatal("later time changed the detached preparation observation")
+			}
 			want := "unknown_observation"
 			if observation == "building" {
 				m.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "building"}}

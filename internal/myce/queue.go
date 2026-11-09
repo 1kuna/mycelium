@@ -723,8 +723,11 @@ func (q *Queue) updateTransaction(ctx context.Context, fn func() error, timing *
 		q.publishWaitStates(oldCalls)
 		q.invalidateCallSnapshots(oldCalls)
 		q.invalidateTerminalStatus()
-		q.commitRecords()
+		// Freeze contact while the transaction's active-job index is still
+		// selected. After commitRecords ends the journal, liveJobs includes
+		// retained history for callers that may mutate records directly.
 		q.publishReadRuntime()
+		q.commitRecords()
 		if committed != nil {
 			committed()
 		}
@@ -1393,7 +1396,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
 		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
@@ -1486,6 +1489,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]
+		q.receiveDeviceRecovery(&m, old)
 		if old != nil && old.Replacement != nil {
 			return q.validateMachineNames([]string{m.ID})
 		}
