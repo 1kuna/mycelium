@@ -2468,7 +2468,12 @@ and restart, so one measured digest cannot authorize an unmeasured alternative.
 Evidence is
 immutable recipe metadata, not an evaluation runner or native qualification.
 The hold and owner action appear in eligibility/status. Approval is eligibility,
-not a job host pin.
+not a job host pin. When owner policy contains an exact work entry, its
+`production_parity_hosts` list constrains every production assignment and
+retarget, including historical registrations and measured variants. Measurements
+cannot authorize an unlisted host; the owner must explicitly add it. An empty
+list admits no host for that production work. Checks and experiments remain
+available for gathering evidence.
 
 Host-pin adoption is measured read-only over retained jobs submitted in an explicit
 time window, grouped by project and production/non-production: an explicit

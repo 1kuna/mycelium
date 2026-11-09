@@ -13,6 +13,13 @@ installed command's help. Optional contracts name their required components in
 [release behavior](references/release-behavior.md#capability-evidence).
 A merged change or a “next release” note does not establish installed support.
 
+From the queue release enforcing explicit production parity lists, a configured
+project/work `production_parity_hosts` entry bounds all production placements,
+including fan-out and recovery. Native qualification, measured quality and old
+registrations cannot admit an unlisted host. The owner must add an approved host
+to widen the list; an explicitly empty list holds that production work. Checks
+and experiments remain available for collecting comparison evidence.
+
 Use the installed CLI or Python `Client.from_installed()`, which resolve
 credentials internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is an installation-owner hold. Preserve its

@@ -46,8 +46,15 @@ func (q *Queue) extensionRegistrationWarnings(e Extension, contexts ...context.C
 	return portabilityWarnings(report)
 }
 
+// An explicit owner list constrains every production placement, including
+// historical registrations and variants with measured quality evidence.
+func (q *Queue) productionParityHostAllowed(j *Job, m *Machine) bool {
+	hosts, configured := q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()]
+	return !configured || slices.Contains(hosts, hostID(m))
+}
+
 // Registration metadata is server-owned and frozen with accepted jobs. Older
-// registrations retain their admission contract, including on identical replay.
+// registrations retain their admission contract subject to live owner policy.
 func (q *Queue) variantParityReason(j *Job, m *Machine) string {
 	if q.commandDiscoveryProduction(j) {
 		return commandDiscoveryParityAction
@@ -56,6 +63,9 @@ func (q *Queue) variantParityReason(j *Job, m *Machine) string {
 		return ""
 	}
 	production := j.Spec.Priority == "production" || jobClass(j.Spec) == "production"
+	if production && !q.productionParityHostAllowed(j, m) {
+		return "host outside production_parity_hosts for this work; " + variantParityAction
+	}
 	approved := slices.Contains(q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()], hostID(m))
 	reason := ""
 	for _, e := range j.Extensions {
