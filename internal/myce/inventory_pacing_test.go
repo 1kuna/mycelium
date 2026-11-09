@@ -158,7 +158,7 @@ func TestHostInventoryTelemetryIdentityAndExpiry(t *testing.T) {
 		observer.mu.Lock()
 		first := observer.lane.observation.PeriodSeconds
 		observer.mu.Unlock()
-		clock.Advance(time.Hour)
+		clock.Advance(time.Hour + time.Second)
 		await(t, func() bool {
 			observer.mu.Lock()
 			defer observer.mu.Unlock()
