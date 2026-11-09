@@ -19,7 +19,7 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 				t.Fatal("not assigned")
 			}
 
-			// Retain the original observed 19.49 -> 19 GiB launch deficit.
+			// Retain the original fixture's 19.49 -> 19 GiB launch deficit.
 			// Apply that same deficit to the actual smaller recovery below.
 			launchDeficit := m.HostAvailableMemoryGB - 19
 
