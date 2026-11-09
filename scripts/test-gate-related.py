@@ -139,6 +139,32 @@ class RelatedTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_request_projection_selects_pressure_and_invalidation_consumers(self):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                def git(*args):
+                    subprocess.run(['git', *args], check=True, capture_output=True)
+                git('init', '-q')
+                root = pathlib.Path('internal/myce')
+                root.mkdir(parents=True)
+                source = root / 'request_projection.go'
+                source.write_text('package p\nfunc projectionRefusal() int { return 1 }\n')
+                (root / 'request_budget_review_test.go').write_text(
+                    'package p\nfunc TestRequestBudgetProjectionLivesThroughResponse(t *testing.T) { helper(t) }\n')
+                (root / 'cheap_read_load_test.go').write_text(
+                    'package p\nfunc TestCheapCachedReadsUnderProjectionPressure(t *testing.T) { helper(t) }\n'
+                    'func TestCheapReadInvalidationBudget(t *testing.T) { helper(t) }\n')
+                (root / 'unrelated_test.go').write_text('package p\nfunc TestUnrelated(t *testing.T) {}\n')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base')
+                source.write_text('package p\nfunc projectionRefusal() int { return 2 }\n')
+                self.assertEqual(related.select('HEAD'), [
+                    ('internal/myce', '^(TestCheapCachedReadsUnderProjectionPressure|TestCheapReadInvalidationBudget|TestRequestBudgetProjectionLivesThroughResponse)$')])
+            finally:
+                os.chdir(previous)
+
     def test_removed_feature_keeps_surviving_consumers(self):
         previous = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:

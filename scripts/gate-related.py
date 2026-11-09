@@ -37,6 +37,10 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/telemetry_budget.go'] = (
 SUPPLEMENTAL_CONSUMERS['internal/myce/diagnostic_budget.go'] = (
     'evidence_budget_test.go', 'evidence_readiness_test.go')
 
+# Request projections own response charges and invalidation under pressure (#1118).
+SUPPLEMENTAL_CONSUMERS['internal/myce/request_projection.go'] = (
+    'request_budget_review_test.go', 'cheap_read_load_test.go')
+
 # The non-race diagnostic benchmark has its correctness regressions here.
 SUPPLEMENTAL_CONSUMERS['internal/myce/checkin_persistence_benchmark_test.go'] = (
     'queue_persistence_test.go',)
