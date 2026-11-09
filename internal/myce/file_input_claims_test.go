@@ -90,12 +90,20 @@ func TestProjectFileStoreConcurrentClaimsAndReservedCapacity(t *testing.T) {
 	b, br := policyInput(t, "bbbb")
 	var wg sync.WaitGroup
 	errs := make(chan error, 2)
+	winners := make(chan FileRef, 2)
 	for _, v := range []struct {
 		path string
 		ref  FileRef
 	}{{a, ar}, {b, br}} {
 		wg.Add(1)
-		go func(path string, ref FileRef) { defer wg.Done(); errs <- c.UploadJobInput(owner, path, ref) }(v.path, v.ref)
+		go func(path string, ref FileRef) {
+			defer wg.Done()
+			err := c.UploadJobInput(owner, path, ref)
+			if err == nil {
+				winners <- ref
+			}
+			errs <- err
+		}(v.path, v.ref)
 	}
 	wg.Wait()
 	close(errs)
@@ -109,6 +117,36 @@ func TestProjectFileStoreConcurrentClaimsAndReservedCapacity(t *testing.T) {
 	}
 	if passed != 1 {
 		t.Fatal("concurrent claims overcommitted quota", passed)
+	}
+	// Settlement reuses the successful concurrent transfer, including its sibling receipt.
+	{
+		ref := <-winners
+		setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 4})
+		claim, err := q.claimFileInput(owner, Spec{Project: "owner"}, ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := spec("experiment")
+		s.Project = "owner"
+		s.Files = FileManifest{"input": ref}
+		submit(t, q, s)
+		// A separate transfer starts after settlement while a sibling still holds
+		// the shared original receipt. Creating its claim must not revoke that HEAD.
+		if _, err := q.claimFileInput(context.Background(), Spec{Project: "another"}, ref); err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.WithValue(owner, fileInputClaimKey{}, claim.ID)
+		if err = c.hasFile(ctx, ref, jobInputUploadPurpose); err != nil {
+			t.Fatal("sibling submission invalidated transfer", err)
+		}
+		if u := projectUsage(t, q, "owner"); u.RetainedBytes != 4 {
+			t.Fatal("settlement double charged", u)
+		}
+		clock.Advance(filePublicationGrace + time.Second)
+		if _, err = q.inputClaimContext(ctx, ref, false); err != nil {
+			t.Fatal("elapsed time invalidated a concurrent transfer receipt", err)
+		}
+		setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 6})
 	}
 	path, ref := policyInput(t, "next")
 	other := WithFileStoreSubmission(context.Background(), Spec{Project: "other"})
@@ -222,41 +260,6 @@ func TestProjectFileStoreResumeUsesStoredLengthAndKeepsCustody(t *testing.T) {
 	clock.Advance(filePublicationGrace + time.Second)
 	if u := projectUsage(t, q, "attached"); u.RetainedBytes != 4 {
 		t.Fatal("resumed allocation expired", u)
-	}
-}
-
-func TestProjectFileStoreSettlementKeepsConcurrentClaimValid(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
-	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 4})
-	path, ref := policyInput(t, "data")
-	owner := WithFileStoreSubmission(context.Background(), Spec{Project: "owner"})
-	claim, err := q.claimFileInput(owner, Spec{Project: "owner"}, ref)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = c.UploadJobInput(owner, path, ref); err != nil {
-		t.Fatal(err)
-	}
-	s := spec("experiment")
-	s.Project = "owner"
-	s.Files = FileManifest{"input": ref}
-	submit(t, q, s)
-	// A separate transfer starts after settlement while a sibling still holds
-	// the shared original receipt. Creating its claim must not revoke that HEAD.
-	if _, err := q.claimFileInput(context.Background(), Spec{Project: "another"}, ref); err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.WithValue(owner, fileInputClaimKey{}, claim.ID)
-	if err = c.hasFile(ctx, ref, jobInputUploadPurpose); err != nil {
-		t.Fatal("sibling submission invalidated transfer", err)
-	}
-	if u := projectUsage(t, q, "owner"); u.RetainedBytes != 4 {
-		t.Fatal("settlement double charged", u)
-	}
-	clock.Advance(filePublicationGrace + time.Second)
-	if _, err = q.inputClaimContext(ctx, ref, false); err != nil {
-		t.Fatal("elapsed time invalidated a concurrent transfer receipt", err)
 	}
 }
 

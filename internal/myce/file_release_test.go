@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -329,28 +328,6 @@ func TestFileReleaseRegistryCheckpointAndBundleProtection(t *testing.T) {
 	}
 	if _, err := os.Stat(q.files.blob(ref)); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestFileReleaseAPI(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
-	j, _, _ := releaseTerminal(t, q, c, "api")
-	clock.Advance(filePublicationGrace + time.Second)
-	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer api.Close()
-	c = Client{URL: api.URL, Token: "test"}
-	var plan FileReleasePlan
-	if err := c.Call(context.Background(), "POST", "/api/files/release/plan", releaseSelection(j), &plan); err != nil {
-		t.Fatal(err)
-	}
-	var got FileReleaseResult
-	req := FileReleaseApply{Selection: plan.Selection, PlanID: plan.ID, AcceptExpiry: true}
-	if err := c.Call(context.Background(), "POST", "/api/files/release/apply", req, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.PlanID != plan.ID {
-		t.Fatal(got)
 	}
 }
 

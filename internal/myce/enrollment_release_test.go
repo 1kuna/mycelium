@@ -73,6 +73,40 @@ func TestEnrollmentReleaseSignedUpdatePreservesCatalogs(t *testing.T) {
 	if !reflect.DeepEqual(q.environments, environments) || !reflect.DeepEqual(q.models, models) {
 		t.Error("approval changed environment/model catalogs")
 	}
+	// Project NAS identity without changing this persisted signed approval.
+	{
+		mountRoot := filepath.Dir(q.root)
+		if err := q.ConfigureOnboardingNAS(context.Background(), "linux", func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("//private:secret@storage.invalid/share " + mountRoot + " cifs rw 0 0\n"), nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := json.Marshal(q.s.EnrollmentRelease)
+		var current struct {
+			NASIdentity NASIdentity `json:"nas_identity"`
+		}
+		if err := client.Call(context.Background(), "GET", "/api/invites/release", nil, &current); err != nil {
+			t.Fatal(err)
+		}
+		if current.NASIdentity.Fingerprint != nasSourceFingerprint("//storage.invalid/share", "smbfs") || current.NASIdentity.CheckpointPath != filepath.Base(q.root) {
+			t.Fatalf("current share metadata missing: %+v", current.NASIdentity)
+		}
+		after, _ := json.Marshal(q.s.EnrollmentRelease)
+		if !bytes.Equal(before, after) {
+			t.Fatal("metadata projection changed persisted release")
+		}
+		public, _ := json.Marshal(current)
+		for _, private := range []string{mountRoot, "private", "secret", "storage.invalid"} {
+			if strings.Contains(string(public), private) {
+				t.Fatal("NAS metadata exposed private mount details")
+			}
+		}
+		client.Token = "wrong-authority"
+		if err := client.Call(context.Background(), "GET", "/api/invites/release", nil, nil); err == nil {
+			t.Fatal("NAS metadata served without authentication")
+		}
+	}
+	client.Token = "fixture-authority"
 	server.Close()
 	if err = q.Close(); err != nil {
 		t.Fatal(err)
@@ -175,6 +209,30 @@ func TestEnrollmentReleaseApprovalTrustAndVersionFences(t *testing.T) {
 			}
 			if !reflect.DeepEqual(approved.Manifest, want) || approved.Origin != origin {
 				t.Errorf("unexpected default approval after request: %+v", approved)
+			}
+			if tc.name == "unauthenticated" {
+				for _, version := range []string{"v1.0.0", "v1.0.1", "v1.0.1+rebuild"} {
+					// Each refusal starts from the same current approval, before forced replacement.
+					if err := q.ConfigureEnrollmentRelease(current, pub, origin, true); err != nil {
+						t.Fatal(err)
+					}
+					m := manifest
+					m.Version = version
+					m.Artifacts = append([]ReleaseArtifact{}, manifest.Artifacts...)
+					m.Artifacts[0].Size++
+					if err := q.ConfigureEnrollmentRelease(sign(m), pub, origin); err == nil {
+						t.Fatal("queue approved equal or older manifest without explicit override")
+					}
+					if q.s.EnrollmentRelease.Manifest.Version != "v1.0.1" {
+						t.Fatal("rejected approval changed current manifest")
+					}
+					if err := q.ConfigureEnrollmentRelease(sign(m), pub, origin, true); err != nil {
+						t.Fatal("explicit re-approval refused", err)
+					}
+					if q.s.EnrollmentRelease.Manifest.Version != version {
+						t.Fatal("explicit approval not applied")
+					}
+				}
 			}
 		})
 	}

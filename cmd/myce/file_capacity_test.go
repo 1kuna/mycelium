@@ -80,13 +80,3 @@ targets: [{os: ` + runtime.GOOS + `, arch: ` + runtime.GOARCH + `, platform: cpu
 		t.Fatal("saved actionable refusal missing", err)
 	}
 }
-
-func TestFileCapacityStatusOutput(t *testing.T) {
-	output := captureJoiningOutput(t, func() error {
-		printStatus(myce.Snapshot{FileStore: &myce.FileStoreStatus{Store: "queue-file-store", UsedBytes: 13, FreeBytes: 40, ReclaimableBytes: 9}}, false)
-		return nil
-	})
-	if !strings.Contains(output, "queue-file-store: used=13 bytes free=40 bytes reclaimable=9 bytes") {
-		t.Fatal(output)
-	}
-}

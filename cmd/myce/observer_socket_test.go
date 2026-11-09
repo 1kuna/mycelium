@@ -35,6 +35,26 @@ func TestObserverSocketRetirementSerializesStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer startup.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	acquired := make(chan *os.File, 1)
+	failed := make(chan error, 1)
+	go func() {
+		next, err := sharedProfileLock(ctx, filepath.Join(root, "startup.lock"))
+		if err != nil {
+			failed <- err
+		} else {
+			acquired <- next
+		}
+	}()
+	select {
+	case next := <-acquired:
+		next.Close()
+		t.Fatal("duplicate lock owner")
+	case err := <-failed:
+		t.Fatal("registration refused instead of waiting", err)
+	case <-time.After(20 * time.Millisecond):
+	}
 	// A replacement holds startup while removing/rebinding the endpoint. The old
 	// owner's check/unlink must not overlap this whole transaction, including
 	// the interval before the replacement has published its new socket.
@@ -53,6 +73,14 @@ func TestObserverSocketRetirementSerializesStartup(t *testing.T) {
 	}
 	defer replacement.Close()
 	startup.Close()
+	select {
+	case next := <-acquired:
+		next.Close()
+	case err := <-failed:
+		t.Fatal(err)
+	case <-ctx.Done():
+		t.Fatal("registration did not recover lock")
+	}
 	// After startup unlocks, the previous identity must still protect the new
 	// endpoint. Verify a real datagram wake reaches its replacement receiver.
 	if err = retireSharedProfileSocket(root, path, identity); err != nil {

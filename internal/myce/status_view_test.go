@@ -61,7 +61,7 @@ func TestStatusViewAvailabilityAndWaiting(t *testing.T) {
 	}
 }
 
-func TestStatusViewPrivacyAndQualification(t *testing.T) {
+func TestStatusViewReadOnlyAndTokenProtected(t *testing.T) {
 	q, c := fixture(t)
 	e := fakeExtension(t)
 	if err := q.AddExtension(e); err != nil {
@@ -117,10 +117,7 @@ func TestStatusViewPrivacyAndQualification(t *testing.T) {
 			t.Fatal("status mutated job")
 		}
 	}
-}
 
-func TestStatusViewReadOnlyAndTokenProtected(t *testing.T) {
-	q, _ := fixture(t)
 	h := API{Queue: q, Token: "status-test"}.Handler()
 	for _, method := range []string{"GET", "POST", "PUT", "DELETE"} {
 		for _, path := range []string{"/", "/api/status"} {

@@ -123,18 +123,19 @@ func TestCacheInterruptedCopyRetainedChecksumAndDirect(t *testing.T) {
 	if _, e = c.Prepare(context.Background(), m); e == nil {
 		t.Fatal("path traversal")
 	}
-}
-func TestCacheCancelledCopyAndSizeMismatch(t *testing.T) {
-	c, model := cacheFixture(t)
-	m := model("m", "data")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, e := c.Prepare(ctx, m); e == nil {
-		t.Fatal("cancel accepted")
-	}
-	m.SizeBytes = 3
-	if _, e := c.Prepare(context.Background(), m); e == nil {
-		t.Fatal("size mismatch accepted")
+
+	{
+		m = model("m", "data")
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, e := c.Prepare(ctx, m); e == nil {
+			t.Fatal("cancel accepted")
+		}
+		m.SizeBytes = 3
+		if _, e := c.Prepare(context.Background(), m); e == nil {
+			t.Fatal("size mismatch accepted")
+		}
 	}
 }
 func TestFetchRejectsInternetAtLoadAndOverwrite(t *testing.T) {

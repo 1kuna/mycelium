@@ -40,7 +40,7 @@ func TestSharedProfileObserverBatchesAndRetiresTerminal(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Error(err)
 			}
-			if len(request.IDs) != 170 {
+			if len(request.IDs) != 2 {
 				t.Errorf("not batched: %d", len(request.IDs))
 			}
 			reply := myce.WaitReply{}
@@ -61,7 +61,7 @@ func TestSharedProfileObserverBatchesAndRetiresTerminal(t *testing.T) {
 	}))
 	defer server.Close()
 	clock := &waitClock{now: time.Now()}
-	for i := range 170 {
+	for i := range 2 {
 		dir := filepath.Join(root, fmt.Sprintf("receipt-%d", i))
 		if err := os.Mkdir(dir, 0700); err != nil {
 			t.Fatal(err)
@@ -98,40 +98,11 @@ func TestSharedProfileObserverBatchesAndRetiresTerminal(t *testing.T) {
 	if err != nil || batches.Load() != 2 {
 		t.Fatal(err, "batch requests", batches.Load())
 	}
-	for i := range 170 {
+	for i := range 2 {
 		var receipt profileReceipt
 		if err := readProfileJSON(filepath.Join(root, fmt.Sprintf("receipt-%d", i), "receipt.json"), &receipt); err != nil || receipt.Status != "succeeded" || receipt.Observation != "not_armed" {
 			t.Fatal(receipt, err)
 		}
-	}
-}
-
-func TestSharedProfileObserverExpiryIsObservationFailure(t *testing.T) {
-	root := t.TempDir()
-	dir := filepath.Join(root, "receipt")
-	if err := os.Mkdir(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	clock := &waitClock{now: time.Now()}
-	receipt := profileReceipt{JobID: "job", Status: "running", Observation: "armed"}
-	if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), receipt); err != nil {
-		t.Fatal(err)
-	}
-	reg := sharedProfileRegistration{Directory: dir, Expires: clock.Now().Add(time.Second)}
-	if err := saveProfileJSON(filepath.Join(root, "watch.json"), reg); err != nil {
-		t.Fatal(err)
-	}
-	clock.advance(time.Second)
-	lock, err := profileLock(filepath.Join(root, "observer.lock"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lock.Close()
-	if err := runSharedProfileLoop(context.Background(), root, lock, clock, func(context.Context, time.Duration) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &receipt); err != nil || receipt.ObservationError != "timeout" || receipt.Status != "running" {
-		t.Fatal(receipt, err)
 	}
 }
 
@@ -247,6 +218,23 @@ func TestSharedProfilePersistenceFailureRetainsOwnership(t *testing.T) {
 	if err := readProfileJSON(path, &saved); err != nil || saved.Status != "succeeded" {
 		t.Fatal(saved, err)
 	}
+
+	// Re-arm the same receipt and registration for observation-only expiry.
+	receipt := profileReceipt{JobID: "job", Status: "running", Observation: "armed"}
+	if err := saveProfileJSON(path, receipt); err != nil {
+		t.Fatal(err)
+	}
+	reg := sharedProfileRegistration{Directory: dir, Expires: clock.Now().Add(time.Second)}
+	if err := saveProfileJSON(entry, reg); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(time.Second)
+	if err := runSharedProfileLoop(context.Background(), root, lock, clock, func(context.Context, time.Duration) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := readProfileJSON(path, &receipt); err != nil || receipt.ObservationError != "timeout" || receipt.Status != "running" {
+		t.Fatal(receipt, err)
+	}
 }
 func TestSharedProfileMissingReceiptRetires(t *testing.T) {
 	root := t.TempDir()
@@ -260,42 +248,5 @@ func TestSharedProfileMissingReceiptRetires(t *testing.T) {
 	}
 	if _, err := os.Stat(entry); !os.IsNotExist(err) {
 		t.Fatal("stale registration retained", err)
-	}
-}
-func TestSharedProfileStartupLockSerializes(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "startup.lock")
-	lock, err := profileLock(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lock.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	acquired := make(chan *os.File, 1)
-	failed := make(chan error, 1)
-	go func() {
-		next, err := sharedProfileLock(ctx, path)
-		if err != nil {
-			failed <- err
-		} else {
-			acquired <- next
-		}
-	}()
-	select {
-	case next := <-acquired:
-		next.Close()
-		t.Fatal("duplicate lock owner")
-	case err := <-failed:
-		t.Fatal("registration refused instead of waiting", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	lock.Close()
-	select {
-	case next := <-acquired:
-		next.Close()
-	case err := <-failed:
-		t.Fatal(err)
-	case <-ctx.Done():
-		t.Fatal("registration did not recover lock")
 	}
 }

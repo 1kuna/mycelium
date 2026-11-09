@@ -63,28 +63,6 @@ func TestPrivacySpoolStartupPermissionsAndErrors(t *testing.T) {
 	}
 }
 
-func TestPrivacyStatusAuthentication(t *testing.T) {
-	q, _ := fixture(t)
-	h := API{Queue: q, Token: "test"}.Handler()
-	for _, path := range []string{"/", "/api/status"} {
-		for _, token := range []string{"", "wrong", "test"} {
-			r := httptest.NewRequest("GET", path, nil)
-			if token != "" {
-				r.Header.Set("Authorization", "Bearer "+token)
-			}
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, r)
-			want := 401
-			if token == "test" {
-				want = 200
-			}
-			if w.Code != want {
-				t.Fatalf("%s auth: got %d want %d", path, w.Code, want)
-			}
-		}
-	}
-}
-
 func TestPrivacyControlErrorDoesNotEchoBody(t *testing.T) {
 	upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(503)

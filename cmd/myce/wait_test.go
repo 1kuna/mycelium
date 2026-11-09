@@ -252,6 +252,23 @@ func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 	if e != nil || s.Jobs[0].State != "queued" {
 		t.Fatalf("%+v %v", s, e)
 	}
+	{
+		s := myce.Spec{Name: "production", Project: "test", Priority: "production"}
+		s.Run.Command = []string{"echo", "done"}
+		s.Needs.MemoryGB = 1
+		s.Needs.Platform = myce.Platform{Required: []string{"xpu"}}
+		deadline := clock.Now().Add(3 * time.Second)
+		s.StartBy = &deadline
+		j, err := q.Submit(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out, diagnostics bytes.Buffer
+		err = waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return q.Tick() })
+		if exitCode(err) != 1 || out.String() != j.ID+" failed\n" {
+			t.Fatalf("exit=%d output=%s err=%v", exitCode(err), out.String(), err)
+		}
+	}
 }
 func TestWaitQueueRestartAndNetworkRecovery(t *testing.T) {
 	q, clock, db, checkpoints := waitQueue(t)
@@ -513,27 +530,6 @@ func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	}
 }
 
-func TestWaitProductionStartDeadline(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
-	s := myce.Spec{Name: "production", Project: "test", Priority: "production"}
-	s.Run.Command = []string{"echo", "done"}
-	s.Needs.MemoryGB = 1
-	s.Needs.Platform = myce.Platform{Required: []string{"xpu"}}
-	deadline := clock.Now().Add(3 * time.Second)
-	s.StartBy = &deadline
-	j, err := q.Submit(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
-	defer server.Close()
-	var out, diagnostics bytes.Buffer
-	err = waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return q.Tick() })
-	if exitCode(err) != 1 || out.String() != j.ID+" failed\n" {
-		t.Fatalf("exit=%d output=%s err=%v", exitCode(err), out.String(), err)
-	}
-}
-
 func TestWaitDeadlineGuidance(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
@@ -634,7 +630,7 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 						return
 					}
 				}
-				json.NewEncoder(w).Encode(myce.Job{ID: "job", State: states[step], Reason: fmt.Sprintf("%s %d", reason, step)})
+				json.NewEncoder(w).Encode(myce.Job{ID: "job", State: states[step], Reason: fmt.Sprintf("%s %d", reason, step), DeadlineGuidance: &myce.DeadlineGuidance{Example: "deadline tutorial"}})
 			}))
 			defer server.Close()
 			clock := &waitClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}

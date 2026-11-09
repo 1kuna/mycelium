@@ -369,6 +369,24 @@ printf '\n' >> "$NOTIFICATION_FILE"
 		t.Fatal("expired profile replay", expiredReceipt, err)
 	}
 	t.Log("local dev: frozen source, result check/download, receipt recovery, notification and fake-clock result expiry")
+	{
+		dir := filepath.Join(root, "failed-delivery")
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		hook := filepath.Join(dir, "notify")
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 7\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		receipt := profileReceipt{Key: "key", Project: "test", JobID: r.JobID, Status: "running", Observation: "armed", Delivery: "armed"}
+		if err := observeProfile(context.Background(), d.Client(), dir, receipt, profileObserver{Notify: hook}); err == nil {
+			t.Fatal("delivery rejection hidden")
+		}
+		var saved profileReceipt
+		if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.Status != "succeeded" || saved.DeliveryStatus != "failed" || saved.Observation != "not_armed" || saved.Delivery == "armed" {
+			t.Fatal("delivery rejection changed computation state", saved, err)
+		}
+	}
 }
 
 func exitCodeForTest(err error) int {
@@ -466,6 +484,28 @@ check: [true]
 	}
 }
 
+func TestProfileOSOnlyPrebuiltError(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// A native amd64 ELF payload, without a compiler or a runnable Linux host.
+	data := make([]byte, 64)
+	copy(data, "\x7fELF\x02\x01\x01")
+	binary.LittleEndian.PutUint16(data[16:], 2)
+	binary.LittleEndian.PutUint16(data[18:], 62)
+	binary.LittleEndian.PutUint32(data[20:], 1)
+	binary.LittleEndian.PutUint16(data[52:], 64)
+	if err := os.WriteFile(filepath.Join(root, "source", "program"), data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	p := executionProfile{Spec: myce.Spec{Name: "binary", Project: "test", Class: "experiment", Targets: []myce.ExecutionTarget{{OS: "linux"}}, Run: myce.RunSpec{Command: []string{"./program"}}}, Source: profileSource{Directory: "source"}, Check: []string{"true"}}
+	err := runPreparedProfile(context.Background(), root, p, []byte("binary-fixture"), nil, nil, "", "", "", "", "", "", io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "declare portable: true if this runs on any arch, or name the arch") || strings.Contains(err.Error(), root) {
+		t.Fatalf("CLI lost actionable/sanitized reason: %v", err)
+	}
+}
+
 func TestProfileTargetRefusalStderrAndReceipt(t *testing.T) {
 	root := t.TempDir()
 	profileDir := filepath.Join(root, ".mycelium", "profiles")
@@ -533,27 +573,5 @@ check: [true]
 	}
 	if strings.Contains(stderr.String(), token) || bytes.Contains(out, []byte(token)) || strings.Contains(receipt.RefusalReason, root) {
 		t.Fatal("refusal leaked credential or private path")
-	}
-}
-
-func TestProfileOSOnlyPrebuiltError(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	// A native amd64 ELF payload, without a compiler or a runnable Linux host.
-	data := make([]byte, 64)
-	copy(data, "\x7fELF\x02\x01\x01")
-	binary.LittleEndian.PutUint16(data[16:], 2)
-	binary.LittleEndian.PutUint16(data[18:], 62)
-	binary.LittleEndian.PutUint32(data[20:], 1)
-	binary.LittleEndian.PutUint16(data[52:], 64)
-	if err := os.WriteFile(filepath.Join(root, "source", "program"), data, 0700); err != nil {
-		t.Fatal(err)
-	}
-	p := executionProfile{Spec: myce.Spec{Name: "binary", Project: "test", Class: "experiment", Targets: []myce.ExecutionTarget{{OS: "linux"}}, Run: myce.RunSpec{Command: []string{"./program"}}}, Source: profileSource{Directory: "source"}, Check: []string{"true"}}
-	err := runPreparedProfile(context.Background(), root, p, []byte("binary-fixture"), nil, nil, "", "", "", "", "", "", io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "declare portable: true if this runs on any arch, or name the arch") || strings.Contains(err.Error(), root) {
-		t.Fatalf("CLI lost actionable/sanitized reason: %v", err)
 	}
 }
