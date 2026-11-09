@@ -152,8 +152,10 @@ func recoveryMountProbe(w Worker, role, path string) func(string, func()) error 
 }
 
 type hostMountResult struct {
-	latency time.Duration
-	err     error
+	latency    time.Duration
+	err        error
+	generation uint64
+	dataProof  bool
 }
 type hostMountProbe struct {
 	root, path  string
@@ -170,6 +172,8 @@ type hostMountProbe struct {
 	nextProbe   time.Time
 	timing      probeTiming
 	retryDelay  time.Duration
+	storage     *hostHealthMonitor
+	dataProbe   func(string, uint64, func()) error
 }
 
 func workerHealthMounts(w Worker) map[string]string {
@@ -210,6 +214,10 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		select {
 		case r := <-p.pending:
 			p.pending, completed = nil, true
+			if p.storage != nil && !p.storage.storageResult(p, r, now) {
+				completed = false
+				break
+			}
 			p.last = HostMountHealth{Root: p.root, LatencySeconds: r.latency.Seconds()}
 			if r.err != nil {
 				p.last.Reason = "mount_probe_failed"
@@ -266,6 +274,18 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 		p.pending, p.started = make(chan hostMountResult, 1), now
 		p.progressed.Store(&now)
 		done, path, probe, measure := p.pending, p.path, p.probe, p.measure
+		generation, data := p.faultGeneration(), false
+		if state := p.backingFault(); state != nil && state.fault.Active && state.fault.Data && state.owner == p.root {
+			data = true
+			path = state.source
+			cycle := state.cycle
+			state.cycle++
+			read := p.dataProbe
+			if read == nil {
+				read = workerStorageReopen
+			}
+			probe = func(path string, progress func()) error { return read(path, cycle, progress) }
+		}
 		clock := p.clock
 		if clock == nil {
 			clock = RealClock{}
@@ -275,13 +295,15 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 				at := clock.Now()
 				p.progressed.Store(&at)
 			}
-			if measure != nil {
-				done <- measure(path, progress)
+			if measure != nil && !data {
+				result := measure(path, progress)
+				result.generation = generation
+				done <- result
 				return
 			}
 			started := time.Now() // OS elapsed I/O measurement, never a scheduling clock.
 			err := probe(path, progress)
-			done <- hostMountResult{time.Since(started), err}
+			done <- hostMountResult{latency: time.Since(started), err: err, generation: generation, dataProof: data}
 		}()
 	}
 	if !completed && result.LatencySeconds == 0 && result.Reason == "" {
@@ -345,13 +367,16 @@ func applyHostMountHealth(w Worker, m *Machine) {
 		if !mountHealthWithholds(probe.Reason) {
 			continue
 		}
-		if probe.Root == "checkpoint" {
-			mark("checkpoint", probe.Reason)
+		if probe.Root != "nas" {
+			mark(probe.Root, probe.Reason)
 			continue
 		}
 		if probe.Root == "nas" && w.ServiceConfig != nil {
-			for role, path := range map[string]string{"job-files": w.JobFileRoot, "model": w.ModelRoot, "model-cache": w.CacheRoot, "environment-source": w.EnvironmentSourceRoot, "environment": w.EnvironmentRoot, "file-cache": w.FileCacheRoot, "extension": w.ExtensionRoot} {
-				if path != "" && withinNAS(w.ServiceConfig.NAS, path) {
+			roots := w.storageRoots()
+			nas := roots["nas"]
+			for _, role := range []string{"job-files", "model", "model-cache", "environment-source", "environment", "file-cache", "extension"} {
+				root := roots[role]
+				if root.path != "" && nas.backing != "" && withinNAS(nas.path, root.path) && root.backing == nas.backing {
 					mark(role, probe.Reason)
 				}
 			}

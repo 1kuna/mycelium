@@ -416,7 +416,8 @@ func completedSharedStage(ctx context.Context, stage string) (bool, error) {
 
 // Only the calling attempt may publish. This detached work writes exclusively
 // into its unique unpublished directory and cannot touch another build's data.
-func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nasRoot, stage string) error {
+func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nasRoot, stage string) (err error) {
+	defer func() { observeStorageContext(ctx, err) }()
 	if c.beforeStage != nil {
 		c.beforeStage(ctx)
 	}
@@ -424,7 +425,6 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
-	var err error
 	if s.ManifestFile != "" {
 		manifestPath, e := c.nasPathContext(ctx, nasRoot, s.ManifestFile)
 		if e != nil {
@@ -611,6 +611,7 @@ func inputRef(s SharedInput) *FileRef { ref := s.ref(); return &ref }
 
 func copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
 	return copyNASInput(ctx, Client{}, source, target, &ref, nil)
+
 }
 
 func makeSharedReadOnly(root string) error {

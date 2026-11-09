@@ -21,13 +21,46 @@ type UnavailableRoot struct {
 
 type workerRootMonitor struct {
 	mu        sync.Mutex
-	expected  map[string]string
+	paths     map[string]string
+	expected  map[string]string // Last positively observed backing, never a configured directory.
 	readiness *workerStorageReadiness
 }
 
 // Published after actual cache discovery. Actor/engine Worker values share this
 // monitor, so a startup copy cannot erase newer verified readiness receipts.
 type workerStorageReadiness struct{ sharedInputs, models, environments []string }
+
+func (w Worker) configuredStoragePaths() map[string]string {
+	paths := map[string]string{"checkpoint": w.CheckpointRoot, "job-files": w.JobFileRoot, "model": w.ModelRoot, "model-cache": w.CacheRoot, "environment-source": w.EnvironmentSourceRoot, "environment": w.EnvironmentRoot, "file-cache": w.FileCacheRoot, "data": w.StateDir, "extension": w.ExtensionRoot}
+	if w.ServiceConfig != nil {
+		paths["nas"] = w.ServiceConfig.NAS
+	}
+	return paths
+}
+
+// Called under mu. Empty paths from an older Worker copy cannot erase a
+// queue-acquired identity; a genuinely different path cannot inherit its mount.
+func (m *workerRootMonitor) setPath(role, path string) {
+	if path == "" {
+		return
+	}
+	if m.paths == nil {
+		m.paths = map[string]string{}
+	}
+	path = filepath.Clean(path)
+	if backing := m.expected[role]; backing != "" && !withinNAS(backing, path) {
+		delete(m.expected, role)
+	}
+	m.paths[role] = path
+}
+
+func (w Worker) publishCheckpointRoot(path string) {
+	if w.rootMonitor != nil {
+		w.rootMonitor.mu.Lock()
+		w.rootMonitor.setPath("checkpoint", path)
+		w.rootMonitor.mu.Unlock()
+	}
+}
 
 func (w Worker) publishStorageReadiness(m Machine) {
 	if w.rootMonitor == nil {
@@ -63,11 +96,13 @@ func (w *Worker) sampleStorageRoots(ctx context.Context, checkpoint string) []Un
 	}
 	w.rootMonitor.mu.Lock()
 	defer w.rootMonitor.mu.Unlock()
-	roots := []struct{ name, path string }{
-		{"job-files", w.JobFileRoot}, {"checkpoint", checkpoint},
-		{"model", w.ModelRoot}, {"model-cache", w.CacheRoot},
-		{"environment-source", w.EnvironmentSourceRoot}, {"environment", w.EnvironmentRoot},
-		{"file-cache", w.FileCacheRoot}, {"data", w.StateDir}, {"extension", w.ExtensionRoot},
+	if w.rootMonitor.expected == nil {
+		w.rootMonitor.expected = map[string]string{}
+	}
+	paths := w.configuredStoragePaths()
+	paths["checkpoint"] = checkpoint
+	for role, path := range paths {
+		w.rootMonitor.setPath(role, path)
 	}
 	nas := ""
 	if w.ServiceConfig != nil {
@@ -77,36 +112,31 @@ func (w *Worker) sampleStorageRoots(ctx context.Context, checkpoint string) []Un
 	if probe == nil {
 		probe = workerMountRoots
 	}
-	if nas != "" {
-		roots = append(roots, struct{ name, path string }{"nas", nas})
-	}
 	mounts, err := probe(ctx)
 	missing := []UnavailableRoot{}
-	for _, root := range roots {
-		if root.path == "" {
-			continue
-		}
-		path := filepath.Clean(root.path)
-		expected := w.rootMonitor.expected[root.name]
-		if nas != "" && withinNAS(nas, path) {
-			expected = filepath.Clean(nas)
-		}
-		for _, mount := range mounts {
-			if withinNAS(mount, path) && (expected == "" || len(mount) > len(expected)) {
-				expected = mount
+	for role, path := range w.rootMonitor.paths {
+		expected := w.rootMonitor.expected[role]
+		if err == nil {
+			for _, mount := range mounts {
+				mount = filepath.Clean(mount)
+				if withinNAS(mount, path) && (expected == "" || len(mount) > len(expected)) {
+					expected = mount
+				}
 			}
 		}
-		if expected == "" {
+		if expected == "" && (nas == "" || !withinNAS(nas, path)) {
 			continue
 		}
-		w.rootMonitor.expected[root.name] = expected
-		mounted := slices.ContainsFunc(mounts, func(mount string) bool { return withinNAS(mount, expected) })
+		if expected != "" {
+			w.rootMonitor.expected[role] = expected
+		}
+		mounted := slices.ContainsFunc(mounts, func(mount string) bool { return filepath.Clean(mount) == expected })
 		if err != nil || !mounted {
 			reason := "configured NAS mount missing"
 			if err != nil {
 				reason = "configured NAS mount inventory unavailable"
 			}
-			missing = append(missing, UnavailableRoot{Root: root.name, Reason: reason})
+			missing = append(missing, UnavailableRoot{Root: role, Reason: reason})
 		}
 	}
 	return missing
@@ -212,6 +242,10 @@ func (q *Queue) storageRootReason(j *Job, m *Machine) string {
 
 func (w Worker) storageRootReason(j *Job) string {
 	machine := w.storageMachine()
+	if w.storageHealth != nil {
+		machine.HostHealth = w.storageHealth.currentSnapshot()
+		applyHostMountHealth(w, &machine)
+	}
 	for _, model := range w.ModelConfig.Models {
 		if model.Name == j.Spec.Needs.Model {
 			var recipe *EnvironmentRecipe

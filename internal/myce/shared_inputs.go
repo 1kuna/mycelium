@@ -127,6 +127,7 @@ func validateSharedInputs(s Spec) error {
 	return nil
 }
 func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]string, func(), error) {
+	ctx = w.storageIOContext(ctx)
 	if j.Spec.Run.Docker && len(j.Spec.SharedInputs) > 0 {
 		return nil, nil, errors.New("shared inputs require native execution")
 	}

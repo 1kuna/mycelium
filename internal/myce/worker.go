@@ -26,6 +26,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	storageHealth        *hostHealthMonitor
 	hygieneCollector     *workerHygieneCollector
 	hygieneWire          *workerHygieneWire
 	unifiedMemoryWire    *workerUnifiedMemoryWire
@@ -574,7 +575,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	var checkpoint string
 	var err error
 	if needsCheckpoint(&j) {
-		checkpoint, err = s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (string, error) { return prepare(j) }, false)
+		checkpoint, err = s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (string, error) {
+			path, err := prepare(j)
+			w.observeStorageError(err)
+			return path, err
+		}, false)
 		if err == nil {
 			err = ctx.Err()
 		}
@@ -1359,6 +1364,14 @@ func (w Worker) Run(stop context.Context) error {
 			return err
 		}
 	}
+	// All worker copies, including the model runtime and launch closures, must
+	// capture the same live health owner before any model plan can be accepted.
+	health, err := startWorkerHealth(availabilityCtx, w, s)
+	if err != nil {
+		return err
+	}
+	w.storageHealth = health
+	defer func() { availabilityCancel(); health.wait() }()
 	rt, err := startModels(w, s.dir)
 	if err != nil {
 		return err

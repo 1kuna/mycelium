@@ -196,19 +196,22 @@ func (h *HostHealth) observe(s HostHealthSample) {
 }
 
 type hostHealthMonitor struct {
-	mu            sync.Mutex
-	clock         Clock
-	dir           string
-	health        HostHealth
-	heartbeat     float64
-	source        func(context.Context) (HostHealthReading, error)
-	foreign       func(context.Context) ([]ForeignConsumer, error)
-	mounts        map[string]*hostMountProbe
-	disks         map[string]float64
-	done          chan struct{}
-	timing        probeTiming
-	foreignTiming probeTiming
-	persist       func(HostHealth) error
+	mu               sync.Mutex
+	clock            Clock
+	dir              string
+	health           HostHealth
+	heartbeat        float64
+	source           func(context.Context) (HostHealthReading, error)
+	foreign          func(context.Context) ([]ForeignConsumer, error)
+	mounts           map[string]*hostMountProbe
+	disks            map[string]float64
+	done             chan struct{}
+	timing           probeTiming
+	foreignTiming    probeTiming
+	persist          func(HostHealth) error
+	storageBackings  map[string]*storageBacking
+	storageRoots     map[string]storageRoot
+	readStorageRoots func() map[string]storageRoot
 }
 
 // Version the on-disk probe evidence only. The wire shape is unchanged, and
@@ -279,7 +282,14 @@ func (m *hostHealthMonitor) record(ctx context.Context, at time.Time, r HostHeal
 		m.foreignTiming.base, m.foreignTiming.cores = m.timing.base, m.timing.cores
 		m.foreignTiming.observe(started, m.clock.Now(), foreignErr != nil || !slices.Equal(foreign, m.health.Foreign))
 	}
+	var storageRoots map[string]storageRoot
+	if m.readStorageRoots != nil {
+		storageRoots = m.readStorageRoots()
+	}
 	m.mu.Lock()
+	if storageRoots != nil {
+		m.storageRoots = storageRoots
+	}
 	s.HeartbeatSeconds, s.DiskFree = m.heartbeat, m.disks
 	for _, probe := range m.mounts {
 		s.Mounts = append(s.Mounts, probe.sample(at, m.health.Baseline))
@@ -293,6 +303,7 @@ func (m *hostHealthMonitor) record(ctx context.Context, at time.Time, r HostHeal
 		}
 		return 0
 	})
+	m.projectStorageFaults(&s)
 	if observation.valid() {
 		// The sensor lane runs independently of check-ins. Freeze the measured
 		// report-path allowance into this new completion, never a cached one.
@@ -349,12 +360,35 @@ func (m *hostHealthMonitor) snapshotLocked(disks []DiskVolume) *HostHealth {
 			m.disks[v.ID] = float64(v.FreeBytes)
 		}
 	}
+	return m.currentSnapshotLocked()
+}
+
+// Admission reads current evidence without replacing the sampler's latest
+// disk-volume measurements with an actor's older machine snapshot.
+func (m *hostHealthMonitor) currentSnapshot() *HostHealth {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.currentSnapshotLocked()
+}
+
+func (m *hostHealthMonitor) currentSnapshotLocked() *HostHealth {
 	h := m.health
 	if len(h.History) > 0 {
 		h.AgeSeconds = max(0, m.clock.Now().Sub(h.History[len(h.History)-1].At).Seconds())
 	}
 	// observe may append into these backing arrays on its next tick.
 	h = cloneHostHealth(h)
+	if len(h.History) == 0 && len(m.storageBackings) > 0 {
+		h.History = []HostHealthSample{{At: m.clock.Now()}}
+	}
+	if len(h.History) > 0 {
+		last := &h.History[len(h.History)-1]
+		last.Mounts = slices.Clone(last.Mounts)
+		m.projectStorageFaults(last)
+	}
 	return &h
 }
 
@@ -391,8 +425,10 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 		m.foreign = func(ctx context.Context) ([]ForeignConsumer, error) { return workerForeignConsumers(ctx, dir) }
 	}
 	m.done = make(chan struct{})
+	m.readStorageRoots = w.storageRoots
+	m.storageRoots = w.storageRoots()
 	for role, path := range workerHealthMounts(w) {
-		m.mounts[role] = &hostMountProbe{root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path), timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}
+		m.mounts[role] = &hostMountProbe{root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path), storage: m, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}
 	}
 	m.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go func() {

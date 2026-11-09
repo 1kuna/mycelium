@@ -111,6 +111,9 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
+	if reason := w.storageRootReason(&j); reason != "" {
+		return fmt.Errorf("%w: %s", errWorkerStartAuthorization, reason)
+	}
 	if j.Spec.WallTime != "" {
 		if w.Clock == nil || len(receiptDirs) != 1 {
 			return errors.New("wall-time enforcement requires owned receipt storage and Clock")
@@ -140,6 +143,11 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 		if err := w.batchAdmission(w.launchContext(), HostLaunch{Machine: w.Machine.ID, Session: session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)}); err != nil {
 			return err
 		}
+	}
+	// A queue reply can predate a fault observed while the request was in
+	// flight. Reuse the live dependency resolver at the payload hand-off.
+	if reason := w.storageRootReason(&j); reason != "" {
+		return fmt.Errorf("%w: %s", errWorkerStartAuthorization, reason)
 	}
 	if err := w.launchContext().Err(); err != nil {
 		return err

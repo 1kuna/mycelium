@@ -227,6 +227,19 @@ not upload these files. Workers build the frozen snapshots through Pixi.
 See [project lock files](../../docs/environments.md#project-lock-files) for
 queue-relative paths and typed read diagnostics.
 
+From the owned-NAS fault follow-up, Mycelium's own staging/hash and checkpoint
+I/O failures also withhold work that depends on the affected network root,
+through the same host-health reason and alerts. Independent local work remains
+eligible. Data faults recover only after three fresh cache-bypass read/reopen
+proofs; metadata or cached probe success cannot clear them. No sentinel write
+is required on read-only inputs. Unsupported cache bypass retains the hold for
+the storage owner. Sibling roles on one backing share one latch and recovery
+owner. A worker restart forgets this latch: the next dependent attempt may fail
+again and re-latch it. Operator exclusions remain independent. This is automatic
+after the worker release; it does not observe arbitrary consumer syscalls.
+Keep the same job while the root recovers;
+do not work around the hold by pinning a host or changing mounts.
+
 ## Read for the relevant branch
 
 - **One-off commands, GPU/memory, variants, models, checkpoints or NAS inputs:**

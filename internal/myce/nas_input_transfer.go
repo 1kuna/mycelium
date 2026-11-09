@@ -28,7 +28,10 @@ func (r nasInputReader) Read(p []byte) (int, error) {
 // Legacy path inputs lack an authored checksum; freeze their source metadata,
 // hash the bytes as copied, then verify that digest on the local destination.
 func copyNASInput(ctx context.Context, client Client, source, target string, expected *FileRef, read func(*os.File, []byte) (int, error)) (stageErr error) {
-	defer func() { stageErr = tracedSharedError(ctx, stageErr) }()
+	defer func() {
+		observeStorageContext(ctx, stageErr)
+		stageErr = tracedSharedError(ctx, stageErr)
+	}()
 	traceSharedInput(ctx, "resolve", "source")
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
@@ -131,6 +134,9 @@ func copyNASInput(ctx context.Context, client Client, source, target string, exp
 		}
 		if err == nil {
 			_, err = io.CopyN(io.MultiWriter(fileDownloadWriter{sharedInputWriter{ctx, out}}, hash), contextReader{ctx, sharedInputReader{ctx, nasInputReader{in, read}, "source"}}, ref.SizeBytes-offset)
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				observeStorageContext(ctx, &os.PathError{Op: "read", Path: source, Err: io.ErrUnexpectedEOF})
+			}
 			err = tracedSharedCopyError(ctx, err)
 		}
 		traceSharedInput(ctx, "sync", "cache")
