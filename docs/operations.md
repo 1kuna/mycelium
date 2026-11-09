@@ -3997,7 +3997,8 @@ and successful flushes still depend on filesystem/device guarantees. Fixture
 tests inject WAL sync failure, lost/torn unsynced suffixes and a process kill
 after sync; they do not replace a physical power-cut drill. See
 [SQLite's synchronous and fullfsync semantics](https://sqlite.org/pragma.html#pragma_synchronous).
-Darwin fullfsync deliberately costs more than ordinary fsync; measure the queue's
+Darwin fullfsync deliberately costs more than ordinary fsync; see the
+[fixture measurements](research/sqlite-durability-measurements.md) for observed
 commit latency and check-in throughput before choosing it for a new workload.
 
 Synchronization and automatic checkpoints can delay other control calls.
