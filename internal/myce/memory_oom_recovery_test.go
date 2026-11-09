@@ -55,8 +55,8 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			source := measuredOOMRecoverySource
-			if candidate.MemoryEnvelope.Source != source {
+			source := candidate.MemoryEnvelope.Source
+			if source != measuredOOMRecoverySource+"; OOM retry floor" {
 				t.Fatal("assigned recovery lost its source", candidate.MemoryEnvelope)
 			}
 			h := &machineHarness{jobs: []Job{*candidate}, controls: map[string]AttemptDirective{}}
@@ -91,13 +91,27 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 			if err := q.Complete(refused); err != nil {
 				t.Fatal(err)
 			}
+			// Preserve the original learning boundary after the real worker
+			// refusal. Recovery envelopes do not project LaunchDriftGB.
+			if q.jobProbeDriftMarginGB(q.s.Jobs[run.ID], q.s.Machines[m.ID]) < .48 {
+				t.Fatal("exact recovery deficit did not teach launch drift")
+			}
+			clock.Advance(time.Second)
+			if unchanged := assignedJob(machineCheck(t, q, m)); unchanged != nil {
+				t.Fatal("unchanged capacity repeated the refused offer", unchanged)
+			}
+			// A new measured capacity, rather than elapsed time, clears the
+			// refusal hold. Keep demand, job and recovery source unchanged.
+			m.FreeHostMemoryGB, m.HostAvailableMemoryGB = free+.1, free+.1
 			clock.Advance(time.Second)
 			next := assignedJob(machineCheck(t, q, m))
 			if next == nil || next.ID != queued.ID || next.Attempt != refused.Attempt+1 {
 				t.Fatal("refused recovery did not retry", next)
 			}
-			if next.MemoryEnvelope.LaunchDriftGB < .48 {
-				t.Fatal("exact recovery deficit did not teach launch drift")
+			hold := next.LaunchCapacityWait[targetKey(&m)]
+			observed := hold.Admission
+			if hold.Attempt != refused.Attempt || observed == nil || observed.Available == nil || observed.EnvelopeSource != source || observed.Required-*observed.Available < .48 {
+				t.Fatalf("next assignment lost the exact recovery deficit: %+v", hold)
 			}
 		})
 	}
