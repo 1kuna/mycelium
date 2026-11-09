@@ -347,6 +347,8 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 	return recordUndo{healthDeliveries: healthDeliveries, base: old, catalogs: catalogs, inventories: inventories, health: q.s.Health.Events}, nil
 }
 func (q *Queue) rollbackRecords(old recordUndo) {
+	q.evidenceGeneration++
+	q.memoryObservationIndex = nil
 	q.invalidateRetainedMemory()
 	jobs, submissions := q.s.Jobs, q.s.Submissions
 	var base state

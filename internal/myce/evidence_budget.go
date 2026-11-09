@@ -277,7 +277,11 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 				if open {
 					deferWork = true
 				} else {
-					apply = func() { delete(q.s.WorkObservations, id); q.memoryObservationIndex = nil }
+					apply = func() {
+						delete(q.s.WorkObservations, id)
+						q.evidenceGeneration++
+						q.memoryObservationIndex = nil
+					}
 					drift = true
 				}
 			}
