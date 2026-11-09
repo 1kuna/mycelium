@@ -123,3 +123,27 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 
 // #215: an enrolled operator machine manages hosts through installed, pinned
 // authority with no MYCE_TOKEN, like status and cancel (#207).
+
+func TestHostMaintenanceMeasuredMemoryCLI(t *testing.T) {
+	q, _, _, _ := waitQueue(t)
+	m := maintenanceCLIWorker("worker")
+	m.HostMemoryBudgetGB = 12
+	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
+	defer server.Close()
+	t.Setenv("MYCE_TOKEN", "test-only")
+	for _, args := range [][]string{{"drain", "host"}, {"budget", "host", "--memory-budget-measured=true"}} {
+		if err := hostMaintenanceCommand(t.Context(), append(args, "--queue", server.URL), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, err := q.HostMaintenanceStatus("host")
+	if err != nil || !status.Policy.MemoryBudget.Measured || status.Policy.MemoryBudget.GiB != 12 {
+		t.Fatal(status, err)
+	}
+	if err := hostMaintenanceCommand(t.Context(), []string{"status", "host", "--memory-budget-measured=true"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("status accepted a mode mutation")
+	}
+}
