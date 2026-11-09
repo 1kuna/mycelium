@@ -19,6 +19,9 @@ including fan-out and recovery. Native qualification, measured quality and old
 registrations cannot admit an unlisted host. The owner must add an approved host
 to widen the list; an explicitly empty list holds that production work. Checks
 and experiments remain available for collecting comparison evidence.
+The typed `production_parity_hosts` blocker identifies this hold even for
+extensions without variants. A removed host's queued binding is placed again;
+running execution and release custody remain with its current attempt.
 
 Use the installed CLI or Python `Client.from_installed()`, which resolve
 credentials internally. Never open, print, copy, pass or set fleet credentials.

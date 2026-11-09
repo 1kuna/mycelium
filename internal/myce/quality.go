@@ -104,7 +104,7 @@ func (q *Queue) productionParityKnown(j *Job, m *Machine) bool {
 	if !j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil {
 		return false
 	}
-	if !q.productionParityHostAllowed(j, m) {
+	if !q.productionParityHostAllowed(j, hostID(m)) {
 		return false
 	}
 	for _, e := range j.Extensions {

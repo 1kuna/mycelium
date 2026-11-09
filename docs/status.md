@@ -2202,6 +2202,14 @@ From the next release, nonterminal native variant jobs expose
   reference-output comparison and `myce policy get/set`. Checks/experiments can
   obtain evidence; historical registrations/replays and accepted jobs are kept.
 
+An explicit work parity list also constrains historical extensions without
+variants. When that list excludes every qualified candidate, status reports
+`production_parity_hosts: held: host not in production parity list` and the
+typed `blocker.code` is `production_parity_hosts`, owned by the queue owner.
+The action is reference-output comparison and explicit physical-host approval
+for that exact work. A queued binding to a removed host is cleared and placed
+again; running attempts retain their execution and release custody.
+
 `variant_advice` is conditional porting guidance when missing coverage could
 relieve current contention on a scarce host. It names the exact missing target,
 backend/device selection, resources, frozen environment/lock, native check and

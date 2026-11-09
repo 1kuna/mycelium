@@ -183,6 +183,8 @@ environment and exact frozen extension version/digest qualification checks.
 Running work keeps its attempt and host custody. Without an exact work entry,
 existing measured-parity and registration rules apply. Measurements never widen
 an explicit host list. Docker/disk recovery obeys the same production boundary.
+Queued bindings to hosts removed from the list are cleared and placed again,
+including bindings saved by older releases or retained after holds are disabled.
 
 Within each tier, fitting projects take turns by weighted recent usage before
 model/environment warmth. Usage has a demand/service-derived horizon and separate stable
