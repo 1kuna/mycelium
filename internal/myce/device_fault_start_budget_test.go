@@ -76,9 +76,16 @@ func TestDeviceFaultStartBudgetRecovery(t *testing.T) {
 			machineCheck(t, q, m)
 			got := job(t, q, j.ID)
 			if got.State != "queued" || got.DeviceFaultStartWait == nil || got.DeviceFaultStartWait.Remaining != remaining ||
-				got.Blocker == nil || got.Blocker.Code != deviceFaultRetryHold || !strings.Contains(got.Blocker.Evidence, "paused for device recovery") ||
 				got.InfrastructureRetries != 1 || got.Losses != 1 || submit(t, q, s).ID != j.ID {
-				t.Fatal("held recovery expired, changed budget/identity, charged a retry, or hid its blocker", got.State, got.Reason, got.Blocker)
+				t.Fatal("held recovery expired, changed budget/identity, or charged a retry", got.State, got.Reason, got.DeviceFaultStartWait)
+			}
+			// Blockers are projected by job GET, not the raw queue snapshot.
+			status, err := q.jobSnapshot(j.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.Blocker == nil || status.Blocker.Code != deviceFaultRetryHold || !strings.Contains(status.Blocker.Evidence, "paused for device recovery") {
+				t.Fatal("held recovery hid its blocker or paused budget", status.Reason, status.Blocker)
 			}
 			m.Devices[0].Reason, m.Devices[0].FreeMemoryGB = "", 8
 			wantDevice := "0"
@@ -165,8 +172,15 @@ func TestDeviceFaultStartBudgetRecoveryBound(t *testing.T) {
 	deadline := clock.Now().Add(MaxProductionStartWindow)
 	clock.Advance(MaxProductionStartWindow - time.Second)
 	machineCheck(t, q, m)
-	if got := job(t, q, j.ID); got.State != "queued" || got.Blocker == nil || got.Blocker.Code != deviceFaultRetryHold {
+	if got := job(t, q, j.ID); got.State != "queued" {
 		t.Fatal("recovery wait expired before its bound", got.State, got.Reason)
+	}
+	status, err := q.jobSnapshot(j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Blocker == nil || status.Blocker.Code != deviceFaultRetryHold {
+		t.Fatal("recovery wait hid its blocker before its bound", status.Reason, status.Blocker)
 	}
 	q = reopenCancellationQueue(t, q, clock)
 	machineCheck(t, q, m)
