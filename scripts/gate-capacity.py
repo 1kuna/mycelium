@@ -456,7 +456,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                                      host_physical_memory_bytes=host_memory)
                         if resources:
                             marker = uuid.uuid4().hex
-                            owner.update(admission_protocol=2, resource_group=group['resource_group'],
+                            owner.update(admission_protocol=2, uid=os.getuid(), resource_group=group['resource_group'],
                                          admission_config_sha256=config_digest,
                                          platform=platform, peak_bytes=peak, exclusive=exclusive,
                                          source_root=str((source_root or repo).resolve()),

@@ -124,15 +124,15 @@ class ReconciliationTests(unittest.TestCase):
                 self.host[owner['pid']] = process(birth=birth)
                 self.assert_refused('holder is still live')
 
-    def test_precise_start_identity_distinguishes_reused_pid(self):
+    def test_precise_start_identity_does_not_override_live_pid(self):
         owner = self.add_run()
         self.host[owner['pid']] = process(birth='reused-start')
-        self.assertEqual(self.run_recovery()['status'], 'reconciled')
+        self.assert_refused('holder is still live')
 
     def test_live_supervisor_marker_descendant_and_scratch_holder_refuse(self):
         owner = self.add_run()
         cases = [({900003: process()}, 'supervisor is still live'),
-                 ({99: process(markers=[owner['run_marker']])}, 'fixtures remain'),
+                 ({99: process(markers=[owner['run_marker']])}, 'global gate quiet'),
                  ({99: process(parent=owner['pid'])}, 'fixtures remain'),
                  ({99: process(paths=[owner['scratch'] + '/tmp'])}, 'fixtures remain')]
         for processes, reason in cases:
@@ -171,7 +171,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assert_refused('guest cleanup unconfirmed')
         self.guest_inventory.side_effect = None
         self.host_inventory.side_effect = [self.host, {99: process(markers=[owner['run_marker']])}]
-        self.assert_refused('fixtures remain')
+        self.assert_refused('global gate quiet')
 
     def test_guest_probe_requires_empty_markers_nonce_and_positive_cleanup(self):
         # Exercise the actual parser, not the reconcile-level guest stub.
@@ -246,16 +246,26 @@ pathlib.Path = mapped
         self.assertTrue(rows[99]['supervisor'])
         self.assertEqual(rows[99]['markers'], ['marked'])
         self.assertEqual(rows[100]['markers'], ['supervised'])
+        with patch.object(parser.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, ['ps'])):
+            with self.assertRaises(subprocess.CalledProcessError):
+                parser.host_inventory()
 
     def test_native_full_descriptor_inventory_finds_nonstandard_handle(self):
-        root = self.root / 'handles'
-        root.mkdir()
+        owner = self.add_run()
+        root = Path(owner['scratch'])
+        root.mkdir(parents=True)
         script = 'import os,signal,sys; f=open(sys.argv[1], "w"); print("ready",flush=True); signal.pause()'
         child = subprocess.Popen([sys.executable, '-c', script, str(root / 'held')],
                                  cwd='/', stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(child.stdout.readline().strip(), 'ready')
             self.assertEqual(REAL_HANDLES(str(root), {child.pid}, all_handles=True), {child.pid})
+            self.host[child.pid] = process()
+            self.host[700001] = process(uid=os.getuid() + 1)
+            self.scratch_processes.side_effect = REAL_HANDLES
+            self.assert_refused('file handles remain')
+            self.scratch_processes.assert_called_with(str(self.folders[0] / 'source'),
+                                                     {os.getpid(), child.pid}, all_handles=True)
         finally:
             child.kill()
             child.wait()

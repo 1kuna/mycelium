@@ -180,21 +180,33 @@ python3 scripts/gate-local.py --reconcile RECEIPT_FOLDER [RECEIPT_FOLDER ...]
 ```
 
 It holds the host admission lock, verifies the immutable owner/full/group
-bindings and absent holder start identity, and inventories marked processes,
-known supervisors, descendants and all OS file handles over the entire retained
-source/scratch tree. Guest active markers must be empty, with a nonce-bound
+bindings and absent recorded PID, and inventories markers, known supervisors
+and descendants over the whole process table. The complete process/file-handle
+inventory for the gate owner's UID must succeed, with no handle into the entire
+retained source/scratch tree. Guest active markers must be empty, with a nonce-bound
 positive guest observation and matching affirmative cleanup for every guest
 leg. A second host inventory and binding check precede archiving. Bound records
 are archived under `.reconciled-UUID`; source and scratch are retained. Each
 attempt writes `reconcile-UUID.json` in the control directory, including the
 decision, proof phase and evidence. Recovery never signals another run.
 
-Only old-format records lacking all execution-identity fields may use the
-strict legacy global-quiet proof: every recorded PID number must be entirely
-absent, no host process may carry any gate marker or known gate-supervisor
-identity, the whole retained tree's OS file-handle inventory must be clean, and
-the requested batch must include a source-bound positive guest cleanup. A live
-or reused legacy PID blocks recovery. Partial identities, malformed records,
+Custody protects gate capacity: CPU, RAM, VM residency and scratch used by
+gate-owned processes. Gate runs, fixtures and supervisors execute as the gate
+owner's UID, so complete file-handle inspection covers that UID. Another UID's
+file handle (for example a backup or indexing daemon reading a 0755 tree) is not
+gate-run liveness and does not consume the reservation. No directory ownership
+or 0700 mode precondition applies, and recovery never changes permissions or
+requests privilege. This ownership-model interpretation is an orchestrator
+default, not a maintainer ruling (2026-11-09).
+
+Both formats require global gate quiet: every recorded PID number must be
+entirely absent, and no host process may carry any gate marker or known
+gate-supervisor identity. A live or reused recorded PID blocks recovery even
+when a new record has a different start identity. Only old-format records
+lacking all execution-identity fields may use legacy guest cleanup discovery;
+their requested batch must include a source-bound positive guest cleanup.
+New records use their persisted identity and exact guest nonce bindings.
+Partial identities, malformed records,
 live fixtures, incomplete inventories and any uncertainty retain occupancy;
 elapsed age never releases it. There is no force flag or scratch deletion.
 The installed local fleet worker can coexist with local gates. CPU admission

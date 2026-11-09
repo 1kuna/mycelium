@@ -132,6 +132,7 @@ def validate(folder, control, group):
     source = folder / 'source'
     if (manifest['identity'] != folder.name or slot.parent != control or slot.is_symlink()
             or not re.fullmatch(r'local-go-slot-[0-9]+', slot.name) or int(slot.name.rsplit('-', 1)[-1]) < 3
+            or owner.get('uid', os.getuid()) != os.getuid()
             or owner.get('admission_protocol') != 2 or owner.get('resource_group') != group['resource_group']
             or owner.get('admission_config_sha256') != group['admission_config_sha256']
             or not hexadecimal(owner.get('run_id')) or type(owner.get('pid')) is not int or owner['pid'] <= 0
@@ -189,17 +190,15 @@ def verify_host(runs, processes, proof=None):
     proof.append(dict(host_process_count=len(processes),
         gate_marker_pids=sorted(p for p, r in processes.items() if r['markers']),
         supervisor_pids=sorted(p for p, r in processes.items() if r['supervisor'])))
-    legacy = any(not r['precise'] for r in runs)
-    if legacy and any(row['markers'] or row['supervisor'] for row in processes.values()):
-        raise RuntimeError('legacy reconciliation requires global gate quiet')
+    if any(row['markers'] or row['supervisor'] for row in processes.values()):
+        raise RuntimeError('reconciliation requires global gate quiet')
     for run in runs:
         owner = run['owner']
         row_proof = dict(run_id=run['folder'].name, precise=run['precise'],
                          holder_pid=owner['pid'], holder_present=owner['pid'] in processes,
                          recorded_supervisors=run['supervisors'])
         proof.append(row_proof)
-        if (not run['precise'] and owner['pid'] in processes or
-                run['precise'] and identity_live(owner, processes)):
+        if owner['pid'] in processes:
             raise RuntimeError('recorded holder is still live')
         if any(identity_live(s, processes) for s in run['supervisors']):
             raise RuntimeError('recorded supervisor is still live')
@@ -219,8 +218,9 @@ def verify_host(runs, processes, proof=None):
         row_proof['marked_descendant_pids'] = sorted(owned)
         if owned:
             raise RuntimeError('marked or descendant fixtures remain')
-        candidates = set(processes)
-        row_proof['checked_host_processes'] = len(candidates)
+        candidates = {pid for pid, row in processes.items() if row['uid'] == os.getuid()}
+        row_proof['handle_inventory_uid'] = os.getuid()
+        row_proof['checked_owner_processes'] = len(candidates)
         holders = budget.scratch_processes(scopes[0], candidates, all_handles=True)
         row_proof['file_holder_pids'] = sorted(holders)
         if holders:
