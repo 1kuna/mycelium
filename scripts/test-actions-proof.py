@@ -187,20 +187,43 @@ class ActionsProofTest(unittest.TestCase):
                 self.assertEqual(ci.main(), 0)
             cleanup.assert_called_once_with(backlog, '123:1')
 
-    def test_failed_tree_is_not_success_or_automatically_retried(self):
+    def test_unverified_failure_status_cannot_suppress_recovery(self):
         tree = self.git('rev-parse', self.first + '^{tree}')
-        self.api.tip = self.first
+        self.api.tip = self.third
         self.api.publish(self.first, tree, 'https://github.com/1kuna/mycelium/actions/runs/1', 'failure')
-        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'run') as run, \
-                patch.dict(os.environ, self.env), redirect_stdout(io.StringIO()):
-            self.assertEqual(ci.run_pending(self.root, self.first, self.scratch, '123:1'), 1)
-            run.assert_not_called()
-        self.api.tip = self.repeat
         with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'run', return_value=0) as run, \
                 patch.object(ci, 'cleanup', return_value=True), patch.dict(os.environ, self.env), \
                 redirect_stdout(io.StringIO()):
-            self.assertEqual(ci.run_pending(self.root, self.repeat, self.scratch, '124:1'), 0)
-            self.assertEqual([call.args[1] for call in run.call_args_list], [self.second, self.third])
+            self.assertEqual(ci.run_pending(self.root, self.third, self.scratch, '124:1'), 0)
+        self.assertEqual([call.args[1] for call in run.call_args_list], [self.first, self.second, self.third])
+
+    def test_terminal_wrapper_failure_is_error_and_later_workflow_recovers_backlog(self):
+        self.api.tip = self.first
+        def failed_wrapper(*args, cwd=None):
+            output = ''
+            if args[0] == 'run':
+                output = json.dumps({'job_id': args[-1].split(':')[2]})
+            elif args[0] == 'wait':
+                return subprocess.CompletedProcess(args, 1, 'darwin failed\nlinux failed\n', '')
+            elif args[0] == 'status':
+                output = json.dumps({'state': 'failed', 'attempt': 1})
+            else:
+                self.fail(args)
+            return subprocess.CompletedProcess(args, 0, output, '')
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'command', failed_wrapper), \
+                patch.object(ci, 'cleanup', return_value=True), patch.dict(os.environ, self.env), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(ci.run_pending(self.root, self.first, self.scratch, '123:1'), 1)
+        tree = self.git('rev-parse', self.first + '^{tree}')
+        self.assertEqual(self.api.statuses[self.first, tree]['state'], 'error')
+        self.api.tip = self.repeat
+        later = Path(self.temp.name) / 'wrapper-recovery'
+        later.mkdir()
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'run', return_value=0) as run, \
+                patch.object(ci, 'cleanup', return_value=True), patch.dict(os.environ, self.env), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(ci.run_pending(self.root, self.repeat, later, '124:1'), 0)
+        self.assertEqual([call.args[1] for call in run.call_args_list], [self.first, self.second, self.third])
 
     def test_incomplete_submissions_remain_recoverable_in_later_workflow(self):
         self.api.tip = self.first
@@ -240,14 +263,15 @@ class ActionsProofTest(unittest.TestCase):
                 patch.dict(os.environ, dict(self.env, GITHUB_RUN_ATTEMPT='2')), redirect_stdout(io.StringIO()):
             self.assertEqual(ci.run_pending(self.root, self.repeat, self.scratch, '123:2'), 1)
         self.assertEqual(retried, [self.first, self.second, self.third])
-        self.assertEqual(self.api.statuses[self.repeat, tree]['state'], 'failure')
+        self.assertEqual(self.api.statuses[self.repeat, tree]['state'], 'error')
 
     def test_old_local_context_is_ignored_and_latest_CI_status_is_authoritative(self):
         api = object.__new__(proof.GitHub)
         sha, tree = 'a' * 40, 'b' * 40
         old = {'context': 'mycelium/full-tree-v1', 'description': 'tree:' + tree, 'state': 'success'}
         ambiguous = dict(old, context='mycelium/main-full-tree-v2', state='failure')
-        with patch.object(api, 'pages', return_value=[old, ambiguous]):
+        ambiguous_v3 = dict(ambiguous, context='mycelium/main-full-tree-v3')
+        with patch.object(api, 'pages', return_value=[old, ambiguous, ambiguous_v3]):
             self.assertIsNone(api.status(sha, tree))
         with patch.object(api, 'pages', return_value=[old,
             {'context': proof.CONTEXT, 'description': 'tree:' + tree, 'state': 'failure'},
@@ -257,6 +281,8 @@ class ActionsProofTest(unittest.TestCase):
         with patch.object(api, 'request') as request:
             with self.assertRaises(ValueError):
                 api.publish(sha, tree, 'https://github.com/1kuna/mycelium/pull/1')
+            with self.assertRaises(ValueError):
+                api.publish(sha, tree, 'https://github.com/1kuna/mycelium/actions/runs/1', 'failure')
             request.assert_not_called()
         # No receipt verifier/publisher remains to accept a fabricated matching
         # instrumentation hash. PR-head reuse must be stacked on #1149 first.

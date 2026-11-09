@@ -17,7 +17,7 @@ _spec.loader.exec_module(proof)
 
 PLATFORMS = ('darwin', 'linux')
 TERMINAL = {'succeeded', 'failed', 'cancelled'}
-# A transport/refusal/cancellation is not a completed suite verdict.
+# No job state or wrapper exit is a completed suite verdict.
 INCOMPLETE = 2
 # GitHub's six-hour job limit is external, not a gate performance deadline.
 # Reserve five minutes for cleanup and five for Actions/checkout overhead.
@@ -101,9 +101,21 @@ def failure_state(job):
     return 'failed'
 
 
+def verified_outcome(state, result_code=None, marker=None):
+    """Default to incomplete; only an accepted full-gate marker proves success.
+
+    The current gate emits no negative receipt proving source identity, a
+    completed suite and cleanup. Even a real test failure therefore remains
+    recoverable. Do not infer a suite verdict from terminal job/wrapper states.
+    """
+    if state == 'succeeded' and result_code == 0 and marker == 'gate full: exit=0\n':
+        return 0
+    return INCOMPLETE
+
+
 def run(root, sha, scratch, owner):
     jobs, states, refusals = {}, {}, {}
-    failed, incomplete, wait_error = False, False, False
+    incomplete, wait_error = False, False
     # Submit both before waiting. An error on one platform must not skip the other.
     for platform in PLATFORMS:
         name = 'gate-full-darwin' if platform == 'darwin' else 'gate-full'
@@ -141,6 +153,7 @@ def run(root, sha, scratch, owner):
         state = states.get(job, refusals.get(platform, 'unavailable'))
         if state == 'failed':
             state = failure_state(job)
+        outcome = INCOMPLETE
         if state == 'succeeded':
             destination = scratch / f'{platform}-result'
             # myce result owns transient recovery through Client.RetryTransient:
@@ -148,10 +161,11 @@ def run(root, sha, scratch, owner):
             # Retain one accepted-result/marker check here, not a second backoff.
             reply = command('result', job, '--out', str(destination))
             marker = destination / 'gate-result.txt'
-            if reply.returncode or not marker.is_file() or marker.read_text() != 'gate full: exit=0\n':
+            outcome = verified_outcome(state, reply.returncode,
+                                       marker.read_text() if marker.is_file() else None)
+            if outcome == INCOMPLETE:
                 state = 'result verification failed'
-        incomplete = incomplete or state not in ('succeeded', 'failed', 'failed (out of memory)')
-        failed = failed or state in ('failed', 'failed (out of memory)')
+        incomplete = incomplete or outcome == INCOMPLETE
         print(f'{platform}: {state}; job {job or "none"}', flush=True)
         rows.append(f'| {platform} | {state} | {job or "none"} |')
     summary = os.environ.get('GITHUB_STEP_SUMMARY')
@@ -163,11 +177,8 @@ def run(root, sha, scratch, owner):
         print('::error title=CI infrastructure failure::At least one platform submission is unconfirmed; '
               'no suite result was verified for that platform. Rerun this workflow to recover '
               'the merge with fresh attempt keys.', flush=True)
-    # Failed waits with no terminal failure are observation errors, not suite
-    # verdicts. A failed platform plus an unavailable peer is incomplete too.
-    if incomplete or (wait_error and not failed):
-        return INCOMPLETE
-    return int(failed)
+    # Observation errors cannot establish coverage, even with a partial receipt.
+    return INCOMPLETE if incomplete or wait_error else 0
 
 
 def active_file(owner):
@@ -227,14 +238,6 @@ def run_pending(root, sha, scratch, owner):
                     api.publish(candidate, tree, recorded['target_url'])
                 known[tree] = recorded
                 continue
-            if recorded and recorded['state'] == 'failure' and os.environ['GITHUB_RUN_ATTEMPT'] == '1':
-                proof.report(candidate, tree, 'FAIL: previous full failed; explicit rerun required',
-                             recorded['target_url'])
-                # A historical failed tree remains visible without poisoning every
-                # later fixed tree. A repeated current tree still fails this run.
-                failed = failed or candidate == tip
-                known[tree] = recorded
-                continue
             proof.report(candidate, tree, 'RUN: no matching successful full-tree proof')
             # Persist before submission: final Actions cleanup must fence this exact
             # earlier commit too if the workflow was coalesced across several merges.
@@ -256,7 +259,9 @@ def run_pending(root, sha, scratch, owner):
             cleaned = cleanup(candidate, owner)
             if not cleaned:
                 return 1
-            state = 'error' if result == INCOMPLETE else ('failure' if result else 'success')
+            # No verified negative receipt exists yet: every non-success is
+            # recoverable, including terminal command/test failures.
+            state = 'success' if result == 0 else 'error'
             api.publish(candidate, tree, evidence, state)
             recorded = {'state': state, 'target_url': evidence, 'source_sha': candidate}
             outcomes[tree] = recorded

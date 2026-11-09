@@ -8,8 +8,8 @@ import re
 import subprocess
 from urllib.request import Request, urlopen
 
-# v1 had unbound provenance; v2 could label infrastructure gaps as failures.
-CONTEXT = 'mycelium/main-full-tree-v3'
+# v1 had unbound provenance; v2/v3 could suppress recovery without a suite receipt.
+CONTEXT = 'mycelium/main-full-tree-v4'
 REPOSITORY = '1kuna/mycelium'
 
 
@@ -55,6 +55,8 @@ class GitHub:
         return None
 
     def publish(self, sha: str, tree: str, url: str, state: str = 'success') -> None:
+        if state not in ('success', 'error'):
+            raise ValueError('no verified negative gate receipt format is supported')
         if not re.fullmatch(r'https://github\.com/1kuna/mycelium/actions/runs/[0-9]+(?:[/?#].*)?', url):
             raise ValueError('coverage needs a public repository run URL')
         self.request(f'statuses/{sha}', {'context': CONTEXT, 'state': state,

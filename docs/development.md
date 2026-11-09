@@ -481,18 +481,15 @@ batch it resolves main again and covers any new commits before exiting. This
 preserves every distinct landed tree even when GitHub reorders events.
 
 Uncovered trees receive both existing full gates. Successful CI coverage records
-avoid repeating a previously tested tree, including on reruns. A completed failed
-platform outcome is recorded as `failure` only when both platforms have terminal
-verdicts and successful peers have verified result markers. It needs an explicit
-rerun and is never called a pass. Missing submissions, observation errors,
-cancellations or unverifiable results are `error`: incomplete coverage, eligible
-for recovery by a later automatic workflow. Incompleteness on any platform takes
-precedence over a known failure on its peer. A workflow with an incomplete tree
-fails even if newer trees succeed. Historical completed failures stay visible
-without poisoning every later fixed tree; a failed current tree fails the workflow.
+avoid repeating a previously tested tree, including on reruns. Every other
+outcome is `error`: incomplete coverage, eligible for recovery by a later
+automatic workflow. A terminal failed job does not prove that the gate ran; the
+current receipt format cannot establish a completed failing suite. An incomplete
+outcome on either platform prevents successful tree proof. A workflow with an
+incomplete tree fails even if newer trees succeed.
 
 An explicit retry executes each distinct tree at most once per batch. Identical
-trees reuse that batch's outcome—including failure or incompleteness—before
+trees reuse that batch's success or incompleteness before
 consulting old commit statuses. This prevents a failed C retry from running both
 fulls again for a later identical-tree commit. An incomplete outcome is never
 retried repeatedly within that batch and remains recoverable in a later workflow. Interrupted work or failed status publication can need
@@ -512,11 +509,21 @@ success record only after both accepted result markers, those source checks and
 owned cleanup pass. It never pairs historical profiles with the event checkout's
 newer adapter or helpers.
 
-The `mycelium/main-full-tree-v3` commit status records `tree:TREE_ID` and its
-public Actions run URL, with `success`, completed `failure` or incomplete `error`.
-Only this context is read: v1 had unsound source/instrumentation provenance, and
-v2 could mislabel incomplete infrastructure work as a completed failure. Those
-ambiguous older records cannot suppress recovery. A different tree or missing successful CI record keeps
+The `mycelium/main-full-tree-v4` commit status records `tree:TREE_ID` and its
+public Actions run URL, with `success` or recoverable `error`.
+Classification defaults to `error`: preparation errors (including `go mod download`
+before the gate), wrapper exits, missing/invalid receipts, failed jobs, signals,
+timeouts and unknown outcomes cannot prove a completed full suite. Only both
+accepted success markers, frozen source checks and confirmed owned cleanup permit
+`success`. The existing gate format provides no negative receipt proving source
+identity, completed failing tests and cleanup, so **even genuine test failures
+remain recoverable and may run again in a later workflow**. No `failure` status
+is published or reused. Failure reuse is deferred until a follow-up on #1149 can
+verify that evidence, rather than treating a job exit as a verdict. Within one
+batch each distinct tree is still attempted at most once, regardless of outcome.
+Only v4 is read: v1 had unsound source/instrumentation provenance, and v2/v3 could
+mislabel incomplete work as a completed failure and suppress recovery. Their
+records cannot suppress recovery. A different tree or missing successful CI record keeps
 the full. The newest status in the context is authoritative. Logs and the step
 summary name each tested/skipped tree and the source of any reused CI result.
 
@@ -619,8 +626,8 @@ per-merge full requirement. CI stays main-only on self-hosted runners; agents do
 not wait on, poll or wake for main CI. Automatic proof covers distinct unproven
 main trees and reuses matching successful fulls. Use the run's job summary to
 inspect both platform outcomes and Mycelium job IDs.
-The workflow's own check and tree status report success/failure using the scoped
-built-in token; no personal access token is needed.
+The workflow check reports pass/fail; the tree status records success/error using
+the scoped built-in token; no personal access token is needed.
 
 [`scripts/actions-full.py`](../scripts/actions-full.py) freezes the corresponding
 platform full-gate profile to each uncovered main SHA and submits it once for
@@ -651,7 +658,8 @@ The deterministic `main-ci:SHA:OS:RUN_ID:RUN_ATTEMPT` keys identify this
 workflow attempt's two jobs. Repeating a submission within that attempt adopts
 the same job, including after an uncertain submit. A workflow rerun uses fresh
 attempt keys: an older attempt's cleanup cannot cancel its replacement, and a
-cancelled key cannot poison a rerun. A failed suite is not automatically rerun.
+cancelled key cannot poison a rerun. An outcome without verified successful proof
+remains eligible for later recovery.
 The CLI handles immutable source uploads, idempotent submission and reconnects;
 there is no custom watcher, cursor or status publisher.
 
@@ -691,7 +699,9 @@ and the workflow emits a `CI infrastructure failure` error annotation: that
 platform has no verified suite result. Submission may have been accepted despite
 a lost reply. Resolve the infrastructure problem privately, then
 repeat cleanup for the original attempt, then rerun the workflow/merge with
-fresh attempt keys. There is no automatic retry for a failed suite.
+fresh attempt keys. Later main workflows automatically recover trees without
+verified successful proof, including jobs reported as failed. A job failure alone
+does not establish that the suite ran.
 
 ### Public repository and private authority
 
