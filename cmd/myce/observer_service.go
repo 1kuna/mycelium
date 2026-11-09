@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -84,6 +85,35 @@ func publishObserverClient(source, target string) error {
 	if err != nil {
 		return err
 	}
+	if _, err := os.Stat(target); err == nil {
+		incomingHash, err := myce.FileSHA256(output.Name())
+		if err != nil {
+			return err
+		}
+		currentHash, err := myce.FileSHA256(target)
+		if err != nil {
+			return err
+		}
+		if incomingHash == currentHash {
+			return nil
+		}
+		incoming, err := observerClientVersion(output.Name())
+		if err != nil {
+			return err
+		}
+		current, err := observerClientVersion(target)
+		if err != nil {
+			return err
+		}
+		// Reuse release ordering: unordered versions and reused versions with
+		// different build bytes cannot replace the published client. An older
+		// role remains usable; it simply leaves the newer shared image intact.
+		if myce.CheckReleaseUpgrade(incoming.Version, current.Version, false, incomingHash == currentHash) != nil {
+			return nil
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if err := os.Rename(output.Name(), target); err != nil {
 		return err
 	}
@@ -93,6 +123,19 @@ func publishObserverClient(source, target string) error {
 	}
 	defer directory.Close()
 	return directory.Sync()
+}
+
+func observerClientVersion(path string) (myce.VersionInfo, error) {
+	ctx, cancel := myce.SetupTimeout(context.Background())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "version", "--json")
+	cmd.Env = observerEnvironment()
+	data, err := cmd.Output()
+	var version myce.VersionInfo
+	if err != nil || json.Unmarshal(data, &version) != nil || version.Version == "" || version.Commit == "" {
+		return version, errors.New("observer_client_version_invalid: refusing to replace the retained client")
+	}
+	return version, nil
 }
 
 func ensureInstalledObserver(ctx context.Context, c myce.ServiceConfig) error {
@@ -119,7 +162,7 @@ func observerManagerCommand(ctx context.Context, name string, args ...string) er
 
 func observerServiceCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce service observer install|run")
+		return errors.New("usage: myce service observer install|uninstall|run")
 	}
 	f := flag.NewFlagSet("service observer", flag.ContinueOnError)
 	rootFlag := f.String("root", "", "private observer registry (default: user cache)")
@@ -128,6 +171,18 @@ func observerServiceCommand(args []string) error {
 	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected observer service arguments")
+	}
+	if args[0] == "uninstall" {
+		if os.Getenv("MYCE_DEV_SESSION_ROOT") != "" || os.Getenv("MYCE_PROCESS_SESSION") != "" {
+			return errors.New("observer supervision cannot be removed from a managed attempt or dev session")
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return uninstallObserverService(ctx, runtime.GOOS, home, *rootFlag, observerManagerCommand)
 	}
 	root := *rootFlag
 	var err error
@@ -189,7 +244,7 @@ func observerServiceCommand(args []string) error {
 		}
 		return err
 	default:
-		return errors.New("usage: myce service observer install|run")
+		return errors.New("usage: myce service observer install|uninstall|run")
 	}
 }
 
@@ -286,6 +341,11 @@ func installObserverService(ctx context.Context, platform, home, executable, roo
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
+	startup, err := sharedProfileLock(ctx, filepath.Join(root, "startup.lock"))
+	if err != nil {
+		return err
+	}
+	defer startup.Close()
 	if err := publishObserverClient(executable, client); err != nil {
 		return err
 	}

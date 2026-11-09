@@ -161,7 +161,16 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		}
 		if action == "uninstall" {
 			fmt.Printf("Uninstall %s: stop boot service, move %s and %s to recoverable Trash\n", c.Role, c.Service, filepath.Dir(c.Config))
-			return myce.Uninstall(ctx, c, *dry, probe.Command)
+			if err := myce.Uninstall(ctx, c, *dry, probe.Command); err != nil {
+				return err
+			}
+			if *dry {
+				return nil
+			}
+			return retireUnusedObserver(ctx, c, home, func(ctx context.Context, name string, args ...string) error {
+				_, err := probe.Command(ctx, name, args...)
+				return err
+			})
 		}
 		token := os.Getenv("MYCE_TOKEN")
 		if token == "" {

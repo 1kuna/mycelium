@@ -641,6 +641,13 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	}
 	return c, e
 }
+
+// StopUserService uses the installer's native completion semantics, including
+// waiting for launchd to remove a label before it can safely be installed again.
+func StopUserService(ctx context.Context, platform, path, label string, command func(context.Context, string, ...string) ([]byte, error)) error {
+	return (installManager{os: platform, command: command}).stop(ctx, installUnit{path: path, label: label})
+}
+
 func Uninstall(ctx context.Context, c ServiceConfig, dry bool, command func(context.Context, string, ...string) ([]byte, error)) error {
 	if c.Detection.OS == "linux" && (c.Role == "worker" && !ValidWorkerUnit(filepath.Base(c.Service)) || c.Role != "worker" && (c.Role != "queue" || filepath.Base(c.Service) != "myce-queue.service")) {
 		return errors.New("refusing non-Mycelium service unit")

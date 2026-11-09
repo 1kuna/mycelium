@@ -131,8 +131,12 @@ through `myce wait --observer-status`; a PID/lock proves ownership, not delivery
 From the release containing #1159, normal install/enrollment and upgraded service
 startup automatically enable per-user launchd/systemd completion supervision.
 Consumer-only installs use `myce service observer install`. Both paths publish
-an independent per-user client: ordinary queue/worker uninstall retains it,
-supervision and armed registrations; reinstall refreshes it automatically.
+an independent per-user client. Role uninstall retains it and supervision while
+another role is installed or registrations remain armed. Removing the last idle
+role also removes supervision/client; reinstall restores them. Older role
+restarts cannot downgrade the client. `myce service observer uninstall` explicitly
+removes supervision/client and refuses while registrations are armed; receipt
+and registry data remain.
 A dead shared owner then restarts and adopts armed registrations without another
 keyed command.
 Without an available user manager, the installer reports on-demand fallback:

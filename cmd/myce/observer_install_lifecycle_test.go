@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,7 +90,12 @@ func TestObserverServiceSurvivesRoleUninstallAndReinstall(t *testing.T) {
 	source := filepath.Join(home, "source-myce")
 	install := func(version string) {
 		t.Helper()
-		if err := os.WriteFile(source, []byte("#!/bin/sh\nprintf '"+version+"'\n"), 0700); err != nil {
+		release := "v1.0.0"
+		if version == "second" {
+			release = "v2.0.0"
+		}
+		script := fmt.Sprintf("#!/bin/sh\nif [ \"$2\" = \"--json\" ]; then printf '{\"version\":\"%s\",\"commit\":\"%s\"}'; else printf '%s'; fi\n", release, version, version)
+		if err := os.WriteFile(source, []byte(script), 0700); err != nil {
 			t.Fatal(err)
 		}
 		if err := myce.Install(context.Background(), c, source, "fixture", manager); err != nil {
@@ -116,11 +122,13 @@ func TestObserverServiceSurvivesRoleUninstallAndReinstall(t *testing.T) {
 	}
 	install("first")
 	checkClient("first")
-	arm := filepath.Join(root, "retained-registration.json")
-	if err := os.WriteFile(arm, []byte("retained armed registration"), 0600); err != nil {
+	receiptDir := observerLifecycleArm(t, root)
+	arm := filepath.Join(receiptDir, "receipt.json")
+	before, err := os.ReadFile(arm)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := myce.Uninstall(context.Background(), c, false, manager); err != nil {
+	if err := setupCommandWithProbe([]string{"uninstall", "--config", c.Config}, myce.MachineProbe{OS: runtime.GOOS, Command: manager}, home); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(c.Binary); !os.IsNotExist(err) {
@@ -129,7 +137,7 @@ func TestObserverServiceSurvivesRoleUninstallAndReinstall(t *testing.T) {
 	checkClient("first")
 	install("second")
 	checkClient("second")
-	if data, err := os.ReadFile(arm); err != nil || string(data) != "retained armed registration" {
+	if data, err := os.ReadFile(arm); err != nil || string(data) != string(before) {
 		t.Fatal("role lifecycle changed a retained registration", err)
 	}
 }

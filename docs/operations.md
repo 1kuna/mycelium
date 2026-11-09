@@ -1320,10 +1320,13 @@ Drain or disable and verify exact release before an authorized uninstall. Inspec
 `myce uninstall --config CONFIG --dry-run` first. The selected service is stopped
 and disabled and role files move to recoverable Trash; preserve active spools,
 checkpoints, archives and data needed by sibling workers. No fleet action is
-implied by these instructions. From the release containing #1159, ordinary role
-uninstall retains the independent per-user completion client, its supervision
-and armed registrations, so callers of remote queues remain observed. A later
-install or upgraded service startup refreshes that client automatically.
+implied by these instructions. From the release containing #1159, role uninstall
+retains the independent per-user completion client and supervision while another
+role is installed or shared registrations remain armed. Removing the last role
+with no armed registrations also removes observer supervision and its client.
+Registry/receipt data and diagnostic history remain. A later install restores
+supervision automatically. `myce service observer uninstall` explicitly removes
+supervision and the client; it refuses while registrations are armed.
 
 ## Convert split workers to one machine worker (M4)
 
@@ -4090,8 +4093,13 @@ enrollment and fleet upgrades all enter this path; an existing host acquires it
 when its upgraded service starts, without an extra operator command. Setup
 atomically publishes a byte-identical executable at
 `~/.local/share/mycelium/client/myce` and points supervision at this independent
-per-user client. It survives ordinary queue/worker uninstall along with shared
-registrations; a subsequent install or upgraded service startup refreshes it.
+per-user client. It survives queue/worker uninstall while another role or armed
+registration still needs it. A subsequent install or upgraded service startup
+refreshes it without downgrading: release ordering follows the existing semver
+upgrade rules, and equal releases must have identical build bytes. Older,
+unordered or reused releases cannot replace a published client. Publication
+compares the complete staged image under the existing startup lock, so concurrent
+role starts cannot reverse that ordering.
 Consumer-only installations can use `myce service observer install`, which
 publishes the invoking CLI into the same durable client slot. Neither path
 requires manual unit/plist setup.
