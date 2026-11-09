@@ -15,28 +15,39 @@ import (
 // reservations or historical attempt peaks. Unknown attribution does not
 // invalidate the independent physical-memory measurement.
 type HostMemoryObservation struct {
+	BaselineVersion int `json:"baseline_version,omitempty"`
+	// Quiescent is a worker-local zero-custody assertion. The queue must also
+	// reconcile whole-host custody before using UsedGB as a baseline.
+	Quiescent          bool    `json:"quiescent_v1,omitempty"`
+	ReserveGB          float64 `json:"reserve_gb,omitempty"`
 	AttributionUnknown bool    `json:"attribution_unknown,omitempty"`
 	TotalGB            float64 `json:"total_gb"`
 	UsedGB             float64 `json:"used_gb"`
 	MyceliumGB         float64 `json:"mycelium_gb"`
 }
 type externalMemoryBucket struct {
-	ByteCounts map[uint8]uint64  `json:"byte_counts,omitempty"`
-	ByteMax    map[uint8]float64 `json:"byte_max,omitempty"`
-	Values     map[uint64]uint64 `json:"values,omitempty"`
-	End        time.Time         `json:"end,omitempty"`
-	Start      time.Time         `json:"start"`
-	Counts     map[uint8]uint32  `json:"counts"`
-	MaxGB      float64           `json:"max_gb"`
-	PeakAt     time.Time         `json:"peak_at"`
+	Quiescent  *externalMemoryBucket `json:"quiescent_v1,omitempty"`
+	Windows    uint64                `json:"windows,omitempty"`
+	ByteCounts map[uint8]uint64      `json:"byte_counts,omitempty"`
+	ByteMax    map[uint8]float64     `json:"byte_max,omitempty"`
+	// Idle quantiles use lower endpoints: binning must never erase variation.
+	ByteMin map[uint8]float64 `json:"byte_min,omitempty"`
+	Values  map[uint64]uint64 `json:"values,omitempty"`
+	End     time.Time         `json:"end,omitempty"`
+	Start   time.Time         `json:"start"`
+	Counts  map[uint8]uint32  `json:"counts"`
+	MaxGB   float64           `json:"max_gb"`
+	PeakAt  time.Time         `json:"peak_at"`
 }
 type externalMemoryRing struct {
-	Slots   int                           `json:"slots,omitempty"`
-	LastAt  time.Time                     `json:"last_at,omitempty"`
-	Cadence time.Duration                 `json:"cadence,omitempty"`
-	Buckets map[int]*externalMemoryBucket `json:"buckets"`
+	WasQuiescent bool                          `json:"was_quiescent,omitempty"`
+	Slots        int                           `json:"slots,omitempty"`
+	LastAt       time.Time                     `json:"last_at,omitempty"`
+	Cadence      time.Duration                 `json:"cadence,omitempty"`
+	Buckets      map[int]*externalMemoryBucket `json:"buckets"`
 }
 type ExternalMemoryWindow struct {
+	Windows uint64    `json:"windows,omitempty"`
 	Samples uint64    `json:"samples"`
 	Buckets int       `json:"buckets"`
 	P50GB   float64   `json:"p50_gb"`
@@ -56,8 +67,10 @@ func (w ExternalMemoryWindow) Summary() string {
 }
 
 type ExternalMemoryHistory struct {
-	Day  ExternalMemoryWindow `json:"24h"`
-	Week ExternalMemoryWindow `json:"7d"`
+	// This separately qualified history never consumes legacy RSS residuals.
+	Quiescent *ExternalMemoryHistory `json:"quiescent_v1,omitempty"`
+	Day       ExternalMemoryWindow   `json:"24h"`
+	Week      ExternalMemoryWindow   `json:"7d"`
 }
 
 func externalBin(v float64) int {
@@ -93,6 +106,8 @@ func (q *Queue) recordExternalMemory(m *Machine) {
 	r.Buckets = maps.Clone(r.Buckets)
 	q.s.ExternalMemory[host] = r
 	now := q.clock.Now()
+	wasQuiescent := r.WasQuiescent && !r.LastAt.IsZero() && !now.Before(r.LastAt) && now.Sub(r.LastAt) < q.machineLossTimeout(m.ID)
+	r.WasQuiescent = q.hostMemoryQuiescent(m)
 	r.LastAt = now
 	width := externalBucketSpan(r.Slots)
 	start := now.Truncate(width)
@@ -121,6 +136,37 @@ func (q *Queue) recordExternalMemory(m *Machine) {
 	if b.PeakAt.IsZero() || v > b.MaxGB {
 		b.MaxGB, b.PeakAt = v, now
 	}
+	if r.WasQuiescent {
+		// No RSS subtraction: idle worker/control overhead and uncharged driver
+		// memory stay protected. Shared RSS can never grant fictitious capacity.
+		idle := &externalMemoryBucket{Start: start}
+		if b.Quiescent != nil {
+			*idle = *b.Quiescent
+		}
+		idle.ByteCounts, idle.ByteMax = maps.Clone(idle.ByteCounts), maps.Clone(idle.ByteMax)
+		idle.ByteMin = maps.Clone(idle.ByteMin)
+		if idle.ByteCounts == nil {
+			idle.ByteCounts, idle.ByteMax = map[uint8]uint64{}, map[uint8]float64{}
+		}
+		if !wasQuiescent {
+			idle.Windows++
+		}
+		idle.End = now
+		v := o.UsedGB
+		bin := uint8(bits.Len64(uint64(min(float64(^uint64(0)>>1), math.Ceil(v*(1<<30))))))
+		if idle.ByteMin == nil {
+			idle.ByteMin = map[uint8]float64{}
+		}
+		if prior, ok := idle.ByteMin[bin]; !ok || v < prior {
+			idle.ByteMin[bin] = v
+		}
+		idle.ByteCounts[bin]++
+		idle.ByteMax[bin] = max(idle.ByteMax[bin], v)
+		if idle.PeakAt.IsZero() || v > idle.MaxGB {
+			idle.MaxGB, idle.PeakAt = v, now
+		}
+		b.Quiescent = idle
+	}
 }
 func (r *externalMemoryRing) window(now time.Time, duration time.Duration) ExternalMemoryWindow {
 	var w ExternalMemoryWindow
@@ -132,6 +178,7 @@ func (r *externalMemoryRing) window(now time.Time, duration time.Duration) Exter
 			continue
 		}
 		w.Buckets++
+		w.Windows += b.Windows
 		if w.FirstAt.IsZero() || b.Start.Before(w.FirstAt) {
 			w.FirstAt = b.Start
 		}
@@ -143,7 +190,11 @@ func (r *externalMemoryRing) window(now time.Time, duration time.Duration) Exter
 			w.Samples += uint64(n)
 		}
 		for bin, n := range b.ByteCounts {
-			values[b.ByteMax[bin]] += n
+			value := b.ByteMax[bin]
+			if lower, ok := b.ByteMin[bin]; ok {
+				value = lower
+			}
+			values[value] += n
 			w.Samples += n
 		}
 		for value, n := range b.Values {
@@ -181,7 +232,17 @@ func (q *Queue) externalMemoryStatus(host string) *ExternalMemoryHistory {
 		return nil
 	}
 	now := q.clock.Now()
-	return &ExternalMemoryHistory{Day: r.window(now, 24*time.Hour), Week: r.window(now, 7*24*time.Hour)}
+	h := &ExternalMemoryHistory{Day: r.window(now, 24*time.Hour), Week: r.window(now, 7*24*time.Hour)}
+	idle := externalMemoryRing{Buckets: map[int]*externalMemoryBucket{}}
+	for key, b := range r.Buckets {
+		if b.Quiescent != nil {
+			idle.Buckets[key] = b.Quiescent
+		}
+	}
+	if len(idle.Buckets) > 0 {
+		h.Quiescent = &ExternalMemoryHistory{Day: idle.window(now, 24*time.Hour), Week: idle.window(now, 7*24*time.Hour)}
+	}
+	return h
 }
 
 type HostBudgetSuggestion struct {
