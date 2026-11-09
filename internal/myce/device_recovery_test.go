@@ -157,6 +157,11 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 					body, probeErr = xpuHealthyHealth, nil
 					clock.Advance(2 * time.Second)
 					scan()
+					if failure := w.Machine.Devices[0].RecoveryBlocked; failure == nil || failure.Error() != wantRejection {
+						t.Fatal("rejection changed before the paced probe was due", failure)
+					}
+					clock.Advance(w.faultHealthDue[key].at.Sub(clock.Now()))
+					scan()
 					if w.Machine.Devices[0].RecoveryBlocked != nil || w.Machine.Devices[0].Reason == "" {
 						t.Fatal("healthy reading did not reset rejection/streak")
 					}
