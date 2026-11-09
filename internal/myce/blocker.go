@@ -135,7 +135,9 @@ func (q *Queue) actionableBlocker(j *Job) (blocker *Blocker) {
 		reason = strings.ReplaceAll(reason, key, "required software")
 	}
 	b := &Blocker{"resource_pressure", "eligible execution capacity", "queue", "wait for the named capacity or reservation to be released; keep other work moving", reason}
-	if !dependencyReady(j) {
+	if deviceFaultRetryReason(reason) {
+		b.Code, b.Dependency, b.Owner, b.Action = deviceFaultRetryHold, "healthy accelerator capacity after a driver fault", "queue and worker", "wait for another healthy device or host, or a health-proven quarantine recovery"
+	} else if !dependencyReady(j) {
 		b.Code, b.Dependency, b.Owner, b.Action = "unprepared", "accepted upstream result", "producer", "complete and publish the required upstream result"
 	} else if strings.Contains(reason, "waiting for software preparation for job ") {
 		b.Code, b.Dependency, b.Owner, b.Action = "waiting_for_builder", "software preparation for the named queued job", "queue", "wait for the named preparation; ask the queue owner if its offer or exact release makes no progress"

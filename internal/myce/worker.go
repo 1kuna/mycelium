@@ -47,11 +47,15 @@ type Worker struct {
 	fleet         *workerFleetRuntime
 
 	DeviceFaultSource   DeviceFaultSource
+	DeviceHealthProbe   DeviceHealthProbe
 	DeviceFaultMatchers map[string]DeviceFaultMatcher
 	faults              *deviceQuarantine
 	faultSince          time.Time       // Kernel records before worker start are not read (#595).
 	faultPending        []KernelLogLine // Matched faults too recent to rule out teardown.
 	faultTeardowns      map[string][]time.Time
+	faultRecovery       map[string]deviceRecoveryObservation
+	faultHealth         map[string]deviceHealthObservation
+	faultHealthAfter    time.Time // A monitoring gap invalidates older in-flight health readings.
 	InventoryProbe      func(context.Context) ([]MachineDevice, error)
 	CPUIsolationProbe   func(context.Context) error
 	cpuRuntimeProbe     *MachineProbe // Runtime/OS seam; tests still exercise real verification rules.

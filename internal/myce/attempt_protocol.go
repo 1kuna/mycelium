@@ -56,6 +56,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	c.Running, c.Started = nil, false
 	c = w.hygieneCheckin(c)
 	c = w.deviceTelemetryCheckin(c)
+	c = w.deviceRecoveryCheckin(c)
 	full := c
 	c = w.unifiedMemoryCheckin(c)
 	if w.toolReport != nil {
@@ -74,11 +75,11 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	}
-	if (w.toolReport != nil && c.ToolInventoryHash != "" || hasHygieneWireFields(c) || hasUnifiedMemoryWireFields(c) || hasResourceFields(c) || hasDeviceTelemetry(c)) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+	if (w.toolReport != nil && c.ToolInventoryHash != "" || hasHygieneWireFields(c) || hasUnifiedMemoryWireFields(c) || hasResourceFields(c) || hasDeviceTelemetry(c) || hasDeviceRecovery(c)) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
 		// Strict decoding rejected additive inventory/hygiene/resource fields before mutation
 		// (for example, a queue replaced with an older inventory-capable binary).
 		// Retry once with the full legacy inventory; attempt protocol is unchanged.
-		c = legacyDeviceTelemetryCheckin(legacyUnifiedMemoryCheckin(w.legacyHygieneCheckin(full)))
+		c = legacyDeviceRecoveryCheckin(legacyDeviceTelemetryCheckin(legacyUnifiedMemoryCheckin(w.legacyHygieneCheckin(full))))
 		if w.Client.resourceWire != nil {
 			w.Client.resourceWire.supported.Store(false)
 			w.Client.resourceWire.cpuPressure.Store(false)
@@ -88,6 +89,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 			w.unifiedMemoryWire.sampleSupported = false
 			w.unifiedMemoryWire.probeSupported = false
 			w.unifiedMemoryWire.telemetrySupported = false
+			w.unifiedMemoryWire.recoverySupported = false
 		}
 		if w.toolReport != nil {
 			w.toolReport.supported = false
@@ -115,6 +117,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		w.unifiedMemoryWire.sampleSupported = reply.HostMemorySampleProtocol == hostMemorySampleProtocol
 		w.unifiedMemoryWire.probeSupported = reply.ProbeMemoryProtocol == probeMemoryProtocol
 		w.unifiedMemoryWire.telemetrySupported = reply.DeviceTelemetryProtocol == deviceTelemetryProtocol
+		w.unifiedMemoryWire.recoverySupported = reply.DeviceRecoveryProtocol == deviceRecoveryProtocol
 	}
 	// A lost/discarded assignment leaves no local custody to stop. Validate
 	// the whole reply first, then explicitly release only unheld own-session

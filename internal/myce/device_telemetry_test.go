@@ -39,7 +39,7 @@ func TestDeviceTelemetryAndHostProbeAdvertisement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply.DeviceTelemetryProtocol != deviceTelemetryProtocol || reply.HostProbeProtocol != hostProbeProtocol {
+	if reply.DeviceTelemetryProtocol != deviceTelemetryProtocol || reply.HostProbeProtocol != hostProbeProtocol || reply.DeviceRecoveryProtocol != deviceRecoveryProtocol {
 		t.Fatal("check-in did not advertise both independent telemetry protocols", reply)
 	}
 }
@@ -55,7 +55,7 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 			return
 		}
 		reports = append(reports, c)
-		if strict && hasDeviceTelemetry(c) {
+		if strict && (hasDeviceTelemetry(c) || hasDeviceRecovery(c)) {
 			rw.WriteHeader(400)
 			_ = json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
 			return
@@ -63,6 +63,7 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 		reply := Reply{AttemptProtocol: keyedAttemptProtocol}
 		if !strict {
 			reply.DeviceTelemetryProtocol = deviceTelemetryProtocol
+			reply.DeviceRecoveryProtocol = deviceRecoveryProtocol
 		}
 		_ = json.NewEncoder(rw).Encode(reply)
 	}))
@@ -71,6 +72,7 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 	free, active := 4.0, 0.0
 	s := &DeviceTelemetry{At: clock.Now(), FreeGB: &free, ActivePercent: &active}
 	m.Devices[0].Telemetry = s
+	m.Devices[0].Recovery = &DeviceRecovery{FaultEvent: "synthetic"}
 	w := Worker{Clock: clock, Client: Client{URL: server.URL}, unifiedMemoryWire: &workerUnifiedMemoryWire{}}
 	send := func() {
 		t.Helper()
@@ -82,7 +84,7 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 	send()
 	clock.Advance(deviceMemorySampleFreshFor)
 	send()
-	if hasDeviceTelemetry(reports[0]) || !hasDeviceTelemetry(reports[1]) {
+	if hasDeviceTelemetry(reports[0]) || !hasDeviceTelemetry(reports[1]) || hasDeviceRecovery(reports[0]) || !hasDeviceRecovery(reports[1]) {
 		t.Fatal("telemetry did not negotiate independently")
 	}
 	// A delayed inventory result carries its original sensor age. Rebase it
@@ -94,7 +96,7 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 	strict = true
 	send()
 	send()
-	if len(reports) != 5 || !hasDeviceTelemetry(reports[2]) || hasDeviceTelemetry(reports[3]) || hasDeviceTelemetry(reports[4]) || s.AgeSeconds != 0 {
+	if len(reports) != 5 || !hasDeviceTelemetry(reports[2]) || hasDeviceTelemetry(reports[3]) || hasDeviceTelemetry(reports[4]) || hasDeviceRecovery(reports[3]) || hasDeviceRecovery(reports[4]) || m.Devices[0].Recovery == nil || s.AgeSeconds != 0 {
 		t.Fatal("downgrade failed or mutated the original sensor evidence")
 	}
 }

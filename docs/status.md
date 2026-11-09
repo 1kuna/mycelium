@@ -616,6 +616,15 @@ An unsupported, multiplexed, incomplete or nonadvancing counter remains unknown.
 Sensor ages are rebased onto queue time; cached inventory cannot refresh them.
 Strict older queues receive the existing inventory shape after negotiation.
 
+With `device-recovery-v1` support (#1142), `devices[].quarantine_recovery`
+records an automatic clear's fault hash, healthy interval, observation window,
+vendor probe and queue-owned transition receipt (`observed_at`). Older queues
+receive inventory without this optional field. `attempt_history[].device_fault`
+is queue-owned host/backend loss evidence, and `blocker.code:
+device_fault_last_healthy` explains a held retry. See
+[device quarantine](operations.md#accelerator-driver-fault-quarantine) for
+recovery conditions and mixed-version behavior.
+
 Fan-out execution may share a discrete XPU card only when every tenant opts in
 with `fan_out.share_xpu: true`; omission or `false` preserves existing admission.
 The declaration is frozen as `batch.share_xpu` on each executing child, including
