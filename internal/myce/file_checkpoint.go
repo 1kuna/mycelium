@@ -296,6 +296,17 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 	return dest, syncWorkerDir(j.Checkpoint)
 }
 func (w Worker) finishFileResult(j Job, result Result, parent string, metadata ...string) (finished Result, err error) {
+	step, outputName := "checkpoint_publication", ""
+	// Surface retryable publication errors without changing custody or Success.
+	defer func() {
+		if err != nil && !stale(err) {
+			finished = finalizationResult(finished, step, outputName, err, false)
+			err = finalizationErrorFor(step, outputName, err)
+		}
+	}()
+	if result.Success && result.ExecutionCause != nil && result.ExecutionCause.Finalization != nil {
+		result.ExecutionCause, result.Error = nil, ""
+	}
 	// Docker mount writers must be proven stopped before any checkpoint/output I/O.
 	if j.Spec.Run.Docker && result.ReleasePending {
 		return result, nil
@@ -326,10 +337,10 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 		return result, nil
 	}
 	if j.Spec.OutputDelivery == asyncNAS || dockerFileJob(j.Spec) {
+		step = "output_spool"
 		root, files, err := captureDeliverySpool(j, parent, w.storageObserver)
 		if errors.Is(err, errRequiredDeliveryOutput) || dockerFileJob(j.Spec) && errors.Is(err, os.ErrPermission) {
-			result.Success, result.Error = false, errRequiredDeliveryOutput.Error()
-			return result, nil
+			return finalizationResult(result, step, "", err, true), nil
 		}
 		if err != nil {
 			return result, err
@@ -338,16 +349,19 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 		defer cancel()
 		ctx = withFileStoreAttempt(ctx, j)
 		if j.Spec.OutputDelivery == asyncNAS {
+			step = "output_reservation"
 			reservation := result
 			reservation.OutputRefs = files
 			if err = w.Client.Call(ctx, "POST", "/api/files/result", reservation, nil); err != nil {
 				return result, err
 			}
+			step = "output_preflight"
 			if err = w.Client.PreflightFileStore(ctx, files); err != nil {
 				return result, err
 			}
 		}
 		for name, ref := range files {
+			step, outputName = "output_upload", name
 			if err = w.Client.uploadFile(ctx, filepath.Join(root, name), ref, attemptOutputUploadPurpose); err != nil {
 				return result, err
 			}
@@ -360,18 +374,17 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 	defer cancel()
 	ctx = withFileStoreAttempt(ctx, j)
 	for name := range j.Spec.Outputs {
+		step, outputName = "output_path", name
 		src, err := confinedPath(j.Spec.Run.Workdir, name)
 		if err != nil {
-			result.Success = false
-			result.Error = "required output missing or invalid"
-			return result, nil
+			return finalizationResult(result, step, name, err, true), nil
 		}
+		step = "output_validation"
 		ref, err := IdentifyFile(src)
 		if err != nil {
-			result.Success = false
-			result.Error = "required output missing or invalid"
-			return result, nil
+			return finalizationResult(result, step, name, err, true), nil
 		}
+		step = "output_upload"
 		if err = w.Client.UploadFile(ctx, src, ref); err != nil {
 			return result, err
 		}

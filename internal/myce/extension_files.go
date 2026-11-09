@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -283,7 +282,9 @@ func (j Job) publishesNASOutputs() bool {
 	return !j.storedFileResults() && (j.Spec.extensionJob() || j.Spec.After != nil) && len(j.Spec.Outputs) > 0
 }
 
-func (w Worker) publishExtensionFiles(j Job, attemptWork string) error {
+func (w Worker) publishExtensionFiles(j Job, attemptWork string) (err error) {
+	step := "output_check"
+	defer func() { err = finalizationErrorFor(step, "", err) }()
 	if check := j.Spec.ExtensionCheck; check != nil && !j.Spec.Run.Docker && j.Spec.Run.Env["MYCE_CHECK_OUTPUT"] != "" {
 		// Only the worker publishes the bounded check result into the CLI's
 		// scratch folder. Payloads never receive write access to shared caches.
@@ -310,6 +311,7 @@ func (w Worker) publishExtensionFiles(j Job, attemptWork string) error {
 	if !j.publishesNASOutputs() {
 		return nil
 	}
+	step = "output_publication"
 	if w.JobFileRoot == "" {
 		return errors.New("job files require a root and clean relative names")
 	}
@@ -379,9 +381,9 @@ func publishDirectoryJobOutputs(j Job, root string, renameDirectory, copyFile fu
 			err = stageJobFiles(names, func(name, source string) error {
 				path, err := confinedPath(j.Spec.Run.Workdir, source)
 				if err != nil {
-					return err
+					return finalizationErrorFor("output_path", name, err)
 				}
-				return copyFile(path, filepath.Join(staged, name))
+				return finalizationErrorFor("output_publication", name, copyFile(path, filepath.Join(staged, name)))
 			})
 		}
 		if err == nil {
@@ -389,7 +391,9 @@ func publishDirectoryJobOutputs(j Job, root string, renameDirectory, copyFile fu
 		}
 		_ = os.RemoveAll(staged)
 		if err != nil {
-			return fmt.Errorf("attempt output publication failed: %w", err)
+			cause := runtimeDiagnostic(finalizationErrorFor("output_publication", "", err))
+			cause.Finalization.Destination = prefix
+			return &runtimeError{diagnostic: *cause, cause: err}
 		}
 	}
 	return nil

@@ -93,34 +93,48 @@ func TestExtensionStaticUsabilityPitfalls(t *testing.T) {
 }
 
 func TestExtensionBaselineFailureIsFailedAttempt(t *testing.T) {
-	e := compositionExtension(t, false)
-	e.Kinds = nil
-	delete(e.Variants[0].Baselines, "kind:sample")
-	e.Variants[0].Check = []string{"sh", "-c", `printf wrong > "$MYCE_CHECK_OUTPUT"`}
-	e = freezeComposition(t, e)
-	root := t.TempDir()
-	ext := filepath.Join(root, "extensions")
-	if err := InstallExtension(ext, e); err != nil {
-		t.Fatal(err)
-	}
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "state", "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: ext, Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	await(t, func() bool { snap, _ := d.Queue.Snapshot(); return len(snap.Machines) > 0 })
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	reports, err := CheckExtension(ctx, ext, e, "fake", "0", "dev-host", os.Stderr, &EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 4 << 20}, d.Client())
-	if err == nil || len(reports) != 1 || reports[0].Qualified {
-		t.Fatal(reports, err)
-	}
-	snapshot, err := d.Queue.publicSnapshot()
-	if err != nil || len(snapshot.Jobs) != 1 {
-		t.Fatal(snapshot, err)
-	}
-	if snapshot.Jobs[0].State != "failed" || !strings.Contains(JobState(snapshot.Jobs[0]), "internal extension check") {
-		t.Fatal("baseline mismatch not failed/labelled", snapshot.Jobs[0])
+	for _, tc := range []struct{ name, command, class string }{
+		{"baseline", `printf wrong > "$MYCE_CHECK_OUTPUT"`, "invalid_numeric_output"},
+		{"directory", `mkdir "$MYCE_CHECK_OUTPUT"`, "not_regular"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := compositionExtension(t, false)
+			e.Kinds = nil
+			delete(e.Variants[0].Baselines, "kind:sample")
+			e.Variants[0].Check = []string{"sh", "-c", tc.command}
+			e = freezeComposition(t, e)
+			root := t.TempDir()
+			ext := filepath.Join(root, "extensions")
+			if err := InstallExtension(ext, e); err != nil {
+				t.Fatal(err)
+			}
+			d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "state", "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: ext, Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			await(t, func() bool { snap, _ := d.Queue.Snapshot(); return len(snap.Machines) > 0 })
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			reports, err := CheckExtension(ctx, ext, e, "fake", "0", "dev-host", os.Stderr, &EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 4 << 20}, d.Client())
+			if err == nil || len(reports) != 1 || reports[0].Qualified {
+				t.Fatal(reports, err)
+			}
+			snapshot, err := d.Queue.publicSnapshot()
+			if err != nil || len(snapshot.Jobs) != 1 {
+				t.Fatal(snapshot, err)
+			}
+			if snapshot.Jobs[0].State != "failed" || !strings.Contains(JobState(snapshot.Jobs[0]), "internal extension check") {
+				t.Fatal("baseline mismatch not failed/labelled", snapshot.Jobs[0])
+			}
+			cause := snapshot.Jobs[0].ExecutionCause
+			if cause == nil || cause.Finalization == nil || cause.Finalization.Step != "output_check" || cause.Class != tc.class || cause.Finalization.CommandExitCode == nil || *cause.Finalization.CommandExitCode != 0 {
+				t.Fatalf("successful check command lost validation cause: %+v", cause)
+			}
+			if err := d.Client().DownloadDiagnostic(ctx, snapshot.Jobs[0].ID, snapshot.Jobs[0].Attempt, "summary.json", filepath.Join(root, "summary.json")); err != nil {
+				t.Fatal("check validation summary unavailable", err)
+			}
+		})
 	}
 }
 

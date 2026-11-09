@@ -514,6 +514,19 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							err = s.save()
 						} else {
 							s.fileError = "file publication pending; local results retained"
+							if finished.Execution == result.Execution && finished.Session == result.Session && finished.ExecutionCause != nil && finished.ExecutionCause.Finalization != nil {
+								s.state.Result = &finished
+								if saveErr := s.save(); saveErr != nil {
+									finish(saveErr)
+									return
+								}
+								if !finished.ReleasePending {
+									released := finished
+									released.ReleaseOnly, released.OutputRefs = true, nil
+									// Best effort: the saved cause replays with the next release.
+									_ = w.Client.Call(ioCtx, "POST", "/api/workers/complete", released, nil)
+								}
+							}
 						}
 					}
 				} else if a.job.FileTransport && report.Progress > s.fileGeneration {

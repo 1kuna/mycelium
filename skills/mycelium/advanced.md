@@ -185,6 +185,19 @@ accepted outputs; `myce result JOB_ID --attempt N --out DIR` requests diagnostic
 artifacts, which may be unavailable. A recovered result is a separately
 identified artifact and does not change the original execution verdict.
 
+Workers and queues with #871's finalization correction retain
+`execution_cause.finalization`: `step`, declared `output`/`destination`, a fixed
+safe `error`, optional HTTP status and `command_exit_code: 0` when observed.
+The queue binds names to the frozen output declarations; expanded worker roots
+and transport text are excluded. Finalization failures have a metadata-only
+`attempt_history[].diagnostics.summary` when artifact capture was not requested
+or yielded no files. `result --attempt N` writes that summary as `summary.json`;
+its size/hash is computed from the recorded metadata, without requiring a blob
+upload. Optional logs/reports still require diagnostic capture and storage.
+Queue-backed outputs must be regular files; archive a directory or declare its
+individual files. A pending upload/reservation retains bytes and retries without
+turning a successful command into an infrastructure loss or accepted result.
+
 For large outputs, publish to the project's own storage in the job and return
 a small path/size/SHA-256 receipt. Verify downstream copies and complete every
 use before releasing only your own terminal results:

@@ -54,14 +54,14 @@ func captureDeliverySpool(j Job, workerRoot string, observers ...*storageObserve
 				return "", nil, errors.New("conflicting local result spool")
 			}
 			if err = verifyFile(context.Background(), filepath.Join(dest, "data", name), ref); err != nil {
-				return "", nil, err
+				return "", nil, finalizationErrorFor("output_spool", name, err)
 			}
 			f, e := os.Open(filepath.Join(dest, "data", name))
 			if e != nil {
-				return "", nil, e
+				return "", nil, finalizationErrorFor("output_spool", name, e)
 			}
 			if e = errors.Join(f.Sync(), f.Close()); e != nil {
-				return "", nil, e
+				return "", nil, finalizationErrorFor("output_spool", name, e)
 			}
 		}
 		if err = syncModelDirectory(dest); err != nil {
@@ -81,11 +81,11 @@ func captureDeliverySpool(j Job, workerRoot string, observers ...*storageObserve
 	for name := range j.Spec.Outputs {
 		src, err := confinedPath(j.Spec.Run.Workdir, name)
 		if err != nil {
-			return "", nil, errRequiredDeliveryOutput
+			return "", nil, requiredOutputError("output_path", name, err)
 		}
 		st, err := os.Stat(src)
-		if err != nil || !st.Mode().IsRegular() {
-			return "", nil, errRequiredDeliveryOutput
+		if err = regularOutputError(st, err); err != nil {
+			return "", nil, requiredOutputError("output_validation", name, err)
 		}
 		sources[name] = src
 		bytes = addDiskBytes(bytes, uint64(st.Size()))
@@ -112,11 +112,11 @@ func captureDeliverySpool(j Job, workerRoot string, observers ...*storageObserve
 	for name, src := range sources {
 		path := filepath.Join(stage, "data", name)
 		if err = copyJobFile(src, path); err != nil {
-			return "", nil, err
+			return "", nil, finalizationErrorFor("output_spool", name, err)
 		}
 		ref, e := IdentifyFile(path)
 		if e != nil {
-			return "", nil, e
+			return "", nil, finalizationErrorFor("output_spool", name, e)
 		}
 		files[name] = ref
 	}
