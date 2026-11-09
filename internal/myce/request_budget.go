@@ -38,6 +38,7 @@ type peerResponseBudgetKey struct{}
 type requestAllocation struct {
 	budgets     *requestBudgets
 	limit, held int64
+	retained    int64 // Cold immutable decodes remain resident across response retries.
 }
 
 // Admission accounts for the wire buffer, decoder scratch and typed allocations.
@@ -204,6 +205,7 @@ func (a *requestAllocation) close() {
 	a.budgets.held -= a.held
 	a.budgets.mu.Unlock()
 	a.held = 0
+	a.retained = 0
 }
 func budgetRefusal(limit int64) error {
 	return &HTTPError{Status: 413, Code: "request_too_large", Message: fmt.Sprintf("request exceeds measured queue memory capacity; fitting wire bytes=%d (decoded payload allocations also charged); split the request or retry with more headroom", max(0, limit))}

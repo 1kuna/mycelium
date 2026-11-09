@@ -710,7 +710,7 @@ func (g *readGeneration) chargeDecode(ctx context.Context, live bool, selected s
 		// bytes require token scratch/copies; discarded ledger values are
 		// scanned in place by decodeReadJob, without typed allocations.
 		wire := 6 * int64(len(data)-(end-start))
-		if !allocation.charge(wire) {
+		if !allocation.chargeRetained(wire) {
 			failure = projectionRefusal(fitting)
 			return
 		}
@@ -718,7 +718,7 @@ func (g *readGeneration) chargeDecode(ctx context.Context, live bool, selected s
 			data = append(append(make([]byte, 0, len(data)-(end-start)), data[:start]...), data[end:]...)
 		}
 		cost, err := jsonAllocationCost(data, target, max(0, fitting-wire))
-		if err != nil || !allocation.charge(cost) {
+		if err != nil || !allocation.chargeRetained(cost) {
 			failure = projectionRefusal(fitting)
 		}
 	}

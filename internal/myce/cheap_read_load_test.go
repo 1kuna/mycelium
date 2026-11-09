@@ -170,9 +170,13 @@ func TestCheapReadInvalidationBudget(t *testing.T) {
 			budgetHost(q, 8<<20, 3)
 			completed := 0
 			var observedCharge int64
+			minRetained := int64(8 << 20)
 			q.observeRead = func(_ string, _, _ time.Duration) {
 				q.requestBudgets.mu.Lock()
 				observedCharge = max(observedCharge, q.requestBudgets.held)
+				if completed > 0 {
+					minRetained = min(minRetained, q.requestBudgets.held)
+				}
 				q.requestBudgets.mu.Unlock()
 				if completed < 20 {
 					id := fmt.Sprintf("completion-%02d", completed)
@@ -190,12 +194,15 @@ func TestCheapReadInvalidationBudget(t *testing.T) {
 			r.Header.Set("Authorization", "Bearer test")
 			w := httptest.NewRecorder()
 			(API{Queue: q, Token: "test"}).Handler().ServeHTTP(w, r)
-			t.Logf("completions=%d observed in-flight charge=%d bytes", completed, observedCharge)
+			t.Logf("completions=%d observed in-flight charge=%d bytes minimum retained across retries=%d", completed, observedCharge, minRetained)
 			if w.Code != 200 || completed != 20 {
 				t.Fatalf("discarded projections consumed live capacity: completions=%d status=%d %s", completed, w.Code, w.Body.String())
 			}
 			if q.requestBudgets.held != 0 {
 				t.Fatal("finished request retained projection capacity")
+			}
+			if minRetained <= 0 {
+				t.Fatal("discarding a response released still-resident cold decode charges")
 			}
 		})
 	}

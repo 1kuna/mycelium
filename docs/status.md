@@ -158,6 +158,8 @@ usage/file-store I/O, status recaptures before returning, including uncached
 filtered and full views and per-job GET. This can repeat observation work during
 completions; discarded response allocations are released before retrying rather
 than accumulating as if every discarded generation were still in flight.
+Cold immutable-decode allowances remain charged through the request because
+their cached records can survive a response retry.
 Ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
 injected queue time at capture, rather than the response completion time.
 

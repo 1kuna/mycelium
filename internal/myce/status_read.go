@@ -146,14 +146,14 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 			return "", false, nil
 		}
 		allocation := projectionAllocation(ctx)
-		mark := allocation.held
+		mark := allocation.markProjection()
 		if int64(len(data)) > (allocation.limit-allocation.held)/6 || !allocation.charge(6*int64(len(data))) {
 			return "", true, projectionRefusal(allocation.limit - allocation.held)
 		}
 		started := q.clock.Now()
 		out, err := q.statusJSONFreshness(data, captured, true)
 		if c.terminalRevision.Load() != revision {
-			allocation.rewind(mark)
+			allocation.rewindProjection(mark)
 			return "", false, nil
 		}
 		c.mu.Lock()
@@ -176,7 +176,7 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 		return data, err
 	}
 	allocation := projectionAllocation(ctx)
-	mark := allocation.held
+	mark := allocation.markProjection()
 	for {
 		revision := c.terminalRevision.Load()
 		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent"}, contexts...)
@@ -189,7 +189,7 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 			return "", err
 		}
 		if c.terminalRevision.Load() != revision {
-			allocation.rewind(mark)
+			allocation.rewindProjection(mark)
 			if err := ctx.Err(); err != nil {
 				return "", err
 			}
@@ -573,9 +573,9 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 	}
 	id = resolved
 	allocation := projectionAllocation(ctx)
-	mark := int64(0)
+	mark := projectionMark{}
 	if allocation != nil {
-		mark = allocation.held
+		mark = allocation.markProjection()
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -625,7 +625,7 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 				unlock()
 				if !valid {
 					if allocation != nil {
-						allocation.rewind(mark)
+						allocation.rewindProjection(mark)
 					}
 					continue
 				}
@@ -655,7 +655,7 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 		q.jobSnapshotsMu.Unlock()
 		if !valid {
 			if allocation != nil {
-				allocation.rewind(mark)
+				allocation.rewindProjection(mark)
 			}
 			continue
 		}
@@ -714,7 +714,7 @@ func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...contex
 	}
 	defer finishBudget()
 	allocation := projectionAllocation(ctx)
-	mark := allocation.held
+	mark := allocation.markProjection()
 	for {
 		revision := q.statusCache.terminalRevision.Load()
 		out, err := q.statusSnapshotGeneration(options, ctx)
@@ -726,7 +726,7 @@ func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...contex
 		}
 		// A terminal fence discarded this response. Its temporary copies are
 		// no longer in flight; do not accumulate them as simultaneous work.
-		allocation.rewind(mark)
+		allocation.rewindProjection(mark)
 	}
 }
 
