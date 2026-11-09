@@ -2125,6 +2125,104 @@
       ],
       "type": "object"
     },
+    "HostMemoryLedger": {
+      "properties": {
+        "allowance_gb": {
+          "type": "number"
+        },
+        "available_gb": {
+          "type": "number"
+        },
+        "available_known": {
+          "type": "boolean"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "debt_gb": {
+          "type": "number"
+        },
+        "free_gb": {
+          "type": "number"
+        },
+        "growth_gb": {
+          "type": "number"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "owners": {
+          "items": {
+            "$ref": "#/$defs/HostMemoryOwner"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "reserved_gb": {
+          "type": "number"
+        },
+        "signed_room_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "captured_at",
+        "observed_at",
+        "available_known",
+        "available_gb",
+        "allowance_gb",
+        "reserved_gb",
+        "growth_gb",
+        "signed_room_gb",
+        "debt_gb",
+        "free_gb",
+        "owners"
+      ],
+      "type": "object"
+    },
+    "HostMemoryOwner": {
+      "properties": {
+        "charge_gb": {
+          "type": "number"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "growth_gb": {
+          "type": "number"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "model_attempt": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "machine",
+        "session",
+        "charge_gb",
+        "growth_gb"
+      ],
+      "type": "object"
+    },
     "IOPressure": {
       "properties": {
         "age_seconds": {
@@ -2387,6 +2485,11 @@
         },
         "last_health_alert_attempt": {
           "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "last_memory_admission": {
+          "$ref": "#/$defs/MemoryAdmissionSnapshot",
+          "description": "Last changed blocking host-memory target comparison in this waiting episode, retained through startup failure and restart. Canonical exact-owner charges, growth and reservation pending state; historical diagnostic, not live usage or proof RAM is the only blocker. Absence is unknown. A retry clears it.",
           "x-contract": "diagnostic"
         },
         "last_stop_outcome": {
@@ -3150,6 +3253,113 @@
       "required": [
         "binary",
         "library"
+      ],
+      "type": "object"
+    },
+    "MemoryAdmissionReservation": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "job": {
+          "type": "string"
+        },
+        "pending": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "pending_known": {
+          "type": "boolean"
+        },
+        "pending_observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "ready_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "job",
+        "state",
+        "pending_known",
+        "pending"
+      ],
+      "type": "object"
+    },
+    "MemoryAdmissionSnapshot": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "drift_reserve_gb": {
+          "type": "number"
+        },
+        "envelope": {
+          "$ref": "#/$defs/JobMemoryEnvelope"
+        },
+        "host": {
+          "type": "string"
+        },
+        "ledger": {
+          "$ref": "#/$defs/HostMemoryLedger"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reservations": {
+          "items": {
+            "$ref": "#/$defs/MemoryAdmissionReservation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "session": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "waiting_since": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "captured_at",
+        "waiting_since",
+        "attempt",
+        "machine",
+        "session",
+        "host",
+        "target",
+        "envelope",
+        "drift_reserve_gb",
+        "reason",
+        "ledger",
+        "reservations"
       ],
       "type": "object"
     },

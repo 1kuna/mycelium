@@ -395,6 +395,7 @@ func (q *Queue) reservationPending(r Reservation) []string {
 	if !present {
 		pending = append(pending, "reserved component absent from inventory")
 	}
+	q.observeReservationPending(r, pending)
 	return pending
 }
 
