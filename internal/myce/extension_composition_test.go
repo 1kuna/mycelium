@@ -140,9 +140,14 @@ func TestCompositionImmutableResolutionReplayAndRestart(t *testing.T) {
 			}
 		}
 		bad := spec("experiment")
-		bad.Run.Env = map[string]string{"MYCE_TOKEN": "bad"}
+		bad.Execution = &ExecutionSpec{Main: ExecutionMember{Command: bad.Run.Command}}
+		bad.Run = RunSpec{}
+		submit(t, q, bad) // The same composed execution is valid without the override.
+		bad.Execution.Main.Env = map[string]string{"MYCE_TOKEN": "bad"}
 		if _, err := q.Submit(bad); err == nil {
 			t.Fatal("token override accepted")
+		} else if !strings.Contains(err.Error(), "execution env cannot override worker control MYCE_TOKEN") {
+			t.Fatal("token override refused for unrelated reason", err)
 		}
 	}
 
