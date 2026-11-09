@@ -57,18 +57,20 @@ type ForeignConsumer struct {
 }
 
 type HostHealth struct {
-	Probe            *ProbeObservation  `json:"probe,omitempty"`
-	DiskRecovery     map[string]float64 `json:"disk_recovery,omitempty"`
-	PersistenceError string             `json:"persistence_error,omitempty"`
-	History          []HostHealthSample `json:"history"`
-	Baseline         []HostHealthSample `json:"baseline"`
-	DrainReason      string             `json:"drain_reason,omitempty"`
-	Candidate        string             `json:"candidate,omitempty"`
-	Consecutive      int                `json:"consecutive,omitempty"`
-	Foreign          []ForeignConsumer  `json:"foreign,omitempty"`
-	ForeignError     string             `json:"foreign_error,omitempty"`
-	ForeignAt        time.Time          `json:"foreign_at,omitempty"`
-	AgeSeconds       float64            `json:"age_seconds"`
+	// Queue-owned explanation; workers omit it, including on strict older peers.
+	PressureEvaluation *HostPressureEvaluation `json:"pressure_evaluation,omitempty"`
+	Probe              *ProbeObservation       `json:"probe,omitempty"`
+	DiskRecovery       map[string]float64      `json:"disk_recovery,omitempty"`
+	PersistenceError   string                  `json:"persistence_error,omitempty"`
+	History            []HostHealthSample      `json:"history"`
+	Baseline           []HostHealthSample      `json:"baseline"`
+	DrainReason        string                  `json:"drain_reason,omitempty"`
+	Candidate          string                  `json:"candidate,omitempty"`
+	Consecutive        int                     `json:"consecutive,omitempty"`
+	Foreign            []ForeignConsumer       `json:"foreign,omitempty"`
+	ForeignError       string                  `json:"foreign_error,omitempty"`
+	ForeignAt          time.Time               `json:"foreign_at,omitempty"`
+	AgeSeconds         float64                 `json:"age_seconds"`
 }
 
 // A robust prediction band is learned separately on every host. The widest
@@ -107,20 +109,12 @@ func (h *HostHealth) observe(s HostHealthSample) {
 		swap := high(func(s HostHealthSample) float64 { return s.SwapGrowth })
 		latency := high(func(s HostHealthSample) float64 { return s.WakeSeconds })
 		heartbeat := s.HeartbeatSeconds > 0 && high(func(s HostHealthSample) float64 { return s.HeartbeatSeconds })
-		// An all-zero idle baseline has no measured positive-pressure
-		// reference. It cannot distinguish normal workload variation (or an
-		// avg10 tail) from degradation by PSI alone. Require independent
-		// swap/local-wake deterioration until healthy observations establish
-		// that reference and its adjacent-sample resolution. This also lets
-		// a retained zero-baseline drain recover without requiring exact zero.
-		// Corroborated pressure is adverse immediately and never trains the
-		// baseline; the existing confirmation rule still filters brief spikes.
-		// Queue-only heartbeat delay is not local memory-pressure evidence.
-		// A learned decay tail must not hide later positive PSI accompanied
-		// by a swap-growth outlier, even if that tail widened the PSI band.
 		pressure := s.Pressure > pressureLimit
 		if s.pressurePSI {
-			pressure = pressure && (pressureLimit > 0 || latency) || s.Pressure > 0 && swap
+			// An idle reference can be positive, too. PSI is time spent
+			// stalled, not proof of harmful pressure; corroborate against
+			// this host's swap/wake bands at every baseline, not just zero.
+			pressure = pressure && latency || s.Pressure > 0 && swap
 		}
 		switch {
 		case pressure:
