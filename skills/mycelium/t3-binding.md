@@ -54,6 +54,18 @@ myce run --entry NAME --notify /absolute/path/to/this-thread-notifier
 Pass `--notify` on every submit and same-key replay. It overrides `MYCE_NOTIFY`,
 which may be set for another thread.
 
-`--check` validates configuration only. The first real wake proves the end-to-end
-binding. Changing the notifier does not replace a live observer, so finish or
-recover observation first.
+`--check` validates configuration only. Notifier exit0/transport acceptance,
+durable receiving-thread arrival and owner disposition are separate evidence.
+For the first real event, match the same delivery_id and receipt through the
+receiver and record the owner's result check. A wake alone proves neither
+accepted output nor durable receipt across a receiver crash. When the supported
+runtime cannot establish a boundary, report it as unverified to its owner;
+this guide adds no acknowledgement service or polling loop.
+
+Changing the notifier does not replace a live observer. Preserve the saved
+binding and use the documented recovery; compatible newer owners can cooperate
+in handoff, while legacy/stalled recovery belongs to the operator. Check
+[installed capability](references/release-behavior.md#capability-evidence) first.
+Schedule list/update responses can expose secret-bearing receiver URLs; use only
+a verified redacted operation when such a lookup is necessary. A saved binding
+is not a reason to list schedules.

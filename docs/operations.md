@@ -4085,3 +4085,35 @@ measurement is notifier runtime, not downstream agent-turn runtime. Use a distin
 notifier executable path per thread, as required by the binding contract.
 Receipt acknowledgement prevents ordinary replay duplicates; exactly-once
 external effects across crashes require receiver deduplication by `delivery_id`.
+
+
+### Completion and health delivery acceptance
+
+Check component support on the actual installed CLI, running observer, queue
+and workers; merged source alone is not rollout evidence. Preserve each original
+job/key/arm and stable delivery identity. Verify computation and accepted result,
+local terminal receipt, notifier invocation/result, transport acceptance,
+supported durable receiving-thread arrival and owner disposition as separate
+boundaries. An armed receipt, held owner lock, successful hook, HTTP acceptance
+or wake alone does not prove the complete chain. Report an unsupported receiver
+boundary to its runtime owner; do not invent a parallel receipt service.
+
+Before cleanup, distinguish parent-bound foreground waits from intentional
+managed shared observers. Reuse exact executable/birth/session and attempt or
+fixture ownership evidence; a PID or old age is insufficient. Only its owner
+stops a scoped helper, verifies exit and free locks, then removes disposable
+fixture state. Preserve survivors, registrations and receipts and stop the
+cleanup if custody is uncertain. A legacy shared owner follows the recovery
+steps above; consumer scripts never kill all waits or edit registry files.
+After a permitted lifecycle transition, verify the exact owned helpers are gone,
+legitimate shared observers remain, and jobs/receipts are still recoverable.
+
+Queue health delivery is independent of job completion. Confirm the running
+queue's health hook is configured for the installation's intended private
+receiver before claiming alert delivery. Diagnostic-only mode remains supported.
+Keep receiver/executable configuration private. Trace one safe episode's stable
+delivery ID through the real hook, durable queue acknowledgement, receiving
+state and owner action; configuration presence or `--check` is insufficient.
+Plan backlog delivery with its owner; keep all undelivered identities and receiver
+deduplication across retries/restart. Never clear history or fake acknowledgement
+to make status healthy. Respect current production-run and rollout authority.
