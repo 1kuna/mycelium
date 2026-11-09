@@ -67,6 +67,9 @@ def run(entries, cores, command):
                 completed.get()
     except (KeyboardInterrupt, SystemExit) as error:
         status = error.code if isinstance(error, SystemExit) else 130
+    except Exception as error:
+        print(f'gate scheduler: {error}', file=sys.stderr, flush=True)
+        status = merge_status(status, 1)
     finally:
         # Watchdogs handle TERM with their existing package custody cleanup.
         # The whole-run gate-budget supervisor remains the final fixture fence.
@@ -75,8 +78,8 @@ def run(entries, cores, command):
                 child.terminate()
         for child in pending:
             result = child.wait()
-            if result < 0 or result == 125:
-                status = 125
+            if result < 0 or result in (124, 125):
+                status = merge_status(status, result)
     return status
 
 

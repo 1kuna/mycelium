@@ -13,7 +13,7 @@ import unittest
 
 SCHEDULER = Path(__file__).with_name('gate-scheduler.py')
 HARNESS = '''
-import importlib.util, json, signal, sys
+import importlib.util, json, signal, subprocess, sys, time
 from pathlib import Path
 spec = importlib.util.spec_from_file_location('scheduler', sys.argv[1])
 scheduler = importlib.util.module_from_spec(spec)
@@ -25,6 +25,15 @@ entries = json.loads((root / 'entries').read_text())
 def command(entry):
     with (root / 'admitted').open('a') as out:
         out.write(entry[0] + '\\n')
+    if entry[1] in ('prepare-error', 'spawn-error'):
+        deadline = time.monotonic() + 5
+        while not (root / 'oldest-started').exists():
+            if time.monotonic() > deadline:
+                raise AssertionError('active watchdog did not start')
+            time.sleep(.01)
+        if entry[1] == 'prepare-error':
+            raise subprocess.CalledProcessError(7, ['preparation-fixture'])
+        return entry[0], [str(root / 'missing-command')]
     return entry[0], [sys.executable, str(root / 'child.py'), str(root), *entry]
 sys.exit(scheduler.run(entries, 2, command))
 '''
@@ -38,11 +47,15 @@ def event(kind):
     os.close(fd)
 def stop(sig, frame):
     event('stopped')
+    if behavior == 'cleanup-killed':
+        os.kill(os.getpid(), signal.SIGKILL)
+    if behavior.startswith('cleanup-'):
+        sys.exit(int(behavior.removeprefix('cleanup-')))
     sys.exit(0)
 signal.signal(signal.SIGTERM, stop)
 event('start')
 (root / (name + '-started')).touch()
-if behavior == 'blocked':
+if behavior == 'blocked' or behavior.startswith('cleanup-'):
     while not (root / 'release').exists():
         time.sleep(.01)
 elif behavior == 'release':
@@ -127,6 +140,17 @@ class SchedulerTests(unittest.TestCase):
             status, output = self.finish(child)
             self.assertEqual(status, 143, output)
             self.assertIn(['oldest', 'stopped'], [json.loads(x) for x in (root / 'events').read_text().splitlines()])
+
+    def test_preparation_and_spawn_failures_preserve_cleanup_status(self):
+        for failure in ('prepare-error', 'spawn-error'):
+            for cleanup, expected in (('0', 1), ('124', 124), ('125', 125), ('killed', 125)):
+                with self.subTest(failure=failure, cleanup=cleanup), tempfile.TemporaryDirectory() as folder:
+                    root = Path(folder)
+                    status, output = self.finish(self.launch(root, [('oldest', 'cleanup-' + cleanup),
+                                                                   ('failure', failure), ('forbidden', 'release')]))
+                    self.assertEqual(status, expected, output)
+                    self.assertEqual((root / 'admitted').read_text().splitlines(), ['oldest', 'failure'])
+                    self.assertIn(['oldest', 'stopped'], [json.loads(x) for x in (root / 'events').read_text().splitlines()])
 
 
 if __name__ == '__main__':
