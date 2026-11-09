@@ -150,9 +150,12 @@ configuration changes refuse new admission until that group has cleaned up.
 The installed local fleet worker can coexist with local gates. Admission records
 its process-tree CPU/RSS from launchd and the OS for observation, but reserves
 its admitted CPU and RAM allowance rather than its current use. Supported
-`myce host status` supplies the current allowance once per full or quick admission,
-with a five-second read budget to bound the fleet's effect on local iteration.
-The FIFO wait does not poll or retry that read. A supported drain/budget/resume
+`myce host status` supplies the current allowance when a full or quick request
+is at the front and otherwise ready to enter, with a five-second read budget to
+bound the fleet's effect on local iteration. The read runs outside the FIFO lock;
+admission then reacquires the lock and rechecks the queue and resource ledger.
+Changed custody or lost capacity invalidates that attempt; a later eligible
+attempt reads again. Waiting itself never polls the queue. A supported drain/budget/resume
 can change this allowance without a worker restart or config rewrite, so process
 identity alone cannot qualify freshness. The cache is fallback only: if the queue
 is unreachable, admission reserves the full last-known allowance and records
@@ -163,8 +166,12 @@ read by the gate helpers. Pressure and sustained-swap stops remain live even
 with stale allowance evidence. The CPU
 ledger adds admitted worker cores, declared local lane budgets and the
 host-qualified workstation reserve. The memory ledger adds the full admitted
-worker budget once, without separately subtracting observed worker RSS. Installed-worker
-fleet custody is separate from local gate lanes and is never modified by local
+worker budget once, without separately subtracting observed worker RSS.
+If an unreachable queue conceals a budget increase, stale CPU reservation can
+overcommit the host and slow work; the orchestrator accepts this outage-fallback
+tradeoff to preserve local availability under MY-37. Live memory-pressure and
+sustained-swap guards remain binding. Installed-worker fleet custody is separate
+from local gate lanes and is never modified by local
 admission. Unknown/local native full custody remains binding; all custody still
 blocks idle cache eviction. Ordinary admission does not require an idle host.
 Swap-baseline calibration excludes local gate lanes, while the fleet worker and
@@ -175,8 +182,12 @@ no polling or relay is needed. Release and calibration fulls take priority over
 ordinary waiters. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is
 removed only after OS process identity proves it has exited or is a zombie. Execution slots
 and unknown fixture custody are never removed by that queue cleanup. There is
-no queue timeout; disk, memory-pressure and measured-memory entry refusals remain
-real stops. A reserved calibration full can wait for an identified comparison
+no queue timeout. With normal pressure, insufficient available memory is
+transient capacity: keep the FIFO ticket and print available/required GiB until
+memory frees. Active-run future peaks remain reserved. Disk below the floor,
+non-normal pressure and sustained swap remain real stops; a single-run memory
+requirement exceeding host physical memory refuses instead of waiting forever.
+A reserved calibration full can wait for an identified comparison
 batch to exit without entering gaps between that batch's runs.
 For comparable timings, `./scripts/gate.sh full --exclusive` (or
 `gate-local.py full --exclusive`) drains all local gate work and reserves all

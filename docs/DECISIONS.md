@@ -25,11 +25,17 @@ Reviewed: 2026-11-09 (MY-37). Owner: project maintainer. This records sanitized 
   four-core native peak 7.01 GiB and passing Linux/VM peak 10.57 GiB, plus
   measured workstation headroom. Reserve the fleet worker's admitted CPU/RAM
   allowance in full, even while idle, so later fleet growth is already covered.
-  Read the admitted allowance once per gate admission through bounded supported
-  host status, because queue-owned budgets can change without a worker restart
+  Read the admitted allowance at the front of the queue when otherwise ready,
+  through bounded supported host status outside the FIFO lock, then recheck
+  queue and ledger before granting. Waiting itself does not query the fleet.
+  Queue-owned budgets can change without a worker restart
   or config rewrite. Cache only for fallback: if the read fails, use the full
   last-known allowance, mark `allowance_stale` in the receipt and keep live
-  pressure/swap stops. This supersedes the process/config-bound refresh default
+  pressure/swap stops. An unseen budget increase during outage can overcommit
+  CPU and slow work; that local-availability tradeoff is accepted. Under normal
+  pressure, insufficient available RAM waits in FIFO with a visible reason;
+  a requirement exceeding physical host memory still refuses.
+  This supersedes request-time and process/config-bound refresh defaults
   without making local development depend on fleet availability. Fleet-worker
   jobs remain background and their custody is not modified by local gates.
   This is an implementation default, separate from Zach's MY-37

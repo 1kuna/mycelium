@@ -53,6 +53,8 @@ class LocalGateTests(unittest.TestCase):
     def setUp(self):
         for name, value in [('legacy_directories', []), ('native_full_custody', False),
                             ('check_pressure', None), ('local_worker_usage', None),
+                            ('total_memory', 64 * capacity.GIB),
+                            ('cached_worker_allowance', dict(cpu_cores=0, memory_bytes=0)),
                             ('local_worker_allowance', dict(cpu_cores=0, memory_bytes=0))]:
             mock = patch.object(capacity, name, return_value=value)
             mock.start()
@@ -153,6 +155,114 @@ class LocalGateTests(unittest.TestCase):
                         capacity.acquire(root, cores=5)
                 finally:
                     for run in runs: run.release()
+
+    def test_normal_pressure_memory_wait_keeps_fifo_then_starts_after_quick_releases(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            available = 20 * capacity.GIB
+            allowance = dict(cpu_cores=4, memory_bytes=8 * capacity.GIB)
+            ticket_bytes, waits = None, 0
+            output = io.StringIO()
+            def wait(_):
+                nonlocal available, ticket_bytes, waits
+                waits += 1
+                tickets = capacity.full_waiters(root)
+                self.assertEqual(len(tickets), 1)
+                if ticket_bytes is None: ticket_bytes = tickets[0].read_bytes()
+                self.assertEqual(tickets[0].read_bytes(), ticket_bytes)
+                self.assertEqual(len(capacity.execution_lanes(root)), 1)
+                available = int(26.8 * capacity.GIB)
+                if waits == 2: reviewer.release()
+                if waits > 2: self.fail('memory waiter did not enter after capacity freed')
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', side_effect=lambda: available),
+                  patch.object(capacity, 'cached_worker_allowance', return_value=allowance),
+                  patch.object(capacity, 'local_worker_allowance', return_value=allowance) as reads,
+                  patch.object(capacity, 'time', Mock(sleep=wait)),
+                  contextlib.redirect_stdout(output)):
+                reviewer = capacity.acquire(root, mode='quick', platform='native')
+                full = capacity.acquire(root, mode='full', platform='both', wait=True)
+                try:
+                    self.assertEqual(waits, 2)
+                    self.assertEqual(reads.call_count, 2)  # Reviewer + actual full start.
+                    self.assertIn('full queue position 1; waiting for memory:', output.getvalue())
+                    self.assertIn('pressure normal', output.getvalue())
+                    self.assertEqual(full.owner['memory_requirement_at_entry_bytes'],
+                        capacity.memory_requirement(config, 'both') + 8 * capacity.GIB)
+                    self.assertEqual(full.owner['available_memory_at_entry_bytes'], available)
+                    self.assertEqual(capacity.full_waiters(root), [])
+                finally: full.release()
+
+    def test_impossible_single_run_memory_requirement_refuses_without_waiting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'total_memory', return_value=16 * capacity.GIB),
+                  patch.object(capacity, 'time', Mock()) as clock):
+                with self.assertRaisesRegex(RuntimeError, 'entry requirement exceeds.*host physical memory'):
+                    capacity.acquire(root, mode='full', wait=True)
+                clock.sleep.assert_not_called()
+                self.assertFalse(capacity.occupied_lanes(root))
+                self.assertEqual(capacity.full_waiters(root), [])
+
+    def test_memory_wait_still_stops_on_pressure_or_disk_danger(self):
+        for danger in ('pressure', 'disk'):
+            with self.subTest(danger=danger), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                waiting = False
+                def wait(_):
+                    nonlocal waiting
+                    waiting = True
+                def pressure():
+                    if waiting and danger == 'pressure':
+                        raise RuntimeError('host memory pressure is not normal')
+                def disk(_):
+                    return type('Disk', (), dict(free=capacity.ENTRY_FLOOR +
+                        (-1 if waiting and danger == 'disk' else capacity.GIB)))()
+                with (patch.object(capacity, 'root', return_value=root),
+                      patch.object(capacity, 'available_memory', return_value=20 * capacity.GIB),
+                      patch.object(capacity, 'check_pressure', side_effect=pressure),
+                      patch.object(capacity.shutil, 'disk_usage', side_effect=disk),
+                      patch.object(capacity, 'time', Mock(sleep=wait))):
+                    with self.assertRaisesRegex(RuntimeError, 'pressure is not normal|disk below'):
+                        capacity.acquire(root, mode='full', wait=True)
+                    self.assertTrue(waiting)
+                    self.assertFalse(capacity.occupied_lanes(root))
+                    self.assertEqual(capacity.full_waiters(root), [])
+
+    def test_allowance_probe_does_not_hold_fifo_lock_and_rechecks_changed_ledger(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            qualified_config(root)
+            calls, waits = 0, 0
+            concurrent = root / 'local-go-slot'
+            def read(*_):
+                nonlocal calls
+                calls += 1
+                with (root / 'local-go-admission.lock').open('a') as handle:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if calls == 1:
+                    concurrent.mkdir()
+                    (concurrent / 'owner.json').write_text(json.dumps(dict(cores=4, fixture=True)))
+                return dict(cpu_cores=0, memory_bytes=0)
+            def wait(_):
+                nonlocal waits
+                waits += 1
+                self.assertTrue(concurrent.exists())
+                (concurrent / 'owner.json').unlink()
+                concurrent.rmdir()
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
+                  patch.object(capacity, 'local_worker_allowance', side_effect=read),
+                  patch.object(capacity, 'time', Mock(sleep=wait))):
+                full = capacity.acquire(root, mode='full', wait=True)
+                try:
+                    self.assertEqual(calls, 2)  # First eligible attempt was invalidated.
+                    self.assertEqual(waits, 1)
+                    self.assertEqual(len(capacity.execution_lanes(root)), 1)
+                finally: full.release()
 
     def test_exclusive_waiter_drains_local_work_and_blocks_new_quick_runs(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -334,7 +444,7 @@ p,folder,label=sys.argv[1:]
 s=importlib.util.spec_from_file_location('cap',p);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
 r=pathlib.Path(folder)
 m.root=lambda _:r;m.legacy_directories=lambda _:[];m.native_full_custody=lambda:False
-m.available_memory=lambda:64*m.GIB;m.check_pressure=lambda:None
+m.available_memory=lambda:64*m.GIB;m.check_pressure=lambda:None;m.local_worker_usage=lambda:None
 m.local_worker_allowance=lambda *_:dict(cpu_cores=0,memory_bytes=0)
 slot=m.acquire(r,mode='full',wait=True)
 with (r/'order').open('a') as out:out.write(label+'\\n')
@@ -909,6 +1019,7 @@ sys.exit(m.main())
             with (patch.object(capacity, 'root', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
                   patch.object(capacity, 'local_worker_usage', return_value=worker),
+                  patch.object(capacity, 'cached_worker_allowance', return_value=allowance),
                   patch.object(capacity, 'local_worker_allowance', return_value=allowance)):
                 slot = capacity.acquire(root, mode='full', cores=4)
                 self.assertEqual(slot.owner['local_worker_usage_at_entry'], worker)
@@ -970,6 +1081,7 @@ sys.exit(m.main())
                   patch.object(memory.Path, 'home', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
                   patch.object(capacity, 'local_worker_usage', return_value=worker),
+                  patch.object(capacity, 'cached_worker_allowance', side_effect=memory.cached_worker_allowance),
                   patch.object(capacity, 'local_worker_allowance', side_effect=memory.local_worker_allowance),
                   patch.object(memory.subprocess, 'run', side_effect=run),
                   patch.dict(os.environ, MYCE_TOKEN='nonsecret-fixture')):
@@ -991,7 +1103,7 @@ sys.exit(m.main())
                     # 6 reserve +8 fleet +4 first +4 second =22 >18.
                     with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                         capacity.acquire(root, mode='full', platform='native')
-                    self.assertEqual(len(refreshes), 4)
+                    self.assertEqual(len(refreshes), 3)  # Busy requests do not query.
                 finally: first.release()
                 for mode, failure in [('full', 'timeout'), ('quick', 'unreachable')]:
                     with self.subTest(mode=mode, failure=failure):
@@ -1003,7 +1115,32 @@ sys.exit(m.main())
                             self.assertEqual(allowance['cpu_cores'], 8)
                             self.assertEqual(allowance['memory_bytes'], 16 * capacity.GIB)
                         finally: stale.release()
-                self.assertEqual(len(refreshes), 6)
+                self.assertEqual(len(refreshes), 5)
+                failure = None
+                status['policy'] = dict(cpu_budget_cores=4,
+                    memory_budget=dict(memory_allowance_bytes=8 * capacity.GIB))
+                holder = capacity.acquire(root, mode='full', platform='native', exclusive=True)
+                try:
+                    def release_exclusive(_):
+                        # The queued full must not read its allowance while
+                        # another run is exclusive, then reuse it after waiting.
+                        self.assertEqual(len(refreshes), 6)
+                        status['policy'] = dict(cpu_budget_cores=8,
+                            memory_budget=dict(memory_allowance_bytes=16 * capacity.GIB))
+                        holder.release()
+                    with patch.object(capacity, 'time', Mock(sleep=release_exclusive)):
+                        queued = capacity.acquire(root, mode='full', platform='native', wait=True)
+                    try:
+                        allowance = queued.owner['worker_allowance_at_entry']
+                        self.assertEqual(allowance['cpu_cores'], 8)
+                        self.assertEqual(allowance['memory_bytes'], 16 * capacity.GIB)
+                        self.assertFalse(allowance['allowance_stale'])
+                        self.assertEqual(len(refreshes), 7)
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root, mode='full', platform='native')
+                    finally: queued.release()
+                finally:
+                    if holder.directory.exists(): holder.release()
 
     def test_allowance_status_is_not_polled_while_waiting_for_local_capacity(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1015,9 +1152,11 @@ sys.exit(m.main())
                 if waits == 3: first.release()
             with (patch.object(capacity, 'root', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
+                  patch.object(capacity, 'cached_worker_allowance', return_value=dict(
+                      cpu_cores=4, memory_bytes=8 * capacity.GIB)),
                   patch.object(capacity, 'local_worker_allowance', return_value=dict(
                       cpu_cores=4, memory_bytes=8 * capacity.GIB)) as allowance,
-                  patch.object(capacity.time, 'sleep', side_effect=wait)):
+                  patch.object(capacity, 'time', Mock(sleep=wait))):
                 first = capacity.acquire(root, mode='full')
                 second = capacity.acquire(root, mode='full', wait=True)
                 try:

@@ -21,6 +21,7 @@ _memory = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_memory)
 local_worker_usage = _memory.local_worker_usage
 local_worker_allowance = _memory.local_worker_allowance
+cached_worker_allowance = _memory.cached_worker_allowance
 
 
 def process_identity(pid):
@@ -203,6 +204,13 @@ def available_memory():
     raise RuntimeError('available memory is unknown')
 
 
+def total_memory():
+    if os.uname().sysname == 'Darwin':
+        return int(subprocess.check_output(['sysctl', '-n', 'hw.memsize'],
+                                          text=True, timeout=5))
+    return os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+
+
 def check_pressure():
     if os.uname().sysname == 'Darwin':
         level = int(subprocess.check_output(['sysctl', '-n',
@@ -286,7 +294,10 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     ticket = directory / (prefix + uuid.uuid4().hex)
     queue_ticket = None
     checked_config, resources = None, None
-    worker_allowance = None
+    allowance_probe = None
+    host_memory = total_memory()
+    if type(host_memory) is not int or host_memory <= 0:
+        raise RuntimeError('host physical memory capacity is unknown')
     try:
         if priority in ('release', 'calibration'):
             with admission_lock(directory):
@@ -303,6 +314,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
         after_identity = process_identity(after_pid) if after_pid else None
         announced = None
         while True:
+            probe_request = None
             check_pressure()
             if shutil.disk_usage(repo).free < ENTRY_FLOOR:
                 raise RuntimeError('local disk below 45 GiB entry floor')
@@ -316,10 +328,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 if not resources and (directory / 'local-go-resource-group.custody').exists():
                     raise RuntimeError('resource qualification removed during active custody; retained')
                 worker = local_worker_usage()
-                if worker_allowance is None:
-                    # One bounded host-status read per gate admission, never
-                    # fleet polling while waiting for local FIFO capacity.
-                    worker_allowance = local_worker_allowance(directory, worker)
+                worker_allowance = (allowance_probe['allowance'] if allowance_probe else
+                                    cached_worker_allowance(directory, worker))
                 effective = dict(config, worker_allowance={key: worker_allowance[key]
                     for key in ('cpu_cores', 'memory_bytes')})
                 config_digest = admission_config_digest(effective)
@@ -364,9 +374,10 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             break
                 gate_memory = memory_requirement(config, platform)
                 needed_memory = gate_memory + worker_allowance['memory_bytes']
-                memory_ok = available_memory() >= needed_memory
-                if not memory_ok:
-                    raise RuntimeError(f'available memory below {needed_memory / GIB:.2f} GiB entry requirement; no work started')
+                if needed_memory > host_memory:
+                    raise RuntimeError(f'{needed_memory / GIB:.2f} GiB entry requirement exceeds '
+                                       f'{host_memory / GIB:.2f} GiB host physical memory; no work started')
+                available = available_memory()
                 lanes = legacy + execution_lanes(directory)
                 occupied = len(lanes)
                 reserved_cores = 0
@@ -395,6 +406,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                     raise ValueError('workstation CPU reserve must not be negative')
                 cpu_ok = reserved_cores + worker_cores + cores + reserve <= (os.cpu_count() or 1)
                 group, resource_ok = None, True
+                admission_memory = needed_memory + (reserved_memory if resources else 0)
+                memory_ok = available >= admission_memory
                 if resources:
                     headroom = config['memory_measurement']['headroom_bytes']
                     peak = gate_memory - headroom
@@ -411,14 +424,26 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             row.get('resource_group') == existing_group.get('resource_group')
                             for row in owners) and
                         not any(row.get('exclusive') for row in owners) and
-                        (not exclusive or not owners) and
-                        available_memory() >= needed_memory + reserved_memory)
+                        (not exclusive or not owners))
                     if platform != 'native':
                         resource_ok = (resource_ok and vm_cores + cores <= resources['vm_cores']
                                        and vm_memory + peak <= resources['vm_memory_bytes'])
-                if (not pending_release and not pending_calibration and queue_first and batch_done and occupied < slots
-                        and cpu_ok and resource_ok
-                        and (resources or mode != 'full' or full_marker)):
+                ledger = dict(config=config, owners=owners,
+                    lane_paths=[str(p) for p in lanes], worker_pid=(worker or {}).get('pid'),
+                    group=json.loads(group_path.read_text()) if group_path.exists() else None,
+                    front=str(queue[0]) if queue else None,
+                    release_waiting=release_waiting, calibration_waiting=calibration_waiting,
+                    full_marker=str(full_marker) if full_marker else None,
+                    resource_ok=resource_ok)
+                if allowance_probe and ledger != allowance_probe['ledger']:
+                    allowance_probe = None
+                    continue  # Changed custody/queue invalidates the optimistic read.
+                ready = (not pending_release and not pending_calibration and queue_first and batch_done and occupied < slots
+                        and cpu_ok and memory_ok and resource_ok
+                        and (resources or mode != 'full' or full_marker))
+                if ready and allowance_probe is None:
+                    probe_request = dict(ledger=ledger, worker=worker)
+                elif ready:
                     if resources:
                         group_path = directory / 'local-go-resource-group.custody'
                         if group_path.exists():
@@ -442,7 +467,10 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                                      mode=mode, priority=priority, cores=cores,
                                      local_worker_usage_at_entry=worker,
                                      worker_allowance_at_entry=worker_allowance,
-                                     workstation_cpu_reserve_cores=reserve)
+                                     workstation_cpu_reserve_cores=reserve,
+                                     available_memory_at_entry_bytes=available,
+                                     memory_requirement_at_entry_bytes=admission_memory,
+                                     host_physical_memory_bytes=host_memory)
                         if resources:
                             owner.update(admission_protocol=2, resource_group=group['resource_group'],
                                          admission_config_sha256=config_digest,
@@ -455,17 +483,28 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         if full_marker:
                             full_marker.write_text(json.dumps(owner) + '\n')
                         return Slot(slot, owner, full_marker, group)
+                else:
+                    # A read followed by lost capacity cannot be reused after
+                    # another long wait. Re-read only on a new eligible attempt.
+                    allowance_probe = None
+            if probe_request:
+                allowance = local_worker_allowance(directory, probe_request['worker'])
+                allowance_probe = dict(allowance=allowance, ledger=probe_request['ledger'])
+                continue  # Recheck pressure, disk, FIFO and ledger under the lock.
             if not wait:
-                reason = (f'available memory below {needed_memory / GIB:.2f} GiB measured entry requirement'
+                reason = (f'capacity busy: available memory below {admission_memory / GIB:.2f} GiB measured entry requirement'
                           if not memory_ok else 'capacity busy or reserved for release/calibration')
                 raise RuntimeError('local ' + reason + '; no work started')
             position = queue.index(queue_ticket) + 1 if queue_ticket else None
-            if announced != (position, batch_done):
+            if announced != (position, batch_done, memory_ok, admission_memory):
                 detail = f'full queue position {position}' if position else 'waiting for local capacity'
+                if not memory_ok:
+                    detail += (f'; waiting for memory: {available / GIB:.2f} GiB available, '
+                               f'{admission_memory / GIB:.2f} GiB required (pressure normal)')
                 if not batch_done:
                     detail += '; waiting for the named comparison batch to exit'
                 print('gate: ' + detail + ' (calibration/release priority first)', flush=True)
-                announced = (position, batch_done)
+                announced = (position, batch_done, memory_ok, admission_memory)
             time.sleep(.5)
     finally:
         with admission_lock(directory):
