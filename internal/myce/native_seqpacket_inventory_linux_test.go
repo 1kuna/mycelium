@@ -53,7 +53,37 @@ func TestNativeSeqpacketStartupLiveListener(t *testing.T) {
 	if !found {
 		t.Fatal("live seqpacket listener missing from startup inventory")
 	}
-	if warning := nativeSeqpacketStartupWarning(nil, errors.New("probe unavailable")); !strings.Contains(warning, "inventory unavailable") {
+	warning := nativeSeqpacketStartupWarning(nil, errors.New("probe unavailable"))
+	if !strings.Contains(warning, "inventory unavailable") {
 		t.Fatal("inventory failure was not visible", warning)
+	}
+
+	q, _ := fixture(t)
+	m := machine("seqpacket", "fake")
+	m.Capabilities = []string{"native_isolation_landlock"}
+	m.NativeIsolationWarning = warning
+	check(t, q, m, nil)
+	snapshot, err := q.publicSnapshot()
+	if err != nil || len(snapshot.Machines) != 1 {
+		t.Fatalf("worker status unavailable: %+v %v", snapshot.Machines, err)
+	}
+	// The CLI formats this published worker with NativeIsolationStatus.
+	status := NativeIsolationStatus(*snapshot.Machines[0])
+	for _, want := range []string{"same-UID pathname SEQPACKET endpoints reachable (partial)", "WARNING: " + m.NativeIsolationWarning, "general egress unavailable"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("status missing %q: %s", want, status)
+		}
+	}
+	if !strings.Contains(status, "inventory unavailable") || !strings.Contains(status, "pathname endpoint exposure unverified") {
+		t.Fatal("published status hid inventory uncertainty", status)
+	}
+	m.Capabilities, m.NativeIsolationWarning = []string{"native_isolation_namespace"}, ""
+	check(t, q, m, nil)
+	snapshot, err = q.publicSnapshot()
+	if err != nil || len(snapshot.Machines) != 1 {
+		t.Fatalf("worker status unavailable: %+v %v", snapshot.Machines, err)
+	}
+	if strings.Contains(NativeIsolationStatus(*snapshot.Machines[0]), "SEQPACKET") {
+		t.Fatal("fallback exception attributed to namespace mode")
 	}
 }

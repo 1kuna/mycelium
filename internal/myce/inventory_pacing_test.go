@@ -55,6 +55,9 @@ func TestXPUTelemetryHostIntervalAndUnknown(t *testing.T) {
 		return d, nil
 	}
 	finishInventoryProbe(t, &lane, source)
+	if !deviceTelemetryReady(lane.value[0].Telemetry, clock.Now()) || *lane.value[1].Telemetry.FreeGB != 2 {
+		t.Fatal("host telemetry duplicated or cross-wired", queries, lane.value)
+	}
 	// A failed new query must clear a previously successful counter.
 	p.Command = func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("unavailable") }
 	clock.Advance(deviceMemorySamplePeriod)

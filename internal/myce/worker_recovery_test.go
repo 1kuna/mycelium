@@ -56,6 +56,25 @@ func TestWorkerStateLockAndCorruption(t *testing.T) {
 	if _, err = w.openStore(); err == nil {
 		t.Fatal("corrupt state silently discarded")
 	}
+	// A syntactically valid document from another state format is not ours
+	// to initialize or replace, even when startup refuses it.
+	data := `{"state":"failed","pid":null,"assigned_xpu":1,"preemption_count":0,"attempt_token":"synthetic-old-attempt"}`
+	path := filepath.Join(w.StateDir, "state.json")
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := w.openStore()
+	if err == nil {
+		store.close()
+		t.Fatal("foreign or incomplete state accepted")
+	}
+	if !strings.Contains(err.Error(), "read worker state") {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != data {
+		t.Fatalf("rejected state changed: %v", err)
+	}
 }
 
 func TestWorkerOfflineLargeOutputIsDurable(t *testing.T) {

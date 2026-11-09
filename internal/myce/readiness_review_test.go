@@ -194,10 +194,36 @@ func TestAdaptiveReadinessSharedSensorHorizon(t *testing.T) {
 }
 
 func TestAdaptiveReadinessSingleProcessResidentGrowth(t *testing.T) {
+	clock := &manualWorkerClock{now: time.Unix(1, 0)}
+	p := newReadinessProgress(clock, readinessHistory{})
+	kib := "1024"
 	birth := "original-model"
-	probe := &processMemoryProbe{}
+	probe := &processMemoryProbe{Resident: func(groups map[int]bool) (uint64, int, error) {
+		// Root 7 execs the model and has no children; other groups are excluded.
+		return processGroupResident([]byte("7 7 "+kib+"\n8 8 999999\n"), groups)
+	}}
 	birthOf := func(int) (string, error) { return birth, nil }
-
+	sample := func() {
+		t.Helper()
+		bytes, members, err := readinessProcessResident(probe, map[int]string{7: "original-model"}, birthOf)
+		if err != nil || members != 1 {
+			t.Fatalf("single-process model RSS unavailable: %d %v", members, err)
+		}
+		gb := float64(bytes) / (1 << 30)
+		p.observeActivity(nil, nil, &gb)
+	}
+	sample()
+	clock.Advance(time.Hour)
+	sample()
+	if p.coldReason() != coldLoadInactive {
+		t.Fatal("unchanged root RSS credited as growth")
+	}
+	kib = "2048"
+	clock.Advance(time.Hour)
+	sample()
+	if p.coldReason() != coldLoadActive {
+		t.Fatal("single-process model growth was excluded")
+	}
 	probe.Resident = func(map[int]bool) (uint64, int, error) {
 		birth = "reused"
 		return 1 << 30, 1, nil

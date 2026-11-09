@@ -2,23 +2,69 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
 
 func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
-	for _, cpu := range []bool{true} {
-		t.Run(map[bool]string{false: "model check", true: "production CPU"}[cpu], func(t *testing.T) {
-			q, clock, m, s := coldProbeAdmissionFixture(t, cpu)
-			if cpu {
-				s.Priority, s.Class = "production", "production"
-			}
+	var bound float64
+	for _, free := range []float64{8, 23} {
+		t.Run(fmt.Sprint(free), func(t *testing.T) {
+			q, clock, m, s := coldProbeAdmissionFixture(t, true)
+			s.Priority, s.Class = "production", "production"
 			queued := submit(t, q, s)
 			run := assignedJob(machineCheck(t, q, m))
 			if run == nil || run.ID != queued.ID {
 				t.Fatal("not assigned")
 			}
-			// Replay the frozen pre-fix offer from the real incident.
+
+			// Preserve the original refused-offer fixture: its demand is the
+			// cold offer, carrying the recovery source through worker results.
+			// This is not the smaller post-OOM recovery assignment below.
+			source := measuredOOMRecoverySource
+			run.MemoryEnvelope.Source = source
+			q.s.Jobs[run.ID].MemoryEnvelope.Source = source
+			h := &machineHarness{jobs: []Job{*run}, controls: map[string]AttemptDirective{}}
+			w := harnessWorker(t, h)
+			w.Machine = m
+			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return []MachineDevice{}, nil }
+			w.HostMemorySource = func(context.Context) (float64, error) { return 19, nil }
+			w.EnvironmentLimit = 1 << 20
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.state.Session, store.state.Fresh = run.Session, true
+			err = store.save()
+			store.close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stop, _ := startHarness(t, w, h)
+			await(t, func() bool { return h.completed(run.ID) })
+			refused := h.result(run.ID)
+			stop()
+			if !refused.Interrupted || refused.ExecutionCause == nil || !refused.ExecutionCause.PrelaunchRefused || refused.ExecutionCause.Predicate != "memory_capacity" {
+				t.Fatalf("worker did not report a prelaunch memory refusal: %+v", refused)
+			}
+			d := refused.ExecutionCause.Admission
+			if d == nil || d.EnvelopeSource != source {
+				t.Fatalf("recovery source stripped: %+v", d)
+			}
+			if err := q.Complete(refused); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			run = assignedJob(machineCheck(t, q, m))
+			if run == nil || run.ID != queued.ID || run.Attempt != refused.Attempt+1 {
+				t.Fatal("refused offer did not retry", run)
+			}
+			if run.MemoryEnvelope.LaunchDriftGB < .48 {
+				t.Fatal("exact recovery deficit did not teach launch drift")
+			}
+
+			// Replay the original frozen pre-fix OOM offer and telemetry.
 			run.Spec.Needs.HostMemoryGB, run.MemoryEnvelope.HostGB = 2.582660675048828, 2.582660675048828
 			q.s.Jobs[run.ID].Spec.Needs.HostMemoryGB = run.Spec.Needs.HostMemoryGB
 			q.s.Jobs[run.ID].MemoryEnvelope = run.MemoryEnvelope
@@ -33,22 +79,21 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
-			pending := q.s.Jobs[run.ID]
-			var bound float64
-			for _, free := range []float64{8, 23} {
-				target := *q.s.Machines[m.ID]
-				target.FreeHostMemoryGB, target.HostAvailableMemoryGB = free, free
-				candidate := q.memoryCandidate(pending, &target)
-				if bound == 0 {
-					bound = candidate.Spec.Needs.HostMemoryGB
-				}
-				if candidate.Spec.Needs.HostMemoryGB != bound || bound <= peak || bound >= 4 {
-					t.Fatalf("recovery follows availability: %+v", candidate.MemoryEnvelope)
-				}
-				w := Worker{Machine: target, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return free - .4, nil }}
-				if err := localAttemptAdmission(w, nil, *candidate, nil); err != nil {
-					t.Fatal(err)
-				}
+			clock.Advance(time.Second)
+			m.FreeHostMemoryGB, m.HostAvailableMemoryGB = free, free
+			candidate := assignedJob(machineCheck(t, q, m))
+			if candidate == nil || candidate.ID != queued.ID || candidate.Attempt != run.Attempt+1 {
+				t.Fatal("OOM recovery not assigned", candidate)
+			}
+			if bound == 0 {
+				bound = candidate.Spec.Needs.HostMemoryGB
+			}
+			if candidate.Spec.Needs.HostMemoryGB != bound || bound <= peak || bound >= 4 {
+				t.Fatalf("recovery follows availability: %+v", candidate.MemoryEnvelope)
+			}
+			w = Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return free - .4, nil }}
+			if err := localAttemptAdmission(w, nil, *candidate, nil); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
@@ -71,32 +116,6 @@ func TestExactLaunchGrowthFitsOwnedEnvelope(t *testing.T) {
 	neighborRoom := need - sample.gb - minimumHostMemoryGB
 	if err := rt.checkHostAdmissionLocked(neighborRoom, true, samples); err == nil {
 		t.Fatal("neighbor's remaining reservation was discounted")
-	}
-}
-
-func TestRecoveryRefusalKeepsSourceAndLearnsDeficit(t *testing.T) {
-	for _, source := range []string{measuredOOMRecoverySource} {
-		t.Run(source, func(t *testing.T) {
-			q, clock, m, s := coldProbeAdmissionFixture(t, true)
-			submit(t, q, s)
-			run := assignedJob(machineCheck(t, q, m))
-			run.MemoryEnvelope.Source = source
-			q.s.Jobs[run.ID].MemoryEnvelope.Source = source
-			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 19, nil }}
-			d := admissionDetail(localAttemptAdmission(w, nil, *run, nil), *run)
-			if d == nil || d.EnvelopeSource != source {
-				t.Fatalf("recovery source stripped: %+v", d)
-			}
-			r := result(run, false)
-			r.Interrupted = true
-			r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit", Predicate: "memory_capacity", PrelaunchRefused: true, Admission: d}
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			if q.jobProbeDriftMarginGB(q.s.Jobs[run.ID], q.s.Machines[m.ID]) < .48 {
-				t.Fatal("exact recovery deficit did not teach launch drift")
-			}
-		})
 	}
 }
 
