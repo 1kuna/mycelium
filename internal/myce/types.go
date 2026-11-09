@@ -705,6 +705,7 @@ type Checkin struct {
 	Running              *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	DeviceRecoveryProtocol     string                       `json:"device_recovery_protocol,omitempty"`
 	DeviceTelemetryProtocol    string                       `json:"device_telemetry_protocol,omitempty"`
 	UnifiedMemoryProtocol      string                       `json:"unified_memory_protocol,omitempty"`
 	HostMemorySampleProtocol   string                       `json:"host_memory_sample_protocol,omitempty"`

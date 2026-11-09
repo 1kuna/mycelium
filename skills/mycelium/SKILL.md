@@ -452,6 +452,18 @@ independent work. Heavy local execution is never a fallback. For a Mycelium
 failure, search existing issues, then report version, job/attempt, expected and
 observed behavior; omit credentials, webhook URLs, private paths and host details.
 
+From the queue release containing #1142, `device_fault_last_healthy` holds a
+job that lost an attempt to a driver fault before it can consume that host's
+last healthy accelerator of the same backend. Keep the job ID and submission
+key: another host, spare healthy capacity or a health-proven recovery can make
+it eligible. This queue protection works with older workers. Automatic
+quarantine clearance additionally needs the supporting worker release and its
+vendor health tool; unsupported/unknown health keeps quarantine. Status
+`devices[].quarantine_recovery` records the fault event, healthy interval,
+measured observation window and clear evidence. Repeated-fault escalation still
+needs the maintenance owner. Do not resubmit to bypass the hold or clear real
+devices as a consumer. See [device quarantine](../../docs/operations.md#accelerator-driver-fault-quarantine).
+
 From the next release (#881), job `health_recovery` retains an `owner_required`
 decision after repeated infrastructure failures: `action: none` means Mycelium
 performed no automatic repair and left capacity unchanged. The summary names

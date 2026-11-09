@@ -98,15 +98,18 @@ func TestDeviceFaultQuarantine(t *testing.T) {
 		t.Fatal(err)
 	}
 	observe("queued")
-	// Free only the healthy neighbor, then assign the same logical job anew.
+	// #1142: freeing the last healthy card must not replay the fault there,
+	// including when this old worker reports no new recovery evidence.
 	if err := q.Complete(Result{Machine: b.Machine, Session: b.Session, Execution: Execution{ID: b.ID, Attempt: b.Attempt}, Success: true}); err != nil {
 		t.Fatal(err)
 	}
-	resumed := assignedJob(machineCheck(t, q, w.Machine))
-	if resumed == nil || resumed.ID != first.ID || resumed.Attempt != a.Attempt+1 || !slices.Equal(resumed.AllocatedDevices, []string{"1"}) {
-		t.Fatal("healthy-device retry", resumed)
+	if resumed := assignedJob(machineCheck(t, q, w.Machine)); resumed != nil {
+		t.Fatal("fault cascaded onto last healthy device", resumed)
 	}
-	observe("running")
+	held := observe("queued")
+	if held.Blocker == nil || held.Blocker.Code != deviceFaultRetryHold || len(held.AttemptHistory) != 1 || held.AttemptHistory[0].DeviceFault == nil {
+		t.Fatal("typed fault/hold evidence missing", held.Blocker, held.AttemptHistory)
+	}
 	t.Logf("job-v1 states: %v", clientStates)
 	// Quarantine survives refresh/restart; an explicit clear doesn't replay the old fault.
 	w.Machine.Devices = slices.Clone(m.Devices)
@@ -132,6 +135,11 @@ func TestDeviceFaultQuarantine(t *testing.T) {
 	}
 	if w.Machine.Devices[0].Reason != "" {
 		t.Fatal("cleared fault replayed")
+	}
+	// Two healthy cards now remain; retry on this host is allowed again.
+	resumed := assignedJob(machineCheck(t, q, w.Machine))
+	if resumed == nil || resumed.ID != first.ID || resumed.Attempt != a.Attempt+1 {
+		t.Fatal("retry with spare healthy capacity", resumed)
 	}
 	if strings.Count(journal.String(), "device quarantined: "+detail) != 1 || strings.Count(journal.String(), "device quarantine cleared: "+detail) != 1 {
 		t.Fatal("quarantine transitions must be logged once", journal.String())
@@ -269,6 +277,7 @@ func TestDeviceFaultRepeatedTeardownQuarantines(t *testing.T) {
 	m := m3Machine()
 	m.Devices[0].pciAddress = "0000:03:00.0"
 	w := Worker{Machine: m, Clock: clock, DeviceFaultMatchers: map[string]DeviceFaultMatcher{"fake": intelKernelFault}}
+	w.DeviceHealthProbe = func(context.Context, MachineDevice) (bool, error) { return true, nil }
 	w.control = &processControl{clock: clock}
 	root := &workerStore{dir: t.TempDir()}
 	var lines []KernelLogLine
@@ -296,6 +305,17 @@ func TestDeviceFaultRepeatedTeardownQuarantines(t *testing.T) {
 		if quarantined := w.Machine.Devices[0].Reason == "device_fault_xe"; quarantined != (i == 2) {
 			t.Fatalf("incident %d: quarantined=%v", i+1, quarantined)
 		}
+	}
+	// Vendor health alone cannot erase the repeated-fault escalation.
+	lines = nil
+	for range 2 {
+		clock.Advance(time.Hour)
+		if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !w.Machine.Devices[0].RepeatedTeardownFault || w.Machine.Devices[0].Reason == "" {
+		t.Fatal("automatic health proof erased escalation", w.Machine.Devices[0])
 	}
 }
 

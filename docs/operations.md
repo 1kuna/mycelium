@@ -2402,6 +2402,52 @@ attempt under the same job ID. This transition does not expose `stopping` or a
 terminal job state when a retry remains available. Infrastructure exhaustion
 still follows the existing terminal policy. Stale results cannot publish.
 
+From the queue release containing #1142, a job's device-fault loss records
+`attempt_history[].device_fault` (physical host, backend, stable device identities
+and queue time). A retry cannot consume that host's last healthy accelerator of
+the same backend. Occupied healthy cards still count; quarantined, unavailable
+or administratively excluded cards do not. Another host or a card with a healthy
+spare remains eligible. A group cannot consume all surviving cards. The queued
+job reports `blocker.code: device_fault_last_healthy` and waits on the same job ID
+and submission key. This protection is queue-side and works with older workers;
+it does not require new recovery fields. Existing pre-upgrade fault history is
+recognized when its retained copy identifies the backend on that worker.
+
+From the worker release containing #1142, non-escalated quarantine also clears
+automatically after positive vendor health evidence and uninterrupted kernel
+observation. Intel uses `xpu-smi health -d PCI-BDF -j`: core temperature, power
+and memory must report `OK`, and no supported component may report a warning or
+critical state. NVIDIA uses UUID-selected `nvidia-smi -q -x`; the matching device
+must explicitly report recovery action `None`. Missing tools, unsupported fields,
+unknown required health and failed reads keep quarantine. Other backends can
+supply the injectable health probe; unsupported backends do not auto-clear.
+Vendor probes have a separate single-flight lane, so a slow tool cannot stop
+kernel scanning or create a probe backlog.
+
+The observation window is an **agent default**, implementing the relayed consumer
+request, not a maintainer ruling. Following MY-34, it is the largest of the
+observed fault-to-first-normal delay, the local control/probe gap, the existing
+one-second teardown attribution interval, and that device's previous successful
+clear window. At least two distinct normal observations must span it. The first
+normal delay is an observed upper bound on recovery, not the exact instant of
+hardware recovery. A matching new fault (including one awaiting teardown
+classification), an unhealthy probe, a kernel-monitor gap or a worker restart
+discards the current healthy streak. Kernel evidence must follow the health
+reading. Repeated-teardown escalation still requires an operator clear; normal
+vendor health alone cannot erase it. The cost of the window is temporarily
+withheld capacity, in exchange for observing a complete local recovery interval.
+
+Clear evidence persists in `devices[].quarantine_recovery`: `fault_event`,
+`healthy_since`, `cleared_at`, `observation_seconds` and `probe`. The queue adds
+`observed_at` when it observes the quarantined-to-healthy transition; replaying
+the same proof does not refresh that queue timestamp. Such a transition after
+the job's loss allows a retry even on a sole recovered card. Worker wall time
+never orders queue admission. Capacity still requires a successful inventory
+refresh, and old attempts still require exact cleanup. Auto-clear requires a
+worker upgrade; a queue-only release provides the cascade protection alone.
+Recovery evidence is negotiated with `device-recovery-v1`; newer workers omit
+the additive field for older strict-decoding queues, including after downgrade.
+
 Quarantine persists in the local worker spool across worker restarts. A changed
 Linux boot ID clears old quarantine; faults in the new boot can quarantine again.
 After repairing a device, an operator can request a clear without stopping the

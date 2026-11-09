@@ -229,12 +229,18 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
+	if j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m) {
+		return false
+	}
 	return (j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID])) && q.yieldPlacementAllows(j, m) && (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.placementPolicyAllowed(j, m, resident)
 }
 
 // Started preparation retains demand while contact is suspect. Resource,
 // reservation and policy fences still apply; this cannot grant a new assignment.
 func (q *Queue) placementDemandAllowed(j *Job, m *Machine) bool {
+	if j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m) {
+		return false
+	}
 	return q.yieldPlacementAllows(j, m) && (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.reservationAllows(j, m) && q.placementDemandPolicy(j, m, false)
 }
 
