@@ -151,7 +151,7 @@ One measured physical-host memory allowance covers simultaneous production deman
 
 Classification uses Mycelium-recorded facts for native, native-group and Docker attempts. Infrastructure evidence is a durably recorded stop or kill delivered to that member before its exit was observed; loss of observation; a Mycelium-side pre-execution or launch refusal/failure (including authorization, exec/spawn or environment preparation infrastructure failure); or Mycelium's own probe proving that an allocated readiness port belongs to a process outside this group when readiness fails. Exit codes, payload stderr, stop intent and signals recorded after exit observation are never infrastructure evidence. Independent member exits, OOM (including an extension job), and readiness timeouts without such evidence fail production immediately without an infrastructure retry. A successful terminal outcome is preserved. Cancellation takes precedence: once `will_not_run: true` is acknowledged, no interruption can requeue the job. Superseded production attempts cannot recover ownership or publish a late result; exact release evidence can still discharge their custody. At most one attempt's result is published. Commands and output writes must still be safe to repeat; external side effects are not exactly-once. Experiments retain their existing retry, checkpoint recovery and planned-stop behavior.
 
-A production attempt that had started gets its original-length start window from interruption detection, including a worker interruption/release. Planned leave keeps its original start deadline. A requeued job may wait for its maintained host to resume within that window; a new production submission to only disabled eligible hosts still fails immediately. Unstarted attempts do not renew their start deadline.
+A production attempt with a relative start window that had started gets its original-length start window from interruption detection, including a worker interruption/release. An explicit absolute `start_by` never renews. Planned leave keeps its original start deadline. A requeued job may wait for its maintained host to resume within that window; a new production submission to only disabled eligible hosts still fails immediately. Unstarted attempts do not renew their start deadline.
 
 Production batch jobs and adapter entries may declare `start_window: 600s`, a
 positive Go duration no greater than `1h`; omission retains the `150s` default.
@@ -164,6 +164,18 @@ the deadline minus original submission time. Job GET exposes the declaration in
 `spec.start_window` and the effective original length in top-level `start_window`
 (nanoseconds), including before startup. Experiments omit the fields and have no
 start deadline. Loss recovery retains that original effective length.
+
+A typed `device_fault_last_healthy` hold pauses the remaining relative startup
+or recovery budget. Recovery and subsequent capacity waits retain that saved
+amount, including across restart; caller-owned absolute
+`start_by` and queued-only `give_up_at` still bind. A hold with no eligible
+recovery terminates at the existing one-hour maximum start window measured from
+the latest queue-recorded device-fault loss, with typed reason
+`device_fault_recovery_timeout`. Restart and heartbeats never renew that bound.
+An active hold checks expiry before resuming, including when a late report clears
+quarantine after the bound.
+This limits an unrecoverable wait without shortening the worker's measured
+health-proof window or releasing exact-attempt custody.
 
 ## Queue-owned host maintenance
 
