@@ -2,7 +2,9 @@
 """Local heavy-work admission shared across checkouts and release builds."""
 import contextlib
 import fcntl
+import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +15,11 @@ import uuid
 GIB = 1024 ** 3
 ENTRY_FLOOR = 45 * GIB
 STOP_FLOOR = 42 * GIB
+
+_spec = importlib.util.spec_from_file_location('gate_memory', Path(__file__).with_name('gate-memory.py'))
+_memory = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_memory)
+local_worker_usage = _memory.local_worker_usage
 
 
 def process_identity(pid):
@@ -222,7 +229,18 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 if not memory_ok:
                     raise RuntimeError(f'available memory below {needed_memory / GIB:.2f} GiB entry requirement; no work started')
                 occupied = len(legacy) + len(occupied_lanes(directory))
+                worker = local_worker_usage()
+                lanes = legacy + occupied_lanes(directory)
+                reserved_cores = 0
+                for lane in lanes:
+                    owner_path = lane / 'owner.json'
+                    # Preserve unknown legacy occupancy and its four-core allowance.
+                    reserved_cores += int(json.loads(owner_path.read_text()).get('cores', 4)) if owner_path.exists() else 4
+                worker_cores = math.ceil((worker or {}).get('cpu_cores', 0))
+                reserve = int(config.get('workstation_cpu_reserve_cores', 0))
+                cpu_ok = reserved_cores + worker_cores + cores + reserve <= (os.cpu_count() or 1)
                 if (not pending_release and not pending_calibration and queue_first and batch_done and occupied < slots
+                        and cpu_ok
                         and (mode != 'full' or full_marker)):
                     for index in range(slots):
                         slot = directory / ('local-go-slot' + (f'-{index + 1}' if index else ''))
@@ -231,7 +249,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         except FileExistsError:
                             continue
                         owner = dict(pid=os.getpid(), run_id=uuid.uuid4().hex,
-                                     mode=mode, priority=priority, cores=cores)
+                                     mode=mode, priority=priority, cores=cores,
+                                     local_worker_usage_at_entry=worker)
                         (slot / 'owner.json').write_text(json.dumps(owner) + '\n')
                         if full_marker:
                             full_marker.write_text(json.dumps(owner) + '\n')

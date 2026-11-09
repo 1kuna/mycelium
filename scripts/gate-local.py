@@ -189,7 +189,8 @@ def main():
                         selection=str(args.selection.resolve()) if args.selection else None,
                         command=args.command, cores=args.cores, identity=identity,
                         platform=args.platform or ('native' if args.command else 'both'),
-                        cache=str(cache), report=str(report))
+                        cache=str(cache), report=str(report),
+                        local_worker_usage_at_entry=slot.owner.get('local_worker_usage_at_entry'))
         path = folder / 'manifest.json'
         path.write_text(json.dumps(manifest) + '\n')
         with capacity.admission_lock(capacity.root(repo)):

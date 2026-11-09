@@ -128,6 +128,14 @@ across Git worktrees and ordinary clones under
 recognizes both existing `local-go-slot` lanes and
 preserves unknown/abandoned ownership. Full runs remain serialized until measured
 capacity is recorded; two heavy lanes permit a release build alongside diagnosis.
+The installed local fleet worker can coexist with local gates. Admission reads
+its process-tree CPU/RSS from launchd and the OS, without queue access or
+credentials, and counts live worker CPU alongside the declared local lane
+budgets and the host-qualified workstation reserve. Available RAM already
+reflects worker residency; do not subtract its RSS a second time. A fleet full
+race suite counts toward full concurrency through its native custody record.
+Ordinary admission does not require an idle host. Idle-only swap calibration
+is separate and must not sample while another gate is running.
 Ordinary fulls wait in FIFO order by default and print their queue position;
 no polling or relay is needed. Release and calibration fulls take priority over
 ordinary waiters. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is
@@ -147,8 +155,16 @@ python3 scripts/gate-local.py --priority release --command \
 
 A run needs 45 GiB disk free at entry. The host measurement supervisor remains
 active through source preparation, Linux staging and guest execution, stopping
-its owned supervisor below 42 GiB. On macOS, elevated memory pressure or new
-swap-outs also stop owned work. Missing nonce-bound cleanup receipts, SSH failure
+its owned supervisor below 42 GiB. On macOS, non-normal memory pressure stops
+owned work immediately. A qualified idle-host swap baseline supplies the peak
+background swapout and swap-use growth rates and the observation interval.
+Two consecutive intervals above the background swapout rate, or with swap use
+growing above baseline alongside the gate/VM working set, stop owned work.
+Two intervals are the minimum evidence of continuation rather than one counter
+batch; the detection cost is two measured sampling periods. An isolated batch
+under normal pressure does not prove thrashing. Each receipt records the baseline,
+its evidence digest and the observed windows. Hosts without that qualification
+retain the strict new-swapout stop. Missing nonce-bound cleanup receipts, SSH failure
 or supervisor death retain capacity; exit status alone never releases it. These floors preserve room for the workstation
 and recovery after the 2026-11-02/03 saturation incident.
 

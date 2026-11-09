@@ -48,7 +48,9 @@ def measure(command, report, mode, source_sha, *, floor=42 * GIB,
     before = dict(build_cache_bytes=cache_bytes(cache), module_cache_bytes=cache_bytes(modules),
                   free_bytes=shutil.disk_usage(disk_root).free)
     before['host_memory'] = memory.snapshot()
-    reason = memory.refusal(before['host_memory'], before['host_memory'])
+    guard = memory.SwapGuard(before['host_memory'],
+                             memory.idle_baseline() if before['host_memory'] else None)
+    reason = guard.check(before['host_memory'])
     if reason:
         raise RuntimeError('gate: ' + reason + '; no work started')
     if before['free_bytes'] < 45 * GIB:
@@ -87,7 +89,14 @@ def measure(command, report, mode, source_sha, *, floor=42 * GIB,
                           load1=os.getloadavg()[0])
             try:
                 sample['host_memory'] = memory.snapshot()
-                reason = memory.refusal(before['host_memory'], sample['host_memory'])
+                current = sample['host_memory']
+                # Pressure/unqualified-host stops do not wait on RSS probes.
+                reason = (guard.check(current) if guard.baseline is None or
+                          current is None or current['pressure_level'] != 1 else None)
+                if not reason:
+                    sample['tree_rss_sum_bytes'] = tree_rss(child.pid)
+                    if guard.baseline is not None:
+                        reason = guard.check(current, sample['tree_rss_sum_bytes'])
             except (OSError, ValueError, subprocess.SubprocessError):
                 reason = 'host memory measurement unavailable'
             if reason:
@@ -100,7 +109,6 @@ def measure(command, report, mode, source_sha, *, floor=42 * GIB,
                 samples.append(sample)
                 return
             try:
-                sample['tree_rss_sum_bytes'] = tree_rss(child.pid)
                 launch = time.monotonic()
                 subprocess.run([sys.executable, '-c', 'pass'], check=True, timeout=5,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -142,7 +150,8 @@ def measure(command, report, mode, source_sha, *, floor=42 * GIB,
                disk_delta_bytes=before['free_bytes'] - after['free_bytes'],
                min_free_bytes=min([before['free_bytes'], after['free_bytes']] +
                                   [s['free_bytes'] for s in samples]),
-               samples=samples, refusal=refusal, phase=phase)
+               samples=samples, refusal=refusal, phase=phase,
+               swap_guard=dict(baseline=guard.baseline, windows=guard.windows))
     if source_info and source_info.exists():
         row.update(json.loads(source_info.read_text()))
     report.parent.mkdir(parents=True, exist_ok=True)

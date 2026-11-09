@@ -33,10 +33,14 @@ measurement = load('gate-measure')
 
 class LocalGateTests(unittest.TestCase):
     def setUp(self):
-        for name, value in [('legacy_directories', []), ('native_full_custody', False), ('check_pressure', None)]:
+        for name, value in [('legacy_directories', []), ('native_full_custody', False),
+                            ('check_pressure', None), ('local_worker_usage', None)]:
             mock = patch.object(capacity, name, return_value=value)
             mock.start()
             self.addCleanup(mock.stop)
+        mock = patch.object(capacity.os, 'cpu_count', return_value=18)
+        mock.start()
+        self.addCleanup(mock.stop)
 
     def test_legacy_owners_are_preserved_and_new_owner_releases_only_its_lane(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -513,6 +517,7 @@ sys.exit(m.main())
             root = Path(folder)
             slot = Mock()
             slot.directory = root / 'lane'
+            slot.owner = {}
             output = root / 'release-binary'
             def supervised(command, **kwargs):
                 manifest_path = Path(command[-1])
@@ -546,11 +551,88 @@ sys.exit(m.main())
                 base = dict(pressure_level=1, swapouts=0)
                 with (patch.object(measurement.subprocess, 'check_output', return_value=str(root)),
                       patch.object(measurement, 'cache_bytes', return_value=0),
+                      patch.object(measurement.memory, 'idle_baseline', return_value=None),
                       patch.object(measurement.memory, 'snapshot', side_effect=[base, current])):
                     result = measurement.measure([sys.executable, '-c', 'import time; time.sleep(10)'],
                         root / 'report', 'full', 'test', phase='host')
                 self.assertEqual(result, 125)
                 self.assertTrue(json.loads((root / 'report').read_text())['refusal'])
+
+    def test_measured_swap_guard_allows_one_batch_but_stops_continuation(self):
+        baseline = dict(schema=1, window_seconds=2, evidence=['idle samples'],
+                        peak_swapout_bytes_per_second=0,
+                        peak_swap_use_growth_bytes_per_second=0)
+        def sample(seconds, pages=28, used=0, working=100):
+            return dict(monotonic_seconds=seconds, pressure_level=1, swapouts=pages,
+                        page_bytes=16384, swap_used_bytes=used, all_vz_rss_sum_bytes=working)
+        guard = measurement.memory.SwapGuard(sample(0), baseline)
+        # Reproduces the actual isolated 384 KiB counter batch under normal pressure.
+        self.assertIsNone(guard.check(sample(2, 52, 393216, 200)))
+        self.assertIsNone(guard.check(sample(4, 52, 393216, 200)))
+        self.assertIsNone(guard.check(sample(6, 52, 393216, 200)))
+        self.assertEqual(guard.excess_windows, 0)
+        for kind in ('rate', 'working-set'):
+            with self.subTest(kind=kind):
+                guard = measurement.memory.SwapGuard(sample(0), baseline)
+                self.assertIsNone(guard.check(sample(2, 52 if kind == 'rate' else 28, 10, 200)))
+                reason = guard.check(sample(4, 76 if kind == 'rate' else 28, 20, 300))
+                self.assertIn('swapout rate' if kind == 'rate' else 'working set', reason)
+        # Measured background rates are allowed without accumulating excess.
+        baseline = dict(baseline, peak_swapout_bytes_per_second=24 * 16384 / 2,
+                        peak_swap_use_growth_bytes_per_second=10)
+        guard = measurement.memory.SwapGuard(sample(0), baseline)
+        for index in range(1, 4):
+            self.assertIsNone(guard.check(sample(index * 2, 28 + index * 24, index * 10, 200)))
+        current = sample(6.1); current['pressure_level'] = 2
+        self.assertIn('pressure', guard.check(current))  # Never wait for a rate window.
+
+    def test_measured_sustained_swap_guard_terminates_owned_supervisor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            baseline = dict(schema=1, window_seconds=2, evidence=['idle samples'],
+                            peak_swapout_bytes_per_second=0,
+                            peak_swap_use_growth_bytes_per_second=0)
+            samples = [dict(monotonic_seconds=i * 2, pressure_level=1, swapouts=i,
+                            page_bytes=16384, swap_used_bytes=i, all_vz_rss_sum_bytes=0)
+                       for i in range(3)]
+            with (patch.object(measurement.subprocess, 'check_output', return_value=str(root)),
+                  patch.object(measurement, 'cache_bytes', return_value=0),
+                  patch.object(measurement, 'tree_rss', return_value=1),
+                  patch.object(measurement.memory, 'idle_baseline', return_value=baseline),
+                  patch.object(measurement.memory, 'snapshot', side_effect=samples)):
+                status = measurement.measure([sys.executable, '-c', 'import time; time.sleep(10)'],
+                    root / 'metrics', 'full', 'test', phase='host')
+            row = json.loads((root / 'metrics').read_text())
+            self.assertEqual(status, 125)
+            self.assertIn('sustained', row['refusal'][0])
+            self.assertEqual(row['swap_guard']['baseline'], baseline)
+            self.assertEqual(len(row['swap_guard']['windows']), 2)
+
+    def test_local_fleet_worker_usage_shares_capacity_without_requiring_idle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'gate-capacity.json').write_text(json.dumps(dict(workstation_cpu_reserve_cores=6)))
+            worker = dict(pid=661, cpu_cores=8, rss_sum_bytes=8 * capacity.GIB)
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
+                  patch.object(capacity, 'local_worker_usage', return_value=worker)):
+                slot = capacity.acquire(root, mode='full', cores=4)
+                self.assertEqual(slot.owner['local_worker_usage_at_entry'], worker)
+                slot.release()
+                worker['cpu_cores'] = 9
+                with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                    capacity.acquire(root, mode='full', cores=4)
+
+    def test_worker_usage_counts_only_installed_worker_process_tree(self):
+        memory = measurement.memory
+        with (patch.object(memory.sys, 'platform', 'darwin'),
+              patch.object(memory.subprocess, 'check_output', side_effect=[
+                  '661 0 local.mycelium.worker\n999 0 other.service\n',
+                  '661 1 100 0.5\n800 661 200 190.0\n801 800 300 50.0\n999 1 900 300.0\n'])):
+            usage = memory.local_worker_usage()
+        self.assertEqual(usage['rss_sum_bytes'], 600 * 1024)
+        self.assertEqual(usage['process_count'], 3)
+        self.assertAlmostEqual(usage['cpu_cores'], 2.405)
 
 
 if __name__ == '__main__':
