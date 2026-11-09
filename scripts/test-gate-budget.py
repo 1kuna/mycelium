@@ -465,17 +465,19 @@ elif args[0] == 'test':
                              (int((root / 'probe-pid').read_text()), signal.SIGKILL))
 
     def test_uninterruptible_probe_has_bounded_reap(self):
-        probe = unittest.mock.Mock()
-        probe.wait.side_effect = subprocess.TimeoutExpired('lsof', 5)
-        with (patch.object(sys, 'platform', 'darwin'),
-              patch.object(subprocess, 'Popen', return_value=probe) as launch):
-            with self.assertRaises(subprocess.TimeoutExpired):
-                budget.scratch_processes('/scratch', {123, 456})
-        self.assertEqual(probe.wait.call_args_list,
-                         [unittest.mock.call(timeout=5), unittest.mock.call(timeout=.2)])
-        probe.kill.assert_called_once_with()
-        command = launch.call_args.args[0]
-        self.assertEqual(command[:2], budget.MACOS_HANDLE_PROBE)
+        for complete, timeout in ((False, 5), (True, 30)):
+            with self.subTest(complete=complete):
+                probe = unittest.mock.Mock()
+                probe.wait.side_effect = subprocess.TimeoutExpired('inventory', timeout)
+                with (patch.object(sys, 'platform', 'darwin'),
+                      patch.object(subprocess, 'Popen', return_value=probe) as launch):
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        budget.scratch_processes('/scratch', {123, 456}, all_handles=complete)
+                self.assertEqual(probe.wait.call_args_list,
+                                 [unittest.mock.call(timeout=timeout), unittest.mock.call(timeout=.2)])
+                probe.kill.assert_called_once_with()
+                command = launch.call_args.args[0]
+                self.assertEqual(command[:2], budget.MACOS_HANDLE_PROBE)
 
     def test_success_cleans_fixture(self):
         scripts = Path(__file__).resolve().parent

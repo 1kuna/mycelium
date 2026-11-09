@@ -82,7 +82,11 @@ def scratch_processes(scratch, pids, all_handles=False, protected_roots=None, ev
             probe = subprocess.Popen(command, stdout=output_file, stderr=subprocess.DEVNULL)
             failure, status = None, None
             try:
-                status = probe.wait(timeout=5)
+                # Complete recovery inventories exceeded the old 5s cap under
+                # ordinary load. The measured host probe maximum was 5.39s;
+                # 30s rounds up roughly 4x that observation (MY-34). Timeout
+                # still refuses custody release; ordinary cleanup stays 5s.
+                status = probe.wait(timeout=30 if all_handles else 5)
             except subprocess.TimeoutExpired as error:
                 failure = error
                 probe.kill()  # Only the probe we just launched, never candidates.

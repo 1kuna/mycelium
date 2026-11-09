@@ -192,6 +192,13 @@ are archived under `.reconciled-UUID`; source and scratch are retained. Each
 attempt writes `reconcile-UUID.json` in the control directory, including the
 decision, proof phase and evidence. Recovery never signals another run.
 
+The complete native handle/mapping probe has a 30-second deadline, derived from
+the measured host recovery-probe maximum of 5.39 seconds with roughly fourfold
+load allowance, rounded up. The previous five-second cap refused under ordinary
+load. This is the orchestrator's MY-34 application (2026-11-09), not a relaxation
+of inventory completeness: a timeout still retains occupancy, terminates only
+the observer, and refuses recovery. Ordinary cleanup keeps its separate bound.
+
 Custody protects gate capacity: CPU, RAM, VM residency and scratch used by
 gate-owned processes. Gate runs, ordinary fixtures and supervisors execute as the
 gate owner's UID, so complete file-handle and mapping inspection covers that UID. Another UID's
