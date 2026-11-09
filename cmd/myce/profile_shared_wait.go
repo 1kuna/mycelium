@@ -94,7 +94,8 @@ func startSharedObserver(ctx context.Context, executable, root string, lock *os.
 	defer ready.Close()
 	defer writeReady.Close()
 	cmd := exec.Command(executable, "wait", "--observer-dir", root, "--detached")
-	cmd.Env = append(notifierEnvironment(), "MYCE_SHARED_OBSERVER=1")
+	cmd.Env = append(observerEnvironment(), "MYCE_SHARED_OBSERVER=1")
+	cmd.Dir = "/"
 	output, err := os.OpenFile(filepath.Join(root, "observer.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -158,6 +159,20 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 	syscall.CloseOnExec(3)
 	lock := os.NewFile(3, "observer.lock")
 	defer lock.Close()
+	ready := os.NewFile(4, "ready")
+	defer ready.Close()
+	err := serveSharedProfiles(ctx, root, lock, func() error { _, err := ready.Write([]byte{1}); return err })
+	if err != nil && ctx.Err() == nil {
+		_ = (&observerLogWriter{root: root}).event(struct {
+			At    time.Time `json:"at"`
+			Event string    `json:"event"`
+		}{time.Now(), "observer_start_failed"})
+	}
+	return err
+}
+
+func serveSharedProfiles(ctx context.Context, root string, lock *os.File, ready func() error) error {
+	log.SetOutput(&observerLogWriter{root: root})
 	// The lifetime lock proves any old socket belongs to an inactive observer.
 	socketPath, socketErr := sharedProfileSocket(root)
 	if socketErr != nil {
@@ -205,9 +220,7 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 			return nil
 		}
 	}
-	ready := os.NewFile(4, "ready")
-	defer ready.Close()
-	return runSharedProfileLoopStarted(ctx, root, lock, myce.RealClock{}, adaptivePause, func() error { _, err := ready.Write([]byte{1}); return err }, wakes)
+	return runSharedProfileLoopStarted(ctx, root, lock, myce.RealClock{}, adaptivePause, ready, wakes)
 }
 
 type sharedProfileFinish struct {

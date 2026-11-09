@@ -22,6 +22,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var errEnvironmentInputTooLarge = errors.New("environment input exceeds 1 MiB")
+
 // EnvironmentRecipe is an immutable submission-time snapshot. Only the cache
 // destination is substituted in binary build arguments; no implicit shell.
 type EnvironmentRecipe struct {
@@ -133,6 +135,9 @@ func snapshotEnvironmentAt(r EnvironmentRecipe, platform, base, label string) (E
 		}
 		for _, n := range names {
 			b, e := os.ReadFile(filepath.Join(filepath.Dir(r.LockFile), n))
+			if e == nil && len(b) > 1<<20 {
+				e = errEnvironmentInputTooLarge
+			}
 			if e != nil {
 				field, authored, companion := "environment.lock_file", r.LockFile, ""
 				if n != name {
@@ -145,9 +150,6 @@ func snapshotEnvironmentAt(r EnvironmentRecipe, platform, base, label string) (E
 					field = "environment.manifest"
 				}
 				return r, PathReadError(field, "queue", authored, base, companion, e)
-			}
-			if len(b) > 1<<20 {
-				return r, errors.New("environment input exceeds 1 MiB")
 			}
 			r.Files[n] = b
 		}
@@ -227,7 +229,7 @@ func (c EnvironmentCatalog) resolveEnvironment(e Environment) (map[string]Enviro
 		if len(e.Platforms) > 0 && !slices.Contains(e.Platforms, p) {
 			continue
 		}
-		r, err := snapshotEnvironment(EnvironmentRecipe{LockFile: e.LockFile, Python: e.Python}, p)
+		r, err := snapshotEnvironment(EnvironmentRecipe{Backend: e.Backend, LockFile: e.LockFile, Python: e.Python}, p)
 		if err != nil {
 			return nil, err
 		}

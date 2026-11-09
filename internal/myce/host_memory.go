@@ -65,10 +65,16 @@ func (q *Queue) refreshHostMemory() {
 		}
 	}
 	q.refreshHostCPU()
+	q.memoryLedgerGeneration++
+	q.hostMemoryLedgers = make(map[string]*HostMemoryLedger, len(q.s.Machines))
+	charges := map[string]*HostMemoryLedger{}
 	for _, m := range q.s.Machines {
 		available := m.HostAvailableMemoryGB
+		observedAt, availableKnown := m.LastSeen, m.HostMemoryMeasured && m.HostMemoryError == ""
 		for _, other := range q.s.Machines {
 			if hostID(other) == hostID(m) && !other.Gone {
+				observedAt = minTime(observedAt, other.LastSeen)
+				availableKnown = availableKnown && other.HostMemoryMeasured && other.HostMemoryError == ""
 				if !other.HostMemoryMeasured || other.HostMemoryError != "" {
 					available = 0
 				} else {
@@ -113,36 +119,16 @@ func (q *Queue) refreshHostMemory() {
 			m.HostMemoryQualification = "UNQUALIFIED"
 		}
 		m.EffectiveHostMemoryBudgetGB = m.hostBudgetGB
-		reserved, growth := 0.0, 0.0
-		for _, j := range q.liveJobs() {
-			owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-			if !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
-				need := hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-				charge, pending := jobHostMemoryCharge(j, owner, need, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
-				reserved += charge
-				growth += pending
-			}
+		owners := charges[hostID(m)]
+		if owners == nil {
+			owners = q.hostMemoryLedger(m)
+			charges[hostID(m)] = owners
 		}
-		for _, r := range q.s.HostReleases {
-			if r.Host != hostID(m) {
-				continue
-			}
-			j := q.s.Jobs[r.Job]
-			if j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && batchReservesCapacity(j) {
-				continue
-			}
-			reserved += r.HostChargeGB
-			growth += r.HostChargeGB
-		}
-		for _, s := range q.s.ModelSlots {
-			owner := slotMachine(q.s.Machines[s.Machine], s)
-			if owner != nil && slotReservesMemory(s) && hostID(owner) == hostID(m) {
-				model, _ := q.model(s.Model)
-				need := hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
-				reserved += need
-				growth += need
-			}
-		}
+		// Sibling targets share immutable owner facts; each target retains its
+		// own physical/unified-memory admission calculation below.
+		copy := *owners
+		ledger := &copy
+		reserved, growth := ledger.ReservedGB, ledger.GrowthGB
 		m.HostMemoryInUseGB = reserved
 		// Availability already has the operator reserve removed. Full envelopes
 		// still consume the static budget; only unused growth consumes live RAM.
@@ -159,6 +145,10 @@ func (q *Queue) refreshHostMemory() {
 		room = q.sharedHostRoom(m, room, reserved, growth)
 		m.hostReservationDebtGB = max(0, -room)
 		m.FreeHostMemoryGB = max(0, room)
+		ledger.AvailableGB, ledger.AllowanceGB = available, m.hostBudgetGB
+		ledger.ObservedAt, ledger.AvailableKnown = observedAt, availableKnown
+		ledger.SignedRoomGB, ledger.DebtGB, ledger.FreeGB = room, m.hostReservationDebtGB, m.FreeHostMemoryGB
+		q.hostMemoryLedgers[m.ID] = ledger
 	}
 }
 
@@ -604,6 +594,8 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 		return charge, charge // Missing/stale data grants no resident credit.
 	}
 	adaptiveCeiling := adaptiveMemoryCeilingGB(j, m)
+	hardCeiling := max(ceiling, adaptiveCeiling)
+	hardContained := j.Spec.Needs.cpuOnly() && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)"
 	e := j.MemoryEnvelope
 	bounded := adaptiveCeiling > 0 && e.ProbeFloorGB <= 0
 	charge = max(ceiling, retainedHostCharge(j))
@@ -620,10 +612,42 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 		coldObserved = max(retainedHostCharge(j), sample.peakGB, sample.gb, sample.footprintGB)
 		charge = max(charge, coldObserved+exploratoryDriftMarginGB(m))
 	}
+	// Accelerator and unenforced attempts also use the generic forecast. A
+	// measured slope can predict impossible occupancy even while fresh. Bound
+	// only its prediction by inventoried physical RAM, never by an operator's
+	// smaller allowance, and never discard actual high water or known demand.
+	physical := 0.0
+	if m.CapabilityProfile != nil {
+		physical = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
+	}
+	if !bounded {
+		charge = max(charge, sample.peakGB, sample.gb, sample.footprintGB)
+	}
 	if !bounded && !sample.at.IsZero() && !now.Before(sample.at) && now.Sub(sample.at) < sample.freshFor() {
-		charge = max(charge, sample.hostForecast(now))
+		forecast := sample.hostForecast(now)
+		if physical > 0 {
+			forecast = min(forecast, physical)
+		}
+		charge = max(charge, forecast)
 	}
 	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, charge, sample, now)
+	if !bounded && physical > 0 {
+		// Apply the same physical bound to outstanding growth; capping only
+		// the static charge would still let the raw slope invent admission debt.
+		limit := max(charge, physical)
+		if _, fresh := sample.hostGrowth(now); fresh {
+			limit = max(0, limit-sample.gb)
+		}
+		if unifiedCUDA(m) {
+			limit = max(limit, j.Spec.Needs.MemoryGB) // No unproved device overlap.
+		}
+		growth = min(growth, limit)
+	}
+	if hardContained {
+		// Bound burst forecasts by the complete physical execution ceiling,
+		// without assuming sampled residency remains present at admission.
+		growth = min(growth, hardCeiling)
+	}
 	if e == nil || (e.ProbeFloorGB <= 0 && adaptiveCeiling <= 0) || j.Spec.Needs.Memory != "auto" || !j.Spec.Needs.cpuOnly() || j.State != "running" || !sample.growthObserved || sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= sample.freshFor() || !validMemoryValue(sample.gb) || !validMemoryValue(sample.growthGB) {
 		return
 	}
@@ -636,6 +660,11 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	charge = floor
 	if !bounded {
 		charge = max(floor, sample.hostForecast(now)+exploratoryDriftMarginGB(m))
+	}
+	if m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
+		// Adaptive guards use their physical execution ceiling, not the
+		// admission estimate. Retain measured footprint and known floors.
+		charge = max(floor, sample.gb, sample.footprintGB, min(charge, hardCeiling))
 	}
 	charge = boundedProcessMemoryCharge(m, floor, sample.footprintGB, charge)
 	growth = max(0, charge-sample.gb)

@@ -824,6 +824,19 @@ These values are captured on the worker outside the queue lock and survive
 requeue, acknowledgement and replacement of the current envelope. Queue logs
 include the same comparison in `detail`.
 
+For `live_host_growth`, `required` is the worker's aggregate pending growth,
+not the launching attempt's envelope. Supporting workers retain `contributors`:
+attempt ID/number or model kind, static `charge_gb`, compared `pending_gb`, the
+`launching` flag, and `sample_fresh`/`sample_age_seconds` (absent when no sample
+exists). The terms include exact-helper credit and sum to the failed comparison.
+A launch-capacity refusal with positive `main: not_started` evidence never spends
+losses or infrastructure retries, including an older worker's `launch/io_error`
+classification. Queue Started authorization alone is not main execution; existing
+supervisor custody still requires exact release before retry.
+If a predecessor queue rejects the additive contributors with `request_invalid`,
+completion delivery retries once with contributors removed from a wire copy;
+the durable local diagnostic and exact release evidence remain intact.
+
 A modern worker also records `prelaunch_refused: true` only for a persisted
 native refusal before custody or launch intent. An exact released copy with
 that proof and no queue-recorded start/custody preserves ledger completeness,
@@ -1308,6 +1321,37 @@ Timeout and queue outage fail without changing policy or release custody.
 Every host command uses queue evidence; there is no local envelope or rest verdict.
 
 ### Live headroom and reservations
+
+From the next release, per-job JSON retains `last_memory_admission`: the last
+changed blocking host-memory comparison in its current wait episode. It is
+retained through a start-deadline failure and queue restart; a retry starts a
+new episode. It records a target comparison, not a claim that RAM is the only
+blocker or that the target will be selected. Absence means no retained comparison,
+not zero usage. Unchanged comparisons reuse their original capture timestamp.
+
+The snapshot has `captured_at`, `waiting_since`, `attempt`, target machine/session,
+host/device and execution target, `envelope` (including basis and source), the
+`drift_reserve_gb` used by physical exploratory sizing, `reason`, `ledger` and
+`reservations`. No exploratory sizing means no exploratory drift reserve.
+The ledger has its own `captured_at`, oldest worker `observed_at`,
+`available_known`, `available_gb`, `allowance_gb`,
+`reserved_gb`, `growth_gb`, `signed_room_gb`, `debt_gb`, `free_gb` and exact
+`owners`. `signed_room_gb` is admission headroom before clamping at zero;
+`debt_gb` is `max(0, -signed_room_gb)`, recalculated rather than accumulated.
+`available_known: false` means the available-memory value is unknown; zero
+`allowance_gb` means no explicit static allowance, not zero physical capacity.
+Each owner identifies an attempt, retained release or model execution, with
+its actual `charge_gb` and remaining `growth_gb`. A live attempt and its nominal
+release receipt appear once. Reservation entries preserve ID, bound job, ready
+time and lifecycle state. Pending custody reuses existing reservation accounting,
+with `pending_known` and `pending_observed_at`; if that pass did not evaluate it,
+pending state is explicitly unknown. Capturing a comparison adds no reservation
+or backlog scan. Reservations add no RAM charge and
+do not exempt their bound jobs from physical capacity or cleanup requirements.
+
+This is one replaceable diagnostic per job, retained with ordinary job history,
+not an event log. It complements #857/#859's integrated wait attribution; it
+does not change admission, containment, retry floors or the worker protocol.
 
 `myce status --json` returns the status snapshot as JSON; with a job ID it
 returns that job's status view. `host_available_memory_gb` is worker-observed
@@ -2171,6 +2215,14 @@ From the next release, nonterminal native variant jobs expose
   reference-output comparison and `myce policy get/set`. Checks/experiments can
   obtain evidence; historical registrations/replays and accepted jobs are kept.
 
+An explicit work parity list also constrains historical extensions without
+variants. When that list excludes every qualified candidate, status reports
+`production_parity_hosts: held: host not in production parity list` and the
+typed `blocker.code` is `production_parity_hosts`, owned by the queue owner.
+The action is reference-output comparison and explicit physical-host approval
+for that exact work. A queued binding to a removed host is cleared and placed
+again; running attempts retain their execution and release custody.
+
 `variant_advice` is conditional porting guidance when missing coverage could
 relieve current contention on a scarce host. It names the exact missing target,
 backend/device selection, resources, frozen environment/lock, native check and
@@ -2594,6 +2646,17 @@ window suspended by qualified resource contention, including explicit
 relative window. Status reasons show the original window's seconds left with
 `paused for capacity`; assignment restores that full window for actual preparation.
 An assigned start without an accepted acknowledgement continues counting down.
+
+The separate `device_fault_start_wait` records queue `since` and the saved
+`remaining` budget in nanoseconds for `device_fault_last_healthy`. Its relative
+countdown says `paused for device recovery`; clearance resumes that saved amount.
+`start_capacity_budget` retains that amount in nanoseconds through subsequent
+capacity waits and assignment, separately from the original `start_window`.
+A later started-attempt loss renews the original window and clears this override.
+An unrecoverable hold fails with `diagnostic_code: device_fault_recovery_timeout`
+one hour (the existing maximum start window) after queue-recorded fault loss.
+Caller-owned absolute cutoffs remain authoritative.
+
 Absolute `start_by`, give-up, ordering `deadline` and cancellation retain their
 existing authority. No retry, reserve or timeout increase is involved.
 

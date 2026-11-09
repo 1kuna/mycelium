@@ -120,6 +120,10 @@ func countedInventoryProbe(t *testing.T, enumerations, queries *int) MachineProb
 		return commandEnv(ctx, env, name, args...)
 	}
 	p.XeActivity = func(context.Context, string) (float64, error) { return 10, nil }
+	p.XPUFreeMemory = func(context.Context) (map[string]float64, error) {
+		*queries++
+		return map[string]float64{"0000:01:00.0": 4, "0000:02:00.0": 2}, nil
+	}
 	return p
 }
 
@@ -169,14 +173,14 @@ func TestXPUTelemetryHostIntervalAndUnknown(t *testing.T) {
 		t.Fatal("consumer interval not sampled", queries)
 	}
 	// A failed new query must clear a previously successful counter.
-	p.Command = func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("unavailable") }
+	p.XPUFreeMemory = func(context.Context) (map[string]float64, error) { return nil, errors.New("unavailable") }
 	clock.Advance(deviceMemorySamplePeriod)
 	finishInventoryProbe(t, &lane, source)
 	if lane.value[0].Telemetry.FreeGB != nil || deviceTelemetryReady(lane.value[0].Telemetry, clock.Now()) {
 		t.Fatal("missing counter reused")
 	}
-	p.Command = func(context.Context, string, ...string) ([]byte, error) {
-		return []byte("0000:01:00.0,4096\n0000:01:00.0,4096\n0000:02:00.0,N/A\n"), nil
+	p.XPUFreeMemory = func(context.Context) (map[string]float64, error) {
+		return nil, nil
 	}
 	w.sampleXPUTelemetry(t.Context(), p, devices)
 	for _, d := range devices {
@@ -277,7 +281,7 @@ func TestHostInventoryTelemetryIdentityAndExpiry(t *testing.T) {
 	}
 }
 
-func TestWorkerTelemetryUsesInjectedHostSource(t *testing.T) {
+func TestWorkerTelemetryDoesNotPollWithoutSharingDemand(t *testing.T) {
 	q, _ := fixture(t)
 	var queries atomic.Int32
 	previous := extensionIdentityProbe
@@ -297,16 +301,17 @@ func TestWorkerTelemetryUsesInjectedHostSource(t *testing.T) {
 	}})
 	awaitInventoryReview(t, func() bool {
 		s, err := q.publicSnapshot()
-		return err == nil && len(s.Machines) == 1 && len(s.Machines[0].Devices) == 1 && deviceTelemetryReady(s.Machines[0].Devices[0].Telemetry, q.clock.Now())
+		return err == nil && len(s.Machines) == 1 && len(s.Machines[0].Devices) == 1
 	})
-	if queries.Load() == 0 {
-		t.Fatal("worker bypassed injected telemetry")
+	if queries.Load() != 0 {
+		t.Fatal("heartbeat without sharing demand initialized a vendor runtime")
 	}
 }
 
 func TestHostInventoryDrainsTelemetryAfterDeviceRemoval(t *testing.T) {
 	clock := &workerFakeClock{now: time.Unix(1000, 0)}
 	observer := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: clock, timing: probeTiming{base: time.Millisecond, cores: 2}}}
+	observer.requestTelemetry(true)
 	var scans atomic.Int32
 	entered, release := make(chan struct{}), make(chan struct{})
 	observer.sampleTelemetry = func(context.Context, []MachineDevice) ([]MachineDevice, error) {
@@ -333,4 +338,67 @@ func TestHostInventoryDrainsTelemetryAfterDeviceRemoval(t *testing.T) {
 	})
 	close(release)
 	await(t, func() bool { observer.mu.Lock(); defer observer.mu.Unlock(); return observer.telemetry.pending == nil })
+}
+
+// Exercise the observer's real demand/freshness call site, with the same
+// heartbeat frequency that formerly drove repeated vendor initialization.
+func TestXPUTelemetryDemandInvocationCount(t *testing.T) {
+	clock := &workerFakeClock{now: time.Unix(1000, 0)}
+	reads, vendors := 0, 0
+	p := MachineProbe{OS: "linux", XPUFreeMemory: func(context.Context) (map[string]float64, error) {
+		reads++
+		return map[string]float64{"0000:01:00.0": 4}, nil
+	}, Command: func(context.Context, string, ...string) ([]byte, error) {
+		vendors++
+		return nil, errors.New("vendor initialization forbidden")
+	}, XeActivity: func(context.Context, string) (float64, error) { return 20, nil }}
+	w := Worker{Clock: clock}
+	card := MachineDevice{ID: "0", Platform: "xpu", Identity: "card", Selector: "0", pciAddress: "0000:01:00.0"}
+	observer := hostInventoryObserver{
+		lane:      hostProbeLane[[]MachineDevice]{clock: clock, known: true, at: clock.Now(), value: []MachineDevice{card}, observation: &ProbeObservation{PeriodSeconds: 3600, CostSeconds: 1, ValidSeconds: 3601}},
+		telemetry: hostProbeLane[[]MachineDevice]{clock: clock, timing: probeTiming{base: deviceMemorySampleFreshFor}},
+	}
+	observer.sampleTelemetry = func(ctx context.Context, devices []MachineDevice) ([]MachineDevice, error) {
+		w.sampleXPUTelemetry(ctx, p, devices)
+		return devices, nil
+	}
+	step := func() {
+		observer.stepTelemetry(t.Context())
+		if observer.telemetry.done != nil {
+			<-observer.telemetry.done
+		}
+		observer.stepTelemetry(t.Context())
+	}
+	for range 600 {
+		step()
+		clock.Advance(100 * time.Millisecond)
+	}
+	if reads != 0 {
+		t.Fatal("idle/CPU heartbeat polled memory", reads)
+	}
+	observer.requestTelemetry(true)
+	start := clock.Now()
+	for range 600 {
+		step()
+		clock.Advance(100 * time.Millisecond)
+	}
+	if reads != 6 || vendors != 0 {
+		t.Fatal("sharing did not reuse the freshness window", reads, vendors)
+	}
+	got, _ := observer.snapshot()
+	if len(got) != 1 || got[0].Telemetry == nil || !got[0].Telemetry.At.Equal(start.Add(50*time.Second)) {
+		t.Fatal("snapshot renewed or lost the original sample time", got)
+	}
+	observer.requestTelemetry(false)
+	for range 600 {
+		step()
+		clock.Advance(100 * time.Millisecond)
+	}
+	if reads != 6 || vendors != 0 {
+		t.Fatal("withdrawn demand continued polling", reads, vendors)
+	}
+	got, _ = observer.snapshot()
+	if got[0].Telemetry != nil {
+		t.Fatal("withdrawn demand renewed stale sharing evidence")
+	}
 }

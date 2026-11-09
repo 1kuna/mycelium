@@ -7,7 +7,7 @@ import (
 	"syscall"
 )
 
-func retireSharedProfileSocket(root, path string, identity os.FileInfo) error {
+func retireSharedProfileSocket(root, path string, identity os.FileInfo, beforeUnlink ...func()) error {
 	// Idle exit has already released lifetime ownership. Every ordinary startup
 	// and cooperative handoff holds startup.lock through replacement readiness,
 	// so keep this complete check/unlink transaction under that same lock.
@@ -21,6 +21,9 @@ func retireSharedProfileSocket(root, path string, identity os.FileInfo) error {
 	}
 	defer startup.Close()
 	if current, err := os.Stat(path); err == nil && os.SameFile(identity, current) {
+		for _, pause := range beforeUnlink {
+			pause()
+		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
