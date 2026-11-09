@@ -527,6 +527,9 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	return nil
 }
 func serviceCommand(args []string) error {
+	if len(args) > 0 && args[0] == "observer" {
+		return observerServiceCommand(args[1:])
+	}
 	f := flag.NewFlagSet("service", flag.ContinueOnError)
 	path := f.String("config", "", "private installed configuration")
 	if e := f.Parse(args); e != nil {
