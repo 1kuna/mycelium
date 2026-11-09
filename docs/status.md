@@ -2630,9 +2630,11 @@ records its host/session/device, typed failed predicates, resource demand and
 room, exact holders with current policy tiers, declaration/admission/charge/
 forecast values and sample age. `preemption.considered` is captured from the
 actual scheduler; diagnostic status reads never manufacture a decision.
-`preemption.source` distinguishes `planner`, `diagnostic_projection` and an
-existing `release_commitment`. `planned` is stop intent, not delivery or release
-proof. `last_planner_decision` preserves the last actual decision's timestamp
+`preemption.source` distinguishes `planner` and `diagnostic_projection`.
+`preemption.planned` is the recorded decision's new-stop intent, not delivery
+or release proof. The separate target field `release_commitment` reports
+previously selected releases still pending; it never rewrites that decision.
+`last_planner_decision` preserves the last actual decision's timestamp
 and resource vector for this exact attempt/next piece/target, even when later
 passes only wait for releases. It never labels a new projection as a past
 planner decision. `resolution` separates `planner_candidate` from

@@ -34,8 +34,9 @@ exact capacity holders, memory forecasts and sample ages, and actual scheduler
 preemption decisions. Check `device_fault` before attributing RAM pressure to
 tests; a quarantined device cannot serve work after CPU holders stop. Missing
 values and dropped history remain unknown. `preemption.source` identifies an
-actual planner decision versus a diagnostic projection or retained release
-commitment; `last_planner_decision` keeps its original timestamp and wave vector.
+actual planner decision versus a diagnostic projection; the separate target
+field `release_commitment` reports retained releases still pending.
+`last_planner_decision` keeps its original timestamp and wave vector.
 Read `latest.closed_at`/`latest.closed_reason` for ended waits and `capture_gaps`/`deferred_at`
 for capture deferred to protect control service. See [wait evidence](../../docs/status.md#retained-production-admission-waits-next-release-868).
 

@@ -543,11 +543,17 @@ func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[stri
 		}
 		input := *j
 		input.AdmissionWait = nil
+		// These entries describe the excluded immutable evidence, not fields
+		// in input. Keep them outside the ordinary field-cache cleanup below.
+		whole := cache["$admission_wait_job"]
 		rest, _, err := q.marshalPersistenceSized(key, &input, max(0, len(q.persisted[key])-len(entry.data)))
+		cache["admission_wait"] = entry
+		if whole.value != nil {
+			cache["$admission_wait_job"] = whole
+		}
 		if err != nil {
 			return nil, nil, err
 		}
-		whole := cache["$admission_wait_job"]
 		if old, ok := whole.value.(waitPersistenceInput); ok && old.evidence == j.AdmissionWait && bytes.Equal(old.base, rest) {
 			return whole.data, nil, nil
 		}

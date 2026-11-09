@@ -189,6 +189,7 @@ type AdmissionWaitTarget struct {
 	AvailableDeviceGB   float64               `json:"available_device_gb"`
 	DeviceMemoryKnown   bool                  `json:"device_memory_known"`
 	Preemption          WaitPreemption        `json:"preemption"`
+	ReleaseCommitment   bool                  `json:"release_commitment,omitempty"`
 	LastPlannerDecision *AdmissionWaitPlan    `json:"last_planner_decision,omitempty"`
 	Holders             []AdmissionWaitHolder `json:"holders,omitempty"`
 }
@@ -551,11 +552,7 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 					}
 				}
 				if placement := j.PreemptionPlacement; placement != nil && placement.Machine == m.ID && placement.Session == m.Session && placement.Device == m.Device && len(placement.Releases) > 0 {
-					target.Preemption.Planned = true
-					if !target.Preemption.Considered {
-						target.Preemption.Source = "release_commitment"
-						target.Preemption.Reason = "selected_releases_pending"
-					}
+					target.ReleaseCommitment = true
 				}
 				if _, ok := obligations[hostID(m)]; !ok {
 					obligations[hostID(m)] = q.hostObligations(hostID(m))
@@ -622,7 +619,7 @@ func sameAdmissionWait(a, b *AdmissionWaitSnapshot) bool {
 	}
 	for i, x := range a.Targets {
 		y := b.Targets[i]
-		if x.Host != y.Host || x.Machine != y.Machine || x.Session != y.Session || x.Device != y.Device || x.DeviceFault != y.DeviceFault || x.Resolution != y.Resolution || x.Concurrency != y.Concurrency || x.Preemption != y.Preemption || x.RequiredCores != y.RequiredCores || x.RequiredHostGB != y.RequiredHostGB || x.RequiredDeviceGB != y.RequiredDeviceGB || !slices.Equal(x.Predicates, y.Predicates) || len(x.Holders) != len(y.Holders) {
+		if x.Host != y.Host || x.Machine != y.Machine || x.Session != y.Session || x.Device != y.Device || x.DeviceFault != y.DeviceFault || x.Resolution != y.Resolution || x.Concurrency != y.Concurrency || x.Preemption != y.Preemption || x.ReleaseCommitment != y.ReleaseCommitment || x.RequiredCores != y.RequiredCores || x.RequiredHostGB != y.RequiredHostGB || x.RequiredDeviceGB != y.RequiredDeviceGB || !slices.Equal(x.Predicates, y.Predicates) || len(x.Holders) != len(y.Holders) {
 			return false
 		}
 		if (x.LastPlannerDecision == nil) != (y.LastPlannerDecision == nil) {

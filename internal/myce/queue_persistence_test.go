@@ -275,6 +275,17 @@ func TestQueuePersistenceCachedEncodingMatchesJSON(t *testing.T) {
 				if !bytes.Equal(want, got) {
 					t.Fatal("cached serializer diverged from JSON")
 				}
+				if key == "jobs/"+j.ID {
+					// Unchanged large jobs must reuse their immutable encoding;
+					// ordinary field-cache cleanup used to discard wait evidence.
+					again, _, err := q.marshalPersistenceValue(key, value)
+					if err != nil {
+						return err
+					}
+					if len(got) == 0 || len(again) == 0 || &got[0] != &again[0] {
+						t.Fatal("unchanged large job re-encoded its admission evidence")
+					}
+				}
 			}
 			return nil
 		}); err != nil {

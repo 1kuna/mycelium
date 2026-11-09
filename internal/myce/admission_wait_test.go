@@ -129,6 +129,7 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 				t.Fatalf("missing pre-child parent evidence: %+v", observed)
 			}
 			planned := false
+			retainedWithoutNewStop := false
 			for _, target := range observed.Latest.Targets {
 				if target.Device != "0" && target.Device != "1" {
 					continue
@@ -137,14 +138,18 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 					t.Fatalf("lost simultaneous host predicate/vector: %+v", target)
 				}
 				if healthy {
-					planned = planned || target.Preemption.Planned
+					planned = planned || target.Preemption.Planned || target.ReleaseCommitment
+					if target.Preemption.Source == "planner" && (target.LastPlannerDecision == nil || target.Preemption != target.LastPlannerDecision.Preemption) {
+						t.Fatalf("retained releases rewrote the recorded planner decision: %+v", target)
+					}
+					retainedWithoutNewStop = retainedWithoutNewStop || target.ReleaseCommitment && target.Preemption.Reason == "no_new_stop_needed" && !target.Preemption.Planned
 					if target.Preemption.Planned && (target.LastPlannerDecision == nil || !target.LastPlannerDecision.Preemption.Considered || target.LastPlannerDecision.Preemption.Source != "planner") {
 						t.Fatalf("lost real selected decision: %+v", target)
 					}
 					if target.Preemption.Considered && target.Preemption.Source != "planner" {
 						t.Fatalf("projection claimed a decision: %+v", target)
 					}
-				} else if target.DeviceFault != "device_fault_xe" || !slices.Contains(target.Predicates, "gpu_memory_telemetry") || target.Preemption.Considered || target.Preemption.Planned {
+				} else if target.DeviceFault != "device_fault_xe" || !slices.Contains(target.Predicates, "gpu_memory_telemetry") || target.Preemption.Considered || target.Preemption.Planned || target.ReleaseCommitment {
 					t.Fatalf("quarantine was not an independent blocker: %+v", target)
 				}
 				for _, run := range runs {
@@ -160,6 +165,9 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 			}
 			if healthy && !planned {
 				t.Fatal("selected releases absent from status")
+			}
+			if healthy && !retainedWithoutNewStop {
+				t.Fatal("release wait lost the planner's no-new-stop decision")
 			}
 			if !healthy {
 				// An arbitrary worker diagnostic suffix must never enter the wire

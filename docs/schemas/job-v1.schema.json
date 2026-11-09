@@ -293,6 +293,9 @@
         "preemption": {
           "$ref": "#/$defs/WaitPreemption"
         },
+        "release_commitment": {
+          "type": "boolean"
+        },
         "required_cores": {
           "type": "integer"
         },
