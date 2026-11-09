@@ -1007,7 +1007,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	spawn := func(s *workerStore, p *process) {
 		j := *s.state.Job
 		if !j.Spec.Needs.cpuOnly() {
-			root.deviceHealthBusy.Store(true)
+			root.vendorProbeStart.setBusy(true)
 		}
 		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p}
 		a.admissionMu, a.worker.stopAdmission = &rt.admissionMu, a.stopAdmission
@@ -1512,7 +1512,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				rt.admissionBlocked = reply.AdmissionBlocked
 				rt.mu.Unlock()
 				if slices.ContainsFunc(reply.ModelPlan, func(s ModelSlot) bool { return s.State == "loading" }) {
-					root.deviceHealthBusy.Store(true)
+					root.vendorProbeStart.setBusy(true)
 				}
 				rt.sync(reply.ModelPlan)
 				if leaving && !leaveSent {

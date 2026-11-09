@@ -366,3 +366,53 @@ func TestQuarantineCustodyAtVendorLaunch(t *testing.T) {
 		t.Fatalf("idle probe invocation count: %q, %v", data, err)
 	}
 }
+
+func TestVendorHealthCustodyOrdersOnlyProcessStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var gate vendorProbeStart
+		ctx := withVendorProbeStart(t.Context(), &gate)
+		starting, finishStart := make(chan struct{}), make(chan struct{})
+		finishQuery, done, acquired := make(chan struct{}), make(chan error, 1), make(chan struct{})
+		go func() {
+			err := startProbeCommand(ctx, func() error {
+				close(starting)
+				<-finishStart // Simulated fork/exec, not the command's completion.
+				return nil
+			})
+			<-finishQuery
+			done <- err
+		}()
+		<-starting
+		go func() { gate.setBusy(true); close(acquired) }()
+		synctest.Wait()
+		select {
+		case <-acquired:
+			t.Fatal("custody overtook process creation")
+		default:
+		}
+		close(finishStart)
+		synctest.Wait()
+		select {
+		case <-acquired:
+		default:
+			t.Fatal("custody waited for query completion")
+		}
+		select {
+		case <-done:
+			t.Fatal("query did not remain pending")
+		default:
+		}
+		calls := 0
+		if err := startProbeCommand(ctx, func() error { calls++; return nil }); !errors.Is(err, errVendorProbeDeferred) || calls != 0 {
+			t.Fatal("new vendor process overtook custody", calls, err)
+		}
+		close(finishQuery)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		gate.setBusy(false)
+		if err := startProbeCommand(ctx, func() error { calls++; return nil }); err != nil || calls != 1 {
+			t.Fatal("idle process start did not resume", calls, err)
+		}
+	})
+}

@@ -87,7 +87,10 @@ func LocalMachineProbe() MachineProbe {
 		var stdout, stderr boundedProbeOutput
 		stdout.limit, stderr.limit = 1<<20, 4096
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-		err := cmd.Run()
+		err := startProbeCommand(ctx, cmd.Start)
+		if err == nil {
+			err = cmd.Wait() // Slow tool completion never holds the start/custody lock.
+		}
 		if errors.Is(err, exec.ErrWaitDelay) {
 			if cleanupErr := killGroup(); !errors.Is(cleanupErr, os.ErrProcessDone) {
 				err = errors.Join(err, cleanupErr)

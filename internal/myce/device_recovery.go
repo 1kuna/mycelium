@@ -107,7 +107,7 @@ type deviceHealthDue struct {
 }
 
 func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[string]deviceHealthObservation {
-	root.deviceHealthBusy.Store(w.vendorGPUActive)
+	root.vendorProbeStart.setBusy(w.vendorGPUActive)
 	for key, h := range w.faultHealth {
 		f := w.faults.Devices[key]
 		if f.Reason == "" || f.RepeatedTeardown || h.event != f.Event {
@@ -142,12 +142,19 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 		for _, d := range devices {
 			key := deviceFaultKey(d)
 			f := faults[key]
-			// A prior query may have outlived collection while another card
-			// acquired custody. Recheck before every vendor initialization.
-			if f.Reason == "" || f.RepeatedTeardown || d.Platform == "xpu" && root.deviceHealthBusy.Load() {
+			// Skip known custody between queries. The production command runner
+			// also orders actual process creation against custody acquisition.
+			if f.Reason == "" || f.RepeatedTeardown || d.Platform == "xpu" && root.vendorProbeStart.blocked() {
 				continue
 			}
-			normal, err := probe(ctx, d)
+			probeCtx := ctx
+			if d.Platform == "xpu" {
+				probeCtx = withVendorProbeStart(ctx, &root.vendorProbeStart)
+			}
+			normal, err := probe(probeCtx, d)
+			if errors.Is(err, errVendorProbeDeferred) {
+				continue // No query ran; do not postpone an idle recovery decision.
+			}
 			out[key] = deviceHealthObservation{f.Event, clock.Now(), normal && err == nil}
 		}
 		return out, nil
