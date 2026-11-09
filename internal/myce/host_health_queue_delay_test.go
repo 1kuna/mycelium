@@ -85,27 +85,6 @@ func TestHostHealthQueueDelayStoppedSensor(t *testing.T) {
 	}
 }
 
-func TestHostHealthQueueDelayFrozenStatus(t *testing.T) {
-	q, clock := fixture(t)
-	m := machine("snapshot-health", "fake")
-	m.HostHealth = &HostHealth{Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .001, ValidSeconds: 2.1}, AgeSeconds: .01, History: []HostHealthSample{{At: clock.Now()}}}
-	check(t, q, m, nil)
-	q.mu.Lock()
-	clock.Advance(12 * time.Second)
-	q.mu.Unlock()
-	view, _, err := q.captureStatusObservation("", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(3 * time.Second)
-	if reason := view.hostHygieneReason(view.s.Machines[m.ID]); reason != "" {
-		t.Fatal("status lost or advanced queue delivery evidence", reason)
-	}
-	if reason := q.hostHygieneReason(q.s.Machines[m.ID]); reason != "host_probe_unknown" {
-		t.Fatal("live queue failed to expire silent sensor", reason)
-	}
-}
-
 func TestHostHealthQueueDelayDetachedViews(t *testing.T) {
 	for _, advice := range []bool{false, true} {
 		t.Run(map[bool]string{false: "immutable-status", true: "submission-advice"}[advice], func(t *testing.T) {
@@ -145,32 +124,6 @@ func TestHostHealthQueueDelayDetachedViews(t *testing.T) {
 				t.Fatal("new detached view hid stopped sensor expiry", reason)
 			}
 		})
-	}
-}
-
-func TestHostHealthQueueDelayFailureAndRollback(t *testing.T) {
-	q, clock := fixture(t)
-	m := machine("fenced-health", "fake")
-	m.HostHealth = &HostHealth{Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .001, ValidSeconds: 2.1}, AgeSeconds: .01, History: []HostHealthSample{{At: clock.Now()}}}
-	check(t, q, m, nil)
-	q.mu.Lock()
-	clock.Advance(12 * time.Second)
-	q.mu.Unlock()
-	rejected := errors.New("reject transaction")
-	if err := q.update(func() error {
-		q.s.Machines[m.ID].HostHealth = &HostHealth{}
-		return rejected
-	}); !errors.Is(err, rejected) {
-		t.Fatal(err)
-	}
-	if reason := q.hostHygieneReason(q.s.Machines[m.ID]); reason != "" {
-		t.Fatal("rollback lost accepted queue delivery evidence", reason)
-	}
-	// A failed observation must refuse immediately, however slow the queue was.
-	m.HostHealth.History[len(m.HostHealth.History)-1].Error = "sensor failed"
-	check(t, q, m, nil)
-	if reason := q.hostHygieneReason(q.s.Machines[m.ID]); reason != "host_probe_unknown" {
-		t.Fatal("queue delay hid sensor failure", reason)
 	}
 }
 

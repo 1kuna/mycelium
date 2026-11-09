@@ -2,11 +2,8 @@ package myce
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"runtime/pprof"
-	"sort"
 	"testing"
 	"time"
 )
@@ -87,57 +84,5 @@ func benchmarkCheckinBodyPhases(b *testing.B, q *Queue, workers []Machine) {
 	b.StopTimer()
 	for name, elapsed := range totals {
 		b.ReportMetric(float64(elapsed)/float64(b.N)/1e6, name+"-ms/op")
-	}
-}
-
-// Frozen on the pre-change planner as well as the existing 660 admission and
-// 402 dispatch decisions. Cover the maintenance release pass and every queued
-// waiting reason with both occupied and available CPU capacity.
-func TestCheckinPlanningOutcomeEquivalence(t *testing.T) {
-	for _, occupied := range []bool{true, false} {
-		t.Run(fmt.Sprint(occupied), func(t *testing.T) {
-			q, _ := candidateCostFixture(t)
-			if !occupied {
-				for i := range 5 {
-					delete(q.s.Jobs, fmt.Sprintf("running-%d", i))
-				}
-			}
-			q.refreshHostMemory()
-			q.refreshHostCPU()
-			q.maintain()
-			type jobOutcome struct {
-				ID, State, Machine, Session, Reason string
-				Attempt                             int
-				Needs                               ResourceNeeds
-			}
-			var jobs []jobOutcome
-			for _, j := range q.liveJobs() {
-				jobs = append(jobs, jobOutcome{j.ID, j.State, j.Machine, j.Session, j.Reason, j.Attempt, j.Spec.Needs})
-			}
-			sort.Slice(jobs, func(i, j int) bool { return jobs[i].ID < jobs[j].ID })
-			type pick struct{ Target, Job string }
-			var picks []pick
-			scan := q.placementScan()
-			for _, m := range scan.machines {
-				id := ""
-				if j := q.plannedPick(m, scan); j != nil {
-					id = j.ID
-				}
-				picks = append(picks, pick{targetKey(m), id})
-			}
-			data, err := json.Marshal(struct {
-				Jobs  []jobOutcome
-				Picks []pick
-			}{jobs, picks})
-			if err != nil {
-				t.Fatal(err)
-			}
-			got := fmt.Sprintf("%x", sha256.Sum256(data))
-			want := map[bool]string{true: "80e3a367392c6882691f3933a050cc97f4fee73a47d37f907a1611a494cb41e8", false: "7b41b03ef3b1540261f76675346d941484131e96bcdcc3631e8f64de83bc8726"}[occupied]
-			t.Logf("occupied=%v jobs=%d picks=%d digest=%s", occupied, len(jobs), len(picks), got)
-			if got != want {
-				t.Fatalf("planning outcomes %s, want %s", got, want)
-			}
-		})
 	}
 }

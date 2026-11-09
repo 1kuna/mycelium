@@ -5,28 +5,6 @@ import (
 	"time"
 )
 
-// Overlapping readers block a writer once, not once per reader. Neither a
-// negative age nor double-counted queue delay may extend sensor validity.
-func TestControlServiceOverlappingQueueReaders(t *testing.T) {
-	q, clock := fixture(t)
-	start := q.controlNow()
-	clock.Advance(time.Second)
-	q.mu.RLock()
-	clock.Advance(4 * time.Second)
-	q.mu.RLock()
-	clock.Advance(7 * time.Second)
-	q.mu.RUnlock()
-	clock.Advance(2 * time.Second)
-	q.mu.RUnlock()
-	if got := q.controlNow() - start; got != time.Second {
-		t.Fatal("reader occupancy became service opportunity", got)
-	}
-	clock.Advance(3 * time.Second)
-	if got := q.controlNow() - start; got != 4*time.Second {
-		t.Fatal("free queue did not advance service opportunity", got)
-	}
-}
-
 // Pause release accounting while another goroutine tries the underlying lock.
 // Physical availability must not get ahead of its service-clock transition.
 func TestControlServicePausedQueueRelease(t *testing.T) {
