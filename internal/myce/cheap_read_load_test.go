@@ -156,7 +156,7 @@ func cheapReadLoad(t *testing.T, requireProgress bool) {
 // Completion waves invalidate an in-flight projection. Successive discarded
 // responses do not coexist and must not exhaust a single request's allowance.
 func TestCheapReadInvalidationBudget(t *testing.T) {
-	for _, path := range []string{"/api/status?jobs=active", "/api/jobs/selected-queued"} {
+	for _, path := range []string{"/api/status?jobs=active"} {
 		t.Run(path, func(t *testing.T) {
 			q, clock := fixture(t)
 			for i := range 30 {

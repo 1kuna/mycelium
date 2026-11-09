@@ -551,6 +551,11 @@ func knownServerRefusal(code string) bool {
 
 func respond(w http.ResponseWriter, v any, err error) {
 	w.Header().Set("Content-Type", "application/json")
+	// Transport cancellation is unavailable observation, never invalid input.
+	// Preserve a retryable public cause without exposing the private error.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		err = &HTTPError{Status: http.StatusServiceUnavailable, Code: "status_unavailable"}
+	}
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrStale) {

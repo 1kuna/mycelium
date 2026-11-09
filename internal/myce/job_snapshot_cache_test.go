@@ -132,8 +132,11 @@ func TestJobSnapshotCacheCommitDuringRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(resume)
-	if got := <-done; got == nil || got.State != "paused" {
-		t.Fatal("published invalidated refresh", got)
+	if got := <-done; got == nil || got.State != "queued" {
+		t.Fatal("in-flight read mixed committed generations", got)
+	}
+	if got, err := q.jobSnapshot(j.ID); err != nil || got.State != "paused" {
+		t.Fatal("subsequent read reused invalidated generation", got, err)
 	}
 }
 
