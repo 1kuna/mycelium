@@ -64,8 +64,9 @@ or running main CI does not block; the sequential runner can lag behind merges.
 Stage explicit paths and commit completed changes; push your own branches.
 Tested fixes deploy to the fleet without a separate task (MY-28, MY-32, MY-33):
 bundle them into one release at a time and roll back if the queue isn't healthy.
-Keep critical patches short during production runs so other work can proceed
-(MY-39); ordinary updates wait. Fix runs failing because of Mycelium.
+Critical patches may deploy during production runs so other work can proceed
+(MY-39); keep making patch time quick. Ordinary updates wait. Fix runs failing
+because of Mycelium.
 Keep a healthy, tested release ready before each scheduled production window.
 Fleet hardware changes still need a task that authorizes them.
 

@@ -2491,8 +2491,8 @@ tests do not qualify a native stop duration.
 
 Tested fixes deploy without a separate task, bundled one release at a time; roll
 back if the queue is not healthy. Critical updates may deploy during a production
-consumer's run with short patch time (MY-39); ordinary updates wait during a
-successful run. Fixing a run failing because of Mycelium is allowed and expected.
+consumer's run (MY-39); patch time is weighed and is being made quick, but it is
+not a precondition. Ordinary updates wait during a successful run. Fixing a run failing because of Mycelium is allowed and expected.
 Orchestrator application: announce rollouts to consumer orchestrators and prefer
 quick rolling updates through existing supported paths that preserve running
 attempts and resumable checkpoints. This authority does not bypass custody,
