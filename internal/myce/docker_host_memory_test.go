@@ -97,6 +97,9 @@ func TestDockerHostMemoryFreshCredit(t *testing.T) {
 		t.Fatal("worker did not credit current Docker use", err)
 	}
 	// Even a larger host cgroup cannot consume the full device-growth floor.
+	// This is a new observation, rather than a cached delivery of the first.
+	clock.Advance(time.Second)
+	sample.sampledAt = clock.Now()
 	sample.NonreclaimableGB = 55
 	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{r}}); err != nil {
 		t.Fatal(err)

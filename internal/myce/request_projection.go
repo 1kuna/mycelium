@@ -35,6 +35,28 @@ func (a *requestAllocation) rewind(mark int64) {
 	a.held = mark
 }
 
+type projectionMark struct{ held, retained int64 }
+
+func (a *requestAllocation) markProjection() projectionMark {
+	return projectionMark{held: a.held, retained: a.retained}
+}
+
+func (a *requestAllocation) chargeRetained(n int64) bool {
+	if !a.charge(n) {
+		return false
+	}
+	a.retained += n
+	return true
+}
+
+func (a *requestAllocation) rewindProjection(mark projectionMark) {
+	// Unchanged readRecord decodes remain reachable through the published
+	// root, even after this response is discarded. Keep their conservative
+	// decode allowance until the handler ends and the next capacity sample
+	// includes their residency. Only transient response work is released.
+	a.rewind(mark.held + a.retained - mark.retained)
+}
+
 // Charge the variable-sized, JSON-owned, acyclic representation BEFORE copying
 // it. The walk follows the same visibility boundary as copyObservationValue.
 // Three stages own detached state, projection and encoding; strings allow JSON's

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -366,12 +367,13 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		contact, settle := a.Queue.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, r.Context())
 		c.contact = contact
 		defer func() { settle(accepted) }()
-		v, err := a.Queue.checkinContext(r.Context(), c)
-		accepted = err == nil
-		if err == nil {
-			v.NASPathChecks = nas.checkin(c)
-		}
-		respondOperation(w, v, err, "worker_checkin_invalid")
+		_, _ = a.Queue.checkinResponseContext(r.Context(), c, func(v Reply, err error) {
+			accepted = err == nil
+			if err == nil {
+				v.NASPathChecks = nas.checkin(c)
+			}
+			respondOperation(w, v, err, "worker_checkin_invalid")
+		})
 	})
 	mux.HandleFunc("POST /api/workers/launch", func(w http.ResponseWriter, r *http.Request) {
 		var l HostLaunch
@@ -476,6 +478,17 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			return
 		}
 		defer finishBudget()
+		if deferredObservationProjection(r) {
+			projection := &observationProjection{limit: observationLimit, request: r, rejected: func() { jobGets.recordRejection(r) }}
+			defer func() {
+				if projection.finish != nil {
+					projection.finish()
+				}
+			}()
+			r = r.WithContext(context.WithValue(r.Context(), observationProjectionKey{}, projection))
+			mux.ServeHTTP(w, r)
+			return
+		}
 		finishObservation, admitted := observationLimit.admit(w, r)
 		if !admitted {
 			jobGets.recordRejection(r)
@@ -550,6 +563,9 @@ func respond(w http.ResponseWriter, v any, err error) {
 		body := map[string]any{"error": rejectionMessages[code], "code": code}
 		var apiError *HTTPError
 		if errors.As(err, &apiError) && publicErrorCode(apiError.Code) && (apiError.Status < 500 || knownServerRefusal(apiError.Code)) {
+			if apiError.RetryAfter > 0 {
+				w.Header().Set("Retry-After", strconv.FormatInt(max(1, int64(math.Ceil(apiError.RetryAfter.Seconds()))), 10))
+			}
 			if apiError.Status >= 400 {
 				status = apiError.Status
 			}

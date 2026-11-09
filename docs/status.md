@@ -64,19 +64,35 @@ recovery. Adverse samples never teach a new healthy baseline. Load requires
 increased wake latency; heartbeat delay also requires local wake latency, so
 ordinary useful CPU work or a slow queue alone does not drain a host. Memory
 pressure, swap growth with wake latency, and low free disk use the host's bands.
-On Linux, pressure is host-wide memory PSI `some avg10` (percent). With the
-zero-baseline correction, an all-zero idle pressure band requires corroborating
-swap-growth or local wake-latency deterioration before pressure
-alone is classified as adverse. Otherwise healthy observations can establish a
-positive workload reference through the normal baseline path, including the
-three-sample recovery of a retained zero-baseline drain. Once that reference is
-positive, pressure outliers trigger independently again. The reference and its
-adjacent-sample resolution come from this host; there is no absolute PSI cutoff.
-Positive PSI with a swap-growth outlier remains adverse even within the learned
-pressure band, so a widened decay-tail reference cannot hide renewed swapping.
-These calibration/corroboration rules apply to Linux PSI. Darwin retains raw OS
-pressure levels (`1` is normal) and its learned pressure-outlier rule; normal
-pressure plus swap growth alone does not drain it. Persisted units are unchanged.
+On Linux, pressure is host-wide memory PSI `some avg10` (percent). From the
+release containing #1110, PSI above its learned band alone does not drain:
+it requires a local wake-latency outlier. Positive PSI with a swap-growth
+outlier also drains, even within the learned PSI band. All outlier limits come
+from this host's healthy baseline; there is no absolute PSI cutoff. A positive
+idle baseline is not evidence that ordinary working PSI harms work. Without
+corroboration, ordinary work can train the baseline and clear a retained drain
+through the existing three-sample recovery rule. Queue-only heartbeat delay is
+not local memory-pressure evidence. Darwin retains raw OS pressure levels
+(`1` is normal) and its learned pressure-outlier rule; normal pressure plus swap
+growth alone does not drain it. Persisted units are unchanged.
+
+The queue also applies this correction to older Linux workers, including their
+already-latched `host_memory_pressure` reports: three distinct, error-free
+samples with swap growth and wake latency inside their learned bands clear the
+effective drain while ordinary work continues. Missing calibration, short or
+invalid history cannot establish recovery. Other drain reasons, stale-probe
+holds, memory headroom/allowances and operator maintenance remain binding. No
+worker restart is needed for this queue-side correction. The worker correction
+also prevents the false local latch after a later worker upgrade.
+
+Linux `host_health.pressure_evaluation` exposes `pressure_limit` (PSI percent),
+`baseline_samples`, the original `reported_drain_reason`, `corroboration`
+(`swap_growth` or `wake_latency` in the latest confirmation horizon), and
+`recovery_samples` (up to three). `host_health.drain_reason` is the queue's
+effective admission reason, used by host health and launch gates, including
+production. Fewer than eight baseline samples means the limit is uncalibrated;
+the reported drain is retained. These queue-owned fields are absent from worker
+check-ins, preserving strict older-queue compatibility.
 Disk pressure also requires exhaustion against measured consumption over the
 confirmation horizon. `disk_recovery` retains that measured reserve until space
 actually recovers; aging history alone cannot clear it. Pending adverse mount
@@ -123,13 +139,28 @@ refreshes every five seconds. Keep tokens in private configuration, not URLs.
 
 The page and `GET /api/status` share a snapshot for a lease learned from local
 capture/hit costs and mutation intervals. Job receipts use the same cost-based
-policy with their own generations. Status snapshots do
+policy with their own generations. From the release containing #1052's second
+read correction, completed default-status and job-receipt generations are read
+without acquiring the live queue mutex or entering projection admission. Cache
+metadata locks cover only completed-response metadata, never a rebuild. A slow
+inspection or other in-flight projection therefore cannot shed these cheap
+reads behind it. Their response copies still consume the queue's measured
+memory allowance; a cache hit is not an exemption from physical capacity.
+Negotiated default-status reads reuse a published page when its history rows
+fit the peer's page-planning allowance. A miss, expiry or invalidation still
+uses control-pressure admission before projection. Legacy scalar wait admission
+and the independent batch-wait index retain their existing behavior.
+Status snapshots do
 not drive start authorization, cancellation or result publication.
 Terminal job commits and their release acknowledgements invalidate the shared
 snapshot immediately. If one commits while status is projecting or waiting for
 usage/file-store I/O, status recaptures before returning, including uncached
 filtered and full views and per-job GET. This can repeat observation work during
-completions; ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
+completions; discarded response allocations are released before retrying rather
+than accumulating as if every discarded generation were still in flight.
+Cold immutable-decode allowances remain charged through the request because
+their cached records can survive a response retry.
+Ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
 injected queue time at capture, rather than the response completion time.
 
 Every status and inspection response includes additive `freshness` metadata:

@@ -33,9 +33,8 @@ queue round trip plus the next report's preparation. Cheap OS sensing does not
 imply cheap delivery to a launch fence. This gap trains before profile activation
 and affects only newly completed probes; later slow reports cannot renew old
 evidence. Both ages are captured at send time, after report preparation. Local
-health admission reads do not train report cadence. During initial learning or
-an unprecedented delivery delay, evidence can still expire: contact alone never
-proves that a sensor is healthy. A stopped sensor expires at its last completed
+health admission reads do not train report cadence. During initial learning,
+evidence can still expire: contact alone never proves that a sensor is healthy. A stopped sensor expires at its last completed
 observation's frozen period, cost prediction and learned report-gap prediction,
 even if the worker continues checking in.
 The prediction uses RFC 6298's
@@ -76,9 +75,38 @@ capacity; saved identity and policy fences remain binding. This does not renew
 the background observation or restore its advertised queue capacity.
 
 The queue translates worker-local age at request receipt to its own injected
-clock and includes preparation/transaction waiting time. New observations expire
-at their frozen validity even while check-in contact remains healthy. Owner age
-is carried explicitly; worker wall-clock skew cannot renew it. Older pressure
+clock and includes preparation/transaction waiting time in diagnostic age.
+For host health, admission and degradation use that original worker-local age
+plus available queue service opportunity since acceptance. Incoming request
+processing and queue mutex occupancy cannot consume the opportunity to accept
+a replacement report. This uses the same mutex service clock as adaptive worker
+contact, without treating contact as sensor evidence. This also covers the first
+fresh report of a restarted worker before any report gap is learned: only actual
+queue delay is excluded, and the remaining frozen validity bounds available
+service after processing. Already stale or failed reports still refuse immediately. A newer fresh health report currently being
+prepared outside the mutex pauses only its own session's prior service age at
+receipt. It cannot revive already expired evidence, and stale or failed input
+cannot obtain this credit. The marker spans preparation, reply hydration, HTTP
+NAS instructions and response encoding, including the first report of a session. Successful return retains only that
+receipt's actual queue processing credit; rejection or cancellation removes the
+marker without retaining credit. After return a silent sensor has its remaining
+frozen validity in available service time. Unrelated workers keep aging. Owner and pressure age rules are unchanged.
+
+A silent sensor expires after its remaining frozen validity in available queue
+service time. A reporting worker whose sensor stops expires when its growing
+worker-local age reaches frozen validity and that report is processed. Under
+normal service this is at most the frozen validity plus the next report delivery;
+a measured queue stall adds its actual duration, not a new fixed timeout.
+Continuous queue unavailability, including an indefinitely pending check-in
+preparation for that session, has no finite trustworthy wall-time expiry bound. Queue restart discards service credit and uses conservative physical
+wall age until another report arrives. Status snapshots freeze both clocks;
+reported `age_seconds` remains physical diagnostic age, so it can exceed
+`valid_seconds` while excluded queue service accounts for the difference.
+A completed failure and explicit drain still withhold immediately. Overlapping
+check-ins retain the newest accepted queue receipt in the same worker session;
+an older delayed success cannot clear a newer refusal or reset its age.
+
+Owner age is carried explicitly; worker wall-clock skew cannot renew it. Older pressure
 reports without timing evidence retain the existing bounded contact policy.
 
 ## Owner availability and interference
