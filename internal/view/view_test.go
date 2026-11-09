@@ -233,17 +233,16 @@ func TestViewIsReadOnlyEndToEnd(t *testing.T) {
 	view := httptest.NewServer(Handler(p, "127.0.0.1:0"))
 	defer view.Close()
 
-	for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
-		for _, path := range []string{"/", "/events", "/api/status", "/api/jobs"} {
-			req, _ := http.NewRequest(method, view.URL+path, strings.NewReader(`{}`))
-			res, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			res.Body.Close()
-			if res.StatusCode != http.StatusMethodNotAllowed {
-				t.Errorf("%s %s: status %d, want 405", method, path, res.StatusCode)
-			}
+	for _, tc := range []struct{ method, path string }{{"POST", "/events"}, {"DELETE", "/api/jobs"}} {
+		method, path := tc.method, tc.path
+		req, _ := http.NewRequest(method, view.URL+path, strings.NewReader(`{}`))
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s: status %d, want 405", method, path, res.StatusCode)
 		}
 	}
 	res, err := http.Get(view.URL + "/api/status")

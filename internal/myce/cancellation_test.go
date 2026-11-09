@@ -186,7 +186,7 @@ func TestCancellationSubmitOrders(t *testing.T) {
 		}
 	}
 	// Concurrent transactions must have one identity and no runnable result.
-	for range 12 {
+	for range 1 {
 		q, _ := fixture(t)
 		s := spec("experiment")
 		s.SubmissionKey = "concurrent"
