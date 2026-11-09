@@ -163,6 +163,45 @@ class LocalGateTests(unittest.TestCase):
                 finally:
                     for run in runs: run.release()
 
+    def test_exclusive_native_calibration_can_measure_an_unqualified_core_count(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                for platform, exclusive, priority in [('native', False, 'calibration'),
+                        ('linux', True, 'calibration'), ('native', True, 'normal')]:
+                    with self.subTest(platform=platform, exclusive=exclusive, priority=priority):
+                        with self.assertRaisesRegex(RuntimeError, 'measured local gate budget'):
+                            capacity.acquire(root, mode='full', platform=platform, cores=8,
+                                             exclusive=exclusive, priority=priority)
+                run = capacity.acquire(root, mode='full', platform='native', cores=8,
+                                       exclusive=True, priority='calibration')
+                try:
+                    self.assertTrue(run.owner['calibration'])
+                    self.assertEqual(run.owner['peak_bytes'], 14 * capacity.GIB)
+                    self.assertEqual(run.owner['memory_requirement_at_entry_bytes'], 19 * capacity.GIB)
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, mode='quick', cores=1)
+                finally: run.release()
+            config['resource_admission']['native_measured_cores'] = 8
+            with self.assertRaisesRegex(ValueError, 'exclusive calibration'):
+                capacity.resource_qualification(config)
+            evidence = root / 'resource-measurements.jsonl'
+            with evidence.open('a') as stream:
+                stream.write(json.dumps(dict(mode='full', status=0, phase='native',
+                    max_tree_rss_sum_bytes=7 * capacity.GIB,
+                    admission=dict(cores=8, exclusive=True))) + '\n')
+            config['memory_measurement']['evidence'][0]['sha256'] = hashlib.sha256(evidence.read_bytes()).hexdigest()
+            (root / 'gate-capacity.json').write_text(json.dumps(config))
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                run = capacity.acquire(root, mode='full', platform='native', cores=8)
+                try: self.assertFalse(run.owner['calibration'])
+                finally: run.release()
+                with self.assertRaisesRegex(RuntimeError, 'measured local gate budget'):
+                    capacity.acquire(root, mode='full', platform='linux', cores=8)
+
     def test_normal_pressure_memory_wait_keeps_fifo_then_starts_after_quick_releases(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

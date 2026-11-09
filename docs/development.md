@@ -374,6 +374,18 @@ non-normal pressure and sustained swap remain real stops; a single-run memory
 requirement exceeding host physical memory refuses instead of waiting forever.
 A reserved calibration full can wait for an identified comparison
 batch to exit without entering gaps between that batch's runs.
+To measure a higher native CPU count, use
+`gate-local.py full --platform native --cores 8 --exclusive --priority calibration`.
+Only this exclusive native full may exceed the existing measured count; its
+provisional memory charge scales the measured native peak by the CPU ratio,
+retains host headroom and the live guards, and labels the receipt as calibration.
+It does not change admission's enabled profile. After comparing the same source
+at the old and candidate counts, a faster healthy measurement can enable
+`resource_admission.native_measured_cores`; its digest-bound evidence must include
+an exclusive native full at that count. Linux retains its separately measured
+count. Release work finishes first; do not queue this exclusive calibration
+before an in-flight release's Mac leg has released capacity.
+
 For comparable timings, `./scripts/gate.sh full --exclusive` (or
 `gate-local.py full --exclusive`) drains all local gate work and reserves all
 local capacity until verified cleanup. A queued exclusive waiter also blocks
