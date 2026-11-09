@@ -20,33 +20,36 @@ func waitEnrollment(ctx context.Context, config myce.ServiceConfig, client myce.
 	if options.Clock == nil {
 		return myce.WaitEnrollment(ctx, config, client, options)
 	}
-	clock := &enrollmentFixtureClock{now: options.Clock.Now()}
+	source := options.Clock
+	clock := &enrollmentFixtureClock{now: source.Now()}
 	options.Clock = clock
 	pause := options.Wait
 	if pause == nil {
 		pause = waitPause
 	}
-	managerObserved := false
-	if command := options.Command; command != nil {
-		options.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			data, err := command(ctx, name, args...)
-			managerObserved = err == nil
-			return data, err
+	healthy := false
+	observed := options.HealthObserved
+	options.HealthObserved = func(valid bool) {
+		healthy = valid
+		if observed != nil {
+			observed(valid)
 		}
 	}
 	options.Wait = func(ctx context.Context, duration time.Duration) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Before valid registration reaches the real manager probe, retain the
-		// real pause so model time cannot exhaust the startup budget first.
-		if !managerObserved {
+		// Only the production verdict, after parsing and receipt PID validation,
+		// permits acceleration. Startup and unhealthy services retain real time.
+		if !healthy {
+			before := source.Now()
 			if err := pause(ctx, duration); err != nil {
 				return err
 			}
+			clock.now = clock.now.Add(source.Now().Sub(before))
+		} else {
+			clock.now = clock.now.Add(duration)
 		}
-		managerObserved = false
-		clock.now = clock.now.Add(duration)
 		return ctx.Err()
 	}
 	// Keep every observation and the original stable duration. Real queue,

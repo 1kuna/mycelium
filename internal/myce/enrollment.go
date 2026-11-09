@@ -252,6 +252,9 @@ type EnrollmentWait struct {
 	Wait      func(context.Context, time.Duration) error
 	Command   func(context.Context, string, ...string) ([]byte, error)
 	Observe   func(context.Context) (EnrollmentObservation, error)
+	// HealthObserved receives the complete readiness verdict, including the
+	// service-health parser and receipt PID fence, for an injected wait.
+	HealthObserved func(bool)
 }
 
 func enrollmentPause(ctx context.Context, d time.Duration) error {
@@ -316,6 +319,9 @@ func WaitEnrollment(ctx context.Context, c ServiceConfig, client Client, opt Enr
 			if receipt.ProcessID <= 0 || pid != strconv.Itoa(receipt.ProcessID) {
 				err = errors.New("enrollment receipt does not belong to the current service process")
 			}
+		}
+		if opt.HealthObserved != nil {
+			opt.HealthObserved(err == nil)
 		}
 		if err == nil {
 			key := receipt.Session + "/" + state + "/" + health

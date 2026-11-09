@@ -138,7 +138,7 @@ func TestEnrollmentWaitUnreachableAnd426(t *testing.T) {
 }
 
 func TestEnrollmentWaitRequiresStableManagerAndSupportsPoliteWaiting(t *testing.T) {
-	for _, mode := range []string{"ready", "polite_waiting", "start-loop", "previous-process"} {
+	for _, mode := range []string{"ready", "polite_waiting", "start-loop", "previous-process", "interrupted-health", "interrupted-pid", "changed-restarts"} {
 		t.Run(mode, func(t *testing.T) {
 			m := readyEnrollmentMachine()
 			if mode == "polite_waiting" {
@@ -151,9 +151,15 @@ func TestEnrollmentWaitRequiresStableManagerAndSupportsPoliteWaiting(t *testing.
 			clock := &fakeClock{now: time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)}
 			budget := 0
 			observations := 0
+			var verdicts []bool
+			timeout := 36 * time.Second
+			if strings.HasPrefix(mode, "interrupted-") || mode == "changed-restarts" {
+				timeout = 90 * time.Second
+			}
 			result, err := WaitEnrollment(context.Background(), ServiceConfig{State: dir, Detection: Detection{OS: "linux"}}, Client{}, EnrollmentWait{
-				Clock: clock, Timeout: 36 * time.Second,
-				Wait: func(context.Context, time.Duration) error { clock.Advance(time.Second); return nil },
+				Clock: clock, Timeout: timeout,
+				HealthObserved: func(healthy bool) { verdicts = append(verdicts, healthy) },
+				Wait:           func(context.Context, time.Duration) error { clock.Advance(time.Second); return nil },
 				Observe: func(context.Context) (EnrollmentObservation, error) {
 					return EnrollmentObservation{Machine: m, Fresh: true, StartGate: StartGateProtocol, AttemptProtocol: AttemptProtocol, Policy: HostMaintenance{Mode: "enabled", CPUBudgetCores: &budget, MemoryBudget: &HostMemoryBudget{}}}, nil
 				},
@@ -167,6 +173,24 @@ func TestEnrollmentWaitRequiresStableManagerAndSupportsPoliteWaiting(t *testing.
 						pid += observations
 						restarts = observations
 					}
+					// Build valid windows before two interruptions; each recovery
+					// must earn a fresh 30 seconds instead of retaining prior time.
+					if observations == 11 || observations == 26 {
+						if mode == "interrupted-health" {
+							return []byte(fmt.Sprintf("ActiveState=activating\nSubState=auto-restart\nMainPID=%d\nNRestarts=0\nResult=exit-code\n", pid)), nil
+						}
+						if mode == "interrupted-pid" {
+							pid++
+						}
+					}
+					if mode == "changed-restarts" {
+						if observations >= 11 {
+							restarts++
+						}
+						if observations >= 26 {
+							restarts++
+						}
+					}
 					return []byte(fmt.Sprintf("ActiveState=active\nSubState=running\nMainPID=%d\nNRestarts=%d\nResult=success\n", pid, restarts)), nil
 				},
 			})
@@ -174,8 +198,26 @@ func TestEnrollmentWaitRequiresStableManagerAndSupportsPoliteWaiting(t *testing.
 				if err == nil || result.State == "ready" {
 					t.Fatal("restarting or different manager process accepted", result.State, err)
 				}
-			} else if err != nil || result.State != mode || observations < 31 {
-				t.Fatal("stable enrollment did not finish correctly", result.State, observations, err)
+			} else {
+				wantState := "ready"
+				if mode == "polite_waiting" {
+					wantState = mode
+				}
+				if err != nil || result.State != wantState || observations < 31 {
+					t.Fatal("stable enrollment did not finish correctly", result.State, observations, err)
+				}
+				if strings.HasPrefix(mode, "interrupted-") && observations != 57 || mode == "changed-restarts" && observations != 56 {
+					t.Fatal("interrupted enrollment reused prior stable time", observations)
+				}
+			}
+			if len(verdicts) != observations {
+				t.Fatal("health verdict was not published for every observation", len(verdicts), observations)
+			}
+			for i, healthy := range verdicts {
+				want := mode != "start-loop" && mode != "previous-process" && !(strings.HasPrefix(mode, "interrupted-") && (i == 10 || i == 25))
+				if healthy != want {
+					t.Fatal("health verdict bypassed parser or receipt PID fence", i, healthy, want)
+				}
 			}
 		})
 	}
