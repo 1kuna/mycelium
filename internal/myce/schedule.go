@@ -27,6 +27,13 @@ func fitsResources(j *Job, m *Machine, memory float64) bool {
 	return fitsResourcesChecked(j, m, memory, nil)
 }
 
+// Memory sizing changes only the memory vector/envelope. These structural
+// eligibility predicates are identical before and after it.
+func memorySizingTargetFits(j *Job, m *Machine) bool {
+	return executionTargetMatches(j.Spec, m) && deviceAllowed(j, m) && dockerRuntimeFits(j, m) &&
+		(j.Spec.Needs.cpuOnly() || m.GPU != "cpu" && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)))
+}
+
 // A nil report retains short-circuit dispatch/launch evaluation. Qualification
 // collects failures from these very same checks, without a second fit path.
 func fitsResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit) bool {

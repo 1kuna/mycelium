@@ -172,6 +172,48 @@ func cpuFits(j *Job, m *Machine) bool {
 	return m.FreeCPUCores >= j.Spec.Needs.cores()
 }
 
+type batchCPUKey struct {
+	host string
+	tier int
+}
+
+// A necessary condition only: imagine every model/build, stopping attempt,
+// resumable/preemptible job and lower-tier job could release immediately. Even
+// that deliberately generous projection cannot reclaim a running, non-yielding
+// same/higher-tier command. If its residual cores cannot fit the demand, memory
+// sizing and the complete release planner cannot produce an eligible candidate.
+// No release or placement is authorized here; all successful cases still use
+// the existing planner. Unknown ledgers and capacity-refusal projections fall
+// through to that planner without this shortcut.
+func (q *Queue) batchCPUCeilingFits(j *Job, m *Machine, scans ...*placementScan) bool {
+	if !m.cpuLedger || len(j.LaunchCapacityWait) > 0 {
+		return true
+	}
+	key := batchCPUKey{hostID(m), q.priorityMatch(j.Spec).Index}
+	var cache map[batchCPUKey]int
+	if len(scans) > 0 {
+		if scans[0].unreleasableCPU == nil {
+			scans[0].unreleasableCPU = map[batchCPUKey]int{}
+		}
+		cache = scans[0].unreleasableCPU
+	}
+	blocked, found := cache[key]
+	if !found {
+		for _, r := range q.liveJobs() {
+			if r.State != "running" || r.ReleaseConfirmed || r.Spec.Resumable || r.Spec.Preemptible || cancelled(r) || priorityStop(r) != nil || q.comparePriority(r.Spec, j.Spec) > 0 {
+				continue
+			}
+			if owner := q.s.Machines[r.Machine]; owner != nil && hostID(owner) == key.host {
+				blocked += r.Spec.Needs.cores()
+			}
+		}
+		if cache != nil {
+			cache[key] = blocked
+		}
+	}
+	return j.Spec.Needs.cores() <= max(0, m.EffectiveCPUCores-blocked)
+}
+
 // Planning may credit only the exact releases chosen by the existing planner.
 // The live ledger stays charged until acknowledgement, including release debt.
 func (q *Queue) cpuAfterReleases(m *Machine, jobs []*Job, slots []*ModelSlot, preparationCores int) Machine {

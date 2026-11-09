@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 )
 
 // Nil counters mean unavailable. HostGB samples anon + kernel + shmem, excluding
@@ -271,9 +270,12 @@ func (q *Queue) memoryCandidates(j *Job, m *Machine) []*Job {
 		if candidate.State == "running" || candidate.State == "stopping" {
 			continue
 		}
-		copy := *candidate
-		q.applyLearnedNeeds(&copy)
-		candidates[i] = q.memoryCandidate(&copy, m)
+		if candidate.Spec.Program != nil {
+			copy := *candidate
+			q.applyLearnedNeeds(&copy)
+			candidate = &copy
+		}
+		candidates[i] = q.memoryCandidate(candidate, m)
 	}
 	return candidates
 }
@@ -658,25 +660,6 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 const acceptedMemoryEscalation = "exploratory (accepted prior invalidated; measured recovery)"
 
 func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEstimate {
-	estimate := q.memoryEstimateForState(j, m, checkSeed, false)
-	if estimate.host != nil {
-		return estimate
-	}
-	prior := q.memoryEstimateForState(j, m, checkSeed, true)
-	if prior.host == nil || prior.source == spentMemoryExploration {
-		return estimate
-	}
-	// Reserve observed demand plus the measured overshoot/sampling error.
-	// Capacity bounds uncertainty only; confirmed need and retry floors win.
-	prior.measuredHostGB, prior.refusal = q.recoveryMemoryBound(j, m, estimate, prior.measuredHostGB, hostMemoryPeakGB(prior.host))
-	prior.samples = 0
-	prior.escalation = true
-	prior.constrainedGB = max(prior.constrainedGB, estimate.constrainedGB)
-	prior.source = acceptedMemoryEscalation
-	return prior
-}
-
-func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation bool) memoryEstimate {
 	provenance := *j
 	// Resumption excludes recording, not using a prior complete-input estimate.
 	provenance.Attempt = 0
@@ -694,82 +677,36 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, checkSeed, escalation
 		seed.Check = true
 		key = &seed
 	}
-	var exact, sameHost, family, sameOS, other *AttemptMemoryPeak
-	var exactN, sameHostN, familyN, sameOSN, otherN, constrainedGB = 0, 0, 0, 0, 0, 0.0
-	var hostRange *MemoryPeakRange
-	var hostAcceptedAt time.Time
-	completeHostRange := true
-	gpuHost := !j.Spec.Needs.cpuOnly() && key.Target.Platform == "xpu" && !m.UnifiedMemory
-	invalidated := false
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+	estimate := q.memoryEstimateForState(j, m, key, configuration, false)
+	if estimate.host != nil {
+		return estimate
+	}
+	prior := q.memoryEstimateForState(j, m, key, configuration, true)
+	if prior.host == nil || prior.source == spentMemoryExploration {
+		return estimate
+	}
+	// Reserve observed demand plus the measured overshoot/sampling error.
+	// Capacity bounds uncertainty only; confirmed need and retry floors win.
+	prior.measuredHostGB, prior.refusal = q.recoveryMemoryBound(j, m, estimate, prior.measuredHostGB, hostMemoryPeakGB(prior.host))
+	prior.samples = 0
+	prior.escalation = true
+	prior.constrainedGB = max(prior.constrainedGB, estimate.constrainedGB)
+	prior.source = acceptedMemoryEscalation
+	return prior
+}
+
+// The ordinary and escalation passes use exactly the same recipe/target key.
+// Only their evidence differs; do not hash all identity inputs again.
+func (q *Queue) memoryEstimateForState(j *Job, m *Machine, key *ObservationKey, configuration string, escalation bool) memoryEstimate {
+	facts := q.memorySizingFacts(j, m, key, configuration, escalation)
+	exact, sameHost, family, sameOS, other := facts.exact, facts.sameHost, facts.family, facts.sameOS, facts.other
+	exactN, sameHostN, familyN, sameOSN, otherN := facts.exactN, facts.sameHostN, facts.familyN, facts.sameOSN, facts.otherN
+	constrainedGB, invalidated := facts.constrainedGB, facts.invalidated
+	hostRange, hostAcceptedAt, completeHostRange := facts.hostRange, facts.hostAcceptedAt, facts.completeHostRange
+	points := facts.points
 	layout := memoryLayout(j, m)
-	// Once corrected evidence exists, legacy XPU attribution on another
-	// comparable key (including a sibling card) must not restore the old peak.
-	correctedXPU := false
-	points := q.memoryObservations(*key, configuration)
-	if escalation {
-		priors := make([]*WorkObservation, 0, len(points))
-		for _, point := range points {
-			if point.MemoryEscalation == nil {
-				continue
-			}
-			prior := *point
-			prior.MemoryPeak, prior.MemoryRecordedAt = point.MemoryEscalation.Peak, point.MemoryEscalation.RecordedAt
-			prior.MemoryRange, prior.GPUHostRange = nil, nil
-			priors = append(priors, &prior)
-		}
-		points = priors
-	}
-	for _, point := range points {
-		if memoryIdentityUsable(*point) && !point.MemoryRecordedAt.IsZero() && point.MemoryPeak != nil && !point.MemoryPeak.constrained() && !point.MemoryPeak.PressureUnavailable && point.MemoryPeak.GPUHost != nil && point.MemoryPeak.GPUHost.SiblingAdjusted {
-			correctedXPU = true
-			break
-		}
-	}
-	for _, point := range points {
-		k, p := point.Key, point.MemoryPeak
-		if correctedXPU && k.Target.Platform == "xpu" && p != nil && p.GPUHost != nil && !p.GPUHost.SiblingAdjusted && !p.constrained() {
-			continue
-		}
-		age := q.clock.Now().Sub(point.MemoryRecordedAt)
-		if memoryIdentityUsable(*point) && p.constrained() {
-			invalidated = true
-			if p.HostGB != nil && validRate(*p.HostGB) {
-				constrainedGB = max(constrainedGB, hostMemoryPeakGB(p))
-			}
-		}
-		if !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || age < 0 || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(hostMemoryPeakGB(p)) {
-			continue
-		}
-		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {
-			continue
-		}
-		sameFamily := sameMemoryFamily(*point, *key, layout)
-		samples := max(1, point.MemorySamples)
-		if sameFamily && sameMemoryHost(k, *key, m) {
-			sameHost, sameHostN = mergeMemoryPeaks(sameHost, p), sameHostN+samples
-			if point.MemoryRecordedAt.After(hostAcceptedAt) {
-				hostAcceptedAt = point.MemoryRecordedAt
-			}
-			rangePeak := point.MemoryRange
-			if gpuHost {
-				rangePeak = point.GPUHostRange
-				_, complete := p.gpuHostPeakGB()
-				completeHostRange = completeHostRange && complete
-			}
-			hostRange = mergeMemoryPeakRanges(hostRange, rangePeak)
-			completeHostRange = completeHostRange && rangePeak.valid() && rangePeak.Samples >= 2
-		}
-		if sameFamily && k.Host == key.Host && k.Component == key.Component && k.Hardware == key.Hardware && k.Fingerprint == key.Fingerprint && k.Environment == key.Environment {
-			exact, exactN = mergeMemoryPeaks(exact, p), exactN+samples
-		} else if sameFamily {
-			family, familyN = mergeMemoryPeaks(family, p), familyN+samples
-		} else if j.Spec.Needs.cpuOnly() && k.Target.OS == key.Target.OS {
-			sameOS, sameOSN = mergeMemoryPeaks(sameOS, p), sameOSN+samples
-		} else {
-			other, otherN = mergeMemoryPeaks(other, p), otherN+samples
-		}
-	}
+	gpuHost := !j.Spec.Needs.cpuOnly() && key.Target.Platform == "xpu" && !m.UnifiedMemory
 	estimate := memoryEstimate{key: key, constrainedGB: constrainedGB}
 	switch {
 	case exact != nil:

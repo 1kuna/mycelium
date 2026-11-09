@@ -143,10 +143,7 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 	if owner == nil || owner.Session != j.Session || q.unreported[owner.ID] || owner.Gone {
 		return nil, "component evidence unavailable"
 	}
-	m := allocationMachine(owner, j.AllocatedDevices)
-	if j.Spec.Needs.cpuOnly() && owner.Devices != nil {
-		m = cpuMachineView(owner)
-	}
+	m := q.memoryObservationMachine(j, owner)
 	component, hardware := "cpu", m.ExtensionFingerprint
 	if m.GPU != "cpu" {
 		component = m.Device

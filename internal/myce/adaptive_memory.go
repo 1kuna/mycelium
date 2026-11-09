@@ -149,18 +149,14 @@ type memoryTransferResult struct {
 
 func (q *Queue) transferMemoryFactor(from, to memoryTransferTarget, device bool) (float64, bool) {
 	key := memoryTransferKey{from, to, device}
-	if c := q.memoryPlanning; c != nil {
-		if result, ok := c.transfers[key]; ok {
-			return result.factor, result.known
-		}
+	catalog := q.memoryObservationCatalog()
+	catalog.prepareDerivations(q.clock.Now())
+	cache := catalog.transfers
+	if result, ok := cache[key]; ok {
+		return result.factor, result.known
 	}
 	factor, known := q.transferMemoryFactorUncached(from, to, device)
-	if c := q.memoryPlanning; c != nil {
-		if c.transfers == nil {
-			c.transfers = map[memoryTransferKey]memoryTransferResult{}
-		}
-		c.transfers[key] = memoryTransferResult{factor, known}
-	}
+	cache[key] = memoryTransferResult{factor, known}
 	return factor, known
 }
 func (q *Queue) transferMemoryFactorUncached(from, to memoryTransferTarget, device bool) (float64, bool) {
