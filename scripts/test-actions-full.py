@@ -94,63 +94,76 @@ class ActionsFullTest(unittest.TestCase):
 
     def test_both_platforms_wait_and_verify_accepted_results(self):
         self.assertEqual(self.exercise(), (0, ['darwin', 'linux'], ['darwin', 'linux']))
-        self.assertEqual(self.exercise(bad_marker=True)[0], ci.INCOMPLETE)
+        self.assertEqual(self.exercise(bad_marker=True)[0], 1)
         with self.assertRaises(ValueError):
             ci.frozen_profile('source: {git: main}\n', SHA)
 
     def test_failure_does_not_skip_other_platform(self):
-        self.assertEqual(self.exercise(linux='failed'), (ci.INCOMPLETE, ['darwin', 'linux'], ['darwin']))
+        self.assertEqual(self.exercise(linux='failed'), (1, ['darwin', 'linux'], ['darwin']))
         self.assertEqual(self.exercise(linux='failed', status_record={
             'state': 'failed', 'attempt': 2, 'attempt_history': [
                 {'attempt': 1, 'out_of_memory': False},
                 {'attempt': 2, 'out_of_memory': True, 'reason': 'PRIVATE'},
-            ]}), (ci.INCOMPLETE, ['darwin', 'linux'], ['darwin']))
-        self.assertEqual(self.exercise(submission_failure=True), (ci.INCOMPLETE, ['linux'], ['linux']))
-        self.assertEqual(self.exercise(linux='cancelled')[0], ci.INCOMPLETE)
+            ]}), (1, ['darwin', 'linux'], ['darwin']))
+        self.assertEqual(self.exercise(submission_failure=True), (1, ['linux'], ['linux']))
+        self.assertEqual(self.exercise(linux='cancelled')[0], 1)
 
-    def test_outcome_classes_default_to_incomplete(self):
-        # These are distinct operational endings, not a blacklist of exit codes.
-        cases = [
-            ('accepted full success', 'succeeded', 0, 'gate full: exit=0\n', 0),
-            ('preparation failure', 'failed', None, None, ci.INCOMPLETE),
-            ('wrapper failure', 'failed', 1, None, ci.INCOMPLETE),
-            ('test failure without negative receipt', 'failed', 1, None, ci.INCOMPLETE),
-            ('OOM', 'failed (out of memory)', None, None, ci.INCOMPLETE),
-            ('signal', 'cancelled', None, None, ci.INCOMPLETE),
-            ('timeout', 'timed out', None, None, ci.INCOMPLETE),
-            ('unknown', 'unknown', None, None, ci.INCOMPLETE),
-            ('missing receipt', 'succeeded', 0, None, ci.INCOMPLETE),
-            ('invalid receipt', 'succeeded', 0, 'gate full: exit=1\n', ci.INCOMPLETE),
-            ('wrong mode', 'succeeded', 0, 'gate quick: exit=0\n', ci.INCOMPLETE),
-            ('unaccepted result', 'succeeded', 69, 'gate full: exit=0\n', ci.INCOMPLETE),
-            ('stale success with failed job', 'failed', 0, 'gate full: exit=0\n', ci.INCOMPLETE),
-        ]
-        for name, state, code, marker, expected in cases:
-            with self.subTest(outcome=name):
-                self.assertEqual(ci.verified_outcome(state, code, marker), expected)
-
-    def test_pre_gate_download_failure_has_no_suite_verdict(self):
-        # Execute the actual wrapper at the reported boundary: download fails
-        # before gate.sh. The terminal failed job must not become durable proof.
+    def test_delayed_B_event_tests_current_C_tip_once_and_cleans_C(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'scripts').mkdir()
-            (root / 'scripts/gate.sh').write_text('#!/bin/bash\ntouch gate-was-run\n')
-            (root / 'scripts/gate.sh').chmod(0o700)
-            for tool in ('git', 'uv'):
-                stub = root / tool
-                stub.write_text('#!/bin/bash\nexit 0\n')
-                stub.chmod(0o700)
-            go = root / 'go'
-            go.write_text('#!/bin/bash\nif [[ $1 == env ]]; then echo go1.25.6; else exit 69; fi\n')
-            go.chmod(0o700)
-            result = subprocess.run(['bash', str(ROOT / 'scripts/gate-profile.sh')], cwd=root,
-                                    env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH']),
-                                    capture_output=True, text=True)
-            self.assertEqual(result.returncode, 69)
-            self.assertFalse((root / 'gate-was-run').exists())
-            self.assertFalse((root / 'gate-result.txt').exists())
-            self.assertEqual(self.exercise(linux='failed')[0], ci.INCOMPLETE)
+            root = Path(directory) / 'repo'
+            root.mkdir()
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(root), *args], text=True,
+                                               stderr=subprocess.DEVNULL).strip()
+            git('init', '-q')
+            git('config', 'user.name', 'Fixture')
+            git('config', 'user.email', 'fixture@example.invalid')
+            adapter = root / '.mycelium/adapter.yaml'
+            adapter.parent.mkdir()
+            commits = []
+            for letter in ('A', 'B', 'C'):
+                adapter.write_text('adapter: ' + letter)
+                git('add', '.mycelium/adapter.yaml')
+                git('commit', '-qm', letter)
+                commits.append(git('rev-parse', 'HEAD'))
+            remote = Path(directory) / 'origin.git'
+            git('clone', '--bare', '--quiet', str(root), str(remote))
+            git('remote', 'add', 'origin', str(remote))
+            git('push', '--quiet', 'origin', 'HEAD:refs/heads/main')
+            # The event checkout is B, while authoritative main is already C.
+            git('checkout', '--quiet', '--detach', commits[1])
+            env = dict(GITHUB_SHA=commits[1], GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1',
+                       RUNNER_TEMP=directory, GITHUB_STEP_SUMMARY=str(Path(directory) / 'summary'))
+            executed = []
+            def run(checkout, sha, scratch, owner):
+                executed.append(sha)
+                self.assertEqual(sha, commits[2])
+                self.assertEqual((checkout / '.mycelium/adapter.yaml').read_text(), 'adapter: C')
+                self.assertEqual(ci.active_sha(owner, ''), commits[2])
+                # Later main advances are evidence for a later workflow, not a loop.
+                git('checkout', '--quiet', '--detach', commits[2])
+                adapter.write_text('adapter: D')
+                git('add', '.mycelium/adapter.yaml')
+                git('commit', '-qm', 'D')
+                git('push', '--quiet', 'origin', 'HEAD:refs/heads/main')
+                return 0
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                with patch.dict(os.environ, env), patch.object(ci.sys, 'argv', ['actions-full.py']), \
+                        patch.object(ci, 'run', run), patch.object(ci, 'cleanup', return_value=True) as cleanup, \
+                        redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(ci.main(), 0)
+                    cleanup.assert_called_once_with(commits[2], '123:1')
+                    cleanup.reset_mock()
+                    with patch.object(ci.sys, 'argv', ['actions-full.py', '--cleanup-only']):
+                        self.assertEqual(ci.main(), 0)
+                    cleanup.assert_called_once_with(commits[2], '123:1')
+                self.assertEqual(executed, [commits[2]])
+                self.assertIn('Main full source: ' + commits[2], output.getvalue())
+                self.assertIn(commits[2], Path(env['GITHUB_STEP_SUMMARY']).read_text())
+            finally:
+                os.chdir(previous)
 
     def test_oom_requires_current_attempt_and_readable_status(self):
         for output, code in [
@@ -174,7 +187,7 @@ class ActionsFullTest(unittest.TestCase):
         self.assertEqual(ci.submission_failure(reply),
                          'infrastructure failure: no qualified target; inspect private receipt for eligibility requirements')
         self.assertEqual(self.exercise(submission_failure=True, refusal=refusal),
-                         (ci.INCOMPLETE, ['linux'], ['linux']))
+                         (1, ['linux'], ['linux']))
         refusal['refusal_reason'] = 'PRIVATE unsupported environment or host path'
         self.assertEqual(ci.submission_failure(subprocess.CompletedProcess([], 78, json.dumps(refusal))),
                          'infrastructure failure: no qualified target; inspect private receipt for eligibility requirements')
@@ -243,7 +256,7 @@ else: sys.exit(2)
                     script = str(ROOT / 'scripts/actions-full.py')
                     wrapper = ("import importlib.util; "
                                f"s=importlib.util.spec_from_file_location('ci', {script!r}); "
-                               "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.run_pending=m.run; "
+                               "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.run_current=m.run; "
                                f"raise SystemExit(m.main(work_seconds={1 if signum is None else 10}))")
                     process = subprocess.Popen([sys.executable, '-c', wrapper], cwd=ROOT, env=env,
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

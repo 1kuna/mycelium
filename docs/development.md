@@ -460,159 +460,36 @@ with `python3 scripts/test-gate-budget.py`.
 
 ## Automatic main full gates
 
-The [`main-full` workflow](../.github/workflows/main-full.yml) is eligible only on
-pushes to `main` and explicit named-tree recovery dispatches on `main`; there
-are no PR or schedule triggers. It uses
-`[self-hosted, mycelium-ci]`, never GitHub-hosted runners. Its workflow/ref
-concurrency group keeps the running member and replaces an older pending member
-with the latest queued member (`cancel-in-progress: false`). Started workflows
-must finish: runner cancellation cleanup previously killed a shared helper
+The [`main-full` workflow](../.github/workflows/main-full.yml) provides
+**coalesced, optional evidence of the current main tip**. It runs only on pushes
+to `main`, on `[self-hosted, mycelium-ci]`; there are no PR, manual-dispatch or
+schedule triggers. Its workflow/ref concurrency group keeps the running member
+and replaces an older pending member with the newest pending member
+(`cancel-in-progress: false`). Started runs are never cancelled to reduce backlog:
+runner cancellation cleanup previously killed shared helpers
 ([#919](https://github.com/1kuna/mycelium/issues/919),
-[#1159](https://github.com/1kuna/mycelium/issues/1159)). GitHub does not guarantee
-dispatch order. See [GitHub's concurrency contract](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
-This change leaves the workflow's deliberately disabled server-side state alone;
-merging this file does not authorize enabling it or triggering a test run.
+[#1159](https://github.com/1kuna/mycelium/issues/1159)). See
+[GitHub's concurrency contract](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
+The deliberately disabled server-side workflow remains disabled; this change
+does not authorize enabling it or triggering a run.
 
-A retained run resolves GitHub's authoritative `refs/heads/main`, fetches that
-immutable commit, and checks every first-parent main commit from the merge
-introducing `scripts/actions-proof.py` through that tip. `GITHUB_SHA` identifies
-the triggering event, not the coverage boundary. For example, if A runs, C goes
-pending, and delayed B replaces C, B's workflow still covers B and C. After each
-batch it resolves main again and covers any new commits before exiting. This
-preserves every distinct landed tree even when GitHub reorders events.
-
-Uncovered trees receive both existing full gates. Successful CI coverage records
-avoid repeating a previously tested tree, including on reruns. Every other
-outcome is `error`: incomplete coverage, eligible for one automatic recovery
-attempt after the initial attempt. After that, the tree stays **UNPROVEN** and
-requires explicit named-tree recovery authorization. A terminal failed job does
-not prove that the gate ran; the
-current receipt format cannot establish a completed failing suite. An incomplete
-outcome on either platform prevents successful tree proof. A workflow with an
-incomplete tree fails even if newer trees succeed.
-
-An explicit retry executes each distinct tree at most once per batch. Identical
-trees reuse that batch's success or incompleteness before
-consulting old commit statuses. This prevents a failed C retry from running both
-fulls again for a later identical-tree commit. An incomplete outcome is never
-retried repeatedly within that batch. Recovery across workflows follows the
-persistent bound below. Interrupted work or failed status publication can need
-recovery; this is deduplication of recorded results, not an exactly-once execution
-transaction across GitHub and Mycelium. Pre-protocol history is not retroactively
-tested. Pre-existing runs outside the concurrency group are not cancelled.
-
-### Bounded recovery
-
-The round-4 review brief (2026-11-09), received by the CI implementation
-worker, requires one automatic recovery retry per tree after its initial attempt.
-This bounds repeated compute on persistently failing trees: N such trees receive
-at most N extra two-platform attempts across any number of later automatic
-workflows. The cost is that an outage can leave coverage unproven until someone
-explicitly authorizes recovery; exhaustion is never a successful proof.
-
-`mycelium/main-full-attempts-v1` stores `tree:TREE_ID attempts:COUNT owner:RUN:ATTEMPT`
-on the **first landed main commit with that tree**. Identical later commits share
-this counter. The workflow/ref concurrency group serializes push and dispatch
-reservations. Before either platform submission, the submitter persists an
-`error` status reserving the next count. An interrupted attempt or uncertain
-status reply consumes that reservation conservatively; it is not refunded.
-An unavailable or malformed counter fails closed without submissions. No new
-state store is used; this channel has the same trusted-writer assumptions as
-proof statuses. Re-entering the same owner cannot reserve another attempt.
-After verified success and cleanup, the counter status becomes `success` with
-the same count, so it does not leave a proven commit red. This counter context
-is never read as proof; coverage still requires the separate verified proof status.
-
-Counts 1 and 2 permit the initial automatic attempt and its one recovery retry.
-Once exhausted, later main runs report **UNPROVEN**, publish `error`, submit no
-more work for that tree, and fail even if every newer tree succeeds. They still
-process newer uncovered trees. A workflow rerun does not reset the counter or
-provide recovery authorization. Missing proof remains visible; no failed job
-state or exhausted budget can become proof.
-
-After diagnosing the failure and reconciling the previous attempt's cleanup,
-an authorized maintainer may request **one** further attempt for a full, lowercase
-40-character tree ID already landed on main:
-
-```sh
-gh workflow run main-full.yml --repo 1kuna/mycelium --ref main \
-  -f recovery_tree=TREE_ID
-```
-
-The required `workflow_dispatch` input is `recovery_tree`. This dispatch processes
-only that named tree (including identical landed commits); it does not retry other
-unproven trees or reset any counter. The counter increases even for an authorized
-attempt, so later automatic runs remain bounded. A dispatch rerun is rejected;
-another attempt requires a fresh named-tree dispatch. Already proven trees reuse
-success without another submission. A tree absent from main, an invalid ID or
-an input supplied outside a dispatch is rejected. A successful recovery dispatch
-proves only its named tree, not the remaining backlog. A pending dispatch can be
-replaced by the shared concurrency group; an unexecuted dispatch grants no durable
-budget. Redispatch explicitly if it is still needed.
-
-The workflow is intentionally disabled. This documented interface does not
-authorize enabling or invoking it as part of this change.
-
-### Frozen CI source and inputs
-
-For each uncovered commit, the submitter creates a private detached checkout of
-that exact commit. Profiles, relative inputs (including `.mycelium/adapter.yaml`),
-and suite helpers all come from that checkout. Both submissions run with that
-checkout as their working directory, while generated profiles and results live
-outside it. Before submission and before status publication, CI verifies the
-checkout's commit/tree IDs and unchanged tracked bytes/modes. It publishes a
-success record only after both accepted result markers, those source checks and
-owned cleanup pass. It never pairs historical profiles with the event checkout's
-newer adapter or helpers.
-
-The `mycelium/main-full-tree-v4` commit status records `tree:TREE_ID` and its
-public Actions run URL, with `success` or recoverable `error`.
-Classification defaults to `error`: preparation errors (including `go mod download`
-before the gate), wrapper exits, missing/invalid receipts, failed jobs, signals,
-timeouts and unknown outcomes cannot prove a completed full suite. Only both
-accepted success markers, frozen source checks and confirmed owned cleanup permit
-`success`. The existing gate format provides no negative receipt proving source
-identity, completed failing tests and cleanup, so **even genuine test failures
-remain unproven and may run again within the recovery contract**. No `failure` status
-is published or reused. Failure reuse is deferred until a follow-up on #1149 can
-verify that evidence, rather than treating a job exit as a verdict. Within one
-batch each distinct tree is still attempted at most once, regardless of outcome.
-Only v4 is read: v1 had unsound source/instrumentation provenance, and v2/v3 could
-mislabel incomplete work as a completed failure and suppress recovery. Their
-records cannot suppress recovery. A different tree or missing successful CI
-record requires full proof; exhausted trees remain unproven until authorized
-recovery succeeds. The newest status in the context is authoritative. Logs and the step
-summary name each tested/skipped tree and the source of any reused CI result.
-
-**Trust rests on upstream GitHub commit-status writers: maintainers and authorized
-tokens. This is not spoof-resistant attestation.** Anyone with status-write
-authority can publish an apparently successful status; the consumer cannot prove
-that writer actually ran the suite. The built-in CI token receives `statuses:
-write`; Mycelium children never inherit it. No personal token is installed on
-runners. API lookup/fetch failure fails CI without claiming coverage. History
-lookup cost grows with commits since activation. Multiple trees share the existing
-six-hour Actions budget; completed records survive a timeout for later recovery.
-
-### Deferred local-full reuse
+At submitter startup, each retained run fetches authoritative `refs/heads/main`
+once and freezes that commit for both platform gates. GitHub does not guarantee
+event order: if A runs, C goes pending, then a delayed B event replaces C, the
+retained run tests current tip C rather than event B. The summary records the
+actual tested SHA separately from the triggering event SHA. Later main advances
+belong to later workflows; the active run does not chase them.
 
 Zach, 2026-11-09, relayed by the orchestrator and received by the CI implementation
 worker: “yes skip CI runs i think. we should be running the tests where it makes
-sense not repetitive nonsense that just wastes compute for no gain.” The desired
-next step is to skip post-merge CI when the landed tree matches a locally proven
-PR tree, but this PR deliberately ships coalescing and CI backlog coverage first.
-It does not accept or publish local receipt proof.
+sense not repetitive nonsense that just wastes compute for no gain.” The
+orchestrator's scope decision after review round 5 withdraws the review-imposed
+requirement to prove every intermediate main tree in CI. **Each PR's pre-merge
+exact-head local proof is the per-PR guarantee.** Main CI is optional additional
+evidence; coalesced intermediate commits need no separate main run. A failed or
+missing optional main run does not replace or waive pre-merge proof.
 
-Local reuse must be a follow-up stacked on #1149's actual receipt format. That
-runner freezes source identity and then overlays current helpers, including
-`gate-leg.sh` and `gate-measure.py`. A shared aggregate instrumentation hash is
-insufficient to establish an approved normal full or to bind every suite-affecting
-helper to the tested tree. The follow-up must record and verify approved harness
-provenance, bind each suite-affecting helper's bytes/mode to that tree, and reject
-unknown, custom or mismatched instrumentation. Until that is reviewed and proven,
-local results and old v1 statuses cannot suppress CI. The removed local publisher
-and its fabricated-hash acceptance test are not retained as valid proof.
-
-Historical runner-capacity evidence (before tree deduplication): the change in [#751](https://github.com/1kuna/mycelium/issues/751)
+Historical runner-capacity evidence (before coalescing): the change in [#751](https://github.com/1kuna/mycelium/issues/751)
 adds two lightweight submitter-role runner services to the fleet pool.
 The T3 host and hosts in a production hold are
 excluded from new runner placement. Both added services use the same repository
@@ -633,20 +510,19 @@ drain. The target is roughly an hour per new merge after that backlog drains.
 
 That historical estimate assumed overlapping main runs. The concurrency group
 now admits one workflow at a time; existing runners are retained without service
-changes. Their availability is not a reason to repeat successful tree proof.
-The submitter still waits cheaply through `myce wait` and verifies accepted
-results rather than reporting success immediately after submission.
+changes. That earlier throughput estimate does not describe the serialized
+workflow. The submitter still waits cheaply through `myce wait` and verifies
+accepted results rather than reporting success immediately after submission.
 
 ### Local merge proof
 
 **Before merging, require the PR's exact-head local full gate and independent
 review.** Darwin runs natively and Linux in the local VM under #1149's local
 runner. A passing exact-head quick suffices for docs-only changes; it does not
-qualify for identical-tree full reuse. Fleet gates and automatic main runs are
-optional additional evidence; their backlog or availability must not hold local
+change the full requirement for code changes. Fleet gates and automatic main
+runs are optional additional evidence; their backlog or availability must not hold local
 iteration or an otherwise proven merge. Record the source SHA and actual verdict.
-CI coverage records are separate from independent review and do not waive it.
-Local-full reuse remains deferred as described above.
+Optional CI results do not waive independent review.
 
 For an exception, apply the [evidence-based acceptance proposal](DECISIONS.md#current-rulings):
 identify the relevant baseline's same failure, the exact candidate result,
@@ -666,32 +542,20 @@ gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main \
   --status completed --limit 1 --json headSha,status,conclusion,url
 ```
 
-Queued or running main runs do not block a merge, and completed proof need not
-match current main: shared fleet gates can lag behind frequent merges.
-The next merging worker inspects a red completed run's platform summaries,
-Mycelium job IDs and logs, then fixes its failures forward before unrelated
-merges. A reviewed fix with its own passing gate may merge while main is red;
-if the fix is already merged, record the failing test and the merged fix as
-resolution evidence instead of waiting for the backlog to reach it.
-A replaced pending run is covered only when a retained workflow records proof
-for its tree. Missing proof is not a pass. Inspect cancelled runs for interrupted
-proof as well; never cancel a started run to reduce backlog.
+Queued or running main runs do not block a merge. Inspect optional results for
+useful failure evidence and fix regressions forward; nobody waits on, polls or
+wakes for main CI. Coalescing means an intermediate merge may have no main run.
+Inspect the summary's actual tested SHA, since GitHub associates the workflow
+check with the triggering event even when a newer tip was selected.
 
-Source: the maintainer's global CI rule, relayed in the 2026-11-04 merge-guidance
-assignment. The November 9 maintainer instruction above supersedes the prior
-per-merge full requirement. CI stays main-only on self-hosted runners; agents do
-not wait on, poll or wake for main CI. Automatic proof covers distinct unproven
-main trees and reuses matching successful fulls. Use the run's job summary to
-inspect both platform outcomes and Mycelium job IDs.
-The workflow check reports pass/fail; the tree status records success/error using
-the scoped built-in token; no personal access token is needed.
+The workflow's own check reports success/failure. No commit-status writer or
+personal access token is needed.
 
 [`scripts/actions-full.py`](../scripts/actions-full.py) freezes the corresponding
-platform full-gate profile to each uncovered main SHA and submits it once for
+platform full-gate profile to the selected main tip and submits it once for
 Darwin arm64 and once for Linux, eligible on either amd64 or arm64. CI preserves
-the profile's
-targets, resources, environment, output contract and check. Linux is one chosen
-target per unproven tree, not an architecture matrix. The temporary architecture
+the profile's targets, resources, environment, output contract and check. Linux is one chosen
+target per run, not an architecture matrix. The temporary architecture
 exclusion from [#527](https://github.com/1kuna/mycelium/issues/527) is removed after
 the bounded native gate-like I/O measurement described in
 [queue disk contention](operations.md#queue-disk-contention-527). The ordinary
@@ -702,8 +566,10 @@ There are no host pins; Mycelium chooses each worker and
 provides the existing `mycelium-gate` environment. Both submissions happen
 before `myce wait` waits for all jobs, even if one fails. Successful jobs also
 require `myce result` to download the accepted, verified `gate-result.txt` marker.
-The runner freezes source/inputs, waits and verifies small accepted results;
-full suites never run on it directly. A profile exit 78 with `no_qualified_target`
+A private detached checkout supplies the selected commit's profiles, relative
+inputs and helpers together; its commit/tree and tracked bytes/modes are checked
+before and after submission. The runner freezes source/inputs, waits and verifies
+small accepted results; full suites never run on it directly. A profile exit 78 with `no_qualified_target`
 is a qualification/total-allowance refusal, not a busy-worker indication. Busy
 qualified hosts accept queued jobs and `myce wait` waits for them. CI reports
 host-memory need and allowance numerically for that refusal; other qualification
@@ -712,11 +578,10 @@ or weaken the learned memory envelope. Darwin proves the native CGO target; Linu
 proves its native builds and full race/dev suite.
 
 The deterministic `main-ci:SHA:OS:RUN_ID:RUN_ATTEMPT` keys identify this
-workflow attempt's two jobs. Repeating a submission within that attempt adopts
-the same job, including after an uncertain submit. A workflow rerun uses fresh
+workflow attempt's two jobs for the selected tip. Repeating a submission within
+that attempt adopts the same job, including after an uncertain submit. A workflow rerun uses fresh
 attempt keys: an older attempt's cleanup cannot cancel its replacement, and a
-cancelled key cannot poison a rerun. An outcome without verified successful proof
-remains eligible for recovery within the persistent attempt budget.
+cancelled key cannot poison a rerun. There is no automatic retry loop.
 The CLI handles immutable source uploads, idempotent submission and reconnects;
 there is no custom watcher, cursor or status publisher.
 
@@ -744,7 +609,7 @@ prevent confirmation; repeat `scripts/actions-full.py --cleanup-only` with the
 original SHA, run ID and attempt environment after authority is restored.
 Only never-started concurrency-pending workflows are replaced. The active
 commit is persisted before each submission, so the final cleanup step fences
-the exact active backlog commit rather than just the workflow's original SHA.
+the selected tip rather than the workflow's original event SHA.
 
 Inspect failures privately with `myce logs JOB_ID`; public logs and
 the summary contain only job IDs, fixed states and exit codes, never raw CLI
@@ -755,10 +620,8 @@ submitted suite reporting `failed`. Its platform row says `infrastructure failur
 and the workflow emits a `CI infrastructure failure` error annotation: that
 platform has no verified suite result. Submission may have been accepted despite
 a lost reply. Resolve the infrastructure problem privately, then
-repeat cleanup for the original attempt. A later main workflow may spend the
-one automatic recovery retry, including for jobs reported as failed. After
-exhaustion, use a fresh named-tree recovery dispatch with new attempt keys. A job failure alone
-does not establish that the suite ran.
+repeat cleanup for the original attempt. Optional CI failures are reported on
+that run; later pushes select main anew rather than retrying historical failures.
 
 ### Public repository and private authority
 
@@ -771,8 +634,7 @@ contributors** (`approval_policy: all_external_contributors`). Keep that setting
 when changing workflows. Repository administrators and main writers remain
 trusted: review any workflow or submitter change before merging it.
 
-The workflow grants `contents: read` and `statuses: write`
-to the built-in `GITHUB_TOKEN` and
+The workflow grants only `contents: read` to the built-in `GITHUB_TOKEN` and
 pins checkout to an immutable action SHA, with `persist-credentials: false`.
 The service environment contains **no fleet token**. `myce` reads the host's
 existing private installed worker/queue configuration and authority files;
@@ -823,7 +685,7 @@ policy or enable CI admission on such a runner. Use an authorized Linux fleet
 host or leave approval to the host owner. Repository registration and an `online`
 runner alone do not prove queue reachability.
 
-Frozen historical checkouts, generated profiles and result markers live in job
+The frozen tip checkout, generated profiles and result markers live in job
 temp and are deleted after owned work settles. Only small CLI recovery receipts
 from commands outside those temporary checkouts remain in the event checkout;
 GitHub terminates job-owned observers at job completion, then the next checkout
@@ -831,11 +693,10 @@ cleans old workspace state. Source-upload staging is removed by the CLI after
 confirmed submission. Runner diagnostic logs stay private; do not upload them
 as public artifacts. Use normal queue artifact retention for fleet outputs.
 
-Validate offline with `python3 scripts/test-actions-full.py`,
-`python3 scripts/test-actions-proof.py` and the quick gate. After independent
+Validate offline with `python3 scripts/test-actions-full.py` and the quick gate. After independent
 review and merge, verify the push-to-main run
 uses the registered self-hosted runner and reports both accepted platform
-results or identical-tree evidence before calling activation complete. No full
+results and the actual tested tip SHA before calling activation complete. No full
 suite runs on a PR push.
 
 ## Native acceptance checklist

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Lightweight Actions submitter; full suites run through Mycelium only."""
 import json
-import importlib.util
 import os
 from pathlib import Path
 import re
@@ -11,14 +10,8 @@ import sys
 import tempfile
 import time
 
-_spec = importlib.util.spec_from_file_location('actions_proof', Path(__file__).with_name('actions-proof.py'))
-proof = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(proof)
-
 PLATFORMS = ('darwin', 'linux')
 TERMINAL = {'succeeded', 'failed', 'cancelled'}
-# No job state or wrapper exit is a completed suite verdict.
-INCOMPLETE = 2
 # GitHub's six-hour job limit is external, not a gate performance deadline.
 # Reserve five minutes for cleanup and five for Actions/checkout overhead.
 WORK_SECONDS = 350 * 60
@@ -101,21 +94,9 @@ def failure_state(job):
     return 'failed'
 
 
-def verified_outcome(state, result_code=None, marker=None):
-    """Default to incomplete; only an accepted full-gate marker proves success.
-
-    The current gate emits no negative receipt proving source identity, a
-    completed suite and cleanup. Even a real test failure therefore remains
-    recoverable. Do not infer a suite verdict from terminal job/wrapper states.
-    """
-    if state == 'succeeded' and result_code == 0 and marker == 'gate full: exit=0\n':
-        return 0
-    return INCOMPLETE
-
-
 def run(root, sha, scratch, owner):
     jobs, states, refusals = {}, {}, {}
-    incomplete, wait_error = False, False
+    failed, wait_error = False, False
     # Submit both before waiting. An error on one platform must not skip the other.
     for platform in PLATFORMS:
         name = 'gate-full-darwin' if platform == 'darwin' else 'gate-full'
@@ -133,9 +114,9 @@ def run(root, sha, scratch, owner):
         except (ValueError, KeyError, TypeError):
             refusals[platform] = submission_failure(reply)
             print(f'{platform}: {refusals[platform]}', flush=True)
-            incomplete = True
+            failed = True
         if reply.returncode:
-            incomplete = True
+            failed = True
 
     if jobs:
         # The standard CLI waits for every job, including after one fails, and
@@ -153,7 +134,6 @@ def run(root, sha, scratch, owner):
         state = states.get(job, refusals.get(platform, 'unavailable'))
         if state == 'failed':
             state = failure_state(job)
-        outcome = INCOMPLETE
         if state == 'succeeded':
             destination = scratch / f'{platform}-result'
             # myce result owns transient recovery through Client.RetryTransient:
@@ -161,11 +141,9 @@ def run(root, sha, scratch, owner):
             # Retain one accepted-result/marker check here, not a second backoff.
             reply = command('result', job, '--out', str(destination))
             marker = destination / 'gate-result.txt'
-            outcome = verified_outcome(state, reply.returncode,
-                                       marker.read_text() if marker.is_file() else None)
-            if outcome == INCOMPLETE:
+            if reply.returncode or not marker.is_file() or marker.read_text() != 'gate full: exit=0\n':
                 state = 'result verification failed'
-        incomplete = incomplete or outcome == INCOMPLETE
+        failed = failed or state != 'succeeded'
         print(f'{platform}: {state}; job {job or "none"}', flush=True)
         rows.append(f'| {platform} | {state} | {job or "none"} |')
     summary = os.environ.get('GITHUB_STEP_SUMMARY')
@@ -175,10 +153,8 @@ def run(root, sha, scratch, owner):
             stream.write('\n'.join(rows) + '\n')
     if refusals:
         print('::error title=CI infrastructure failure::At least one platform submission is unconfirmed; '
-              'no suite result was verified for that platform. Rerun this workflow to recover '
-              'the merge with fresh attempt keys.', flush=True)
-    # Observation errors cannot establish coverage, even with a partial receipt.
-    return INCOMPLETE if incomplete or wait_error else 0
+              'no suite result was verified for that platform.', flush=True)
+    return int(failed or wait_error)
 
 
 def active_file(owner):
@@ -196,123 +172,42 @@ def active_sha(owner, fallback):
 
 
 def verify_checkout(root, sha, tree):
-    """Bind profile, relative inputs and suite helpers to the historical tree."""
+    """Bind profile, relative inputs and suite helpers to the selected main commit."""
     identity = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD', 'HEAD^{tree}'],
                                        text=True).splitlines()
     if identity != [sha, tree]:
-        raise ValueError('historical checkout identity changed')
+        raise ValueError('selected checkout identity changed')
     subprocess.run(['git', '-C', str(root), '-c', 'core.fileMode=true', 'diff', '--exit-code', '--quiet', 'HEAD'], check=True)
 
 
-def recovery_tree():
-    """A fresh main dispatch grants one attempt for exactly one landed tree."""
-    tree = os.environ.get('MYCELIUM_RECOVERY_TREE', '')
-    if os.environ.get('GITHUB_EVENT_NAME', 'push') == 'workflow_dispatch':
-        if not re.fullmatch('[0-9a-f]{40}', tree):
-            raise ValueError('manual recovery requires a full lowercase tree ID')
-        if os.environ['GITHUB_RUN_ATTEMPT'] != '1':
-            raise ValueError('manual recovery reruns need a new named-tree dispatch')
-        return tree
-    if tree:
-        raise ValueError('recovery authorization requires workflow_dispatch')
-    return None
-
-
-def run_pending(root, sha, scratch, owner):
-    api = proof.GitHub()
-    known, processed, outcomes, anchors = {}, set(), {}, {}
-    authorized = recovery_tree()
-    failed = False
-    evidence = f'https://github.com/{proof.REPOSITORY}/actions/runs/{owner.split(":")[0]}'
-    # GITHUB_SHA can be a delayed B event after C replaced it in the pending
-    # slot. Reconcile main itself, never the event's obsolete upper bound.
-    tip = proof.fetch_main(api)
-    if authorized and authorized not in {proof.git('rev-parse', commit + '^{tree}')
-                                        for commit in proof.main_history(tip)}:
-        raise ValueError('recovery tree has not landed on main')
-    while True:
-        for candidate in proof.main_history(tip):
-            if candidate in processed:
-                continue
-            processed.add(candidate)
-            tree = proof.git('rev-parse', candidate + '^{tree}')
-            anchor = anchors.setdefault(tree, candidate)
-            if authorized and tree != authorized:
-                continue
-            # Current-batch outcomes take precedence over durable history. An
-            # explicit retry is once per distinct tree, even when it fails.
-            if tree in outcomes:
-                recorded = outcomes[tree]
-                proof.report(candidate, tree, 'REUSE: this batch already attempted tree; outcome ' + recorded['state'],
-                             recorded['target_url'])
-                api.publish(candidate, tree, recorded['target_url'], recorded['state'])
-                failed = failed or recorded['state'] != 'success'
-                continue
-            recorded = api.status(candidate, tree)
-            if recorded is None:
-                recorded = known.get(tree)
-            if recorded and recorded['state'] == 'success':
-                proof.report(candidate, tree, 'SKIP: identical tree already passed Darwin and Linux full',
-                             recorded['target_url'])
-                # Record identical-tree coverage on each landed main commit.
-                if recorded.get('source_sha') != candidate:
-                    api.publish(candidate, tree, recorded['target_url'])
-                known[tree] = recorded
-                continue
-            # History is oldest first, so identical trees always share the same
-            # first landed commit's persistent budget, across workflow invocations.
-            count, previous_owner = api.attempts(anchor, tree)
-            if previous_owner == owner or (count >= 2 and not authorized):
-                proof.report(candidate, tree,
-                             'UNPROVEN: attempt budget exhausted or already reserved; '
-                             'named-tree manual recovery required', evidence)
-                api.publish(candidate, tree, evidence, 'error')
-                outcomes[tree] = {'state': 'error', 'target_url': evidence, 'source_sha': candidate}
-                failed = True
-                continue
-            proof.report(candidate, tree, 'RUN: no matching successful full-tree proof')
-            # Persist before submission: final Actions cleanup must fence this exact
-            # earlier commit too if the workflow was coalesced across several merges.
-            path = active_file(owner)
-            pending = path.with_suffix('.tmp')
-            pending.write_text(json.dumps({'sha': candidate}))
-            pending.replace(path)
-            destination = scratch / candidate
-            destination.mkdir()
-            checkout = destination / 'source'
-            subprocess.run(['git', 'clone', '--shared', '--no-checkout', '--quiet',
-                            str(root), str(checkout)], check=True,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            subprocess.run(['git', '-C', str(checkout), 'checkout', '--quiet', '--detach', candidate],
-                           check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            verify_checkout(checkout, candidate, tree)
-            api.record_attempt(anchor, tree, count + 1, owner, evidence)
-            result = run(checkout, candidate, destination, owner)
-            verify_checkout(checkout, candidate, tree)
-            cleaned = cleanup(candidate, owner)
-            if not cleaned:
-                return 1
-            # No verified negative receipt exists yet: every non-success is
-            # recoverable, including terminal command/test failures.
-            state = 'success' if result == 0 else 'error'
-            if state == 'success':
-                api.record_attempt(anchor, tree, count + 1, owner, evidence, state='success')
-            api.publish(candidate, tree, evidence, state)
-            recorded = {'state': state, 'target_url': evidence, 'source_sha': candidate}
-            outcomes[tree] = recorded
-            known[tree] = recorded
-            failed = failed or bool(result)
-            if state == 'error':
-                label = ('UNPROVEN: automatic budget exhausted; named-tree manual recovery required'
-                         if count + 1 >= 2 else 'INCOMPLETE: one automatic recovery attempt remains')
-            else:
-                label = 'full success'
-            proof.report(candidate, tree, label, evidence)
-
-        current = proof.fetch_main(api)
-        if current == tip:
-            return int(failed)
-        tip = current
+def run_current(root, event_sha, scratch, owner):
+    # A delayed B event can replace pending C. Fetch main once at startup,
+    # rather than testing the event SHA or walking intermediate commits.
+    subprocess.run(['git', '-C', str(root), 'fetch', '--no-tags', 'origin', 'refs/heads/main'],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    sha = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'FETCH_HEAD^{commit}'], text=True).strip()
+    if not re.fullmatch('[0-9a-f]{40}', sha):
+        raise ValueError('invalid main tip')
+    line = f'Main full source: {sha} (triggering event: {event_sha})'
+    print(line, flush=True)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+            stream.write(line + '\n\n')
+    # The final cleanup step must use the selected tip's keys, not the event SHA.
+    path = active_file(owner)
+    pending = path.with_suffix('.tmp')
+    pending.write_text(json.dumps({'sha': sha}))
+    pending.replace(path)
+    checkout = scratch / 'source'
+    subprocess.run(['git', 'clone', '--shared', '--no-checkout', '--quiet', str(root), str(checkout)],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(['git', '-C', str(checkout), 'checkout', '--quiet', '--detach', sha],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    tree = subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+    verify_checkout(checkout, sha, tree)
+    status = run(checkout, sha, scratch, owner)
+    verify_checkout(checkout, sha, tree)
+    return status
 
 
 def main(work_seconds=WORK_SECONDS):
@@ -337,9 +232,9 @@ def main(work_seconds=WORK_SECONDS):
         deadline = float(os.environ.get('MYCELIUM_CI_DEADLINE', time.monotonic() + work_seconds))
         remaining = min(work_seconds, deadline - time.monotonic())
         signal.setitimer(signal.ITIMER_REAL, max(0.001, remaining))
-        # Private historical checkouts, generated profiles and verified markers live here.
+        # The frozen tip checkout, generated profiles and accepted markers live here.
         with tempfile.TemporaryDirectory(prefix='mycelium-ci-', dir=os.environ['RUNNER_TEMP']) as scratch:
-            status = run_pending(root, sha, Path(scratch), owner)
+            status = run_current(root, sha, Path(scratch), owner)
     except SubmitterStopped:
         print('CI submitter interrupted or timed out; cancelling owned gates', flush=True)
     finally:

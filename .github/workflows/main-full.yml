@@ -3,16 +3,9 @@ name: main-full
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      recovery_tree:
-        description: 'Authorize one recovery attempt for this full landed tree ID'
-        required: true
-        type: string
 
 permissions:
   contents: read
-  statuses: write
 
 # Replace superseded pending runs; keep started runs to avoid runner cleanup
 # terminating shared helpers (#919, #1159).
@@ -37,10 +30,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Prove uncovered main trees or report existing full proof
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MYCELIUM_RECOVERY_TREE: ${{ inputs.recovery_tree }}
+      - name: Test the current main tip
         run: python3 scripts/actions-full.py
       - name: Cancel any unfinished gates owned by this attempt
         if: always()
