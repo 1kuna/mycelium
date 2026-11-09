@@ -120,8 +120,8 @@ fixtures remain. It then archives the abandoned record as `.reconciled-UUID`
 and reuses the slot. Legacy marker/scratch records receive the same fixture-exit
 check. Live holders, live fixtures, malformed records and inventory uncertainty
 retain occupancy; elapsed age never releases custody. Reconciliation never
-signals another run or removes its scratch. Never clear another owner's record
-merely to admit more work.
+signals another run or removes its scratch. Development gate records may be reset under MY-41; preserve running production
+customer jobs.
 The
 two-suite boundary preserves the repository's observed Mac safety rule: more
 concurrent full suites caused false failures. Linux fleet gates rely on the
@@ -518,31 +518,20 @@ accepted results rather than reporting success immediately after submission.
 
 ### Local merge proof
 
-**Before merging, require the PR's exact-head local full gate and independent
-review.** Darwin runs natively and Linux in the local VM under #1149's local
-runner. A passing exact-head quick suffices for docs-only changes; it does not
-change the full requirement for code changes. Fleet gates and automatic main
-runs are optional additional evidence; their backlog or availability must not hold local
-iteration or an otherwise proven merge. Record the source SHA and actual verdict.
-Optional CI results do not waive independent review.
+Under [MY-41](DECISIONS.md#my-41), merge when quick plus the change's targeted
+tests pass. No independent review, review rounds, exact-head full gate per PR,
+main-CI wait or gate-exception procedure is required. Run the full suite once
+per release batch and fix breakage forward. Automatic main runs remain diagnostic
+feedback; failures are work to fix, not a hold on unrelated merges.
 
-For an exception, apply the [evidence-based acceptance proposal](DECISIONS.md#current-rulings):
-identify the relevant baseline's same failure, the exact candidate result,
-evidence that the change does not worsen it, and the existing scoped authority.
-Issue ownership alone is insufficient. Keep the original gate verdict and
-exception disposition separate; a changed or unexplained failure is unresolved.
-An interrupted or unsubmitted run has no suite verdict. Existing scoped
-substitutes keep their own conditions and expiry; elapsed queue time alone does
-not create an exception. Independent review and the normal exact-head proof
-requirements above remain.
+Gate tooling is development tooling: if its custody or guard state blocks work, reset it (stop the gate VM, clear the control-directory records) and fix the tool forward.
 
-```sh
-gh api repos/1kuna/mycelium/commits/main --jq .sha
-gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main --limit 20 \
-  --json headSha,status,conclusion,url
-gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main \
-  --status completed --limit 1 --json headSha,status,conclusion,url
-```
+The memory guard stops only on critical pressure or real swap growth. Updating
+that guard's implementation is a separate worker's code change; this documentation
+change does not claim it is already implemented. Development gates, custody,
+admission and guards may be changed freely when they block work. Earlier tooling
+custody and guard restrictions in this document are superseded by MY-41. Preserve
+running production customer jobs, secrets and public-repository privacy.
 
 Queued or running main runs do not block a merge. Inspect optional results for
 useful failure evidence and fix regressions forward; nobody waits on, polls or
@@ -624,13 +613,13 @@ that run; later pushes test their own event commits rather than retrying histori
 ### Public repository and private authority
 
 The runner is registered to **this repository**, not an organization-wide pool.
-Only reviewed code merged to main is eligible: the workflow has neither
+Only code merged to main is eligible: the workflow has neither
 `pull_request` nor `pull_request_target`, and fork/feature pushes cannot trigger
 this repository's runner. Fork copies cannot address the upstream runner.
 Under Settings → Actions → General, require approval for **all outside
 contributors** (`approval_policy: all_external_contributors`). Keep that setting
 when changing workflows. Repository administrators and main writers remain
-trusted: review any workflow or submitter change before merging it.
+trusted: validate workflow or submitter changes with quick and targeted tests.
 
 The workflow grants only `contents: read` to the built-in `GITHUB_TOKEN` and
 pins checkout to an immutable action SHA, with `persist-credentials: false`.
@@ -690,8 +679,7 @@ cleans old workspace state. Source-upload staging is removed by the CLI after
 confirmed submission. Runner diagnostic logs stay private; do not upload them
 as public artifacts. Use normal queue artifact retention for fleet outputs.
 
-Validate offline with `python3 scripts/test-actions-full.py` and the quick gate. After independent
-review and merge, verify the push-to-main run
+Validate offline with `python3 scripts/test-actions-full.py` and the quick gate. After merge, verify the push-to-main run
 uses the registered self-hosted runner and reports both accepted platform
 results and the tested event SHA before calling activation complete. No full
 suite runs on a PR push.
@@ -1463,7 +1451,7 @@ platform/toolchain, package overlap, wall and resource-cost coverage. Preserve
 original verdicts, retained incident/security assertions and unproved donors;
 no runtime target by itself waives the existing gates.
 
-The 50% function-count target influenced #1086 planning; it is not acceptance under this v2.1 assignment. Do not delete or consolidate an additional test merely to reach a number. For every removed or replaced test, retain the duplicate/obsolete reason, any incident/security behavior, named surviving assertions and independent review disposition. Keep uncertain donors. Treat the existing 21m30s figure as #1086's historical work-plan goal, not a v2.1 budget or gate exception; retaining an operational time budget requires a measured cost rationale and its source authority. Report actual before/after wall and fleet resource cost, with missing measurements explicit. A final count or passing full alone does not prove retained behavior.
+The 50% function-count target influenced #1086 planning; it is not acceptance under this v2.1 assignment. Do not delete or consolidate an additional test merely to reach a number. For every removed or replaced test, retain the duplicate/obsolete reason, any incident/security behavior, named surviving assertions and validation disposition. Keep uncertain donors. Treat the existing 21m30s figure as #1086's historical work-plan goal, not a v2.1 budget or gate exception; retaining an operational time budget requires a measured cost rationale and its source authority. Report actual before/after wall and fleet resource cost, with missing measurements explicit. A final count or passing full alone does not prove retained behavior.
 
 Dated inventory: the November 9, 2026 06:10 UTC common-base projection was
 3,396 → 1,698 Go Test functions at `67a487f3`, superseding the earlier
@@ -1472,7 +1460,7 @@ merged counts, passing cases or measured speedup. The issue’s 06:20 UTC update
 withdraws the numeric target and records a per-cut rationale audit in progress.
 
 Next action: the #1086 coordinator retains each cut’s reason, surviving assertions
-and independent review, keeps uncertain donors, and reports actual wall and
+and validation, keeps uncertain donors, and reports actual wall and
 fleet resource cost for the identified combined source. Missing measurements
 and unresolved behavior remain explicit; the final count or a passing full
 alone does not complete acceptance.
