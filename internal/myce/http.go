@@ -662,15 +662,16 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		err := c.callOnce(ctx, method, path, in, out)
 		var api *HTTPError
 		if (resourceFields || evidenceFields || finalizationFields) && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
-			// Strict JSON rejection occurs before mutation. Retry only once, with
-			// additive telemetry removed; retain the original durable local result.
-			if c.resourceWire != nil {
+			// Strict JSON rejection occurs before mutation. Finalization has no
+			// negotiated protocol: remove it independently, retaining telemetry
+			// advertised by this response. Keep the durable local result intact.
+			if c.resourceWire != nil && !finalizationFields {
 				c.resourceWire.supported.Store(false)
 				c.resourceWire.cpuPressure.Store(false)
 				c.resourceWire.executionEvidence.Store(false)
 			}
-			legacy, _ := executionEvidenceWireInput(in, false)
-			legacy, _ = resourceWireInput(legacy, false)
+			legacy, _ := executionEvidenceWireInput(in, c.resourceWire != nil && c.resourceWire.executionEvidence.Load())
+			legacy, _ = resourceWireInput(legacy, c.resourceWire != nil && c.resourceWire.supported.Load(), c.resourceWire != nil && c.resourceWire.cpuPressure.Load())
 			legacy, _ = finalizationWireInput(legacy, true)
 			return c.callOnce(ctx, method, path, legacy, out)
 		}

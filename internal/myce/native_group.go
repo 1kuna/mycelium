@@ -412,7 +412,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
 			if errors.Is(runErr, errWorkerMemory) && !independentFailure {
 				r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit"}
-			} else if stage && r.ExecutionCause.Class == "io_error" {
+			} else if stage && r.ExecutionCause.Class == "io_error" && r.ExecutionCause.Finalization == nil {
 				r.ExecutionCause.Class = "stage_failed"
 			}
 		}
@@ -798,6 +798,13 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		m.Exit = observed
 		saveErr := g.saveLocked()
 		if saveErr != nil {
+			if waitErr == nil && observed.Status == 0 {
+				// Receipt persistence is a post-exit failure, not a payload exit.
+				cause := runtimeDiagnostic(finalizationErrorFor("receipt_persistence", "", saveErr))
+				zero := 0
+				cause.Finalization.CommandExitCode = &zero
+				saveErr = &runtimeError{diagnostic: *cause, cause: saveErr}
+			}
 			m.err = errors.Join(waitErr, saveErr)
 		}
 		g.p.mu.Unlock()

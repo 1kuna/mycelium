@@ -23,7 +23,7 @@ var finalizationSteps = map[string]bool{
 	"output_path": true, "output_validation": true, "output_check": true,
 	"output_publication": true, "output_spool": true, "output_reservation": true,
 	"output_preflight": true, "output_upload": true, "checkpoint_publication": true,
-	"diagnostic_publication": true, "log_persistence": true,
+	"diagnostic_publication": true, "log_persistence": true, "receipt_persistence": true,
 }
 
 var finalizationErrors = map[string]string{
@@ -105,7 +105,7 @@ func finalizationErrorFor(step, output string, err error) error {
 	}
 	// Compare only complete, owned rule messages. Never scrape arbitrary text.
 	switch err.Error() {
-	case "file must be regular", "job input/output must be a regular file":
+	case "file must be regular", "job input/output must be a regular file", "check output must be a regular file beneath its attempt directory":
 		d.Error = "not_regular"
 	case "job file escapes shared root", "job files require a root and clean relative names", "output escapes root":
 		d.Error = "unsafe_path"
