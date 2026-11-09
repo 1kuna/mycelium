@@ -671,7 +671,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			}
 			fmt.Printf("Mycelium joining: https://%s\n", tlsListener.Addr())
 		}
-		server := &http.Server{Handler: myce.API{Queue: q, Token: *token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		server := &http.Server{Handler: myce.API{Queue: q, Token: *token}.Handler(), ReadHeaderTimeout: 5 * time.Second, ConnContext: myce.QueueConnectionContext}
 		queueServers = append(queueServers, server)
 		errs := make(chan error, 3)
 		if debugListener != nil {
