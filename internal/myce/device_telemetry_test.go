@@ -34,7 +34,7 @@ func TestXPUTelemetryIdentityAndUnknown(t *testing.T) {
 		`"0000:02:00.0":{"total_bytes":8589934592,"used_bytes":6442450944}`,
 		`"0000:01:00.0":{"total_bytes":8589934592}`,
 		`"0000:01:00.0":{"total_bytes":8589934592,"used_bytes":8589934593}`,
-		`"0000:01:00.0":{"total_bytes":8589934592,"used_bytes":0},"01:00.0":{"total_bytes":8589934592,"used_bytes":0}`,
+		`"0000:01:00.0":{"total_bytes":8589934592,"used_bytes":0},"00000000:01:00.0":{"total_bytes":8589934592,"used_bytes":0}`,
 	} {
 		body := fmt.Sprintf(`{"sampled_at":%q,"gtt_mm":{"0000:01:00.0":"usage: 0"},"vram":{%s}}`, clock.Now().Format(time.RFC3339Nano), vram)
 		w := Worker{Clock: clock, GPUTelemetryHelper: gpuTelemetryTestHelper(t, "cat <<'SAMPLE'\n"+body+"\nSAMPLE\n")}

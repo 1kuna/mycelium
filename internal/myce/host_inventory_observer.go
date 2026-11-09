@@ -131,7 +131,7 @@ func (m *hostInventoryObserver) stepTelemetry(ctx context.Context) {
 	}
 	// A fresh sample retains its original age and serves every decision in
 	// that window. Pending work must still be drained after demand disappears.
-	if m.telemetry.pending == nil && (!m.telemetryDemand || m.telemetry.fresh(m.lane.clock.Now()) && slices.ContainsFunc(m.telemetry.value, func(d MachineDevice) bool {
+	if m.telemetry.pending == nil && (!m.telemetryDemand || len(m.lane.value) == 0 || m.telemetry.fresh(m.lane.clock.Now()) && slices.ContainsFunc(m.telemetry.value, func(d MachineDevice) bool {
 		return deviceTelemetryFresh(d.Telemetry, m.lane.clock.Now())
 	})) {
 		return
