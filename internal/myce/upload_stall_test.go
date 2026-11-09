@@ -27,11 +27,13 @@ func TestUploadFilePausedPATCH(t *testing.T) {
 		pause              time.Duration
 		lostAck            bool
 		delayedPublication bool
+		closedTransport    bool
 	}{
-		{"tolerates", 700 * time.Millisecond, false, false},
-		{"resumes", 1500 * time.Millisecond, false, false},
-		{"published-without-ack", 0, true, false},
-		{"publication-races-offset-probe", 0, true, true},
+		{"tolerates", 700 * time.Millisecond, false, false, false},
+		{"resumes", 1500 * time.Millisecond, false, false, false},
+		{"published-without-ack", 0, true, false, false},
+		{"publication-races-offset-probe", 0, true, true, false},
+		{"transport-closed-after-accept", 0, false, false, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			pause := scenario.pause
@@ -130,7 +132,11 @@ func TestUploadFilePausedPATCH(t *testing.T) {
 			defer transport.CloseIdleConnections()
 			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 			defer cancel()
-			client := Client{URL: server.URL, HTTP: &http.Client{Transport: transport}, Jitter: func() float64 { return 0 }}
+			var roundTrip http.RoundTripper = transport
+			if scenario.closedTransport {
+				roundTrip = &uploadClosedAckTransport{base: transport}
+			}
+			client := Client{URL: server.URL, HTTP: &http.Client{Transport: roundTrip}, Jitter: func() float64 { return 0 }}
 			// Force the interrupted branch independently of warm-up request
 			// timing; the default-window branch above proves pause tolerance.
 			if scenario.name == "resumes" {
@@ -153,6 +159,25 @@ func TestUploadFilePausedPATCH(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A timeout can close the shared socket before the writer updates its deadline.
+// net/http may return that closed-connection error instead of the read timeout.
+// Lose an accepted PATCH acknowledgement with the exact error identity observed
+// in the full gate, so recovery must probe the accepted offset before continuing.
+type uploadClosedAckTransport struct {
+	base   http.RoundTripper
+	closed bool
+}
+
+func (t *uploadClosedAckTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(r)
+	if err == nil && r.Method == "PATCH" && !t.closed {
+		t.closed = true
+		response.Body.Close()
+		return nil, &net.OpError{Op: "set", Net: "tcp", Err: net.ErrClosed}
+	}
+	return response, err
 }
 
 func TestUploadTimingProtocolAndPressure(t *testing.T) {
