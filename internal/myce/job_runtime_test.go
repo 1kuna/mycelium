@@ -71,7 +71,12 @@ func TestJobRuntimeStaleAndNoncomparableHistory(t *testing.T) {
 	if r.RemainingSeconds == nil || r.RemainingWorkUnknown {
 		t.Fatalf("age alone expired comparable evidence: %+v", r)
 	}
-	q.s.Jobs[second.ID].Timing.Reason = "mixed or unknown host occupancy"
+	if err := q.update(func() error {
+		q.touchJob(second.ID).Timing.Reason = "mixed or unknown host occupancy"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	r = runtimeJob(t, q, second.ID).Runtime
 	if !strings.Contains(r.Reason, "mixed or unknown host occupancy") {
 		t.Fatalf("incompatible history: %+v", r)
