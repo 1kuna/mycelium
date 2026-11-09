@@ -217,10 +217,10 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	})
 	mux.HandleFunc("GET /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Myce-Wait", "batch-v1")
-		jobGets.record(r.UserAgent(), r.URL.Query().Get("view") == "wait")
 		var j *Job
 		var err error
 		if r.URL.Query().Get("view") == "wait" {
+			jobGets.record(r.UserAgent(), true)
 			states, _, _, readErr := waitStates.readContext(r.Context(), WaitRequest{IDs: []string{r.PathValue("id")}})
 			err = readErr
 			if err == nil {
@@ -240,6 +240,10 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			}
 		} else {
 			j, err = a.Queue.jobSnapshot(r.PathValue("id"), r.Context())
+			var refusal *HTTPError
+			if !errors.As(err, &refusal) || refusal.Code != "client_rate_limited" {
+				jobGets.record(r.UserAgent(), false)
+			}
 		}
 		// Keep the GET execution payload empty without changing Spec's JSON
 		// encoding, which also defines durable submission fingerprints.
