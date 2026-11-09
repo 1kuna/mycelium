@@ -166,12 +166,18 @@ func TestAdaptiveMemoryTransferUsesPairedError(t *testing.T) {
 				s.AllowedMachines = []string{source.ID}
 				runMemory(t, q, clock, source, s, 3*unit, nil)
 				// Exercise transfer admission on its destination, rather than letting
-				// the scheduler prefer the source that already ran this workload.
+				// an unpinned job also competes for placement on the source.
 				s.AllowedMachines = []string{destination.ID}
 				queued := submit(t, q, s)
 				candidate := check(t, q, destination, nil).Job
 				if candidate == nil || candidate.ID != queued.ID || candidate.MemoryEnvelope.Basis != "learned" {
 					t.Fatal("accepted transfer did not dispatch", candidate)
+				}
+				low := (2*unit + minimumHostMemoryGB) / unit
+				high := (5*unit + minimumHostMemoryGB) / (2 * unit)
+				want := (3*unit + minimumHostMemoryGB) * (high + (high - low))
+				if e := candidate.MemoryEnvelope; e.Source != "accepted transfer + measured error" || e.Basis != "learned" || math.Abs(e.HostGB-want) > 1e-8 {
+					t.Fatalf("did not use measured transfer errors: %+v want %v", e, want)
 				}
 				finish(t, q, candidate, true)
 				// Unknown identities and expired pairs cannot inherit calibration.
