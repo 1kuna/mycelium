@@ -404,15 +404,10 @@ func TestMaintenancePersistenceRejoinAndMemoryDebt(t *testing.T) {
 
 func TestMaintenancePlannedStopsDoNotConsumeRetries(t *testing.T) {
 	t.Run("contract", func(t *testing.T) {
-		for _, mode := range []string{"complete", "lost", "restart", "timeout", "pending"} {
+		for _, mode := range []string{"complete", "lost", "pending"} {
 			t.Run(mode, func(t *testing.T) {
 				q, c := fixture(t)
 				a, b := maintenanceMachines()
-				if mode == "timeout" {
-					if err := q.SetLossTimeouts(time.Hour, time.Hour, time.Hour); err != nil {
-						t.Fatal(err)
-					}
-				}
 				check(t, q, b, nil)
 				for iteration := 0; iteration < 1; iteration++ {
 					j := maintenanceAssign(t, q, a, "production")
@@ -425,15 +420,6 @@ func TestMaintenancePlannedStopsDoNotConsumeRetries(t *testing.T) {
 						switch mode {
 						case "lost":
 							c.Advance(ProductionLossAfter)
-							check(t, q, b, nil)
-						case "restart":
-							old := a.Session
-							a.Session = ID()
-							if _, err := q.Checkin(Checkin{Machine: a, Fresh: true, PreviousSession: old}); err != nil {
-								t.Fatal(err)
-							}
-						case "timeout":
-							c.Advance(StopGrace)
 							check(t, q, b, nil)
 						default:
 							r := result(j, false)

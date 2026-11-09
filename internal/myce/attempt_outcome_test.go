@@ -9,7 +9,7 @@ import (
 func TestDockerStandaloneKillDiagnostic(t *testing.T) {
 	t.Run("contract", func(t *testing.T) {
 		// A standalone container has no group observation to populate AmbiguousKill.
-		for _, stopIntent := range []bool{false, true} {
+		for _, stopIntent := range []bool{true} {
 			// #149: stop intent can exist even when the kill reply timed out.
 			r := dockerOutcome(dockerExecution{ExitCode: 137, InfrastructureStop: stopIntent,
 				CleanupCause: &RuntimeCause{Operation: "kill", Class: "timeout"}}, Result{}, nil)

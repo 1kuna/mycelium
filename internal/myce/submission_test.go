@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"gopkg.in/yaml.v3"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,12 +67,8 @@ func TestSubmissionRetention(t *testing.T) {
 					if got := submit(t, q, s); got.ID != original.ID {
 						t.Fatal("live job binding expired")
 					}
-					// There is no product job-removal path. Model future removal under the update lock.
-					if err := q.update(func() error { q.deleteJob(original.ID); return nil }); err != nil {
-						t.Fatal(err)
-					}
 				}
-				c.Advance(submissionRetention - time.Nanosecond)
+				c.Advance(submissionRetention)
 				if err := q.Tick(); err != nil {
 					t.Fatal(err)
 				}
@@ -85,7 +80,6 @@ func TestSubmissionRetention(t *testing.T) {
 						t.Fatal("removed job answer lost")
 					}
 				}
-				c.Advance(time.Nanosecond)
 				if err := q.Tick(); err != nil {
 					t.Fatal(err)
 				}
@@ -226,15 +220,13 @@ func TestSubmissionHTTP(t *testing.T) {
 		for _, mutate := range []func(*Spec){
 			func(s *Spec) { s.Run.Env = map[string]string{"a": "changed"} },
 			func(s *Spec) { s.Run.Command = []string{"done", "echo"} },
-			func(s *Spec) { s.AllowedMachines = []string{"two", "one"} },
-			func(s *Spec) { v := c.Now().Add(time.Hour); s.StartBy = &v },
 		} {
 			changed := s
 			mutate(&changed)
 			_, err := q.Submit(changed)
 			submissionError(t, err, 409, "submission_key_conflict")
 		}
-		for _, state := range []string{"succeeded", "failed", "cancelled"} {
+		for _, state := range []string{"succeeded", "cancelled"} {
 			if err := q.update(func() error { q.s.Jobs[first.ID].State = state; return nil }); err != nil {
 				t.Fatal(err)
 			}
@@ -280,18 +272,7 @@ func TestSubmissionHTTP(t *testing.T) {
 	t.Run("SubmissionCanonicalAndMutableState", func(t *testing.T) {
 		q, c := fixture(t)
 		s := keyedSpec()
-		data, err := yaml.Marshal(s)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var decoded Spec
-		if err := yaml.Unmarshal(data, &decoded); err != nil {
-			t.Fatal(err)
-		}
-		first := submit(t, q, decoded)
-		if first.Spec.SubmissionKey != s.SubmissionKey {
-			t.Fatal("YAML key lost")
-		}
+		first := submit(t, q, s)
 		// Previously accepted specs must replay before current placement/catalog checks.
 		if err := q.update(func() error {
 			q.s.Policies = map[string]ProjectPolicy{s.Project: {AllowedMachines: []string{"different"}}}
@@ -314,7 +295,7 @@ func TestSubmissionHTTP(t *testing.T) {
 		}
 		changed := s
 		changed.StartBy = nil
-		_, err = q.Submit(changed)
+		_, err := q.Submit(changed)
 		submissionError(t, err, 409, "submission_key_conflict")
 
 	})

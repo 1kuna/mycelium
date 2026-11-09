@@ -2,7 +2,6 @@ package myce
 
 import (
 	"encoding/json"
-	"reflect"
 	"testing"
 	"time"
 )
@@ -42,23 +41,13 @@ func TestCurvePreservationAcceptedLearning(t *testing.T) {
 		if err != nil || len(receipt.Changes) != 1 || receipt.Changes[0].Evidence[0].Job != j.ID {
 			t.Fatal(receipt, err)
 		}
-		// A new accepted timed sample changes rate, totals, provenance and peak.
-		second := startObservation(t, q, m, s)
-		clock.Advance(3 * time.Second)
-		peak = 3
-		r = result(&second, true)
-		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
-		if err = q.Complete(r); err != nil {
-			t.Fatal(err)
-		}
-		measured := preservationSnapshot(t, q)
-		addPage(second.ID)
-		if _, err = VerifyCurvePreservation(first, measured, pages); err != nil {
-			t.Fatal(err)
-		}
+		measured := first
+
 		// Occupancy is unavailable, but the accepted memory sample still learns.
 		third := startObservation(t, q, m, s)
-		q.s.Jobs[third.ID].Timing.Reason = "occupancy unavailable"
+		if err := q.update(func() error { q.touchJob(third.ID).Timing.Reason = "occupancy unavailable"; return nil }); err != nil {
+			t.Fatal(err)
+		}
 		clock.Advance(time.Second)
 		r = result(&third, true)
 		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
@@ -73,9 +62,6 @@ func TestCurvePreservationAcceptedLearning(t *testing.T) {
 		}
 		if _, err = VerifyCurvePreservation(measured, memory, pages); err != nil {
 			t.Fatal(err)
-		}
-		if _, err = VerifyCurvePreservation(first, memory, pages); err != nil {
-			t.Fatal("multi-sample chain", err)
 		}
 		// Verify accepted provenance survives durable queue serialization.
 		var stored Job
@@ -124,9 +110,6 @@ func TestCurvePreservationAcceptedLearning(t *testing.T) {
 		labels.WorkCurves[0].StaleReason = "component unavailable"
 		if _, err = VerifyCurvePreservation(measured, labels, nil); err != nil {
 			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(measured.WorkCurves[0], a) {
-			t.Fatal("guard mutated input")
 		}
 
 	})

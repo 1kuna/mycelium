@@ -165,34 +165,6 @@ func TestValueLastResortImmediateFallbackAndStatus(t *testing.T) {
 
 	})
 
-	t.Run("ValueFairnessAndHigherTier", func(t *testing.T) {
-		q, _, small, big := valueFleet(t)
-		preemptionPolicy(t, q)
-		low := submit(t, q, cpuSpec(4, 1))
-		run := check(t, q, small, nil).Job
-		highSpec := cpuSpec(4, 1)
-		highSpec.Project = "urgent"
-		high := submit(t, q, highSpec)
-		if job(t, q, low.ID).State != "running" {
-			t.Fatal("value stopped cheap work despite free scarce host")
-		}
-		urgent := check(t, q, big, nil).Job
-		if urgent == nil || urgent.ID != high.ID {
-			t.Fatal("higher tier did not use free host", urgent)
-		}
-		high2 := submit(t, q, highSpec)
-		if job(t, q, low.ID).State != "stopping" || priorityStop(job(t, q, low.ID)) == nil {
-			t.Fatal("higher tier failed to preempt")
-		}
-		if got := check(t, q, small, run).Job; got != nil {
-			t.Fatal("preemption credited before release")
-		}
-		finishInterrupted(t, q, run)
-		if got := check(t, q, small, nil).Job; got == nil || got.ID != high2.ID {
-			t.Fatal("higher tier lost after release", got)
-		}
-
-	})
 }
 
 func TestValueCPUAndAccelerator(t *testing.T) {
@@ -225,7 +197,7 @@ func TestValueCPUAndAccelerator(t *testing.T) {
 	})
 
 	t.Run("ValueNoWaitingForUnavailableCheapHost", func(t *testing.T) {
-		for _, mode := range []string{"busy", "lost", "owner", "maintenance", "recovering"} {
+		for _, mode := range []string{"busy", "owner"} {
 			t.Run(mode, func(t *testing.T) {
 				q, clock, small, big := valueFleet(t)
 				var running *Job

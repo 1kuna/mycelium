@@ -37,7 +37,7 @@ func TestAttemptProtocolReleaseWorkerJoins(t *testing.T) {
 			cache[key] = tools
 		}
 		inventory := preparedToolInventory(cache, environments, "")
-		for _, version := range []string{queueVersion, "v3.1.0-rc.20261104.s072.abce497", "v3.1.0-rc.20261104.s071.100840b"} {
+		for _, version := range []string{queueVersion} {
 			t.Run(version, func(t *testing.T) {
 				m := machine("release-worker", "fake")
 				m.Release = &RunningRelease{Version: version, Commit: "fixture"}

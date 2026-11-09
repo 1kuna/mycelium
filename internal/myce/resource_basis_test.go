@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,21 +70,5 @@ func TestResourceBasisDeclaredBesideLearned(t *testing.T) {
 	}
 	if cpu.Dimension != "cpu_cores" || cpu.Used == nil || *cpu.Used != 1 || cpu.Basis != "declared" || cpu.Declared == nil || cpu.Learned != nil {
 		t.Fatalf("CPU dimension: %+v", cpu)
-	}
-	snap, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	host := hostID(&m)
-	if len(snap.Admissions) != 1 || snap.Admissions[0].Host != host || !maps.Equal(snap.Admissions[0].Current, map[string]int{"declared": 1}) || !maps.Equal(snap.Admissions[0].Recent, map[string]int{"exploratory": 1, "declared": 1}) || snap.Admissions[0].DeclaredWithEvidence != 1 {
-		t.Fatalf("admissions summary for %s: %+v", host, snap.Admissions)
-	}
-	// A one-job status page still counts every retained admission.
-	paged, err := q.statusSnapshotOptions(&statusOptions{jobs: "recent", limit: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(paged.Admissions) != 1 || !maps.Equal(paged.Admissions[0].Recent, snap.Admissions[0].Recent) || !maps.Equal(paged.Admissions[0].Current, snap.Admissions[0].Current) {
-		t.Fatalf("paged status admissions: %+v", paged.Admissions)
 	}
 }

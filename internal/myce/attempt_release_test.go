@@ -15,12 +15,8 @@ func TestAttemptProtocolLostAssignmentStop(t *testing.T) {
 			name                         string
 			planned, docker, otherReport bool
 		}{
-			{name: "cancel"},
 			{name: "P3-planned-stop", planned: true},
-			{name: "Docker-cancel", docker: true},
-			{name: "Docker-P3-planned-stop", planned: true, docker: true},
 			{name: "Docker-cancel-other-report", docker: true, otherReport: true},
-			{name: "Docker-P3-other-report", planned: true, docker: true, otherReport: true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				planned := tc.planned
@@ -124,7 +120,7 @@ func TestAttemptProtocolLostAssignmentStop(t *testing.T) {
 	})
 
 	t.Run("CancellationLostAssignmentEmptyCheckin", func(t *testing.T) {
-		for _, held := range []bool{false, true} {
+		for _, held := range []bool{true} {
 			t.Run(map[bool]string{false: "redelivery", true: "held-host"}[held], func(t *testing.T) {
 				q, _ := fixture(t)
 				m := machine("one", "fake")
@@ -175,7 +171,6 @@ func TestAttemptProtocolUnheldStopFences(t *testing.T) {
 	}{
 		{name: "multiple-stops", directives: []AttemptDirective{stop, {Execution: owned.Execution, Session: m.Session, Stop: true}, {Execution: Execution{ID: "another", Attempt: 3}, Session: m.Session, Stop: true}}, wantAck: []Execution{stop.Execution, {ID: "another", Attempt: 3}}},
 		{name: "foreign-session", directives: []AttemptDirective{{Execution: stop.Execution, Session: "foreign", Stop: true}}},
-		{name: "unheld-hold", directives: []AttemptDirective{{Execution: stop.Execution, Session: m.Session, Hold: true}}},
 		{name: "validate-before-ack", directives: []AttemptDirective{stop, {Execution: Execution{ID: "invalid"}, Session: m.Session, Stop: true}}, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

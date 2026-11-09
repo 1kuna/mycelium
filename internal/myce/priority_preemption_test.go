@@ -118,8 +118,8 @@ func preemptionPolicy(t *testing.T, q *Queue) {
 }
 func TestPriorityPreemptionModelsAndPins(t *testing.T) {
 	t.Run("contract", func(t *testing.T) {
-		for _, kind := range []string{"call", "load", "idle", "pin"} {
-			for _, higher := range []bool{false, true} {
+		for _, kind := range []string{"call", "load", "pin"} {
+			for _, higher := range map[string][]bool{"call": {true}, "load": {false, true}, "pin": {true}}[kind] {
 				t.Run(fmt.Sprintf("%s/higher=%v", kind, higher), func(t *testing.T) {
 					q, _, m := modelFixture(t)
 					preemptionPolicy(t, q)

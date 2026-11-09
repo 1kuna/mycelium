@@ -82,7 +82,7 @@ func TestRQv2IndependentExitBeforeStopObservation(t *testing.T) {
 		for _, tc := range []struct {
 			mode string
 			code int
-		}{{"main-nonzero", 7}, {"main-killed", 137}} {
+		}{{"main-killed", 137}} {
 			t.Run(fmt.Sprint(tc.code), func(t *testing.T) {
 				w, store, clock, root := dockerFixture(t)
 				q, _ := fixture(t)

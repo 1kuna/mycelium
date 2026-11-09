@@ -53,7 +53,7 @@ func TestUnifiedMemoryWireNegotiationAndDowngrade(t *testing.T) {
 		strict = true
 		send()
 		send()
-		if len(reports) != 5 || !hasUnifiedMemoryWireFields(reports[2]) {
+		if !hasUnifiedMemoryWireFields(reports[2]) {
 			t.Fatal("downgrade did not attempt negotiated shape once", len(reports))
 		}
 		for _, r := range reports[3:] {

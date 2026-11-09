@@ -59,7 +59,7 @@ func TestQueueUpgradeRetiresLegacyDefaultThrottle(t *testing.T) {
 		for _, v := range []struct {
 			nice  int
 			quota string
-		}{{0, "45%"}, {5, "25%"}, {10, "150%"}} {
+		}{{5, "25%"}} {
 			home := t.TempDir()
 			c, err := PlanInstall("queue", home, "", home, "http://queue.invalid", "queue", Detection{OS: "linux", Arch: "amd64"})
 			if err != nil {

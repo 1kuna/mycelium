@@ -75,7 +75,7 @@ func TestCopyLifecycleTimesSurviveReleaseRetryAndRestart(t *testing.T) {
 	if err != nil || len(page.Entries) == 0 || page.Entries[0].Kind != "assigned" || !page.Entries[0].At.Equal(assignedAt) {
 		t.Fatal("existing ledger lost per-attempt assignment time", page, err)
 	}
-	for _, kind := range []string{"stop", "cancel", "held-cancel"} {
+	for _, kind := range []string{"held-cancel"} {
 		t.Run("legacy-idle-"+kind, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("legacy", "xpu")

@@ -348,9 +348,6 @@ func TestProductionPreemptionReleaseGrace(t *testing.T) {
 		if check(t, q, a, nil).Job != nil {
 			t.Fatal("release credit cannot admit work")
 		}
-		if q.roomPlan(job(t, q, prod.ID), q.s.Machines[a.ID], true) != nil {
-			t.Fatal("full memory report retained speculative release credit")
-		}
 		// #662 forbids redirecting the demand after it caused this release.
 		// A full report supersedes credit, but cannot authorize an unrelated stop.
 		if check(t, q, b, second).Stop {

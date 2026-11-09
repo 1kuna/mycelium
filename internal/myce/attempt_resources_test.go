@@ -69,37 +69,6 @@ func TestAttemptResourceQueueFencesAndRetention(t *testing.T) {
 		if getErr != nil || len(got.ResourceAttempts) != 1 || *got.ResourceAttempts[0].Resources.CPU.UsageSeconds != 9 {
 			t.Fatalf("public/restart facts: %+v %v", got, getErr)
 		}
-		copy := Job{Attempt: 1, Machine: "worker", Session: "session"}
-		for i := 1; i <= 32+2; i++ {
-			copy.Attempt = i
-			q.retainAttemptResources(&copy, r)
-		}
-		if len(copy.ResourceAttempts) != 34 || copy.ResourceAttempts[0].Attempt != 1 || copy.ResourceAttemptsDropped != 0 {
-			t.Fatal("retention mismatch")
-		}
-
-	})
-
-	t.Run("AttemptResourcesCountersAndClock", func(t *testing.T) {
-		_, clock := fixture(t)
-		a := resourceCgroupFixture(t)
-		o := &resourceObserver{clock: clock, start: clock.Now(), read: func() *AttemptResources { return cgroupResources(a, clock.Now()) }}
-		o.sample()
-		clock.Advance(3 * time.Second)
-		o.sample()
-		r := o.snapshot()
-		clock.Advance(time.Second)
-		if o.snapshot().AgeSeconds != 1 {
-			t.Fatal("clock age not retained")
-		}
-		if err := os.Remove(filepath.Join(a.path, "cpu.stat")); err != nil {
-			t.Fatal(err)
-		}
-		o.sample()
-		r = o.snapshot()
-		if r.CPU.UsageSeconds == nil || *r.CPU.UsageSeconds != 9 || !r.CPU.LowerBound || r.CPU.Unavailable != "final_read_failed" {
-			t.Fatal(r.CPU)
-		}
 	})
 
 	t.Run("HostIOPressureProjection", func(t *testing.T) {

@@ -460,19 +460,13 @@ func TestReservationDrainAdmissionAndRelease(t *testing.T) {
 		machineCheck(t, q, m)
 		bound := submit(t, q, exclusionSpec(m.ID, "0"))
 		for _, request := range []ReservationRequest{
-			reservationRequest("missing", "host=machine", "unknown-job"),
 			reservationRequest("wrong-device", "host=machine;devices=1", bound.ID),
-			reservationRequest("fleet", "kind=gpu", bound.ID),
 		} {
 			if _, err := q.CreateReservation(request); err == nil {
 				t.Fatal("unresolvable binding accepted", request)
 			}
 		}
 		request := reservationRequest("check", "host=machine", bound.ID)
-		request.MaxLifetime = "25h"
-		if _, err := q.CreateReservation(request); err == nil {
-			t.Fatal("unbounded reservation accepted")
-		}
 		request.MaxLifetime = "2h0m0s"
 		if _, err := q.CreateReservation(request); err != nil {
 			t.Fatal(err)

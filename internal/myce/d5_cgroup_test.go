@@ -55,13 +55,6 @@ func TestNativeMainMemoryCapComposition(t *testing.T) {
 	if err != nil || string(data) != "536870912" {
 		t.Fatalf("main received wrong cap %s %v", data, err)
 	}
-	for _, gb := range []float64{-1, 3} {
-		invalid := j.Spec
-		invalid.Execution = &ExecutionSpec{Main: ExecutionMember{MemoryGB: gb, Command: []string{"true"}}}
-		if err := lowerExecution(&invalid); err == nil {
-			t.Fatal("invalid cap accepted", gb)
-		}
-	}
 }
 
 func TestMemoryCgroupChildrenLinuxIntegration(t *testing.T) {

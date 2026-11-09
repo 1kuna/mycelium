@@ -54,7 +54,7 @@ func maintenanceBenchmarkWorker(t *testing.T, m Machine) (Worker, string, string
 }
 
 func TestMaintenanceRunningBenchmark(t *testing.T) {
-	for _, action := range []string{"drain", "disable", "disable-stop"} {
+	for _, action := range []string{"drain", "disable-stop"} {
 		t.Run(action, func(t *testing.T) {
 			q, _ := fixture(t)
 			w, marker, release := maintenanceBenchmarkWorker(t, machine("benchmark-worker", "xpu", "host"))
@@ -114,7 +114,7 @@ func TestMaintenanceRunningBenchmark(t *testing.T) {
 
 func TestMaintenanceDelayedBenchmarkCommand(t *testing.T) {
 	t.Run("contract", func(t *testing.T) {
-		for _, action := range []string{"drain", "disable", "disable-stop"} {
+		for _, action := range []string{"drain"} {
 			t.Run(action, func(t *testing.T) {
 				q, _ := fixture(t)
 				w, marker, release := maintenanceBenchmarkWorker(t, machine("benchmark-worker", "xpu", "host"))

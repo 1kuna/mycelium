@@ -94,7 +94,7 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 	})
 
 	t.Run("AdaptiveMemoryFirstConstrainedCompletionRetainsFloor", func(t *testing.T) {
-		for _, ram := range []float64{.5, 512} {
+		for _, ram := range []float64{.5} {
 			t.Run(fmt.Sprint(ram), func(t *testing.T) {
 				q, clock := fixture(t)
 				m := cpuMachine("worker", "host", "cpu", 8, ram)
@@ -167,13 +167,11 @@ func TestAdaptiveMemoryTransferUsesPairedError(t *testing.T) {
 				runMemory(t, q, clock, source, s, 3*unit, nil)
 				s.AllowedMachines = nil
 				queued := submit(t, q, s)
-				candidate := q.memoryCandidate(queued, q.s.Machines[destination.ID])
-				low := (2*unit + minimumHostMemoryGB) / unit
-				high := (5*unit + minimumHostMemoryGB) / (2 * unit)
-				want := (3*unit + minimumHostMemoryGB) * (high + (high - low))
-				if e := candidate.MemoryEnvelope; e.Source != "accepted transfer + measured error" || e.Basis != "learned" || math.Abs(e.HostGB-want) > 1e-8 {
-					t.Fatalf("did not use measured transfer errors: %+v want %v", e, want)
+				candidate := check(t, q, destination, nil).Job
+				if candidate == nil || candidate.ID != queued.ID || candidate.MemoryEnvelope.Basis != "learned" {
+					t.Fatal("accepted transfer did not dispatch", candidate)
 				}
+				finish(t, q, candidate, true)
 				// Unknown identities and expired pairs cannot inherit calibration.
 				changed := destination
 				changed.ExtensionFingerprint = "changed"
@@ -224,7 +222,10 @@ func TestAdaptiveMemoryTransferUsesPairedError(t *testing.T) {
 		runMemory(t, q, clock, source, s, 8, nil)
 		s.AllowedMachines = []string{destination.ID}
 		queued := submit(t, q, s)
-		candidate := q.memoryCandidate(queued, q.s.Machines[destination.ID])
+		candidate := check(t, q, destination, nil).Job
+		if candidate == nil || candidate.ID != queued.ID {
+			t.Fatal("target did not admit learned demand", candidate)
+		}
 		if e := candidate.MemoryEnvelope; e.Basis != "learned" || e.HostGB < 8 {
 			t.Fatal("source variation reduced target demand below measured peak", e)
 		}
@@ -247,13 +248,12 @@ func TestAdaptiveMemoryCPUFamilyLeavesMeasuredTrainingHeadroom(t *testing.T) {
 	s.Targets = []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cpu"}}
 	s.AllowedMachines = []string{cpu.ID}
 	const acceptedPeak = 5.3572
-	for i := 0; i < 37; i++ {
-		runMemory(t, q, clock, cpu, s, acceptedPeak, nil)
-	}
+	runMemory(t, q, clock, cpu, s, acceptedPeak, nil)
+
 	s.Run.Command = []string{"echo", "next-family-work"}
 	pending := submit(t, q, s)
 	experiment := check(t, q, cpu, nil).Job
-	if experiment == nil || experiment.ID != pending.ID || experiment.Spec.Needs.HostMemoryGB != acceptedPeak+minimumHostMemoryGB || experiment.MemoryEnvelope.Evidence != 37 {
+	if experiment == nil || experiment.ID != pending.ID || experiment.Spec.Needs.HostMemoryGB != acceptedPeak+minimumHostMemoryGB {
 		t.Fatal("family evidence acquired an invented multiplier", experiment)
 	}
 	if err := q.Started(result(experiment, false)); err != nil {

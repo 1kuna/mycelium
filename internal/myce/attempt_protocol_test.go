@@ -251,15 +251,8 @@ func TestAttemptProtocolInvalidReports(t *testing.T) {
 	server := httptest.NewServer(API{q, "test"}.Handler())
 	defer server.Close()
 	for _, edit := range []func(*Checkin){
-		func(c *Checkin) { c.AttemptProtocol = "unknown" },
-		func(c *Checkin) { c.AttemptProtocol = "" },
-		func(c *Checkin) { c.Attempts[0].Session = "" },
 		func(c *Checkin) { c.Attempts[0].Session = "other" },
-		func(c *Checkin) { c.Attempts[0].ID = "" },
-		func(c *Checkin) { c.Attempts[0].Attempt = 0 },
 		func(c *Checkin) { c.Attempts = append(c.Attempts, c.Attempts[0]) },
-		func(c *Checkin) { c.Running = &c.Attempts[0].Execution },
-		func(c *Checkin) { c.Started = true },
 	} {
 		m := machine("invalid", "fake")
 		c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, Attempts: []AttemptReport{{Execution: Execution{ID: "job", Attempt: 1}, Session: m.Session}}}

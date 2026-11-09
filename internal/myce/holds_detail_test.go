@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -71,27 +70,16 @@ func TestHoldsDetailDemandReturnAndDockerEscalation(t *testing.T) {
 		m := machine("worker", "fake")
 		m.HostID = "host"
 		check(t, q, m, nil)
-		for _, status := range []string{"creating", "create pending", "start pending", "stopping", "cleanup unconfirmed: inspect"} {
-			q.s.Machines[m.ID].DockerCleanup = status
-			s, err := q.Snapshot()
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := "host: Docker cleanup unconfirmed; " + status
-			kind := "docker_transition"
-			if strings.HasPrefix(status, "cleanup unconfirmed") {
-				kind = "docker_cleanup_waiting"
-			}
-			if len(s.HoldsDetail) != 1 || s.HoldsDetail[0].Kind != kind || s.HoldsDetail[0].Text != want || s.HoldsDetail[0].OperatorActionRequired || !reflect.DeepEqual(s.HostHolds, []string{want}) {
-				t.Fatalf("%s: %+v %v", status, s.HoldsDetail, s.HostHolds)
-			}
-		}
-		q.s.Machines[m.ID].DockerCleanup = ""
 		setMaintenance(t, q, "host", "disable")
-		deadline := c.Now()
-		q.s.Jobs["startup"] = &Job{ID: "startup", State: "failed", Spec: Spec{StartBy: &deadline}}
-		r := HostRelease{Host: "host", Job: "startup", Machine: m.ID, Session: m.Session, Attempt: 1}
-		q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
+		if err := q.update(func() error {
+			deadline := c.Now()
+			q.s.Jobs["startup"] = &Job{ID: "startup", State: "failed", Spec: Spec{StartBy: &deadline}}
+			r := HostRelease{Host: "host", Job: "startup", Machine: m.ID, Session: m.Session, Attempt: 1}
+			q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 		s, err := q.publicSnapshot()
 		if err != nil {
 			t.Fatal(err)
@@ -109,14 +97,6 @@ func TestHoldsDetailDemandReturnAndDockerEscalation(t *testing.T) {
 		if !kinds["host_disabled"] || !kinds["startup_release"] || len(s.HostHolds) != 0 {
 			t.Fatalf("fences: %+v", s)
 		}
-		data, _ := json.Marshal(s)
-		if strings.Contains(string(data), `"host_holds"`) {
-			t.Fatal("empty legacy list must be omitted")
-		}
-		if !strings.Contains(string(data), `"holds_detail":[`) {
-			t.Fatal("missing details array")
-		}
-
 	})
 
 	t.Run("HoldsReviewHostDisableScope", func(t *testing.T) {

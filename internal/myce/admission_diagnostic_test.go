@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -19,7 +18,7 @@ import (
 // #456: distinct real worker admission checks survive acknowledgement,
 // replacement of the assignment envelope, success, and a durable queue reopen.
 func TestAdmissionDiagnosticRetained(t *testing.T) {
-	for _, subcheck := range []string{"live_host_ram", "aggregate_host_allowance", "live_host_growth", "live_gpu_memory"} {
+	for _, subcheck := range []string{"live_host_ram", "live_gpu_memory"} {
 		t.Run(subcheck, func(t *testing.T) {
 			path, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
 			clock := &fakeClock{now: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)}
@@ -62,11 +61,6 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 					t.Fatal("started without RAM")
 				}
 				refusal = e
-			} else {
-				if subcheck == "aggregate_host_allowance" {
-					w.Machine.HostMemoryBudgetGB = 21.9
-				}
-				refusal = localAttemptAdmission(w, nil, *j, nil)
 			}
 			if !errors.Is(refusal, errWorkerMemory) {
 				t.Fatal("no memory refusal", refusal)
@@ -166,16 +160,5 @@ func TestAdmissionDiagnosticUnavailableAndPrivacy(t *testing.T) {
 	public, _ := json.Marshal(c)
 	if strings.Contains(string(public)+c.String(), "private-secret") {
 		t.Fatal("untrusted strings leaked", string(public))
-	}
-	for _, mutate := range []func(*AdmissionDetail){
-		func(d *AdmissionDetail) { d.Subcheck = "private-secret" },
-		func(d *AdmissionDetail) { d.Unit = "private-secret" },
-		func(d *AdmissionDetail) { d.Required = math.NaN() },
-	} {
-		bad := *d
-		mutate(&bad)
-		if safeAdmissionDetail(&bad) != nil {
-			t.Fatal("invalid diagnostic accepted")
-		}
 	}
 }

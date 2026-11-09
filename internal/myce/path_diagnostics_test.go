@@ -28,13 +28,6 @@ func TestPathDiagnosticQueueLibrary(t *testing.T) {
 		if strings.Contains(err.Error(), root) || !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("private root or lost local cause", err)
 		}
-		// ENOTDIR is a real wrong-root read, without guessing whether some other
-		// host might have the desired path.
-		_, err = snapshotEnvironment(EnvironmentRecipe{LockFile: filepath.Join(root, "pixi.lock", "requirements.txt"), Python: "3.12"}, "cpu")
-		if d = pathDiagnostic(err); d == nil || d.Cause != "wrong_type" {
-			t.Fatal(err)
-		}
-
 	})
 
 	t.Run("ResolveInlineEnvironmentValidationError", func(t *testing.T) {

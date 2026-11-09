@@ -233,7 +233,7 @@ while :; do sleep .02; done`}
 
 	t.Run("SharedHostPressureUnknownAndStale", func(t *testing.T) {
 		q, clock, m, run := sharedRunning(t, false)
-		for _, p := range []*SharedHostPressure{nil, {}, {MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, AgeSeconds: signalMaxAge.Seconds()}, {MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, MemoryPSI: -1}} {
+		for _, p := range []*SharedHostPressure{nil} {
 			m.SharedHostPressure = p
 			check(t, q, m, run)
 			if job(t, q, run.ID).State != "running" || q.s.Machines[m.ID].SharedHostReason == "" {

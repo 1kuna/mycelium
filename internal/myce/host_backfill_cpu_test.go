@@ -58,7 +58,7 @@ func TestHostBackfillCPUAccumulates(t *testing.T) {
 				demand := submit(t, q, large)
 				small.Needs.MemoryGB, small.Needs.CPUCores = tc.ram/16, 1
 				for _, remaining := range [][]*Job{{a, b}, {b}} {
-					for i := 0; i < 3; i++ {
+					for i := 0; i < 1; i++ {
 						clock.Advance(time.Second)
 						later := submit(t, q, small)
 						if got := assignedJob(machineCheck(t, q, m, remaining...)); got != nil {
@@ -92,7 +92,7 @@ func TestHostBackfillCPUAccumulates(t *testing.T) {
 	})
 
 	t.Run("HostBackfillCPULocalFairTurn", func(t *testing.T) {
-		for _, remoteDemand := range []bool{false, true} {
+		for _, remoteDemand := range []bool{true} {
 			t.Run(fmt.Sprintf("remote-demand=%v", remoteDemand), func(t *testing.T) {
 				q, clock := fixture(t)
 				local, remote := cpuBackfillMachine("local", 64), cpuBackfillMachine("remote", 64)

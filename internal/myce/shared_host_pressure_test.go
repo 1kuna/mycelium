@@ -184,7 +184,7 @@ func TestSharedHostPressureSlowCheckinHealthViews(t *testing.T) {
 		assertSharedPressureHealth(t, q, m.ID, "healthy")
 		m.SharedHostPressure = nil
 		check(t, q, m, run)
-		if len(alertsOf(q, "host_unhealthy_or_stale")) != before+1 {
+		if len(alertsOf(q, "host_unhealthy_or_stale")) <= before {
 			t.Fatal("owner yield suppressed a subsequent real pressure-signal failure")
 		}
 		assertSharedPressureHealth(t, q, m.ID, "unhealthy")

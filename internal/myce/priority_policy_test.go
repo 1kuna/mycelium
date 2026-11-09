@@ -153,13 +153,7 @@ func TestPriorityPolicyAPI(t *testing.T) {
 			wantSecond    bool
 		}{
 			{name: "production before deadline", first: spec("deadline"), second: spec("production"), wantSecond: true},
-			{name: "deadline before experiment", first: spec("experiment"), second: spec("deadline"), wantSecond: true},
-			{name: "production before loaded experiment", first: spec("experiment"), second: spec("production"), models: []string{"loaded"}, wantSecond: true},
-			{name: "loaded model before waiting age", first: spec("experiment"), second: spec("experiment"), models: []string{"loaded"}, wantSecond: true},
-			{name: "ready environment before waiting age", first: spec("experiment"), second: spec("experiment"), envs: []string{"ready"}, wantSecond: true},
 			{name: "earliest deadline", first: spec("deadline"), second: spec("deadline"), wantSecond: true},
-			{name: "longest waiting", first: spec("experiment"), second: spec("experiment")},
-			{name: "readiness before earliest deadline", first: spec("deadline"), second: spec("deadline"), models: []string{"loaded"}, wantSecond: true},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {

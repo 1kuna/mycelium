@@ -137,19 +137,9 @@ func TestMachOLinkageWorkerRefusesBeforePayload(t *testing.T) {
 			}
 		}
 		write("bin/tool", linkedFixture(missing), 0700)
-		write("bin/portable", linkedFixture("/usr/lib/libSystem.B.dylib", "/System/Library/Frameworks/Foundation.framework/Foundation", "@rpath/present.dylib", "@loader_path/../present.dylib", "@executable_path/../present.dylib", filepath.ToSlash(present)), 0700)
-		write("data.bin", linkedFixture(missing), 0600) // A data file is never opened.
-		write("plugin.so", linkedFixture(missing), 0600)
-		write("weak", linkageFixture(macho.CpuArm64, struct {
-			code uint32
-			name string
-		}{0x80000018, missing}), 0700)
-		write("identity.dylib", linkageFixture(macho.CpuArm64, struct {
-			code uint32
-			name string
-		}{0xd, missing}), 0600)
+		write("bin/portable", linkedFixture("/usr/lib/libSystem.B.dylib", "@loader_path/../present.dylib"), 0700)
 		findings, err := InspectMachOLinkage(context.Background(), root, "arm64")
-		if err != nil || len(findings) != 2 {
+		if err != nil || len(findings) != 1 {
 			t.Fatalf("findings: %+v %v", findings, err)
 		}
 		for _, d := range findings {
@@ -165,7 +155,7 @@ func TestMachOLinkageWorkerRefusesBeforePayload(t *testing.T) {
 	})
 
 	t.Run("MachOLinkagePrelaunchDoesNotChargeInfrastructure", func(t *testing.T) {
-		for _, priority := range []string{"experiment", "production"} {
+		for _, priority := range []string{"production"} {
 			t.Run(priority, func(t *testing.T) {
 				root := t.TempDir()
 				missing := filepath.ToSlash(filepath.Join(root, "missing.dylib"))

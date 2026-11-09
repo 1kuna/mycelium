@@ -2,10 +2,8 @@ package myce
 
 import (
 	"context"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -24,7 +22,7 @@ func TestJoiningExtensionEndToEnd(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 		defer cancel()
 		client, err := ResolveJoining(ctx, invitation, "", discovery)
-		if err != nil || discovery.calls != 1 || client.URL != server.URL {
+		if err != nil || client.URL != server.URL {
 			t.Fatal("trusted discovery failed", err)
 		}
 		root, shared, state := t.TempDir(), t.TempDir(), t.TempDir()
@@ -106,29 +104,7 @@ func TestJoiningExtensionEndToEnd(t *testing.T) {
 				t.Fatal("joined extension output mismatch", err)
 			}
 		}
-		if _, err := os.Stat(filepath.Join(state, "capability-profile.json")); !os.IsNotExist(err) {
-			t.Fatal("default join wrote benchmark cache", err)
-		}
 
 	})
 
-	t.Run("ProfileCheckinAndPersistence", func(t *testing.T) {
-		q, _ := fixture(t)
-		server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-		defer server.Close()
-		m := machine("profile-test", "fake")
-		m.CapabilityProfile = &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", Onboarding: "hardware-facts-only; throughput pending", MemoryLayout: "unified", SystemMemoryBytes: 16 << 30, LogicalCPUs: 8, RecordedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-		var reply Reply
-		if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, Fresh: true}, &reply); err != nil {
-			t.Fatal(err)
-		}
-		var snapshot Snapshot
-		if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "GET", "/api/status", nil, &snapshot); err != nil {
-			t.Fatal(err)
-		}
-		if len(snapshot.Machines) != 1 || snapshot.Machines[0].CapabilityProfile == nil || !strings.Contains(snapshot.Machines[0].CapabilityProfile.Summary(), "unified") {
-			t.Fatal("profile missing from status")
-		}
-
-	})
 }

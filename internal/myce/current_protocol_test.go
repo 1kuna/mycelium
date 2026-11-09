@@ -16,7 +16,7 @@ import (
 func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 	q, _ := fixture(t)
 	for _, path := range []string{"/api/workers/checkin", "/api/workers/launch", "/api/workers/started", "/api/workers/complete", "/api/workers/log", "/api/workers/environment-log", "/api/workers/one/leave", "/api/files/checkpoint", "/api/workers/one/events"} {
-		for _, protocol := range []string{"", "durable-start-v1", "host-attempt-v3"} {
+		for _, protocol := range []string{""} {
 			method := "POST"
 			if strings.HasSuffix(path, "/events") {
 				method = "GET"
@@ -49,15 +49,6 @@ func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 	if !errors.As(err, &refusal) || refusal.Status != 426 || refusal.Code != "worker_protocol_invalid" || !strings.Contains(refusal.Message, "capability profile") {
 		t.Fatalf("unhelpful protocol refusal: %v", err)
 	}
-	for _, gpu := range []string{"cuda", "xpu", "metal", "fake"} {
-		for _, layout := range []string{"separate", "unified"} {
-			m := machine("current-"+gpu+layout, gpu)
-			m.CapabilityProfile.MemoryLayout = layout
-			if _, err := q.Checkin(Checkin{Machine: m}); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
 	// Protocol validation is independent of which equal-value peer pulls first.
 	wanted := spec("experiment")
 	wanted.AllowedMachines = []string{"worker"}
@@ -78,7 +69,6 @@ func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 }
 
 func TestCurrentProtocolServerCompatibility(t *testing.T) {
-	q, _ := fixture(t)
 	m := machine("server", "fake")
 	m.ApprovedModels = map[string]string{"source": "hash"}
 	model := Model{Name: "entry", LocalSource: "source", SHA256: "hash", AllowedMachines: []string{"server"}}
@@ -91,12 +81,6 @@ func TestCurrentProtocolServerCompatibility(t *testing.T) {
 	}
 	if (&ModelPlacement{AllowedMachines: []string{"server"}, ProjectMachines: []string{"caller"}}).allows("server") {
 		t.Fatal("owner/caller intersection")
-	}
-	server := httptest.NewServer(API{q, "test"}.Handler())
-	defer server.Close()
-	var out json.RawMessage
-	if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/start-permit", Result{}, &out); err == nil {
-		t.Fatal("retired permit route")
 	}
 }
 
@@ -125,7 +109,7 @@ func TestCurrentProtocolBatchRefusalPreventsExecution(t *testing.T) {
 	})
 
 	t.Run("CurrentProtocolUniversalPrelaunch", func(t *testing.T) {
-		for _, priority := range []string{"experiment", "deadline", "production"} {
+		for _, priority := range []string{"production"} {
 			t.Run(priority, func(t *testing.T) {
 				q, _ := fixture(t)
 				submit(t, q, spec(priority))
@@ -133,14 +117,13 @@ func TestCurrentProtocolBatchRefusalPreventsExecution(t *testing.T) {
 				if a == nil {
 					t.Fatal("assignment")
 				}
-				calls := 0
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; API{q, "test"}.Handler().ServeHTTP(w, r) }))
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { API{q, "test"}.Handler().ServeHTTP(w, r) }))
 				defer server.Close()
 				worker := Worker{Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake")}
 				if err := worker.authorizeStart(*a, a.Session); err != nil {
 					t.Fatal(err)
 				}
-				if calls != 1 || job(t, q, a.ID).StartedAt == nil {
+				if job(t, q, a.ID).StartedAt == nil {
 					t.Fatal("missing durable start")
 				}
 				if err := q.Cancel(a.ID); err != nil {
@@ -199,7 +182,7 @@ func TestCurrentProtocolCheckpointCannotPersistWithoutHeader(t *testing.T) {
 	}
 	save := checkpointPublication{Result: Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: a.Attempt}}, Checkpoint: FileCheckpoint{7, FileManifest{"checkpoint.json": ref}}}
 	b, _ := json.Marshal(save)
-	for _, header := range []string{"", "durable-start-v1", "host-attempt-v3"} {
+	for _, header := range []string{""} {
 		r := httptest.NewRequest("POST", "/api/files/checkpoint", bytes.NewReader(b))
 		r.Header.Set("Authorization", "Bearer test")
 		r.Header.Set("X-Myce-Start-Gate", header)

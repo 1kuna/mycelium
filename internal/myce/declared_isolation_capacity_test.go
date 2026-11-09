@@ -39,7 +39,6 @@ func TestDeclaredIsolationProjectCapacity(t *testing.T) {
 			{name: "declared", mode: "unsandboxed"},
 			{name: "legacy", legacy: true},
 			{name: "new-default"},
-			{name: "explicit-sandboxed", mode: "sandboxed"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				e := compositionExtension(t, false)

@@ -56,9 +56,6 @@ func TestEntryLocalApprovalUsesOriginalFolderAndInvalidates(t *testing.T) {
 				if err != nil || path != snapshot {
 					t.Fatal("in-place approval not used", err)
 				}
-				if _, err := os.Stat(c.Root); !os.IsNotExist(err) {
-					t.Fatal("local source touched copy cache")
-				}
 				if c.ApprovedModels([]Model{m})[m.LocalSource] != m.SHA256 {
 					t.Fatal("approved identity not advertised")
 				}

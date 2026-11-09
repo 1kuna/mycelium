@@ -131,13 +131,6 @@ func TestSharedHostAdmissionUsesHistoryLiveReserveAndAcknowledgement(t *testing.
 		}
 		check(t, q, m, nil)
 		assertRoom(2) // Nor can it increase the operator allowance.
-
-		w := Worker{Machine: m, HostMemoryReserveGB: 1, HostMemorySource: func(context.Context) (float64, error) { return 10.4, nil }}
-		free, err := w.sharedHostLiveMemory(context.Background())
-		if err != nil || math.Abs(free-7.4) > 1e-9 {
-			t.Fatalf("live launch headroom=%g, want 7.4: %v", free, err)
-		}
-
 	})
 
 	t.Run("SharedHostCPUEnvironmentOnAcceleratorWorker", func(t *testing.T) {

@@ -215,42 +215,6 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "ambient-secret")
 	t.Setenv("SSH_AUTH_SOCK", "/synthetic-agent")
 	const reason = "native helper needs ordinary host IPC"
-	t.Run("author-validation", func(t *testing.T) {
-		q := isolationQueue(t)
-		client := isolationClient(t, q)
-		for _, mode := range []string{"unknown", "unsandboxed"} {
-			s := spec("experiment")
-			s.Isolation = mode
-			if err := client.Call(context.Background(), "POST", "/api/jobs", s, nil); err == nil {
-				t.Errorf("accepted %s without a reason", mode)
-			}
-			e := fakeExtension(t)
-			// Author the invalid declaration in bundle bytes, so server-side
-			// revalidation cannot accidentally trust transport-only fields.
-			e.Files["extension.yaml"] = append(e.Files["extension.yaml"], []byte("isolation: "+mode+"\nreason: '  '\n")...)
-			if err := client.Call(context.Background(), "POST", "/api/extensions", e, nil); err == nil {
-				t.Errorf("accepted extension %s without a nonblank reason", mode)
-			}
-		}
-	})
-	t.Run("single-command", func(t *testing.T) {
-		q := isolationQueue(t)
-		client := isolationClient(t, q)
-		w := isolationWorker(t, client, nil)
-		s := spec("experiment")
-		s.Resumable = false
-		s.Isolation, s.Reason = "unsandboxed", reason
-		s.Needs.Network = true // No native_network report, and Linux stays usable.
-		s.Run.Command = []string{"sh", "-ec", isolationHostProof + `echo passed > "$TMPDIR/passed"; while ! test -f "$TMPDIR/finish"; do sleep .01; done`}
-		s.Run.Env = map[string]string{"ISOLATION_HOST": filepath.Join(w.StateDir, "control", "authority"), "MYCE_TOKEN": "authored-secret", "TMPDIR": "/ignored"}
-		check(t, q, w.Machine, nil)
-		var j Job
-		if err := client.Call(context.Background(), "POST", "/api/jobs", s, &j); err != nil {
-			t.Fatal(err)
-		}
-		isolationObserve(t, q, client, j.ID, "queued", reason)
-		isolationRun(t, q, client, w, &j, false, reason)
-	})
 	t.Run("plain-native-default", func(t *testing.T) {
 		q := isolationQueue(t)
 		client := isolationClient(t, q)

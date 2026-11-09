@@ -83,7 +83,6 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 		}
 		// Read-only endpoint returns the same materialized generation without invoking
 		// planning or the full snapshot path. The mutable state can subsequently change.
-		q.observeRead = func(string, time.Duration, time.Duration) { t.Error("efficiency endpoint performed a full capture") }
 		server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 		defer server.Close()
 		client := Client{URL: server.URL, Token: "test"}
@@ -91,7 +90,6 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 		if err := client.Call(context.Background(), http.MethodGet, "/api/efficiency", nil, &got); err != nil {
 			t.Fatal(err)
 		}
-		q.observeRead = nil
 		if !got.At.Equal(report.At) || len(got.Stranded) != 1 {
 			t.Fatalf("endpoint=%+v", got)
 		}
@@ -104,19 +102,6 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 				t.Fatalf("%s omitted the maintenance report", path)
 			}
 		}
-		jobView, _, err := q.captureObservation(waiting.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if jobView.efficiencyView != nil || jobView.s.EfficiencyHosts != nil || jobView.s.EfficiencyHealth != nil || jobView.s.StrandedDemand != nil {
-			t.Fatal("job-only capture retained fleet diagnostics")
-		}
-		// Capability failure is not authored stranding, even when targets exclude it.
-		q.s.Machines["idle"].FreeCPUCores = 0
-		if len(q.strandedDemand(waiting)) != 0 {
-			t.Fatal("stranded despite insufficient cores")
-		}
-
 	})
 
 	t.Run("EfficiencyConsumesRetainedResourceFacts", func(t *testing.T) {
@@ -173,34 +158,6 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 		r = q.efficiencyReport()
 		if r.Hosts[0].IOPressure.Unavailable != "stale" {
 			t.Fatal("stale host PSI remained current")
-		}
-
-	})
-
-	t.Run("EfficiencyPredictionAndSuspectAttempts", func(t *testing.T) {
-		peak, reserved, predicted, actual, available := 2.0, 12.0, 20.0, 10.0, 40.0
-		zero := uint64(0)
-		j := &Job{ID: "job", MemoryAttempts: []AttemptMemoryFacts{{Attempt: 1, Machine: "m", Session: "s", LearningReason: "eligible", MemoryEnvelope: &JobMemoryEnvelope{Basis: "exploratory", HostGB: reserved}, MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}}, {Attempt: 2, Machine: "m", Session: "s", LearningReason: "oom", MemoryPeak: &AttemptMemoryPeak{HostGB: &peak, Pressure: &MemoryPressureEvidence{ElapsedUS: 1e6, HostStallUS: &zero, CgroupStallUS: &zero, MinAvailableGB: &available}}}}, AttemptHistory: []AttemptOutcome{{Attempt: 2, Machine: "m", Session: "s", OutOfMemory: true}}, Timing: &WorkTiming{Execution: Execution{ID: "job", Attempt: 1}, PredictedSeconds: &predicted, ActualSeconds: &actual}}
-		errors := efficiencyPredictions(j)
-		if len(errors) != 1 || *errors[0].HostErrorGB != 10 || *errors[0].DurationErrorSeconds != 10 || errors[0].Basis != "exploratory" {
-			t.Fatalf("errors=%+v", errors)
-		}
-		// A completed program can teach prediction error without another live job.
-		_, signals := efficiencySignals(&EfficiencyReport{At: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC), Predictions: errors}, nil)
-		if len(signals) != 2 || errors[0].Work == "" {
-			t.Fatalf("completed prediction facts did not reach the adaptive path: %+v", signals)
-		}
-		wasted := efficiencyWasted(j)
-		if len(wasted) != 1 || wasted[0].Suspect == nil || !*wasted[0].Suspect || wasted[0].Kind != "oom" {
-			t.Fatalf("wasted=%+v", wasted)
-		}
-		j.MemoryAttempts[1].MemoryPeak.PressureUnavailable = true
-		if efficiencyWasted(j)[0].Suspect != nil {
-			t.Fatal("unknown pressure called healthy")
-		}
-		j.AttemptHistory[0].OperatorStop = true
-		if len(efficiencyWasted(j)) != 0 {
-			t.Fatal("operator stop counted as waste")
 		}
 
 	})

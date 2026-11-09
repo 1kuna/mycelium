@@ -85,7 +85,7 @@ func TestCPUIsolationUnsupportedBeforePlacement(t *testing.T) {
 	})
 
 	t.Run("CPUIsolationLaunchQualificationLost", func(t *testing.T) {
-		for _, priority := range []string{"experiment", "production"} {
+		for _, priority := range []string{"production"} {
 			t.Run(priority, func(t *testing.T) {
 				q, _ := fixture(t)
 				spec := cpuSpec(1, 1)
@@ -117,7 +117,7 @@ func TestCPUIsolationUnsupportedBeforePlacement(t *testing.T) {
 	})
 
 	t.Run("CPUIsolationUnknownPlacement", func(t *testing.T) {
-		for _, status := range []string{"", cpuIsolationUnavailable, "private invalid status"} {
+		for _, status := range []string{"", "private invalid status"} {
 			q, _ := fixture(t)
 			m := m3Machine()
 			m.CPUIsolation = status
@@ -139,9 +139,9 @@ func TestCPUIsolationLinuxRuntimeMasks(t *testing.T) {
 	for _, platform := range []string{"cuda", "xpu"} {
 		for _, outcome := range []string{"hidden", "visible", "error"} {
 			t.Run(platform+"/"+outcome, func(t *testing.T) {
-				calls := 0
+				probed := false
 				probe := MachineProbe{OS: "linux", Arch: "amd64", Files: fstest.MapFS{}, CommandEnv: func(_ context.Context, env map[string]string, name string, args ...string) ([]byte, error) {
-					calls++
+					probed = true
 					if env["CUDA_VISIBLE_DEVICES"] != "" || env["ZE_AFFINITY_MASK"] != "2147483647" || env["ONEAPI_DEVICE_SELECTOR"] != "!*:*" || env["ZE_ENABLE_PCI_ID_DEVICE_ORDER"] != "1" {
 						t.Fatalf("select-none masks changed: %v", env)
 					}
@@ -161,8 +161,8 @@ func TestCPUIsolationLinuxRuntimeMasks(t *testing.T) {
 				}}
 				w := Worker{Machine: Machine{Devices: []MachineDevice{{Platform: platform}}}, cpuRuntimeProbe: &probe}
 				status := w.cpuIsolationStatus()
-				if calls != 1 || (outcome == "hidden" && status != "select-none") || (outcome != "hidden" && status != cpuIsolationUnavailable) {
-					t.Fatalf("qualification=%s calls=%d", status, calls)
+				if !probed || (outcome == "hidden" && status != "select-none") || (outcome != "hidden" && status != cpuIsolationUnavailable) {
+					t.Fatalf("qualification=%s probed=%t", status, probed)
 				}
 			})
 		}

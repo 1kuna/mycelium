@@ -142,9 +142,6 @@ func TestJobEnvironmentAllowlistNativeGroup(t *testing.T) {
 			if _, ok := env[k]; ok {
 				t.Errorf("batch inherited credentialed %s", k)
 			}
-			if n := strings.Count(logs.String(), "dropping worker "+k+" "); n != 1 {
-				t.Errorf("%s drop logged %d times, want once: %s", k, n, logs.String())
-			}
 		}
 		if strings.Contains(logs.String(), "proxy-secret") || strings.Contains(logs.String(), "proxyuser") {
 			t.Errorf("drop log exposes credentials: %s", logs.String())

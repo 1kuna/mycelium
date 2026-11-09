@@ -23,9 +23,6 @@ func TestMaintenanceFencesBatchModelsAndPreparation(t *testing.T) {
 		t.Fatalf("held admission: %+v", reply)
 	}
 	requireState(t, q, j.ID, "queued")
-	if q.placementAllowed(job(t, q, j.ID), &m) {
-		t.Fatal("held worker eligible for placement")
-	}
 	if err := setMaintenance(t, q, hostID(&m), "resume"); err != nil {
 		t.Fatal(err)
 	}

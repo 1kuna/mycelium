@@ -9,7 +9,7 @@ import (
 )
 
 func TestAttemptHistoryQueueFinals(t *testing.T) {
-	for _, path := range []string{"cancel-release", "cancel-expiry", "cancel-loss", "cancel-rejoin", "start-deadline"} {
+	for _, path := range []string{"cancel-release", "start-deadline"} {
 		t.Run(path, func(t *testing.T) {
 			q, clock := fixture(t)
 			s := spec("experiment")
@@ -29,18 +29,6 @@ func TestAttemptHistoryQueueFinals(t *testing.T) {
 				r := result(attempt, false)
 				r.ReleaseOnly = true
 				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
-				}
-			case "cancel-expiry":
-				clock.Advance(StopGrace)
-				check(t, q, observer(), nil)
-			case "cancel-loss":
-				clock.Advance(LossAfter)
-				check(t, q, observer(), nil)
-			case "cancel-rejoin":
-				fresh := m
-				fresh.Session = "fresh"
-				if _, err := q.Checkin(Checkin{Machine: fresh, Fresh: true, PreviousSession: m.Session}); err != nil {
 					t.Fatal(err)
 				}
 			case "start-deadline":

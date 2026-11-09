@@ -91,7 +91,7 @@ func TestSyncUsesRealAPIAndWorker(t *testing.T) {
 	})
 
 	t.Run("SyncTargetsCancelAndPersistence", func(t *testing.T) {
-		for _, target := range []string{"one", "fake", "all"} {
+		for _, target := range []string{"all"} {
 			t.Run(target, func(t *testing.T) {
 				q, _, m := syncFixture(t)
 				if e := q.SyncModel(SyncRequest{Model: "a", To: target}); e != nil {

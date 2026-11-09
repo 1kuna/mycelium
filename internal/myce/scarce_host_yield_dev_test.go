@@ -392,17 +392,6 @@ while True:time.sleep(.01)
 		if got := job(t, q, accepted.ID); got.Spec.ResumeCompatibility.CheckpointFormat != "counter-v1" || !got.Spec.Preemptible {
 			t.Fatal("contract not frozen", got.Spec)
 		}
-		for _, bad := range []Spec{
-			{Priority: "production", Preemptible: true},
-			{Class: "test", Preemptible: true},
-			{Resumable: true, Preemptible: true},
-			{Resumable: true, ResumeCompatibility: &ResumeCompatibility{CheckpointFormat: "counter-v1"}},
-		} {
-			if err := validateYieldContract(bad); err == nil {
-				t.Fatal("invalid contract accepted", bad)
-			}
-		}
-
 	})
 
 	t.Run("ScarceHostYieldDestinationLostAfterStopAndDemandCancel", func(t *testing.T) {

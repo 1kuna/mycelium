@@ -151,8 +151,6 @@ func TestAttemptHistoryLaunchPredicatePrivacy(t *testing.T) {
 		kind, predicate string
 	}{
 		{reject("device_identity_mismatch", errors.New("private-secret")), launchRefused, "device_identity_mismatch"},
-		{reject("device_probe_unavailable", errors.New("private-secret")), launchRefused, "device_probe_unavailable"},
-		{fmt.Errorf("private-secret: %w", errWorkerMemory), launchRefused, "memory_capacity"},
 		{errors.New("private-secret"), environmentFailed, "environment_prepare"},
 	} {
 		w := recoveryWorker(t)

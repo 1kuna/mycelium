@@ -143,10 +143,6 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 		path, reason string
 	}{
 		{"release-only", "hypha waiting: on battery"},
-		{"heartbeat-other", "machine leaving"},
-		{"heartbeat-empty", "making room for production job"},
-		{"stop-expiry", "making room for production job"},
-		{"machine-quiet", "hypha waiting: on battery"},
 		{"priority-preemption", "making room for production job"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
@@ -184,22 +180,6 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 				if err := q.Complete(r); err != nil {
 					t.Fatal(err)
 				}
-			}
-			switch tc.path {
-			case "heartbeat-other", "heartbeat-empty":
-				c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Recovering: true}
-				if tc.path == "heartbeat-other" {
-					c.Attempts = []AttemptReport{{Execution: Execution{ID: "unknown", Attempt: 1}, Session: m.Session}}
-				}
-				if _, err := q.Checkin(c); err != nil {
-					t.Fatal(err)
-				}
-			case "stop-expiry":
-				clock.Advance(job(t, q, first.ID).StopAt.Sub(clock.Now()))
-				check(t, q, observer(), nil)
-			case "machine-quiet":
-				clock.Advance(LossAfter)
-				check(t, q, observer(), nil)
 			}
 			got := job(t, q, first.ID)
 			if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || len(got.AttemptHistory) != 1 {

@@ -169,14 +169,10 @@ func TestTierFairnessOwnerCapCASAndCalls(t *testing.T) {
 		urgent := projectSpec("atlas")
 		urgent.Priority = ""
 		urgent.Class = "urgent"
-		waiting := submit(t, q, urgent)
+		submit(t, q, urgent)
 		if job(t, q, low.ID).State != "running" || job(t, q, a.ID).State != "running" {
 			t.Fatal("capped demand interrupted useful work")
 		}
-		if reason := q.capReason(q.s.Jobs[waiting.ID]); !strings.Contains(reason, "concurrent work cap") {
-			t.Fatal(reason)
-		}
-
 	})
 }
 

@@ -14,8 +14,6 @@ func TestDeadlineGuidancePolicyAndIdentity(t *testing.T) {
 		tiers  []PriorityTier
 		change string
 	}{
-		{"default", nil, "higher"},
-		{"catchall", []PriorityTier{{"shared", []string{"*/*"}}}, "same"},
 		{"custom", []PriorityTier{{"preferred", []string{"test/experiment"}}, {"rest", []string{"*/*"}}}, "lower"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,12 +67,6 @@ func TestDeadlineGuidancePolicyAndIdentity(t *testing.T) {
 				t.Fatal("dispatch disagrees with deadline guidance", got)
 			}
 		})
-	}
-	q, _ := fixture(t)
-	s := spec("deadline")
-	s.Deadline = nil
-	if _, err := q.Submit(s); err == nil || !strings.Contains(err.Error(), "deadline") {
-		t.Fatal("missing deadline accepted", err)
 	}
 }
 

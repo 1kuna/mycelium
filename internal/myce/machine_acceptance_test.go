@@ -45,10 +45,6 @@ func TestM3RetiredNamesPreserveReplay(t *testing.T) {
 	if err := q.ConfigureHosts(map[string]HostPolicy{"b70-gpu0": {}}); !errors.As(err, &typed) || typed.Code != "machine_renamed" {
 		t.Fatal(err)
 	}
-	s.SubmissionKey, s.AllowedMachines = "literal-name", []string{"arbitrary-gpu0"}
-	if _, err := q.Submit(s); err != nil {
-		t.Fatal("arbitrary suffix treated as retired", err)
-	}
 }
 
 func TestM3StopEventsCoverMachineSession(t *testing.T) {

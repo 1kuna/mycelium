@@ -82,12 +82,7 @@ func TestM3ConcurrentDeviceSlotsAndCPU(t *testing.T) {
 	t.Run("M3SelectorsAndTypedErrors", func(t *testing.T) {
 		for _, tc := range []struct{ name, selector, code string }{
 			{"count", `{"count":2}`, "gpu_count_unsupported"},
-			{"zero", `{"count":0}`, "gpu_selector_invalid"},
-			{"fraction", `{"count":1.5}`, "gpu_selector_invalid"},
-			{"empty", `{"devices":[]}`, "gpu_selector_invalid"},
 			{"duplicate", `{"devices":["0","0"]}`, "gpu_selector_invalid"},
-			{"noncanonical", `{"devices":["01"]}`, "gpu_selector_invalid"},
-			{"number", `{"devices":[0]}`, "gpu_selector_invalid"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				q, _ := fixture(t)

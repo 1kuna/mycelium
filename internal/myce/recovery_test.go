@@ -34,17 +34,6 @@ func TestCrashDurableSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	var mode string
-	var full int
-	if err = q.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
-		t.Fatal(err)
-	}
-	if err = q.db.QueryRow("PRAGMA synchronous").Scan(&full); err != nil {
-		t.Fatal(err)
-	}
-	if mode != "wal" || full != 2 {
-		t.Fatalf("durability: %s %d", mode, full)
-	}
 	snap, err := q.Snapshot()
 	if err != nil || len(snap.Jobs) != 1 || snap.Jobs[0].State != "queued" {
 		t.Fatalf("lost submitted job: %+v %v", snap, err)

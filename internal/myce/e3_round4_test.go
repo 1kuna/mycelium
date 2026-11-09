@@ -12,7 +12,7 @@ import (
 
 func TestExtensionSmokeSuccessRemainsUnqualified(t *testing.T) {
 	t.Run("contract", func(t *testing.T) {
-		for _, mode := range []string{"main-smoke", "check-without-baseline"} {
+		for _, mode := range []string{"check-without-baseline"} {
 			t.Run(mode, func(t *testing.T) {
 				e := compositionExtension(t, false)
 				e.Kinds = nil

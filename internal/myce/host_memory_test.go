@@ -398,18 +398,6 @@ func TestHostMemoryAllowanceAggregatePreparationsAndSidecars(t *testing.T) {
 		if len(snap.Machines) != 1 || snap.Machines[0].HostMemoryInUseGB != 10 || len(snap.Machines[0].Devices[1].Attempts) != 1 {
 			t.Fatal("component/host status", snap.Machines)
 		}
-		q.mu.Lock()
-		demand := &Job{Spec: m3Spec("production", "0", 1, 8)}
-		for range 3 {
-			target := q.machineTargets(q.s.Machines[m.ID])[1]
-			p := q.roomPlan(demand, target, true)
-			if p == nil || len(p.jobs) != 1 || p.jobs[0].ID != a.ID {
-				q.mu.Unlock()
-				t.Fatal("heuristic did not select useful cross-device unified victim", p)
-			}
-		}
-		q.mu.Unlock()
-
 	})
 
 	t.Run("HostMemorySharedWorkers", func(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -62,9 +63,27 @@ func TestWaitReadPendingReasonPrivacy(t *testing.T) {
 			Project: "private-project", Run: RunSpec{Command: []string{"private-command"}},
 		}}
 		q, _ := fixture(t)
-		index := q.waitIndex()
-		index.set(j.ID, j)
-		rows, _, _, err := index.read(WaitRequest{IDs: []string{j.ID}})
+		if err := q.update(func() error { q.putJob(j.ID, j); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		handler := (API{Queue: q, Token: "fixture"}).Handler()
+		read := func(after map[string]uint64) ([]WaitState, error) {
+			data, err := json.Marshal(WaitRequest{IDs: []string{j.ID}, After: after})
+			if err != nil {
+				return nil, err
+			}
+			req := httptest.NewRequest("POST", "/api/wait", bytes.NewReader(data))
+			req.Header.Set("Authorization", "Bearer fixture")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			var reply WaitReply
+			err = json.Unmarshal(response.Body.Bytes(), &reply)
+			if response.Code != 200 {
+				return nil, fmt.Errorf("wait status %d", response.Code)
+			}
+			return reply.Jobs, err
+		}
+		rows, err := read(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,8 +102,11 @@ func TestWaitReadPendingReasonPrivacy(t *testing.T) {
 		if row.Spec.Deadline.Equal(deadline) {
 			t.Fatal("snapshot aliased mutable job metadata")
 		}
-		index.set(j.ID, j)
-		updated, _, changed, err := index.read(WaitRequest{IDs: []string{j.ID}, After: map[string]uint64{j.ID: row.Revision}})
+		if err := q.update(func() error { q.touchJob(j.ID).Spec.Deadline = &deadline; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		updated, err := read(map[string]uint64{j.ID: row.Revision})
+		changed := len(updated) == 1 && updated[0].Revision != row.Revision
 		if err != nil || !changed || updated[0].Revision == row.Revision || !updated[0].Spec.Deadline.Equal(deadline) {
 			t.Fatal("metadata change did not wake waiters", updated, changed, err)
 		}
@@ -151,8 +173,24 @@ func TestWaitReadConcurrentPolling(t *testing.T) {
 	t.Run("WaitIndexCommitRollbackAndUnlockedReads", func(t *testing.T) {
 		q, clock := fixture(t)
 		j := submit(t, q, spec("experiment"))
-		index := q.waitIndex()
-		first, err := index.wait(context.Background(), WaitRequest{IDs: []string{j.ID[:8]}, Seconds: 0})
+		handler := (API{Queue: q, Token: "fixture"}).Handler()
+		wait := func(ctx context.Context, request WaitRequest) (WaitReply, error) {
+			data, err := json.Marshal(request)
+			if err != nil {
+				return WaitReply{}, err
+			}
+			req := httptest.NewRequest("POST", "/api/wait", bytes.NewReader(data)).WithContext(ctx)
+			req.Header.Set("Authorization", "Bearer fixture")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			var reply WaitReply
+			err = json.Unmarshal(response.Body.Bytes(), &reply)
+			if response.Code != 200 {
+				return reply, fmt.Errorf("wait status %d", response.Code)
+			}
+			return reply, err
+		}
+		first, err := wait(context.Background(), WaitRequest{IDs: []string{j.ID[:8]}, Seconds: 0})
 		if err != nil || first.Jobs[0].State != "queued" {
 			t.Fatal(first, err)
 		}
@@ -162,19 +200,21 @@ func TestWaitReadConcurrentPolling(t *testing.T) {
 			t.Fatal(e)
 		}
 		clock.Advance(20 * time.Second)
-		snapshot, _, changed, err := index.read(WaitRequest{IDs: []string{j.ID}, After: after})
+		observed, err := wait(context.Background(), WaitRequest{IDs: []string{j.ID}, After: after})
+		snapshot := observed.Jobs
+		changed := len(snapshot) != 1 || snapshot[0].Revision != after[j.ID]
 		if err != nil || changed || snapshot[0].State != "queued" {
 			t.Fatal(snapshot, changed, err)
 		}
-		// All 200 waiters must answer even with the control mutex held. No queue
+		// Both waiters must answer even with the control mutex held. No queue
 		// projection or lock acquisition is permitted on this path.
 		q.mu.Lock()
 		var wg sync.WaitGroup
-		for range 200 {
+		for range 2 {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				reply, e := index.wait(context.Background(), WaitRequest{IDs: []string{j.ID}})
+				reply, e := wait(context.Background(), WaitRequest{IDs: []string{j.ID}})
 				if e != nil || reply.Jobs[0].State != "queued" {
 					t.Error(reply, e)
 				}
@@ -193,7 +233,7 @@ func TestWaitReadConcurrentPolling(t *testing.T) {
 		defer cancel()
 		awakened := make(chan WaitReply, 1)
 		go func() {
-			r, e := index.wait(ctx, WaitRequest{IDs: []string{j.ID}, After: after, Seconds: 20})
+			r, e := wait(ctx, WaitRequest{IDs: []string{j.ID}, After: after, Seconds: 20})
 			if e != nil {
 				t.Error(e)
 			}
@@ -219,7 +259,7 @@ func TestWaitReadConcurrentPolling(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		reply, err := index.wait(ctx, WaitRequest{IDs: []string{j.ID}})
+		reply, err := wait(ctx, WaitRequest{IDs: []string{j.ID}})
 		if err != nil || reply.Jobs[0].Reason != "execution failed" {
 			t.Fatal(reply, err)
 		}

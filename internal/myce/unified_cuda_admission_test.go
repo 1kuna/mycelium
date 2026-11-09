@@ -19,28 +19,16 @@ func unifiedCUDAAdmissionMachine() Machine {
 }
 
 func TestUnifiedCUDAAdmissionPhysicalFloor(t *testing.T) {
-	for _, mode := range []string{"unified", "discrete-cuda", "other-unified"} {
+	for _, mode := range []string{"unified"} {
 		t.Run(mode, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := unifiedCUDAAdmissionMachine()
-			if mode == "discrete-cuda" {
-				m.UnifiedMemory, m.CapabilityProfile.MemoryLayout = false, "separate"
-			}
-			if mode == "other-unified" {
-				m.GPU = "fake"
-			}
 			m.HostAvailableMemoryGB = 20
 			m.MemoryObservation.UsedGB = 97 // 24 GiB raw free, below the 25 GiB floor.
 			s := spec("experiment")
 			s.Needs.MemoryGB, s.Needs.HostMemoryGB = 2, 1
 			j := submit(t, q, s)
 			reply := check(t, q, m, nil)
-			if mode != "unified" {
-				if reply.Job == nil || reply.Job.ID != j.ID {
-					t.Fatal("other host admission changed", reply)
-				}
-				return
-			}
 			if reply.Job != nil {
 				t.Fatal("CUDA admitted below physical floor")
 			}

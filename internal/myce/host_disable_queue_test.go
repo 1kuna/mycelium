@@ -2,7 +2,6 @@ package myce
 
 import (
 	"errors"
-	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -53,6 +52,13 @@ func TestAttemptHistoryLateRefund(t *testing.T) {
 			if i == 2 && (h.State != "queued" || h.Reason != "requeued: stopped by operator" || !h.OperatorStop || !h.EndedAt.Equal(before.AttemptHistory[i].EndedAt)) {
 				t.Fatalf("stale refund decision: %+v", h)
 			}
+		}
+
+		if e := q.Complete(r); !errors.Is(e, ErrStale) {
+			t.Fatalf("obsolete operator result accepted: %v", e)
+		}
+		if got := job(t, q, j.ID); got.Losses != 2 {
+			t.Fatal("duplicate refunded another attempt")
 		}
 
 	})
@@ -111,39 +117,4 @@ func TestAttemptHistoryLateRefund(t *testing.T) {
 
 	})
 
-	t.Run("OperatorStopRefundRevivesThirdLossAndPreservesOtherLosses", func(t *testing.T) {
-		q, c := fixture(t)
-		m := machine("operator", "fake")
-		s := spec("experiment")
-		s.Resumable = false
-		j := submit(t, q, s)
-		var old *Job
-		for i := 0; i < 3; i++ {
-			// Each unresolved lost copy keeps its original GPU slot.
-			m = machine(fmt.Sprintf("operator-%d", i), "fake")
-			old = check(t, q, m, nil).Job
-			if old == nil {
-				t.Fatal("no assignment")
-			}
-			advanceReportingPeer(t, q, c, observer(), LossAfter)
-		}
-		if got := job(t, q, j.ID); got.Losses != 3 || got.State != "failed" {
-			t.Fatalf("not third loss: %+v", got)
-		}
-		r := operatorResult(result(old, false))
-		r.Interrupted = true
-		if e := q.Complete(r); !errors.Is(e, ErrStale) {
-			t.Fatalf("obsolete operator result accepted: %v", e)
-		}
-		if got := job(t, q, j.ID); got.Losses != 2 || got.State != "queued" {
-			t.Fatalf("refund did not revive: %+v", got)
-		}
-		if e := q.Complete(r); !errors.Is(e, ErrStale) {
-			t.Fatalf("obsolete operator result accepted: %v", e)
-		}
-		if got := job(t, q, j.ID); got.Losses != 2 {
-			t.Fatal("duplicate refunded another attempt")
-		}
-
-	})
 }

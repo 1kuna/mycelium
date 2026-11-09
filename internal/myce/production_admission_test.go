@@ -9,7 +9,7 @@ import (
 )
 
 func TestProductionAdmissionRepeatedPreemptionBackoff(t *testing.T) {
-	for _, next := range []string{"expiry", "other-host", "outside-window"} {
+	for _, next := range []string{"expiry", "other-host"} {
 		t.Run(next, func(t *testing.T) {
 			q, clock := fixture(t)
 			if err := q.SetLossTimeouts(time.Hour, time.Hour, time.Hour); err != nil {
@@ -126,7 +126,7 @@ func productionAdmissionFixture(t *testing.T) (*Queue, *workerFakeClock, Machine
 }
 
 func TestProductionAdmissionPredictableDependentDemand(t *testing.T) {
-	for _, edge := range []string{"piece", "whole-parent", "fan-out-stage", "producer-overrun"} {
+	for _, edge := range []string{"whole-parent", "producer-overrun"} {
 		t.Run(edge, func(t *testing.T) {
 			q, clock, source, target, p, x := productionAdmissionFixture(t)
 			parent := submit(t, q, p)

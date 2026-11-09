@@ -6,7 +6,6 @@ import (
 	"mycelium/internal/probeguard"
 	"os"
 	"runtime"
-	"sort"
 	"testing"
 	"time"
 )
@@ -36,20 +35,6 @@ func TestDarwinRSSGuardNative(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { p.stopDirective(w.Clock.Now(), 0, true, true) })
-	// Measure the exact RSS+pressure probe path used by the observer, including
-	// session inventory/birth checks. No threshold assertion depends on speed.
-	var costs []time.Duration
-	for i := 0; i < 20; i++ {
-		at := time.Now()
-		_, _, err := w.processMemory.OwnedResident(p.rssRoots())
-		_, pressureErr := w.processMemory.Pressure(context.Background())
-		if err != nil || pressureErr != nil {
-			t.Fatalf("native probe: %v %v", err, pressureErr)
-		}
-		costs = append(costs, time.Since(at))
-	}
-	sort.Slice(costs, func(i, j int) bool { return costs[i] < costs[j] })
-	t.Logf("20 complete RSS+pressure probes: median=%s p95=%s max=%s", costs[10], costs[18], costs[19])
 	r := d5Finish(t, p)
 	if r.Success || !r.OutOfMemory || r.ReleasePending || r.Interrupted || r.ExecutionCause == nil || r.ExecutionCause.Class != rssLimitExceeded {
 		t.Fatalf("native guard: %+v", r)

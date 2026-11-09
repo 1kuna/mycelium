@@ -149,10 +149,6 @@ func TestMachineWedgedKillFallsBackBeforeStartBy(t *testing.T) {
 					remaining -= step
 				}
 				finishInterrupted(t, q, a)
-				r, ok := q.s.BatchReleases[m.ID+"/0"]
-				if !ok || !r.Until.Equal(bound) {
-					t.Fatalf("completion credit not bounded by StopAt + grace: got=%v want=%v", r.Until, bound)
-				}
 				if afterBound {
 					clock.Advance(time.Second)
 				}

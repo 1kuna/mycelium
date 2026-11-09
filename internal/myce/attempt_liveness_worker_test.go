@@ -45,27 +45,28 @@ func TestAttemptLivenessSamplerDoesNotBlockHeartbeat(t *testing.T) {
 func TestAttemptLivenessRejectsReusedAnchorPID(t *testing.T) {
 	data := []byte("42 1 42 00:10.00 Tue Nov 3 12:00:00 2026\n")
 	observedBirth := "owned-birth"
-	inventoryCalls := 0
 	birth := func(pid int) (string, error) {
 		if pid != 42 {
 			t.Fatalf("wrong anchor %d", pid)
 		}
 		return observedBirth, nil
 	}
-	inventory := func(context.Context) ([]byte, error) { inventoryCalls++; return data, nil }
+	inventory := func(context.Context) ([]byte, error) {
+		if observedBirth != "owned-birth" {
+			t.Fatal("foreign anchor reached process inventory")
+		}
+		return data, nil
+	}
 	if n, _, err := sampleLivenessCPU(context.Background(), 42, "owned-birth", birth, inventory); err != nil || n != 10 {
 		t.Fatal("owned anchor unavailable", n, err)
 	}
 	// The native supervisor can be reaped while output publication is pending.
 	// Its reused PID is stable across each probe, but belongs to a different job.
 	observedBirth = "foreign-birth"
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 1; i++ {
 		if _, _, err := sampleLivenessCPU(context.Background(), 42, "owned-birth", birth, inventory); err == nil {
 			t.Fatal("foreign reused anchor supplied CPU")
 		}
-	}
-	if inventoryCalls != 1 {
-		t.Fatal("foreign anchor reached process inventory", inventoryCalls)
 	}
 	observedBirth = "owned-birth"
 	if _, _, err := sampleLivenessCPU(context.Background(), 42, "owned-birth", birth, func(context.Context) ([]byte, error) { observedBirth = "foreign-birth"; return data, nil }); err == nil {

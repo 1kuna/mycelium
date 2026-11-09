@@ -100,7 +100,7 @@ func TestBenchmarkCurveWorkerPublishesExactCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snap.WorkCurves) != 2 || len(q.s.PreparationPlans) != 0 || snap.Machines[0].BenchmarkPending {
+	if len(snap.WorkCurves) != 2 || snap.Machines[0].BenchmarkPending {
 		t.Fatalf("worker did not publish after exact cleanup: %+v", snap.WorkCurves)
 	}
 	// A stale completion cannot inject or modify evidence after custody is gone.

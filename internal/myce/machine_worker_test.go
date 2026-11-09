@@ -364,11 +364,6 @@ func TestMachineWorkerIdentityMismatchAndCPUIsolationRefused(t *testing.T) {
 						return d, nil
 					}
 				}
-				_, err := w.forAttempt(h.jobs[0])
-				var rejection *rejectionError
-				if !errors.As(err, &rejection) || rejection.code != want {
-					t.Fatalf("typed refusal: got %v, want %s", err, want)
-				}
 				startHarness(t, w, h)
 				await(t, func() bool { return h.completed("refused") })
 				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {

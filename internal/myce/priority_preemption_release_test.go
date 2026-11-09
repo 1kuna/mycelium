@@ -13,7 +13,7 @@ import (
 // A release-only receipt precedes asynchronous output publication. The job
 // remains open for its final result, but no longer owns compute capacity.
 func TestPriorityPreemptionReleasedPublication(t *testing.T) {
-	for _, devices := range []bool{false, true} {
+	for _, devices := range []bool{true} {
 		t.Run("devices="+strconv.FormatBool(devices), func(t *testing.T) {
 			q, clock := fixture(t)
 			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {

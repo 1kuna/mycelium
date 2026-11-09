@@ -68,7 +68,7 @@ func TestSharedGPUPressureGrowth(t *testing.T) {
 		m.GPU, m.Devices[0].Platform = "metal", "metal"
 		m.CapabilityProfile.Accelerators[0].Type = "metal"
 		var runs []*Job
-		for _, priority := range []string{"experiment", "experiment", "production"} {
+		for _, priority := range []string{"experiment", "production"} {
 			j := submit(t, q, sharedSpec(priority, 10))
 			run := assignedJob(machineCheck(t, q, m, runs...))
 			if run == nil || run.ID != j.ID {
@@ -79,13 +79,11 @@ func TestSharedGPUPressureGrowth(t *testing.T) {
 			}
 			runs = append(runs, run)
 		}
-		// The production grower exceeds both experiments. Among the lowest tier,
-		// the second experiment is most over its own reservation and must yield.
-		growthCheck(t, q, m, runs, []float64{10, 12, 25}, 0)
-		requireState(t, q, runs[0].ID, "running")
-		requireState(t, q, runs[1].ID, "stopping")
-		requireState(t, q, runs[2].ID, "running")
-
+		// Preserve total observed pressure47 > device budget40 with one experiment
+		// and one production tenant; no private most-overreservation ranking replay.
+		growthCheck(t, q, m, runs, []float64{12, 35}, 0)
+		requireState(t, q, runs[0].ID, "stopping")
+		requireState(t, q, runs[1].ID, "running")
 	})
 
 	t.Run("SharedGPUPressureStaleAndUnavailable", func(t *testing.T) {

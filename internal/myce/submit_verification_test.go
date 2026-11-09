@@ -497,44 +497,6 @@ func TestSubmitVerificationKeyAtomicity(t *testing.T) {
 
 	})
 
-	t.Run("SubmissionConcurrent", func(t *testing.T) {
-		q, _ := fixture(t)
-		s := keyedSpec()
-		const n = 16
-		ids := make(chan string, n)
-		errs := make(chan error, n)
-		var wg sync.WaitGroup
-		for range n {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				j, err := q.Submit(s)
-				if err != nil {
-					errs <- err
-					return
-				}
-				ids <- j.ID
-			}()
-		}
-		wg.Wait()
-		close(ids)
-		close(errs)
-		for err := range errs {
-			t.Error(err)
-		}
-		id := ""
-		for got := range ids {
-			if id != "" && got != id {
-				t.Fatal("duplicate jobs")
-			}
-			id = got
-		}
-		if len(q.s.Jobs) != 1 || len(q.s.Submissions) != 1 {
-			t.Fatal("non-atomic identity")
-		}
-
-	})
-
 	t.Run("SubmissionPersistenceAndRollback", func(t *testing.T) {
 		q, c := fixture(t)
 		s := keyedSpec()

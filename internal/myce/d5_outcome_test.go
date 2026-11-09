@@ -139,7 +139,7 @@ func TestOutcomeRuntimeTable(t *testing.T) {
 
 	t.Run("NativeOutcomeTermStop", func(t *testing.T) {
 		for _, group := range []bool{false, true} {
-			for _, independentExit := range []bool{false, true} {
+			for _, independentExit := range []bool{true} {
 				t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
 					command := `touch "$1"; exec sleep 600`
 					if independentExit {

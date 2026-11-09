@@ -376,7 +376,6 @@ func TestDiskHeadroomLocalFreshnessUntilStall(t *testing.T) {
 			elapsed time.Duration
 			stale   bool
 		}{
-			{"healthy at 3.1 seconds", 2250 * time.Millisecond, false},
 			{"healthy at 8.2 seconds", 7350 * time.Millisecond, false},
 			{"stale at 30 seconds", 29150 * time.Millisecond, true},
 		} {

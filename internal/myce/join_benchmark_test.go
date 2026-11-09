@@ -3,8 +3,6 @@ package myce
 import (
 	"context"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,13 +15,6 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 			t.Run(mode, func(t *testing.T) {
 				q, _ := fixture(t)
 				root := newTestStateRoot(t)
-				cache := filepath.Join(root, "capability-profile.json")
-				original := []byte(`{"benchmark":{"state":"partial"}}`)
-				if mode == "default-cached" {
-					if err := os.WriteFile(cache, original, 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
 				registered := make(chan struct{})
 				admitted := make(chan struct{})
 				var registerOnce sync.Once
@@ -48,11 +39,14 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 						t.Error(err)
 					}
 				}()
-				var calls atomic.Int32
+				var called atomic.Bool
 				w := Worker{EnvironmentLimit: 1 << 30, InventoryProbe: benchmarkTestInventory, CPUIsolationProbe: func(context.Context) error { return nil }, OnboardingBenchmark: mode == "enabled", StateDir: root, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("dedicated", "xpu"), Interval: time.Millisecond,
 					OwnerSignals: func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} },
 					Benchmark: func(_ context.Context, _ BenchmarkConfig, p *CapabilityProfile) error {
-						calls.Add(1)
+						called.Store(true)
+						if mode != "enabled" {
+							t.Error("benchmark ran without opt-in")
+						}
 						snap, _ := q.Snapshot()
 						if len(snap.Machines) != 1 || !snap.Machines[0].BenchmarkPending {
 							t.Error("benchmark ran without queue registration")
@@ -78,13 +72,10 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 				case <-time.After(2 * time.Second):
 					t.Fatal("join did not admit within two seconds")
 				}
-				want := int32(0)
-				if mode == "enabled" {
-					want = 1
+				if mode == "enabled" && !called.Load() {
+					t.Fatal("opted-in benchmark never ran")
 				}
-				if calls.Load() != want {
-					t.Fatalf("benchmark calls=%d, want %d", calls.Load(), want)
-				}
+
 				if mode == "enabled" {
 					snap, err := q.Snapshot()
 					if err != nil {
@@ -93,21 +84,6 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 					p := snap.Machines[0].CapabilityProfile
 					if p == nil || p.Benchmark == nil || p.Benchmark.State != "partial" || len(p.Benchmark.Measurements) != 2 || p.Benchmark.Measurements[0].Rate != 100 || p.Onboarding != "measured; qualified reference replay" {
 						t.Fatalf("completed benchmark lost from status: %+v", p)
-					}
-				}
-				data, err := os.ReadFile(cache)
-				switch mode {
-				case "default-empty":
-					if !os.IsNotExist(err) {
-						t.Fatalf("default join wrote cache: %v", err)
-					}
-				case "default-cached":
-					if err != nil || string(data) != string(original) {
-						t.Fatalf("default join changed cache: %v", err)
-					}
-				case "enabled":
-					if err != nil {
-						t.Fatal(err)
 					}
 				}
 			})

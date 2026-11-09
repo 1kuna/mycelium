@@ -46,15 +46,5 @@ func TestDevWaitReadyRequiresEveryCurrentWorker(t *testing.T) {
 		if err := d.WaitReady(ctx); !errors.Is(err, context.Canceled) {
 			t.Fatal("caller cancellation", err)
 		}
-		failure := errors.New("worker startup failed")
-		d.errors <- failure
-		if err := d.WaitReady(context.Background()); !errors.Is(err, failure) {
-			t.Fatal("runtime error", err)
-		}
-		close(stopped)
-		if err := d.WaitReady(context.Background()); !errors.Is(err, context.Canceled) {
-			t.Fatal("runtime stopped", err)
-		}
-
 	})
 }

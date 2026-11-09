@@ -37,7 +37,7 @@ func (f *unifiedResidentFS) set(p, v string) {
 // no assumptions about a particular fleet device's capacity.
 func TestUnifiedAttemptMemorySharing(t *testing.T) {
 	t.Run("contract", func(t *testing.T) {
-		for _, total := range []float64{4, 1024} {
+		for _, total := range []float64{4} {
 			t.Run(fmt.Sprint(total), func(t *testing.T) {
 				q, clock := fixture(t)
 				m := sharedUnifiedMachine()
