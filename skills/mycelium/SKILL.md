@@ -134,6 +134,12 @@ owner to verify identity before same-key replay.
 For detached completion, bind a notifier to your own thread with
 [T3 binding](t3-binding.md). Supporting clients expose local observer diagnostics
 through `myce wait --observer-status`; a PID/lock proves ownership, not delivery.
+From the release containing #1160, shared owners use their own session and a
+clean allowlist environment, excluding runner/job tracking and MYCE_TOKEN while
+preserving PATH/locale for legacy notifiers. Managed attempts/dev sessions keep
+their existing cleanup custody. A dead owner still recovers on the next keyed
+command; automatic supervision is deferred to [#1166](https://github.com/1kuna/mycelium/issues/1166).
+See [upgrade and recovery](../../docs/operations.md#completion-observer-upgrade-and-recovery-next-release).
 Legacy or stalled shared-observer recovery belongs to its operator. Keep stable
 receipts and delivery IDs; do not kill a shared observer or edit its registry.
 

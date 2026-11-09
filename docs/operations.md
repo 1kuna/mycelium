@@ -4113,6 +4113,28 @@ use job GET times and the paginated job ledger described in [status](status.md).
 ## Completion observer upgrade and recovery (next release)
 
 Managed observers adopt all armed registrations in their private user registry.
+From the release containing #1160, caller-started shared owners have their own
+session/process group and start from `/`, so starter exit and process-group
+cleanup do not remove unrelated callers' observation. Their environment is an
+allowlist: HOME/USER/LOGNAME, XDG config/cache/data paths, TLS certificate paths,
+the starter's PATH and locale, and explicit dev/managed-attempt custody markers.
+Runner tracking identities, job-scoped variables, inherited temporary directories,
+unrelated secrets and MYCE_TOKEN are excluded. An allowlist also excludes future
+CI providers' tracking variables without needing a provider-specific denylist.
+Notifier delivery retains its separately saved caller environment with MYCE_TOKEN
+removed; legacy registrations without that snapshot keep the owner's PATH/locale
+fallback. Dev sessions and managed attempts retain their existing cleanup custody.
+
+There is no automatic supervisor in this release. A dead owner is recovered by
+the next ordinary keyed command, which adopts retained armed registrations.
+[Canonical per-user CLI supervision](https://github.com/1kuna/mycelium/issues/1166)
+is a separate follow-up; this release installs no observer unit/plist, publishes
+no independent client image and adds no observer service install/uninstall path.
+Ordinary startup and cooperative handoff hold startup.lock through socket
+replacement/readiness; old-owner cleanup serializes its identity check and unlink
+under the same lock. Broken owner startup records a bounded
+`observer_start_failed` event in `observer.log` without raw errors or authority.
+
 An ordinary keyed profile/adapter command starts one when the lifetime lock is
 free. Updating a CLI symlink does not change the image of an existing process.
 Supporting newer clients write a versioned upgrade request when arming or
