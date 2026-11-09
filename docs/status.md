@@ -168,6 +168,7 @@ Every status and inspection response includes additive `freshness` metadata:
 assembled; `age_seconds` is their nonnegative difference; and `cached` says
 whether this request reused a previously completed default-status generation.
 The age includes projection and observation I/O, even for an uncached response.
+The injected read clock is frozen before off-lock projection and observation I/O.
 It excludes JSON encoding and network transfer after assembly. Interpret a
 cached or slow observation at its capture time, including worker freshness.
 Old CLIs continue to decode the existing fields.
@@ -2604,6 +2605,8 @@ observation inputs from an atomically published generation. Cold reads, expired
 responses and fan-out parents do not wait for the live queue transaction mutex.
 An in-flight response completes at its captured generation; later commits
 invalidate subsequent cache lookups instead of repeatedly restarting that read.
+Terminal state and release confirmation come from the same captured generation;
+the next read after an invalidating publication sees the committed update.
 A read is a point-in-time observation, not a fence asserting that no commit
 finished while the response was being built. Elapsed runtime is evaluated with
 the injected read clock. Policy, custody and worker evidence remain from the
