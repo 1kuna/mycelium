@@ -600,6 +600,13 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	if bounded {
 		charge = boundedHostMemoryCharge(j, m, ceiling, adaptiveCeiling, sample, now)
 	}
+	coldObserved := 0.0
+	if adaptiveCeiling > 0 && !bounded {
+		// An unknown command can outgrow its original opportunity. Retain
+		// measured demand independently of its replaceable live forecast.
+		coldObserved = max(retainedHostCharge(j), sample.peakGB, sample.gb, sample.footprintGB)
+		charge = max(charge, coldObserved+exploratoryDriftMarginGB(m))
+	}
 	if !bounded && !sample.at.IsZero() && !now.Before(sample.at) && now.Sub(sample.at) < sample.freshFor() {
 		charge = max(charge, sample.hostForecast(now))
 	}
@@ -610,6 +617,8 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	floor := e.ProbeFloorGB
 	if bounded {
 		floor = charge // Estimates can grow, never earn probe credit.
+	} else if adaptiveCeiling > 0 {
+		floor = max(floor, coldObserved+exploratoryDriftMarginGB(m))
 	}
 	charge = floor
 	if !bounded {
@@ -684,7 +693,7 @@ func retainedHostCharge(j *Job) float64 {
 func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 	for _, j := range q.liveJobs() {
 		m := q.s.Machines[j.Machine]
-		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || adaptiveMemoryCeilingGB(j, m) <= 0 || j.MemoryEnvelope.ProbeFloorGB > 0 {
+		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || adaptiveMemoryCeilingGB(j, m) <= 0 {
 			continue
 		}
 		sample := q.hostMemorySamples[machine][jobKey(*j)]
@@ -697,6 +706,12 @@ func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 			}
 		}
 		observed = max(observed, sample.peakGB, sample.gb, sample.footprintGB)
+		if j.MemoryEnvelope.ProbeFloorGB > 0 {
+			// Cold probes may release the unused offered envelope after complete
+			// Started evidence. Persist only actual high water, never the offer
+			// or forecast, so a transient prediction cannot become a floor.
+			charge = max(retainedHostCharge(j), observed)
+		}
 		if _, fresh := sample.identifiedHostForecast(now); fresh {
 			id = max(id, sample.id)
 		}

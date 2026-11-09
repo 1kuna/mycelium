@@ -65,3 +65,9 @@ ceiling is not additional reserved demand. Substituting it for an offered residu
 envelope can exceed the host allowance beside existing work and hold startup
 before the first sample. Missing/stale samples grant no resident credit; fresh
 Started observations and exact-release custody retain their existing rules.
+
+Cold probes also retain exact-attempt measured high water across expiry, missing
+reports and queue restart. Fresh complete Started samples can release unused
+offer capacity, but cannot release an observed peak. Cold forecasts remain live
+predictions rather than durable measured floors; a later flat sample can correct
+them. Admission, worker checks and final launch use the same measured floor.
