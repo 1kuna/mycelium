@@ -677,8 +677,8 @@ func (a API) registerFiles(mux *requestMux) {
 }
 
 // File transfers have no whole-request deadline. Each direction learns its
-// own byte service time; queue verification before headers is bounded only by
-// the owner, since socket throughput cannot estimate server disk/hash work.
+// own byte service time. Upload PATCH also uses measured request service and
+// pressure; other pre-header verification remains bounded by the owner.
 var errFileTransferStalled = errors.New("file transfer stalled")
 
 // Record the failed phase before HTTP proxy wrapping or timeout normalization.
@@ -688,21 +688,59 @@ var errFileTransferLocal = errors.New("local download storage failed")
 
 func (c Client) fileTimeout(_ int64) time.Duration { return c.transferIdle }
 
+// Per-operation evidence spans the tus HEAD/POST/PATCH exchange, not unrelated
+// uploads. RFC 6298 sections 2.1/2.4 specify a one-second initial/minimum TCP
+// retransmission timer: a faster socket copy cannot justify declaring a dead
+// peer before it has an opportunity to retransmit. Four measured service periods
+// retain the existing progress jitter allowance. Retry-After is a server signal,
+// not a throughput estimate. The owner's context can always end the operation.
+type uploadTiming struct {
+	mu                sync.Mutex
+	service, pressure time.Duration
+}
+
+func (t *uploadTiming) observe(service, pressure time.Duration) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.service = max(t.service, service)
+	t.pressure = max(t.pressure, pressure)
+}
+func (t *uploadTiming) window() time.Duration {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return max(clientRecoveryPeriod, growDuration(growDuration(t.service)), t.pressure)
+}
+
 type fileTransferConn struct {
 	net.Conn
+	timing                      *uploadTiming
 	idle                        time.Duration // Explicit test/owner override; zero learns from progress.
 	clock                       Clock
 	readProgress, writeProgress transferProgress
 	reading, writing            *atomic.Bool
+	awaiting                    *atomic.Bool
+	deadlineMu                  sync.Mutex
 }
 
 func (c *fileTransferConn) deadline(read bool, bytes int) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
 	idle := c.idle
 	if idle == 0 {
-		if read && (c.reading == nil || c.reading.Load()) {
-			idle = c.readProgress.window(bytes)
-		} else if !read && (c.writing == nil || c.writing.Load()) {
-			idle = c.writeProgress.window(bytes)
+		if read {
+			if c.reading == nil || c.reading.Load() {
+				idle = max(c.readProgress.window(bytes), c.timing.window())
+			} else if c.awaiting != nil && c.awaiting.Load() {
+				idle = c.timing.window()
+			}
+		} else if c.writing == nil || c.writing.Load() {
+			idle = max(c.writeProgress.window(bytes), c.timing.window())
 		}
 	}
 	end := time.Time{}
@@ -721,6 +759,20 @@ func (c *fileTransferConn) deadline(read bool, bytes int) error {
 	}
 	return c.SetWriteDeadline(end)
 }
+
+// Serialize with deadline's phase check AND socket update; otherwise a reader
+// that saw the old phase can clear the newly armed response deadline.
+func (c *fileTransferConn) awaitResponse() {
+	c.awaiting.Store(true)
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	clock := c.clock
+	if clock == nil {
+		clock = RealClock{}
+	}
+	c.SetReadDeadline(clock.Now().Add(max(c.idle, c.timing.window())))
+}
+
 func (c *fileTransferConn) Read(p []byte) (int, error) {
 	if err := c.deadline(true, len(p)); err != nil {
 		return 0, err
@@ -735,7 +787,7 @@ func (c *fileTransferConn) Read(p []byte) (int, error) {
 		now := clock.Now()
 		c.readProgress.record(now, now.Sub(started), n, waited)
 	}
-	return n, fileTransferTimeout(err, max(c.idle, c.readProgress.window(len(p))))
+	return n, fileTransferTimeout(err, max(c.idle, c.readProgress.window(len(p)), c.timing.window()))
 }
 func (c *fileTransferConn) Write(p []byte) (int, error) {
 	total := 0
@@ -760,7 +812,7 @@ func (c *fileTransferConn) Write(p []byte) (int, error) {
 			if n > 0 && errors.As(err, &timeout) && timeout.Timeout() {
 				continue
 			}
-			return total, fileTransferTimeout(err, max(c.idle, c.writeProgress.window(len(p))))
+			return total, fileTransferTimeout(err, max(c.idle, c.writeProgress.window(len(p)), c.timing.window()))
 		}
 		if n == 0 {
 			return total, io.ErrNoProgress
@@ -845,8 +897,21 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 	if err != nil {
 		return nil, err
 	}
-	var reading, writing atomic.Bool
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{WroteHeaders: func() { writing.Store(true) }}))
+	var reading, writing, awaiting atomic.Bool
+	var progressConn atomic.Pointer[fileTransferConn]
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		WroteHeaders: func() { writing.Store(true) },
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			writing.Store(false)
+			awaiting.Store(true)
+			// net/http reads the response concurrently with uploading the body.
+			// Arm the header wait only after the last body byte, so a long but
+			// progressing upload never spends its response-service window.
+			if conn := progressConn.Load(); conn != nil && conn.timing != nil {
+				conn.awaitResponse()
+			}
+		},
+	}))
 	fileStoreSubmissionHeaders(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	for k, v := range headers {
@@ -888,7 +953,15 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 			if err != nil {
 				return nil, fileTransferTimeout(err, idle)
 			}
-			return &fileTransferConn{Conn: conn, idle: idle, clock: c.clock(), reading: &reading, writing: &writing}, nil
+			var timing *uploadTiming
+			if method == "PATCH" {
+				timing = c.uploadTiming
+			}
+			// Socket deadlines use the real socket's clock, independently of an
+			// injected observation/pacing clock (unit tests may freeze that).
+			wrapped := &fileTransferConn{Conn: conn, idle: idle, clock: RealClock{}, reading: &reading, writing: &writing, awaiting: &awaiting, timing: timing}
+			progressConn.Store(wrapped)
+			return wrapped, nil
 		}
 		// TLS normally runs over the wrapped TCP connection. An injected TLS
 		// dialer owns its handshake and authority checks; retain that path too.
@@ -940,7 +1013,13 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 		transport.DisableKeepAlives = true
 		local.Transport = transport
 	}
+	started := c.clock().Now()
 	res, err := local.Do(req)
+	pressure := time.Duration(0)
+	if res != nil {
+		pressure = retryAfter(res.Header.Get("Retry-After"), c.clock().Now())
+	}
+	c.uploadTiming.observe(c.clock().Now().Sub(started), pressure)
 	if err != nil {
 		return nil, fmt.Errorf("file transfer connection failed: %w", err)
 	}
@@ -1021,6 +1100,27 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 }
 
 func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileRef, purpose string) error {
+	c.uploadTiming = &uploadTiming{}
+	pace := ClientPace{}
+	for {
+		if err := c.ownerError(ctx); err != nil {
+			return err
+		}
+		started := c.clock().Now()
+		err := c.uploadFileAttempt(ctx, f, ref, purpose)
+		if err == nil || c.singleAttempt || !retryTransient(err) {
+			return err
+		}
+		pace.Observe(c.clock().Now().Sub(started), false)
+		if stopped := c.pause(ctx, pace.Delay(c.clock().Now(), time.Time{}, err, c.Jitter)); stopped != nil {
+			return &clientRetryStopped{err, stopped}
+		}
+	}
+}
+
+// Every retry rechecks publication and the server's accepted tus offset. Never
+// replay a PATCH whose acknowledgement was lost, even if socket writes succeeded.
+func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref FileRef, purpose string) error {
 	if s, ok := ctx.Value(fileStoreSubmissionKey{}).(Spec); ok && ctx.Value(fileStoreAttemptKey{}) == nil {
 		var claim FileInputClaim
 		err := c.Call(ctx, "POST", "/api/files/input-claims", map[string]any{"project": s.Project, "class": s.Class, "file": ref}, &claim)
@@ -1061,26 +1161,29 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 		}
 	}
 	endpoint := "/api/files/uploads/" + ref.SHA256
-	res, err = c.fileRequest(ctx, "HEAD", endpoint, nil, map[string]string{"Tus-Resumable": "1.0.0"}, 0)
+	offset, err := c.uploadOffset(ctx, endpoint, ref.SizeBytes)
 	if err != nil {
+		var missing *HTTPError
+		if errors.As(err, &missing) && (missing.Status == 404 || missing.Status == 410) {
+			// Publication can finish after the preceding blob probe, while tus HEAD
+			// waits for its upload lock. Publishing removes the tus metadata.
+			return c.hasFile(ctx, ref, headPurpose)
+		}
 		return err
 	}
-	offset, e := strconv.ParseInt(res.Header.Get("Upload-Offset"), 10, 64)
-	size, se := strconv.ParseInt(res.Header.Get("Upload-Length"), 10, 64)
-	err = fileResponse(res, 200, c.clock().Now())
-	if err != nil {
-		return err
-	}
-	if e != nil || se != nil || size != ref.SizeBytes || offset < 0 || offset > size {
-		return errors.New("invalid resumable upload offset/size")
-	}
-	if _, err = f.Seek(offset, io.SeekStart); err != nil {
-		return err
-	}
-	// Bounded PATCH bodies let a slow connection progress without one huge request.
 	for {
-		n := min(int64(4<<20), size-offset)
-		res, err = c.fileRequest(ctx, "PATCH", endpoint, io.LimitReader(f, n), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": strconv.FormatInt(offset, 10), "Content-Type": "application/offset+octet-stream"}, ref.SizeBytes)
+		if err := c.ownerError(ctx); err != nil {
+			return err
+		}
+		if _, err = f.Seek(offset, io.SeekStart); err != nil {
+			return err
+		}
+		n := min(int64(4<<20), ref.SizeBytes-offset)
+		// Close synchronizes with any late net/http body reader before a retry
+		// seeks the caller's handle. A failed response may race the writer goroutine.
+		body := &uploadBody{reader: io.LimitReader(f, n)}
+		res, err = c.fileRequest(ctx, "PATCH", endpoint, body, map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": strconv.FormatInt(offset, 10), "Content-Type": "application/offset+octet-stream"}, ref.SizeBytes)
+		body.Close()
 		if err != nil {
 			return err
 		}
@@ -1092,12 +1195,53 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 			return errors.New("invalid upload acknowledgement")
 		}
 		offset = next
-		if offset == size {
+		if offset == ref.SizeBytes {
 			break
 		}
 	}
+
 	return c.hasFile(ctx, ref, headPurpose)
 }
+
+// net/http may close a request body asynchronously after RoundTrip returns.
+// Fence reads so the next attempt can safely seek the same open source handle.
+type uploadBody struct {
+	mu     sync.Mutex
+	reader io.Reader
+}
+
+func (b *uploadBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.reader == nil {
+		return 0, io.EOF
+	}
+	return b.reader.Read(p)
+}
+func (b *uploadBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.reader = nil
+	return nil
+}
+
+// tus HEAD is authoritative; local socket writes are not accepted progress.
+func (c Client) uploadOffset(ctx context.Context, endpoint string, size int64) (int64, error) {
+	res, err := c.fileRequest(ctx, "HEAD", endpoint, nil, map[string]string{"Tus-Resumable": "1.0.0"})
+	if err != nil {
+		return 0, err
+	}
+	offset, oe := strconv.ParseInt(res.Header.Get("Upload-Offset"), 10, 64)
+	length, le := strconv.ParseInt(res.Header.Get("Upload-Length"), 10, 64)
+	if err = fileResponse(res, 200, c.clock().Now()); err != nil {
+		return 0, err
+	}
+	if oe != nil || le != nil || length != size || offset < 0 || offset > size {
+		return 0, errors.New("invalid resumable upload offset/size")
+	}
+	return offset, nil
+}
+
 func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) (stageErr error) {
 	traceSharedFile(ctx, ref)
 	defer func() { stageErr = tracedSharedError(ctx, stageErr) }()

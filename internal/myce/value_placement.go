@@ -182,6 +182,7 @@ type placementScan struct {
 	memoryIdentities map[*Job]string
 	memory           *memoryPlanningCache
 	hostBackfill     map[string]*hostBackfillDemand
+	unreleasableCPU  map[batchCPUKey]int
 }
 
 func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
@@ -192,6 +193,15 @@ func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
 		return scan
 	}
 	return &placementScan{machines: q.plannerMachines(), sets: map[string]*candidateSet{}, memoryIdentities: q.checkinMemoryIdentities}
+}
+
+// A supplied scan already owns this inventory for its immutable pass. Reason
+// readers must not rebuild every component/group view for every queued job.
+func (q *Queue) planningMachines(scans ...*placementScan) []*Machine {
+	if len(scans) > 0 {
+		return scans[0].machines
+	}
+	return q.plannerMachines()
 }
 
 func (q *Queue) placementValues(scan *placementScan) map[string]*hostValue {

@@ -121,6 +121,8 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 				t.Fatal("initial probe did not retain physical containment", ceiling)
 			}
 			second := submit(t, q, render)
+			// Explicit identities keep the replay/fencing scenarios distinct while
+			// allowing fresh samples to replace an earlier unknown-growth sample.
 			report := func(j *Job, sampleID int64) AttemptReport {
 				footprint := ram / 16
 				return AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true,
