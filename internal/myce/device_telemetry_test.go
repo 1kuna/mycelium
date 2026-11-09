@@ -14,12 +14,12 @@ import (
 func TestXPUTelemetryUsesBrokerWithoutVendorInitialization(t *testing.T) {
 	_, clock := fixture(t)
 	body := fmt.Sprintf(`{"sampled_at":%q,"gtt_mm":{"0000:01:00.0":"usage: 999999"},"vram":{"0000:01:00.0":{"total_bytes":8589934592,"used_bytes":2147483648}}}`, clock.Now().Format(time.RFC3339Nano))
-	w := Worker{Clock: clock, GPUTelemetryHelper: gpuTelemetryTestHelper(t, "cat <<'SAMPLE'\n"+body+"\nSAMPLE\n")}
+	w := Worker{Clock: clock}
 	calls := 0
 	p := MachineProbe{OS: "linux", Command: func(context.Context, string, ...string) ([]byte, error) {
 		calls++
 		return []byte("0000:01:00.0, 4096\n"), nil
-	}, XeActivity: func(context.Context, string) (float64, error) { return 25, nil }}
+	}, XeActivity: func(context.Context, string) (float64, error) { return 25, nil }, XPUFreeMemory: xpuTelemetryTestSource(clock, body)}
 	devices := []MachineDevice{{Platform: "xpu", pciAddress: "0000:01:00.0", ReserveMemoryGB: 1}}
 	w.sampleXPUTelemetry(t.Context(), p, devices)
 	if calls != 0 || !deviceTelemetryReady(devices[0].Telemetry, clock.Now()) || *devices[0].Telemetry.FreeGB != 5 {
@@ -37,11 +37,11 @@ func TestXPUTelemetryIdentityAndUnknown(t *testing.T) {
 		`"0000:01:00.0":{"total_bytes":8589934592,"used_bytes":0},"00000000:01:00.0":{"total_bytes":8589934592,"used_bytes":0}`,
 	} {
 		body := fmt.Sprintf(`{"sampled_at":%q,"gtt_mm":{"0000:01:00.0":"usage: 0"},"vram":{%s}}`, clock.Now().Format(time.RFC3339Nano), vram)
-		w := Worker{Clock: clock, GPUTelemetryHelper: gpuTelemetryTestHelper(t, "cat <<'SAMPLE'\n"+body+"\nSAMPLE\n")}
+		w := Worker{Clock: clock}
 		p := MachineProbe{OS: "linux", Command: func(context.Context, string, ...string) ([]byte, error) {
 			t.Fatal("telemetry initialized a vendor runtime")
 			return nil, nil
-		}, XeActivity: func(context.Context, string) (float64, error) { return 25, nil }}
+		}, XeActivity: func(context.Context, string) (float64, error) { return 25, nil }, XPUFreeMemory: xpuTelemetryTestSource(clock, body)}
 		devices := []MachineDevice{{Platform: "xpu", pciAddress: "0000:01:00.0", FreeMemoryGB: 8, ReserveMemoryGB: 1}}
 		w.sampleXPUTelemetry(t.Context(), p, devices)
 		d := devices[0]
@@ -52,6 +52,20 @@ func TestXPUTelemetryIdentityAndUnknown(t *testing.T) {
 		} else if d.Telemetry.FreeGB != nil || deviceTelemetryReady(d.Telemetry, clock.Now()) {
 			t.Fatal("wrong-device, incomplete or ambiguous memory became headroom", d)
 		}
+	}
+}
+
+// Counter mapping does not depend on shell startup completing inside the real
+// helper's 200ms collection deadline. Keep the production decoder and mapper;
+// TestGPUHostMemoryTelemetryHelperBoundary covers executable I/O and its budget.
+func xpuTelemetryTestSource(clock Clock, body string) func(context.Context) (map[string]float64, error) {
+	return func(context.Context) (map[string]float64, error) {
+		at := clock.Now()
+		sample, err := decodeGPUTelemetrySnapshot([]byte(body), at, at)
+		if err != nil {
+			return nil, err
+		}
+		return xpuSnapshotFreeMemory(sample), nil
 	}
 }
 

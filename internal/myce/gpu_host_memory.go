@@ -271,8 +271,12 @@ func readGPUTelemetrySnapshot(ctx context.Context, clock Clock, path string) (*g
 		return nil, errAttemptMemoryUnsupported
 	}
 	finished := clock.Now()
+	return decodeGPUTelemetrySnapshot(out.Bytes(), started, finished)
+}
+
+func decodeGPUTelemetrySnapshot(data []byte, started, finished time.Time) (*gpuTelemetrySnapshot, error) {
 	var sample gpuTelemetrySnapshot
-	if err := json.Unmarshal(out.Bytes(), &sample); err != nil || sample.SampledAt.IsZero() || sample.SampledAt.Before(started) || sample.SampledAt.After(finished) || finished.Sub(started) > attemptMemorySamplePeriod || len(sample.GTTMM) == 0 {
+	if err := json.Unmarshal(data, &sample); err != nil || sample.SampledAt.IsZero() || sample.SampledAt.Before(started) || sample.SampledAt.After(finished) || finished.Sub(started) > attemptMemorySamplePeriod || len(sample.GTTMM) == 0 {
 		return nil, errAttemptMemoryUnsupported
 	}
 	return &sample, nil

@@ -96,6 +96,11 @@ func (w Worker) xpuFreeMemory(ctx context.Context) (map[string]float64, error) {
 	if err != nil {
 		return free, err
 	}
+	return xpuSnapshotFreeMemory(s), nil
+}
+
+func xpuSnapshotFreeMemory(s *gpuTelemetrySnapshot) map[string]float64 {
+	free := map[string]float64{}
 	seen := map[string]bool{}
 	for identity, memory := range s.VRAM {
 		pci := normalizePCIAddress(strings.TrimSpace(identity))
@@ -108,7 +113,7 @@ func (w Worker) xpuFreeMemory(ctx context.Context) (map[string]float64, error) {
 			free[pci] = float64(*memory.TotalBytes-*memory.UsedBytes) / (1 << 30)
 		}
 	}
-	return free, nil
+	return free
 }
 
 func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, devices []MachineDevice) {
