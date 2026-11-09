@@ -116,6 +116,14 @@ the parent later received a cancellation intent. A parent cancelled before
 success still cancels its dependents with `upstream_cancelled` and reason
 `upstream parent cancelled`; expired outputs return `result_expired`.
 
+From the worker release containing #1168, opt-in XPU fan-out sharing requires
+fresh VRAM counters from the separately administered read-only telemetry broker.
+An older GTT-only broker still supports host RAM accounting; missing VRAM
+evidence withholds extra sharing. Ask the installation owner to qualify the
+[updated broker](../../deploy/gpu-telemetry/README.md), rather than starting GPU
+vendor-tool samplers to unblock placement. Ordinary exclusive admission remains
+available within its configured budget.
+
 ## Observe and recover
 
 Keep owned waits in the foreground. Supporting clients accept one batch of up

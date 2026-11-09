@@ -1751,7 +1751,7 @@ The broker contract is:
    collection window. Do not serve a cached or periodically refreshed
    snapshot and do not timestamp old data as fresh.
 
-The exact JSON schema is:
+The required JSON fields are:
 
 ```json
 {
@@ -1767,6 +1767,15 @@ The exact JSON schema is:
 host clock as the worker. `gtt_mm` maps each full lowercase PCI address to its
 unmodified debugfs text. Include every card an attempt can use: the worker
 requires its selected card and every other card present in its DRM clients.
+The reference broker also supplies optional `vram` entries keyed by the same PCI
+identities, each with unsigned `total_bytes` and `used_bytes`. These come from a
+read-only Xe memory-regions query with uncensored usage evidence;
+GTT storage is never used as VRAM. Missing, censored or invalid entries withhold
+telemetry-dependent sharing and never trigger vendor-tool fallback. Ordinary
+configured-budget admission is unchanged. The [broker installation guide](../deploy/gpu-telemetry/README.md)
+describes the read-only DRM policy and older-kernel accounting limitations of
+this additive source. Existing GTT-only brokers remain usable for host RAM accounting.
+
 The helper forwards the broker's timestamp and text unchanged. A timestamp
 before the current helper invocation or after it finishes is rejected, so a
 cached snapshot is not accepted even when recent. A malformed, absent or stale

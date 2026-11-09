@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -169,4 +170,83 @@ func TestDeviceHealthVendorEvidence(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestQuarantineHealthMeasuredInvocationCount(t *testing.T) {
+	_, clock := fixture(t)
+	m := m3Machine()
+	m.Devices[0].Platform = "xpu"
+	calls := 0
+	w := Worker{Clock: clock, Machine: m, faults: &deviceQuarantine{Devices: map[string]deviceFault{}, RecoveryWindows: map[string]float64{}},
+		DeviceHealthProbe: func(context.Context, MachineDevice) (bool, error) { calls++; return false, nil }}
+	key := deviceFaultKey(m.Devices[0])
+	w.faults.Devices[key] = deviceFault{Reason: "device_fault_xe", Event: "fault", At: clock.Now().Add(-time.Minute)}
+	root := &workerStore{dir: t.TempDir()}
+	for range 600 {
+		w.quarantineHealth(t.Context(), root)
+		clear(w.faultHealth) // The kernel scan consumes each failed proof.
+		clock.Advance(100 * time.Millisecond)
+	}
+	if calls != 1 {
+		t.Fatal("recovery polled inside the measured failure window", calls)
+	}
+	w.quarantineHealth(t.Context(), root)
+	clear(w.faultHealth)
+	if calls != 2 {
+		t.Fatal("due recovery probe did not run", calls)
+	}
+	// A new fault is a new decision, independent of the old event's backoff.
+	clear(w.faultHealth)
+	w.faults.Devices[key] = deviceFault{Reason: "device_fault_xe", Event: "new-fault", At: clock.Now()}
+	w.quarantineHealth(t.Context(), root)
+	if calls != 3 {
+		t.Fatal("new fault inherited old probe delay", calls)
+	}
+}
+
+func TestQuarantineHealthStalledProbeKeepsKernelMonitoring(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls, scans atomic.Int32
+		release := make(chan struct{})
+		w := Worker{Clock: RealClock{}, Interval: time.Second, Machine: m3Machine(),
+			DeviceFaultSource: func(context.Context, time.Time) (KernelLogSnapshot, error) {
+				scans.Add(1)
+				return KernelLogSnapshot{BootID: "boot"}, nil
+			},
+			DeviceHealthProbe: func(context.Context, MachineDevice) (bool, error) {
+				calls.Add(1)
+				<-release // Includes a vendor process start that cannot be cancelled.
+				return true, nil
+			}}
+		root := &workerStore{dir: t.TempDir()}
+		if err := w.initDeviceFaults(t.Context(), root); err != nil {
+			t.Fatal(err)
+		}
+		key := deviceFaultKey(w.Machine.Devices[0])
+		w.faults.Devices[key] = deviceFault{Reason: "device_fault_xe", Event: "fault", At: w.Clock.Now().Add(-time.Second)}
+		scan := func() {
+			t.Helper()
+			if err := w.refreshDeviceFaults(t.Context(), root); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before := scans.Load()
+		for range 5 {
+			scan()
+			<-time.After(time.Second)
+			synctest.Wait()
+		}
+		if calls.Load() != 1 || scans.Load() < before+5 || w.Machine.Devices[0].Reason == "" {
+			t.Fatal("stalled health must retain quarantine and allow kernel scans", calls.Load(), scans.Load(), w.Machine.Devices[0])
+		}
+		close(release)
+		for range 20 {
+			scan()
+			<-time.After(time.Second)
+			synctest.Wait()
+		}
+		if w.Machine.Devices[0].Reason != "" || w.Machine.Devices[0].Recovery == nil {
+			t.Fatal("completed health did not resume measured recovery", w.Machine.Devices[0])
+		}
+	})
 }
