@@ -190,7 +190,7 @@ func TestM4VerifiedEmptyConversionReceipt(t *testing.T) {
 }
 
 func TestM4VerifiedEmptyRefusals(t *testing.T) {
-	for _, kind := range []string{"queue", "running", "obligations", "unit_active", "unit_unreadable", "cgroup_populated", "cgroup_unreadable", "spool_unsettled", "spool_missing", "container_running", "docker_inaccessible"} {
+	for _, kind := range []string{"queue", "retained-paused", "running", "obligations", "unit_active", "unit_unreadable", "cgroup_populated", "cgroup_unreadable", "spool_unsettled", "spool_missing", "container_running", "docker_inaccessible"} {
 		t.Run(kind, func(t *testing.T) {
 			c, clock, mapping, opts, run := m4EmptyFixture(t)
 			q, err := openConversionQueue(c, clock)

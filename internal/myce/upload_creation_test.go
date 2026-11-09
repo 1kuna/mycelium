@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func creationRequest(ctx context.Context, ref FileRef) *http.Request {
@@ -157,5 +158,101 @@ func TestUploadCreationResultReservationHandoff(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// Retained regression: #691 customer30upload serialization.
+func TestUploadCreationBurst(t *testing.T) {
+	_, s := creationStore(t, 1<<20)
+	record := s.recordUpload
+	// Model a one-second queue-lock wait at each purpose lookup. Readers can
+	// proceed together once a check-in releases q.mu; a global store lock cannot.
+	s.recordUpload = func(hash, purpose string, created bool, contexts ...context.Context) error {
+		ctx := requestContext(contexts)
+		select {
+		case <-time.After(time.Second):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return record(hash, purpose, created, contexts...)
+	}
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			s.serveUpload(w, creationRequest(context.Background(), creationRef(fmt.Sprintf("input-%02d", i))))
+			if w.Code != http.StatusCreated {
+				t.Errorf("creation %d: %d %s", i, w.Code, w.Body.String())
+			}
+		}(i)
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+	t.Logf("30 creations with one-second queue waits: %s", elapsed)
+	if elapsed >= 10*time.Second {
+		t.Fatalf("creations serialized: %s", elapsed)
+	}
+}
+
+// Retained regression: #693 pressure-clear cancellation.
+func TestUploadCreationCancelledPressureClear(t *testing.T) {
+	q, s := creationStore(t, 9)
+	q.deliveryRoot = q.root
+	spec := asyncDeliverySpec()
+	spec.Class = "production"
+	spec.Priority = "production"
+	spec.Disk.OutputBytes = 1
+	j := submit(t, q, spec)
+	assigned := check(t, q, machine("writer", "fake"), nil).Job
+	if assigned == nil || assigned.ID != j.ID {
+		t.Fatal("missing production assignment")
+	}
+	// The real result-reservation refusal creates the job pressure condition.
+	output := creationRef("0123456789")
+	result := result(assigned, true)
+	result.OutputRefs = FileManifest{"out.txt": output}
+	if err := q.reserveDeliveryResult(context.Background(), result); err == nil {
+		t.Fatal("expected capacity refusal")
+	}
+	if !q.s.Health.Conditions["storage-write/job/"+j.ID].Active {
+		t.Fatal("missing real pressure condition")
+	}
+	entered := make(chan struct{})
+	q.checkpointProbe = func() bool { q.mu.Lock(); close(entered); return true }
+	ctx, cancel := context.WithCancel(withFileStoreAttempt(context.Background(), *assigned))
+	defer cancel()
+	done := make(chan struct{})
+	ref := creationRef("12345678")
+	go func() {
+		defer close(done)
+		r := creationRequest(ctx, ref)
+		fileStoreSubmissionHeaders(ctx, r)
+		s.serveUpload(httptest.NewRecorder(), r)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("pressure transaction not reached")
+	}
+	cancel()
+	select {
+	case <-done:
+		q.mu.Unlock()
+	case <-time.After(100 * time.Millisecond):
+		s.mu.Lock()
+		held := s.creations[ref.SHA256].length
+		s.mu.Unlock()
+		q.mu.Unlock()
+		<-done
+		t.Fatalf("cancelled POST remained blocked on pressure-clear updateRequest with %d bytes reserved", held)
+	}
+	s.mu.Lock()
+	_, held := s.creations[ref.SHA256]
+	s.mu.Unlock()
+	if held {
+		t.Fatal("cancelled pressure-clear POST retained its reservation")
 	}
 }

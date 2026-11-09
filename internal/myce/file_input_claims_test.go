@@ -354,3 +354,30 @@ func TestProjectFileStoreRecoveryAndFailureDiagnosticsRemainPublishable(t *testi
 		}
 	})
 }
+
+// Retained regression: #940/#941 fixed-zone claim allocation after rollback.
+func TestProjectFileStoreClaimAllocationSurvivesUnrelatedRollback(t *testing.T) {
+	q, clock := fixture(t)
+	// A named zone makes JSON normalization observable without a wall clock.
+	clock.now = time.Date(2026, 11, 7, 4, 15, 0, 0, time.FixedZone("fixture-local", -5*60*60))
+	_, ref := policyInput(t, "input")
+	claim, err := q.claimFileInput(context.Background(), Spec{Project: "claim-repro", Class: "deadline"}, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := false
+	q.checkpointProbe = func() bool {
+		if !entered {
+			entered = true
+			sentinel := errors.New("unrelated rejected mutation")
+			if err := q.update(func() error { return sentinel }); !errors.Is(err, sentinel) {
+				t.Fatal(err)
+			}
+		}
+		return true
+	}
+	ctx := context.WithValue(context.Background(), fileInputClaimKey{}, claim.ID)
+	if _, err = q.inputClaimContext(ctx, ref, true); err != nil {
+		t.Fatal("valid claim refused after unrelated rollback", err)
+	}
+}

@@ -311,3 +311,21 @@ func TestFleetRuntimeStaleFailureAckDoesNotConcealRecovery(t *testing.T) {
 		t.Fatal("explicit recovery concealed by stale failure acknowledgement")
 	}
 }
+
+// Retained regression: security: ordinary worker lacks installed activation authority.
+func TestFleetOrdinaryWorkerNeverActivates(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		t.Error("ordinary worker contacted fleet endpoint")
+	}))
+	defer server.Close()
+	w := Worker{Client: Client{URL: server.URL, Token: "test"}, Machine: Machine{ID: "worker", HostID: "host", Session: "session"}}
+	runtime := w.newFleetRuntime()
+	if runtime != nil || runtime.observe(context.Background(), w.Machine, true) != nil || requests.Load() != 0 {
+		t.Fatal("worker without installed config gained activation authority")
+	}
+	if p, err := CollectFleetRuntime(context.Background(), ServiceConfig{}, "session"); p != nil || err == nil {
+		t.Fatal("missing installed service gained runtime proof")
+	}
+}

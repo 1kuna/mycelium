@@ -2,9 +2,13 @@ package myce
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -146,5 +150,56 @@ func TestHostHygieneMountWarmupAcceptsSuccessfulLatencyVariation(t *testing.T) {
 	}
 	if successes < hostHealthWarmup {
 		t.Fatal("successful warmup was frozen", successes)
+	}
+}
+
+// Retained regression: #895 tiny checkpoint access must not enumerate6900entry root.
+func TestHostHygieneCheckpointLargeDirectoryDoesNotEnumerate(t *testing.T) {
+	files := fstest.MapFS{"checkpoints": &fstest.MapFile{Mode: fs.ModeDir}}
+	for i := 0; i < 6900; i++ {
+		files[fmt.Sprintf("checkpoints/attempt-%d", i)] = &fstest.MapFile{Mode: fs.ModeDir}
+	}
+	var enumerations, accesses atomic.Int32
+	readProbe, checkpointProbe := workerHealthMountProbe, workerHealthCheckpointProbe
+	t.Cleanup(func() { workerHealthMountProbe, workerHealthCheckpointProbe = readProbe, checkpointProbe })
+	workerHealthMountProbe = func(path string, _ func()) error {
+		enumerations.Add(1)
+		return errors.New("large-directory stream initialization stalled")
+	}
+	workerHealthCheckpointProbe = func(path string, progress func()) error {
+		if _, err := fs.Stat(files, path); err != nil {
+			return err
+		}
+		// The same fake root supports tiny exclusive access without enumerating
+		// its busy attempt directories. No payload file is opened.
+		name := path + "/.myce-probe-fake.tmp"
+		if _, exists := files[name]; exists {
+			return fs.ErrExist
+		}
+		files[name] = &fstest.MapFile{}
+		delete(files, name)
+		accesses.Add(1)
+		return nil
+	}
+	m, clock := healthFixture(t, 1)
+	access := healthMountAccess("checkpoint")
+	p := &hostMountProbe{root: "checkpoint", path: "checkpoints", measure: func(path string, _ func()) hostMountResult {
+		return hostMountResult{latency: time.Millisecond, err: access(path, func() {})}
+	}}
+	m.mounts["checkpoint"] = p
+	for i := 0; i < hostHealthWarmup+hostHealthConfirmation+1; i++ {
+		clock.Advance(signalRefresh)
+		if err := m.sample(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		await(t, func() bool { return len(p.pending) == 1 })
+	}
+	got := m.health.History[len(m.health.History)-1].Mounts[0]
+	if enumerations.Load() != 0 || accesses.Load() == 0 || got.Reason != "" || got.Adverse {
+		t.Fatal("directory enumeration withheld responsive checkpoint access", enumerations.Load(), accesses.Load(), got)
+	}
+	await(t, func() bool { return len(p.pending) == 1 })
+	if err := healthMountAccess("nas")("checkpoints", func() {}); err == nil || enumerations.Load() != 1 {
+		t.Fatal("NAS root lost its read-only directory check")
 	}
 }
