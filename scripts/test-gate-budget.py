@@ -183,6 +183,8 @@ class GateBudgetTests(unittest.TestCase):
             scripts = root / 'scripts'
             scripts.mkdir()
             shutil.copyfile(Path(__file__).with_name('gate.sh'), scripts / 'gate.sh')
+            for name in ('gate-scheduler.py', 'test-gate-scheduler.py'):
+                shutil.copyfile(Path(__file__).with_name(name), scripts / name)
             shutil.copyfile(Path(__file__).with_name('gate-progress.py'), scripts / 'gate-progress.py')
             shutil.copyfile(Path(__file__).with_name('gate-budget.py'), scripts / 'gate-budget.py')
             shutil.copyfile(Path(__file__).with_name('gate-handles.py'), scripts / 'gate-handles.py')
@@ -434,6 +436,8 @@ with patch.object(subprocess.Popen, 'wait', wait):
             (root / "scripts").mkdir()
             (root / "bin").mkdir()
             (root / "scripts/gate.sh").write_bytes((scripts / "gate.sh").read_bytes())
+            for name in ("gate-scheduler.py", "test-gate-scheduler.py"):
+                shutil.copyfile(scripts / name, root / "scripts" / name)
             shutil.copyfile(scripts / "gate-progress.py", root / "scripts/gate-progress.py")
             shutil.copyfile(scripts / "gate-budget.py", root / "scripts/gate-budget.py")
             shutil.copyfile(scripts / "gate-handles.py", root / "scripts/gate-handles.py")
