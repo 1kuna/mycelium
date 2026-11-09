@@ -64,7 +64,7 @@ func TestPathDiagnosticWorkerReadAndFreshness(t *testing.T) {
 	m := machine("synthetic-worker", "cpu")
 	m.LastSeen = clock.Now()
 	m.EnvironmentReports = []EnvironmentReport{{Key: recipe.Key, State: "failed", PathDiagnostic: d}}
-	q.s.Machines[m.ID] = &m
+	check(t, q, m, nil)
 	observation := q.EnvironmentEntries()[0].Platforms[0].WorkerReads[0]
 	if observation.State != "failed" || observation.Diagnostic == nil {
 		t.Fatal(observation)

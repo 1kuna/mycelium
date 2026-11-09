@@ -508,6 +508,8 @@ type Job struct {
 	CommandDiscovery          *CommandDiscovery                       `json:"command_discovery,omitempty"`
 	SidecarEnvironmentRecipes map[string]map[string]EnvironmentRecipe `json:"sidecar_environment_recipes,omitempty"`
 
+	HostMemoryCharge *AttemptHostMemoryCharge `json:"host_memory_charge,omitempty"`
+
 	FileTransport         bool                   `json:"file_transport,omitempty"`
 	FileCheckpoints       map[int]FileCheckpoint `json:"file_checkpoints,omitempty"`
 	ResumeFiles           *FileCheckpoint        `json:"resume_files,omitempty"`
@@ -565,6 +567,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	Suspect           bool                     `json:"suspect,omitempty"` // Status-only; uncertainty never proves loss.
 	IOPressure        *IOPressure              `json:"io_pressure,omitempty"`
 	HygieneCollection *WorkerHygieneCollection `json:"hygiene_collection,omitempty"`
 	HostHealth        *HostHealth              `json:"host_health,omitempty"`
@@ -684,6 +687,8 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
+	contact              *checkinContact   // Queue-local request fence, never serialized.
+	period               time.Duration     // Transport header; not part of strict legacy JSON.
 	ToolInventoryHash    string            `json:"tool_inventory_hash,omitempty"`
 	ToolInventoryVersion uint64            `json:"tool_inventory_version,omitempty"`
 	NASPathReports       []NASPathReport   `json:"nas_path_reports,omitempty"`
@@ -702,6 +707,7 @@ type Checkin struct {
 type Reply struct {
 	DeviceTelemetryProtocol    string                       `json:"device_telemetry_protocol,omitempty"`
 	UnifiedMemoryProtocol      string                       `json:"unified_memory_protocol,omitempty"`
+	HostMemorySampleProtocol   string                       `json:"host_memory_sample_protocol,omitempty"`
 	ProbeMemoryProtocol        string                       `json:"probe_memory_protocol,omitempty"`
 	HostCollectionProtocol     string                       `json:"hygiene_collection_protocol,omitempty"`
 	HostProbeProtocol          string                       `json:"host_probe_protocol,omitempty"`

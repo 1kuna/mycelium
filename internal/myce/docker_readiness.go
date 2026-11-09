@@ -22,6 +22,15 @@ func (d *dockerAttempt) rpcCadence(operation string) time.Duration {
 	defer d.latencyMu.Unlock()
 	return d.latency[operation].cadence()
 }
+
+// Draining a completed CLI's buffered output needs the same local variability
+// allowance as its response, rather than just the mean between observations.
+// Only completed samples count here: outage backoff must not delay pipe cleanup.
+func (d *dockerAttempt) rpcDrainBudget(operation string) time.Duration {
+	d.latencyMu.Lock()
+	defer d.latencyMu.Unlock()
+	return d.latency[operation].budget()
+}
 func (d *dockerAttempt) noteRPCLatency(operation string, elapsed time.Duration) {
 	d.latencyMu.Lock()
 	defer d.latencyMu.Unlock()

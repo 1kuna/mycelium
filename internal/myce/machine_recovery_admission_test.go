@@ -113,7 +113,7 @@ func TestMachineRecoveryDoesNotSpendQueuedAttempts(t *testing.T) {
 				finishInterrupted(t, q, owned)
 				previous := m.Session
 				m.Session = "after-drain"
-				r, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Fresh: true, PreviousSession: previous})
+				r, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Fresh: true, PreviousSession: previous, period: time.Second})
 				if err != nil {
 					t.Fatal(err)
 				}

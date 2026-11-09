@@ -14,7 +14,7 @@ still determine when a full refresh is necessary.
 | --- | --- | --- |
 | Ordinary/extension/check-in JSON: 1/2/8 MiB | OS available RAM, container ancestor headroom and `GOMEMLIMIT`, minus measured GC growth and stack reserve; runnable CPUs plus a control lane share the pool. Wire buffers and typed map/slice/struct allocations are charged before decode. Prevents one body or simultaneous bodies exhausting queue memory. | Large requests can receive 413 under actual memory contention. |
 | Wait: 256 IDs, 20 seconds | Scalar response storage and current headroom bound ID count. Nonnegative representable caller seconds, HTTP cancellation/deadline and negotiated transport deadline bound duration; measured check-in service cost leaves delivery time. | Large batches split at the advertised capacity; transport expiry does not cancel jobs. |
-| Status: default 100 / maximum 1,000; interval and ledger maximum 256 | Go representation size and measured serialized row size determine memory cost. Status history additionally uses measured projection time per row against local check-in latency. Before timings exist it probes one history row per runnable lane. Positive explicit page lengths are upper bounds; cursors retain coverage. | Page length changes with pressure and cost; clients must follow returned cursors. Active/custody visibility and explicit full detail retain their existing meaning. |
+| Status: default 100 / maximum 1,000; interval and ledger maximum 256 | Go representation size and measured serialized row size determine memory cost. Status history additionally uses measured job-row projection/encoding time against local check-in service. Fleet diagnostics, disk, usage SQL and lock waits do not count as marginal row cost. Explicit page intent provides the latency floor, capped by physical memory; without intent or timings it probes one history row per runnable lane; cursors retain coverage. | Page length changes with pressure and cost; clients must follow returned cursors. Active/custody visibility and explicit full detail retain their existing meaning. |
 | Usage: maximum 90 days | Positive representable caller duration and request cancellation. | An explicitly broad report may do more work. |
 | Extension source: 1 MiB | Current host memory shared among source, clone, YAML/JSON, base64 and fingerprint representations. Folder reads enforce the remaining allowance using actual retained bytes even if a file grows after stat. | Source registration can refuse under memory pressure; large assets should use immutable file references. |
 | Resolve NAS: 256 pending, 8 checks/heartbeat, 1 minute | Pending metadata uses measured queue headroom; freshness expires at the existing worker session freshness fence. One check per heartbeat matches the worker's single outstanding syscall slot. | Cold/stale evidence remains unknown. This is existence advice, never byte verification or launch authority. |
@@ -81,3 +81,23 @@ bodies and sparse decoded expansion, cover concurrent accounting/recovery,
 legacy and negotiated peers, injected-clock wait expiry, larger batch reads,
 projection cost changes and disk commitments above 8 GiB. These are synthetic
 API proofs, not native fleet capacity or filesystem-quota qualification.
+
+## Measurement custody and partial history
+
+Darwin reads the OS memory tool at `/usr/bin/vm_stat`; PATH does not select the
+source. Concurrent admissions share one probe with its own context. Its work
+bound is the live waiter set and one occupied helper slot: one caller cancelling
+only removes that waiter, and the last departure cancels the helper. The slot
+remains occupied until the helper exits, so cancellation cannot accumulate
+orphan OS processes. A newcomer waits for an abandoned probe to exit before
+starting fresh. This custody bound follows actual demand; no arbitrary timer or
+stale-headroom fallback grants admission. Genuine probe errors remain typed
+`request_capacity_unavailable` with a sanitized cause and fitting bytes zero;
+extension readers propagate that error instead of inventing a size refusal.
+
+A default status reply is a history sample. Known job completion and continuity
+must use job GET or batched waits; retained-history discovery follows cursors.
+Explicit `limit` expresses a requested page need within physical capacity, not
+permission to evade deep-allocation admission. A single row remains valid when
+its measured cost or the physical allowance requires it. CLI text announces
+partial coverage and points to exact job reads or full retained history.

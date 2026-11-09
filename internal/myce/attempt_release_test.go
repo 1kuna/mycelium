@@ -56,7 +56,7 @@ func TestAttemptProtocolLostAssignmentStop(t *testing.T) {
 			}
 			victim := submit(t, q, victimSpec)
 			// The queue commits the assignment, but the worker never receives it.
-			wire := attemptWire(t, w.Client, Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol})
+			wire := attemptWire(t, w.Client, Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second})
 			if len(wire.Attempts) != 1 {
 				t.Fatalf("missing initial assignment: %+v", wire)
 			}
@@ -191,7 +191,7 @@ func TestAttemptProtocolDockerReportedRelease(t *testing.T) {
 	q, _ := fixture(t)
 	m := dockerMachine("docker-custody", "fake")
 	submit(t, q, dockerJob().Spec)
-	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
+	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second}
 	reply, err := q.Checkin(c)
 	if err != nil || len(reply.Attempts) != 1 || reply.Attempts[0].Job == nil {
 		t.Fatalf("missing Docker assignment: %+v %v", reply, err)

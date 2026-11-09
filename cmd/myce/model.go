@@ -20,10 +20,7 @@ func modelCommand(args []string) error {
 	f := flag.NewFlagSet("model "+args[0], flag.ContinueOnError)
 	modelConfig := f.String("model-config", "", "model catalog for measurement-digest (read only)")
 	environmentConfig := f.String("environment-config", "", "environment catalog for measurement-digest")
-	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue URL")
-	token := f.String("token", env("MYCE_TOKEN", ""), "fleet token (prefer MYCE_TOKEN)")
-	// DefValue is only help text; keep the actual environment default private.
-	f.Lookup("token").DefValue = ""
+	authority := installedClientFlags(f)
 	to := f.String("to", "", "sync to machine, platform, or all")
 	cancel := f.Bool("cancel", false, "cancel pre-copy request; keep resumable partial bytes")
 	project := f.String("project", "", "project owning pin")
@@ -89,11 +86,15 @@ func modelCommand(args []string) error {
 		}
 		return myce.FetchModel(context.Background(), *url, *root, p, *size, *sum)
 	}
-	if *token == "" {
-		return errors.New("set MYCE_TOKEN")
+	client, err := authority.ownerClient()
+	if err != nil {
+		return err
+	}
+	if client.HTTP != nil {
+		defer client.HTTP.CloseIdleConnections()
 	}
 	if args[0] == "sync" {
-		return (myce.Client{URL: *queue, Token: *token}).Call(context.Background(), "POST", "/api/models/sync", myce.SyncRequest{Model: f.Arg(0), To: *to, Cancel: *cancel}, nil)
+		return client.Call(context.Background(), "POST", "/api/models/sync", myce.SyncRequest{Model: f.Arg(0), To: *to, Cancel: *cancel}, nil)
 	}
 	p := myce.ModelPin{Project: *project, Model: f.Arg(0), Machine: *machine, Platform: *platform, Start: *start, End: *end, Timezone: *timezone}
 	if *weekdays != "" {
@@ -108,5 +109,5 @@ func modelCommand(args []string) error {
 	if args[0] != "pin" && args[0] != "unpin" {
 		return errors.New("unknown model command")
 	}
-	return (myce.Client{URL: *queue, Token: *token}).Call(context.Background(), "POST", "/api/models/"+args[0], p, nil)
+	return client.Call(context.Background(), "POST", "/api/models/"+args[0], p, nil)
 }

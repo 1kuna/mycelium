@@ -111,11 +111,17 @@ On macOS, the full supervisor holds one of two cross-checkout filesystem locks
 for its entire lifetime, independent of package commands or test expressions. It also
 accounts for older standalone full race commands before entering a slot. The
 slot also has a `mycelium-full-gate-N.custody` record beside its lock in
-`GOCACHE`, containing the run marker and scratch directory. Only verified fixture
-exit removes that record; failed inventory or supervisor death retains occupancy
-after the OS releases the lock. Recovery requires verifying the recorded run's
-fixtures have exited before removing its custody record. Never clear another
-owner's record merely to admit more work.
+`GOCACHE`, containing the holder PID and process start identity, then the run
+marker and scratch directory before fixtures start. Records publish atomically.
+Verified fixture exit removes the record on normal cleanup. After supervisor
+death, a new supervisor holding both admission and slot locks checks the recorded
+holder identity and verifies that no marked, descendant or scratch-holding
+fixtures remain. It then archives the abandoned record as `.reconciled-UUID`
+and reuses the slot. Legacy marker/scratch records receive the same fixture-exit
+check. Live holders, live fixtures, malformed records and inventory uncertainty
+retain occupancy; elapsed age never releases custody. Reconciliation never
+signals another run or removes its scratch. Never clear another owner's record
+merely to admit more work.
 The
 two-suite boundary preserves the repository's observed Mac safety rule: more
 concurrent full suites caused false failures. Linux fleet gates rely on the
@@ -154,6 +160,57 @@ Clock. Results report read latency and read/check-in mutex hold separately.
 Six measured reads per endpoint make the reported p99 the sample maximum,
 not a production tail estimate. Compare accepted outputs from identical profile
 versions and CPU placement; natural fleet latency remains release-owner proof.
+
+`BenchmarkReadStages` compares the legacy capture/queued planner with published
+immutable inputs on the same #1030 fixture (160 or 6,500 retained constrained
+executions, 110 queued jobs, 1,400 curves and five occupied workers). Run it with
+`-run '^$' -bench '^BenchmarkReadStages$' -benchtime=20x`. It reports capture,
+derivation, JSON encoding, live-mutex hold, allocation and response bytes for
+default/full status and queued/running/terminal receipts. Capture includes mutex
+hold; do not add it twice. First materialization is included, and later reads
+reuse the generation. This isolates projection from usage/file-store I/O and
+transport; it does not establish production tail latency.
+`TestReadSnapshotBulkWorkDoesNotHoldQueue` blocks record decoding while a real
+control commit must complete, proving lock separation without a machine-tuned
+timing threshold. Existing terminal-commit, cache, custody, redaction and
+contention checks remain unchanged.
+
+### Submission advice attribution (#1065)
+
+`BenchmarkSubmissionAdvice` uses the same incident-size retained history (6,500
+constrained executions, 110 queued jobs, 1,400 curves, five synthetic workers).
+It reports marginal commit-side snapshot capture mutex time separately from
+post-commit capture/decoding, waiting reasons and deadline guidance. The
+`submission_advice` telemetry event reports those advice phases after unlock;
+existing update telemetry continues to measure the durable transaction.
+
+Before isolation, a native ARM64 fixture with `GOMAXPROCS=2` and three measured
+calls spent 61.31 ms/op holding the live mutex (16.93 ms wait reason, 42.94 ms
+status waiting reason, 1.44 ms deadline guidance). After isolation, marginal
+snapshot pinning takes about 3.9 microseconds/op inside the commit, with no
+post-commit acquisition. Warm advice takes 10.24 ms/op (8.12 ms capture/charged
+active copies and catalog reservation, 0.82 ms wait reason, 0.64 ms status reason, 0.60 ms deadline
+advice), versus 61.39 ms/op before. Retained payloads are borrowed read-only;
+only active jobs, worker ledgers and private planner caches are owned. One cold
+decode measured 1.72 seconds outside the live mutex; it happens once for
+unchanged immutable records across commits. The benchmark reports that cold
+sample separately from steady-state costs. This is fixture evidence, not a live
+tail claim; cold decoding remains visible and there is no history cutoff.
+
+The HTTP regression blocks immutable decoding, completes a later control commit,
+and requires the original response to finish while another owner holds `q.mu`.
+Advice uses the accepted commit's policy and retained memory evidence. Cold
+decode, detached active/worker copies and private observation-catalog space all
+charge the existing measured request budget before construction.
+If diagnostic allocation cannot fit, preserve successful acceptance, policy and
+deadline-guidance fields with an explicit unavailable-blocker explanation. This
+prevents a post-commit error from encouraging duplicate unkeyed submissions;
+the cost is temporarily less detailed advice until headroom recovers. Normal
+headroom preserves the existing advice values. Cold/warm constrained-capacity
+HTTP regressions cover unkeyed acceptance and exact keyed replay. A separate
+warm-curve regression with few jobs proves catalog allocation cannot bypass the
+allowance and that advice recovers on the same job when headroom returns. Production tail
+verification belongs to the separately authorized release after deployment.
 
 ### Release upgrade compatibility
 
@@ -1023,7 +1080,7 @@ No availability windows means always present. Windows use Monday=0 through
 Sunday=6, with start-inclusive/end-exclusive hours in a repeating synthetic
 UTC week. `departure: planned` (default) saves resumable work and restarts
 non-resumable work. `departure: loss` cuts execution without a final checkpoint;
-the real queue's priority loss timeouts and majority-silence guard determine
+the real queue's adaptive loss allowance and majority-silence guard determine
 when batch work becomes available again. Interrupted model calls fail visibly
 on abrupt loss; this simulator does not emulate HTTP response replay.
 
@@ -1214,6 +1271,30 @@ jobs carry timing and memory-attempt evidence used by cold-memory planning.
 This `!race` laptop regression includes real SQLite commits and uses an injected
 clock for every decision; CPU accounting includes the concurrent readers. It
 does not establish live fleet latency or native hardware qualification.
+
+`GOMAXPROCS=2 go test ./internal/myce -run '^$' -bench '^BenchmarkCheckinBodyPhases$' -benchtime=20x`
+uses the same retained-evidence shape with five occupied workers and sequential
+check-ins. It reports maintain, placement/reconciliation, deferred environment,
+qualification/model/copy plans, health, efficiency, retained-index construction,
+transaction body, persistence and record snapshot milliseconds per check-in.
+Child phases are inclusive: retained-index construction is already inside the
+planning/health phases. `all_holds-ms/op` includes the check-in's other mutex
+holds, including snapshot preparation; benchmark wall time also includes work
+outside the lock. These opt-in timers never control scheduling.
+
+Cold retained execution facts are indexed by full comparable work/configuration
+and OS, reducing only exact-attempt peaks/recovery margins with identical
+provenance and end time. Unchanged cold facts survive planning passes and
+transactions. Cold writes, collection, terminal transitions, rollback and record
+rebuilds invalidate the index; live and transaction-touched cold facts are
+reduced afresh per immutable pass. Check-in preparation copies relevant cold
+fields under the mutex and hashes/reduces outside it, installing only the same
+cold-record generation. Inventory views and lower-bound answers remain private
+to each immutable pass. Current owner identity, qualification, unreported/gone
+state and time fences are still checked, including permanent-capacity views.
+The original full-history evaluator and frozen admission/health digests provide
+decision-equivalence regressions. This optimization does not change scheduling
+policy or persistence and does not establish live latency under competing I/O.
 
 ## Backed storage admission integration
 

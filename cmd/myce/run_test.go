@@ -50,7 +50,7 @@ func TestRunQueueOutcomesAndCancellation(t *testing.T) {
 					if outcome == "succeeded" || outcome == "failed" {
 						m := maintenanceCLIWorker("cpu-worker")
 						m.CPUIsolation = "select-none"
-						reply, err := q.Checkin(myce.Checkin{Machine: m})
+						reply, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: m})
 						if err != nil || reply.Job == nil {
 							t.Errorf("assignment: %+v %v %s", reply, err, waitAssignmentDiagnostics(q))
 							w.WriteHeader(500)

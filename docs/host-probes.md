@@ -33,9 +33,8 @@ queue round trip plus the next report's preparation. Cheap OS sensing does not
 imply cheap delivery to a launch fence. This gap trains before profile activation
 and affects only newly completed probes; later slow reports cannot renew old
 evidence. Both ages are captured at send time, after report preparation. Local
-health admission reads do not train report cadence. During initial learning or
-an unprecedented delivery delay, evidence can still expire: contact alone never
-proves that a sensor is healthy. A stopped sensor expires at its last completed
+health admission reads do not train report cadence. During initial learning,
+evidence can still expire: contact alone never proves that a sensor is healthy. A stopped sensor expires at its last completed
 observation's frozen period, cost prediction and learned report-gap prediction,
 even if the worker continues checking in.
 The prediction uses RFC 6298's
@@ -48,6 +47,27 @@ A slow pending scan never extends the previous observation. A completed failure
 removes it immediately. Inventory retains stable device identity, but stale or
 failed capacity cannot qualify work; partial driver failures preserve fresh
 healthy siblings. Direct launch ownership/identity checks remain mandatory.
+Inventory compares hardware, topology, configuration and health, excluding
+telemetry timestamps, activity counters, free memory and a unified device's
+live uncapped budget. Workload activity cannot reset discovery backoff.
+Unchanged failed-family classifications also back off; failed devices remain
+unknown and partial observations retain their original expiry. Each
+pass reuses its device enumeration for XPU qualification fingerprints and
+shares identical fingerprint commands across cards; fingerprint bytes remain
+compatible with existing qualification records.
+
+Discrete XPU telemetry has its own observation lane. One host-wide `xpu-smi`
+CSV query supplies PCI-keyed memory counters for all cards, at most once per
+existing five-second device-consumer interval (or the slower control/probe-cost
+cadence). Xe PMU activity remains per PCI device. A missing tool, unsupported
+counter, missing row or duplicate PCI row supplies unknown memory. Results keep
+their original sample start, and merge only into matching device/driver,
+selector, topology and reserve observations. Missing or ten-second-old samples
+cannot authorize telemetry-dependent sharing. A slow query never blocks
+discovery, check-ins or starts another copy of itself. Per-device runtime
+fallbacks use private device-affinity environments where supported; a full
+inventory or host-wide telemetry query intentionally covers the host.
+
 For an already assigned attempt, a fresh direct launch probe can establish
 recovery from a cached `device_probe_unavailable` observation. The direct probe
 must still succeed, identify exactly the assigned device and report healthy
@@ -55,9 +75,38 @@ capacity; saved identity and policy fences remain binding. This does not renew
 the background observation or restore its advertised queue capacity.
 
 The queue translates worker-local age at request receipt to its own injected
-clock and includes preparation/transaction waiting time. New observations expire
-at their frozen validity even while check-in contact remains healthy. Owner age
-is carried explicitly; worker wall-clock skew cannot renew it. Older pressure
+clock and includes preparation/transaction waiting time in diagnostic age.
+For host health, admission and degradation use that original worker-local age
+plus available queue service opportunity since acceptance. Incoming request
+processing and queue mutex occupancy cannot consume the opportunity to accept
+a replacement report. This uses the same mutex service clock as adaptive worker
+contact, without treating contact as sensor evidence. This also covers the first
+fresh report of a restarted worker before any report gap is learned: only actual
+queue delay is excluded, and the remaining frozen validity bounds available
+service after processing. Already stale or failed reports still refuse immediately. A newer fresh health report currently being
+prepared outside the mutex pauses only its own session's prior service age at
+receipt. It cannot revive already expired evidence, and stale or failed input
+cannot obtain this credit. The marker spans preparation, reply hydration, HTTP
+NAS instructions and response encoding, including the first report of a session. Successful return retains only that
+receipt's actual queue processing credit; rejection or cancellation removes the
+marker without retaining credit. After return a silent sensor has its remaining
+frozen validity in available service time. Unrelated workers keep aging. Owner and pressure age rules are unchanged.
+
+A silent sensor expires after its remaining frozen validity in available queue
+service time. A reporting worker whose sensor stops expires when its growing
+worker-local age reaches frozen validity and that report is processed. Under
+normal service this is at most the frozen validity plus the next report delivery;
+a measured queue stall adds its actual duration, not a new fixed timeout.
+Continuous queue unavailability, including an indefinitely pending check-in
+preparation for that session, has no finite trustworthy wall-time expiry bound. Queue restart discards service credit and uses conservative physical
+wall age until another report arrives. Status snapshots freeze both clocks;
+reported `age_seconds` remains physical diagnostic age, so it can exceed
+`valid_seconds` while excluded queue service accounts for the difference.
+A completed failure and explicit drain still withhold immediately. Overlapping
+check-ins retain the newest accepted queue receipt in the same worker session;
+an older delayed success cannot clear a newer refusal or reset its age.
+
+Owner age is carried explicitly; worker wall-clock skew cannot renew it. Older pressure
 reports without timing evidence retain the existing bounded contact policy.
 
 ## Owner availability and interference
@@ -132,3 +181,20 @@ These are laptop proofs. Native daemon, GPU driver stress, thermal cycles,
 Windows session bridge, OS hang reproduction and representative daily-owner
 latency under load require a separately authorized maintenance run. No native
 hang-cause attribution, fleet change or deployment is implied.
+
+`TestInventoryHelperLaunchMeasurement` measures an instrumented two-card fake
+inventory for one simulated minute, with a one-second heartbeat, 250ms scan
+cost and two CPU cores. The former per-card fingerprint/query path launches
+174 enumeration and 116 memory helpers; the corrected path launches 35 and 12.
+This compares launch counts, not native driver overhead or throughput. No
+production GPU or compute workload is exercised.
+
+After an authorized deploy, the operator can compare equal-duration kernel-log
+windows before and after worker activation: count peer-to-peer DMA warnings per
+elapsed minute and record helper launches, observation cost/period, sample age,
+workload occupancy and driver errors. Use existing logs and read-only process
+observations; do not start GPU stress or extra driver probes on a production
+host. Exclude the activation window from steady-state rates and compare similar
+occupancy. Expected evidence is fewer enumeration/memory helpers and fewer
+warnings without stale data granting sharing. A warning-rate reduction alone
+does not establish the cause of compute timeouts; track those independently.

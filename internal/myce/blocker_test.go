@@ -25,25 +25,30 @@ func TestActionableBlockerPreparationObservationsAgree(t *testing.T) {
 			j := submit(t, q, s)
 			live := q.s.Machines[m.ID]
 			want := "unprepared"
-			switch state {
-			case "offered":
-				q.s.PreparationPlans = map[string]HostLaunch{"offer": {Machine: m.ID, Session: live.Session, Key: r.Key, Kind: "environment"}}
-				want = "waiting_for_builder"
-			case "building":
-				live.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "building"}}
-				want = "building"
-			case "failed", "uploading":
-				live.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "failed", FailureKind: "deterministic", Error: "build exit 1", Log: "No solution found: package absent from first index"}}
-				if state == "uploading" {
-					live.EnvironmentReports[0].State = "uploading"
+			if err := q.update(func() error {
+				switch state {
+				case "offered":
+					q.s.PreparationPlans = map[string]HostLaunch{"offer": {Machine: m.ID, Session: live.Session, Key: r.Key, Kind: "environment"}}
+					want = "waiting_for_builder"
+				case "building":
+					live.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "building"}}
+					want = "building"
+				case "failed", "uploading":
+					live.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "failed", FailureKind: "deterministic", Error: "build exit 1", Log: "No solution found: package absent from first index"}}
+					if state == "uploading" {
+						live.EnvironmentReports[0].State = "uploading"
+					}
+					want = "deterministically_failed"
+				case "busy":
+					live.CPUCapacityReason = "no preparation core available"
+					want = "waiting_for_builder"
+				case "stale":
+					clock.Advance(24 * time.Hour)
+					want = "unknown_observation"
 				}
-				want = "deterministically_failed"
-			case "busy":
-				live.CPUCapacityReason = "no preparation core available"
-				want = "waiting_for_builder"
-			case "stale":
-				clock.Advance(24 * time.Hour)
-				want = "unknown_observation"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
 			}
 			got, err := q.jobSnapshot(j.ID)
 			if err != nil {
@@ -133,6 +138,8 @@ func TestActionableBlockerNativePreparationIdentity(t *testing.T) {
 	m.EnvironmentReports = []EnvironmentReport{{Key: extensionPreparationKey(e, &m), State: "uploading", FailureKind: "deterministic", Error: "dependency resolution failed", Log: "No solution found"}}
 	q.s.Machines[m.ID] = &m
 	j := &Job{State: "queued", Spec: Spec{ExtensionCheck: &ExtensionCheckRequest{Work: "extension:" + e.Name}}, Extensions: []Extension{e}}
+	check(t, q, m, nil)
+	m = *q.s.Machines[m.ID]
 	b := q.environmentBlocker(j, &m)
 	if b == nil || b.Code != "deterministically_failed" || !strings.Contains(b.Evidence, "No solution found") {
 		t.Fatalf("%+v", b)

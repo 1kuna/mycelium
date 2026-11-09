@@ -139,7 +139,7 @@ func (q *Queue) variantFreshness(m *Machine) string {
 		return "unknown"
 	}
 	now := q.clock.Now()
-	if m.Gone || now.Before(m.LastSeen) || now.Sub(m.LastSeen) >= q.machineLossTimeout(m.ID) {
+	if !q.workerFresh(m, now) {
 		return "stale"
 	}
 	return "fresh"

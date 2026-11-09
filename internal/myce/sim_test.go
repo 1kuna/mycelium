@@ -167,7 +167,7 @@ func TestSimSuddenLossCheckpoint(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	nearSim(t, r.InfrastructureLostSeconds, 3)
-	nearSim(t, r.Projects["exp"].ExperimentFinishSeconds, 93) // loss at 13 + real 60s timeout + remaining 20
+	nearSim(t, r.Projects["exp"].ExperimentFinishSeconds, 35) // loss at 13 + two advertised 1s intervals + remaining 20
 }
 
 // A check-in can admit a model after its command releases memory. Virtual

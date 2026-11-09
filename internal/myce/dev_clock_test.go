@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -206,10 +207,17 @@ type accountingInterleaveClock struct {
 
 func (c *accountingInterleaveClock) Now() time.Time {
 	value := c.base.Now()
-	// Arrival contact also reads the clock before q.mu. Pause specifically at
-	// locked accounting, whose serialization with advance this test proves.
-	if c.queue.mu.TryRLock() {
-		c.queue.mu.RUnlock()
+	// Contact, memory snapshots and mutex service instrumentation also read the
+	// clock. Pause only the transaction's direct clock read for usage accounting,
+	// after it owns q.mu and before the heartbeat updates LastSeen.
+	pc, _, _, ok := runtime.Caller(1)
+	if !ok || !strings.HasSuffix(runtime.FuncForPC(pc).Name(), ".(*Queue).updateTransaction") {
+		return value
+	}
+	// Inspect physical ownership directly: the instrumented lock reads this
+	// clock itself, so using it here would recursively enter service accounting.
+	if c.queue.mu.mu.TryRLock() {
+		c.queue.mu.mu.RUnlock()
 		return value
 	}
 	c.once.Do(func() { close(c.entered); <-c.release })

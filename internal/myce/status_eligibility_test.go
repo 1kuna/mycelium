@@ -102,8 +102,7 @@ func TestStatusEligibleHostsLifecycle(t *testing.T) {
 	}
 	c.Advance(time.Second) // Global observations may lag by one cache lifetime.
 	assertEligibleStatus(t, q, j.ID, "running", s.AllowedMachines, []string{"host-a"}, false)
-	c.Advance(LossAfter)
-	check(t, q, b, nil)
+	advanceReportingPeer(t, q, c, b, LossAfter)
 	check(t, q, observer(), nil)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)

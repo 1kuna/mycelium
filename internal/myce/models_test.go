@@ -151,8 +151,12 @@ func TestModelLossAndFreshSession(t *testing.T) {
 	other.ModelURL = "http://127.0.0.1:1235"
 	other.ModelConfigHash = modelConfigHash(q.models)
 	check(t, q, other, nil)
-	clock.Advance(LossAfter)
-	check(t, q, other, nil)
+	// Isolate this worker's loss from a whole-fleet outage: its peer continues
+	// reporting at the advertised cadence throughout the silence.
+	for elapsed := time.Duration(0); elapsed < LossAfter; elapsed += time.Second {
+		clock.Advance(time.Second)
+		check(t, q, other, nil)
+	}
 	if !q.s.Machines[m.ID].Gone || q.s.ModelSlots[slotKey(m.ID, "test")] == nil {
 		t.Fatal("lost worker released unknown engine custody")
 	}
@@ -455,13 +459,11 @@ func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("first call did not start")
 	}
-	if e := q.update(func() error {
-		clock.Advance(LossAfter)
-		q.s.Machines[other.ID].LastSeen = clock.Now()
-		q.maintain()
-		return nil
-	}); e != nil {
-		t.Fatal(e)
+	// Advance between transactions while the survivor keeps checking in. A
+	// jump while holding q.mu represents blocked service, not worker silence.
+	for elapsed := time.Duration(0); elapsed < LossAfter; elapsed += time.Second {
+		clock.Advance(time.Second)
+		check(t, q, other, nil)
 	}
 	select {
 	case data := <-result:

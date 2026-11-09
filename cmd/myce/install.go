@@ -30,21 +30,17 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 }
 
 // Storage validation has per-operation progress bounds. Keep cancellation across
-// the install, with the existing setup allowance applied to each subprocess.
+// the install; service waits follow systemd and ordinary probes stay bounded.
 func boundedSetupProbe(probe myce.MachineProbe) myce.MachineProbe {
 	command, commandEnv := probe.Command, probe.CommandEnv
 	if command != nil {
-		probe.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			bounded, cancel := myce.SetupTimeout(ctx)
-			defer cancel()
-			return command(bounded, name, args...)
-		}
+		probe.Command = myce.BoundSetupCommand(command)
 	}
 	if commandEnv != nil {
 		probe.CommandEnv = func(ctx context.Context, env map[string]string, name string, args ...string) ([]byte, error) {
-			bounded, cancel := myce.SetupTimeout(ctx)
-			defer cancel()
-			return commandEnv(bounded, env, name, args...)
+			return myce.BoundSetupCommand(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				return commandEnv(ctx, env, name, args...)
+			})(ctx, name, args...)
 		}
 	}
 	return probe
@@ -52,7 +48,7 @@ func boundedSetupProbe(probe myce.MachineProbe) myce.MachineProbe {
 
 func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error), install func(context.Context, myce.ServiceConfig, string, string, func(context.Context, string, ...string) ([]byte, error)) error) error {
 	setupContext := myce.SetupTimeout
-	if len(args) > 0 && args[0] == "install" {
+	if len(args) > 0 && (args[0] == "install" || args[0] == "uninstall") {
 		setupContext = context.WithCancel
 		probe = boundedSetupProbe(probe)
 	}

@@ -332,9 +332,30 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			deviceFloor = max(deviceFloor, floor.MemoryGB)
 		}
 		switch {
+		case !copy.Spec.Run.Docker && j.OOMRetries > 0 && (n.cpuOnly() || j.Spec.ExtensionCheck != nil):
+			// Recovery estimates demand. Free RAM is an admission constraint,
+			// never the next attempt's predicted demand.
+			bound, lower := measuredOOMRecovery(j)
+			if estimate.host != nil {
+				peak := hostMemoryPeakGB(estimate.host)
+				bound = max(bound, estimate.measuredHostGB, peak*estimate.hostFactor)
+				lower = max(lower, peak)
+			}
+			// A long sampling horizon can forecast more growth than a target
+			// can ever contain. Bound that uncertainty by permanent capacity;
+			// preserve every measured lower bound and durable retry floor.
+			room, why := q.recoveryMemoryRoom(j, m)
+			n.HostMemoryGB = max(min(bound, room), lower, q.constrainedMemoryLowerFor(j, estimate, !n.cpuOnly() && !m.UnifiedMemory))
+			if why != "" {
+				refusal = why
+			}
+			source, basis = measuredOOMRecoverySource, "exploratory"
+			if estimate.escalation {
+				source = estimate.source
+			}
 		case estimate.host != nil:
 			source, basis, evidence = estimate.source, "learned", estimate.samples
-			if evidence == 0 || estimate.uncalibrated || estimate.deviceUncalibrated || estimate.measuredHostGB > 0 && boundedMemorySource(estimate.source) {
+			if evidence == 0 || estimate.source == priorVersionMemorySource || estimate.uncalibrated || estimate.deviceUncalibrated || estimate.measuredHostGB > 0 && boundedMemorySource(estimate.source) {
 				basis = "exploratory"
 			}
 			host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
@@ -448,29 +469,6 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			// retained constrained requirement. Admission refuses when less
 			// room is currently free, including the first constrained attempt.
 			n.HostMemoryGB = max(minimumHostMemoryGB, host, q.constrainedMemoryLowerFor(j, estimate, !n.cpuOnly() && !m.UnifiedMemory))
-		}
-		if !copy.Spec.Run.Docker && j.OOMRetries > 0 && estimate.host == nil && (n.cpuOnly() || j.Spec.ExtensionCheck != nil) {
-			// An OOM disproves a small exploratory bound. Re-probe usable
-			// headroom, keeping the measured retry lower bound below. Old
-			// launch-drift maxima are not a workload-demand ceiling; strict
-			// worker launch checks still refuse an intervening loss of RAM.
-			margin := q.jobProbeDriftMarginGB(j, m)
-			host, why := q.exploratoryMemoryWithDrift(j, m, margin)
-			if m.UnifiedMemory && !n.cpuOnly() {
-				// The probe is the shared physical pool. hostNeed adds the
-				// retained device vector, so leave that share out of host RAM.
-				device := max(n.MemoryGB, deviceFloor)
-				if floor := j.MemoryOOMFloor; floor != nil {
-					device = max(floor.MemoryGB, j.DeviceMemoryFloorGB)
-				}
-				host -= device
-			}
-			n.HostMemoryGB = max(n.HostMemoryGB, host)
-			source, basis, evidence = "exploratory OOM recovery; measured peak + growth; physical headroom", "exploratory", 0
-			refusal = why
-			if n.cpuOnly() {
-				probeFloor = max(hostFloor, q.constrainedMemoryLowerFor(j, estimate, false))
-			}
 		}
 		n.HostMemoryGB = max(n.HostMemoryGB, hostFloor)
 		if probeFloor > 0 {
@@ -638,16 +636,23 @@ func sameMemoryHost(k, target ObservationKey, m *Machine) bool {
 // accepted runs then replace that seed, so a check never shrinks it.
 func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 	estimate := q.memoryEstimateFor(j, m, false)
-	if estimate.host != nil || estimate.source != "" || estimate.key == nil || j.Spec.ExtensionCheck != nil || !j.Spec.extensionJob() {
+	if estimate.host != nil || estimate.key == nil || !j.Spec.extensionJob() {
 		return estimate
 	}
-	seed := q.memoryEstimateFor(j, m, true)
-	if seed.host == nil || seed.source == spentMemoryExploration {
-		return estimate
+	// Current-version qualification evidence supersedes historical workload
+	// evidence. Keep the existing invalidation and spent-exploration fences.
+	if estimate.source == "" && j.Spec.ExtensionCheck == nil {
+		seed := q.memoryEstimateFor(j, m, true)
+		if seed.host != nil && seed.source != spentMemoryExploration {
+			seed.key, seed.constrainedGB = estimate.key, max(seed.constrainedGB, estimate.constrainedGB)
+			seed.source += "; from qualification checks"
+			return seed
+		}
 	}
-	seed.key, seed.constrainedGB = estimate.key, max(seed.constrainedGB, estimate.constrainedGB)
-	seed.source += "; from qualification checks"
-	return seed
+	if seed := q.priorVersionMemory(j, m, estimate); seed.host != nil {
+		return seed
+	}
+	return estimate
 }
 
 const acceptedMemoryEscalation = "exploratory (accepted prior invalidated; measured recovery)"

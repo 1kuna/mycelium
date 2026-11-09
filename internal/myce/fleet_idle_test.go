@@ -100,7 +100,7 @@ func TestFleetUpgradePendingSurvivesRestartAndRefreshesIdleSession(t *testing.T)
 	old := m.Session
 	m.Session = "worker-restarted-before-cutover"
 	m.Fleet = fleetTestProof(c, m.Session, 201, false)
-	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: old}); err != nil {
+	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: old, period: time.Second}); err != nil {
 		t.Fatal(err)
 	}
 	h := q.fleetActiveHost()
@@ -184,14 +184,14 @@ func TestFleetUpgradePendingRestartNeedsExactZeroEngineCalls(t *testing.T) {
 		{Name: "test", Attempt: attempt, State: "ready"},
 		{Name: "test", Attempt: attempt, State: "ready", CallsMeasured: true, InFlight: 1},
 	} {
-		if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{report}}); err != nil {
+		if _, err := q.Checkin(Checkin{Machine: m, period: time.Second, ModelReports: []ModelReport{report}}); err != nil {
 			t.Fatal(err)
 		}
 		if q.maintenanceBlocked("host") || q.fleetPausesCalls() || q.fleetActiveHost() != nil || q.s.ModelSlots[slotKey(m.ID, "test")].State != "ready" {
 			t.Fatal("unknown or live engine calls acquired drain", q.fleetUpgradeStatus())
 		}
 	}
-	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: attempt, State: "ready", CallsMeasured: true}}}); err != nil {
+	if _, err := q.Checkin(Checkin{Machine: m, period: time.Second, ModelReports: []ModelReport{{Name: "test", Attempt: attempt, State: "ready", CallsMeasured: true}}}); err != nil {
 		t.Fatal(err)
 	}
 	if h := q.fleetActiveHost(); h == nil || h.Phase != "draining" || !h.Owned {

@@ -222,7 +222,7 @@ func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.
 				return ErrStale
 			}
 			predicate := "host_launch"
-			if q.hostLaunchAllowed(q.s.Machines[r.Machine], r.Session) {
+			if q.hostSessionLaunchAllowed(q.s.Machines[r.Machine], r.Session) {
 				predicate = q.startPlacementRejection(j)
 			}
 			if predicate != "" {
@@ -272,8 +272,6 @@ func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.
 }
 
 func (w Worker) reportNativeCustody(j Job, session, execution, custody, phase string, supervisors ...int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), workerStartRequestTimeout)
-	defer cancel()
 	report := NativeCustodyReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: w.Machine.ID, Session: session, ProcessID: execution, CustodyID: custody, Phase: phase}
 	if len(supervisors) > 0 {
 		report.SupervisorPID = supervisors[0]
@@ -287,7 +285,7 @@ func (w Worker) reportNativeCustody(j Job, session, execution, custody, phase st
 		OK        bool   `json:"ok"`
 		StartGate string `json:"start_gate"`
 	}
-	err := w.Client.Call(ctx, "POST", "/api/workers/native-custody", report, &reply)
+	_, err := w.controlHandshake("/api/workers/native-custody", report, &reply)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errWorkerStartAuthorization, err)
 	}

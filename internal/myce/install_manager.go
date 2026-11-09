@@ -233,8 +233,10 @@ func snapshotInstall(ctx context.Context, c ServiceConfig, files installFiles, c
 // restore is the one recovery path on both platforms: files, manager reload,
 // registration, activity, then independent verification of the whole snapshot.
 func (tx *installTransaction) restore(ctx context.Context) error {
-	recovery, cancel := SetupTimeout(context.WithoutCancel(ctx))
-	defer cancel()
+	// Each command owns a fresh allowance, including systemd's effective
+	// lifecycle budgets. A total probe deadline can expire mid-stop and then
+	// poison every subsequent recovery operation and final inspection.
+	recovery := context.WithoutCancel(ctx)
 	result := tx.restoreFiles()
 	reloadErr := tx.manager.reload(recovery, tx.units)
 	result = errors.Join(result, reloadErr)
@@ -327,7 +329,12 @@ func (m installManager) stop(ctx context.Context, u installUnit) error {
 		}
 		return err
 	}
-	_, err := m.command(ctx, "launchctl", "bootout", u.target())
+	wait, cancel := m.launchdStopContext(ctx, u)
+	defer cancel()
+	if err := wait.Err(); err != nil {
+		return err
+	}
+	_, err := m.command(wait, "launchctl", "bootout", u.target())
 	if installExit(err, 113) {
 		return nil
 	}
@@ -336,9 +343,7 @@ func (m installManager) stop(ctx context.Context, u installUnit) error {
 	}
 	// bootout acknowledges the request before launchd necessarily removes the
 	// label. Reusing it sooner races bootstrap (EIO), including during rollback.
-	wait, cancel := SetupTimeout(ctx)
-	defer cancel()
-	ticker := time.NewTicker(20 * time.Millisecond)
+	ticker := time.NewTicker(launchdStopPoll)
 	defer ticker.Stop()
 	for {
 		state, err := m.inspect(wait, u)

@@ -3,6 +3,7 @@ package myce
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -174,9 +175,10 @@ func TestExtensionBundleStoreInterruptedMigrationAndRecipes(t *testing.T) {
 		t.Fatal("migration unexpectedly committed")
 	}
 	for key, want := range old {
-		var got []byte
-		if err := q.db.QueryRow("SELECT data FROM queue_state WHERE key=?", key).Scan(&got); err != nil || !bytes.Equal(want, got) {
-			t.Fatal("failed migration changed durable state", err)
+		got := durableQueueRecord(t, q.db, key)
+		var before, after any
+		if json.Unmarshal(want, &before) != nil || json.Unmarshal(got, &after) != nil || !reflect.DeepEqual(before, after) {
+			t.Fatal("failed migration changed durable state")
 		}
 	}
 	dbPath := q.lock.Name()[:len(q.lock.Name())-len(".lock")]

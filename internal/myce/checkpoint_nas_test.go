@@ -137,10 +137,15 @@ func TestWorkerProductionWithoutNAS(t *testing.T) {
 }
 
 func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	s := spec("production")
 	s.Resumable = false
 	submit(t, q, s)
+	m := machine("worker", "fake")
+	if first, err := q.Checkin(Checkin{Machine: m}); err != nil || first.Job != nil {
+		t.Fatal("cold legacy response did not stay idle", first, err)
+	}
+	clock.Advance(time.Second) // The faulted check-in is the measured second send.
 	// Drain a probe left pending by setup before replacing the fault seam.
 	await(t, func() bool {
 		_, err := q.nasProbe.run(q.root, func() (bool, error) { return true, nil })
@@ -178,7 +183,7 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 		return available
 	}
 	done := make(chan Reply, 1)
-	go func() { r, _ := q.Checkin(Checkin{Machine: machine("worker", "fake")}); done <- r }()
+	go func() { r, _ := q.Checkin(Checkin{Machine: m}); done <- r }()
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):

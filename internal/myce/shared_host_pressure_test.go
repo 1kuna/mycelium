@@ -304,7 +304,7 @@ func TestSharedHostPressureQueuesRequireTarget(t *testing.T) {
 func TestSharedHostPressureSlowCheckinHealthViews(t *testing.T) {
 	q, clock, m, _ := sharedRunning(t, false)
 	clock.Advance(time.Second)
-	settle := q.beginCheckin(m.ID, m.Session)
+	settle := q.beginWorkerCheckin(m.ID, m.Session, time.Second, true)
 	defer settle(false)
 	clock.Advance(20 * time.Second)
 	q.mu.Lock()
@@ -316,7 +316,7 @@ func TestSharedHostPressureSlowCheckinHealthViews(t *testing.T) {
 	}
 	assertSharedPressureHealth(t, q, m.ID, "healthy")
 	// The same pending request must not hide missing evidence indefinitely.
-	clock.Advance(pendingCheckinContactLimit)
+	clock.Advance(legacyPressureDeliveryAllowance)
 	q.mu.Lock()
 	reason = q.sharedPressureReason(q.s.Machines[m.ID])
 	q.mu.Unlock()

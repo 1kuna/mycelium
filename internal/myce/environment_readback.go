@@ -54,7 +54,7 @@ func (q *Queue) EnvironmentEntries() []EnvironmentEntry {
 				continue
 			}
 			observation := EnvironmentReadObservation{Worker: fmt.Sprintf("worker-%d", i+1), State: "unknown"}
-			if !m.Gone && !m.LastSeen.IsZero() && !q.clock.Now().Before(m.LastSeen) && q.clock.Now().Sub(m.LastSeen) <= q.machineLossTimeout(id) {
+			if q.workerFresh(m, q.clock.Now()) {
 				observation.State, observation.Diagnostic = "failed", d
 			}
 			observations[report.Key] = append(observations[report.Key], observation)

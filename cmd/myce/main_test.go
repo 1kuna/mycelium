@@ -235,12 +235,16 @@ func TestDevCheckpointEndToEnd(t *testing.T) {
 	}
 
 	wait(t, ctx, func() bool {
-		var snap myce.Snapshot
-		if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
-			t.Fatal(err)
+		var jobs []*myce.Job
+		for _, id := range []string{experiment.ID, prod.ID} {
+			j, err := c.GetJob(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			jobs = append(jobs, j)
 		}
 		both := 0
-		for _, j := range snap.Jobs {
+		for _, j := range jobs {
 			if j.ID == experiment.ID || j.ID == prod.ID {
 				if j.State == "failed" {
 					t.Fatalf("job failed: %+v", j)

@@ -196,6 +196,38 @@
       ],
       "type": "object"
     },
+    "AttemptHostMemoryCharge": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "gib": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "observed_gb": {
+          "type": "number"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "sample_id": {
+          "type": "integer"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "session",
+        "gib"
+      ],
+      "type": "object"
+    },
     "AttemptIO": {
       "properties": {
         "pressure": {
@@ -2293,6 +2325,10 @@
         },
         "health_recovery": {
           "$ref": "#/$defs/AlertRecovery",
+          "x-contract": "diagnostic"
+        },
+        "host_memory_charge": {
+          "$ref": "#/$defs/AttemptHostMemoryCharge",
           "x-contract": "diagnostic"
         },
         "id": {
@@ -4910,11 +4946,20 @@
         "blob": {
           "type": "string"
         },
+        "bytes_copied": {
+          "type": "integer"
+        },
         "capacity": {
           "type": "string"
         },
+        "errno": {
+          "type": "integer"
+        },
         "error": {
           "type": "string"
+        },
+        "expected_bytes": {
+          "type": "integer"
         },
         "input": {
           "type": "string"
@@ -4925,8 +4970,14 @@
         "operation": {
           "type": "string"
         },
+        "path_class": {
+          "type": "string"
+        },
         "required_bytes": {
           "type": "integer"
+        },
+        "stage": {
+          "type": "string"
         },
         "status": {
           "type": "integer"

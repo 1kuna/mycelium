@@ -198,7 +198,10 @@ func TestUsageAndFairnessPersistAcrossRestart(t *testing.T) {
 	run := check(t, q, m, nil)
 	_ = run
 	start := c.Now()
-	c.Advance(30 * time.Second)
+	for range 30 {
+		c.Advance(time.Second)
+		check(t, q, m, nil)
+	}
 	if e = q.Tick(); e != nil {
 		t.Fatal(e)
 	}

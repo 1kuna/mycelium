@@ -64,7 +64,7 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 			if !slices.ContainsFunc(candidate.Extensions, eligible) {
 				continue
 			}
-			if q.diskHeadroomReason(candidate, m) != "" || !q.placementPolicyWithoutReservation(candidate, m, false) || !deviceAllowed(candidate, m) {
+			if q.diskHeadroomReason(candidate, m) != "" || !q.placementDemandPolicy(candidate, m, false) || !deviceAllowed(candidate, m) {
 				continue
 			}
 			for _, selected := range candidate.Extensions {
@@ -81,6 +81,7 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 }
 
 func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationPlan {
+	defer q.bodyPhaseFinish("qualification_plan", q.bodyPhaseStart())
 	if !q.reservationAllows(nil, m) || q.deviceAdmissionBlocked(m) || !q.hostLaunchAllowed(m, m.Session) {
 		return nil
 	}

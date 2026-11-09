@@ -184,8 +184,7 @@ func TestFanOutLossRetriesOnlyAffectedWave(t *testing.T) {
 		t.Fatal("no second wave")
 	}
 	finish(t, q, b, true)
-	clock.Advance(LossAfter + time.Second)
-	check(t, q, other, nil) // Keeps one host alive so the lost one can be declared gone.
+	advanceReportingPeer(t, q, clock, other, LossAfter+time.Second)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}

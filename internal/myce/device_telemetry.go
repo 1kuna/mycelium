@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"encoding/csv"
-	"errors"
 	"slices"
 	"strconv"
 	"strings"
@@ -80,47 +79,78 @@ func receivedDeviceTelemetry(c Checkin, now time.Time) Checkin {
 }
 
 func deviceTelemetryReady(s *DeviceTelemetry, now time.Time) bool {
-	return validDeviceTelemetry(s) && s != nil && s.FreeGB != nil && s.ActivePercent != nil &&
-		!now.Before(s.At) && now.Sub(s.At) < deviceMemorySampleFreshFor
+	return deviceTelemetryFresh(s, now) && s.FreeGB != nil && s.ActivePercent != nil
 }
 
-// Use the installed CLI's supported single-shot query, with the PCI identity
-// rather than a runtime ordinal. The old XPUM stats schema is not this tool's
-// output. A missing/unsupported query leaves its telemetry counter unknown.
-func xpuFreeMemory(ctx context.Context, p MachineProbe, pci string) (float64, error) {
-	b, err := p.Command(ctx, "xpu-smi", "--id="+pci, "--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits")
+func deviceTelemetryFresh(s *DeviceTelemetry, now time.Time) bool {
+	return validDeviceTelemetry(s) && s != nil && !now.Before(s.At) && now.Sub(s.At) < deviceMemorySampleFreshFor
+}
+
+// One host query returns PCI-keyed counters for every card. Missing, duplicate,
+// malformed and unsupported counters remain unknown; ordinals are never joined.
+func xpuFreeMemory(ctx context.Context, p MachineProbe) map[string]float64 {
+	free := map[string]float64{}
+	if p.Command == nil {
+		return free
+	}
+	b, err := p.Command(ctx, "xpu-smi", "--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits")
 	if err != nil {
-		return 0, err
+		return free
 	}
 	rows, err := csv.NewReader(strings.NewReader(string(b))).ReadAll()
-	if err != nil || len(rows) != 1 || len(rows[0]) != 2 || normalizePCIAddress(strings.TrimSpace(rows[0][0])) != normalizePCIAddress(pci) {
-		return 0, errors.New("XPU free-memory identity unavailable")
+	if err != nil {
+		return free
 	}
-	n, err := strconv.ParseFloat(strings.TrimSpace(rows[0][1]), 64)
-	if err != nil || !validMemoryValue(n) {
-		return 0, errors.New("XPU free-memory counter unavailable")
+	seen := map[string]bool{}
+	for _, row := range rows {
+		if len(row) != 2 {
+			return map[string]float64{}
+		}
+		pci := normalizePCIAddress(strings.TrimSpace(row[0]))
+		if seen[pci] {
+			delete(free, pci)
+			continue
+		}
+		seen[pci] = true
+		n, err := strconv.ParseFloat(strings.TrimSpace(row[1]), 64)
+		if err == nil && validMemoryValue(n) {
+			free[pci] = n / 1024
+		}
 	}
-	return n / 1024, nil
+	return free
 }
 
-func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, d *MachineDevice) {
-	if p.OS != "linux" || d.Platform != "xpu" || d.UnifiedMemory || d.pciAddress == "" {
+func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, devices []MachineDevice) {
+	if p.OS != "linux" {
+		return
+	}
+	eligible := func(d MachineDevice) bool {
+		return d.Platform == "xpu" && !d.UnifiedMemory && d.pciAddress != "" && d.Reason == ""
+	}
+	if !slices.ContainsFunc(devices, eligible) {
 		return
 	}
 	clock := w.Clock
 	if clock == nil {
 		clock = RealClock{}
 	}
-	s := &DeviceTelemetry{At: clock.Now(), Source: "xpu-smi memory; Xe PMU busiest hardware engine"}
-	if free, err := xpuFreeMemory(ctx, p, d.pciAddress); err == nil {
-		free = max(0, free-d.ReserveMemoryGB)
-		s.FreeGB = &free
-		d.FreeMemoryGB = min(d.FreeMemoryGB, free)
-	}
-	if p.XeActivity != nil {
-		if active, err := p.XeActivity(ctx, d.pciAddress); err == nil && validMemoryValue(active) && active <= 100 {
-			s.ActivePercent = &active
+	at := clock.Now()
+	freeByPCI := xpuFreeMemory(ctx, p)
+	for i := range devices {
+		d := &devices[i]
+		if !eligible(*d) {
+			continue
 		}
+		s := &DeviceTelemetry{At: at, Source: "xpu-smi memory; Xe PMU busiest hardware engine"}
+		if free, ok := freeByPCI[normalizePCIAddress(d.pciAddress)]; ok {
+			free = max(0, free-d.ReserveMemoryGB)
+			s.FreeGB = &free
+		}
+		if p.XeActivity != nil {
+			if active, err := p.XeActivity(ctx, d.pciAddress); err == nil && validMemoryValue(active) && active <= 100 {
+				s.ActivePercent = &active
+			}
+		}
+		d.Telemetry = s
 	}
-	d.Telemetry = s
 }

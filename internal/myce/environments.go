@@ -395,6 +395,7 @@ func (q *Queue) environmentPreparationAvailable(m *Machine) bool {
 }
 
 func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
+	defer q.bodyPhaseFinish("environment_plan", q.bodyPhaseStart())
 	if q.s.HostMaintenance[hostID(m)].SharedHost != nil {
 		return nil
 	}
@@ -1187,7 +1188,7 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 }
 
 type environmentRuntime struct {
-	authorize func(HostLaunch) error
+	authorize func(context.Context, HostLaunch) error
 	dir       string
 	cache     *EnvironmentCache
 	prepare   func(context.Context, EnvironmentRecipe) error
@@ -1236,11 +1237,11 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 	prepare := rt.prepare
 	ctx, cancel := context.WithCancel(context.Background())
 	if rt.authorize != nil {
-		ctx = withLaunchGate(ctx, func() error {
+		ctx = withLaunchGate(ctx, func(ctx context.Context) error {
 			if r.Launch == nil {
 				return ErrStale
 			}
-			return rt.authorize(*r.Launch)
+			return rt.authorize(ctx, *r.Launch)
 		})
 	}
 	rt.cancel = cancel

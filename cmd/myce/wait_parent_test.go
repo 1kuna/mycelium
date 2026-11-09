@@ -81,6 +81,11 @@ func TestRunExitsAfterRealParentExit(t *testing.T)  { testObserverParentExit(t, 
 func testObserverParentExit(t *testing.T, command string) {
 	dir := t.TempDir()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This legacy queue fixture has no batch endpoint.
+		if r.Method == http.MethodPost && r.URL.Path == "/api/wait" {
+			http.NotFound(w, r)
+			return
+		}
 		if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0600); err != nil {
 			t.Error(err)
 		}

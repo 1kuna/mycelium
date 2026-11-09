@@ -253,6 +253,8 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.FileStoreBytes = 100 << 30
 	c.RestartGrace = RestartGrace
 	c.ProductionInfrastructureRetries = DefaultProductionInfrastructureRetries
+	// Worker configs retain these unused schema values so older installers can
+	// validate a saved worker config on rollback. Only queues decide worker loss.
 	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
 	c.UploadSpoolDir = filepath.Join(c.State, "uploads")
 	c.UploadSpoolBytes = DefaultUploadSpoolBytes
@@ -261,6 +263,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.CPUReserveCores = 0
 	c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = 10, "25%", "512M", "64"
 	if role == "queue" {
+		c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = 0, 0, 0
 		// Control transactions and heartbeats must not share job politeness limits.
 		c.Nice, c.CPUQuota, c.MemoryMax = 0, "", "infinity"
 	}
@@ -653,7 +656,7 @@ func Uninstall(ctx context.Context, c ServiceConfig, dry bool, command func(cont
 	if c.Detection.OS == "linux" {
 		_, e = command(ctx, "systemctl", "--user", "disable", "--now", filepath.Base(c.Service))
 	} else {
-		_, e = command(ctx, "launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid()), c.Service)
+		e = (installManager{os: "darwin", command: command}).stop(ctx, installUnit{path: c.Service, label: "local.mycelium." + c.Role})
 	}
 	if e != nil {
 		return fmt.Errorf("stop service before removing setup: %w", e)

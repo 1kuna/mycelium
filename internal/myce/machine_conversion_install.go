@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strings"
 	"syscall"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -32,7 +31,12 @@ func openConversionQueue(c ServiceConfig, clock Clock) (*Queue, error) {
 		lock.Close()
 		return nil, err
 	}
-	q := &Queue{db: db, lock: lock, clock: clock, root: c.Checkpoints, unreported: map[string]bool{}, calls: map[string]*ModelCall{}, lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}}
+	q := &Queue{db: db, lock: lock, clock: clock, root: c.Checkpoints, unreported: map[string]bool{}, calls: map[string]*ModelCall{}}
+	if err = db.QueryRow("PRAGMA page_size").Scan(&q.persistencePageBytes); err != nil {
+		q.Close()
+		return nil, err
+	}
+
 	var data []byte
 	if err = db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data); err == nil {
 		data, err = readQueueState(db, data)
@@ -51,6 +55,15 @@ func openConversionQueue(c ServiceConfig, clock Clock) (*Queue, error) {
 	if q.s.Schema != persistedSchema {
 		q.Close()
 		return nil, errors.New("unsupported queue schema")
+	}
+	// Offline conversion cannot learn from arrivals. Reuse only the last
+	// committed session's frozen validity; wall time continues to age it.
+	// Missing historical evidence needs the existing verified-empty drain path.
+	q.contacts = map[string]*workerContact{}
+	for id, evidence := range q.s.ContactEvidence {
+		if m := q.s.Machines[id]; m != nil && m.Session == evidence.Session && evidence.Allowance > 0 {
+			q.contacts[id] = &workerContact{session: m.Session, processed: m.LastSeen, allowance: evidence.Allowance}
+		}
 	}
 	return q, nil
 }

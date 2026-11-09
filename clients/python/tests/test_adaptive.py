@@ -8,7 +8,6 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 from mycelium import Client
-from mycelium.adaptive import Pace
 from mycelium.transfer import _ProgressSocket
 
 
@@ -27,6 +26,9 @@ class Clock:
 
 class Reply(io.BytesIO):
     def __init__(self, value, headers=None):
+        if isinstance(value, dict) and isinstance(value.get("jobs"), list):
+            for row in value["jobs"]:
+                row.setdefault("spec", {})
         super().__init__(json.dumps(value).encode())
         self.headers = headers or {}
 
@@ -41,6 +43,8 @@ class AdaptiveTests(unittest.TestCase):
                     client._clock = clock
                     calls, holds = [], []
                     def respond(request, **kwargs):
+                        if request.selector == "/api/wait" and not batch:
+                            raise HTTPError(request.full_url, 404, "unsupported", {}, Reply({}))
                         calls.append(request)
                         clock.now += latency
                         state = "succeeded" if len(calls) >= 7 else "queued"
@@ -84,40 +88,6 @@ class AdaptiveTests(unittest.TestCase):
                 self.assertEqual(clock.now, 10)
                 self.assertEqual(len(attempts), 2)
 
-    def test_near_expected_event(self):
-        pace = Pace()
-        for i in range(12):
-            pace.observe(.001, i == 0)
-        self.assertLess(pace.next(.99, 1), pace.next(0, 1))
-
-    def test_throughput_stall_and_slow_progress(self):
-        for period in (.001, 120):
-            for size in (16, 1024 * 1024):
-                clock = Clock()
-                class Socket:
-                    stalled = False
-                    timeout = None
-                    def settimeout(self, timeout):
-                        self.timeout = timeout
-                    def recv_into(self, buffer, *args):
-                        if self.stalled:
-                            clock.now += self.timeout
-                            raise socket.timeout()
-                        if self.timeout is not None and period > self.timeout:
-                            raise AssertionError("slow progress killed")
-                        clock.now += period
-                        return len(buffer)
-                source = Socket()
-                transfer = _ProgressSocket(source, adaptive=True)
-                with patch("mycelium.transfer.time", clock), patch.object(transfer, "_buffered", return_value=False):
-                    for _ in range(100):
-                        self.assertEqual(transfer.recv_into(bytearray(size)), size)
-                    self.assertAlmostEqual(clock.now, 100 * period)
-                    source.stalled = True
-                    with self.assertRaises(socket.timeout):
-                        transfer.recv_into(bytearray(size))
-                    self.assertGreater(source.timeout, period)
-                    self.assertLess(source.timeout, 100 * period)
 
     def test_transfer_owner_timeout_bounds_progress(self):
         clock = Clock()

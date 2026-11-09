@@ -30,6 +30,11 @@ func TestAttemptProtocolLegacyWorkerNewQueue(t *testing.T) {
 	m := machine("legacy", "fake")
 	submit(t, q, spec("experiment"))
 	reply := attemptWire(t, client, Checkin{Machine: m})
+	if reply.Job != nil || len(reply.Attempts) != 0 {
+		t.Fatal("cold legacy sender received work before establishing cadence")
+	}
+	clock.Advance(time.Second)
+	reply = attemptWire(t, client, Checkin{Machine: m})
 	if reply.Job == nil || reply.AttemptProtocol != "" || len(reply.Attempts) != 0 {
 		t.Fatalf("legacy assignment changed: %+v", reply)
 	}
@@ -199,8 +204,8 @@ func TestAttemptProtocolStaleResultByKey(t *testing.T) {
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test"}
 	m := machine("keyed", "fake")
+	c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, period: time.Second}
 	submit(t, q, spec("experiment"))
-	c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m}
 	old := attemptWire(t, client, c).Attempts[0].Job
 	if err := q.Leave(m.ID, true); err != nil {
 		t.Fatal(err)
@@ -269,7 +274,11 @@ func TestAttemptProtocolStopEventKey(t *testing.T) {
 	client := Client{URL: server.URL, Token: "test"}
 	m := machine("events", "fake")
 	submit(t, q, spec("experiment"))
-	j := attemptWire(t, client, Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m}).Attempts[0].Job
+	wire := attemptWire(t, client, Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, period: time.Second})
+	if len(wire.Attempts) != 1 || wire.Attempts[0].Job == nil {
+		t.Fatalf("missing assignment: %+v", wire)
+	}
+	j := wire.Attempts[0].Job
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +303,7 @@ func TestAttemptProtocolRestartCustody(t *testing.T) {
 	s.Resumable = false
 	submit(t, q, s)
 	m := machine("restart", "fake")
-	c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m}
+	c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, period: time.Second}
 	reply, err := q.Checkin(c)
 	if err != nil || len(reply.Attempts) != 1 || reply.Attempts[0].Job == nil {
 		t.Fatalf("assignment: %+v %v", reply, err)
@@ -352,7 +361,7 @@ func TestAttemptProtocolExactNativeReleaseAck(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("release", "fake")
 			submit(t, q, spec("experiment"))
-			c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m}
+			c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, period: time.Second}
 			reply, err := q.Checkin(c)
 			if err != nil {
 				t.Fatal(err)

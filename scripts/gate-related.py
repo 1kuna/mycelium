@@ -24,6 +24,11 @@ for source in ('shared_clone_darwin', 'shared_clone_linux', 'shared_clone_other'
 SUPPLEMENTAL_CONSUMERS['internal/myce/engine_health.go'] = (
     'engine_recovery_test.go', 'engine_recovery_round3_test.go')
 
+# Copy-runtime authorization is exercised through its lifecycle/maintenance
+# consumers; the implementation predates the matching test filename convention.
+SUPPLEMENTAL_CONSUMERS['internal/myce/worker_sync.go'] = (
+    'sync_test.go', 'host_maintenance_work_test.go', 'server_entries_round4_test.go')
+
 # Adaptive private budgets are exercised through their observable consumers.
 SUPPLEMENTAL_CONSUMERS['internal/myce/observation_cache_budget.go'] = (
     'status_read_test.go',)
@@ -31,6 +36,13 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/telemetry_budget.go'] = (
     'job_get_volume_test.go', 'request_timing_test.go', 'queue_mutex_test.go')
 SUPPLEMENTAL_CONSUMERS['internal/myce/diagnostic_budget.go'] = (
     'evidence_budget_test.go', 'evidence_readiness_test.go')
+
+# The non-race diagnostic benchmark has its correctness regressions here.
+SUPPLEMENTAL_CONSUMERS['internal/myce/checkin_persistence_benchmark_test.go'] = (
+    'queue_persistence_test.go',)
+SUPPLEMENTAL_CONSUMERS['internal/myce/machine_conversion_install.go'] = (
+    'machine_migration_test.go', 'machine_verified_empty_test.go',
+    'machine_migration_spool_test.go')
 
 # Platform socket helpers implement transfer progress underneath file clients.
 for source in ('file_socket_unix', 'file_socket_other'):

@@ -31,6 +31,10 @@ type SharedHostPressure struct {
 
 const sharedHostPressureCause = "shared_host_pressure"
 
+// Compatibility only for legacy pressure reports with no frozen probe validity.
+// This does not control worker freshness or loss; host-probe-v1 uses its sample.
+const legacyPressureDeliveryAllowance = 30 * time.Second
+
 type sharedPressureLearning struct {
 	Wake probeEstimate `json:"wake"`
 	PSI  probeEstimate `json:"psi"`
@@ -114,7 +118,7 @@ func (q *Queue) sharedPressureFresh(m *Machine) bool {
 	reportAt := p.ReceivedAt.Add(time.Duration(p.AgeSeconds * float64(time.Second)))
 	contact := maxTime(reportAt, q.lastContact(m, now))
 	return now.Sub(contact)+time.Duration(p.AgeSeconds*float64(time.Second)) < p.Probe.freshness() &&
-		now.Sub(p.ReceivedAt) < p.Probe.freshness()+pendingCheckinContactLimit
+		now.Sub(p.ReceivedAt) < p.Probe.freshness()+legacyPressureDeliveryAllowance
 }
 
 // hostPressureReason is the first owner-pressure reason among m's host

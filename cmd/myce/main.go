@@ -308,9 +308,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	hostReserve := f.Float64("reserve-host-memory-gb", 0, "host RAM reserve in GiB (unified uses the larger GPU/host reserve once)")
 	reserve := f.Float64("reserve-memory-gb", 0, "GPU memory to keep outside Mycelium")
 	productionRetries := f.Int("production-infrastructure-retries", myce.DefaultProductionInfrastructureRetries, "maximum infrastructure requeues per production job")
-	productionLoss := f.Duration("production-loss-timeout", myce.ProductionLossAfter, "quiet timeout for production work")
-	deadlineLoss := f.Duration("deadline-loss-timeout", myce.DeadlineLossAfter, "quiet timeout for deadline work")
-	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "quiet timeout for experiment work")
+	productionLoss := f.Duration("production-loss-timeout", 0, "minimum production silence allowance; zero learns check-in timing")
+	deadlineLoss := f.Duration("deadline-loss-timeout", 0, "minimum deadline silence allowance; zero learns check-in timing")
+	experimentLoss := f.Duration("experiment-loss-timeout", 0, "minimum experiment silence allowance; zero learns check-in timing")
 	restartGrace := f.Duration("restart-grace", myce.RestartGrace, "worker recovery grace after queue restart")
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
 	hostname, _ := os.Hostname()
@@ -961,6 +961,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	if page := s.JobsPage; page != nil && page.NextBefore != "" {
+		fmt.Printf("jobs: %d of %d retained jobs shown; use status JOB_ID for a known job or status --history for all history\n", page.Returned, page.Total)
+	}
 	if s.HealthAlertDelivery != nil {
 		fmt.Println(s.HealthAlertDelivery.Summary())
 	}

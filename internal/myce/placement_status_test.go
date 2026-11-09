@@ -100,9 +100,7 @@ func TestPlacementStatusAuthoredAndScheduler(t *testing.T) {
 			}
 			// The durable record retains intent and historical decision after completion.
 			var data []byte
-			if err = q.db.QueryRow("SELECT data FROM queue_state WHERE key=?", "jobs/"+submitted.ID).Scan(&data); err != nil {
-				t.Fatal(err)
-			}
+			data = durableQueueRecord(t, q.db, "jobs/"+submitted.ID)
 			var stored Job
 			if err = json.Unmarshal(data, &stored); err != nil || !reflect.DeepEqual(stored.Placement, frozen.Placement) || !reflect.DeepEqual(stored.PlacementIntent, frozen.PlacementIntent) {
 				t.Fatal("placement not persisted", err)

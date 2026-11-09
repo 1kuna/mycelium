@@ -3,7 +3,6 @@ package myce
 import (
 	"iter"
 	"maps"
-	"slices"
 	"strings"
 	"time"
 )
@@ -94,7 +93,7 @@ func (q *Queue) memoryConstraintEvidenceAfter(key ObservationKey, configuration 
 		if lower, ok := cache.history.lower[id]; ok {
 			return lower
 		}
-		lower := q.memoryConstraintEvidenceFrom(key, configuration, slices.Values(cache.retainedMemoryJobs(q, id)), discrete, after)
+		lower := cache.retainedMemoryEvidence(q, id)
 		cache.history.lower[id] = lower
 		return lower
 	}

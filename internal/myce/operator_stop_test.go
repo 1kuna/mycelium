@@ -204,8 +204,7 @@ func TestOperatorStopRefundRevivesThirdLossAndPreservesOtherLosses(t *testing.T)
 		if old == nil {
 			t.Fatal("no assignment")
 		}
-		c.Advance(LossAfter)
-		check(t, q, observer(), nil)
+		advanceReportingPeer(t, q, c, observer(), LossAfter)
 	}
 	if got := job(t, q, j.ID); got.Losses != 3 || got.State != "failed" {
 		t.Fatalf("not third loss: %+v", got)

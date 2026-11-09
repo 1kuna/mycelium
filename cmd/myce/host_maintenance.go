@@ -116,7 +116,11 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if action == "budget" && !*dryRun && request.MemoryBudgetGB == nil && request.MemoryBudgetMeasured == nil && request.CPUBudgetCores == nil {
 		return errors.New("budget requires --memory-budget-gb GiB or --cpu-budget-cores N")
 	}
-	c, err := authority.client()
+	resolve := authority.client
+	if action != "status" && !*dryRun {
+		resolve = authority.ownerClient
+	}
+	c, err := resolve()
 	if err != nil {
 		return err
 	}

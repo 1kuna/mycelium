@@ -107,12 +107,6 @@ class ActionsFullTest(unittest.TestCase):
             ]}), (1, ['darwin', 'linux'], ['darwin']))
         self.assertEqual(self.exercise(submission_failure=True), (1, ['linux'], ['linux']))
 
-    def test_submission_outage_is_infrastructure_not_a_suite_failure(self):
-        self.assertEqual(self.exercise(submission_failure=True), (1, ['linux'], ['linux']))
-        reply = subprocess.CompletedProcess([], 69, 'PRIVATE ERROR', 'PRIVATE ERROR')
-        self.assertEqual(ci.submission_failure(reply),
-                         'infrastructure failure: submission unavailable (exit 69)')
-
     def test_oom_requires_current_attempt_and_readable_status(self):
         for output, code in [
             (json.dumps({'state': 'failed', 'attempt': 2, 'attempt_history': [

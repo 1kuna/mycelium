@@ -486,9 +486,10 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	cmd.Dir = d.workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
-	// After CLI exit/cancellation, inherited pipes get one local observation
-	// interval to drain. Outage backoff must not strand worker shutdown.
-	cmd.WaitDelay = d.rpcCadence("inspect")
+	// CLI exit can precede consumption of already-buffered output. Use this
+	// operation's completed response allowance, without outage backoff, so
+	// normal local variation does not truncate output or strand shutdown.
+	cmd.WaitDelay = d.rpcDrainBudget(operation)
 	var stdout bytes.Buffer
 	stderr := diagnosticTail{dir: d.dir}
 	defer stderr.release()
@@ -1253,7 +1254,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		output.Close()
 		return nil, err
 	}
-	p := &process{stopAdmission: w.stopAdmission, machine: w.Machine.ID, job: j, done: make(chan workerFinish, 1), docker: d, savePriorityStop: s.priorityStopRecorder()}
+	p := &process{cancelStart: w.cancelStart, stopAdmission: w.stopAdmission, machine: w.Machine.ID, job: j, done: make(chan workerFinish, 1), docker: d, savePriorityStop: s.priorityStopRecorder()}
 	if w.control != nil {
 		w.control.set(p)
 	}

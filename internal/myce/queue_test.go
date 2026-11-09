@@ -44,6 +44,8 @@ func fixture(t *testing.T) (*Queue, *fakeClock) {
 	t.Cleanup(func() { q.Close() })
 	fakeCheckpointAvailability(t, q, true)
 	q.fileRetention, q.logRetention = testFileRetention, testLogRetention
+	// These fixtures exercise explicit historical operator minimums.
+	q.lossTimeouts = [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}
 	q.s.PublicationHorizon = filePublicationGrace
 	return q, c
 }
@@ -88,7 +90,7 @@ func machine(id, gpu string, host ...string) Machine {
 }
 func check(t *testing.T, q *Queue, m Machine, r *Job) Reply {
 	t.Helper()
-	c := Checkin{Machine: m}
+	c := Checkin{Machine: m, period: time.Second} // Simulate the current worker timing header.
 	if r != nil {
 		c.Running = &Execution{ID: r.ID, Attempt: r.Attempt}
 		c.Machine.FreeMemoryGB = max(0, m.FreeMemoryGB-r.Spec.Needs.MemoryGB)
@@ -487,8 +489,7 @@ func TestThreeAttempts(t *testing.T) {
 		if r == nil || r.Attempt != i {
 			t.Fatalf("attempt %d: %+v", i, r)
 		}
-		c.Advance(LossAfter)
-		check(t, q, observer(), nil)
+		advanceReportingPeer(t, q, c, observer(), LossAfter)
 		if err := q.Tick(); err != nil {
 			t.Fatal(err)
 		}
@@ -705,8 +706,7 @@ func TestResumableThreeInfrastructureLosses(t *testing.T) {
 		if r == nil {
 			t.Fatal("no assignment")
 		}
-		c.Advance(LossAfter)
-		check(t, q, observer(), nil)
+		advanceReportingPeer(t, q, c, observer(), LossAfter)
 		// Reusing the same worker requires cleanup of its exact lost copy.
 		released := result(r, false)
 		released.ReleaseOnly = true

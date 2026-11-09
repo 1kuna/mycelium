@@ -160,10 +160,10 @@ func TestLaunchCapacityExactReleaseAndCallerDeadlines(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := job(t, q, j.ID)
-			if deadline == "generated" && got.State != "queued" {
-				t.Fatal("generated deadline killed capacity wait", got)
+			if (deadline == "generated" || deadline == "relative") && got.State != "queued" {
+				t.Fatal("relative deadline killed capacity wait", got)
 			}
-			if (deadline == "absolute" || deadline == "relative") && got.State != "failed" {
+			if deadline == "absolute" && got.State != "failed" {
 				t.Fatal("caller deadline ignored", got)
 			}
 			release := result(offer, false)
@@ -171,7 +171,7 @@ func TestLaunchCapacityExactReleaseAndCallerDeadlines(t *testing.T) {
 			if err := q.Complete(release); err != nil {
 				t.Fatal(err)
 			}
-			if deadline == "generated" {
+			if deadline == "generated" || deadline == "relative" {
 				if got := check(t, q, m, nil).Job; got == nil || got.ID != j.ID {
 					t.Fatal("exact release did not permit start", got)
 				}
@@ -565,7 +565,7 @@ func TestLaunchCapacityKnownRefusalRestart(t *testing.T) {
 			clock.Advance(time.Second)
 			previous := m.Session
 			m.Session = "replacement"
-			reply, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous})
+			reply, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous, period: time.Second})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -577,8 +577,8 @@ func TestLaunchCapacityKnownRefusalRestart(t *testing.T) {
 			if next == nil || next.ID != j.ID || next.Attempt != 2 {
 				t.Fatal("clean restart did not resume capacity demand", next)
 			}
-			if tier == "production" && !next.Spec.StartBy.Equal(*offer.Spec.StartBy) {
-				t.Fatal("fresh session extended caller deadline")
+			if tier == "production" && (next.StartWindow != offer.StartWindow || !next.Spec.StartBy.Equal(clock.Now().Add(time.Minute))) {
+				t.Fatal("fresh session did not restore relative startup budget")
 			}
 			finish(t, q, next, true)
 		})
@@ -613,7 +613,7 @@ func TestLaunchCapacityInitialLearnedMemory(t *testing.T) {
 			}
 			clock.Advance(ProductionStartTimeout + time.Second)
 			got := job(t, q, j.ID)
-			if deadline != "generated" {
+			if deadline == "absolute" {
 				if got.State != "failed" {
 					t.Fatal("learned sizing suppressed caller cutoff", got.State)
 				}
@@ -670,12 +670,6 @@ func TestLaunchCapacityInitialColdMemory(t *testing.T) {
 					t.Fatal(err)
 				}
 				got := job(t, q, j.ID)
-				if caller {
-					if got.State != "failed" {
-						t.Fatal("caller deadline ignored", got.State)
-					}
-					return
-				}
 				if got.State != "queued" || !got.StartCapacityWaiting || got.InfrastructureRetries != 0 || got.Losses != 0 {
 					t.Fatal("cold capacity wait expired or charged", got.State, got.Reason)
 				}
@@ -758,12 +752,6 @@ func TestLaunchCapacityBoundedExploration(t *testing.T) {
 			}
 			clock.Advance(ProductionStartTimeout + time.Second)
 			got := job(t, q, j.ID)
-			if caller {
-				if got.State != "failed" {
-					t.Fatal("bounded wait ignored caller cutoff", got.State)
-				}
-				return
-			}
 			if got.State != "queued" || !got.StartCapacityWaiting || got.Losses != 0 || got.InfrastructureRetries != 0 {
 				t.Fatal("bounded capacity wait expired or charged", got.State, got.Reason)
 			}

@@ -120,7 +120,15 @@ func TestResolveLockedCPUJobWithStagedInputOnTwoRoots(t *testing.T) {
 		if err := client.Call(context.Background(), "POST", "/api/resolve", ResolveRequest{Spec: s}, &r); err != nil {
 			t.Fatal(err)
 		}
-		return len(r.Targets) == 2 && len(r.FileInputs) == 2 && r.FileInputs[0].State == "needs-staging" && r.FileInputs[1].State == "needs-staging"
+		if len(r.Targets) != 2 || len(r.FileInputs) != 2 || r.FileInputs[0].State != "needs-staging" || r.FileInputs[1].State != "needs-staging" {
+			return false
+		}
+		for _, target := range r.Targets {
+			if !target.Eligible {
+				return false
+			}
+		}
+		return true
 	})
 	for _, target := range r.Targets {
 		if !target.Eligible || !strings.Contains(target.Reason, "environment prepared") || target.Target.Platform != "cpu" {
@@ -152,6 +160,7 @@ func TestResolveExplainsSharedHostRefusal(t *testing.T) {
 	q.environments = EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": {Key: key, Backend: "uv", LockFile: "requirements.txt", Files: map[string][]byte{"requirements.txt": []byte("# pinned\n")}}}}}
 	m := machine("shared", "cpu")
 	m.LastSeen = c.Now()
+	check(t, q, m, nil)
 	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 1}
 	m.EnvironmentBuilder = true
 	q.s.Machines[m.ID] = &m
@@ -184,7 +193,7 @@ func TestResolveFlagsDataLocalityPin(t *testing.T) {
 	for _, id := range []string{"data-host", "other-host"} {
 		m := machine(id, "cpu")
 		m.LastSeen = c.Now()
-		q.s.Machines[id] = &m
+		check(t, q, m, nil)
 	}
 	s := cpuResolveSpec()
 	s.AllowedMachines = []string{"data-host"}
