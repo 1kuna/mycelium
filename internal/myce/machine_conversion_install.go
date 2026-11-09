@@ -3,7 +3,6 @@ package myce
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,11 +25,7 @@ func openConversionQueue(c ServiceConfig, clock Clock) (*Queue, error) {
 		lock.Close()
 		return nil, errors.New("stop the queue service before offline conversion")
 	}
-	db, err := sql.Open("sqlite", "file:"+c.DB+"?mode=rw")
-	if err != nil {
-		lock.Close()
-		return nil, err
-	}
+	db := openQueueSQLite("file:"+c.DB+"?mode=rw", true)
 	q := &Queue{db: db, lock: lock, clock: clock, root: c.Checkpoints, unreported: map[string]bool{}, calls: map[string]*ModelCall{}}
 	if err = db.QueryRow("PRAGMA page_size").Scan(&q.persistencePageBytes); err != nil {
 		q.Close()

@@ -3982,6 +3982,24 @@ use the [stopped-state backup procedure](operations.md#queue-backup-restore-and-
 for a complete queue recovery generation.
 
 Queue mutations commit under the queue mutex with WAL and `synchronous=FULL`.
+Every physical writer connection applies and reads back these settings, including
+connections replaced by the SQL pool and offline conversion writers. Darwin
+writers also require `fullfsync=ON`: SQLite requests `F_FULLFSYNC` for WAL commits
+and checkpoints. Linux retains its existing FULL/WAL flush policy. A setting
+error or mismatched readback refuses the connection with `queue SQLite durability`
+in the error; fix the storage/configuration cause rather than lower durability.
+Offline conversion requires an existing WAL database and does not switch a
+non-WAL database during preview. Read-only observation connections stay read-only.
+
+These are requested and verified SQLite settings, not a hardware qualification:
+SQLite's Darwin VFS may fall back to ordinary fsync when fullfsync is unsupported,
+and successful flushes still depend on filesystem/device guarantees. Fixture
+tests inject WAL sync failure, lost/torn unsynced suffixes and a process kill
+after sync; they do not replace a physical power-cut drill. See
+[SQLite's synchronous and fullfsync semantics](https://sqlite.org/pragma.html#pragma_synchronous).
+Darwin fullfsync deliberately costs more than ordinary fsync; measure the queue's
+commit latency and check-in throughput before choosing it for a new workload.
+
 Synchronization and automatic checkpoints can delay other control calls.
 Unlocking before commit would break durable publication/rollback semantics.
 Mutable state and WAL checkpointing can cause sustained write amplification
