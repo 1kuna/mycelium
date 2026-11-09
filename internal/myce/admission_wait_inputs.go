@@ -16,7 +16,7 @@ func sameAdmissionWaitInputs(a, b *admissionWaitCapture) bool {
 		return false
 	}
 	x, y := a.index.capture, b.index.capture
-	if !reflect.DeepEqual(a.decisions, b.decisions) ||
+	if !sameAdmissionDecisions(a.admissions, b.admissions) || !reflect.DeepEqual(a.decisions, b.decisions) ||
 		!reflect.DeepEqual(x.models, y.models) || !reflect.DeepEqual(x.environments, y.environments) ||
 		!reflect.DeepEqual(x.runtime, y.runtime) || !sameWaitLedgers(x.ledgers, y.ledgers) ||
 		x.source.networkQuiet != y.source.networkQuiet || x.source.nasAvailable != y.source.nasAvailable ||

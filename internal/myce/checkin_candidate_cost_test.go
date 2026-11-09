@@ -126,6 +126,8 @@ func candidateCostFixture(t testing.TB) (*Queue, []Machine) {
 
 func BenchmarkCheckinCandidateCost(b *testing.B) {
 	q, workers := candidateCostFixture(b)
+	// Exercise overdue actual decisions as well as unchanged diagnostics.
+	q.clock.(*fakeClock).Advance(2 * time.Second)
 	benchmarkCheckinCandidateCost(b, q, workers)
 }
 

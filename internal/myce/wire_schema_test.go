@@ -58,6 +58,11 @@ func generatedJobSchema(t *testing.T) []byte {
 	schema["title"] = "Mycelium Job reply v1"
 	schema["description"] = "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; observation replies include spec_projection describing omitted spec fields, including files and run. Additional diagnostics may grow."
 	defs := schema["$defs"].(map[string]any)
+	admission := defs["AdmissionDecision"].(map[string]any)["properties"].(map[string]any)
+	admission["outcome"].(map[string]any)["enum"] = []AdmissionOutcome{AdmissionNotConsidered, AdmissionRejected, AdmissionNotSelected}
+	admission["stage"].(map[string]any)["enum"] = []AdmissionStage{AdmissionCheckin, AdmissionEligibility, AdmissionPlacement}
+	admission["predicate"].(map[string]any)["description"] = "Code-owned first failed predicate at the actual check-in boundary; separate from diagnostic predicates."
+
 	// GET Job replies redact execution payloads, including run.command.
 	// Spec encoding itself stays unchanged for durable submission fingerprints.
 	delete(defs["RunSpec"].(map[string]any), "required")

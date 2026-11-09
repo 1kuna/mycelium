@@ -256,22 +256,25 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 }
 
 func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom, scans ...*placementScan) *Job {
-	if q.environmentFailureBlocked(j, m) {
+	if !q.admissionPass(j, m, !q.environmentFailureBlocked(j, m), predicateEnvironmentFailure) {
 		return nil
 	}
-	if !q.preemptionPlacementAllows(j, m) || !q.yieldPlacementAllows(j, m) {
+	if !q.admissionPass(j, m, q.preemptionPlacementAllows(j, m), predicatePreemptionPlacement) || !q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) {
 		return nil
 	}
 	if j.Spec.FanOut != nil {
 		return q.fanOutCandidateWithResources(j, m, resources)
 	}
-	if j.State != "queued" || len(m.groupMembers) > 0 && !q.mayNeedCards(j, m) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
+	if j.State != "queued" || len(m.groupMembers) > 0 && !q.admissionPass(j, m, q.mayNeedCards(j, m), predicateCardGroup) || !q.placementAllowed(j, m) || !q.admissionPass(j, m, q.checkpointReady(j, m), predicateCheckpoint) {
 		return nil
 	}
-	for _, candidate := range extensionJobs(j, m, true) {
+	variants := extensionJobs(j, m, true)
+	q.admissionPass(j, m, len(variants) > 0, predicateExtensionCandidates)
+	for _, candidate := range variants {
 		if j.Batch != nil && j.Batch.Run {
 			candidate = q.retryWaveCandidate(candidate, m)
 			if candidate == nil {
+				q.admissionPass(j, m, false, predicateRetryWave)
 				continue
 			}
 		}
@@ -279,11 +282,11 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 		// These final eligibility predicates cannot be changed by memory
 		// sizing. Reject incompatible routes before reducing their evidence;
 		// live room, reclaim, fairness and all remaining checks still follow.
-		if !memorySizingTargetFits(candidate, m) || !toolsFit(candidate, m) || !nativeNetworkFits(candidate, m) || !q.batchCPUCeilingFits(candidate, m, scans...) {
+		if !q.admissionPass(j, m, memorySizingTargetFits(candidate, m), predicateMemoryTarget) || !q.admissionPass(j, m, toolsFit(candidate, m), predicateTools) || !q.admissionPass(j, m, nativeNetworkFits(candidate, m), predicateNativeNetwork) || !q.admissionPass(j, m, q.batchCPUCeilingFits(candidate, m, scans...), predicateCPUCeiling) {
 			continue
 		}
 		candidate = q.memoryCandidate(candidate, m)
-		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
+		if q.admissionPass(j, m, q.capReasonFor(candidate, m) == "", predicateProjectCapacity) && q.batchResourcesFitWithScan(candidate, m, resources) {
 			return candidate
 		}
 	}
@@ -337,7 +340,7 @@ func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 	return q.batchResourcesFitWithScan(j, m, nil)
 }
 func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {
-	if q.variantParityReason(j, m) != "" {
+	if !q.admissionPass(j, m, q.variantParityReason(j, m) == "", predicateVariantParity) {
 		return false
 	}
 	key := resourceKey(j)
@@ -368,7 +371,7 @@ func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batc
 			resources[key] = room
 		}
 	}
-	return room.ok && fitsResources(j, &room.machine, room.memory)
+	return q.admissionPass(j, m, room.ok, predicateReleasePlan) && q.admissionPass(j, m, fitsResources(j, &room.machine, room.memory), predicateResources)
 }
 func (q *Queue) batchResourceProjection(j *Job, m *Machine) batchResourceRoom {
 	plan, yield := q.ordinaryRoomPlan(j, m, true)
@@ -441,11 +444,16 @@ func (q *Queue) pick(m *Machine, scans ...*placementScan) *Job {
 }
 
 func (q *Queue) plannedPick(m *Machine, scan *placementScan) *Job {
+	if t := q.admissionTrace; t != nil {
+		previous := t.selecting
+		t.selecting = true
+		defer func() { t.selecting = previous }()
+	}
 	return q.immediateCandidate(q.assignmentPlan(scan)[targetKey(m)], m)
 }
 
 func (q *Queue) immediateCandidate(best *Job, m *Machine) *Job {
-	if best != nil && (q.preemptionReleasesPending(best) || q.preparationActive(m) || q.preparationStopping(m) || q.calls[best.ID] != nil || !fits(best, m, m.FreeMemoryGB) || !environmentReady(best, m)) {
+	if best != nil && (!q.admissionGate(best, m, !q.preemptionReleasesPending(best), predicateReleasePending) || !q.admissionGate(best, m, !q.preparationActive(m), predicatePreparationActive) || !q.admissionGate(best, m, !q.preparationStopping(m), predicatePreparationStopping) || !q.admissionGate(best, m, q.calls[best.ID] == nil, predicateModelCall) || !q.admissionGate(best, m, fits(best, m, m.FreeMemoryGB), predicateResources) || !q.admissionGate(best, m, environmentReady(best, m), predicateEnvironment)) {
 		return nil
 	}
 	return best

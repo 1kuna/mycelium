@@ -1,5 +1,55 @@
 {
   "$defs": {
+    "AdmissionDecision": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "checkin_machine": {
+          "type": "string"
+        },
+        "checkin_session": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "opportunity_seconds": {
+          "type": "number"
+        },
+        "outcome": {
+          "enum": [
+            "not_considered",
+            "rejected",
+            "not_selected"
+          ],
+          "type": "string"
+        },
+        "predicate": {
+          "description": "Code-owned first failed predicate at the actual check-in boundary; separate from diagnostic predicates.",
+          "type": "string"
+        },
+        "stage": {
+          "enum": [
+            "checkin",
+            "candidate_eligibility",
+            "placement"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "checkin_machine",
+        "checkin_session",
+        "outcome",
+        "stage",
+        "predicate",
+        "opportunity_seconds"
+      ],
+      "type": "object"
+    },
     "AdmissionDetail": {
       "properties": {
         "available": {
@@ -245,6 +295,9 @@
     },
     "AdmissionWaitTarget": {
       "properties": {
+        "admission_decision": {
+          "$ref": "#/$defs/AdmissionDecision"
+        },
         "available_cores": {
           "type": "integer"
         },

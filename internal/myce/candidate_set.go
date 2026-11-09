@@ -44,7 +44,10 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 	s.resources = map[batchResourceKey]batchResourceRoom{}
 	fence := q.groupDemandFence(m)
 	for _, j := range q.liveJobs() {
+		previousDecision, previousJob := q.beginAdmissionCandidate(j, m)
 		if fence != nil && j.ID != fence.ID && q.comparePriority(j.Spec, fence.Spec) >= 0 {
+			q.admissionPass(j, m, false, predicateGroupDemand)
+			q.endAdmissionCandidate(j, m, nil, previousDecision, previousJob)
 			continue
 		}
 		if j.State == "queued" && plainMemoryWork(j.Spec) && j.Spec.FanOut == nil {
@@ -62,7 +65,12 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 		}
 		// A host fence can only withhold an otherwise fitting candidate. Fully
 		// occupied targets need no global backlog/target memory-sizing pass.
-		if candidate := q.batchCandidateWithResources(j, m, s.resources, scan); candidate != nil && q.hostBackfillAllows(candidate, m, q.hostBackfillFences(scan)[hostID(m)]) {
+		candidate := q.batchCandidateWithResources(j, m, s.resources, scan)
+		if candidate != nil && !q.admissionPass(j, m, q.hostBackfillAllows(candidate, m, q.hostBackfillFences(scan)[hostID(m)]), predicateHostBackfill) {
+			candidate = nil
+		}
+		q.endAdmissionCandidate(j, m, candidate, previousDecision, previousJob)
+		if candidate != nil {
 			s.jobs = append(s.jobs, candidate)
 		}
 	}

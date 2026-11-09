@@ -166,6 +166,16 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 			if healthy && !planned {
 				t.Fatal("selected releases absent from status")
 			}
+			if healthy {
+				captured := false
+				for _, target := range observed.Latest.Targets {
+					d := target.AdmissionDecision
+					captured = captured || d != nil && d.Outcome == AdmissionRejected && d.Stage == AdmissionPlacement && d.Predicate == predicateReleasePending
+				}
+				if !captured {
+					t.Fatalf("missing actual placement rejection while selected releases remain pending: %+v", observed.Latest.Targets)
+				}
+			}
 			if healthy && !retainedWithoutNewStop {
 				t.Fatal("release wait lost the planner's no-new-stop decision")
 			}
@@ -559,5 +569,133 @@ func TestAdmissionWaitCaptureYieldsAndRetainedHistoryShrinks(t *testing.T) {
 	shrunk := admissionWaitAPI(t, q, j.ID)
 	if len(shrunk.Transitions) != 0 || shrunk.HistoryBytes != 0 || shrunk.Dropped != closed.Dropped+1 || !reflect.DeepEqual(shrunk.First, closed.First) || !reflect.DeepEqual(shrunk.Latest, closed.Latest) {
 		t.Fatalf("pressure lost endpoints or failed to shed optional history: %+v", shrunk)
+	}
+}
+
+// #884: a healthy pinned worker really considers a deadline job at attempt 0.
+// Tools fail before network isolation and CPU capacity; projections must never
+// claim that either later predicate was the captured rejection.
+func TestAdmissionWaitDeadlineCheckinDecision(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 4, 16)
+	m.CapabilityProfile.OS, m.CapabilityProfile.Arch = "darwin", "arm64"
+	m.Capabilities = []string{"native_isolation_seatbelt", "native_network"}
+	m.ToolInventory = map[string][]string{"": {"missing-tool"}}
+	check(t, q, m, nil)
+	s := cpuSpec(2, 1)
+	s.Priority = "deadline"
+	deadline := clock.Now().Add(24 * time.Hour)
+	s.Deadline = &deadline
+	s.AllowedMachines = []string{m.ID}
+	s.Needs.Tools, s.Needs.Network = []string{"missing-tool"}, true
+	s.Isolation = "sandboxed"
+	s.Run.Command = []string{"echo", "test-secret-marker", "/private/test-marker"}
+	j := submit(t, q, s)
+	m.ToolInventory = nil
+	m.Capabilities = []string{"native_isolation_seatbelt"}
+	clock.Advance(3 * time.Hour)
+	if check(t, q, m, nil).Job != nil {
+		t.Fatal("ineligible deadline assigned")
+	}
+	if got := job(t, q, j.ID); got.Attempt != 0 || got.State != "queued" {
+		t.Fatalf("unexpected attempt: %+v", got)
+	}
+	evidence := admissionWaitAPI(t, q, j.ID)
+	assertDecision := func(e *AdmissionWaitEvidence) {
+		t.Helper()
+		if e.Latest == nil || len(e.Latest.Targets) != 1 {
+			t.Fatalf("missing decision target: %+v", e)
+		}
+		target := e.Latest.Targets[0]
+		d := target.AdmissionDecision
+		if d == nil || d.Outcome != AdmissionRejected || d.Stage != AdmissionEligibility || d.Predicate != predicateTools || d.CheckinMachine != m.ID || d.CheckinSession != m.Session || !d.At.Equal(clock.Now()) || d.OpportunitySeconds <= 0 {
+			t.Fatalf("wrong actual rejection: %+v", d)
+		}
+	}
+	assertDecision(evidence)
+	// HTTP buffers and subsequent captures cannot mutate the previously read fact.
+	evidence.Latest.Targets[0].AdmissionDecision.Predicate = "caller mutation"
+	assertDecision(admissionWaitAPI(t, q, j.ID))
+	before := admissionWaitAPI(t, q, j.ID)
+	q = reopenVariants(t, q, clock)
+	if got := admissionWaitAPI(t, q, j.ID); !reflect.DeepEqual(got, before) {
+		t.Fatal("restart lost actual decision")
+	}
+	// Resume/retry may reuse diagnostic evidence, but only the next real check-in
+	// can record a new decision. Closed snapshots preserve their historical fact.
+	paused, err := q.PauseJob(j.ID, PauseJobRequest{Reason: "owner pause"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := admissionWaitAPI(t, q, j.ID); got.Latest.ClosedReason != "paused" || got.Latest.ClosedAt == nil {
+		t.Fatal("pause left wait open")
+	}
+	if _, err = q.ResumeJob(j.ID, paused.PauseRevision); err != nil {
+		t.Fatal(err)
+	}
+	if err = q.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := admissionWaitAPI(t, q, j.ID); got.Latest.ClosedReason != "cancelled" || got.Latest.ClosedAt == nil {
+		t.Fatal("cancel left wait open")
+	}
+}
+
+func TestAdmissionWaitExperimentSelectionAndLifecycle(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 4, 16)
+	check(t, q, m, nil)
+	holder := submit(t, q, cpuSpec(1, 1))
+	run := check(t, q, m, nil).Job
+	if run == nil || run.ID != holder.ID {
+		t.Fatal("missing holder")
+	}
+	s := cpuSpec(1, 1)
+	s.Needs.Tools = []string{"missing-tool"}
+	j := submit(t, q, s)
+	clock.Advance(time.Second)
+	check(t, q, m, run)
+	skipped := admissionWaitAPI(t, q, j.ID)
+	d := skipped.Latest.Targets[0].AdmissionDecision
+	if d == nil || d.Outcome != AdmissionNotConsidered || d.Stage != AdmissionCheckin || d.Predicate != predicateAttemptReports {
+		t.Fatalf("invented consideration: %+v", d)
+	}
+	finish(t, q, run, true)
+	clock.Advance(time.Second)
+	check(t, q, m, nil)
+	blocked := admissionWaitAPI(t, q, j.ID)
+	d = blocked.Latest.Targets[0].AdmissionDecision
+	if d == nil || d.Outcome != AdmissionRejected || d.Predicate != predicateTools {
+		t.Fatalf("experiment rejection missing: %+v", d)
+	}
+	// Repairing reported eligibility admits the same job and closes its wait.
+	m.ToolInventory = map[string][]string{"": {"missing-tool"}}
+	assigned := check(t, q, m, nil).Job
+	if assigned == nil || assigned.ID != j.ID {
+		t.Fatal("eligible experiment not assigned")
+	}
+	started := admissionWaitAPI(t, q, j.ID)
+	if started.Latest.ClosedReason != "assigned" || started.Latest.ClosedAt == nil {
+		t.Fatal("assignment left wait open")
+	}
+	finish(t, q, assigned, true)
+	if got := admissionWaitAPI(t, q, j.ID); got.Latest.ClosedAt == nil {
+		t.Fatal("terminal job left wait open")
+	}
+	// An unstarted wait can also terminate without ever assigning an attempt.
+	expiring := s
+	until := clock.Now().Add(2 * time.Second)
+	expiring.GiveUpAt = &until
+	next := submit(t, q, expiring)
+	m.ToolInventory = nil
+	clock.Advance(time.Second)
+	check(t, q, m, nil)
+	admissionWaitAPI(t, q, next.ID)
+	clock.Advance(time.Second)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := admissionWaitAPI(t, q, next.ID); got.Latest.ClosedReason != "failed" || got.Latest.ClosedAt == nil {
+		t.Fatal("terminal failure left wait open")
 	}
 }
