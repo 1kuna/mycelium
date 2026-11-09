@@ -155,6 +155,16 @@ measured observation window and clear evidence. Repeated-fault escalation still
 needs the maintenance owner. Do not resubmit to bypass the hold or clear real
 devices as a consumer. See [device quarantine](../../docs/operations.md#accelerator-driver-fault-quarantine).
 
+From the release containing #1170, Go/CLI and Python recover a missing resumable
+upload session (404) by checking the content-addressed blob. Success requires
+server SHA-256 verification plus matching client size/ETag checks. If the blob
+is also absent, the same upload retries within its existing owner deadline
+(Go context or Python `transfer_timeout`); keep the original file, digest and
+submission key. A late retry after completion is safe. Typed integrity,
+authority and storage-policy refusals still need their owner. Upload errors use
+the standard JSON code/error envelope; HEAD carries `X-Myce-Error-Code`.
+See [file transfer recovery](../../docs/files.md#transfer-behavior).
+
 ## Read for the relevant branch
 
 - **One-off commands, GPU/memory, variants, models, checkpoints or NAS inputs:**

@@ -51,6 +51,10 @@ class TransferStalledError(TimeoutError):
         self.code = code
 
 
+class _UploadPendingError(ConnectionError):
+    """A missing session whose blob is not published yet; retry only uploads."""
+
+
 class APIError(RuntimeError):
     """The queue rejected a request; status and response body are retained."""
 
@@ -435,10 +439,16 @@ class Client:
         elif project:
             claim = self._call("POST", "/api/files/input-claims", {"project": project, "class": class_, "file": ref})
             headers["X-Myce-Input-Claim"] = claim["id"]
+        def verified_blob():
+            with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size) as response:
+                if (response.headers.get("Content-Length") != str(size) or
+                        response.headers.get("ETag") != '"' + ref["sha256"] + '"'):
+                    raise ValueError("stored file identity mismatch")
+            return ref
+
         def attempt():
             try:
-                with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-                    return ref
+                return verified_blob()
             except APIError as error:
                 if error.status not in (404, 410):
                     raise
@@ -449,22 +459,13 @@ class Client:
                 pass
             # A lost final acknowledgement may already have published the blob.
             try:
-                with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-                    return ref
+                return verified_blob()
             except APIError as error:
                 if error.status not in (404, 410):
                     raise
-            try:
-                with request("HEAD", endpoint, headers=headers) as response:
-                    offset = int(response.headers["Upload-Offset"])
-                    length = int(response.headers["Upload-Length"])
-            except APIError as error:
-                if error.status not in (404, 410):
-                    raise
-                # Final publication can race the blob probe, then remove tus
-                # metadata before this HEAD acquires the original upload lock.
-                with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-                    return ref
+            with request("HEAD", endpoint, headers=headers) as response:
+                offset = int(response.headers["Upload-Offset"])
+                length = int(response.headers["Upload-Length"])
             if length != size or not 0 <= offset <= size:
                 raise ValueError("invalid upload offset/length")
             with source.open("rb") as stream:
@@ -479,15 +480,29 @@ class Client:
                         if int(response.headers["Upload-Offset"]) != offset + len(chunk):
                             raise ValueError("invalid upload acknowledgement")
                     offset += len(chunk)
-            with request("HEAD", "/api/files/blobs/" + ref["sha256"], headers=headers, size=size):
-                pass
-            return ref
+            return verified_blob()
+
+        def reconciled_attempt():
+            try:
+                return attempt()
+            except APIError as error:
+                if error.status not in (404, 410):
+                    raise
+                # Publication removes tus metadata. Only the hash/size-verified
+                # blob proves completion. Missing bytes use the paced retry;
+                # transient probe failures also return to that same owner.
+                try:
+                    return verified_blob()
+                except APIError as missing:
+                    if missing.status not in (404, 410):
+                        raise
+                    raise _UploadPendingError(str(error)) from error
 
         pace = Pace(jitter=self._jitter)
         while True:
             started = self._clock.monotonic()
             try:
-                return attempt()
+                return reconciled_attempt()
             except (TransferStalledError, URLError, ConnectionError, APIError) as error:
                 if isinstance(error, APIError) and (error.status not in (408, 429, 500, 502, 503, 504) or
                         error.code not in (None, "", "request_failed", "queue_stopping", "client_rate_limited", "observation_shed_control_pressure")):

@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -323,6 +324,9 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	return s.syncDir(filepath.Join(s.root, "uploads"))
 }
 func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
+	response := &uploadResponse{ResponseWriter: w}
+	w = response
+	defer response.finish()
 	var err error
 	r, err = fileStoreSubmissionRequest(r)
 	if err != nil {
@@ -361,8 +365,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		r = r.WithContext(claimCtx)
-		response := &uploadResponse{ResponseWriter: w}
-		s.handler.ServeHTTP(response, r)
+		s.handler.ServeHTTP(w, r)
 		if response.status >= 400 {
 			return
 		}
@@ -493,8 +496,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	// Keep immediate cancellation and the final queue-issued claim context.
 	r = r.WithContext(context.WithValue(r.Context(), uploadCreationContextKey{}, r.Context()))
-	response := &uploadResponse{ResponseWriter: w}
-	s.handler.ServeHTTP(response, r)
+	s.handler.ServeHTTP(w, r)
 	if response.status == http.StatusCreated {
 		s.unidentifiedReserveAdmitted.Add(unidentified)
 	}
@@ -503,16 +505,81 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Keep tus streaming and ResponseController capabilities while observing errors.
+// Successes stream unchanged, including ResponseController capabilities. Only
+// error bodies are held so both our refusals and tus's plain-text errors leave
+// through the same public JSON envelope. HEAD carries its code in a header.
 type uploadResponse struct {
 	http.ResponseWriter
 	status int
+	body   bytes.Buffer
 }
 
 func (w *uploadResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w *uploadResponse) WriteHeader(status int) {
+	if status < 200 {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	if w.status != 0 {
+		return
+	}
 	w.status = status
-	w.ResponseWriter.WriteHeader(status)
+	if status < 400 {
+		w.ResponseWriter.WriteHeader(status)
+	}
+}
+func (w *uploadResponse) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.status >= 400 {
+		return w.body.Write(p)
+	}
+	return w.ResponseWriter.Write(p)
+}
+func (w *uploadResponse) finish() {
+	if w.status < 400 {
+		return
+	}
+	var envelope struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	body := w.body.Bytes()
+	if json.Unmarshal(body, &envelope) != nil || envelope.Code == "" || envelope.Error == "" {
+		// Never expose tus's internal errors (which may contain storage paths).
+		envelope.Code = "file_upload_failed"
+		envelope.Error = "file upload failed"
+		switch w.status {
+		case 400:
+			envelope.Code, envelope.Error = "file_upload_invalid", "invalid upload request"
+		case 404, 410:
+			envelope.Code, envelope.Error = "file_upload_not_found", "upload session not found; check the verified blob before resuming"
+		case 405, 501:
+			envelope.Code, envelope.Error = "file_upload_method_unsupported", "upload method is not supported"
+		case 408:
+			envelope.Code, envelope.Error = "file_upload_interrupted", "upload request interrupted"
+		case 409:
+			envelope.Code, envelope.Error = "file_upload_conflict", "upload conflicts with stored state"
+			if bytes.HasPrefix(body, []byte("ERR_MISMATCHED_OFFSET:")) {
+				envelope.Code, envelope.Error = "file_upload_offset_mismatch", "upload offset does not match accepted progress"
+			}
+		case 412:
+			envelope.Code, envelope.Error = "file_upload_version_unsupported", "missing or unsupported Tus-Resumable version"
+		case 413:
+			envelope.Code, envelope.Error = "file_upload_size_exceeded", "upload exceeds its declared size"
+		case 423:
+			envelope.Code, envelope.Error = "file_upload_locked", "upload session is locked"
+		case 500, 502, 503, 504:
+			envelope.Code, envelope.Error = "file_upload_unavailable", "upload storage unavailable"
+		}
+		body, _ = json.Marshal(envelope)
+	}
+	w.Header().Del("Content-Length")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Myce-Error-Code", envelope.Code)
+	w.ResponseWriter.WriteHeader(w.status)
+	_, _ = w.ResponseWriter.Write(body)
 }
 func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata bool) {
 	if r.Method == http.MethodHead && (r.Header.Get("X-Myce-Input-Claim") != "" || r.Header.Get("X-Myce-File-Attempt") != "") {
@@ -1120,7 +1187,7 @@ func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileR
 
 // Every retry rechecks publication and the server's accepted tus offset. Never
 // replay a PATCH whose acknowledgement was lost, even if socket writes succeeded.
-func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref FileRef, purpose string) error {
+func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref FileRef, purpose string) (result error) {
 	if s, ok := ctx.Value(fileStoreSubmissionKey{}).(Spec); ok && ctx.Value(fileStoreAttemptKey{}) == nil {
 		var claim FileInputClaim
 		err := c.Call(ctx, "POST", "/api/files/input-claims", map[string]any{"project": s.Project, "class": s.Class, "file": ref}, &claim)
@@ -1133,6 +1200,18 @@ func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref File
 	if headPurpose == "" {
 		headPurpose = fileImportUploadPurpose
 	}
+	defer func() {
+		if !missingUpload(result) {
+			return
+		}
+		// A duplicate final PATCH or late HEAD may find that publication removed
+		// the session. Only the hash-verified blob proves completion.
+		if err := c.hasFile(ctx, ref, headPurpose); missingUpload(err) {
+			result = &uploadPendingError{result}
+		} else {
+			result = err
+		}
+	}()
 	if err := c.hasFile(ctx, ref, headPurpose); err == nil {
 		return nil
 	} else {
@@ -1163,12 +1242,6 @@ func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref File
 	endpoint := "/api/files/uploads/" + ref.SHA256
 	offset, err := c.uploadOffset(ctx, endpoint, ref.SizeBytes)
 	if err != nil {
-		var missing *HTTPError
-		if errors.As(err, &missing) && (missing.Status == 404 || missing.Status == 410) {
-			// Publication can finish after the preceding blob probe, while tus HEAD
-			// waits for its upload lock. Publishing removes the tus metadata.
-			return c.hasFile(ctx, ref, headPurpose)
-		}
 		return err
 	}
 	for {
@@ -1202,6 +1275,16 @@ func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref File
 
 	return c.hasFile(ctx, ref, headPurpose)
 }
+
+func missingUpload(err error) bool {
+	var failure *HTTPError
+	return errors.As(err, &failure) && (failure.Status == 404 || failure.Status == 410)
+}
+
+// Scoped to upload reconciliation: missing sessions elsewhere remain permanent.
+type uploadPendingError struct{ error }
+
+func (e *uploadPendingError) Unwrap() error { return e.error }
 
 // net/http may close a request body asynchronously after RoundTrip returns.
 // Fence reads so the next attempt can safely seek the same open source handle.
@@ -1404,6 +1487,10 @@ func fileTransferError(res *http.Response, message string, observed ...time.Time
 
 	if res.StatusCode == 410 && res.Header.Get("X-Myce-Error-Code") == "result_expired" {
 		return resultExpired()
+	}
+	// HEAD has no response body; upload errors retain their typed code here.
+	if code := res.Header.Get("X-Myce-Error-Code"); publicErrorCode(code) || code == "request_failed" {
+		return &HTTPError{Status: res.StatusCode, Code: code, Message: message, RetryAfter: delay}
 	}
 	return &HTTPError{Status: res.StatusCode, Message: message, RetryAfter: delay}
 }

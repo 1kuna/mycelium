@@ -240,6 +240,20 @@ local socket writes never count as acknowledgement. Typed integrity, authority
 and storage-policy refusals still return immediately. Retry pacing follows the
 current server `Retry-After` or measured service cost with positive jitter.
 
+From the release containing #1170, every `/api/files/uploads/` error uses the
+standard JSON `{"code":"…","error":"…"}` envelope, including errors from the
+resumable-upload handler. HEAD errors expose the code in `X-Myce-Error-Code`
+because HTTP HEAD has no response body. Successful tus responses are unchanged.
+A concurrent duplicate final PATCH or late HEAD can return 404
+`file_upload_not_found` after publication has removed the upload session.
+Go/CLI and Python check the content-addressed blob, whose HEAD verifies stored
+bytes against SHA-256; clients also require the expected ETag and size. A
+verified blob makes the upload successful. If the session and blob are both
+absent, clients retry with existing pacing within the same Go context deadline
+or Python `transfer_timeout`, recreating/resuming the same digest as needed.
+Missing upload metadata alone never proves either completion or lost content.
+Integrity and typed authority/storage refusals still stop recovery immediately.
+
 File transfers have no default whole-request deadline. The per-socket progress
 window learns byte service time and gaps. Upload PATCH windows additionally use
 the upload's observed request round-trip/service time (four service periods of

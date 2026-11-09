@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.error import URLError
-from mycelium import APIError
+from mycelium import APIError, TransferStalledError
+from test_adaptive import Clock
 
 from mycelium import Client
 
@@ -20,7 +21,8 @@ class ExtensionClientTests(unittest.TestCase):
             if method == "HEAD" and "/blobs/" in endpoint and calls.count("HEAD") <= 2:
                 raise APIError(404, "missing")
             response = io.BytesIO()
-            response.headers = {"Upload-Offset": str(size if method == "PATCH" else 0), "Upload-Length": "4"}
+            response.headers = {"Upload-Offset": str(size if method == "PATCH" else 0), "Upload-Length": "4",
+                                "Content-Length": "4", "ETag": '"' + hashlib.sha256(b"data").hexdigest() + '"'}
             return response
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder, "input")
@@ -47,7 +49,7 @@ class ExtensionClientTests(unittest.TestCase):
                 raise APIError(410, '{"code":"result_expired","error":"expired"}')
             response = io.BytesIO()
             response.headers = {"Upload-Offset": str(len(body) if method == "PATCH" else 0),
-                                "Upload-Length": str(len(body))}
+                                "Upload-Length": str(len(body)), "Content-Length": str(len(body)), "ETag": '"' + sha + '"'}
             return response
 
         with tempfile.TemporaryDirectory() as folder:
@@ -57,6 +59,69 @@ class ExtensionClientTests(unittest.TestCase):
                 self.assertEqual(client.upload_file(source), {"sha256": sha, "size_bytes": len(body)})
         self.assertEqual(calls, [("HEAD", blob), ("POST", "/api/files/uploads/"), ("HEAD", blob),
                                  ("HEAD", upload), ("PATCH", upload), ("HEAD", blob)])
+
+    def test_missing_upload_reconciles_verified_blob_or_retries_within_deadline(self):
+        for phase in ("HEAD", "PATCH"):
+            for outcome in ("published", "pending", "absent", "wrong_hash", "wrong_size", "unavailable", "probe_interrupted"):
+                with self.subTest(phase=phase, outcome=outcome):
+                    clock = Clock()
+                    client = Client(token="fixture", transfer_timeout=2)
+                    client._clock, client._jitter = clock, lambda: 0
+                    digest = hashlib.sha256(b"data").hexdigest()
+                    ref = {"sha256": digest, "size_bytes": 4}
+                    calls, published = [], False
+                    failures = 0
+                    probe_failed = False
+
+                    def request(method, endpoint, data=None, headers=None, size=0, **kwargs):
+                        nonlocal failures, published, probe_failed
+                        self.assertEqual(kwargs["deadline"], 2)
+                        calls.append((method, endpoint))
+                        reply = io.BytesIO()
+                        reply.headers = {"Upload-Offset": str(4 if method == "PATCH" else 0), "Upload-Length": "4",
+                                         "Content-Length": "4", "ETag": '"' + digest + '"'}
+                        if "/blobs/" in endpoint:
+                            if not published:
+                                raise APIError(404, "missing")
+                            if outcome == "probe_interrupted" and not probe_failed:
+                                probe_failed = True
+                                raise URLError("lost verification response")
+                            if outcome == "wrong_hash":
+                                reply.headers["ETag"] = '"' + "0" * 64 + '"'
+                            if outcome == "wrong_size":
+                                reply.headers["Content-Length"] = "3"
+                            if outcome == "unavailable":
+                                raise APIError(503, '{"code":"file_blob_unavailable","error":"unavailable"}')
+                        elif method == phase and "/uploads/" in endpoint and method != "POST":
+                            failures += 1
+                            if failures == 1 or outcome == "absent":
+                                published = outcome not in ("pending", "absent")
+                                raise APIError(404, '{"code":"file_upload_not_found","error":"missing"}')
+                        if method == "PATCH":
+                            published = True
+                        return reply
+
+                    with tempfile.TemporaryDirectory() as folder:
+                        source = Path(folder, "input")
+                        source.write_bytes(b"data")
+                        with patch.object(client, "_file_request", side_effect=request):
+                            if outcome == "absent":
+                                with self.assertRaises(TransferStalledError):
+                                    client.upload_file(source)
+                                self.assertEqual(clock.now, 2)
+                            elif outcome in ("wrong_hash", "wrong_size"):
+                                with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                                    client.upload_file(source)
+                                self.assertFalse(clock.sleeps)
+                            elif outcome == "unavailable":
+                                with self.assertRaises(APIError) as caught:
+                                    client.upload_file(source)
+                                self.assertEqual(caught.exception.code, "file_blob_unavailable")
+                                self.assertFalse(clock.sleeps)
+                            else:
+                                self.assertEqual(client.upload_file(source), ref)
+                                self.assertEqual(len(clock.sleeps), int(outcome in ("pending", "probe_interrupted")))
+                    self.assertEqual(calls[-1][0], "HEAD")
 
     def test_keyed_submit_wait_and_terminal_failure(self):
         client = Client(token="fixture")
