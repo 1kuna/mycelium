@@ -46,7 +46,7 @@ func attemptOutcome(j *Job, r Result) AttemptOutcome {
 		inputsStaged:      r.Success || j.StartedAt != nil || j.InputsStagedAt != nil || r.InputsStagedAt != nil,
 		Placement:         j.Placement,
 		Attempt:           j.Attempt, Machine: j.Machine, Session: j.Session,
-		ExecutionCause: safeAttemptRuntimeCause(j, r.ExecutionCause), CleanupCause: safeRuntimeCause(r.CleanupCause),
+		ExecutionCause: safeAttemptRuntimeCause(j, r.ExecutionCause), CleanupCause: safeAttemptRuntimeCause(j, r.CleanupCause),
 		Forced: r.Forced, Interrupted: r.Interrupted, OutOfMemory: r.OutOfMemory,
 		PoliteStop: r.PoliteStop, OperatorStop: r.OperatorStop || plannedMaintenanceStop(j),
 		PriorityStop: r.PriorityStop,
@@ -75,6 +75,7 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	}
 	outcome.EndedAt = q.clock.Now()
 	outcome.State = j.State
+	retainFinalizationSummary(j, &outcome)
 	// Reuse status redaction, including availability text supplied by workers.
 	outcome.Reason = statusJobCopy(&Job{State: j.State, Reason: j.Reason, ExecutionCause: outcome.ExecutionCause}).Reason
 	e := JobLedgerEntry{Attempt: outcome.Attempt, Machine: outcome.Machine, Session: outcome.Session, Kind: "outcome", Reason: outcome.Reason, State: outcome.State}

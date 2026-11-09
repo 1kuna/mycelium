@@ -125,6 +125,16 @@ evade them. Permanent authority/TLS/integrity/configuration refusals go to their
 owner. An older observer's restart classification may require the installation
 owner to verify identity before same-key replay.
 
+From the worker/queue release containing #871's finalization correction, an
+exit-zero command can still fail its declared output contract. Read
+`execution_cause.finalization` in status/GET for the step, declared relative
+output or destination, sanitized error and observed command exit zero. A
+directory is not a regular-file output; declare individual files or an archive.
+`myce result JOB_ID --attempt N --out DIR` retrieves a safe `summary.json` for
+these failures even without optional diagnostic artifacts. Upload/publication
+errors retain local results for retry; a publication-pending job is not accepted
+success. Keep its identity and resolve the reported storage/permission problem.
+
 For detached completion, bind a notifier to your own thread with
 [T3 binding](t3-binding.md). Supporting clients expose local observer diagnostics
 through `myce wait --observer-status`; a PID/lock proves ownership, not delivery.

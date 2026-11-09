@@ -228,8 +228,10 @@ func statusJobValue(job *Job) Job {
 			j.Reason = "production cannot start: no eligible host is enabled"
 		case j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "host_unavailable" && strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
 			j.Reason = "production start deadline exceeded"
-		case j.ExecutionCause != nil && (j.ExecutionCause.Operation == "input_staging" || j.ExecutionCause.Class == machoLibraryMissing || j.ExecutionCause.Predicate != ""):
+		case j.ExecutionCause != nil && (j.ExecutionCause.Finalization != nil || j.ExecutionCause.Operation == "input_staging" || j.ExecutionCause.Class == machoLibraryMissing || j.ExecutionCause.Predicate != ""):
 			j.Reason = "execution failed: " + j.ExecutionCause.String()
+		case j.ExecutionCause == nil && j.CleanupCause != nil:
+			j.Reason = "finalization failed: " + j.CleanupCause.String()
 		case j.Reason == "command failed: "+execFormatMessage || j.Reason == "native check failed: "+execFormatMessage:
 			// Fixed exec failure guidance contains no payload or machine paths.
 		case j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable:

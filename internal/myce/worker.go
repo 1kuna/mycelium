@@ -1050,6 +1050,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		} else if syncErr != nil || closeErr != nil {
 			result.CleanupCause = runtimeDiagnostic(runtimeErrorFor("persist", errors.Join(syncErr, closeErr)))
 		}
+		if observed.Status == 0 && result.ExecutionCause == nil && (syncErr != nil || closeErr != nil) {
+			result = finalizationResult(result, "log_persistence", "", errors.Join(syncErr, closeErr), true)
+			zero := 0
+			result.ExecutionCause.Finalization.CommandExitCode = &zero
+		}
 		if oomErr != nil {
 			result.Error = oomErr.Error()
 		} else if launchErr != nil {
@@ -1078,9 +1083,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		p.mu.Unlock()
 		if result.Success {
 			if e := w.publishExtensionFiles(j, executionWork); e != nil {
-				result.Success = false
-				result.Error = e.Error()
-				result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))
+				result = finalizationResult(result, "output_publication", "", e, true)
 			}
 		}
 		result.StoragePeak = w.storageObserver.finish()

@@ -142,23 +142,27 @@ func specRejection(err error) error {
 // command arguments, environment values, endpoint URLs, or worker filesystem paths.
 // Linkage explicitly retains install names from payload load commands.
 type RuntimeCause struct {
-	Linkage          *MachOLinkage     `json:"linkage,omitempty"`
-	RSSLimit         *RSSLimitEvidence `json:"rss_limit,omitempty"`
-	MissingTools     []string          `json:"missing_tools,omitempty"`
-	Host             string            `json:"host,omitempty"`
-	Staging          *StagingCause     `json:"staging,omitempty"`
-	PathDiagnostic   *PathDiagnostic   `json:"path_diagnostic,omitempty"`
-	Admission        *AdmissionDetail  `json:"admission,omitempty"`
-	PrelaunchRefused bool              `json:"prelaunch_refused,omitempty"`
-	Operation        string            `json:"operation"`
-	Class            string            `json:"class"`
-	ExitCode         *int              `json:"exit_code,omitempty"`
-	Predicate        string            `json:"predicate,omitempty"`
-	Reason           string            `json:"reason,omitempty"`
+	Finalization     *FinalizationDetail `json:"finalization,omitempty"`
+	Linkage          *MachOLinkage       `json:"linkage,omitempty"`
+	RSSLimit         *RSSLimitEvidence   `json:"rss_limit,omitempty"`
+	MissingTools     []string            `json:"missing_tools,omitempty"`
+	Host             string              `json:"host,omitempty"`
+	Staging          *StagingCause       `json:"staging,omitempty"`
+	PathDiagnostic   *PathDiagnostic     `json:"path_diagnostic,omitempty"`
+	Admission        *AdmissionDetail    `json:"admission,omitempty"`
+	PrelaunchRefused bool                `json:"prelaunch_refused,omitempty"`
+	Operation        string              `json:"operation"`
+	Class            string              `json:"class"`
+	ExitCode         *int                `json:"exit_code,omitempty"`
+	Predicate        string              `json:"predicate,omitempty"`
+	Reason           string              `json:"reason,omitempty"`
 }
 
 func (c RuntimeCause) String() string {
 	text := c.Operation + ": " + c.Class
+	if d := safeFinalization(c.Finalization); d != nil {
+		text += "; " + d.String()
+	}
 	if c.Class == machoLibraryMissing {
 		if d := safeMachOLinkage(c.Linkage); d != nil {
 			text += "; " + d.String()
@@ -316,6 +320,9 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
 	operations["execution"], classes[wallTimeLimit] = true, true
 	classes["tools_missing"] = true
+	if c.Operation == "outputs" && safeFinalization(c.Finalization) != nil {
+		classes[c.Finalization.Error] = true
+	}
 	classes["host_unavailable"] = c.Operation == "launch"
 	classes[machoLibraryMissing] = true
 	classes[diskLimitExceeded] = true
@@ -331,6 +338,10 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		}
 	}
 	out := *c
+	out.Finalization = nil
+	if c.Operation == "outputs" {
+		out.Finalization = safeFinalization(c.Finalization)
+	}
 	out.Linkage = nil
 	if c.Operation == "launch" && c.Class == machoLibraryMissing {
 		out.Linkage = safeMachOLinkage(c.Linkage)

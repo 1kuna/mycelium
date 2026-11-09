@@ -2032,6 +2032,11 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		}
 		q.settleRelease(r, true)
 		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+			if cause := safeAttemptRuntimeCause(j, r.ExecutionCause); !terminal(j.State) && cause != nil && cause.Finalization != nil {
+				j.ExecutionCause = cause
+				j.CleanupCause = safeAttemptRuntimeCause(j, r.CleanupCause)
+				j.Reason = "finalization pending: " + cause.String()
+			}
 			q.recordAttemptMemory(j, r)
 			q.retainAttemptResources(j, r.Resources)
 			j.ReleaseConfirmed = true
@@ -2128,8 +2133,9 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		r.ExecutionCause, r.Error = wallTimeCause(), wallTimeLimit
 	}
 	r.ExecutionCause = safeAttemptRuntimeCause(j, r.ExecutionCause)
+	r.CleanupCause = safeAttemptRuntimeCause(j, r.CleanupCause)
 	q.recordColdProbeRefusal(j, r)
-	if r.ExecutionCause != nil && r.ExecutionCause.Operation == "input_staging" {
+	if r.ExecutionCause != nil && (r.ExecutionCause.Operation == "input_staging" || r.ExecutionCause.Finalization != nil) {
 		// Keep the durable reason as safe as the structured cause; Error may
 		// contain the original worker-supplied diagnostic name or private text.
 		r.Error = r.ExecutionCause.String()
@@ -2512,6 +2518,9 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 	}
 	if j.State == "running" && j.ReleaseConfirmed {
 		j.Reason = "execution released; awaiting final result publication"
+		if cause := safeRuntimeCause(j.ExecutionCause); cause != nil && cause.Finalization != nil {
+			j.Reason += "; " + cause.String()
+		}
 	}
 	// Eligibility/reasons need the full diagnostic inputs until redaction.
 	copy := *j

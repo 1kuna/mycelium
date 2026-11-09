@@ -432,6 +432,11 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			r.Success = false
 			r.Error = errors.Join(runErr, persist).Error()
 			r.CleanupCause = runtimeDiagnostic(runtimeErrorFor("persist", persist))
+			if runErr == nil && oom == nil {
+				r = finalizationResult(r, "log_persistence", "", persist, true)
+				zero := 0
+				r.ExecutionCause.Finalization.CommandExitCode = &zero
+			}
 		}
 		if j.Spec.Program != nil {
 			main := g.members[len(g.members)-1]
@@ -443,9 +448,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		r.StoragePeak = w.storageObserver.finish()
 		if r.Success {
 			if e := w.publishExtensionFiles(j, filepath.Join(g.dir, "job-files", j.ID, strconv.Itoa(j.Attempt))); e != nil {
-				r.Success = false
-				r.Error = e.Error()
-				r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))
+				r = finalizationResult(r, "output_publication", "", e, true)
 			}
 		}
 		saveErr := saveWorkerJSON(g.dir, identity+".result.json", r)

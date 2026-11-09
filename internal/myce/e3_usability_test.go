@@ -122,6 +122,13 @@ func TestExtensionBaselineFailureIsFailedAttempt(t *testing.T) {
 	if snapshot.Jobs[0].State != "failed" || !strings.Contains(JobState(snapshot.Jobs[0]), "internal extension check") {
 		t.Fatal("baseline mismatch not failed/labelled", snapshot.Jobs[0])
 	}
+	cause := snapshot.Jobs[0].ExecutionCause
+	if cause == nil || cause.Finalization == nil || cause.Finalization.Step != "output_check" || cause.Class != "invalid_numeric_output" || cause.Finalization.CommandExitCode == nil || *cause.Finalization.CommandExitCode != 0 {
+		t.Fatalf("successful check command lost validation cause: %+v", cause)
+	}
+	if err := d.Client().DownloadDiagnostic(ctx, snapshot.Jobs[0].ID, snapshot.Jobs[0].Attempt, "summary.json", filepath.Join(root, "summary.json")); err != nil {
+		t.Fatal("check validation summary unavailable", err)
+	}
 }
 
 func TestExtensionRunOutputContract(t *testing.T) {

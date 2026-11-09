@@ -3,6 +3,8 @@ package myce
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -24,6 +26,8 @@ type DiagnosticReport struct {
 }
 type AttemptDiagnostics struct {
 	Files FileManifest `json:"files"`
+	// Queue-owned safe metadata, available even without optional artifact capture.
+	Summary *FailureSummary `json:"summary,omitempty"`
 }
 type FailedTest struct {
 	ID        string `json:"id"`
@@ -169,7 +173,13 @@ func readDiagnostic(path string, limit int64, tail bool) ([]byte, error) {
 	return data, err
 }
 
-func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath string) (Result, error) {
+func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath string) (finished Result, err error) {
+	defer func() {
+		if err != nil {
+			finished = finalizationResult(finished, "diagnostic_publication", "", err, false)
+			err = finalizationErrorFor("diagnostic_publication", "", err)
+		}
+	}()
 	if j.Spec.Diagnostics == nil || result.Success || result.ReleaseOnly {
 		return result, nil
 	}
@@ -183,6 +193,11 @@ func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath s
 	defer os.RemoveAll(stage)
 	summary := FailureSummary{Execution: result.Execution, Machine: result.Machine, Session: result.Session, Error: result.Error,
 		ExecutionCause: result.ExecutionCause, CleanupCause: result.CleanupCause, FailedTests: []FailedTest{}}
+	if result.ExecutionCause != nil && result.ExecutionCause.Finalization != nil {
+		summary.ExecutionCause = safeJobRuntimeCause(j.Spec, result.ExecutionCause)
+		summary.CleanupCause = safeJobRuntimeCause(j.Spec, result.CleanupCause)
+		summary.Error = summary.ExecutionCause.String()
+	}
 	remaining, releaseBudget := reserveDiagnosticBytes(parent, ^uint64(0))
 	defer releaseBudget()
 	if remaining == 0 {
@@ -295,6 +310,10 @@ func DiagnosticFiles(j *Job, attempt int) (FileManifest, error) {
 	}
 	for _, a := range j.AttemptHistory {
 		if a.Attempt == attempt && a.State == "failed" && a.Diagnostics != nil {
+			if data := inlineDiagnosticSummary(a.Diagnostics); data != nil {
+				hash := sha256.Sum256(data)
+				return FileManifest{"summary.json": {SHA256: hex.EncodeToString(hash[:]), SizeBytes: int64(len(data))}}, nil
+			}
 			return a.Diagnostics.Files, nil
 		}
 	}
@@ -314,5 +333,46 @@ func (c Client) DownloadDiagnostic(ctx context.Context, id string, attempt int, 
 	if !ok {
 		return &HTTPError{Status: 404, Code: "artifact_unknown", Message: "diagnostic artifact not found"}
 	}
+	for _, a := range j.AttemptHistory {
+		if a.Attempt == attempt && name == "summary.json" {
+			if data := inlineDiagnosticSummary(a.Diagnostics); data != nil {
+				if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+					return err
+				}
+				f, err := os.CreateTemp(filepath.Dir(dest), ".diagnostic-")
+				if err != nil {
+					return err
+				}
+				defer os.Remove(f.Name())
+				_, writeErr := f.Write(data)
+				if err = errors.Join(writeErr, f.Close()); err != nil {
+					return err
+				}
+				if err = verifyFile(ctx, f.Name(), ref); err != nil {
+					return err
+				}
+				return os.Rename(f.Name(), dest)
+			}
+		}
+	}
 	return c.downloadResultFile(ctx, ref, dest)
+}
+
+func inlineDiagnosticSummary(d *AttemptDiagnostics) []byte {
+	if d == nil || len(d.Files) != 0 || d.Summary == nil {
+		return nil
+	}
+	data, _ := json.MarshalIndent(d.Summary, "", "  ")
+	return data
+}
+
+func retainFinalizationSummary(j *Job, outcome *AttemptOutcome) {
+	if j.State != "failed" || outcome.ExecutionCause == nil || outcome.ExecutionCause.Finalization == nil || outcome.Diagnostics != nil && len(outcome.Diagnostics.Files) != 0 {
+		return
+	}
+	outcome.Diagnostics = &AttemptDiagnostics{Summary: &FailureSummary{
+		Execution: Execution{ID: j.ID, Attempt: outcome.Attempt}, Machine: outcome.Machine, Session: outcome.Session,
+		Error: outcome.ExecutionCause.String(), ExecutionCause: outcome.ExecutionCause, CleanupCause: outcome.CleanupCause,
+		FailedTests: []FailedTest{},
+	}}
 }

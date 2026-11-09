@@ -106,6 +106,20 @@ func safeJobRuntimeCause(spec Spec, c *RuntimeCause) *RuntimeCause {
 	out := safeRuntimeCause(c)
 	if out != nil {
 		out.Staging = bindStagingCause(spec, out.Staging)
+		if out.Finalization != nil && out.Finalization.Output != "" {
+			if _, declared := spec.Outputs[out.Finalization.Output]; !declared {
+				out.Finalization.Output = ""
+			}
+		}
+		if out.Finalization != nil && out.Finalization.Destination != "" {
+			declared := false
+			for _, prefix := range spec.Outputs {
+				declared = declared || prefix == out.Finalization.Destination
+			}
+			if !declared {
+				out.Finalization.Destination = ""
+			}
+		}
 	}
 	if out == nil || out.PathDiagnostic == nil {
 		return out

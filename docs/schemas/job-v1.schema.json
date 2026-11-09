@@ -189,6 +189,9 @@
       "properties": {
         "files": {
           "$ref": "#/$defs/FileManifest"
+        },
+        "summary": {
+          "$ref": "#/$defs/FailureSummary"
         }
       },
       "required": [
@@ -1907,6 +1910,81 @@
       ],
       "type": "object"
     },
+    "FailedTest": {
+      "properties": {
+        "classname": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "FailureSummary": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "cleanup_cause": {
+          "$ref": "#/$defs/RuntimeCause"
+        },
+        "error": {
+          "type": "string"
+        },
+        "execution_cause": {
+          "$ref": "#/$defs/RuntimeCause"
+        },
+        "failed_tests": {
+          "items": {
+            "$ref": "#/$defs/FailedTest"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "report_errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "session": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "machine",
+        "session",
+        "success",
+        "failed_tests"
+      ],
+      "type": "object"
+    },
     "FanOut": {
       "properties": {
         "max_concurrency": {
@@ -2030,6 +2108,33 @@
       "required": [
         "sha256",
         "size_bytes"
+      ],
+      "type": "object"
+    },
+    "FinalizationDetail": {
+      "properties": {
+        "command_exit_code": {
+          "type": "integer"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "http_status": {
+          "type": "integer"
+        },
+        "output": {
+          "type": "string"
+        },
+        "step": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "step",
+        "error"
       ],
       "type": "object"
     },
@@ -4626,6 +4731,9 @@
         },
         "exit_code": {
           "type": "integer"
+        },
+        "finalization": {
+          "$ref": "#/$defs/FinalizationDetail"
         },
         "host": {
           "type": "string"

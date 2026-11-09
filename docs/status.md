@@ -19,6 +19,16 @@ and `myce logs JOB_ID` prints its output.
 The rest of this page is a field-by-field reference, including
 [live view](#live-view-myce-view).
 
+With the worker/queue release containing #871's finalization correction, a
+command that exits zero can still fail output validation or publication.
+`execution_cause.finalization` identifies the step, declared relative output or
+destination, sanitized underlying error and `command_exit_code: 0` when known.
+`myce status JOB_ID`, job GET and attempt history retain that distinction.
+`myce result JOB_ID --attempt N --out DIR` can retrieve a metadata-only
+`summary.json` even without opt-in log/report capture. No worker root or raw
+transport error is included. Retryable publication errors remain pending and
+retain local results; their typed cause clears after successful publication.
+
 From the next release, cold CPU probes report their initial reservation
 in `memory_envelope.host_gb`, with known need and member/retry floors in
 `probe_floor_gb`. A running probe's host admission charge can follow its fresh
