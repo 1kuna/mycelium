@@ -11,96 +11,138 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+type waitIndexResult struct {
+	reply WaitReply
+	err   error
+}
+
+func awaitWaitIndexBlocked(t *testing.T, ctx context.Context, index *waitStateIndex, request WaitRequest) <-chan waitIndexResult {
+	t.Helper()
+	done := make(chan waitIndexResult, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		reply, err := index.wait(ctx, request)
+		done <- waitIndexResult{reply, err}
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("waiter did not join after context cancellation")
+		}
+	})
+	// The index notification, context and transport timer belong to this
+	// synctest bubble. No socket or queue transaction is in the wait path.
+	// Wait returns only after the waiter has durably blocked, not while its
+	// select operands are still being evaluated.
+	synctest.Wait()
+	select {
+	case result := <-done:
+		t.Fatalf("unchanged revision returned before commit/cancel: %+v", result)
+	default:
+	}
+	return done
+}
 
 func TestWaitIndexCommitRollbackAndUnlockedReads(t *testing.T) {
 	q, clock := fixture(t)
 	j := submit(t, q, spec("experiment"))
-	index := q.waitIndex()
-	first, err := index.wait(context.Background(), WaitRequest{IDs: []string{j.ID[:8]}, Seconds: 0})
-	if err != nil || first.Jobs[0].State != "queued" {
-		t.Fatal(first, err)
-	}
-	after := map[string]uint64{j.ID: first.Jobs[0].Revision}
-	abort := errors.New("rollback")
-	if e := q.update(func() error { q.touchJob(j.ID).State = "failed"; return abort }); !errors.Is(e, abort) {
-		t.Fatal(e)
-	}
-	clock.Advance(20 * time.Second)
-	snapshot, _, changed, err := index.read(WaitRequest{IDs: []string{j.ID}, After: after})
-	if err != nil || changed || snapshot[0].State != "queued" {
-		t.Fatal(snapshot, changed, err)
-	}
-	// All 200 waiters must answer even with the control mutex held. No queue
-	// projection or lock acquisition is permitted on this path.
-	q.mu.Lock()
-	var wg sync.WaitGroup
-	for range 200 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			reply, e := index.wait(context.Background(), WaitRequest{IDs: []string{j.ID}})
-			if e != nil || reply.Jobs[0].State != "queued" {
-				t.Error(reply, e)
-			}
-		}()
-	}
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
+	// Create the notification channel inside the bubble; queue persistence
+	// remains real, but the waiter only reads the in-memory committed index.
+	synctest.Test(t, func(t *testing.T) {
+		index := q.waitIndex()
+		first, err := index.wait(context.Background(), WaitRequest{IDs: []string{j.ID[:8]}, Seconds: 0})
+		if err != nil || first.Jobs[0].State != "queued" {
+			t.Fatal(first, err)
+		}
+		after := map[string]uint64{j.ID: first.Jobs[0].Revision}
+		abort := errors.New("rollback")
+		if e := q.update(func() error { q.touchJob(j.ID).State = "failed"; return abort }); !errors.Is(e, abort) {
+			t.Fatal(e)
+		}
+		clock.Advance(20 * time.Second)
+		snapshot, _, changed, err := index.read(WaitRequest{IDs: []string{j.ID}, After: after})
+		if err != nil || changed || snapshot[0].State != "queued" {
+			t.Fatal(snapshot, changed, err)
+		}
+		// All 200 waiters must answer even with the control mutex held. No queue
+		// projection or lock acquisition is permitted on this path.
+		q.mu.Lock()
+		var wg sync.WaitGroup
+		for range 200 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				reply, e := index.wait(context.Background(), WaitRequest{IDs: []string{j.ID}})
+				if e != nil || reply.Jobs[0].State != "queued" {
+					t.Error(reply, e)
+				}
+			}()
+		}
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			q.mu.Unlock()
+			t.Fatal("waiters took queue mutex")
+		}
 		q.mu.Unlock()
-		t.Fatal("waiters took queue mutex")
-	}
-	q.mu.Unlock()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	awakened := make(chan WaitReply, 1)
-	go func() {
-		r, e := index.wait(ctx, WaitRequest{IDs: []string{j.ID}, After: after, Seconds: 20})
-		if e != nil {
-			t.Error(e)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		awakened := awaitWaitIndexBlocked(t, ctx, index, WaitRequest{IDs: []string{j.ID}, After: after, Seconds: 20})
+		if err = q.Cancel(j.ID); err != nil {
+			t.Fatal(err)
 		}
-		awakened <- r
-	}()
-	if err = q.Cancel(j.ID); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case reply := <-awakened:
-		if reply.Jobs[0].State != "cancelled" || reply.Jobs[0].Revision == after[j.ID] {
-			t.Fatal(reply)
+		select {
+		case result := <-awakened:
+			if result.err != nil || len(result.reply.Jobs) != 1 || result.reply.Jobs[0].State != "cancelled" || result.reply.Jobs[0].Revision == after[j.ID] {
+				t.Fatal(result.reply, result.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("committed change did not wake waiter")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("committed change did not wake waiter")
-	}
-	// Failed runtime text uses exactly the public sanitizer, outside both locks.
-	if err = q.update(func() error {
-		v := q.touchJob(j.ID)
-		v.State = "failed"
-		v.Reason = "command failed: private fixture data"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	reply, err := index.wait(ctx, WaitRequest{IDs: []string{j.ID}})
-	if err != nil || reply.Jobs[0].Reason != "execution failed" {
-		t.Fatal(reply, err)
-	}
+		// Failed runtime text uses exactly the public sanitizer, outside both locks.
+		if err = q.update(func() error {
+			v := q.touchJob(j.ID)
+			v.State = "failed"
+			v.Reason = "command failed: private fixture data"
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		reply, err := index.wait(ctx, WaitRequest{IDs: []string{j.ID}})
+		if err != nil || reply.Jobs[0].Reason != "execution failed" {
+			t.Fatal(reply, err)
+		}
+	})
 }
 func TestWaitIndexCancellation(t *testing.T) {
 	q, _ := fixture(t)
 	j := submit(t, q, spec("experiment"))
-	index := q.waitIndex()
-	initial, _ := index.wait(context.Background(), WaitRequest{IDs: []string{j.ID}})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := index.wait(ctx, WaitRequest{IDs: []string{j.ID}, After: map[string]uint64{j.ID: initial.Jobs[0].Revision}, Seconds: 20})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatal(err)
-	}
+	// Create the notification channel inside the bubble; queue persistence
+	// remains real, but the waiter only reads the in-memory committed index.
+	synctest.Test(t, func(t *testing.T) {
+		index := q.waitIndex()
+		initial, _ := index.wait(context.Background(), WaitRequest{IDs: []string{j.ID}})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := awaitWaitIndexBlocked(t, ctx, index, WaitRequest{IDs: []string{j.ID}, After: map[string]uint64{j.ID: initial.Jobs[0].Revision}, Seconds: 20})
+		cancel()
+		select {
+		case result := <-done:
+			if !errors.Is(result.err, context.Canceled) {
+				t.Fatal(result.reply, result.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("cancellation did not release in-flight waiter")
+		}
+	})
 }
 
 // One wave represents 200 concurrent waiters over 6,500 retained jobs. Idle
