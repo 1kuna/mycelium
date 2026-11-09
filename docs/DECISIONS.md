@@ -25,9 +25,12 @@ Reviewed: 2026-11-09 (MY-37). Owner: project maintainer. This records sanitized 
   four-core native peak 7.01 GiB and passing Linux/VM peak 10.57 GiB, plus
   measured workstation headroom. Reserve the fleet worker's admitted CPU/RAM
   allowance in full, even while idle, so later fleet growth is already covered.
-  Cache that allowance from supported host status, bound to worker process
-  identity and the opaque installed-config hash; refresh once on a changed
-  binding and retain the full previous allowance if refresh fails. Fleet-worker
+  Read the admitted allowance once per gate admission through bounded supported
+  host status, because queue-owned budgets can change without a worker restart
+  or config rewrite. Cache only for fallback: if the read fails, use the full
+  last-known allowance, mark `allowance_stale` in the receipt and keep live
+  pressure/swap stops. This supersedes the process/config-bound refresh default
+  without making local development depend on fleet availability. Fleet-worker
   jobs remain background and their custody is not modified by local gates.
   This is an implementation default, separate from Zach's MY-37
   local-development ruling.

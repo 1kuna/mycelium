@@ -934,58 +934,96 @@ sys.exit(m.main())
         self.assertEqual(usage['process_count'], 3)
         self.assertAlmostEqual(usage['cpu_cores'], 2.405)
 
-    def test_worker_allowance_binding_refreshes_once_and_failed_refresh_reserves_full_budget(self):
+    def test_policy_budget_change_without_restart_or_config_rewrite_refreshes_every_admission(self):
         memory = measurement.memory
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder).resolve()
-            control = home / '.cache/mycelium-gates/control'
-            control.mkdir(parents=True)
-            config = home / '.local/share/mycelium/worker/config.json'
-            config.parent.mkdir(parents=True)
-            config.write_text('opaque bytes; deliberately not JSON')
+            root = Path(folder)
+            qualified_config(root)
             status = dict(host='fixture-host', policy=dict(cpu_budget_cores=4,
                 memory_budget=dict(memory_allowance_bytes=8 * capacity.GIB)), workers=[])
-            evidence = control / 'status.json'
+            evidence = root / 'status.json'
             evidence.write_text(json.dumps(status))
-            identity = capacity.process_identity(os.getpid())
-            binding = dict(pid=os.getpid(), process_identity=identity,
+            worker = dict(pid=os.getpid(), cpu_cores=0, rss_sum_bytes=0)
+            config = root / '.local/share/mycelium/worker/config.json'
+            config.parent.mkdir(parents=True)
+            config.write_text('opaque unchanged fixture')
+            # Keep the original binding unchanged, exactly like drain/budget/
+            # resume: queue-owned policy does not rewrite worker config.
+            binding = dict(pid=os.getpid(), process_identity=capacity.process_identity(os.getpid()),
                            installed_config_sha256=hashlib.sha256(config.read_bytes()).hexdigest())
-            cached = dict(schema=1, host='fixture-host', cpu_cores=4, memory_bytes=8 * capacity.GIB,
-                binding=binding, evidence=dict(path=str(evidence), sha256=hashlib.sha256(evidence.read_bytes()).hexdigest()))
-            cache = control / 'worker-allowance.json'
-            cache.write_text(json.dumps(cached))
+            cache = root / 'worker-allowance.json'
+            cache.write_text(json.dumps(dict(schema=1, host='fixture-host', cpu_cores=4,
+                memory_bytes=8 * capacity.GIB, binding=binding,
+                evidence=dict(path=str(evidence), sha256=hashlib.sha256(evidence.read_bytes()).hexdigest()))))
             original = subprocess.run
             refreshes = []
-            succeeding = False
+            failure = None
             def run(args, **kwargs):
                 if args[0] != 'myce': return original(args, **kwargs)
                 refreshes.append(args)
+                self.assertEqual(kwargs['timeout'], 5)
                 self.assertFalse('MYCE_TOKEN' in kwargs['env'], 'gate inherited forbidden authority variable')
-                return subprocess.CompletedProcess(args, 0 if succeeding else 1,
+                if failure == 'timeout': raise subprocess.TimeoutExpired(args, kwargs['timeout'])
+                return subprocess.CompletedProcess(args, 1 if failure else 0,
                                                    json.dumps(status).encode(), b'')
-            worker = dict(pid=os.getpid(), cpu_cores=0, rss_sum_bytes=0)
-            with (patch.object(memory.Path, 'home', return_value=home),
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(memory.Path, 'home', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
+                  patch.object(capacity, 'local_worker_usage', return_value=worker),
+                  patch.object(capacity, 'local_worker_allowance', side_effect=memory.local_worker_allowance),
                   patch.object(memory.subprocess, 'run', side_effect=run),
                   patch.dict(os.environ, MYCE_TOKEN='nonsecret-fixture')):
-                self.assertEqual(memory.local_worker_allowance(control, worker)['cpu_cores'], 4)
-                self.assertFalse(refreshes)
-                config.write_text('changed opaque installation')
-                for _ in range(2):
-                    allowance = memory.local_worker_allowance(control, worker)
-                    self.assertEqual(allowance['cpu_cores'], 4)
-                    self.assertEqual(allowance['memory_bytes'], 8 * capacity.GIB)
-                    self.assertEqual(allowance['refresh_status'], 'refresh_failed_fully_reserved')
+                first = capacity.acquire(root, mode='full', platform='native')
                 self.assertEqual(len(refreshes), 1)
-                succeeding = True
-                saved = json.loads(cache.read_text())
-                saved['binding']['process_identity'] = 'old process'
-                saved.pop('failed_refresh_binding')
-                cache.write_text(json.dumps(saved))
-                allowance = memory.local_worker_allowance(control, worker)
-                self.assertEqual(allowance['refresh_status'], 'refreshed_fully_reserved')
-                self.assertEqual(len(refreshes), 2)
-                memory.local_worker_allowance(control, worker)
-                self.assertEqual(len(refreshes), 2)
+                self.assertFalse(first.owner['worker_allowance_at_entry']['allowance_stale'])
+                try:
+                    status['policy'] = dict(cpu_budget_cores=8,
+                        memory_budget=dict(memory_allowance_bytes=16 * capacity.GIB))
+                    with self.assertRaisesRegex(RuntimeError, 'configuration changed'):
+                        capacity.acquire(root, mode='full', platform='native')
+                    self.assertEqual(len(refreshes), 2)
+                finally: first.release()
+                first = capacity.acquire(root, mode='full', platform='native')
+                try:
+                    allowance = first.owner['worker_allowance_at_entry']
+                    self.assertEqual(allowance['cpu_cores'], 8)
+                    self.assertEqual(allowance['memory_bytes'], 16 * capacity.GIB)
+                    # 6 reserve +8 fleet +4 first +4 second =22 >18.
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, mode='full', platform='native')
+                    self.assertEqual(len(refreshes), 4)
+                finally: first.release()
+                for mode, failure in [('full', 'timeout'), ('quick', 'unreachable')]:
+                    with self.subTest(mode=mode, failure=failure):
+                        stale = capacity.acquire(root, mode=mode, platform='native')
+                        try:
+                            allowance = stale.owner['worker_allowance_at_entry']
+                            self.assertTrue(allowance['allowance_stale'])
+                            self.assertEqual(allowance['refresh_status'], 'allowance_stale')
+                            self.assertEqual(allowance['cpu_cores'], 8)
+                            self.assertEqual(allowance['memory_bytes'], 16 * capacity.GIB)
+                        finally: stale.release()
+                self.assertEqual(len(refreshes), 6)
+
+    def test_allowance_status_is_not_polled_while_waiting_for_local_capacity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            waits = 0
+            def wait(_):
+                nonlocal waits
+                waits += 1
+                if waits == 3: first.release()
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
+                  patch.object(capacity, 'local_worker_allowance', return_value=dict(
+                      cpu_cores=4, memory_bytes=8 * capacity.GIB)) as allowance,
+                  patch.object(capacity.time, 'sleep', side_effect=wait)):
+                first = capacity.acquire(root, mode='full')
+                second = capacity.acquire(root, mode='full', wait=True)
+                try:
+                    self.assertEqual(waits, 3)
+                    self.assertEqual(allowance.call_count, 2)  # One per gate, not per wait.
+                finally: second.release()
 
     def test_fleet_custody_is_separate_but_still_prevents_cache_eviction(self):
         with tempfile.TemporaryDirectory() as folder:

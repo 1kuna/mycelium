@@ -66,15 +66,17 @@ def worker_allowance_from_status(status: dict) -> dict:
 def local_worker_allowance(control: Path, worker: Optional[dict]) -> dict:
     """Reserve admitted allowance, not an idle worker's current consumption.
 
-    Caller holds host admission. One supported refresh per changed binding;
-    failure retains the last qualified allowance in full, with no usage credit.
-    Installed configuration is hashed as opaque bytes, never parsed or logged.
+    Caller holds host admission and calls once per gate admission, not on every
+    FIFO check. Queue-owned policy can change without a process/config change.
+    A bounded supported read refreshes the fallback; failure keeps that full
+    allowance, explicitly stale, without making local work queue-dependent.
     """
     cache_path = control / 'worker-allowance.json'
     if not cache_path.exists():
         if worker and worker.get('pid'):
             raise RuntimeError('local worker allowance requires supported host-status qualification')
-        return dict(cpu_cores=0, memory_bytes=0, refresh_status='no_installed_worker')
+        return dict(cpu_cores=0, memory_bytes=0, allowance_stale=False,
+                    refresh_status='no_installed_worker')
     cached = json.loads(cache_path.read_text())
     status = json.loads(evidence_bytes(cached['evidence']))
     allowance = worker_allowance_from_status(status)
@@ -89,24 +91,13 @@ def local_worker_allowance(control: Path, worker: Optional[dict]) -> dict:
         if result.returncode not in (0, 1) or (fields and len(fields) != 2):
             raise ValueError('local worker process identity is unknown')
         identity = fields[1].strip() if fields and not fields[0].startswith('Z') else None
-    config = Path.home() / '.local/share/mycelium/worker/config.json'
-    config_hash = None
+    binding = dict(pid=pid, process_identity=identity)
     try:
-        with config.open('rb') as stream:
-            digest = hashlib.sha256()
-            for block in iter(lambda: stream.read(1024 * 1024), b''):
-                digest.update(block)
-            config_hash = digest.hexdigest()
-    except FileNotFoundError:
-        pass
-    binding = dict(pid=pid, process_identity=identity, installed_config_sha256=config_hash)
-    if binding == cached['binding']:
-        return dict(cached, refresh_status='cached_fully_reserved')
-    if binding == cached.get('failed_refresh_binding'):
-        return dict(cached, refresh_status='refresh_failed_fully_reserved', observed_binding=binding)
-    try:
+        # Bound the fleet's effect on starting local work to five seconds;
+        # there is no retry or queue-availability prerequisite for execution.
         result = subprocess.run(['myce', 'host', 'status', cached['host']],
-            capture_output=True, env={k: v for k, v in os.environ.items() if not k.startswith('MYCE_')})
+            capture_output=True, timeout=5,
+            env={k: v for k, v in os.environ.items() if not k.startswith('MYCE_')})
         if result.returncode != 0:
             raise ValueError('supported worker allowance refresh failed')
         observed = json.loads(result.stdout)
@@ -117,14 +108,14 @@ def local_worker_allowance(control: Path, worker: Optional[dict]) -> dict:
         evidence.write_bytes(result.stdout)
         cached = dict(schema=1, host=cached['host'], **allowance, binding=binding,
             evidence=dict(path=str(evidence), sha256=hashlib.sha256(result.stdout).hexdigest()))
-        refresh_status = 'refreshed_fully_reserved'
-    except (OSError, ValueError, KeyError, TypeError):
-        cached['failed_refresh_binding'] = binding
-        refresh_status = 'refresh_failed_fully_reserved'
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return dict(cached, allowance_stale=True, refresh_status='allowance_stale',
+                    observed_binding=binding)
     pending = cache_path.with_suffix('.pending')
     pending.write_text(json.dumps(cached) + '\n')
     pending.replace(cache_path)
-    return dict(cached, refresh_status=refresh_status, observed_binding=binding)
+    return dict(cached, allowance_stale=False, refresh_status='refreshed_fully_reserved',
+                observed_binding=binding)
 
 
 def snapshot():

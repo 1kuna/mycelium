@@ -286,6 +286,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     ticket = directory / (prefix + uuid.uuid4().hex)
     queue_ticket = None
     checked_config, resources = None, None
+    worker_allowance = None
     try:
         if priority in ('release', 'calibration'):
             with admission_lock(directory):
@@ -315,7 +316,10 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 if not resources and (directory / 'local-go-resource-group.custody').exists():
                     raise RuntimeError('resource qualification removed during active custody; retained')
                 worker = local_worker_usage()
-                worker_allowance = local_worker_allowance(directory, worker)
+                if worker_allowance is None:
+                    # One bounded host-status read per gate admission, never
+                    # fleet polling while waiting for local FIFO capacity.
+                    worker_allowance = local_worker_allowance(directory, worker)
                 effective = dict(config, worker_allowance={key: worker_allowance[key]
                     for key in ('cpu_cores', 'memory_bytes')})
                 config_digest = admission_config_digest(effective)

@@ -150,12 +150,17 @@ configuration changes refuse new admission until that group has cleaned up.
 The installed local fleet worker can coexist with local gates. Admission records
 its process-tree CPU/RSS from launchd and the OS for observation, but reserves
 its admitted CPU and RAM allowance rather than its current use. Supported
-`myce host status` supplies a cached allowance bound to worker PID/start identity
-and the installed configuration's opaque SHA-256; configuration contents and
-credentials are never parsed or printed. A changed binding triggers one supported
-refresh. A failed refresh retains the previous allowance in full, with no idle
-usage credit. Each receipt includes the allowance, evidence digest, binding and
-refresh outcome. Ordinary unchanged admission makes no queue request. The CPU
+`myce host status` supplies the current allowance once per full or quick admission,
+with a five-second read budget to bound the fleet's effect on local iteration.
+The FIFO wait does not poll or retry that read. A supported drain/budget/resume
+can change this allowance without a worker restart or config rewrite, so process
+identity alone cannot qualify freshness. The cache is fallback only: if the queue
+is unreachable, admission reserves the full last-known allowance and records
+`allowance_stale`, keeping local development independent of fleet availability.
+Each receipt includes the allowance, evidence digest, observed worker identity
+and refresh/staleness outcome. Configuration contents and credentials are never
+read by the gate helpers. Pressure and sustained-swap stops remain live even
+with stale allowance evidence. The CPU
 ledger adds admitted worker cores, declared local lane budgets and the
 host-qualified workstation reserve. The memory ledger adds the full admitted
 worker budget once, without separately subtracting observed worker RSS. Installed-worker
