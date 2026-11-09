@@ -150,7 +150,12 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	handler := API{Queue: q, Token: "test"}.Handler()
-	start := func(name, priority string) (context.CancelFunc, <-chan int) {
+	type response struct {
+		name string
+		code int
+		body string
+	}
+	start := func(name, priority string) (context.CancelFunc, <-chan response) {
 		child, stop := context.WithCancel(ctx)
 		path, payload := "/models/test/infer", "audio"
 		if !generic {
@@ -161,8 +166,12 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 		req.Header.Set("X-Myce-Project", "test")
 		req.Header.Set("X-Myce-Priority", priority)
 		req.Header.Set("X-Call", name)
-		done := make(chan int, 1)
-		go func() { w := httptest.NewRecorder(); handler.ServeHTTP(w, req); done <- w.Code }()
+		done := make(chan response, 1)
+		go func() {
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			done <- response{name, w.Code, w.Body.String()}
+		}()
 		return stop, done
 	}
 	receive := func(want string) {
@@ -176,7 +185,9 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 			t.Fatal("request did not reach upstream")
 		}
 	}
-	stop, first := start("active", "experiment")
+	// Keep capacity occupied until stop() below. A production waiter can
+	// preempt an active experiment before the three-call state is observed.
+	stop, first := start("active", "production")
 	receive("active")
 	_, experiment := start("experiment", "experiment")
 	_, production := start("production", "production")
@@ -189,8 +200,14 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 			break
 		}
 		select {
+		case result := <-first:
+			t.Fatalf("calls did not queue: %s returned %d: %s (last call count=%d)", result.name, result.code, result.body, n)
+		case result := <-experiment:
+			t.Fatalf("calls did not queue: %s returned %d: %s (last call count=%d)", result.name, result.code, result.body, n)
+		case result := <-production:
+			t.Fatalf("calls did not queue: %s returned %d: %s (last call count=%d)", result.name, result.code, result.body, n)
 		case <-ctx.Done():
-			t.Fatal("calls did not queue")
+			t.Fatalf("calls did not queue (last call count=%d)", n)
 		case <-time.After(time.Millisecond):
 		}
 	}
@@ -204,11 +221,14 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 	release <- struct{}{}
 	receive("experiment")
 	release <- struct{}{}
-	for _, done := range []<-chan int{first, production, experiment} {
+	for _, done := range []<-chan response{first, production, experiment} {
 		select {
-		case code := <-done:
-			if code == 409 {
-				t.Fatal("overlapping HTTP request")
+		case result := <-done:
+			if result.code == 409 {
+				t.Fatalf("overlapping HTTP request: %s: %s", result.name, result.body)
+			}
+			if result.name != "active" && (result.code != http.StatusOK || result.body != "ok") {
+				t.Fatalf("%s did not complete: status=%d body=%s", result.name, result.code, result.body)
 			}
 		case <-ctx.Done():
 			t.Fatal("handler did not finish")
