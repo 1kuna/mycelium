@@ -112,4 +112,40 @@ func TestEnvironmentCPUWorkerBuildAndExecute(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("shared-wheel-second-environment-offline", func(t *testing.T) {
+		// #144: a distinct environment using an already-downloaded package can
+		// prepare offline; path layout, HTTP defaults and download counts are not pinned.
+		cache := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, DownloadLimit: 1 << 20}
+		offline := false
+		cache.Run = func(_ context.Context, args []string, _ string, env []string, _, _ io.Writer) error {
+			if args[1] == "venv" {
+				return nil
+			}
+			vars := map[string]string{}
+			for _, value := range env {
+				k, v, _ := strings.Cut(value, "=")
+				vars[k] = v
+			}
+			wheel := filepath.Join(vars["UV_CACHE_DIR"], "shared-wheel")
+			if _, err := os.Stat(wheel); err == nil {
+				return nil
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+			if offline {
+				return errors.New("package download unavailable while preparing second environment")
+			}
+			return os.WriteFile(wheel, make([]byte, 128<<10), 0600)
+		}
+		for _, key := range []string{strings.Repeat("a", 64), strings.Repeat("b", 64)} {
+			recipe := EnvironmentRecipe{Key: key, Backend: "uv", Python: "3.12", LockFile: "requirements.txt", Files: map[string][]byte{"requirements.txt": []byte("numpy==2.0.2\n")}}
+			_, release, err := cache.Acquire(t.Context(), recipe)
+			if err != nil {
+				t.Fatal("shared package did not prepare environment", err)
+			}
+			release()
+			offline = true
+		}
+	})
 }

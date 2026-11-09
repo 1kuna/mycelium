@@ -1,6 +1,10 @@
 package myce
 
 import (
+	"gopkg.in/yaml.v3"
+)
+
+import (
 	"bytes"
 	"context"
 	"encoding/json"
