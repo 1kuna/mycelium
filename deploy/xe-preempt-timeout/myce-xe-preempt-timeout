@@ -7,8 +7,6 @@ import json
 import os
 from pathlib import Path
 import re
-import signal
-import subprocess
 import sys
 import syslog
 
@@ -71,12 +69,16 @@ def checked(target: Path, value: int) -> int:
     return unsigned(target.read_text())
 
 
+class VerificationMismatch(ValueError):
+    pass
+
+
 def write_verified(target: Path, value: int) -> None:
     target.write_text(f"{value}\n")
     actual = unsigned(target.read_text())
     log(f"{target}: wrote {value}, read back {actual}")
     if actual != value:
-        raise ValueError(f"{target}: readback mismatch")
+        raise VerificationMismatch(f"{target}: expected {value}, read back {actual}")
 
 
 def run(args: argparse.Namespace) -> int | None:
@@ -84,18 +86,11 @@ def run(args: argparse.Namespace) -> int | None:
     if args.action != "restore" and value is None:
         log("PREEMPT_TIMEOUT_US unset: leaving kernel/administrator values unchanged")
         return
-    if args.action == "startup-check" and xe_cards(args.sysfs_root, args.card):
-        # Best-effort ordering only. Five seconds is the startup latency budget,
-        # not a claim about normal udev completion time. Never wait indefinitely.
-        try:
-            result = subprocess.run(["/usr/bin/udevadm", "settle", "--timeout=5"],
-                                    timeout=5, check=False)
-            if result.returncode:
-                log(f"WARNING: udev settle exited {result.returncode}; continuing worker startup")
-        except (OSError, subprocess.TimeoutExpired) as error:
-            log(f"WARNING: udev settle failed: {error}; continuing worker startup")
     targets = engines(args.sysfs_root, args.card)
-    if args.action in ("verify", "startup-check"):
+    if not targets:
+        log("no xe CCS attributes present; no writes")
+        return 0
+    if args.action == "verify":
         status = 0
         for _, target in targets:
             try:
@@ -103,19 +98,24 @@ def run(args: argparse.Namespace) -> int | None:
                 if actual != value:
                     status = max(status, 1)
                     log(f"WARNING: {target}: expected {value}, read {actual}; "
-                        "verification: mismatch, status=1, continuing worker startup (report-only)")
+                        "verification: mismatch, status=1")
                 else:
                     log(f"{target}: verified {actual}; verification: match, status=0")
             except (OSError, ValueError) as error:
                 status = 2
                 log(f"WARNING: {target}: {error}; verification: error, status=2, "
-                    "continuing worker startup (report-only)")
+                    "application requires operator attention")
         return status
     args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Serialize device-add callbacks, manual apply and rollback. Never unlink
     # the lock while callbacks can still be running.
     with (args.state_dir / "lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if args.nonblocking_lock else 0)
+            fcntl.flock(lock, flags)
+        except BlockingIOError:
+            log("application: busy, status=75; no wait, reapply and verify before GPU work")
+            return 75
         state_file = args.state_dir / "prior.json"
         prior = json.loads(state_file.read_text()) if state_file.exists() else {}
         plan = []
@@ -147,65 +147,28 @@ def run(args: argparse.Namespace) -> int | None:
             else:
                 log(f"{target}: already {desired}, read back {current}; no write")
         # Keep the record until uninstall succeeds; repeated restores are safe.
-        if not targets:
-            log("no xe CCS attributes present; no writes")
-
-
-def startup(args: argparse.Namespace) -> None:
-    # The parent does no config/sysfs reads. Bound the entire child, including
-    # discovery, logging and reads after settle, rather than individual calls.
-    command = [sys.executable, str(Path(__file__).absolute()), "startup-check",
-               "--config", str(args.config), "--sysfs-root", str(args.sysfs_root)]
-    if args.card is not None:
-        command.extend(["--card", args.card])
-    child = subprocess.Popen(command, start_new_session=True)
-    try:
-        status = child.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        log("WARNING: verification: timeout, status=124, continuing worker startup; "
-            "terminating check (at most 2 seconds grace)")
-        try:
-            os.killpg(child.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            child.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            # Never wait indefinitely for a kernel-blocked child after SIGKILL.
-            log("WARNING: verification: killed, status=137, continuing worker startup")
-        return
-    if status:
-        log(f"WARNING: verification: child failure, status={status}, continuing worker startup")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("apply", "verify", "startup", "startup-check", "restore"))
+    parser.add_argument("action", choices=("apply", "verify", "restore"))
     parser.add_argument("--card")
+    parser.add_argument("--nonblocking-lock", action="store_true")
     parser.add_argument("--config", type=Path, default=Path("/etc/myce-xe-preempt-timeout.conf"))
     parser.add_argument("--sysfs-root", type=Path, default=Path("/sys"))
     parser.add_argument("--state-dir", type=Path, default=Path("/var/lib/myce-xe-preempt-timeout"))
     args = parser.parse_args()
     syslog.openlog("myce-xe-preempt-timeout")
     try:
-        if args.action == "startup":
-            startup(args)
-        else:
-            status = run(args)
-            if args.action == "startup-check":
-                return status or 0
-    except (OSError, ValueError, TypeError) as error:
-        if args.action in ("verify", "startup", "startup-check"):
-            log(f"WARNING: {error}; verification: error, status=2, "
-                "continuing worker startup (report-only)")
-            return 2 if args.action == "startup-check" else 0
-        log(f"FAILED: {error}")
+        status = run(args) or 0
+        log(f"{args.action}: complete, status={status}")
+        return status
+    except VerificationMismatch as error:
+        log(f"FAILED: verification: mismatch, status=1; {error}")
         return 1
-    return 0
+    except (OSError, ValueError, TypeError) as error:
+        log(f"FAILED: verification: error, status=2; {error}")
+        return 2
 
 
 if __name__ == "__main__":

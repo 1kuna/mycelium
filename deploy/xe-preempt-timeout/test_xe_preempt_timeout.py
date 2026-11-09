@@ -1,8 +1,11 @@
 """Laptop integration tests: all helper invocations use temporary fake sysfs."""
 from pathlib import Path
 import argparse
+import fcntl
 import os
 import runpy
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,7 +52,10 @@ class TimeoutTest(unittest.TestCase):
                                  "--config", str(self.config),
                                  "--state-dir", str(self.state), *extra],
                                 capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0 if success else 1, result.stderr)
+        if success:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        else:
+            self.assertNotEqual(result.returncode, 0, result.stderr)
         return result.stderr
 
     def test_config_parsing_and_unset(self):
@@ -112,69 +118,60 @@ class TimeoutTest(unittest.TestCase):
             self.invoke("verify")
             self.assertEqual(self.target.read_text(), f"{value}\n")
 
-    def test_worker_reports_unapplied_policy_without_failure(self):
-        self.assertIn("expected 1280000, read 640000", self.invoke("verify"))
-        self.assertIn("verification: mismatch, status=1, continuing", self.invoke("verify"))
-        self.assertIn("verification: child failure, status=1, continuing", self.invoke("startup"))
-        self.assertIn("continuing worker startup", self.invoke("verify"))
+    def test_verification_returns_and_logs_mismatch_status(self):
+        self.assertIn("expected 1280000, read 640000", self.invoke("verify", success=False))
+        self.assertIn("verification: mismatch, status=1", self.invoke("verify", success=False))
+        helper = runpy.run_path(str(HELPER))
+        args = argparse.Namespace(action="verify", config=self.config,
+                                  sysfs_root=self.root, card=None)
+        with mock.patch.object(helper["syslog"], "syslog") as journal:
+            self.assertEqual(helper["run"](args), 1)
+            self.assertTrue(any("verification: mismatch, status=1" in call.args[1]
+                                for call in journal.call_args_list))
         self.invoke()
         self.invoke("verify")
-        self.target.write_text("640000\n")
-        self.assertIn("report-only", self.invoke("verify"))
         self.target.with_name("preempt_timeout_min").unlink()
-        self.assertIn("WARNING", self.invoke("verify"))
-        self.config.write_text("PREEMPT_TIMEOUT_US=invalid\n")
-        self.assertIn("continuing worker startup", self.invoke("startup"))
+        self.assertIn("verification: error, status=2", self.invoke("verify", success=False))
 
-    def test_startup_settle_is_conditional_bounded_and_report_only(self):
-        helper = runpy.run_path(str(HELPER))
-        args = argparse.Namespace(action="startup-check", config=self.config,
-                                  sysfs_root=self.root, card=None, state_dir=self.state)
-        with mock.patch.object(helper["subprocess"], "run") as settle, \
-                mock.patch.object(helper["syslog"], "syslog") as journal:
-            self.config.write_text("PREEMPT_TIMEOUT_US=\n")
-            helper["run"](args)
-            settle.assert_not_called()
-            self.config.write_text("PREEMPT_TIMEOUT_US=1280000\n")
-            driver = self.root / "class/drm/card0/device/driver"
-            driver.unlink()
-            helper["run"](args)
-            settle.assert_not_called()
-            driver.symlink_to(self.root / "drivers/xe")
-            for outcome in (subprocess.CompletedProcess([], 0),
-                            subprocess.CompletedProcess([], 1),
-                            subprocess.TimeoutExpired("udevadm", 5),
-                            FileNotFoundError("udevadm missing")):
-                settle.reset_mock()
-                settle.side_effect = outcome if isinstance(outcome, Exception) else None
-                settle.return_value = outcome
-                helper["run"](args)
-                settle.assert_called_once_with(
-                    ["/usr/bin/udevadm", "settle", "--timeout=5"], timeout=5, check=False)
-            messages = [call.args[1] for call in journal.call_args_list]
-            self.assertTrue(any("expected 1280000, read 640000" in m for m in messages))
-            self.assertTrue(any("verification: mismatch, status=1, continuing" in m for m in messages))
-            self.assertTrue(any("udev settle failed" in m for m in messages))
-            self.assertTrue(any("udev settle exited 1" in m for m in messages))
+    def test_udev_application_does_not_wait_for_lock(self):
+        self.state.mkdir()
+        with (self.state / "lock").open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            started = time.monotonic()
+            result = subprocess.run(
+                [sys.executable, str(HELPER), "apply", "--nonblocking-lock",
+                 "--config", str(self.config), "--sysfs-root", str(self.root),
+                 "--state-dir", str(self.state)], capture_output=True, text=True, timeout=3)
+            self.assertEqual(result.returncode, 75, result.stderr)
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertIn("busy, status=75; no wait", result.stderr)
         self.assertEqual(self.target.read_text(), "640000\n")
-        self.assertFalse(self.state.exists())
+        self.invoke()
+        self.invoke("verify")
 
-    def test_whole_startup_bounds_stalled_attribute_read(self):
-        # A FIFO with no writer blocks Path.read_text just like a stalled sysfs
-        # read. Use the real supervisor/deadlines, without mocking read or wait.
+    def test_bounded_udev_run_terminates_stalled_attribute_read(self):
+        timeout = shutil.which("timeout") or shutil.which("gtimeout")
+        if not timeout:
+            self.skipTest("GNU timeout unavailable; run this test on Linux or with coreutils")
+        rule = HELPER.with_name("70-myce-xe-preempt-timeout.rules").read_text()
+        command = shlex.split(rule.split('RUN+="', 1)[1].strip().removesuffix('"'))
+        command[0] = timeout
+        index = command.index("/usr/local/libexec/myce-xe-preempt-timeout")
+        command[index:index + 1] = [sys.executable, str(HELPER)]
+        command[command.index("%k")] = "card0"
+        command.extend(["--config", str(self.config), "--sysfs-root", str(self.root),
+                        "--state-dir", str(self.state)])
+        # Exercise the actual RUN command using a FIFO that never supplies data.
         self.target.unlink()
         os.mkfifo(self.target)
         started = time.monotonic()
-        result = subprocess.run(
-            [sys.executable, str(HELPER), "startup", "--config", str(self.config),
-             "--sysfs-root", str(self.root)], capture_output=True, text=True, timeout=15)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
         elapsed = time.monotonic() - started
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("verification: timeout, status=124, continuing", result.stderr)
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertIn("sending signal TERM", result.stderr)
         self.assertGreaterEqual(elapsed, 10)
-        # One second allows interpreter startup and test-host scheduling jitter.
-        self.assertLess(elapsed, 13)
-        self.assertFalse(self.state.exists())
+        self.assertLess(elapsed, 13)  # Includes one second scheduling tolerance.
+        self.assertFalse((self.state / "prior.json").exists())
 
     def test_no_xe_and_invalid_card(self):
         self.invoke("apply", "--card", "../card0", success=False)
