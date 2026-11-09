@@ -202,6 +202,33 @@ class LocalGateTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'measured local gate budget'):
                     capacity.acquire(root, mode='full', platform='linux', cores=8)
 
+    def test_both_reserves_two_host_budgets_but_one_guest_budget(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                both = capacity.acquire(root, mode='full', platform='both', cores=4)
+                try:
+                    self.assertEqual(both.owner['cores'], 8)
+                    self.assertEqual(both.owner['per_leg_cores'], 4)
+                    self.assertEqual(both.owner['peak_bytes'],
+                        capacity.memory_requirement(config, 'both') - 5 * capacity.GIB)
+                    self.assertEqual(both.owner['vm_peak_bytes'],
+                        capacity.memory_requirement(config, 'linux') - 5 * capacity.GIB)
+                    # Four more guest cores fit the 8-vCPU VM and 18-core host;
+                    # native's CPU and RAM must not be charged to the guest.
+                    guest = capacity.acquire(root, mode='full', platform='linux', cores=4)
+                    try:
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root, mode='quick', cores=1)
+                    finally: guest.release()
+                finally: both.release()
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=22 * capacity.GIB)):
+                with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                    capacity.acquire(root, mode='full', platform='both', cores=4)
+
     def test_normal_pressure_memory_wait_keeps_fifo_then_starts_after_quick_releases(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -546,7 +573,8 @@ sys.exit(m.main())
             linux_provisional_bytes=6 * capacity.GIB, linux_peak_bytes=None,
             evidence=['completed native receipt and host observation sidecar']))
         self.assertEqual(capacity.memory_requirement(config, 'native'), 10754768896)
-        self.assertEqual(capacity.memory_requirement(config, 'both'), 12593872896)
+        self.assertEqual(capacity.memory_requirement(config, 'linux'), 12593872896)
+        self.assertEqual(capacity.memory_requirement(config, 'both'), 12593872896 + 4919132160)
         config['memory_measurement']['linux_peak_bytes'] = 7 * capacity.GIB
         self.assertEqual(capacity.memory_requirement(config, 'linux'),
                          7 * capacity.GIB + 315785216 + 5835636736)
@@ -725,6 +753,59 @@ sys.exit(m.main())
                 self.assertFalse((root / 'native-cleanup.json').exists())
                 self.assertFalse((root / 'linux-cleanup.json').exists())
 
+    def test_both_legs_overlap_and_collect_test_failure_before_releasing(self):
+        # The native child cannot finish until the Linux child is launched.
+        # Real pipes prove overlap without a sleep or an elapsed-time threshold.
+        for result in (0, 1):
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                path = root / 'manifest.json'
+                path.write_text(json.dumps(dict(repo=str(root), cache=str(root / 'cache'), cores=2,
+                    report=str(root / 'report'), mode='full', command=[], platform='both', identity='run')))
+                original = subprocess.Popen
+                children, writers = [], []
+                def launch(command, **kwargs):
+                    if children:
+                        self.assertIsNone(children[0].poll(), 'native finished before guest launch')
+                        receipt = root / 'linux-cleanup.json'
+                        nonce = command[command.index('--cleanup-id') + 1]
+                        code = 0
+                    else:
+                        receipt = kwargs['env']['GATE_CLEANUP_RECEIPT']
+                        nonce = kwargs['env']['GATE_CLEANUP_ID']
+                        code = result
+                    reader, writer = os.pipe()
+                    writers.append(writer)
+                    worker = ('import json,os,pathlib,select,sys; '
+                        'fd=int(sys.argv[1]); '
+                        'assert select.select([fd],[],[],5)[0], "peer was not launched"; '
+                        'assert os.read(fd,1)==b"x"; '
+                        'pathlib.Path(sys.argv[2]).write_text(json.dumps(dict(schema=1,'
+                        'identity=sys.argv[3],stopped=True,status=int(sys.argv[4])))); '
+                        'sys.exit(int(sys.argv[4]))')
+                    try:
+                        child = original([sys.executable, '-c', worker, str(reader), str(receipt), nonce, str(code)],
+                                         pass_fds=(reader,))
+                    finally: os.close(reader)
+                    children.append(child)
+                    if len(children) == 2:
+                        for fd in writers: os.write(fd, b'x')
+                    return child
+                try:
+                    with (patch.object(local.sources, 'freeze', return_value={'source_sha': 'test'}),
+                          patch.object(local.sources, 'extract', side_effect=lambda a, d: (d / 'scripts').mkdir()),
+                          patch.object(local.sources, 'runtime_archive'),
+                          patch.object(local.sources, 'predecessors', return_value=[]),
+                          patch.object(local.subprocess, 'Popen', side_effect=launch)):
+                        self.assertEqual(local.execute(path), result)
+                    self.assertEqual(len(children), 2)
+                    self.assertTrue(all(child.poll() is not None for child in children))
+                    self.assertTrue(local.receipts.confirmed(root / 'overall-cleanup.json', 'run'))
+                finally:
+                    for fd in writers: os.close(fd)
+                    for child in children:
+                        if child.poll() is None: child.kill(); child.wait()
+
     def test_unknown_native_exit_never_starts_linux_or_confirms_capacity(self):
         for code in (-9, 255):
             with self.subTest(code=code), tempfile.TemporaryDirectory() as folder:
@@ -854,7 +935,7 @@ sys.exit(m.main())
             self.assertFalse((active / 'nonce').exists())
 
     def test_cancellation_between_legs_and_during_launch_handoff_revokes_linux(self):
-        for timing in ('between', 'handoff'):
+        for timing in ('between', 'handoff', 'both-running'):
             with self.subTest(timing=timing), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 path = root / 'manifest.json'
@@ -875,6 +956,15 @@ sys.exit(m.main())
                         local.receipts.publish(env['GATE_CLEANUP_RECEIPT'], env['GATE_CLEANUP_ID'],
                                                stopped=True, status=0)
                         child.wait.return_value = child.poll.return_value = 0
+                        if timing == 'both-running':
+                            stopped = threading.Event()
+                            child.poll.return_value = None
+                            child.send_signal.side_effect = lambda sig: stopped.set()
+                            def native_wait():
+                                self.assertTrue(stopped.wait(5), 'native cancellation was not forwarded')
+                                child.poll.return_value = 143
+                                return 143
+                            child.wait.side_effect = native_wait
                     else:
                         signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
                         child.poll.return_value = None
@@ -892,8 +982,10 @@ sys.exit(m.main())
                       patch.object(local.subprocess, 'Popen', side_effect=launch)):
                     self.assertEqual(local.execute(path), 125)
                 self.assertEqual(len(calls), 1 if timing == 'between' else 2)
-                if timing == 'handoff':
+                if timing in ('handoff', 'both-running'):
                     children[-1].send_signal.assert_called_once_with(signal.SIGTERM)
+                if timing == 'both-running':
+                    children[0].send_signal.assert_called_once_with(signal.SIGTERM)
                 self.assertTrue(local.receipts.confirmed(root / 'overall-cleanup.json', 'run'))
 
     def test_dead_priority_reservations_do_not_survive_their_waiters(self):
@@ -1079,6 +1171,7 @@ sys.exit(m.main())
             config['quick_memory_measurement'] = dict(peak_bytes=capacity.GIB,
                 evidence=[dict(path=str(evidence), sha256=hashlib.sha256(evidence.read_bytes()).hexdigest())])
             self.assertEqual(capacity.memory_requirement(config, 'native', 'quick'), 6 * capacity.GIB)
+            self.assertEqual(capacity.memory_requirement(config, 'both', 'quick'), 17 * capacity.GIB)
             self.assertEqual(capacity.memory_requirement(config, 'native'), 12 * capacity.GIB)
             (root / 'gate-capacity.json').write_text(json.dumps(config))
             with (patch.object(capacity, 'root', return_value=root),
