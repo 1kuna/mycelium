@@ -212,6 +212,30 @@ func TestEnrollmentReleaseApprovalTrustAndVersionFences(t *testing.T) {
 			if !reflect.DeepEqual(approved.Manifest, want) || approved.Origin != origin {
 				t.Errorf("unexpected default approval after request: %+v", approved)
 			}
+			if tc.name == "equal-changed-bytes" {
+				for _, version := range []string{"v1.0.1", "v1.0.1+rebuild"} {
+					m := changed
+					m.Version = version
+					request := EnrollmentReleaseApproval{SignedRelease: sign(m), PublicKey: pub, Origin: origin}
+					if err := client.Call(context.Background(), "POST", "/api/invites/release", request, nil); err == nil {
+						t.Fatal("queue approved equal or older manifest without explicit override")
+					}
+					if q.s.EnrollmentRelease.Manifest.Version != "v1.0.1" {
+						t.Fatal("rejected approval changed current manifest")
+					}
+					request.AllowDowngrade = true
+					if err := client.Call(context.Background(), "POST", "/api/invites/release", request, nil); err != nil {
+						t.Fatal("explicit re-approval refused", err)
+					}
+					if q.s.EnrollmentRelease.Manifest.Version != version {
+						t.Fatal("explicit approval not applied")
+					}
+					if err := q.ConfigureEnrollmentRelease(current, pub, origin, true); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
 		})
 	}
 }

@@ -102,6 +102,24 @@ func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Unknown read-only Docker output and ordinary unknown bytes keep custody.
+	if os.Geteuid() != 0 {
+		stuck := filepath.Join(dir, "job-files", "stuck", "1", "out")
+		if err := os.MkdirAll(stuck, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(stuck, "root-owned"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(stuck, 0500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(stuck, 0700) })
+		if err := os.MkdirAll(filepath.Join(dir, "job-files", "done", "1"), 0700); err != nil {
+			t.Fatal(err)
+		}
+
+	}
 	// Accepted completion clears custody; a crash leaves no attempt state at all.
 	if err := saveWorkerJSON(dir, "state-attempt-accepted.json", workerState{Session: "s"}); err != nil {
 		t.Fatal(err)
@@ -157,6 +175,21 @@ func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 		t.Fatal("finished log removed before its retention window")
 	}
 
+	if os.Geteuid() != 0 {
+		now := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+		for _, age := range []time.Duration{2 * AttemptFilesGrace} {
+			if err := workerRetention(dir, now.Add(age), testLogRetention); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"stuck", "done"} {
+				if _, err := os.Stat(filepath.Join(dir, "job-files", name, "1")); err != nil {
+					t.Fatal("unknown data retired on age", name, err)
+				}
+			}
+		}
+
+	}
+
 	// Custody, not age, protects attempt files; logs keep their own window.
 	clock.Advance(8 * 24 * time.Hour)
 	pass()
@@ -166,6 +199,7 @@ func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 	if _, err := os.Stat(finished); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("expired log retained")
 	}
+
 }
 
 func TestAttemptFilesRetentionRefusesLinkedRoot(t *testing.T) {
@@ -186,42 +220,5 @@ func TestAttemptFilesRetentionRefusesLinkedRoot(t *testing.T) {
 	entries, err := os.ReadDir(victim)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("link target touched: %v %v", entries, err)
-	}
-}
-
-// Root-owned Docker output cannot be removed; it must not stop other cleanup
-// or report the same failure every minute.
-func TestAttemptFilesRetentionRetriesStuckFolderDaily(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can remove read-only folders")
-	}
-	dir := t.TempDir()
-	stuck := filepath.Join(dir, "job-files", "stuck", "1", "out")
-	if err := os.MkdirAll(stuck, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stuck, "root-owned"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(stuck, 0500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(stuck, 0700) })
-	if err := os.MkdirAll(filepath.Join(dir, "job-files", "done", "1"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
-	if err := pruneAttemptFiles(dir, now); err != nil {
-		t.Fatal(err)
-	}
-	for _, age := range []time.Duration{AttemptFilesGrace, 2 * AttemptFilesGrace} {
-		if err := pruneAttemptFiles(dir, now.Add(age)); err != nil {
-			t.Fatal(err)
-		}
-		for _, name := range []string{"stuck", "done"} {
-			if _, err := os.Stat(filepath.Join(dir, "job-files", name, "1")); err != nil {
-				t.Fatal("unknown data retired on age", name, err)
-			}
-		}
 	}
 }

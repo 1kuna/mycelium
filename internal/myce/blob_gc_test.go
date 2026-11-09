@@ -126,6 +126,81 @@ func TestBlobGCConcurrentUploadAndReferences(t *testing.T) {
 			t.Fatal("import/catalog custody lost", err)
 		}
 	}
+
+	{
+		originalHTTP := c.HTTP
+		files := map[string][]byte{"requirements.txt": []byte("published between POST and HEAD")}
+		data, err := json.Marshal(files)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "import")
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		ref, err := IdentifyFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.HTTP = &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
+			res, err := http.DefaultTransport.RoundTrip(req)
+			if err == nil && req.Method == "POST" && strings.HasSuffix(req.URL.Path, "/uploads/") {
+				gcRecipe(t, q, "published between POST and HEAD")
+			}
+			return res, err
+		})}
+		if err := c.UploadFile(context.Background(), path, ref); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(testFileRetention + time.Nanosecond)
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.files.verify(context.Background(), ref); err != nil {
+			t.Fatal("deduplicated import lost custody", err)
+		}
+		c.HTTP = originalHTTP
+
+	}
+
+	{
+		path := filepath.Join(t.TempDir(), "input")
+		if err := os.WriteFile(path, []byte("download survives unlink"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		ref, err := IdentifyFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = c.UploadFile(context.Background(), path, ref); err != nil {
+			t.Fatal(err)
+		}
+		j := submit(t, q, Spec{Name: "open", Project: "test", Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{MemoryGB: 1, Platform: Platform{Any: true}}, Files: FileManifest{"input": ref}})
+		if err = q.update(func() error {
+			q.s.Jobs[j.ID].State = "succeeded"
+			ended := clock.Now()
+			q.s.Jobs[j.ID].FinishedAt = &ended
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(testFileRetention)
+		if err = q.update(func() error { q.maintain(); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		// The download has opened and verified its descriptor before the directory
+		// durability barrier. Unlink there, then finish serving that same descriptor.
+		originalSync := q.files.syncDir
+		defer func() { q.files.syncDir = originalSync }()
+		q.files.syncDir = func(string) error { return q.reclaimJobFiles() }
+		if err = c.DownloadFile(context.Background(), ref, filepath.Join(t.TempDir(), "download")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
+			t.Fatal("test did not unlink", err)
+		}
+
+	}
 }
 
 func TestBlobGCImportCompletesBeforeEnrollment(t *testing.T) {
@@ -193,40 +268,5 @@ func TestBlobGCImportCompletesBeforeEnrollment(t *testing.T) {
 	}
 	if err := q.files.verify(context.Background(), ref); err != nil {
 		t.Fatal("acknowledged import enrolled after promotion", err)
-	}
-}
-
-func TestBlobGCImportDedupAfterPOST(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
-	files := map[string][]byte{"requirements.txt": []byte("published between POST and HEAD")}
-	data, err := json.Marshal(files)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "import")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	ref, err := IdentifyFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.HTTP = &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
-		res, err := http.DefaultTransport.RoundTrip(req)
-		if err == nil && req.Method == "POST" && strings.HasSuffix(req.URL.Path, "/uploads/") {
-			gcRecipe(t, q, "published between POST and HEAD")
-		}
-		return res, err
-	})}
-	if err := c.UploadFile(context.Background(), path, ref); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(testFileRetention + time.Nanosecond)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.files.verify(context.Background(), ref); err != nil {
-		t.Fatal("deduplicated import lost custody", err)
 	}
 }

@@ -95,71 +95,6 @@ func TestFileStoreReserveLegacyProductionWrites(t *testing.T) {
 	}
 }
 
-func TestFileStoreReserveWorkerAttemptTier(t *testing.T) {
-	for _, priority := range []string{"production", "experiment"} {
-		t.Run(priority, func(t *testing.T) {
-			q, _ := fixture(t)
-			c := retentionClient(t, q)
-			q.files.limit = 12
-			_, input := retentionUpload(t, c, "123456")
-			q.fileStoreProductionReserve, q.files.productionReserve = 6, 6
-			s := spec(priority)
-			s.Resumable = false
-			s.Files = FileManifest{"input": input}
-			s.Outputs = map[string]string{"out.txt": "results"}
-			m := machine("publisher", "fake")
-			check(t, q, m, nil)
-			submitted := submit(t, q, s)
-			assigned := check(t, q, m, nil).Job
-			if assigned == nil || assigned.ID != submitted.ID {
-				t.Fatal("not assigned")
-			}
-			assigned.Spec.Run.Workdir = t.TempDir()
-			if err := os.WriteFile(filepath.Join(assigned.Spec.Run.Workdir, "out.txt"), []byte("next"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			seenAttempt := false
-			c.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
-				if strings.HasPrefix(r.URL.Path, "/api/files/") {
-					seenAttempt = seenAttempt || r.Header.Get("X-Myce-File-Attempt") != ""
-					r.Header.Set("X-Myce-Project", "different-project")
-					claimed := "production"
-					if priority == "production" {
-						claimed = "experiment"
-					}
-					r.Header.Set("X-Myce-Class", claimed)
-				}
-				return http.DefaultTransport.RoundTrip(r)
-			})}
-			r, err := (Worker{Client: c}).finishFileResult(*assigned, result(assigned, true), t.TempDir())
-			if !seenAttempt {
-				t.Fatal("worker omitted execution identity")
-			}
-			if priority == "production" {
-				if err != nil {
-					t.Fatal("production native result", err)
-				}
-				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				assertFilePolicyRefusal(t, err, "production reserve=6 bytes")
-			}
-			stale := *assigned
-			stale.Attempt++
-			path, ref := policyInput(t, "stale")
-			err = c.UploadJobInput(withFileStoreAttempt(context.Background(), stale), path, ref)
-			var he *HTTPError
-			if !errors.As(err, &he) || he.Status != http.StatusConflict {
-				t.Fatalf("stale upload identity accepted: %v", err)
-			}
-			if u := q.fileStoreStatus(context.Background()).UnidentifiedReserveAdmittedBytes; u != 0 {
-				t.Fatalf("identified write counted as fallback: %d", u)
-			}
-		})
-	}
-}
-
 func TestFileStoreReserveInputHintsCannotPromote(t *testing.T) {
 	for _, tc := range []struct {
 		project, class string
@@ -173,7 +108,7 @@ func TestFileStoreReserveInputHintsCannotPromote(t *testing.T) {
 			q, _ := fixture(t)
 			c := retentionClient(t, q)
 			q.files.limit = 12
-			retentionUpload(t, c, "123456")
+			_, input := retentionUpload(t, c, "123456")
 			q.fileStoreProductionReserve, q.files.productionReserve = 6, 6
 			if err := q.ConfigureProjects(map[string]ProjectPolicy{"service": {Weight: 1, DefaultCallPriority: "production"}, "research": {Weight: 1, DefaultCallPriority: "experiment"}}); err != nil {
 				t.Fatal(err)
@@ -193,6 +128,64 @@ func TestFileStoreReserveInputHintsCannotPromote(t *testing.T) {
 			if u := q.fileStoreStatus(context.Background()).UnidentifiedReserveAdmittedBytes; u != 0 {
 				t.Fatalf("project-policy admission counted as fallback: %d", u)
 			}
+			priority := "experiment"
+			if tc.project == "service" {
+				priority = "production"
+			}
+			{
+				s := spec(priority)
+				s.Resumable = false
+				s.Files = FileManifest{"input": input}
+				s.Outputs = map[string]string{"out.txt": "results"}
+				m := machine("publisher", "fake")
+				check(t, q, m, nil)
+				submitted := submit(t, q, s)
+				assigned := check(t, q, m, nil).Job
+				if assigned == nil || assigned.ID != submitted.ID {
+					t.Fatal("not assigned")
+				}
+				assigned.Spec.Run.Workdir = t.TempDir()
+				if err := os.WriteFile(filepath.Join(assigned.Spec.Run.Workdir, "out.txt"), []byte("next"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				seenAttempt := false
+				c.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+					if strings.HasPrefix(r.URL.Path, "/api/files/") {
+						seenAttempt = seenAttempt || r.Header.Get("X-Myce-File-Attempt") != ""
+						r.Header.Set("X-Myce-Project", "different-project")
+						claimed := "production"
+						if priority == "production" {
+							claimed = "experiment"
+						}
+						r.Header.Set("X-Myce-Class", claimed)
+					}
+					return http.DefaultTransport.RoundTrip(r)
+				})}
+				r, err := (Worker{Client: c}).finishFileResult(*assigned, result(assigned, true), t.TempDir())
+				if !seenAttempt {
+					t.Fatal("worker omitted execution identity")
+				}
+				if priority == "production" {
+					if err != nil {
+						t.Fatal("production native result", err)
+					}
+					if err := q.Complete(r); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					assertFilePolicyRefusal(t, err, "production reserve=6 bytes")
+				}
+				stale := *assigned
+				stale.Attempt++
+				path, ref := policyInput(t, "stale")
+				err = c.UploadJobInput(withFileStoreAttempt(context.Background(), stale), path, ref)
+				var he *HTTPError
+				if !errors.As(err, &he) || he.Status != http.StatusConflict {
+					t.Fatalf("stale upload identity accepted: %v", err)
+				}
+
+			}
+
 		})
 	}
 }

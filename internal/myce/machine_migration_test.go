@@ -446,6 +446,22 @@ func TestM4LegacyBesideInventoryRefused(t *testing.T) {
 	if !errors.As(err, &typed) || typed.Code != "machine_worker_conflict" {
 		t.Fatal("mixed worker generations accepted", err)
 	}
+
+	// Retire the idle legacy fixture before testing the reverse registration order.
+	if err := q.update(func() error { delete(q.s.Machines, old.ID); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	{
+		modern := machine("host", "fake", "host")
+		modern.Devices = []MachineDevice{{ID: "0", Platform: "fake", Identity: "fake0", Selector: "0", BudgetGB: 8, FreeMemoryGB: 8}}
+		check(t, q, modern, nil)
+		_, err := q.Checkin(Checkin{Machine: machine("host-gpu1", "fake", "host")})
+		var typed *HTTPError
+		if !errors.As(err, &typed) || typed.Code != "machine_worker_conflict" {
+			t.Fatal("legacy joined beside inventory", err)
+		}
+
+	}
 }
 
 func TestM4RollbackPreservesPinEdits(t *testing.T) {
@@ -475,16 +491,32 @@ func TestM4RollbackRefusesUnrepresentableNewPin(t *testing.T) {
 	if q.s.MachineConversion.RolledBack || len(q.s.Pins) != 1 {
 		t.Fatal("refusal mutated state")
 	}
-}
-func TestM4InventoryBesideLegacyRefused(t *testing.T) {
-	q, _ := fixture(t)
-	modern := machine("host", "fake", "host")
-	modern.Devices = []MachineDevice{{ID: "0", Platform: "fake", Identity: "fake0", Selector: "0", BudgetGB: 8, FreeMemoryGB: 8}}
-	check(t, q, modern, nil)
-	_, err := q.Checkin(Checkin{Machine: machine("host-gpu1", "fake", "host")})
-	var typed *HTTPError
-	if !errors.As(err, &typed) || typed.Code != "machine_worker_conflict" {
-		t.Fatal("legacy joined beside inventory", err)
+
+	if err := q.update(func() error { q.s.Pins = nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	{
+		s := spec("experiment")
+		s.AllowedMachines = []string{"host"}
+		s.Resumable = true
+		j := submit(t, q, s)
+		for _, state := range []string{"queued", "cancelled"} {
+			if err := q.update(func() error { q.s.Jobs[j.ID].State = state; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := json.Marshal(q.s)
+			for _, dry := range []bool{true, false} {
+				err := q.RollbackMachines(dry)
+				var typed *QueuedRetiredMachinesError
+				if !errors.As(err, &typed) || !reflect.DeepEqual(typed.Jobs, []string{j.ID}) {
+					t.Errorf("rollback lost machine-era intent: %v", err)
+				}
+			}
+			after, _ := json.Marshal(q.s)
+			if !reflect.DeepEqual(before, after) {
+				t.Error("refused rollback mutated state")
+			}
+		}
 	}
 }
 

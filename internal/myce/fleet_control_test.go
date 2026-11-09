@@ -21,9 +21,49 @@ func TestFleetHelperRefetchesDelayedControl(t *testing.T) {
 	for _, edge := range []string{"before-publication"} {
 		t.Run(edge, func(t *testing.T) {
 			f := newFleetInstallFixture(t, "linux")
+			base := f.deps.client
+			refused := false
+			f.deps.client = func(c ServiceConfig) (Client, error) {
+				client, err := base(c)
+				if err != nil {
+					return client, err
+				}
+				transport := client.HTTP.Transport
+				if transport == nil {
+					transport = http.DefaultTransport
+				}
+				client.HTTP.Transport = clientTestTransport(func(r *http.Request) (*http.Response, error) {
+					if r.URL.Path == "/api/fleet/ack" && !refused {
+						refused = true
+						w := httptest.NewRecorder()
+						respond(w, nil, fleetError("fleet_instruction_stale"))
+						return w.Result(), nil
+					}
+					return transport.RoundTrip(r)
+				})
+				return client, nil
+			}
+			var refetch *fleetInstructionRefetchError
+			if err := f.launch(); !errors.As(err, &refetch) {
+				t.Fatal("prepared stale claim must yield to ordinary runtime poll", err)
+			}
+			r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
+			if err != nil || !r.LaunchPending || f.launches != 0 {
+				t.Fatal(r, err)
+			}
 			if err := f.launch(); err != nil {
 				t.Fatal(err)
 			}
+			if err := f.launch(); err != nil {
+				t.Fatal(err)
+			}
+			if f.launches != 1 || len(f.failureCodes) != 0 {
+				t.Fatal("duplicate helper or stopped operation", f.launches, f.failureCodes)
+			}
+			if _, err := os.Stat(f.c.Binary); err != nil {
+				t.Fatal(err)
+			}
+
 			q, clock, _ := fleetFixture(t, "queue")
 			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 				t.Fatal(err)
@@ -79,52 +119,6 @@ func TestFleetHelperRefetchesDelayedControl(t *testing.T) {
 			}
 			f.assertBinary(f.next)
 		})
-	}
-}
-
-func TestFleetPreparedClaimRefetchesWithoutDuplicateHelper(t *testing.T) {
-	f := newFleetInstallFixture(t, "linux")
-	base := f.deps.client
-	refused := false
-	f.deps.client = func(c ServiceConfig) (Client, error) {
-		client, err := base(c)
-		if err != nil {
-			return client, err
-		}
-		transport := client.HTTP.Transport
-		if transport == nil {
-			transport = http.DefaultTransport
-		}
-		client.HTTP.Transport = clientTestTransport(func(r *http.Request) (*http.Response, error) {
-			if r.URL.Path == "/api/fleet/ack" && !refused {
-				refused = true
-				w := httptest.NewRecorder()
-				respond(w, nil, fleetError("fleet_instruction_stale"))
-				return w.Result(), nil
-			}
-			return transport.RoundTrip(r)
-		})
-		return client, nil
-	}
-	var refetch *fleetInstructionRefetchError
-	if err := f.launch(); !errors.As(err, &refetch) {
-		t.Fatal("prepared stale claim must yield to ordinary runtime poll", err)
-	}
-	r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-	if err != nil || !r.LaunchPending || f.launches != 0 {
-		t.Fatal(r, err)
-	}
-	if err := f.launch(); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.launch(); err != nil {
-		t.Fatal(err)
-	}
-	if f.launches != 1 || len(f.failureCodes) != 0 {
-		t.Fatal("duplicate helper or stopped operation", f.launches, f.failureCodes)
-	}
-	if _, err := os.Stat(f.c.Binary); err != nil {
-		t.Fatal(err)
 	}
 }
 

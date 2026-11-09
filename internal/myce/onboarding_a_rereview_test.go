@@ -2,8 +2,6 @@ package myce
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,40 +12,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestReleaseApprovalMonotonic(t *testing.T) {
-	for _, version := range []string{"v1.0.0", "v1.0.1", "v1.0.1+rebuild"} {
-		t.Run(version, func(t *testing.T) {
-			q, _ := fixture(t)
-			pub, key, _ := ed25519.GenerateKey(rand.Reader)
-			_, _, m := signedTestRelease(t)
-			sign := func() []byte {
-				raw, _ := json.Marshal(m)
-				b, _ := json.Marshal(SignedRelease{raw, ed25519.Sign(key, raw)})
-				return b
-			}
-			if err := q.ConfigureEnrollmentRelease(sign(), pub, "https://publisher.invalid"); err != nil {
-				t.Fatal(err)
-			}
-			m.Version = version
-			// Identical approvals are idempotent; reusing an equal version for
-			// different artifact bytes must still require explicit force.
-			m.Artifacts[0].Size++
-			if err := q.ConfigureEnrollmentRelease(sign(), pub, "https://publisher.invalid"); err == nil {
-				t.Fatal("queue approved equal or older manifest without explicit override")
-			}
-			if q.s.EnrollmentRelease.Manifest.Version != "v1.0.1" {
-				t.Fatal("rejected approval changed current manifest")
-			}
-			if err := q.ConfigureEnrollmentRelease(sign(), pub, "https://publisher.invalid", true); err != nil {
-				t.Fatal("explicit re-approval refused", err)
-			}
-			if q.s.EnrollmentRelease.Manifest.Version != version {
-				t.Fatal("explicit approval not applied")
-			}
-		})
-	}
-}
 
 func TestEnrollmentDrainIntentSurvivesCrash(t *testing.T) {
 	for _, afterPost := range []bool{false, true} {

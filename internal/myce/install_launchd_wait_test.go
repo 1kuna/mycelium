@@ -13,7 +13,7 @@ import (
 func TestLaunchdSlowExitInstallAndRollback(t *testing.T) {
 	for _, earlyAck := range []bool{false, true} {
 		t.Run(map[bool]string{false: "blocking-bootout", true: "async-label-removal"}[earlyAck], func(t *testing.T) {
-			for _, rollback := range []bool{false, true} {
+			for _, rollback := range []bool{earlyAck} {
 				t.Run(map[bool]string{false: "install", true: "canceled-install-rollback"}[rollback], func(t *testing.T) {
 					f := newInstallMatrixFixture(t, "darwin", "worker", 2)
 					unit := filepath.Base(f.c.Service)

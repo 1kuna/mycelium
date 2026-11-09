@@ -3,16 +3,18 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestAPIAuthenticationAndFlow(t *testing.T) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	server := httptest.NewServer(API{Queue: q, Token: "secret"}.Handler())
 	defer server.Close()
 	ctx := context.Background()
@@ -41,9 +43,43 @@ func TestAPIAuthenticationAndFlow(t *testing.T) {
 	if err := c.Call(ctx, "GET", "/api/jobs/"+j.ID+"/logs", nil, &logs); err != nil || len(logs) != 1 {
 		t.Fatalf("logs %v %v", logs, err)
 	}
+	// Capture the running generation before cancellation, rather than authorize from it.
+	var beforeCancel Snapshot
+	if err := c.Call(ctx, "GET", "/api/status", nil, &beforeCancel); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Call(ctx, "POST", "/api/jobs/"+j.ID+"/cancel", nil, nil); err != nil {
 		t.Fatal(err)
 	}
+	{
+		a := r.Job
+		if a == nil || a.ID != j.ID {
+			t.Fatal("no assignment")
+		}
+		type answer struct {
+			s   Snapshot
+			err error
+		}
+		stale, staleErr := q.cachedPublicSnapshot()
+		got := answer{stale, staleErr}
+		if got.err != nil || len(got.s.Jobs) != 1 || got.s.Jobs[0].CancelledAt != nil {
+			t.Fatal("refresh was not a single captured generation", got.err)
+		}
+		launch := HostLaunch{Kind: "batch", Key: a.ID, Machine: a.Machine, Session: a.Session, Attempt: strconv.Itoa(a.Attempt)}
+		if err := q.Started(result(a, true)); !errors.Is(err, ErrStale) {
+			t.Fatal("stale status authorized Started", err)
+		}
+		if err := q.AuthorizeLaunch(launch); err == nil {
+			t.Fatal("stale status authorized launch")
+		}
+		fresh, err := q.jobSnapshot(a.ID)
+		if err != nil || fresh.CancelledAt == nil {
+			t.Fatal("job polling reused stale global status", err)
+		}
+
+	}
+	// The later public status request must describe the completed generation.
+	clock.Advance(time.Second)
 	if err := c.Call(ctx, "POST", "/api/workers/complete", result(r.Job, false), nil); err != nil {
 		t.Fatal(err)
 	}

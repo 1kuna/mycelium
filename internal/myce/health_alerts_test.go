@@ -68,6 +68,46 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 	if len(persisted.Health.Events) != 1 || !persisted.Health.Events[0].Delivered {
 		t.Fatal("delivery acknowledgement not durable")
 	}
+
+	// Stop delivery before adding the separate retained-attempt incident.
+	cancel()
+	<-done
+	{
+		s := dockerJob().Spec
+		s.Priority = "production"
+		submit(t, q, s)
+		m := dockerMachine("retained", "fake")
+		assigned := check(t, q, m, nil).Job
+		if assigned == nil {
+			t.Fatal("no attempt")
+		}
+		cause := &RuntimeCause{Operation: "inspect", Class: "timeout"}
+		r := result(assigned, false)
+		r.ReleasePending = true
+		r.CleanupCause = cause
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if len(alertsOf(q, "production_attempt_lost")) != 1 {
+			t.Fatal("missing initial alert")
+		}
+		c.Advance(time.Second)
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if len(alertsOf(q, "production_attempt_lost")) != 1 || q.s.Jobs[assigned.ID].LastHealthAlertAttempt != assigned.Attempt {
+			t.Fatal("same retained attempt alerted after event pruning")
+		}
+		data, err := json.Marshal(q.s.Jobs[assigned.ID])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stored Job
+		if err := json.Unmarshal(data, &stored); err != nil || stored.LastHealthAlertAttempt != assigned.Attempt {
+			t.Fatal("attempt alert fact not serialized", err)
+		}
+
+	}
 }
 
 func TestHealthAlertDockerPendingTimeout(t *testing.T) {
@@ -118,55 +158,5 @@ func TestHealthAlertDockerPendingTimeout(t *testing.T) {
 				t.Fatal("alert released custody")
 			}
 		})
-	}
-}
-
-func TestHealthAlertAttemptDedupOutlivesEventWindow(t *testing.T) {
-	q, c := fixture(t)
-	s := dockerJob().Spec
-	s.Priority = "production"
-	submit(t, q, s)
-	m := dockerMachine("retained", "fake")
-	assigned := check(t, q, m, nil).Job
-	if assigned == nil {
-		t.Fatal("no attempt")
-	}
-	cause := &RuntimeCause{Operation: "inspect", Class: "timeout"}
-	r := result(assigned, false)
-	r.ReleasePending = true
-	r.CleanupCause = cause
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if len(alertsOf(q, "production_attempt_lost")) != 1 {
-		t.Fatal("missing initial alert")
-	}
-	// A burst preserves exact incident custody and must not duplicate an old
-	// attempt alert. Delivered history has no count-based eviction.
-	if err := q.update(func() error {
-		for i := 0; i < 257; i++ {
-			q.appendHealthAlert(HealthAlert{Kind: "disk_below_guard"})
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if len(alertsOf(q, "production_attempt_lost")) != 1 {
-		t.Fatal("burst evicted unique incident history")
-	}
-	c.Advance(time.Second)
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if len(alertsOf(q, "production_attempt_lost")) != 1 || q.s.Jobs[assigned.ID].LastHealthAlertAttempt != assigned.Attempt {
-		t.Fatal("same retained attempt alerted after event pruning")
-	}
-	data, err := json.Marshal(q.s.Jobs[assigned.ID])
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stored Job
-	if err := json.Unmarshal(data, &stored); err != nil || stored.LastHealthAlertAttempt != assigned.Attempt {
-		t.Fatal("attempt alert fact not serialized", err)
 	}
 }

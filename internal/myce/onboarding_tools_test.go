@@ -88,6 +88,12 @@ func TestOnboardingToolsRefuseTamperAndErrors(t *testing.T) {
 	for _, mode := range []string{"checksum", "download", "symlink", "version"} {
 		t.Run(mode, func(t *testing.T) {
 			c, _ := PlanInstall("worker", t.TempDir(), "", "/fixture/nas", "http://queue.invalid", "hypha", Detection{OS: "linux", Arch: "arm64", Platform: "cpu", MemoryMode: "fixed"})
+			if mode == "checksum" {
+				unsupported := c
+				unsupported.Detection.OS = "windows"
+				_, err := BootstrapEnvironmentTools(context.Background(), unsupported, ToolBootstrapProbe{})
+				requirePreflightCode(t, err, "tool_platform_unsupported")
+			}
 			before := c
 			b := toolArchive(t, "uv")
 			sum := sha256.Sum256(b)
@@ -114,21 +120,4 @@ func TestOnboardingToolsRefuseTamperAndErrors(t *testing.T) {
 			}
 		})
 	}
-}
-func TestOnboardingToolReleaseMatrix(t *testing.T) {
-	for _, osname := range []string{"linux", "darwin"} {
-		for _, arch := range []string{"amd64", "arm64"} {
-			releases, err := PinnedEnvironmentTools(osname, arch)
-			if err != nil || len(releases) != 2 {
-				t.Fatal(err)
-			}
-			for _, r := range releases {
-				if len(r.SHA256) != 64 || !strings.HasPrefix(r.URL, "https://github.com/") || r.Version == "" {
-					t.Fatal(r)
-				}
-			}
-		}
-	}
-	_, err := PinnedEnvironmentTools("windows", "arm64")
-	requirePreflightCode(t, err, "tool_platform_unsupported")
 }

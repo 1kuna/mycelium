@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -121,6 +122,24 @@ func TestEnrollmentDrainRaceTimeoutRestoresPolicy(t *testing.T) {
 		api.ServeHTTP(w, r)
 	}))
 	defer server.Close()
+	{
+		state := c.State
+		if err := os.Mkdir(filepath.Join(state, enrollmentResumeFile+".tmp"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		_, err := PrepareEnrollmentUpgrade(context.Background(), ServiceConfig{Name: m.ID, HostID: m.HostID, State: state}, Client{URL: server.URL, Token: "test"}, clock, time.Second, nil)
+		if err == nil {
+			t.Fatal("upgrade permitted without durable resume authority")
+		}
+		status, e := q.HostMaintenanceStatus(m.HostID)
+		if e != nil || status.Policy.Mode != "enabled" {
+			t.Fatal("receipt failure left drain", status.Policy.Mode, e)
+		}
+
+		if err := os.Remove(filepath.Join(state, enrollmentResumeFile+".tmp")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
 	_, err := PrepareEnrollmentUpgrade(context.Background(), c, Client{URL: server.URL, Token: "test"}, clock, time.Second, func(context.Context, time.Duration) error { clock.Advance(time.Second); return nil })
 	if err == nil {
 		t.Fatal("racing custody allowed install")
@@ -131,25 +150,5 @@ func TestEnrollmentDrainRaceTimeoutRestoresPolicy(t *testing.T) {
 	}
 	if _, e = os.Stat(filepath.Join(c.State, enrollmentResumeFile)); !os.IsNotExist(e) {
 		t.Fatal("successful timeout undo retained resume authority", e)
-	}
-}
-
-func TestEnrollmentUpgradeReceiptFailureRestoresPolicy(t *testing.T) {
-	q, clock := fixture(t)
-	m := cpuMachine("hypha", "hypha", "fake", 8, 32)
-	check(t, q, m, nil)
-	state := t.TempDir()
-	if err := os.Mkdir(filepath.Join(state, enrollmentResumeFile+".tmp"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
-	defer server.Close()
-	_, err := PrepareEnrollmentUpgrade(context.Background(), ServiceConfig{Name: m.ID, HostID: m.HostID, State: state}, Client{URL: server.URL, Token: "test"}, clock, time.Second, nil)
-	if err == nil {
-		t.Fatal("upgrade permitted without durable resume authority")
-	}
-	status, e := q.HostMaintenanceStatus(m.HostID)
-	if e != nil || status.Policy.Mode != "enabled" {
-		t.Fatal("receipt failure left drain", status.Policy.Mode, e)
 	}
 }

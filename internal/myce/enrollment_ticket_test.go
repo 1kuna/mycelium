@@ -106,7 +106,29 @@ func TestEnrollmentTicketPinnedHTTPAndRedirect(t *testing.T) {
 	if _, err = RedeemInvitation(context.Background(), s.URL, wrong.Fingerprint, ticket.Ticket); err == nil {
 		t.Fatal("wrong TLS pin accepted")
 	}
-	invitation, err := RedeemInvitation(context.Background(), s.URL, authority.Fingerprint, ticket.Ticket)
+	var wg sync.WaitGroup
+	var accepted atomic.Int32
+	type redemption struct {
+		invitation Invitation
+		err        error
+	}
+	invitations := make(chan redemption, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if invitation, err := RedeemInvitation(context.Background(), s.URL, authority.Fingerprint, ticket.Ticket); err == nil {
+				accepted.Add(1)
+				invitations <- redemption{invitation, err}
+			}
+		}()
+	}
+	wg.Wait()
+	if accepted.Load() != 1 {
+		t.Fatal("HTTP redemption count", accepted.Load())
+	}
+	acceptedInvitation := <-invitations
+	invitation, err := acceptedInvitation.invitation, acceptedInvitation.err
 	if err != nil || invitation.Token != authority.Token {
 		t.Fatal("redemption failed", err)
 	}
@@ -127,31 +149,5 @@ func TestEnrollmentTicketPinnedHTTPAndRedirect(t *testing.T) {
 	}
 	if redirected.Load() != 0 {
 		t.Fatal("client followed redirect before returning an error")
-	}
-}
-
-func TestEnrollmentTicketHTTPConcurrentRedemption(t *testing.T) {
-	q, _ := fixture(t)
-	var handler http.Handler
-	server, authority := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handler.ServeHTTP(w, r) }))
-	handler = (API{Queue: q, Token: authority.Token}).HandlerWithJoiningIdentity(authority.Fingerprint)
-	ticket, err := q.MintEnrollmentTicket(authority.Fingerprint, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wg sync.WaitGroup
-	var accepted atomic.Int32
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := RedeemInvitation(context.Background(), server.URL, authority.Fingerprint, ticket.Ticket); err == nil {
-				accepted.Add(1)
-			}
-		}()
-	}
-	wg.Wait()
-	if accepted.Load() != 1 {
-		t.Fatal("HTTP redemption count", accepted.Load())
 	}
 }

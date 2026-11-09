@@ -172,14 +172,13 @@ func TestFilesNASInputs(t *testing.T) {
 
 func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 	t.Parallel()
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	if err := q.ConfigureFileStore(t.TempDir(), 128, true); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	c := Client{URL: server.URL, Token: "test"}
-	clock := &fakeClock{}
 	cache := FileCache{Root: t.TempDir(), Limit: 8, Clock: clock, Client: c}
 	refs := []FileRef{}
 	for _, data := range []string{"aaaa", "bbbb", "cccc"} {
@@ -239,6 +238,40 @@ func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 	}
 	if err := q.files.verify(context.Background(), refs[0]); err != nil {
 		t.Fatal("authoritative copy evicted", err)
+	}
+
+	{
+		// Keep expiry metadata while testing eviction of expired cache bytes.
+		if err := q.ConfigureLogRetention(2 * testFileRetention); err != nil {
+			t.Fatal(err)
+		}
+		_, a := retentionUpload(t, c, "aaaaaaaaaaaaaaaa")
+		s := spec("experiment")
+		s.Files = FileManifest{"input": a}
+		j := submit(t, q, s)
+		cache.Limit = 16
+		if err := cache.copyTo(context.Background(), a, filepath.Join(t.TempDir(), "a")); err != nil {
+			t.Fatal(err)
+		}
+		victim := filepath.Join(cache.Root, a.SHA256)
+
+		if err := q.Cancel(j.ID); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(testFileRetention)
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.HasFile(context.Background(), a); !isResultExpired(err) {
+			t.Fatal("victim did not expire", err)
+		}
+		_, b := retentionUpload(t, c, "bbbbbbbbbbbbbbbb")
+		if err := cache.copyTo(context.Background(), b, filepath.Join(t.TempDir(), "b")); err != nil {
+			t.Fatal("expired victim wedged cache", err)
+		}
+		if _, err := os.Stat(victim); !os.IsNotExist(err) {
+			t.Fatal("expired victim retained", err)
+		}
 	}
 }
 
