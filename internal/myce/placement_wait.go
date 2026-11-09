@@ -9,14 +9,20 @@ import (
 // Explain admission on the job's own targets, using the same target checks and
 // resolved envelopes as placement. Network and preparation failures are useful
 // diagnostics; unrelated platforms, devices and qualifications are not.
-func (q *Queue) targetWaitingReason(j *Job) string {
+func (q *Queue) targetWaitingReason(j *Job, scans ...*placementScan) string {
 	if why := q.memoryEvidenceWaitingReason(j); why != "" {
 		return why
 	}
 	var reasons []string
 	specific := false
-	for _, m := range q.plannerMachines() {
+	for _, m := range q.planningMachines(scans...) {
 		if !q.jobAllowsMachine(j, m.ID) {
+			continue
+		}
+		// Plain jobs keep their structural requirements through sizing. The
+		// final report below excludes these same unrelated routes. Extension
+		// variants must still be lowered first by memoryCandidates.
+		if !j.Spec.extensionJob() && !memorySizingTargetFits(j, m) {
 			continue
 		}
 		capacity := q.qualificationCapacity(m)

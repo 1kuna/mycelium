@@ -76,6 +76,14 @@ Never-started learned allocations also keep the bounded reservation. Host sample
 validity follows delivery cadence of distinct negotiated observations; cached
 or unidentified repeated reports cannot renew resident credit. Cold probes still protect the execution ceiling
 without fresh complete evidence.
+On releases supporting opt-in measured host allowances, machine JSON
+`host_memory_derivation` explains the qualified idle baseline, protected reserve
+and effective allowance, or the existing authored fallback while evidence is
+unknown. `external_memory.quiescent_v1` reports qualified samples and observed
+idle windows; legacy RSS-residual peaks cannot establish that ownership or
+coverage. A derived zero is exhausted capacity. Keep the same waiting job;
+host configuration and mode changes belong to the maintenance owner. See
+[host allowances](../../docs/operations.md#host-ram-admission-and-ceilings).
 `memory_envelope.enforcement` names the acknowledged behavior; older queues or
 workers retain the previous estimate-sized ceiling. From the next release, cold
 CPU probes also use the adaptive guard, so a small residual admission envelope
@@ -274,6 +282,22 @@ heartbeats. `pending` remains unknown; `present` proves neither size nor hash.
 From the next queue release, all queue listeners share these observations;
 completed samples expire with worker-session freshness rather than a fixed
 minute. Staging still verifies the declared bytes before execution.
+
+If a file upload reports `file transfer stalled` or Python
+`TransferStalledError`, repeat `myce file put` on the unchanged source or call
+`upload_file` again. Its digest locates the same tus upload and HEAD recovers the
+server's accepted offset. Keep the same submission key and receipt when retrying
+a profile/adapter run. There is no CLI stall-timeout flag; Python's API `timeout`
+does not change the transfer detector.
+
+From the release containing #1100, Go/CLI and Python automatically resume an
+interrupted PATCH after checking publication and the accepted offset. The stall
+window follows observed request service, socket progress and server
+`Retry-After`, with TCP's retransmission timer as its protocol floor. A dead
+socket still triggers recovery. A Go context deadline or Python
+`transfer_timeout` bounds the upload and all retries; after interruption retain
+the source and the same run key/receipt for recovery. See
+[uploads](../../docs/files.md) for the protocol and error boundaries.
 
 If a profile or entry exits 69 with `input storage unconfirmed`, its intent and
 frozen inputs remain in the receipt. The diagnostic names preflight or upload,
@@ -484,7 +508,7 @@ consumer flags or identity changes.
 
 From the release containing #959, interrupted `myce logs JOB` prints `myce logs JOB --after SEQ` on stderr. Resume with that cursor after the reported Retry-After to avoid replaying completed pages; add `--follow` to keep following. From the release containing #890, read-only `myce policy get` resolves installed worker, then queue authority without setting or printing `MYCE_TOKEN`.
 
-**Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; CLI/Python consumers use scalar batch deadline metadata without a bootstrap GET, as described above. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`).
+**Available from the next release (#810):** CLI and Python waits adapt to measured response cost and revisions, back off scalar reads while unchanged, and approach expected events. Negotiated held long-polls resume immediately so progress stays observable; CLI/Python consumers use scalar batch deadline metadata without a bootstrap GET, as described above. Reads honour 429/503 `Retry-After` with jitter; old queues use adaptive scalar reads. Bound observation with `myce wait --timeout DURATION`, Python `wait(timeout=SECONDS)`, or the job's deadline; timeout leaves work alive. Without an owner/job deadline there is no fixed observer lifetime. File transfers learn stall windows from complete service periods between socket readiness waits, including buffered draining and producer/consumer work; individual buffered copies and the first arrival cannot establish throughput. Go checks for available socket progress before declaring an expired-poller stall. Before a service period is established and during non-PATCH queue verification before headers, only the owner bounds the operation (Go context deadline, Python `transfer_timeout`). Upload PATCH uses the additional request-service and pressure evidence described in the upload recovery guidance above (#1100).
 
 **Input and accepted-result recovery (next release, #831/#751):** profile/adapter input storage retries span preflight and reconciled uploads under the caller's one context deadline; each retry reports its sanitized cause and honours `Retry-After`. `myce result` uses the same transient recovery for accepted retrieval, including CI. Permanent authentication, TLS, capacity, integrity and configuration errors stop immediately. No retry count or new default deadline is imposed; without an owner deadline, interrupt to stop observation/recovery and resume the saved intent later.
 

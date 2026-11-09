@@ -242,7 +242,10 @@ func retryTransient(err error) bool {
 		return false
 	}
 	var network net.Error
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, errFileTransferStalled) ||
+	// Concurrent HTTP read/write shutdown can surface the closed socket's
+	// deadline error instead of the timeout that caused it. Replay-safe callers
+	// retry; upload callers first reconcile the server's accepted offset.
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, errFileTransferStalled) ||
 		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) ||
 		errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.ETIMEDOUT) || errors.As(err, &network) && (network.Timeout() || network.Temporary())
 }

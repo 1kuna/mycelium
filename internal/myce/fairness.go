@@ -255,7 +255,7 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 	return ""
 }
 
-func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
+func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom, scans ...*placementScan) *Job {
 	if q.environmentFailureBlocked(j, m) {
 		return nil
 	}
@@ -276,6 +276,12 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 			}
 		}
 		q.applyLearnedNeeds(candidate)
+		// These final eligibility predicates cannot be changed by memory
+		// sizing. Reject incompatible routes before reducing their evidence;
+		// live room, reclaim, fairness and all remaining checks still follow.
+		if !memorySizingTargetFits(candidate, m) || !toolsFit(candidate, m) || !nativeNetworkFits(candidate, m) || !q.batchCPUCeilingFits(candidate, m, scans...) {
+			continue
+		}
 		candidate = q.memoryCandidate(candidate, m)
 		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
 			return candidate
@@ -607,7 +613,7 @@ func (q *Queue) waitReason(j *Job, scans ...*placementScan) string {
 	}
 	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {
 		found := false
-		for _, target := range q.plannerMachines() {
+		for _, target := range q.planningMachines(scans...) {
 			if !target.Gone && q.jobAllowsMachine(j, target.ID) && deviceAllowed(j, target) && target.MemoryError == "" && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, target.GPU)) {
 				found = true
 				break
@@ -632,11 +638,11 @@ func (q *Queue) waitReason(j *Job, scans ...*placementScan) string {
 	if r := q.holdWaitReason(j); r != "" {
 		return r
 	}
-	if reason := q.targetWaitingReason(j); reason != "" {
+	if reason := q.targetWaitingReason(j, scans...); reason != "" {
 		return reason
 	}
 	machines := map[string]*Machine{}
-	for _, m := range q.plannerMachines() {
+	for _, m := range q.planningMachines(scans...) {
 		if q.projectAllows(j.Spec.Project, m.ID) {
 			machines[targetKey(m)] = m
 		}

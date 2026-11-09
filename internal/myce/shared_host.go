@@ -123,7 +123,7 @@ func (q *Queue) sharedHostRoom(m *Machine, room, reserved, growth float64) float
 }
 
 func validHostMemoryObservation(o *HostMemoryObservation) bool {
-	return o != nil && validMemoryValue(o.TotalGB) && o.TotalGB > 0 && validMemoryValue(o.UsedGB) && o.UsedGB <= o.TotalGB && validMemoryValue(o.MyceliumGB) && o.MyceliumGB <= o.UsedGB
+	return o != nil && validMemoryValue(o.ReserveGB) && validMemoryValue(o.TotalGB) && o.TotalGB > 0 && validMemoryValue(o.UsedGB) && o.UsedGB <= o.TotalGB && validMemoryValue(o.MyceliumGB) && o.MyceliumGB <= o.UsedGB
 }
 
 // Establish Darwin payload priority after its execution gate opens. Successful
