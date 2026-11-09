@@ -102,6 +102,12 @@ preparation for that session, has no finite trustworthy wall-time expiry bound. 
 wall age until another report arrives. Status snapshots freeze both clocks;
 reported `age_seconds` remains physical diagnostic age, so it can exceed
 `valid_seconds` while excluded queue service accounts for the difference.
+
+Unified-CUDA physical host admission uses the accepted check-in's adaptive
+worker freshness and the same frozen host-health evidence validity. It has no
+separate fixed check-in age cutoff. Invalid physical RAM measurements, expired
+or failed health observations and stale worker sessions still withhold room;
+physical reserves and outstanding allocation growth are subtracted unchanged.
 A completed failure and explicit drain still withhold immediately. Overlapping
 check-ins retain the newest accepted queue receipt in the same worker session;
 an older delayed success cannot clear a newer refusal or reset its age.

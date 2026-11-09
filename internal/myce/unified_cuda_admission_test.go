@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -122,7 +123,7 @@ func TestUnifiedCUDAAdmissionUnknownDeviceRemainsFull(t *testing.T) {
 	if got := q.s.Machines[m.ID].FreeHostMemoryGB; got != 18 {
 		t.Fatalf("device growth discounted: got %g GiB, want 50 - 32 = 18", got)
 	}
-	clock.Advance(hostMemorySampleFreshFor)
+	clock.Advance(q.workerArrivalAllowance(q.s.Machines[m.ID]))
 	q.refreshHostMemory()
 	if got := q.s.Machines[m.ID].FreeHostMemoryGB; got != 0 {
 		t.Fatal("stale physical sample admitted CUDA", got)
@@ -285,5 +286,68 @@ func TestUnifiedCUDAAdmissionImpossibleProductionDoesNotStarve(t *testing.T) {
 	}
 	if job(t, q, demand.ID).State != "queued" {
 		t.Fatal("impossible production was admitted")
+	}
+}
+
+// Slow healthy check-ins used to book the entire outstanding growth as debt
+// after five seconds, independently of the accepted observation's validity.
+func TestUnifiedCUDAAdmissionAdaptiveObservation(t *testing.T) {
+	q, clock := fixture(t)
+	m := unifiedCUDAAdmissionMachine()
+	m.MemoryObservation.UsedGB = 3.9
+	m.HostAvailableMemoryGB = 92.1 // 121 total - 3.9 used - 25 reserve.
+	observation := &ProbeObservation{PeriodSeconds: 12, CostSeconds: .1, ValidSeconds: 24.1}
+	sampleAt := clock.Now()
+	report := func(age float64) {
+		m.HostHealth = &HostHealth{Probe: observation, AgeSeconds: age,
+			History: []HostHealthSample{{At: sampleAt}}}
+		if _, err := q.Checkin(Checkin{Machine: m, period: 12 * time.Second}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report(0)
+	clock.Advance(10700 * time.Millisecond)
+	accepted := q.s.Machines[m.ID]
+	if !q.workerFresh(accepted, clock.Now()) || !q.hostHealthEvidenceValid(accepted, clock.Now()) {
+		t.Fatal("incident fixture lacks healthy adaptive evidence")
+	}
+	// 102 GiB cannot fit a 96 GiB allowance. Refuse only the real shortfall,
+	// rather than manufacturing 102 GiB debt from a fixed freshness cutoff.
+	if got := q.unifiedCUDAHostRoom(accepted, 92.1-102, 102); math.Abs(got-(-9.9)) > 1e-9 {
+		t.Fatalf("healthy slow observation charged fictitious debt: room=%g, want -9.9", got)
+	}
+	// Once #1117 removes the unused cold-probe promotion, the smaller real
+	// outstanding demand fits under the same physical observation and reserve.
+	if got := q.unifiedCUDAHostRoom(accepted, 92.1-72, 72); math.Abs(got-20.1) > 1e-9 {
+		t.Fatalf("healthy slow observation refused fitting growth: room=%g", got)
+	}
+	// A continuing heartbeat carrying the same expired sensor observation
+	// cannot renew its validity, even with a new accepted delivery receipt.
+	clock.Advance(14 * time.Second)
+	report(clock.Now().Sub(sampleAt).Seconds())
+	accepted = q.s.Machines[m.ID]
+	if !q.workerFresh(accepted, clock.Now()) {
+		t.Fatal("stopped sensor fixture also lost worker contact")
+	}
+	if got := q.unifiedCUDAHostRoom(accepted, 20.1, 72); got != -72 {
+		t.Fatalf("expired observation granted physical credit: %g", got)
+	}
+	// New successful evidence restores room; invalid physical data does not.
+	sampleAt = clock.Now()
+	report(0)
+	accepted = q.s.Machines[m.ID]
+	accepted.HostHealth.History[0].Error = "sensor failed"
+	if got := q.unifiedCUDAHostRoom(accepted, 20.1, 72); got != -72 {
+		t.Fatalf("failed sensor granted physical credit: %g", got)
+	}
+	accepted.HostHealth.History[0].Error = ""
+	accepted.MemoryObservation = nil
+	if got := q.unifiedCUDAHostRoom(accepted, 20.1, 72); got != -72 {
+		t.Fatalf("missing physical observation granted credit: %g", got)
+	}
+	accepted.MemoryObservation = m.MemoryObservation
+	clock.Advance(q.workerArrivalAllowance(accepted))
+	if got := q.unifiedCUDAHostRoom(accepted, 20.1, 72); got != -72 {
+		t.Fatalf("silent worker granted physical credit: %g", got)
 	}
 }

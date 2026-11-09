@@ -69,7 +69,11 @@ func (q *Queue) unifiedCUDAHostRoom(m *Machine, room, growth float64) float64 {
 		o := sibling.MemoryObservation
 		floor, ok := unifiedCUDAFloor(sibling)
 		now := q.clock.Now()
-		if !ok || !validHostMemoryObservation(o) || sibling.LastSeen.After(now) || now.Sub(sibling.LastSeen) >= hostMemorySampleFreshFor {
+		// Physical RAM is sampled for each accepted check-in. Reuse that
+		// session's adaptive contact and frozen host-health delivery evidence;
+		// an unrelated fixed age must not turn healthy slow control into debt.
+		// Continuing contact still cannot renew expired/failed sensor evidence.
+		if !ok || !validHostMemoryObservation(o) || !q.workerFresh(sibling, now) || !q.hostHealthEvidenceValid(sibling, now) {
 			return min(room, -growth)
 		}
 		room = min(room, o.TotalGB-o.UsedGB-floor-growth)
