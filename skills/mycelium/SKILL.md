@@ -82,6 +82,10 @@ CPU probes also use the adaptive guard, so a small residual admission envelope
 is not their execution limit. Native CPU auto-memory OOMs and native accelerator-check host cgroup OOMs
 retain killed-peak floors and retry against usable physical headroom;
 exploratory under-sizing does not spend a fixed attempt budget.
+From the release containing #1116, cold native CPU probes retain their full
+assigned admission envelope before fresh Started telemetry; a wider adaptive
+execution ceiling does not increase that reservation to the whole host.
+Missing/stale data grants no resident credit and exact release remains required.
 Growth/overshoot stays replaceable uncertainty, rather than a permanent floor.
 If the measured lower bound exceeds every eligible capacity, the job reports
 a capacity refusal. Inspect each attempt's envelope and learning reason. Declared numeric limits,

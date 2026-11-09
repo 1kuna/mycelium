@@ -574,7 +574,8 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 
 // Bounded learned/exploratory estimates are admission reservations; their
 // wider execution ceiling contains unseen growth but is not measured demand.
-// Cold probes still need complete fresh evidence before releasing their ceiling.
+// Cold probes still need complete fresh evidence before releasing their offered
+// envelope. Their adaptive execution ceiling is containment, not extra demand.
 func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
 	if m != nil && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" &&
 		!j.Spec.Run.Docker && j.Spec.Needs.cpuOnly() && j.Spec.Needs.Memory != "auto" && j.Spec.Needs.HostMemoryGB > 0 {
@@ -593,9 +594,9 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	e := j.MemoryEnvelope
 	bounded := adaptiveCeiling > 0 && e.ProbeFloorGB <= 0
 	charge = max(ceiling, retainedHostCharge(j))
-	if adaptiveCeiling > 0 && !bounded {
-		charge = max(charge, adaptiveCeiling)
-	}
+	// A cold probe already reserves the full opportunity admitted beside its
+	// neighbors. Promoting it to wider execution containment here can exceed the
+	// host allowance and block startup before the first observation can arrive.
 	if bounded {
 		charge = boundedHostMemoryCharge(j, m, ceiling, adaptiveCeiling, sample, now)
 	}
