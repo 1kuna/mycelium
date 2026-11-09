@@ -2874,6 +2874,7 @@ func (q *Queue) renewRecoveryStartWindow(j *Job) {
 		}
 		deadline := q.clock.Now().Add(j.StartWindow)
 		j.Spec.StartBy = &deadline
+		j.StartCapacityBudget = nil
 	}
 }
 
@@ -2995,7 +2996,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if j.DeviceFaultStartWait != nil {
 		q.resumeDeviceFaultStartBudget(j)
 	} else if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !absoluteStartBy(j) && j.Spec.StartBy != nil {
-		deadline := q.clock.Now().Add(j.StartWindow)
+		deadline := q.clock.Now().Add(startCapacityBudget(j))
 		j.Spec.StartBy = &deadline
 	}
 	j.StartCapacityWaiting = false

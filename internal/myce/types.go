@@ -421,6 +421,9 @@ type SpecProjection struct {
 type Job struct {
 	DeviceFaultStartWait *DeviceFaultStartWait `json:"device_fault_start_wait,omitempty"`
 	StartCapacityWaiting bool                  `json:"start_capacity_waiting,omitempty"`
+	// Preserve a fault pause's unused budget through subsequent capacity waits.
+	// A started-attempt loss renews from StartWindow and clears this override.
+	StartCapacityBudget *time.Duration `json:"start_capacity_budget,omitempty"`
 
 	LaunchCapacityWait map[string]LaunchCapacityWait `json:"launch_capacity_wait,omitempty"`
 	ExecutionEvidence  *ExecutionEvidence            `json:"execution_evidence,omitempty"`

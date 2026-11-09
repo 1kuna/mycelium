@@ -166,11 +166,14 @@ the deadline minus original submission time. Job GET exposes the declaration in
 start deadline. Loss recovery retains that original effective length.
 
 A typed `device_fault_last_healthy` hold pauses the remaining relative startup
-or recovery budget. Recovery resumes that saved amount; caller-owned absolute
+or recovery budget. Recovery and subsequent capacity waits retain that saved
+amount, including across restart; caller-owned absolute
 `start_by` and queued-only `give_up_at` still bind. A hold with no eligible
 recovery terminates at the existing one-hour maximum start window measured from
 the latest queue-recorded device-fault loss, with typed reason
 `device_fault_recovery_timeout`. Restart and heartbeats never renew that bound.
+An active hold checks expiry before resuming, including when a late report clears
+quarantine after the bound.
 This limits an unrecoverable wait without shortening the worker's measured
 health-proof window or releasing exact-attempt custody.
 

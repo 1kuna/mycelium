@@ -2419,12 +2419,16 @@ at entry and resumes that amount when an eligible route returns; status keeps
 `device_fault_last_healthy` and shows `paused for device recovery`. The original
 `start_window` remains unchanged for a later started-attempt loss. Explicit
 absolute `start_by` and queued-only `give_up_at` still bind.
+The saved amount survives any capacity wait after clearance and queue restart;
+capacity recovery cannot refund startup time spent before the device-fault hold.
 
 An unrecoverable quarantine must not strand a job forever. The hold expires one
 `MaxProductionStartWindow` (the existing one-hour maximum availability window)
 after the latest queue-recorded device-fault loss, including across queue
 restarts. It fails with `diagnostic_code: device_fault_recovery_timeout` and a
-launch timeout cause with the same predicate. This bounds withheld capacity and
+launch timeout even when the first report after the bound clears quarantine;
+an active hold expires before its budget can resume. The timeout is a sanitized
+launch cause with the same predicate. This bounds withheld capacity and
 caller latency when recovery never arrives; its cost is giving up on a recovery
 that takes longer than the existing maximum start window. Earlier caller
 cutoffs win. This bound applies to held jobs of every priority and never clears

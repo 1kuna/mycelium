@@ -41,6 +41,8 @@ func (q *Queue) resumeDeviceFaultStartBudget(j *Job) {
 		if j.Spec.StartBy != nil && !absoluteStartBy(j) {
 			deadline := q.clock.Now().Add(wait.Remaining)
 			j.Spec.StartBy = &deadline
+			remaining := wait.Remaining
+			j.StartCapacityBudget = &remaining
 		}
 		j.DeviceFaultStartWait = nil
 	}
@@ -54,8 +56,12 @@ func (q *Queue) maintainDeviceFaultStartWait(j *Job) bool {
 		j.DeviceFaultStartWait = nil
 		return false
 	}
-	if j.State != "queued" || q.deviceFaultRetryWaitingReason(j) == "" {
+	if j.State != "queued" {
 		q.resumeDeviceFaultStartBudget(j)
+		return false
+	}
+	waiting := q.deviceFaultRetryWaitingReason(j) != ""
+	if !waiting && j.DeviceFaultStartWait == nil {
 		return false
 	}
 	now := q.clock.Now()
@@ -64,7 +70,7 @@ func (q *Queue) maintainDeviceFaultStartWait(j *Job) bool {
 		if j.Spec.StartBy != nil && !absoluteStartBy(j) {
 			remaining = max(0, j.Spec.StartBy.Sub(now))
 			if j.StartCapacityWaiting || q.launchCapacityPending(j) {
-				remaining = j.StartWindow
+				remaining = startCapacityBudget(j)
 			}
 		}
 		j.DeviceFaultStartWait = &DeviceFaultStartWait{Since: now, Remaining: remaining}
@@ -90,6 +96,13 @@ func (q *Queue) maintainDeviceFaultStartWait(j *Job) bool {
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
 		}
+		return true
+	}
+	// A check-in installs its cleared inventory before maintenance. An active
+	// hold must pass the loss-anchored expiry checks above before it can resume.
+	if !waiting {
+		q.resumeDeviceFaultStartBudget(j)
+		return false
 	}
 	return true
 }

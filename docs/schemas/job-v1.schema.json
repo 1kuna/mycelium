@@ -2854,6 +2854,10 @@
           "type": "boolean",
           "x-contract": "diagnostic"
         },
+        "start_capacity_budget": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
         "start_capacity_waiting": {
           "type": "boolean",
           "x-contract": "diagnostic"

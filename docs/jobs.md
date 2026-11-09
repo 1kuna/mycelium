@@ -725,7 +725,9 @@ This adds no timeout or retry-budget increase.
 
 A typed `device_fault_last_healthy` hold separately pauses the **remaining**
 relative startup/recovery budget, preserving it across restart. Status shows
-`paused for device recovery`; clearance resumes the saved amount. To bound
+`paused for device recovery`; clearance resumes the saved amount.
+Subsequent capacity waiting preserves that saved amount, including across
+restart, rather than restoring time spent before the hold. To bound
 permanent quarantine, this hold fails with `device_fault_recovery_timeout` one
 existing maximum start window (one hour) after queue-recorded fault loss. Earlier
 absolute `start_by` or queued-only `give_up_at` still wins. This never clears

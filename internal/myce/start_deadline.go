@@ -15,6 +15,13 @@ const ProductionStartTimeout = maxGPUStopGrace + StopGrace + 15*time.Second
 // waiting is separate from this relative startup budget.
 const MaxProductionStartWindow = time.Hour
 
+func startCapacityBudget(j *Job) time.Duration {
+	if j.StartCapacityBudget != nil {
+		return *j.StartCapacityBudget
+	}
+	return j.StartWindow
+}
+
 func productionStartWindow(s Spec) time.Duration {
 	if s.StartWindow != "" {
 		window, _ := time.ParseDuration(s.StartWindow) // validated at submission
@@ -157,7 +164,7 @@ func (q *Queue) maintainStartDeadlines() {
 			if j.StartCapacityWaiting && status.ready && j.Spec.StartBy != nil {
 				// Capacity recovered before dispatch. Restore startup time without
 				// hiding a later unavailable/disabled-route diagnosis.
-				deadline := now.Add(j.StartWindow)
+				deadline := now.Add(startCapacityBudget(j))
 				j.Spec.StartBy = &deadline
 			}
 			j.StartCapacityWaiting = status.waiting
@@ -251,12 +258,12 @@ func pausedStartBudget(j *Job) string {
 	if wait := j.DeviceFaultStartWait; wait != nil {
 		return fmt.Sprintf("%.0fs left to start (paused for device recovery)", wait.Remaining.Seconds())
 	}
-	return fmt.Sprintf("%.0fs left to start (paused for capacity)", j.StartWindow.Seconds())
+	return fmt.Sprintf("%.0fs left to start (paused for capacity)", startCapacityBudget(j).Seconds())
 }
 
 func (q *Queue) startStatusReason(j *Job, scans ...*placementScan) string {
 	if q.startCapacityPaused(j) {
-		// Assignment restores the original relative window. The old saved
+		// Assignment restores the saved relative budget. The old saved
 		// cutoff is suspended, so subtracting wall time would report zero.
 		return q.startWaitingReason(j, scans...) + "; " + pausedStartBudget(j)
 	}

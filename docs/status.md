@@ -2642,6 +2642,9 @@ An assigned start without an accepted acknowledgement continues counting down.
 The separate `device_fault_start_wait` records queue `since` and the saved
 `remaining` budget in nanoseconds for `device_fault_last_healthy`. Its relative
 countdown says `paused for device recovery`; clearance resumes that saved amount.
+`start_capacity_budget` retains that amount in nanoseconds through subsequent
+capacity waits and assignment, separately from the original `start_window`.
+A later started-attempt loss renews the original window and clears this override.
 An unrecoverable hold fails with `diagnostic_code: device_fault_recovery_timeout`
 one hour (the existing maximum start window) after queue-recorded fault loss.
 Caller-owned absolute cutoffs remain authoritative.

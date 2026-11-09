@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -42,23 +43,24 @@ func deviceFaultStartBudgetFixture(t *testing.T, q *Queue, clock *fakeClock, s S
 }
 
 func TestDeviceFaultStartBudgetRecovery(t *testing.T) {
-	for _, mode := range []string{"operator-clear", "health-proven", "unstarted", "capacity-after-clear"} {
+	for _, mode := range []string{"operator-clear", "health-proven", "unstarted", "capacity-after-clear", "unstarted-capacity-after-clear"} {
 		t.Run(mode, func(t *testing.T) {
 			s := spec("production")
 			s.StartWindow, s.SubmissionKey = "600s", "fault-recovery"
-			if mode == "capacity-after-clear" {
+			capacityAfterClear := strings.Contains(mode, "capacity-after-clear")
+			if capacityAfterClear {
 				s.Needs.HostMemoryGB = 4
 			}
 			q, clock := fixture(t)
-			m, j := deviceFaultStartBudgetFixture(t, q, clock, s, mode != "unstarted")
+			m, j := deviceFaultStartBudgetFixture(t, q, clock, s, !strings.HasPrefix(mode, "unstarted"))
 			remaining := 10 * time.Minute
-			if mode == "unstarted" {
+			if strings.HasPrefix(mode, "unstarted") {
 				remaining -= time.Minute
 			}
 			if j.DeviceFaultStartWait == nil || j.DeviceFaultStartWait.Remaining != remaining || !j.Spec.StartBy.Equal(clock.Now().Add(remaining)) {
 				t.Fatal("loss renewal or pause lost the remaining budget", j.Spec.StartBy, j.DeviceFaultStartWait)
 			}
-			if mode == "capacity-after-clear" {
+			if capacityAfterClear {
 				m.HostAvailableMemoryGB = 0
 				machineCheck(t, q, m)
 			}
@@ -88,7 +90,7 @@ func TestDeviceFaultStartBudgetRecovery(t *testing.T) {
 			if mode == "health-proven" {
 				m.Devices[0].Recovery = &DeviceRecovery{FaultEvent: strings.Repeat("a", 64), HealthySince: clock.Now().Add(-time.Minute), ClearedAt: clock.Now(), ObservationSeconds: 60, Probe: "vendor health"}
 			}
-			if mode == "capacity-after-clear" {
+			if capacityAfterClear {
 				// Real incident control: after a clear the job remained queued
 				// with 600s paused for RAM/reservation capacity, not expired.
 				m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 0
@@ -97,8 +99,12 @@ func TestDeviceFaultStartBudgetRecovery(t *testing.T) {
 				}
 				clock.Advance(20 * time.Minute)
 				machineCheck(t, q, m)
+				q = reopenCancellationQueue(t, q, clock)
+				machineCheck(t, q, m)
 				got := job(t, q, j.ID)
-				if got.State != "queued" || got.DeviceFaultStartWait != nil || !strings.Contains(got.Reason, "600s left to start (paused for capacity)") ||
+				paused := fmt.Sprintf("%.0fs left to start (paused for capacity)", remaining.Seconds())
+				if got.State != "queued" || got.DeviceFaultStartWait != nil || !strings.Contains(got.Reason, paused) ||
+					got.StartCapacityBudget == nil || *got.StartCapacityBudget != remaining || got.StartWindow != 10*time.Minute ||
 					got.InfrastructureRetries != 1 || got.Losses != 1 {
 					t.Fatal("post-clear capacity wait expired or charged the job", got.State, got.Reason)
 				}
@@ -119,6 +125,31 @@ func TestDeviceFaultStartBudgetRecovery(t *testing.T) {
 			}
 			if err := q.Started(result(next, true)); err != nil {
 				t.Fatal(err)
+			}
+			if mode == "unstarted-capacity-after-clear" {
+				// The saved 540s belongs to startup, not the original window:
+				// a later loss after Started must still renew the full 600s.
+				clock.Advance(10 * time.Second)
+				m.Devices[0].Reason, m.Devices[0].FreeMemoryGB = "device_fault_xe", 0
+				machineCheck(t, q, m, next)
+				got := job(t, q, j.ID)
+				if got.State != "queued" || got.StartWindow != 10*time.Minute || got.StartCapacityBudget != nil ||
+					got.DeviceFaultStartWait == nil || got.DeviceFaultStartWait.Remaining != 10*time.Minute || !got.Spec.StartBy.Equal(clock.Now().Add(10*time.Minute)) {
+					t.Fatal("started loss renewed from partial startup budget", got.State, got.Spec.StartBy, got.DeviceFaultStartWait)
+				}
+				release := result(next, false)
+				release.ReleaseOnly = true
+				if err := q.Complete(release); err != nil {
+					t.Fatal(err)
+				}
+				m.Devices[0].Reason, m.Devices[0].FreeMemoryGB = "", 8
+				next = assignedJob(machineCheck(t, q, m))
+				if next == nil || next.ID != j.ID || !next.Spec.StartBy.Equal(clock.Now().Add(10*time.Minute)) {
+					t.Fatal("second clear did not preserve the renewed original window", next)
+				}
+				if err := q.Started(result(next, true)); err != nil {
+					t.Fatal(err)
+				}
 			}
 			finish(t, q, next, true)
 			requireState(t, q, j.ID, "succeeded")
@@ -149,6 +180,51 @@ func TestDeviceFaultStartBudgetRecoveryBound(t *testing.T) {
 	m.Devices[0].Reason, m.Devices[0].FreeMemoryGB = "", 8
 	if next := assignedJob(machineCheck(t, q, m)); next != nil {
 		t.Fatal("late clear resurrected expired recovery", next)
+	}
+}
+
+func TestDeviceFaultStartBudgetLateClear(t *testing.T) {
+	for _, cutoffKind := range []string{"recovery_bound", "start_by", "give_up_at"} {
+		t.Run(cutoffKind, func(t *testing.T) {
+			q, clock := fixture(t)
+			s := spec("production")
+			s.StartWindow = "600s"
+			cutoff := clock.Now().Add(2 * time.Minute)
+			if cutoffKind == "start_by" {
+				s.StartBy = &cutoff
+			} else if cutoffKind == "give_up_at" {
+				s.GiveUpAt = &cutoff
+			}
+			m, j := deviceFaultStartBudgetFixture(t, q, clock, s, true)
+			if cutoffKind == "recovery_bound" {
+				clock.Advance(MaxProductionStartWindow - time.Second)
+				machineCheck(t, q, m)
+				if got := job(t, q, j.ID); got.State != "queued" || got.DeviceFaultStartWait == nil {
+					t.Fatal("hold expired before its bound", got.State, got.Reason)
+				}
+				clock.Advance(2 * time.Second)
+			} else {
+				clock.Advance(MaxProductionStartWindow + time.Second)
+			}
+			// No maintenance occurs between crossing the bound and this first
+			// event, which installs cleared inventory before running maintenance.
+			m.Devices[0].Reason, m.Devices[0].FreeMemoryGB = "", 8
+			if next := assignedJob(machineCheck(t, q, m)); next != nil {
+				t.Fatal("late clearance bypassed the active hold's bound", next)
+			}
+			got := job(t, q, j.ID)
+			if got.State != "failed" || got.FinishedAt == nil || !got.FinishedAt.Equal(clock.Now()) || got.InfrastructureRetries != 1 || got.Losses != 1 {
+				t.Fatal("late-clear expiry missing or charged another retry", got.State, got.Reason)
+			}
+			if cutoffKind == "recovery_bound" {
+				if got.DiagnosticCode != deviceFaultRecoveryTimeout || got.ExecutionCause == nil || got.ExecutionCause.Predicate != deviceFaultRecoveryTimeout {
+					t.Fatal("late clear lost the typed recovery timeout", got.DiagnosticCode, got.ExecutionCause)
+				}
+			} else if got.DiagnosticCode == deviceFaultRecoveryTimeout || cutoffKind == "start_by" && !got.Spec.StartBy.Equal(cutoff) ||
+				cutoffKind == "give_up_at" && got.Reason != "give-up time reached" {
+				t.Fatal("late clear overrode the earlier absolute cutoff", got.Reason, got.Spec.StartBy)
+			}
+		})
 	}
 }
 

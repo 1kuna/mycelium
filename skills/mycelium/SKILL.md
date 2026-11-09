@@ -150,7 +150,8 @@ key: another host, spare healthy capacity or a health-proven recovery can make
 it eligible. This queue protection works with older workers.
 
 The typed hold pauses the remaining relative start/recovery budget; status says
-`paused for device recovery`. Explicit absolute `start_by` and queued-only
+`paused for device recovery`. The saved amount persists through capacity waiting
+after clearance and restart. Explicit absolute `start_by` and queued-only
 `give_up_at` still bind. If recovery never becomes eligible, the hold terminates
 one existing maximum start window (one hour) after the queue-recorded fault loss
 with `diagnostic_code: device_fault_recovery_timeout`. Preserve that terminal
