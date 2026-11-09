@@ -1,0 +1,2 @@
+# Short synchronous writes; no spawned daemon. Includes boot coldplug.
+ACTION=="add", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNEL!="card[0-9]*-*", DRIVERS=="xe", RUN+="/usr/local/libexec/myce-xe-preempt-timeout apply --card %k"
