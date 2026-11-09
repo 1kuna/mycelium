@@ -1265,7 +1265,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			checkpointRoot := root.state.CheckpointRoot
 			available, _ := root.nasProbe.runProgress(checkpointRoot, func(progress func()) (bool, error) {
 				err := workerCheckpointAvailable(checkpointRoot, progress)
-				w.observeStorageError(err)
+				probeWorker.observeStorageError(err)
 				return err == nil, err
 			})
 			m.CheckpointUnavailable = !available || diagnostics.CheckpointUnavailable
@@ -1358,11 +1358,12 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			// snapshot and age it with their own launch-time clock read.
 			rt.batchHostMemorySamples = w.hostMemorySamples
 			rt.mu.Unlock()
+			probeClock := w.Clock
 			m.IOPressure, _ = ioProbe.run("host-io-pressure", func() (*IOPressure, error) {
 				if workerIOPressure == nil {
-					return &IOPressure{SampledAt: w.Clock.Now(), Unavailable: "unsupported_os"}, nil
+					return &IOPressure{SampledAt: probeClock.Now(), Unavailable: "unsupported_os"}, nil
 				}
-				return workerIOPressure(w.Clock), nil
+				return workerIOPressure(probeClock), nil
 			})
 			if m.IOPressure != nil {
 				m.IOPressure.AgeSeconds = max(0, w.Clock.Now().Sub(m.IOPressure.SampledAt).Seconds())

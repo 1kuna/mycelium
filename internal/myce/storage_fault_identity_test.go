@@ -121,9 +121,16 @@ func TestStorageFaultQueueCheckpointReplyPublishesIdentity(t *testing.T) {
 	foreign, reopen := workerForeignConsumers, workerStorageReopen
 	workerForeignConsumers = nil
 	fault := &os.PathError{Op: "read", Path: filepath.Join(nas, "job", "previous", "save"), Err: syscall.EIO}
-	workerStorageReopen = func(string, uint64, func()) error { return fault }
-	t.Cleanup(func() { workerForeignConsumers, workerStorageReopen = foreign, reopen })
 	var prepared atomic.Bool
+	// The fault starts at checkpoint preparation, not at a racing background
+	// health probe that could fence the attempt before it reaches that seam.
+	workerStorageReopen = func(string, uint64, func()) error {
+		if !prepared.Load() {
+			return nil
+		}
+		return fault
+	}
+	t.Cleanup(func() { workerForeignConsumers, workerStorageReopen = foreign, reopen })
 	w.checkpointPrepare = func(Job) (string, error) { prepared.Store(true); return "", fault }
 	j := recoveryJob(t, []string{"true"})
 	j.Checkpoint = filepath.Join(nas, "job")
