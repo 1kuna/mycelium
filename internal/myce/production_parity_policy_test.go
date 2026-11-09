@@ -11,7 +11,9 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			q, clock := fixture(t)
 			e := compositionExtension(t, false)
-			a := valueMachine("reference-worker", "xpu", 32)
+			// Equal capacity makes the unapproved candidate win the normal
+			// deterministic placement tie, unless owner policy fences it.
+			a := valueMachine("reference-worker", "xpu", 96)
 			b := valueMachine("candidate-worker", "cuda", 96)
 			a.CapabilityProfile.OS, a.CapabilityProfile.Arch = "linux", "amd64"
 			b.CapabilityProfile.OS, b.CapabilityProfile.Arch = "linux", "arm64"
