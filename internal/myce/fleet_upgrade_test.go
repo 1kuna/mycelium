@@ -517,7 +517,28 @@ func TestFleetUpgradeAlreadyCurrentRequiresStableEnrollmentHealth(t *testing.T) 
 	if i, err := q.fleetInstruction("queue", "@queue", "queue-current"); err != nil || i.Operation != "" {
 		t.Fatal("rerun instructed already-current queue to restart")
 	}
-	for n := 0; n < 32; n++ {
+	for n := 0; n < 10; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	q.fleetQueue.Proof.ServiceHealthy = false
+	fleetTick(t, q)
+	q.fleetQueue.Proof.ServiceHealthy = true
+	fleetTick(t, q)
+	for n := 0; n < 29; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	if h := q.fleetActiveHost(); h == nil || h.Host != "queue" || h.QueueDone {
+		t.Fatal("queue health interruption retained earlier stable time", q.fleetUpgradeStatus())
+	}
+	q.fleetQueue.Proof.PID++
+	fleetTick(t, q)
+	for n := 0; n < 29; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	if h := q.fleetActiveHost(); h == nil || h.Host != "queue" || h.QueueDone {
+		t.Fatal("new queue process retained earlier stable time", q.fleetUpgradeStatus())
+	}
+	for n := 0; n < 2; n++ {
 		fleetHeartbeatAdvance(t, q, c)
 	}
 	h := q.fleetActiveHost()
@@ -542,9 +563,32 @@ func TestFleetUpgradeAlreadyCurrentRequiresStableEnrollmentHealth(t *testing.T) 
 	m.HostMemoryError = ""
 	m.Fleet.ObservedAt = c.Now()
 	check(t, q, m, nil)
-	for n := 0; n < 32; n++ {
+	for n := 0; n < 10; n++ {
 		fleetHeartbeatAdvance(t, q, c)
 	}
+	// A healthy partial window must not survive an enrollment-health failure.
+	m.HostMemoryError = "memory unavailable again"
+	m.Fleet.ObservedAt = c.Now()
+	check(t, q, m, nil)
+	m.HostMemoryError = ""
+	check(t, q, m, nil)
+	for n := 0; n < 29; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	if q.s.FleetUpgrade.State == "complete" || q.s.HostMaintenance["a"].Mode != "drained" {
+		t.Fatal("enrollment interruption retained earlier stable time")
+	}
+	// A valid new process identity also needs its own full stable window.
+	m.Fleet = cloneFleetProof(q.s.Machines[m.ID].Fleet)
+	m.Fleet.PID++
+	check(t, q, m, nil)
+	for n := 0; n < 29; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	if q.s.FleetUpgrade.State == "complete" || q.s.HostMaintenance["a"].Mode != "drained" {
+		t.Fatal("replacement process retained earlier stable time")
+	}
+	fleetHeartbeatAdvance(t, q, c)
 	if q.s.FleetUpgrade.State != "complete" || q.s.Machines[m.ID].Session != m.Session {
 		t.Fatal("healthy current host not reconciled without restart")
 	}

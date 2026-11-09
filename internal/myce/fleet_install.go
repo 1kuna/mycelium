@@ -712,7 +712,8 @@ func fleetStagingPath(c ServiceConfig, i FleetUpdateInstruction) string {
 // readiness budget and 30-second stable-manager requirement: the bound stops
 // failed startup without granting custody release or completing queue proof.
 func waitFleetManager(ctx context.Context, c ServiceConfig, beforePID int, d fleetInstallDeps) error {
-	opt := d.health
+	var stability fleetStability
+	opt := stability.managerOptions(d.health)
 	if opt.Clock == nil {
 		opt.Clock = RealClock{}
 	}
@@ -733,7 +734,12 @@ func waitFleetManager(ctx context.Context, c ServiceConfig, beforePID int, d fle
 		identity, err := EnrollmentServiceHealth(probe, c, d.command)
 		cancel()
 		pid, _, _ := strings.Cut(identity, "/")
-		if err == nil && pid != strconv.Itoa(beforePID) {
+		healthy := err == nil && pid != strconv.Itoa(beforePID)
+		stability.observeManager(healthy)
+		if opt.HealthObserved != nil {
+			opt.HealthObserved(healthy)
+		}
+		if healthy {
 			if identity != previous {
 				stableSince, previous = opt.Clock.Now(), identity
 			}
