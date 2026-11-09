@@ -655,6 +655,9 @@ With `device-health-v1` support (#1185),
 `devices[].quarantine_recovery_blocked` reports the last rejected health proof:
 `code`, optional `component` or `exit_status`, and worker `observed_at`.
 Only sanitized classifications are reported, never raw probe text or paths.
+`health_probe_monitor_gap` rejects a query begun before a kernel-monitor gap;
+`health_probe_comparison_stale` rejects target/sibling evidence exceeding the
+comparison horizon. A sibling query never renews the target's `observed_at`.
 A healthy reading clears this diagnostic but must still establish the recovery
 window. `devices[].unsupported_on_device` lists canonical required components
 excluded by a fresh same-batch healthy same-model sibling comparison (for

@@ -667,6 +667,11 @@ func Uninstall(ctx context.Context, c ServiceConfig, dry bool, command func(cont
 	if e != nil {
 		return fmt.Errorf("stop service before removing setup: %w", e)
 	}
+	// Revoke only this installation's health access after stopping its service.
+	// Keep the config/ownership identity available if cleanup needs a retry.
+	if e = xpuHealthAccess(ctx, c, "remove", command); e != nil {
+		return e
+	}
 	// Preserve binary, private credentials, spools, cache and config together.
 	trash := filepath.Join(filepath.Dir(filepath.Dir(c.Config)), ".Trash")
 	if e = os.MkdirAll(trash, 0700); e != nil {

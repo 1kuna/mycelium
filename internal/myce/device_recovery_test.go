@@ -256,6 +256,8 @@ func TestDeviceHealthVendorEvidence(t *testing.T) {
 		{"xpu", `{"core_temperature":{"status":"OK"},"power_health":{"status":"OK"},"memory_health":{"status":"Warning"}}`, "health_component_failed: memory"},
 		{"xpu", `{"core_temperature":{"status":"OK"},"power_health":{"status":"Unknown"},"memory_health":{"status":"OK"}}`, "health_component_unknown: power"},
 		{"xpu", strings.Replace(xpuHealthyHealth, `"frequency_health":{"status":"OK"}`, `"frequency_health":{"status":"Warning"}`, 1), "health_component_failed: frequency"},
+		{"xpu", strings.Replace(xpuHealthyHealth, `"memory_health":{"status":"OK"}`, `"memory_health":{"status":"Critical"}`, 1), "health_component_failed: memory"},
+		{"xpu", strings.Replace(xpuHealthyHealth, `"memory_temperature":{"status":"Unknown"}`, `"memory_temperature":{"status":"Critical"}`, 1), "health_component_failed: memory_temperature"},
 		{"xpu", `{}`, "health_component_missing: core_temperature"},
 		{"xpu", `{"core_temperature":{"status":"OK"},"memory_health":{"status":"OK"}}`, "health_component_missing: power"},
 		{"xpu", `{"error":"private diagnostic"}`, "health_probe_error"},
@@ -365,4 +367,71 @@ func TestQuarantineHealthStalledProbeKeepsKernelMonitoring(t *testing.T) {
 			t.Fatal("completed health did not resume measured recovery", w.Machine.Devices[0])
 		}
 	})
+}
+
+// A late sibling must neither renew the target nor bridge a kernel-monitor gap.
+func TestDeviceHealthDelayedSibling(t *testing.T) {
+	for _, gap := range []bool{false, true} {
+		t.Run(fmt.Sprint("monitor_gap=", gap), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				m := m3Machine()
+				for i := range m.Devices {
+					m.Devices[i].Platform = "xpu"
+					m.Devices[i].Fingerprint = "same-model"
+				}
+				release, entered := make(chan struct{}), make(chan struct{})
+				var monitorErr error
+				w := Worker{Machine: m, Clock: RealClock{}, Interval: time.Second,
+					DeviceFaultSource: func(context.Context, time.Time) (KernelLogSnapshot, error) {
+						return KernelLogSnapshot{BootID: "boot"}, monitorErr
+					},
+					DeviceHealthReportProbe: func(_ context.Context, d MachineDevice) (DeviceHealthReport, error) {
+						if d.ID == m.Devices[1].ID {
+							close(entered)
+							<-release
+						}
+						return DeviceHealthReport{Components: map[string]string{"core_temperature": "OK", "power": "OK", "memory": "Unknown"}}, nil
+					},
+				}
+				root := &workerStore{dir: t.TempDir()}
+				root.deviceFaults.timeout = -1
+				if err := w.initDeviceFaults(t.Context(), root); err != nil {
+					t.Fatal(err)
+				}
+				key := deviceFaultKey(m.Devices[0])
+				w.faults.Devices[key] = deviceFault{Reason: "device_fault_xe", Event: strings.Repeat("a", 64), At: w.Clock.Now().Add(-2 * time.Second)}
+				w.applyDeviceQuarantine()
+				targetAt := w.Clock.Now()
+				scan := func() {
+					t.Helper()
+					if err := w.refreshDeviceFaults(t.Context(), root); err != nil {
+						t.Fatal(err)
+					}
+				}
+				scan() // Returns while the sibling remains blocked in its own lane.
+				<-entered
+				if gap {
+					monitorErr = errors.New("unreadable")
+					scan()
+					monitorErr = nil
+				} else {
+					<-time.After(2 * time.Second)
+				}
+				close(release)
+				synctest.Wait()
+				scan()
+				failure := w.Machine.Devices[0].RecoveryBlocked
+				want := "health_probe_comparison_stale"
+				if gap {
+					want = "health_probe_monitor_gap"
+				}
+				if w.Machine.Devices[0].Reason == "" || len(w.faultRecovery) != 0 || failure == nil || failure.Code != want {
+					t.Fatal("late comparison established recovery", w.Machine.Devices[0], w.faultRecovery)
+				}
+				if !failure.ObservedAt.Equal(targetAt) {
+					t.Fatal("sibling renewed target observation", failure.ObservedAt, targetAt)
+				}
+			})
+		})
+	}
 }

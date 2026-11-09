@@ -270,7 +270,12 @@ healthy same-model sibling in the same health batch is excluded from that proof
 and published as `unsupported_on_device`. This is the orchestrator's 2026-11-09
 agent default under MY-34, not a maintainer ruling. The existing nonempty
 hardware/driver fingerprint identifies the model. Each batch obtains fresh
-comparison evidence; new sibling kernel faults invalidate it. All other
+comparison evidence; new sibling kernel faults invalidate it. Each query keeps
+its own start/completion time. A monitoring gap rejects any query begun before
+the gap, and a subsequent kernel scan must follow both query completions. The
+whole comparison is bounded by one control interval plus the prior measured
+kernel service-cost prediction, frozen before starting. Slow comparison cannot
+renew older evidence or grow its own allowance. All other
 required components must be OK, and warnings on optional components still
 prevent clearance. Missing/malformed readings and Unknown without a healthy
 same-model sibling keep quarantine. The kernel observation window is unchanged.
@@ -283,7 +288,13 @@ required for IGSC's read/write open) and Xe PMT telemetry attributes (0440,
 read-only), via a root-owned udev rule and immediate application to matching
 nodes. Unrelated MEI nodes are excluded. It needs noninteractive administrator
 authority, installs no sudoers grant, runs no health command as root, and needs
-no manual group/permission step. See [installation and rollout
+no manual group/permission step. The captured health invocation opened MEI
+`O_RDWR` for IGSC/HECI, which requires both read and write permission; PMT used
+`O_RDONLY`. Every install/start retries the full provisioning sequence, rather
+than trusting rule bytes left by an interrupted setup. The root-only node
+journal also captures recreated nodes; last-owner uninstall restores unchanged
+grants to the saved permissions and removes the rule/helper. Other installation
+owners and administrator edits are preserved. See [installation and rollout
 semantics](operations.md#accelerator-driver-fault-quarantine).
 
 Rejected proofs publish sanitized `quarantine_recovery_blocked` status after

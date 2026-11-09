@@ -2487,15 +2487,30 @@ and have no inventory exclusion, quarantine or new kernel fault. Missing,
 malformed or failed readings cannot establish unsupported capability. Without a
 healthy same-model sibling (including a single-card host), Unknown retains
 quarantine. Each batch compares fresh readings; there is no cached model
-allowlist. The exclusion accompanies the durable clear receipt in status and
-never shortens the kernel observation window.
+allowlist. Each reading retains its query start and completion timestamps;
+completing a sibling query never renews target evidence. Neither query may
+begin before a kernel-monitor gap. The whole comparison must fit one control
+interval plus the previously measured kernel service-cost prediction, frozen
+before the batch starts. This bounds skew without allowing a stalled batch to
+expand its own allowance; an overly slow comparison retains quarantine. A
+kernel scan must start after both queries complete. Status reports
+`health_probe_monitor_gap` or `health_probe_comparison_stale` when those fences
+reject evidence. The exclusion accompanies the durable clear receipt in status
+and never shortens the kernel observation window.
 
 Linux XPU worker installation provisions health access automatically, before
 service activation. Binary-only release rollout also performs this idempotent
 prerequisite on service startup, before reading credentials or accepting work.
 The root-owned `/etc/udev/rules.d/70-mycelium-xpu-health.rules` grants the worker's
 existing primary group mode `0660` on GPU MEI nodes whose ancestor driver is
-`mei_gsc`. IGSC opens MEI read/write even for this read-only query. Unrelated
+`mei_gsc`. In the bounded xpu-smi 2.2.0 health trace, IGSC/HECI opened GPU MEI
+with `O_RDWR`, denied for the worker; root's query had no such denial. This
+exchange opens a bidirectional HECI channel even though the requested operation
+is a health read. Linux checks both read and write permission for `O_RDWR`, so a
+read-only group grant cannot satisfy the observed invocation. `0660` supplies
+that required open without world access; no read-only alternative has been
+qualified for this tool. PMT was opened `O_RDONLY` and retains read-only access.
+Unrelated
 management-engine MEI nodes remain untouched. Xe-owned Intel PMT `telem` sysfs
 attributes receive that group and mode `0440`; no world access is added. The
 installer reloads the rule and applies the same narrow permissions to current
@@ -2503,10 +2518,31 @@ nodes, without probing the GPU or restarting a service. Existing group membershi
 is already effective, so no user-manager restart or manual group step is needed.
 Installation needs noninteractive administrator authority (`sudo -n`); inability
 to provision returns `xpu_health_access_unavailable` before activation. No
-sudoers grant or elevated health command is installed. Matching rules need no
-privileged startup operation. One worker account owns this host-wide rule;
-multiple distinct worker accounts need an explicit shared-group installation
-design before using it.
+sudoers grant or elevated health command is installed. Each startup/install
+reapplies the setup, even when rule bytes match: a rule published before a failed
+reload or node update is not proof of completed access. Activation stays blocked
+on failure and the next supported install/start repairs that partial application.
+
+The root-only helper and baseline journal live under
+`/var/lib/mycelium/xpu-health-access`. The udev helper records each node's
+original group/mode and filesystem identity before granting access, including
+new/recreated nodes. A stable root lock serializes udev, install and removal.
+Owners are keyed by account and installation identity; several installations
+using the same primary group share access. Different primary groups refuse
+rather than replace another owner's grant.
+
+Supported uninstall stops its worker, releases only that installation's owner
+record, and retains grants while another installation still owns them. The last
+owner removes the unchanged Mycelium rule, reloads udev and restores each
+still-current grant to its recorded original group/mode. Node identity checks
+prevent restoring an old device's receipt onto its replacement. Subsequent
+administrator node edits are preserved; a changed/non-Mycelium rule refuses
+cleanup instead of deleting it. Cleanup failure returns
+`xpu_health_access_cleanup_failed` and retains the service configuration for a
+supported uninstall retry. The root helper/journal are removed after successful
+last-owner cleanup; the inert lock file remains for coordination. This requires
+noninteractive administrator authority for uninstall as well as install; dry-run
+uninstall makes no changes.
 
 Read-only xpu-smi 2.2.0 observations found worker temperature Unknown and root
 temperature OK, with GPU MEI and PMT access denied to the worker; this did not

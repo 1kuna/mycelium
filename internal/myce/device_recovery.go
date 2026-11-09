@@ -85,7 +85,7 @@ func deviceHealthFailure(normal bool, err error) *DeviceHealthFailure {
 			case "core_temperature", "power", "memory", "memory_temperature", "frequency", "fabric_port", "optional":
 				return &DeviceHealthFailure{Code: failure.Code, Component: failure.Component}
 			}
-		case "health_probe_invalid_output", "health_probe_error", "health_probe_identity_unavailable", "health_probe_identity_mismatch", "health_probe_unsupported", "health_probe_permission_denied", "health_probe_unavailable", "health_probe_cancelled", "health_probe_failed", "health_probe_unhealthy":
+		case "health_probe_invalid_output", "health_probe_error", "health_probe_identity_unavailable", "health_probe_identity_mismatch", "health_probe_unsupported", "health_probe_permission_denied", "health_probe_unavailable", "health_probe_cancelled", "health_probe_failed", "health_probe_unhealthy", "health_probe_comparison_stale", "health_probe_monitor_gap":
 			return &DeviceHealthFailure{Code: failure.Code}
 		case "health_probe_exit":
 			if failure.ExitStatus != nil {
@@ -202,13 +202,35 @@ func (q *Queue) receiveDeviceRecovery(m, old *Machine) {
 }
 
 type deviceHealthObservation struct {
-	event           string
-	at              time.Time
-	normal          bool
-	failure         *DeviceHealthFailure
-	unsupported     []string
-	sibling, model  string
-	siblingTeardown string
+	event                     string
+	at                        time.Time // Target query completion, never renewed by comparison.
+	started                   time.Time
+	siblingStarted, siblingAt time.Time
+	normal                    bool
+	failure                   *DeviceHealthFailure
+	unsupported               []string
+	sibling, model            string
+	siblingTeardown           string
+}
+
+func earliestHealthTime(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
+}
+func latestHealthTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+func (h deviceHealthObservation) predates(after time.Time) bool {
+	start := h.started
+	if start.IsZero() {
+		start = h.at
+	} // Compatibility for existing injected observations.
+	return start.Before(after) || !h.siblingStarted.IsZero() && h.siblingStarted.Before(after)
 }
 
 type deviceRecoveryObservation struct {
@@ -236,7 +258,7 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 		return nil
 	}
 	devices, faults, probe, clock := slices.Clone(w.Machine.Devices), maps.Clone(w.faults.Devices), w.DeviceHealthProbe, w.Clock
-	comparisonDevices := devices // Keep healthy siblings outside the due-target filter.
+	comparisonDevices := slices.Clone(devices) // Keep healthy siblings outside the due-target filter.
 	devices = slices.DeleteFunc(devices, func(d MachineDevice) bool {
 		key := deviceFaultKey(d)
 		fault, due := faults[key], w.faultHealthDue[key]
@@ -254,18 +276,27 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 
 	reportProbe := w.DeviceHealthReportProbe
 	teardowns := maps.Clone(w.faults.Teardowns)
+	// Compare within one control interval plus the prior kernel-cost prediction.
+	// Freeze the allowance before starting: a stalled query cannot enlarge its own validity window.
+	comparisonWindow := root.faultTiming.controlPeriod() + time.Duration(root.faultTiming.cost.upper()*float64(time.Second))
 	read := func() (map[string]deviceHealthObservation, error) {
 		out := map[string]deviceHealthObservation{}
-		reports := map[string]DeviceHealthReport{}
-		errorsByDevice := map[string]error{}
-		readReport := func(d MachineDevice) (DeviceHealthReport, error) {
+		type reading struct {
+			report      DeviceHealthReport
+			err         error
+			started, at time.Time
+		}
+		reports := map[string]reading{}
+		readReport := func(d MachineDevice) reading {
 			key := deviceFaultKey(d)
 			if r, ok := reports[key]; ok {
-				return r, errorsByDevice[key]
+				return r
 			}
-			r, err := reportProbe(ctx, d)
-			reports[key], errorsByDevice[key] = r, err
-			return r, err
+			r := reading{started: clock.Now()}
+			r.report, r.err = reportProbe(ctx, d)
+			r.at = clock.Now()
+			reports[key] = r
+			return r
 		}
 		for _, d := range devices {
 			key := deviceFaultKey(d)
@@ -273,12 +304,14 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 			if f.Reason == "" || f.RepeatedTeardown {
 				continue
 			}
-			h := deviceHealthObservation{event: f.Event}
+			h := deviceHealthObservation{event: f.Event, started: clock.Now()}
 			var normal bool
 			var err error
 			if reportProbe != nil && d.Platform == "xpu" {
-				r, readErr := readReport(d)
-				err = readErr
+				target := readReport(d)
+				r, errRead := target.report, target.err
+				h.started, h.at = target.started, target.at
+				err = errRead
 				if err == nil {
 					_, err = r.proof(nil)
 					if _, comparisonErr := r.proof(&r); err != nil && comparisonErr == nil && d.Fingerprint != "" {
@@ -286,7 +319,8 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 							if sibling.Platform != d.Platform || sibling.Identity == d.Identity || sibling.Fingerprint != d.Fingerprint || sibling.Reason != "" || faults[deviceFaultKey(sibling)].Reason != "" {
 								continue
 							}
-							s, siblingErr := readReport(sibling)
+							comparison := readReport(sibling)
+							s, siblingErr := comparison.report, comparison.err
 							if siblingErr != nil {
 								continue
 							}
@@ -295,6 +329,12 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 							if _, siblingErr = s.proof(&s); siblingErr != nil {
 								continue
 							}
+							span := latestHealthTime(target.at, comparison.at).Sub(earliestHealthTime(target.started, comparison.started))
+							if span < 0 || span > comparisonWindow {
+								err = &DeviceHealthFailure{Code: "health_probe_comparison_stale"}
+								continue
+							}
+							h.siblingStarted, h.siblingAt = comparison.started, comparison.at
 							h.unsupported, err = r.proof(&s)
 							h.sibling, h.model = deviceFaultKey(sibling), d.Fingerprint
 							h.siblingTeardown = teardowns[h.sibling].Event
@@ -307,10 +347,11 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 				normal = err == nil
 			} else if probe != nil {
 				normal, err = probe(ctx, d)
+				h.at = clock.Now()
 			} else {
 				err = exec.ErrNotFound
 			}
-			h.at, h.normal, h.failure = clock.Now(), normal && err == nil, deviceHealthFailure(normal, err)
+			h.normal, h.failure = normal && err == nil, deviceHealthFailure(normal, err)
 			out[key] = h
 		}
 		return out, nil
@@ -343,8 +384,12 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 	}
 	for key, h := range health {
 		f := w.faults.Devices[key]
-		if f.Reason == "" || f.RepeatedTeardown || f.Event != h.event || h.at.Before(w.faultHealthAfter) {
+		if f.Reason == "" || f.RepeatedTeardown || f.Event != h.event {
 			continue
+		}
+		if h.predates(w.faultHealthAfter) {
+			h.normal, h.failure, h.unsupported = false, &DeviceHealthFailure{Code: "health_probe_monitor_gap"}, nil
+			health[key] = h
 		}
 		if w.faultRejected == nil {
 			w.faultRejected = map[string]deviceHealthObservation{}
@@ -404,11 +449,11 @@ func (w *Worker) autoClearDeviceFaults(next *deviceQuarantine, health map[string
 		if !ok {
 			continue
 		}
-		if h.at.Before(fault.At) || h.at.Before(w.faultHealthAfter) {
+		if h.predates(fault.At) || h.predates(w.faultHealthAfter) {
 			delete(health, key)
 			continue
 		}
-		if snapshot.started.Before(h.at) {
+		if snapshot.started.Before(latestHealthTime(h.at, h.siblingAt)) {
 			continue
 		}
 		delete(health, key) // Consumed only after a subsequent kernel observation.

@@ -230,7 +230,8 @@ sanitized code and component or probe exit status. `unsupported_on_device`
 lists a required component excluded only after a fresh healthy same-model
 sibling reports it undeterminable in the same health batch. Every remaining
 required component must be OK; Unknown without that comparison (including a
-single-card host) retains quarantine. Successful command exit alone is not proof. Repeated-fault escalation still
+single-card host), stale comparison, or a monitoring gap retains quarantine.
+Successful command exit alone is not proof. Repeated-fault escalation still
 needs the maintenance owner. Do not resubmit to bypass the hold or clear real
 devices as a consumer. See [device quarantine](../../docs/operations.md#accelerator-driver-fault-quarantine).
 
