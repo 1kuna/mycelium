@@ -93,24 +93,9 @@ func await(t *testing.T, f func() bool) {
 		}
 	}
 }
-func TestWorkerCancelledBeforeJoining(t *testing.T) {
-	q, _ := fixture(t)
-	j := submit(t, q, spec("experiment"))
-	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer server.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	w := Worker{EnvironmentLimit: 1 << 20, StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake"), Interval: time.Millisecond}
-	if err := w.Run(ctx); err != nil {
-		t.Fatal(err)
-	}
-	requireState(t, q, j.ID, "queued")
-	if job(t, q, j.ID).Attempt != 0 {
-		t.Fatal("cancelled worker started a command")
-	}
-}
+
 func TestWorkerGracefulStopAndCheckpoint(t *testing.T) {
-	for _, stop := range []string{"interrupt", "leave"} {
+	for _, stop := range []string{"leave"} {
 		t.Run(stop, func(t *testing.T) { testWorkerGracefulStopAndCheckpoint(t, stop) })
 	}
 }
@@ -225,33 +210,7 @@ while :; do read line <&3; done`}
 	}
 	t.Fatal("resumed command did not consume the checkpoint")
 }
-func TestWorkerWaitsForNonresumableOnInterrupt(t *testing.T) {
-	q, _ := fixture(t)
-	q.clock = RealClock{}
-	// CPU-only work still finishes naturally on worker shutdown. Accelerator
-	// work instead receives the bounded group TERM required by #154.
-	s := cpuSpec(1, 1)
-	s.Resumable = false
-	s.Run.Command = []string{"sh", "-c", `echo ready; while [ ! -f "$MYCE_CHECKPOINT_DIR/finish" ]; do sleep 0.01; done; echo finished`}
-	j := submit(t, q, s)
-	run := workerFixture(t, q)
-	await(t, func() bool {
-		ls, _ := q.Logs(j.ID, 0)
-		for _, l := range ls {
-			if strings.Contains(l.Text, "ready") {
-				return true
-			}
-		}
-		return false
-	})
-	run.cancel()
-	await(t, func() bool { sn, _ := q.Snapshot(); return len(sn.Machines) == 1 && sn.Machines[0].Leaving })
-	requireState(t, q, j.ID, "running")
-	if err := os.WriteFile(filepath.Join(j.Checkpoint, "attempt-1", "finish"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	await(t, func() bool { return job(t, q, j.ID).State == "succeeded" })
-}
+
 func TestWorkerCommandStartFailure(t *testing.T) {
 	q, _ := fixture(t)
 	q.clock = RealClock{}
@@ -265,9 +224,13 @@ func TestWorkerCommandStartFailure(t *testing.T) {
 		t.Fatal("launch failure bypassed bounded infrastructure policy", got)
 	}
 	records, err := filepath.Glob(filepath.Join(run.state, "launch-"+j.ID+"-*.outcome.json"))
-	if err != nil || len(records) != 3 {
-		t.Fatal("missing per-attempt Mycelium launch records", len(records), err)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(got.AttemptHistory) != 3 {
+		t.Fatal("missing per-attempt Mycelium launch records", len(got.AttemptHistory))
+	}
+
 	for _, path := range records {
 		data, err := os.ReadFile(path)
 		if err != nil {

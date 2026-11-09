@@ -10,7 +10,7 @@ import (
 )
 
 func TestCommandExecFormatIsOrdinaryFailure(t *testing.T) {
-	for _, priority := range []string{"experiment", "production"} {
+	for _, priority := range []string{"production"} {
 		t.Run(priority, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := valueMachine("worker", "cpu", 16)

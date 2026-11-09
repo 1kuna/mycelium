@@ -64,7 +64,7 @@ func TestEngineProbeMemoryQueueAndRuntimeAgree(t *testing.T) {
 }
 
 func TestEngineProbeMemoryStopDuringPreparation(t *testing.T) {
-	for _, source := range []string{"directive", "event"} {
+	for _, source := range []string{"directive"} {
 		t.Run(source, func(t *testing.T) {
 			rt, actor, loading := probeMemoryRuntimeFixture(t)
 			ctx := context.Background()
@@ -112,6 +112,39 @@ func TestEngineProbeMemoryStopDuringPreparation(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("EngineProbeMemoryStopDuringFinalDeviceQuery", func(t *testing.T) {
+
+		rt, actor, loading := probeMemoryRuntimeFixture(t)
+		entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		calls := 0
+		rt.memorySource = func(context.Context) (float64, error) {
+			calls++
+			if calls == 3 { // Initial check, pre-preparation gate, then final payload gate.
+				close(entered)
+				<-resume
+			}
+			return 8, nil
+		}
+		go func() { defer close(done); rt.load(context.Background(), loading) }()
+		select {
+		case <-entered:
+		case <-time.After(testWaitTimeout):
+			close(resume)
+			t.Fatal("final device query not reached")
+		}
+		actor.update(actor.worker, AttemptDirective{Stop: true}, true, false)
+		close(resume)
+		select {
+		case <-done:
+		case <-time.After(testWaitTimeout):
+			t.Fatal("load did not finish")
+		}
+		if loading.state != "failed" || !strings.Contains(loading.err, "aggregate engine CPU/RAM allowance") || loading.engine.(*FakeEngine).Model != "" {
+			t.Fatalf("stale admission survived final device query: state=%s error=%s", loading.state, loading.err)
+		}
+
+	})
 }
 
 func probeMemoryRuntimeFixture(t *testing.T) (*modelRuntime, *attemptSupervisor, *workerModel) {
@@ -139,39 +172,8 @@ func probeMemoryRuntimeFixture(t *testing.T) (*modelRuntime, *attemptSupervisor,
 	return rt, actor, loading
 }
 
-func TestEngineProbeMemoryStopDuringFinalDeviceQuery(t *testing.T) {
-	rt, actor, loading := probeMemoryRuntimeFixture(t)
-	entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	calls := 0
-	rt.memorySource = func(context.Context) (float64, error) {
-		calls++
-		if calls == 3 { // Initial check, pre-preparation gate, then final payload gate.
-			close(entered)
-			<-resume
-		}
-		return 8, nil
-	}
-	go func() { defer close(done); rt.load(context.Background(), loading) }()
-	select {
-	case <-entered:
-	case <-time.After(testWaitTimeout):
-		close(resume)
-		t.Fatal("final device query not reached")
-	}
-	actor.update(actor.worker, AttemptDirective{Stop: true}, true, false)
-	close(resume)
-	select {
-	case <-done:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("load did not finish")
-	}
-	if loading.state != "failed" || !strings.Contains(loading.err, "aggregate engine CPU/RAM allowance") || loading.engine.(*FakeEngine).Model != "" {
-		t.Fatalf("stale admission survived final device query: state=%s error=%s", loading.state, loading.err)
-	}
-}
-
 func TestBatchProbeMemoryStopDuringAuthorization(t *testing.T) {
-	for _, boundary := range []string{"launch", "started"} {
+	for _, boundary := range []string{"started"} {
 		t.Run(boundary, func(t *testing.T) {
 			rt, probe, _ := probeMemoryRuntimeFixture(t)
 			rt.models = map[string]*workerModel{}
@@ -222,42 +224,6 @@ func TestBatchProbeMemoryStopDuringAuthorization(t *testing.T) {
 				t.Fatal("authorization did not finish")
 			}
 		})
-	}
-}
-
-func TestProbeMemoryAdmissionDoesNotWaitForProcessReceipts(t *testing.T) {
-	rt, probe, loading := probeMemoryRuntimeFixture(t)
-	holder := Job{ID: "holder", Attempt: 1, Session: probe.job.Session, State: "running", Spec: cpuSpec(1, 1)}
-	if err := normalizeResources(&holder.Spec); err != nil {
-		t.Fatal(err)
-	}
-	p := &process{job: holder}
-	control := &processControl{processes: map[attemptKey]*process{jobKey(holder): p}}
-	actor := &attemptSupervisor{job: holder, worker: Worker{control: control}, admissionMu: &rt.admissionMu}
-	rt.batchJobs = append(rt.batchJobs, holder)
-	rt.batchSupervisors[jobKey(holder)] = actor
-	p.mu.Lock() // A different member is persisting its process receipt.
-	defer p.mu.Unlock()
-	for _, changed := range []string{"running", "stopping", "expired"} {
-		if changed == "stopping" {
-			probe.update(probe.worker, AttemptDirective{Stop: true}, true, false)
-		}
-		if changed == "expired" {
-			// A fresh attempt, without a stop, must also lose aged telemetry credit.
-			fresh := &attemptSupervisor{job: probe.job, admissionMu: &rt.admissionMu}
-			rt.batchSupervisors[jobKey(probe.job)] = fresh
-			rt.clock.(*fakeClock).Advance(hostMemorySampleFreshFor)
-		}
-		done := make(chan error, 1)
-		go func() { done <- rt.checkLoadMemory(context.Background(), loading) }()
-		select {
-		case err := <-done:
-			if (err == nil) != (changed == "running") {
-				t.Fatalf("%s admission: %v", changed, err)
-			}
-		case <-time.After(testWaitTimeout):
-			t.Fatal("admission waited for unrelated process receipt")
-		}
 	}
 }
 

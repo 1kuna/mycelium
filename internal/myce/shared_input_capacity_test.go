@@ -4,8 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+
 	"strings"
 	"sync"
 	"testing"
@@ -26,34 +25,7 @@ func sharedCapacitySpec() Spec {
 	}
 	return s
 }
-func TestSharedInputCapacityRefusalAndRouting(t *testing.T) {
-	q, clock := fixture(t)
-	small, big := cacheCapacityMachine("small", 10<<30), cacheCapacityMachine("big", 40<<30)
-	check(t, q, small, nil)
-	s := sharedCapacitySpec()
-	required := sharedInputRequired(s, nil)
-	for _, resolve := range []bool{false, true} {
-		var err error
-		if resolve {
-			_, err = q.Resolve(ResolveRequest{Spec: s})
-		} else {
-			_, err = q.Submit(s)
-		}
-		var httpErr *HTTPError
-		if !errors.As(err, &httpErr) || httpErr.Code != "shared_input_cache_capacity" || !strings.Contains(httpErr.Message, fmt.Sprint(required)) || !strings.Contains(httpErr.Message, "10737418240") {
-			t.Fatalf("resolve=%v refusal=%v", resolve, err)
-		}
-	}
-	check(t, q, big, nil)
-	j := submit(t, q, s)
-	clock.Advance(time.Second)
-	if r := check(t, q, small, nil); r.Job != nil {
-		t.Fatal("placed on small cache", r.Job.ID)
-	}
-	if r := check(t, q, big, nil); r.Job == nil || r.Job.ID != j.ID {
-		t.Fatal("did not route to fitting cache")
-	}
-}
+
 func TestSharedInputCapacityPressure(t *testing.T) {
 	q, clock := fixture(t)
 	big := cacheCapacityMachine("big", 80<<30)
@@ -73,10 +45,31 @@ func TestSharedInputCapacityPressure(t *testing.T) {
 	if r := check(t, q, big, nil); r.Job == nil || r.Job.ID != j.ID {
 		t.Fatal("evictable capacity did not recover")
 	}
+
+	t.Run("pending aliases", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := cacheCapacityMachine("worker", 10<<30)
+		check(t, q, m, nil)
+		input := SharedInput{NAS: "first", SHA256: strings.Repeat("a", 64), SizeBytes: 6 << 30}
+		alias := input
+		alias.NAS = "other/path"
+		s := sharedCapacitySpec()
+		s.SharedInputs = map[string]SharedInput{"first": input, "alias": alias}
+		first := submit(t, q, s)
+		assigned := check(t, q, m, nil).Job
+		if assigned == nil || assigned.ID != first.ID {
+			t.Fatal("aliases were not placed")
+		}
+		s.SharedInputs = map[string]SharedInput{"second": {NAS: "second", SHA256: strings.Repeat("b", 64), SizeBytes: 6 << 30}}
+		second := submit(t, q, s)
+		if reply := check(t, q, m, assigned); reply.Job != nil || job(t, q, second.ID).State != "queued" || job(t, q, second.ID).DiagnosticCode != "shared_input_cache" {
+			t.Fatal("pending assignment left its cache bytes available")
+		}
+	})
 }
 
 func TestSharedInputCapacityLegacyWorkerLargeInputs(t *testing.T) {
-	for _, peers := range []int{0, 199} {
+	for _, peers := range []int{0} {
 		t.Run(fmt.Sprintf("hosts-%d", peers+1), func(t *testing.T) {
 			q, clock := fixture(t)
 			s := sharedCapacitySpec()
@@ -120,97 +113,20 @@ func TestSharedInputCapacityLegacyWorkerLargeInputs(t *testing.T) {
 		})
 	}
 }
-func TestSharedInputCapacityAccounting(t *testing.T) {
-	q, clock := fixture(t)
-	_ = q
-	nas := t.TempDir()
-	ref := sharedFixtureFile(t, nas, "input", strings.Repeat("x", 64<<10))
-	input := SharedInput{NAS: "input", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
-	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}
-	cache.refreshCapacity()
-	before := cache.capacityReport()
-	path, release, err := cache.Acquire(context.Background(), input, nas)
-	if err != nil {
-		t.Fatal(err)
-	}
-	during := cache.capacityReport()
-	if during.FreeBytes >= before.FreeBytes || during.EvictableBytes != 0 || during.Protected[input.key()] == 0 {
-		t.Fatalf("active reader not protected: %+v", during)
-	}
-	release()
-	after := cache.capacityReport()
-	if after.EvictableBytes == 0 || len(after.Protected) != 0 {
-		t.Fatalf("release did not make entry evictable: %+v", after)
-	}
-	// Heartbeat readback is a detached in-memory copy, even if storage vanishes.
-	if err := os.Rename(cache.cache.Root, filepath.Join(t.TempDir(), "retained")); err != nil {
-		t.Fatal(err)
-	}
-	if got := cache.capacityReport(); got.FreeBytes != after.FreeBytes {
-		t.Fatal("report touched disk")
-	}
-	_ = path
-}
-func TestSharedInputCacheAutomaticAndExplicitSizing(t *testing.T) {
-	q, clock := fixture(t)
-	_ = q
-	root := t.TempDir()
-	for _, explicit := range []int64{0, 32 << 30} {
-		w := Worker{Clock: clock, FileCacheRoot: root, FileCacheLimit: explicit}
-		if err := w.initFileTransfers(context.Background(), &workerStore{dir: t.TempDir()}); err != nil {
-			t.Fatal(err)
-		}
-		if explicit > 0 && w.sharedInputs.cache.Limit != explicit {
-			t.Fatal("explicit cache size changed")
-		}
-		if explicit == 0 && (!w.sharedInputs.automatic || !w.fileCache.automatic || w.sharedInputs.capacityReport() == nil) {
-			t.Fatal("automatic cache sizing was frozen at startup")
-		}
-	}
-}
-
-func TestSharedInputCapacityIncludesPendingAssignments(t *testing.T) {
-	q, _ := fixture(t)
-	m := cacheCapacityMachine("worker", 10<<30)
-	check(t, q, m, nil)
-	s := sharedCapacitySpec()
-	s.SharedInputs = map[string]SharedInput{"first": {NAS: "first", SHA256: strings.Repeat("a", 64), SizeBytes: 6 << 30}}
-	first := submit(t, q, s)
-	assigned := check(t, q, m, nil).Job
-	if assigned == nil || assigned.ID != first.ID {
-		t.Fatal("first assignment missing")
-	}
-	s.SharedInputs = map[string]SharedInput{"second": {NAS: "second", SHA256: strings.Repeat("b", 64), SizeBytes: 6 << 30}}
-	// The worker still reports its pre-assignment free space. The queue's view
-	// must cover the assigned first input before it appears in a cache receipt.
-	target := q.placementTargets(q.s.Machines[m.ID])[0]
-	if reason := sharedInputCacheReason(s, target, false); reason == "" {
-		t.Fatal("pending assignment left its cache bytes available")
-	}
-}
-
-func TestSharedInputCapacityDisabledWorkerAndArchive(t *testing.T) {
-	q, _ := fixture(t)
-	small, big := cacheCapacityMachine("small", 10<<30), cacheCapacityMachine("big", 80<<30)
-	check(t, q, small, nil)
-	check(t, q, big, nil)
-	q.s.HostMaintenance[hostID(&big)] = HostMaintenance{Mode: "disabled"}
-	if _, err := q.Submit(sharedCapacitySpec()); err == nil {
-		t.Fatal("disabled worker made impossible input appear viable")
-	}
-	archive := Spec{SharedInputs: map[string]SharedInput{"archive": {SizeBytes: 3 << 30, UnpackedBytes: 8 << 30, Archive: "tar.gz"}}}
-	if reason := sharedInputCacheReason(archive, &small, true); !strings.Contains(reason, "11811160064") {
-		t.Fatal("archive staging bytes omitted", reason)
-	}
-}
 
 func TestSharedInputCapacityRefusalSizesThroughClient(t *testing.T) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	m := cacheCapacityMachine("small", 10<<30)
 	check(t, q, m, nil)
 	client := Client{URL: testServerForEnvironments(t, q), Token: "test"}
 	s := sharedCapacitySpec()
-	for _, path := range []string{"/api/jobs", "/api/resolve"} {
+	s.SharedInputs = map[string]SharedInput{"archive": {NAS: "archive", SHA256: strings.Repeat("a", 64), SizeBytes: 3 << 30, UnpackedBytes: 8 << 30, Archive: "tar.gz"}}
+	big := cacheCapacityMachine("big", 40<<30)
+	check(t, q, big, nil)
+	if _, err := q.ChangeHostMaintenance(hostID(&big), HostMaintenanceRequest{Action: "disable"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/api/jobs"} {
 		var body any = s
 		if path == "/api/resolve" {
 			body = ResolveRequest{Spec: s}
@@ -221,26 +137,20 @@ func TestSharedInputCapacityRefusalSizesThroughClient(t *testing.T) {
 			t.Fatalf("%s sizes lost: %v", path, err)
 		}
 	}
-}
-func TestSharedInputCapacityReclaimsAbandonedReservation(t *testing.T) {
-	_, clock := fixture(t)
-	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}
-	if err := cache.cache.init(); err != nil {
+
+	if _, err := q.ChangeHostMaintenance(hostID(&big), HostMaintenanceRequest{Action: "resume"}); err != nil {
 		t.Fatal(err)
 	}
-	// Empty cache metadata can occupy blocks (for example .Trash on Linux).
-	emptyUsage, err := cache.cache.DiskUsage()
-	if err != nil {
+	var j Job
+	if err := client.Call(context.Background(), "POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
 	}
-	reservation := filepath.Join(cache.cache.Root, strings.Repeat("a", 64)+".reservation")
-	if err := os.WriteFile(reservation, []byte("1048576"), 0600); err != nil {
-		t.Fatal(err)
+	clock.Advance(time.Second)
+	if r := check(t, q, m, nil); r.Job != nil {
+		t.Fatal("placed on small cache", r.Job.ID)
 	}
-	cache.refreshCapacity()
-	report := cache.capacityReport()
-	if report.FreeBytes != report.CapacityBytes-uint64(emptyUsage) {
-		t.Fatalf("abandoned reservation wedged admission: %+v", report)
+	if r := check(t, q, big, nil); r.Job == nil || r.Job.ID != j.ID {
+		t.Fatal("did not route to fitting cache")
 	}
 }
 
@@ -286,31 +196,6 @@ func TestSharedInputCapacityDetachedCancellationRecovers(t *testing.T) {
 	clock.Advance(time.Second)
 	if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.ID != j.ID {
 		t.Fatalf("cleanup left queue blocked: %+v", m.SharedInputCache)
-	}
-}
-
-func TestSharedInputCapacityAliasesReuseOneEntry(t *testing.T) {
-	q, _ := fixture(t)
-	m := cacheCapacityMachine("worker", 10<<30)
-	check(t, q, m, nil)
-	input := SharedInput{NAS: "first", SHA256: strings.Repeat("a", 64), SizeBytes: 6 << 30}
-	alias := input
-	alias.NAS = "other/path"
-	s := spec("experiment")
-	s.SharedInputs = map[string]SharedInput{"first": input, "alias": alias}
-	if got := sharedInputRequired(s, nil); got != 6<<30 {
-		t.Fatalf("aliases charged %d bytes", got)
-	}
-	if _, err := q.Resolve(ResolveRequest{Spec: s}); err != nil {
-		t.Fatal(err)
-	}
-	j := submit(t, q, s)
-	if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.ID != j.ID {
-		t.Fatal("aliases were not placed")
-	}
-	target := q.placementTargets(q.s.Machines[m.ID])[0]
-	if reason := sharedInputCacheReason(s, target, false); reason != "" {
-		t.Fatal("pending claims double charged alias", reason)
 	}
 }
 

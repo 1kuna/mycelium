@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
+
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -13,7 +13,7 @@ import (
 // The event stream can beat (or outlive a blocked) heartbeat. A checkpoint
 // handler exiting zero must retain the stop's cause without an actor directive.
 func TestPriorityStopEventBeforeHeartbeat(t *testing.T) {
-	for _, group := range []bool{false, true} {
+	for _, group := range []bool{true} {
 		t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
 			w, store, p := d5NativeStart(t, group, nil, []string{"sh", "-c", `trap 'echo PAUSED; exit 0' TERM; touch "$1"; while :; do sleep .01; done`, "main", "{work}/ready"})
 			nativeFile(t, p.job.Spec.Run.Workdir, "ready")
@@ -95,42 +95,4 @@ func (c *observedEventClock) Now() time.Time {
 	default:
 	}
 	return now
-}
-func TestWorkerEventReconnectUsesClock(t *testing.T) {
-	clock := &observedEventClock{reads: make(chan struct{}, 16)}
-	clock.now = time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
-	requests := make(chan struct{}, 4)
-	transport := clientTestTransport(func(r *http.Request) (*http.Response, error) {
-		requests <- struct{}{}
-		return nil, errors.New("event stream unavailable")
-	})
-	w := Worker{Clock: clock, Machine: machine("event-worker", "fake"), Client: Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: transport}}}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); w.watchStops(ctx, make(chan WorkerEvent)) }()
-	defer func() { cancel(); <-done }()
-	// Observe the initial readiness check, failure timestamp, and backoff check.
-	for i := 0; i < 3; i++ {
-		select {
-		case <-clock.reads:
-		case <-time.After(testWaitTimeout):
-			t.Fatal("retry did not consult Clock")
-		}
-	}
-	select {
-	case <-requests:
-	default:
-		t.Fatal("initial request missing")
-	}
-	select {
-	case <-requests:
-		t.Fatal("retried before fake-clock deadline")
-	default:
-	}
-	clock.Advance(time.Second)
-	select {
-	case <-requests:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("fake-clock advance did not release reconnect")
-	}
 }

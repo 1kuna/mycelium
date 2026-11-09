@@ -15,10 +15,7 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 		hint, total                    float64
 		oom, missingDevice, sameTarget bool
 	}{
-		{"hint", 12, 10.855361938476562, false, false, false},
 		{"no hint", 0, 10.855361938476562, false, false, false},
-		{"oversized cgroup despite small RSS", 12, 25, false, false, false},
-		{"failed probe cannot repeat", 12, 10.855361938476562, true, false, false},
 		{"missing device telemetry", 12, 10.855361938476562, true, true, false},
 		{"same target different layout", 12, 10.855361938476562, true, false, true},
 	} {

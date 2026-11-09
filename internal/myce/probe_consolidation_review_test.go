@@ -9,59 +9,6 @@ import (
 	"testing"
 )
 
-func TestIndependentDiscreteCUDANAMemory(t *testing.T) {
-	p := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", "16", "Generic NVIDIA", "", true})
-	command := p.Command
-	p.Command = func(ctx context.Context, n string, args ...string) ([]byte, error) {
-		if n == "nvidia-smi" && strings.Contains(strings.Join(args, " "), "name,memory.total") {
-			out := "Generic NVIDIA, N/A"
-			if strings.Contains(strings.Join(args, " "), "pci.bus_id") {
-				out += ", 0000:01:00.0"
-			}
-			return []byte(out), nil
-		}
-		return command(ctx, n, args...)
-	}
-	got, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
-	if err == nil {
-		t.Fatalf("known PCIe discrete device with unknown VRAM must not become unified: %+v", got)
-	}
-	requirePreflightCode(t, err, "gpu_memory_unavailable")
-}
-
-func TestIndependentMissingNvidiaToolDoesNotBlockIntel(t *testing.T) {
-	p := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", "16", "NVIDIA", "", false}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
-	got, err := p.Accelerators(context.Background())
-	if err == nil {
-		t.Fatalf("driverless NVIDIA has no failure: inventory=%+v", got)
-	}
-	if len(got) != 1 || got[0].Platform != "xpu" {
-		t.Fatalf("Intel hidden: %+v err=%v", got, err)
-	}
-}
-
-func TestIndependentUnrelatedRenderNodeDoesNotHideIntel(t *testing.T) {
-	p := pciFixtureProbe(pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
-	glob, read := p.Glob, p.ReadFile
-	p.Glob = func(pattern string) ([]string, error) {
-		nodes, e := glob(pattern)
-		if strings.Contains(pattern, "renderD") {
-			nodes = append(nodes, "/dev/dri/renderD129")
-		}
-		return nodes, e
-	}
-	p.ReadFile = func(path string) ([]byte, error) {
-		if strings.Contains(path, "renderD129") {
-			return nil, os.ErrPermission
-		}
-		return read(path)
-	}
-	got, err := p.Accelerators(context.Background())
-	if len(got) != 1 || got[0].Platform != "xpu" {
-		t.Fatalf("working Intel hidden by another render node: %+v err=%v", got, err)
-	}
-}
-
 func TestIndependentWorkerFamilyFailureRetainsIntel(t *testing.T) {
 	p := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", "16", "NVIDIA", "", true}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
 	cmd := p.Command

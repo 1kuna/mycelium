@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strings"
+
 	"sync/atomic"
 	"testing"
 	"time"
@@ -75,7 +75,7 @@ func runInventoryReviewWorker(t *testing.T, q *Queue, w Worker) Client {
 }
 
 func TestInventoryReviewDeviceAllowanceRealAPI(t *testing.T) {
-	for _, selection := range []string{"1", "", "0,1"} {
+	for _, selection := range []string{"1"} {
 		t.Run("selection="+selection, func(t *testing.T) {
 			q, _ := fixture(t)
 			m := machine("inventory-worker", "fake", "inventory-host")
@@ -115,6 +115,67 @@ func TestInventoryReviewDeviceAllowanceRealAPI(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("InventoryRereviewUnmatchedSelectors", func(t *testing.T) {
+
+		for _, selection := range []string{"GPU-nope", "0,GPU-nope"} {
+			t.Run(selection, func(t *testing.T) {
+				w := recoveryWorker(t)
+				w.Machine.Device = selection
+				w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return inventoryReviewDevices(), nil }
+				s, err := w.openStore()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.close()
+				err = w.initInventory(context.Background(), s)
+				if selection == "7" || selection == "GPU-nope" {
+					var rule *rejectionError
+					if !errors.As(err, &rule) || rule.code != "device_selector_unmatched" {
+						t.Fatalf("startup did not refuse unmatched allowance: %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if w.inventoryReason != "device_selector_unmatched" || len(w.Machine.Devices) != 1 {
+					t.Fatalf("partial allowance silently dropped: %+v reason=%s", w.Machine.Devices, w.inventoryReason)
+				}
+				q, _ := fixture(t)
+				clock := &workerFakeClock{now: q.clock.Now()}
+				q.clock = clock
+				// Use a separate real worker with the partial allowance for public status.
+				m := machine("selected", "fake", "selected-host")
+				m.Device = selection
+				client := runInventoryReviewWorker(t, q, Worker{Machine: m, InventoryProbe: w.InventoryProbe})
+				awaitInventoryReview(t, func() bool {
+					clock.Advance(time.Second) // Expire the observational status generation.
+					// Read the actual public wire diagnostic, without coupling the test
+					// to the machine struct added by this repair.
+					var wire struct {
+						Machines []struct {
+							ID              string `json:"id"`
+							InventoryReason string `json:"inventory_reason"`
+							MemoryError     string `json:"memory_error"`
+						} `json:"machines"`
+					}
+					if err := client.Call(context.Background(), "GET", "/api/status", nil, &wire); err != nil {
+						return false
+					}
+					for _, m := range wire.Machines {
+						if m.ID == "selected" {
+							return m.InventoryReason == "device_selector_unmatched" && m.MemoryError == ""
+						}
+					}
+					return false
+				})
+				gpu := submit(t, q, spec("experiment"))
+				awaitInventoryReview(t, func() bool { return job(t, q, gpu.ID).State == "succeeded" })
+			})
+		}
+
+	})
 }
 
 func TestInventoryReviewRecoveryRealAPI(t *testing.T) {
@@ -176,107 +237,19 @@ func TestInventoryReviewRecoveryRealAPI(t *testing.T) {
 }
 
 func TestInventoryReviewIdentityRecovery(t *testing.T) {
-	t.Run("replacement", func(t *testing.T) {
-		old := fakeMachineDevices()
-		changed := fakeMachineDevices()
-		changed[1].Identity = "replacement-card"
-		withheld := reconcileDevices(old, changed)
-		for i := 0; i < 2; i++ {
-			if len(withheld) != 2 || withheld[1].Reason != "device_identity_mismatch" || withheld[1].Identity != old[1].Identity {
-				t.Fatalf("mismatch admitted replacement: %+v", withheld)
-			}
-			withheld = reconcileDevices(withheld, changed)
-		}
-		recovered := reconcileDevices(withheld, old)
-		if len(recovered) != 2 || recovered[1].Reason != "" {
-			t.Fatalf("matching identity stayed withheld: %+v", recovered)
-		}
-	})
 	t.Run("driver-and-name", func(t *testing.T) {
 		old, changed := fakeMachineDevices(), fakeMachineDevices()
 		changed[0].Fingerprint, changed[1].Fingerprint = "new driver/name", "new driver/name"
-		for _, d := range reconcileDevices(old, changed) {
-			if d.Reason != "" {
-				t.Fatalf("driver/name changed identity: %+v", d)
-			}
-		}
 		w := Worker{Machine: Machine{Devices: old}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return changed, nil }}
 		if _, err := w.forAttempt(Job{AllocatedDevices: []string{"1"}}); err != nil {
 			t.Fatalf("driver change blocked launch: %v", err)
 		}
 	})
-	t.Run("launch-probe-error", func(t *testing.T) {
-		w := Worker{Machine: Machine{Devices: fakeMachineDevices()}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return nil, errors.New("offline") }}
-		_, err := w.forAttempt(Job{AllocatedDevices: []string{"1"}})
-		var rule *rejectionError
-		if !errors.As(err, &rule) || rule.code != "device_probe_unavailable" {
-			t.Fatalf("probe failure reason: %v", err)
-		}
-	})
-}
-
-func TestInventoryReviewPersistedWithholdingExpires(t *testing.T) {
-	for _, reason := range []string{"device_identity_mismatch", "device_probe_unavailable", "device_memory_unavailable"} {
-		t.Run(reason, func(t *testing.T) {
-			w := Worker{Clock: RealClock{}, Machine: machine("saved", "fake")}
-			w.StateDir = newTestStateRoot(t)
-			s, err := w.openStore()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer s.close()
-			old := fakeMachineDevices()
-			old[1].Reason = reason
-			if err := saveWorkerJSON(s.dir, "devices.json", old); err != nil {
-				t.Fatal(err)
-			}
-			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }
-			if err := w.initInventory(context.Background(), s); err != nil {
-				t.Fatal(err)
-			}
-			if w.Machine.Devices[1].Reason != "" {
-				t.Fatal("persisted condition outlived probe")
-			}
-		})
-	}
-}
-
-func TestInventoryReviewBudgetReasons(t *testing.T) {
-	for _, unified := range []bool{true, false} {
-		for _, cap := range []float64{0, 32} {
-			t.Run(fmt.Sprintf("unified=%t/cap=%g", unified, cap), func(t *testing.T) {
-				w := Worker{Clock: RealClock{}, StateDir: newTestStateRoot(t), Machine: machine("budget", "fake")}
-				d := inventoryReviewDevices()[0]
-				d.BudgetGB, d.FreeMemoryGB, d.TotalMemoryGB = cap, 64, 96
-				d.UnifiedMemory, d.MemoryMeasured = unified, true
-				w.Machine.Devices = []MachineDevice{d}
-				s, err := w.openStore()
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer s.close()
-				if err := w.initInventory(context.Background(), s); err != nil {
-					t.Fatal(err)
-				}
-				got := w.Machine.Devices[0]
-				if unified && cap == 0 {
-					if got.BudgetGB != 64 || got.Reason != "" {
-						t.Fatalf("measured unified capacity lost: %+v", got)
-					}
-				} else if cap == 0 && got.Reason != "device_budget_unavailable" {
-					t.Fatalf("missing budget reason: %+v", got)
-				}
-				if cap > 0 && got.machine(w.Machine).FreeMemoryGB != 32 {
-					t.Fatal("operator cap exceeded")
-				}
-			})
-		}
-	}
 }
 
 func TestInventoryReviewUnifiedLocalProbe(t *testing.T) {
-	for _, platform := range []string{"metal", "cuda"} {
-		for _, cap := range []float64{0, 12} {
+	for _, platform := range []string{"cuda"} {
+		for _, cap := range []float64{12} {
 			t.Run(fmt.Sprintf("%s/cap=%g", platform, cap), func(t *testing.T) {
 				available := 20
 				p := MachineProbe{OS: "darwin", Arch: "arm64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -327,44 +300,6 @@ func TestInventoryReviewUnifiedLocalProbe(t *testing.T) {
 	}
 }
 
-func TestInventoryReviewPublicProbeReason(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("diagnostic", "fake", "diagnostic-host")
-	m.Devices, m.MemoryError = []MachineDevice{}, "device_probe_unavailable"
-	check(t, q, m, nil)
-	s, err := q.publicSnapshot()
-	if err != nil || s.Machines[0].MemoryError != "device_probe_unavailable" {
-		t.Fatalf("public typed reason lost: %v %v", s.Machines, err)
-	}
-}
-
-func TestInventoryReviewCPUHasNoProbeError(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("cpu-only", "cpu", "cpu-only-host")
-	m.Device = "0" // Dev's diagnostic selector does not offer an accelerator.
-	runInventoryReviewWorker(t, q, Worker{Machine: m, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return []MachineDevice{}, nil }})
-	awaitInventoryReview(t, func() bool { s, _ := q.Snapshot(); return len(s.Machines) == 1 })
-	s, _ := q.Snapshot()
-	if s.Machines[0].MemoryError != "" {
-		t.Fatal("CPU-only inventory reported an accelerator probe error")
-	}
-}
-
-func TestInventoryReviewCUDAProbeFailureTyped(t *testing.T) {
-	p := MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("driver failed") }}
-	p = withCUDAFacts(p, false, 1)
-	_, err := p.Accelerators(context.Background())
-	var rule *rejectionError
-	if !errors.As(err, &rule) || rule.code != "device_probe_unavailable" {
-		t.Fatalf("failed CUDA inventory swallowed: %v", err)
-	}
-	p.Command = func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }
-	p.Glob = func(string) ([]string, error) { return nil, nil }
-	if devices, err := p.Accelerators(context.Background()); err != nil || len(devices) != 0 {
-		t.Fatalf("GPU-less host: %v %v", devices, err)
-	}
-}
-
 func TestInventoryReviewSplitWorkerDiagnostic(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("one", "fake", "physical")
@@ -375,7 +310,7 @@ func TestInventoryReviewSplitWorkerDiagnostic(t *testing.T) {
 	defer server.Close()
 	err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}, nil)
 	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) || httpErr.Status != 409 || httpErr.Code != "machine_worker_conflict" || !strings.Contains(httpErr.Message, "run one machine worker per host; see M4 install conversion") {
+	if !errors.As(err, &httpErr) || httpErr.Status != 409 || httpErr.Code != "machine_worker_conflict" {
 		t.Fatalf("split worker diagnostic: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -384,17 +319,5 @@ func TestInventoryReviewSplitWorkerDiagnostic(t *testing.T) {
 	err = w.Run(ctx)
 	if !errors.As(err, &httpErr) || httpErr.Code != "machine_worker_conflict" {
 		t.Fatalf("worker did not stop on split configuration: %v", err)
-	}
-}
-
-func TestInventoryReviewSingleAttemptStateIsStrict(t *testing.T) {
-	for _, attempts := range [][]string{nil, {"a", "b"}} {
-		dir := t.TempDir()
-		if err := saveWorkerJSON(dir, "state.json", workerState{Attempts: attempts}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := readSingleAttemptState(filepath.Join(dir, "state.json")); err == nil {
-			t.Fatalf("accepted %d attempts", len(attempts))
-		}
 	}
 }

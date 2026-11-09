@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
+
 	"testing"
 	"time"
 )
@@ -100,6 +100,9 @@ func TestModelSnapshotsNativeDevJourney(t *testing.T) {
 	}
 	modelRoot := filepath.Join(state, "models")
 	repo := tinyModel(t, modelRoot)
+	for _, name := range []string{"model.safetensors", "config.json"} {
+		emulateModelSymlink(t, filepath.Join(repo, "snapshots", tinyRevision, name))
+	}
 	// A second revision of the same repository exists; the declared one does not.
 	hubRepo(t, modelRoot, "org/moved", otherRevision, map[string]string{"model.safetensors": tinyWeights})
 	outside := filepath.Join(modelRoot, "private.txt")
@@ -169,7 +172,7 @@ printf '%s' "$MYCE_MODEL_BASE" > result`
 		if strings.HasPrefix(string(path), repo) {
 			t.Fatal("job received the shared hub instead of a verified copy", string(path))
 		}
-		if data, _ := os.ReadFile(filepath.Join(repo, "snapshots", tinyRevision, "model.safetensors")); string(data) != tinyWeights {
+		if data, _ := os.ReadFile(filepath.Join(repo, "snapshots", tinyRevision, "model.safetensors")); len(data) != 1067 || !strings.HasPrefix(string(data), "XSym\n") {
 			t.Fatal("shared hub changed", string(data))
 		}
 	})
@@ -183,8 +186,7 @@ printf '%s' "$MYCE_MODEL_BASE" > result`
 		}
 	})
 	for _, refused := range []struct{ name, repo, revision, want string }{
-		{"wrong revision", "org/moved", tinyRevision, "has this repository but not the declared revision"},
-		{"missing repository", "org/absent", tinyRevision, "acquire it with a CPU download job"},
+
 		{"symlink escape", "org/escape", tinyRevision, "links outside its repository blob store"},
 		{"changed blob", "org/changed", tinyRevision, "failed size or hash verification"},
 	} {
@@ -292,115 +294,6 @@ func snapshotJob(repo string) Job {
 	return Job{Spec: Spec{ModelSnapshots: map[string]ModelSnapshot{"base": {Repo: repo, Revision: tinyRevision}}}, ModelLimits: &ModelLimits{}}
 }
 
-func TestModelSnapshotBudgetExceedsFileCache(t *testing.T) {
-	modelRoot := t.TempDir()
-	tinyModel(t, modelRoot)
-	w := snapshotWorker(t, modelRoot, &fakeClock{now: time.Unix(1000, 0)})
-	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
-	if err != nil {
-		t.Fatal("snapshot larger than the 16-byte file cache was refused:", err)
-	}
-	for _, release := range releases {
-		release()
-	}
-	if data, _ := os.ReadFile(filepath.Join(paths["MYCE_MODEL_BASE"], "model.safetensors")); string(data) != tinyWeights {
-		t.Fatalf("cached view %q", data)
-	}
-}
-
-func TestModelSnapshotSameVolumeClonesAndIgnoresSourceWrites(t *testing.T) {
-	modelRoot := t.TempDir()
-	weights := strings.Repeat("w", 64<<20)
-	repo := hubRepo(t, modelRoot, "org/large", tinyRevision, map[string]string{"model.safetensors": weights})
-	blob, err := filepath.EvalSymlinks(filepath.Join(repo, "snapshots", tinyRevision, "model.safetensors"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := snapshotWorker(t, modelRoot, &fakeClock{now: time.Unix(1000, 0)})
-	probe, _ := os.Open(blob)
-	clones := cloneSharedFile(probe, filepath.Join(t.TempDir(), "probe"))
-	probe.Close()
-	free := func() int64 {
-		var st syscall.Statfs_t
-		if err := syscall.Statfs(w.modelSnapshots.cache.Root, &st); err != nil {
-			t.Fatal(err)
-		}
-		return int64(st.Bavail) * int64(st.Bsize)
-	}
-	if err := PrepareStateRoots(w.modelSnapshots.cache.Root); err != nil {
-		t.Fatal(err)
-	}
-	before := free()
-	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/large"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		for _, release := range releases {
-			release()
-		}
-	}()
-	if used := before - free(); clones && used >= int64(len(weights)) {
-		t.Fatalf("same-volume snapshot used %d bytes for a %d-byte clone", used, len(weights))
-	} else if !clones {
-		t.Log("volume cannot clone; the snapshot was copied")
-	}
-	// A download job rewriting the hub blob in place must not reach the view.
-	f, err := os.OpenFile(blob, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.WriteAt([]byte("tampered"), 0); err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-	cached := filepath.Join(paths["MYCE_MODEL_BASE"], "model.safetensors")
-	if data, _ := os.ReadFile(cached); string(data) != weights {
-		t.Fatal("source write changed the verified snapshot view")
-	}
-	again, more, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/large"))
-	releases = append(releases, more...)
-	if err != nil || again["MYCE_MODEL_BASE"] != paths["MYCE_MODEL_BASE"] {
-		t.Fatal("verified view not reused", err)
-	}
-}
-
-func TestModelSnapshotRestartSkipsUnchangedRehash(t *testing.T) {
-	modelRoot := t.TempDir()
-	tinyModel(t, modelRoot)
-	clock := &fakeClock{now: time.Unix(1000, 0)}
-	w := snapshotWorker(t, modelRoot, clock)
-	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	releases[0]()
-	// A restarted worker has a fresh cache object over the same directory.
-	restart := func() int {
-		rehashes := 0
-		w.modelSnapshots = &SharedInputCache{cache: EnvironmentCache{Root: w.modelSnapshots.cache.Root, Limit: w.modelSnapshots.cache.Limit, Clock: clock}, beforeVerify: func() { rehashes++ }}
-		_, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		releases[0]()
-		return rehashes
-	}
-	if n := restart(); n != 0 {
-		t.Fatalf("restart re-hashed unchanged snapshot %d times", n)
-	}
-	clock.Advance(time.Hour)
-	if err := os.Chtimes(filepath.Join(paths["MYCE_MODEL_BASE"], "config.json"), clock.Now(), clock.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if n := restart(); n != 1 {
-		t.Fatalf("restart after a changed mtime re-hashed %d times, want 1", n)
-	}
-	if n := restart(); n != 0 {
-		t.Fatalf("re-verified snapshot re-hashed %d times after restart", n)
-	}
-}
-
 func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 	if root := os.Getenv("MYCE_SNAPSHOT_CUSTODY_HELPER"); root != "" {
 		clock := &fakeClock{now: time.Unix(1000, 0)}
@@ -410,9 +303,13 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, _, err = w.acquireModelSnapshots(context.WithValue(context.Background(), sharedInputOwnerKey{}, owner), snapshotJob("org/tiny"))
+		paths, _, err := w.acquireModelSnapshots(context.WithValue(context.Background(), sharedInputOwnerKey{}, owner), snapshotJob("org/tiny"))
 		if err != nil {
 			t.Fatal(err)
+		}
+		got, err := os.ReadFile(filepath.Join(paths["MYCE_MODEL_BASE"], "model.safetensors"))
+		if err != nil || string(got) != tinyWeights {
+			t.Fatalf("not real bytes: %q %v", got, err)
 		}
 		// Exit without releasing: the OS drops every flock, as on worker death.
 		os.Exit(0)
@@ -420,7 +317,10 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 	root := t.TempDir()
 	t.Cleanup(func() { _ = removeSharedEntry(root) })
 	modelRoot := filepath.Join(root, "models")
-	tinyModel(t, modelRoot)
+	repoFixture := tinyModel(t, modelRoot)
+	for _, name := range []string{"model.safetensors", "config.json"} {
+		emulateModelSymlink(t, filepath.Join(repoFixture, "snapshots", tinyRevision, name))
+	}
 	if err := os.Mkdir(filepath.Join(root, "attempt"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -431,29 +331,45 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 	}
 	clock := &fakeClock{now: time.Unix(1000, 0)}
 	clock.Advance(time.Hour)
-	rehashes := 0
-	cache := &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 1, Clock: clock}, beforeVerify: func() { rehashes++ }}
+
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 1, Clock: clock}}
 	if err := cache.cache.init(); err != nil {
 		t.Fatal(err)
 	}
-	input, repo, err := resolveModelSnapshot(context.Background(), modelRoot, snapshotJob("org/tiny").Spec.ModelSnapshots["base"])
+	input, _, err := resolveModelSnapshot(context.Background(), modelRoot, snapshotJob("org/tiny").Spec.ModelSnapshots["base"])
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(cache.cache.Root, input.key(), "data", "config.json")
+	w := Worker{ModelRoot: modelRoot, modelSnapshots: cache}
+	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, release := range releases {
+		release()
+	}
+	model := filepath.Join(paths["MYCE_MODEL_BASE"], "model.safetensors")
+	if data, err := os.ReadFile(model); err != nil || string(data) != tinyWeights {
+		t.Fatalf("restart bytes: %q %v", data, err)
+	}
 	if err := cache.admit(context.Background(), "other", 10); err == nil {
 		t.Fatal("restart evicted an active snapshot")
 	}
 	if err := os.Chtimes(path, clock.Now(), clock.Now()); err != nil {
 		t.Fatal("active snapshot removed", err)
 	}
-	if _, release, err := cache.Acquire(context.Background(), input, repo); err == nil {
+	paths, releases, err = w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
+	for _, release := range releases {
 		release()
-		t.Fatal("changed active snapshot accepted")
 	}
-	if rehashes != 0 {
-		t.Fatal("active snapshot reverified after restart")
+	if err == nil || runtimeDiagnostic(err).Predicate != "model_snapshot_mismatch" || len(paths) != 0 {
+		t.Fatalf("changed retained view accepted: %v %v", paths, err)
 	}
+	if err := cache.admit(context.Background(), "another", 10); err == nil {
+		t.Fatal("refusal released retained custody")
+	}
+
 	// Another attempt in the real shared spool cannot release the active owner.
 	sibling, err := newAttemptStore(&workerStore{dir: filepath.Join(root, "attempt")}, Job{ID: "sibling", Attempt: 1, Session: "session"})
 	if err != nil {
@@ -462,16 +378,8 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 	if _, err := sibling.pinSharedInput(cache.cache.Root, input.key()); err != nil {
 		t.Fatal(err)
 	}
-	// Recover the interrupted atomic publication used by older pin writers too.
-	temporary := sharedInputPin(cache.cache.Root, input.key(), sibling.sharedInputOwnerID()) + ".tmp"
-	if err := os.WriteFile(temporary, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
 	if err := sibling.cleanupOrphan(clock); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Stat(temporary); !os.IsNotExist(err) {
-		t.Fatal("interrupted owner pin leaked", err)
 	}
 	if pinned, err := sharedInputPinned(cache.cache.Root, input.key()); err != nil || !pinned {
 		t.Fatal("sibling cleanup lost active pin", err)

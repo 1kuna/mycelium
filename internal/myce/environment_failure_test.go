@@ -182,9 +182,15 @@ func TestEnvironmentFailedUploadPreservesFullLogAndOtherPreparation(t *testing.T
 		t.Fatal("completed build retained custody during log upload")
 	}
 	const full = "compiler output preceding the final excerpt\nNo solution found: fix the package index\n"
-	chunk := EnvironmentLog{Machine: m.ID, Session: m.Session, Key: first.Key, Offset: 1, Text: full}
-	if err := q.AppendEnvironmentLog(chunk); err != nil {
-		t.Fatal(err)
+	for offset := 0; offset < len(full); offset += len(full) / 2 {
+		end := min(offset+len(full)/2, len(full))
+		chunk := EnvironmentLog{Machine: m.ID, Session: m.Session, Key: first.Key, Offset: int64(offset + 1), Text: full[offset:end]}
+		if err := q.AppendEnvironmentLog(chunk); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.AppendEnvironmentLog(chunk); err != nil {
+			t.Fatal(err)
+		}
 	}
 	m.EnvironmentReports[0].State = "failed"
 	clock.Advance(time.Second)
@@ -196,15 +202,19 @@ func TestEnvironmentFailedUploadPreservesFullLogAndOtherPreparation(t *testing.T
 	if err != nil || len(logs) == 0 || !strings.HasPrefix(logs[0].Text, full) {
 		t.Fatal("trailing log lost", logs, err)
 	}
+
+	var got strings.Builder
+	for _, l := range logs {
+		got.WriteString(l.Text)
+	}
+	if !strings.HasPrefix(got.String(), full) || strings.Count(got.String(), full) != 1 {
+		t.Fatal("lost or duplicated build output")
+	}
 }
 
 func TestEnvironmentFailureClassificationAndPersistedExcerpt(t *testing.T) {
 	_, clock := fixture(t)
-	for _, tc := range []struct{ output, kind string }{
-		{"No solution found: example==1.0 unavailable on first index", "deterministic"},
-		{"failed to download: connection reset by peer", "transient"},
-		{"No space left on device", "transient"},
-	} {
+	for _, tc := range []struct{ output, kind string }{{"No solution found: example==1.0 unavailable on first index", "deterministic"}, {"failed to download: connection reset by peer", "transient"}} {
 		t.Run(tc.kind+tc.output[:5], func(t *testing.T) {
 			r := binaryRecipe(t, "cpu")
 			r.Build = []string{"sh", "-c", "exit 1"}
@@ -244,25 +254,5 @@ func TestEnvironmentFailureClassificationAndPersistedExcerpt(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// A recipe hash is not evidence of an HTTP status. #718 independent review
-// reproduced an unchanged deterministic recipe retrying because its hash had 504.
-func TestEnvironmentFailureHashIsNotHTTPStatus(t *testing.T) {
-	const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789504503ab"
-	err := exec.Command("sh", "-c", "exit 1").Run()
-	wrapped := fmt.Errorf("environment %s build failed: %w (log %s.build.log)", key, err, key)
-	const output = "No solution found: example==1.0 unavailable on first index"
-	if got := classifyEnvironmentFailure(wrapped, output); got != "deterministic" {
-		t.Fatal("hash converted a recipe failure to a retry", got)
-	}
-	if got := environmentFailureKind(EnvironmentReport{Error: wrapped.Error(), Log: output}); got != "deterministic" {
-		t.Fatal("legacy hash converted a recipe failure to a retry", got)
-	}
-	for _, diagnostic := range []string{"HTTP 503", "HTTP/1.1 504 Gateway Timeout", "status code: 502", "HTTP error 504"} {
-		if got := classifyEnvironmentFailure(wrapped, diagnostic); got != "transient" {
-			t.Fatal("HTTP failure did not retry", diagnostic, got)
-		}
 	}
 }

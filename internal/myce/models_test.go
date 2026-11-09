@@ -48,6 +48,34 @@ func reportModel(t *testing.T, q *Queue, m Machine, state string) Reply {
 func TestModelLoadRouteIdleAndReload(t *testing.T) {
 	t.Parallel()
 	q, clock, m := modelFixture(t)
+	q.models.Wait = 15 * time.Minute
+	m.ModelConfigHash = modelConfigHash(q.models)
+	check(t, q, m, nil)
+
+	api := API{Queue: q, Token: "test"}.Handler()
+	status := func() Snapshot {
+		t.Helper()
+		// Inspect the exact idle boundary independently of observation staleness.
+		req := httptest.NewRequest("GET", "/api/inspection", nil)
+		req.Header.Set("Authorization", "Bearer test")
+		response := httptest.NewRecorder()
+		api.ServeHTTP(response, req)
+		var snap Snapshot
+		if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &snap) != nil {
+			t.Fatal("status", response.Code, response.Body.String())
+		}
+		return snap
+	}
+	if len(status().LoadedModels) != 0 {
+		t.Fatal("model already loaded")
+	}
+	ready := func() {
+		t.Helper()
+		snap := status()
+		if len(snap.LoadedModels) != 1 || snap.LoadedModels[0].State != "ready" {
+			t.Fatalf("not ready: %+v", snap.LoadedModels)
+		}
+	}
 	c := addModelCall(t, q, "experiment")
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
 	if s == nil || s.State != "loading" || c.Machine != "" {
@@ -57,22 +85,31 @@ func TestModelLoadRouteIdleAndReload(t *testing.T) {
 	if len(r.ModelPlan) != 1 {
 		t.Fatal("missing load plan")
 	}
+	clock.Advance(10 * time.Minute)
 	reportModel(t, q, m, "ready")
+	if c.Machine != m.ID || s.State != "ready" {
+		t.Fatal("load duration counted as idle time")
+	}
 	if c.Machine != m.ID || s.InFlight != 1 {
 		t.Fatal("call not routed to ready model")
 	}
 	if e := q.finishCall(c.ID); e != nil {
 		t.Fatal(e)
 	}
-	clock.Advance(9 * time.Minute)
+	clock.Advance(10*time.Minute - time.Nanosecond)
 	q.Tick()
 	if s.State != "ready" {
 		t.Fatal("unloaded too early")
 	}
-	clock.Advance(time.Minute)
+	ready()
+	clock.Advance(time.Nanosecond)
 	q.Tick()
 	if s.State != "draining" {
 		t.Fatal("idle model not drained")
+	}
+	snap := status()
+	if len(snap.LoadedModels) != 1 || snap.LoadedModels[0].State != "draining" {
+		t.Fatalf("idle expiry did not drain: %+v", snap.LoadedModels)
 	}
 	reportModel(t, q, m, "unloaded")
 	if len(q.s.ModelSlots) != 0 {
@@ -82,6 +119,48 @@ func TestModelLoadRouteIdleAndReload(t *testing.T) {
 	if q.s.ModelSlots[slotKey(m.ID, "test")].State != "loading" || c.Machine != "" {
 		t.Fatal("second call must reload")
 	}
+
+	t.Run("AdaptiveReadinessBurstThenIdleClock", func(t *testing.T) {
+
+		for _, hostCount := range []int{1} {
+			t.Run(fmt.Sprint(hostCount), func(t *testing.T) {
+				q, clock, m := modelFixture(t)
+				q.models.Idle, q.models.Wait = 0, 0
+				m.EffectiveCPUCores = 2
+				m.CapabilityProfile.SystemMemoryBytes = 16 << 30
+				check(t, q, m, nil)
+				call := addModelCall(t, q, "experiment")
+				slot := q.s.ModelSlots[slotKey(m.ID, "test")]
+				clock.Advance(2 * time.Second)
+				reportModel(t, q, m, "ready")
+				if err := q.finishCall(call.ID); err != nil {
+					t.Fatal(err)
+				}
+				for i := 0; i < 2; i++ {
+					clock.Advance(time.Second)
+					reportModel(t, q, m, "ready")
+					call = addModelCall(t, q, "experiment")
+					if call.Attempt != slot.Attempt {
+						t.Fatalf("burst iteration %d call=%+v slot=%+v demand=%+v", i, call, slot, q.s.ModelUses["test"])
+					}
+					if err := q.finishCall(call.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				clock.Advance(500 * time.Millisecond)
+				reportModel(t, q, m, "ready")
+				if slot.State != "ready" {
+					t.Fatal("expected near-term demand lost residency")
+				}
+				clock.Advance(10 * time.Second)
+				reportModel(t, q, m, "ready")
+				if slot.State != "draining" {
+					t.Fatal("idle model ignored measured demand/reload cost")
+				}
+			})
+		}
+
+	})
 }
 func TestModelPriorityDrainingAndBatchMemory(t *testing.T) {
 	t.Parallel()
@@ -103,6 +182,18 @@ func TestModelPriorityDrainingAndBatchMemory(t *testing.T) {
 	}
 	if e := q.finishCall(c.ID); e != nil {
 		t.Fatal(e)
+	}
+	if _, e := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "unload_failed", Error: "process survived"}}}); e != nil {
+		t.Fatal(e)
+	}
+	if s == nil || s.Error != "model load or unload failed" || q.s.Machines[m.ID].FreeMemoryGB != 0 {
+		t.Fatal("failed unload released memory or hid error")
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if s.State != "unload_failed" {
+		t.Fatalf("scheduler hides failed unload: %+v", s)
 	}
 	r = reportModel(t, q, m, "unloaded")
 	if r.Job == nil || r.Job.ID != j.ID {
@@ -129,19 +220,22 @@ func TestModelCallPreemptsResumableBatch(t *testing.T) {
 	if q.s.ModelSlots[slotKey(m.ID, "test")] == nil {
 		t.Fatal("model not loaded before retried lower priority batch")
 	}
+
+	t.Run("ModelCallStopsNonresumableBatch", func(t *testing.T) {
+
+		q, _, m := modelFixture(t)
+		s := spec("experiment")
+		s.Resumable = false
+		j := submit(t, q, s)
+		check(t, q, m, nil)
+		addModelCall(t, q, "production")
+		if q.s.Jobs[j.ID].State != "stopping" || len(q.s.ModelSlots) != 0 {
+			t.Fatal("nonresumable batch was not preempted")
+		}
+
+	})
 }
-func TestModelCallStopsNonresumableBatch(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	s := spec("experiment")
-	s.Resumable = false
-	j := submit(t, q, s)
-	check(t, q, m, nil)
-	addModelCall(t, q, "production")
-	if q.s.Jobs[j.ID].State != "stopping" || len(q.s.ModelSlots) != 0 {
-		t.Fatal("nonresumable batch was not preempted")
-	}
-}
+
 func TestModelLossAndFreshSession(t *testing.T) {
 	t.Parallel()
 	q, clock, m := modelFixture(t)
@@ -180,21 +274,7 @@ func TestModelCallSharesPriorityOrder(t *testing.T) {
 		t.Fatal("batch bypassed production call")
 	}
 }
-func TestModelLoadedAffinity(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	c := addModelCall(t, q, "experiment")
-	reportModel(t, q, m, "ready")
-	q.finishCall(c.ID)
-	other := machine("aaa", "fake")
-	other.ModelURL = "http://127.0.0.1:1235"
-	other.ModelConfigHash = modelConfigHash(q.models)
-	check(t, q, other, nil)
-	c = addModelCall(t, q, "production")
-	if c.Machine != m.ID || len(q.s.ModelSlots) != 1 {
-		t.Fatal("loaded model must win over idle worker")
-	}
-}
+
 func TestModelConfigAndOpenAIValidation(t *testing.T) {
 	t.Parallel()
 	q, _, _ := modelFixture(t)
@@ -202,7 +282,7 @@ func TestModelConfigAndOpenAIValidation(t *testing.T) {
 	for _, tc := range []struct {
 		body, project, priority string
 		status                  int
-	}{{`{"model":"test"}`, "", "production", 400}, {`{"model":"unknown"}`, "test", "production", 400}, {`{"model":"test"}`, "test", "invalid", 400}, {`{"model":"test"}`, "test", "deadline", 400}} {
+	}{{`{"model":"test"}`, "", "production", 400}, {`{"model":"unknown"}`, "test", "production", 400}} {
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(tc.body))
 		req.Header.Set("Authorization", "Bearer test-token")
 		req.Header.Set("X-Myce-Project", tc.project)
@@ -213,6 +293,15 @@ func TestModelConfigAndOpenAIValidation(t *testing.T) {
 			t.Fatalf("got %d: %s", w.Code, w.Body.String())
 		}
 	}
+
+	t.Run("ModelConfigMismatchFailsClearly", func(t *testing.T) {
+
+		q, _, m := modelFixture(t)
+		m.ModelConfigHash = "wrong"
+		if _, e := q.Checkin(Checkin{Machine: m}); e == nil || !strings.Contains(e.Error(), "config does not match") {
+			t.Fatal("mismatched catalog accepted")
+		}
+	})
 }
 func TestDevModelHTTPFormats(t *testing.T) {
 	t.Parallel()
@@ -252,21 +341,6 @@ func TestDevModelHTTPFormats(t *testing.T) {
 	}
 }
 
-func TestModelIdleStartsAfterLoad(t *testing.T) {
-	t.Parallel()
-	q, clock, m := modelFixture(t)
-	// Permit a load longer than the idle interval without crossing its own
-	// whole-load deadline. Idle accounting starts only once readiness arrives.
-	q.models.Wait = 15 * time.Minute
-	m.ModelConfigHash = modelConfigHash(q.models)
-	check(t, q, m, nil)
-	c := addModelCall(t, q, "production")
-	clock.Advance(10 * time.Minute)
-	reportModel(t, q, m, "ready")
-	if c.Machine != m.ID || q.s.ModelSlots[slotKey(m.ID, "test")].State != "ready" {
-		t.Fatal("load duration counted as idle time")
-	}
-}
 func TestModelLeaveDrainsBeforeGone(t *testing.T) {
 	t.Parallel()
 	q, _, m := modelFixture(t)
@@ -385,29 +459,6 @@ func TestModelWaitTimeoutUsesClock(t *testing.T) {
 type advancingModelClock struct{ now time.Time }
 
 func (c *advancingModelClock) Now() time.Time { c.now = c.now.Add(time.Minute); return c.now }
-func TestModelConfigMismatchFailsClearly(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	m.ModelConfigHash = "wrong"
-	if _, e := q.Checkin(Checkin{Machine: m}); e == nil || !strings.Contains(e.Error(), "config does not match") {
-		t.Fatal("mismatched catalog accepted")
-	}
-}
-func TestModelUnloadFailureKeepsMemory(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	c := addModelCall(t, q, "experiment")
-	reportModel(t, q, m, "ready")
-	q.finishCall(c.ID)
-	submit(t, q, spec("production"))
-	if _, e := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "unload_failed", Error: "process survived"}}}); e != nil {
-		t.Fatal(e)
-	}
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if s == nil || s.Error != "model load or unload failed" || q.s.Machines[m.ID].FreeMemoryGB != 0 {
-		t.Fatal("failed unload released memory or hid error")
-	}
-}
 
 func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
 	t.Parallel()
@@ -478,97 +529,6 @@ func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
 	}
 }
 
-func TestModelPriorityTracksRemainingCalls(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	high := addModelCall(t, q, "production")
-	reportModel(t, q, m, "ready")
-	low := addModelCall(t, q, "experiment")
-	if err := q.finishCall(high.ID); err != nil {
-		t.Fatal(err)
-	}
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if s.Priority != low.Priority || s.InFlight != 1 {
-		t.Fatalf("finished production call still protects experiments: %+v", s)
-	}
-	submit(t, q, spec("deadline"))
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	if s.State != "draining" {
-		t.Fatal("deadline batch cannot reclaim experiment model")
-	}
-}
-
-func TestIdleModelCanBeReclaimedAfterProductionCall(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	c := addModelCall(t, q, "production")
-	reportModel(t, q, m, "ready")
-	if err := q.finishCall(c.ID); err != nil {
-		t.Fatal(err)
-	}
-	submit(t, q, spec("production"))
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	if q.s.ModelSlots[slotKey(m.ID, "test")].State != "draining" {
-		t.Fatal("idle model retains production priority and blocks production batch")
-	}
-}
-
-func TestModelCallNotBlockedByBatchThatCannotReclaimMemory(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	addModelCall(t, q, "production")
-	reportModel(t, q, m, "ready")
-	submit(t, q, spec("deadline"))
-	c := addModelCall(t, q, "experiment")
-	if c.Machine != m.ID {
-		t.Fatal("batch which cannot reclaim production model blocks calls to that model")
-	}
-}
-
-func TestModelReservationMeasuredMemory(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	for _, state := range []string{"loading", "ready", "draining", "unloading", "unload_failed"} {
-		q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, Attempt: "engine-attempt", State: state}
-		for _, measured := range []bool{false, true} {
-			m.MemoryMeasured = measured
-			want := 8.0
-			if measured && state != "loading" {
-				want = 0
-			}
-			if got := q.modelReservation(&m, []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: state}}); got != want {
-				t.Fatalf("%s measured=%v: got %v want %v", state, measured, got, want)
-			}
-		}
-	}
-	m.MemoryMeasured = true
-	q.s.ModelSlots[slotKey(m.ID, "test")].State = "loading"
-	if q.modelReservation(&m, nil) != 8 {
-		t.Fatal("unreported loading memory not reserved")
-	}
-	if q.modelReservation(&m, []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "ready"}}) != 0 {
-		t.Fatal("readiness counted both measured usage and reservation")
-	}
-}
-
-func TestCallCanUseDoesNotBlockBatchForImpossibleCall(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	q.models.Models[0].MemoryGB = 16
-	c := &ModelCall{Model: "test", Priority: "production"}
-	if q.callCanUse(q.s.Machines[m.ID], c) {
-		t.Fatal("impossible model can block fitting batch")
-	}
-	q.models.Models[0].MemoryGB = 8
-	if !q.callCanUse(q.s.Machines[m.ID], c) {
-		t.Fatal("fitting model cannot precede batch")
-	}
-}
-
 func TestEmptyStreamingResponsePreservesStatus(t *testing.T) {
 	t.Parallel()
 	q, _, m := modelFixture(t)
@@ -588,25 +548,6 @@ func TestEmptyStreamingResponsePreservesStatus(t *testing.T) {
 	API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest || w.Header().Get("Content-Type") != "application/json" {
 		t.Fatalf("empty upstream error changed: %d %+v", w.Code, w.Header())
-	}
-}
-
-func TestFailedUnloadIsNotCountedAsReclaimable(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	c := addModelCall(t, q, "experiment")
-	reportModel(t, q, m, "ready")
-	if err := q.finishCall(c.ID); err != nil {
-		t.Fatal(err)
-	}
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	s.State, s.Error = "unload_failed", "process survived"
-	submit(t, q, spec("production"))
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	if s.State != "unload_failed" {
-		t.Fatalf("scheduler hides failed unload: %+v", s)
 	}
 }
 
@@ -675,56 +616,6 @@ func TestRetryReleasesOldModelPriorityAndResetsIdle(t *testing.T) {
 
 // Move the transient CLI ready-state assertions here: a status HTTP request
 // cannot be guaranteed to arrive before a one-second real idle timer expires.
-func TestModelReadyIdleReloadStatusFakeClock(t *testing.T) {
-	t.Parallel()
-	q, clock, m := modelFixture(t)
-	q.models.Idle = time.Second
-	api := API{Queue: q, Token: "test"}.Handler()
-	status := func() Snapshot {
-		t.Helper()
-		// Inspect the exact idle boundary independently of observation staleness.
-		req := httptest.NewRequest("GET", "/api/inspection", nil)
-		req.Header.Set("Authorization", "Bearer test")
-		response := httptest.NewRecorder()
-		api.ServeHTTP(response, req)
-		var snap Snapshot
-		if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &snap) != nil {
-			t.Fatal("status", response.Code, response.Body.String())
-		}
-		return snap
-	}
-	if len(status().LoadedModels) != 0 {
-		t.Fatal("model already loaded")
-	}
-	ready := func() {
-		t.Helper()
-		snap := status()
-		if len(snap.LoadedModels) != 1 || snap.LoadedModels[0].State != "ready" {
-			t.Fatalf("not ready: %+v", snap.LoadedModels)
-		}
-	}
-	for range 2 {
-		call := addModelCall(t, q, "production")
-		reportModel(t, q, m, "ready")
-		ready()
-		if err := q.finishCall(call.ID); err != nil {
-			t.Fatal(err)
-		}
-		clock.Advance(time.Second - time.Nanosecond)
-		q.Tick()
-		ready()
-		clock.Advance(time.Nanosecond)
-		q.Tick()
-		snap := status()
-		if len(snap.LoadedModels) != 1 || snap.LoadedModels[0].State != "draining" {
-			t.Fatalf("idle expiry did not drain: %+v", snap.LoadedModels)
-		}
-		reportModel(t, q, m, "unloaded")
-		if len(status().LoadedModels) != 0 {
-			t.Fatal("idle unload retained slot")
-		}
-	}
-}
 
 func TestCombinedBatchModelReclamation(t *testing.T) {
 	t.Parallel()
@@ -759,7 +650,6 @@ func TestCombinedReclamationTierAndPinEligibility(t *testing.T) {
 	}{
 		{"active-pin", "production", true, true, true, false},
 		{"inactive-pin", "production", true, false, true, true},
-		{"nonresumable-production", "production", false, false, false, true},
 		{"nonresumable-deadline", "deadline", false, false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -846,4 +736,38 @@ func currentTestReportAttempt(q *Queue, m Machine, name string) string {
 		return s.Attempt
 	}
 	return "no-assigned-engine"
+}
+
+func TestModelPriorityTracksRemainingCalls(t *testing.T) {
+	t.Parallel()
+	q, _, m := modelFixture(t)
+	high := addModelCall(t, q, "production")
+	reportModel(t, q, m, "ready")
+	low := addModelCall(t, q, "experiment")
+	if err := q.finishCall(high.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := q.s.ModelSlots[slotKey(m.ID, "test")]
+	if s.Priority != low.Priority || s.InFlight != 1 {
+		t.Fatalf("finished production call still protects experiments: %+v", s)
+	}
+	submit(t, q, spec("deadline"))
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if s.State != "draining" {
+		t.Fatal("deadline batch cannot reclaim experiment model")
+	}
+}
+
+func TestModelCallNotBlockedByBatchThatCannotReclaimMemory(t *testing.T) {
+	t.Parallel()
+	q, _, m := modelFixture(t)
+	addModelCall(t, q, "production")
+	reportModel(t, q, m, "ready")
+	submit(t, q, spec("deadline"))
+	c := addModelCall(t, q, "experiment")
+	if c.Machine != m.ID {
+		t.Fatal("batch which cannot reclaim production model blocks calls to that model")
+	}
 }

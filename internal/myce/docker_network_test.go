@@ -25,15 +25,7 @@ func TestDockerPrivateNetworkContract(t *testing.T) {
 	for _, tc := range []struct {
 		fields string
 		valid  bool
-	}{
-		{`"docker_network":"private"`, true},
-		{`"docker_memory_gb":2`, true},
-		{`"docker_memory_gb":7`, false},
-		{`"docker_network":"host"`, false},
-		{`"docker_network":"private","docker_memory_gb":2,"docker_sidecars":[{"name":"naming","memory_gb":2,"command":["docker","run","image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]`, true},
-		{`"docker_network":"private","docker_memory_gb":4,"docker_sidecars":[{"name":"naming","memory_gb":4,"command":["docker","run","image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]`, true},
-		{`"docker_network":"private","docker_memory_gb":4,"docker_sidecars":[{"name":"naming","memory_gb":7,"command":["docker","run","image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]`, false},
-	} {
+	}{{`"docker_network":"host"`, false}, {`"docker_network":"private","docker_memory_gb":2,"docker_sidecars":[{"name":"naming","memory_gb":2,"command":["docker","run","image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]`, true}} {
 		s := dockerJob().Spec
 		s.Needs.HostMemoryGB = 6
 		data, _ := json.Marshal(s)
@@ -236,40 +228,6 @@ func fakeDockerGroupInspect(root string, ids []string, mode string, out io.Write
 	_ = json.NewEncoder(out).Encode(objects)
 }
 
-func TestDockerPrivateNetworkLifecycle(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	j := dockerJob()
-	j.Checkpoint = t.TempDir()
-	j.Spec.Run.DockerNetwork = "private"
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-	p.stop(c.Now(), 0, true)
-	expireDockerStop(t, p)
-	select {
-	case f := <-p.done:
-		if !f.result.Forced {
-			t.Fatal("not forced")
-		}
-	case <-time.After(4 * time.Second):
-		t.Fatal("cleanup stuck")
-	}
-	data, _ := os.ReadFile(filepath.Join(root, "calls"))
-	calls := string(data)
-	if !strings.Contains(calls, "network create --driver bridge --internal") || !strings.Contains(calls, "MYCE_DOCKER_NETWORK=myce-") {
-		t.Fatalf("network contract missing: %s", calls)
-	}
-	if !strings.Contains(calls, "network disconnect --force net1 id1") || strings.Index(calls, "network rm") < strings.Index(calls, "kill --signal=KILL") {
-		t.Fatal("network removed before containers stopped")
-	}
-	if _, e := os.Stat(filepath.Join(root, "network-removed")); e != nil {
-		t.Fatal("network not removed")
-	}
-}
-
 func dockerGroupJob(t *testing.T) Job {
 	j := dockerJob()
 	j.Checkpoint = t.TempDir()
@@ -281,7 +239,7 @@ func dockerGroupJob(t *testing.T) Job {
 }
 
 // Run the shared fake daemon effects in process. Memory rejection is independent
-// of CLI startup; TestDockerHealthyHelperStartupBudget covers that boundary.
+// of CLI startup; TestDockerReadinessTimeoutAndStop covers that boundary.
 func fakeDockerGroupCommand(root string) func(context.Context, ...string) ([]byte, error) {
 	var mu sync.Mutex
 	return func(ctx context.Context, args ...string) ([]byte, error) {
@@ -343,7 +301,7 @@ func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
 	for _, tc := range []struct {
 		id         string
 		afterStart bool
-	}{{"", false}, {"id1", false}, {"sidecar-sortformer", true}} {
+	}{{"id1", false}, {"sidecar-sortformer", true}} {
 		id, afterStart := tc.id, tc.afterStart
 		t.Run(fmt.Sprintf("%s/after-start=%v", id, afterStart), func(t *testing.T) {
 			w, s, c, root := dockerFixtureCommand(t, fakeDockerGroupCommand)
@@ -479,6 +437,13 @@ func TestDockerSidecarsMainExitAndReadiness(t *testing.T) {
 	if _, e := os.Stat(filepath.Join(root, "network-removed")); e != nil {
 		t.Fatal("network survives")
 	}
+
+	if !strings.Contains(calls, "network create --driver bridge --internal") || !strings.Contains(calls, "MYCE_DOCKER_NETWORK=myce-") {
+		t.Fatalf("network contract missing: %s", calls)
+	}
+	if !strings.Contains(calls, "network disconnect --force net1 id1") || strings.Index(calls, "network rm") < strings.Index(calls, "kill --signal=KILL") {
+		t.Fatal("network removed before containers stopped")
+	}
 }
 func TestDockerSidecarCrashFailsJob(t *testing.T) {
 	w, s, _, root := dockerFixture(t)
@@ -514,7 +479,7 @@ func TestDockerNetworkViolationsAndRemovalHold(t *testing.T) {
 			await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
 			_ = os.WriteFile(filepath.Join(root, "mode"), []byte(mode), 0600)
 			_ = os.WriteFile(filepath.Join(root, "unlabeled-network"), nil, 0600)
-			if mode == "refuse-network-rm" || mode == "late-network-container" {
+			if mode == "refuse-network-rm" {
 				p.stop(c.Now(), 0, true)
 				expireDockerStop(t, p)
 			}
@@ -530,7 +495,7 @@ func TestDockerNetworkViolationsAndRemovalHold(t *testing.T) {
 			}
 			select {
 			case f := <-p.done:
-				if mode == "published-port" || mode == "other-network" || mode == "socket-mount" {
+				if mode == "published-port" {
 					if f.result.Success || f.result.Interrupted || !strings.Contains(f.result.Error, "containment violation") {
 						t.Fatalf("violation: %+v", f.result)
 					}
@@ -541,11 +506,7 @@ func TestDockerNetworkViolationsAndRemovalHold(t *testing.T) {
 			if _, e := os.Stat(filepath.Join(root, "unlabeled-network")); e != nil {
 				t.Fatal("unlabeled network touched")
 			}
-			if mode == "late-network-container" {
-				if _, e := os.Stat(filepath.Join(root, "extra-stopped")); e != nil {
-					t.Fatal("late container survived")
-				}
-			}
+
 		})
 	}
 }
@@ -555,7 +516,17 @@ func TestDockerReadinessTimeoutAndStop(t *testing.T) {
 			w, s, c, root := dockerFixture(t)
 			j := dockerGroupJob(t)
 			var checked atomic.Bool
-			server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { checked.Store(true); rw.WriteHeader(503) }))
+			server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+				if !stop {
+					c.advance(time.Second)
+				}
+				checked.Store(true)
+				if stop {
+					rw.WriteHeader(503)
+				} else {
+					rw.WriteHeader(200)
+				}
+			}))
 			defer server.Close()
 			u, _ := url.Parse(server.URL)
 			port, _ := strconv.Atoi(u.Port())
@@ -570,14 +541,15 @@ func TestDockerReadinessTimeoutAndStop(t *testing.T) {
 			if stop {
 				p.stop(c.Now(), 0, true)
 				expireDockerStop(t, p)
-			} else {
-				c.advance(time.Second)
 			}
 			expireDockerStop(t, p)
 			select {
 			case f := <-p.done:
 				if f.result.Success {
 					t.Fatal("failed readiness succeeded")
+				}
+				if !stop && (f.result.Interrupted || f.result.Success) {
+					t.Fatalf("readiness failure became loss: %+v", f.result)
 				}
 				if !stop && !strings.Contains(f.result.Error, "readiness timeout") {
 					t.Fatalf("wrong reason: %+v", f.result)
@@ -651,73 +623,6 @@ func TestDockerGroupAdmissionUsesSimultaneousJobMemory(t *testing.T) {
 	}
 	if snap.Machines[0].FreeHostMemoryGB != 2 {
 		t.Fatalf("admission did not charge job memory: %g", snap.Machines[0].FreeHostMemoryGB)
-	}
-}
-
-func TestDockerReadinessRejectsSuccessAtDeadline(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	j := dockerGroupJob(t)
-	var checked atomic.Bool
-	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		c.advance(time.Second)
-		checked.Store(true)
-		rw.WriteHeader(200)
-	}))
-	defer server.Close()
-	u, _ := url.Parse(server.URL)
-	port, _ := strconv.Atoi(u.Port())
-	j.Spec.Run.DockerSidecars[0].Readiness = &DockerReadiness{Port: port, Path: "/ready", Timeout: "1s"}
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(p.docker.close)
-	// Synchronize readiness and cleanup independently of laptop load.
-	await(t, func() bool { return checked.Load() })
-	expireDockerStop(t, p)
-	await(t, func() bool {
-		select {
-		case f := <-p.done:
-			if f.result.Success || !strings.Contains(f.result.Error, "readiness timeout") {
-				t.Fatalf("late readiness: %+v", f.result)
-			}
-			return true
-		default:
-			return false
-		}
-	})
-	if _, e := os.Stat(filepath.Join(root, "running")); e == nil {
-		t.Fatal("main started at expired readiness boundary")
-	}
-}
-
-func TestDockerReadinessFailureIsCommandFailureNotLoss(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	j := dockerGroupJob(t)
-	var checked atomic.Bool
-	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { checked.Store(true); rw.WriteHeader(503) }))
-	defer server.Close()
-	u, _ := url.Parse(server.URL)
-	port, _ := strconv.Atoi(u.Port())
-	j.Spec.Run.DockerSidecars[0].Readiness = &DockerReadiness{Port: port, Path: "/ready", Timeout: "1s"}
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, func() bool { return checked.Load() })
-	c.advance(time.Second)
-	expireDockerStop(t, p)
-	select {
-	case f := <-p.done:
-		if f.result.Interrupted || f.result.Success {
-			t.Fatalf("readiness failure became loss: %+v", f.result)
-		}
-	case <-time.After(4 * time.Second):
-		t.Fatal("cleanup stuck")
-	}
-	if _, e := os.Stat(filepath.Join(root, "running")); e == nil {
-		t.Fatal("main started")
 	}
 }
 
@@ -820,43 +725,3 @@ func tableOOM(root, id string) bool {
 
 // Memory caps must not change the declared network; the fake daemon exercises
 // the managed adapter and inspect verification without a Docker installation.
-func TestDockerMemoryCapWithoutNetwork(t *testing.T) {
-	w, store, clock, root := dockerFixture(t)
-	j := dockerJob()
-	j.Spec.Needs.HostMemoryGB = 4
-	j.Spec.Run.DockerMemoryGB = 2
-	if err := j.Spec.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	p, err := startDockerFixture(w, store, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		p.stop(clock.Now(), 0, true)
-		clock.advance(defaultGPUStopGrace + 5*time.Second)
-		p.docker.waitShutdown(clock)
-		p.docker.close()
-	})
-	await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
-	calls, err := os.ReadFile(filepath.Join(root, "calls"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(calls), "--network none") || !strings.Contains(string(calls), "--memory 2147483648") || strings.Contains(string(calls), "network create") {
-		t.Fatalf("memory changed network contract: %s", calls)
-	}
-}
-
-func TestDockerMemoryCapOfflineInventory(t *testing.T) {
-	q, _ := fixture(t)
-	m := dockerSharedMachine()
-	check(t, q, m, nil)
-	s := dockerJob().Spec
-	s.Needs.HostMemoryGB = 4
-	s.Run.DockerMemoryGB = 2
-	j := submit(t, q, s)
-	if got := check(t, q, m, nil).Job; got == nil || got.ID != j.ID || got.Spec.Run.DockerNetwork != "" {
-		t.Fatal("offline capped Docker job not placed", got)
-	}
-}

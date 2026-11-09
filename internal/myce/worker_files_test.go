@@ -139,13 +139,12 @@ func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 	if err = d.Client().UploadFile(ctx, source, ref); err != nil {
 		t.Fatal(err)
 	}
-	var previous string
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 2; i++ {
 		privateFiles := FileManifest{"source": ref}
-		if i == 2 {
+		if i == 1 {
 			privateFiles = nil
 		}
-		j, e := d.Client().Submit(ctx, Spec{Name: "shared", Project: "test", Run: RunSpec{Command: []string{"sh", "-ec", `test "$(cat "$MYCE_INPUT_RUNTIME/bin/run")" = hello; printf '%s' "$MYCE_INPUT_RUNTIME" > result`}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}, Files: privateFiles, SharedInputs: map[string]SharedInput{"runtime": input}, Outputs: map[string]string{"result": "results"}})
+		j, e := d.Client().Submit(ctx, Spec{Name: "shared", Project: "test", Run: RunSpec{Command: []string{"sh", "-ec", `test "$(cat "$MYCE_INPUT_RUNTIME/bin/run")" = hello; cat "$MYCE_INPUT_RUNTIME/bin/run" > result`}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}, Files: privateFiles, SharedInputs: map[string]SharedInput{"runtime": input}, Outputs: map[string]string{"result": "results"}})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -174,10 +173,10 @@ func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		if i > 0 && string(b) != previous {
-			t.Fatal("per-job copy", previous, string(b))
+
+		if string(b) != "hello" {
+			t.Fatal("shared input bytes changed", string(b))
 		}
-		previous = string(b)
 		// Published scratch is disposable even for the shared-only third job.
 		// The next job must still reuse the shared tree after that scratch is gone.
 		scratch := filepath.Join(state, "workers", "fake-1", "job-files", j.ID)

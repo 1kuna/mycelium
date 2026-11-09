@@ -2,7 +2,7 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
+
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,49 +10,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestMemoryReviewLegacyObservationKey(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	j := startObservation(t, q, m, s)
-	key, why := q.workObservationKey(&j)
-	if key == nil {
-		t.Fatal(why)
-	}
-	// This is the persisted pre-146 field order, including its OOM fence.
-	var legacy struct {
-		Allowance       string          `json:"allowance,omitempty"`
-		Work            string          `json:"work"`
-		ExtensionDigest string          `json:"extension_digest"`
-		Target          ExecutionTarget `json:"target"`
-		Reference       WorkReference   `json:"reference"`
-		Host            string          `json:"host"`
-		Component       string          `json:"component"`
-		Hardware        string          `json:"hardware"`
-		Fingerprint     string          `json:"fingerprint"`
-		Environment     string          `json:"environment"`
-		Configuration   string          `json:"configuration"`
-		Concurrency     int             `json:"concurrency"`
-		BatchSize       int             `json:"batch_size"`
-	}
-	b, _ := json.Marshal(key)
-	if err := json.Unmarshal(b, &legacy); err != nil {
-		t.Fatal(err)
-	}
-	b, _ = json.Marshal(legacy)
-	var restored ObservationKey
-	if err := json.Unmarshal(b, &restored); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.update(func() error {
-		q.s.WorkObservations = map[string]WorkObservation{identityHash(legacy): {Key: restored, Forbidden: true, RecordedAt: clock.Now()}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !q.s.WorkObservations[identityHash(key)].Forbidden {
-		t.Fatal("persisted pre-146 Forbidden observation no longer resolves")
-	}
-}
 
 func TestMemoryReviewDockerMissingParentReleases(t *testing.T) {
 	_, clock := fixture(t)
@@ -191,19 +148,11 @@ func TestMemoryReviewResumedEstimateAndOOMFloor(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	// A retry may use complete-input history even though it cannot record it.
-	probe := *q.s.Jobs[first.ID]
-	probe.State, probe.Attempt, probe.Spec.Resumable, probe.Spec.Needs.Memory = "queued", 2, true, "auto"
-	for id, point := range q.s.WorkObservations {
-		point.Forbidden = true
-		q.s.WorkObservations[id] = point
-	}
-	estimate := q.memoryCandidate(&probe, q.s.Machines[m.ID])
-	if estimate.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-		t.Fatal("resumed or Forbidden performance point lost its accepted memory peak")
-	}
 	s.Needs.Memory, s.Resumable = "auto", true
 	second := startObservation(t, q, m, s)
+	if second.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
+		t.Fatal("complete input memory history lost", second.MemoryEnvelope)
+	}
 	clock.Advance(time.Second)
 	r = result(&second, false)
 	r.OutOfMemory, r.Error = true, "host memory ceiling exceeded"

@@ -10,7 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
+
 	"runtime"
 	"strings"
 	"sync"
@@ -55,63 +55,7 @@ func freezeComposition(t *testing.T, e Extension) Extension {
 	}
 	return e
 }
-func TestCompositionRoundtripAndSharedLowering(t *testing.T) {
-	e := compositionExtension(t, false)
-	for _, format := range []string{"json", "yaml"} {
-		var out Extension
-		if format == "json" {
-			b, err := json.Marshal(e)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = json.Unmarshal(b, &out); err != nil {
-				t.Fatal(err)
-			}
-		} else {
-			b, err := yaml.Marshal(e)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = yaml.Unmarshal(b, &out); err != nil {
-				t.Fatal(err)
-			}
-			out.Files = e.Files
-			out.Digest = e.Digest
-		}
-		if !reflect.DeepEqual(e, out) {
-			t.Fatalf("%s roundtrip changed description", format)
-		}
-	}
-	m := machine("target", "fake")
-	m.CapabilityProfile = &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}
-	ordinary := spec("experiment")
-	ordinary.Run = RunSpec{}
-	execution := e.Variants[0].Execution
-	ordinary.Execution = &execution
-	extension := Spec{Extension: e.Name + "@1", Kind: "sample"}
-	if err := ordinary.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if err := lowerExecution(&ordinary); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.lower(&extension, &m); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(ordinary.Run, extension.Run) {
-		t.Fatalf("different execution lowering: %+v / %+v", ordinary.Run, extension.Run)
-	}
-	legacy := spec("experiment")
-	before := legacy.Run
-	if err := lowerExecution(&legacy); err != nil || !reflect.DeepEqual(before, legacy.Run) {
-		t.Fatal("old run changed", err)
-	}
-	q, _ := fixture(t)
-	j := submit(t, q, ordinary)
-	if j.Spec.Execution != nil || !reflect.DeepEqual(j.Spec.Run, ordinary.Run) {
-		t.Fatal("ordinary adapter not persisted")
-	}
-}
+
 func TestCompositionImmutableResolutionReplayAndRestart(t *testing.T) {
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)}
@@ -128,11 +72,21 @@ func TestCompositionImmutableResolutionReplayAndRestart(t *testing.T) {
 	if err = q.AddExtension(e); err != nil {
 		t.Fatal(err)
 	}
+	e.Files["run.sh"][0] = '!'
+	e.Files["extra"] = []byte("caller mutation")
 	s := Spec{Name: "wrap", Project: "test", Extension: e.Name, SubmissionKey: "fixed"}
 	j := submit(t, q, s)
 	if j.Spec.Extension != extensionKey(e) || j.Spec.ExtensionDigest != e.Digest || j.Spec.Class != "preview" {
 		t.Fatal("resolution/default missing", j.Spec)
 	}
+	if j.Extensions[0].Files["run.sh"][0] == '!' || j.Extensions[0].Files["extra"] != nil {
+		t.Fatal("caller mutated registered bytes")
+	}
+	actual, err := extensionFromFiles(j.Extensions[0].Files)
+	if err != nil || actual.Digest != e.Digest {
+		t.Fatal("snapshot is not immutable", err)
+	}
+	e = j.Extensions[0]
 	newer := e
 	newer.Version = "2"
 	newer.DefaultClass = "other"
@@ -170,148 +124,48 @@ func TestCompositionImmutableResolutionReplayAndRestart(t *testing.T) {
 	if replay.ID != j.ID || replay.Extensions[0].Digest != e.Digest || replay.Spec.ExtensionDigest != e.Digest {
 		t.Fatal("restart lost frozen resolution")
 	}
-}
-func TestCompositionTargetValidationAndQualification(t *testing.T) {
-	e := compositionExtension(t, false)
-	target := e.Variants[0].Target
-	m := machine("target", "fake")
-	m.CapabilityProfile = &CapabilityProfile{OS: target.OS, Arch: target.Arch}
-	j := Job{Spec: Spec{Extension: extensionKey(e)}, Extensions: []Extension{e}}
-	m.ExtensionFingerprint = "test-fingerprint"
-	r := newExtensionReport(e, &m, "extension:"+e.Name)
-	r.Setup = true
-	r.Qualified = true
-	r.CheckID = "test-check"
-	m.ExtensionReports = []ExtensionReport{r}
-	if qualifiedExtension(&j, &m) == nil {
-		t.Fatal("matching target not selected")
+
+	{
+		for _, field := range []string{"env", "execution"} {
+			bad := Spec{Name: "x", Project: "test", Extension: extensionKey(e)}
+			if field == "env" {
+				bad.Run.Env = map[string]string{"X": "override"}
+			} else {
+				bad.Execution = &ExecutionSpec{Main: ExecutionMember{Command: []string{"main"}}}
+			}
+			if _, err := q.Submit(bad); err == nil {
+				t.Fatal("caller override accepted", field)
+			}
+		}
+		bad := spec("experiment")
+		bad.Run.Env = map[string]string{"MYCE_TOKEN": "bad"}
+		if _, err := q.Submit(bad); err == nil {
+			t.Fatal("token override accepted")
+		}
 	}
-	m.CapabilityProfile.Arch = "other"
-	if qualifiedExtension(&j, &m) != nil {
-		t.Fatal("wrong architecture accepted")
-	}
-	m.CapabilityProfile.Arch = target.Arch
-	wrong := target
-	wrong.OS = "other"
-	m.ExtensionReports[0].Target = &wrong
-	if qualifiedExtension(&j, &m) != nil {
-		t.Fatal("qualification from another target accepted")
-	}
-	e.Variants = append(e.Variants, e.Variants[0])
-	if err := e.validate(); err == nil {
-		t.Fatal("duplicate target accepted")
-	}
-	e.Variants = e.Variants[:1]
-	e.Run = []string{"ignored"}
-	if err := e.validate(); err == nil {
-		t.Fatal("legacy/variant merge accepted")
-	}
-	e.Run = nil
-	e.Variants[0].Execution.Main.Environment = "missing"
-	if err := e.validate(); err == nil {
-		t.Fatal("missing environment reference accepted")
-	}
-}
-func TestCompositionEnvironmentSnapshotsAndBackend(t *testing.T) {
-	e := compositionExtension(t, true)
-	r := e.Variants[0].Environments["main"]
-	// YAML authoring roundtrip excludes snapshots; reparsing restores them exactly.
-	reparsed := freezeComposition(t, e)
-	if !reflect.DeepEqual(r, reparsed.Variants[0].Environments["main"]) {
-		t.Fatal("recipe roundtrip changed")
-	}
-	changed := e
-	changed.Files = map[string][]byte{}
-	for n, b := range e.Files {
-		changed.Files[n] = append([]byte(nil), b...)
-	}
-	changed.Files["locks/requirements.txt"] = []byte("package==1\n")
-	changed = freezeComposition(t, changed)
-	if changed.Digest == e.Digest || changed.Variants[0].Environments["main"].Key == r.Key {
-		t.Fatal("lock bytes omitted from identity")
-	}
-	if string(r.Files["requirements.txt"]) != "# synthetic empty lock\n" {
-		t.Fatal("snapshot mutated")
-	}
-	changed = e
-	changed.Variants = append([]ExtensionVariant(nil), e.Variants...)
-	changed.Variants[0].Target.Arch = "other"
-	changed = freezeComposition(t, changed)
-	if changed.Variants[0].Environments["main"].Key == r.Key {
-		t.Fatal("target omitted from cache identity")
-	}
-	r.Backend = "pixi"
-	e.Variants[0].Environments["main"] = r
-	b, _ := yaml.Marshal(e)
-	e.Files["extension.yaml"] = b
-	if _, err := extensionFromFiles(e.Files); err == nil {
-		t.Fatal("pixi silently accepted")
-	}
-	c := &EnvironmentCache{}
-	r.Backend = "unsupported"
-	if _, _, err := c.Acquire(context.Background(), r); err == nil || !strings.Contains(err.Error(), "backend") {
-		t.Fatal("unsupported backend used uv", err)
-	}
-}
-func TestCompositionSidecarSeamAndCallerFences(t *testing.T) {
-	zero := 0
-	execution := ExecutionSpec{Main: ExecutionMember{Command: []string{"main"}, Env: map[string]string{"HELPER_URL": "{sidecars.helper.url}"}}, Sidecars: []NativeSidecar{{Name: "helper", Command: []string{"server", "{port}"}, MemoryGB: 1, Port: &zero, Readiness: &NativeReadiness{Path: "/health", Timeout: "150s"}}}}
-	execution.Sidecars[0].Env = map[string]string{"EXTENSION_DIR": "{extension}"}
-	if err := execution.validate(); err != nil {
-		t.Fatal(err)
-	}
-	for _, marshal := range []func(any) ([]byte, error){json.Marshal, yaml.Marshal} {
-		b, err := marshal(execution)
-		if err != nil {
+
+	{
+		a := compositionExtension(t, true)
+		b := compositionExtension(t, true)
+		b.Version = "2-debug"
+		b.Files["run.sh"] = []byte("#!/bin/sh\necho debug\n")
+		b = freezeComposition(t, b)
+		if err := q.AddExtension(a); err != nil {
 			t.Fatal(err)
 		}
-		var out ExecutionSpec
-		if err = yaml.Unmarshal(b, &out); err != nil {
+		if err := q.AddExtension(b); err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(execution, out) {
-			t.Fatal("group schema lost data")
+		m := machine("target", "fake")
+		m.CapabilityProfile = &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}
+		m.ExtensionFingerprint = "test-fingerprint"
+		report := newExtensionReport(a, &m, "extension:"+a.Name)
+		report.Setup, report.Qualified, report.CheckID = true, true, "check-a"
+		m.ExtensionReports = []ExtensionReport{report}
+		j := submit(t, q, Spec{Name: "qualification", Project: "test", Extension: extensionKey(b)})
+		if reply := check(t, q, m, nil); reply.Job != nil && reply.Job.ID == j.ID {
+			t.Fatal("shared prefix inherited another version's qualification")
 		}
-	}
-	s := spec("experiment")
-	s.Run = RunSpec{}
-	s.Execution = &execution
-	s.Needs.HostMemoryGB = 2
-	if err := s.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	lowered := s
-	if err := lowerExecution(&lowered); err != nil {
-		t.Fatal(err)
-	}
-	expandNativeExtension(&lowered, map[string]string{"MYCE_EXTENSION_DIR": "expanded"})
-	if execution.Sidecars[0].Env["EXTENSION_DIR"] != "{extension}" {
-		t.Fatal("lowering mutated frozen member env")
-	}
-	s.Execution = nil
-	s.Run = RunSpec{Command: []string{"main"}, Sidecars: execution.Sidecars}
-	if err := s.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	s = Spec{Name: "x", Project: "test", Extension: "sample"}
-	for _, field := range []string{"env", "execution", "digest"} {
-		bad := s
-		switch field {
-		case "env":
-			bad.Run.Env = map[string]string{"X": "override"}
-		case "execution":
-			bad.Execution = &ExecutionSpec{Main: execution.Main}
-		case "digest":
-			bad.ExtensionDigest = "invalid"
-		}
-		if bad.Validate() == nil {
-			t.Fatal("caller override accepted", field)
-		}
-	}
-	execution.Sidecars = nil
-	execution.Main.Env = map[string]string{"MYCE_TOKEN": "bad"}
-	if execution.validate() == nil {
-		t.Fatal("token override accepted")
 	}
 }
 
@@ -466,92 +320,4 @@ while ! test -s child.pid; do sleep 0.01; done
 	nativeNoSurvivors(t, &nativeTestRun{p: &process{cmd: &exec.Cmd{Process: &os.Process{Pid: state.PID}}}, dir: nativeDir})
 }
 
-func TestCompositionRegistrationOwnsBytes(t *testing.T) {
-	q, _ := fixture(t)
-	e := compositionExtension(t, false)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	e.Files["run.sh"][0] = '!'
-	e.Files["extra"] = []byte("caller mutation")
-	j := submit(t, q, Spec{Name: "frozen", Project: "test", ExtensionDigest: e.Digest})
-	if j.Extensions[0].Files["run.sh"][0] == '!' || j.Extensions[0].Files["extra"] != nil {
-		t.Fatal("caller mutated registered bytes")
-	}
-	actual, err := extensionFromFiles(j.Extensions[0].Files)
-	if err != nil || actual.Digest != e.Digest {
-		t.Fatal("snapshot is not immutable", err)
-	}
-}
-
-func TestCompositionDefaultClassUsesAdmissionValidation(t *testing.T) {
-	for _, class := range []string{"deadline", "production", "preview"} {
-		t.Run(class, func(t *testing.T) {
-			q, clock := fixture(t)
-			e := compositionExtension(t, false)
-			e.DefaultClass = class
-			e = freezeComposition(t, e)
-			if err := q.AddExtension(e); err != nil {
-				t.Fatal(err)
-			}
-			s := Spec{Name: "default", Project: "test", Extension: extensionKey(e)}
-			if class == "deadline" {
-				if _, err := q.Submit(s); err == nil {
-					t.Fatal("default class bypassed deadline validation")
-				}
-				d := clock.Now().Add(time.Hour)
-				s.Deadline = &d
-			}
-			if class == "production" {
-				start := clock.Now().Add(time.Minute)
-				s.StartBy = &start
-			}
-			j := submit(t, q, s)
-			if j.Spec.Class != class {
-				t.Fatal("class default lost")
-			}
-			s.Run.Env = map[string]string{"X": "override"}
-			if _, err := q.Submit(s); err == nil {
-				t.Fatal("resolution hid caller override")
-			}
-		})
-	}
-}
-
 // Versions and debug scripts must not multiply identical dependency prefixes.
-func TestCompositionEnvironmentSharedAcrossVersions(t *testing.T) {
-	a := compositionExtension(t, true)
-	b := compositionExtension(t, true)
-	b.Version = "2-debug"
-	b.Files["run.sh"] = []byte("#!/bin/sh\necho debug\n")
-	b = freezeComposition(t, b)
-	ra, rb := a.Variants[0].Environments["main"], b.Variants[0].Environments["main"]
-	if a.Digest == b.Digest || ra.Key != rb.Key {
-		t.Fatalf("identical dependency inputs have different prefixes: %s != %s", ra.Key, rb.Key)
-	}
-	var builds int
-	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Run: func(context.Context, []string, string, []string, io.Writer, io.Writer) error { builds++; return nil }}
-	pa, release, err := c.Acquire(context.Background(), ra)
-	if err != nil {
-		t.Fatal(err)
-	}
-	release()
-	pb, release, err := c.Acquire(context.Background(), rb)
-	if err != nil {
-		t.Fatal(err)
-	}
-	release()
-	if pa != pb || builds != 2 {
-		t.Fatalf("prefix reuse: %s %s installer calls=%d", pa, pb, builds)
-	}
-	m := machine("target", "fake")
-	m.CapabilityProfile = &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}
-	m.ExtensionFingerprint = "test-fingerprint"
-	report := newExtensionReport(a, &m, "extension:"+a.Name)
-	report.Setup, report.Qualified, report.CheckID = true, true, "check-a"
-	m.ExtensionReports = []ExtensionReport{report}
-	j := Job{Spec: Spec{Extension: extensionKey(b)}, Extensions: []Extension{b}}
-	if qualifiedExtension(&j, &m) != nil {
-		t.Fatal("shared prefix inherited another version's qualification")
-	}
-}

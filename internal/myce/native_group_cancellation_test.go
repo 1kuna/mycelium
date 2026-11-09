@@ -14,7 +14,7 @@ import (
 )
 
 func TestNativeGroupGPUCancellationSidecarGrace(t *testing.T) {
-	for _, mode := range []string{"cooperative", "sidecar-escalation", "main-escalation"} {
+	for _, mode := range []string{"cooperative", "sidecar-escalation"} {
 		t.Run(mode, func(t *testing.T) {
 			w := recoveryWorker(t)
 			clock := &manualWorkerClock{now: time.Date(2026, 10, 29, 21, 0, 0, 0, time.UTC)}

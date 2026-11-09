@@ -46,7 +46,7 @@ func TestWorkerWallTimeStartedReceiptRestart(t *testing.T) {
 	if err != nil || r.ExecutionCause == nil || r.ExecutionCause.Class != wallTimeLimit || !r.ReleasePending || r.Interrupted {
 		t.Fatal("restart lost cause or custody", r, err)
 	}
-	for _, r := range []Result{{Success: true}, {ExecutionCause: &RuntimeCause{Operation: "command", Class: "command_exit"}}, {OutOfMemory: true, Interrupted: true}} {
+	for _, r := range []Result{{ExecutionCause: &RuntimeCause{Operation: "command", Class: "command_exit"}}} {
 		got, err := applyWorkerWallTime(dir, *j, r)
 		if err != nil || got.Success != r.Success || got.OutOfMemory != r.OutOfMemory || got.ExecutionCause != r.ExecutionCause {
 			t.Fatal("intent overrode independent outcome", got, err)

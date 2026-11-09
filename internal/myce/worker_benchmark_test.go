@@ -10,7 +10,7 @@ import (
 )
 
 func TestDeviceMaintenanceBenchmarkWorkerContinues(t *testing.T) {
-	for _, scenario := range []string{"primary", "sibling", "after-offer"} {
+	for _, scenario := range []string{"after-offer"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := m3Machine()

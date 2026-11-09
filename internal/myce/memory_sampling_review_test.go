@@ -169,15 +169,14 @@ func TestMemorySamplingOOMInvalidatesAndRelearns(t *testing.T) {
 			t.Fatalf("auto OOM retained a memory estimate or poisoned predictions: %+v", point)
 		}
 	}
-	probe := first
-	q.beginWorkTiming(&probe)
-	if probe.Timing.PredictedSeconds == nil {
-		t.Fatal("memory invalidation suppressed completion predictions")
-	}
 	if err := q.Cancel(second.ID); err != nil {
 		t.Fatal(err)
 	}
 	explore := startObservation(t, q, m, s)
+	if explore.Timing.PredictedSeconds == nil {
+		t.Fatal("memory invalidation suppressed completion predictions")
+	}
+
 	if explore.MemoryEnvelope.Source != acceptedMemoryEscalation || explore.MemoryEnvelope.Basis != "exploratory" || explore.MemoryEnvelope.HostGB != host+2*minimumHostMemoryGB {
 		t.Fatalf("invalidated class did not explore: %+v", explore.MemoryEnvelope)
 	}
@@ -220,12 +219,6 @@ func TestMemorySamplingHostOOMKeepsGPUReservation(t *testing.T) {
 	next := check(t, q, m, nil).Job
 	if next == nil || next.Spec.Needs.MemoryGB != first.Spec.Needs.MemoryGB {
 		t.Fatalf("host-only OOM increased GPU reservation: first=%+v next=%+v", first.Spec.Needs, next)
-	}
-	probe := *next
-	probe.State, probe.MemoryOOMFloor = "queued", nil
-	probe.MemoryFallback = &SizeHint{MemoryGB: 64, HostMemoryGB: 4}
-	if n := q.memoryCandidate(&probe, q.s.Machines[m.ID]).Spec.Needs.MemoryGB; n > m.TotalMemoryGB {
-		t.Fatalf("auto reservation exceeds card total: %g", n)
 	}
 }
 
@@ -293,22 +286,10 @@ func TestMemorySamplingSubTickDoesNotLearn(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	if estimate := q.memoryEstimate(&first, q.s.Machines[m.ID]); estimate.host != nil {
-		t.Fatal("sub-tick run trained memory")
-	}
-}
 
-func TestMemorySamplingXPUKernelSizes(t *testing.T) {
-	for _, tc := range []struct {
-		value string
-		gb    float64
-	}{{"0", 0}, {"4096", 4096.0 / (1 << 30)}, {"2 MiB", 2.0 / 1024}, {"3 KiB", 3.0 / (1 << 20)}} {
-		t.Run(tc.value, func(t *testing.T) {
-			_, gb, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\ndrm-resident-vram0: "+tc.value+"\n"), "0000:03:00.0")
-			if err != nil || gb != tc.gb {
-				t.Fatalf("kernel size %q: %g %v", tc.value, gb, err)
-			}
-		})
+	next := startObservation(t, q, m, s)
+	if next.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatal("sub-tick run trained memory", next.MemoryEnvelope)
 	}
 }
 

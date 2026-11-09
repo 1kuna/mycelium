@@ -1,6 +1,10 @@
 package myce
 
 import (
+	"errors"
+)
+
+import (
 	"context"
 	"fmt"
 	"io"
@@ -12,77 +16,9 @@ import (
 	"time"
 )
 
-func TestEnvironmentCPURecipes(t *testing.T) {
-	dir := t.TempDir()
-	for name, data := range map[string]string{
-		"uv.lock": "locked-uv", "pyproject.toml": "[project]\nname='example'\n",
-		"pixi.lock": "locked-pixi", "pixi.toml": "[workspace]\nchannels=['conda-forge']\nplatforms=['linux-64','osx-arm64']\n[dependencies]\npython='>=3.12,<3.13'\nuv='*'\nffmpeg='*'\n",
-	} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	catalogFile := filepath.Join(dir, "catalog.yaml")
-	for _, recipe := range []string{
-		"python: '3.12', lock_file: uv.lock", "backend: pixi, lock_file: pixi.lock",
-	} {
-		if err := os.WriteFile(catalogFile, []byte("environments:\n  tools:\n    cpu: {"+recipe+"}\n"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		catalog, err := ReadEnvironments(catalogFile)
-		if err != nil {
-			t.Fatalf("CPU recipe %s: %v", recipe, err)
-		}
-		q, _ := fixture(t)
-		if err := q.ConfigureEnvironments(catalog); err != nil {
-			t.Fatal(err)
-		}
-		s := cpuSpec(1, 1)
-		s.Environment.Name = "tools"
-		j := submit(t, q, s)
-		for _, hostOS := range []string{"linux", "darwin"} {
-			m := cpuMachine("host", "host", "cpu", 4, 8)
-			m.CapabilityProfile.OS = hostOS
-			m.FreeHostMemoryGB = 8
-			m.EnvironmentBuilder = true
-			if !fits(j, &m, 0) || environmentKey(j, &m) != catalog.Environments["tools"]["cpu"].Key {
-				t.Fatalf("CPU recipe unavailable on %s: %s", hostOS, recipe)
-			}
-		}
-		// Any still filters by the exact recipe; GPU work cannot borrow cpu.
-		anyJob := *j
-		anyJob.Spec = spec("experiment")
-		anyJob.Spec.Environment.Name = "tools"
-		gpu := cpuMachine("gpu", "gpu", "fake", 4, 8)
-		gpu.FreeHostMemoryGB = 8
-		gpu.EnvironmentBuilder = true
-		if fits(&anyJob, &gpu, 8) {
-			t.Fatal("any borrowed a CPU recipe for GPU work")
-		}
-		cpu := cpuMachineView(&gpu)
-		gpuOnly := *j
-		gpuOnly.EnvironmentRecipes = map[string]EnvironmentRecipe{"fake": binaryRecipe(t, "fake")}
-		if fits(&gpuOnly, cpu, 0) {
-			t.Fatal("CPU work borrowed a GPU recipe")
-		}
-	}
-	q, _ := fixture(t)
-	for _, platforms := range [][]string{{"cpu"}, {"cpu", "fake"}, nil} {
-		r, err := q.resolveEnvironment(Environment{LockFile: filepath.Join(dir, "uv.lock"), Python: "3.12", Platforms: platforms})
-		if err != nil || r["cpu"].Key == "" || r["cpu"].Platform != "cpu" {
-			t.Fatalf("inline CPU resolution (%v): %v, %v", platforms, r, err)
-		}
-		if len(platforms) > 0 && len(r) != len(platforms) {
-			t.Fatalf("inline platforms widened: %v", r)
-		}
-		if other, ok := r["fake"]; ok && other.Key == r["cpu"].Key {
-			t.Fatal("CPU and GPU cache identities alias")
-		}
-	}
-}
-
 func TestEnvironmentCPUWorkerBuildAndExecute(t *testing.T) {
 	fakePixi(t) // Existing offline installer fixture, no package downloads.
+	t.Setenv("MYCE_TOKEN", "must-not-reach-builder")
 	for _, kind := range []string{"inline-uv", "catalog-pixi"} {
 		t.Run(kind, func(t *testing.T) {
 			q, _ := fixture(t)
@@ -135,6 +71,23 @@ func TestEnvironmentCPUWorkerBuildAndExecute(t *testing.T) {
 					return os.WriteFile(filepath.Join(bin, "env-check"), []byte("#!/bin/sh\nset -eu\ntest \"${PATH%%:*}\" = \"$VIRTUAL_ENV/bin\"\ntest \"$MYCE_PLATFORM\" = cpu\necho cpu-env-ok\n"), 0700)
 				}
 			}
+			customRun := w.environmentRun
+			w.environmentRun = func(ctx context.Context, argv []string, dir string, env []string, stdout, stderr io.Writer) error {
+				vars := map[string]string{}
+				for _, e := range env {
+					k, v, _ := strings.Cut(e, "=")
+					vars[k] = v
+				}
+				if vars["MYCE_TOKEN"] != "" {
+					return errors.New("missing HTTP limits or leaked token")
+				}
+				if customRun != nil {
+					return customRun(ctx, argv, dir, env, stdout, stderr)
+				}
+				c := &EnvironmentCache{}
+				return c.runBuild(ctx, argv, dir, env, stdout, stderr)
+			}
+
 			done := make(chan error, 1)
 			go func() { done <- w.Run(ctx) }()
 			defer func() {

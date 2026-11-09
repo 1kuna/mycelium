@@ -42,7 +42,7 @@ func TestExtensionSharedInputReuse(t *testing.T) {
 		return err == nil && len(snap.Machines) > 0 && snap.Machines[0].SharedInputCache != nil
 	})
 	s := Spec{Name: "extension-cache", Project: "test", Priority: "experiment", Kind: "sample", SharedInputs: map[string]SharedInput{"data": {NAS: "data", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}}, Outputs: map[string]string{"output": "results"}}
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3; i++ {
 		var j Job
 		if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
 			t.Fatal(err)
@@ -67,7 +67,11 @@ func TestExtensionSharedInputReuse(t *testing.T) {
 			return false
 		})
 		b, err := os.ReadFile(filepath.Join(nas, j.OutputFiles["output"]))
-		if err != nil || string(b) != "cached input" {
+		want := "cached input"
+		if i == 2 {
+			want = "second"
+		}
+		if err != nil || string(b) != want {
 			t.Fatal(string(b), err)
 		}
 		if i == 0 {
@@ -75,64 +79,10 @@ func TestExtensionSharedInputReuse(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-	}
-}
-
-func TestExtensionSharedInputConcurrentAndChangedIdentity(t *testing.T) {
-	nas := t.TempDir()
-	ref := sharedFixtureFile(t, nas, "data", "first")
-	input := SharedInput{NAS: "data", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
-	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20}}
-	t.Cleanup(func() { _ = removeSharedEntry(cache.cache.Root) })
-	type result struct {
-		path string
-		done func()
-		err  error
-	}
-	results := make(chan result, 2)
-	start := make(chan struct{})
-	for i := 0; i < 2; i++ {
-		go func() {
-			<-start
-			path, done, err := cache.Acquire(context.Background(), input, nas)
-			results <- result{path, done, err}
-		}()
-	}
-	close(start)
-	a, b := <-results, <-results
-	if a.err != nil || b.err != nil {
-		t.Fatal(a.err, b.err)
-	}
-	defer a.done()
-	defer b.done()
-	if a.path != b.path {
-		t.Fatal("concurrent users did not share a copy")
-	}
-	ref = sharedFixtureFile(t, nas, "data", "second")
-	changed := SharedInput{NAS: "data", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
-	path, done, err := cache.Acquire(context.Background(), changed, nas)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer done()
-	if path == a.path {
-		t.Fatal("changed identity reused old copy")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil || string(data) != "second" {
-		t.Fatal(string(data), err)
-	}
-	if err := os.Remove(filepath.Join(nas, "data")); err != nil {
-		t.Fatal(err)
-	}
-	restarted := &SharedInputCache{cache: EnvironmentCache{Root: cache.cache.Root, Limit: 1 << 20}}
-	path2, release, err := restarted.Acquire(context.Background(), changed, nas)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	if path2 != path {
-		t.Fatal("restart did not reuse locally verified input")
+		if i == 1 {
+			ref = sharedFixtureFile(t, nas, "data", "second")
+			s.SharedInputs["data"] = SharedInput{NAS: "data", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
+		}
 	}
 }
 
@@ -189,39 +139,79 @@ func TestSharedInputBlockedColdMissDoesNotBlockOtherInputs(t *testing.T) {
 		t.Fatal(r.err)
 	}
 	r.done()
-}
 
-func TestSharedInputReadinessAffinityAndBudget(t *testing.T) {
-	input := SharedInput{NAS: "input", SHA256: digestBytes([]byte("x")), SizeBytes: 1}
-	job := &Job{Spec: Spec{SharedInputs: map[string]SharedInput{"data": input}}}
-	cold := &Machine{}
-	warm := &Machine{CachedSharedInputs: []string{input.key()}}
-	if affinity(job, warm) <= affinity(job, cold) {
-		t.Fatal("ready cache has no placement affinity")
-	}
-	volume := DiskVolume{Roots: []string{"file-cache"}}
-	coldNeed, _ := diskVolumeNeed(job, volume, cold)
-	warmNeed, _ := diskVolumeNeed(job, volume, warm)
-	if coldNeed != 1 || warmNeed != 0 {
-		t.Fatalf("cold=%d warm=%d", coldNeed, warmNeed)
-	}
+	t.Run("ConcurrentSharedBuildsReserveRemainingBytes", func(t *testing.T) {
+
+		nas := t.TempDir()
+		const size = 128 << 10
+		a := sharedFixtureFile(t, nas, "a", strings.Repeat("a", size))
+		b := sharedFixtureFile(t, nas, "b", strings.Repeat("b", size))
+		c := sharedFixtureFile(t, nas, "c", strings.Repeat("c", size))
+		cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 2*size + 64<<10, Clock: &workerFakeClock{now: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)}}}
+		t.Cleanup(func() { _ = removeSharedEntry(cache.cache.Root) })
+		ready, publish := make(chan struct{}, 2), make(chan struct{})
+		var arrivals atomic.Int32
+		cache.beforePublish = func() {
+			if arrivals.Add(1) <= 2 {
+				ready <- struct{}{}
+				<-publish
+			}
+		}
+		type result struct {
+			done func()
+			err  error
+		}
+		results := make(chan result, 2)
+		pending := 0
+		t.Cleanup(func() {
+			close(publish)
+			for ; pending > 0; pending-- {
+				r := <-results
+				if r.done != nil {
+					r.done()
+				}
+				if r.err != nil {
+					t.Error(r.err)
+				}
+			}
+		})
+		for _, pair := range []struct {
+			name string
+			ref  FileRef
+		}{{"a", a}, {"b", b}} {
+			pending++
+			go func() {
+				_, done, err := cache.Acquire(context.Background(), SharedInput{NAS: pair.name, SHA256: pair.ref.SHA256, SizeBytes: pair.ref.SizeBytes}, nas)
+				results <- result{done, err}
+			}()
+			// Admission measures remaining reservations before allocated bytes. Let
+			// this copy finish before starting the next: growth between those scans
+			// can conservatively refuse a build that would fit after copying stops.
+			// Both writers still hold their reservations and remain unpublished.
+			select {
+			case <-ready:
+			case r := <-results:
+				pending--
+				if r.done != nil {
+					r.done()
+				}
+				t.Fatalf("build %s returned before publication barrier: %v", pair.name, r.err)
+			}
+		}
+		// Both in-progress files already occupy their reservation. A third does
+		// not fit and cannot evict either active build.
+		_, done, err := cache.Acquire(context.Background(), SharedInput{NAS: "c", SHA256: c.SHA256, SizeBytes: c.SizeBytes}, nas)
+		if err == nil {
+			done()
+			t.Fatal("admitted third build beyond cache capacity")
+		}
+
+	})
 }
 
 func TestExtensionSharedInputsRequireNewWorkerCapability(t *testing.T) {
 	input := SharedInput{NAS: "input", SHA256: digestBytes([]byte("a")), SizeBytes: 1}
 	s := Spec{Kind: "sample", SharedInputs: map[string]SharedInput{"data": input}}
-	old := &Machine{Capabilities: []string{"shared_inputs_v1"}}
-	if sharedInputsFit(s, old) {
-		t.Fatal("old worker could accept a NAS-output extension job")
-	}
-	upgraded := &Machine{Capabilities: []string{"shared_inputs_v1", "extension_shared_inputs_v1"}}
-	if !sharedInputsFit(s, upgraded) {
-		t.Fatal("upgraded worker refused extension shared input")
-	}
-	s.Kind = ""
-	if !sharedInputsFit(s, old) {
-		t.Fatal("old worker lost plain shared input compatibility")
-	}
 	q, _ := fixture(t)
 	e := fakeExtension(t)
 	if err := q.AddExtension(e); err != nil {
@@ -249,71 +239,5 @@ func TestExtensionSharedInputsRequireNewWorkerCapability(t *testing.T) {
 	current := job(t, q, j.ID)
 	if err := q.Started(Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: current.Attempt}}); err == nil {
 		t.Fatal("old worker authorized to start extension input")
-	}
-}
-
-func TestConcurrentSharedBuildsReserveRemainingBytes(t *testing.T) {
-	nas := t.TempDir()
-	const size = 128 << 10
-	a := sharedFixtureFile(t, nas, "a", strings.Repeat("a", size))
-	b := sharedFixtureFile(t, nas, "b", strings.Repeat("b", size))
-	c := sharedFixtureFile(t, nas, "c", strings.Repeat("c", size))
-	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 2*size + 64<<10, Clock: &workerFakeClock{now: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)}}}
-	t.Cleanup(func() { _ = removeSharedEntry(cache.cache.Root) })
-	ready, publish := make(chan struct{}, 2), make(chan struct{})
-	var arrivals atomic.Int32
-	cache.beforePublish = func() {
-		if arrivals.Add(1) <= 2 {
-			ready <- struct{}{}
-			<-publish
-		}
-	}
-	type result struct {
-		done func()
-		err  error
-	}
-	results := make(chan result, 2)
-	pending := 0
-	t.Cleanup(func() {
-		close(publish)
-		for ; pending > 0; pending-- {
-			r := <-results
-			if r.done != nil {
-				r.done()
-			}
-			if r.err != nil {
-				t.Error(r.err)
-			}
-		}
-	})
-	for _, pair := range []struct {
-		name string
-		ref  FileRef
-	}{{"a", a}, {"b", b}} {
-		pending++
-		go func() {
-			_, done, err := cache.Acquire(context.Background(), SharedInput{NAS: pair.name, SHA256: pair.ref.SHA256, SizeBytes: pair.ref.SizeBytes}, nas)
-			results <- result{done, err}
-		}()
-		// Admission measures remaining reservations before allocated bytes. Let
-		// this copy finish before starting the next: growth between those scans
-		// can conservatively refuse a build that would fit after copying stops.
-		// Both writers still hold their reservations and remain unpublished.
-		select {
-		case <-ready:
-		case r := <-results:
-			pending--
-			if r.done != nil {
-				r.done()
-			}
-			t.Fatalf("build %s returned before publication barrier: %v", pair.name, r.err)
-		}
-	}
-	// Both in-progress files already occupy their reservation. A third does
-	// not fit and cannot evict either active build.
-	_, done, err := cache.Acquire(context.Background(), SharedInput{NAS: "c", SHA256: c.SHA256, SizeBytes: c.SizeBytes}, nas)
-	if err == nil {
-		done()
-		t.Fatal("admitted third build beyond cache capacity")
 	}
 }

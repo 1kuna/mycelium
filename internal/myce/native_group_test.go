@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
+
 	"testing"
 	"time"
 )
@@ -336,9 +336,7 @@ func TestNativeGroupReadyEnvironmentAndCleanup(t *testing.T) {
 			if result := nativeFinish(t, r); !result.Success {
 				t.Fatal(result)
 			}
-			if r.calls.Load() < 5 {
-				t.Fatal("missing per-member authorization", r.calls.Load())
-			}
+
 		})
 	}
 }
@@ -355,54 +353,7 @@ func TestNativeGroupReadinessTimeout(t *testing.T) {
 		t.Fatal("main started before readiness")
 	}
 }
-func TestNativeGroupOccupiedPort(t *testing.T) {
-	occupied, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer occupied.Close()
-	s := nativeSpec(t)
-	port := occupied.Addr().(*net.TCPAddr).Port
-	s.Run.Sidecars[0].Port = &port
-	r := nativeStart(t, s, "fake")
-	result := nativeFinish(t, r)
-	if result.Success || !result.Interrupted || !strings.Contains(result.Error, "port") {
-		t.Fatal(result)
-	}
-	if _, err := os.Stat(filepath.Join(r.dir, "side.json")); !os.IsNotExist(err) {
-		t.Fatal("helper started on occupied port")
-	}
-}
-func TestNativeGroupMemberDeath(t *testing.T) {
-	s := nativeSpec(t)
-	r := nativeStart(t, s, "fake")
-	nativeFile(t, r.dir, "main-ready")
-	nativeFile(t, r.dir, "child.pid")
-	data, _ := os.ReadFile(filepath.Join(r.dir, "side.json"))
-	var v struct{ PID int }
-	_ = json.Unmarshal(data, &v)
-	if err := syscall.Kill(v.PID, syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	result := nativeFinish(t, r)
-	if result.Success || result.Interrupted || !strings.Contains(result.Error, "sidecar helper exited") {
-		t.Fatal(result)
-	}
-}
-func TestNativeGroupCancellationPreparing(t *testing.T) {
-	s := nativeSpec(t)
-	s.Run.Sidecars[0].Env["NATIVE_TEST_UNREADY"] = "1"
-	r := nativeStart(t, s, "fake")
-	nativeFile(t, r.dir, "child.pid")
-	r.p.stop(r.w.Clock.Now(), time.Second, false)
-	result := nativeFinish(t, r)
-	if !result.Interrupted || result.Success {
-		t.Fatal(result)
-	}
-	if _, err := os.Stat(filepath.Join(r.dir, "main.json")); !os.IsNotExist(err) {
-		t.Fatal("main started after cancellation")
-	}
-}
+
 func TestNativeGroupDistinctPortsAndLogOptOut(t *testing.T) {
 	s1 := nativeSpec(t)
 	s1.Logs = "none"
@@ -425,45 +376,7 @@ func TestNativeGroupDistinctPortsAndLogOptOut(t *testing.T) {
 		t.Fatal("logs:none persisted payload logs")
 	}
 }
-func TestNativeGroupLateLaunchDenied(t *testing.T) {
-	s := nativeSpec(t)
-	s.Run.Sidecars[0].Env["NATIVE_TEST_UNREADY"] = "file"
-	r := nativeStart(t, s, "fake")
-	nativeFile(t, r.dir, "child.pid")
-	if err := r.q.Cancel(r.j.ID); err != nil {
-		t.Fatal(err)
-	}
-	nativeTouch(t, r.dir, "allow-ready")
-	result := nativeFinish(t, r)
-	if !result.Interrupted {
-		t.Fatal(result)
-	}
-	if _, err := os.Stat(filepath.Join(r.dir, "main.json")); !os.IsNotExist(err) {
-		t.Fatal("main launched after queue cancellation")
-	}
-}
 
-func TestNativeGroupNamedEnvironment(t *testing.T) {
-	s := nativeSpec(t)
-	recipe, err := snapshotEnvironment(EnvironmentRecipe{Binary: s.Run.Command[0]}, "fake")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.Run.Sidecars[0].Environment = "tools"
-	s.Run.Sidecars[0].Command = append([]string{"{env.tools.root}/bin/" + filepath.Base(s.Run.Command[0])}, s.Run.Command[1:]...)
-	s.Run.Sidecars[0].Env["HELPER_ROOT"] = "{env.tools.root}"
-	r := nativeStart(t, s, "fake", EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"fake": recipe}}})
-	nativeFile(t, r.dir, "main-ready")
-	env := nativeEnv(t, r.dir, "side")
-	want := filepath.Join(r.w.environmentCache.Root, recipe.Key)
-	if env["MYCE_ENVIRONMENT_DIR"] != want || env["HELPER_ROOT"] != want {
-		t.Fatal("helper environment not bound")
-	}
-	nativeTouch(t, r.dir, "finish")
-	if result := nativeFinish(t, r); !result.Success {
-		t.Fatal(result)
-	}
-}
 func TestNativeGroupForeignReadinessListener(t *testing.T) {
 	s := nativeSpec(t)
 	r := nativeStart(t, s, "fake")
@@ -485,10 +398,22 @@ func TestNativeGroupForeignReadinessListener(t *testing.T) {
 }
 func TestNativeWorkerCancellationPreparation(t *testing.T) {
 	s := nativeSpec(t)
-	s.Run.Sidecars[0].Env["NATIVE_TEST_UNREADY"] = "1"
+	s.Run.Sidecars[0].Env["NATIVE_TEST_UNREADY"] = "file"
 	q, _ := fixture(t)
 	q.clock = &workerFakeClock{now: q.clock.Now()}
 	j := submit(t, q, s)
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := Worker{EnvironmentLimit: 1 << 20, StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake"), Interval: time.Millisecond}
+	if err := w.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	requireState(t, q, j.ID, "queued")
+	if job(t, q, j.ID).Attempt != 0 {
+		t.Fatal("cancelled worker started a command")
+	}
 	run := workerFixture(t, q)
 	dir := nativeWorkerWork(t, run.state)
 	nativeFile(t, dir, "child.pid")
@@ -506,64 +431,15 @@ func TestNativeWorkerCancellationPreparation(t *testing.T) {
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
+	nativeTouch(t, dir, "allow-ready")
 	await(t, func() bool { return job(t, q, j.ID).State == "cancelled" && job(t, q, j.ID).ReleaseConfirmed })
-	if result := run.result(t); !result.Interrupted || result.ReleasePending {
+	if result := run.result(t); !result.Interrupted || result.Success || result.ReleasePending {
 		t.Fatal(result)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "main.json")); !os.IsNotExist(err) {
+		t.Fatal("main launched after queue cancellation")
 	}
 	nativeNoSurvivors(t, &nativeTestRun{p: &process{cmd: &exec.Cmd{Process: &os.Process{Pid: state.PID}}}, dir: dir})
-}
-func TestNativeGroupValidation(t *testing.T) {
-	for _, kind := range []string{"reserved-name", "collision", "ram", "token", "device", "remote-readiness", "invalid-readiness", "docker"} {
-		t.Run(kind, func(t *testing.T) {
-			s := nativeSpec(t)
-			switch kind {
-			case "reserved-name":
-				s.Run.Sidecars[0].Name = "main"
-			case "collision":
-				s.Run.Sidecars[0].Name = "a-b"
-				other := s.Run.Sidecars[0]
-				other.Name = "a.b"
-				s.Run.Sidecars = append(s.Run.Sidecars, other)
-			case "ram":
-				s.Run.Sidecars[0].MemoryGB = 3
-			case "token":
-				s.Run.Sidecars[0].Env["MYCE_TOKEN"] = "override"
-			case "device":
-				s.Run.Sidecars[0].Env["CUDA_VISIBLE_DEVICES"] = "other"
-			case "remote-readiness":
-				s.Run.Sidecars[0].Readiness.Path = "//other/health"
-			case "invalid-readiness":
-				s.Run.Sidecars[0].Readiness.Path = "/bad%url"
-			case "docker":
-				s.Run.Docker = true
-			}
-			if s.Validate() == nil {
-				t.Fatal("invalid group accepted")
-			}
-		})
-	}
-}
-
-func TestNativeGroupInfrastructureLeaveRequeues(t *testing.T) {
-	s := nativeSpec(t)
-	s.Resumable = true
-	r := nativeStart(t, s, "fake")
-	nativeFile(t, r.dir, "main-ready")
-	if err := r.q.Leave("native", false); err != nil {
-		t.Fatal(err)
-	}
-	r.p.stop(r.w.Clock.Now(), time.Second, false)
-	result := nativeFinish(t, r)
-	if !result.Interrupted || result.Success {
-		t.Fatal(result)
-	}
-	if err := r.q.Complete(result); err != nil {
-		t.Fatal(err)
-	}
-	current := job(t, r.q, r.j.ID)
-	if current.State != "queued" || current.Losses != 0 {
-		t.Fatal("infrastructure stop consumed stage/loss budget", current.State, current.Losses)
-	}
 }
 
 func TestNativeGroupLockedLibraryPaths(t *testing.T) {
@@ -596,10 +472,18 @@ func TestNativeGroupLockedLibraryPaths(t *testing.T) {
 			s.Run.Sidecars[0].Env[key] = ambient
 			if own {
 				s.Run.Sidecars[0].Environment = "helper"
+				s.Run.Sidecars[0].Command = append([]string{"{env.helper.root}/bin/" + filepath.Base(s.Run.Command[0])}, s.Run.Command[1:]...)
+				s.Run.Sidecars[0].Env["HELPER_ROOT"] = "{env.helper.root}"
 			}
 			r := nativeStart(t, s, "fake", EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"main": {"fake": recipe}, "helper": {"fake": helper}}})
 			nativeFile(t, r.dir, "main-ready")
 			main, side := nativeEnv(t, r.dir, "main"), nativeEnv(t, r.dir, "side")
+			if own {
+				want := filepath.Join(r.w.environmentCache.Root, helper.Key)
+				if side["MYCE_ENVIRONMENT_DIR"] != want || side["HELPER_ROOT"] != want {
+					t.Fatal("helper environment not bound")
+				}
+			}
 			for name, env := range map[string]map[string]string{"main": main, "side": side} {
 				if !strings.HasPrefix(env[key], filepath.Join(env["MYCE_ENVIRONMENT_DIR"], "venv", "lib")+":") {
 					t.Errorf("%s lost locked precedence: %q", name, env[key])

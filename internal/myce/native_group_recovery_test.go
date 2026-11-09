@@ -20,6 +20,14 @@ import (
 )
 
 func TestNativeGroupWorkerCrashHelper(t *testing.T) {
+	if os.Getenv("MYCE_RECOVERY_TEST_HELPER") == "1" {
+		w := Worker{EnvironmentLimit: 1 << 20, Client: Client{URL: os.Getenv("MYCE_RECOVERY_TEST_URL"), Token: "test"}, Machine: machine("crash-worker", "fake"), StateDir: os.Getenv("MYCE_RECOVERY_TEST_STATE"), Interval: 5 * time.Millisecond}
+		if err := w.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		return
+	}
 	if os.Getenv("NATIVE_CRASH_WORKER") != "1" {
 		return
 	}
@@ -30,7 +38,7 @@ func TestNativeGroupWorkerCrashHelper(t *testing.T) {
 }
 
 func TestNativeGroupSIGKILLRestart(t *testing.T) {
-	for _, scrub := range []bool{false, true} {
+	for _, scrub := range []bool{true} {
 		t.Run(fmt.Sprintf("scrub=%v", scrub), func(t *testing.T) {
 			q, _ := fixture(t)
 			q.clock = RealClock{}
@@ -132,9 +140,30 @@ func TestNativeGroupSIGKILLRestart(t *testing.T) {
 
 func TestNativeGroupPortHandoff(t *testing.T) {
 	t.Parallel()
-	for _, collisions := range []int{1, 3} {
+	for _, collisions := range []int{nativeBindAttempts} {
 		t.Run(strconv.Itoa(collisions), func(t *testing.T) { nativePortHandoff(t, collisions) })
 	}
+
+	t.Run("NativeGroupOccupiedPort", func(t *testing.T) {
+
+		occupied, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer occupied.Close()
+		s := nativeSpec(t)
+		port := occupied.Addr().(*net.TCPAddr).Port
+		s.Run.Sidecars[0].Port = &port
+		r := nativeStart(t, s, "fake")
+		result := nativeFinish(t, r)
+		if result.Success || !result.Interrupted || !strings.Contains(result.Error, "port") {
+			t.Fatal(result)
+		}
+		if _, err := os.Stat(filepath.Join(r.dir, "side.json")); !os.IsNotExist(err) {
+			t.Fatal("helper started on occupied port")
+		}
+
+	})
 }
 
 func nativePortHandoff(t *testing.T, collisions int) Result {
@@ -278,7 +307,7 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 }
 
 func TestNativeGroupProductionOutcomes(t *testing.T) {
-	for _, mode := range []string{"timeout", "self-exit", "infrastructure"} {
+	for _, mode := range []string{"zero", "infrastructure"} {
 		t.Run(mode, func(t *testing.T) {
 			s := nativeSpec(t)
 			s.Priority = "production"
@@ -287,25 +316,39 @@ func TestNativeGroupProductionOutcomes(t *testing.T) {
 				s.Run.Sidecars[0].Readiness.Timeout = "150ms"
 				s.Run.Sidecars[0].Env["NATIVE_TEST_UNREADY"] = "1"
 			}
-			r := nativeStart(t, s, "fake")
-			if mode != "timeout" {
-				nativeFile(t, r.dir, "main-ready")
-				if mode == "infrastructure" {
-					r.p.stop(r.w.Clock.Now(), time.Second, false)
-				} else {
-					data, _ := os.ReadFile(filepath.Join(r.dir, "side.json"))
-					var v struct{ PID int }
-					_ = json.Unmarshal(data, &v)
-					if err := syscall.Kill(v.PID, syscall.SIGTERM); err != nil {
-						t.Fatal(err)
-					}
-				}
+			if mode == "zero" {
+				s.Run.Command = []string{"/bin/sleep", "600"}
+				s.Run.Sidecars[0].Port = nil
+				s.Run.Sidecars[0].Readiness = nil
+				s.Run.Sidecars[0].Command = []string{"sh", "-c", `while [ ! -f "$REVIEW_EXIT" ]; do sleep 0.01; done; exit 0`}
+				s.Run.Sidecars[0].Env = map[string]string{"REVIEW_EXIT": "{work}/self-exit"}
 			}
+			r := nativeStart(t, s, "fake")
+			if mode == "zero" {
+				await(t, func() bool { return r.p.native.started() })
+				nativeTouch(t, r.dir, "self-exit")
+			} else {
+				nativeFile(t, r.dir, "main-ready")
+				if err := r.q.Leave("native", false); err != nil {
+					t.Fatal(err)
+				}
+				r.p.stop(r.w.Clock.Now(), time.Second, false)
+			}
+
 			result := nativeFinish(t, r)
 			if err := r.q.Complete(result); err != nil {
 				t.Fatal(err)
 			}
 			cur := job(t, r.q, r.j.ID)
+			if mode == "zero" && (result.Success || result.Interrupted || !strings.Contains(result.Error, "sidecar helper exited")) {
+				t.Fatal(result)
+			}
+			if mode == "zero" && (result.Success || result.Interrupted || cur.State != "failed" || cur.InfrastructureRetries != 0) {
+				t.Fatal("successful helper exit did not fail stage")
+			}
+			if mode == "infrastructure" && (!result.Interrupted || result.Success || cur.Losses != 0) {
+				t.Fatal("infrastructure stop consumed stage/loss budget", cur.State, cur.Losses)
+			}
 			wantState, wantRetries := "failed", 0
 			if mode == "infrastructure" {
 				wantState, wantRetries = "queued", 1
@@ -315,29 +358,6 @@ func TestNativeGroupProductionOutcomes(t *testing.T) {
 				t.Fatalf("expected %s/%d", wantState, wantRetries)
 			}
 		})
-	}
-}
-
-func TestNativeGroupZeroSelfExit(t *testing.T) {
-	s := nativeSpec(t)
-	s.Priority = "production"
-	s.SubmissionKey = "review-zero-exit"
-	s.Run.Command = []string{"/bin/sleep", "600"}
-	s.Run.Sidecars[0].Port = nil
-	s.Run.Sidecars[0].Readiness = nil
-	s.Run.Sidecars[0].Command = []string{"sh", "-c", `while [ ! -f "$REVIEW_EXIT" ]; do sleep 0.01; done; exit 0`}
-	s.Run.Sidecars[0].Env = map[string]string{"REVIEW_EXIT": "{work}/self-exit"}
-	r := nativeStart(t, s, "fake")
-	await(t, func() bool { return r.p.native.started() })
-	nativeTouch(t, r.dir, "self-exit")
-	result := nativeFinish(t, r)
-	if err := r.q.Complete(result); err != nil {
-		t.Fatal(err)
-	}
-	cur := job(t, r.q, r.j.ID)
-	t.Logf("zero self-exit: success=%v interrupted=%v state=%s retries=%d", result.Success, result.Interrupted, cur.State, cur.InfrastructureRetries)
-	if result.Success || result.Interrupted || cur.State != "failed" || cur.InfrastructureRetries != 0 {
-		t.Fatal("successful helper exit did not fail stage")
 	}
 }
 

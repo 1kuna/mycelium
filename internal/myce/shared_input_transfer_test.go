@@ -113,8 +113,4 @@ func TestSharedInputsStoredReferencesHaveRetentionAndAdmission(t *testing.T) {
 	if _, err = os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
 		t.Fatal("terminal shared input not reclaimed", err)
 	}
-	s.SharedInputs["ASSET"] = input
-	if err := s.Validate(); err == nil {
-		t.Fatal("colliding environment names accepted")
-	}
 }

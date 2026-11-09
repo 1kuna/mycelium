@@ -140,7 +140,7 @@ func TestNativeExtensionPixiLazyAcquisition(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(archive.Bytes())
-	home, downloads := t.TempDir(), 0
+	home := t.TempDir()
 	w.environmentCache.Tools = &EnvironmentToolSource{
 		Home: func() (string, error) { return home, nil },
 		Releases: func(osname, arch string) ([]ToolRelease, error) {
@@ -152,7 +152,6 @@ func TestNativeExtensionPixiLazyAcquisition(t *testing.T) {
 		},
 		Probe: ToolBootstrapProbe{
 			Fetch: func(_ context.Context, r ToolRelease) (io.ReadCloser, error) {
-				downloads++
 				if r.Name != "pixi" {
 					t.Fatal("unexpected tool")
 				}
@@ -166,9 +165,12 @@ func TestNativeExtensionPixiLazyAcquisition(t *testing.T) {
 	if err := w.prepareRegisteredExtension(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
-	if downloads != 1 {
-		t.Fatalf("downloads = %d", downloads)
+
+	w.environmentCache.Tools.Probe.Fetch = func(context.Context, ToolRelease) (io.ReadCloser, error) {
+		t.Error("runtime rebuilt or reacquired pixi")
+		return nil, errors.New("unexpected tool fetch after preparation")
 	}
+
 	startNativeExtensionFixture(t, w)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -183,9 +185,7 @@ func TestNativeExtensionPixiLazyAcquisition(t *testing.T) {
 		}
 		return out.State == "succeeded"
 	})
-	if downloads != 1 {
-		t.Fatal("runtime rebuilt or reacquired pixi")
-	}
+
 }
 
 func startNativeExtensionFixture(t *testing.T, w Worker) {

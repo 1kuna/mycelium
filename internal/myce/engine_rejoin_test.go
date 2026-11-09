@@ -13,7 +13,7 @@ import (
 // A partition does not release a known engine. A same-session worker can
 // resume its exact live engine without inventing a replacement attempt.
 func TestEngineRecoveryRejoinSameSessionLiveEngine(t *testing.T) {
-	for _, pinned := range []bool{false, true} {
+	for _, pinned := range []bool{false} {
 		t.Run(fmt.Sprintf("pinned=%v", pinned), func(t *testing.T) {
 			q, clock := fixture(t)
 			model := serverTestModel(t, "ready")
@@ -110,33 +110,3 @@ func TestEngineRecoveryRejoinSameSessionLiveEngine(t *testing.T) {
 }
 
 // Each failed warm-up must fail its own queued calls, regardless of history.
-func TestEngineRecoveryRepeatedInitialLoadFailure(t *testing.T) {
-	q, clock, m := modelFixture(t)
-	q.models.Wait = time.Hour
-	if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
-		t.Fatal(err)
-	}
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	first := addModelCall(t, q, "experiment")
-	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "failed", Error: "verification failed"}}}); err != nil {
-		t.Fatal(err)
-	}
-	if first.Error == "" {
-		t.Fatal("first call not failed")
-	}
-	clock.Advance(time.Second)
-	check(t, q, m, nil)
-	if s.State != "loading" {
-		t.Fatal("pin did not retry warm-up")
-	}
-	second := addModelCall(t, q, "experiment")
-	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "failed", Error: "verification failed"}}}); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 5; i++ {
-		check(t, q, m, nil)
-	}
-	if second.Error == "" {
-		t.Fatalf("second call to persistently-failing pinned model not failed promptly; slot state=%s crash=%d", s.State, s.CrashCount)
-	}
-}

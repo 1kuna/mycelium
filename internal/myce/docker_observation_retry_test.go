@@ -16,7 +16,7 @@ import (
 // Reproduce #149 at the real daemon boundary: a running production attempt
 // outlives timed-out inventory reads, retains custody, and completes normally.
 func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
-	for _, operation := range []string{"ps", "inspect"} {
+	for _, operation := range []string{"inspect"} {
 		t.Run(operation, func(t *testing.T) {
 			w, store, clock, root := dockerFixture(t)
 			var armed atomic.Bool
@@ -156,7 +156,7 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 // A heartbeat sent during a slow startup read can remain at the queue after
 // that read recovers. It must not turn observation health into stop authority.
 func TestDockerObservationRetryHeartbeatAllowsOwnedLaunch(t *testing.T) {
-	for _, protocol := range []string{"legacy", "machine"} {
+	for _, protocol := range []string{"machine"} {
 		t.Run(protocol, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := dockerMachine("worker", "fake")

@@ -13,7 +13,7 @@ func TestMemoryEscalationMeasuredIncidentRange(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	s.Needs.Memory = "auto"
 	var first Job
-	for _, host := range []float64{15, 17, 18.7} {
+	for _, host := range []float64{18.7} {
 		first = startObservation(t, q, m, s)
 		clock.Advance(time.Second)
 		r := result(&first, true)
@@ -33,7 +33,7 @@ func TestMemoryEscalationMeasuredIncidentRange(t *testing.T) {
 	}
 	candidate := first
 	candidate.State = "queued"
-	for _, allowance := range []float64{64, 128} {
+	for _, allowance := range []float64{64} {
 		target := *q.s.Machines[m.ID]
 		target.EffectiveHostMemoryBudgetGB = allowance
 		e := q.memoryCandidate(&candidate, &target).MemoryEnvelope

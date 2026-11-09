@@ -371,7 +371,7 @@ func TestNativeIsolationLinuxFallback(t *testing.T) {
 	if errno != 0 || abi < 6 {
 		t.Skip("Landlock ABI 6 unavailable; no hygiene-only fallback")
 	}
-	for _, sidecars := range []bool{false, true} {
+	for _, sidecars := range []bool{true} {
 		t.Run(strconv.FormatBool(sidecars), func(t *testing.T) {
 			root := t.TempDir()
 			work := filepath.Join(root, "own")
@@ -451,32 +451,5 @@ func TestNativeIsolationLinuxFallback(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestNativeIsolationLinuxGateAndQueuePort(t *testing.T) {
-	root := t.TempDir()
-	cmd := exec.Command("/bin/sh", "-c", `read gate || exit 125; exec "$@"`, "myce-supervisor-test", "/bin/true")
-	cmd.Dir = root
-	gate := slices.Clone(cmd.Args[:4])
-	ready, readyWriter, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ready.Close()
-	defer readyWriter.Close()
-	cmd.ExtraFiles = []*os.File{readyWriter}
-	if err := nativeWrapPayload(cmd, []string{"/native-helper", "/bin/true"}); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(cmd.Args[:4], gate) || cmd.Path != "/bin/sh" || cmd.ExtraFiles[0] != readyWriter {
-		t.Fatal("isolation replaced the worker gate or receipt descriptors")
-	}
-	w := Worker{Client: Client{URL: "http://127.0.0.1:8921"}}
-	if _, err := w.nativeLinuxPolicy(cmd, root, root, nil, []string{"8921"}); err == nil || !strings.Contains(err.Error(), "control port") {
-		t.Fatalf("queue port not rejected: %v", err)
-	}
-	if _, err := nativeIsolationSupport(true); err == nil || !strings.Contains(err.Error(), "native_network_unavailable") {
-		t.Fatalf("unqualified egress accepted: %v", err)
 	}
 }

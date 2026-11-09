@@ -40,4 +40,22 @@ func TestExtensionPrepareCapacityChange(t *testing.T) {
 			t.Fatal(rt.reports[key])
 		}
 	}
+
+	t.Run("ExtensionPrepareFingerprintChangesOffer", func(t *testing.T) {
+
+		e := compositionExtension(t, false)
+		q, w := prepareTestWorker(t, e)
+		submit(t, q, Spec{Name: "prepare", Project: "test", Extension: extensionKey(e)})
+		first := check(t, q, w.Machine, nil).EnvironmentPlan[0]
+		w.Machine.EnvironmentReports = []EnvironmentReport{{Key: first.Key, State: "failed"}}
+		if len(check(t, q, w.Machine, nil).EnvironmentPlan) != 0 {
+			t.Fatal("failure was not negatively cached")
+		}
+		w.Machine.ExtensionFingerprint = "changed"
+		next := check(t, q, w.Machine, nil).EnvironmentPlan
+		if len(next) != 1 || next[0].Key == first.Key {
+			t.Fatal("stale fingerprint reused")
+		}
+
+	})
 }

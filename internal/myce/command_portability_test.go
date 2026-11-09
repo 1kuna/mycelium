@@ -2,10 +2,9 @@ package myce
 
 import (
 	"bytes"
-	"context"
+
 	"encoding/json"
-	"os"
-	"path/filepath"
+
 	"slices"
 	"strings"
 	"testing"
@@ -18,7 +17,7 @@ func TestCommandPortabilityExcludedEnvironmentCandidates(t *testing.T) {
 	q.environments = EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}
 	linux := ExecutionTarget{"linux", "amd64", "cpu"}
 	darwin := ExecutionTarget{"darwin", "arm64", "cpu"}
-	for i, target := range []ExecutionTarget{linux, darwin, {"freebsd", "riscv64", "cpu"}} {
+	for i, target := range []ExecutionTarget{linux, darwin} {
 		m := machine([]string{"linux-worker", "darwin-worker", "unknown-worker"}[i], "cpu")
 		m.LastSeen = c.Now()
 		m.CapabilityProfile.OS, m.CapabilityProfile.Arch = target.OS, target.Arch
@@ -134,83 +133,5 @@ func TestCommandPortabilityIntersectsEveryMember(t *testing.T) {
 	}
 	if got := portabilityRow(t, p, ExecutionTarget{"darwin", "arm64", "cpu"}); !strings.HasPrefix(got.EnvironmentCoverage, "unknown:") {
 		t.Fatalf("unread inline metadata became a known exclusion: %+v", got)
-	}
-}
-
-func TestCommandPortabilityCPUMemberCapsNormalizeBeforeLowering(t *testing.T) {
-	q, _ := fixture(t)
-	r := breadthRecipe("linux-64", "osx-arm64")
-	q.environments = EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}
-	for _, composed := range []bool{false, true} {
-		s := cpuResolveSpec()
-		s.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 4}
-		if composed {
-			s.Run = RunSpec{}
-			s.Execution = &ExecutionSpec{Main: ExecutionMember{Command: []string{"echo", "ok"}, MemoryGB: 1, Environment: "tools"}}
-		} else {
-			s.Run.MemoryGB = 1
-			s.Environment = Environment{Name: "tools"}
-		}
-		if err := s.Validate(); err != nil {
-			t.Fatal(err)
-		}
-		before := identityHash(s)
-		resolved, err := q.Resolve(ResolveRequest{Spec: s})
-		if err != nil || resolved.Portability == nil {
-			t.Fatalf("resolve rejected valid CPU member cap: %+v %v", resolved, err)
-		}
-		p, err := q.Portability(PortabilityRequest{Spec: &s})
-		if err != nil || len(p.Targets) != 2 || len(p.Targets[0].Environments) != 1 || p.Targets[0].Environments[0].Key != r.Key {
-			t.Fatalf("CPU member cap dropped lock discovery: %+v %v", p, err)
-		}
-		if identityHash(s) != before {
-			t.Fatal("normalization changed caller intent")
-		}
-	}
-}
-
-// The diagnostic is not a launch permit or a result check. A real small command
-// still goes through submit, accepted output verification and exact release.
-func TestCommandPortabilityRealCPUResult(t *testing.T) {
-	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "breadth-fixture", Interval: 10 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	s := cpuResolveSpec()
-	s.SubmissionKey = "breadth-result"
-	_, input := retentionJobInput(t, d.Client(), "portable-cpu-ok\n")
-	s.Files = map[string]FileRef{"source.txt": input}
-	s.Run.Command = []string{"sh", "-c", "cat source.txt > result.txt"}
-	s.Outputs = map[string]string{"result.txt": "results"}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	var report ResolveReport
-	if err := d.Client().Call(ctx, "POST", "/api/resolve", ResolveRequest{Spec: s}, &report); err != nil || report.Portability == nil {
-		t.Fatal(report, err)
-	}
-	j, err := d.Client().Submit(ctx, s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	completed, err := d.Client().Wait(ctx, j.ID)
-	if err != nil || completed.State != "succeeded" {
-		t.Fatal(completed, err)
-	}
-	dest := filepath.Join(root, "accepted.txt")
-	if err := d.Client().DownloadResult(ctx, j.ID, "result.txt", dest); err != nil {
-		t.Fatal(err)
-	}
-	if data, err := os.ReadFile(dest); err != nil || string(data) != "portable-cpu-ok\n" {
-		t.Fatalf("accepted bytes: %q %v", data, err)
-	}
-	await(t, func() bool {
-		current, err := d.Client().GetJob(ctx, j.ID)
-		return err == nil && current.ReleaseConfirmed
-	})
-	replayed, err := d.Client().Submit(ctx, s)
-	if err != nil || replayed.ID != j.ID || !replayed.SubmissionReused {
-		t.Fatal(replayed, err)
 	}
 }

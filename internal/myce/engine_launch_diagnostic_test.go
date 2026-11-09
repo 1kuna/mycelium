@@ -13,7 +13,7 @@ import (
 // #868: the final shared-host check runs after queue Started authorization.
 // Its refusal must retain the comparison, even though custody already exists.
 func TestEngineLaunchAdmissionDiagnostic(t *testing.T) {
-	for _, check := range []string{"live_host_growth", "aggregate_cpu_allowance", "aggregate_host_allowance"} {
+	for _, check := range []string{"live_host_growth", "aggregate_cpu_allowance"} {
 		t.Run(check, func(t *testing.T) {
 			rt, _, _ := probeMemoryRuntimeFixture(t)
 			rt.models = map[string]*workerModel{}

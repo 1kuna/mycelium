@@ -36,7 +36,7 @@ func TestExtensionPrepareCheckOrdinaryEnvironmentIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, w.Machine.GPU, w.extensionFingerprint, &w.Machine)
-	if qualifiedExtension(j, &w.Machine) == nil {
+	if reply := check(t, q, w.Machine, nil); reply.Job == nil || reply.Job.ID != j.ID {
 		t.Fatalf("unchanged environment lost qualification: before=%s after=%+v", reports[0].EnvironmentIdentity, w.Machine.ExtensionReports)
 	}
 }

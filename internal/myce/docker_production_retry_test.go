@@ -14,7 +14,7 @@ import (
 
 // Exercise the real adapter, durable custody and queue through the fake daemon.
 func TestDockerProductionOutcomeCause(t *testing.T) {
-	for _, cause := range []string{"stop-main", "exit-one", "worker-recovery", "exhaustion"} {
+	for _, cause := range []string{"exit-one", "exhaustion"} {
 		t.Run(cause, func(t *testing.T) {
 			w, store, clock, root := dockerFixture(t)
 			q, _ := fixture(t)

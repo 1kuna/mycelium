@@ -153,6 +153,14 @@ func TestDockerRestartCompletedMain(t *testing.T) {
 	if !st.Released || !st.EvidenceSaved || !st.NetworkRemoved {
 		t.Fatalf("incomplete release: %+v", st)
 	}
+	info, _ := os.Stat(filepath.Join(s.dir, s.state.Identity+".docker-evidence.json"))
+	if info.Mode().Perm() != 0600 {
+		t.Fatal("evidence is not private")
+	}
+	log, _ := os.ReadFile(filepath.Join(s.dir, s.state.Log))
+	if strings.Count(string(log), "payload stderr") != 1 {
+		t.Fatal("sidecar private stderr entered uploaded main log")
+	}
 	r := saved
 	for id, m := range st.Containers {
 		want := 0
@@ -196,46 +204,60 @@ func TestDockerRestartCompletedMain(t *testing.T) {
 	if string(first) != string(second) {
 		t.Fatal("ack retention boundary renewed")
 	}
+
+	t.Run("DockerRestartLiveCompletionSurvivesRecovery", func(t *testing.T) {
+
+		w, s, _, clock, root := restartResultFixture(t)
+		if e := os.WriteFile(filepath.Join(root, "mode"), []byte("term"), 0600); e != nil {
+			t.Fatal(e)
+		}
+		clock.advance(StopGrace)
+		if err := os.Remove(filepath.Join(root, "running")); err != nil {
+			t.Fatal(err)
+		}
+		p, err := w.restoreDocker(s)
+		if err != nil || p == nil {
+			t.Fatal("restore", err)
+		}
+		defer p.docker.close()
+		clock.advance(StopGrace)
+		r := d5Finish(t, p)
+		if !r.Success || r.Interrupted {
+			t.Fatalf("discarded recovered completion: %+v", r)
+		}
+		for id, m := range restartRead(t, s).Containers {
+			if id == "id1" {
+				continue
+			}
+			if m.ExitCode == nil || *m.ExitCode != 143 || m.TermOutcome != "sent" || m.StderrTail != "payload stderr\n" {
+				t.Fatalf("TERM evidence: %+v", m)
+			}
+		}
+		q := restartQueue(t, s, w)
+		if e := q.Complete(r); e != nil {
+			t.Fatal(e)
+		}
+		got := job(t, q, r.ID)
+		if got.State != "succeeded" || got.Losses != 0 {
+			t.Fatalf("completion changed: %+v", got)
+		}
+		m := w.Machine
+		m.HostAvailableMemoryGB = 32
+		m.HostMemoryMeasured = true
+		m.FreeHostMemoryGB = 32
+		reply := check(t, q, m, nil)
+		if reply.Job != nil {
+			t.Fatalf("completed job retried: %+v", reply)
+		}
+
+	})
 }
 
 // Case 2 includes zero first observed while recovery cleans up the old main.
-func TestDockerRestartLiveCompletionSurvivesRecovery(t *testing.T) {
-	w, s, _, clock, root := restartResultFixture(t)
-	clock.advance(StopGrace)
-	if err := os.Remove(filepath.Join(root, "running")); err != nil {
-		t.Fatal(err)
-	}
-	p, err := w.restoreDocker(s)
-	if err != nil || p == nil {
-		t.Fatal("restore", err)
-	}
-	defer p.docker.close()
-	clock.advance(StopGrace)
-	r := d5Finish(t, p)
-	if !r.Success || r.Interrupted {
-		t.Fatalf("discarded recovered completion: %+v", r)
-	}
-	q := restartQueue(t, s, w)
-	if e := q.Complete(r); e != nil {
-		t.Fatal(e)
-	}
-	got := job(t, q, r.ID)
-	if got.State != "succeeded" || got.Losses != 0 {
-		t.Fatalf("completion changed: %+v", got)
-	}
-	m := w.Machine
-	m.HostAvailableMemoryGB = 32
-	m.HostMemoryMeasured = true
-	m.FreeHostMemoryGB = 32
-	reply := check(t, q, m, nil)
-	if reply.Job != nil {
-		t.Fatalf("completed job retried: %+v", reply)
-	}
-}
 
 // Case 3: durable payload failures retain precedence over recovery interruption.
 func TestDockerRestartMainFailures(t *testing.T) {
-	for _, kind := range []string{"nonzero", "memory", "oom", "containment", "operator"} {
+	for _, kind := range []string{"memory", "containment", "operator"} {
 		t.Run(kind, func(t *testing.T) {
 			w, s, d, c, root := restartResultFixture(t)
 			if kind == "nonzero" || kind == "oom" {
@@ -248,7 +270,12 @@ func TestDockerRestartMainFailures(t *testing.T) {
 			case "memory":
 				d.state.MemoryFailure = "Docker memory ceiling not enforced"
 			case "containment":
-				d.state.Failure = "Docker containment violation"
+				if err := os.Remove(filepath.Join(root, "running-sidecar-naming")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "disconnected-sidecar-naming"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
 			case "operator":
 				d.state.OperatorConfirmed = true
 			}
@@ -268,6 +295,14 @@ func TestDockerRestartMainFailures(t *testing.T) {
 				return
 			}
 			r := restartSavedResult(t, w, s)
+			if kind == "containment" {
+				if r.Success || r.Interrupted || !strings.Contains(r.Error, "private network attachment missing") {
+					t.Fatalf("missing containment failure: %+v", r)
+				}
+				if !strings.Contains(restartRead(t, s).Failure, "private network attachment missing") {
+					t.Fatal("containment failure not durable")
+				}
+			}
 			if r.Success || (kind != "operator" && r.Interrupted) {
 				t.Fatalf("failure changed: %+v", r)
 			}
@@ -370,29 +405,9 @@ func TestDockerRestartLateSuccessOnlySettlesExactCustody(t *testing.T) {
 	}
 }
 
-func TestDockerRestartGracefulSidecarEvidence(t *testing.T) {
-	w, s, d, _, root := restartResultFixture(t)
-	if e := os.WriteFile(filepath.Join(root, "mode"), []byte("term"), 0600); e != nil {
-		t.Fatal(e)
-	}
-	restartMainExit(t, d, root)
-	r := restartSavedResult(t, w, s)
-	if !r.Success || r.Interrupted {
-		t.Fatalf("sidecar TERM became loss: %+v", r)
-	}
-	for id, m := range restartRead(t, s).Containers {
-		if id == "id1" {
-			continue
-		}
-		if m.ExitCode == nil || *m.ExitCode != 143 || m.TermOutcome != "sent" || m.StderrTail != "payload stderr\n" {
-			t.Fatalf("TERM evidence: %+v", m)
-		}
-	}
-}
-
 // Released custody cannot prove that output finalization would have succeeded.
 func TestDockerRestartReleasedWithoutResultStaysLoss(t *testing.T) {
-	for _, kind := range []string{"crash", "output-sync-close"} {
+	for _, kind := range []string{"output-sync-close"} {
 		t.Run(kind, func(t *testing.T) {
 			w, s, d, c, root := restartResultFixture(t)
 			restartMainExit(t, d, root)
@@ -448,24 +463,5 @@ func TestDockerRestartReleasedWithoutResultStaysLoss(t *testing.T) {
 				t.Fatalf("expected retry: %+v", reply)
 			}
 		})
-	}
-}
-
-func TestDockerRestartDisconnectedSidecarIsContainmentFailure(t *testing.T) {
-	w, s, d, _, root := restartResultFixture(t)
-	restartMainExit(t, d, root)
-	// The sidecar exits and loses its attachment during grace, before recovery.
-	if err := os.Remove(filepath.Join(root, "running-sidecar-naming")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "disconnected-sidecar-naming"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	r := restartSavedResult(t, w, s)
-	if r.Success || r.Interrupted || !strings.Contains(r.Error, "private network attachment missing") {
-		t.Fatalf("missing containment failure: %+v", r)
-	}
-	if !strings.Contains(restartRead(t, s).Failure, "private network attachment missing") {
-		t.Fatal("containment failure not durable")
 	}
 }

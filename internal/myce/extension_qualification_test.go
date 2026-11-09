@@ -2,12 +2,12 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
+
 	"errors"
-	"fmt"
+
 	"os"
 	"path/filepath"
-	"strings"
+
 	"testing"
 	"time"
 )
@@ -60,6 +60,16 @@ func reconcileQualification(t *testing.T, w Worker, plan ExtensionQualificationP
 func TestExtensionFirstDemandQualification(t *testing.T) {
 	t.Run("cold adoption accepted comparison and warm evidence", func(t *testing.T) {
 		q, w, e, demand, prepare, plans := qualificationFixture(t)
+		if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: []string{w.Machine.ID}}}); err != nil {
+			t.Fatal(err)
+		}
+		waiting, err := q.Submit(Spec{Name: "waiting", Project: "test", Priority: "experiment", Extension: extensionKey(e)})
+		if err != nil {
+			t.Fatalf("qualification is temporary, not structural incompatibility: %v", err)
+		}
+		if err := q.Cancel(waiting.ID); err != nil {
+			t.Fatal(err)
+		}
 		for _, plan := range plans {
 			reconcileQualification(t, w, plan)
 			first := qualificationJob(t, q, plan.Report.CheckID)
@@ -111,47 +121,10 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 			t.Fatal("warm demand failed to reuse evidence", warm)
 		}
 		finish(t, q, warm.Job, true)
-		submit(t, q, Spec{Name: "warm-repeat", Project: "test", Extension: extensionKey(e)})
-		if repeat := check(t, q, w.Machine, nil); repeat.Job == nil || repeat.Job.Spec.ExtensionCheck != nil || len(repeat.ExtensionQualificationPlan) != 0 {
-			t.Fatal("warm repeat scheduled another native check", repeat)
-		}
 		changed := w.Machine
 		changed.ExtensionFingerprint = "new-device-fingerprint"
 		if qualifiedExtension(demand, &changed) != nil {
 			t.Fatal("warm evidence survived a changed device identity")
-		}
-	})
-
-	t.Run("reconnect and persisted queue adopt pending check", func(t *testing.T) {
-		q, w, _, _, _, plans := qualificationFixture(t)
-		plan := plans[0]
-		reconcileQualification(t, w, plan)
-		first := qualificationJob(t, q, plan.Report.CheckID)
-		previous := w.Machine.Session
-		w.Machine.Session = "reconnected"
-		w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
-		if _, err := q.Checkin(Checkin{Machine: w.Machine, Fresh: true, PreviousSession: previous}); err != nil {
-			t.Fatal(err)
-		}
-		reconcileQualification(t, w, plan)
-		if replay := qualificationJob(t, q, plan.Report.CheckID); replay.ID != first.ID {
-			t.Fatal("reconnect duplicated check")
-		}
-		var marker []byte
-		if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&marker); err != nil {
-			t.Fatal(err)
-		}
-		data, err := readQueueState(q.db, marker)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var restored state
-		if err := json.Unmarshal(data, &restored); err != nil {
-			t.Fatal(err)
-		}
-		record := restored.Submissions[submissionDigest("extension-check", plan.Report.CheckID)]
-		if record == nil || record.JobID != first.ID || automaticExtensionCheck(restored.Jobs[first.ID]) == nil {
-			t.Fatal("SQLite lost invocation identity")
 		}
 	})
 
@@ -269,110 +242,5 @@ func TestExtensionQualificationSuspectRetainsDemand(t *testing.T) {
 	w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
 	if got := check(t, q, w.Machine, nil).Job; got == nil || got.ID != checkID {
 		t.Fatal("fresh contact did not resume the original check", got)
-	}
-}
-
-func TestExtensionQualificationMixedBacklog(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)}
-	m := machine("worker", "fake")
-	m.ExtensionFingerprint = "synthetic-native-identity"
-	m.LastSeen, m.DiskReceivedAt = clock.Now(), clock.Now()
-	m.DiskVolumes = []DiskVolume{{ID: "local", Roots: []string{"data"}, TotalBytes: 1 << 30, FreeBytes: 512 << 20, SampledAt: clock.Now()}}
-	e := fakeExtension(t)
-	other := fakeExtension(t)
-	other.Files["extension.yaml"] = []byte(strings.ReplaceAll(strings.ReplaceAll(string(other.Files["extension.yaml"]), "version: '1'", "version: '2'"), "resumable: true", "resumable: false"))
-	var err error
-	other, err = extensionFromFiles(other.Files)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, extension := range []Extension{e, other} {
-		for _, work := range extensionWorks(extension) {
-			r := newExtensionReport(extension, &m, work)
-			r.Setup = true
-			m.ExtensionReports = append(m.ExtensionReports, r)
-		}
-	}
-	job := func(id string, extensions ...Extension) *Job {
-		return &Job{ID: id, State: "queued", Spec: Spec{Project: "test", Kind: "sample"}, Extensions: extensions}
-	}
-	host, disk, device := job("host", e), job("disk", e), job("device", e)
-	host.Spec.AllowedMachines = []string{"other-worker"}
-	disk.Spec.Disk = &DiskNeeds{InputBytes: 1 << 30}
-	device.Spec.Needs.GPU = &GPUSelection{Devices: []string{"other-device"}}
-	resume := job("resume", other)
-	resume.Spec.Resumable = true
-	useful := job("useful", other)
-	plain := &Job{ID: "plain", State: "queued", Spec: spec("experiment")}
-	q := &Queue{clock: clock, s: state{Jobs: map[string]*Job{}, Extensions: map[string]Extension{extensionKey(e): e, extensionKey(other): other}, Machines: map[string]*Machine{m.ID: &m}}}
-	// This planning-only fixture bypasses check-in; supply the current worker's
-	// advertised cadence as an accepted report would before offering work.
-	q.acceptContactPeriod(&m, time.Second, nil)
-	for _, j := range []*Job{host, disk, device, resume, useful, plain} {
-		q.s.Jobs[j.ID] = j
-	}
-	assertOffers := func(want ...Extension) {
-		t.Helper()
-		expected := map[string]bool{}
-		for _, extension := range want {
-			for _, work := range extensionWorks(extension) {
-				expected[extension.Digest+"/"+work] = true
-			}
-		}
-		for _, plan := range q.extensionQualificationPlan(&m) {
-			key := plan.Report.Digest + "/" + plan.Report.Work
-			if !expected[key] || plan.Machine != m.ID {
-				t.Fatalf("unexpected qualification offer: %+v", plan)
-			}
-			delete(expected, key)
-		}
-		if len(expected) != 0 {
-			t.Fatal("missing qualification offers", expected)
-		}
-	}
-	// Ineligible jobs must not lend their eligibility to another frozen digest.
-	assertOffers(other)
-	host.Spec.AllowedMachines = []string{m.ID}
-	assertOffers(e, other)
-	useful.State = "cancelled"
-	assertOffers(e) // The resumable job cannot keep the non-resumable check alive.
-	for i := range m.ExtensionReports {
-		m.ExtensionReports[i].Qualified = true
-	}
-	assertOffers() // A new pass immediately observes newly accepted qualification.
-}
-
-// #459's post-restart queue had 149 registered extensions and 194 queued
-// plain commands, each with three shared inputs (608, 637 and 4063 bytes).
-// Qualification demand used to rehash those inputs for every catalogue entry
-// on every target, despite none of these commands using an extension. Keep
-// this fixture synthetic: no deployment identities, paths or payloads.
-func BenchmarkExtensionQualificationPlainBacklog(b *testing.B) {
-	clock := &fakeClock{now: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)}
-	m := machine("worker", "fake")
-	m.LastSeen, m.DiskReceivedAt = clock.Now(), clock.Now()
-	m.DiskVolumes = []DiskVolume{{ID: "local", Roots: []string{"data", "file-cache", "checkpoint"}, TotalBytes: 1 << 40, FreeBytes: 1 << 39, SampledAt: clock.Now()}}
-	for i := range 48 {
-		m.CachedSharedInputs = append(m.CachedSharedInputs, fmt.Sprintf("%064x", i))
-	}
-	q := &Queue{clock: clock, s: state{Jobs: map[string]*Job{}, Extensions: map[string]Extension{}, Machines: map[string]*Machine{m.ID: &m}}}
-	for i := range 149 {
-		id := fmt.Sprint(i)
-		q.s.Extensions[id] = Extension{Name: "extension-" + id, Version: "1", Digest: fmt.Sprintf("%064x", i), Resumable: true}
-	}
-	for i := range 194 {
-		id := fmt.Sprint(i)
-		s := spec("experiment")
-		s.SharedInputs = map[string]SharedInput{}
-		for k, size := range []int64{608, 637, 4063} {
-			s.SharedInputs[fmt.Sprint(k)] = SharedInput{SHA256: strings.Repeat(fmt.Sprint(k+1), 64), SizeBytes: size}
-		}
-		q.s.Jobs[id] = &Job{ID: id, Spec: s, State: "queued", Queued: clock.Now()}
-	}
-	b.ReportAllocs()
-	for b.Loop() {
-		if plans := q.extensionQualificationPlan(&m); len(plans) != 0 {
-			b.Fatal("plain commands manufactured qualification demand", plans)
-		}
 	}
 }

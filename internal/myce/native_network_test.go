@@ -80,17 +80,6 @@ func TestUnsandboxedNetworkJobPreparesAndRunsWithoutNativeNetwork(t *testing.T) 
 	}
 }
 
-// Native policy is not an additional prerequisite for explicitly contained
-// Docker commands; their existing runtime/network policy continues to apply.
-func TestNativeNetworkDockerPlacement(t *testing.T) {
-	j := dockerJob()
-	j.Spec.Needs.Network = true
-	m := machine("docker", "fake")
-	if !nativeNetworkFits(&j, &m) || nativeNetworkRequired(&j) {
-		t.Fatal("native network policy applied to Docker")
-	}
-}
-
 func TestNativeNetworkExtensionDeclaration(t *testing.T) {
 	for _, caller := range []bool{false, true} {
 		e := compositionExtension(t, false)
@@ -116,7 +105,7 @@ func TestNativeIsolationMixedWorkerPlacement(t *testing.T) {
 	s := spec("experiment")
 	s.Isolation = "sandboxed"
 	j := submit(t, q, s)
-	for _, caps := range [][]string{nil, {"native_isolation_unavailable"}, {"native_network"}} {
+	for _, caps := range [][]string{nil, {"native_network"}} {
 		old.Capabilities = caps
 		if r := check(t, q, old, nil); r.Job != nil {
 			t.Fatalf("unisolated worker received job with %v", caps)

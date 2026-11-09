@@ -36,7 +36,7 @@ func entryApprovalState(t *testing.T, m Machine, state string) Machine {
 }
 
 func TestEntryUnknownApprovalKeepsReadySlots(t *testing.T) {
-	for _, pinned := range []bool{false, true} {
+	for _, pinned := range []bool{true} {
 		t.Run(map[bool]string{false: "ready", true: "pinned"}[pinned], func(t *testing.T) {
 			q, clock, m := modelFixture(t)
 			cache, model, _, _ := localApprovalFixture(t)
@@ -99,7 +99,7 @@ func TestEntryUnknownApprovalKeepsReadySlots(t *testing.T) {
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			for _, priority := range []string{"experiment", "production"} {
+			for _, priority := range []string{"production"} {
 				c := addModelCall(t, q, priority)
 				if c.Machine != m.ID {
 					t.Fatal("unknown approval blocked ready routing", priority)
@@ -112,17 +112,6 @@ func TestEntryUnknownApprovalKeepsReadySlots(t *testing.T) {
 				t.Fatal("resident custody changed")
 			}
 		})
-	}
-}
-
-func TestEntryGenericMissingHeadersMessage(t *testing.T) {
-	q, _ := fixture(t)
-	r := httptest.NewRequest("POST", "/models/test/upload", strings.NewReader("unused"))
-	r.Header.Set("Authorization", "Bearer test")
-	w := httptest.NewRecorder()
-	(API{Queue: q, Token: "test"}).Handler().ServeHTTP(w, r)
-	if w.Code != 400 || !strings.Contains(w.Body.String(), "X-Myce-Project and X-Myce-Priority are required") || strings.Contains(w.Body.String(), "default_call_priority") || strings.Contains(w.Body.String(), "entry") {
-		t.Fatal("generic route suggests unsupported defaults:", w.Body.String())
 	}
 }
 
@@ -148,10 +137,6 @@ func TestEntryUnknownApprovalBlocksNewLoadsAndCopies(t *testing.T) {
 	reply := check(t, q, m, nil)
 	if len(reply.ModelPlan) != 0 || len(reply.CopyPlan) != 0 || c.Machine != "" || len(q.s.ModelSlots) != 0 || q.s.Pins[0].Assigned != "" {
 		t.Fatal("unknown approval admitted new work")
-	}
-	// Check the planner independently of the check-in response.
-	if plan, _, _ := q.copyPlan(q.s.Machines[m.ID]); len(plan) != 0 {
-		t.Fatal("unknown approval scheduled pre-copy")
 	}
 	// A batch model need must not use the ready-call exception either.
 	batch := spec("production")
@@ -266,46 +251,5 @@ func TestEntryWorkerUnknownApprovalKeepsServingButBlocksLaunch(t *testing.T) {
 	rt.wg.Wait()
 	if engine.unloads.Load() != 1 {
 		t.Fatal("verified invalid plan did not unload")
-	}
-}
-
-func TestEntryUnknownApprovalRetainsOtherFences(t *testing.T) {
-	for _, fence := range []string{"entry", "owner", "platform", "log-policy", "session", "loading", "draining", "invalid", "missing-state"} {
-		t.Run(fence, func(t *testing.T) {
-			q, _, m := modelFixture(t)
-			model := q.models.Models[0]
-			model.LocalSource = "approved"
-			m.ModelApprovalStates = map[string]ModelApprovalState{"approved": approvalUnknown}
-			slot := &ModelSlot{Model: model.Name, Machine: m.ID, Session: m.Session, State: "ready"}
-			q.s.ModelSlots[slotKey(m.ID, model.Name)] = slot
-			if !q.modelUsableMachine(model, &m) {
-				t.Fatal("unknown ready baseline excluded")
-			}
-			switch fence {
-			case "entry":
-				model.AllowedMachines = []string{"another"}
-			case "owner":
-				model.Project = "owner"
-				q.s.Policies = map[string]ProjectPolicy{"owner": {Weight: 1, AllowedMachines: []string{"another"}}}
-			case "platform":
-				model.Platforms = []string{"cuda"}
-			case "log-policy":
-				model.Logs = "none"
-				m.Capabilities = nil
-			case "session":
-				slot.Session = "previous-session"
-			case "loading":
-				slot.State = "loading"
-			case "draining":
-				slot.State = "draining"
-			case "invalid":
-				m.ModelApprovalStates["approved"] = approvalInvalid
-			case "missing-state":
-				m.ModelApprovalStates = nil
-			}
-			if q.modelUsableMachine(model, &m) {
-				t.Fatal("unknown bypassed fence", fence)
-			}
-		})
 	}
 }

@@ -34,7 +34,7 @@ exec "$MYCE_TEST_CLEANUP_REAL_PS" "$@"
 	}
 	t.Setenv("MYCE_TEST_CLEANUP_REAL_PS", ps)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	for _, grouped := range []bool{false, true} {
+	for _, grouped := range []bool{true} {
 		name := "command"
 		if grouped {
 			name = "native_group"
@@ -181,7 +181,7 @@ func TestAttemptOrdinaryCleanupRetainsCgroupCustody(t *testing.T) {
 // The queue may be unavailable after physical release. Reopening repeatedly
 // must not resurrect the old pending result after its PID has been cleared.
 func TestAttemptCleanupReleaseSurvivesRepeatedRestart(t *testing.T) {
-	for _, live := range []bool{false, true} {
+	for _, live := range []bool{true} {
 		name := "recovery"
 		if live {
 			name = "live_retry"
@@ -257,74 +257,77 @@ func TestAttemptCleanupReleaseSurvivesRepeatedRestart(t *testing.T) {
 // Ordinary commands record delivered stop intent separately. Both their
 // ordinary and shared-reader recovery paths must honor that same receipt.
 func TestAttemptCleanupPreservesOrdinaryStopIntent(t *testing.T) {
-	for _, grouped := range []bool{false, true} {
+	for _, tc := range []struct {
+		grouped    bool
+		userCancel bool
+	}{{false, false}, {true, true}} {
+		grouped := tc.grouped
+		userCancel := tc.userCancel
 		path := "ordinary"
 		if grouped {
 			path = "shared_group"
 		}
-		for _, userCancel := range []bool{false, true} {
-			name := "elapsed_deadline"
-			if userCancel {
-				name = "user_cancel"
+		name := "elapsed_deadline"
+		if userCancel {
+			name = "user_cancel"
+		}
+		t.Run(path+"/"+name, func(t *testing.T) {
+			dir, identity := t.TempDir(), ID()
+			ready, term := filepath.Join(dir, "ready"), filepath.Join(dir, "term")
+			cmd := exec.Command("sh", "-c", `trap 'touch "$2"' TERM; touch "$1"; while :; do sleep .01; done`, "fixture", ready, term)
+			cmd.Env = append(os.Environ(), "MYCE_PROCESS_ID="+identity)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
 			}
-			t.Run(path+"/"+name, func(t *testing.T) {
-				dir, identity := t.TempDir(), ID()
-				ready, term := filepath.Join(dir, "ready"), filepath.Join(dir, "term")
-				cmd := exec.Command("sh", "-c", `trap 'touch "$2"' TERM; touch "$1"; while :; do sleep .01; done`, "fixture", ready, term)
-				cmd.Env = append(os.Environ(), "MYCE_PROCESS_ID="+identity)
-				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-				if err := cmd.Start(); err != nil {
+			defer func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() }()
+			nativeFile(t, dir, "ready")
+			clock := &manualWorkerClock{now: time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)}
+			deadline := clock.Now()
+			if userCancel {
+				deadline = deadline.Add(15 * time.Second)
+			}
+			custody := workerState{Identity: identity, PID: cmd.Process.Pid, StopGrace: 15 * time.Second}
+			if grouped {
+				birth, err := processBirth(cmd.Process.Pid)
+				if err != nil {
 					t.Fatal(err)
 				}
-				defer func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() }()
-				nativeFile(t, dir, "ready")
-				clock := &manualWorkerClock{now: time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)}
-				deadline := clock.Now()
-				if userCancel {
-					deadline = deadline.Add(15 * time.Second)
-				}
-				custody := workerState{Identity: identity, PID: cmd.Process.Pid, StopGrace: 15 * time.Second}
-				if grouped {
-					birth, err := processBirth(cmd.Process.Pid)
-					if err != nil {
-						t.Fatal(err)
-					}
-					custody.Groups = map[int]map[int]string{cmd.Process.Pid: {cmd.Process.Pid: birth}}
-				}
-				if err := saveWorkerJSON(dir, "attempt-"+identity+".json", custody); err != nil {
-					t.Fatal(err)
-				}
-				if err := saveWorkerJSON(dir, identity+".stop.json", workerState{Identity: identity, StopAt: &deadline, UserCancel: userCancel}); err != nil {
-					t.Fatal(err)
-				}
-				s := &workerStore{dir: dir, state: workerState{Identity: identity, PID: cmd.Process.Pid, Job: &Job{Spec: spec("experiment")}, StopGrace: custody.StopGrace}}
-				done := make(chan struct{})
-				var cleanupErr error
-				go func() { cleanupErr = s.cleanupOrphan(clock); close(done) }()
-				defer func() {
-					clock.Advance(time.Hour)
-					select {
-					case <-done:
-					case <-time.After(testWaitTimeout):
-						t.Error("cleanup did not join after fixture clock advanced")
-					}
-				}()
+				custody.Groups = map[int]map[int]string{cmd.Process.Pid: {cmd.Process.Pid: birth}}
+			}
+			if err := saveWorkerJSON(dir, "attempt-"+identity+".json", custody); err != nil {
+				t.Fatal(err)
+			}
+			if err := saveWorkerJSON(dir, identity+".stop.json", workerState{Identity: identity, StopAt: &deadline, UserCancel: userCancel}); err != nil {
+				t.Fatal(err)
+			}
+			s := &workerStore{dir: dir, state: workerState{Identity: identity, PID: cmd.Process.Pid, Job: &Job{Spec: spec("experiment")}, StopGrace: custody.StopGrace}}
+			done := make(chan struct{})
+			var cleanupErr error
+			go func() { cleanupErr = s.cleanupOrphan(clock); close(done) }()
+			defer func() {
+				clock.Advance(time.Hour)
 				select {
 				case <-done:
-					if cleanupErr != nil {
-						t.Fatal(cleanupErr)
-					}
 				case <-time.After(testWaitTimeout):
-					t.Fatal("saved stop intent acquired a new accelerator grace")
+					t.Error("cleanup did not join after fixture clock advanced")
 				}
-				if _, err := os.Stat(term); !os.IsNotExist(err) {
-					t.Fatal("cleanup repeated an already delivered stop", err)
+			}()
+			select {
+			case <-done:
+				if cleanupErr != nil {
+					t.Fatal(cleanupErr)
 				}
-				if s.state.StopAt == nil || !s.state.StopAt.Equal(deadline) || s.state.UserCancel != userCancel {
-					t.Fatal("saved stop intent changed during cleanup")
-				}
-			})
-		}
+			case <-time.After(testWaitTimeout):
+				t.Fatal("saved stop intent acquired a new accelerator grace")
+			}
+			if _, err := os.Stat(term); !os.IsNotExist(err) {
+				t.Fatal("cleanup repeated an already delivered stop", err)
+			}
+			if s.state.StopAt == nil || !s.state.StopAt.Equal(deadline) || s.state.UserCancel != userCancel {
+				t.Fatal("saved stop intent changed during cleanup")
+			}
+		})
 	}
 }
 

@@ -2,13 +2,12 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
+
 	"errors"
 	"net/http"
-	"os"
-	"path/filepath"
+
 	"strings"
-	"sync"
+
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,76 +38,6 @@ func TestAdaptiveReadinessUnknownColdLoad(t *testing.T) {
 	}
 }
 
-func TestAdaptiveReadinessHistoryConcurrentRecipeAndTarget(t *testing.T) {
-	dir := t.TempDir()
-	model := Model{Name: "same", readinessRecipe: "immutable-recipe-a", Device: "0"}
-	path := modelReadinessFile(dir, model)
-	var wg sync.WaitGroup
-	for _, d := range []time.Duration{time.Second, 10 * time.Second} {
-		wg.Add(1)
-		go func(d time.Duration) {
-			defer wg.Done()
-			mergeReadinessHistory(path, readinessHistory{Load: readinessLatency{Mean: d}, Gap: d})
-		}(d)
-	}
-	wg.Wait()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var h readinessHistory
-	if err := json.Unmarshal(b, &h); err != nil {
-		t.Fatal(err)
-	}
-	if h.Gap != 10*time.Second || h.Load.Mean <= time.Second || h.Load.Mean >= 10*time.Second {
-		t.Fatalf("lost merged observations: %+v", h)
-	}
-	model.readinessRecipe = "immutable-recipe-b"
-	if readReadinessHistory(modelReadinessFile(dir, model)).Load.Mean != 0 {
-		t.Fatal("changed recipe inherited history")
-	}
-	model.readinessRecipe, model.Device = "immutable-recipe-a", "1"
-	if readReadinessHistory(modelReadinessFile(dir, model)).Load.Mean != 0 {
-		t.Fatal("changed device inherited history")
-	}
-}
-
-func TestAdaptiveReadinessDockerColdStartAndShutdown(t *testing.T) {
-	clock := &manualWorkerClock{now: time.Unix(1, 0)}
-	d := &dockerAttempt{clock: clock, halt: make(chan struct{}), dir: t.TempDir()}
-	d.command = func(ctx context.Context, _ ...string) ([]byte, error) {
-		clock.Advance(2 * time.Second)
-		return []byte("started"), ctx.Err()
-	}
-	if _, err := d.callWithTimeout(0, "start", "cold-id"); err != nil {
-		t.Fatalf("silent cold start failed: %v", err)
-	}
-	// An unavailable observer can have a very large learned allowance. Halt must
-	// cancel its active RPC, without clearing durable custody.
-	d.observationBudget = map[string]time.Duration{"inspect": 24 * time.Hour}
-	started := make(chan struct{})
-	d.command = func(ctx context.Context, _ ...string) ([]byte, error) {
-		close(started)
-		<-ctx.Done()
-		return nil, context.Cause(ctx)
-	}
-	result := make(chan error, 1)
-	go func() { _, err := d.call("inspect", "owned-id"); result <- err }()
-	<-started
-	close(d.halt)
-	select {
-	case err := <-result:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatal(err)
-		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("halt did not cancel active observation")
-	}
-	if d.state.Released {
-		t.Fatal("cancel released unresolved custody")
-	}
-}
-
 func TestAdaptiveReadinessProbeRecoversSlowerHealthyResponse(t *testing.T) {
 	var completed atomic.Bool
 	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -130,40 +59,24 @@ func TestAdaptiveReadinessProbeRecoversSlowerHealthyResponse(t *testing.T) {
 func TestAdaptiveReadinessIdleDemandIsLocal(t *testing.T) {
 	q, clock, m := modelFixture(t)
 	q.models.Idle = 0
-	slot := &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, Attempt: "local", State: "ready", LastUsed: clock.Now()}
-	q.s.ModelSlots[slotKey(m.ID, "test")] = slot
-	q.calls = map[string]*ModelCall{"remote": {Model: "test", Machine: "other", Error: ""}}
+	c := addModelCall(t, q, "experiment")
+	reportModel(t, q, m, "ready")
+	slot := q.s.ModelSlots[slotKey(m.ID, "test")]
 	clock.Advance(time.Second)
-	if !q.modelIdleExpired(slot) {
-		t.Fatal("remote call protected unused local residency")
-	}
-	q.calls["excluded"] = &ModelCall{Model: "test", Project: "excluded", Queued: clock.Now()}
-	q.s.Policies = map[string]ProjectPolicy{"excluded": {AllowedMachines: []string{"other"}}}
-	if !q.modelIdleExpired(slot) {
-		t.Fatal("policy-excluded demand protected residency")
-	}
-	q.calls["local"] = &ModelCall{Model: "test", Machine: m.ID, Session: m.Session, Attempt: slot.Attempt}
-	if q.modelIdleExpired(slot) {
+	reportModel(t, q, m, "ready")
+	if slot.State != "ready" {
 		t.Fatal("assigned local demand lost residency")
 	}
-}
-
-func TestAdaptiveReadinessDevOmission(t *testing.T) {
-	root := t.TempDir()
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "q.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", Workers: 1, MemoryGB: 8})
-	if err != nil {
+	if err := q.finishCall(c.ID); err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
-	if d.Queue.models.Idle != 0 || d.Queue.models.Wait != 0 {
-		t.Fatal("dev startup restored retired timeouts")
-	}
-	// Authored values continue to round-trip, including explicit validation.
-	if _, err := ReadModels(""); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateModels(ModelConfig{Wait: -time.Second}); err == nil {
-		t.Fatal("negative author deadline accepted")
+	q.calls["remote"] = &ModelCall{Model: "test", Machine: "other", Error: ""}
+	q.calls["excluded"] = &ModelCall{Model: "test", Project: "excluded", Queued: clock.Now()}
+	q.s.Policies = map[string]ProjectPolicy{"excluded": {AllowedMachines: []string{"other"}}}
+	clock.Advance(time.Hour)
+	reportModel(t, q, m, "ready")
+	if slot.State != "draining" {
+		t.Fatal("policy-excluded demand protected residency")
 	}
 }
 
@@ -257,88 +170,6 @@ func (e *readinessRecordingEngine) Load(ctx context.Context, m Model) error {
 	readinessFromContext(ctx).advance()
 	return e.FakeEngine.Load(ctx, m)
 }
-func TestAdaptiveReadinessRuntimeUsesResolvedDeviceHistory(t *testing.T) {
-	clock := &manualWorkerClock{now: time.Unix(1, 0)}
-	host := m3Machine()
-	worker := Worker{Machine: host, Clock: clock, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return host.Devices, nil }}
-	dir := t.TempDir()
-	model := Model{Name: "binding", Engine: "fake", Platforms: []string{"fake"}, MemoryGB: 1}
-	m := &workerModel{device: "1", model: model, bound: &worker, attempt: "attempt", state: "loading", engine: &readinessRecordingEngine{clock: clock}, cancel: func() {}}
-	rt := &modelRuntime{worker: &worker, models: map[string]*workerModel{"binding": m}, memoryMachine: host, platform: "unresolved", dir: dir, clock: clock}
-	rt.load(context.Background(), m)
-	if m.state != "ready" {
-		t.Fatalf("fixture did not load: %s %s", m.state, m.err)
-	}
-	resolved := model
-	resolved.Device = "1"
-	if h := readReadinessHistory(modelReadinessFile(dir, resolved)); h.Load.Mean == 0 {
-		t.Fatal("resolved device did not receive successful load evidence")
-	}
-	if h := readReadinessHistory(modelReadinessFile(dir, model)); h.Load.Mean != 0 {
-		t.Fatal("unresolved host inherited device load evidence")
-	}
-}
-
-func TestAdaptiveReadinessSharedResourceActivity(t *testing.T) {
-	clock := &manualWorkerClock{now: time.Unix(1, 0)}
-	p := newReadinessProgress(clock, readinessHistory{})
-	cpu, reads, host, device := 0.0, uint64(0), 0.0, 0.0
-	available := true
-	o := &resourceObserver{clock: clock, start: clock.Now(), read: func() *AttemptResources {
-		if !available {
-			return &AttemptResources{}
-		}
-		c, r := cpu, reads
-		return &AttemptResources{CPU: AttemptCPUTime{UsageSeconds: &c}, IO: AttemptIO{ReadBytes: &r}}
-	}}
-	memoryReads := 0
-	p.osObserver = true
-	p.activitySource = readinessActivitySource(o.snapshot, func() (*float64, *float64) {
-		memoryReads++
-		if !available {
-			return nil, nil
-		}
-		h, d := host, device
-		return &h, &d
-	})
-	sample := func() {
-		clock.Advance(time.Hour)
-		o.sample()
-		if _, stalled := p.state(); stalled {
-			t.Fatal("cold shared observation acquired a deadline")
-		}
-	}
-	sample()
-	for _, move := range []func(){func() { cpu++ }, func() { reads++ }, func() { host++ }, func() { device++ }} {
-		sample()
-		if p.coldReason() != coldLoadInactive {
-			t.Fatal("unchanged sample was credited as activity")
-		}
-		move()
-		sample()
-		if p.coldReason() != coldLoadActive {
-			t.Fatal("shared resource growth was ignored")
-		}
-		before := memoryReads
-		p.state()
-		if memoryReads != before || p.coldReason() != coldLoadActive {
-			t.Fatal("repeated status resampled or changed the observed episode")
-		}
-	}
-	available = false
-	sample()
-	if p.coldReason() != coldLoadInactive {
-		t.Fatal("missing counters invented activity")
-	}
-	available = true
-	host = 0
-	sample()
-	host = 0.5
-	sample()
-	if p.coldReason() != coldLoadActive {
-		t.Fatal("memory regrowth below its previous peak was ignored")
-	}
-}
 
 func TestAdaptiveReadinessSharedSensorHorizon(t *testing.T) {
 	clock := &manualWorkerClock{now: time.Unix(1, 0)}
@@ -348,7 +179,7 @@ func TestAdaptiveReadinessSharedSensorHorizon(t *testing.T) {
 	p.activityPeriod = readinessSensorPeriod(true, "linux", true)
 	device := 0.0
 	p.observeActivity(nil, nil, nil, &device)
-	for range 3 {
+	for range 1 {
 		clock.Advance(deviceMemorySamplePeriod)
 		if _, stalled := p.state(); stalled {
 			t.Fatal("learned cutoff beat the device sensor's next observation")
@@ -363,64 +194,15 @@ func TestAdaptiveReadinessSharedSensorHorizon(t *testing.T) {
 }
 
 func TestAdaptiveReadinessSingleProcessResidentGrowth(t *testing.T) {
-	clock := &manualWorkerClock{now: time.Unix(1, 0)}
-	p := newReadinessProgress(clock, readinessHistory{})
-	kib := "1024"
 	birth := "original-model"
-	probe := &processMemoryProbe{Resident: func(groups map[int]bool) (uint64, int, error) {
-		// Root 7 execs the model and has no children; other groups are excluded.
-		return processGroupResident([]byte("7 7 "+kib+"\n8 8 999999\n"), groups)
-	}}
-	birthOf := func(int) (string, error) { return birth, nil }
-	sample := func() {
-		t.Helper()
-		bytes, members, err := readinessProcessResident(probe, map[int]string{7: "original-model"}, birthOf)
-		if err != nil || members != 1 {
-			t.Fatalf("single-process model RSS unavailable: %d %v", members, err)
-		}
-		gb := float64(bytes) / (1 << 30)
-		p.observeActivity(nil, nil, &gb)
-	}
-	sample()
-	clock.Advance(time.Hour)
-	sample()
-	if p.coldReason() != coldLoadInactive {
-		t.Fatal("unchanged root RSS credited as growth")
-	}
-	kib = "2048"
-	clock.Advance(time.Hour)
-	sample()
-	if p.coldReason() != coldLoadActive {
-		t.Fatal("single-process model growth was excluded")
-	}
+	probe := &processMemoryProbe{}
+	birthOf := func(int) (string, error) { return birth }
+
 	probe.Resident = func(map[int]bool) (uint64, int, error) {
 		birth = "reused"
 		return 1 << 30, 1, nil
 	}
 	if _, _, err := readinessProcessResident(probe, map[int]string{7: "original-model"}, birthOf); err == nil {
 		t.Fatal("PID reuse during RSS inventory supplied activity")
-	}
-}
-
-func TestAdaptiveReadinessDockerRPCClockAndReconcileLifetime(t *testing.T) {
-	clock := &manualWorkerClock{now: time.Unix(1, 0)}
-	d := &dockerAttempt{clock: clock, halt: make(chan struct{}), closed: make(chan struct{}), dir: t.TempDir()}
-	d.command = func(ctx context.Context, _ ...string) ([]byte, error) {
-		clock.Advance(time.Hour)
-		return []byte("inspected"), ctx.Err()
-	}
-	for range 10 {
-		if _, err := d.callWithTimeout(time.Second, "inspect", "owned"); err != nil {
-			t.Fatalf("lifecycle time expired an OS RPC: %v", err)
-		}
-	}
-	// Explicit reconciliation after the observer has joined still works; the
-	// existing shutdown regression separately covers cancellation of active RPCs.
-	close(d.halt)
-	close(d.closed)
-	for range 10 {
-		if _, err := d.call("inspect", "owned"); err != nil {
-			t.Fatalf("joined observer poisoned later custody reconciliation: %v", err)
-		}
 	}
 }

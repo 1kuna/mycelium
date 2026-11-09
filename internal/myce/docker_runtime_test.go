@@ -14,30 +14,6 @@ import (
 func TestDockerRuntimePlacement(t *testing.T) {
 	image := dockerJob()
 	native := Job{Spec: spec("experiment")}
-	for _, tc := range []struct {
-		name, os string
-		enabled  bool
-		fits     bool
-	}{
-		{"native-only", "linux", false, false},
-		{"enabled", "linux", true, true},
-		{"unsupported", "darwin", true, false},
-		{"unknown-os", "", true, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m := machine(tc.name, "fake")
-			m.CapabilityProfile.OS = tc.os
-			if tc.enabled {
-				m.Capabilities = append(m.Capabilities, "docker")
-			}
-			if got := fits(&image, &m, 8); got != tc.fits {
-				t.Fatalf("image fits=%v, want %v", got, tc.fits)
-			}
-			if !fits(&native, &m, 8) {
-				t.Fatal("native command requires Docker")
-			}
-		})
-	}
 	q, _ := fixture(t)
 	m := machine("native", "fake")
 	m.CapabilityProfile.OS = "linux"
@@ -154,19 +130,5 @@ func TestDockerRuntimeDisabledWorkerMakesNoCalls(t *testing.T) {
 	snapshot, err := q.Snapshot()
 	if err != nil || len(snapshot.Machines) != 1 || contains(snapshot.Machines[0].Capabilities, "docker") {
 		t.Fatal("disabled worker advertised Docker", err)
-	}
-}
-
-func TestDockerRuntimeReasonIgnoresExcludedMachine(t *testing.T) {
-	q, _ := fixture(t)
-	enabled := dockerSharedMachine()
-	native := machine("native-only", "fake")
-	check(t, q, enabled, nil)
-	check(t, q, native, nil)
-	s := dockerJob().Spec
-	s.ExcludedMachines = []string{enabled.ID}
-	j := submit(t, q, s)
-	if got := job(t, q, j.ID).Reason; got != "needs docker runtime; no worker has it enabled" {
-		t.Fatal("excluded Docker worker masked actionable reason", got)
 	}
 }

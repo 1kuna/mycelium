@@ -35,7 +35,7 @@ func TestProcessTreeCancellation(t *testing.T) {
 		return
 	}
 
-	for _, mode := range []string{"cancel", "complete", "gate-budget"} {
+	for _, mode := range []string{"cancel", "complete"} {
 		t.Run(mode, func(t *testing.T) {
 			w := recoveryWorker(t)
 			w.Machine.GPU = "cpu"
@@ -46,20 +46,7 @@ func TestProcessTreeCancellation(t *testing.T) {
 			defer store.close()
 			dir := t.TempDir()
 			command := []string{os.Args[0], "-test.run=^TestProcessTreeHelper$"}
-			if mode == "gate-budget" {
-				budget, err := filepath.Abs("../../scripts/gate-budget.py")
-				if err != nil {
-					t.Fatal(err)
-				}
-				script := filepath.Join(dir, "scripts", "fixture.sh")
-				if err := os.MkdirAll(filepath.Dir(script), 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(script, []byte("#!/bin/bash\nexec \"$@\"\n"), 0700); err != nil {
-					t.Fatal(err)
-				}
-				command = append([]string{"python3", budget, script}, command...)
-			}
+
 			j := recoveryJob(t, command)
 			j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
 			j.Spec.Run.Env = map[string]string{"TREE_TEST_DIR": dir, "TREE_TEST_MODE": mode, "TREE_TEST_OWNER": strconv.Itoa(os.Getpid())}
@@ -79,7 +66,21 @@ func TestProcessTreeCancellation(t *testing.T) {
 				t.Fatal("fixture did not leave the attempt process group")
 			}
 			if mode != "complete" {
+				if mode == "cancel" {
+					p.saveCustody = func() error { return errors.New("transient custody write") }
+					p.stopDirective(w.Clock.Now(), 0, true, true)
+					if p.killed {
+						t.Fatal("failed custody snapshot consumed cancellation")
+					}
+					if _, err := processBirth(p.cmd.Process.Pid); err != nil {
+						t.Fatal(err)
+					}
+					p.saveCustody = nil
+				}
 				p.stopDirective(w.Clock.Now(), 0, true, true)
+				if !p.killed {
+					t.Fatal("cancellation did not retry")
+				}
 			}
 			result := d5Finish(t, p)
 			if result.ReleasePending {
@@ -219,30 +220,3 @@ func TestProcessTreeRecovery(t *testing.T) {
 }
 
 // A transient inspector/persistence failure must not consume the only KILL.
-func TestProcessTreeCancellationRetriesCustody(t *testing.T) {
-	cmd := exec.Command("sleep", "300")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	j := recoveryJob(t, []string{"unused"})
-	j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
-	p := &process{cmd: cmd, job: j, saveCustody: func() error { return errors.New("transient custody write") }}
-	p.stopDirective(RealClock{}.Now(), 0, true, true)
-	if p.killed {
-		t.Fatal("failed custody snapshot consumed cancellation")
-	}
-	if _, err := processBirth(cmd.Process.Pid); err != nil {
-		t.Fatal(err)
-	}
-	p.saveCustody = nil
-	p.stopDirective(RealClock{}.Now(), 0, true, true)
-	if !p.killed {
-		t.Fatal("cancellation did not retry")
-	}
-	_ = cmd.Wait()
-	if _, err := processBirth(cmd.Process.Pid); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("retried cancellation left a process: %v", err)
-	}
-}

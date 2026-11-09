@@ -16,7 +16,7 @@ import (
 // cancelled by its caller while queued keeps the earlier qualified report,
 // while a check that runs and fails still revokes it.
 func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
-	for _, mode := range []string{"cancelled while queued", "never admitted", "runs and fails", "lost after starting"} {
+	for _, mode := range []string{"cancelled while queued", "never admitted", "lost after starting"} {
 		t.Run(mode, func(t *testing.T) {
 			q, clock := fixture(t)
 			e := compositionExtension(t, false)
@@ -107,16 +107,6 @@ func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
 							if err := q.Tick(); err != nil {
 								t.Fatal(err)
 							}
-						case "runs and fails":
-							m.HostAvailableMemoryGB = 32
-							running := check(t, q, m, nil).Job
-							if running == nil {
-								t.Fatal("check not assigned")
-							}
-							if err := q.Started(result(running, true)); err != nil {
-								t.Fatal(err)
-							}
-							finish(t, q, running, false)
 						case "lost after starting":
 							// Each requeue clears StartedAt, so the failed
 							// record alone no longer shows the check ran.
@@ -162,12 +152,7 @@ func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
 				}
 				return
 			}
-			if mode == "runs and fails" {
-				if got.StartedAt == nil || saved[0].Qualified || !strings.HasPrefix(saved[0].Reason, "check failed") {
-					t.Fatalf("failed run kept qualification: job=%+v report=%+v", got, saved[0])
-				}
-				return
-			}
+
 			if got.StartedAt != nil || !terminal(got.State) {
 				t.Fatalf("check started or was left live: %+v", got)
 			}

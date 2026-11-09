@@ -29,10 +29,14 @@ func (c *workerFakeClock) Advance(d time.Duration) {
 
 func TestWorkerStopAndGraceDuringBlockedUpload(t *testing.T) {
 	testWorkerBlockedNetworkStop(t, false)
+
+	t.Run("WorkerStopAndGraceDuringBlockedCheckin", func(t *testing.T) {
+
+		testWorkerBlockedNetworkStop(t, true)
+
+	})
 }
-func TestWorkerStopAndGraceDuringBlockedCheckin(t *testing.T) {
-	testWorkerBlockedNetworkStop(t, true)
-}
+
 func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	t.Helper()
 	q, _ := fixture(t)

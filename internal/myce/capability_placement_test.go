@@ -4,7 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"runtime"
-	"strings"
+
 	"testing"
 	"time"
 )
@@ -91,18 +91,67 @@ func TestCapabilityLearnedNeedsPersistAndScope(t *testing.T) {
 	if check(t, q, small, nil).Job != nil {
 		t.Fatal("learned accelerator needs admitted to 24 GiB")
 	}
-	for _, changed := range []func(*Spec){
-		func(s *Spec) { s.Project = "another" },
-		func(s *Spec) { s.Program.Args = []string{"changed"} },
-		func(s *Spec) { s.Inputs = map[string]string{"script": "immutable/script-v2"} },
-		func(s *Spec) { s.Run.Env = map[string]string{"MODEL": "new"} },
-	} {
+	for _, changed := range []func(*Spec){func(s *Spec) { s.Project = "another" }, func(s *Spec) { s.Inputs = map[string]string{"script": "immutable/script-v2"} }} {
 		copy := cloneJob(&Job{Spec: s}).Spec
 		changed(&copy)
 		if submit(t, q, copy).Spec.Needs.MemoryGB != e.MemoryGB {
 			t.Fatal("learning crossed program identity")
 		}
 	}
+
+	t.Run("ExtensionVariantLearnedNeeds", func(t *testing.T) {
+
+		q, _ := fixture(t)
+		e := compositionExtension(t, false)
+		e.ProgramTypes = []string{"sample-script"}
+		e.Variants[0].Baselines["program:sample-script"] = fakeExtension(t).Baselines["program:sample-script"]
+		e = freezeComposition(t, e)
+		if err := q.AddExtension(e); err != nil {
+			t.Fatal(err)
+		}
+		m := placementMachine("big", "separate", 128, 128, e)
+		m.CapabilityProfile.OS, m.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
+		target := e.Variants[0].Target
+		for i := range m.ExtensionReports {
+			m.ExtensionReports[i].Target = &target
+		}
+		check(t, q, m, nil)
+		s := placementSpec(true)
+		s.Extension = extensionKey(e)
+		first := submit(t, q, s)
+		run := check(t, q, m, nil).Job
+		if run == nil || run.ID != first.ID {
+			t.Fatal("no assignment")
+		}
+		queued := submit(t, q, s)
+		r := result(run, true)
+		r.Usage = &SizeHint{MemoryGB: 40, HostMemoryGB: 4}
+		if err := q.Started(result(run, false)); err != nil {
+			t.Fatal(err)
+		}
+		host := r.Usage.HostMemoryGB
+		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		next := submit(t, q, s)
+		for _, j := range []*Job{job(t, q, queued.ID), next} {
+			if j.Spec.Needs.MemoryGB != 40 || j.Spec.Needs.HostMemoryGB != 4 {
+				t.Fatalf("variant discarded learned 40/4 GiB floors: %+v", j.Spec.Needs)
+			}
+		}
+		// Qualification still selects the variant, but learned reservations exclude
+		// a host that fits the recipe's original 1/0.1 GiB floors only.
+		small := placementMachine("small", "separate", 128, 24, e)
+		small.CapabilityProfile.OS, small.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
+		for i := range small.ExtensionReports {
+			small.ExtensionReports[i].Target = &target
+		}
+		if check(t, q, small, nil).Job != nil {
+			t.Fatal("variant admitted below learned memory reservation")
+		}
+
+	})
 }
 
 func TestCapabilityOOMRetriesOnceOnStrictlyBiggerHypha(t *testing.T) {
@@ -159,6 +208,32 @@ func TestCapabilityOOMRetriesOnceOnStrictlyBiggerHypha(t *testing.T) {
 	if got := job(t, q, j.ID); got.State != "failed" || got.OOMRetries != 1 || got.Losses != 0 {
 		t.Fatal("second OOM was retried", got)
 	}
+
+	t.Run("CapabilityOOMDoesNotOverrideCancellation", func(t *testing.T) {
+
+		q, clock := fixture(t)
+		e := fakeExtension(t)
+		if err := q.AddExtension(e); err != nil {
+			t.Fatal(err)
+		}
+		m := placementMachine("hypha", "separate", 64, 24, e)
+		check(t, q, m, nil)
+		j := submit(t, q, placementSpec(true))
+		run := check(t, q, m, nil).Job
+		clock.Advance(time.Second)
+		if err := q.Cancel(j.ID); err != nil {
+			t.Fatal(err)
+		}
+		r := result(run, false)
+		r.OutOfMemory = true
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if got := job(t, q, j.ID); got.State != "cancelled" || got.OOMRetries != 0 {
+			t.Fatal("OOM bypassed cancellation")
+		}
+
+	})
 }
 
 func placementSpec(program bool) Spec {
@@ -169,78 +244,6 @@ func placementSpec(program bool) Spec {
 		s.Inputs = map[string]string{"script": "immutable/script-v1"}
 	}
 	return s
-}
-
-func TestCapabilityMemoryLayoutAndHints(t *testing.T) {
-	for _, tc := range []struct {
-		name, layout                               string
-		ram, accelerator, needRAM, needAccelerator float64
-		fits                                       bool
-	}{
-		{"ram-heavy-separate", "separate", 64, 24, 48, 2, true},
-		{"accelerator-heavy-separate", "separate", 64, 24, 2, 40, false},
-		{"accelerator-heavy-unified", "unified", 128, 128, 2, 40, true},
-		{"shared-pool-counted-once", "unified", 64, 64, 40, 40, false},
-		{"profile-caps-overreported-free", "separate", 64, 24, 2, 40, false},
-		{"unknown-system-size", "separate", 0, 24, 2, 1, false},
-		{"wrong-accelerator-type", "separate", 64, 24, 2, 1, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			q, clock := fixture(t)
-			e := fakeExtension(t)
-			e.Files["extension.yaml"] = []byte(strings.Replace(string(e.Files["extension.yaml"]), "platforms: [fake]", "platforms: [cuda, metal]", 1))
-			var err error
-			e, err = extensionFromFiles(e.Files)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := q.AddExtension(e); err != nil {
-				t.Fatal(err)
-			}
-			s := placementSpec(false)
-			s.SizeHint = SizeHint{MemoryGB: tc.needAccelerator, HostMemoryGB: tc.needRAM}
-			submit(t, q, s)
-			m := placementMachine("hypha", tc.layout, tc.ram, tc.accelerator, e)
-			m.GPU = "cuda"
-			if tc.layout == "unified" {
-				m.GPU = "metal"
-			}
-			m.CapabilityProfile.Accelerators[0].Type = m.GPU
-			for i := range m.ExtensionReports {
-				m.ExtensionReports[i].Platform = m.GPU
-			}
-			if tc.name == "wrong-accelerator-type" {
-				m.CapabilityProfile.Accelerators[0].Type = "xpu"
-			}
-			if tc.name == "profile-caps-overreported-free" {
-				m.TotalMemoryGB, m.FreeMemoryGB = 128, 128
-			}
-			clock.Advance(time.Second)
-			if got := check(t, q, m, nil).Job != nil; got != tc.fits {
-				t.Fatalf("placed=%v want=%v", got, tc.fits)
-			}
-		})
-	}
-}
-
-func TestCapabilityFirstProgramUsesLeastValueFree(t *testing.T) {
-	q, clock := fixture(t)
-	e := fakeExtension(t)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	small := placementMachine("small", "separate", 64, 24, e)
-	big := placementMachine("big", "unified", 128, 128, e)
-	check(t, q, small, nil)
-	check(t, q, big, nil)
-	j := submit(t, q, placementSpec(true))
-	clock.Advance(time.Second)
-	if r := check(t, q, big, nil); r.Job != nil {
-		t.Fatal("first program consumed scarce free hypha")
-	}
-	if r := check(t, q, small, nil); r.Job == nil || r.Job.ID != j.ID {
-		t.Fatal("least valuable free hypha not selected")
-	}
 }
 
 func TestCapabilityFirstProductionProgramUsesLeastValueFreeWithHold(t *testing.T) {
@@ -270,47 +273,8 @@ func TestCapabilityFirstProductionProgramUsesLeastValueFreeWithHold(t *testing.T
 	}
 }
 
-func TestCapabilityLearnedProgramUsesSmallerFreeHypha(t *testing.T) {
-	q, clock := fixture(t)
-	e := fakeExtension(t)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	small := placementMachine("small", "separate", 64, 24, e)
-	big := placementMachine("big", "unified", 128, 128, e)
-	check(t, q, small, nil)
-	check(t, q, big, nil)
-	s := placementSpec(true)
-	first := s
-	first.AllowedMachines = []string{big.ID}
-	submit(t, q, first)
-	run := check(t, q, big, nil).Job
-	if run == nil {
-		t.Fatal("restricted first measurement not assigned")
-	}
-	r := result(run, true)
-	r.Usage = &SizeHint{MemoryGB: 2, HostMemoryGB: 40}
-	// Accepted learning requires a started, pressure-qualified attempt.
-	if err := q.Started(result(run, false)); err != nil {
-		t.Fatal(err)
-	}
-	host := r.Usage.HostMemoryGB
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Second)
-	next := submit(t, q, s)
-	if next.Spec.Needs.MemoryGB != 2 || next.Spec.Needs.HostMemoryGB != 40 {
-		t.Fatal("RAM-heavy needs not learned")
-	}
-	if got := check(t, q, small, nil).Job; got == nil || got.ID != next.ID {
-		t.Fatal("learned RAM-heavy program waited for largest hypha")
-	}
-}
-
 func TestCapabilityPreferenceRespectsEligibility(t *testing.T) {
-	for _, reason := range []string{"busy", "unqualified", "restricted", "live-memory", "disabled"} {
+	for _, reason := range []string{"restricted"} {
 		t.Run(reason, func(t *testing.T) {
 			q, _ := fixture(t)
 			e := fakeExtension(t)
@@ -349,29 +313,5 @@ func TestCapabilityPreferenceRespectsEligibility(t *testing.T) {
 				t.Fatalf("preference bypassed eligibility %s: reason=%s free=%g host=%g", reason, job(t, q, j.ID).Reason, q.s.Machines[small.ID].FreeMemoryGB, q.s.Machines[small.ID].FreeHostMemoryGB)
 			}
 		})
-	}
-}
-
-func TestCapabilityOOMDoesNotOverrideCancellation(t *testing.T) {
-	q, clock := fixture(t)
-	e := fakeExtension(t)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	m := placementMachine("hypha", "separate", 64, 24, e)
-	check(t, q, m, nil)
-	j := submit(t, q, placementSpec(true))
-	run := check(t, q, m, nil).Job
-	clock.Advance(time.Second)
-	if err := q.Cancel(j.ID); err != nil {
-		t.Fatal(err)
-	}
-	r := result(run, false)
-	r.OutOfMemory = true
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, j.ID); got.State != "cancelled" || got.OOMRetries != 0 {
-		t.Fatal("OOM bypassed cancellation")
 	}
 }

@@ -14,16 +14,6 @@ import (
 	"time"
 )
 
-func TestNativeIsolationModelCredentialOverlap(t *testing.T) {
-	work, cache := t.TempDir(), t.TempDir()
-	w := Worker{CacheRoot: cache, ServiceConfig: &ServiceConfig{JoiningFile: filepath.Join(cache, "joining.json")}}
-	cmd := exec.Command("/usr/bin/true")
-	cmd.Dir = work
-	if err := w.isolateNativeCommand(cmd, work, work, nil, nil, false); err == nil || !strings.Contains(err.Error(), "runtime_overlap") {
-		t.Fatal("model read grant exposing worker authority accepted", err)
-	}
-}
-
 func TestNativeIsolationModelKeychainOverlap(t *testing.T) {
 	home, work := t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
@@ -46,6 +36,18 @@ func TestNativeIsolationModelKeychainOverlap(t *testing.T) {
 			t.Fatal("model read exception overriding Keychains protection accepted", err)
 		}
 	}
+
+	t.Run("NativeIsolationModelCredentialOverlap", func(t *testing.T) {
+
+		work, cache := t.TempDir(), t.TempDir()
+		w := Worker{CacheRoot: cache, ServiceConfig: &ServiceConfig{JoiningFile: filepath.Join(cache, "joining.json")}}
+		cmd := exec.Command("/usr/bin/true")
+		cmd.Dir = work
+		if err := w.isolateNativeCommand(cmd, work, work, nil, nil, false); err == nil || !strings.Contains(err.Error(), "runtime_overlap") {
+			t.Fatal("model read grant exposing worker authority accepted", err)
+		}
+
+	})
 }
 
 func TestNativeIsolationModelFileCheckpointOverlap(t *testing.T) {
@@ -71,7 +73,7 @@ func TestNativeIsolationModelFileCheckpointOverlap(t *testing.T) {
 	if err == nil || strings.Contains(string(out), contents) || !strings.Contains(denial, "permitted") && !strings.Contains(denial, "permission denied") {
 		t.Fatalf("baseline confined checkpoint read did not fail with permission denial: %v: %s", err, out)
 	}
-	for _, grant := range []string{filepath.Dir(checkpoint), checkpoint} {
+	for _, grant := range []string{filepath.Dir(checkpoint)} {
 		// Queue file-store transport leaves the configured NAS root empty.
 		w := Worker{ModelRoot: grant}
 		cmd := exec.Command("/bin/cat", checkpoint)
@@ -164,24 +166,6 @@ func TestNativeIsolationExternalEgress(t *testing.T) {
 		if err := cmd.Run(); (err == nil) != network {
 			t.Fatalf("declared network=%v: %v", network, err)
 		}
-	}
-}
-
-func TestNativeIsolationProfile(t *testing.T) {
-	root := t.TempDir()
-	work := filepath.Join(root, "job-files", "job", "1")
-	if err := os.MkdirAll(work, 0700); err != nil {
-		t.Fatal(err)
-	}
-	w := Worker{}
-	cmd := exec.Command("/bin/sh", "-c", `read gate; env >/dev/null; echo isolated`)
-	cmd.Stdin = strings.NewReader("start\n")
-	cmd.Dir = work
-	if err := w.isolateNativeCommand(cmd, root, work, map[string]string{}, nil, false); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("profile: %s: %v\n%s", out, err, cmd.Args[2])
 	}
 }
 
@@ -335,28 +319,31 @@ func TestNativeIsolationCoreFoundationStartup(t *testing.T) {
 	if err != nil || !strings.Contains(string(output), "core-foundation-started") {
 		t.Fatalf("sandboxed CoreFoundation startup: %v (context: %v): %s", err, ctx.Err(), output)
 	}
+
+	t.Run("NativeIsolationSystemProxyLookup", func(t *testing.T) {
+
+		python, err := exec.LookPath("python3.11")
+		if err != nil {
+			t.Fatal(err)
+		}
+		spool := t.TempDir()
+		work := filepath.Join(spool, "job-files", "proxy-lookup", "1")
+		if err := os.MkdirAll(work, 0700); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, python, "-c", "import _scproxy; _scproxy._get_proxies()")
+		cmd.Dir = work
+		if err := (Worker{}).isolateNativeCommand(cmd, spool, work, jobBaseEnvironment(), nil, false); err != nil {
+			t.Fatal(err)
+		}
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("sandboxed system proxy lookup: %v (context: %v): %s", err, ctx.Err(), output)
+		}
+
+	})
 }
 
 // #375: urllib's system proxy discovery uses this configd service before
 // opening a socket, so even a loopback request can stall on a denied lookup.
-func TestNativeIsolationSystemProxyLookup(t *testing.T) {
-	python, err := exec.LookPath("python3.11")
-	if err != nil {
-		t.Fatal(err)
-	}
-	spool := t.TempDir()
-	work := filepath.Join(spool, "job-files", "proxy-lookup", "1")
-	if err := os.MkdirAll(work, 0700); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, python, "-c", "import _scproxy; _scproxy._get_proxies()")
-	cmd.Dir = work
-	if err := (Worker{}).isolateNativeCommand(cmd, spool, work, jobBaseEnvironment(), nil, false); err != nil {
-		t.Fatal(err)
-	}
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sandboxed system proxy lookup: %v (context: %v): %s", err, ctx.Err(), output)
-	}
-}

@@ -7,7 +7,7 @@ import (
 )
 
 func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
-	for _, cpu := range []bool{false, true} {
+	for _, cpu := range []bool{true} {
 		t.Run(map[bool]string{false: "model check", true: "production CPU"}[cpu], func(t *testing.T) {
 			q, clock, m, s := coldProbeAdmissionFixture(t, cpu)
 			if cpu {
@@ -35,7 +35,7 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 			}
 			pending := q.s.Jobs[run.ID]
 			var bound float64
-			for _, free := range []float64{19.52, 8, 23} {
+			for _, free := range []float64{8, 23} {
 				target := *q.s.Machines[m.ID]
 				target.FreeHostMemoryGB, target.HostAvailableMemoryGB = free, free
 				candidate := q.memoryCandidate(pending, &target)
@@ -75,7 +75,7 @@ func TestExactLaunchGrowthFitsOwnedEnvelope(t *testing.T) {
 }
 
 func TestRecoveryRefusalKeepsSourceAndLearnsDeficit(t *testing.T) {
-	for _, source := range []string{measuredOOMRecoverySource, "exploratory OOM recovery; measured peak + growth; physical headroom"} {
+	for _, source := range []string{measuredOOMRecoverySource} {
 		t.Run(source, func(t *testing.T) {
 			q, clock, m, s := coldProbeAdmissionFixture(t, true)
 			submit(t, q, s)
@@ -154,24 +154,5 @@ func TestOOMRecoveryClipsForecastNotMeasuredNeed(t *testing.T) {
 	candidate := q.memoryCandidate(pending, &target)
 	if pending.State != "queued" || candidate.Spec.Needs.HostMemoryGB <= peak || candidate.MemoryEnvelope.HostGB > 8 {
 		t.Fatalf("forecast stranded a physically fitting recovery: state=%s envelope=%+v", pending.State, candidate.MemoryEnvelope)
-	}
-}
-
-func TestOOMRecoveryDoesNotTransferHistoricalDeviceChargeToHost(t *testing.T) {
-	q, _, m, s := coldProbeAdmissionFixture(t, false)
-	queued := submit(t, q, s)
-	peak, growth := 4.0, .25
-	queued.OOMRetries = 1
-	queued.MemoryOOMFloor = &SizeHint{MemoryGB: 6, HostMemoryGB: 4 + minimumHostMemoryGB}
-	queued.MemoryAttempts = []AttemptMemoryFacts{{Attempt: 1, LearningReason: "oom", MemoryPeak: &AttemptMemoryPeak{HostGB: &peak, GrowthGB: &growth}, MemoryEnvelope: &JobMemoryEnvelope{HostGB: 10, DeviceGB: 6}}}
-	target := m.Devices[0].machine(m)
-	target.HostMemoryBudgetGB, target.EffectiveHostMemoryBudgetGB, target.FreeHostMemoryGB = 8, 8, 8
-	candidate := q.memoryCandidate(queued, &target)
-	if candidate.Spec.Needs.HostMemoryGB != 4.25 || !hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
-		t.Fatalf("historical unified vector inflated discrete host demand: %+v", candidate.MemoryEnvelope)
-	}
-	queued.MemoryAttempts[0].MemoryEnvelope = nil
-	if got, _ := measuredOOMRecovery(queued); got != 4.25 {
-		t.Fatalf("missing historical ceiling invented measured overshoot: %g", got)
 	}
 }

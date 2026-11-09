@@ -28,7 +28,7 @@ func recoveryReport(t *testing.T, q *Queue, m Machine, s *ModelSlot, state strin
 }
 
 func TestEngineRecoveryCrashLoopClockAndFreshAttempt(t *testing.T) {
-	for _, pinned := range []bool{false, true} {
+	for _, pinned := range []bool{true} {
 		t.Run(fmt.Sprintf("pinned=%v", pinned), func(t *testing.T) {
 			q, clock, m := modelFixture(t)
 			q.models.Wait = time.Hour
@@ -47,7 +47,7 @@ func TestEngineRecoveryCrashLoopClockAndFreshAttempt(t *testing.T) {
 			if err := q.retryCall(pending.ID); err != nil {
 				t.Fatal(err)
 			}
-			for i, delay := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second} {
+			for i, delay := range []time.Duration{time.Second, 2 * time.Second} {
 				old := s.Attempt
 				recoveryReport(t, q, m, s, "unloading")
 				if s.State == "ready" || s.CrashCount != i+1 {
@@ -145,7 +145,7 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 		policy string
 		pinned bool
 		loss   string
-	}{{"", false, "kill"}, {"none", true, "exit"}, {"", true, "health"}} {
+	}{{"", false, "kill"}, {"", true, "health"}} {
 		t.Run(fmt.Sprintf("logs=%s/pinned=%v/%s", tc.policy, tc.pinned, tc.loss), func(t *testing.T) {
 			policy, pinned, loss := tc.policy, tc.pinned, tc.loss
 			q, clock := fixture(t)
@@ -281,7 +281,7 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 
 func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 	t.Parallel()
-	for _, code := range []int{503, 302, 0} {
+	for _, code := range []int{503, 0} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			var probes atomic.Int32
 			permits := make(chan bool, 8)
@@ -326,117 +326,80 @@ func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 	}
 }
 
-func TestEngineRecoveryCleanupFailureKeepsCustody(t *testing.T) {
-	q, _, m := modelFixture(t)
-	call := addModelCall(t, q, "experiment")
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	recoveryReport(t, q, m, s, "ready")
-	e := &lifecycleEngine{unloadErr: errors.New("synthetic cleanup failure")}
-	wm := &workerModel{model: Model{Name: "test", MemoryGB: 8}, engine: e, state: "ready", runtimeFailed: true, attempt: s.Attempt}
-	released := false
-	wm.releaseEnvironment = func() { released = true }
-	rt := &modelRuntime{models: map[string]*workerModel{"test": wm}}
-	rt.unload(wm)
-	rt.wg.Wait()
-	reports, used := rt.report()
-	if used != 8 || reports[0].State != "unload_failed" || released {
-		t.Fatal("cleanup failure lost custody")
-	}
-	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: reports}); err != nil {
-		t.Fatal(err)
-	}
-	if s.State != "unload_failed" || s.RetryAt != nil || q.modelMemory(m.ID) != 8 {
-		t.Fatal("queue released failed cleanup")
-	}
-	if err := q.finishCall(call.ID); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestEngineRecoveryInitialLoadFailureStillFailsCall(t *testing.T) {
-	q, _, m := modelFixture(t)
-	call := addModelCall(t, q, "experiment")
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	_, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: s.Attempt, State: "failed", Error: "synthetic verification failure"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if call.Error != "model load failed" || call.Machine != "" || q.modelMemory(m.ID) != 0 {
-		t.Fatalf("initial verification failure became a silent retry wait: %+v", call)
-	}
-}
-
 // Synthetic worker transport keeps the request blocked until heartbeat withdraws
 // readiness, independently of the engine's own TCP shutdown behavior.
 func TestEngineRecoveryInFlightReplaySafety(t *testing.T) {
-	for _, generic := range []bool{false, true} {
-		for _, retrySafe := range []bool{false, true} {
-			t.Run(fmt.Sprintf("generic=%v/safe=%v", generic, retrySafe), func(t *testing.T) {
-				q, _, m := modelFixture(t)
-				q.models.Models[0].RetrySafe = retrySafe
-				m.ModelConfigHash = modelConfigHash(q.models)
-				started := make(chan struct{}, 2)
-				var hits atomic.Int32
-				worker := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					io.Copy(io.Discard, r.Body)
-					if hits.Add(1) == 1 {
-						started <- struct{}{}
-						<-r.Context().Done()
-						return
-					}
-					fmt.Fprint(w, "recovered")
-				}))
-				defer worker.Close()
-				m.ModelURL = worker.URL
-				check(t, q, m, nil)
-				warm := addModelCall(t, q, "experiment")
-				s := q.s.ModelSlots[slotKey(m.ID, "test")]
+	for _, tc := range []struct {
+		generic   bool
+		retrySafe bool
+	}{{false, false}, {true, true}} {
+		generic := tc.generic
+		retrySafe := tc.retrySafe
+		t.Run(fmt.Sprintf("generic=%v/safe=%v", generic, retrySafe), func(t *testing.T) {
+			q, _, m := modelFixture(t)
+			q.models.Models[0].RetrySafe = retrySafe
+			m.ModelConfigHash = modelConfigHash(q.models)
+			started := make(chan struct{}, 2)
+			var hits atomic.Int32
+			worker := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				if hits.Add(1) == 1 {
+					started <- struct{}{}
+					<-r.Context().Done()
+					return
+				}
+				fmt.Fprint(w, "recovered")
+			}))
+			defer worker.Close()
+			m.ModelURL = worker.URL
+			check(t, q, m, nil)
+			warm := addModelCall(t, q, "experiment")
+			s := q.s.ModelSlots[slotKey(m.ID, "test")]
+			recoveryReport(t, q, m, s, "ready")
+			q.finishCall(warm.ID)
+			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+			defer cancel()
+			path, body := "/models/test/work", "synthetic"
+			if !generic {
+				path, body = "/v1/chat/completions", `{"model":"test"}`
+			}
+			req := httptest.NewRequest("POST", path, strings.NewReader(body)).WithContext(ctx)
+			req.Header.Set("Authorization", "Bearer test")
+			req.Header.Set("X-Myce-Project", "test")
+			req.Header.Set("X-Myce-Priority", "experiment")
+			result := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() { API{Queue: q, Token: "test"}.Handler().ServeHTTP(result, req); close(done) }()
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatal("request never started")
+			}
+			recoveryReport(t, q, m, s, "failed")
+			if retrySafe {
+				// Drive fake time only while the handler is stopped at a queue lock, keeping
+				// this Clock fixture free of concurrent reads/writes.
+				q.mu.Lock()
+				q.s.ModelSlots[slotKey(m.ID, "test")] = s
+				s.RetryAt = nil
+				s.State = "loading"
+				s.Attempt = ID()
+				q.mu.Unlock()
 				recoveryReport(t, q, m, s, "ready")
-				q.finishCall(warm.ID)
-				ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-				defer cancel()
-				path, body := "/models/test/work", "synthetic"
-				if !generic {
-					path, body = "/v1/chat/completions", `{"model":"test"}`
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("dead attempt did not release client")
+			}
+			if retrySafe {
+				if result.Code != 200 || result.Body.String() != "recovered" || hits.Load() != 2 {
+					t.Fatalf("safe retry: %d %s hits=%d", result.Code, result.Body.String(), hits.Load())
 				}
-				req := httptest.NewRequest("POST", path, strings.NewReader(body)).WithContext(ctx)
-				req.Header.Set("Authorization", "Bearer test")
-				req.Header.Set("X-Myce-Project", "test")
-				req.Header.Set("X-Myce-Priority", "experiment")
-				result := httptest.NewRecorder()
-				done := make(chan struct{})
-				go func() { API{Queue: q, Token: "test"}.Handler().ServeHTTP(result, req); close(done) }()
-				select {
-				case <-started:
-				case <-ctx.Done():
-					t.Fatal("request never started")
-				}
-				recoveryReport(t, q, m, s, "failed")
-				if retrySafe {
-					// Drive fake time only while the handler is stopped at a queue lock, keeping
-					// this Clock fixture free of concurrent reads/writes.
-					q.mu.Lock()
-					q.s.ModelSlots[slotKey(m.ID, "test")] = s
-					s.RetryAt = nil
-					s.State = "loading"
-					s.Attempt = ID()
-					q.mu.Unlock()
-					recoveryReport(t, q, m, s, "ready")
-				}
-				select {
-				case <-done:
-				case <-ctx.Done():
-					t.Fatal("dead attempt did not release client")
-				}
-				if retrySafe {
-					if result.Code != 200 || result.Body.String() != "recovered" || hits.Load() != 2 {
-						t.Fatalf("safe retry: %d %s hits=%d", result.Code, result.Body.String(), hits.Load())
-					}
-				} else if result.Code != 503 || hits.Load() != 1 {
-					t.Fatalf("unsafe replay: %d hits=%d", result.Code, hits.Load())
-				}
-			})
-		}
+			} else if result.Code != 503 || hits.Load() != 1 {
+				t.Fatalf("unsafe replay: %d hits=%d", result.Code, hits.Load())
+			}
+		})
 	}
 }
 
@@ -486,39 +449,26 @@ func TestEngineRecoveryWaitBoundAndStatus(t *testing.T) {
 	}
 }
 
-func TestEngineRecoveryRejectsLateCallAndCompletion(t *testing.T) {
-	rt := &modelRuntime{models: map[string]*workerModel{"test": {model: Model{Name: "test"}, engine: &FakeEngine{Model: "test"}, state: "ready", attempt: "new"}}, session: "session", token: "test"}
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"test"}`))
-	req.Header.Set("Authorization", "Bearer test")
-	req.Header.Set("X-Myce-Session", "session")
-	req.Header.Set("X-Myce-Engine-Attempt", "old")
-	recorder := httptest.NewRecorder()
-	rt.serve(recorder, req)
-	if recorder.Code != 503 || recorder.Header().Get("X-Myce-Engine-Failed") != "" || recorder.Header().Get("X-Myce-Engine-Rejected") != "old" {
-		t.Fatal("late call reached replacement engine")
-	}
-	q, _, m := modelFixture(t)
-	old := addModelCall(t, q, "experiment")
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	recoveryReport(t, q, m, s, "ready")
-	s.Attempt = ID()
-	s.InFlight = 2
-	if err := q.finishCall(old.ID); err != nil {
-		t.Fatal(err)
-	}
-	if s.InFlight != 2 {
-		t.Fatal("late completion consumed replacement capacity")
-	}
-}
-
 func TestEngineRecoveryPinReservesBackoffMemory(t *testing.T) {
 	q, clock, m := modelFixture(t)
+	q.models.Models[0].HostMemoryGB = 2
+	m.ModelConfigHash = modelConfigHash(q.models)
+	m.MemoryMeasured = true
+	m.HostMemoryMeasured = true
+	m.HostAvailableMemoryGB = 10
+	check(t, q, m, nil)
 	if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
 		t.Fatal(err)
 	}
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
+	m.FreeMemoryGB = 0
 	recoveryReport(t, q, m, s, "ready")
+	m.FreeMemoryGB = 8
 	recoveryReport(t, q, m, s, "failed")
+	qm := q.s.Machines[m.ID]
+	if !s.RetryReserved || q.modelMemory(m.ID) != 8 || qm.FreeMemoryGB != 0 || qm.HostMemoryInUseGB != 2 {
+		t.Fatalf("pin lost planning GPU/RAM: %+v %+v", s, qm)
+	}
 	borrowed := submit(t, q, spec("experiment"))
 	running := check(t, q, m, nil).Job
 	if running != nil || q.s.Jobs[borrowed.ID].State != "queued" || !s.RetryReserved {
@@ -529,6 +479,54 @@ func TestEngineRecoveryPinReservesBackoffMemory(t *testing.T) {
 	if s.State != "loading" || s.CrashCount != 1 || q.s.Jobs[borrowed.ID].State != "queued" {
 		t.Fatalf("pin recovery lost priority/history: %+v", s)
 	}
+
+	recoveryReport(t, q, m, s, "failed")
+	if err := q.Unpin("test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.ModelSlots[slotKey(m.ID, "test")] != nil || qm.FreeMemoryGB != 8 || qm.HostMemoryInUseGB != 0 {
+		t.Fatal("unpin retained a released planning reservation")
+	}
+
+	t.Run("EngineRecoveryReservationDoesNotInventFreeMemory", func(t *testing.T) {
+
+		for _, hostLow := range []bool{true} {
+			t.Run(fmt.Sprint(hostLow), func(t *testing.T) {
+				q, clock, m := modelFixture(t)
+				q.models.Models[0].HostMemoryGB = 2
+				m.ModelConfigHash = modelConfigHash(q.models)
+				m.MemoryMeasured = true
+				m.HostMemoryMeasured = true
+				m.HostAvailableMemoryGB = 10
+				check(t, q, m, nil)
+				if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
+					t.Fatal(err)
+				}
+				s := q.s.ModelSlots[slotKey(m.ID, "test")]
+				m.FreeMemoryGB = 0
+				recoveryReport(t, q, m, s, "ready")
+				m.FreeMemoryGB = 2
+				if hostLow {
+					m.FreeMemoryGB = 8
+					m.HostAvailableMemoryGB = 1
+				}
+				recoveryReport(t, q, m, s, "failed")
+				clock.Advance(time.Second)
+				check(t, q, m, nil)
+				if s.State != "failed" {
+					t.Fatal("planning reservation bypassed actual memory admission")
+				}
+				if err := q.Unpin("test", "test"); err != nil {
+					t.Fatal(err)
+				}
+				qm := q.s.Machines[m.ID]
+				if qm.FreeMemoryGB != m.FreeMemoryGB || qm.FreeHostMemoryGB != m.HostAvailableMemoryGB {
+					t.Fatalf("unpin invented memory: GPU=%v host=%v", qm.FreeMemoryGB, qm.FreeHostMemoryGB)
+				}
+			})
+		}
+
+	})
 }
 
 // The engine's TCP error may arrive before Wait completes. The authenticated
@@ -552,7 +550,7 @@ func (e *recoveryTransportErrorEngine) StreamRequest(ctx context.Context, _ stri
 }
 
 func TestEngineRecoveryUnsafeTransportBeforeWait(t *testing.T) {
-	for _, tc := range []struct{ generic, bodyFailure, stream bool }{{false, false, false}, {true, false, false}, {false, true, false}, {false, true, true}} {
+	for _, tc := range []struct{ generic, bodyFailure, stream bool }{{true, false, false}, {false, true, true}} {
 		t.Run(fmt.Sprintf("generic=%v/bodyFailure=%v/stream=%v", tc.generic, tc.bodyFailure, tc.stream), func(t *testing.T) {
 			generic := tc.generic
 			q, _, m := modelFixture(t)

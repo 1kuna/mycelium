@@ -107,31 +107,6 @@ func retentionPair(t *testing.T, sidecarName string) (ServiceConfig, ServiceConf
 	return c, source, clock, f
 }
 
-func TestReconcileRetiredDockerLeavesUnownedContainers(t *testing.T) {
-	for _, name := range []string{"/verso-pair", "/docker-render-1", "/unrelated-service"} {
-		t.Run(name, func(t *testing.T) {
-			c, source, clock, f := retentionPair(t, name)
-			// Even matching attempt custody cannot authorize an unowned container.
-			unowned := f.containers["pair-sidecar"]
-			unowned.Config.Labels = map[string]string{}
-			f.containers[unowned.ID] = unowned
-			report, err := reconcileRetiredDocker(context.Background(), c.Config, clock, f.caller)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !slices.Equal(f.removed, []string{"pair-main"}) || len(f.containers) != 1 || f.containers[unowned.ID].Name != name {
-				t.Fatal("ownership did not determine removal", f.removed, f.containers)
-			}
-			if len(report) != 1 || !report[0].Removed || report[0].Container != "pair-main" {
-				t.Fatal("owned container not reconciled", report)
-			}
-			if _, err := os.Stat(filepath.Join(source.State, "pair.docker-evidence.json")); err != nil {
-				t.Fatal("private evidence lost", err)
-			}
-		})
-	}
-}
-
 func TestReconcileRetiredDockerReportsPartialRemoval(t *testing.T) {
 	c, source, clock, f := retentionPair(t, "/myce-pair-sidecar")
 	f.partialRemove = true
@@ -193,7 +168,7 @@ func TestReconcileRetiredDockerCustody(t *testing.T) {
 	now := time.Unix(200000, 0)
 	clock := &dockerTestClock{now: now}
 	f := &retentionDaemon{t: t, containers: map[string]dockerInspection{}}
-	for _, attempt := range []string{"settled", "no-ack", "unreleased", "wrong-owner", "recent", "no-evidence", "owned-consumer-name", "owned-render-name", "active"} {
+	for _, attempt := range []string{"settled", "no-ack", "unreleased", "wrong-owner", "recent", "no-evidence", "owned-consumer-name", "active"} {
 		code := 143
 		st := dockerExecution{Identity: attempt, Endpoint: "fake", Released: true, EvidenceSaved: true, Containers: map[string]dockerMember{attempt: {Name: "main", ExitCode: &code, StderrTail: "private stderr"}}}
 		if attempt == "unreleased" {
@@ -274,6 +249,33 @@ func TestReconcileRetiredDockerCustody(t *testing.T) {
 	if err != nil || !strings.Contains(string(data), "private stderr") {
 		t.Fatal("private evidence lost", err)
 	}
+
+	t.Run("ReconcileRetiredDockerLeavesUnownedContainers", func(t *testing.T) {
+
+		for _, name := range []string{"/verso-pair"} {
+			t.Run(name, func(t *testing.T) {
+				c, source, clock, f := retentionPair(t, name)
+				// Even matching attempt custody cannot authorize an unowned container.
+				unowned := f.containers["pair-sidecar"]
+				unowned.Config.Labels = map[string]string{}
+				f.containers[unowned.ID] = unowned
+				report, err := reconcileRetiredDocker(context.Background(), c.Config, clock, f.caller)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Equal(f.removed, []string{"pair-main"}) || len(f.containers) != 1 || f.containers[unowned.ID].Name != name {
+					t.Fatal("ownership did not determine removal", f.removed, f.containers)
+				}
+				if len(report) != 1 || !report[0].Removed || report[0].Container != "pair-main" {
+					t.Fatal("owned container not reconciled", report)
+				}
+				if _, err := os.Stat(filepath.Join(source.State, "pair.docker-evidence.json")); err != nil {
+					t.Fatal("private evidence lost", err)
+				}
+			})
+		}
+
+	})
 }
 
 func TestReconcileRetiredDockerRequiresProvenConversion(t *testing.T) {

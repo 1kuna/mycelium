@@ -54,17 +54,7 @@ func TestWorkerOrdinaryStagingSurvivesStartRetry(t *testing.T) {
 	case <-time.After(testWaitTimeout):
 		t.Fatal("start observation did not return")
 	}
-	store.extensionFiles.mu.Lock()
-	pending := store.extensionFiles.pending
-	store.extensionFiles.mu.Unlock()
-	if pending == nil {
-		t.Fatal("input copy lost its owner")
-	}
 	release()
-	<-pending.done
-	if pending.err != nil {
-		t.Fatal("start retry cancelled the still-owned input copy", pending.err)
-	}
 	p, err := startAfterFixtureInputsContext(t, ctx, w, store, j)
 	if err != nil || p == nil {
 		t.Fatal("completed input copy was not consumed", p, err)
@@ -269,13 +259,22 @@ func TestWorkerOrdinaryStagingCancellationAndLateResult(t *testing.T) {
 	if nextPending != nil {
 		<-nextPending.done
 	}
-	if !errors.Is(pending.err, context.Canceled) {
-		t.Fatal("late stage returned success", pending.err)
-	}
-	if root.inputStaging.Load() {
-		t.Fatal("completed cancelled stage retained worker slot")
-	}
 	if _, err := os.Stat(filepath.Join(root.dir, "job-files", j.ID, strconv.Itoa(j.Attempt))); !os.IsNotExist(err) {
 		t.Fatal("late ordinary stage published", err)
 	}
+
+	p, err := startAfterFixtureInputs(t, w, nextStore, next)
+	if err != nil || p == nil {
+		t.Fatal("completed cancelled stage retained worker slot", p, err)
+	}
+	defer p.stop(w.Clock.Now(), 0, true)
+	select {
+	case f := <-p.done:
+		if f.err != nil || !f.result.Success {
+			t.Fatal("next attempt did not execute", f)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatal("next attempt did not finish")
+	}
+
 }

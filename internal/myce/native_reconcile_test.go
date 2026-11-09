@@ -132,22 +132,24 @@ func TestReconcileNativeAttemptSettlesUpgrade(t *testing.T) {
 	if got := job(t, q, j.ID); got.State != "failed" || !got.ReleaseConfirmed || got.Attempt != j.Attempt {
 		t.Fatal("reconciliation changed failure or reran the attempt", got)
 	}
-}
 
-func TestReconcileNativeAttemptDeadGroupAndSidecars(t *testing.T) {
-	s, _ := nativeReconcileFixture(t, Job{ID: "job", Attempt: 1, Session: "session", Machine: "hypha"})
-	if err := saveWorkerJSON(s.dir, "attempt-exact-native.json", workerState{Identity: s.state.Identity, PID: s.state.PID, Groups: map[int]map[int]string{s.state.PID: {s.state.PID: "supervisor-birth", s.state.PID - 1: "sidecar-birth"}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveWorkerJSON(s.dir, "native-exact-native.json", struct {
-		Identity string
-		Members  []nativeMember
-	}{s.state.Identity, []nativeMember{{Name: "main", PID: s.state.PID}, {Name: "helper", PID: s.state.PID - 1}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err != nil || readNativeReconciled(t, s).Result.ReleasePending {
-		t.Fatal("verified-dead native group and sidecars did not settle", err)
-	}
+	t.Run("ReconcileNativeAttemptDeadGroupAndSidecars", func(t *testing.T) {
+
+		s, _ := nativeReconcileFixture(t, Job{ID: "job", Attempt: 1, Session: "session", Machine: "hypha"})
+		if err := saveWorkerJSON(s.dir, "attempt-exact-native.json", workerState{Identity: s.state.Identity, PID: s.state.PID, Groups: map[int]map[int]string{s.state.PID: {s.state.PID: "supervisor-birth", s.state.PID - 1: "sidecar-birth"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := saveWorkerJSON(s.dir, "native-exact-native.json", struct {
+			Identity string
+			Members  []nativeMember
+		}{s.state.Identity, []nativeMember{{Name: "main", PID: s.state.PID}, {Name: "helper", PID: s.state.PID - 1}}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err != nil || readNativeReconciled(t, s).Result.ReleasePending {
+			t.Fatal("verified-dead native group and sidecars did not settle", err)
+		}
+
+	})
 }
 
 func TestReconcileNativeAttemptLiveProcessKeepsCustody(t *testing.T) {
@@ -180,6 +182,32 @@ func TestReconcileNativeAttemptLiveProcessKeepsCustody(t *testing.T) {
 	if err := syscall.Kill(pid, 0); err != nil {
 		t.Fatal("reconciliation signalled live work", err)
 	}
+
+	t.Run("ReconcileNativeAttemptPIDOnlyRetainsPopulatedCgroup", func(t *testing.T) {
+
+		s, _ := nativeReconcileFixture(t, Job{ID: "job", Attempt: 1, Session: "session", Machine: "hypha"})
+		s.state.Cgroup = filepath.Join(t.TempDir(), "attempt-"+s.state.Identity)
+		if err := os.Mkdir(s.state.Cgroup, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.save(); err != nil {
+			t.Fatal(err)
+		}
+		events := filepath.Join(s.state.Cgroup, "cgroup.events")
+		if err := os.WriteFile(events, []byte("populated 1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err == nil || !readNativeReconciled(t, s).Result.ReleasePending {
+			t.Fatal("PID-only custody ignored populated saved cgroup", err)
+		}
+		if err := os.WriteFile(events, []byte("populated 0\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err != nil {
+			t.Fatal("empty saved cgroup did not settle PID-only custody", err)
+		}
+
+	})
 }
 
 func TestReconcileNativeAttemptRequiresOfflineExactResultAndClosedScratch(t *testing.T) {
@@ -205,30 +233,6 @@ func TestReconcileNativeAttemptRequiresOfflineExactResultAndClosedScratch(t *tes
 	}
 	if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err == nil || !readNativeReconciled(t, s).Result.ReleasePending {
 		t.Fatal("stale result discharged exact attempt", err)
-	}
-}
-
-func TestReconcileNativeAttemptPIDOnlyRetainsPopulatedCgroup(t *testing.T) {
-	s, _ := nativeReconcileFixture(t, Job{ID: "job", Attempt: 1, Session: "session", Machine: "hypha"})
-	s.state.Cgroup = filepath.Join(t.TempDir(), "attempt-"+s.state.Identity)
-	if err := os.Mkdir(s.state.Cgroup, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.save(); err != nil {
-		t.Fatal(err)
-	}
-	events := filepath.Join(s.state.Cgroup, "cgroup.events")
-	if err := os.WriteFile(events, []byte("populated 1\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err == nil || !readNativeReconciled(t, s).Result.ReleasePending {
-		t.Fatal("PID-only custody ignored populated saved cgroup", err)
-	}
-	if err := os.WriteFile(events, []byte("populated 0\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err != nil {
-		t.Fatal("empty saved cgroup did not settle PID-only custody", err)
 	}
 }
 

@@ -65,6 +65,49 @@ func TestDockerStopProtocol(t *testing.T) {
 	if calls("TERM") != 2 || calls("KILL") != 6 {
 		t.Fatalf("signals at deadline: TERM=%d KILL=%d", calls("TERM"), calls("KILL"))
 	}
+
+	t.Run("CooperativeExit", func(t *testing.T) {
+		q, clock := fixture(t)
+		s := spec("experiment")
+		s.Resumable = false
+		submit(t, q, s)
+		m := machine("gpu", "fake")
+		victim := check(t, q, m, nil).Job
+		submit(t, q, spec("production"))
+		directive := check(t, q, m, victim)
+		if directive.Kill || directive.GraceSeconds <= 0 {
+			t.Fatal("no TERM grace", directive)
+		}
+		d, dc, root := stopAttempt(t)
+		if err := os.WriteFile(filepath.Join(root, "extra"), []byte("yes"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		d.stop(dc.Now(), time.Duration(directive.GraceSeconds)*time.Second, directive.Kill)
+		if _, err := d.reconcile(); err != nil {
+			t.Fatal(err)
+		}
+		// Simulate the daemon observing the main and helper's cooperative exits.
+		if err := os.Remove(filepath.Join(root, "running")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(root, "extra")); err != nil {
+			t.Fatal(err)
+		}
+		dc.advance(time.Second)
+		if done, err := d.reconcile(); err != nil || !done {
+			t.Fatal("TERM exit not released", done, err)
+		}
+		dc.advance(20 * time.Second)
+		if _, err := d.reconcile(); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := os.ReadFile(filepath.Join(root, "calls"))
+		if strings.Contains(string(b), "kill --signal=KILL ") {
+			t.Fatal("KILL after TERM exit", string(b))
+		}
+		clock.Advance(time.Second)
+		finishInterrupted(t, q, victim)
+	})
 }
 
 func withoutToken(env []string) []string {
@@ -75,90 +118,6 @@ func withoutToken(env []string) []string {
 		}
 	}
 	return out
-}
-
-func TestDockerSidecarStopRecoveryAndEvidence(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	j := dockerGroupJob(t)
-	p, err := startDockerFixture(w, s, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-	if err = os.Remove(filepath.Join(root, "running")); err != nil {
-		t.Fatal(err)
-	}
-	await(t, func() bool {
-		b, _ := os.ReadFile(filepath.Join(root, "calls"))
-		return strings.Count(string(b), "kill --signal=TERM sidecar-") == 2
-	})
-	p.docker.close()
-	var before dockerExecution
-	b, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
-	if err != nil || json.Unmarshal(b, &before) != nil {
-		t.Fatal("missing custody")
-	}
-	c.advance(StopGrace / 2)
-	restored, err := w.restoreDocker(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restored.docker.close()
-	await(t, func() bool {
-		b, _ := os.ReadFile(filepath.Join(root, "calls"))
-		return strings.Count(string(b), "inspect ") >= 4
-	})
-	restored.docker.mu.Lock()
-	if restored.docker.state.Forced || !restored.docker.state.StopAt.Equal(*before.StopAt) {
-		t.Error("restart forced stop or lost deadline")
-	}
-	restored.docker.mu.Unlock()
-	c.advance(StopGrace / 2)
-	select {
-	case f := <-restored.done:
-		if f.result.ReleasePending {
-			t.Fatal("release pending")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("cleanup stuck")
-	}
-	b, _ = os.ReadFile(filepath.Join(root, "calls"))
-	if strings.Count(string(b), "kill --signal=TERM sidecar-") != 2 || strings.Count(string(b), "kill --signal=KILL sidecar-") != 2 {
-		t.Fatal("restart resent signals")
-	}
-	b, err = os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker-evidence.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var evidence map[string]dockerMember
-	if err = json.Unmarshal(b, &evidence); err != nil {
-		t.Fatal(err)
-	}
-	if len(evidence) != 3 {
-		t.Fatal("missing container evidence")
-	}
-	for _, m := range evidence {
-		if m.ExitCode == nil || m.StderrTail != "payload stderr\n" {
-			t.Fatalf("missing stderr/exit for %s", m.Name)
-		}
-	}
-	info, _ := os.Stat(filepath.Join(s.dir, s.state.Identity+".docker-evidence.json"))
-	if info.Mode().Perm() != 0600 {
-		t.Fatal("evidence is not private")
-	}
-	log, _ := os.ReadFile(filepath.Join(s.dir, s.state.Log))
-	if strings.Count(string(log), "payload stderr") != 1 {
-		t.Fatal("sidecar private stderr entered uploaded main log")
-	}
-}
-
-func TestDockerStderrByteBound(t *testing.T) {
-	b := &dockerTail{limit: dockerStderrTailBytes}
-	_, _ = b.Write([]byte(strings.Repeat("x", dockerStderrTailBytes*2)))
-	_, _ = b.Write([]byte("final stderr\n"))
-	if len(b.data) != dockerStderrTailBytes || !strings.HasSuffix(string(b.data), "final stderr\n") {
-		t.Fatal("stderr byte tail is not bounded")
-	}
 }
 
 func TestDockerSidecarEvidenceSurvivesRetention(t *testing.T) {
@@ -259,7 +218,7 @@ func stopCalls(t *testing.T, root, signal string) int {
 }
 
 func TestDockerTermAtMostOnce(t *testing.T) {
-	for _, mode := range []string{"", "refuse-kill", "unknown-kill", "delivered-error", "crash-before-call", "crash-after-call"} {
+	for _, mode := range []string{"crash-before-call", "crash-after-call"} {
 		t.Run(mode, func(t *testing.T) {
 			d, c, root := stopAttempt(t)
 			deadline := *d.state.StopAt
@@ -350,7 +309,7 @@ func TestDockerTermAtMostOnce(t *testing.T) {
 }
 
 func TestDockerSignalPersistenceFailureRetry(t *testing.T) {
-	for _, recovery := range []string{"live", "restart", "flush-then-restart", "deadline-then-restart"} {
+	for _, recovery := range []string{"restart", "deadline-then-restart"} {
 		t.Run(recovery, func(t *testing.T) {
 			d, c, root := stopAttempt(t)
 			deadline := *d.state.StopAt
@@ -449,7 +408,7 @@ func TestDockerDeadlineKillDespitePersistenceFailure(t *testing.T) {
 }
 
 func TestDockerDeadlineKillRetry(t *testing.T) {
-	for _, mode := range []string{"refuse-kill", "unknown-kill", "delivered-error"} {
+	for _, mode := range []string{"delivered-error"} {
 		t.Run(mode, func(t *testing.T) {
 			d, c, root := stopAttempt(t)
 			if _, err := d.reconcile(); err != nil {

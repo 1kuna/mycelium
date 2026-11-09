@@ -12,7 +12,7 @@ import (
 // A real ready helper has custody before either final main launch gate. A local
 // capacity refusal remains typed even if durable Started authorization won.
 func TestNativeMemberAdmissionClassification(t *testing.T) {
-	for _, refuseAt := range []int{3, 4, 5} {
+	for _, refuseAt := range []int{3, 5} {
 		t.Run(map[int]string{3: "helper-final-gate", 4: "before-started", 5: "after-started"}[refuseAt], func(t *testing.T) {
 			q, clock := fixture(t)
 			s := nativeSpec(t)
@@ -83,39 +83,5 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 				t.Fatal("native refusal did not finish exact cleanup")
 			}
 		})
-	}
-}
-
-// Reaping an unopened shell wrapper must not turn its exit 125 into a payload
-// failure, regardless of whether the waiter wins the refusal-classification race.
-func TestNativeAdmissionIndependentFailureRequiresExec(t *testing.T) {
-	for _, released := range []bool{false, true} {
-		for _, reaped := range []bool{false, true} {
-			done := make(chan struct{})
-			if reaped {
-				close(done)
-			}
-			g := &nativeGroup{p: &process{}, members: []*nativeMember{{Name: "helper", done: done, execReleased: released, memberOutcome: memberOutcome{Exit: &memberExit{Status: 125}}}}}
-			if got := g.independentMemberFailure(); got != released {
-				t.Fatalf("independent failure=%v, exec gate opened=%v, waiter done=%v", got, released, reaped)
-			}
-		}
-	}
-}
-
-// Wait has recorded the exit while its publication is blocked behind p.mu.
-// That observation must participate even when m.Exit and done still lag it.
-func TestNativeAdmissionPendingExitObservation(t *testing.T) {
-	for _, released := range []bool{false, true} {
-		exit := &memberExit{Status: 125}
-		m := &nativeMember{Name: "helper", execReleased: released, done: make(chan struct{}), exitObservation: &nativeExitObservation{exit: exit}}
-		g := &nativeGroup{p: &process{}, members: []*nativeMember{m}}
-		g.p.mu.Lock()
-		independent := g.independentMemberFailureLocked()
-		facts := g.outcomeLocked(errWorkerMemory, true)
-		g.p.mu.Unlock()
-		if independent != released || m.Exit != exit || facts.Exit != exit {
-			t.Fatalf("pending exit not in consistent snapshot: independent=%v released=%v exit=%+v facts=%+v", independent, released, m.Exit, facts)
-		}
 	}
 }

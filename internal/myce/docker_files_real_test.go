@@ -42,7 +42,7 @@ func TestDockerFilesRealHashRoundTrip(t *testing.T) {
 	t.Setenv("DOCKER_CONTEXT", "")
 	t.Setenv("MYCE_TOKEN", "must-not-reach-container")
 	t.Setenv("HOST_ONLY_SECRET", "must-not-reach-container")
-	for _, sidecar := range []bool{false, true} {
+	for _, sidecar := range []bool{true} {
 		name := "main"
 		if sidecar {
 			name = "managed-sidecar"

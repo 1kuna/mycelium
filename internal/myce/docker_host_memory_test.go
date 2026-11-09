@@ -158,32 +158,9 @@ func TestDockerHostMemoryStaleOrMissingKeepsReservation(t *testing.T) {
 	}
 }
 
-func TestDockerHostMemoryExternalAttribution(t *testing.T) {
-	q, clock, m, holder, sample := dockerHostCreditFixture(t)
-	r := AttemptReport{Execution: Execution{ID: holder.ID, Attempt: holder.Attempt}, Session: holder.Session, Started: true, CurrentHostMemory: sample}
-	old := workerMemoryRSS
-	t.Cleanup(func() { workerMemoryRSS = old })
-	workerMemoryRSS = func(context.Context) (float64, error) { return 1, nil }
-	w := Worker{Clock: clock}
-	m.MemoryObservation = creditDockerObservation(w.hostMemoryObservation(context.Background(), m, 75, nil), []Job{*holder}, []AttemptReport{r}, clock.Now())
-	if m.MemoryObservation == nil || m.MemoryObservation.MyceliumGB != 41 {
-		t.Fatal("managed container memory labelled external", m.MemoryObservation)
-	}
-	// Isolate this observation from the initial idle inventory check-in.
-	q.s.ExternalMemory = nil
-	q.recordExternalMemory(&m)
-	if got := q.externalMemoryStatus(m.HostID).Week.MaxGB; got != 5 {
-		t.Fatal("external memory includes Docker charge", got)
-	}
-	clock.Advance(hostMemorySampleFreshFor)
-	if o := creditDockerObservation(w.hostMemoryObservation(context.Background(), m, 75, nil), []Job{*holder}, []AttemptReport{r}, clock.Now()); o == nil || !o.AttributionUnknown || o.TotalGB != 121 || o.UsedGB != 46 {
-		t.Fatal("stale container sample lost physical memory evidence", o)
-	}
-}
-
 // A failed attribution probe must preserve raw physical evidence for admission.
 func TestDockerHostMemoryUnknownAttributionKeepsPhysicalHeadroom(t *testing.T) {
-	q, clock, m, holder, _ := dockerHostCreditFixture(t)
+	q, clock, m, holder, sample := dockerHostCreditFixture(t)
 	m.HostAvailableMemoryGB = 80
 	before := q.externalMemoryStatus(m.HostID).Week.Samples
 	r := AttemptReport{Execution: Execution{ID: holder.ID, Attempt: holder.Attempt}, Session: holder.Session, Started: true}
@@ -206,5 +183,27 @@ func TestDockerHostMemoryUnknownAttributionKeepsPhysicalHeadroom(t *testing.T) {
 	}
 	if got := q.externalMemoryStatus(m.HostID).Week.Samples; got != before {
 		t.Fatal("unknown attribution polluted external history", got)
+	}
+
+	{
+		r := AttemptReport{Execution: Execution{ID: holder.ID, Attempt: holder.Attempt}, Session: holder.Session, Started: true, CurrentHostMemory: sample}
+		old := workerMemoryRSS
+		t.Cleanup(func() { workerMemoryRSS = old })
+		workerMemoryRSS = func(context.Context) (float64, error) { return 1, nil }
+		w := Worker{Clock: clock}
+		m.MemoryObservation = creditDockerObservation(w.hostMemoryObservation(context.Background(), m, 75, nil), []Job{*holder}, []AttemptReport{r}, clock.Now())
+		if m.MemoryObservation == nil || m.MemoryObservation.MyceliumGB != 41 {
+			t.Fatal("managed container memory labelled external", m.MemoryObservation)
+		}
+		// Isolate this observation from the initial idle inventory check-in.
+		q.s.ExternalMemory = nil
+		q.recordExternalMemory(&m)
+		if got := q.externalMemoryStatus(m.HostID).Week.MaxGB; got != 5 {
+			t.Fatal("external memory includes Docker charge", got)
+		}
+		clock.Advance(hostMemorySampleFreshFor)
+		if o := creditDockerObservation(w.hostMemoryObservation(context.Background(), m, 75, nil), []Job{*holder}, []AttemptReport{r}, clock.Now()); o == nil || !o.AttributionUnknown || o.TotalGB != 121 || o.UsedGB != 46 {
+			t.Fatal("stale container sample lost physical memory evidence", o)
+		}
 	}
 }

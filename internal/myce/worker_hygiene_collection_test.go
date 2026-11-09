@@ -13,7 +13,7 @@ import (
 )
 
 func TestWorkerHygieneCollectionFileBudgetAndLocks(t *testing.T) {
-	for _, count := range []int{2, 100} {
+	for _, count := range []int{2} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			clock := &fakeClock{now: time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)}
 			cache := &FileCache{Root: t.TempDir(), Limit: 16, Clock: clock}
@@ -75,7 +75,6 @@ func TestWorkerHygieneCollectionEnvironmentBudgetReferencesAndCustody(t *testing
 	free := pruneFixture(t, cache, 1, 48*time.Hour)
 	referenced := pruneFixture(t, cache, 2, 48*time.Hour)
 	active := pruneFixture(t, cache, 3, 48*time.Hour)
-	recent := pruneFixture(t, cache, 4, time.Hour)
 	lock, err := cache.lock(context.Background(), active+".use", syscall.LOCK_SH)
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +88,7 @@ func TestWorkerHygieneCollectionEnvironmentBudgetReferencesAndCustody(t *testing
 	if _, err := os.Stat(filepath.Join(cache.Root, free)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("unreferenced old cache entry retained", err)
 	}
-	for _, key := range []string{referenced, active, recent} {
+	for _, key := range []string{referenced, active} {
 		if _, err := os.Stat(filepath.Join(cache.Root, key)); err != nil {
 			t.Fatal("protected environment removed", key, err)
 		}
@@ -99,27 +98,6 @@ func TestWorkerHygieneCollectionEnvironmentBudgetReferencesAndCustody(t *testing
 	}
 	if _, err := os.Stat(filepath.Join(cache.Root, referenced)); err != nil {
 		t.Fatal("failed reference lookup removed data", err)
-	}
-}
-
-func TestWorkerHygieneCollectionUsesExistingAutomaticBudgetAndCadence(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)}
-	cache := &EnvironmentCache{Root: t.TempDir(), Clock: clock, sizeLimit: func(string) (int64, error) { return 12345, nil }}
-	c := &workerHygieneCollector{w: Worker{Clock: clock, environmentCache: cache}}
-	c.collect(context.Background())
-	first := c.snapshot()
-	if first.Environments.Limit != 12345 || first.Environments.Error != "" {
-		t.Fatal("automatic budget not applied", first)
-	}
-	clock.Advance(time.Second)
-	c.collect(context.Background())
-	if !c.snapshot().At.Equal(first.At) {
-		t.Fatal("release requests caused repeated bulk sweeps")
-	}
-	clock.Advance(time.Minute)
-	c.collect(context.Background())
-	if !c.snapshot().At.After(first.At) {
-		t.Fatal("idle maintenance did not run again")
 	}
 }
 

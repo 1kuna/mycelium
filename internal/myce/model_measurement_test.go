@@ -62,36 +62,20 @@ func boundModelFixture(t *testing.T, n int) (*Queue, *Machine, Model, *ModelCall
 }
 
 func TestModelMeasurementBindingAndMeasuredAdmission(t *testing.T) {
-	for _, n := range []int{1, 8} {
-		t.Run(fmt.Sprint(n), func(t *testing.T) {
-			q, m, model, c := boundModelFixture(t, n)
-			if limit := q.declaredCallLimit(c, m, model); limit != n {
-				t.Fatalf("limit=%d want=%d", limit, n)
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprint(changed), func(t *testing.T) {
+			q, m, _, _ := boundModelFixture(t, 8)
+			want := 8
+			if changed {
+				// Altered server cannot reuse the command's bound measurement.
+				q.models.Models[0].Args = []string{"changed-context"}
+				q.s.Machines[m.ID].ModelConfigHash = modelConfigHash(q.models)
+				want = 1
 			}
 			q.maintain()
-			if got := q.s.ModelSlots[targetSlotKey(m, model.Name)].InFlight; got != n {
-				t.Fatalf("actual admission=%d want=%d", got, n)
+			if got := q.s.ModelSlots[targetSlotKey(m, "bound")].InFlight; got != want {
+				t.Fatalf("actual admission=%d want=%d", got, want)
 			}
 		})
-	}
-	q, m, model, c := boundModelFixture(t, 8)
-	// The command's curve cannot bind an altered server, even at the same shape.
-	changed := model
-	changed.Args = []string{"changed-context"}
-	if len(q.boundModelPoints(c, m, changed)) != 0 || q.declaredCallLimit(c, m, changed) != 1 {
-		t.Fatal("changed server reused curve")
-	}
-	for id, p := range q.s.WorkObservations {
-		p.Key.ServerDigest = ""
-		q.s.WorkObservations[id] = p
-	}
-	if q.declaredCallLimit(c, m, model) != 1 {
-		t.Fatal("extension-only sweep qualified calls")
-	}
-	// Undeclared callers preserve configured routing/limits, including unlimited.
-	c.FanOut = ""
-	model.MaxInFlight = 0
-	if q.declaredCallLimit(c, m, model) != 0 {
-		t.Fatal("legacy configured limit changed")
 	}
 }

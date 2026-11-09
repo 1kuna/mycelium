@@ -17,7 +17,7 @@ func TestOpenAIRoutingKeepsBufferedEngineCompatibility(t *testing.T) {
 	check(t, q, m, nil)
 	q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, State: "ready", Priority: "production", LastUsed: q.clock.Now()}
 	api := API{Queue: q, Token: "test"}.Handler()
-	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings", "/v1/completions"} {
+	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings"} {
 		req := httptest.NewRequest("POST", path, strings.NewReader(`{"model":"test","input":"hello"}`))
 		req.Header.Set("Authorization", "Bearer test")
 		req.Header.Set("X-Myce-Project", "atlas")

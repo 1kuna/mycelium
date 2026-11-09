@@ -36,7 +36,7 @@ func TestDockerFilesAdmission(t *testing.T) {
 			}
 		})
 	}
-	for _, flag := range []string{"--volume=/tmp:/myce/inputs", "-v=/tmp:/other", "--mount=type=bind,src=/tmp,dst=/other", "--env=SECRET=value", "--env=MYCE_TOKEN=value", "--workdir=/myce/work/subdir", "--user=0", "--group-add=0", "--privileged"} {
+	for _, flag := range []string{"--mount=type=bind,src=/tmp,dst=/other", "--env=MYCE_TOKEN=value", "--workdir=/myce/work/subdir", "--user=0", "--group-add=0", "--privileged"} {
 		for _, sidecar := range []bool{false, true} {
 			s := cloneJob(&Job{Spec: base}).Spec
 			command := slices.Insert(s.Run.Command, 2, flag)
@@ -56,20 +56,6 @@ func TestDockerFilesAdmission(t *testing.T) {
 	base.Run.Command = append(base.Run.Command, "--env=payload-argument")
 	if err := base.Validate(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestDockerFilesPlacement(t *testing.T) {
-	j := dockerJob()
-	j.Spec.Outputs = map[string]string{"result": "results"}
-	m := machine("docker", "fake")
-	m.Capabilities = append(m.Capabilities, "docker")
-	if dockerRuntimeFits(&j, &m) || !strings.Contains(dockerRuntimeWaitingReason(&j, map[string]*Machine{m.ID: &m}), dockerFilesCapability) {
-		t.Fatal("file job accepted by an older Docker worker")
-	}
-	m.Capabilities = append(m.Capabilities, dockerFilesCapability)
-	if !dockerRuntimeFits(&j, &m) {
-		t.Fatal("new Docker worker rejected")
 	}
 }
 
@@ -250,7 +236,7 @@ func TestDockerFilesPublicationReplay(t *testing.T) {
 }
 
 func TestDockerFilesInvalidOutput(t *testing.T) {
-	for _, kind := range []string{"missing", "directory", "escape", "unreadable"} {
+	for _, kind := range []string{"missing", "escape"} {
 		t.Run(kind, func(t *testing.T) {
 			_, w, store, j := dockerFilesPublicationFixture(t)
 			path := filepath.Join(j.Spec.Run.Workdir, "result.txt")

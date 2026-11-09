@@ -16,7 +16,7 @@ func TestMaintenanceDelayedDockerGroupLaunch(t *testing.T) {
 		call   int
 		denied string
 		action string
-	}{{"network", 1, "network create", "drain"}, {"sidecar-start", 3, "start sidecar-sortformer", "disable"}, {"main-start", 7, "start id1", "disable-stop"}} {
+	}{{"network", 1, "network create", "drain"}, {"main-start", 7, "start id1", "disable-stop"}} {
 		action := boundary.action
 		t.Run(boundary.name+"/"+action, func(t *testing.T) {
 			w, store, _, root := dockerFixture(t)

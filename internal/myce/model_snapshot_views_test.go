@@ -131,6 +131,23 @@ func modelSnapshotViews(t *testing.T, mode string, wrap func(*testing.T, Worker,
 			t.Fatalf("%s payload not ready: %q %v: %s", mode, line, err, &errorsOut[i])
 		}
 	}
+	if mode == "plain" {
+		blob, err := filepath.EvalSymlinks(filepath.Join(repo, "snapshots", tinyRevision, "model.safetensors"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.OpenFile(blob, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteAt([]byte("tampered"), 0); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		if data, _ := os.ReadFile(filepath.Join(paths[0], "model.safetensors")); string(data) != tinyWeights {
+			t.Fatal("source write changed the verified snapshot view")
+		}
+	}
 	for _, pipe := range pipes {
 		if _, err := fmt.Fprintln(pipe, "go"); err != nil {
 			t.Fatal(err)

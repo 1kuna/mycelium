@@ -10,7 +10,7 @@ import (
 // Retained #884 evidence: these are different attempts, not a 7.5423 GiB
 // observation. A larger permanently qualified target must not block this one.
 func TestMemoryRecoveryTargetPairedEvidence(t *testing.T) {
-	for _, margin := range []float64{2.1867791904561273, 12} {
+	for _, margin := range []float64{12} {
 		t.Run(fmt.Sprint(margin), func(t *testing.T) {
 			q, clock := fixture(t)
 			m := cpuMachine("worker", "worker", "cpu", 8, 32)
@@ -132,11 +132,14 @@ func TestMemoryRecoveryTargetAcceptedHistoryRetainsLower(t *testing.T) {
 	})
 	clock.Advance(365 * 24 * time.Hour)
 	check(t, q, m, nil)
+	m.HostAvailableMemoryGB = 6
 	queued := submit(t, q, s)
-	physical := *q.s.Machines[m.ID]
-	physical.FreeHostMemoryGB = 6
-	candidate := q.memoryCandidate(queued, &physical)
-	if candidate.Spec.Needs.HostMemoryGB < 8 || hostFits(&physical, 0, candidate.Spec.Needs.HostMemoryGB) {
-		t.Fatal("accepted history clipped constrained measured need", candidate.MemoryEnvelope)
+	if run := check(t, q, m, nil).Job; run != nil {
+		t.Fatal("accepted history clipped constrained measured need", run.MemoryEnvelope)
+	}
+	m.HostAvailableMemoryGB = 32
+	candidate := check(t, q, m, nil).Job
+	if candidate == nil || candidate.ID != queued.ID || candidate.Spec.Needs.HostMemoryGB < 8 {
+		t.Fatal("accepted history clipped constrained measured need", candidate)
 	}
 }

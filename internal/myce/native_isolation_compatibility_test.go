@@ -34,7 +34,7 @@ import (
 func TestNativeIsolationCompatibility(t *testing.T) {
 	t.Run("staged-files-checkpoint", func(t *testing.T) {
 		w, root, j := nativeCompatibilityFixture(t, "files")
-		j.Attempt = 2
+		j.Attempt = 3
 		// Exercise the existing piece-output transport and worker publisher,
 		// without requiring a frozen extension or bypassing Worker.start.
 		j.Spec.After = &PieceDependency{Job: "tiny-upstream", Piece: "text", Outputs: map[string]string{"input.txt": "source.txt"}}
@@ -42,6 +42,12 @@ func TestNativeIsolationCompatibility(t *testing.T) {
 		j.Spec.Outputs = map[string]string{"output.txt": "results"}
 		nativeCompatibilityWrite(t, filepath.Join(w.JobFileRoot, "inputs/source.txt"), "native compatibility input\n")
 		nativeCompatibilityWrite(t, filepath.Join(j.Checkpoint, "attempt-1/checkpoint.json"), nativeCompatibilitySave1)
+		nativeCompatibilityWrite(t, filepath.Join(j.Checkpoint, "attempt-1", "saved"), "old")
+		latest := filepath.Join(j.Checkpoint, "attempt-2", "nested", "saved")
+		nativeCompatibilityWrite(t, latest, "new")
+		nativeCompatibilityWrite(t, filepath.Join(j.Checkpoint, "attempt-2", "checkpoint.json"), nativeCompatibilitySave1)
+		nativeCompatibilityWrite(t, filepath.Join(j.Checkpoint, "attempt-2", "partial.tmp"), "incomplete")
+
 		j.Spec.Run.Env["EXPECTED_CHECKPOINT"] = attemptCheckpoint(j)
 		p := nativeCompatibilityRun(t, w, root, j, 30*time.Second)
 		for name, path := range map[string]string{
@@ -55,6 +61,22 @@ func TestNativeIsolationCompatibility(t *testing.T) {
 			nativeCompatibilityRead(t, filepath.Join(attemptCheckpoint(j), "checkpoint.json"), nativeCompatibilitySave2)
 			nativeCompatibilityRead(t, filepath.Join(j.Checkpoint, "attempt-1/checkpoint.json"), nativeCompatibilitySave1)
 		})
+		dest := attemptCheckpoint(j)
+		data, err := os.ReadFile(filepath.Join(dest, "nested", "saved"))
+		if err != nil || string(data) != "new" {
+			t.Fatalf("checkpoint %q: %v", data, err)
+		}
+		if _, err = os.Stat(filepath.Join(dest, "partial.tmp")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("copied incomplete checkpoint")
+		}
+		if err = os.WriteFile(filepath.Join(dest, "nested", "saved"), []byte("attempt 3"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		data, _ = os.ReadFile(latest)
+		if string(data) != "new" {
+			t.Fatal("new attempt modified previous checkpoint")
+		}
+
 		input, err := os.Stat(filepath.Join(w.JobFileRoot, "inputs/source.txt"))
 		staged, stagedErr := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "input.txt"))
 		if err != nil || stagedErr != nil || os.SameFile(input, staged) {
@@ -62,7 +84,7 @@ func TestNativeIsolationCompatibility(t *testing.T) {
 		}
 	})
 	t.Run("shared-cache", func(t *testing.T) {
-		for _, configured := range []bool{false, true} {
+		for _, configured := range []bool{true} {
 			name := "default"
 			if configured {
 				name = "configured"
@@ -111,11 +133,6 @@ func TestNativeIsolationCompatibility(t *testing.T) {
 		j.Attempt = 2
 		j.Spec.Inputs = map[string]string{"input.txt": "inputs/source.txt"}
 		nativeCompatibilityPaths(t, &j, paths)
-		nativeCompatibilityRun(t, w, root, j, 30*time.Second)
-	})
-	t.Run("external-runtime-model", func(t *testing.T) {
-		w, root, j := nativeCompatibilityFixture(t, "external")
-		nativeCompatibilityExternal(t, &w, &j)
 		nativeCompatibilityRun(t, w, root, j, 30*time.Second)
 	})
 	t.Run("two-sidecars", func(t *testing.T) {

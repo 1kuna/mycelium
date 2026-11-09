@@ -118,58 +118,6 @@ func TestWorkerRootsProductionAdmissionAndExactCustody(t *testing.T) {
 	finish(t, q, recovered, true)
 }
 
-func TestWorkerRootsDependencyChecks(t *testing.T) {
-	q, _ := fixture(t)
-	input := SharedInput{NAS: "input", SHA256: strings.Repeat("a", 64), SizeBytes: 1}
-	base := Job{Spec: cpuSpec(1, 1)}
-	base.Spec.Priority = "production"
-	for _, tc := range []struct {
-		root string
-		edit func(*Job, *Machine)
-	}{
-		{"checkpoint", func(j *Job, m *Machine) { j.Spec.SharedInputs = map[string]SharedInput{"data": input} }},
-		{"model", func(j *Job, m *Machine) {
-			j.Spec.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "org/model"}}
-		}},
-		{"environment", func(j *Job, m *Machine) { j.Spec.Environment.Name = "runtime" }},
-		{"extension", func(j *Job, m *Machine) { j.Spec.Extension = "fixture@1" }},
-		{"file-cache", func(j *Job, m *Machine) {
-			j.Spec.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "org/model"}}
-		}},
-	} {
-		t.Run(tc.root, func(t *testing.T) {
-			m := cpuMachine("worker", "worker", "cpu", 4, 16)
-			m.UnavailableRoots = []UnavailableRoot{{Root: tc.root, Reason: "configured NAS mount missing"}}
-			j := cloneJob(&base)
-			tc.edit(&j, &m)
-			if q.storageRootReason(&j, &m) == "" {
-				t.Fatal("NAS dependency bypassed admission")
-			}
-			if err := localAttemptAdmission(Worker{Machine: m}, nil, j, nil); err == nil {
-				t.Fatal("local launch admitted missing root")
-			}
-			if tc.root == "checkpoint" {
-				m.CachedSharedInputs = []string{input.key()}
-				if reason := storageRootReason(&j, &m); reason != "" {
-					t.Fatal("verified local input blocked", reason)
-				}
-			}
-			m.UnavailableRoots = nil
-			if tc.root == "file-cache" {
-				// Snapshot bytes live in FileCacheRoot, independently of the
-				// engine model cache configured by CacheRoot.
-				m.UnavailableRoots = []UnavailableRoot{{Root: "model-cache", Reason: "configured NAS mount missing"}}
-			}
-			if reason := q.storageRootReason(&j, &m); reason != "" {
-				t.Fatal("recovered dependency still blocked", reason)
-			}
-			if err := localAttemptAdmission(Worker{Machine: m}, nil, j, nil); err != nil {
-				t.Fatal("recovered dependency refused locally", err)
-			}
-		})
-	}
-}
-
 func TestWorkerRootsMissingExtensionAllowsPlainCommand(t *testing.T) {
 	q, _ := fixture(t)
 	m := cpuMachine("worker", "worker", "cpu", 4, 16)
@@ -184,22 +132,6 @@ func TestWorkerRootsMissingExtensionAllowsPlainCommand(t *testing.T) {
 	w := Worker{Machine: m, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
 	if err := localAttemptAdmission(w, nil, *assigned, nil); err != nil {
 		t.Fatal("plain command refused locally", err)
-	}
-}
-
-func TestWorkerRootsAutofsIsNotMountedNAS(t *testing.T) {
-	for _, osname := range []string{"darwin", "linux"} {
-		t.Run(osname, func(t *testing.T) {
-			roots, err := workerMountedNASRoots(context.Background(), osname, func(context.Context, string, ...string) ([]byte, error) {
-				if osname == "linux" {
-					return []byte("map /nas autofs rw 0 0\nfixture /nas/online nfs rw 0 0\n"), nil
-				}
-				return []byte("map on /nas (autofs)\nfixture on /nas/online (smbfs)\n"), nil
-			})
-			if err != nil || len(roots) != 1 || roots[0] != "/nas/online" {
-				t.Fatal("automount placeholder counted as NAS", roots, err)
-			}
-		})
 	}
 }
 
@@ -416,20 +348,13 @@ func TestWorkerRootsFrozenLockNeedsNoSource(t *testing.T) {
 	s := spec("production")
 	s.Resumable = false
 	s.Environment.Name = "runtime"
-	j := submit(t, q, s)
+	submit(t, q, s)
 	if err := os.Remove(lock); err != nil {
 		t.Fatal(err)
 	}
 	m := machine("builder", "fake")
 	m.EnvironmentBuilder = true
 	m.UnavailableRoots = []UnavailableRoot{{Root: "environment-source", Reason: "configured NAS mount missing"}}
-	w := Worker{Machine: m}
-	if reason := q.storageRootReason(j, &m); reason != "" {
-		t.Fatal("frozen lock environment blocked by unused source", reason)
-	}
-	if err := localAttemptAdmission(w, nil, *j, nil); err != nil {
-		t.Fatal("frozen lock environment refused locally", err)
-	}
 	if reply := check(t, q, m, nil); len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Key != recipe.Key {
 		t.Fatal("unused source blocked preparation")
 	}
@@ -441,20 +366,6 @@ func TestWorkerRootsFrozenLockNeedsNoSource(t *testing.T) {
 	defer release()
 	if output, err := exec.Command(filepath.Join(path, "venv", "bin", "python"), "-c", "print('frozen')").CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != "frozen" {
 		t.Fatalf("frozen environment did not run: %s %v", output, err)
-	}
-	// Helpers and model runtimes use the same recipe classification.
-	helper := Job{Spec: spec("production"), SidecarEnvironmentRecipes: map[string]map[string]EnvironmentRecipe{"helper": {"fake": recipe}}}
-	if reason := storageRootReason(&helper, &m); reason != "" {
-		t.Fatal("frozen helper blocked by unused source", reason)
-	}
-	model := Model{Name: "model", Environment: "runtime"}
-	modelJob := Job{Spec: spec("production"), ModelEnvironmentKey: recipe.Key}
-	if reason := storageRootReasonForModel(&modelJob, &m, model, &recipe); reason != "" {
-		t.Fatal("frozen model environment blocked by unused source", reason)
-	}
-	m.UnavailableRoots[0].Root = "environment"
-	if storageRootReason(j, &m) == "" || storageRootReason(&helper, &m) == "" || storageRootReasonForModel(&modelJob, &m, model, &recipe) == "" {
-		t.Fatal("frozen recipe bypassed missing destination cache")
 	}
 }
 

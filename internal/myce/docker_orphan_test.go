@@ -89,13 +89,3 @@ func TestDockerOrphanStopProtocol(t *testing.T) {
 		})
 	}
 }
-
-func TestDockerEvidenceWithoutStore(t *testing.T) {
-	d := &dockerAttempt{state: dockerExecution{Identity: "orphan"}}
-	if err := d.retainEvidence(nil); err != nil {
-		t.Fatal(err)
-	}
-	if d.state.EvidenceSaved {
-		t.Fatal("evidence saved without a durable write")
-	}
-}

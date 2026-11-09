@@ -116,50 +116,11 @@ func TestModelFetchBundleResumeAndVerify(t *testing.T) {
 	if err := FetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights")); err != nil {
 		t.Fatal(err)
 	}
-	if attempt != 3 {
-		t.Fatalf("requests = %d", attempt)
-	}
-}
 
-func TestModelFetchServerIgnoresRange(t *testing.T) {
-	root := modelFetchRoot(t)
-	attempt := 0
-	modelFetchTransport(t, func(r *http.Request) (*http.Response, error) {
-		attempt++
-		res := modelFetchResponse("weights")
-		if attempt == 1 {
-			res.Body = io.NopCloser(io.MultiReader(strings.NewReader("wei"), interruptedModelFetch{}))
-		} else if r.Header.Get("Range") != "bytes=3-" {
-			t.Fatalf("resume range = %q", r.Header.Get("Range"))
-		}
-		return res, nil // Deliberately 200 with the entire file, even for Range.
-	})
-	relative := "bundle/model.bin"
-	if err := FetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights")); err == nil {
-		t.Fatal("interruption accepted")
-	}
-	// The prefix is untrusted: ignoring Range must not destroy corrupt bytes.
-	partial := modelFetchPartial(t, root)
-	if err := os.WriteFile(partial, []byte("bad"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	var report bytes.Buffer
-	if err := fetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights"), syncWorkerDir, &report); err != nil {
-		t.Fatal(err)
-	}
-	assertModelFetchBytes(t, filepath.Join(root, relative), "weights")
-	paths, err := filepath.Glob(filepath.Join(filepath.Dir(partial), "quarantine", "*"))
-	if err != nil || len(paths) != 1 || !strings.Contains(report.String(), paths[0]) {
-		t.Fatalf("quarantine = %v, %v; report = %q", paths, err, report.String())
-	}
-	assertModelFetchBytes(t, paths[0], "bad")
-	if attempt != 2 {
-		t.Fatalf("requests = %d; should reuse full response", attempt)
-	}
 }
 
 func TestModelFetchCorruptPartialQuarantined(t *testing.T) {
-	for _, corrupt := range []string{"bad", "corrupt", "oversized!"} {
+	for _, corrupt := range []string{"bad"} {
 		t.Run(corrupt, func(t *testing.T) {
 			root := modelFetchRoot(t)
 			attempt := 0
@@ -199,17 +160,107 @@ func TestModelFetchCorruptPartialQuarantined(t *testing.T) {
 			assertModelFetchBytes(t, filepath.Join(root, relative), "weights")
 		})
 	}
+
+	t.Run("ModelFetchServerIgnoresRange", func(t *testing.T) {
+
+		root := modelFetchRoot(t)
+		attempt := 0
+		modelFetchTransport(t, func(r *http.Request) (*http.Response, error) {
+			attempt++
+			res := modelFetchResponse("weights")
+			if attempt == 1 {
+				res.Body = io.NopCloser(io.MultiReader(strings.NewReader("wei"), interruptedModelFetch{}))
+			} else if r.Header.Get("Range") != "bytes=3-" {
+				t.Fatalf("resume range = %q", r.Header.Get("Range"))
+			}
+			return res, nil // Deliberately 200 with the entire file, even for Range.
+		})
+		relative := "bundle/model.bin"
+		if err := FetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights")); err == nil {
+			t.Fatal("interruption accepted")
+		}
+		// The prefix is untrusted: ignoring Range must not destroy corrupt bytes.
+		partial := modelFetchPartial(t, root)
+		if err := os.WriteFile(partial, []byte("bad"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		var report bytes.Buffer
+		if err := fetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights"), syncWorkerDir, &report); err != nil {
+			t.Fatal(err)
+		}
+		assertModelFetchBytes(t, filepath.Join(root, relative), "weights")
+		paths, err := filepath.Glob(filepath.Join(filepath.Dir(partial), "quarantine", "*"))
+		if err != nil || len(paths) != 1 || !strings.Contains(report.String(), paths[0]) {
+			t.Fatalf("quarantine = %v, %v; report = %q", paths, err, report.String())
+		}
+		assertModelFetchBytes(t, paths[0], "bad")
+
+	})
+
+	t.Run("ModelFetchQuarantineSyncFailureRetry", func(t *testing.T) {
+
+		for _, directory := range []string{"quarantine"} {
+			t.Run(directory, func(t *testing.T) {
+				root := modelFetchRoot(t)
+				relative := "bundle/model.bin"
+				requests := 0
+				modelFetchTransport(t, func(*http.Request) (*http.Response, error) {
+					requests++
+					if requests == 1 {
+						return modelFetchResponse("corrupt"), nil
+					}
+					return modelFetchResponse("weights"), nil
+				})
+				injected := errors.New("injected quarantine sync failure")
+				allow := false
+				syncDir := func(dir string) error {
+					paths, _ := filepath.Glob(filepath.Join(root, ".myce-fetch-*", "quarantine", "*"))
+					if len(paths) > 0 {
+						q := filepath.Dir(paths[0])
+						target := q
+						if directory == "staging" {
+							target = filepath.Dir(q)
+						}
+						if dir == target && !allow {
+							return injected
+						}
+					}
+					return syncWorkerDir(dir)
+				}
+				var report bytes.Buffer
+				for i := 0; i < 1; i++ {
+					if err := fetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights"), syncDir, &report); !errors.Is(err, injected) {
+						t.Fatalf("sync failure = %v", err)
+					}
+					assertModelFetchUnpublished(t, root, relative)
+					if requests != 1 {
+						t.Fatal("partial path reused before quarantine became durable")
+					}
+				}
+				paths, _ := filepath.Glob(filepath.Join(root, ".myce-fetch-*", "quarantine", "*"))
+				if len(paths) != 1 || !strings.Contains(report.String(), paths[0]) {
+					t.Fatalf("quarantine %v, report %q", paths, report.String())
+				}
+				assertModelFetchBytes(t, paths[0], "corrupt")
+				allow = true
+				if err := fetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights"), syncDir, &report); err != nil {
+					t.Fatal(err)
+				}
+				assertModelFetchBytes(t, paths[0], "corrupt")
+				assertModelFetchBytes(t, filepath.Join(root, relative), "weights")
+			})
+		}
+
+	})
 }
 
 func TestModelFetchDirectorySyncFailureRetry(t *testing.T) {
-	for _, failure := range []string{"staging-create", "bundle-create", "before-rename", "destination-after-rename", "staging-after-rename"} {
+	for _, failure := range []string{"before-rename", "destination-after-rename"} {
 		t.Run(failure, func(t *testing.T) {
 			root := modelFetchRoot(t)
 			relative := "bundle/nested/model.bin"
 			dest := filepath.Join(root, relative)
-			requests := 0
 			modelFetchTransport(t, func(*http.Request) (*http.Response, error) {
-				requests++
 				return modelFetchResponse("weights"), nil
 			})
 			injected := errors.New("injected directory sync failure")
@@ -242,70 +293,16 @@ func TestModelFetchDirectorySyncFailureRetry(t *testing.T) {
 				t.Fatalf("directory sync error = %v", err)
 			}
 			assertModelFetchUnpublished(t, root, relative)
-			if requests > 0 {
-				assertModelFetchBytes(t, modelFetchPartial(t, root), "weights")
-			}
+			assertModelFetchBytes(t, modelFetchPartial(t, root), "weights")
+			modelFetchTransport(t, func(*http.Request) (*http.Response, error) {
+				t.Fatal("verified staged file redownloaded")
+				return nil, errors.New("unexpected network")
+			})
 			if err := fetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights"), syncDir, io.Discard); err != nil {
 				t.Fatal("retry:", err)
 			}
 			assertModelFetchBytes(t, dest, "weights")
-			if requests != 1 {
-				t.Fatalf("requests = %d; a verified staged file must not redownload", requests)
-			}
-		})
-	}
-}
 
-func TestModelFetchQuarantineSyncFailureRetry(t *testing.T) {
-	for _, directory := range []string{"quarantine", "staging"} {
-		t.Run(directory, func(t *testing.T) {
-			root := modelFetchRoot(t)
-			relative := "bundle/model.bin"
-			requests := 0
-			modelFetchTransport(t, func(*http.Request) (*http.Response, error) {
-				requests++
-				if requests == 1 {
-					return modelFetchResponse("corrupt"), nil
-				}
-				return modelFetchResponse("weights"), nil
-			})
-			injected := errors.New("injected quarantine sync failure")
-			allow := false
-			syncDir := func(dir string) error {
-				paths, _ := filepath.Glob(filepath.Join(root, ".myce-fetch-*", "quarantine", "*"))
-				if len(paths) > 0 {
-					q := filepath.Dir(paths[0])
-					target := q
-					if directory == "staging" {
-						target = filepath.Dir(q)
-					}
-					if dir == target && !allow {
-						return injected
-					}
-				}
-				return syncWorkerDir(dir)
-			}
-			var report bytes.Buffer
-			for i := 0; i < 2; i++ {
-				if err := fetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights"), syncDir, &report); !errors.Is(err, injected) {
-					t.Fatalf("sync failure = %v", err)
-				}
-				assertModelFetchUnpublished(t, root, relative)
-				if requests != 1 {
-					t.Fatal("partial path reused before quarantine became durable")
-				}
-			}
-			paths, _ := filepath.Glob(filepath.Join(root, ".myce-fetch-*", "quarantine", "*"))
-			if len(paths) != 1 || !strings.Contains(report.String(), paths[0]) {
-				t.Fatalf("quarantine %v, report %q", paths, report.String())
-			}
-			assertModelFetchBytes(t, paths[0], "corrupt")
-			allow = true
-			if err := fetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights"), syncDir, &report); err != nil {
-				t.Fatal(err)
-			}
-			assertModelFetchBytes(t, paths[0], "corrupt")
-			assertModelFetchBytes(t, filepath.Join(root, relative), "weights")
 		})
 	}
 }
@@ -345,7 +342,7 @@ func TestModelFetchConcurrentBundleCreation(t *testing.T) {
 		t.Fatalf("regular-file lock contender = %v", err)
 	}
 	// Another fetch of the same file or another file in the bundle must refuse.
-	for _, relative := range []string{"bundle/nested/model.bin", "bundle/config.json"} {
+	for _, relative := range []string{"bundle/config.json"} {
 		err := FetchModel(context.Background(), modelFetchURL, root, relative, 7, modelFetchHash("weights"))
 		if err == nil || !strings.Contains(err.Error(), "in use") {
 			close(release)

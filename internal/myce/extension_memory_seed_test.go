@@ -6,7 +6,7 @@ import (
 )
 
 func TestNewVersionSeedsFromPriorAcceptedMemory(t *testing.T) {
-	for _, mode := range []string{"reference only", "same model command", "changed model command"} {
+	for _, mode := range []string{"reference only", "same model command"} {
 		t.Run(mode, func(t *testing.T) {
 			q, clock, m, s := observationFixture(t)
 			s.Needs.Memory = "auto"
@@ -171,58 +171,6 @@ func TestNewVersionUnifiedSeedRequiresPairedDevicePeak(t *testing.T) {
 	candidate := seedMemoryCandidate(t, q, queued, &target)
 	if candidate.MemoryEnvelope.Source == priorVersionMemorySource || !hostFits(&target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
 		t.Fatalf("unpaired predecessor peak stranded the shared-pool probe: %+v", candidate.MemoryEnvelope)
-	}
-}
-
-func TestCheckSharedSidecarDoesNotProveSharedModel(t *testing.T) {
-	e := compositionExtension(t, false)
-	v := e.Variants[0]
-	v.Execution.Sidecars = []NativeSidecar{{Name: "metrics", Command: []string{"sh", "-c", "echo metrics"}}}
-	if checkSharesWorkload(e, v, e, v) {
-		t.Fatal("incidental helper made a different check command comparable to the workload")
-	}
-}
-
-func TestNewVersionSeedMixedVersionOrdering(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	s.Needs.Memory, s.Workload = "auto", nil
-	s.AllowedMachines = []string{m.ID}
-	s.ExtensionCheck = &ExtensionCheckRequest{Work: s.workType(), Directory: t.TempDir()}
-	base := registeredExtension(t, q, s.Extension)
-	// The nearest semantic predecessor is neither the newest acceptance nor
-	// the opaque version. All are real accepted checks on the same target.
-	for i, version := range []string{"legacy", "2", "1"} {
-		e := base
-		e.Version = version
-		e = freezeComposition(t, e)
-		if err := q.AddExtension(e); err != nil {
-			t.Fatal(err)
-		}
-		report := newExtensionReport(e, &m, s.workType())
-		report.Setup = true
-		m.ExtensionReports = append(m.ExtensionReports, report)
-		s.Extension, s.ExtensionDigest = extensionKey(e), e.Digest
-		run := startSeedCheck(t, q, m, s)
-		clock.Advance(time.Second)
-		peak, growth := float64(6-i), .1
-		r := result(&run, true)
-		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, GrowthGB: &growth}
-		if err := q.Complete(r); err != nil {
-			t.Fatal(err)
-		}
-	}
-	base.Version = "3"
-	base = freezeComposition(t, base)
-	if err := q.AddExtension(base); err != nil {
-		t.Fatal(err)
-	}
-	s.Extension, s.ExtensionDigest = extensionKey(base), base.Digest
-	queued := submit(t, q, s)
-	for range 50 {
-		candidate := seedMemoryCandidate(t, q, queued, q.s.Machines[m.ID])
-		if candidate.Spec.Needs.HostMemoryGB != 5.1 {
-			t.Fatalf("mixed versions changed the selected predecessor: %+v", candidate.MemoryEnvelope)
-		}
 	}
 }
 

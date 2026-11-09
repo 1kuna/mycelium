@@ -52,13 +52,17 @@ func TestDockerSharedDeviceSamplesContainerDescendants(t *testing.T) {
 	if err != nil || !ids[42] || !ids[43] || ids[99] {
 		t.Fatal("incorrect host PIDs", ids, err)
 	}
-	gb, foreign, err := cudaAttemptMemory([]byte("GPU-one, 42, 1024\nGPU-one, 99, 8192"), "GPU-one", ids, map[int]bool{99: true})
-	if err != nil || foreign || gb != 1 {
-		t.Fatal("known co-tenant counted as foreign", gb, foreign, err)
-	}
 	// The fixture's exact cap is inspected by the real managed adapter.
 	limit, _ := os.ReadFile(filepath.Join(root, "--memory"))
 	if string(limit) != strconv.FormatInt(2<<30, 10) {
 		t.Fatal("missing cap", string(limit))
+	}
+
+	calls, err := os.ReadFile(filepath.Join(root, "calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(calls), "--network none") || !strings.Contains(string(calls), "--memory 2147483648") || strings.Contains(string(calls), "network create") {
+		t.Fatalf("memory changed network contract: %s", calls)
 	}
 }

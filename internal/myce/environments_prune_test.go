@@ -37,9 +37,9 @@ func pruneFixture(t *testing.T, c *EnvironmentCache, n int, age time.Duration) s
 
 func TestEnvironmentPrune(t *testing.T) {
 	q, clock := fixture(t)
-	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}
-	if err := c.init(); err != nil {
-		t.Fatal(err)
+	c := &EnvironmentCache{Root: t.TempDir(), Clock: clock, sizeLimit: func(string) (int64, error) { return environmentCacheSize(23 << 30) }}
+	if err := c.init(); err == nil || !strings.Contains(err.Error(), "24 GiB free") {
+		t.Fatal("preparation did not enforce its free-space floor", err)
 	}
 	old := 48 * time.Hour
 	eligible := pruneFixture(t, c, 1, old)
@@ -62,6 +62,12 @@ func TestEnvironmentPrune(t *testing.T) {
 	s := spec("experiment")
 	s.Environment.Name = "needed"
 	submit(t, q, s)
+	if err := q.update(func() error {
+		q.s.ModelSlots = map[string]*ModelSlot{"loading": {EnvironmentRecipe: &EnvironmentRecipe{Key: referenced}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test"}
@@ -90,6 +96,25 @@ func TestEnvironmentPrune(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(c.Root, "prune-audit.jsonl")); !os.IsNotExist(err) {
 		t.Fatal("dry-run wrote audit", err)
 	}
+	for _, unavailable := range []bool{false, true} {
+		calls := 0
+		_, err := c.Prune(context.Background(), true, func(ctx context.Context, key string) (bool, error) {
+			if key != eligible {
+				return refs(ctx, key)
+			}
+			calls++
+			if calls == 2 && unavailable {
+				return false, errors.New("queue unavailable")
+			}
+			return calls == 2, nil
+		})
+		if (err != nil) != unavailable || calls != 2 {
+			t.Fatal(err, calls)
+		}
+		if _, err := os.Stat(filepath.Join(c.Root, eligible)); err != nil {
+			t.Fatal("reference recheck failed to preserve environment", err)
+		}
+	}
 	report, err = c.Prune(context.Background(), true, refs)
 	if err != nil || report.ReclaimedBytes <= 0 {
 		t.Fatal(report, err)
@@ -105,147 +130,5 @@ func TestEnvironmentPrune(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(c.Root, "prune-audit.jsonl"))
 	if err != nil || !strings.Contains(string(b), eligible) || !strings.Contains(string(b), `"removed":true`) || !strings.Contains(string(b), fmt.Sprintf(`"reclaimed_bytes":%d`, report.ReclaimedBytes)) {
 		t.Fatal(string(b), err)
-	}
-}
-
-func TestEnvironmentPruneReferenceRecheck(t *testing.T) {
-	_, clock := fixture(t)
-	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}
-	if err := c.init(); err != nil {
-		t.Fatal(err)
-	}
-	key := pruneFixture(t, c, 1, 48*time.Hour)
-	for _, unavailable := range []bool{false, true} {
-		calls := 0
-		_, err := c.Prune(context.Background(), true, func(context.Context, string) (bool, error) {
-			calls++
-			if calls == 2 && unavailable {
-				return false, errors.New("queue unavailable")
-			}
-			return calls == 2, nil
-		})
-		if (err != nil) != unavailable || calls != 2 {
-			t.Fatal(err, calls)
-		}
-		if _, err := os.Stat(filepath.Join(c.Root, key)); err != nil {
-			t.Fatal("reference recheck failed to preserve environment", err)
-		}
-	}
-}
-
-func TestEnvironmentPruneBelowPreparationFreeSpaceFloor(t *testing.T) {
-	_, clock := fixture(t)
-	capacityChecks := 0
-	c := &EnvironmentCache{Root: t.TempDir(), Clock: clock, sizeLimit: func(string) (int64, error) {
-		capacityChecks++
-		return environmentCacheSize(23 << 30)
-	}}
-	// The same low-space cache must still refuse new preparation, but that
-	// failure must not poison maintenance of an already prepared environment.
-	if err := c.init(); err == nil || !strings.Contains(err.Error(), "24 GiB free") {
-		t.Fatal("preparation did not enforce its free-space floor", err)
-	}
-	key := pruneFixture(t, c, 1, 48*time.Hour)
-	refs := func(context.Context, string) (bool, error) { return false, nil }
-	report, err := c.Prune(context.Background(), false, refs)
-	if err != nil || len(report.Entries) != 1 || report.Entries[0].Key != key || report.Entries[0].Removed || report.ReclaimedBytes != 0 {
-		t.Fatal("low-space dry-run failed", report, err)
-	}
-	if _, err := os.Stat(filepath.Join(c.Root, key)); err != nil {
-		t.Fatal("dry-run removed candidate", err)
-	}
-	report, err = c.Prune(context.Background(), true, refs)
-	if err != nil || !report.Entries[0].Removed || report.ReclaimedBytes <= 0 {
-		t.Fatal("low-space apply failed", report, err)
-	}
-	if _, err := os.Stat(filepath.Join(c.Root, key)); !os.IsNotExist(err) {
-		t.Fatal("low-space apply retained candidate", err)
-	}
-	if capacityChecks != 1 {
-		t.Fatal("prune attempted capacity sizing", capacityChecks)
-	}
-	audit, err := os.ReadFile(filepath.Join(c.Root, "prune-audit.jsonl"))
-	if err != nil || !strings.Contains(string(audit), `"removed":true`) {
-		t.Fatal("low-space apply omitted audit", string(audit), err)
-	}
-}
-
-func TestEnvironmentPruneRetainedReferences(t *testing.T) {
-	q, _ := fixture(t)
-	ctx := context.Background()
-	key := strings.Repeat("a", 64)
-	r := EnvironmentRecipe{Key: key}
-	for _, source := range []string{"sidecar", "extension", "setup", "unreleased", "preparation"} {
-		t.Run(source, func(t *testing.T) {
-			key := key
-			e := Extension{Digest: strings.Repeat("b", 64)}
-			m := machine("setup-worker", "fake")
-			if source == "setup" {
-				key = extensionPreparationKey(e, &m)
-			}
-			j := submit(t, q, spec("experiment"))
-			if err := q.update(func() error {
-				stored := q.s.Jobs[j.ID]
-				switch source {
-				case "sidecar":
-					stored.SidecarEnvironmentRecipes = map[string]map[string]EnvironmentRecipe{"helper": {"fake": r}}
-				case "extension":
-					stored.Extensions = []Extension{{Variants: []ExtensionVariant{{Environments: map[string]EnvironmentRecipe{"main": r}}}}}
-				case "setup":
-					q.s.Machines[m.ID] = &m
-					stored.Extensions = []Extension{e}
-				case "unreleased":
-					stored.State = "succeeded"
-					stored.Attempt = 1
-					stored.EnvironmentRecipes = map[string]EnvironmentRecipe{"fake": r}
-				case "preparation":
-					q.s.PreparationPlans = map[string]HostLaunch{"build": {Kind: "environment", Key: key}}
-				}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if !q.environmentReferenced(ctx, key) {
-				t.Fatal("lost reference", source)
-			}
-			if err := q.update(func() error {
-				stored := q.s.Jobs[j.ID]
-				stored.State = "succeeded"
-				stored.ReleaseConfirmed = true
-				q.s.PreparationPlans = nil
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if q.environmentReferenced(ctx, key) {
-				t.Fatal("released terminal job still referenced", source)
-			}
-		})
-	}
-}
-
-func TestEnvironmentPruneModelReferences(t *testing.T) {
-	q, _ := fixture(t)
-	key := strings.Repeat("b", 64)
-	if err := q.update(func() error {
-		q.s.ModelSlots = map[string]*ModelSlot{"loading": {EnvironmentRecipe: &EnvironmentRecipe{Key: key}}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !q.environmentReferenced(context.Background(), key) {
-		t.Fatal("loading model environment unprotected")
-	}
-	if err := q.update(func() error {
-		q.s.ModelSlots = nil
-		q.models.Models = []Model{{Name: "queued", Environment: "runtime"}}
-		q.environments.Environments = map[string]map[string]EnvironmentRecipe{"runtime": {"fake": {Key: key}}}
-		q.calls = map[string]*ModelCall{"call": {Model: "queued"}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !q.environmentReferenced(context.Background(), key) {
-		t.Fatal("queued call environment unprotected")
 	}
 }

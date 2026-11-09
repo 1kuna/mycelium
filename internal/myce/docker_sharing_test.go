@@ -68,18 +68,19 @@ func startSharedDocker(t *testing.T, m Machine, clock Clock, j *Job) (*process, 
 	return p, s, root
 }
 
-func TestDockerSharedDeviceRunsTwoJobsThatFit(t *testing.T) {
+func TestDockerSharedDeviceProductionStopsAllContainers(t *testing.T) {
 	q, _ := fixture(t)
 	clock := &dockerTestClock{now: q.clock.Now()}
 	q.clock = clock
 	m := dockerSharedMachine()
 	a, b := dockerSharedPair(t, q, m)
+	pa, _, rootA := startSharedDocker(t, m, clock, a)
+	pb, _, rootB := startSharedDocker(t, m, clock, b)
 	w := sharedWorker(m, clock)
 	if err := localAttemptAdmission(w, []Job{*a}, *b, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, j := range []*Job{a, b} {
-		_, _, root := startSharedDocker(t, m, clock, j)
+	for _, root := range []string{rootA, rootB} {
 		limit, _ := os.ReadFile(filepath.Join(root, "--memory"))
 		network, _ := os.ReadFile(filepath.Join(root, "--network"))
 		if string(limit) != "1073741824" || string(network) != "none" {
@@ -89,16 +90,21 @@ func TestDockerSharedDeviceRunsTwoJobsThatFit(t *testing.T) {
 	machineCheck(t, q, m, a, b)
 	requireState(t, q, a.ID, "running")
 	requireState(t, q, b.ID, "running")
-}
 
-func TestDockerSharedDeviceProductionStopsAllContainers(t *testing.T) {
-	q, _ := fixture(t)
-	clock := &dockerTestClock{now: q.clock.Now()}
-	q.clock = clock
-	m := dockerSharedMachine()
-	a, b := dockerSharedPair(t, q, m)
-	pa, _, rootA := startSharedDocker(t, m, clock, a)
-	pb, _, rootB := startSharedDocker(t, m, clock, b)
+	machineCheck(t, q, m, a, b)
+	q = memoryFactsRestart(t, q, clock)
+	fakeCheckpointAvailability(t, q, true)
+	third := submit(t, q, dockerSharedSpec("experiment", 17))
+	if assignedJob(machineCheck(t, q, m, a, b)) != nil {
+		t.Fatal("restart lost charge")
+	}
+	for _, old := range []*Job{a, b} {
+		got := job(t, q, old.ID)
+		if got.State != "running" || got.Attempt != old.Attempt || got.ReleaseConfirmed {
+			t.Fatal("restart lost exact custody", got.ID, got.State)
+		}
+	}
+	requireState(t, q, third.ID, "queued")
 	demand := submit(t, q, dockerSharedSpec("production", 25))
 	reply := machineCheck(t, q, m, a, b)
 	if assignedJob(reply) != nil {
@@ -170,24 +176,4 @@ func TestDockerSharedDeviceUnknownMemoryKeepsCard(t *testing.T) {
 		t.Fatal("joined unknown device demand")
 	}
 	requireState(t, q, small.ID, "queued")
-}
-
-func TestDockerSharedDeviceRestartKeepsCustody(t *testing.T) {
-	q, clock := fixture(t)
-	m := dockerSharedMachine()
-	a, b := dockerSharedPair(t, q, m)
-	machineCheck(t, q, m, a, b)
-	q = memoryFactsRestart(t, q, clock)
-	fakeCheckpointAvailability(t, q, true)
-	third := submit(t, q, dockerSharedSpec("experiment", 17))
-	if assignedJob(machineCheck(t, q, m, a, b)) != nil {
-		t.Fatal("restart lost charge")
-	}
-	for _, old := range []*Job{a, b} {
-		got := job(t, q, old.ID)
-		if got.State != "running" || got.Attempt != old.Attempt || got.ReleaseConfirmed {
-			t.Fatal("restart lost exact custody", got.ID, got.State)
-		}
-	}
-	requireState(t, q, third.ID, "queued")
 }

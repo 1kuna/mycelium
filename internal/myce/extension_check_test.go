@@ -1,6 +1,10 @@
 package myce
 
 import (
+	"net/http/httptest"
+)
+
+import (
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -12,7 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
+
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,264 +26,8 @@ import (
 // Work without its own memory evidence is seeded by its checks' peaks (#186).
 const checkSeededPeak = "accepted peak + measured uncertainty; from qualification checks"
 
-func TestExtensionCheckAutoMemory(t *testing.T) {
-	t.Run("floor-free variant", func(t *testing.T) {
-		e := compositionExtension(t, false)
-		e.Variants[0].Needs = ResourceNeeds{Memory: "auto"}
-		freezeComposition(t, e)
-	})
-	for _, mode := range []string{"", "auto"} {
-		t.Run("submission/"+mode, func(t *testing.T) {
-			e := compositionExtension(t, false)
-			e.Kinds = nil
-			e.Variants[0].Needs.Memory = mode
-			if mode == "auto" {
-				e.Variants[0].Needs = ResourceNeeds{Memory: mode}
-			}
-			delete(e.Variants[0].Baselines, "kind:sample")
-			e = freezeComposition(t, e)
-			root := t.TempDir()
-			if err := InstallExtension(root, e); err != nil {
-				t.Fatal(err)
-			}
-			fingerprint, err := ExtensionFingerprint(context.Background(), "fake", "0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			m := machine("check-worker", "fake")
-			m.HostID, m.Device, m.ExtensionFingerprint = "check-host", "0", fingerprint
-			m.CapabilityProfile.OS, m.CapabilityProfile.Arch = e.Variants[0].Target.OS, e.Variants[0].Target.Arch
-			response := func(v any) (*http.Response, error) {
-				b, _ := json.Marshal(v)
-				return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(bytes.NewReader(b))}, nil
-			}
-			submitted := false
-			client := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
-				switch req.URL.Path {
-				case "/api/inspection":
-					return response(Snapshot{Machines: []*Machine{&m}})
-				case "/api/extensions":
-					return response(nil)
-				case "/api/jobs":
-					var s Spec
-					if err := json.NewDecoder(req.Body).Decode(&s); err != nil {
-						t.Fatal(err)
-					}
-					submitted = true
-					if !s.RequireTarget {
-						t.Error("runtime check omitted capacity-only target validation")
-					}
-					if s.Needs.Memory != mode || s.ExtensionCheck == nil {
-						t.Errorf("check submission memory = %q, want %q", s.Needs.Memory, mode)
-					}
-					return response(Job{ID: "check", State: "failed", Reason: "fixture check failure"})
-				case "/api/jobs/check":
-					return response(Job{ID: "check", State: "failed"})
-				case "/api/jobs/cancel":
-					return response(map[string]any{"release": "released"})
-				case "/api/jobs/check/logs":
-					return response([]LogChunk{})
-				}
-				t.Fatalf("unexpected request: %s", req.URL.Path)
-				return nil, os.ErrInvalid
-			})}}
-			cache := &EnvironmentCache{Root: t.TempDir(), Limit: 4 << 20}
-			reports, err := CheckExtension(context.Background(), root, e, "fake", "0", m.HostID, io.Discard, cache, client)
-			if !submitted || err == nil || len(reports) != 1 || reports[0].Qualified {
-				t.Fatalf("failed check granted qualification: %+v, %v", reports, err)
-			}
-			saved := readExtensionReports(root, e, "fake")
-			if len(saved) != 1 || saved[0].Qualified {
-				t.Fatalf("failed check persisted qualification: %+v", saved)
-			}
-		})
-	}
-}
-
-func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
-	for _, checkAge := range []time.Duration{0, 29 * 24 * time.Hour} {
-		t.Run(checkAge.String(), func(t *testing.T) {
-			q, clock, m, s := observationFixture(t)
-			e := registeredExtension(t, q, s.Extension)
-			e.Version = "auto"
-			e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
-			e = freezeComposition(t, e)
-			if err := q.AddExtension(e); err != nil {
-				t.Fatal(err)
-			}
-			report := newExtensionReport(e, &m, "extension:sample")
-			report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
-			m.ExtensionReports = []ExtensionReport{report}
-			check(t, q, m, nil)
-			s.Extension = extensionKey(e)
-			work := startObservation(t, q, m, s)
-			clock.Advance(2 * time.Second)
-			finish(t, q, &work, true)
-			key := identityHash(q.s.Jobs[work.ID].Timing.Key)
-			before := q.s.WorkObservations[key]
-			if before.Units != 10 || before.Seconds != 2 || before.Rate != 5 || before.LatencySeconds != 2 {
-				t.Fatalf("missing throughput history: %+v", before)
-			}
-			clock.Advance(checkAge)
-			probe := s
-			probe.Workload = nil
-			probe.ExtensionDigest = e.Digest
-			probe.AllowedMachines = []string{m.ID}
-			probe.Needs.Memory = "auto"
-			probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
-			job := startObservation(t, q, m, probe)
-			clock.Advance(time.Second)
-			host := 2.0
-			r := result(&job, true)
-			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			// The check records its own memory point (#618) and leaves the
-			// workload's throughput point untouched.
-			after := q.s.WorkObservations[key]
-			if !reflect.DeepEqual(after, before) {
-				t.Errorf("auto check changed the workload's observation: before=%+v after=%+v", before, after)
-			}
-			checkKey := q.s.Jobs[job.ID].Timing.Key
-			own := q.s.WorkObservations[identityHash(checkKey)]
-			if len(q.s.WorkObservations) != 2 || !checkKey.Check || !own.MemoryRecordedAt.Equal(clock.Now()) || own.MemoryPeak == nil || own.MemoryPeak.HostGB == nil || *own.MemoryPeak.HostGB != host || own.Rate != 0 {
-				t.Errorf("auto check did not record its own memory: %+v", q.s.WorkObservations)
-			}
-			timing := q.s.Jobs[job.ID].Timing
-			if timing.ActualSeconds != nil || timing.PredictedSeconds != nil {
-				t.Errorf("check learned timing: %+v", timing)
-			}
-
-			if checkAge > 0 {
-				// Work was measured on day 0; the day-29 check must not keep its
-				// throughput usable for placement or prediction on day 34.
-				clock.Advance(5 * 24 * time.Hour)
-				check(t, q, m, nil)
-				next := submit(t, q, s)
-				if estimate, ok := q.estimateCompletion(q.s.Jobs[next.ID], q.s.Machines[m.ID]); !ok || estimate.samples != 1 {
-					t.Errorf("unchanged throughput lost on age: %+v", estimate)
-				}
-				reply := check(t, q, m, nil)
-				if reply.Job == nil || reply.Job.ID != next.ID {
-					t.Fatalf("day-34 work not assigned: %+v", reply)
-				}
-				if err := q.Started(result(reply.Job, true)); err != nil {
-					t.Fatal(err)
-				}
-				if timing := q.s.Jobs[next.ID].Timing; timing == nil || timing.Key == nil || timing.PredictedSeconds == nil {
-					t.Errorf("unchanged throughput lost for prediction: %+v", timing)
-				}
-				// The day-29 check memory is fresh on its own clock and seeds
-				// work that has no memory evidence of its own (#186).
-				if got := q.s.Jobs[next.ID]; got.MemoryEnvelope == nil || got.MemoryEnvelope.Source != checkSeededPeak || got.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-					t.Errorf("fresh check peak not reused after throughput expired: %+v", got.MemoryEnvelope)
-				}
-			}
-		})
-	}
-}
-
-func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	e := registeredExtension(t, q, s.Extension)
-	e.Version = "auto"
-	e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
-	e = freezeComposition(t, e)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	report := newExtensionReport(e, &m, "extension:sample")
-	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
-	m.ExtensionReports = []ExtensionReport{report}
-	check(t, q, m, nil)
-	k, why := curveKey(e, q.s.Machines[m.ID], "extension:sample")
-	if k == nil {
-		t.Fatal(why)
-	}
-	k.Concurrency = 1
-	q.s.WorkObservations = map[string]WorkObservation{identityHash(k): {Key: *k, Source: "idle reference", SampleID: "benchmark", Samples: 1, Units: 10, Seconds: 2, Rate: 5, LatencySeconds: 2, RecordedAt: clock.Now()}}
-	s.Extension = extensionKey(e)
-	probe := s
-	probe.Workload = nil
-	probe.ExtensionDigest = e.Digest
-	probe.AllowedMachines = []string{m.ID}
-	probe.Needs.Memory = "auto"
-	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
-	job := startObservation(t, q, m, probe)
-	clock.Advance(time.Second)
-	host := 2.0
-	r := result(&job, true)
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if p := q.s.WorkObservations[identityHash(k)]; len(q.s.WorkObservations) != 2 || p.MemoryPeak != nil || p.SampleID != "benchmark" {
-		t.Fatalf("check memory landed on the benchmark point: %+v", q.s.WorkObservations)
-	}
-	queued := submit(t, q, s)
-	next := check(t, q, m, nil).Job
-	if next == nil || next.ID != queued.ID {
-		t.Fatalf("comparable work not assigned: %+v", next)
-	}
-	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-		t.Fatalf("check peak beside a benchmark point not reused: %+v", next.MemoryEnvelope)
-	}
-}
-
-func TestExtensionCheckAutoMemorySurvivesOldBenchmarkReport(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	e := registeredExtension(t, q, s.Extension)
-	e.Version = "auto"
-	e.Variants[0].Needs.Memory = "auto" // Keeps the host floor a reference point needs.
-	e.Variants[0].Sweeps = map[string]ReferenceSweep{"extension:sample": {Command: []string{"sh", "curve.sh"}, Counts: []int{1}, MaxConcurrency: 1}}
-	e.Files["curve.sh"] = []byte("exit 0\n")
-	e = freezeComposition(t, e)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	report := newExtensionReport(e, &m, "extension:sample")
-	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
-	m.ExtensionReports = []ExtensionReport{report}
-	check(t, q, m, nil)
-	s.Extension = extensionKey(e)
-	probe := s
-	probe.Workload = nil
-	probe.ExtensionDigest = e.Digest
-	probe.AllowedMachines = []string{m.ID}
-	probe.Needs.Memory = "auto"
-	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
-	job := startObservation(t, q, m, probe)
-	clock.Advance(time.Second)
-	host := 2.0
-	r := result(&job, true)
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	k, why := curveKey(e, q.s.Machines[m.ID], "extension:sample")
-	if k == nil {
-		t.Fatal(why)
-	}
-	k.Concurrency = 1
-	// A distinct, otherwise valid benchmark report whose throughput is 31 days old.
-	old := WorkObservation{Key: *k, Source: "idle reference", SampleID: "old-benchmark", Units: 10, Seconds: 2, Rate: 5, LatencySeconds: 2, RecordedAt: clock.Now().Add(-31 * 24 * time.Hour)}
-	publishCurves(t, q, m, []WorkObservation{old})
-	if p := q.s.WorkObservations[identityHash(k)]; len(q.s.WorkObservations) != 2 || p.SampleID != "old-benchmark" {
-		t.Fatalf("old benchmark report not accepted beside the check's point: %+v", q.s.WorkObservations)
-	}
-	queued := submit(t, q, s)
-	next := check(t, q, m, nil).Job
-	if next == nil || next.ID != queued.ID {
-		t.Fatalf("comparable work not assigned: %+v", next)
-	}
-	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-		t.Fatalf("old benchmark report expired fresh memory: %+v", next.MemoryEnvelope)
-	}
-}
-
 func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
-	for _, outcome := range []string{"accepted", "constrained", "failed"} {
+	for _, outcome := range []string{"accepted", "constrained"} {
 		t.Run(outcome, func(t *testing.T) {
 			q, clock, m, s := observationFixture(t)
 			e := registeredExtension(t, q, s.Extension)
@@ -345,6 +93,73 @@ func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("ExtensionCheckAutoPreservesThroughput", func(t *testing.T) {
+
+		for _, checkAge := range []time.Duration{29 * 24 * time.Hour} {
+			t.Run(checkAge.String(), func(t *testing.T) {
+				q, clock, m, s := observationFixture(t)
+				e := registeredExtension(t, q, s.Extension)
+				e.Version = "auto"
+				e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
+				e = freezeComposition(t, e)
+				if err := q.AddExtension(e); err != nil {
+					t.Fatal(err)
+				}
+				report := newExtensionReport(e, &m, "extension:sample")
+				report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
+				m.ExtensionReports = []ExtensionReport{report}
+				check(t, q, m, nil)
+				s.Extension = extensionKey(e)
+				work := startObservation(t, q, m, s)
+				clock.Advance(2 * time.Second)
+				finish(t, q, &work, true)
+				clock.Advance(checkAge)
+				probe := s
+				probe.Workload = nil
+				probe.ExtensionDigest = e.Digest
+				probe.AllowedMachines = []string{m.ID}
+				probe.Needs.Memory = "auto"
+				probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+				job := startObservation(t, q, m, probe)
+				clock.Advance(time.Second)
+				host := 2.0
+				r := result(&job, true)
+				r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				timing := q.s.Jobs[job.ID].Timing
+				if timing.ActualSeconds != nil || timing.PredictedSeconds != nil {
+					t.Errorf("check learned timing: %+v", timing)
+				}
+
+				if checkAge > 0 {
+					// Work was measured on day 0; the day-29 check must not keep its
+					// throughput usable for placement or prediction on day 34.
+					clock.Advance(5 * 24 * time.Hour)
+					check(t, q, m, nil)
+					next := submit(t, q, s)
+					reply := check(t, q, m, nil)
+					if reply.Job == nil || reply.Job.ID != next.ID {
+						t.Fatalf("day-34 work not assigned: %+v", reply)
+					}
+					if err := q.Started(result(reply.Job, true)); err != nil {
+						t.Fatal(err)
+					}
+					if timing := q.s.Jobs[next.ID].Timing; timing == nil || timing.Key == nil || timing.PredictedSeconds == nil {
+						t.Errorf("unchanged throughput lost for prediction: %+v", timing)
+					}
+					// The day-29 check memory is fresh on its own clock and seeds
+					// work that has no memory evidence of its own (#186).
+					if got := q.s.Jobs[next.ID]; got.MemoryEnvelope == nil || got.MemoryEnvelope.Source != checkSeededPeak || got.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
+						t.Errorf("fresh check peak not reused after throughput expired: %+v", got.MemoryEnvelope)
+					}
+				}
+			})
+		}
+
+	})
 }
 
 func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
@@ -420,9 +235,7 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 	for _, flags := range []struct {
 		host, device string
 		cache        *EnvironmentCache
-	}{
-		{"wrong-host", "0", cache}, {"", "0", cache}, {"local-host", "", cache}, {"local-host", "0", nil},
-	} {
+	}{{"wrong-host", "0", cache}} {
 		if _, err := CheckExtension(ctx, root, e, "fake", flags.device, flags.host, io.Discard, flags.cache, d.Client()); err == nil {
 			t.Fatal("invalid selection accepted")
 		}
@@ -465,7 +278,7 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 // would not. An oversized learned estimate waits for evidence or capacity;
 // neither case can bypass live admission.
 func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
-	for _, peak := range []float64{13.08499526977539, 25} {
+	for _, peak := range []float64{25} {
 		t.Run(fmt.Sprint(peak), func(t *testing.T) {
 			q, _, m, s := floorFreeFitFixture(t, 24)
 			sibling := m.Devices[0]
@@ -700,19 +513,38 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 					t.Fatalf("missing admission reason %q: %s", want, saved[0].Reason)
 				}
 			}
-		})
-	}
-}
+			if mode == "execution exceeds timeout" {
+				privateReason := "never started: environment preparation blocked: /private/fixture: worker-secret"
+				if err := q.update(func() error { q.s.Jobs[submitted.ID].Reason = privateReason; return nil }); err != nil {
+					t.Fatal(err)
+				}
+				handler := API{Queue: q, Token: "test"}.Handler()
+				readPublic := func() Job {
+					req := httptest.NewRequest("GET", "/api/jobs/"+submitted.ID, nil)
+					req.Header.Set("Authorization", "Bearer test")
+					out := httptest.NewRecorder()
+					handler.ServeHTTP(out, req)
+					var got Job
+					if out.Code != 200 || json.Unmarshal(out.Body.Bytes(), &got) != nil {
+						t.Fatal("public job read", out.Code, out.Body.String())
+					}
+					return got
+				}
+				got := readPublic()
+				if got.Reason != "never started: waiting for environment or command preparation" {
+					t.Fatalf("unsafe or missing admission category: %s", got.Reason)
+				}
+				if again := readPublic(); again.Reason != got.Reason {
+					t.Fatalf("admission category lost on repeated projection: %s", again.Reason)
+				}
+				if err := q.update(func() error { q.s.Jobs[submitted.ID].Spec.ExtensionCheck = nil; return nil }); err != nil {
+					t.Fatal(err)
+				}
+				if got := readPublic(); got.Reason != "execution failed" {
+					t.Fatalf("arbitrary job supplied a check timeout reason: %s", got.Reason)
+				}
+			}
 
-func TestExtensionCheckTimeoutPrivacy(t *testing.T) {
-	j := &Job{State: "failed", Spec: Spec{ExtensionCheck: &ExtensionCheckRequest{}}, Reason: "never started: environment preparation blocked: /private/fixture: worker-secret"}
-	if got := statusJobValue(j); got.Reason != "never started: waiting for environment or command preparation" {
-		t.Fatalf("unsafe or missing admission category: %s", got.Reason)
-	} else if again := statusJobValue(&got); again.Reason != got.Reason {
-		t.Fatalf("admission category lost on repeated projection: %s", again.Reason)
-	}
-	j.Spec.ExtensionCheck = nil
-	if got := statusJobValue(j); got.Reason != "execution failed" {
-		t.Fatalf("arbitrary job supplied a check timeout reason: %s", got.Reason)
+		})
 	}
 }

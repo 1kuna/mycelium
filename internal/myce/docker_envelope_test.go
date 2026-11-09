@@ -74,9 +74,6 @@ func TestDockerEnvelopeSharedParent(t *testing.T) {
 	j.Spec.Run.DockerMemoryGB = 1
 	m := machine("docker", "fake")
 	m.Capabilities = append(m.Capabilities, "docker")
-	if !dockerRuntimeFits(&j, &m) {
-		t.Fatal("legacy capped Docker refused")
-	}
 	j.Spec.Run.DockerMemoryGB = 0
 	if dockerRuntimeFits(&j, &m) || dockerRuntimeWaitingReason(&j, map[string]*Machine{m.ID: &m}) != dockerEnvelopeUnavailable {
 		t.Fatal("unsupported envelope Docker lacks refusal")

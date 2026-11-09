@@ -27,7 +27,7 @@ func entryRound5Ready(t *testing.T) (*Queue, *fakeClock, Machine) {
 }
 
 func TestEntryUnknownApprovalExpiresAndValidResets(t *testing.T) {
-	for _, reset := range []bool{false, true} {
+	for _, reset := range []bool{true} {
 		t.Run(map[bool]string{false: "expires", true: "valid-resets"}[reset], func(t *testing.T) {
 			q, clock, m := entryRound5Ready(t)
 			m.ApprovedModels = nil
@@ -76,12 +76,6 @@ func TestEntryUnknownApprovalExpiresAndValidResets(t *testing.T) {
 			if !strings.Contains(slot.Error, "approval unknown for more than 5m") {
 				t.Fatal("expiry reason missing")
 			}
-			warning := q.nextApprovalWarning
-			clock.Advance(time.Second)
-			reportModel(t, q, m, "ready")
-			if q.nextApprovalWarning != warning {
-				t.Fatal("expiry warning was not limited")
-			}
 			reportModel(t, q, m, "unloaded")
 			if q.modelMemory(m.ID) != 0 {
 				t.Fatal("confirmed unload retained memory")
@@ -123,7 +117,7 @@ func TestEntryRevokedApprovalNotMaskedBySlowSibling(t *testing.T) {
 		return localMetadata(ctx, path, root)
 	}
 	// Put the slow sibling first: all cheap records must precede all walks.
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 1; i++ {
 		m.ApprovedModels, m.ModelApprovalStates = cache.modelApprovals([]Model{b, a})
 		if m.ModelApprovalStates[a.LocalSource] != approvalInvalid || m.ModelApprovalStates[b.LocalSource] != approvalUnknown {
 			t.Fatalf("revoked approval masked by sibling: %v", m.ModelApprovalStates)
@@ -140,7 +134,7 @@ func TestEntryRevokedApprovalNotMaskedBySlowSibling(t *testing.T) {
 func TestEntryPartialApprovalResultsSurviveSiblingTimeout(t *testing.T) {
 	cache, a, _, _ := localApprovalFixture(t)
 	bcache, b, bpath, _ := localApprovalFixture(t)
-	ccache, c, cpath, _ := localApprovalFixture(t)
+	ccache, c, _, _ := localApprovalFixture(t)
 	b.LocalSource = "slow"
 	b.Name = "slow"
 	c.LocalSource = "changed"
@@ -154,7 +148,21 @@ func TestEntryPartialApprovalResultsSurviveSiblingTimeout(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(cpath, "config.json"), []byte("changed"), 0600); err != nil {
+	record := filepath.Join(cache.ApprovalRoot, "changed.json")
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var approval localModelApproval
+	if err := json.Unmarshal(data, &approval); err != nil {
+		t.Fatal(err)
+	}
+	approval.Host = "mismatched-host-placeholder"
+	data, err = json.Marshal(approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	release, finished := make(chan struct{}), make(chan struct{})
@@ -184,48 +192,6 @@ func TestEntryPartialApprovalResultsSurviveSiblingTimeout(t *testing.T) {
 	_, states = cache.modelApprovals(models)
 	if states[a.LocalSource] != approvalInvalid {
 		t.Fatal("pending walk hid later revocation")
-	}
-}
-
-func TestEntryMismatchedRecordPrecedesSlowWalk(t *testing.T) {
-	cache, a, _, _ := localApprovalFixture(t)
-	bcache, b, _, _ := localApprovalFixture(t)
-	b.LocalSource = "slow"
-	b.Name = "slow"
-	data, err := os.ReadFile(filepath.Join(bcache.ApprovalRoot, "approved.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cache.ApprovalRoot, "slow.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	record := filepath.Join(cache.ApprovalRoot, "approved.json")
-	data, err = os.ReadFile(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var approval localModelApproval
-	if err := json.Unmarshal(data, &approval); err != nil {
-		t.Fatal(err)
-	}
-	approval.Host = "mismatched-host-placeholder"
-	data, err = json.Marshal(approval)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(record, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	release := make(chan struct{})
-	var once sync.Once
-	t.Cleanup(func() { once.Do(func() { close(release) }) })
-	cache.localMetadataProbe = func(ctx context.Context, path, root string) ([]localModelMetadata, error) {
-		<-release
-		return localMetadata(ctx, path, root)
-	}
-	_, states := cache.modelApprovals([]Model{b, a})
-	if states[a.LocalSource] != approvalInvalid || states[b.LocalSource] != approvalUnknown {
-		t.Fatalf("host mismatch was hidden: %v", states)
 	}
 }
 

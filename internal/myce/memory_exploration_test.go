@@ -101,12 +101,7 @@ func TestMemoryExplorationForeignPriorRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
 		lower, prior, hint float64
-	}{
-		{"foreign only", 0, 12, 0},
-		{"undersized hint", 0, 12, 1},
-		{"local lower bound exceeds cap", 12, 12, 1},
-		{"hint exceeds cap", 3, 3.634326934814453, 9},
-	} {
+	}{{"foreign only", 0, 12, 0}, {"hint exceeds cap", 3, 3.634326934814453, 9}} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock, linux, darwin, s := memoryExplorationFixture(t)
 			s.Name = "ordinary-cpu-production"

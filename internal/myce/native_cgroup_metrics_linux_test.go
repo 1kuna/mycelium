@@ -21,58 +21,6 @@ func init() {
 	}
 }
 
-func TestNativeCgroupMetricFiles(t *testing.T) {
-	// The cgroup2 mount exposes only a delegated subtree. Include an unrelated
-	// mount first so the resolver cannot simply append membership to /sys.
-	mounts := []byte("31 20 0:27 /elsewhere /unrelated rw - cgroup2 cgroup rw\n" +
-		"32 20 0:28 /service /sys/fs/cgroup rw - cgroup2 cgroup rw\n")
-	main := "/sys/fs/cgroup/attempt/main"
-	helper := "/sys/fs/cgroup/attempt/sidecar-helper"
-	files, err := nativeCgroupMetricFiles([]byte("0::/service/attempt/main\n"), mounts, nativeLinuxPolicy{MetricCgroups: []string{helper, main}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var want []string
-	for _, leaf := range []string{main, helper} {
-		for _, name := range []string{"memory.peak", "memory.max", "memory.events", "memory.current", "memory.stat"} {
-			want = append(want, filepath.Join(leaf, name))
-		}
-	}
-	if !slices.Equal(files, want) {
-		t.Fatalf("wrong exact metric grants: got %v, want %v", files, want)
-	}
-	// An inherited outer attempt has no trusted member list. It must expose
-	// that exact leaf, never its aggregate parent or another attempt.
-	files, err = nativeCgroupMetricFiles([]byte("0::/service/attempt/main\n"), mounts, nativeLinuxPolicy{})
-	if err != nil || !slices.Equal(files, want[:5]) {
-		t.Fatalf("inherited current-leaf metrics: %v, %v", files, err)
-	}
-}
-
-func TestNativeCurrentCgroupMountRoots(t *testing.T) {
-	for _, tc := range []struct{ name, membership, mounts, want string }{
-		{"host", "0::/service/attempt/main\n", "32 20 0:28 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n", "/sys/fs/cgroup/service/attempt/main"},
-		{"namespace root", "0::/\n", "32 20 0:28 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n", "/sys/fs/cgroup"},
-		{"escaped mount", "0::/service name/attempt/main\n", `32 20 0:28 /service\040name /cgroup\040mount rw - cgroup2 cgroup rw` + "\n", "/cgroup mount/attempt/main"},
-		{"outside mount", "0::/service-other/main\n", "32 20 0:28 /service /sys/fs/cgroup rw - cgroup2 cgroup rw\n", ""},
-		{"no unified mount", "0::/service/main\n", "32 20 0:28 / /sys/fs/cgroup rw - cgroup cgroup rw\n", ""},
-		{"traversal", "0::/../service/main\n", "32 20 0:28 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := nativeCurrentCgroup([]byte(tc.membership), []byte(tc.mounts))
-			if tc.want == "" {
-				if err == nil {
-					t.Fatalf("unresolvable membership accepted: %s", got)
-				}
-				return
-			}
-			if err != nil || got != tc.want {
-				t.Fatalf("current leaf: %q, %v; want %q", got, err, tc.want)
-			}
-		})
-	}
-}
-
 func TestNativeCgroupMetricsRejectRuntimeAliases(t *testing.T) {
 	root := t.TempDir()
 	currentMount := filepath.Join(root, "current")

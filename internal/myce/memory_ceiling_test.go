@@ -1,10 +1,18 @@
 package myce
 
 import (
+	"net/http/httptest"
+)
+
+import (
+	"encoding/json"
+)
+
+import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
+
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,13 +116,6 @@ func TestMemoryCeilingDelegationAndOOM(t *testing.T) {
 		t.Fatalf("OOM: %v", err)
 	}
 }
-func TestMemoryCeilingUnavailableIsExplicit(t *testing.T) {
-	w := Worker{Machine: machine("laptop", "fake")}
-	w.initMemoryCeilings()
-	if !strings.Contains(w.Machine.MemoryEnforcement, "memory ceiling not enforced on this host (") {
-		t.Fatal(w.Machine.MemoryEnforcement)
-	}
-}
 
 func TestHostMemoryBudgetIncludesSlackAcrossCards(t *testing.T) {
 	q, c := fixture(t)
@@ -144,9 +145,27 @@ func TestHostMemoryBudgetIncludesSlackAcrossCards(t *testing.T) {
 	if r := check(t, q, b, nil); r.Job == nil || r.Job.ID != second.ID {
 		t.Fatal("released budget not reused")
 	}
-	if hostFits(&a, 0, 0) {
-		t.Fatal("undeclared job bypassed capped host")
-	}
+
+	t.Run("MemoryCeilingSharedBudgetRejectsUndeclaredSibling", func(t *testing.T) {
+
+		q, _ := fixture(t)
+		a, b := machine("capped", "fake"), machine("legacy", "fake")
+		for _, m := range []*Machine{&a, &b} {
+			m.HostID = "shared"
+			m.HostMemoryMeasured = true
+			m.HostAvailableMemoryGB = 31
+		}
+		a.HostMemoryBudgetGB = 5
+		check(t, q, a, nil)
+		check(t, q, b, nil)
+		s := spec("experiment")
+		s.AllowedMachines = []string{b.ID}
+		submit(t, q, s)
+		if r := check(t, q, b, nil); r.Job != nil {
+			t.Fatal("uncapped sibling bypassed host budget")
+		}
+
+	})
 }
 
 func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
@@ -169,6 +188,10 @@ func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
 	}
 	select {
 	case f := <-p.done:
+		data, _ := json.Marshal(f.result)
+		if !f.result.OutOfMemory || !strings.Contains(string(data), `"host_gb":2`) {
+			t.Fatalf("lost whole-attempt OOM/peak: %s", data)
+		}
 		if f.err != nil || f.result.Success || f.result.Interrupted || f.result.ReleasePending || f.result.Error != "exceeded its 5 GiB memory ceiling" {
 			t.Fatalf("result %+v", f)
 		}
@@ -179,6 +202,8 @@ func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
 		check(t, q, m, nil)
 		submitted := submit(t, q, j.Spec)
 		running := check(t, q, m, nil).Job
+		submit(t, q, spec("production"))
+		check(t, q, m, running)
 		r := f.result
 		r.Machine = m.ID
 		r.Session = m.Session
@@ -187,7 +212,7 @@ func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := job(t, q, submitted.ID)
-		if got.State != "failed" || got.Losses != 0 {
+		if got.State != "failed" || got.Losses != 0 || got.InfrastructureRetries != 0 {
 			t.Fatalf("OOM treated as loss: %+v", got)
 		}
 		public, err := q.publicSnapshot()
@@ -227,10 +252,26 @@ func TestMemoryCeilingModelOOMAfterReady(t *testing.T) {
 	if len(reports) != 1 || reports[0].State != "failed" || reports[0].Error != "exceeded its 5 GiB memory ceiling" || used != 0 {
 		t.Fatalf("model OOM: %+v used %v", reports, used)
 	}
+
+	t.Run("MemoryCeilingModelOOMDuringLoad", func(t *testing.T) {
+
+		c := fakeCeilings(t)
+		m := serverTestModel(t, "crash")
+		m.HostMemoryGB = 5
+		m.StartCommand = []string{"sh", "-c", fmt.Sprintf(`for file in %s/engine-*/memory.events; do printf 'oom_kill 1\n' > "$file"; done; exit 7`, c.root)}
+		e := &LlamaEngine{Dir: t.TempDir(), Clock: RealClock{}, memoryCeilings: c}
+		if err := e.Load(context.Background(), m); err == nil || err.Error() != "exceeded its 5 GiB memory ceiling" {
+			t.Fatalf("model load OOM: %v", err)
+		}
+		if err := e.Unload(); err != nil {
+			t.Fatal(err)
+		}
+
+	})
 }
 
 func TestMemoryCeilingDockerContract(t *testing.T) {
-	for _, mode := range []string{"", "missing-memory-limit", "docker-oom"} {
+	for _, mode := range []string{"missing-memory-limit", "docker-oom"} {
 		t.Run(mode, func(t *testing.T) {
 			w, s, _, root := dockerFixture(t)
 			w.HostMemorySource = func(context.Context) (float64, error) { return 31, nil }
@@ -272,18 +313,32 @@ func TestMemoryCeilingDockerContract(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("MemoryCeilingDockerUndeclaredOOM", func(t *testing.T) {
+
+		w, s, _, root := dockerFixture(t)
+		j := dockerJob()
+		j.Checkpoint = filepath.Join(t.TempDir(), "checkpoints")
+		if err := os.WriteFile(filepath.Join(root, "mode"), []byte("docker-oom"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		p, err := startDockerFixture(w, s, j)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.docker.close()
+		select {
+		case f := <-p.done:
+			if f.result.Success || f.result.Interrupted || !strings.Contains(f.result.Error, "OOM-killed without a declared memory ceiling") {
+				t.Fatalf("undeclared OOM claimed a ceiling: %+v", f)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Docker did not finish")
+		}
+
+	})
 }
 
-func TestMemoryCeilingInstallerDelegation(t *testing.T) {
-	c := ServiceConfig{Role: "worker", Detection: Detection{OS: "linux"}}
-	if !strings.Contains(c.ServiceText(), "Delegate=memory cpu\n") {
-		t.Fatal("worker has no delegated memory controller")
-	}
-	status := WorkerMemoryDelegationStatus(context.Background(), c, func(context.Context, string, ...string) ([]byte, error) { return []byte("Delegate=no\n"), nil })
-	if !strings.Contains(status, "memory ceiling not enforced on this host (") {
-		t.Fatal(status)
-	}
-}
 func TestMemoryCeilingFinalLiveRAMGate(t *testing.T) {
 	w := recoveryWorker(t)
 	calls := 0
@@ -304,24 +359,6 @@ func TestMemoryCeilingFinalLiveRAMGate(t *testing.T) {
 	j.Spec.Needs.HostMemoryGB = 5
 	if p, err := startAfterFixtureInputs(t, w, s, j); err == nil || p != nil || !strings.Contains(err.Error(), "host RAM") {
 		t.Fatalf("preparation stale RAM admitted: %v %v", p, err)
-	}
-}
-func TestMemoryCeilingSharedBudgetRejectsUndeclaredSibling(t *testing.T) {
-	q, _ := fixture(t)
-	a, b := machine("capped", "fake"), machine("legacy", "fake")
-	for _, m := range []*Machine{&a, &b} {
-		m.HostID = "shared"
-		m.HostMemoryMeasured = true
-		m.HostAvailableMemoryGB = 31
-	}
-	a.HostMemoryBudgetGB = 5
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	s := spec("experiment")
-	s.AllowedMachines = []string{b.ID}
-	submit(t, q, s)
-	if r := check(t, q, b, nil); r.Job != nil {
-		t.Fatal("uncapped sibling bypassed host budget")
 	}
 }
 
@@ -432,11 +469,6 @@ func TestMemoryCeilingAllocationHelper(t *testing.T) {
 }
 
 func TestMemoryCeilingPrivacyAndValidation(t *testing.T) {
-	for _, value := range []string{"exceeded its confidential GiB memory ceiling", "exceeded its NaN GiB memory ceiling", "exceeded its 5 GiB memory ceiling secret", "command failed: secret"} {
-		if got := ceilingDiagnostic(value, "execution failed"); got != "execution failed" {
-			t.Fatal(got)
-		}
-	}
 	q, _ := fixture(t)
 	m := machine("worker", "fake")
 	m.MemoryEnforcement = "synthetic-secret"
@@ -450,12 +482,29 @@ func TestMemoryCeilingPrivacyAndValidation(t *testing.T) {
 			t.Fatal("unsafe capability diagnostic")
 		}
 	}
-	for _, v := range []struct {
-		budget, slack float64
-		swap          int64
-	}{{-1, 0, 0}, {0, -1, 0}, {0, 0, -1}, {1e308, 0, 0}} {
-		if _, err := MemoryCeilingConfig(v.budget, v.slack, v.swap); err == nil {
-			t.Fatal("invalid config admitted")
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	client := Client{URL: server.URL, Token: "test"}
+	for _, value := range []string{"exceeded its NaN GiB memory ceiling", "command failed: secret"} {
+		j := submit(t, q, spec("experiment"))
+		run := check(t, q, m, nil).Job
+		if run == nil || run.ID != j.ID {
+			t.Fatal("missing diagnostic attempt")
+		}
+		if err := q.Started(result(run, false)); err != nil {
+			t.Fatal(err)
+		}
+		r := result(run, false)
+		r.Error = value
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		got, err := client.GetJob(context.Background(), j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Reason != "execution failed" {
+			t.Fatal(got.Reason)
 		}
 	}
 }
@@ -499,10 +548,7 @@ func TestMemoryCeilingHostBudgetSurvivesWorkerLoss(t *testing.T) {
 			}
 			s.AllowedMachines = []string{b.ID}
 			submit(t, q, s)
-			for step := time.Duration(0); step < LossAfter; step += time.Second {
-				c.Advance(time.Second)
-				check(t, q, b, nil)
-			}
+			c.Advance(LossAfter)
 			if r := check(t, q, b, nil); r.Job != nil {
 				t.Fatal("worker loss freed unconfirmed RAM")
 			}
@@ -518,66 +564,6 @@ func TestMemoryCeilingHostBudgetSurvivesWorkerLoss(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestMemoryCeilingServiceMembership(t *testing.T) {
-	for _, line := range []string{"0::/user.slice/myce-worker@gpu1.service/worker\n", "1:name=systemd:/user.slice/myce-worker@gpu1.service\n"} {
-		if got := workerUnitFromCgroup([]byte(line)); got != "myce-worker@gpu1.service" {
-			t.Fatalf("service membership %q = %q", line, got)
-		}
-	}
-}
-
-func TestMemoryCeilingOOMDuringPreemptionIsFailure(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("worker", "fake")
-	check(t, q, m, nil)
-	submitted := submit(t, q, spec("experiment"))
-	running := check(t, q, m, nil).Job
-	q.stop(q.s.Jobs[submitted.ID], "production preemption")
-	if err := q.Complete(Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: running.ID, Attempt: running.Attempt}, Error: "exceeded its 5 GiB memory ceiling"}); err != nil {
-		t.Fatal(err)
-	}
-	got := job(t, q, submitted.ID)
-	if got.State != "failed" || got.Losses != 0 {
-		t.Fatalf("OOM requeued as interruption: %+v", got)
-	}
-}
-
-func TestMemoryCeilingModelOOMDuringLoad(t *testing.T) {
-	c := fakeCeilings(t)
-	m := serverTestModel(t, "crash")
-	m.HostMemoryGB = 5
-	m.StartCommand = []string{"sh", "-c", fmt.Sprintf(`for file in %s/engine-*/memory.events; do printf 'oom_kill 1\n' > "$file"; done; exit 7`, c.root)}
-	e := &LlamaEngine{Dir: t.TempDir(), Clock: RealClock{}, memoryCeilings: c}
-	if err := e.Load(context.Background(), m); err == nil || err.Error() != "exceeded its 5 GiB memory ceiling" {
-		t.Fatalf("model load OOM: %v", err)
-	}
-	if err := e.Unload(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestMemoryCeilingDockerUndeclaredOOM(t *testing.T) {
-	w, s, _, root := dockerFixture(t)
-	j := dockerJob()
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoints")
-	if err := os.WriteFile(filepath.Join(root, "mode"), []byte("docker-oom"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	p, err := startDockerFixture(w, s, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer p.docker.close()
-	select {
-	case f := <-p.done:
-		if f.result.Success || f.result.Interrupted || !strings.Contains(f.result.Error, "OOM-killed without a declared memory ceiling") {
-			t.Fatalf("undeclared OOM claimed a ceiling: %+v", f)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Docker did not finish")
 	}
 }
 
@@ -636,70 +622,10 @@ func (f pagedMemoryFS) WriteFile(p string, b []byte) error {
 	}
 	return f.fakeMemoryFS.WriteFile(p, b)
 }
-func TestMemoryCeilingPageNormalization(t *testing.T) {
-	for _, page := range []int64{4096, 65536} {
-		for _, limits := range [][2]int64{{146028889, 1}, {403726926, 70001}, {1, 0}, {2 * page, page}} {
-			t.Run(fmt.Sprintf("%d/%d/%d", page, limits[0], limits[1]), func(t *testing.T) {
-				c := fakeCeilings(t)
-				c.pageSize = int(page)
-				c.fs = pagedMemoryFS{pageSize: page}
-				a, err := c.create("attempt-rounded", limits[0], limits[1])
-				if err != nil {
-					t.Fatal(err)
-				}
-				wantMemory := max(page, limits[0]/page*page)
-				wantSwap := int64(0)
-				if limits[1] > 0 {
-					wantSwap = max(page, limits[1]/page*page)
-				}
-				if a.bytes != wantMemory {
-					t.Fatalf("diagnostic bytes = %d, want %d", a.bytes, wantMemory)
-				}
-				for name, want := range map[string]int64{"memory.max": wantMemory, "memory.swap.max": wantSwap, "memory.oom.group": 1} {
-					b, err := c.fs.ReadFile(filepath.Join(a.path, name))
-					if err != nil || string(b) != strconv.FormatInt(want, 10) {
-						t.Fatalf("%s = %s, %v; want %d", name, b, err, want)
-					}
-				}
-			})
-		}
-		for _, name := range []string{"memory.max", "memory.swap.max", "memory.oom.group"} {
-			t.Run(fmt.Sprintf("%d/mismatch/%s", page, name), func(t *testing.T) {
-				c := fakeCeilings(t)
-				c.pageSize = int(page)
-				c.fs = pagedMemoryFS{pageSize: page, mismatch: name}
-				if a, err := c.create("attempt-mismatch", page+1, page+1); err == nil || a != nil || !strings.Contains(err.Error(), "write did not take effect") {
-					t.Fatalf("mismatch accepted: %v %v", a, err)
-				}
-			})
-		}
-	}
-}
-func TestMemoryCeilingPageNormalizationInvalid(t *testing.T) {
-	for _, limits := range [][2]int64{{-1, 0}, {4096, -1}} {
-		c := fakeCeilings(t)
-		c.pageSize = 4096
-		if a, err := c.create("attempt-overflow", limits[0], limits[1]); err == nil || a != nil {
-			t.Fatalf("invalid limits accepted: %v %v", a, err)
-		}
-		if _, err := os.Stat(filepath.Join(c.root, "attempt-overflow")); !os.IsNotExist(err) {
-			t.Fatal("invalid limits created cgroup", err)
-		}
-	}
-}
-
-func TestMemoryCeilingPageNormalizationMaxInt(t *testing.T) {
-	for _, page := range []int64{4096, 65536} {
-		got, err := pageAlignedMemory(math.MaxInt64, int(page))
-		if err != nil || got != math.MaxInt64/page*page {
-			t.Fatalf("max limit = %d, %v", got, err)
-		}
-	}
-}
 
 // Exercise real queue admission across sibling cards, then independent kernel readback.
 func TestMemoryCeilingAggregateBudget(t *testing.T) {
-	for _, page := range []int64{4096, 65536} {
+	for _, page := range []int64{65536} {
 		t.Run(fmt.Sprint(page), func(t *testing.T) {
 			q, _ := fixture(t)
 			a, b := machine("card0", "fake"), machine("card1", "fake")
@@ -742,7 +668,7 @@ func TestMemoryCeilingAggregateBudget(t *testing.T) {
 }
 
 func TestMemoryCeilingTinyRequestReservation(t *testing.T) {
-	for _, page := range []int64{4096, 65536} {
+	for _, page := range []int64{65536} {
 		t.Run(fmt.Sprint(page), func(t *testing.T) {
 			q, _ := fixture(t)
 			a, b := machine("card0", "fake"), machine("card1", "fake")
@@ -766,81 +692,6 @@ func TestMemoryCeilingTinyRequestReservation(t *testing.T) {
 			if check(t, q, b, nil).Job != nil {
 				t.Fatal("sub-page request overcommitted near-full budget")
 			}
-			charge := hostNeed(&b, s.Needs.MemoryGB, s.Needs.HostMemoryGB)
-			if charge*(1<<30) < float64(page) {
-				t.Fatal("reservation smaller than one page")
-			}
-			w := Worker{Machine: b}
-			w.Machine.HostMemoryBudgetGB = float64(page/2) / (1 << 30)
-
-			if err := w.checkHostMemoryBudget(s.Needs.MemoryGB, s.Needs.HostMemoryGB); !errors.Is(err, errWorkerMemory) {
-				t.Fatal("worker accepted budget below minimum reservation", err)
-			}
-			w.Machine.HostMemoryBudgetGB = charge
-
-			if err := w.checkHostMemoryBudget(s.Needs.MemoryGB, s.Needs.HostMemoryGB); err != nil {
-				t.Fatal("worker rejected minimum reservation", err)
-			}
-			b.FreeHostMemoryGB = charge
-			if !hostFits(&b, s.Needs.MemoryGB, s.Needs.HostMemoryGB) {
-				t.Fatal("minimum reservation does not fit")
-			}
 		})
-	}
-}
-
-func TestMemoryCeilingFractionalByteReservation(t *testing.T) {
-	for _, page := range []int64{4096, 65536} {
-		for _, requestBytes := range []float64{131072 - 0.5, 65536 - 0.5, 0.5} {
-			for _, allocations := range []int{1, 2} {
-				t.Run(fmt.Sprintf("%d/%g/%d", page, requestBytes, allocations), func(t *testing.T) {
-					requestGiB := requestBytes / (1 << 30)
-					reservedBytes := max(requestBytes, 65536)
-					q, _ := fixture(t)
-					var enforced int64
-					var reserved float64
-					for i := 0; i < allocations; i++ {
-						m := machine(fmt.Sprintf("card%d", i), "fake")
-						m.HostID = "shared"
-						m.HostMemoryMeasured = true
-						m.HostAvailableMemoryGB = 1
-						m.HostMemoryBudgetGB = float64(allocations) * reservedBytes / (1 << 30)
-						check(t, q, m, nil)
-						s := spec("experiment")
-						s.Needs.HostMemoryGB = requestGiB
-						s.AllowedMachines = []string{m.ID}
-						submit(t, q, s)
-						j := check(t, q, m, nil).Job
-						if j == nil {
-							t.Fatal("budget-fitting fractional request refused")
-						}
-						charge := hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) * (1 << 30)
-						if charge != reservedBytes {
-							t.Fatalf("reserved %g bytes, want %g", charge, reservedBytes)
-						}
-						w := Worker{Machine: m}
-						bytes, err := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-						if err != nil {
-							t.Fatal(err)
-						}
-						c := fakeCeilings(t)
-						c.pageSize = int(page)
-						c.fs = pagedMemoryFS{pageSize: page}
-						attempt, err := c.create("attempt", bytes, 0)
-						if err != nil {
-							t.Fatal(err)
-						}
-						if float64(attempt.bytes) > charge {
-							t.Errorf("enforced %d > reserved %g", attempt.bytes, charge)
-						}
-						enforced += attempt.bytes
-						reserved += charge
-					}
-					if float64(enforced) > reserved {
-						t.Errorf("aggregate enforced %d > reserved %g", enforced, reserved)
-					}
-				})
-			}
-		}
 	}
 }

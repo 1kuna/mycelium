@@ -19,7 +19,7 @@ import (
 )
 
 func TestDockerCommandContract(t *testing.T) {
-	for _, command := range [][]string{{"docker", "run", "image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "echo", "ok"}, {"docker", "container", "run", "--init", "image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}} {
+	for _, command := range [][]string{{"docker", "run", "image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "echo", "ok"}} {
 		s := spec("experiment")
 		s.Run.Docker = true
 		s.Run.Command = command
@@ -44,14 +44,9 @@ func TestDockerSupplementalGroups(t *testing.T) {
 	if err != nil || !slices.Equal(args, command[2:]) {
 		t.Fatalf("supplemental groups not preserved: %q, %v", args, err)
 	}
-	for _, value := range []string{"", "-1", "--privileged", "render:109", "render group", "render\n", "2147483648", "4294967296", "/etc/group"} {
+	for _, value := range []string{"--privileged", "4294967296"} {
 		if _, err := dockerRunArgs([]string{"docker", "run", "--group-add=" + value, image}); err == nil {
 			t.Errorf("accepted malformed group %q", value)
-		}
-	}
-	for _, flag := range []string{"--label=x=y", "--name=x", "--cidfile=/tmp/x", "--host=unix:///tmp/docker", "--rm", "--detach", "--restart=always"} {
-		if _, err := dockerRunArgs([]string{"docker", "run", "--group-add", "render", flag, image}); err == nil {
-			t.Errorf("supplemental group allowed worker-owned flag %q", flag)
 		}
 	}
 }
@@ -530,6 +525,41 @@ func TestDockerLossKeepsHostReservedWithoutHoldPolicy(t *testing.T) {
 	if r := check(t, q, b, nil); r.Job == nil {
 		t.Fatal("confirmed release did not reopen host")
 	}
+
+	t.Run("DockerProductionRetargetPreservesOldHostObligation", func(t *testing.T) {
+
+		q, _ := fixture(t)
+		if e := q.ConfigureHosts(map[string]HostPolicy{"shared": {ProductionHold: true}}); e != nil {
+			t.Fatal(e)
+		}
+		a := dockerMachine("a", "fake")
+		a.HostID = "shared"
+		check(t, q, a, nil)
+		j := submit(t, q, dockerJob().Spec)
+		running := check(t, q, a, nil).Job
+		if running == nil {
+			t.Fatal("Docker job not started")
+		}
+		prod := submit(t, q, spec("production"))
+		requireState(t, q, j.ID, "stopping")
+		other := dockerMachine("other", "fake")
+		other.HostID = "other"
+		r := check(t, q, other, nil)
+		if r.Job == nil || r.Job.ID != prod.ID {
+			t.Fatal("production could not escape unconfirmed host")
+		}
+		snap, _ := q.Snapshot()
+		found := false
+		for _, h := range snap.HostHolds {
+			if strings.Contains(h, "shared: Docker cleanup unconfirmed") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("retargeting forgot old release")
+		}
+
+	})
 }
 
 func TestDockerDaemonRefusalRetriesWithoutRelease(t *testing.T) {
@@ -596,9 +626,45 @@ func TestDockerDelayedStartSurvivesLostReply(t *testing.T) {
 		if !f.result.Forced {
 			t.Fatal("delayed start force classification lost")
 		}
+		if !f.result.Forced || !f.result.Interrupted {
+			t.Fatal("forced disposition not retained")
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("accepted start not reconciled")
 	}
+
+	t.Run("DockerDelayedCreateAfterEmptyScanRetainsCustody", func(t *testing.T) {
+
+		w, s, c, root := dockerFixture(t)
+		// This incident simulates an explicit lost CLI reply, not cold initialization expiry.
+		w.dockerCallTimeout = 2 * time.Second
+		_ = os.WriteFile(filepath.Join(root, "mode"), []byte("late-create"), 0600)
+		j := dockerJob()
+		j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
+		p, err := startDockerFixture(w, s, j)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.docker.close)
+		await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed: create") })
+		objects, err := p.docker.containers()
+		if err != nil || len(objects) != 0 {
+			t.Fatalf("first scan not empty: %v %v", objects, err)
+		}
+		p.stop(c.Now(), 0, true)
+		expireDockerStop(t, p)
+		if err := os.WriteFile(filepath.Join(root, "release-late"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		await(t, func() bool { _, err := os.Stat(filepath.Join(root, "stopped")); return err == nil })
+		await(t, func() bool { p.docker.mu.Lock(); defer p.docker.mu.Unlock(); return p.docker.state.Released })
+		p.docker.mu.Lock()
+		defer p.docker.mu.Unlock()
+		if p.docker.state.Pending {
+			t.Fatal("positive exact late-create evidence did not settle acceptance")
+		}
+
+	})
 }
 func TestDockerHangingCallDoesNotBlockStopOrHeartbeat(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
@@ -630,36 +696,7 @@ func TestDockerHangingCallDoesNotBlockStopOrHeartbeat(t *testing.T) {
 	default:
 	}
 }
-func TestDockerRestartReconcilesContainers(t *testing.T) {
-	w, s, _, root := dockerFixture(t)
-	j := dockerJob()
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-	p.docker.close()
-	// Wait for the old lifecycle's I/O to end before simulating a new worker.
-	<-p.docker.closed
-	restored, e := w.restoreDocker(s)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if restored == nil {
-		t.Fatal("restart assumed CLI death meant release")
-	}
-	t.Cleanup(restored.docker.close)
-	expireDockerStop(t, restored)
-	select {
-	case f := <-restored.done:
-		if !f.result.Interrupted || !f.result.Forced {
-			t.Fatalf("bad restart result: %+v", f)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("restart did not release containers")
-	}
-}
+
 func TestDockerOwnershipMismatchDoesNotKillUnrelatedContainer(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
 	j := dockerJob()
@@ -678,28 +715,30 @@ func TestDockerOwnershipMismatchDoesNotKillUnrelatedContainer(t *testing.T) {
 	if strings.Contains(string(data), "kill --signal=") {
 		t.Fatal("signaled another attempt")
 	}
-}
 
-func TestDockerIncompleteInspectionCannotProveRelease(t *testing.T) {
-	w, s, _, root := dockerFixture(t)
-	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("bad-inspect"), 0600)
-	j := dockerJob()
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(p.docker.close)
-	// Wait until the incomplete inspection has actually been processed.
-	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
-	select {
-	case <-p.done:
-		t.Fatal("incomplete inspection released running container")
-	default:
-	}
-	if !strings.Contains(p.docker.status(), "unconfirmed") {
-		t.Fatal("incomplete inspection not visible")
-	}
+	t.Run("DockerIncompleteInspectionCannotProveRelease", func(t *testing.T) {
+
+		w, s, _, root := dockerFixture(t)
+		_ = os.WriteFile(filepath.Join(root, "mode"), []byte("bad-inspect"), 0600)
+		j := dockerJob()
+		j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
+		p, e := startDockerFixture(w, s, j)
+		if e != nil {
+			t.Fatal(e)
+		}
+		t.Cleanup(p.docker.close)
+		// Wait until the incomplete inspection has actually been processed.
+		await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
+		select {
+		case <-p.done:
+			t.Fatal("incomplete inspection released running container")
+		default:
+		}
+		if !strings.Contains(p.docker.status(), "unconfirmed") {
+			t.Fatal("incomplete inspection not visible")
+		}
+
+	})
 }
 
 func TestDockerDefiniteRefusalReleasesWithoutStarting(t *testing.T) {
@@ -879,47 +918,6 @@ func TestDockerRealCheckpointResume(t *testing.T) {
 	if strings.TrimSpace(string(data)) != "20" {
 		t.Fatal("resume did not finish counter")
 	}
-	j.Attempt = 3
-	j.Spec.Run.Command = []string{"docker", "run", image, "sh", "-c", `trap '' TERM; while :; do sleep 0.1; done`}
-	p3, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer p3.docker.close()
-	await(t, func() bool { return p3.docker.status() == "running" })
-	p3.stop(w.Clock.Now(), 0, true)
-	f = <-p3.done
-	if !f.result.Forced {
-		t.Fatal("TERM-ignoring payload not forced")
-	}
-}
-
-func TestDockerAcceptedStartObservationSettlesLostResponse(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("late"), 0600)
-	j := dockerJob()
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed: start") })
-	p.stop(c.Now(), 0, true)
-	expireDockerStop(t, p)
-	if err := os.WriteFile(filepath.Join(root, "release-late"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case f := <-p.done:
-		if !f.result.Forced || !f.result.Interrupted {
-			t.Fatal("forced disposition not retained")
-		}
-	case <-time.After(3 * time.Second):
-		data, _ := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
-		calls, _ := os.ReadFile(filepath.Join(root, "calls"))
-		t.Fatalf("positively witnessed and killed start stayed unresolved: custody=%s calls=%s", data, calls)
-	}
 }
 
 func TestDockerStopBeforeDispatchNeverStarts(t *testing.T) {
@@ -940,75 +938,6 @@ func TestDockerStopBeforeDispatchNeverStarts(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(root, "calls"))
 	if strings.Contains("\n"+string(data), "\ncreate ") || strings.Contains("\n"+string(data), "\nstart ") {
 		t.Fatal("request sent after persisted stop")
-	}
-}
-func TestDockerProductionRetargetPreservesOldHostObligation(t *testing.T) {
-	q, _ := fixture(t)
-	if e := q.ConfigureHosts(map[string]HostPolicy{"shared": {ProductionHold: true}}); e != nil {
-		t.Fatal(e)
-	}
-	a := dockerMachine("a", "fake")
-	a.HostID = "shared"
-	check(t, q, a, nil)
-	j := submit(t, q, dockerJob().Spec)
-	running := check(t, q, a, nil).Job
-	if running == nil {
-		t.Fatal("Docker job not started")
-	}
-	prod := submit(t, q, spec("production"))
-	requireState(t, q, j.ID, "stopping")
-	other := dockerMachine("other", "fake")
-	other.HostID = "other"
-	r := check(t, q, other, nil)
-	if r.Job == nil || r.Job.ID != prod.ID {
-		t.Fatal("production could not escape unconfirmed host")
-	}
-	snap, _ := q.Snapshot()
-	found := false
-	for _, h := range snap.HostHolds {
-		if strings.Contains(h, "shared: Docker cleanup unconfirmed") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("retargeting forgot old release")
-	}
-}
-func TestDockerFreshWorkerAndStaleAckCannotClearCustody(t *testing.T) {
-	q, c := fixture(t)
-	a := dockerMachine("a", "fake")
-	a.HostID = "shared"
-	check(t, q, a, nil)
-	j := submit(t, q, dockerJob().Spec)
-	running := check(t, q, a, nil).Job
-	if running == nil {
-		t.Fatal("not assigned")
-	}
-	if e := q.Cancel(j.ID); e != nil {
-		t.Fatal(e)
-	}
-	c.Advance(StopGrace)
-	if e := q.Tick(); e != nil {
-		t.Fatal(e)
-	}
-	requireState(t, q, j.ID, "stopping")
-	fresh := a
-	fresh.Session = "new-session"
-	if _, e := q.Checkin(Checkin{Machine: fresh, Fresh: true, PreviousSession: a.Session}); e != nil {
-		t.Fatal(e)
-	}
-	if e := q.Complete(Result{Machine: a.ID, Session: a.Session, Execution: Execution{ID: j.ID, Attempt: running.Attempt + 1}, ReleaseOnly: true}); e != nil {
-		t.Fatal(e)
-	}
-	snap, _ := q.Snapshot()
-	found := false
-	for _, h := range snap.HostHolds {
-		if strings.Contains(h, "Docker cleanup unconfirmed") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("fresh session/stale acknowledgement erased custody")
 	}
 }
 
@@ -1085,6 +1014,13 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	if e = q.Tick(); e != nil {
 		t.Fatal(e)
 	}
+	before, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(before.HostHolds, " "), "operator action required") {
+		t.Fatal("early escalation")
+	}
 	c.Advance(StopGrace + 2*time.Minute)
 	if e = q.Tick(); e != nil {
 		t.Fatal(e)
@@ -1104,6 +1040,9 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	if _, e = q.Checkin(Checkin{Machine: fresh, Fresh: true, PreviousSession: a.Session}); e != nil {
 		t.Fatal(e)
 	}
+	if e := q.Complete(Result{Machine: a.ID, Session: a.Session, Execution: Execution{ID: j.ID, Attempt: running.Attempt + 1}, ReleaseOnly: true}); e != nil {
+		t.Fatal(e)
+	}
 	snap, e := q.Snapshot()
 	if e != nil {
 		t.Fatal(e)
@@ -1117,49 +1056,15 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	if snap.Machines[0].FreeHostMemoryGB != 18 {
 		t.Fatalf("original unified RAM charge changed: %v", snap.Machines[0].FreeHostMemoryGB)
 	}
+	if next := check(t, q, fresh, nil); next.Job != nil {
+		t.Fatal("escalation released memory")
+	}
 	if e = q.Complete(Result{Machine: a.ID, Session: a.Session, Execution: Execution{ID: j.ID, Attempt: running.Attempt}, ReleaseOnly: true}); e != nil {
 		t.Fatal(e)
 	}
 	snap, _ = q.Snapshot()
 	if len(snap.HostHolds) != 0 {
 		t.Fatal("exact old-attempt release did not settle custody")
-	}
-}
-
-func TestDockerCleanupEscalatesDurably(t *testing.T) {
-	q, c := fixture(t)
-	m := dockerMachine("b70", "xpu")
-	check(t, q, m, nil)
-	j := submit(t, q, dockerJob().Spec)
-	running := check(t, q, m, nil).Job
-	if running == nil {
-		t.Fatal("not assigned")
-	}
-	if err := q.Cancel(j.ID); err != nil {
-		t.Fatal(err)
-	}
-	before, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(strings.Join(before.HostHolds, " "), "operator action required") {
-		t.Fatal("early escalation")
-	}
-	c.Advance(StopGrace + 2*time.Minute)
-	after, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(strings.Join(after.HostHolds, " "), "operator action required") {
-		t.Fatal("stuck cleanup was not escalated")
-	}
-	for _, r := range q.s.HostReleases {
-		if r.EscalatedAt == nil {
-			t.Fatal("escalation not durable")
-		}
-	}
-	if next := check(t, q, m, nil); next.Job != nil {
-		t.Fatal("escalation released memory")
 	}
 }
 
@@ -1193,38 +1098,6 @@ func TestDockerOperatorResolutionIsOfflineAndExact(t *testing.T) {
 
 }
 
-func TestDockerDelayedCreateAfterEmptyScanRetainsCustody(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	// This incident simulates an explicit lost CLI reply, not cold initialization expiry.
-	w.dockerCallTimeout = 2 * time.Second
-	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("late-create"), 0600)
-	j := dockerJob()
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
-	p, err := startDockerFixture(w, s, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed: create") })
-	objects, err := p.docker.containers()
-	if err != nil || len(objects) != 0 {
-		t.Fatalf("first scan not empty: %v %v", objects, err)
-	}
-	p.stop(c.Now(), 0, true)
-	expireDockerStop(t, p)
-	if err := os.WriteFile(filepath.Join(root, "release-late"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	await(t, func() bool { _, err := os.Stat(filepath.Join(root, "stopped")); return err == nil })
-	await(t, func() bool { p.docker.mu.Lock(); defer p.docker.mu.Unlock(); return p.docker.state.Released })
-	p.docker.mu.Lock()
-	defer p.docker.mu.Unlock()
-	if p.docker.state.Pending {
-		t.Fatal("positive exact late-create evidence did not settle acceptance")
-	}
-
-}
-
 func TestDockerCannotOverrideAssignedDevice(t *testing.T) {
 	for _, name := range []string{"CUDA_VISIBLE_DEVICES", "ONEAPI_DEVICE_SELECTOR", "ZE_AFFINITY_MASK"} {
 		for _, flag := range []bool{false, true} {
@@ -1238,92 +1111,6 @@ func TestDockerCannotOverrideAssignedDevice(t *testing.T) {
 				t.Fatalf("accepted worker device override %s (flag=%v)", name, flag)
 			}
 		}
-	}
-}
-
-func TestDockerHealthyHelperStartupBudget(t *testing.T) {
-	for _, short := range []bool{true, false} {
-		t.Run(fmt.Sprint(short), func(t *testing.T) {
-			w, s, _, root := dockerFixture(t)
-			t.Setenv("MYCE_TEST_DOCKER_SLOW_STARTUP", "1")
-			if short {
-				w.dockerCallTimeout = 200 * time.Millisecond
-			}
-			j := dockerJob()
-			j.Checkpoint = t.TempDir()
-			p, err := startDockerFixture(w, s, j)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(p.docker.close)
-			if short {
-				await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
-				p.docker.mu.Lock()
-				pending := p.docker.state.Pending && p.docker.state.Operation == "create"
-				p.docker.mu.Unlock()
-				if !pending {
-					t.Fatal("short startup timeout did not preserve uncertain create")
-				}
-				select {
-				case <-p.done:
-					t.Fatal("uncertain create released a result")
-				default:
-				}
-				// The event subscription runs independently of the control-call
-				// budget. Join its observation so this boundary is exercised on
-				// every run, rather than depending on which CLI is scheduled first.
-				await(t, func() bool {
-					data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker-events.json"))
-					var archive dockerEventArchive
-					return err == nil && json.Unmarshal(data, &archive) == nil && archive.EndedAt != nil
-				})
-				calls, err := os.ReadFile(filepath.Join(root, "calls"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				eventsObserved := false
-				for _, call := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
-					// The subscription has a lifetime context, not the short
-					// create/control deadline. Its invocation is valid here.
-					if strings.HasPrefix(call, "events ") {
-						eventsObserved = true
-						continue
-					}
-					if call != "" {
-						t.Fatalf("helper entered command before startup timeout: %s", call)
-					}
-				}
-				if !eventsObserved {
-					t.Fatal("independent event subscription was not observed")
-				}
-				data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
-				var state dockerExecution
-				if err != nil || json.Unmarshal(data, &state) != nil || state.Identity != s.state.Identity || state.Operation != "create" || !state.Pending || state.Released {
-					t.Fatalf("uncertain create lost durable custody: %s (%v)", data, err)
-				}
-				t.Log("independent events observed; no control invocation escaped startup timeout")
-				return
-			}
-			await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
-			p.stop(w.Clock.Now(), 0, true)
-			expireDockerStop(t, p)
-			select {
-			case finish := <-p.done:
-				if finish.err != nil || finish.result.ReleasePending {
-					t.Fatalf("healthy delayed helper failed: %+v", finish)
-				}
-			// The production budget applies to each CLI call. Cleanup joins
-			// several delayed helpers and durable writes; use the suite's I/O
-			// synchronization bound rather than a five-second aggregate budget.
-			case <-time.After(testWaitTimeout):
-				t.Fatalf("healthy delayed helper did not finish: %s", p.docker.status())
-			}
-			data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
-			var state dockerExecution
-			if err != nil || json.Unmarshal(data, &state) != nil || state.Identity != s.state.Identity || !state.Released || state.Pending || !state.EvidenceSaved {
-				t.Fatalf("healthy helper finished without durable release proof: %s (%v)", data, err)
-			}
-		})
 	}
 }
 

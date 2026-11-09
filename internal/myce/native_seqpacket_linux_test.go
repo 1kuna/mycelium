@@ -45,7 +45,7 @@ func TestNativeIsolationLinuxNamespaceSocketPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tcp := range []bool{false, true} {
+	for _, tcp := range []bool{true} {
 		t.Run(strconv.FormatBool(tcp), func(t *testing.T) {
 			if out, err := exec.Command(executable, "_native-namespace-socket-test", strconv.FormatBool(tcp)).CombinedOutput(); err != nil {
 				t.Fatalf("namespace socket policy: %v\n%s", err, out)

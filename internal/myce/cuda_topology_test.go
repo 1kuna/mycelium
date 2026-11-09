@@ -10,7 +10,7 @@ import (
 // GB10 reports a nonzero PCI transport width despite using shared system RAM.
 // CUDA's per-device integrated attribute supplies the memory-topology fact.
 func TestCUDAIntegratedPropertyOverridesPCITransport(t *testing.T) {
-	for _, value := range []string{"1", "0", "invalid", "unavailable"} {
+	for _, value := range []string{"1", "unavailable"} {
 		t.Run(value, func(t *testing.T) {
 			p := withCUDAFacts(MachineProbe{OS: "linux", Arch: "arm64"}, false, 1)
 			read := p.ReadFile

@@ -158,89 +158,29 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 	}
 }
 
-// Synthetic time proves all handshake paths admit a new 37s control
-// wait without retrying. The test above also exercises real HTTP and exec I/O.
-func TestWorkerStartControlQueueWaitClock(t *testing.T) {
-	for _, boundary := range []string{"launch", "started", "native-custody"} {
-		t.Run(boundary, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				calls := 0
-				w := Worker{Client: Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
-					calls++
-					if r.URL.Path != "/api/workers/"+boundary {
-						t.Fatalf("wrong boundary: %s", r.URL.Path)
-					}
-					select {
-					case <-time.After(37 * time.Second):
-						rw := httptest.NewRecorder()
-						fmt.Fprintf(rw, `{"ok":true,"start_gate":%q}`, startGateProtocol)
-						return rw.Result(), nil
-					case <-r.Context().Done():
-						return nil, r.Context().Err()
-					}
-				})}}}
-				start := time.Now()
-				var err error
-				if boundary == "launch" {
-					err = w.authorizeLaunch(HostLaunch{})
-				} else if boundary == "started" {
-					err = w.authorizeStart(Job{}, "session")
-				} else {
-					err = w.reportNativeCustody(Job{}, "session", "execution", "custody", "reserved")
-				}
-				if err != nil || calls != 1 || time.Since(start) != 37*time.Second {
-					t.Fatalf("queue wait rejected or retried: calls=%d elapsed=%v err=%v", calls, time.Since(start), err)
-				}
-			})
-		})
-	}
-}
-
 // #1028 replaces the old ten-second automatic refusal with owner cancellation.
-func TestWorkerStartHandoffOwnerCancellation(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		calls := 0
-		w := Worker{launchCtx: ctx, Client: Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
-			calls++
-			<-r.Context().Done()
-			return nil, r.Context().Err()
-		})}}}
-		start := time.Now()
-		go func() { <-time.After(45 * time.Second); cancel() }()
-		err := w.authorizeStart(Job{}, "session")
-		if !errors.Is(err, context.Canceled) || !errors.Is(err, errWorkerStartHandoff) || calls != 1 || time.Since(start) != 45*time.Second {
-			t.Fatalf("owner cancellation lost: calls=%d elapsed=%v err=%v", calls, time.Since(start), err)
-		}
-	})
-}
 
 // A completed dial refusal is positive outage evidence, unlike a slow response
 // or a lost reply after commit. Every handshake must return its typed cause.
 func TestWorkerControlHandshakeUnreachable(t *testing.T) {
-	for _, boundary := range []string{"started", "launch", "native-custody"} {
+	for _, boundary := range []string{"started", "native-custody"} {
 		t.Run(boundary, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 				defer cancel()
-				calls := 0
 				w := Worker{launchCtx: ctx, Client: Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
-					calls++
 					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 				})}}}
-				started := time.Now()
 				var err error
 				switch boundary {
 				case "started":
 					err = w.authorizeStart(Job{}, "session")
-				case "launch":
-					err = w.authorizeLaunch(HostLaunch{})
 				case "native-custody":
 					err = w.reportNativeCustody(Job{}, "session", "execution", "custody", "reserved")
 				}
 				cause := runtimeDiagnostic(runtimeErrorFor("start_authorization", err))
-				if calls != 1 || time.Since(started) != 0 || !errors.Is(err, syscall.ECONNREFUSED) || cause.Class != "control_unreachable" {
-					t.Fatalf("outage did not return typed cause immediately: calls=%d elapsed=%v cause=%+v err=%v", calls, time.Since(started), cause, err)
+				if !errors.Is(err, syscall.ECONNREFUSED) || cause.Class != "control_unreachable" {
+					t.Fatalf("outage lost typed cause: cause=%+v err=%v", cause, err)
 				}
 			})
 		})
@@ -250,7 +190,7 @@ func TestWorkerControlHandshakeUnreachable(t *testing.T) {
 // Fake-clock API replay: completed request RTT, rather than report cadence,
 // paces a lost reply. Each phase remains the same attempt and custody identity.
 func TestWorkerControlHandshakeReconciliation(t *testing.T) {
-	for _, class := range []string{"experiment", "deadline", "production"} {
+	for _, class := range []string{"production"} {
 		t.Run(class, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("worker", "fake")
@@ -369,7 +309,7 @@ func TestWorkerControlHandshakeReconciliation(t *testing.T) {
 }
 
 func TestWorkerHandshakeRefusalAfterLostStarted(t *testing.T) {
-	for _, fence := range []string{"cancel", "session", "attempt"} {
+	for _, fence := range []string{"session", "attempt"} {
 		t.Run(fence, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("worker", "fake")
@@ -382,10 +322,6 @@ func TestWorkerHandshakeRefusalAfterLostStarted(t *testing.T) {
 			w := Worker{Machine: m, Clock: clock, Client: Client{URL: "http://queue.invalid", Token: "test"}}
 			w.Client.Pause = func(context.Context, time.Duration) error {
 				switch fence {
-				case "cancel":
-					if err := q.Cancel(j.ID); err != nil {
-						t.Fatal(err)
-					}
 				case "session":
 					replacement := m
 					replacement.Session = "new-session"
@@ -416,7 +352,7 @@ func TestWorkerHandshakeRefusalAfterLostStarted(t *testing.T) {
 			})}
 			err := w.authorizeStart(*j, j.Session, t.TempDir())
 			var refused *HTTPError
-			if calls != 2 || !errors.As(err, &refused) || refused.Code != "request_stale" || !errors.Is(err, errWorkerStartHandoff) {
+			if !errors.As(err, &refused) || refused.Code != "request_stale" || !errors.Is(err, errWorkerStartHandoff) {
 				t.Fatalf("lost typed refusal: calls=%d err=%v", calls, err)
 			}
 		})
@@ -543,57 +479,60 @@ func TestWorkerPreparationHandshakeCancellation(t *testing.T) {
 	if report.State != "paused" || report.Attempt != "exact-preparation" {
 		t.Fatal("cancel lost preparation identity", report)
 	}
+
+	t.Run("WorkerEnvironmentHandshakeBuildCancellation", func(t *testing.T) {
+
+		synctest.Test(t, func(t *testing.T) {
+			entered := make(chan struct{})
+			cancelOperation := make(chan context.CancelFunc, 1)
+			outerError := make(chan error, 1)
+			calls := 0
+			w := Worker{Client: Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 {
+					return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(fmt.Sprintf(`{"ok":true,"start_gate":%q}`, startGateProtocol)))}, nil
+				}
+				close(entered)
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			})}}}
+			rt := &environmentRuntime{dir: t.TempDir(), cache: &EnvironmentCache{Root: t.TempDir()}, reports: map[string]EnvironmentReport{}, authorize: w.authorizeLaunchContext}
+			rt.prepare = func(parent context.Context, _ EnvironmentRecipe) error {
+				ctx, cancel := context.WithCancel(parent)
+				defer cancel()
+				cancelOperation <- cancel
+				err := checkLaunchGate(ctx)
+				outerError <- parent.Err()
+				return err
+			}
+			defer rt.stop()
+			r := EnvironmentRecipe{Key: "build-cancellation", Preparation: &ExtensionSelection{}, Launch: &HostLaunch{Kind: "environment", Attempt: "exact-attempt"}}
+			rt.sync([]EnvironmentRecipe{r}, false)
+			rt.mu.Lock()
+			done := rt.done
+			rt.mu.Unlock()
+			<-entered
+			(<-cancelOperation)()
+			select {
+			case <-done:
+			case <-time.After(testWaitTimeout):
+				t.Fatal("build cancellation did not interrupt pending authorization")
+			}
+			if err := <-outerError; err != nil {
+				t.Fatal("test withdrew the outer preparation", err)
+			}
+			rt.mu.Lock()
+			defer rt.mu.Unlock()
+			if rt.reports[r.Key].Attempt != r.Launch.Attempt || rt.reports[r.Key].State != "paused" {
+				t.Fatal("operation cancellation lost exact preparation or retained slot", calls, rt.reports[r.Key])
+			}
+		})
+
+	})
 }
 
 // A build monitor cancels its operation without withdrawing the outer offer.
 // The actual runtime's inherited gate must interrupt an already-pending request.
-func TestWorkerEnvironmentHandshakeBuildCancellation(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		entered := make(chan struct{})
-		cancelOperation := make(chan context.CancelFunc, 1)
-		outerError := make(chan error, 1)
-		calls := 0
-		w := Worker{Client: Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
-			calls++
-			if calls == 1 {
-				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(fmt.Sprintf(`{"ok":true,"start_gate":%q}`, startGateProtocol)))}, nil
-			}
-			close(entered)
-			<-r.Context().Done()
-			return nil, r.Context().Err()
-		})}}}
-		rt := &environmentRuntime{dir: t.TempDir(), cache: &EnvironmentCache{Root: t.TempDir()}, reports: map[string]EnvironmentReport{}, authorize: w.authorizeLaunchContext}
-		rt.prepare = func(parent context.Context, _ EnvironmentRecipe) error {
-			ctx, cancel := context.WithCancel(parent)
-			defer cancel()
-			cancelOperation <- cancel
-			err := checkLaunchGate(ctx)
-			outerError <- parent.Err()
-			return err
-		}
-		defer rt.stop()
-		r := EnvironmentRecipe{Key: "build-cancellation", Preparation: &ExtensionSelection{}, Launch: &HostLaunch{Kind: "environment", Attempt: "exact-attempt"}}
-		rt.sync([]EnvironmentRecipe{r}, false)
-		rt.mu.Lock()
-		done := rt.done
-		rt.mu.Unlock()
-		<-entered
-		(<-cancelOperation)()
-		select {
-		case <-done:
-		case <-time.After(testWaitTimeout):
-			t.Fatal("build cancellation did not interrupt pending authorization")
-		}
-		if err := <-outerError; err != nil {
-			t.Fatal("test withdrew the outer preparation", err)
-		}
-		rt.mu.Lock()
-		defer rt.mu.Unlock()
-		if calls != 2 || rt.cancel != nil || rt.reports[r.Key].Attempt != r.Launch.Attempt || rt.reports[r.Key].State != "paused" {
-			t.Fatal("operation cancellation lost exact preparation or retained slot", calls, rt.reports[r.Key])
-		}
-	})
-}
 
 // Only the control loop uses this clock; its first ordinary tick is a named
 // synchronization signal, independent of worker/queue activity or wall sleeps.

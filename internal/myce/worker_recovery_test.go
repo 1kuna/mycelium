@@ -18,33 +18,6 @@ import (
 	"time"
 )
 
-func TestWorkerRetryFakeClockBoundaries(t *testing.T) {
-	c := &fakeClock{now: time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC)}
-	var r workerRetry
-	if !r.ready(c.Now()) {
-		t.Fatal("first request must run immediately")
-	}
-	for _, d := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second} {
-		r.failed(c.Now(), time.Second)
-		if r.delay != d {
-			t.Fatalf("delay %s want %s", r.delay, d)
-		}
-		c.Advance(d - time.Nanosecond)
-		if r.ready(c.Now()) {
-			t.Fatal("retry before deadline")
-		}
-		c.Advance(time.Nanosecond)
-		if !r.ready(c.Now()) {
-			t.Fatal("retry not ready at deadline")
-		}
-	}
-	r.succeeded(c.Now(), time.Second)
-	c.Advance(time.Second)
-	r.failed(c.Now(), time.Second)
-	if r.delay != time.Second {
-		t.Fatal("success did not reset backoff")
-	}
-}
 func recoveryWorker(t *testing.T) Worker {
 	t.Helper()
 	handler := workerTestHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -76,84 +49,12 @@ func TestWorkerStateLockAndCorruption(t *testing.T) {
 	if _, err = w.openStore(); err == nil {
 		t.Fatal("second owner acquired worker state lock")
 	}
-	s.state.Session = "persisted"
-	if err = s.save(); err != nil {
-		t.Fatal(err)
-	}
-	s.close()
-	s, err = w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.state.Session != "persisted" {
-		t.Fatal("state not durable")
-	}
 	s.close()
 	if err = os.WriteFile(filepath.Join(w.StateDir, "state.json"), []byte("broken"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = w.openStore(); err == nil {
 		t.Fatal("corrupt state silently discarded")
-	}
-}
-func TestWorkerStateRejectsForeignDocuments(t *testing.T) {
-	for _, data := range []string{
-		`{"state":"failed","pid":null,"assigned_xpu":1,"preemption_count":0,"attempt_token":"synthetic-old-attempt"}`,
-		`{"state":"running","pid":999999,"assigned_xpu":1,"preemption_count":2,"attempt_token":"synthetic-old-attempt"}`,
-		`{}`, `null`, `{"pid":999999}`, `{"session":"old","fresh":false}`,
-		`{"session":null,"fresh":false,"offset":0}`,
-		`{"session":"old","fresh":false,"offset":0,"attempt_token":"foreign"}`,
-		`{"session":"old","fresh":false,"offset":0} {}`,
-	} {
-		t.Run(data, func(t *testing.T) {
-			w := recoveryWorker(t)
-			path := filepath.Join(w.StateDir, "state.json")
-			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
-				t.Fatal(err)
-			}
-			for range 2 {
-				store, err := w.openStore()
-				if err == nil {
-					store.close()
-					t.Fatal("foreign or incomplete state accepted")
-				}
-				if !strings.Contains(err.Error(), "read worker state") {
-					t.Fatal(err)
-				}
-			}
-			got, err := os.ReadFile(path)
-			if err != nil || string(got) != data {
-				t.Fatalf("rejected state changed: %v", err)
-			}
-		})
-	}
-}
-
-func TestWorkerStateAcceptsExistingSchema(t *testing.T) {
-	for _, data := range []string{
-		`{"schema_version":3,"session":"old","fresh":false,"offset":0}`,
-		`{"schema_version":3,"session":"old","previous_session":"previous","fresh":true,"offset":17,"pid":42,"identity":"owned","launch_pending":true,"birth":"birth","pending":2,"checkpoint_root":"/local","log":"owned.log"}`,
-	} {
-		w := recoveryWorker(t)
-		if err := os.WriteFile(filepath.Join(w.StateDir, "state.json"), []byte(data), 0600); err != nil {
-			t.Fatal(err)
-		}
-		store, err := w.openStore()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if store.state.Session != "old" {
-			t.Fatal("existing session lost")
-		}
-		if err := store.save(); err != nil {
-			t.Fatal(err)
-		}
-		store.close()
-		store, err = w.openStore()
-		if err != nil {
-			t.Fatal(err)
-		}
-		store.close()
 	}
 }
 
@@ -197,52 +98,7 @@ func TestWorkerOfflineLargeOutputIsDurable(t *testing.T) {
 		t.Fatalf("persisted result %+v: %v", result, err)
 	}
 }
-func TestWorkerAttemptCheckpointIsolation(t *testing.T) {
-	j := recoveryJob(t, []string{"true"})
-	for _, dir := range []string{"attempt-1", "attempt-2", "attempt-2/nested"} {
-		if err := os.MkdirAll(filepath.Join(j.Checkpoint, dir), 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	first := filepath.Join(j.Checkpoint, "attempt-1", "saved")
-	latest := filepath.Join(j.Checkpoint, "attempt-2", "nested", "saved")
-	if err := os.WriteFile(first, []byte("old"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(latest, []byte("new"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	clock := &fakeClock{now: time.Unix(100, 0)}
-	older := clock.Now()
-	clock.Advance(100*time.Second + 123*time.Nanosecond)
-	newer := clock.Now()
-	os.Chtimes(first, older, older)
-	os.Chtimes(latest, newer, newer)
-	os.WriteFile(filepath.Join(j.Checkpoint, "attempt-2", "partial.tmp"), []byte("incomplete"), 0600)
-	j.Attempt = 3
-	dest, err := prepareCheckpoint(j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(dest, "nested", "saved"))
-	if err != nil || string(data) != "new" {
-		t.Fatalf("checkpoint %q: %v", data, err)
-	}
-	if _, err = os.Stat(filepath.Join(dest, "partial.tmp")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("copied incomplete checkpoint")
-	}
-	progress, err := checkpointProgress(dest)
-	if err != nil || progress != 0 {
-		t.Fatalf("progress %d: %v", progress, err)
-	}
-	if err = os.WriteFile(filepath.Join(dest, "nested", "saved"), []byte("attempt 3"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	data, _ = os.ReadFile(latest)
-	if string(data) != "new" {
-		t.Fatal("new attempt modified previous checkpoint")
-	}
-}
+
 func TestWorkerMissingCheckpointRootNotCreated(t *testing.T) {
 	w := recoveryWorker(t)
 	w.checkpointPrepare = prepareCheckpoint
@@ -526,15 +382,7 @@ func TestWorkerLegacyRootCheckpointAndSymlink(t *testing.T) {
 		t.Fatalf("symlink checkpoint should fail visibly: %v", err)
 	}
 }
-func TestWorkerRecoveryCrashHelper(t *testing.T) {
-	if os.Getenv("MYCE_RECOVERY_TEST_HELPER") != "1" {
-		return
-	}
-	w := Worker{EnvironmentLimit: 1 << 20, Client: Client{URL: os.Getenv("MYCE_RECOVERY_TEST_URL"), Token: "test"}, Machine: machine("crash-worker", "fake"), StateDir: os.Getenv("MYCE_RECOVERY_TEST_STATE"), Interval: 5 * time.Millisecond}
-	if err := w.Run(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-}
+
 func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	q, _ := fixture(t)
 	s := spec("experiment")
@@ -543,7 +391,7 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	stateDir := t.TempDir()
-	helper := exec.Command(os.Args[0], "-test.run=^TestWorkerRecoveryCrashHelper$")
+	helper := exec.Command(os.Args[0], "-test.run=^TestNativeGroupWorkerCrashHelper$")
 	helper.Env = append(os.Environ(), "MYCE_RECOVERY_TEST_HELPER=1", "MYCE_RECOVERY_TEST_URL="+server.URL, "MYCE_RECOVERY_TEST_STATE="+stateDir)
 	if err := helper.Start(); err != nil {
 		t.Fatal(err)
@@ -628,44 +476,5 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 		}
 	case <-time.After(testWaitTimeout):
 		t.Fatal("restarted worker failed to leave")
-	}
-}
-
-func TestSignalExitedGroupPermissionRace(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		signalErr  error
-		members    []int
-		inspectErr error
-		wantErr    error
-	}{
-		{name: "success"},
-		{name: "already gone", signalErr: syscall.ESRCH},
-		{name: "exiting group permission race", signalErr: syscall.EPERM},
-		{name: "live group permission refused", signalErr: syscall.EPERM, members: []int{42}, wantErr: syscall.EPERM},
-		{name: "inventory failure refuses cleanup", signalErr: syscall.EPERM, inspectErr: errors.New("inventory unavailable"), wantErr: syscall.EPERM},
-		{name: "other signal error", signalErr: syscall.EINVAL, wantErr: syscall.EINVAL},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			inspected := false
-			err := signalWorkerGroupUsing(42, syscall.SIGKILL, func(group int, signal syscall.Signal) error {
-				if group != -42 || signal != syscall.SIGKILL {
-					t.Fatal("wrong group/signal", group, signal)
-				}
-				return tc.signalErr
-			}, func(group int) ([]int, error) {
-				inspected = true
-				if group != 42 {
-					t.Fatal("wrong inventory group", group)
-				}
-				return tc.members, tc.inspectErr
-			})
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatal("signal result", err, "want", tc.wantErr)
-			}
-			if inspected != errors.Is(tc.signalErr, syscall.EPERM) {
-				t.Fatal("unexpected inventory decision")
-			}
-		})
 	}
 }

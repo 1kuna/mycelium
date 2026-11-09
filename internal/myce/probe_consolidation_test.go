@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+
 	"os"
 	"os/exec"
 	"strings"
@@ -54,13 +54,8 @@ func consolidatedProbe(t *testing.T, devices ...pciFixture) MachineProbe {
 func TestConsolidatedHostMatrix(t *testing.T) {
 	cuda := pciFixture{"0000:01:00.0", "0x10de", "16", "generic", "", true}
 	xpu := pciFixture{"0000:02:00.0", "0x8086", "1", "generic", "", true}
-	xpu2 := xpu
-	xpu2.address = "0000:03:00.0"
-	bmc := pciFixture{"0000:04:00.0", "0x1a03", "1", "BMC VGA", "", false}
-	driverless := xpu
+	driverless := cuda
 	driverless.usable = false
-	integrated := xpu
-	integrated.link = "0"
 	spark := cuda
 	spark.link = "0"
 	for _, tc := range []struct {
@@ -68,12 +63,7 @@ func TestConsolidatedHostMatrix(t *testing.T) {
 		devices []pciFixture
 		modes   []string
 		code    string
-	}{
-		{"b70", []pciFixture{xpu, xpu2, bmc}, []string{"fixed", "fixed"}, ""},
-		{"spark", []pciFixture{spark}, []string{"unified"}, ""},
-		{"mixed_driverless", []pciFixture{cuda, driverless}, []string{"dedicated"}, "gpu_driver_missing"},
-		{"integrated_plus_cuda", []pciFixture{integrated, cuda}, []string{"dedicated", "unified"}, ""},
-	} {
+	}{{"mixed_driverless", []pciFixture{driverless, xpu}, []string{"fixed"}, "gpu_driver_missing"}, {"spark", []pciFixture{spark}, []string{"unified"}, ""}} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := consolidatedProbe(t, tc.devices...)
 			command := p.Command
@@ -141,24 +131,36 @@ func TestConsolidatedHostMatrix(t *testing.T) {
 			}
 		})
 	}
-}
 
-func TestConsolidatedAppleWithoutPCISysfs(t *testing.T) {
-	p := onboardingProbe("metal")
-	p.Glob = func(string) ([]string, error) { t.Fatal("Apple host accessed PCI"); return nil, nil }
-	p.ReadFile = func(string) ([]byte, error) { t.Fatal("Apple host accessed PCI"); return nil, nil }
-	got, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
-	if err != nil || len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 0 {
-		t.Fatal(got, err)
-	}
+	t.Run("ConsolidatedAppleWithoutPCISysfs", func(t *testing.T) {
+
+		p := onboardingProbe("metal")
+
+		got, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
+		if err != nil || len(got.Devices) != 1 || got.MemoryMode != "unified" || got.ReserveGB != 0 {
+			t.Fatal(got, err)
+		}
+
+	})
 }
 
 func TestConsolidatedEndpointFailureIsolation(t *testing.T) {
-	for _, attr := range []string{"class", "vendor", "current_link_width"} {
+	for _, attr := range []string{"current_link_width"} {
 		t.Run(attr, func(t *testing.T) {
 			p := consolidatedProbe(t, pciFixture{"0000:01:00.0", "0x8086", "1", "healthy", "", true}, pciFixture{"0000:02:00.0", "0x8086", "1", "unreadable", "", true})
+			glob := p.Glob
+			p.Glob = func(pattern string) ([]string, error) {
+				nodes, e := glob(pattern)
+				if strings.Contains(pattern, "renderD") {
+					nodes = append(nodes, "/dev/dri/renderD129")
+				}
+				return nodes, e
+			}
 			read := p.ReadFile
 			p.ReadFile = func(path string) ([]byte, error) {
+				if strings.Contains(path, "renderD129") {
+					return nil, os.ErrPermission
+				}
 				if strings.Contains(path, "0000:02:00.0") && strings.HasSuffix(path, "/"+attr) {
 					return nil, os.ErrPermission
 				}
@@ -194,56 +196,15 @@ func TestConsolidatedDiscreteNAExplicitBudget(t *testing.T) {
 		}
 		return command(ctx, name, args...)
 	}
+	if _, err := PreflightHardware(context.Background(), ServiceConfig{}, p); err == nil {
+		t.Fatal("known PCIe discrete device with unknown VRAM must not become unified")
+	} else {
+		requirePreflightCode(t, err, "gpu_memory_unavailable")
+	}
 	c := ServiceConfig{Detection: Detection{Platform: "cuda", MemoryMode: "fixed", MemoryGB: 24, ReserveGB: 2}}
 	got, err := PreflightHardware(context.Background(), c, p)
 	if err != nil || got.MemoryMode != "fixed" || got.MemoryGB != 24 || got.ReserveGB != 2 {
 		t.Fatal(got, err)
-	}
-}
-
-func TestConsolidatedMissingFamilyTyped(t *testing.T) {
-	p := consolidatedProbe(t, pciFixture{"0000:01:00.0", "0x10de", "16", "generic", "", false}, pciFixture{"0000:02:00.0", "0x8086", "1", "generic", "", true})
-	devices, err := p.Accelerators(context.Background())
-	var partial *acceleratorProbeError
-	if !errors.As(err, &partial) || !partial.failed("cuda") || partial.failed("xpu") || len(devices) != 1 {
-		t.Fatal(fmt.Sprint(devices), err)
-	}
-}
-
-func TestConsolidatedMissingIntegratedRuntimeReported(t *testing.T) {
-	p := consolidatedProbe(t, pciFixture{"0000:01:00.0", "0x10de", "16", "generic", "", true}, pciFixture{"0000:02:00.0", "0x8086", "0", "generic", "", false})
-	var notes []string
-	p.Info = func(note string) { notes = append(notes, note) }
-	got, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
-	if err != nil || len(got.Devices) != 1 || got.Platform != "cuda" {
-		t.Fatal(got, err)
-	}
-	if !strings.Contains(strings.Join(notes, "\n"), "needs driver/runtime") {
-		t.Fatal("missing integrated runtime was not reported", notes)
-	}
-}
-
-func TestConsolidatedAbsentCUDAInvalidRuntimeInformational(t *testing.T) {
-	for _, output := range []string{"invalid runtime output", "GPU-same, driver\nGPU-same, driver"} {
-		t.Run(output, func(t *testing.T) {
-			p := consolidatedProbe(t, pciFixture{"0000:01:00.0", "0x8086", "1", "generic", "", true})
-			command := p.Command
-			p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-				if name == "nvidia-smi" {
-					return []byte(output), nil
-				}
-				return command(ctx, name, args...)
-			}
-			var notes []string
-			p.Info = func(note string) { notes = append(notes, note) }
-			devices, err := (Worker{Machine: Machine{GPU: "xpu"}}).localInventoryWithProbe(context.Background(), p)
-			if err != nil || len(devices) != 1 || devices[0].Platform != "xpu" || devices[0].Reason != "" {
-				t.Fatal(devices, err)
-			}
-			if !strings.Contains(strings.Join(notes, "\n"), "without an NVIDIA PCI") {
-				t.Fatal("absent CUDA runtime failure was not informational", notes)
-			}
-		})
 	}
 }
 

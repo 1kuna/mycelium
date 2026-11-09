@@ -1,6 +1,10 @@
 package myce
 
 import (
+	"net/http/httptest"
+)
+
+import (
 	"errors"
 	"fmt"
 	"math"
@@ -16,7 +20,7 @@ func TestMemoryRecoveryIncident(t *testing.T) {
 		name  string
 		hosts int
 		scale float64
-	}{{"tiny", 2, 1.0 / 16}, {"large", 40, 64}} {
+	}{{"incident", 2, 1}} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock := fixture(t)
 			clock.now = time.Date(2026, 11, 6, 6, 30, 0, 0, time.UTC)
@@ -123,6 +127,28 @@ func TestMemoryRecoveryIncident(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("MemoryRecoveryNewEligibleCapacity", func(t *testing.T) {
+
+		q, clock, m := learnedMemoryFixture(t)
+		s := cpuSpec(1, 0)
+		s.RequireTarget = true
+		runMemory(t, q, clock, m, s, 40, nil)
+		pending := submit(t, q, s)
+		if !strings.HasPrefix(q.memoryEvidenceWaitingReason(pending), memoryEvidenceRecovering+":") {
+			t.Fatal("not waiting")
+		}
+		larger := cpuMachine("additional", "additional-host", "cpu", 8, 64)
+		larger.HostMemoryBudgetGB, larger.ExtensionFingerprint = 64, "cpu-v1"
+		check(t, q, larger, nil)
+		if why := q.memoryEvidenceWaitingReason(pending); why != "" {
+			t.Fatal("capacity change did not recover", why)
+		}
+		if run := check(t, q, larger, nil).Job; run == nil || run.ID != pending.ID {
+			t.Fatal("same job not assigned")
+		}
+
+	})
 }
 
 // A constrained RSS stop supplies observed variance, not proof of exclusive
@@ -154,17 +180,18 @@ func TestMemoryRecoveryGuardUsesObservedVariance(t *testing.T) {
 	}
 	// The retry is still queued: its ended attempt must already supply the
 	// observed lower bound and overshoot to comparable new submissions.
-	probe := *queued
-	probe.State = "queued"
 	wantRecovery := peak + (peak - 3.9251251220703125) + .125
-	ownRetry := q.memoryCandidate(job(t, q, run.ID), q.s.Machines[m.ID]).MemoryEnvelope
-	if math.Abs(ownRetry.HostGB-wantRecovery) > 1e-9 || !strings.HasPrefix(ownRetry.Source, acceptedMemoryEscalation) {
-		t.Fatal("accepted prior recovery expanded to host capacity", ownRetry)
+	ownRetry := check(t, q, m, nil).Job
+	if ownRetry == nil {
+		t.Fatal("missing recovery")
 	}
-	if e := q.memoryCandidate(&probe, q.s.Machines[m.ID]).MemoryEnvelope; math.Abs(e.HostGB-wantRecovery) > 1e-9 {
-		t.Fatal("queued retry lost class evidence", e)
+	if e := ownRetry.MemoryEnvelope; math.Abs(e.HostGB-wantRecovery) > 1e-9 || !strings.HasPrefix(e.Source, acceptedMemoryEscalation) {
+		t.Fatal("accepted prior recovery expanded to host capacity", e)
 	}
 	if err := q.Cancel(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Complete(result(ownRetry, false)); err != nil {
 		t.Fatal(err)
 	}
 	clean := 3.5586090087890625
@@ -174,7 +201,10 @@ func TestMemoryRecoveryGuardUsesObservedVariance(t *testing.T) {
 		t.Fatalf("overshoot margin: %+v want %g", recovery.MemoryEnvelope, want)
 	}
 	queued = submit(t, q, s)
-	learned := q.memoryCandidate(queued, q.s.Machines[m.ID])
+	learned := check(t, q, m, nil).Job
+	if learned == nil || learned.ID != queued.ID {
+		t.Fatal("missing learned assignment")
+	}
 	if math.Abs(learned.MemoryEnvelope.HostGB-want) > 1e-9 || learned.MemoryEnvelope.Basis != "learned" {
 		t.Fatal("clean evidence forgot observed variance", learned.MemoryEnvelope)
 	}
@@ -192,26 +222,6 @@ func TestMemoryRecoveryGuardUsesObservedVariance(t *testing.T) {
 	}
 	if explicitStop == nil {
 		t.Fatal("explicit guard was weakened")
-	}
-}
-
-func TestMemoryRecoveryNewEligibleCapacity(t *testing.T) {
-	q, clock, m := learnedMemoryFixture(t)
-	s := cpuSpec(1, 0)
-	s.RequireTarget = true
-	runMemory(t, q, clock, m, s, 40, nil)
-	pending := submit(t, q, s)
-	if !strings.HasPrefix(q.memoryEvidenceWaitingReason(pending), memoryEvidenceRecovering+":") {
-		t.Fatal("not waiting")
-	}
-	larger := cpuMachine("additional", "additional-host", "cpu", 8, 64)
-	larger.HostMemoryBudgetGB, larger.ExtensionFingerprint = 64, "cpu-v1"
-	check(t, q, larger, nil)
-	if why := q.memoryEvidenceWaitingReason(pending); why != "" {
-		t.Fatal("capacity change did not recover", why)
-	}
-	if run := check(t, q, larger, nil).Job; run == nil || run.ID != pending.ID {
-		t.Fatal("same job not assigned")
 	}
 }
 
@@ -282,7 +292,7 @@ func TestMemoryRecoveryCapRetainsAcceptedMeasurement(t *testing.T) {
 	q, clock, m := learnedMemoryFixture(t)
 	s := cpuSpec(1, 0)
 	s.RequireTarget = true
-	runMemory(t, q, clock, m, s, 12, nil)
+	accepted := runMemory(t, q, clock, m, s, 12, nil)
 	runMemory(t, q, clock, m, s, 4, func(r *Result) {
 		r.Success = false
 		r.MemoryPeak.Constrained = true
@@ -301,14 +311,20 @@ func TestMemoryRecoveryCapRetainsAcceptedMeasurement(t *testing.T) {
 	}
 	m.HostMemoryBudgetGB = budget
 	check(t, q, m, nil)
-	pending := submit(t, q, s)
-	if e := q.memoryCandidate(pending, q.s.Machines[m.ID]).MemoryEnvelope; e.HostGB < 12 {
-		t.Fatal("uncertainty cap discarded the accepted measurement", e)
-	}
-	if why := q.memoryEvidenceWaitingReason(pending); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
-		t.Fatal("unrecovered measurement must wait", why)
-	}
+	submit(t, q, s)
+
 	if run := check(t, q, m, nil).Job; run != nil {
 		t.Fatal("ran below unrecovered accepted peak")
+	}
+
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	client := Client{URL: server.URL, Token: "test"}
+	got, err := client.GetJob(context.Background(), accepted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.MemoryAttempts) != 1 || got.MemoryAttempts[0].MemoryPeak == nil || got.MemoryAttempts[0].MemoryPeak.HostGB == nil || *got.MemoryAttempts[0].MemoryPeak.HostGB != 12 {
+		t.Fatal("uncertainty cap discarded the accepted measurement", got.MemoryAttempts)
 	}
 }

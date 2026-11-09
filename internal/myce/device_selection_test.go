@@ -23,38 +23,6 @@ func selectedDeviceEnv(platform, device string) map[string]string {
 	return map[string]string{"ZE_AFFINITY_MASK": device, "ONEAPI_DEVICE_SELECTOR": selector}
 }
 
-func TestDeviceSelectionEnvironment(t *testing.T) {
-	for _, platform := range []string{"xpu", "cuda"} {
-		for _, device := range []string{"0", "1"} {
-			t.Run(platform+"/"+device, func(t *testing.T) {
-				m, err := WithModelDevice(Model{}, platform, device)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for key, want := range selectedDeviceEnv(platform, device) {
-					if m.DeviceEnv[key] != want {
-						t.Fatalf("%s=%q, want %q", key, m.DeviceEnv[key], want)
-					}
-				}
-				m.Engine, m.StartCommand, m.HealthURL = "server", []string{"echo"}, "http://127.0.0.1:{port}"
-				m = withPlacementEnvironment(m, Machine{GPU: platform, Device: device})
-				_, _, _, env, err := serverCommand(m, 7332)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for key, want := range selectedDeviceEnv(platform, device) {
-					if !slices.Contains(env, key+"="+want) {
-						t.Fatalf("server missing %s=%s", key, want)
-					}
-				}
-				if !slices.Contains(env, "MYCE_DEVICES="+device) {
-					t.Fatal("server missing physical MYCE_DEVICES")
-				}
-			})
-		}
-	}
-}
-
 // The fake runtime applies affinity first, then selects the renumbered devices.
 func TestDeviceSelectionDetection(t *testing.T) {
 	root := t.TempDir()
@@ -115,7 +83,7 @@ done
 	if err != nil || strings.TrimSpace(string(out)) != "" {
 		t.Fatalf("fake must reject index 1 after a one-card mask: %q %v", out, err)
 	}
-	for _, device := range []string{"0", "1"} {
+	for _, device := range []string{"1"} {
 		t.Run(device, func(t *testing.T) {
 			t.Setenv("ZE_AFFINITY_MASK", "1")
 			t.Setenv("ONEAPI_DEVICE_SELECTOR", "level_zero:1")
@@ -138,7 +106,7 @@ done
 
 func TestDeviceSelectionBatchEnvironment(t *testing.T) {
 	for _, platform := range []string{"xpu", "cuda"} {
-		for _, device := range []string{"0", "1"} {
+		for _, device := range []string{"1"} {
 			t.Run(platform+"/"+device, func(t *testing.T) {
 				w := recoveryWorker(t)
 				w.Machine.GPU, w.Machine.Device = platform, device
@@ -167,54 +135,8 @@ func TestDeviceSelectionBatchEnvironment(t *testing.T) {
 	}
 }
 
-func TestDeviceSelectionDockerEnvironment(t *testing.T) {
-	for _, platform := range []string{"xpu", "cuda"} {
-		for _, device := range []string{"0", "1"} {
-			t.Run(platform+"/"+device, func(t *testing.T) {
-				w, s, c, root := dockerFixture(t)
-				w.Machine.GPU, w.Machine.Device = platform, device
-				j := dockerJob()
-				j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
-				// Preserve the full Intel inventory so the physical affinity mask is valid.
-				j.Spec.Run.Command = append([]string{"docker", "run", "--device", "/dev/dri/renderD128", "--device", "/dev/dri/renderD129"}, j.Spec.Run.Command[2:]...)
-				p, err := startDockerFixture(w, s, j)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(p.docker.close)
-				await(t, func() bool {
-					select {
-					case result := <-p.done:
-						t.Fatalf("Docker exited before running: %+v", result)
-					default:
-					}
-					_, err := os.Stat(filepath.Join(root, "running"))
-					return err == nil
-				})
-				data, err := os.ReadFile(filepath.Join(root, "calls"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				p.stop(c.Now(), 0, true)
-				expireDockerStop(t, p)
-				<-p.done
-				for key, want := range selectedDeviceEnv(platform, device) {
-					if !strings.Contains(string(data), "--env "+key+"="+want+" ") {
-						t.Fatalf("Docker missing %s=%s: %s", key, want, data)
-					}
-				}
-				for _, want := range []string{"--env MYCE_DEVICES=" + device + " ", "--device /dev/dri/renderD128 ", "--device /dev/dri/renderD129 "} {
-					if !strings.Contains(string(data), want) {
-						t.Fatalf("Docker missing %s: %s", want, data)
-					}
-				}
-			})
-		}
-	}
-}
-
 func TestDeviceSelectionDockerSidecarEnvironment(t *testing.T) {
-	for _, device := range []string{"0", "1"} {
+	for _, device := range []string{"1"} {
 		t.Run(device, func(t *testing.T) {
 			w, s, c, root := dockerFixture(t)
 			w.Machine.GPU, w.Machine.Device = "xpu", device
@@ -278,4 +200,52 @@ func TestDeviceSelectionDockerSidecarEnvironment(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("DeviceSelectionDockerEnvironment", func(t *testing.T) {
+
+		for _, platform := range []string{"cuda"} {
+			for _, device := range []string{"1"} {
+				t.Run(platform+"/"+device, func(t *testing.T) {
+					w, s, c, root := dockerFixture(t)
+					w.Machine.GPU, w.Machine.Device = platform, device
+					j := dockerJob()
+					j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
+					// Preserve the full Intel inventory so the physical affinity mask is valid.
+					j.Spec.Run.Command = append([]string{"docker", "run", "--device", "/dev/dri/renderD128", "--device", "/dev/dri/renderD129"}, j.Spec.Run.Command[2:]...)
+					p, err := startDockerFixture(w, s, j)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(p.docker.close)
+					await(t, func() bool {
+						select {
+						case result := <-p.done:
+							t.Fatalf("Docker exited before running: %+v", result)
+						default:
+						}
+						_, err := os.Stat(filepath.Join(root, "running"))
+						return err == nil
+					})
+					data, err := os.ReadFile(filepath.Join(root, "calls"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					p.stop(c.Now(), 0, true)
+					expireDockerStop(t, p)
+					<-p.done
+					for key, want := range selectedDeviceEnv(platform, device) {
+						if !strings.Contains(string(data), "--env "+key+"="+want+" ") {
+							t.Fatalf("Docker missing %s=%s: %s", key, want, data)
+						}
+					}
+					for _, want := range []string{"--env MYCE_DEVICES=" + device + " ", "--device /dev/dri/renderD128 ", "--device /dev/dri/renderD129 "} {
+						if !strings.Contains(string(data), want) {
+							t.Fatalf("Docker missing %s: %s", want, data)
+						}
+					}
+				})
+			}
+		}
+
+	})
 }

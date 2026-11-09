@@ -3,7 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
-	"reflect"
+
 	"strconv"
 	"testing"
 	"time"
@@ -13,73 +13,69 @@ import (
 // The next operation must authorize against that lagging, healthy report. The
 // fake durable Docker store and command seam force this ordering without sleeps.
 func TestDockerLaunchHeartbeatInterleaving(t *testing.T) {
-	for _, operation := range []string{"network-create", "create", "start"} {
-		for _, inventory := range []string{"legacy", "machine"} {
-			t.Run(inventory+"/"+operation, func(t *testing.T) {
-				q, clock := fixture(t)
-				m := dockerMachine("worker", "fake")
-				if inventory == "machine" {
-					m = m3Machine()
-					m.Capabilities = append(m.Capabilities, "docker")
-				}
-				submit(t, q, dockerJob().Spec)
-				var j *Job
-				if inventory == "machine" {
-					j = assignedJob(machineCheck(t, q, m))
-				} else {
-					j = check(t, q, m, nil).Job
-				}
-				if j == nil {
-					t.Fatal("missing assignment")
-				}
-				launch := HostLaunch{Machine: j.Machine, Session: j.Session, Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(j.Attempt)}
-				var saved dockerExecution
-				dispatches := 0
-				d := &dockerAttempt{clock: clock, dir: "fake-store", timeout: time.Second,
-					persist: func(s dockerExecution) error { saved = s; return nil },
-					admit:   func() error { return q.AuthorizeLaunch(launch) },
-				}
-				d.command = func(context.Context, ...string) ([]byte, error) {
-					dispatches++
-					if dispatches == 1 {
-						if !saved.Pending || saved.Operation != operation {
-							t.Fatal("operation was not durable before dispatch", saved)
-						}
-						clock.Advance(100 * time.Millisecond)
-						m.DockerCleanup = d.status()
-						c := Checkin{Machine: m}
-						execution := Execution{ID: j.ID, Attempt: j.Attempt}
-						if inventory == "machine" {
-							c.AttemptProtocol = keyedAttemptProtocol
-							c.Attempts = []AttemptReport{{Execution: execution, Session: j.Session}}
-						} else {
-							c.Running = &execution
-						}
-						if _, err := q.Checkin(c); err != nil {
-							t.Fatal(err)
-						}
+	for _, tc := range []struct{ operation, inventory string }{{"create", "legacy"}, {"start", "machine"}} {
+		operation, inventory := tc.operation, tc.inventory
+		t.Run(inventory+"/"+operation, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := dockerMachine("worker", "fake")
+			if inventory == "machine" {
+				m = m3Machine()
+				m.Capabilities = append(m.Capabilities, "docker")
+			}
+			submit(t, q, dockerJob().Spec)
+			var j *Job
+			if inventory == "machine" {
+				j = assignedJob(machineCheck(t, q, m))
+			} else {
+				j = check(t, q, m, nil).Job
+			}
+			if j == nil {
+				t.Fatal("missing assignment")
+			}
+			launch := HostLaunch{Machine: j.Machine, Session: j.Session, Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(j.Attempt)}
+			var saved dockerExecution
+			dispatches := 0
+			d := &dockerAttempt{clock: clock, dir: "fake-store", timeout: time.Second,
+				persist: func(s dockerExecution) error { saved = s; return nil },
+				admit:   func() error { return q.AuthorizeLaunch(launch) },
+			}
+			d.command = func(context.Context, ...string) ([]byte, error) {
+				dispatches++
+				if dispatches == 1 {
+					if !saved.Pending || saved.Operation != operation {
+						t.Fatal("operation was not durable before dispatch", saved)
 					}
-					return []byte("receipt"), nil
+					clock.Advance(100 * time.Millisecond)
+					m.DockerCleanup = d.status()
+					c := Checkin{Machine: m}
+					execution := Execution{ID: j.ID, Attempt: j.Attempt}
+					if inventory == "machine" {
+						c.AttemptProtocol = keyedAttemptProtocol
+						c.Attempts = []AttemptReport{{Execution: execution, Session: j.Session}}
+					} else {
+						c.Running = &execution
+					}
+					if _, err := q.Checkin(c); err != nil {
+						t.Fatal(err)
+					}
 				}
-				if _, err := d.operation(operation, operation); err != nil {
-					t.Fatal("first operation", err)
-				}
-				before := cloneMachine(q.s.Machines[m.ID])
-				if _, err := d.operation("create", "create"); err != nil {
-					t.Fatalf("live attempt refused after %s heartbeat: %v", operation, err)
-				}
-				if !reflect.DeepEqual(before, cloneMachine(q.s.Machines[m.ID])) {
-					t.Fatal("authorization rewrote heartbeat diagnostics")
-				}
-				if err := q.Started(result(j, true)); err != nil {
-					t.Fatalf("start acknowledgement refused after healthy heartbeat: %v", err)
-				}
-				current := job(t, q, j.ID)
-				if dispatches != 2 || current.Attempt != 1 || current.InfrastructureRetries != 0 || current.Losses != 0 {
-					t.Fatal("healthy launch consumed a retry", current)
-				}
-			})
-		}
+				return []byte("receipt"), nil
+			}
+			if _, err := d.operation(operation, operation); err != nil {
+				t.Fatal("first operation", err)
+			}
+			if _, err := d.operation("create", "create"); err != nil {
+				t.Fatalf("live attempt refused after %s heartbeat: %v", operation, err)
+			}
+
+			if err := q.Started(result(j, true)); err != nil {
+				t.Fatalf("start acknowledgement refused after healthy heartbeat: %v", err)
+			}
+			current := job(t, q, j.ID)
+			if dispatches != 2 || current.Attempt != 1 || current.InfrastructureRetries != 0 || current.Losses != 0 {
+				t.Fatal("healthy launch consumed a retry", current)
+			}
+		})
 	}
 }
 

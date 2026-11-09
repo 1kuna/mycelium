@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
+
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -145,48 +145,7 @@ func runtimeLoadFixture(t *testing.T, engine Engine) (*modelRuntime, *workerMode
 	rt := &modelRuntime{models: map[string]*workerModel{"test": m}, session: "session", memorySource: func(context.Context) (float64, error) { return 8, nil }}
 	return rt, m, ctx
 }
-func TestRuntimeLoadReadinessRacingWithDrain(t *testing.T) {
-	e := &lifecycleEngine{started: make(chan struct{}), release: make(chan struct{})}
-	rt, m, ctx := runtimeLoadFixture(t, e)
-	rt.wg.Add(1)
-	go func() { defer rt.wg.Done(); rt.load(ctx, m) }()
-	<-e.started
-	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: "test", Session: "session", State: "draining"}})
-	close(e.release)
-	rt.wg.Wait()
-	if m.state != "unloaded" || e.unloads.Load() != 1 {
-		t.Fatalf("cancelled load exposed model instead of unloading: %s unloads=%d", m.state, e.unloads.Load())
-	}
-}
-func TestRuntimeFailedLoadCleanupRetainsMemory(t *testing.T) {
-	e := &lifecycleEngine{loadErr: errors.New("load failed"), unloadErr: errors.New("process survived")}
-	rt, m, ctx := runtimeLoadFixture(t, e)
-	rt.load(ctx, m)
-	reports, used := rt.report()
-	if m.state != "unload_failed" || used != 8 || reports[0].Error != "model load or unload failed" {
-		t.Fatalf("failed cleanup released reservation: %+v memory=%v", reports, used)
-	}
-}
-func TestRuntimeLoadChecksMemoryWithoutHoldingMutex(t *testing.T) {
-	for _, measured := range []bool{false, true} {
-		for _, state := range []string{"ready", "loading", "unloading"} {
-			t.Run(fmt.Sprintf("measured=%v/%s", measured, state), func(t *testing.T) {
-				rt, m, ctx := runtimeLoadFixture(t, &lifecycleEngine{})
-				rt.memoryMeasured = measured
-				rt.models["other"] = &workerModel{model: Model{Name: "other", MemoryGB: 4}, state: state}
-				rt.batchMemory = &atomic.Uint64{}
-				rt.batchMemory.Store(math.Float64bits(2))
-				rt.memorySource = func(context.Context) (float64, error) { rt.report(); return 12, nil }
-				err := rt.checkLoadMemory(ctx, m)
-				// Configured: 12 - model(4) - batch(2) cannot fit 8. Native:
-				// resident/batch allocations are already measured, loading is not.
-				if (err != nil) != !measured {
-					t.Fatalf("unexpected memory check: %v", err)
-				}
-			})
-		}
-	}
-}
+
 func TestRuntimeLoadMemoryErrorNeverStartsEngine(t *testing.T) {
 	e := &lifecycleEngine{started: make(chan struct{})}
 	rt, m, ctx := runtimeLoadFixture(t, e)

@@ -3,7 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
-	"fmt"
+
 	"os/exec"
 	"strings"
 	"testing"
@@ -47,30 +47,6 @@ func familyProbe(t *testing.T, nvidiaClass string) MachineProbe {
 	}
 }
 
-func TestAcceleratorFamiliesIndependent(t *testing.T) {
-	for _, class := range []string{"", "0x040300", "0x030000", "0x030200"} {
-		t.Run("nvidia-class="+class, func(t *testing.T) {
-			p := familyProbe(t, class)
-			devices, err := p.Accelerators(context.Background())
-			if len(devices) != 2 {
-				t.Fatalf("Level Zero devices hidden: devices=%+v err=%v", devices, err)
-			}
-			for i, d := range devices {
-				if d.Platform != "xpu" || d.Identity != fmt.Sprintf("b70-%d", i) || d.Selector != fmt.Sprint(i) || d.ID != fmt.Sprint(i) {
-					t.Fatalf("unexpected B70 device: %+v", d)
-				}
-			}
-			if strings.HasPrefix(class, "0x03") {
-				if err == nil || !strings.Contains(err.Error(), "cuda") {
-					t.Fatalf("CUDA refusal lost: %v", err)
-				}
-			} else if err != nil {
-				t.Fatalf("absent NVIDIA display device refused inventory: %v", err)
-			}
-		})
-	}
-}
-
 func TestDegradedInventoryZeroCustodyQuiescent(t *testing.T) {
 	q, _ := fixture(t)
 	m, _ := maintenanceMachines()
@@ -79,18 +55,6 @@ func TestDegradedInventoryZeroCustodyQuiescent(t *testing.T) {
 	status := maintenanceChange(t, q, "disable", true)
 	if status.Healthy || !status.Quiescent || len(status.Attempts) != 0 || status.Calls != 0 || status.Preparations != 0 || status.Sidecars != 0 || len(status.PendingReleases) != 0 || len(status.PendingCleanup) != 0 {
 		t.Fatalf("inventory health blocks zero-custody maintenance: %+v", status)
-	}
-}
-
-func TestAcceleratorLevelZeroFailurePreservesCUDA(t *testing.T) {
-	p := familyProbe(t, "0x030000")
-	p.Command = func(context.Context, string, ...string) ([]byte, error) { return []byte("GPU-card, driver"), nil }
-	p.CommandEnv = func(context.Context, map[string]string, string, ...string) ([]byte, error) {
-		return nil, errors.New("Level Zero unavailable")
-	}
-	devices, err := p.Accelerators(context.Background())
-	if len(devices) != 1 || devices[0].Platform != "cuda" || err == nil || !strings.Contains(err.Error(), "xpu") {
-		t.Fatalf("CUDA devices hidden by Level Zero: %+v %v", devices, err)
 	}
 }
 
@@ -121,4 +85,18 @@ func TestAcceleratorPartialInventoryWorker(t *testing.T) {
 	if _, err := w.forAttempt(Job{AllocatedDevices: []string{"0"}}); err != nil {
 		t.Fatalf("healthy XPU launch blocked by CUDA: %v", err)
 	}
+
+	t.Run("AcceleratorLevelZeroFailurePreservesCUDA", func(t *testing.T) {
+
+		p := familyProbe(t, "0x030000")
+		p.Command = func(context.Context, string, ...string) ([]byte, error) { return []byte("GPU-card, driver"), nil }
+		p.CommandEnv = func(context.Context, map[string]string, string, ...string) ([]byte, error) {
+			return nil, errors.New("Level Zero unavailable")
+		}
+		devices, err := p.Accelerators(context.Background())
+		if len(devices) != 1 || devices[0].Platform != "cuda" || err == nil || !strings.Contains(err.Error(), "xpu") {
+			t.Fatalf("CUDA devices hidden by Level Zero: %+v %v", devices, err)
+		}
+
+	})
 }

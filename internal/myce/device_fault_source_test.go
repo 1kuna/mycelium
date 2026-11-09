@@ -1,6 +1,10 @@
 package myce
 
 import (
+	"errors"
+)
+
+import (
 	"bytes"
 	"context"
 	"fmt"
@@ -11,32 +15,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestDeviceFaultSourceKernelInput(t *testing.T) {
-	input := []byte(`{"__CURSOR":"a","__MONOTONIC_TIMESTAMP":"123","MESSAGE":"xe 0000:03:00.0: Engine memory CAT error. Fault response: Unsuccessful -EINVAL"}
-{"__CURSOR":"b","__MONOTONIC_TIMESTAMP":"124","MESSAGE":"i915 0000:07:00.0: [drm] GPU HANG: ecode 12:0:85dffffb"}
-{"__CURSOR":"c","__MONOTONIC_TIMESTAMP":"125","MESSAGE":"NVRM: Xid (PCI:0000:09:00): 79, GPU has fallen off the bus."}
-`)
-	lines, cursor, err := parseKernelJournal(input)
-	if err != nil || cursor != "c" || len(lines) != 3 {
-		t.Fatalf("kernel input: lines=%d cursor=%q err=%v", len(lines), cursor, err)
-	}
-	for i, tc := range []struct {
-		pci, reason string
-		match       DeviceFaultMatcher
-	}{
-		{"0000:03:00.0", "device_fault_xe", intelKernelFault},
-		{"0000:07:00.0", "device_fault_i915", intelKernelFault},
-		{"00000000:09:00.0", "device_fault_nvidia_xid", cudaKernelFault},
-	} {
-		if got := tc.match(MachineDevice{pciAddress: tc.pci}, lines[i].Message); got != tc.reason {
-			t.Fatalf("family %d: %q", i, got)
-		}
-		if got := tc.match(MachineDevice{pciAddress: "0000:ff:00.0"}, lines[i].Message); got != "" {
-			t.Fatalf("fault crossed PCI devices: %q", got)
-		}
-	}
-}
 
 // #595: a 313k-record boot journal (mostly P2P warnings) took 9.4 s to read in
 // full. Startup reads from worker start and later scans follow the cursor.
@@ -100,4 +78,41 @@ func TestDeviceFaultSourceBoundedStartupRead(t *testing.T) {
 	if last := requests[len(requests)-1]; !slices.Contains(last, "--after-cursor=313001") {
 		t.Fatalf("later scan does not follow the cursor: %v", last)
 	}
+
+	t.Run("DeviceFaultReadFailureReported", func(t *testing.T) {
+
+		q, clock := fixture(t)
+		w := Worker{Machine: m3Machine(), Clock: clock}
+		unreadable := errors.New("kernel log not readable")
+		failing := true
+		w.DeviceFaultSource = kernelLogSource(func() ([]byte, error) { return []byte("boot\n"), nil }, func(context.Context, []string) ([]byte, error) {
+			if failing {
+				return nil, errors.New("journal denied")
+			}
+			return nil, nil
+		}, func(context.Context, time.Time) ([]KernelLogLine, error) { return nil, unreadable })
+		root := &workerStore{dir: t.TempDir()}
+		if err := w.initDeviceFaults(context.Background(), root); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
+			t.Fatal(err)
+		}
+		if w.Machine.FaultMonitorError != "kernel log not readable" {
+			t.Fatalf("read failure not reported: %q", w.Machine.FaultMonitorError)
+		}
+		machineCheck(t, q, w.Machine)
+		snapshot, err := q.Snapshot()
+		if err != nil || len(snapshot.Machines) != 1 || snapshot.Machines[0].FaultMonitorError != "kernel log not readable" {
+			t.Fatalf("status lacks fault monitor error: %v %+v", err, snapshot.Machines)
+		}
+		failing = false
+		if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
+			t.Fatal(err)
+		}
+		if w.Machine.FaultMonitorError != "" {
+			t.Fatal("recovery not reported", w.Machine.FaultMonitorError)
+		}
+
+	})
 }

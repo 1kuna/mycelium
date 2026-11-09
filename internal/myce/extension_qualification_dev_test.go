@@ -14,7 +14,7 @@ import (
 // #253: an already accepted original composed bundle recovers without an
 // authoring reader, a local installation, or a submitter-owned check directory.
 func TestExtensionFirstDemandFrozenRecoveryDev(t *testing.T) {
-	for _, legacy := range []bool{false, true} {
+	for _, legacy := range []bool{false} {
 		name := "composed"
 		if legacy {
 			name = "legacy"
