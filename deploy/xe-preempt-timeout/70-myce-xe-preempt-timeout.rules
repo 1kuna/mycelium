@@ -1,0 +1,2 @@
+# Metadata only: systemd applies the setting outside device-event processing.
+ACTION=="add", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNEL!="card[0-9]*-*", DRIVERS=="xe", TAG+="systemd", ENV{SYSTEMD_WANTS}+="myce-xe-preempt-timeout@%k.service"

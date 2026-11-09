@@ -204,3 +204,32 @@ host. Exclude the activation window from steady-state rates and compare similar
 occupancy. Expected evidence is fewer enumeration/memory helpers and fewer
 warnings without stale data granting sharing. A warning-rate reduction alone
 does not establish the cause of compute timeouts; track those independently.
+
+## Optional xe CCS preemption timeout
+
+The optional [host template](../deploy/xe-preempt-timeout/README.md) persists an
+explicitly configured CCS `preempt_timeout_us` across boot and xe device adds,
+using a metadata-only udev rule that requests a bounded per-card systemd
+oneshot, plus an independent boot oneshot. Udev launches no helper and does no
+sysfs/state I/O; it does not wait for application to finish. The boot
+unit is wanted by `multi-user.target`, has its own start timeout, and has no
+ordering/dependency against the worker. Nothing is added to worker startup:
+the setting matters when GPU jobs create execution queues, well after boot.
+Failures/timeouts affect the optional operation; mismatches log an explicit
+status for the operator. Uninterruptible kernel stalls cannot be cured by a
+process timeout. The template is disabled by default (no writes), is installed
+manually, and can restore recorded prior values and be removed. It never
+changes job timeouts or timeslices.
+
+Evidence status: raising 640000 to 1280000 microseconds is a **diagnostic trial**
+for observed GuC preemption timeouts/engine resets on Intel Arc Pro B70 with xe
+and Linux 7.0, not a vendor-validated setting or established fix. Confirmation
+batch results and native boot/hotplug proof are still required before separate
+authorization to apply it. A hung context can take up to an extra **0.64 seconds**
+to reset, delaying recovery. Newly created GPU execution queues inherit the
+value; existing queues retain their old value, including during rollback.
+
+The template's README contains installation, direct sysfs/journal verification,
+prior-value (or explicit 640000) rollback, uninstall and laptop fake-sysfs tests.
+The live sysfs bound names and validation follow Linux 7.0's
+[`xe_hw_engine_class_sysfs.c`](https://github.com/torvalds/linux/blob/v7.0/drivers/gpu/drm/xe/xe_hw_engine_class_sysfs.c).
