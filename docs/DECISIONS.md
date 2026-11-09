@@ -18,6 +18,22 @@ Reviewed: 2026-11-09 (MY-37). Owner: project maintainer. This records sanitized 
   fleet-gate merge requirement for Mycelium development. Independent review,
   real race coverage, custody and native platform proof remain required.
 
+- **MY-38 — 2026-11-09 — Prioritize fast local iteration when updating gate admission.**
+  Zach: “if you need to pause the queue to update and make iteration faster i'd
+  prefer you did that rather than just constantly waiting. us being able to
+  iterate fast matters much more”. Source: Zach's direct instruction to the
+  Mycelium orchestrator, recorded in
+  [#1086](https://github.com/1kuna/mycelium/issues/1086#issuecomment-6744617550).
+  Received by the local gate implementation worker. Orchestrator interpretation
+  (not Zach's words): this authority covers only the local development gate
+  queue. It may be paused or drained, and never-admitted waiters may be cancelled
+  and restarted with current helpers. Admitted and unknown execution custody
+  is never cleared; an admitted run may be cancelled only through supported gate
+  cancellation and must be restarted immediately. Other projects' fleet work
+  is never held. Release-critical work keeps priority, and each restarted
+  waiter receives its replacement receipt on its PR. This supersedes the earlier
+  orchestrator default to drain older waiters naturally before reactivation.
+
 - **Orchestrator default (not a maintainer ruling), 2026-11-09 — Measured local admission.**
   Received by the local-runner worker after calibration: admit fulls from
   measured per-leg CPU/RAM and live host capacity rather than fixed N=1;
