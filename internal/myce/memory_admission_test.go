@@ -33,7 +33,10 @@ func TestMemoryAdmissionPreservesCancelledOwnerThroughDeadline(t *testing.T) {
 	}
 	s := cpuSpec(1, 21.3)
 	s.Priority = "production"
-	s.StartWindow = "10m"
+	// Relative startup windows now pause for capacity waiting. An explicit
+	// absolute cutoff still fails and must preserve the blocking evidence.
+	cutoff := clock.Now().Add(10 * time.Minute)
+	s.StartBy = &cutoff
 	// Non-resumable work remains resident. A reservation cannot grant its RAM.
 	queued := submit(t, q, s)
 	if _, err := q.CreateReservation(reservationRequest("validation", "host="+m.HostID, queued.ID)); err != nil {

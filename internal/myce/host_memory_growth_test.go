@@ -312,9 +312,14 @@ func TestHostMemoryProbeForecastCannotExceedEnforcedCeiling(t *testing.T) {
 			}
 			// Cancellation cannot discard custody or acquire reduced probe credit.
 			j.State = "stopping"
-			stopped, _ := jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
-			if stopped < ceiling || enforced && stopped != ceiling {
+			stopped, pending := jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+			if stopped < ceiling || enforced && pending > ceiling {
 				t.Fatal("stopping probe lost full charge", stopped)
+			}
+			clock.Advance(hostMemorySampleFreshFor)
+			stopped, pending = jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+			if stopped < ceiling || pending < ceiling {
+				t.Fatal("stale stopping probe lost custody", stopped, pending)
 			}
 		})
 	}
@@ -347,8 +352,8 @@ func TestHostMemoryDeclaredGrowthBoundedByHardContainment(t *testing.T) {
 			clock.Advance(time.Second)
 			m.HostAvailableMemoryGB = 18.939971923828125
 			reports := []AttemptReport{
-				{Execution: Execution{ID: first.ID, Attempt: first.Attempt}, Session: first.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: .4, GrowthGB: 10}},
-				{Execution: Execution{ID: second.ID, Attempt: second.Attempt}, Session: second.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: .6, GrowthGB: 14}},
+				{Execution: Execution{ID: first.ID, Attempt: first.Attempt}, Session: first.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{SampleID: 1, NonreclaimableGB: .4, GrowthGB: 10}},
+				{Execution: Execution{ID: second.ID, Attempt: second.Attempt}, Session: second.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{SampleID: 1, NonreclaimableGB: .6, GrowthGB: 14}},
 			}
 			if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports}); err != nil {
 				t.Fatal(err)
