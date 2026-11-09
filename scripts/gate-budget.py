@@ -272,7 +272,8 @@ def main():
     # The repository's two-suite safety rule is specific to Macs. Linux fleet
     # jobs are already admitted against declared CPU and learned host memory;
     # an additional fixed suite count would strand those allocated resources.
-    slot = acquire_full_slot() if mode == 'full' and sys.platform == 'darwin' else None
+    slot = acquire_full_slot() if (mode == 'full' and sys.platform == 'darwin'
+                                   and os.environ.get('GATE_LOCAL_CAPACITY_HELD') != '1') else None
     root = Path(sys.argv[1]).resolve().parent.parent / '.gate'
     root.mkdir(exist_ok=True)
     scratch = tempfile.mkdtemp(prefix='run.', dir=root)
@@ -301,8 +302,7 @@ def main():
             remove_scratch(scratch)
         else:
             print(f'gate scratch retained: {scratch}', file=sys.stderr)
-            if status == 0:
-                status = 1
+            status = 125  # Unconfirmed custody prevents capacity reuse.
         if slot is not None:
             release_full_slot(slot, stopped)
         print(f'gate {mode}: exit={status} wall={int(time.monotonic() - started)}s', flush=True)

@@ -1,8 +1,23 @@
 # Decisions
 
-Reviewed: 2026-11-08 (MY-36). Owner: project maintainer. This records sanitized rulings; [the approved design](design-proposal.md) remains the only product spec. Dates identify the original rulings, not new qualification. Exact source records and deployment facts remain in private local history.
+Reviewed: 2026-11-09 (MY-37). Owner: project maintainer. This records sanitized rulings; [the approved design](design-proposal.md) remains the only product spec. Dates identify the original rulings, not new qualification. Exact source records and deployment facts remain in private local history.
 
 ## Current rulings
+
+- **MY-37 — 2026-11-09 — Local development must not depend on fleet availability.**
+  Most Mycelium development should run on the 64 GB development host. Zach:
+  “Most, if not all, mycelium development should be able to occur” on that host;
+  “And iteration should not be dependent on the availability of the nodes. It
+  should just be dependent on the host machine that's being used for development.”
+  Source: Zach's direct instruction, relayed by the Mycelium orchestrator in
+  [#1086](https://github.com/1kuna/mycelium/issues/1086), received by the local-runner
+  and test-speed workers. Quick/full gates run Darwin natively and Linux in a
+  directly invoked local VM, with persistent caches, idle cache trimming,
+  disk floors and measured capacity admission. Fleet gates are optional extra
+  evidence. Supersedes the 2026-11-03 fleet-only gate location and exact-head
+  fleet-gate merge requirement for Mycelium development. Independent review,
+  real race coverage, custody and native platform proof remain required.
+
 
 - **MY-36 — 2026-11-08 — Stage every NAS input locally before processing.** The default for every NAS input, whatever its size, is a transfer to the executing machine's local disk before processing. Processing must use that local copy so its bottleneck is local compute and local benchmarks remain meaningful. Source: maintainer, 2026-11-08, relayed by the Mycelium orchestrator and recorded on [#1061](https://github.com/1kuna/mycelium/issues/1061), verbatim: “i think any files should transfer to the machines it's being processed on from the nas because processing bottleneck shouldn't be network because then local benchmarks become entirely irrelevant.” This widens #1061 from large files to all input files. Agent implementation boundary: existing declared shared and job-file inputs can stage automatically; raw paths embedded in payload code are undeclared and need an input declaration/local path. Mutable checkpoint saves retain their separate durability and custody contract; this ruling does not authorize silently treating mutable checkpoint state as an immutable cache entry. MY-34 governs headroom, eviction and recovery; no size threshold selects local staging.
 

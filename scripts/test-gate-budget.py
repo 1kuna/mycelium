@@ -168,7 +168,7 @@ class GateBudgetTests(unittest.TestCase):
                           patch.object(budget, 'stop_fixtures', return_value=False),
                           contextlib.redirect_stdout(io.StringIO()),
                           contextlib.redirect_stderr(io.StringIO())):
-                        self.assertEqual(budget.main(), 1)
+                        self.assertEqual(budget.main(), 125)
                     self.assertTrue(first.closed)
                     with patch.object(budget.time, 'sleep', side_effect=RuntimeError('blocked')):
                         with self.assertRaisesRegex(RuntimeError, 'blocked'):
@@ -312,10 +312,10 @@ elif args[0] == 'test':
                   patch.dict(os.environ, env),
                   patch.object(os, 'kill', wraps=real_kill) as kill,
                   contextlib.redirect_stdout(output), contextlib.redirect_stderr(output)):
-                self.assertEqual(budget.main(), 1)
+                self.assertEqual(budget.main(), 125)
             self.assertLess(time.monotonic() - started, 10)
             self.assertIn('fixture inventory failed; scratch retained', output.getvalue())
-            self.assertIn('gate quick: exit=1', output.getvalue())
+            self.assertIn('gate quick: exit=125', output.getvalue())
             self.assertEqual(len(list((root / '.gate').iterdir())), 1)
             self.assertEqual(kill.call_count, 1)  # Only the stuck probe.
             self.assertEqual(kill.call_args.args,

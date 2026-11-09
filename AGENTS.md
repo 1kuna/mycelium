@@ -40,25 +40,26 @@
 ```sh
 ./scripts/gate.sh quick BASE   # per change (default); build, vet, targets, related race tests
 ./scripts/gate.sh full         # once per batch before a fleet deploy; dev e2e + one race suite
-myce run --profile gate-quick --input gate-selection.tsv=FILE  # quick on a fleet CPU host, not the T3 Mac; docs/development.md
 ./myce dev # long-running local API and fake workers; Ctrl-C to stop
 ```
 
-Hotfix: quick, deploy, then full, fixing forward. Run full gates on the fleet
-(`myce run --profile gate-full`, or `gate-full-darwin`), not on the T3 Mac: local
-full gates there fill its shared Go build cache and disk, which blocks other work
-on that host (2026-11-03). At most two full race suites at
-once on one Mac (more causes false failures). Details: `docs/development.md`.
+Quick and full gates run on the development host: Darwin natively and Linux
+inside the local VM invoked by the gate. Fleet gates are optional extra evidence.
+Hotfix: quick, deploy, then full, fixing forward. The 2026-11-02/03 local cache
+and disk saturation incident is mitigated by persistent gate-owned caches,
+automatic idle cache trimming, a 45 GiB entry/42 GiB stop floor and capacity-aware
+admission; preserve other owners' slots. Full concurrency stays at one until
+measured; release builds take the next free lane. Details: `docs/development.md`.
 
 Test behavior, security invariants and real incidents; add a focused regression
 per observed bug. No speculative edge-case matrices, implementation-detail pins,
 duplicate journeys or process self-audits (maintainer, 2026-10-22). Native GPU/daemon/identity/boot checks are separate
 from laptop proof; see `docs/development.md`.
 
-Before merging, follow `docs/development.md#automatic-main-full-gates`: require
-independent review and the PR's exact-head fleet full gate (quick for docs-only),
-inspect main's latest completed run, and fix red or missing runs forward. Queued
-or running main CI does not block; the sequential runner can lag behind merges.
+Before merging, follow `docs/development.md#local-merge-proof`: require independent
+review and the PR's exact-head local full gate (quick for docs-only). Fleet gates
+and automatic main runs provide optional extra evidence; node availability does
+not gate development or merges. Inspect known failures and fix new failures forward.
 
 Stage explicit paths and commit completed changes; push your own branches.
 Tested fixes deploy to the fleet without a separate task (MY-28, MY-32, MY-33):

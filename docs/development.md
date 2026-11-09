@@ -11,11 +11,26 @@ contracts, with unsupported/native gaps explicit.
 Quick defaults to the merge base of the current branch and `origin/main`;
 pass an ancestor `BASE` explicitly to check a wider batch. Every supplied ref
 is reduced to its merge base with `HEAD`, so a moving `origin/main` never
-selects unrelated changes that landed after the branch diverged. Known heavy
-runs use the project's Mycelium submission path. Inspect host load/memory/disk
-before local heavy work; do not exceed two full race suites on one Mac.
+selects unrelated changes that landed after the branch diverged. Development gates run directly on the development host, independently of fleet
+nodes and queue availability. On Darwin, the default gate includes native Darwin
+and a directly invoked local Linux VM. Inspect load/memory/disk before heavy work;
+use the capacity admission below rather than creating additional test processes.
 
 ## Laptop test gates
+
+On the 64 GB development host, install Lima and prepare the local Linux VM once
+using [local gate setup](#local-linux-vm). Then the normal commands prove both
+platforms without `myce run` or fleet credentials:
+
+```sh
+./scripts/gate.sh quick
+./scripts/gate.sh full
+```
+
+`GATE_TARGET=native` runs only the current OS, including inside fleet profiles.
+Use it for focused diagnosis or a separately owned baseline; record that it is
+partial platform proof. On Linux, the gate runs natively. Darwin CGO still needs
+a native Mac toolchain.
 
 Run `./scripts/gate.sh` (or `./scripts/gate.sh quick BASE`) for a change. The
 base defaults to the branch merge base with `origin/main`; an explicit ref
@@ -107,6 +122,23 @@ workspace, which is deleted on exit because it holds only rebuildable test state
 Failure logs belong in an
 ignored `.reports/` folder (for example redirect stdout/stderr there).
 
+Local development admission uses an atomic directory per heavy run, shared
+across Git worktrees. It recognizes both existing `local-go-slot` lanes and
+preserves unknown/abandoned ownership. Full runs remain serialized until measured
+capacity is recorded; two heavy lanes permit a release build alongside diagnosis.
+Release waiters take the next free lane. A run needs 45 GiB disk free at entry;
+the measurement supervisor stops its owned gate below 42 GiB and retains capacity
+if fixture cleanup is uncertain. These floors preserve room for the workstation
+and recovery after the 2026-11-02/03 saturation incident.
+
+Darwin development uses a gate-owned Go build cache shared across checkouts.
+Only idle gate-owned build objects are automatically evicted above 12 GiB;
+module downloads, compatibility sources and timing history are retained. Linux
+uses persistent guest build/module caches and the same idle eviction policy.
+No other project's cache is trimmed. The ceiling is an initial storage budget,
+not a measured per-run peak; `.reports/gate-local.jsonl` records actual growth.
+
+Native-only legacy/fleet Mac gates retain the following custody mechanism.
 On macOS, the full supervisor holds one of two cross-checkout filesystem locks
 for its entire lifetime, independent of package commands or test expressions. It also
 accounts for older standalone full race commands before entering a slot. The
@@ -404,6 +436,50 @@ Retain the other profile fields, then submit with
 `myce run --profile .reports/go-test-darwin.yaml -- -race ./...` from the repo root.
 Use separate submissions with distinct target lists for cross-platform proof.
 
+## Local Linux VM
+
+Install `lima` through Homebrew. This headless Ubuntu VM uses Apple's native
+virtualization, needs no Docker Desktop UI and can be stopped without changing
+fleet services:
+
+```sh
+limactl create --name=mycelium-gates --vm-type=vz --cpus=8 --memory=24 --disk=100 \
+  --mount-none --containerd=none --rosetta=false --tty=false template:ubuntu-24.04
+limactl start --tty=false mycelium-gates
+limactl autostart enable --condition=login mycelium-gates
+```
+
+The 100 GiB disk is sparse. Provision Go 1.25.6+, GCC, Git, Python 3, uv and
+`uv python install 3.11` inside the VM; install Docker separately for real-daemon
+focused tests. Follow upstream checksum verification for the Go archive.
+The VM receives a snapshot of tracked and unignored source files, including
+uncommitted edits; host HOME/NAS directories are not mounted. Compilation and
+fixture I/O use the guest-native filesystem. Persistent guest caches are
+`~/.cache/mycelium-gates/go-build` and `~/.cache/mycelium-gates/go-mod`.
+Preparation downloads dependencies before the offline gate. `GATE_VM` selects a
+separately provisioned Lima instance. The initial gate CPU budget is four cores
+per platform leg; the wrapper runs the legs sequentially pending capacity proof.
+
+For a focused command in the same VM, retain your local admission slot and use:
+
+```sh
+python3 scripts/gate-linux.py -- python3 scripts/gate-budget.py \
+  scripts/gate-command.sh go test -race -count=1 ./internal/myce -run '^TestName$'
+```
+
+`--repo DIR` selects another checkout; `--ref SHA` uses its committed bytes.
+Instrumentation helpers are added separately; product/test sources stay at that
+revision. Failed source snapshots are retained for diagnosis; confirm guest
+fixture exit before removing them. Gate logs remain local. The JSONL measurement
+records wall/user/system seconds, sampled RSS sum (shared pages may count twice),
+disk/cache deltas and foreground process-launch latency. That latency is a
+workstation responsiveness proxy, not a UI latency guarantee.
+
+Stop with `limactl stop mycelium-gates`; disable login startup with
+`limactl autostart disable mycelium-gates`. Before deletion, verify no guest work
+or unique evidence remains. `limactl delete mycelium-gates` removes its disk and
+caches. The existing native Mycelium worker and live fleet policy are independent.
+
 ## Fan-out burst acceptance
 
 Run the real `myce dev` runtime burst separately from race instrumentation:
@@ -498,10 +574,16 @@ used the previous declarations. Cost: two persistent runner installations, works
 submitter/wait processes, plus overlapping gate demand within ordinary Mycelium
 admission; gate resources, test coverage and result acceptance stay the same.
 
-**Before merging, require the PR's exact-head fleet full gate and independent
-review**, then inspect main's workflow records and latest *completed* `main-full`
-run, including its head SHA. For a docs-only change, a passing exact-head fleet
-quick gate is sufficient in place of full.
+### Local merge proof
+
+**Before merging, require the PR's exact-head local full gate and independent
+review.** On the development Mac, the full command proves Darwin natively and
+Linux in the local VM. A passing exact-head local quick gate is sufficient for
+docs-only changes. Fleet gates and automatic main runs are optional additional
+evidence: their queue, worker availability or backlog must not hold local
+iteration or an otherwise proven merge. Preserve the recorded result and source
+SHA; acceptance is the gate verdict, not successful process launch.
+
 The [2026-11-07 orchestrator default](DECISIONS.md#current-rulings) permits
 unrelated merges despite known, owned test failures or known six-hour main-run
 capacity cancellations when every other test passes without race or panic; the
@@ -516,15 +598,11 @@ gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main \
   --status completed --limit 1 --json headSha,status,conclusion,url
 ```
 
-Queued or running main runs do not block a merge, and completed proof need not
-match current main: shared fleet gates can lag behind frequent merges.
-The next merging worker inspects a red completed run's platform summaries,
-Mycelium job IDs and logs, then fixes its failures forward before unrelated
-merges. A reviewed fix with its own passing gate may merge while main is red;
-if the fix is already merged, record the failing test and the merged fix as
-resolution evidence instead of waiting for the backlog to reach it. A merge with
-no workflow run at all is a missing-run defect for that worker to repair, not
-passing evidence. Inspect cancelled runs for interrupted proof as well.
+Queued, missing or running main fleet runs do not block a merge with local proof.
+Inspect completed failures when relevant and fix new failures forward; record an
+owned known failure rather than weakening its assertions. A missing automatic
+run is a CI defect to repair, not failed local proof. Automatic CI remains once
+per main push and is not a prerequisite for the next change.
 
 Source: the maintainer's global CI rule, relayed in the 2026-11-04 merge-guidance
 assignment. CI remains once per merge on self-hosted fleet runners; agents do
