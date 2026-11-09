@@ -163,7 +163,7 @@ work. Critical/unknown pressure, actual swap growth and the disk floors still
 stop work. Quick and focused requests can use a separate
 `quick_memory_measurement` containing digest-bound successful quick observations
 and their maximum `peak_bytes`. The development-host observations peak at
-2.78 GiB across 37 successful quick phase records, versus 7.01 GiB for fulls.
+2.78 GiB across 39 successful quick phase records, versus 7.01 GiB for fulls.
 Native quick charges that measured peak plus shared host headroom; Linux also
 charges measured VM residency. Live available memory already reflects other
 running processes, so quick does not charge their entire peaks again. This
