@@ -105,6 +105,9 @@ step gate-progress-regressions python3 scripts/test-gate-progress.py
 if [[ -f scripts/test-gate-local.py ]]; then
   step gate-local-regressions python3 scripts/test-gate-local.py
 fi
+if [[ -f scripts/test-gate-reconcile.py ]]; then
+  step gate-reconcile-regressions python3 scripts/test-gate-reconcile.py
+fi
 step gate-scheduler-regressions python3 scripts/test-gate-scheduler.py
 if [[ -f scripts/test-gate-shards.py ]]; then
   step gate-shards-regressions python3 scripts/test-gate-shards.py

@@ -36,7 +36,7 @@ class GateBudgetTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         for name in ('GATE_LOCAL_SLOT', 'GATE_LOCAL_SLOT_ID', 'MYCE_GATE_BUDGET',
                      'GATE_SCRATCH', 'GATE_RUN_ID', 'GATE_CLEANUP_ID',
-                     'GATE_CLEANUP_RECEIPT'):
+                     'GATE_CLEANUP_RECEIPT', 'GATE_EXECUTION_CUSTODY', 'GATE_CUSTODY_ID'):
             os.environ.pop(name, None)
 
     def test_native_only_full_obeys_resource_group_but_fleet_remains_background(self):
@@ -107,6 +107,51 @@ class GateBudgetTests(unittest.TestCase):
                 (lane / 'owner.json').write_text(json.dumps(owner))
                 with self.assertRaisesRegex(RuntimeError, 'identity'):
                     budget.local_resource_admission()
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'native measured admission')
+    def test_measured_identity_launches_and_cleans_payload_without_signalling_supervisor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            source = root / 'source'
+            (source / 'scripts').mkdir(parents=True)
+            control = root / '.cache/mycelium-gates/control'
+            lane = control / 'local-go-slot-3'
+            lane.mkdir(parents=True)
+            marker = 'a' * 32
+            scratch = source / '.gate' / ('run.' + marker)
+            owner = dict(admission_protocol=2, resource_group='b' * 32,
+                         admission_config_sha256='c' * 64, run_id='d' * 32,
+                         source_root=str(source), pid=os.getpid(), run_marker=marker,
+                         process_identity='fixture-owner', scratch=str(scratch))
+            (lane / 'owner.json').write_text(json.dumps(owner))
+            (control / 'local-go-resource-group.custody').write_text(json.dumps(
+                dict(admission_protocol=2, resource_group='b' * 32, admission_config_sha256='c' * 64)))
+            for name in ('local-go-slot', 'local-go-slot-2'):
+                (control / name).mkdir()
+                (control / name / 'owner.json').write_text(json.dumps(
+                    dict(protocol_guard=True, resource_group='b' * 32)))
+            gate = source / 'scripts/payload.sh'
+            gate.write_text('set -eu\n'
+                'test -z "${GATE_EXECUTION_CUSTODY:-}"\n'
+                'test -z "${GATE_CUSTODY_ID:-}"\n'
+                f'test "$GATE_RUN_ID" = {marker}\n'
+                f'echo ran > {shlex.quote(str(root / "ran"))}\n')
+            receipt, journal = root / 'cleanup.json', root / 'native-custody.json'
+            env = dict(os.environ, HOME=str(root), GATE_LOCAL_SLOT=str(lane),
+                       GATE_LOCAL_SLOT_ID='d' * 32, GATE_CUSTODY_ID=marker,
+                       GATE_CLEANUP_ID='e' * 32, GATE_CLEANUP_RECEIPT=str(receipt),
+                       GATE_EXECUTION_CUSTODY=str(journal))
+            result = subprocess.run([sys.executable, budget.__file__, str(gate)], cwd=source,
+                                    env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((root / 'ran').exists())
+            self.assertTrue(json.loads(receipt.read_text())['stopped'])
+            custody = json.loads(journal.read_text())
+            self.assertEqual(custody['run_marker'], marker)
+            self.assertEqual(custody['scratch'], str(scratch))
+            self.assertTrue(custody['supervisors'][0]['process_identity'])
+            self.assertFalse(scratch.exists())
+            self.assertEqual(json.loads((lane / 'owner.json').read_text()), owner)
 
     def test_abandoned_slots_reconcile_but_live_fixtures_keep_custody(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -536,16 +581,18 @@ with patch.object(subprocess.Popen, 'wait', wait):
             (root / "scripts/gate-related.py").write_text("")
             go = root / "bin/go"
             go.write_text(f'''#!{sys.executable}
-import signal, sys
+import os, signal, sys, time
 from pathlib import Path
 if sys.argv[1] == "env":
     print({str(root)!r})
 else:
-    Path({str(root / 'ready')!r}).touch()
+    Path({str(root / 'ready')!r}).write_text(str(os.getpid()))
+    signal.signal(signal.SIGTERM, lambda *_: time.sleep(.3))
     signal.pause()
 ''')
             go.chmod(0o755)
-            env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"])
+            env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+                       MYCE_PROCESS_SESSION="1")
             env.pop("MYCE_GATE_BUDGET", None)
             env["GATE_SCRATCH"] = str(root / "scratch")
             (root / "scratch").mkdir()
@@ -554,10 +601,13 @@ else:
                 stub = root / "bin" / name
                 stub.write_text("#!/bin/sh\n" + body + "\n")
                 stub.chmod(0o755)
-            for budgeted in (False, True):
-                with self.subTest(budgeted=budgeted):
+            for budgeted, repeated in ((False, False), (False, True), (True, False)):
+                with self.subTest(budgeted=budgeted, repeated=repeated):
                     ready = root / "ready"
                     ready.unlink(missing_ok=True)
+                    receipt = root / 'cleanup.json'
+                    receipt.unlink(missing_ok=True)
+                    env.update(GATE_CLEANUP_RECEIPT=str(receipt), GATE_CLEANUP_ID='termination-fixture')
                     if budgeted:
                         # Trigger the production timeout branch once the fake build
                         # is ready, without changing the production budget.
@@ -592,17 +642,34 @@ with patch.object(subprocess.Popen, "wait", wait):
                                     self.fail("fake build did not start")
                                 time.sleep(.01)
                             child.terminate()
+                            if repeated:
+                                time.sleep(.05)  # Independent host/native guard observations.
+                                child.terminate()
                         output, _ = child.communicate(timeout=15)
                         self.assertEqual(child.returncode, expected, output)
                         self.assertNotIn("exit=0", output)
                         mode = "quick" if budgeted else "full"
                         self.assertIn(f"gate {mode}: exit={expected}", output)
+                        self.assertEqual(json.loads(receipt.read_text()),
+                                         dict(schema=1, identity='termination-fixture',
+                                              stopped=True, status=expected))
                         if budgeted:
                             self.assertIn("exit=124", output)
                     finally:
-                        if child.poll() is None:
+                        # Every fixture shares our explicitly owned session.
+                        # A deliberately broken cleanup must not strand a shell
+                        # that starts the next fake command after its Go exits.
+                        try:
                             os.killpg(child.pid, signal.SIGKILL)
-                            child.communicate()
+                        except ProcessLookupError:
+                            pass
+                        child.communicate()
+                        if ready.exists():
+                            fixture_pid = int(ready.read_text())
+                            probe = subprocess.run(['ps', '-p', str(fixture_pid), '-o', 'args='],
+                                                   capture_output=True, text=True)
+                            if str(go) in probe.stdout:
+                                os.kill(fixture_pid, signal.SIGKILL)
 
 
 if __name__ == "__main__":

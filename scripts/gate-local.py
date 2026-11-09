@@ -119,10 +119,14 @@ def execute(path):
         if manifest['platform'] != 'linux':
             native_id = uuid.uuid4().hex
             native_receipt = folder / 'native-cleanup.json'
-            native_env = dict(env, GATE_CLEANUP_ID=native_id, GATE_CLEANUP_RECEIPT=str(native_receipt))
+            native_env = dict(env, GATE_CLEANUP_ID=native_id, GATE_CLEANUP_RECEIPT=str(native_receipt),
+                              GATE_EXECUTION_CUSTODY=str(folder / 'native-custody.json'))
             if manifest.get('capacity_owner', {}).get('admission_protocol') == 2:
                 native_env.update(GATE_LOCAL_SLOT=manifest['capacity_slot'],
                                   GATE_LOCAL_SLOT_ID=manifest['capacity_owner']['run_id'])
+                marker = manifest['capacity_owner'].get('run_marker')
+                if marker:
+                    native_env.update(GATE_CUSTODY_ID=marker, GATE_SCRATCH=manifest['capacity_owner']['scratch'])
             mode = manifest['mode']
             payload = manifest['command'] or ['bash', 'scripts/gate-leg.sh', mode]
             if not manifest['command'] and mode == 'quick':
@@ -140,6 +144,9 @@ def execute(path):
                 return status
         linux_id = uuid.uuid4().hex
         linux_receipt = folder / 'linux-cleanup.json'
+        receipts.publish(folder / 'linux-custody.json', linux_id, stopped=False, status=125,
+                         vm=env.get('GATE_VM', 'mycelium-gates'),
+                         source_info=json.loads(info.read_text()))
         linux = [sys.executable, str(REPO / 'scripts/gate-linux.py'), '--archive', str(runtime),
                  '--report', str(report), '--cleanup-receipt', str(linux_receipt),
                  '--cleanup-id', linux_id, '--cores', str(manifest['cores']),
@@ -191,9 +198,15 @@ def main():
     parser.add_argument('--after-pid', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--command', nargs=argparse.REMAINDER, default=[])
     parser.add_argument('--execute', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--reconcile', type=Path, nargs='+', metavar='RECEIPT',
+                        help='verify abandoned measured custody and archive it without deleting scratch')
     args = parser.parse_args()
     if args.execute:
         return execute(args.execute)
+    if args.reconcile:
+        result = module('gate-reconcile').reconcile(args.reconcile, args.repo.resolve())
+        print('local gate reconciliation:', json.dumps(result), flush=True)
+        return 0
     if args.after_pid and args.priority != 'calibration':
         parser.error('--after-pid is only for the reserved calibration full')
     repo = args.repo.resolve()
@@ -233,6 +246,8 @@ def main():
             if not others and not legacy and not capacity.native_full_custody(include_fleet=True):
                 trim_cache(cache)
         env = dict(os.environ, GOCACHE=str(cache))
+        if slot.owner.get('run_marker'):
+            env.update(GATE_CUSTODY_ID=slot.owner['run_marker'], GATE_SCRATCH=slot.owner['scratch'])
         command = [sys.executable, str(REPO / 'scripts/gate-measure.py'), '--report', str(report),
                    '--run-id', identity,
                    '--source-info', str(folder / 'source-identity.json'), '--mode', args.mode,

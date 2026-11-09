@@ -19,10 +19,13 @@ MACOS_HANDLE_PROBE = [sys.executable, str(Path(__file__).with_name('gate-handles
 
 
 def interrupted(signum, frame):
+    # Ignore a second guard signal before unwinding into the cleanup block.
+    for ignored in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(ignored, signal.SIG_IGN)
     raise SystemExit(128 + signum)
 
 
-def scratch_processes(scratch, pids):
+def scratch_processes(scratch, pids, all_handles=False):
     """Use OS file handles for reparented fixtures, including env -i payloads."""
     def inside(name):
         # OS handle inventories give resolved paths. Do not stat every path in
@@ -31,18 +34,29 @@ def scratch_processes(scratch, pids):
     found = set()
     if sys.platform.startswith('linux'):
         for pid in pids:
-            for entry in ('cwd', 'exe', 'fd/0', 'fd/1', 'fd/2'):
+            entries = ['cwd', 'exe', 'fd/0', 'fd/1', 'fd/2']
+            if all_handles:
+                try:
+                    entries = ['cwd', 'exe'] + [str(p.relative_to(Path('/proc') / str(pid)))
+                                                for p in (Path('/proc') / str(pid) / 'fd').iterdir()]
+                except FileNotFoundError:
+                    continue
+            for entry in entries:
                 try:
                     if inside(os.readlink(f'/proc/{pid}/{entry}')):
                         found.add(pid)
-                except (FileNotFoundError, PermissionError):
+                except FileNotFoundError:
                     pass
+                except PermissionError:
+                    if all_handles:
+                        raise
     else:
         # Apple's lsof cannot exclude network mounts, and even +D scans can
         # block on unrelated storage. libproc reads process paths directly.
         if not pids:
             return found
-        command = [*MACOS_HANDLE_PROBE, scratch, *map(str, sorted(pids))]
+        command = [*MACOS_HANDLE_PROBE, *(['--all-fds'] if all_handles else []),
+                   scratch, *map(str, sorted(pids))]
         # Keep native inspection in a bounded subprocess: an unavailable kernel
         # probe costs retained scratch, never fixture signals or deletion.
         with tempfile.TemporaryFile(mode='w+t') as output_file:
@@ -337,7 +351,7 @@ def local_resource_admission():
         pid = parents[pid]
     if pid != row['pid']:
         raise RuntimeError('local resource owner is not an execution ancestor')
-    return True
+    return row
 
 
 def main():
@@ -356,17 +370,37 @@ def main():
     slot = acquire_full_slot() if mode == 'full' and sys.platform == 'darwin' and not admitted else None
     root = Path(sys.argv[1]).resolve().parent.parent / '.gate'
     root.mkdir(exist_ok=True)
-    scratch = tempfile.mkdtemp(prefix='run.', dir=root)
-    marker = 'GATE_RUN_ID=' + uuid.uuid4().hex
+    if isinstance(admitted, dict) and admitted.get('run_marker') and admitted.get('scratch'):
+        scratch = str(root / ('run.' + admitted['run_marker']))
+        if scratch != admitted['scratch']:
+            raise RuntimeError('admitted scratch identity changed')
+        Path(scratch).mkdir(mode=0o700)
+        marker = 'GATE_RUN_ID=' + admitted['run_marker']
+    else:
+        scratch = tempfile.mkdtemp(prefix='run.', dir=root)
+        marker = 'GATE_RUN_ID=' + uuid.uuid4().hex
     if slot is not None:
         write_full_custody(slot, marker, scratch)
     child_env = dict(os.environ, MYCE_GATE_BUDGET='1', GATE_SCRATCH=scratch)
+    child_env.pop('GATE_CUSTODY_ID', None)
     child_env.pop('GATE_LOCAL_SLOT', None)
     child_env.pop('GATE_LOCAL_SLOT_ID', None)
     child_env['GATE_RUN_ID'] = marker.split('=', 1)[1]
     # Receipt authority belongs only to this supervisor, never nested fixtures.
     receipt_path = child_env.pop('GATE_CLEANUP_RECEIPT', None)
     receipt_identity = child_env.pop('GATE_CLEANUP_ID', None)
+    custody_path = child_env.pop('GATE_EXECUTION_CUSTODY', None)
+    if custody_path:
+        birth = subprocess.check_output(['ps', '-p', str(os.getpid()), '-o', 'lstart='],
+                                        text=True, env=dict(os.environ, LC_ALL='C')).strip()
+        if not birth:
+            raise RuntimeError('budget supervisor identity unavailable')
+        path = Path(custody_path)
+        pending = path.with_name(path.name + '.' + uuid.uuid4().hex)
+        pending.write_text(json.dumps(dict(schema=1, identity=receipt_identity,
+            run_marker=marker.split('=', 1)[1], scratch=scratch,
+            supervisors=[dict(pid=os.getpid(), process_identity=birth)])) + '\n')
+        pending.replace(path)
     child = subprocess.Popen(['bash', *sys.argv[1:]], env=child_env, start_new_session=not bool(os.environ.get('MYCE_PROCESS_SESSION')))
     try:
         # Per-command progress watchdogs decide stalls; no gate wall deadline.
@@ -376,6 +410,11 @@ def main():
     except (KeyboardInterrupt, SystemExit) as error:
         status = error.code if isinstance(error, SystemExit) else 130
     finally:
+        # Host and native measurement guards can deliver TERM independently.
+        # Once cleanup starts, another signal must not interrupt its custody
+        # inventory or prevent the affirmative receipt from being published.
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signum, signal.SIG_IGN)
         # Keep scratch available for TERM handlers/checkpoint saves. This also
         # catches leaked fixtures after an otherwise successful shell exit.
         try:

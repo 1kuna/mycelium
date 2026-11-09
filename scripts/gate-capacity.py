@@ -455,10 +455,13 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                                      memory_requirement_at_entry_bytes=admission_memory,
                                      host_physical_memory_bytes=host_memory)
                         if resources:
+                            marker = uuid.uuid4().hex
                             owner.update(admission_protocol=2, resource_group=group['resource_group'],
                                          admission_config_sha256=config_digest,
                                          platform=platform, peak_bytes=peak, exclusive=exclusive,
-                                         source_root=str(source_root.resolve()) if source_root else None)
+                                         source_root=str((source_root or repo).resolve()),
+                                         process_identity=process_identity(os.getpid()), run_marker=marker,
+                                         scratch=str((source_root or repo).resolve() / '.gate' / ('run.' + marker)))
                             if mode == 'full':
                                 full_marker = directory / ('local-go-full-' + owner['run_id'] + '.custody')
                         owner = json.loads(json.dumps(owner))  # Freeze observation dictionaries too.

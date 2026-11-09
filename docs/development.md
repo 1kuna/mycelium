@@ -167,6 +167,36 @@ new helpers wait for old/unknown execution owners to finish. Protocol guards
 leave only after every admitted run has affirmative cleanup. Active resource
 custody binds the normalized capacity configuration and evidence digest;
 configuration changes refuse new admission until that group has cleaned up.
+Measured owners persist the holder PID and start identity, unique run marker,
+and planned private scratch before launching work. Native supervisors and guest
+cleanup nonces are journaled separately in the run's retained receipt folder.
+Repeated termination signals cannot interrupt the budget's cleanup or its
+receipt publication.
+
+After supervisor death, use the supported zero-workload recovery command:
+
+```sh
+python3 scripts/gate-local.py --reconcile RECEIPT_FOLDER [RECEIPT_FOLDER ...]
+```
+
+It holds the host admission lock, verifies the immutable owner/full/group
+bindings and absent holder start identity, and inventories marked processes,
+known supervisors, descendants and all OS file handles over the entire retained
+source/scratch tree. Guest active markers must be empty, with a nonce-bound
+positive guest observation and matching affirmative cleanup for every guest
+leg. A second host inventory and binding check precede archiving. Bound records
+are archived under `.reconciled-UUID`; source and scratch are retained. Each
+attempt writes `reconcile-UUID.json` in the control directory, including the
+decision, proof phase and evidence. Recovery never signals another run.
+
+Only old-format records lacking all execution-identity fields may use the
+strict legacy global-quiet proof: every recorded PID number must be entirely
+absent, no host process may carry any gate marker or known gate-supervisor
+identity, the whole retained tree's OS file-handle inventory must be clean, and
+the requested batch must include a source-bound positive guest cleanup. A live
+or reused legacy PID blocks recovery. Partial identities, malformed records,
+live fixtures, incomplete inventories and any uncertainty retain occupancy;
+elapsed age never releases it. There is no force flag or scratch deletion.
 The installed local fleet worker can coexist with local gates. CPU admission
 adds the static `fleet_worker_cpu_reserve_cores` from private local gate config,
 declared local gate cores and the host-qualified workstation reserve. The

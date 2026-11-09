@@ -39,7 +39,11 @@ class FdPath(c.Structure):
     _fields_ = [('file', FileInfo), ('vnode', VnodePath)]
 
 
-def inventory(scratch, pids):
+class Descriptor(c.Structure):
+    _fields_ = [('number', c.c_int32), ('kind', c.c_uint32)]
+
+
+def inventory(scratch, pids, all_fds=False):
     lib = c.CDLL('/usr/lib/libproc.dylib', use_errno=True)
     lib.proc_pidinfo.argtypes = [c.c_int, c.c_int, c.c_uint64, c.c_void_p, c.c_int]
     lib.proc_pidfdinfo.argtypes = [c.c_int, c.c_int, c.c_int, c.c_void_p, c.c_int]
@@ -53,7 +57,9 @@ def inventory(scratch, pids):
         # Non-vnode descriptors (pipes, sockets) have no file path to inspect.
         gone = {errno.ESRCH, errno.ENOENT}
         if fd:
-            gone.update({errno.EBADF, errno.EINVAL, errno.ENOTSUP})
+            gone.add(errno.EBADF)
+            if not all_fds:
+                gone.update({errno.EINVAL, errno.ENOTSUP})
         if result <= 0 and error in gone:
             return False
         raise OSError(error, 'native process path inventory failed')
@@ -70,7 +76,26 @@ def inventory(scratch, pids):
         executable = c.create_string_buffer(4096)
         if checked(lib.proc_pidpath(pid, executable, len(executable))):
             paths.append(executable.value)
-        for fd in range(3):
+        descriptors = range(3)
+        if all_fds:
+            c.set_errno(0)
+            size = lib.proc_pidinfo(pid, 1, 0, None, 0)  # PROC_PIDLISTFDS
+            if size == 0 and c.get_errno() == 0:
+                descriptors = []
+            elif not checked(size):
+                continue
+            entries = (Descriptor * (size // c.sizeof(Descriptor) + 1))()
+            c.set_errno(0)
+            read = lib.proc_pidinfo(pid, 1, 0, c.byref(entries), c.sizeof(entries))
+            if read == 0 and c.get_errno() == 0:
+                read = 0
+            elif not checked(read):
+                continue
+            if read >= c.sizeof(entries) or read % c.sizeof(Descriptor):
+                raise RuntimeError('descriptor inventory changed or is incomplete')
+            descriptors = [entry.number for entry in entries[:read // c.sizeof(Descriptor)]
+                           if entry.kind == 1]  # PROX_FDTYPE_VNODE
+        for fd in descriptors:
             info = FdPath()
             if checked(lib.proc_pidfdinfo(pid, fd, 2, c.byref(info), c.sizeof(info)),
                        c.sizeof(info), fd=True):
@@ -80,4 +105,8 @@ def inventory(scratch, pids):
 
 
 if __name__ == '__main__':
-    inventory(sys.argv[1], map(int, sys.argv[2:]))
+    arguments = sys.argv[1:]
+    all_fds = arguments[:1] == ['--all-fds']
+    if all_fds:
+        arguments = arguments[1:]
+    inventory(arguments[0], map(int, arguments[1:]), all_fds)
