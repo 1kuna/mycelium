@@ -834,6 +834,19 @@ These values are captured on the worker outside the queue lock and survive
 requeue, acknowledgement and replacement of the current envelope. Queue logs
 include the same comparison in `detail`.
 
+For `live_host_growth`, `required` is the worker's aggregate pending growth,
+not the launching attempt's envelope. Supporting workers retain `contributors`:
+attempt ID/number or model kind, static `charge_gb`, compared `pending_gb`, the
+`launching` flag, and `sample_fresh`/`sample_age_seconds` (absent when no sample
+exists). The terms include exact-helper credit and sum to the failed comparison.
+A launch-capacity refusal with positive `main: not_started` evidence never spends
+losses or infrastructure retries, including an older worker's `launch/io_error`
+classification. Queue Started authorization alone is not main execution; existing
+supervisor custody still requires exact release before retry.
+If a predecessor queue rejects the additive contributors with `request_invalid`,
+completion delivery retries once with contributors removed from a wire copy;
+the durable local diagnostic and exact release evidence remain intact.
+
 A modern worker also records `prelaunch_refused: true` only for a persisted
 native refusal before custody or launch intent. An exact released copy with
 that proof and no queue-recorded start/custody preserves ledger completeness,
@@ -2635,6 +2648,17 @@ window suspended by qualified resource contention, including explicit
 relative window. Status reasons show the original window's seconds left with
 `paused for capacity`; assignment restores that full window for actual preparation.
 An assigned start without an accepted acknowledgement continues counting down.
+
+The separate `device_fault_start_wait` records queue `since` and the saved
+`remaining` budget in nanoseconds for `device_fault_last_healthy`. Its relative
+countdown says `paused for device recovery`; clearance resumes that saved amount.
+`start_capacity_budget` retains that amount in nanoseconds through subsequent
+capacity waits and assignment, separately from the original `start_window`.
+A later started-attempt loss renews the original window and clears this override.
+An unrecoverable hold fails with `diagnostic_code: device_fault_recovery_timeout`
+one hour (the existing maximum start window) after queue-recorded fault loss.
+Caller-owned absolute cutoffs remain authoritative.
+
 Absolute `start_by`, give-up, ordering `deadline` and cancellation retain their
 existing authority. No retry, reserve or timeout increase is involved.
 

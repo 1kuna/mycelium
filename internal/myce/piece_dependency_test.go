@@ -383,6 +383,9 @@ func TestPieceDependencyWholeParentCancellation(t *testing.T) {
 		t.Fatal("cancelled downstream wave was allowed to start", err)
 	}
 	finish(t, q, child, true)
+	if got := job(t, q, consumer.ID); got.DiagnosticCode != "upstream_cancelled" || got.Reason != "upstream parent cancelled" {
+		t.Fatal("upstream cancellation lost its reason", got)
+	}
 	ack, err = q.CancelJob(parent.ID)
 	if err != nil || *ack.Release == "pending" {
 		t.Fatal("downstream exact release did not settle upstream", ack, err)
@@ -391,5 +394,79 @@ func TestPieceDependencyWholeParentCancellation(t *testing.T) {
 	future := submit(t, q, wholeParentConsumer(s, consumer.ID, true))
 	if future.State != "cancelled" || future.FanOut.Next != 0 {
 		t.Fatal("future dependent escaped persisted cancellation", future)
+	}
+}
+
+func TestPieceDependencySucceededParentLaterCancellation(t *testing.T) {
+	q, clock, m, s := fanOutFixture(t, 1)
+	if err := q.ConfigureFileStore(q.files.root, 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	s.Outputs = map[string]string{"out": "results"}
+	parent := submit(t, q, s)
+	wave := check(t, q, m, nil).Job
+	ref := putPieceTestFile(t, q, "accepted output")
+	r := result(wave, true)
+	r.OutputRefs = FileManifest{"item-0/out": ref}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	completed := job(t, q, parent.ID)
+	if completed.State != "succeeded" {
+		t.Fatal("parent did not succeed", completed)
+	}
+	clock.Advance(time.Second)
+	if err := q.Cancel(parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, parent.ID); got.State != "succeeded" || got.CancelledAt == nil || !got.CancelledAt.After(*completed.FinishedAt) {
+		t.Fatal("missing later cancellation intent", got)
+	}
+	for _, c := range []Spec{pieceConsumer(s, parent.ID, "item-0"), wholeParentConsumer(s, parent.ID, false)} {
+		got := submit(t, q, c)
+		if got.State != "queued" || cancelled(got) || !dependencyReady(got) || !got.Dependency.ReadyAt.Equal(clock.Now()) {
+			t.Fatal("succeeded parent cancellation prevented binding", got)
+		}
+		if c.After.Piece == "" {
+			if got.Dependency.Executions["item-0"] != result(wave, true).Execution {
+				t.Fatal("whole-parent binding lost accepted execution", got.Dependency)
+			}
+		} else if got.Dependency.Execution != result(wave, true).Execution {
+			t.Fatal("piece binding lost accepted execution", got.Dependency)
+		}
+		if len(got.Dependency.Files) != 1 {
+			t.Fatal("binding lost accepted outputs", got.Dependency)
+		}
+	}
+	if err := q.ConfigureFileRetention(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Hour)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if !job(t, q, parent.ID).FilesExpired {
+		t.Fatal("parent outputs did not expire")
+	}
+	if _, err := q.Submit(wholeParentConsumer(s, parent.ID, false)); !isResultExpired(err) {
+		t.Fatal("later cancellation masked expired outputs", err)
+	}
+}
+
+func TestPieceDependencyCancelledParentReason(t *testing.T) {
+	q, clock, _, s := fanOutFixture(t, 1)
+	s.Outputs = map[string]string{"out": "results"}
+	parent := submit(t, q, s)
+	existing := submit(t, q, wholeParentConsumer(s, parent.ID, false))
+	clock.Advance(time.Second)
+	if err := q.Cancel(parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	late := submit(t, q, pieceConsumer(s, parent.ID, "item-0"))
+	for _, id := range []string{existing.ID, late.ID} {
+		got := job(t, q, id)
+		if got.State != "cancelled" || got.CancelledAt == nil || got.DiagnosticCode != "upstream_cancelled" || got.Reason != "upstream parent cancelled" || got.Dependency.ReadyAt != nil || !got.FinishedAt.Equal(clock.Now()) {
+			t.Fatal("missing typed upstream cancellation", got)
+		}
 	}
 }

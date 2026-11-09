@@ -5,6 +5,15 @@
         "available": {
           "type": "number"
         },
+        "contributors": {
+          "items": {
+            "$ref": "#/$defs/HostGrowthContributor"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "envelope_device_gb": {
           "type": "number"
         },
@@ -1058,6 +1067,22 @@
       ],
       "type": "object"
     },
+    "DeviceFaultStartWait": {
+      "properties": {
+        "remaining": {
+          "type": "integer"
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "remaining"
+      ],
+      "type": "object"
+    },
     "DiagnosticReport": {
       "properties": {
         "format": {
@@ -1291,6 +1316,9 @@
     },
     "Environment": {
       "properties": {
+        "backend": {
+          "type": "string"
+        },
         "lock_file": {
           "type": "string"
         },
@@ -2177,6 +2205,41 @@
       },
       "type": "object"
     },
+    "HostGrowthContributor": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "charge_gb": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "launching": {
+          "type": "boolean"
+        },
+        "pending_gb": {
+          "type": "number"
+        },
+        "sample_age_seconds": {
+          "type": "number"
+        },
+        "sample_fresh": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "charge_gb",
+        "pending_gb",
+        "sample_fresh"
+      ],
+      "type": "object"
+    },
     "HostLaunch": {
       "properties": {
         "attempt": {
@@ -2450,6 +2513,10 @@
         "dependency": {
           "$ref": "#/$defs/PieceBinding",
           "x-contract": "stable"
+        },
+        "device_fault_start_wait": {
+          "$ref": "#/$defs/DeviceFaultStartWait",
+          "x-contract": "diagnostic"
         },
         "device_memory_floor_gb": {
           "type": "number",
@@ -2893,6 +2960,10 @@
         "start_by_explicit": {
           "description": "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute.",
           "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "start_capacity_budget": {
+          "type": "integer",
           "x-contract": "diagnostic"
         },
         "start_capacity_waiting": {

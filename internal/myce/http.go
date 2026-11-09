@@ -654,6 +654,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	in, evidenceFields := executionEvidenceWireInput(in, c.resourceWire != nil && c.resourceWire.executionEvidence.Load())
 	in, resourceFields := resourceWireInput(in, supported, cpuPressure)
 	in, finalizationFields := finalizationWireInput(in, false)
+	withoutContributors, contributorFields := withoutAdmissionContributors(in)
 	clock := c.clock()
 	pace := ClientPace{}
 	var last error
@@ -661,7 +662,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		started := clock.Now()
 		err := c.callOnce(ctx, method, path, in, out)
 		var api *HTTPError
-		if (resourceFields || evidenceFields || finalizationFields) && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
+		if (resourceFields || evidenceFields || finalizationFields || contributorFields) && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
 			// Strict JSON rejection occurs before mutation. Finalization has no
 			// negotiated protocol: remove it independently, retaining telemetry
 			// advertised by this response. Keep the durable local result intact.
@@ -670,7 +671,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 				c.resourceWire.cpuPressure.Store(false)
 				c.resourceWire.executionEvidence.Store(false)
 			}
-			legacy, _ := executionEvidenceWireInput(in, c.resourceWire != nil && c.resourceWire.executionEvidence.Load())
+			legacy, _ := executionEvidenceWireInput(withoutContributors, c.resourceWire != nil && c.resourceWire.executionEvidence.Load())
 			legacy, _ = resourceWireInput(legacy, c.resourceWire != nil && c.resourceWire.supported.Load(), c.resourceWire != nil && c.resourceWire.cpuPressure.Load())
 			legacy, _ = finalizationWireInput(legacy, true)
 			return c.callOnce(ctx, method, path, legacy, out)

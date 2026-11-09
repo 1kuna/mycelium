@@ -44,6 +44,8 @@ func PathReadError(field, side, path, base, companion string, err error) error {
 	}
 	cause := "read_failed"
 	switch {
+	case errors.Is(err, errEnvironmentInputTooLarge):
+		cause = "too_large"
 	case errors.Is(err, fs.ErrNotExist):
 		cause = "missing"
 		if companion != "" {

@@ -612,10 +612,37 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 		coldObserved = max(retainedHostCharge(j), sample.peakGB, sample.gb, sample.footprintGB)
 		charge = max(charge, coldObserved+exploratoryDriftMarginGB(m))
 	}
+	// Accelerator and unenforced attempts also use the generic forecast. A
+	// measured slope can predict impossible occupancy even while fresh. Bound
+	// only its prediction by inventoried physical RAM, never by an operator's
+	// smaller allowance, and never discard actual high water or known demand.
+	physical := 0.0
+	if m.CapabilityProfile != nil {
+		physical = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
+	}
+	if !bounded {
+		charge = max(charge, sample.peakGB, sample.gb, sample.footprintGB)
+	}
 	if !bounded && !sample.at.IsZero() && !now.Before(sample.at) && now.Sub(sample.at) < sample.freshFor() {
-		charge = max(charge, sample.hostForecast(now))
+		forecast := sample.hostForecast(now)
+		if physical > 0 {
+			forecast = min(forecast, physical)
+		}
+		charge = max(charge, forecast)
 	}
 	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, charge, sample, now)
+	if !bounded && physical > 0 {
+		// Apply the same physical bound to outstanding growth; capping only
+		// the static charge would still let the raw slope invent admission debt.
+		limit := max(charge, physical)
+		if _, fresh := sample.hostGrowth(now); fresh {
+			limit = max(0, limit-sample.gb)
+		}
+		if unifiedCUDA(m) {
+			limit = max(limit, j.Spec.Needs.MemoryGB) // No unproved device overlap.
+		}
+		growth = min(growth, limit)
+	}
 	if hardContained {
 		// Bound burst forecasts by the complete physical execution ceiling,
 		// without assuming sampled residency remains present at admission.

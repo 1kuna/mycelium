@@ -112,6 +112,9 @@ func TestReviewOldQueueKeepsSupportedEvidence(t *testing.T) {
 			if got.ExecutionCause == nil || got.ExecutionCause.Finalization == nil {
 				t.Error("first request omitted finalization")
 			}
+			if got.CleanupCause == nil || got.CleanupCause.Admission == nil || len(got.CleanupCause.Admission.Contributors) != 1 {
+				t.Error("first request omitted admission contributors")
+			}
 			http.Error(w, `{"code":"request_invalid","error":"unknown finalization field"}`, 400)
 			return
 		}
@@ -122,12 +125,15 @@ func TestReviewOldQueueKeepsSupportedEvidence(t *testing.T) {
 		if got.Resources != nil && got.Resources.CPU.Pressure == nil || got.ExecutionCause == nil || got.ExecutionCause.Finalization != nil {
 			t.Error("retry changed supported CPU pressure or retained finalization")
 		}
+		if got.CleanupCause == nil || got.CleanupCause.Admission == nil || len(got.CleanupCause.Admission.Contributors) != 0 {
+			t.Error("retry retained unsupported admission contributors")
+		}
 		fmt.Fprint(w, `{"ok":true}`)
 	}))
 	defer api.Close()
 	zero := 0
 	cause := &RuntimeCause{Operation: "outputs", Class: "not_regular", Finalization: &FinalizationDetail{Step: "output_validation", Error: "not_regular", CommandExitCode: &zero}}
-	result := Result{ExecutionCause: cause, Resources: &AttemptResources{CPU: AttemptCPUTime{Pressure: &IOPressure{}}}, ExecutionEvidence: &ExecutionEvidence{Main: executionMayHaveRun}}
+	result := Result{ExecutionCause: cause, CleanupCause: &RuntimeCause{Operation: "launch", Class: "resource_limit", Admission: &AdmissionDetail{Contributors: []HostGrowthContributor{{Kind: "attempt", ChargeGB: 4}}}}, Resources: &AttemptResources{CPU: AttemptCPUTime{Pressure: &IOPressure{}}}, ExecutionEvidence: &ExecutionEvidence{Main: executionMayHaveRun}}
 	if err := (Client{URL: api.URL, resourceWire: wire}).Call(context.Background(), "POST", "/api/workers/complete", result, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -136,5 +142,8 @@ func TestReviewOldQueueKeepsSupportedEvidence(t *testing.T) {
 	}
 	if !wire.supported.Load() || !wire.cpuPressure.Load() || !wire.executionEvidence.Load() || result.ExecutionCause.Finalization == nil {
 		t.Fatal("downgrade changed supported protocols or durable result")
+	}
+	if len(result.CleanupCause.Admission.Contributors) != 1 {
+		t.Fatal("downgrade changed durable admission contributors")
 	}
 }

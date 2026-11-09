@@ -1,0 +1,175 @@
+#!/usr/bin/python3
+"""Optional xe CCS timeout policy. No third-party dependencies (Python 3.9+)."""
+from __future__ import annotations
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import syslog
+
+
+def log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+    syslog.syslog(syslog.LOG_NOTICE, message)
+
+
+def unsigned(text: str) -> int:
+    if not re.fullmatch(r"[0-9]+", text.strip()):
+        raise ValueError(f"expected unsigned decimal integer: {text!r}")
+    return int(text.strip())
+
+
+def configured(path: Path) -> int | None:
+    value = None
+    seen = False
+    for line in path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        key, sep, raw = line.partition("=")
+        if key.strip() != "PREEMPT_TIMEOUT_US" or not sep or seen:
+            raise ValueError("expected one PREEMPT_TIMEOUT_US assignment")
+        seen = True
+        value = unsigned(raw) if raw.strip() else None
+    return value
+
+
+def xe_cards(root: Path, card: str | None) -> list[Path]:
+    if card is not None and not re.fullmatch(r"card[0-9]+", card):
+        raise ValueError("invalid DRM card name")
+    found = []
+    for entry in sorted((root / "class/drm").glob(card or "card[0-9]*")):
+        if not re.fullmatch(r"card[0-9]+", entry.name):
+            continue
+        device = entry / "device"
+        if (device / "driver").resolve().name != "xe":
+            continue
+        found.append(entry)
+    return found
+
+
+def engines(root: Path, card: str | None) -> list[tuple[str, Path]]:
+    found = []
+    for entry in xe_cards(root, card):
+        device = entry / "device"
+        for target in sorted(device.glob("tile[0-9]*/gt[0-9]*/engines/ccs/preempt_timeout_us")):
+            identity = device.resolve().name + "/" + str(target.relative_to(device))
+            found.append((identity, target))
+    return found
+
+
+def checked(target: Path, value: int) -> int:
+    low = unsigned(target.with_name("preempt_timeout_min").read_text())
+    high = unsigned(target.with_name("preempt_timeout_max").read_text())
+    if not low <= value <= high:
+        raise ValueError(f"{target}: {value} outside sysfs range [{low}, {high}]")
+    return unsigned(target.read_text())
+
+
+class VerificationMismatch(ValueError):
+    pass
+
+
+def write_verified(target: Path, value: int) -> None:
+    target.write_text(f"{value}\n")
+    actual = unsigned(target.read_text())
+    log(f"{target}: wrote {value}, read back {actual}")
+    if actual != value:
+        raise VerificationMismatch(f"{target}: expected {value}, read back {actual}")
+
+
+def run(args: argparse.Namespace) -> int | None:
+    value = configured(args.config) if args.action != "restore" else None
+    if args.action != "restore" and value is None:
+        log("PREEMPT_TIMEOUT_US unset: leaving kernel/administrator values unchanged")
+        return
+    targets = engines(args.sysfs_root, args.card)
+    if not targets:
+        log("no xe CCS attributes present; no writes")
+        return 0
+    if args.action == "verify":
+        status = 0
+        for _, target in targets:
+            try:
+                actual = checked(target, value)
+                if actual != value:
+                    status = max(status, 1)
+                    log(f"WARNING: {target}: expected {value}, read {actual}; "
+                        "verification: mismatch, status=1")
+                else:
+                    log(f"{target}: verified {actual}; verification: match, status=0")
+            except (OSError, ValueError) as error:
+                status = 2
+                log(f"WARNING: {target}: {error}; verification: error, status=2, "
+                    "application requires operator attention")
+        return status
+    args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Serialize device-add callbacks, manual apply and rollback. Never unlink
+    # the lock while callbacks can still be running.
+    with (args.state_dir / "lock").open("a") as lock:
+        try:
+            flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if args.nonblocking_lock else 0)
+            fcntl.flock(lock, flags)
+        except BlockingIOError:
+            log("application: busy, status=75; no wait, reapply and verify before GPU work")
+            return 75
+        state_file = args.state_dir / "prior.json"
+        prior = json.loads(state_file.read_text()) if state_file.exists() else {}
+        plan = []
+        for identity, target in targets:
+            desired = prior.get(identity) if args.action == "restore" else value
+            if desired is None:
+                continue
+            current = checked(target, desired)
+            plan.append((identity, target, desired, current))
+        # Validate all ranges before changing any device. Record original values
+        # durably before writing sysfs, including across retries and reboots.
+        if args.action == "apply":
+            for identity, _, _, current in plan:
+                prior.setdefault(identity, current)
+            temporary = state_file.with_suffix(".tmp")
+            with temporary.open("w") as output:
+                json.dump(prior, output, sort_keys=True)
+                output.flush()
+                os.fsync(output.fileno())
+            temporary.replace(state_file)
+            directory = os.open(args.state_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        for _, target, desired, current in plan:
+            if current != desired:
+                write_verified(target, desired)
+            else:
+                log(f"{target}: already {desired}, read back {current}; no write")
+        # Keep the record until uninstall succeeds; repeated restores are safe.
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("apply", "verify", "restore"))
+    parser.add_argument("--card")
+    parser.add_argument("--nonblocking-lock", action="store_true")
+    parser.add_argument("--config", type=Path, default=Path("/etc/myce-xe-preempt-timeout.conf"))
+    parser.add_argument("--sysfs-root", type=Path, default=Path("/sys"))
+    parser.add_argument("--state-dir", type=Path, default=Path("/var/lib/myce-xe-preempt-timeout"))
+    args = parser.parse_args()
+    syslog.openlog("myce-xe-preempt-timeout")
+    try:
+        status = run(args) or 0
+        log(f"{args.action}: complete, status={status}")
+        return status
+    except VerificationMismatch as error:
+        log(f"FAILED: verification: mismatch, status=1; {error}")
+        return 1
+    except (OSError, ValueError, TypeError) as error:
+        log(f"FAILED: verification: error, status=2; {error}")
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

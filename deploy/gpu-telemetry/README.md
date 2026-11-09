@@ -14,6 +14,24 @@ unsigned-byte `usage`, assembles one complete JSON object of at most 64 KiB,
 sends it, and closes. There is no snapshot file or cache and no GPU write, command
 execution, caller-selected path, network endpoint or fleet credential.
 
+The additive `vram` map reports `total_bytes` and `used_bytes` for each configured
+card through the read-only Xe `DRM_IOCTL_XE_DEVICE_QUERY/MEM_REGIONS` interface.
+It excludes system/GTT regions and rejects malformed or incomplete replies. No
+Level Zero initialization, GPU object creation or work submission occurs.
+Older kernels censor usage to zero without `CAP_PERFMON` or `CAP_SYS_ADMIN`;
+newer kernels expose it without privilege. Positive usage proves the counter
+is uncensored. A zero with neither capability stays unknown, so an unprivileged
+censored zero can never become free VRAM. The template adds no capability: it
+retains `CAP_DAC_READ_SEARCH`, binds DRM nodes read-only into its private `/dev`,
+and allows read access to DRM character devices. The fixed PCI inventory still
+selects the render node; clients cannot choose a node or ioctl. Missing device
+access or unsupported counters omit VRAM while preserving mandatory GTT evidence.
+Older kernels require separately qualified accounting privilege for usable VRAM;
+that is an operator policy decision, not an automatic privilege change. A legacy
+GTT-only broker remains compatible but cannot authorize telemetry-dependent
+sharing. Separately install and qualify the updated broker and unit before
+relying on VRAM counters. The worker receives no capability.
+
 Systemd owns the socket. The persistent broker uses Python's standard-library
 `socketserver.ForkingMixIn` so no interpreter starts per request. Each child gets
 one connection, a 150 ms total deadline from accept (request, reads and reply),
