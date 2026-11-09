@@ -72,6 +72,7 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	w.faultTeardowns = map[string][]time.Time{}
 	w.faultRecovery = map[string]deviceRecoveryObservation{}
 	w.faultHealth = map[string]deviceHealthObservation{}
+	w.faultHealthDue = map[string]deviceHealthDue{}
 	w.faultHealthAfter = w.Clock.Now()
 	data, err := os.ReadFile(filepath.Join(root.dir, deviceFaultFile))
 	if err == nil {
@@ -98,6 +99,11 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	previousBudget := root.deviceFaults.timeout
 	root.deviceFaults.timeout = -1
 	defer func() { root.deviceFaults.timeout = previousBudget }()
+	// Surviving attempts have not yet been recovered into the actor ledger.
+	// Startup establishes the kernel cursor, never vendor-runtime recovery.
+	previousActive := w.vendorGPUActive
+	w.vendorGPUActive = true
+	defer func() { w.vendorGPUActive = previousActive }()
 	return w.refreshDeviceFaults(ctx, root)
 }
 

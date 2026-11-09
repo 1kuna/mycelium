@@ -1,6 +1,7 @@
 """Laptop checks: python3 -B -m unittest discover -s deploy/gpu-telemetry -v."""
 
 import configparser
+import ctypes
 import datetime as dt
 import importlib.machinery
 import importlib.util
@@ -9,11 +10,13 @@ import multiprocessing
 import os
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 loader = importlib.machinery.SourceFileLoader(
     'telemetry', str(Path(__file__).with_name('myce-gpu-telemetry-broker')))
@@ -132,6 +135,54 @@ class TelemetryTest(unittest.TestCase):
                       ['../../bad'], ['0000:01:ff.0']):
             with self.subTest(cards=cards), self.assertRaises(ValueError):
                 telemetry.validate_cards(cards)
+
+    def test_vram_query_is_read_only_and_excludes_host_storage(self) -> None:
+        # UAPI fixture: system region plus one VRAM region. Only the latter
+        # supplies device headroom; no process/vendor tool is involved.
+        raw = struct.pack('=II', 2, 0)
+        for kind, instance, size, used in ((0, 0, 64 << 30, 10 << 30),
+                                           (1, 1, 8 << 30, 2 << 30)):
+            raw += struct.pack('=HHIQQQQ6Q', kind, instance, 4096,
+                               size, used, 0, 0, *([0] * 6))
+        calls = []
+
+        def ioctl(fd, request, query, mutate):
+            calls.append((fd, request))
+            self.assertEqual(struct.unpack_from('=I', query, 8)[0], 1)
+            address = struct.unpack_from('=Q', query, 16)[0]
+            if address:
+                ctypes.memmove(address, raw, len(raw))
+            struct.pack_into('=I', query, 12, len(raw))
+
+        with mock.patch.object(Path, 'read_text', return_value='CapEff:\t0000004000000000\n'), \
+                mock.patch.object(Path, 'glob', return_value=[Path('renderD128')]), \
+                mock.patch.object(os, 'open', return_value=10) as opened, \
+                mock.patch.object(os, 'close') as closed, \
+                mock.patch.object(telemetry.fcntl, 'ioctl', side_effect=ioctl):
+            self.assertEqual(telemetry.collect_vram(CARDS[0]),
+                             {'total_bytes': 8 << 30, 'used_bytes': 2 << 30})
+            opened.assert_called_once_with(Path('/dev/dri/renderD128'), os.O_RDONLY | os.O_CLOEXEC)
+            closed.assert_called_once_with(10)
+        self.assertEqual(calls, [(10, 0xc0286440)] * 2)
+        with self.assertRaises(ValueError):
+            telemetry.vram_regions(raw[:-1])
+
+    def test_censored_usage_never_becomes_free_vram(self) -> None:
+        with mock.patch.object(Path, 'read_text', return_value='CapEff:\t0000000000000000\n'), \
+                mock.patch.object(os, 'open') as opened:
+            with self.assertRaises(ValueError):
+                telemetry.collect_vram(CARDS[0])
+            opened.assert_not_called()
+
+    def test_vram_is_optional_and_preserves_gtt_contract(self) -> None:
+        with mock.patch.object(telemetry, 'collect_vram', return_value={'total_bytes': 8192, 'used_bytes': 2048}):
+            sample = json.loads(telemetry.collect(CARDS, self.root))
+        self.assertEqual(sample['vram'][CARDS[1]], {'total_bytes': 8192, 'used_bytes': 2048})
+        self.assertEqual(sample['gtt_mm'], {card: RAW for card in CARDS})
+        with mock.patch.object(telemetry, 'collect_vram', side_effect=ValueError('unsupported')):
+            sample = json.loads(telemetry.collect(CARDS, self.root))
+        self.assertEqual(sample['vram'], {})
+        self.assertEqual(sample['gtt_mm'], {card: RAW for card in CARDS})
 
     def test_wrapper_clears_environment_and_ignores_caller_arguments(self) -> None:
         # Substitute only the installed binary location; execute the real shell

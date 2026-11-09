@@ -56,17 +56,39 @@ pass reuses its device enumeration for XPU qualification fingerprints and
 shares identical fingerprint commands across cards; fingerprint bytes remain
 compatible with existing qualification records.
 
-Discrete XPU telemetry has its own observation lane. One host-wide `xpu-smi`
-CSV query supplies PCI-keyed memory counters for all cards, at most once per
-existing five-second device-consumer interval (or the slower control/probe-cost
-cadence). Xe PMU activity remains per PCI device. A missing tool, unsupported
-counter, missing row or duplicate PCI row supplies unknown memory. Results keep
-their original sample start, and merge only into matching device/driver,
-selector, topology and reserve observations. Missing or ten-second-old samples
-cannot authorize telemetry-dependent sharing. A slow query never blocks
-discovery, check-ins or starts another copy of itself. Per-device runtime
-fallbacks use private device-affinity environments where supported; a full
-inventory or host-wide telemetry query intentionally covers the host.
+Discrete XPU telemetry has its own demand-driven observation lane. Only active
+opt-in fan-out sharing consumes physical card headroom. Idle, CPU-only and
+exclusive-device heartbeats do not request these counters. Sharing reuses one
+sample throughout its existing ten-second freshness window, without renewing
+its timestamp; measured probe cost can slow subsequent observations. Missing or
+expired evidence withholds additional sharing. Ordinary configured-budget
+admission and exact-attempt DRM fdinfo sampling remain independent.
+
+Memory comes from the optional read-only GPU telemetry broker's PCI-keyed
+`vram` counters. The worker never falls back to `xpu-smi`: starting that tool can
+initialize the vendor runtime on every card, including busy siblings. The
+reference broker uses only `DRM_IOCTL_XE_DEVICE_QUERY` with `MEM_REGIONS`; it
+creates no GPU objects or execution contexts. It verifies accounting capability
+before accepting usage: the kernel silently censors usage to zero without
+`CAP_PERFMON` or `CAP_SYS_ADMIN`. The template grants only `CAP_PERFMON` in
+addition to its existing debugfs-read capability, with read-only DRM access.
+A GTT-only broker remains valid for host-backed storage but supplies unknown
+VRAM. Upgrade and qualify the broker separately to retain opportunistic sharing;
+missing counters never become free device memory. Xe PMU activity remains per
+PCI device. Samples merge only into matching device/driver, selector, topology
+and reserve observations, with their original age.
+
+Quarantine recovery is separate from inventory telemetry. XPU vendor health
+checks wait while any accelerator attempt or model retains local custody,
+since even a query aimed at a quarantined card can initialize its busy sibling.
+Kernel fault detection continues. Once quiescent, a completed health reading
+is reused until the recovery decision's existing quiet window: the greatest of
+fault-to-reading latency, previously measured recovery, and the existing kernel
+teardown-attribution resolution. Failed readings lengthen that interval from
+observed failure duration. A new fault event starts a new decision. This avoids
+repeated vendor initialization while a quiet-window decision cannot yet change;
+the cost is later recovery detection within the measured window. No new fixed
+retry rate is introduced.
 
 For an already assigned attempt, a fresh direct launch probe can establish
 recovery from a cached `device_probe_unavailable` observation. The direct probe
@@ -191,7 +213,11 @@ hang-cause attribution, fleet change or deployment is implied.
 `TestInventoryHelperLaunchMeasurement` measures an instrumented two-card fake
 inventory for one simulated minute, with a one-second heartbeat, 250ms scan
 cost and two CPU cores. The former per-card fingerprint/query path launches
-174 enumeration and 116 memory helpers; the corrected path launches 35 and 12.
+174 enumeration and 116 memory helpers; #1040 reduced this to 35 and 12, while
+intentionally retaining the five-second host-memory lane. The demand regression
+now simulates one minute each without demand, with sharing demand and after
+withdrawal: zero, six and zero additional broker memory reads, and zero vendor
+initializations throughout.
 This compares launch counts, not native driver overhead or throughput. No
 production GPU or compute workload is exercised.
 

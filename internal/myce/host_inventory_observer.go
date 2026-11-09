@@ -101,6 +101,43 @@ type hostInventoryObserver struct {
 	lane            hostProbeLane[[]MachineDevice]
 	telemetry       hostProbeLane[[]MachineDevice]
 	sampleTelemetry func(context.Context, []MachineDevice) ([]MachineDevice, error)
+	telemetryDemand bool
+	wake            chan struct{}
+}
+
+// Only sharing consumes physical XPU headroom. CPU and exclusive-device work
+// use their existing budgets/attempt counters; heartbeat is not sensor demand.
+func (m *hostInventoryObserver) requestTelemetry(demand bool) {
+	m.mu.Lock()
+	if m.telemetryDemand == demand {
+		m.mu.Unlock()
+		return
+	}
+	m.telemetryDemand = demand
+	if m.wake == nil {
+		m.wake = make(chan struct{}, 1)
+	}
+	wake := m.wake
+	m.mu.Unlock()
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *hostInventoryObserver) stepTelemetry(ctx context.Context) {
+	if m.sampleTelemetry == nil {
+		return
+	}
+	// A fresh sample retains its original age and serves every decision in
+	// that window. Pending work must still be drained after demand disappears.
+	if m.telemetry.pending == nil && (!m.telemetryDemand || m.telemetry.fresh(m.lane.clock.Now()) && slices.ContainsFunc(m.telemetry.value, func(d MachineDevice) bool {
+		return deviceTelemetryFresh(d.Telemetry, m.lane.clock.Now())
+	})) {
+		return
+	}
+	devices, _ := hostInventorySnapshot(&m.lane)
+	m.telemetry.stepWhen(ctx, func(ctx context.Context) ([]MachineDevice, error) { return m.sampleTelemetry(ctx, devices) }, m.telemetryDemand)
 }
 
 func (m *hostInventoryObserver) snapshot() ([]MachineDevice, error) {
@@ -124,19 +161,19 @@ func (m *hostInventoryObserver) snapshot() ([]MachineDevice, error) {
 func (m *hostInventoryObserver) run(ctx context.Context, source func(context.Context) ([]MachineDevice, error)) {
 	m.lane.equal = sameInventoryObservation
 	m.telemetry.clock = m.lane.clock
-	// Sharing consumes device samples every five seconds and expires them
-	// after one missed sample. Faster queries cannot extend that contract.
-	m.telemetry.timing = probeTiming{base: max(deviceMemorySamplePeriod, m.lane.timing.controlPeriod()), cores: m.lane.timing.cores}
+	// Reuse the wire contract's freshness window. The measured lane may slow
+	// expensive/unchanging observations; it cannot renew old sharing evidence.
+	m.telemetry.timing = probeTiming{base: max(deviceMemorySampleFreshFor, m.lane.timing.controlPeriod()), cores: m.lane.timing.cores}
 	for {
 		m.mu.Lock()
 		m.lane.step(ctx, source)
 		wait, done := m.lane.waitDuration(), m.lane.done
-		if m.sampleTelemetry != nil && (len(m.lane.value) > 0 || m.telemetry.pending != nil) {
-			devices, _ := hostInventorySnapshot(&m.lane)
-			m.telemetry.step(ctx, func(ctx context.Context) ([]MachineDevice, error) { return m.sampleTelemetry(ctx, devices) })
+		m.stepTelemetry(ctx)
+		if m.telemetry.pending != nil {
 			wait = min(wait, m.telemetry.waitDuration())
 		}
 		telemetryDone := m.telemetry.done
+		wake := m.wake
 		m.mu.Unlock()
 		timer := time.NewTimer(wait)
 		select {
@@ -146,6 +183,7 @@ func (m *hostInventoryObserver) run(ctx context.Context, source func(context.Con
 		case <-timer.C:
 		case <-done:
 		case <-telemetryDone:
+		case <-wake:
 		}
 		timer.Stop()
 	}

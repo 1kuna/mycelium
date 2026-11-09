@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,25 +11,46 @@ import (
 	"time"
 )
 
+func TestXPUTelemetryUsesBrokerWithoutVendorInitialization(t *testing.T) {
+	_, clock := fixture(t)
+	body := fmt.Sprintf(`{"sampled_at":%q,"gtt_mm":{"0000:01:00.0":"usage: 999999"},"vram":{"0000:01:00.0":{"total_bytes":8589934592,"used_bytes":2147483648}}}`, clock.Now().Format(time.RFC3339Nano))
+	w := Worker{Clock: clock, GPUTelemetryHelper: gpuTelemetryTestHelper(t, "cat <<'SAMPLE'\n"+body+"\nSAMPLE\n")}
+	calls := 0
+	p := MachineProbe{OS: "linux", Command: func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		return []byte("0000:01:00.0, 4096\n"), nil
+	}, XeActivity: func(context.Context, string) (float64, error) { return 25, nil }}
+	devices := []MachineDevice{{Platform: "xpu", pciAddress: "0000:01:00.0", ReserveMemoryGB: 1}}
+	w.sampleXPUTelemetry(t.Context(), p, devices)
+	if calls != 0 || !deviceTelemetryReady(devices[0].Telemetry, clock.Now()) || *devices[0].Telemetry.FreeGB != 5 {
+		t.Fatal("broker VRAM not used independently of GTT; vendor initializations", calls, devices[0].Telemetry)
+	}
+}
+
 func TestXPUTelemetryIdentityAndUnknown(t *testing.T) {
 	_, clock := fixture(t)
-	for _, output := range []string{"0000:01:00.0, 2048\n", "0000:02:00.0, 2048\n", "0000:01:00.0, N/A\n"} {
-		d := MachineDevice{Platform: "xpu", pciAddress: "0000:01:00.0", FreeMemoryGB: 8, ReserveMemoryGB: 1}
-		p := MachineProbe{OS: "linux", Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
-			if n != "xpu-smi" || strings.Join(args, " ") != "--query-gpu=pci.bus_id,memory.free --format=csv,noheader,nounits" {
-				t.Fatal("unexpected native query", n, args)
-			}
-			return []byte(output), nil
+	for _, vram := range []string{
+		`"0000:01:00.0":{"total_bytes":8589934592,"used_bytes":6442450944}`,
+		`"0000:02:00.0":{"total_bytes":8589934592,"used_bytes":6442450944}`,
+		`"0000:01:00.0":{"total_bytes":8589934592}`,
+		`"0000:01:00.0":{"total_bytes":8589934592,"used_bytes":8589934593}`,
+		`"0000:01:00.0":{"total_bytes":8589934592,"used_bytes":0},"01:00.0":{"total_bytes":8589934592,"used_bytes":0}`,
+	} {
+		body := fmt.Sprintf(`{"sampled_at":%q,"gtt_mm":{"0000:01:00.0":"usage: 0"},"vram":{%s}}`, clock.Now().Format(time.RFC3339Nano), vram)
+		w := Worker{Clock: clock, GPUTelemetryHelper: gpuTelemetryTestHelper(t, "cat <<'SAMPLE'\n"+body+"\nSAMPLE\n")}
+		p := MachineProbe{OS: "linux", Command: func(context.Context, string, ...string) ([]byte, error) {
+			t.Fatal("telemetry initialized a vendor runtime")
+			return nil, nil
 		}, XeActivity: func(context.Context, string) (float64, error) { return 25, nil }}
-		devices := []MachineDevice{d}
-		(Worker{Clock: clock}).sampleXPUTelemetry(context.Background(), p, devices)
-		d = devices[0]
-		if output == "0000:01:00.0, 2048\n" {
+		devices := []MachineDevice{{Platform: "xpu", pciAddress: "0000:01:00.0", FreeMemoryGB: 8, ReserveMemoryGB: 1}}
+		w.sampleXPUTelemetry(t.Context(), p, devices)
+		d := devices[0]
+		if strings.Contains(vram, `"used_bytes":6442450944`) && strings.HasPrefix(vram, `"0000:01:00.0"`) {
 			if !deviceTelemetryReady(d.Telemetry, clock.Now()) || *d.Telemetry.FreeGB != 1 || *d.Telemetry.ActivePercent != 25 {
-				t.Fatal("valid native counters not retained within allowance", d)
+				t.Fatal("valid broker counters not retained within allowance", d)
 			}
 		} else if d.Telemetry.FreeGB != nil || deviceTelemetryReady(d.Telemetry, clock.Now()) {
-			t.Fatal("wrong-device or N/A memory became headroom", d)
+			t.Fatal("wrong-device, incomplete or ambiguous memory became headroom", d)
 		}
 	}
 }

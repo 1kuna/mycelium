@@ -2,9 +2,7 @@ package myce
 
 import (
 	"context"
-	"encoding/csv"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -86,38 +84,31 @@ func deviceTelemetryFresh(s *DeviceTelemetry, now time.Time) bool {
 	return validDeviceTelemetry(s) && s != nil && !now.Before(s.At) && now.Sub(s.At) < deviceMemorySampleFreshFor
 }
 
-// One host query returns PCI-keyed counters for every card. Missing, duplicate,
-// malformed and unsupported counters remain unknown; ordinals are never joined.
-func xpuFreeMemory(ctx context.Context, p MachineProbe) map[string]float64 {
+// The optional broker exposes privileged kernel usage counters without Level
+// Zero initialization. Old GTT-only brokers supply no VRAM evidence. Neither
+// their host storage nor censored/missing counters can become device headroom.
+func (w Worker) xpuFreeMemory(ctx context.Context) (map[string]float64, error) {
 	free := map[string]float64{}
-	if p.Command == nil {
-		return free
+	if w.Clock == nil {
+		w.Clock = RealClock{}
 	}
-	b, err := p.Command(ctx, "xpu-smi", "--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits")
+	s, err := readGPUTelemetrySnapshot(ctx, w.Clock, w.GPUTelemetryHelper)
 	if err != nil {
-		return free
-	}
-	rows, err := csv.NewReader(strings.NewReader(string(b))).ReadAll()
-	if err != nil {
-		return free
+		return free, err
 	}
 	seen := map[string]bool{}
-	for _, row := range rows {
-		if len(row) != 2 {
-			return map[string]float64{}
-		}
-		pci := normalizePCIAddress(strings.TrimSpace(row[0]))
+	for identity, memory := range s.VRAM {
+		pci := normalizePCIAddress(strings.TrimSpace(identity))
 		if seen[pci] {
 			delete(free, pci)
 			continue
 		}
 		seen[pci] = true
-		n, err := strconv.ParseFloat(strings.TrimSpace(row[1]), 64)
-		if err == nil && validMemoryValue(n) {
-			free[pci] = n / 1024
+		if hostTelemetryPCI.MatchString(pci) && memory.TotalBytes != nil && memory.UsedBytes != nil && *memory.TotalBytes > 0 && *memory.UsedBytes <= *memory.TotalBytes {
+			free[pci] = float64(*memory.TotalBytes-*memory.UsedBytes) / (1 << 30)
 		}
 	}
-	return free
+	return free, nil
 }
 
 func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, devices []MachineDevice) {
@@ -135,13 +126,18 @@ func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, devices 
 		clock = RealClock{}
 	}
 	at := clock.Now()
-	freeByPCI := xpuFreeMemory(ctx, p)
+	var freeByPCI map[string]float64
+	if p.XPUFreeMemory != nil {
+		freeByPCI, _ = p.XPUFreeMemory(ctx)
+	} else {
+		freeByPCI, _ = w.xpuFreeMemory(ctx)
+	}
 	for i := range devices {
 		d := &devices[i]
 		if !eligible(*d) {
 			continue
 		}
-		s := &DeviceTelemetry{At: at, Source: "xpu-smi memory; Xe PMU busiest hardware engine"}
+		s := &DeviceTelemetry{At: at, Source: "read-only Xe broker VRAM; Xe PMU busiest hardware engine"}
 		if free, ok := freeByPCI[normalizePCIAddress(d.pciAddress)]; ok {
 			free = max(0, free-d.ReserveMemoryGB)
 			s.FreeGB = &free

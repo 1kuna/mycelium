@@ -170,3 +170,49 @@ func TestDeviceHealthVendorEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestQuarantineHealthMeasuredInvocationCount(t *testing.T) {
+	_, clock := fixture(t)
+	m := m3Machine()
+	m.Devices[0].Platform = "xpu"
+	calls := 0
+	w := Worker{Clock: clock, Machine: m, faults: &deviceQuarantine{Devices: map[string]deviceFault{}, RecoveryWindows: map[string]float64{}},
+		DeviceHealthProbe: func(context.Context, MachineDevice) (bool, error) { calls++; return false, nil }}
+	key := deviceFaultKey(m.Devices[0])
+	w.faults.Devices[key] = deviceFault{Reason: "device_fault_xe", Event: "fault", At: clock.Now().Add(-time.Minute)}
+	root := &workerStore{dir: t.TempDir()}
+	for range 600 {
+		w.quarantineHealth(t.Context(), root)
+		clear(w.faultHealth) // The kernel scan consumes each failed proof.
+		clock.Advance(100 * time.Millisecond)
+	}
+	if calls != 1 {
+		t.Fatal("recovery polled inside the measured failure window", calls)
+	}
+	w.quarantineHealth(t.Context(), root)
+	clear(w.faultHealth)
+	if calls != 2 {
+		t.Fatal("due recovery probe did not run", calls)
+	}
+	w.vendorGPUActive = true
+	for range 2400 {
+		w.quarantineHealth(t.Context(), root)
+		clear(w.faultHealth)
+		clock.Advance(100 * time.Millisecond)
+	}
+	if calls != 2 {
+		t.Fatal("busy sibling caused vendor initialization", calls)
+	}
+	w.vendorGPUActive = false
+	w.quarantineHealth(t.Context(), root)
+	if calls != 3 {
+		t.Fatal("quiescent recovery did not resume", calls)
+	}
+	// A new fault is a new decision, independent of the old event's backoff.
+	clear(w.faultHealth)
+	w.faults.Devices[key] = deviceFault{Reason: "device_fault_xe", Event: "new-fault", At: clock.Now()}
+	w.quarantineHealth(t.Context(), root)
+	if calls != 4 {
+		t.Fatal("new fault inherited old probe delay", calls)
+	}
+}
