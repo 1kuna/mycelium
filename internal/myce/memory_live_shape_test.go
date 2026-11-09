@@ -158,10 +158,14 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 				t.Fatal("initial probe did not retain physical containment", ceiling)
 			}
 			second := submit(t, q, render)
+			var sampleID int64
 			report := func(j *Job) AttemptReport {
+				// Distinct measurements may replace an earlier unknown-growth
+				// sample; an anonymous replay must retain that sample's fence.
+				sampleID++
 				footprint := ram / 16
 				return AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true,
-					CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: ram / 32, FootprintGB: &footprint, GrowthGB: ram / 64, GrowthRateGB: ram / 64, GrowthObserved: true}}
+					CurrentHostMemory: &CurrentHostMemory{SampleID: sampleID, NonreclaimableGB: ram / 32, FootprintGB: &footprint, GrowthGB: ram / 64, GrowthRateGB: ram / 64, GrowthObserved: true}}
 			}
 			pull := func(reports ...AttemptReport) *Job {
 				t.Helper()

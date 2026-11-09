@@ -62,7 +62,7 @@ func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateS
 		}
 		// A host fence can only withhold an otherwise fitting candidate. Fully
 		// occupied targets need no global backlog/target memory-sizing pass.
-		if candidate := q.batchCandidateWithResources(j, m, s.resources); candidate != nil && q.hostBackfillAllows(candidate, m, q.hostBackfillFences(scan)[hostID(m)]) {
+		if candidate := q.batchCandidateWithResources(j, m, s.resources, scan); candidate != nil && q.hostBackfillAllows(candidate, m, q.hostBackfillFences(scan)[hostID(m)]) {
 			s.jobs = append(s.jobs, candidate)
 		}
 	}
