@@ -119,6 +119,7 @@ func TestInstallXPUHealthAccessLifecycle(t *testing.T) {
 	link("/sys/class/intel_pmt/telem1", "/sys/devices/gpu/pmt/telem1")
 	write("/bin/chown", "#!/bin/sh\nexit 0\n", 0700)
 	write("/bin/flock", "#!/bin/sh\nexit 0\n", 0700)
+	write("/bin/rmdir", "#!/bin/sh\nif [ -e '"+root+"/fail-final-rmdir' ]; then exit 97; fi\nexec /bin/rmdir \"$@\"\n", 0700)
 	write("/bin/udevadm", "#!/bin/sh\n[ ! -e '"+root+"/fail-reload' ]\n", 0700)
 	if runtime.GOOS == "darwin" {
 		write("/bin/stat", "#!/bin/sh\nshift\nformat=$1\nshift\ncase \"$format\" in '%g %a') format='%g %Lp';; esac\nexec /usr/bin/stat -L -f \"$format\" \"$@\"\n", 0700)
@@ -201,13 +202,40 @@ func TestInstallXPUHealthAccessLifecycle(t *testing.T) {
 	if err := os.Chmod(root+"/sys/devices/gpu/pmt/telem0/telem", 0600); err != nil {
 		t.Fatal(err)
 	}
+	// Interrupt final teardown after validation/ownership metadata is removed
+	// but before any directory is removed. Retry must use the external record.
+	write("/fail-final-rmdir", "", 0600)
+	if err := run("remove", other); err == nil {
+		t.Fatal("did not interrupt final teardown")
+	}
+	state := "/var/lib/mycelium/xpu-health-access"
+	for _, suffix := range []string{"/gid", "/format", "/owners/" + other} {
+		if _, err := os.Stat(root + state + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("interruption preceded metadata removal", suffix, err)
+		}
+	}
+	if _, err := os.Stat(root + state); err != nil {
+		t.Fatal("interruption followed directory removal", err)
+	}
+	if _, err := os.Stat(root + state + ".teardown"); err != nil {
+		t.Fatal("missing teardown retry authority", err)
+	}
+	if mode("/dev/mei1") != 0400 || mode("/sys/devices/gpu/pmt/telem1/telem") != 0400 {
+		t.Fatal("teardown began before revoking access")
+	}
+	if err := run("remove", owner); err == nil {
+		t.Fatal("another owner completed pending teardown")
+	}
+	if err := os.Remove(root + "/fail-final-rmdir"); err != nil {
+		t.Fatal(err)
+	}
 	if err := run("remove", other); err != nil {
 		t.Fatal(err)
 	}
 	if mode("/dev/mei1") != 0400 || mode("/dev/mei0") != 0600 || mode("/sys/devices/gpu/pmt/telem0/telem") != 0600 || mode("/sys/devices/gpu/pmt/telem1/telem") != 0400 {
 		t.Fatal("uninstall did not restore baseline/preserve administrator edits")
 	}
-	for _, path := range []string{xpuHealthRulePath, xpuHealthAccessPath, "/var/lib/mycelium/xpu-health-access"} {
+	for _, path := range []string{xpuHealthRulePath, xpuHealthAccessPath, "/var/lib/mycelium/xpu-health-access", "/var/lib/mycelium/xpu-health-access.teardown"} {
 		if _, err := os.Stat(root + path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("uninstall retained access state", path, err)
 		}

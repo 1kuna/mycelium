@@ -290,11 +290,17 @@ nodes. Unrelated MEI nodes are excluded. It needs noninteractive administrator
 authority, installs no sudoers grant, runs no health command as root, and needs
 no manual group/permission step. The captured health invocation opened MEI
 `O_RDWR` for IGSC/HECI, which requires both read and write permission; PMT used
-`O_RDONLY`. Every install/start retries the full provisioning sequence, rather
+`O_RDONLY`; the [sanitized native excerpts](evidence/xpu-health-access.md)
+retain the open flags and matching `mei_gsc` observation. Group `0660` permits
+channel operations beyond health queries; the permission helper does not
+restrict that API. A narrower health-only helper remains unqualified future
+work. Every install/start retries the full provisioning sequence, rather
 than trusting rule bytes left by an interrupted setup. The root-only node
 journal also captures recreated nodes; last-owner uninstall restores unchanged
 grants to the saved permissions and removes the rule/helper. Other installation
-owners and administrator edits are preserved. See [installation and rollout
+owners and administrator edits are preserved. An external root-only completion
+record makes the final teardown resumable after ownership/validation metadata
+is removed; it remains until the state directory is gone. See [installation and rollout
 semantics](operations.md#accelerator-driver-fault-quarantine).
 
 Rejected proofs publish sanitized `quarantine_recovery_blocked` status after

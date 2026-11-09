@@ -2503,15 +2503,21 @@ service activation. Binary-only release rollout also performs this idempotent
 prerequisite on service startup, before reading credentials or accepting work.
 The root-owned `/etc/udev/rules.d/70-mycelium-xpu-health.rules` grants the worker's
 existing primary group mode `0660` on GPU MEI nodes whose ancestor driver is
-`mei_gsc`. In the bounded xpu-smi 2.2.0 health trace, IGSC/HECI opened GPU MEI
-with `O_RDWR`, denied for the worker; root's query had no such denial. This
+`mei_gsc`. The [retained sanitized trace and matching driver
+observation](evidence/xpu-health-access.md) show xpu-smi 2.2.0 attempting
+`O_RDWR|O_CLOEXEC` on a GPU MEI node, denied for the worker; root's query had no
+such denial. This
 exchange opens a bidirectional HECI channel even though the requested operation
 is a health read. Linux checks both read and write permission for `O_RDWR`, so a
 read-only group grant cannot satisfy the observed invocation. `0660` supplies
 that required open without world access; no read-only alternative has been
 qualified for this tool. PMT was opened `O_RDONLY` and retains read-only access.
-Unrelated
-management-engine MEI nodes remain untouched. Xe-owned Intel PMT `telem` sysfs
+This is a device-access grant, not a health-only boundary: any process with the
+worker's primary group can attempt channel operations beyond health queries,
+subject to the driver's own controls. The installed helper manages permissions;
+it does not restrict channel operations to health. A narrower helper exposing
+only qualified health queries is unimplemented and unqualified future work.
+Unrelated management-engine MEI nodes remain untouched. Xe-owned Intel PMT `telem` sysfs
 attributes receive that group and mode `0440`; no world access is added. The
 installer reloads the rule and applies the same narrow permissions to current
 nodes, without probing the GPU or restarting a service. Existing group membership
@@ -2539,7 +2545,13 @@ prevent restoring an old device's receipt onto its replacement. Subsequent
 administrator node edits are preserved; a changed/non-Mycelium rule refuses
 cleanup instead of deleting it. Cleanup failure returns
 `xpu_health_access_cleanup_failed` and retains the service configuration for a
-supported uninstall retry. The root helper/journal are removed after successful
+supported uninstall retry. After grants are restored, final teardown publishes
+a root-only completion record at
+`/var/lib/mycelium/xpu-health-access.teardown` before deleting ownership or
+validation metadata. The same owner can resume directory cleanup using that
+record even if `gid`/`format` are already gone; install and udev application
+refuse while teardown is pending. The completion record is removed only after
+the state directory is gone. The root helper/journal are removed after successful
 last-owner cleanup; the inert lock file remains for coordination. This requires
 noninteractive administrator authority for uninstall as well as install; dry-run
 uninstall makes no changes.

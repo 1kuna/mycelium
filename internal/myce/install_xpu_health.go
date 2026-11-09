@@ -34,6 +34,7 @@ action=$1
 gid=$2
 case "$gid" in ''|*[!0-9]*) exit 1;; esac
 state=/var/lib/mycelium/xpu-health-access
+teardown=$state.teardown
 destination=/etc/udev/rules.d/70-mycelium-xpu-health.rules
 exec 9>/run/lock/mycelium-xpu-health.lock
 flock -x 9
@@ -76,12 +77,24 @@ apply_node() {
     baseline=$(stat -Lc '%g %a' "$node")
     publish "$receipt" 0600 "$(printf '%s\n%s\n%s\n' "$node" "$object" "$baseline")"
   fi
-  # IGSC/HECI uses O_RDWR for the health exchange. PMT is read-only.
+  # Captured health invocation: MEI O_RDWR, PMT O_RDONLY.
+  # Evidence: docs/evidence/xpu-health-access.md.
   chgrp "$gid" "$node"
   chmod "$mode" "$node"
 }
+finish_teardown() {
+  # The external record is the retry authority once validation metadata goes.
+  # Keep it until the final directory is gone, including across interruptions.
+  rm -f "$state/owners/$owner" "$state/access.sh" "$state/gid" "$state/format"
+  if [ -d "$state/owners" ]; then rmdir "$state/owners"; fi
+  if [ -d "$state/nodes" ]; then rmdir "$state/nodes"; fi
+  if [ -e "$state" ]; then rmdir "$state"; fi
+  rm "$teardown"
+}
 [ ! -L "$state" ] || exit 1
 if [ "$action" = apply ]; then
+  [ ! -e "$teardown" ]
+  [ ! -L "$teardown" ]
   [ "$(cat "$state/format")" = mycelium-xpu-health-v1 ]
   [ "$(cat "$state/gid")" = "$gid" ]
   apply_node "$3"
@@ -94,6 +107,15 @@ case "$owner" in ''|*[!0-9a-f]*) exit 1;; esac
 if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then exit 1; fi
 # Never remove or overwrite a rule changed by another owner/administrator.
 if [ -f "$destination" ]; then [ "$(cat "$destination")" = "$rules" ]; fi
+teardown_record=$(printf 'mycelium-xpu-health-teardown-v1\n%s\n%s' "$gid" "$owner")
+if [ -L "$teardown" ] || { [ -e "$teardown" ] && [ ! -f "$teardown" ]; }; then exit 1; fi
+if [ -f "$teardown" ]; then
+  [ "$(cat "$teardown")" = "$teardown_record" ]
+  [ "$action" = remove ]
+  [ ! -e "$destination" ]
+  finish_teardown
+  exit 0
+fi
 if [ "$action" = install ] && [ ! -d "$state" ]; then
   [ ! -e "$destination" ] # Do not adopt grants whose baseline journal is lost.
   mkdir -p "$(dirname "$state")"
@@ -165,8 +187,10 @@ remove)
     fi
     rm "$receipt"
   done
-  rm "$state/owners/$owner" "$state/access.sh" "$state/gid" "$state/format"
-  rmdir "$state/owners" "$state/nodes" "$state"
+  # All grants are restored and receipts consumed. Publish retry authority
+  # outside $state before removing any of the validation/ownership metadata.
+  publish "$teardown" 0600 "$teardown_record"
+  finish_teardown
   ;;
 *) exit 1;;
 esac
