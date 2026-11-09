@@ -17,13 +17,48 @@ func TestSessionCoverage(t *testing.T) {
 		known         bool
 	}{
 		{"interactive console", 1, 1, []Session{{1, 0}}, true},
+		{"interop session zero", 0, 1, []Session{{1, 0}}, false},
+		{"remote session", 2, 1, []Session{{2, 0}}, false},
+		{"switch in progress", 1, 0xffffffff, []Session{{1, 0}}, false},
+		{"other active session", 1, 1, []Session{{1, 0}, {2, 0}}, false},
+		{"disconnected user", 1, 1, []Session{{1, 0}, {2, 4}}, false},
 		{"missing console", 1, 1, nil, false},
+		{"not active", 1, 1, []Session{{1, 4}}, false},
+		{"listener and session zero", 1, 1, []Session{{0, 4}, {1, 0}, {65536, 6}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := Covered(tc.self, tc.console, tc.sessions); got != tc.known {
 				t.Fatal(got)
 			}
 		})
+	}
+}
+
+func TestIdleAndPower(t *testing.T) {
+	for _, tc := range []struct {
+		now, last uint32
+		seconds   float64
+		known     bool
+	}{
+		{500000, 100000, 400, true}, {500, 0xfffffff0, .516, true}, {100, 101, 0, false},
+	} {
+		s, k := Idle(tc.now, tc.last)
+		if s != tc.seconds || k != tc.known {
+			t.Fatal(tc, s, k)
+		}
+	}
+	for _, tc := range []struct {
+		ac, battery, saver byte
+		power              string
+		laptop             bool
+	}{
+		{1, 128, 0, "ac", false}, {0, 1, 0, "battery", true}, {255, 128, 0, "unknown", false},
+		{1, 255, 0, "unknown", true}, {1, 129, 0, "unknown", true}, {1, 1, 1, "battery", true}, {0, 128, 0, "battery", false},
+	} {
+		p, l := Power(tc.ac, tc.battery, tc.saver)
+		if p != tc.power || l != tc.laptop {
+			t.Fatal(tc, p, l)
+		}
 	}
 }
 
@@ -127,27 +162,56 @@ func TestInstallUninstallOwnership(t *testing.T) {
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatal("owned install retained", err)
 	}
-	t.Run("failed-install", func(t *testing.T) {
-		parent := t.TempDir()
-		root := filepath.Join(parent, "bridge")
-		source := filepath.Join(parent, "source.exe")
-		os.WriteFile(source, []byte("test"), 0600)
-		hooks := InstallHooks{Secure: func(string) error { return os.ErrPermission }, Registration: func() (string, error) { return "", nil }}
-		if err := Install(root, source, hooks); err == nil {
-			t.Fatal("installed without secure ACL")
-		}
-		if _, err := os.Stat(root); !os.IsNotExist(err) {
-			t.Fatal("partial insecure directory retained", err)
-		}
-		os.Mkdir(root, 0700)
-		os.WriteFile(filepath.Join(root, "keep"), []byte("unique"), 0600)
-		if err := Install(root, source, hooks); err == nil {
-			t.Fatal("overwrote directory")
-		}
-		if b, err := os.ReadFile(filepath.Join(root, "keep")); err != nil || string(b) != "unique" {
-			t.Fatal("foreign data lost")
-		}
-	})
+}
+
+func TestContinuityDoesNotCountStartupSleepOrBadTicks(t *testing.T) {
+	var c Continuity
+	if s, k := c.Observe(600000, 0); !k || s != 0 {
+		t.Fatal(s, k)
+	}
+	for now := uint64(605000); now <= 900000; now += 5000 {
+		c.Observe(now, 0)
+	}
+	if s, k := c.Observe(900000, 0); !k || s != 300 {
+		t.Fatal(s, k)
+	}
+	if s, k := c.Observe(900001, 900000); !k || s != 0 {
+		t.Fatal("new input", s, k)
+	}
+	if s, k := c.Observe(4500000, 900000); !k || s != 0 {
+		t.Fatal("sleep counted", s, k)
+	}
+	if s, k := c.Observe(4500100, 4500101); k || s != 0 {
+		t.Fatal("future tick", s, k)
+	}
+	if s, k := c.Observe(4500200, 0); !k || s != 0 {
+		t.Fatal("anomaly did not reset", s, k)
+	}
+	if s, k := c.Observe(4500100, 0); !k || s != 0 {
+		t.Fatal("clock rollback", s, k)
+	}
+}
+
+func TestInstallFailurePreservesForeignData(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "bridge")
+	source := filepath.Join(parent, "source.exe")
+	os.WriteFile(source, []byte("test"), 0600)
+	hooks := InstallHooks{Secure: func(string) error { return os.ErrPermission }, Registration: func() (string, error) { return "", nil }}
+	if err := Install(root, source, hooks); err == nil {
+		t.Fatal("installed without secure ACL")
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatal("partial insecure directory retained", err)
+	}
+	os.Mkdir(root, 0700)
+	os.WriteFile(filepath.Join(root, "keep"), []byte("unique"), 0600)
+	if err := Install(root, source, hooks); err == nil {
+		t.Fatal("overwrote directory")
+	}
+	if b, err := os.ReadFile(filepath.Join(root, "keep")); err != nil || string(b) != "unique" {
+		t.Fatal("foreign data lost")
+	}
 }
 
 func TestHTTPBoundary(t *testing.T) {
@@ -198,6 +262,11 @@ func TestRejectMalformedSignedResponses(t *testing.T) {
 	key, _ := c.validate()
 	for _, body := range []string{
 		`{"idle_known":true,"idle_seconds":400,"power":"ac","heat":"unknown","gpu_heat":"nominal","heat_coverage":"gpu-only"}`,
+		`{"idle_known":true,"idle_seconds":400,"laptop":null,"power":"ac","heat":"unknown","gpu_heat":"nominal","heat_coverage":"gpu-only"}`,
+		`{"laptop":false,"idle_seconds":-1,"power":"ac","heat":"nominal"}`,
+		`{"laptop":false,"power":"desktop","heat":"nominal"}`,
+		`{"laptop":false,"power":"ac","heat":"cool"}`,
+		`{"power":"ac","heat":"nominal"} trailing`,
 		string(make([]byte, 4097)),
 	} {
 		t.Run(body[:min(20, len(body))], func(t *testing.T) {
