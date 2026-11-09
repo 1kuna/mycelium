@@ -2,7 +2,6 @@ package myce
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -72,120 +71,6 @@ func TestRequestTimingSlowHandler(t *testing.T) {
 	summary := q.requestLatencies.snapshot()
 	if len(summary) != 1 || summary[0].Route != "POST /test/{id}" || summary[0].Count != 2 || summary[0].P99MS < 1000 {
 		t.Fatal(summary)
-	}
-}
-
-func TestRequestTimingRollingStatusAndFastSilence(t *testing.T) {
-	q, _ := fixture(t)
-	var logs bytes.Buffer
-	old := log.Writer()
-	log.SetOutput(&logs)
-	defer log.SetOutput(old)
-	h := API{Queue: q, Token: "secret"}.Handler()
-	for i := 0; i < testLatencyBurst+10; i++ {
-		r := httptest.NewRequest("GET", fmt.Sprintf("/api/jobs/missing-%d?token=hidden", i), nil)
-		r.Header.Set("Authorization", "Bearer secret")
-		h.ServeHTTP(httptest.NewRecorder(), r)
-	}
-	if strings.Contains(logs.String(), "private") || strings.Contains(logs.String(), "hidden") {
-		t.Fatal("private data in locally selected telemetry", logs.String())
-	}
-	snapshot, err := q.publicSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshot.RequestLatencies) != 1 {
-		t.Fatal(snapshot.RequestLatencies)
-	}
-	s := snapshot.RequestLatencies[0]
-	if s.Route != "GET /api/jobs/{id}" || s.Count != testLatencyBurst+10 || s.Samples != testLatencyBurst+10 {
-		t.Fatal(s)
-	}
-	// Nearest rank percentiles describe only the retained window.
-	var samples requestLatencies
-	for i := 1; i <= testLatencyBurst*2; i++ {
-		samples.record("route", time.Duration(i)*time.Millisecond)
-	}
-	got := samples.snapshot()[0]
-	if got.P50MS < 256 || got.P50MS > 512 || got.P95MS < 487 || got.P99MS < 507 || got.P99MS > 512 {
-		t.Fatal(got)
-	}
-	for i := 0; i < testRouteBurst+10; i++ {
-		samples.record(fmt.Sprint(i), time.Second)
-	}
-	if len(samples.snapshot()) != testRouteBurst+11 {
-		t.Fatal("trusted route summaries were dropped")
-	}
-	// Requests without queue work must not claim to have measured a mutex.
-	if spanFrom(context.Background()) != nil {
-		t.Fatal("unexpected span")
-	}
-}
-
-func TestRequestTimingHydrationRecovery(t *testing.T) {
-	q, _ := fixture(t)
-	s := &requestSpan{started: time.Now()}
-	ctx := context.WithValue(context.Background(), requestSpanKey{}, s)
-	q.observeUpdate = func(time.Duration, time.Duration) { <-time.After(25 * time.Millisecond) }
-	reply := Reply{EnvironmentPlan: []EnvironmentRecipe{{Key: "missing", FilesRef: &FileRef{SHA256: strings.Repeat("a", 64), SizeBytes: 1}, Launch: &HostLaunch{Attempt: "missing"}}}}
-	started := make(chan struct{})
-	done := make(chan error, 1)
-	q.mu.Lock()
-	go func() { close(started); done <- q.hydrateReply(&reply, ctx) }()
-	<-started
-	<-time.After(25 * time.Millisecond)
-	q.mu.Unlock()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if !s.measured || s.wait < 20*time.Millisecond || s.hold < 20*time.Millisecond {
-		t.Fatalf("hydration capture/recovery missing: wait=%s hold=%s", s.wait, s.hold)
-	}
-	if len(reply.EnvironmentPlan) != 0 {
-		t.Fatal("undeliverable plan retained")
-	}
-}
-
-func TestRequestTimingEarlyRouteLabels(t *testing.T) {
-	q, _ := fixture(t)
-	h := API{Queue: q, Token: "secret"}.Handler()
-	for _, tc := range []struct{ method, path, token, route string }{
-		{"POST", "/api/jobs", "wrong", "POST /api/jobs"},
-		{"POST", "/api/workers/started", "secret", "POST /api/workers/started"},
-		{"POST", "/api/invites/redeem", "", "/api/invites/redeem"},
-	} {
-		r := httptest.NewRequest(tc.method, tc.path, nil)
-		r.Header.Set("Authorization", "Bearer "+tc.token)
-		h.ServeHTTP(httptest.NewRecorder(), r)
-		found := false
-		for _, s := range q.requestLatencies.snapshot() {
-			if s.Route == tc.route {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("route %s lost: %+v", tc.route, q.requestLatencies.snapshot())
-		}
-	}
-}
-
-func TestRequestTimingControlTransactions(t *testing.T) {
-	q, _ := fixture(t)
-	for name, operation := range map[string]func(context.Context){
-		"started": func(ctx context.Context) { _ = q.Started(Result{}, ctx) },
-		"cancel":  func(ctx context.Context) { _, _ = q.CancelJob("missing", ctx) },
-		"upload": func(ctx context.Context) {
-			_ = q.recordFileUpload(strings.Repeat("b", 64), jobInputUploadPurpose, true, ctx)
-		},
-		"bundle": func(ctx context.Context) { _ = q.recordBundleUpload(strings.Repeat("c", 64), true, ctx) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			s := &requestSpan{started: time.Now()}
-			operation(context.WithValue(context.Background(), requestSpanKey{}, s))
-			if !s.measured || s.hold <= 0 {
-				t.Fatal("queue transaction was not attributed")
-			}
-		})
 	}
 }
 

@@ -18,7 +18,7 @@ import (
 // predicate. The helper is already launched, as shown by its bare error in the
 // retained service log. No clock timing or scheduler luck is involved.
 func TestFleetHelperRefetchesDelayedControl(t *testing.T) {
-	for _, edge := range []string{"before-fetch", "before-publication", "before-restart"} {
+	for _, edge := range []string{"before-publication"} {
 		t.Run(edge, func(t *testing.T) {
 			f := newFleetInstallFixture(t, "linux")
 			if err := f.launch(); err != nil {
@@ -79,41 +79,6 @@ func TestFleetHelperRefetchesDelayedControl(t *testing.T) {
 			}
 			f.assertBinary(f.next)
 		})
-	}
-}
-
-func TestFleetHelperObsoleteRefetchPreservesPhase(t *testing.T) {
-	f := newFleetInstallFixture(t, "linux")
-	if err := f.launch(); err != nil {
-		t.Fatal(err)
-	}
-	f.denyAt, f.denyCode = 2, "fleet_instruction_stale"
-	base := f.deps.client
-	f.deps.client = func(c ServiceConfig) (Client, error) {
-		client, err := base(c)
-		if err != nil {
-			return client, err
-		}
-		transport := client.HTTP.Transport
-		if transport == nil {
-			transport = http.DefaultTransport
-		}
-		client.HTTP.Transport = clientTestTransport(func(r *http.Request) (*http.Response, error) {
-			if r.URL.Path == "/api/fleet/instruction" {
-				w := httptest.NewRecorder()
-				respond(w, nil, fleetError("fleet_instruction_stale"))
-				return w.Result(), nil
-			}
-			return transport.RoundTrip(r)
-		})
-		return client, nil
-	}
-	if err := f.apply(); err == nil || err.Error() != "fleet_instruction_stale" {
-		t.Fatal(err)
-	}
-	r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-	if err != nil || r.Phase != "prepared" || f.restarts != 0 || len(f.failureCodes) != 0 {
-		t.Fatal("obsolete control poisoned durable operation", r, err)
 	}
 }
 

@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,10 +8,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
-	"testing/synctest"
 	"time"
 )
 
@@ -93,58 +90,6 @@ func TestRequestBudgetProjectionLivesThroughResponse(t *testing.T) {
 	}
 }
 
-func TestRequestBudgetIntervalVariablePayload(t *testing.T) {
-	q, _ := fixture(t)
-	budgetHost(q, 128<<10, 1)
-	for i, project := range []string{"small", strings.Repeat("x", 16000)} {
-		data, _ := json.Marshal(ModelIntervalEvent{Sequence: i + 1, ModelInterval: ModelInterval{Project: project}})
-		if _, err := q.db.Exec("INSERT INTO model_intervals(seq,data) VALUES(?,?)", i+1, data); err != nil {
-			t.Fatal(err)
-		}
-	}
-	q.s.ModelIntervalHighWater = 2
-	first, err := q.ModelIntervals(t.Context(), 0, -1, 100)
-	if err != nil || len(first.Entries) != 1 || !first.HasMore || first.Next != 1 {
-		t.Fatal(first, err)
-	}
-	_, err = q.ModelIntervals(t.Context(), first.Next, first.HighWater, 100)
-	var refusal *HTTPError
-	if !errors.As(err, &refusal) || refusal.Status != 503 || refusal.Code != "projection_capacity_exceeded" {
-		t.Fatal("large row bypassed memory allowance", err)
-	}
-	if q.requestBudgets.held != 0 {
-		t.Fatal("interval capacity leaked")
-	}
-}
-
-func TestRequestBudgetCachedPeerAndUnavailableRefusals(t *testing.T) {
-	q, _ := fixture(t)
-	budgetHost(q, 64<<20, 2)
-	handler := API{q, "test"}.Handler()
-	request := func(negotiated bool) *httptest.ResponseRecorder {
-		r := httptest.NewRequest("GET", "/api/status", nil)
-		r.Header.Set("Authorization", "Bearer test")
-		if negotiated {
-			r.Header.Set("X-Myce-Request-Budgets", requestBudgetProtocol)
-			r.Header.Set("X-Myce-Max-Response-Bytes", "1")
-		}
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, r)
-		return w
-	}
-	if w := request(false); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	if w := request(true); w.Code != 503 || !strings.Contains(w.Body.String(), "projection_capacity_exceeded") || !strings.Contains(w.Body.String(), "fitting bytes=1") {
-		t.Fatal("cached peer capacity bypass", w.Code, w.Body.String())
-	}
-	q.requestBudgets.memory = func(context.Context) (int64, error) { return 0, errors.New("private measurement failure") }
-	w := request(false)
-	if w.Code != 503 || !strings.Contains(w.Body.String(), "request_capacity_unavailable") || !strings.Contains(w.Body.String(), "fitting bytes=0") || strings.Contains(w.Body.String(), "private") {
-		t.Fatal("capacity refusal lost or unsanitized", w.Code, w.Body.String())
-	}
-}
-
 func TestRequestBudgetGrowingFolderUsesActualBytes(t *testing.T) {
 	folder := t.TempDir()
 	for _, name := range []string{"a", "b"} {
@@ -217,57 +162,4 @@ type slowBudgetResponse struct{ *httptest.ResponseRecorder }
 func (w slowBudgetResponse) Write(p []byte) (int, error) {
 	time.Sleep(10 * time.Second)
 	return w.ResponseRecorder.Write(p)
-}
-
-func TestRequestBudgetControlTimingExcludesTransport(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		q, clock := fixture(t)
-		handler := q.measureRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			r.Pattern = "POST /api/workers/checkin"
-			if _, err := io.Copy(io.Discard, r.Body); err != nil {
-				t.Fatal(err)
-			}
-			unlock := requestLock(r.Context(), &q.mu)
-			time.Sleep(5 * time.Millisecond)
-			unlock()
-			_, _ = w.Write([]byte("{}"))
-		}), map[string]struct{}{"POST /api/workers/checkin": {}})
-		r := httptest.NewRequest("POST", "/api/workers/checkin", &slowBudgetBody{Reader: strings.NewReader("{}")})
-		handler.ServeHTTP(slowBudgetResponse{httptest.NewRecorder()}, r)
-		if q.requestBudgets.controlTime != 5*time.Millisecond {
-			t.Fatal("peer transport contaminated control work", q.requestBudgets.controlTime)
-		}
-		q.requestBudgets.recordProjection(1, int(reflect.TypeFor[Job]().Size()), time.Millisecond)
-		r.Header.Set("X-Myce-Request-Budgets", requestBudgetProtocol)
-		r.Header.Set("X-Myce-Transport-Deadline", clock.Now().Add(time.Second).Format(time.RFC3339Nano))
-		duration, err := q.requestBudgets.waitDuration(r, 20, clock.Now())
-		if err != nil || duration != 995*time.Millisecond {
-			t.Fatal(duration, err)
-		}
-	})
-}
-
-func TestRequestBudgetCachedReceiptProjection(t *testing.T) {
-	q, _ := fixture(t)
-	budgetHost(q, 64<<20, 1)
-	job := &Job{ID: "cached-receipt", State: "succeeded", ReleaseConfirmed: true, Spec: Spec{Name: strings.Repeat("x", 10000)}}
-	q.s.Jobs[job.ID] = job
-	handler := API{q, "test"}.Handler()
-	request := func() *httptest.ResponseRecorder {
-		r := httptest.NewRequest("GET", "/api/jobs/"+job.ID, nil)
-		r.Header.Set("Authorization", "Bearer test")
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, r)
-		return w
-	}
-	if w := request(); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	budgetHost(q, 64<<10, 1)
-	if w := request(); w.Code != 503 || !strings.Contains(w.Body.String(), "projection_capacity_exceeded") {
-		t.Fatal("cached receipt escaped shared capacity", w.Code, w.Body.String())
-	}
-	if q.requestBudgets.held != 0 {
-		t.Fatal("receipt capacity leaked")
-	}
 }

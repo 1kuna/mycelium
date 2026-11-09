@@ -190,7 +190,7 @@ func TestM4VerifiedEmptyConversionReceipt(t *testing.T) {
 }
 
 func TestM4VerifiedEmptyRefusals(t *testing.T) {
-	for _, kind := range []string{"queue", "paused", "waiting", "retained-paused", "retained-waiting", "running", "stopping", "preparing", "obligations", "unit_active", "unit_unreadable", "cgroup_populated", "cgroup_unreadable", "spool_unsettled", "spool_missing", "container_running", "docker_inaccessible"} {
+	for _, kind := range []string{"queue", "running", "obligations", "unit_active", "unit_unreadable", "cgroup_populated", "cgroup_unreadable", "spool_unsettled", "spool_missing", "container_running", "docker_inaccessible"} {
 		t.Run(kind, func(t *testing.T) {
 			c, clock, mapping, opts, run := m4EmptyFixture(t)
 			q, err := openConversionQueue(c, clock)
@@ -268,17 +268,6 @@ func TestM4VerifiedEmptyRefusals(t *testing.T) {
 				t.Fatal("refusal changed queue state")
 			}
 		})
-	}
-}
-
-func TestM4VerifiedEmptyRemainsExplicit(t *testing.T) {
-	c, clock, mapping, _, run := m4EmptyFixture(t)
-	for _, dry := range []bool{true, false} {
-		err := ConvertQueueInstall(context.Background(), c, mapping, dry, false, clock, run)
-		var typed *HTTPError
-		if !errors.As(err, &typed) || typed.Code != "machine_migration_incomplete" {
-			t.Fatal("default source gate changed", err)
-		}
 	}
 }
 

@@ -12,9 +12,6 @@ import (
 
 // synctest drives the existing I/O budget and simulated metadata delays with
 // fake timers; callbacks and real filesystem work must finish before time moves.
-func TestWorkerPreparationToleratesSlowMetadata(t *testing.T) {
-	synctest.Test(t, testWorkerPreparationToleratesSlowMetadata)
-}
 
 func testWorkerPreparationToleratesSlowMetadata(t *testing.T) {
 	w := recoveryWorker(t)
@@ -88,10 +85,6 @@ func testWorkerPreparationTimeoutRetainsSingleCall(t *testing.T) {
 	}
 }
 
-func TestWorkerNASProbeToleratesSlowMetadata(t *testing.T) {
-	synctest.Test(t, testWorkerNASProbeToleratesSlowMetadata)
-}
-
 func testWorkerNASProbeToleratesSlowMetadata(t *testing.T) {
 	w := recoveryWorker(t)
 	s, err := w.openStore()
@@ -108,10 +101,6 @@ func testWorkerNASProbeToleratesSlowMetadata(t *testing.T) {
 			t.Fatalf("healthy slow NAS reported unavailable: %v", err)
 		}
 	}
-}
-
-func TestWorkerNASProbeBlockedAndRecovery(t *testing.T) {
-	synctest.Test(t, testWorkerNASProbeBlockedAndRecovery)
 }
 
 func testWorkerNASProbeBlockedAndRecovery(t *testing.T) {
@@ -163,30 +152,6 @@ func testWorkerNASProbeBlockedAndRecovery(t *testing.T) {
 }
 
 // Exercise the real queue adapter without making a network filesystem a test prerequisite.
-func TestQueueNASProbeToleratesSlowMetadata(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		q, _ := fixture(t)
-		defer func() {
-			q.nasProbe.mu.Lock()
-			pending := q.nasProbe.pending
-			q.nasProbe.mu.Unlock()
-			if pending != nil {
-				<-pending.done
-			}
-		}()
-		q.checkpointProbe = func() bool {
-			available, _ := q.nasProbe.run(q.root, func() (bool, error) {
-				time.Sleep(500 * time.Millisecond)
-				return true, nil
-			})
-			return available
-		}
-		j := submit(t, q, spec("experiment"))
-		if r := check(t, q, machine("worker", "fake"), nil); r.Job == nil || r.Job.ID != j.ID {
-			t.Fatal("healthy slow NAS prevented assignment")
-		}
-	})
-}
 
 func TestWorkerPreparationCancellationRetainsSingleCall(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

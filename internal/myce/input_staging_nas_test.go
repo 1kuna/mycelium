@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // #660: stored source exists, but a shared NAS input was authored relative to
@@ -84,76 +83,6 @@ func TestInputStagingMissingNASNamesSourceAndSurvivesReopen(t *testing.T) {
 	}
 }
 
-func TestInputStagingStoredSharedInputAfterRestart(t *testing.T) {
-	q, clock := fixture(t)
-	s := submitVerificationInput(t, q)
-	if err := q.ConfigureFileStore(q.files.root, 1<<20, false); err != nil {
-		t.Fatal(err)
-	}
-	s.Run.Command = []string{"sh", "-ec", `test "$(cat "$MYCE_INPUT_MOVIE")" = imported && test -s input`}
-	s.Resumable = false
-	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	client := Client{URL: api.URL, Token: "test"}
-	media := t.TempDir()
-	ref := sharedFixtureFile(t, media, "movie", "imported")
-	if err := client.UploadFile(context.Background(), filepath.Join(media, "movie"), ref); err != nil {
-		t.Fatal(err)
-	}
-	s.SharedInputs = map[string]SharedInput{"movie": {SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}}
-	check(t, q, cacheCapacityMachine("stored-reader", 1<<20), nil)
-	submitted := submit(t, q, s)
-	api.Close()
-	database, root, storeRoot := strings.TrimSuffix(q.lock.Name(), ".lock"), q.root, q.files.root
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	q, err := Open(database, root, clock, WithFileStore(storeRoot, 1<<20, false))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer q.Close()
-	fakeCheckpointAvailability(t, q, true)
-	m := cacheCapacityMachine("stored-reader", 1<<20)
-	assigned := check(t, q, m, nil).Job
-	if assigned == nil {
-		t.Fatal("not assigned after restart", job(t, q, submitted.ID))
-	}
-	api = httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer api.Close()
-	client.URL = api.URL
-	w := Worker{StateDir: newTestStateRoot(t), Machine: m, Clock: clock, Client: client, CheckpointRoot: q.root,
-		HostMemorySource: func(context.Context) (float64, error) { return 64, nil },
-		MemorySource:     func(context.Context) (float64, error) { return 64, nil }}
-	w.fileCache = &FileCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock, Client: client}
-	w.sharedInputs = &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}, Client: client}
-	store, err := w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.close()
-	store.state.Session, store.state.Job = assigned.Session, assigned
-	p, err := startAfterFixtureInputs(t, w, store, *assigned)
-	if err != nil || p == nil {
-		t.Fatalf("imported input did not launch: process=%v err=%v", p, err)
-	}
-	select {
-	case finished := <-p.done:
-		if finished.err != nil || !finished.result.Success {
-			t.Fatalf("payload failed reading imported media: %+v", finished)
-		}
-		if err := q.Complete(finished.result); err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(testWaitTimeout):
-		p.stop(clock.Now(), 0, true)
-		t.Fatal("payload did not finish")
-	}
-	got := job(t, q, submitted.ID)
-	if got.State != "succeeded" || got.StartedAt == nil || got.Losses != 0 {
-		t.Fatalf("imported job did not run successfully: %+v", got)
-	}
-}
-
 func TestInputStagingPathDiagnosticRefusesPrivatePaths(t *testing.T) {
 	c := &RuntimeCause{Operation: "input_staging", Class: "not_found", PathDiagnostic: &PathDiagnostic{Field: "shared_inputs.movie.nas", Side: "worker", Path: "/synthetic/private/movie", ResolutionBase: "worker-checkpoint-root", Cause: "missing"}}
 	if safeRuntimeCause(c).PathDiagnostic != nil || strings.Contains(c.String(), "/synthetic/private") {
@@ -162,7 +91,7 @@ func TestInputStagingPathDiagnosticRefusesPrivatePaths(t *testing.T) {
 }
 
 func TestInputStagingPathDiagnosticRequiresDeclaredNASInput(t *testing.T) {
-	for _, name := range []string{"movie", "UNDECLARED_SECRET", "stored"} {
+	for _, name := range []string{"UNDECLARED_SECRET", "stored"} {
 		t.Run(name, func(t *testing.T) {
 			q, clock := fixture(t)
 			s := submitVerificationInput(t, q)

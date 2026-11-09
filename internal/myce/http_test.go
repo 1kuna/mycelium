@@ -58,6 +58,30 @@ func TestAPIAuthenticationAndFlow(t *testing.T) {
 	if strings.Contains(rr.Body.String(), "<script>") || !strings.Contains(rr.Body.String(), "&lt;script&gt;") {
 		t.Fatal("status HTML must escape job content")
 	}
+
+	// Status routes require their authority independently of worker authorization.
+	{
+		h := API{Queue: q, Token: "test"}.Handler()
+		for _, path := range []string{"/", "/api/status"} {
+			for _, token := range []string{"", "wrong", "test"} {
+				r := httptest.NewRequest("GET", path, nil)
+				if token != "" {
+					r.Header.Set("Authorization", "Bearer "+token)
+				}
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, r)
+				want := 401
+				if token == "test" {
+					want = 200
+				}
+				if w.Code != want {
+					t.Fatalf("%s auth: got %d want %d", path, w.Code, want)
+				}
+			}
+		}
+
+	}
+
 }
 func TestAPIRejectsMalformedRequests(t *testing.T) {
 	q, _ := fixture(t)

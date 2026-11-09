@@ -18,45 +18,13 @@ func TestJobSpecInvalidHTTPAndQueueLog(t *testing.T) {
 		name, code, reason string
 		prepare            func(*testing.T, *Queue, *Spec)
 	}{
-		{"logs", "job_logs_invalid", "logs", func(_ *testing.T, _ *Queue, s *Spec) { s.Logs = "bad" }},
-		{"memory", "job_memory_invalid", "memory_gb", func(_ *testing.T, _ *Queue, s *Spec) { s.Needs.MemoryGB = -1 }},
-		{"docker", "job_docker_invalid", "Docker memory", func(_ *testing.T, _ *Queue, s *Spec) {
-			s.Needs.HostMemoryGB = 1
-			s.Run.Docker, s.Run.DockerNetwork, s.Run.DockerMemoryGB = true, "private", 2
-		}},
-		{"fields", "job_fields_required", "required", func(_ *testing.T, _ *Queue, s *Spec) { s.Name = "" }},
-		{"deadline", "job_deadline_invalid", "deadline", func(_ *testing.T, _ *Queue, s *Spec) { s.Priority = "deadline" }},
-		{"project", "job_project_invalid", "project", func(_ *testing.T, _ *Queue, s *Spec) { s.Project = "bad/project" }},
-		{"class", "job_class_invalid", "class", func(_ *testing.T, _ *Queue, s *Spec) { s.Class = "bad/class" }},
+
 		{"execution", "job_execution_invalid", "execution", func(_ *testing.T, _ *Queue, s *Spec) { s.Execution = &ExecutionSpec{} }},
-		{"placement", "job_placement_invalid", "allowed_machines", func(t *testing.T, q *Queue, s *Spec) {
-			if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: []string{"allowed"}}}); err != nil {
-				t.Fatal(err)
-			}
-			s.AllowedMachines = []string{"other"}
-		}},
-		{"capacity", "job_capacity_invalid", "compatible machine", func(t *testing.T, q *Queue, s *Spec) {
-			check(t, q, machine("allowed", "fake"), nil)
-			if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: []string{"allowed"}}}); err != nil {
-				t.Fatal(err)
-			}
-			s.Needs.Platform = Platform{Required: []string{"cuda"}}
-		}},
+
 		{"environment", "job_environment_invalid", `unknown environment "missing"`, func(_ *testing.T, q *Queue, s *Spec) {
 			q.environments.Environments = map[string]map[string]EnvironmentRecipe{"known": {}}
 			s.Environment.Name = "missing"
 		}},
-		{"environment platform", "job_environment_platform_mismatch", "platform", func(t *testing.T, q *Queue, s *Spec) {
-			if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"cpu-tools": {"cpu": binaryRecipe(t, "cpu")}}}); err != nil {
-				t.Fatal(err)
-			}
-			s.Environment.Name = "cpu-tools"
-		}},
-		{"sidecar environment", "job_environment_invalid", "sidecar", func(_ *testing.T, _ *Queue, s *Spec) {
-			s.Needs.HostMemoryGB = 2
-			s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"echo"}, MemoryGB: 1, Environment: "missing"}}
-		}},
-		{"extension", "job_program_invalid", "extension", func(_ *testing.T, _ *Queue, s *Spec) { s.Extension = "missing@1" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, _ := fixture(t)

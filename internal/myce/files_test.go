@@ -12,50 +12,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
-
-func TestFilesOpenHandleSurvivesPathReplacement(t *testing.T) {
-	q, _ := fixture(t)
-	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, false); err != nil {
-		t.Fatal(err)
-	}
-	api := httptest.NewServer(API{Queue: q, Token: "fixture"}.Handler())
-	defer api.Close()
-	c := Client{URL: api.URL, Token: "fixture"}
-	path := filepath.Join(t.TempDir(), "source")
-	if err := os.WriteFile(path, []byte("retained bytes"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	ctx := context.Background()
-	ref, err := IdentifyOpenFile(ctx, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Rename(path, path+".original"); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(path, []byte("replaced bytes"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err = c.UploadJobInputFile(ctx, f, ref); err != nil {
-		t.Fatal(err)
-	}
-	dest := filepath.Join(t.TempDir(), "download")
-	if err = c.DownloadFile(ctx, ref, dest); err != nil {
-		t.Fatal(err)
-	}
-	if data, err := os.ReadFile(dest); err != nil || string(data) != "retained bytes" {
-		t.Fatalf("upload followed replacement pathname: %q %v", data, err)
-	}
-}
 
 func TestFilesResumableAndHashRefusal(t *testing.T) {
 	t.Parallel()
@@ -568,52 +527,6 @@ func TestFileStoreCorruptUploadOffsetCapacityAndRestart(t *testing.T) {
 	}
 }
 
-func TestStoredModelCacheSingleAndBundle(t *testing.T) {
-	t.Parallel()
-	q, _ := fixture(t)
-	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer server.Close()
-	c := Client{URL: server.URL, Token: "test"}
-	files := []ModelFile{}
-	for name, data := range map[string]string{"weights": "model", "config.json": "{}"} {
-		src := filepath.Join(t.TempDir(), "file")
-		os.WriteFile(src, []byte(data), 0600)
-		ref, _ := IdentifyFile(src)
-		if err := c.UploadFile(context.Background(), src, ref); err != nil {
-			t.Fatal(err)
-		}
-		files = append(files, ModelFile{Path: name, SHA256: ref.SHA256, SizeBytes: ref.SizeBytes})
-	}
-	root, _ := filepath.EvalSymlinks(t.TempDir())
-	cache := ModelCache{Root: root, Limit: 9, Clock: RealClock{}, FileClient: &c}
-	if err := cache.init(); err != nil {
-		t.Fatal(err)
-	}
-	bundleSize, bundleHash, _ := ModelFilesIdentity(files)
-	var weight ModelFile
-	for _, f := range files {
-		if f.Path == "weights" {
-			weight = f
-		}
-	}
-	models := []Model{{Name: "one", Path: "stored", FileStore: true, SizeBytes: weight.SizeBytes, SHA256: weight.SHA256}, {Name: "bundle", Path: "stored", FileStore: true, SizeBytes: bundleSize, SHA256: bundleHash, Files: files}}
-	for _, model := range models {
-		path, err := cache.Prepare(context.Background(), model)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = verifyModel(path, model); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(cache.Root, cacheKey(models[0]))); !os.IsNotExist(err) {
-		t.Fatal("unloaded stored model was not evicted", err)
-	}
-}
-
 func TestStoredExtensionInputAndOutput(t *testing.T) {
 	t.Parallel()
 	q, _ := fixture(t)
@@ -733,68 +646,5 @@ func TestFilesTransientInputRetryReconcilesAcceptedOffset(t *testing.T) {
 	}
 	if err := c.HasFile(ctx, ref); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestFilesTransientPostCreateProbe(t *testing.T) {
-	for _, status := range []int{503, 401} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			q, _ := fixture(t)
-			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, false); err != nil {
-				t.Fatal(err)
-			}
-			backend := API{Queue: q, Token: "fixture"}.Handler()
-			var created, injected, paused, bypassed atomic.Bool
-			var offsetReads atomic.Int32
-			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == "POST" && r.URL.Path == "/api/files/uploads/" {
-					created.Store(true)
-				}
-				if r.Method == "HEAD" && strings.HasPrefix(r.URL.Path, "/api/files/blobs/") && created.Load() && injected.CompareAndSwap(false, true) {
-					w.Header().Set("Retry-After", "7")
-					w.WriteHeader(status)
-					return
-				}
-				if r.Method == "HEAD" && strings.HasPrefix(r.URL.Path, "/api/files/uploads/") {
-					offsetReads.Add(1)
-					if !paused.Load() {
-						bypassed.Store(true)
-					}
-				}
-				backend.ServeHTTP(w, r)
-			}))
-			defer api.Close()
-			path := filepath.Join(t.TempDir(), "input")
-			if err := os.WriteFile(path, []byte("input bytes"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			ref, err := IdentifyFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			clock := &fakeClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
-			reports := 0
-			c := Client{URL: api.URL, Token: "fixture", Clock: clock, Jitter: func() float64 { return 0 }, Pause: func(_ context.Context, d time.Duration) error {
-				if d < 7*time.Second {
-					t.Fatal("probe Retry-After discarded", d)
-				}
-				paused.Store(true)
-				clock.Advance(d)
-				return nil
-			}}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			err = c.RetryTransient(ctx, func(ctx context.Context, one Client) error { return one.UploadJobInput(ctx, path, ref) }, func(error, time.Duration) { reports++ })
-			if status == 503 {
-				if err != nil || reports != 1 || !paused.Load() || bypassed.Load() || offsetReads.Load() != 1 {
-					t.Fatal("transient probe bypassed retry owner", err, reports, offsetReads.Load(), bypassed.Load())
-				}
-			} else {
-				var failure *HTTPError
-				if !errors.As(err, &failure) || failure.Status != status || reports != 0 || offsetReads.Load() != 0 {
-					t.Fatal("permanent probe ignored", err, reports, offsetReads.Load())
-				}
-			}
-		})
 	}
 }

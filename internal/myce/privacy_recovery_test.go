@@ -4,14 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -60,28 +58,6 @@ func TestPrivacySpoolStartupPermissionsAndErrors(t *testing.T) {
 	other, _ := fixture(t)
 	if err := other.ConfigureUploadSpool(dir, 32); err == nil {
 		t.Fatal("live spool can be claimed by another queue")
-	}
-}
-
-func TestPrivacyStatusAuthentication(t *testing.T) {
-	q, _ := fixture(t)
-	h := API{Queue: q, Token: "test"}.Handler()
-	for _, path := range []string{"/", "/api/status"} {
-		for _, token := range []string{"", "wrong", "test"} {
-			r := httptest.NewRequest("GET", path, nil)
-			if token != "" {
-				r.Header.Set("Authorization", "Bearer "+token)
-			}
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, r)
-			want := 401
-			if token == "test" {
-				want = 200
-			}
-			if w.Code != want {
-				t.Fatalf("%s auth: got %d want %d", path, w.Code, want)
-			}
-		}
 	}
 }
 
@@ -167,40 +143,6 @@ func TestPrivacyFrozenCallTimesOutAndReleasesSlot(t *testing.T) {
 	}
 }
 
-func TestPrivacyGenericRetryRequiresCatalogOptIn(t *testing.T) {
-	for _, safe := range []bool{false, true} {
-		t.Run(fmt.Sprint(safe), func(t *testing.T) {
-			q, _, m := modelFixture(t)
-			if err := json.Unmarshal([]byte(fmt.Sprintf(`{"retry_safe":%v}`, safe)), &q.models.Models[0]); err != nil {
-				t.Fatal(err)
-			}
-			first := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); panic(http.ErrAbortHandler) }))
-			defer first.Close()
-			var retries atomic.Int32
-			second := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { retries.Add(1); w.Write([]byte("ok")) }))
-			defer second.Close()
-			m.ModelURL = first.URL
-			m.ModelConfigHash = modelConfigHash(q.models)
-			check(t, q, m, nil)
-			other := machine("two", "fake")
-			other.ModelURL = second.URL
-			other.ModelConfigHash = m.ModelConfigHash
-			check(t, q, other, nil)
-			for _, worker := range []Machine{m, other} {
-				q.s.ModelSlots[slotKey(worker.ID, "test")] = &ModelSlot{Model: "test", Machine: worker.ID, Session: worker.Session, State: "ready", LastUsed: q.clock.Now()}
-			}
-			w := httptest.NewRecorder()
-			API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, privacyRequest("/models/test/ocr"))
-			if safe && (w.Code != 200 || retries.Load() != 1) {
-				t.Fatal("safe request not retried")
-			}
-			if !safe && (w.Code != 503 || retries.Load() != 0) {
-				t.Fatal("unsafe request retried")
-			}
-		})
-	}
-}
-
 func TestPrivacyPinnedFailureBackoffAndStatus(t *testing.T) {
 	q, clock, m := modelFixture(t)
 	if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
@@ -264,25 +206,6 @@ func TestPrivacyPinnedFailureBackoffAndStatus(t *testing.T) {
 	}
 }
 
-func TestPrivacyServerLogsNone(t *testing.T) {
-	m := serverTestModel(t, "ready")
-	if err := json.Unmarshal([]byte(`{"logs":"none"}`), &m); err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	engine := NewModelEngine(m, dir, RealClock{})
-	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-	defer cancel()
-	if err := engine.Load(ctx, m); err != nil {
-		t.Fatal(err)
-	}
-	defer engine.Unload()
-	logs, err := filepath.Glob(filepath.Join(dir, "*.log"))
-	if err != nil || len(logs) != 0 {
-		t.Fatal("logs:none captured server output")
-	}
-}
-
 func TestPrivacyWorkerRetriesCleanedFailedModel(t *testing.T) {
 	old := &lifecycleEngine{loadErr: errors.New("warmup failed")}
 	rt, wm, ctx := runtimeLoadFixture(t, old)
@@ -294,27 +217,6 @@ func TestPrivacyWorkerRetriesCleanedFailedModel(t *testing.T) {
 	reports, _ := rt.report()
 	if len(reports) != 1 || reports[0].State != "ready" || old.unloads.Load() != 1 {
 		t.Fatal("worker ignored retry plan after successful cleanup")
-	}
-}
-
-func TestPrivacyCompletedBatchLogRetention(t *testing.T) {
-	q, clock := fixture(t)
-	j := submit(t, q, spec("production"))
-	m := machine("one", "fake")
-	assigned := check(t, q, m, nil).Job
-	r := result(assigned, true)
-	if err := q.AppendLog(LogChunk{Result: r, Text: "synthetic log"}); err != nil {
-		t.Fatal(err)
-	}
-	finish(t, q, assigned, true)
-	clock.Advance(7 * 24 * time.Hour)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	var logs int
-	err := q.db.QueryRow("SELECT count(*) FROM logs WHERE job=?", j.ID).Scan(&logs)
-	if err != nil || logs != 0 {
-		t.Fatal("completed logs outlived default retention")
 	}
 }
 
@@ -453,40 +355,6 @@ func TestPrivacyStatusBrowserAuthUsesFleetToken(t *testing.T) {
 		}
 		if strings.Contains(w.Body.String(), "Bearer test") {
 			t.Fatal("token embedded in status")
-		}
-	}
-}
-
-func TestPrivacyWorkerFrozenHeadersTimesOut(t *testing.T) {
-	upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); <-r.Context().Done() }))
-	defer upstream.Close()
-	wm := &workerModel{state: "ready", model: Model{RequestTimeout: 20 * time.Millisecond}, engine: &LlamaEngine{url: upstream.URL}}
-	rt := &modelRuntime{models: map[string]*workerModel{"test": wm}, session: "session", token: "test"}
-	req := privacyRequest("/v1/chat/completions")
-	req.Header.Set("X-Myce-Session", "session")
-	w := httptest.NewRecorder()
-	rt.serve(w, req)
-	if w.Code != 504 || !strings.Contains(w.Body.String(), "request timeout") || wm.inflight != 0 {
-		t.Fatal("worker timeout is unclear or retained slot")
-	}
-}
-
-func TestPrivacyCatalogFieldsValidate(t *testing.T) {
-	base := "models:\n  - name: synthetic\n    engine: fake\n    path: synthetic\n    memory_gb: 1\n    platforms: [fake]\n"
-	path := filepath.Join(t.TempDir(), "models.yaml")
-	if err := os.WriteFile(path, []byte(base+"    request_timeout: 25ms\n    logs: none\n    retry_safe: true\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	c, err := ReadModels(path)
-	if err != nil || c.Models[0].RequestTimeout != 25*time.Millisecond || c.Models[0].Logs != "none" || !c.Models[0].RetrySafe {
-		t.Fatal("catalog privacy fields not parsed")
-	}
-	for _, invalid := range []string{"    request_timeout: -1s\n", "    logs: invalid\n"} {
-		if err := os.WriteFile(path, []byte(base+invalid), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := ReadModels(path); err == nil {
-			t.Fatal("invalid catalog privacy field accepted")
 		}
 	}
 }

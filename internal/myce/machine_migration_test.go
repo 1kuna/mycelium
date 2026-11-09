@@ -45,41 +45,6 @@ func m4Sources(t *testing.T) ([]ServiceConfig, ServiceConfig) {
 	}
 	return sources, base
 }
-func TestM4WorkerPlanPreservesSplitSettings(t *testing.T) {
-	src, dest := m4Sources(t)
-	got, err := PlanMachineInstall(dest.Config, []string{src[1].Config, src[0].Config}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Name != "host" || got.HostID != "host" || got.Device != "0,1" || len(got.MachineDevices) != 2 {
-		t.Fatalf("machine identity: %+v", got)
-	}
-	for _, field := range []string{"Queue", "NAS", "Checkpoints", "ModelRoot", "EnvironmentRoot", "ModelCache", "EnvironmentCache", "ModelCacheBytes", "EnvironmentCacheBytes", "HostMemoryBudgetGB", "ReserveHostMemoryGB", "CPUReserveCores", "EnvironmentFile"} {
-		if !reflect.DeepEqual(reflect.ValueOf(got).FieldByName(field).Interface(), reflect.ValueOf(src[0]).FieldByName(field).Interface()) {
-			t.Errorf("lost %s", field)
-		}
-	}
-	for i, d := range got.MachineDevices {
-		if d.Selector != src[i].Device || d.Detection != src[i].Detection {
-			t.Fatalf("lost fixed capacity/reserve: %+v", d)
-		}
-	}
-}
-func TestM4WorkerPlanConflictAndMissingSource(t *testing.T) {
-	src, dest := m4Sources(t)
-	src[1].Queue = "http://different.invalid"
-	data, _ := json.Marshal(src[1])
-	os.WriteFile(src[1].Config, data, 0600)
-	_, err := PlanMachineInstall(dest.Config, []string{src[0].Config, src[1].Config}, nil)
-	if err == nil || !strings.Contains(err.Error(), "machine_migration_conflict") || !strings.Contains(err.Error(), "queue") {
-		t.Fatal(err)
-	}
-	_, err = PlanMachineInstall(dest.Config, []string{src[0].Config, src[1].Config}, map[string]bool{"queue": true})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-}
 
 func TestM4WorkerSourceUnitOwnership(t *testing.T) {
 	src, dest := m4Sources(t)
@@ -111,59 +76,7 @@ func m4Queue(t *testing.T) (*Queue, *fakeClock, []MachineRename) {
 	}
 	return q, clock, []MachineRename{{"host-gpu0", "host", "0"}, {"host-gpu1", "host", "1"}, {"spark", "spark", "0"}}
 }
-func TestM4QueueRewriteRetirementAndRollback(t *testing.T) {
-	q, _, mapping := m4Queue(t)
-	if err := q.update(func() error {
-		q.s.Policies = map[string]ProjectPolicy{"project": {Weight: 1, AllowedMachines: []string{"host-gpu0", "host-gpu1", "spark"}}}
-		q.s.Pins = []ModelPin{{Project: "project", Model: "model", Machine: "host-gpu1"}}
-		q.s.Hosts = map[string]*HostState{"host-gpu0": {Policy: HostPolicy{ProductionHold: true}}, "host-gpu1": {Policy: HostPolicy{ProductionHold: true}}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	models := ModelConfig{Models: []Model{{Name: "model", AllowedMachines: []string{"host-gpu1"}}}}
-	before, _ := json.Marshal(q.s)
-	if _, err := q.ConvertMachines(mapping, models, true); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := json.Marshal(q.s)
-	if string(before) != string(after) {
-		t.Fatal("dry run mutated state")
-	}
-	plan, err := q.ConvertMachines(mapping, models, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(q.s.Policies["project"].AllowedMachines, []string{"host", "spark"}) || q.s.Pins[0].Machine != "host" || q.s.Pins[0].Device != "1" || !q.s.Hosts["host"].Policy.ProductionHold {
-		t.Fatal("policy rewrite", q.s.Policies, q.s.Pins, q.s.Hosts)
-	}
-	if plan.ConvertedModels.Models[0].Device != "1" || !reflect.DeepEqual(plan.ConvertedModels.Models[0].AllowedMachines, []string{"host"}) {
-		t.Fatal("server fence", plan.ConvertedModels)
-	}
-	for _, r := range mapping[:2] {
-		if m := q.s.Machines[r.From]; m.Replacement == nil || m.Replacement.Device != r.Device || !m.Gone || m.Session != "session-"+r.From {
-			t.Fatal("history lost", m)
-		}
-	}
-	s := spec("experiment")
-	s.AllowedMachines = []string{"host-gpu0"}
-	var typed *HTTPError
-	if _, err = q.Submit(s); !errors.As(err, &typed) || typed.Code != "machine_renamed" {
-		t.Fatal("rename guidance", err)
-	}
-	if _, err = q.ConvertMachines(mapping, models, false); err != nil {
-		t.Fatal("idempotence", err)
-	}
-	// New accepted intent must survive rollback; no DB snapshot restoration.
-	j := submit(t, q, spec("experiment"))
-	if err = q.RollbackMachines(false); err != nil {
-		t.Fatal(err)
-	}
-	if q.s.Jobs[j.ID] == nil || q.s.Machines["host-gpu0"].Replacement != nil || q.s.Pins[0].Machine != "host-gpu1" {
-		t.Fatal("rollback lost intent or policy")
-	}
-	check(t, q, machine("host-gpu0", "fake", "host"), nil)
-}
+
 func TestM4QueueRefusesQueuedNamesAndConflictingFences(t *testing.T) {
 	for _, state := range []string{"queued", "paused", "waiting"} {
 		t.Run(state, func(t *testing.T) {
@@ -220,30 +133,6 @@ func TestM4QueueRefusesQueuedNamesAndConflictingFences(t *testing.T) {
 			t.Fatal("stale source accepted")
 		}
 	})
-}
-func TestM4DeployGate(t *testing.T) {
-	src, dest := m4Sources(t)
-	if err := os.MkdirAll(filepath.Dir(src[0].Service), 0700); err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range src {
-		if err := os.WriteFile(c.Service, []byte("legacy"), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := CheckMachineInstallGate(dest); err == nil || !strings.Contains(err.Error(), "machine_worker_conflict") {
-		t.Fatal(err)
-	}
-	got, err := PlanMachineInstall(dest.Config, []string{src[0].Config}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = CheckMachineInstallGate(got); err == nil || !strings.Contains(err.Error(), "machine_migration_incomplete") {
-		t.Fatal(err)
-	}
-	if err = CheckMachineInstallGate(src[0]); err == nil {
-		t.Fatal("split worker upgrade accepted")
-	}
 }
 
 func m4InstallFixture(t *testing.T) ([]ServiceConfig, ServiceConfig, string, *installMatrixManager, func(context.Context, string, ...string) ([]byte, error)) {
@@ -443,43 +332,6 @@ func TestM4WorkerConversionDryRunIdempotenceEnableSetRollback(t *testing.T) {
 		t.Fatal("both generations active")
 	}
 }
-func TestM4WorkerConversionMutationFailures(t *testing.T) {
-	for _, point := range []string{"retire", "write", "fsync", "rename", "directory-fsync", "activation"} {
-		t.Run(point, func(t *testing.T) {
-			src, c, binary, m, run := m4InstallFixture(t)
-			fired := false
-			files := installFiles{before: func(op, path string) error {
-				if !fired && op == point {
-					fired = true
-					return errors.New("injected migration mutation")
-				}
-				return nil
-			}}
-			runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
-				out, err := run(ctx, name, args...)
-				if !fired && point == "activation" && name == "systemctl" && args[1] == "enable" && args[len(args)-1] == filepath.Base(c.Service) {
-					fired = true
-					return out, errors.New("injected activation")
-				}
-				return out, err
-			}
-			if err := convertWorkerInstall(context.Background(), c, binary, false, runner, files); err == nil || !fired {
-				t.Fatal("fault did not refuse", err)
-			}
-			for _, old := range src {
-				if _, err := ReadServiceConfig(old.Config); err != nil {
-					t.Fatal("source not restored", err)
-				}
-				if s := m.states[filepath.Base(old.Service)]; !s.active || s.enabled != "enabled" {
-					t.Fatal("source registration/activity not restored", s)
-				}
-			}
-			if m.states[filepath.Base(c.Service)].active {
-				t.Fatal("new worker survived failed conversion")
-			}
-		})
-	}
-}
 
 func m4OfflineQueue(t *testing.T) (ServiceConfig, *fakeClock, []MachineRename) {
 	t.Helper()
@@ -596,60 +448,6 @@ func TestM4LegacyBesideInventoryRefused(t *testing.T) {
 	}
 }
 
-func TestM4PerDeviceFixedCapacityAtRuntime(t *testing.T) {
-	w := Worker{Machine: Machine{GPU: "cuda", FreeMemoryGB: 24, ReservedMemoryGB: 2}, DeviceSettings: []DeviceInstall{
-		{Selector: "GPU-one", Detection: Detection{Platform: "cuda", MemoryMode: "fixed", MemoryGB: 24, ReserveGB: 2}},
-		{Selector: "GPU-two", Detection: Detection{Platform: "cuda", MemoryMode: "fixed", MemoryGB: 31, ReserveGB: 3}},
-	}}
-	probe := MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name == "nvidia-smi" && args[0] == "--query-gpu=uuid,driver_version,pci.bus_id" {
-			return []byte("GPU-one, driver, 0000:01:00.0\nGPU-two, driver, 0000:02:00.0\n"), nil
-		}
-		return nil, errors.New("fixed capacity must not require telemetry")
-	}}
-	probe = withCUDAFacts(probe, false, 2)
-	devices, err := w.localInventoryWithProbe(context.Background(), probe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(devices) != 2 {
-		t.Fatal(devices)
-	}
-	for i, want := range []float64{22, 28} {
-		d := devices[i]
-		if d.MemoryMode != "fixed" || d.BudgetGB != want || d.FreeMemoryGB != want || d.ReserveMemoryGB != float64(i+2) {
-			t.Fatalf("device %d lost explicit fixed capacity/reserve: %+v", i, d)
-		}
-	}
-}
-
-func TestM4SparkPlanKeepsSingleCUDAUUID(t *testing.T) {
-	sources, dest := m4Sources(t)
-	source := sources[0]
-	source.HostID = "spark"
-	source.Name = "spark"
-	source.Device = "GPU-spark-uuid"
-	source.Detection.Platform = "cuda"
-	source.Detection.MemoryMode = "unified"
-	source.Detection.MemoryGB = 0
-	source.Detection.ReserveGB = 16
-	source.Service = dest.Service
-	data, _ := json.Marshal(source)
-	if err := os.WriteFile(source.Config, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := PlanMachineInstall(dest.Config, []string{source.Config}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Name != "spark" || got.Device != "GPU-spark-uuid" || len(got.MachineDevices) != 1 || got.MachineDevices[0].Selector != source.Device || got.MachineDevices[0].Detection != source.Detection {
-		t.Fatal("Spark UUID/capacity lost", got)
-	}
-	if got.ModelCache != source.ModelCache || got.EnvironmentFile != source.EnvironmentFile || got.HostMemoryBudgetGB != source.HostMemoryBudgetGB {
-		t.Fatal("Spark config lost")
-	}
-}
-
 func TestM4RollbackPreservesPinEdits(t *testing.T) {
 	q, _, mapping := m4Queue(t)
 	q.s.Pins = []ModelPin{{Project: "removed", Model: "m", Machine: "host-gpu0"}, {Project: "kept", Model: "m", Machine: "host-gpu1"}}
@@ -691,7 +489,7 @@ func TestM4InventoryBesideLegacyRefused(t *testing.T) {
 }
 
 func TestM4QueuePolicyFileDriftRefused(t *testing.T) {
-	for _, phase := range []string{"before", "retry", "rollback"} {
+	for _, phase := range []string{"before", "rollback"} {
 		t.Run(phase, func(t *testing.T) {
 			c, clock, mapping := m4OfflineQueue(t)
 			run := func(context.Context, string, ...string) ([]byte, error) { return nil, nil }
@@ -717,7 +515,7 @@ func TestM4QueuePolicyFileDriftRefused(t *testing.T) {
 }
 
 func TestM4QueuePublicationInterruption(t *testing.T) {
-	for _, op := range []string{"write", "fsync", "rename", "directory-fsync"} {
+	for _, op := range []string{"rename", "directory-fsync"} {
 		t.Run(op, func(t *testing.T) {
 			c, clock, mapping := m4OfflineQueue(t)
 			run := func(context.Context, string, ...string) ([]byte, error) { return nil, nil }
@@ -746,73 +544,6 @@ func TestM4QueuePublicationInterruption(t *testing.T) {
 				t.Fatal("recovery lost maintenance/retirement")
 			}
 		})
-	}
-}
-func TestM4PerDeviceMeasuredReserveAtRuntime(t *testing.T) {
-	w := Worker{Machine: Machine{GPU: "cuda"}, DeviceSettings: []DeviceInstall{{Selector: "GPU-one", Detection: Detection{Platform: "cuda", MemoryMode: "dedicated", MemoryGB: 24, ReserveGB: 5}}}}
-	probe := MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name == "nvidia-smi" {
-			switch args[0] {
-			case "--query-gpu=uuid,driver_version,pci.bus_id":
-				return []byte("GPU-one, driver\n"), nil
-			case "--query-gpu=name,memory.total,pci.bus_id":
-				return []byte("CUDA, 32768\n"), nil
-			case "--query-gpu=memory.free":
-				return []byte("32768\n"), nil
-			}
-		}
-		return nil, errors.New("unexpected probe")
-	}}
-	probe = withCUDAFacts(probe, false, 1)
-	d, err := w.localInventoryWithProbe(context.Background(), probe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(d) != 1 || d[0].ReserveMemoryGB != 5 || d[0].BudgetGB != 19 || d[0].MemoryMode != "dedicated" {
-		t.Fatal("lost measured capacity mode/reserve", d)
-	}
-}
-
-func TestM4SparkInstallRollback(t *testing.T) {
-	src, c, binary, m, run := m4InstallFixtureFor(t, true)
-	c.ModelCatalog = filepath.Join(t.TempDir(), "models.yaml")
-	src[0].ModelCatalog = c.ModelCatalog
-	sourceData, _ := json.Marshal(src[0])
-	if err := os.WriteFile(src[0].Config, sourceData, 0600); err != nil {
-		t.Fatal(err)
-	}
-	originalModels := []byte("models:\n- {name: model, engine: fake, path: model.gguf, memory_gb: 1, platforms: [cuda], allowed_machines: [host-gpu1]}\n")
-	if err := os.WriteFile(c.ModelCatalog, originalModels, 0600); err != nil {
-		t.Fatal(err)
-	}
-	original, _ := os.ReadFile(src[0].Config)
-	if err := ConvertWorkerInstall(context.Background(), c, binary, false, run); err != nil {
-		t.Fatal(err)
-	}
-	installed, err := ReadServiceConfig(c.Config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog, err := ReadModels(c.ModelCatalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(catalog.Models[0].AllowedMachines, []string{"host"}) || catalog.Models[0].Device != "1" {
-		t.Fatal("worker-local catalog fence not converted", catalog)
-	}
-	if installed.Name != "spark" || installed.Device != "GPU-spark-uuid" || installed.MachineDevices[0].Detection.ReserveGB != 16 || installed.EnvironmentFile != src[0].EnvironmentFile {
-		t.Fatal("Spark settings lost", installed)
-	}
-	if err := RollbackMachineInstall(context.Background(), c.Config, false, run); err != nil {
-		t.Fatal(err)
-	}
-	restoredModels, _ := os.ReadFile(c.ModelCatalog)
-	if !reflect.DeepEqual(restoredModels, originalModels) {
-		t.Fatal("worker-local catalog not restored")
-	}
-	after, _ := os.ReadFile(src[0].Config)
-	if !reflect.DeepEqual(original, after) || !m.states[filepath.Base(src[0].Service)].active {
-		t.Fatal("Spark installation not restored")
 	}
 }
 

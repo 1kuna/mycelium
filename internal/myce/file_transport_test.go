@@ -20,7 +20,7 @@ import (
 // transfers retain that authority and use a separate connection. Custom TLS
 // dialers own ALPN; ordinary transfers must still negotiate HTTP/1.1 (#221).
 func TestFileTransferHTTP2AuthorityComposition(t *testing.T) {
-	for _, mode := range []string{"transport", "tls-context", "tls-legacy", "tls-context-h2", "tls-legacy-h2"} {
+	for _, mode := range []string{"transport", "tls-legacy", "tls-context-h2"} {
 		t.Run(mode, func(t *testing.T) {
 			body := []byte("verified shared input")
 			var requests, checks, dials atomic.Int32

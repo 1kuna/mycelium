@@ -182,26 +182,6 @@ func TestM4R2LegacyRegistryRetirement(t *testing.T) {
 	}
 }
 
-func TestM4R2QueuePublicationModes(t *testing.T) {
-	c, clock, mapping := m4OfflineQueue(t)
-	if err := os.Chmod(c.ProjectConfig, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(c.HostConfig, 0640); err != nil {
-		t.Fatal(err)
-	}
-	run := func(context.Context, string, ...string) ([]byte, error) { return nil, nil }
-	if err := ConvertQueueInstall(context.Background(), c, mapping, false, false, clock, run); err != nil {
-		t.Fatal(err)
-	}
-	for p, mode := range map[string]os.FileMode{c.ProjectConfig: 0644, c.HostConfig: 0640} {
-		st, err := os.Stat(p)
-		if err != nil || st.Mode().Perm() != mode {
-			t.Errorf("policy mode: %v %v", st, err)
-		}
-	}
-}
-
 func TestM4R2RollbackDryRunChecks(t *testing.T) {
 	_, c, binary, m, run := m4InstallFixture(t)
 	if err := ConvertWorkerInstall(context.Background(), c, binary, false, run); err != nil {

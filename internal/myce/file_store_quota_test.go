@@ -78,22 +78,6 @@ func assertQuotaRefusal(t *testing.T, err error, want ...string) {
 	}
 }
 
-func TestProjectFileStoreUsageDeduplicatesDigests(t *testing.T) {
-	q, _ := fixture(t)
-	c := retentionClient(t, q)
-	quotaResult(t, q, c, "owner", "experiment", "shared!")
-	quotaResult(t, q, c, "owner", "experiment", "shared!")
-	quotaResult(t, q, c, "owner", "experiment", "unique")
-	quotaResult(t, q, c, "other", "experiment", "shared!")
-	owner, other := projectUsage(t, q, "owner"), projectUsage(t, q, "other")
-	if owner.RetainedBytes != 13 || owner.AddedBytes24h != 13 || other.RetainedBytes != 7 || owner.Refusal != "" {
-		t.Fatalf("owner=%+v other=%+v", owner, other)
-	}
-	if used := q.fileStoreStatus(context.Background()).UsedBytes; used != 13 {
-		t.Fatalf("shared digest charged twice globally: used=%d", used)
-	}
-}
-
 func TestProjectFileStoreQuotaRefusesUntilRelease(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)

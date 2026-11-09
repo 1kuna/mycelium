@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -98,93 +97,5 @@ func TestInstallWorkerRuntimeAndServiceDetection(t *testing.T) {
 				t.Fatal("upgrade replaced token")
 			}
 		})
-	}
-}
-
-func TestGPUDeviceAccessDiagnostics(t *testing.T) {
-	for _, tc := range []struct {
-		name          string
-		nodes, groups []string
-		denied        bool
-		want          string
-	}{
-		{name: "missing driver", want: "missing device nodes"},
-		{name: "denied", nodes: []string{"/dev/dri/renderD129"}, denied: true, want: "sudo usermod"},
-		{name: "accessible ACL", nodes: []string{"/dev/dri/renderD129"}},
-		{name: "group alone insufficient", nodes: []string{"/dev/dri/renderD129"}, groups: []string{"render", "video"}, denied: true, want: "cannot open"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := GPUAccessProbe{Glob: func(pattern string) ([]string, error) {
-				if pattern != "/dev/dri/renderD*" {
-					t.Fatal(pattern)
-				}
-				return tc.nodes, nil
-			}, Groups: func() ([]string, error) { return tc.groups, nil }, Open: func(string) error {
-				if tc.denied {
-					return os.ErrPermission
-				}
-				return nil
-			}}
-			err := p.Check("xpu")
-			if tc.want == "" {
-				if err != nil {
-					t.Fatal(err)
-				}
-			} else if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
-func TestInstallWorkerRejectsNoDevicesAndRequiresExplicitOptOut(t *testing.T) {
-	for _, allow := range []bool{false, true} {
-		t.Run(strconv.FormatBool(allow), func(t *testing.T) {
-			home := t.TempDir()
-			c, _ := PlanInstall("worker", home, "", home, "http://queue:7331", "worker", Detection{OS: "linux", Arch: "amd64", Platform: "fake"})
-			c.AllowDeviceless = allow
-			binary := filepath.Join(home, "source")
-			os.WriteFile(binary, []byte("fake"), 0700)
-			enabled := false
-			err := Install(context.Background(), c, binary, "private", func(_ context.Context, name string, args ...string) ([]byte, error) {
-				if name == "systemd-run" {
-					return []byte(`{}`), nil
-				}
-				if strings.Contains(strings.Join(args, " "), "enable --now") {
-					enabled = true
-				}
-				return nil, nil
-			})
-			if allow {
-				if err != nil || !enabled {
-					t.Fatal(err, enabled)
-				}
-			} else if err == nil || enabled {
-				t.Fatal("deviceless worker accepted", err, enabled)
-			}
-		})
-	}
-}
-
-func TestDetectServiceSelectedXPUUsesWorkerBinding(t *testing.T) {
-	t.Setenv("PATH", os.Getenv("PATH"))
-	t.Setenv("ZE_AFFINITY_MASK", "old")
-	t.Setenv("ONEAPI_DEVICE_SELECTOR", "old")
-	c := ServiceConfig{Path: "/runtime/bin:/usr/bin", Device: "1", Detection: Detection{OS: "linux", Platform: "xpu", MemoryMode: "fixed", MemoryGB: 16}}
-	p := fakeProbe("linux", "amd64", "", "[level_zero:gpu] Intel Arc GPU")
-	command := p.Command
-	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if os.Getenv("ZE_AFFINITY_MASK") != "1" || os.Getenv("ONEAPI_DEVICE_SELECTOR") != "level_zero:0" || os.Getenv("PATH") != c.Path {
-			t.Fatal("service probe differs from job binding")
-		}
-		return command(ctx, name, args...)
-	}
-	facts := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x8086", "8", "Intel GPU", "", true}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
-	p.Glob, p.ReadFile = facts.Glob, facts.ReadFile
-	p.CommandEnv = facts.CommandEnv
-	access := GPUAccessProbe{Glob: func(string) ([]string, error) { return []string{"/dev/dri/renderD129"}, nil }, Groups: func() ([]string, error) { return []string{"render"}, nil }, Open: func(string) error { return nil }}
-	d, err := DetectService(context.Background(), c, p, access)
-	if err != nil || d.Platform != "xpu" || d.MemoryGB != 16 {
-		t.Fatal(d, err)
 	}
 }

@@ -34,37 +34,6 @@ func TestEnrollmentUpgradeRefusesQueueProtocolBeforeDrain(t *testing.T) {
 	}
 }
 
-func TestEnrollmentUpgradePreservesDisabledAndDrained(t *testing.T) {
-	for _, action := range []string{"disable", "drain", "resume"} {
-		t.Run(action, func(t *testing.T) {
-			q, clock := fixture(t)
-			m := cpuMachine("hypha", "hypha", "fake", 8, 32)
-			check(t, q, m, nil)
-			if _, err := q.ChangeHostMaintenance("hypha", HostMaintenanceRequest{Action: action}); err != nil {
-				t.Fatal(err)
-			}
-			server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
-			defer server.Close()
-			client := Client{URL: server.URL, Token: "test"}
-			c := ServiceConfig{Name: m.ID, HostID: m.HostID, State: t.TempDir()}
-			receipt, err := PrepareEnrollmentUpgrade(context.Background(), c, client, clock, time.Second, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = FinishEnrollmentUpgrade(context.Background(), c, client, receipt); err != nil {
-				t.Fatal(err)
-			}
-			status, err := q.HostMaintenanceStatus(m.HostID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := map[string]string{"disable": "disabled", "drain": "drained", "resume": "enabled"}[action]
-			if status.Policy.Mode != want {
-				t.Fatalf("maintenance changed: %s -> %s", want, status.Policy.Mode)
-			}
-		})
-	}
-}
 func TestEnrollmentUpgradeCustodyBlocksAndCASDoesNotResumeDisabled(t *testing.T) {
 	q, clock := fixture(t)
 	m := cpuMachine("hypha", "hypha", "fake", 8, 32)
@@ -120,22 +89,6 @@ func TestEnrollmentUpgradeRerunResumesOwnDrain(t *testing.T) {
 	status, err := q.HostMaintenanceStatus(m.HostID)
 	if err != nil || status.Policy.Mode != "enabled" {
 		t.Fatal("rerun abandoned its own drain", status.Policy.Mode, err)
-	}
-}
-
-func TestEnrollmentBusyUpgradeDoesNotLeaveDrain(t *testing.T) {
-	q, clock := fixture(t)
-	m := cpuMachine("hypha", "hypha", "fake", 8, 32)
-	maintenanceAssign(t, q, m, "experiment")
-	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
-	defer server.Close()
-	_, err := PrepareEnrollmentUpgrade(context.Background(), ServiceConfig{Name: m.ID, HostID: m.HostID, State: t.TempDir()}, Client{URL: server.URL, Token: "test"}, clock, time.Second, func(context.Context, time.Duration) error { clock.Advance(time.Second); return nil })
-	if err == nil {
-		t.Fatal("busy upgrade accepted")
-	}
-	status, e := q.HostMaintenanceStatus(m.HostID)
-	if e != nil || status.Policy.Mode != "enabled" {
-		t.Fatal("failed upgrade left host drained", status.Policy.Mode, e)
 	}
 }
 

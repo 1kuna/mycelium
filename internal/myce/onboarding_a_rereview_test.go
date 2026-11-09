@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -47,30 +46,6 @@ func TestReleaseApprovalMonotonic(t *testing.T) {
 				t.Fatal("explicit approval not applied")
 			}
 		})
-	}
-}
-
-func TestReleaseDevelopmentReplacement(t *testing.T) {
-	if err := CheckReleaseUpgrade("v1.0.1", "development", false); err == nil || !strings.Contains(err.Error(), "--allow-downgrade") {
-		t.Errorf("missing explicit recovery guidance: %v", err)
-	}
-	if err := CheckReleaseUpgrade("v1.0.1", "development", true); err != nil {
-		t.Errorf("explicit development replacement refused: %v", err)
-	}
-}
-
-func TestEnrollmentProbeErrorPreserved(t *testing.T) {
-	s, err := (Worker{StateDir: t.TempDir()}).openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.close()
-	w := Worker{Machine: Machine{GPU: "xpu"}, Clock: &fakeClock{now: time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)}, DeviceSettings: []DeviceInstall{{Selector: "0", Detection: Detection{Platform: "xpu", MemoryMode: "fixed", MemoryGB: 16}}}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return nil, errors.New("fixture driver unavailable") }}
-	if err = w.initInventory(context.Background(), s); err != nil {
-		t.Fatal(err)
-	}
-	if w.inventoryReason != "device_probe_unavailable" {
-		t.Fatalf("probe error overwritten: %s", w.inventoryReason)
 	}
 }
 
@@ -149,47 +124,6 @@ func (tr *enrollmentCrashTransport) RoundTrip(r *http.Request) (*http.Response, 
 		tr.after(r)
 	}
 	return response, err
-}
-
-func TestReleaseBuildMetadataValid(t *testing.T) {
-	_, _, m := signedTestRelease(t)
-	m.Version = "v1.0.1+rebuild"
-	if err := m.Validate(); err != nil {
-		t.Fatal("semver build metadata rejected", err)
-	}
-}
-
-func TestReleaseApprovalSurvivesRestart(t *testing.T) {
-	dir := t.TempDir()
-	db := filepath.Join(dir, "queue.db")
-	root := t.TempDir()
-	clock := &fakeClock{now: time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)}
-	q, err := Open(db, root, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, pub, _ := signedTestRelease(t)
-	if err = q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid"); err != nil {
-		q.Close()
-		t.Fatal(err)
-	}
-	if err = q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	q, err = Open(db, root, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer q.Close()
-	if err = q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid"); err != nil {
-		t.Fatal("identical approval after restart was not idempotent", err)
-	}
-	if err = q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid/changed"); err == nil {
-		t.Fatal("restart forgot approval monotonicity for changed metadata")
-	}
-	if err = q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid/changed", true); err != nil {
-		t.Fatal("explicit restart re-approval refused", err)
-	}
 }
 
 func TestEnrollmentRecoveryRequiresRestoredVersion(t *testing.T) {

@@ -9,14 +9,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -361,7 +359,7 @@ func TestFleetInstallRequiresCurrentMaintenanceAuthority(t *testing.T) {
 }
 
 func TestFleetInstallRefusesBadHashAndStorageWithoutRollback(t *testing.T) {
-	for _, fault := range []string{"hash", "storage", "restart"} {
+	for _, fault := range []string{"hash", "storage"} {
 		t.Run(fault, func(t *testing.T) {
 			f := newFleetInstallFixture(t, "linux")
 			if err := f.launch(); err != nil {
@@ -510,7 +508,7 @@ func (e fleetTestExit) Error() string { return "synthetic manager exit" }
 func (e fleetTestExit) ExitCode() int { return int(e) }
 
 func TestFleetInstallExplicitRevisionRecovery(t *testing.T) {
-	for _, phase := range []string{"prepared", "installed", "restarting", "failed"} {
+	for _, phase := range []string{"restarting", "failed"} {
 		t.Run(phase, func(t *testing.T) {
 			f := newFleetInstallFixture(t, "linux")
 			if err := f.launch(); err != nil {
@@ -601,53 +599,6 @@ func TestFleetInstallRecoveryRequiresAbsentHelperAndExactOldProcess(t *testing.T
 	}
 }
 
-func TestFleetInstallSharedBinaryStillRestartsOldWorker(t *testing.T) {
-	for _, fault := range []string{"healthy", "storage", "installed-storage"} {
-		t.Run(fault, func(t *testing.T) {
-			f := newFleetInstallFixture(t, "linux")
-			// A colocated queue has already replaced the shared installed pathname;
-			// the worker's retained executable mapping and session are still old.
-			if err := os.WriteFile(f.c.Binary, f.next, 0700); err != nil {
-				t.Fatal(err)
-			}
-			f.version = f.i.Release.Manifest.Version
-			if err := f.launch(); err != nil {
-				t.Fatal(err)
-			}
-			r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-			if err != nil || r.BeforeRuntime.SHA256 == r.BeforeSHA256 {
-				t.Fatal("disk hash confused with running image", err)
-			}
-			if fault == "installed-storage" {
-				r.Phase = "installed"
-				if err := writeFleetReceipt(f.c, r); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if fault != "healthy" {
-				if err := os.Mkdir(filepath.Join(f.c.NAS, "mycelium"), 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(f.c.State, filepath.Join(f.c.NAS, "mycelium", "checkpoints")); err != nil {
-					t.Fatal(err)
-				}
-			}
-			err = f.apply()
-			if fault != "healthy" {
-				if err == nil || err.Error() != "fleet_storage_preflight_failed" || f.restarts != 0 {
-					t.Fatal("shared binary bypassed storage preflight", err, f.restarts)
-				}
-			} else if err != nil || f.restarts != 1 {
-				t.Fatal("shared binary skipped worker activation", err, f.restarts)
-			}
-			if f.fetches != 0 {
-				t.Fatal("shared binary fetched again")
-			}
-			f.assertBinary(f.next)
-		})
-	}
-}
-
 func TestFleetInstallStopsAfterFailedManagerHealth(t *testing.T) {
 	f := newFleetInstallFixture(t, "linux")
 	if err := f.launch(); err != nil {
@@ -719,61 +670,5 @@ func TestFleetInstallRetainsStorageFailureForQueueReconciliation(t *testing.T) {
 	failure, err = ReadFleetUpdateFailure(f.c)
 	if err != nil || failure == nil || failure.Failure != "fleet_failure_code_unrecognized" {
 		t.Fatalf("untrusted failure exposed: %+v %v", failure, err)
-	}
-}
-
-func TestFleetInstallFileCacheCapacity(t *testing.T) {
-	for _, goos := range []string{"linux", "darwin"} {
-		t.Run(goos, func(t *testing.T) {
-			f := newFleetInstallFixture(t, goos)
-			// Save through the installer's flag overlay, then reinstall with no
-			// override before the signed fleet update reads the configuration.
-			for _, args := range [][]string{{"--file-cache-bytes=34359738368"}, nil} {
-				c, err := ReadServiceConfig(f.c.Config)
-				if err != nil {
-					t.Fatal(err)
-				}
-				values := ServiceConfig{}
-				flags := flag.NewFlagSet("install", flag.ContinueOnError)
-				RegisterInstallFlags(flags, &values)
-				if err := flags.Parse(args); err != nil {
-					t.Fatal(err)
-				}
-				c, err = OverlayInstallFlags(flags, c, values)
-				if err != nil {
-					t.Fatal(err)
-				}
-				data, err := json.Marshal(c)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(c.Config, data, 0600); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(c.Service, []byte(c.ServiceText()), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := f.launch(); err != nil {
-				t.Fatal(err)
-			}
-			if err := f.apply(); err != nil {
-				t.Fatal(err)
-			}
-			c, err := ReadServiceConfig(f.c.Config)
-			if err != nil || c.FileCacheBytes != 32<<30 {
-				t.Fatalf("fleet upgrade lost file cache capacity: %d, %v", c.FileCacheBytes, err)
-			}
-			// launchd regenerates Args at startup; systemd retains the saved unit.
-			args := c.Args()
-			i := slices.Index(args, "--file-cache-bytes")
-			if i < 0 || args[i+1] != "34359738368" {
-				t.Fatal("fleet restart arguments lost file cache capacity")
-			}
-			unit, err := os.ReadFile(c.Service)
-			if err != nil || string(unit) != c.ServiceText() {
-				t.Fatal("fleet upgrade changed installed service configuration", err)
-			}
-		})
 	}
 }

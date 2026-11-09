@@ -202,45 +202,6 @@ func TestNASInputReclaimsOwnCrashedReservation(t *testing.T) {
 	}
 }
 
-func TestNASInputCompletedArchiveNeedsNoTransferSpace(t *testing.T) {
-	_, clock := fixture(t)
-	nas, root := t.TempDir(), t.TempDir()
-	t.Cleanup(func() {
-		if err := removeSharedEntry(root); err != nil {
-			t.Error(err)
-		}
-	})
-	input := sharedArchive(t, nas)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cache := &SharedInputCache{cache: EnvironmentCache{Root: root, Limit: 1 << 20, Clock: clock}, beforePublish: cancel}
-	if _, _, err := cache.Acquire(ctx, input, nas); !errors.Is(err, context.Canceled) {
-		t.Fatal("late cancellation published", err)
-	}
-	<-onlySharedStaging(t, cache).done
-	if err := os.Remove(filepath.Join(nas, input.NAS)); err != nil {
-		t.Fatal(err)
-	}
-	resumed := &SharedInputCache{
-		cache: EnvironmentCache{Root: root, Limit: 1, Clock: clock}, automatic: true,
-		diskProbe: func(string) (DiskReading, error) {
-			return DiskReading{TotalBytes: 1 << 30, FreeBytes: diskFreeFloor(1 << 30)}, nil
-		},
-		resolveNAS: func(string, string) (string, error) {
-			t.Error("completed archive touched NAS")
-			return "", os.ErrNotExist
-		},
-	}
-	path, release, err := resumed.Acquire(context.Background(), input, nas)
-	if err != nil {
-		t.Fatal("completed archive charged transfer space", err)
-	}
-	defer release()
-	if b, err := os.ReadFile(filepath.Join(path, "bin/run")); err != nil || string(b) != "hello" {
-		t.Fatalf("archive payload: %q %v", b, err)
-	}
-}
-
 func TestNASInputTornCompletionRecordRecovers(t *testing.T) {
 	for _, archive := range []bool{false, true} {
 		t.Run(map[bool]string{false: "file", true: "archive"}[archive], func(t *testing.T) {

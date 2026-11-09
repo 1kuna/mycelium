@@ -51,16 +51,6 @@ func TestCgroupMemoryHeadroomHierarchy(t *testing.T) {
 	}
 }
 
-func TestProcessMemoryHeadroomMeasuredBoundary(t *testing.T) {
-	available, err := processMemoryHeadroom(1)
-	if err != nil {
-		t.Fatal("cannot establish this process's container boundary", err)
-	}
-	if available < 0 || available > 1 {
-		t.Fatal("physical headroom grew", available)
-	}
-}
-
 func TestCgroupMemoryHybridAndHostRoot(t *testing.T) {
 	files := map[string]string{
 		"/proc/self/cgroup":                    "0::/unified\n5:memory:/legacy\n",

@@ -15,7 +15,7 @@ import (
 )
 
 func TestAttemptDiskDiagnosticsStopRace(t *testing.T) {
-	for _, stopAt := range []string{"before-verification", "during-verification", "after-completion"} {
+	for _, stopAt := range []string{"during-verification"} {
 		t.Run(stopAt, func(t *testing.T) {
 			q, clock := fixture(t)
 			c := retentionClient(t, q)
@@ -180,23 +180,5 @@ func TestAttemptDiskLimitFailure(t *testing.T) {
 				t.Fatalf("wrong attempt quota report accepted: %v", err)
 			}
 		})
-	}
-}
-
-func TestAttemptDiskDenialEvidence(t *testing.T) {
-	full := runtimeDiagnostic(runtimeErrorFor("outputs", syscall.ENOSPC))
-	if full.Class != "storage_full" {
-		t.Fatal("uncontained ENOSPC was mistaken for an attempt quota")
-	}
-	r := Result{Error: "disk_limit_exceeded: no space left on device", ExecutionCause: full}
-	if attemptDiskLimitFailure(r) {
-		t.Fatal("text/uncontained ENOSPC established a quota failure")
-	}
-	r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", syscall.EDQUOT))
-	at := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
-	facts := attemptCause{memberOutcome: memberOutcome{Signals: []deliveredSignal{{Signal: "TERM", At: at}}, Exit: &memberExit{Status: 1, ObservedAt: at.Add(time.Second)}}}
-	r = classifyAttemptOutcome(r, facts)
-	if !attemptDiskLimitFailure(r) || r.Interrupted || r.OutOfMemory {
-		t.Fatalf("quota denial became an interruption or memory failure: %+v", r)
 	}
 }

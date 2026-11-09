@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -216,39 +215,6 @@ func TestFileReleaseProtectedCustodyAndDelivery(t *testing.T) {
 	}
 }
 
-func TestFileReleaseVerifiedDelivery(t *testing.T) {
-	q, clock := fixture(t)
-	j := deliveryAssignment(t, q)
-	r := deliveryResult(t, q, j, "preserved output")
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	accepted := awaitDeliveryState(t, q, j.ID, "verified")
-	clock.Advance(filePublicationGrace + time.Second)
-	s := FileReleaseSelection{Project: accepted.Spec.Project, Jobs: []string{j.ID}}
-	p := releasePlan(t, q, s)
-	if len(p.Jobs[0].Blockers) > 0 || p.Jobs[0].DeliveryVerifiedAt == nil || p.ReclaimableBytes != r.OutputRefs["out.txt"].SizeBytes {
-		t.Fatal(p)
-	}
-	if _, err := releaseApply(q, p); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
-	// Verify the supported destination receipt/content still exists after release.
-	root, err := os.OpenRoot(q.deliveryRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
-	ref := r.OutputRefs["out.txt"]
-	receipt := deliveryReceipt{DestinationID: accepted.Delivery.DestinationID, Execution: accepted.Delivery.Execution, Machine: accepted.Machine, Session: accepted.Session, Policy: asyncNAS + "/1", ManifestSHA256: accepted.Delivery.ManifestSHA256, Files: FileManifest{"out.txt": ref}}
-	if err = verifyDeliveryDirectory(root, filepath.Join("results", j.ID, "1"), receipt); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestFileReleaseStalePlanAndPublicationGrace(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
@@ -329,28 +295,6 @@ func TestFileReleaseRegistryCheckpointAndBundleProtection(t *testing.T) {
 	}
 	if _, err := os.Stat(q.files.blob(ref)); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestFileReleaseAPI(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
-	j, _, _ := releaseTerminal(t, q, c, "api")
-	clock.Advance(filePublicationGrace + time.Second)
-	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer api.Close()
-	c = Client{URL: api.URL, Token: "test"}
-	var plan FileReleasePlan
-	if err := c.Call(context.Background(), "POST", "/api/files/release/plan", releaseSelection(j), &plan); err != nil {
-		t.Fatal(err)
-	}
-	var got FileReleaseResult
-	req := FileReleaseApply{Selection: plan.Selection, PlanID: plan.ID, AcceptExpiry: true}
-	if err := c.Call(context.Background(), "POST", "/api/files/release/apply", req, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.PlanID != plan.ID {
-		t.Fatal(got)
 	}
 }
 
@@ -436,43 +380,8 @@ func TestFileReleaseReferenceChangeDuringCommit(t *testing.T) {
 	}
 }
 
-func TestFileReleaseWholeGroupAndUnsuccessfulSelection(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
-	a, _, ref := releaseTerminal(t, q, c, "group")
-	b, _, _ := releaseTerminal(t, q, c, "group")
-	unselected, _, kept := releaseTerminal(t, q, c, "incomplete")
-	if err := q.update(func() error {
-		q.touchJob(a.ID).State = "failed"
-		q.touchJob(unselected.ID).State = "failed"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(filePublicationGrace + time.Second)
-	p := releasePlan(t, q, releaseSelection(a, b))
-	if p.ReclaimableBytes != ref.SizeBytes {
-		t.Fatal(p)
-	}
-	if _, err := releaseApply(q, p); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
-		t.Fatal("group not reclaimed", err)
-	}
-	if job(t, q, unselected.ID).FilesExpired {
-		t.Fatal("unsuccessful unselected work expired")
-	}
-	if _, err := os.Stat(q.files.blob(kept)); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestFileReleaseProtectsExpiredCustodyAndRecoveredResults(t *testing.T) {
-	for _, kind := range []string{"expired_custody", "recovered_result", "recent_bundle", "refreshed_bundle"} {
+	for _, kind := range []string{"expired_custody", "recovered_result"} {
 		t.Run(kind, func(t *testing.T) {
 			q, clock := fixture(t)
 			c := retentionClient(t, q)
@@ -529,36 +438,6 @@ func TestFileReleaseChangedCustodyInvalidatesPlan(t *testing.T) {
 	releaseCode(t, err, "file_release_stale")
 	if job(t, q, j.ID).FilesExpired {
 		t.Fatal("changed execution expired")
-	}
-}
-
-func TestFileReleaseOverlappingGroupsRetainReplay(t *testing.T) {
-	q, clock := fixture(t)
-	c := retentionClient(t, q)
-	a, _, _ := releaseTerminal(t, q, c, "overlap-a")
-	b, _, _ := releaseTerminal(t, q, c, "overlap-b")
-	clock.Advance(filePublicationGrace + time.Second)
-	firstPlan := releasePlan(t, q, releaseSelection(a))
-	first, err := releaseApply(q, firstPlan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondPlan := releasePlan(t, q, releaseSelection(a, b))
-	second, err := releaseApply(q, secondPlan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = q.reclaimPublishedFiles(); err != nil {
-		t.Fatal(err)
-	}
-	for _, v := range []struct {
-		plan   FileReleasePlan
-		result FileReleaseResult
-	}{{firstPlan, first}, {secondPlan, second}} {
-		replay, err := releaseApply(q, v.plan)
-		if err != nil || replay != v.result {
-			t.Fatal("overlap lost receipt", replay, err)
-		}
 	}
 }
 

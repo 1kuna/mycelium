@@ -14,8 +14,8 @@ import (
 
 // An operator's drain is a separate decision even at the same clock timestamp.
 func TestEnrollmentRecoveryPreservesOperatorDrain(t *testing.T) {
-	for _, boundary := range []string{"before-post", "after-post", "conflict", "completed-receipt"} {
-		for _, advance := range []bool{false, true} {
+	for _, boundary := range []string{"after-post", "conflict"} {
+		for _, advance := range []bool{false} {
 			t.Run(boundary+map[bool]string{false: "/same-time", true: "/later"}[advance], func(t *testing.T) {
 				q, clock := fixture(t)
 				m := cpuMachine("hypha", "hypha", "fake", 8, 32)

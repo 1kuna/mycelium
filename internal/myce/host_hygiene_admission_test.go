@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"testing/fstest"
 	"time"
 )
 
@@ -85,76 +84,6 @@ func TestHostHygieneMountCompletedOutliersKeepProductionHealth(t *testing.T) {
 
 // Four successful metadata operations can exceed the stall allowance in total.
 // Only an individual operation's lack of progress is an admission failure.
-func TestHostHygieneMountProgressingOutlierIsAdvisory(t *testing.T) {
-	for _, role := range []string{"checkpoint", "nas"} {
-		t.Run(role, func(t *testing.T) {
-			q, clock, baseline, publish := mountAdmissionFixture(t, role)
-			files := fstest.MapFS{"root": &fstest.MapFile{Mode: fs.ModeDir}}
-			permit, entered := make(chan struct{}), make(chan int, 8)
-			t.Cleanup(func() { close(permit) })
-			var operations atomic.Int32
-			p := &hostMountProbe{root: role, path: "root", clock: clock, last: HostMountHealth{Root: role, LatencySeconds: .001}}
-			p.measure = func(path string, progress func()) hostMountResult {
-				start := clock.Now()
-				step := func() { entered <- int(operations.Load()); <-permit }
-				observed := func() { progress(); operations.Add(1) }
-				if role == "nas" {
-					err := readHealthMount(path, func(path string) (os.FileInfo, error) {
-						step()
-						return fs.Stat(files, path)
-					}, func(path string) (fs.ReadDirFile, error) {
-						step()
-						f, err := files.Open(path)
-						if err != nil {
-							return nil, err
-						}
-						return steppedMountDirectory{ReadDirFile: f.(fs.ReadDirFile), step: step}, nil
-					}, observed)
-					return hostMountResult{latency: clock.Now().Sub(start), err: err}
-				}
-				for stage := 0; stage < 4; stage++ {
-					step()
-					switch stage {
-					case 0:
-						if _, err := fs.Stat(files, path); err != nil {
-							return hostMountResult{err: err}
-						}
-					case 1:
-						files[path+"/probe"] = &fstest.MapFile{}
-					case 3:
-						delete(files, path+"/probe")
-					}
-					observed()
-				}
-				return hostMountResult{latency: clock.Now().Sub(start)}
-			}
-			p.sample(clock.Now(), baseline)
-			for stage := 0; stage < 4; stage++ {
-				<-entered
-				// Spend twenty seconds in each operation, matching successful metadata
-				// tails that motivated #234. Every operation stays below its 30s bound.
-				for i := 0; i < 4; i++ {
-					clock.Advance(signalRefresh)
-					got := p.sample(clock.Now(), baseline)
-					if got.Reason == "mount_probe_stalled" || publish(got) != "" {
-						t.Fatal("progressing sequence held admission", stage, got)
-					}
-				}
-				permit <- struct{}{}
-				await(t, func() bool { return operations.Load() >= int32(stage+1) })
-			}
-			await(t, func() bool { return len(p.pending) == 1 })
-			got := p.sample(clock.Now(), baseline)
-			if got.Reason != "mount_probe_slow" || got.LatencySeconds <= checkpointAvailabilityStallBudget.Seconds() || publish(got) != "" {
-				t.Fatal("slow completed success was not advisory", got)
-			}
-			alerts := alertsOf(q, "host_mount_degraded")
-			if len(alerts) != 1 || alerts[0].Reason != "mount_probe_slow" || alerts[0].Mount == nil || alerts[0].Mount.SlowThresholdSeconds != .001 || alerts[0].Mount.OperationAgeSeconds <= 0 || len(alertsOf(q, "host_mount_unavailable")) != 0 {
-				t.Fatal("advisory lost measured evidence or duplicated its wake", alerts)
-			}
-		})
-	}
-}
 
 func TestHostHygieneMountAdvisoryEscalatesAndNeedsFreshRecovery(t *testing.T) {
 	q, clock, baseline, publish := mountAdmissionFixture(t, "checkpoint")

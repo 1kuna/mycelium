@@ -73,6 +73,42 @@ func TestEnrollmentReleaseSignedUpdatePreservesCatalogs(t *testing.T) {
 	if !reflect.DeepEqual(q.environments, environments) || !reflect.DeepEqual(q.models, models) {
 		t.Error("approval changed environment/model catalogs")
 	}
+
+	// Project current NAS identity without persisting or disclosing its source.
+	{
+		client := client
+		root := filepath.Dir(q.root)
+		if err := q.ConfigureOnboardingNAS(context.Background(), "linux", func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("//private:secret@storage.invalid/share " + root + " cifs rw 0 0\n"), nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := json.Marshal(q.s.EnrollmentRelease)
+		var current struct {
+			NASIdentity NASIdentity `json:"nas_identity"`
+		}
+		if err := client.Call(context.Background(), "GET", "/api/invites/release", nil, &current); err != nil {
+			t.Fatal(err)
+		}
+		if current.NASIdentity.Fingerprint != nasSourceFingerprint("//storage.invalid/share", "smbfs") || current.NASIdentity.CheckpointPath != filepath.Base(q.root) {
+			t.Fatalf("current share metadata missing: %+v", current.NASIdentity)
+		}
+		after, _ := json.Marshal(q.s.EnrollmentRelease)
+		if !bytes.Equal(before, after) {
+			t.Fatal("metadata projection changed persisted release")
+		}
+		public, _ := json.Marshal(current)
+		for _, private := range []string{root, "private", "secret", "storage.invalid"} {
+			if strings.Contains(string(public), private) {
+				t.Fatal("NAS metadata exposed private mount details")
+			}
+		}
+		client.Token = "wrong-authority"
+		if err := client.Call(context.Background(), "GET", "/api/invites/release", nil, nil); err == nil {
+			t.Fatal("NAS metadata served without authentication")
+		}
+
+	}
 	server.Close()
 	if err = q.Close(); err != nil {
 		t.Fatal(err)
@@ -207,42 +243,6 @@ func TestEnrollmentReleaseApprovalRequiresLocallyProvisionedKey(t *testing.T) {
 	}
 	if err = client.Call(context.Background(), "POST", "/api/invites/release", request, nil); err != nil {
 		t.Fatal("locally provisioned legacy approval remained unavailable", err)
-	}
-}
-
-func TestEnrollmentReleaseApprovalStorageFailure(t *testing.T) {
-	q, _ := fixture(t)
-	data, pub, _ := signedTestRelease(t)
-	if err := q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid"); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := json.Marshal(q.s)
-	var logs bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&logs)
-	defer log.SetOutput(previous)
-	if _, err := q.db.Exec("PRAGMA query_only=ON"); err != nil {
-		t.Fatal(err)
-	}
-	defer q.db.Exec("PRAGMA query_only=OFF")
-	server := httptest.NewServer((API{Queue: q, Token: "fixture-authority"}).Handler())
-	defer server.Close()
-	client := Client{URL: server.URL, Token: "fixture-authority"}
-	request := EnrollmentReleaseApproval{SignedRelease: data, PublicKey: pub, Origin: "https://publisher.invalid/changed", AllowDowngrade: true}
-	err := client.Call(context.Background(), "POST", "/api/invites/release", request, nil)
-	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) || httpErr.Status != 500 || httpErr.Code != "release_approval_failed" {
-		t.Fatalf("storage failure must be internal, not a manifest refusal: %v", err)
-	}
-	if !strings.Contains(logs.String(), "SQLITE_READONLY") || !strings.Contains(logs.String(), "code=release_approval_failed") {
-		t.Fatalf("storage failure must log its sanitized underlying cause alongside the 500: %s", logs.String())
-	}
-	if strings.Contains(logs.String(), "fixture-authority") || strings.Contains(logs.String(), q.root) {
-		t.Fatal("storage diagnostics exposed private input")
-	}
-	after, _ := json.Marshal(q.s)
-	if !bytes.Equal(before, after) {
-		t.Fatal("failed commit changed default approval or trust")
 	}
 }
 

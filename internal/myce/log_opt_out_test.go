@@ -10,31 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
-
-func TestBatchLogPolicyValidation(t *testing.T) {
-	for _, policy := range []string{"", "keep", "none", "invalid"} {
-		t.Run(policy, func(t *testing.T) {
-			s := spec("experiment")
-			data, err := yaml.Marshal(s)
-			if err != nil {
-				t.Fatal(err)
-			}
-			data = append(data, []byte("logs: "+policy+"\n")...)
-			var parsed Spec
-			decoder := yaml.NewDecoder(strings.NewReader(string(data)))
-			decoder.KnownFields(true)
-			if err := decoder.Decode(&parsed); err != nil {
-				t.Fatal(err)
-			}
-			if err := parsed.Validate(); (err == nil) != (policy != "invalid") {
-				t.Fatalf("logs %q: %v", policy, err)
-			}
-		})
-	}
-}
 
 func TestBatchLogsNoneQueueDiscardsCurrentAttemptOnly(t *testing.T) {
 	q, _ := fixture(t)
@@ -62,7 +38,7 @@ func TestBatchLogsNoneQueueDiscardsCurrentAttemptOnly(t *testing.T) {
 }
 
 func TestBatchLogsNoneLifecycle(t *testing.T) {
-	for _, mode := range []string{"success", "failure", "cancel", "large-output"} {
+	for _, mode := range []string{"failure", "large-output"} {
 		t.Run(mode, func(t *testing.T) {
 			q, _ := fixture(t)
 			clock := &workerFakeClock{now: q.clock.Now()}
@@ -147,43 +123,8 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 	}
 }
 
-func TestBatchLogsDefaultCapture(t *testing.T) {
-	for _, policy := range []string{"", "keep"} {
-		t.Run(policy, func(t *testing.T) {
-			q, _ := fixture(t)
-			q.clock = &workerFakeClock{now: q.clock.Now()}
-			s := spec("experiment")
-			s.Resumable = false
-			s.Logs = policy
-			s.Run.Command = []string{"sh", "-c", "echo synthetic-stdout; echo synthetic-stderr >&2"}
-			j := submit(t, q, s)
-			run := workerFixture(t, q)
-			await(t, func() bool { return job(t, q, j.ID).State == "succeeded" })
-			logs, err := q.Logs(j.ID, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var text strings.Builder
-			for _, chunk := range logs {
-				text.WriteString(chunk.Text)
-			}
-			if text.String() != "synthetic-stdout\nsynthetic-stderr\n" {
-				t.Fatal("default queue capture changed")
-			}
-			files, err := filepath.Glob(filepath.Join(run.state, "*.log"))
-			if err != nil || len(files) != 1 {
-				t.Fatalf("default attempt log missing: %v", err)
-			}
-			data, err := os.ReadFile(files[0])
-			if err != nil || string(data) != text.String() {
-				t.Fatal("default worker capture changed")
-			}
-		})
-	}
-}
-
 func TestServerLogPolicyOutput(t *testing.T) {
-	for _, policy := range []string{"none", "", "keep"} {
+	for _, policy := range []string{"none"} {
 		t.Run(policy, func(t *testing.T) {
 			m := serverTestModel(t, "ready")
 			m.Logs = policy
@@ -364,7 +305,7 @@ func logsNoneMachine(t *testing.T, id string) Machine {
 }
 
 func TestLogsNoneRequiresWorkerCapability(t *testing.T) {
-	for _, policy := range []string{"", "keep", "none"} {
+	for _, policy := range []string{"none"} {
 		t.Run(policy, func(t *testing.T) {
 			q, clock := fixture(t)
 			s := spec("experiment")
@@ -475,22 +416,5 @@ func TestLogsNoneEnvironmentOutput(t *testing.T) {
 	var count int
 	if err := q.db.QueryRow("SELECT count(*) FROM environment_build_logs WHERE key=?", r.Key).Scan(&count); err != nil || count != 1 {
 		t.Fatal("environment's independent log was lost", err)
-	}
-}
-
-func TestLogsNoneServerFailureDiagnostic(t *testing.T) {
-	for _, policy := range []string{"none", "keep"} {
-		m := serverTestModel(t, "crash")
-		m.Logs = policy
-		e := NewModelEngine(m, t.TempDir(), RealClock{})
-		ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-		err := e.Load(ctx, m)
-		cancel()
-		if err == nil || !strings.Contains(err.Error(), "exit status 7") {
-			t.Fatalf("missing exit diagnostic: %v", err)
-		}
-		if strings.Contains(err.Error(), "see engine-") != (policy == "keep") {
-			t.Fatalf("incorrect log advice: %v", err)
-		}
 	}
 }

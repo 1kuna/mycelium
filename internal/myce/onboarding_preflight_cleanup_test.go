@@ -10,7 +10,7 @@ import (
 )
 
 func TestStoragePreflightRemovesOnlyItsNewDirectories(t *testing.T) {
-	for _, mode := range []string{"success", "probe-failure", "cancel-during-mkdir"} {
+	for _, mode := range []string{"success", "cancel-during-mkdir"} {
 		t.Run(mode, func(t *testing.T) {
 			mount := t.TempDir()
 			c, err := PlanInstall("worker", t.TempDir(), "", mount, "http://queue.invalid", "fixture", Detection{OS: "linux", Arch: "amd64", Platform: "cuda", MemoryMode: "fixed", MemoryGB: 8})

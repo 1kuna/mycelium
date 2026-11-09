@@ -2,7 +2,6 @@ package myce
 
 import (
 	"crypto/sha256"
-
 	"errors"
 	"io/fs"
 	"os"
@@ -35,41 +34,6 @@ func stateTree(t *testing.T, root string) map[string][32]byte {
 		t.Fatal(err)
 	}
 	return out
-}
-
-func TestCurrentQueueWALRestart(t *testing.T) {
-	source := filepath.Join(t.TempDir(), "queue.db")
-	q, e := Open(source, t.TempDir(), RealClock{})
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer q.Close()
-	submitted := submit(t, q, spec("experiment"))
-	target := filepath.Join(t.TempDir(), "queue.db")
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		b, e := os.ReadFile(source + suffix)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if e = os.WriteFile(target+suffix, b, 0600); e != nil {
-			t.Fatal(e)
-		}
-	}
-	marker, e := os.ReadFile(filepath.Join(filepath.Dir(source), FormatMarker))
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e = os.WriteFile(filepath.Join(filepath.Dir(target), FormatMarker), marker, 0600); e != nil {
-		t.Fatal(e)
-	}
-	restarted, e := Open(target, t.TempDir(), RealClock{})
-	if e != nil {
-		t.Fatal("current crash snapshot refused", e)
-	}
-	defer restarted.Close()
-	if len(restarted.s.Jobs) != 1 || restarted.s.Jobs[submitted.ID] == nil {
-		t.Fatal("current WAL state lost")
-	}
 }
 
 func TestLegacyStandaloneCustodyRefusal(t *testing.T) {

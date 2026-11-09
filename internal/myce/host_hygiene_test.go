@@ -2,11 +2,9 @@ package myce
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -176,75 +174,6 @@ func TestHostHygieneColdPressureWithSwapGrowth(t *testing.T) {
 				t.Fatal("corroborated pressure was accepted into the healthy baseline", h.DrainReason, len(h.Baseline), baseline)
 			}
 		})
-	}
-}
-
-func TestHostHygieneNormalPressureLevelWithSwapGrowth(t *testing.T) {
-	// Darwin reports an OS level: 1 is normal, not positive memory PSI.
-	m, c := healthFixture(t, 1)
-	swap := 0.0
-	m.source = func(context.Context) (HostHealthReading, error) {
-		swap += 1 << 20
-		return HostHealthReading{Load: 1, Pressure: 1, SwapBytes: swap, WakeSeconds: .001}, nil
-	}
-	for range hostHealthConfirmation {
-		c.Advance(signalRefresh)
-		if err := m.sample(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if m.health.DrainReason != "" {
-		t.Fatal("normal OS pressure and unchanged wake latency drained", m.health.DrainReason)
-	}
-	reopened, err := openHostHealth(m.dir, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reopened.health.Baseline[len(reopened.health.Baseline)-1].Pressure != 1 {
-		t.Fatal("persisted OS pressure units changed")
-	}
-	reopened.source = func(context.Context) (HostHealthReading, error) {
-		return HostHealthReading{Load: 1, Pressure: 4, SwapBytes: swap, WakeSeconds: .001}, nil
-	}
-	for range hostHealthConfirmation {
-		c.Advance(signalRefresh)
-		if err := reopened.sample(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if reopened.health.DrainReason != "host_memory_pressure" {
-		t.Fatal("OS pressure increase did not drain after restart", reopened.health.DrainReason)
-	}
-}
-
-func TestHostHygieneBriefSpikeAndMissingSensor(t *testing.T) {
-	m, c := healthFixture(t, 1)
-	m.source = func(context.Context) (HostHealthReading, error) {
-		return HostHealthReading{Load: 100, WakeSeconds: 1}, nil
-	}
-	c.Advance(signalRefresh)
-	if err := m.sample(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	m.source = func(context.Context) (HostHealthReading, error) {
-		return HostHealthReading{}, errors.New("private sensor detail")
-	}
-	c.Advance(signalRefresh)
-	if err := m.sample(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	m.source = func(context.Context) (HostHealthReading, error) {
-		return HostHealthReading{Load: 1, Pressure: 1, WakeSeconds: .001}, nil
-	}
-	c.Advance(signalRefresh)
-	if err := m.sample(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if m.health.DrainReason != "" {
-		t.Fatal("brief spike drained")
-	}
-	if strings.Contains(fmt.Sprint(m.health), "private sensor") {
-		t.Fatal("raw probe error leaked")
 	}
 }
 

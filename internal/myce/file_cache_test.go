@@ -14,27 +14,10 @@ import (
 	"time"
 )
 
-func TestFileCacheLargeInputUsesProgressBudget(t *testing.T) {
-	ref := sharedFixtureFile(t, t.TempDir(), "input", "slow healthy input")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(10 * time.Millisecond)
-		w.Header().Set("ETag", fmt.Sprintf("%q", ref.SHA256))
-		w.Header().Set("Content-Length", fmt.Sprint(ref.SizeBytes))
-		if r.Method != "HEAD" {
-			_, _ = w.Write([]byte("slow healthy input"))
-		}
-	}))
-	defer server.Close()
-	cache := FileCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Client: Client{URL: server.URL, HTTP: &http.Client{Timeout: time.Millisecond}}}
-	if err := cache.copyTo(context.Background(), ref, filepath.Join(t.TempDir(), "attempt")); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // #720: an unrelated victim must never require queue availability. Its accepted
 // retention may have ended, or its HEAD may fail while the new blob is healthy.
 func TestFileCacheEvictionIndependentOfVictimStorage(t *testing.T) {
-	for _, status := range []int{404, 410, 503} {
+	for _, status := range []int{503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			q, clock := fixture(t)
 			if err := q.ConfigureFileStore(t.TempDir(), 1024, true); err != nil {

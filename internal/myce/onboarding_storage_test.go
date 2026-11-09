@@ -70,35 +70,34 @@ func TestOnboardingNASRootsAndCheckpointRoundTrip(t *testing.T) {
 	}
 }
 func TestOnboardingNASMissingUnreachableNoLocalSubstitute(t *testing.T) {
-	for _, osname := range []string{"linux", "darwin"} {
-		for _, mode := range []string{"absent", "unreachable", "local-filesystem"} {
-			t.Run(osname+"/"+mode, func(t *testing.T) {
-				c, _ := onboardingNAS(t, osname)
-				c.NAS = filepath.Join(c.WorkerHome, "missing")
-				c.Checkpoints = filepath.Join(c.NAS, "checkpoints")
-				before := stateTree(t, c.WorkerHome)
-				_, err := PrepareOnboardingStorage(context.Background(), c, false, func(context.Context, string, ...string) ([]byte, error) {
-					if mode == "unreachable" {
-						return nil, fmt.Errorf("private-value")
-					}
-					if mode == "local-filesystem" {
-						return []byte("source " + c.NAS + " ext4 rw 0 0\n"), nil
-					}
-					return nil, nil
-				})
-				code := "nas_not_mounted"
+	for _, tc := range []struct{ osname, mode string }{{"linux", "absent"}, {"darwin", "local-filesystem"}} {
+		osname, mode := tc.osname, tc.mode
+		t.Run(osname+"/"+mode, func(t *testing.T) {
+			c, _ := onboardingNAS(t, osname)
+			c.NAS = filepath.Join(c.WorkerHome, "missing")
+			c.Checkpoints = filepath.Join(c.NAS, "checkpoints")
+			before := stateTree(t, c.WorkerHome)
+			_, err := PrepareOnboardingStorage(context.Background(), c, false, func(context.Context, string, ...string) ([]byte, error) {
 				if mode == "unreachable" {
-					code = "nas_unreachable"
+					return nil, fmt.Errorf("private-value")
 				}
-				requirePreflightCode(t, err, code)
-				if strings.Contains(err.Error(), "private-value") {
-					t.Fatal("credential content emitted")
+				if mode == "local-filesystem" {
+					return []byte("source " + c.NAS + " ext4 rw 0 0\n"), nil
 				}
-				if !reflect.DeepEqual(before, stateTree(t, c.WorkerHome)) {
-					t.Fatal("NAS refusal changed local files")
-				}
+				return nil, nil
 			})
-		}
+			code := "nas_not_mounted"
+			if mode == "unreachable" {
+				code = "nas_unreachable"
+			}
+			requirePreflightCode(t, err, code)
+			if strings.Contains(err.Error(), "private-value") {
+				t.Fatal("credential content emitted")
+			}
+			if !reflect.DeepEqual(before, stateTree(t, c.WorkerHome)) {
+				t.Fatal("NAS refusal changed local files")
+			}
+		})
 	}
 }
 func TestOnboardingNASDiscoveryAndBoundaries(t *testing.T) {

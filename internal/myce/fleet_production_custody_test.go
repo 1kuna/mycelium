@@ -55,118 +55,120 @@ func TestFleetProductionIdleLastCopyReleaseAfterRetry(t *testing.T) {
 }
 
 func TestFleetProductionIdleReconcilesPersistedCopyJobs(t *testing.T) {
-	for _, recovery := range []string{"target", "newer"} {
-		for _, pending := range []bool{false, true} {
-			t.Run(recovery+"/pending-"+stringBool(pending), func(t *testing.T) {
-				q, c, _ := fleetFixture(t, "queue")
-				pub, private, err := ed25519.GenerateKey(rand.Reader)
-				if err != nil {
-					t.Fatal(err)
-				}
-				manifest := q.s.EnrollmentRelease.Manifest
-				sign := func(version string) []byte {
-					manifest.Version = version
-					data, _ := json.Marshal(manifest)
-					envelope, _ := json.Marshal(SignedRelease{Manifest: data, Signature: ed25519.Sign(private, data)})
-					return envelope
-				}
-				if err := q.ConfigureEnrollmentRelease(sign("v1.0.1"), pub, "https://publisher.invalid/release"); err != nil {
-					t.Fatal(err)
-				}
-				// Two old failed jobs, one with one retained attempt and one with two.
-				// Omitempty persists the unset aggregate exactly as older queues did.
-				if err := q.update(func() error {
-					now := c.Now()
-					for n := 1; n <= 2; n++ {
-						j := &Job{ID: fmt.Sprintf("failed-%d", n), Spec: spec("production"), State: "failed", Attempt: n, Queued: c.Now(), FinishedAt: &now}
-						for attempt := 1; attempt <= n; attempt++ {
-							copy := Copy{Machine: "remote", Session: "old", Attempt: attempt, ReleaseConfirmed: true, ReleaseReason: "execution_acknowledged"}
-							if pending && n == 2 && attempt == 1 {
-								copy.ReleaseConfirmed, copy.ReleaseReason = false, "awaiting_release"
-							}
-							j.Copies = append(j.Copies, copy)
+	for _, tc := range []struct {
+		recovery string
+		pending  bool
+	}{{"target", true}, {"newer", false}} {
+		recovery, pending := tc.recovery, tc.pending
+		t.Run(recovery+"/pending-"+stringBool(pending), func(t *testing.T) {
+			q, c, _ := fleetFixture(t, "queue")
+			pub, private, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest := q.s.EnrollmentRelease.Manifest
+			sign := func(version string) []byte {
+				manifest.Version = version
+				data, _ := json.Marshal(manifest)
+				envelope, _ := json.Marshal(SignedRelease{Manifest: data, Signature: ed25519.Sign(private, data)})
+				return envelope
+			}
+			if err := q.ConfigureEnrollmentRelease(sign("v1.0.1"), pub, "https://publisher.invalid/release"); err != nil {
+				t.Fatal(err)
+			}
+			// Two old failed jobs, one with one retained attempt and one with two.
+			// Omitempty persists the unset aggregate exactly as older queues did.
+			if err := q.update(func() error {
+				now := c.Now()
+				for n := 1; n <= 2; n++ {
+					j := &Job{ID: fmt.Sprintf("failed-%d", n), Spec: spec("production"), State: "failed", Attempt: n, Queued: c.Now(), FinishedAt: &now}
+					for attempt := 1; attempt <= n; attempt++ {
+						copy := Copy{Machine: "remote", Session: "old", Attempt: attempt, ReleaseConfirmed: true, ReleaseReason: "execution_acknowledged"}
+						if pending && n == 2 && attempt == 1 {
+							copy.ReleaseConfirmed, copy.ReleaseReason = false, "awaiting_release"
 						}
-						q.putJob(j.ID, j)
+						j.Copies = append(j.Copies, copy)
 					}
-					if q.fleetProductionIdle() == pending || mutableJob(q.s.Jobs["failed-2"]) != pending {
-						t.Fatal("guards did not use per-copy release evidence")
+					q.putJob(j.ID, j)
+				}
+				if q.fleetProductionIdle() == pending || mutableJob(q.s.Jobs["failed-2"]) != pending {
+					t.Fatal("guards did not use per-copy release evidence")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			// Persist an operation already waiting on the incident's stale aggregate.
+			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{QueueOnly: true, WaitProductionIdle: true}); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			if err := q.update(func() error {
+				h := q.s.FleetUpgrade.Hosts[0]
+				if h.Phase == "pending" {
+					if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "drain", DrainOwner: q.s.FleetUpgrade.Operation}); err != nil {
+						return err
 					}
-					return nil
-				}); err != nil {
+					h.Owned, h.Policy = true, q.s.HostMaintenance[h.Host]
+				}
+				h.Phase, h.Wait = "draining", "waiting for production attempts and release custody across the fleet"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			operation := q.s.FleetUpgrade.Operation
+			q = reopenCancellationQueue(t, q, c)
+			fakeCheckpointAvailability(t, q, true)
+			proof := fleetTestProof(c, "queue-restarted", 101, true)
+			if recovery == "newer" {
+				proof.Version = "v1.0.2"
+			}
+			q.fleetQueue = &fleetQueueRuntime{Session: proof.Session, Host: "queue", OS: "linux", Arch: "amd64", Proof: proof, ObservedAt: c.Now()}
+			fleetTick(t, q)
+			if q.s.FleetUpgrade.Operation != operation || q.fleetProductionIdle() == pending {
+				t.Fatal("restart lost operation or misclassified copy custody", q.fleetUpgradeStatus())
+			}
+			if pending {
+				if h := q.fleetActiveHost(); h.Phase != "draining" || h.Wait == "" || job(t, q, "failed-2").ReleaseConfirmed {
+					t.Fatal("unconfirmed old copy did not retain wait", h)
+				}
+				r := Result{Execution: Execution{ID: "failed-2", Attempt: 1}, Machine: "remote", Session: "old", ReleaseOnly: true}
+				if err := q.Complete(r); err != nil {
 					t.Fatal(err)
 				}
-				// Persist an operation already waiting on the incident's stale aggregate.
-				if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{QueueOnly: true, WaitProductionIdle: true}); err != nil {
-					t.Fatal(err)
+			}
+			for _, id := range []string{"failed-1", "failed-2"} {
+				if !job(t, q, id).ReleaseConfirmed || mutableJob(q.s.Jobs[id]) {
+					t.Fatal("released failed job still carries mutable custody", id)
 				}
-				fleetTick(t, q)
-				if err := q.update(func() error {
-					h := q.s.FleetUpgrade.Hosts[0]
-					if h.Phase == "pending" {
-						if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "drain", DrainOwner: q.s.FleetUpgrade.Operation}); err != nil {
-							return err
-						}
-						h.Owned, h.Policy = true, q.s.HostMaintenance[h.Host]
-					}
-					h.Phase, h.Wait = "draining", "waiting for production attempts and release custody across the fleet"
-					return nil
-				}); err != nil {
-					t.Fatal(err)
+			}
+			fleetTick(t, q)
+			if recovery == "newer" {
+				if q.s.FleetUpgrade.State != "stopped" || q.fleetActiveHost().Failure != "queue_running_hash_mismatch" || !q.fleetPausesProduction() {
+					t.Fatal("replacement queue did not expose supported fix-forward recovery", q.fleetUpgradeStatus())
 				}
-				operation := q.s.FleetUpgrade.Operation
-				q = reopenCancellationQueue(t, q, c)
-				fakeCheckpointAvailability(t, q, true)
-				proof := fleetTestProof(c, "queue-restarted", 101, true)
-				if recovery == "newer" {
-					proof.Version = "v1.0.2"
-				}
-				q.fleetQueue = &fleetQueueRuntime{Session: proof.Session, Host: "queue", OS: "linux", Arch: "amd64", Proof: proof, ObservedAt: c.Now()}
-				fleetTick(t, q)
-				if q.s.FleetUpgrade.Operation != operation || q.fleetProductionIdle() == pending {
-					t.Fatal("restart lost operation or misclassified copy custody", q.fleetUpgradeStatus())
-				}
-				if pending {
-					if h := q.fleetActiveHost(); h.Phase != "draining" || h.Wait == "" || job(t, q, "failed-2").ReleaseConfirmed {
-						t.Fatal("unconfirmed old copy did not retain wait", h)
-					}
-					r := Result{Execution: Execution{ID: "failed-2", Attempt: 1}, Machine: "remote", Session: "old", ReleaseOnly: true}
-					if err := q.Complete(r); err != nil {
-						t.Fatal(err)
-					}
-				}
-				for _, id := range []string{"failed-1", "failed-2"} {
-					if !job(t, q, id).ReleaseConfirmed || mutableJob(q.s.Jobs[id]) {
-						t.Fatal("released failed job still carries mutable custody", id)
-					}
-				}
-				fleetTick(t, q)
-				if recovery == "newer" {
-					if q.s.FleetUpgrade.State != "stopped" || q.fleetActiveHost().Failure != "queue_running_hash_mismatch" || !q.fleetPausesProduction() {
-						t.Fatal("replacement queue did not expose supported fix-forward recovery", q.fleetUpgradeStatus())
-					}
 
-					if err := q.approveEnrollmentRelease(EnrollmentReleaseApproval{SignedRelease: sign(proof.Version), PublicKey: pub, Origin: "https://publisher.invalid/release"}); err != nil {
-						t.Fatal(err)
-					}
-					out, err := q.StartFleetUpgrade(FleetUpgradeRequest{QueueOnly: true, WaitProductionIdle: true, Release: proof.Version})
-					if err != nil || out.Operation == operation {
-						t.Fatal("explicit newer approved release did not recover", out, err)
-					}
+				if err := q.approveEnrollmentRelease(EnrollmentReleaseApproval{SignedRelease: sign(proof.Version), PublicKey: pub, Origin: "https://publisher.invalid/release"}); err != nil {
+					t.Fatal(err)
 				}
-				// The restarted queue already runs the target bytes. Verify health
-				// with its new session/PID; no second restart may be instructed.
-				for n := 0; n < 34; n++ {
-					fleetHeartbeatAdvance(t, q, c)
-					instruction, err := q.fleetInstruction("queue", "@queue", proof.Session)
-					if err != nil || instruction.Operation != "" {
-						t.Fatal("already-current restarted queue instructed to restart", instruction, err)
-					}
+				out, err := q.StartFleetUpgrade(FleetUpgradeRequest{QueueOnly: true, WaitProductionIdle: true, Release: proof.Version})
+				if err != nil || out.Operation == operation {
+					t.Fatal("explicit newer approved release did not recover", out, err)
 				}
-				if q.s.FleetUpgrade.State != "complete" || q.fleetPausesProduction() {
-					t.Fatal("persisted operation did not finish", q.fleetUpgradeStatus())
+			}
+			// The restarted queue already runs the target bytes. Verify health
+			// with its new session/PID; no second restart may be instructed.
+			for n := 0; n < 34; n++ {
+				fleetHeartbeatAdvance(t, q, c)
+				instruction, err := q.fleetInstruction("queue", "@queue", proof.Session)
+				if err != nil || instruction.Operation != "" {
+					t.Fatal("already-current restarted queue instructed to restart", instruction, err)
 				}
-			})
-		}
+			}
+			if q.s.FleetUpgrade.State != "complete" || q.fleetPausesProduction() {
+				t.Fatal("persisted operation did not finish", q.fleetUpgradeStatus())
+			}
+		})
 	}
 }
 

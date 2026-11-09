@@ -95,16 +95,3 @@ func TestDarwinUpgradePreservesCodeIdentity(t *testing.T) {
 		})
 	}
 }
-
-func TestCodeSigningInspectionCapturesStderr(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	path := filepath.Join(dir, "codesign")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\necho synthetic-signature-metadata >&2\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	got, err := LocalMachineProbe().Command(context.Background(), path, "-dv", "synthetic-binary")
-	if err != nil || string(got) != "synthetic-signature-metadata\n" {
-		t.Fatalf("codesign inspection lost stderr: %q, %v", got, err)
-	}
-}

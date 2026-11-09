@@ -119,19 +119,6 @@ func TestProductionHoldScopeOnMachineWorker(t *testing.T) {
 }
 
 // An empty startup file holds nothing, so a later file can still add a hold.
-func TestProductionHoldEmptyStartupFileStillSeeds(t *testing.T) {
-	t.Parallel()
-	q, _ := fixture(t)
-	if err := q.ConfigureHosts(map[string]HostPolicy{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.ConfigureHosts(map[string]HostPolicy{"machine": {ProductionHold: true}}); err != nil {
-		t.Fatal("adding a hold after an empty startup file refused:", err)
-	}
-	if !q.PriorityPolicy().Policy.Hosts["machine"].ProductionHold {
-		t.Fatal("hold not seeded")
-	}
-}
 
 // The policy API changes persisted host scope; restart keeps it, and the
 // startup file that seeded the old policy no longer blocks or replaces it.

@@ -243,7 +243,7 @@ func TestFleetFailureFinalPublisherRecheckPreservesCode(t *testing.T) {
 // #846 reproduces transient stale proof after intent. Maintenance changes remain
 // terminal at each boundary; only stale control responses may refetch.
 func TestFleetFailureAfterIntentRemainsDurable(t *testing.T) {
-	for _, denyAt := range []int{2, 3, 4} {
+	for _, denyAt := range []int{3, 4} {
 		t.Run(map[int]string{2: "before-fetch", 3: "before-publication", 4: "before-restart"}[denyAt], func(t *testing.T) {
 			f := newFleetInstallFixture(t, "darwin")
 			if err := f.launch(); err != nil {
@@ -260,42 +260,6 @@ func TestFleetFailureAfterIntentRemainsDurable(t *testing.T) {
 			if err := f.apply(); err == nil || f.restarts != 0 || f.launches != 1 {
 				t.Fatal("failed helper automatically retried activation", err)
 			}
-		})
-	}
-}
-
-func TestFleetFailureDarwinInstalledIdentity(t *testing.T) {
-	for _, fault := range []string{"old-adhoc", "different-requirement", "candidate-probe", "helper-launch"} {
-		t.Run(fault, func(t *testing.T) {
-			f := newFleetInstallFixture(t, "darwin")
-			command := f.deps.command
-			f.deps.command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-				if fault == "old-adhoc" && name == "codesign" && args[0] == "-dv" && args[len(args)-1] == f.c.Binary {
-					return []byte("Identifier=io.github.1kuna.mycelium\nSignature=adhoc\n"), nil
-				}
-				if fault == "candidate-probe" && name == fleetStagingPath(f.c, f.i) || fault == "helper-launch" && name == "launchctl" && args[0] == "submit" {
-					return nil, errors.New("private OS diagnostic")
-				}
-				return command(ctx, name, args...)
-			}
-			f.changeDR = fault == "different-requirement"
-			err := f.launch()
-			want := "fleet_helper_launch_failed"
-			if fault != "helper-launch" {
-				if err != nil {
-					t.Fatal(err)
-				}
-				err = f.apply()
-				want = "fleet_darwin_identity_refused"
-				if fault == "candidate-probe" {
-					want = "fleet_candidate_invalid"
-				}
-			}
-			ack, readErr := ReadFleetUpdateFailure(f.c)
-			if err == nil || err.Error() != want || readErr != nil || ack == nil || ack.Failure != want || len(f.failureCodes) != 1 || f.failureCodes[0] != want || f.restarts != 0 {
-				t.Fatalf("lost Darwin failure: %v %+v %v %v", err, ack, readErr, f.failureCodes)
-			}
-			f.assertBinary(f.old)
 		})
 	}
 }

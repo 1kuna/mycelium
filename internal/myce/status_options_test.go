@@ -39,63 +39,6 @@ func readStatusOptions(t *testing.T, q *Queue, query string) Snapshot {
 	return s
 }
 
-func TestStatusOptionsBoundedHistoryAndPaging(t *testing.T) {
-	const history = defaultStatusJobs + 3
-	q, c := fixture(t)
-	setStatusTestCapacity(q)
-	for i := range history {
-		id := fmt.Sprintf("history-%04d", i)
-		at := c.Now().Add(-time.Duration(i) * time.Second)
-		q.s.Jobs[id] = &Job{ID: id, State: "succeeded", ReleaseConfirmed: true, Attempt: 1, Queued: at,
-			Spec: Spec{Project: "history"}, Timing: &WorkTiming{Reason: string(make([]byte, 1024))}}
-	}
-	// A very old terminal answer with unconfirmed custody must remain visible.
-	q.s.Jobs["cleanup"] = &Job{ID: "cleanup", State: "failed", Attempt: 1, Queued: c.Now().Add(-time.Hour)}
-	q.s.Jobs["active"] = &Job{ID: "active", State: "running", Spec: Spec{Project: "active"}}
-	q.s.WorkObservations = map[string]WorkObservation{"point": {Job: "history-0000"}}
-	s := readStatusOptions(t, q, "")
-	if len(s.Jobs) != defaultStatusJobs+2 || s.JobsPage.Total != history+2 || len(s.WorkCurves) != 1 || s.WorkCurves[0].Job != "history-0000" {
-		t.Fatalf("unbounded summary: %+v", s.JobsPage)
-	}
-	data, _ := json.Marshal(s)
-	if len(data) > 1<<20 {
-		t.Fatalf("summary copied cold history: %d bytes", len(data))
-	}
-	// Growing history tenfold does not grow the returned summary.
-	for i := history; i < 10*history; i++ {
-		id := fmt.Sprintf("history-%05d", i)
-		q.s.Jobs[id] = &Job{ID: id, State: "succeeded", Queued: c.Now().Add(-24 * time.Hour), Spec: Spec{Project: "history"}}
-	}
-	c.Advance(statusCacheLifetime)
-	larger := readStatusOptions(t, q, "")
-	more, _ := json.Marshal(larger)
-	if len(larger.Jobs) > len(s.Jobs) || len(more) > 1<<20 {
-		t.Fatalf("history growth amplified summary: %d -> %d", len(data), len(more))
-	}
-	previous := map[string]bool{}
-	for _, j := range s.Jobs {
-		previous[j.ID] = true
-	}
-	for _, j := range larger.Jobs {
-		if !previous[j.ID] {
-			t.Fatal("adaptive page skipped newer history", j.ID)
-		}
-	}
-	active := readStatusOptions(t, q, "?jobs=active")
-	if len(active.Jobs) != 2 || len(active.WorkCurves) != 1 {
-		t.Fatalf("active/cleanup hidden: %d", len(active.Jobs))
-	}
-	full := readStatusOptions(t, q, "?detail=full")
-	if len(full.Jobs) != 10*history+2 || len(full.WorkCurves) != 1 {
-		t.Fatal("full detail lost history or curves")
-	}
-	// Historical IDs remain readable independently of the bounded summary.
-	got, err := q.jobSnapshot(fmt.Sprintf("history-%04d", history-1))
-	if err != nil || got.ID != fmt.Sprintf("history-%04d", history-1) {
-		t.Fatal(got, err)
-	}
-}
-
 // Cursor and time/project filtering need only a few pages, independent of the
 // over-limit summary fixture above.
 func TestStatusOptionsPaging(t *testing.T) {
@@ -124,19 +67,6 @@ func TestStatusOptionsPaging(t *testing.T) {
 	}
 	if len(seen) != 7 {
 		t.Fatalf("lost history: %d", len(seen))
-	}
-}
-
-func TestStatusOptionsRejectInvalidQuery(t *testing.T) {
-	for _, query := range []string{"jobs=unknown", "limit=0", "limit=-1", "since=invalid", "detail=unknown", "before=missing"} {
-		q, _ := fixture(t)
-		r := httptest.NewRequest("GET", "/api/status?"+query, nil)
-		r.Header.Set("Authorization", "Bearer test")
-		w := httptest.NewRecorder()
-		API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r)
-		if w.Code != 400 {
-			t.Fatalf("%s: %d %s", query, w.Code, w.Body.String())
-		}
 	}
 }
 

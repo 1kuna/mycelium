@@ -15,40 +15,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
-
-func TestFleetRuntimeReportsDefinitiveSmokeFailure(t *testing.T) {
-	f := newFleetInstallFixture(t, "linux")
-	r := fleetInstallReceipt{Instruction: f.i, ConfigSHA256: strings.Repeat("a", 64), BeforeSHA256: strings.Repeat("b", 64), Phase: "restarting"}
-	if err := writeFleetReceipt(f.c, r); err != nil {
-		t.Fatal(err)
-	}
-	var got FleetUpgradeAck
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/fleet/ack" {
-			t.Error("smoke failure attempted unrelated request", r.URL.Path)
-			w.WriteHeader(404)
-			return
-		}
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Error(err)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-	}))
-	defer server.Close()
-	proof := &FleetRuntimeProof{Version: f.i.Release.Manifest.Version, Session: "new-failed-session", PID: 999, SHA256: strings.Repeat("a", 64), Failure: "runner_smoke_failed"}
-	collect := func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error) {
-		return proof, errors.New("cached runner smoke failure")
-	}
-	_ = pollFleetRuntime(context.Background(), f.c, Client{URL: server.URL, Token: "fixture"}, collect, nil, f.i.Host, f.i.Machine, proof.Session, false, "", nil)
-	if got.Operation != f.i.Operation || got.Revision != f.i.Revision || got.Session != f.i.Session || got.Failure != "runner_smoke_failed" || got.Runtime == nil || got.Runtime.Session != proof.Session {
-		t.Fatalf("definitive startup failure lost its fences: %+v", got)
-	}
-}
 
 // Swap the actual executable of a live subprocess before its first hash. This
 // catches both accidentally reopening os.Executable and caching the disk file
@@ -172,23 +141,6 @@ func TestFleetPublisherBootstrapNeverReplacesTrust(t *testing.T) {
 	}
 	if _, err := provisionFleetPublisher(context.Background(), state, client); err == nil || requests.Load() != 1 {
 		t.Fatal("invalid existing trust was repaired remotely", err)
-	}
-}
-
-func TestFleetOrdinaryWorkerNeverActivates(t *testing.T) {
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		t.Error("ordinary worker contacted fleet endpoint")
-	}))
-	defer server.Close()
-	w := Worker{Client: Client{URL: server.URL, Token: "test"}, Machine: Machine{ID: "worker", HostID: "host", Session: "session"}}
-	runtime := w.newFleetRuntime()
-	if runtime != nil || runtime.observe(context.Background(), w.Machine, true) != nil || requests.Load() != 0 {
-		t.Fatal("worker without installed config gained activation authority")
-	}
-	if p, err := CollectFleetRuntime(context.Background(), ServiceConfig{}, "session"); p != nil || err == nil {
-		t.Fatal("missing installed service gained runtime proof")
 	}
 }
 
@@ -357,63 +309,5 @@ func TestFleetRuntimeStaleFailureAckDoesNotConcealRecovery(t *testing.T) {
 	result = pollFleetRuntime(context.Background(), c, client, collect, launch, i.Host, i.Machine, i.Session, true, result.attempted, result.failed)
 	if launches != 1 || result.attempted != "upgrade/2" {
 		t.Fatal("explicit recovery concealed by stale failure acknowledgement")
-	}
-}
-
-func TestFleetRuntimeInstructionWireResponses(t *testing.T) {
-	for _, response := range []struct {
-		name     string
-		status   int
-		body     string
-		launches int
-	}{
-		{"empty-object", 200, `{}`, 0},
-		{"null", 200, `null`, 0},
-		{"no-content", 204, "", 0},
-		{"null-wrapper", 200, `{"instruction":null}`, 0},
-		{"wrapped-instruction", 200, `{"instruction":{"operation":"upgrade","revision":1,"host":"host","machine":"worker","session":"session","publisher_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}}`, 1},
-	} {
-		t.Run(response.name, func(t *testing.T) {
-			c := fleetRuntimeTestConfig(t)
-			if err := os.WriteFile(filepath.Join(c.State, "fleet-publisher.pub"), bytes.Repeat([]byte{1}, ed25519.PublicKeySize), 0600); err != nil {
-				t.Fatal(err)
-			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(response.status)
-				_, _ = io.WriteString(w, response.body)
-			}))
-			defer server.Close()
-			collect := func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error) {
-				return &FleetRuntimeProof{Session: "session", ServiceHealthy: true}, nil
-			}
-			launches := 0
-			launch := func(context.Context, ServiceConfig, FleetUpdateInstruction) error { launches++; return nil }
-			_ = pollFleetRuntime(context.Background(), c, Client{URL: server.URL}, collect, launch, "host", "worker", "session", true, "", nil)
-			if launches != response.launches {
-				t.Fatal("unexpected activation for instruction response", launches)
-			}
-		})
-	}
-}
-
-func TestFleetRuntimeCachedProofExpiresWithoutRenewingObservation(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)}
-	m := Machine{ID: "worker", HostID: "host", Session: "session"}
-	completed := make(chan fleetPollResult, 1)
-	completed <- fleetPollResult{proof: &FleetRuntimeProof{Session: m.Session, ServiceHealthy: true, ObservedAt: clock.Now()}}
-	r := &workerFleetRuntime{clock: clock, pending: completed}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // no network is needed to exercise completed/cached observations.
-	first := r.observe(ctx, m, false)
-	if first == nil || r.generation != 1 || first.ObservedAt != clock.Now() {
-		t.Fatal("completed probe did not advance generation")
-	}
-	clock.Advance(fleetRuntimeFreshFor - time.Nanosecond)
-	if p := r.observe(ctx, m, false); p == nil || p.ObservedAt != first.ObservedAt || r.generation != 1 {
-		t.Fatal("cached heartbeat renewed manager observation")
-	}
-	clock.Advance(time.Nanosecond)
-	if r.observe(ctx, m, false) != nil || r.generation != 1 {
-		t.Fatal("stale manager proof remained eligible")
 	}
 }

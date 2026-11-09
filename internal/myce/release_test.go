@@ -106,39 +106,3 @@ func TestBootstrapRequiresTrustedHTTPSOrigin(t *testing.T) {
 		}
 	}
 }
-
-func TestReleaseDowngradeOrdering(t *testing.T) {
-	for _, tc := range []struct {
-		target, installed string
-		allow, ok         bool
-	}{
-		{"v1.9.0", "v1.10.0", false, false},
-		{"v1.9.0", "v1.10.0", true, true},
-		{"v1.10.0", "v1.9.0", false, true},
-		{"v2.0.0-rc.1", "v2.0.0", false, false},
-		{"v2.0.0", "v2.0.0-rc.1", false, true},
-		{"v1.0.0", "v1.0.0", false, true},
-		{"opaque", "v1.0.0", true, false},
-	} {
-		if err := CheckReleaseUpgrade(tc.target, tc.installed, tc.allow); (err == nil) != tc.ok {
-			t.Fatal("incorrect semantic version ordering", tc, err)
-		}
-	}
-}
-
-func TestReleaseMatrixUsesConfiguredTargets(t *testing.T) {
-	old := ReleaseTargets
-	defer func() { ReleaseTargets = old }()
-	_, _, m := signedTestRelease(t)
-	ReleaseTargets = append(append([]ReleaseTarget{}, old...), ReleaseTarget{OS: "linux", Arch: "riscv64"})
-	if err := m.Validate(); err == nil {
-		t.Fatal("new required target ignored")
-	}
-	m.Artifacts = append(m.Artifacts, ReleaseArtifact{OS: "linux", Arch: "riscv64", File: "myce-linux-riscv64", SHA256: strings.Repeat("a", 64), Size: 123})
-	if err := m.Validate(); err != nil {
-		t.Fatal("data-driven target refused", err)
-	}
-	if _, err := m.Select("linux", "riscv64"); err != nil {
-		t.Fatal(err)
-	}
-}

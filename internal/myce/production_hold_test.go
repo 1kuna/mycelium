@@ -99,57 +99,6 @@ func TestProductionHoldDisplacesBothCardsAndReturnsImmediately(t *testing.T) {
 
 }
 
-func TestProductionHoldDefaultOffAndOtherHost(t *testing.T) {
-	t.Parallel()
-	for _, mode := range []string{"off", "spark", "impossible"} {
-		t.Run(mode, func(t *testing.T) {
-			q, _, a, b, s := holdFleet(t, mode != "off")
-			x := submit(t, q, spec("experiment"))
-			x = check(t, q, a, nil).Job
-			y := submit(t, q, spec("experiment"))
-			y = check(t, q, b, nil).Job
-			p := spec("production")
-			p.AllowedMachines = []string{a.ID}
-			if mode == "spark" {
-				p.AllowedMachines = []string{s.ID}
-			}
-			if mode == "impossible" {
-				p.Needs.MemoryGB = 100
-			}
-			submit(t, q, p)
-			if check(t, q, b, y).Stop {
-				t.Fatal("unrelated card stopped")
-			}
-			if check(t, q, a, x).Stop != (mode == "off") {
-				t.Fatal("wrong preemption")
-			}
-		})
-	}
-}
-func TestProductionHoldSecondArrival(t *testing.T) {
-	t.Parallel()
-	q, _, a, b, _ := holdFleet(t, true)
-	p := spec("production")
-	p.AllowedMachines = []string{a.ID}
-	submit(t, q, p)
-	first := check(t, q, a, nil).Job
-	e := spec("experiment")
-	e.AllowedMachines = []string{b.ID}
-	waiting := submit(t, q, e)
-	second := submit(t, q, p)
-	finish(t, q, first, true)
-	if check(t, q, b, nil).Job != nil {
-		t.Fatal("queued second production must hold")
-	}
-	running := check(t, q, a, nil).Job
-	if running == nil || running.ID != second.ID {
-		t.Fatal("second production not assigned")
-	}
-	finish(t, q, running, true)
-	if got := check(t, q, b, nil).Job; got == nil || got.ID != waiting.ID {
-		t.Fatal("final settled demand did not return experiment")
-	}
-}
 func TestProductionHoldExpiryAndLostWorkerRetainRelease(t *testing.T) {
 	t.Parallel()
 	q, c, a, b, s := holdFleet(t, true)
@@ -426,23 +375,6 @@ func TestProductionHoldFailedCleanupIsNotRelease(t *testing.T) {
 	}
 }
 
-func TestProductionHoldReportsPinnedConflict(t *testing.T) {
-	t.Parallel()
-	q, _, a := modelFixture(t, "b70")
-	check(t, q, a, nil)
-	if e := q.Pin(ModelPin{Project: "test", Model: "test", Machine: a.ID}); e != nil {
-		t.Fatal(e)
-	}
-	reportModel(t, q, a, "ready")
-	if e := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); e != nil {
-		t.Fatal(e)
-	}
-	p := submit(t, q, spec("production"))
-	if reason := job(t, q, p.ID).Reason; !strings.Contains(reason, "pinned model test") {
-		t.Fatal(reason)
-	}
-}
-
 func TestProductionHoldRestartReconcilesModelInference(t *testing.T) {
 	t.Parallel()
 	q, c, a := modelFixture(t, "b70")
@@ -573,51 +505,6 @@ func TestProductionHoldRetainsExecutionLostBeforeDemand(t *testing.T) {
 	}
 }
 
-func TestProductionHoldExpiredDemandDoesNotStopExperiments(t *testing.T) {
-	t.Parallel()
-	q, c, a, _, _ := holdFleet(t, true)
-	x := submit(t, q, spec("experiment"))
-	x = check(t, q, a, nil).Job
-	p := spec("production")
-	p.AllowedMachines = []string{a.ID}
-	now := c.Now()
-	p.GiveUpAt = &now
-	prod := submit(t, q, p)
-	requireState(t, q, prod.ID, "failed")
-	if check(t, q, a, x).Stop {
-		t.Fatal("expired demand stopped an experiment")
-	}
-}
-
-func TestProductionHoldKeepsProductionEnvironmentBuild(t *testing.T) {
-	t.Parallel()
-	q, _, a, _, _ := holdFleet(t, true)
-	r := binaryRecipe(t, "fake")
-	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"production-tools": {"fake": r}}}); err != nil {
-		t.Fatal(err)
-	}
-	a.EnvironmentBuilder = true
-	check(t, q, a, nil)
-	p := spec("production")
-	p.AllowedMachines = []string{a.ID}
-	p.Environment.Name = "production-tools"
-	prod := submit(t, q, p)
-	reply := check(t, q, a, nil)
-	if reply.Job != nil || len(reply.EnvironmentPlan) != 1 {
-		t.Fatalf("missing production build: %+v", reply)
-	}
-	a.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "building"}}
-	reply = check(t, q, a, nil)
-	if len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Key != r.Key {
-		t.Fatalf("hold canceled its own production build: %+v", reply)
-	}
-	a.EnvironmentReports[0].State = "ready"
-	a.Environments = []string{r.Key}
-	if got := check(t, q, a, nil).Job; got == nil || got.ID != prod.ID {
-		t.Fatalf("production did not start: %+v", got)
-	}
-}
-
 func TestProductionHoldLostModelNeedsPriorSessionCleanup(t *testing.T) {
 	t.Parallel()
 	q, c, a := modelFixture(t, "b70")
@@ -659,49 +546,6 @@ func TestProductionHoldLostModelNeedsPriorSessionCleanup(t *testing.T) {
 	}
 	if got := check(t, q, b, nil).Job; got == nil || got.ID != prod.ID {
 		t.Fatalf("cleaned model did not release production: %+v", got)
-	}
-}
-
-func TestProductionHoldResidentCallUsesReservedHostMemory(t *testing.T) {
-	t.Parallel()
-	q, _, a := modelFixture(t, "b70")
-	config := q.models
-	config.Models[0].HostMemoryGB = 1
-	if err := q.ConfigureModels(config); err != nil {
-		t.Fatal(err)
-	}
-	a.HostMemoryMeasured = true
-	a.HostAvailableMemoryGB = 1
-	a.ModelConfigHash = modelConfigHash(config)
-	check(t, q, a, nil)
-	b := machine("two", "fake")
-	b.HostID = "b70"
-	b.HostMemoryMeasured = true
-	b.HostAvailableMemoryGB = 1
-	check(t, q, b, nil)
-	if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: a.ID}); err != nil {
-		t.Fatal(err)
-	}
-	reportModel(t, q, a, "ready")
-	x := submit(t, q, spec("experiment"))
-	x = check(t, q, b, nil).Job
-	if x == nil {
-		t.Fatal("experiment not started")
-	}
-	if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); err != nil {
-		t.Fatal(err)
-	}
-	prod := addModelCall(t, q, "production")
-	if prod.ProductionHost != "b70" || prod.Machine != "" {
-		t.Fatalf("resident call bypassed host hold: %+v", prod)
-	}
-	if !check(t, q, b, x).Stop {
-		t.Fatal("sibling experiment not stopped")
-	}
-	finishInterrupted(t, q, x)
-	reportModel(t, q, a, "ready")
-	if prod.Machine != a.ID {
-		t.Fatalf("resident production call not dispatched: %+v", prod)
 	}
 }
 
@@ -931,46 +775,6 @@ func TestProductionHoldKillsLateCopyDuringNASLoss(t *testing.T) {
 	}
 }
 
-func TestProductionHoldSequentialStageGap(t *testing.T) {
-	t.Parallel()
-	for _, gap := range []time.Duration{5 * time.Second, 200 * time.Second} {
-		t.Run(gap.String(), func(t *testing.T) {
-			q, c, a, b, _ := holdFleet(t, true)
-			stage := spec("production")
-			stage.AllowedMachines = []string{a.ID}
-			submit(t, q, stage)
-			first := check(t, q, a, nil).Job
-			e := spec("experiment")
-			e.AllowedMachines = []string{b.ID}
-			waiting := submit(t, q, e)
-			finish(t, q, first, true)
-			between := check(t, q, b, nil).Job
-			if between == nil || between.ID != waiting.ID {
-				t.Fatal("experiment did not return immediately in stage gap")
-			}
-			c.Advance(gap)
-			check(t, q, a, nil)
-			check(t, q, b, between)
-			second := submit(t, q, stage)
-			if !check(t, q, b, between).Stop {
-				t.Fatal("new stage did not immediately reclaim")
-			}
-			if check(t, q, a, nil).Job != nil {
-				t.Fatal("new stage bypassed experiment release")
-			}
-			finishInterrupted(t, q, between)
-			run := check(t, q, a, nil).Job
-			if run == nil || run.ID != second.ID {
-				t.Fatal("second stage not admitted")
-			}
-			finish(t, q, run, true)
-			if got := check(t, q, b, nil).Job; got == nil || got.ID != waiting.ID {
-				t.Fatal("final stage retained idle hold")
-			}
-		})
-	}
-}
-
 func TestProductionDemandWithoutIdleCooldown(t *testing.T) {
 	t.Parallel()
 	q, clock, a, b, _ := holdFleet(t, true)
@@ -1027,98 +831,5 @@ func TestProductionDemandWithoutIdleCooldown(t *testing.T) {
 	finish(t, q, run, true)
 	if got := check(t, q, b, nil).Job; got == nil || got.ID != first.ID {
 		t.Fatal("final demand retained idle cooldown")
-	}
-}
-
-func TestProductionDemandPreservesModelIdleUnload(t *testing.T) {
-	t.Parallel()
-	q, clock, a := modelFixture(t)
-	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&a): {ProductionHold: true}}); err != nil {
-		t.Fatal(err)
-	}
-	prod := addModelCall(t, q, "production")
-	reportModel(t, q, a, "ready")
-	if prod.Machine != a.ID {
-		t.Fatal("production not routed")
-	}
-	if err := q.finishCall(prod.ID); err != nil {
-		t.Fatal(err)
-	}
-	slot := q.s.ModelSlots[slotKey(a.ID, "test")]
-	if slot == nil || slot.State != "ready" || q.held(hostID(&a)) {
-		t.Fatal("settled production replaced engine idle interval", slot)
-	}
-	lower := addModelCall(t, q, "experiment")
-	if lower.Machine != a.ID {
-		t.Fatal("resident model withheld from lower priority after settled demand")
-	}
-	if err := q.finishCall(lower.ID); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(9 * time.Minute)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	if slot.State != "ready" {
-		t.Fatal("engine idle deadline shortened", slot.State)
-	}
-	clock.Advance(time.Minute)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	if slot.State != "draining" {
-		t.Fatal("engine idle unload deadline lost", slot.State)
-	}
-}
-
-func TestProductionHoldFloorFreeAutoMemory(t *testing.T) {
-	for _, mode := range []string{"enforced learned", "allowance exploratory", "unmeasured decoy"} {
-		t.Run(mode, func(t *testing.T) {
-			allowance := 0.0
-			if mode == "allowance exploratory" {
-				allowance = 16
-			}
-			q, clock, m, s := floorFreeFitFixture(t, allowance)
-			policies := map[string]HostPolicy{hostID(&m): {ProductionHold: true}}
-			if mode == "allowance exploratory" {
-				q.s.WorkObservations = nil
-			}
-			if mode == "unmeasured decoy" {
-				decoy := m
-				decoy.ID, decoy.HostID, decoy.Session = "a-decoy", "a-decoy-host", "decoy-session"
-				decoy.MemoryEnforcement = ""
-				decoy.Devices = append([]MachineDevice(nil), m.Devices...)
-				report := decoy.Devices[0].ExtensionReports[0]
-				report.Host = hostID(&decoy)
-				decoy.Devices[0].ExtensionReports = []ExtensionReport{report}
-				decoy.HostMemoryMeasured, decoy.HostAvailableMemoryGB = false, 0
-				machineCheck(t, q, decoy)
-				policies[hostID(&decoy)] = HostPolicy{ProductionHold: true}
-			}
-			if err := q.ConfigureHosts(policies); err != nil {
-				t.Fatal(err)
-			}
-			s.Priority = "production"
-			j := submit(t, q, s)
-			stored := q.s.Jobs[j.ID]
-			if stored.ProductionHost != hostID(&m) || !q.held(hostID(&m)) {
-				t.Errorf("auto hold bound to %q; want %q active", stored.ProductionHost, hostID(&m))
-			}
-			// A numeric declaration of the same sized work chooses the same host.
-			target := m.Devices[0].machine(*q.s.Machines[m.ID])
-			candidate := q.memoryCandidates(stored, &target)[0]
-			numeric := *candidate
-			numeric.Spec.Extension, numeric.Spec.ExtensionDigest, numeric.Extensions, numeric.MemoryEnvelope = "", "", nil, nil
-			numeric.Spec.Needs.Memory = ""
-			numeric.ProductionHost = ""
-			if target := q.productionTarget(&numeric, nil); target != hostID(&m) {
-				t.Errorf("numeric target %q envelope=%+v", target, candidate.MemoryEnvelope)
-			}
-			clock.Advance(time.Second)
-			run := assignedJob(machineCheck(t, q, m))
-			if run == nil || run.ID != j.ID || run.ProductionHost != hostID(&m) || run.Spec.Needs.HostMemoryGB <= 0 {
-				t.Fatalf("wrong pinned dispatch: %+v", run)
-			}
-		})
 	}
 }

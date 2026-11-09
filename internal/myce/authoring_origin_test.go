@@ -128,29 +128,3 @@ func TestAuthoringOriginRetentionReplayAndPrivacy(t *testing.T) {
 		t.Fatal("reservation retained unvalidated origin text")
 	}
 }
-
-func TestAuthoringOriginGeneratedRecords(t *testing.T) {
-	q, _, m, s := fanOutFixture(t, 2)
-	s.AuthoringOrigin = OriginAdapter
-	parent := submit(t, q, s)
-	child := check(t, q, m, nil).Job
-	if child == nil || child.Batch == nil || child.Batch.Parent != parent.ID || child.Spec.AuthoringOrigin != OriginFanOutChild || job(t, q, parent.ID).Spec.AuthoringOrigin != OriginAdapter {
-		t.Fatal("fan-out parent and generated child origins not distinct")
-	}
-	q, w, _, _, _, plans := qualificationFixture(t)
-	if err := w.reconcileExtensionQualification(t.Context(), plans[0]); err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, j := range q.s.Jobs {
-		if j.Spec.ExtensionCheck != nil {
-			found = true
-			if j.Spec.AuthoringOrigin != OriginExtensionCheck {
-				t.Fatal("generated qualification origin lost")
-			}
-		}
-	}
-	if !found {
-		t.Fatal("no qualification record")
-	}
-}

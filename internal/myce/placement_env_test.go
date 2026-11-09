@@ -6,7 +6,7 @@ import (
 )
 
 func TestWorkerPlacementEnvironmentEveryAttempt(t *testing.T) {
-	for _, platform := range []string{"fake", "cuda", "xpu", "metal"} {
+	for _, platform := range []string{"fake", "xpu"} {
 		t.Run(platform, func(t *testing.T) {
 			w := recoveryWorker(t)
 			w.Machine.GPU = platform

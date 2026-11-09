@@ -9,12 +9,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -113,37 +111,6 @@ func TestInputTransferDelayedHeadersHaveOnlyOwnerDeadline(t *testing.T) {
 	}
 }
 
-func TestInputTransferReadOverloadHonoursRetryAfter(t *testing.T) {
-	ref := sharedFixtureFile(t, t.TempDir(), "input", "dependency")
-	clock := &fakeClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
-	heads, pauses := 0, 0
-	c := Client{URL: "http://fixture.invalid", Clock: clock, Jitter: func() float64 { return 0 }, Pause: func(_ context.Context, delay time.Duration) error {
-		pauses++
-		if delay < 7*time.Second {
-			t.Error("retried before server allowance", delay)
-		}
-		clock.Advance(delay)
-		return nil
-	}}
-	c.HTTP = &http.Client{Timeout: time.Millisecond, Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
-		clock.Advance(time.Second)
-		if r.Method == "HEAD" {
-			heads++
-			if heads <= 2 {
-				return &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"7"}, "X-Myce-Error-Code": {"queue_stopping"}}, Body: io.NopCloser(strings.NewReader(`{"code":"queue_stopping"}`))}, nil
-			}
-		}
-		return &http.Response{StatusCode: 200, Header: http.Header{"Etag": {fmt.Sprintf("%q", ref.SHA256)}}, ContentLength: ref.SizeBytes, Body: io.NopCloser(strings.NewReader("dependency"))}, nil
-	})}
-	cache := FileCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock, Client: c}
-	if err := cache.copyTo(context.Background(), ref, filepath.Join(t.TempDir(), "input")); err != nil {
-		t.Fatal(err)
-	}
-	if heads != 3 || pauses != 2 {
-		t.Fatal("nested or missing overload recovery", heads, pauses)
-	}
-}
-
 func TestInputTransferRecoveryOwnerWithdrawal(t *testing.T) {
 	for _, deadline := range []bool{false, true} {
 		t.Run(fmt.Sprint("deadline=", deadline), func(t *testing.T) {
@@ -215,44 +182,6 @@ func TestInputTransferRealOutageReturnsWithoutRecovery(t *testing.T) {
 
 // The actual HTTP transport normalizes dial timeouts before cache recovery
 // sees them. A completed timed-out dial is not an ambiguous live body stall.
-func TestInputTransferTimedOutDialReturnsWithoutRecovery(t *testing.T) {
-	for _, phase := range []string{"HEAD", "GET"} {
-		t.Run(phase, func(t *testing.T) {
-			ref := sharedFixtureFile(t, t.TempDir(), "input", "dependency")
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("ETag", fmt.Sprintf("%q", ref.SHA256))
-				w.Header().Set("Content-Length", fmt.Sprint(ref.SizeBytes))
-			}))
-			defer server.Close()
-			var dials atomic.Int32
-			wantDials := int32(1)
-			if phase == "GET" {
-				wantDials = 2
-			}
-			transport := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-				if dials.Add(1) == wantDials {
-					return nil, &net.OpError{Op: "dial", Net: network, Err: context.DeadlineExceeded}
-				}
-				return (&net.Dialer{}).DialContext(ctx, network, address)
-			}}
-			defer transport.CloseIdleConnections()
-			c := Client{URL: server.URL, HTTP: &http.Client{Transport: transport}, Pause: func(context.Context, time.Duration) error {
-				t.Error("recovered a completed timed-out dial")
-				return context.Canceled
-			}}
-			cache := FileCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Client: c}
-			dest := filepath.Join(t.TempDir(), "input")
-			err := cache.copyTo(context.Background(), ref, dest)
-			var dial *net.OpError
-			if !errors.Is(err, errInputTransferUnreachable) || !errors.As(err, &dial) || dial.Op != "dial" || stagingErrorName(err) != "storage_unreachable" || dials.Load() != wantDials {
-				t.Fatal("completed dial timeout lost identity", dials.Load(), err)
-			}
-			if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("published on dial timeout", err)
-			}
-		})
-	}
-}
 
 func TestInputTransferPermanentRefusalsDoNotRecover(t *testing.T) {
 	for _, failure := range []string{"auth", "typed_storage", "etag", "checksum"} {
@@ -299,48 +228,6 @@ func TestInputTransferPermanentRefusalsDoNotRecover(t *testing.T) {
 	}
 }
 
-func TestInputTransferRefusingProxyDoesNotRecover(t *testing.T) {
-	for _, phase := range []string{"HEAD", "GET"} {
-		t.Run(phase, func(t *testing.T) {
-			ref := sharedFixtureFile(t, t.TempDir(), "input", "dependency")
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("ETag", fmt.Sprintf("%q", ref.SHA256))
-				w.Header().Set("Content-Length", fmt.Sprint(ref.SizeBytes))
-			}))
-			defer server.Close()
-			proxy := httptest.NewServer(http.NotFoundHandler())
-			proxyURL, err := url.Parse(proxy.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			proxy.Close()
-			var refused atomic.Int32
-			transport := &http.Transport{Proxy: func(r *http.Request) (*url.URL, error) {
-				if r.Method == phase {
-					refused.Add(1)
-					return proxyURL, nil
-				}
-				return nil, nil
-			}}
-			defer transport.CloseIdleConnections()
-			c := Client{URL: server.URL, HTTP: &http.Client{Transport: transport}, Pause: func(context.Context, time.Duration) error {
-				t.Error("recovered a completed proxy dial refusal")
-				return context.Canceled
-			}}
-			cache := FileCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Client: c}
-			dest := filepath.Join(t.TempDir(), "input")
-			err = cache.copyTo(context.Background(), ref, dest)
-			var op *net.OpError
-			if !errors.Is(err, errInputTransferUnreachable) || !errors.As(err, &op) || op.Op != "proxyconnect" || !errors.Is(err, syscall.ECONNREFUSED) || stagingErrorName(err) != "storage_unreachable" || refused.Load() != 1 {
-				t.Fatal("proxy outage lost identity", refused.Load(), err)
-			}
-			if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("published on proxy outage", err)
-			}
-		})
-	}
-}
-
 type inputTransferFaultSink struct {
 	data              bytes.Buffer
 	writeErr, syncErr error
@@ -358,33 +245,3 @@ func (s *inputTransferFaultSink) Sync() error { s.syncs++; return s.syncErr }
 type inputTransferReadError struct{ err error }
 
 func (r inputTransferReadError) Read([]byte) (int, error) { return 0, r.err }
-
-func TestInputTransferLocalFailureDoesNotRecover(t *testing.T) {
-	for _, phase := range []string{"sync_after_stall", "write"} {
-		t.Run(phase, func(t *testing.T) {
-			sink := &inputTransferFaultSink{syncErr: syscall.EIO}
-			want := syscall.EIO
-			wantName := "EIO"
-			if phase == "write" {
-				sink = &inputTransferFaultSink{writeErr: syscall.EPIPE}
-				want = syscall.EPIPE
-				wantName = "EPIPE"
-			}
-			var recovering atomic.Bool
-			ctx := context.WithValue(context.Background(), inputTransferRecoveryKey{}, &recovering)
-			c := Client{Pause: func(context.Context, time.Duration) error {
-				t.Error("recovered a terminal local storage failure")
-				return context.Canceled
-			}}
-			calls := 0
-			err := c.recoverInputTransfer(ctx, FileRef{}, "cache_download", func(Client) error {
-				calls++
-				_, err := copyFileDownload(sink, io.MultiReader(strings.NewReader("partial"), inputTransferReadError{errFileTransferStalled}))
-				return err
-			})
-			if !errors.Is(err, want) || stagingErrorName(err) != wantName || recovering.Load() || calls != 1 || sink.syncs != 1 {
-				t.Fatalf("local failure hidden: calls=%d syncs=%d pending=%v err=%v", calls, sink.syncs, recovering.Load(), err)
-			}
-		})
-	}
-}

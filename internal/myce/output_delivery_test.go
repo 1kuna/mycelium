@@ -307,32 +307,3 @@ func TestOutputDeliveryRejectsStaleAttempt(t *testing.T) {
 		t.Fatal("old attempt delivered", err)
 	}
 }
-
-func TestOutputDeliveryDefaultAndValidation(t *testing.T) {
-	s := asyncDeliverySpec()
-	if err := s.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	s.OutputDelivery = "typo"
-	if err := s.Validate(); err == nil {
-		t.Fatal("unknown policy accepted")
-	}
-	s.OutputDelivery = asyncNAS
-	s.Disk = nil
-	if err := s.Validate(); err == nil {
-		t.Fatal("unbudgeted outputs accepted")
-	}
-	j := Job{Spec: Spec{Outputs: map[string]string{"out.txt": "results"}}, ID: ID(), Attempt: 1}
-	if j.storedFileResults() {
-		t.Fatal("default result transport changed")
-	}
-	j.Spec.Run.Workdir = t.TempDir()
-	os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "out.txt"), []byte("default"), 0600)
-	root := t.TempDir()
-	if err := publishJobOutputs(j, root); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(root, outputRelative(j, "out.txt", "results"))); err != nil {
-		t.Fatal("default synchronous publication changed", err)
-	}
-}

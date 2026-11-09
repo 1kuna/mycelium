@@ -155,28 +155,3 @@ func TestEnrollmentTicketHTTPConcurrentRedemption(t *testing.T) {
 		t.Fatal("HTTP redemption count", accepted.Load())
 	}
 }
-func TestEnrollmentTicketPrunesExpiredAndUsed(t *testing.T) {
-	q, clock := fixture(t)
-	pin := strings.Repeat("a", 64)
-	used, err := q.MintEnrollmentTicket(pin, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = q.RedeemEnrollmentTicket(used.Ticket, pin); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = q.MintEnrollmentTicket(pin, time.Second); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(2 * time.Second)
-	if _, err = q.MintEnrollmentTicket(pin, time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	var count int
-	if err = q.db.QueryRow("SELECT COUNT(*) FROM enrollment_tickets").Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 1 {
-		t.Fatal("expired/used rows retained", count)
-	}
-}

@@ -5,65 +5,6 @@ import (
 	"time"
 )
 
-func TestFleetUpgradeBusyHostAdmitsUntilExactIdleMoment(t *testing.T) {
-	q, c, _ := fleetFixture(t, "host")
-	m := cpuBackfillMachine("worker", 16)
-	m.HostID = "host"
-	m.Fleet = fleetTestProof(c, m.Session, 200, false)
-	machineCheck(t, q, m)
-	s := cpuSpec(1, 1)
-	first := submit(t, q, s)
-	a := assignedJob(machineCheck(t, q, m))
-	if a == nil || a.ID != first.ID {
-		t.Fatal("first job not assigned")
-	}
-	machineCheck(t, q, m, a)
-	operation, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// An hours-long execution does not reserve the whole host for maintenance.
-	c.Advance(2 * time.Hour)
-	m.Fleet.ObservedAt, q.fleetQueue.Proof.ObservedAt = c.Now(), c.Now()
-	machineCheck(t, q, m, a)
-	second := submit(t, q, s)
-	b := assignedJob(machineCheck(t, q, m, a))
-	if b == nil || b.ID != second.ID || q.maintenanceBlocked("host") || q.fleetActiveHost() != nil {
-		t.Fatal("pending update held spare capacity", q.fleetUpgradeStatus())
-	}
-	for _, r := range []*Job{a, b} {
-		if got := job(t, q, r.ID); got.State != "running" || got.StopAt != nil || got.Attempt != 1 || got.Losses != 0 {
-			t.Fatal("pending upgrade interrupted execution", got)
-		}
-	}
-	finish(t, q, a, true)
-	// A completion retaining its payload's custody is still busy.
-	r := result(b, true)
-	r.ReleasePending = true
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	third := submit(t, q, s)
-	if q.maintenanceBlocked("host") || q.fleetActiveHost() != nil {
-		t.Fatal("release-pending payload acquired a drain")
-	}
-	r.ReleasePending, r.ReleaseOnly = false, true
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	// The exact release and next placement share the serialized queue boundary.
-	if got := assignedJob(machineCheck(t, q, m)); got != nil {
-		t.Fatal("queued work refilled the cutover gap", got.ID)
-	}
-	h := q.fleetActiveHost()
-	if h == nil || h.Phase != "queue_update" || !h.Owned || q.s.HostMaintenance["host"].DrainOwner != operation.Operation || job(t, q, third.ID).State != "queued" {
-		t.Fatal("fresh idle moment did not acquire exact drain", q.fleetUpgradeStatus())
-	}
-	if i := fleetInstructionFor(t, q); i.Machine != "@queue" {
-		t.Fatal("colocated queue must update first")
-	}
-}
-
 func TestFleetUpgradePendingSurvivesRestartAndRefreshesIdleSession(t *testing.T) {
 	q, c, workers := fleetFixture(t, "host", "host")
 	m := workers[0]

@@ -82,45 +82,48 @@ func TestEnrollmentCompletedReceiptAfterResumeAllowsNextUpgrade(t *testing.T) {
 }
 
 func TestEnrollmentReceiptWithoutDrainPreservesQueuePolicy(t *testing.T) {
-	for _, action := range []string{"resume", "disable"} {
-		for _, intent := range []bool{false, true} {
-			t.Run(action+map[bool]string{false: "/completed", true: "/intent"}[intent], func(t *testing.T) {
-				q, clock := fixture(t)
-				m := cpuMachine("hypha", "hypha", "fake", 8, 32)
-				check(t, q, m, nil)
-				c := ServiceConfig{Name: m.ID, HostID: m.HostID, State: t.TempDir()}
-				server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
-				defer server.Close()
-				client := Client{URL: server.URL, Token: "test"}
-				receipt, err := PrepareEnrollmentUpgrade(context.Background(), c, client, clock, time.Second, nil)
-				if err != nil {
+	for _, tc := range []struct {
+		action string
+		intent bool
+	}{{"disable", true}, {"resume", false}} {
+		action, intent := tc.action, tc.intent
+
+		t.Run(action+map[bool]string{false: "/completed", true: "/intent"}[intent], func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuMachine("hypha", "hypha", "fake", 8, 32)
+			check(t, q, m, nil)
+			c := ServiceConfig{Name: m.ID, HostID: m.HostID, State: t.TempDir()}
+			server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
+			defer server.Close()
+			client := Client{URL: server.URL, Token: "test"}
+			receipt, err := PrepareEnrollmentUpgrade(context.Background(), c, client, clock, time.Second, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if intent {
+				if err := saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Intent: true, Host: c.HostID, Name: c.Name, UpdatedAt: receipt.Policy.UpdatedAt, DrainOwner: receipt.Policy.DrainOwner}); err != nil {
 					t.Fatal(err)
 				}
-				if intent {
-					if err := saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Intent: true, Host: c.HostID, Name: c.Name, UpdatedAt: receipt.Policy.UpdatedAt, DrainOwner: receipt.Policy.DrainOwner}); err != nil {
-						t.Fatal(err)
-					}
-				}
-				before, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: action})
-				if err != nil {
-					t.Fatal(err)
-				}
-				// An old in-memory receipt must not produce an ineffective command
-				// either, including when a response was lost after resume committed.
-				if err := FinishEnrollmentUpgrade(context.Background(), c, client, receipt); err == nil || strings.Contains(err.Error(), "myce host resume") {
-					t.Fatalf("unexpected stale resume result: %v", err)
-				}
-				if pending, err := ResolveEnrollmentUpgrade(context.Background(), c, client); err != nil || pending.Policy.Mode != "" {
-					t.Fatalf("non-drained policy blocked by receipt: %+v, %v", pending.Policy, err)
-				}
-				if _, err := os.Stat(filepath.Join(c.State, enrollmentResumeFile)); !errors.Is(err, os.ErrNotExist) {
-					t.Fatal("stale receipt not retired", err)
-				}
-				after, err := q.HostMaintenanceStatus(m.HostID)
-				if err != nil || after.Policy.Mode != before.Policy.Mode || !after.Policy.UpdatedAt.Equal(before.Policy.UpdatedAt) || after.Policy.DrainOwner != before.Policy.DrainOwner {
-					t.Fatalf("queue policy changed: %+v -> %+v, %v", before.Policy, after.Policy, err)
-				}
-			})
-		}
+			}
+			before, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: action})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// An old in-memory receipt must not produce an ineffective command
+			// either, including when a response was lost after resume committed.
+			if err := FinishEnrollmentUpgrade(context.Background(), c, client, receipt); err == nil || strings.Contains(err.Error(), "myce host resume") {
+				t.Fatalf("unexpected stale resume result: %v", err)
+			}
+			if pending, err := ResolveEnrollmentUpgrade(context.Background(), c, client); err != nil || pending.Policy.Mode != "" {
+				t.Fatalf("non-drained policy blocked by receipt: %+v, %v", pending.Policy, err)
+			}
+			if _, err := os.Stat(filepath.Join(c.State, enrollmentResumeFile)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("stale receipt not retired", err)
+			}
+			after, err := q.HostMaintenanceStatus(m.HostID)
+			if err != nil || after.Policy.Mode != before.Policy.Mode || !after.Policy.UpdatedAt.Equal(before.Policy.UpdatedAt) || after.Policy.DrainOwner != before.Policy.DrainOwner {
+				t.Fatalf("queue policy changed: %+v -> %+v, %v", before.Policy, after.Policy, err)
+			}
+		})
 	}
 }

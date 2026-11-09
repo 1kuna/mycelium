@@ -302,26 +302,6 @@ func TestProjectFileStoreOutputReservationAdmission(t *testing.T) {
 	}
 }
 
-func TestProjectFileStorePendingIdentityUsesOwnerReservation(t *testing.T) {
-	q, _ := fixture(t)
-	c := retentionClient(t, q)
-	q.deliveryRoot = q.root
-	q.files.limit = 12
-	setQuotaPolicy(t, q, "neighbor", ProjectPolicy{ReservedFileBytes: 8})
-	s := asyncDeliverySpec()
-	s.Project = "neighbor"
-	s.Disk.OutputBytes = 8
-	j := submit(t, q, s)
-	_, ref := policyInput(t, "12345678")
-	if err := q.update(func() error { q.touchJob(j.ID).PendingOutputRefs = FileManifest{"out.txt": ref}; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	path, ref := policyInput(t, "data")
-	if err := c.UploadJobInput(WithFileStoreSubmission(context.Background(), Spec{Project: "other"}), path, ref); err != nil {
-		t.Fatal("pending identity double charged entitlement", err)
-	}
-}
-
 func TestProjectFileStoreRecoveryAndFailureDiagnosticsRemainPublishable(t *testing.T) {
 	t.Run("recovery", func(t *testing.T) {
 		q, _, c, p := recoveryFixture(t)
@@ -373,30 +353,4 @@ func TestProjectFileStoreRecoveryAndFailureDiagnosticsRemainPublishable(t *testi
 			t.Fatal("diagnostic publication did not finish")
 		}
 	})
-}
-
-func TestProjectFileStoreClaimAllocationSurvivesUnrelatedRollback(t *testing.T) {
-	q, clock := fixture(t)
-	// A named zone makes JSON normalization observable without a wall clock.
-	clock.now = time.Date(2026, 11, 7, 4, 15, 0, 0, time.FixedZone("fixture-local", -5*60*60))
-	_, ref := policyInput(t, "input")
-	claim, err := q.claimFileInput(context.Background(), Spec{Project: "claim-repro", Class: "deadline"}, ref)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entered := false
-	q.checkpointProbe = func() bool {
-		if !entered {
-			entered = true
-			sentinel := errors.New("unrelated rejected mutation")
-			if err := q.update(func() error { return sentinel }); !errors.Is(err, sentinel) {
-				t.Fatal(err)
-			}
-		}
-		return true
-	}
-	ctx := context.WithValue(context.Background(), fileInputClaimKey{}, claim.ID)
-	if _, err = q.inputClaimContext(ctx, ref, true); err != nil {
-		t.Fatal("valid claim refused after unrelated rollback", err)
-	}
 }

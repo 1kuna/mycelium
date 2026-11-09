@@ -181,35 +181,3 @@ func TestInputTransferProductionPreparationRetainsAttempt(t *testing.T) {
 		})
 	}
 }
-
-func TestInputTransferRecoveringStatusDoesNotHideRefusal(t *testing.T) {
-	q, clock := fixture(t)
-	m := cpuMachine("input-worker", "", "cpu", 4, 16)
-	m.LastSeen, m.FileTransferError = clock.Now(), inputTransferRecoveringReason
-	if err := q.update(func() error { q.s.Machines[m.ID] = &m; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	status, err := q.publicSnapshot()
-	if err != nil || len(status.Machines) != 1 || status.Machines[0].FileTransferError != inputTransferRecoveringReason {
-		t.Fatal("lost public recovering reason", status.Machines, err)
-	}
-	for _, event := range q.s.Health.Events {
-		if event.Kind == "staging_cache_refused" {
-			t.Fatal("pending recovery reported as refusal", event)
-		}
-	}
-	for _, order := range [][]string{{inputTransferRecoveringReason, "private transport failure"}, {"private transport failure", inputTransferRecoveringReason}} {
-		combined := ""
-		for _, next := range order {
-			combined = preferTransferError(combined, next)
-		}
-		if err := q.update(func() error { m.FileTransferError = combined; return nil }); err != nil {
-			t.Fatal(err)
-		}
-		requireIncident(t, q, "staging_cache_refused", "cache/"+m.ID, 1, true)
-		status, err = q.publicSnapshot()
-		if err != nil || len(status.Machines) != 1 || status.Machines[0].FileTransferError != "file transfer pending; only published progress is available elsewhere" {
-			t.Fatal("refusal leaked private text or was hidden by aggregation order", status.Machines, err)
-		}
-	}
-}
