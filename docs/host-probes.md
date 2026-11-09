@@ -264,12 +264,27 @@ The live sysfs bound names and validation follow Linux 7.0's
 ## Quarantine health proof diagnostics (#1185)
 
 XPU recovery reads the native `xpu-smi health` JSON fields `core_temperature`,
-`power_health` and `memory_health`; all must explicitly report `OK`.
-Warnings on other components prevent clearance;
-unsupported optional components do not prove or disprove the required health.
+`power_health` and `memory_health`. Required components must report `OK`.
+A component explicitly undeterminable on both the target and an otherwise
+healthy same-model sibling in the same health batch is excluded from that proof
+and published as `unsupported_on_device`. This is the orchestrator's 2026-11-09
+agent default under MY-34, not a maintainer ruling. The existing nonempty
+hardware/driver fingerprint identifies the model. Each batch obtains fresh
+comparison evidence; new sibling kernel faults invalidate it. All other
+required components must be OK, and warnings on optional components still
+prevent clearance. Missing/malformed readings and Unknown without a healthy
+same-model sibling keep quarantine. The kernel observation window is unchanged.
+
 The command runner keeps stdout JSON separate from stderr diagnostics. A MEI
-initialization warning cannot replace the component results, and successful exit
-alone is insufficient.
+initialization warning cannot replace component evidence, and successful exit
+alone is insufficient. The supported Linux XPU installer/startup migration
+grants the existing worker primary group access to GPU `mei_gsc` nodes (0660,
+required for IGSC's read/write open) and Xe PMT telemetry attributes (0440,
+read-only), via a root-owned udev rule and immediate application to matching
+nodes. Unrelated MEI nodes are excluded. It needs noninteractive administrator
+authority, installs no sudoers grant, runs no health command as root, and needs
+no manual group/permission step. See [installation and rollout
+semantics](operations.md#accelerator-driver-fault-quarantine).
 
 Rejected proofs publish sanitized `quarantine_recovery_blocked` status after
 `device-health-v1` negotiation, with the failed component or command exit status.
@@ -281,6 +296,7 @@ cadence; independent pacing is tracked in #1168/#1171.
 
 The native diagnosis found unknown memory health even as root and both MEI and
 PMT access denials for the worker. It does not establish an MEI-only dependency.
-No device permission is installed by this parser/status change. A future
-installer permission change needs an isolated access dependency and a sufficient
-positive memory-health witness; native auto-clear acceptance remains in #1185.
+Earlier healthy-sibling evidence was supplied by the orchestrator; the fresh
+comparison was skipped because that device had a running production attempt.
+Native installation and recovery verification remain release-rollout work in
+#1185. No live permission changes or extra device queries accompany this patch.

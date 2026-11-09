@@ -18,6 +18,37 @@ import (
 // A normal result is positive vendor evidence, never command success alone.
 type DeviceHealthProbe func(context.Context, MachineDevice) (bool, error)
 
+// DeviceHealthReportProbe preserves component evidence for same-batch model
+// capability comparison. Legacy/custom boolean probes retain their contract.
+type DeviceHealthReportProbe func(context.Context, MachineDevice) (DeviceHealthReport, error)
+type DeviceHealthReport struct {
+	Components map[string]string
+}
+
+var requiredXPUHealth = []string{"core_temperature", "power", "memory"}
+
+func (r DeviceHealthReport) proof(sibling *DeviceHealthReport) ([]string, error) {
+	var unsupported []string
+	for _, component := range requiredXPUHealth {
+		status := r.Components[component]
+		if status == "OK" {
+			continue
+		}
+		code := "health_component_failed"
+		if status == "" {
+			code = "health_component_missing"
+		} else if status == "Unknown" {
+			code = "health_component_unknown"
+			if sibling != nil && sibling.Components[component] == "Unknown" {
+				unsupported = append(unsupported, component)
+				continue
+			}
+		}
+		return unsupported, &DeviceHealthFailure{Code: code, Component: component}
+	}
+	return unsupported, nil
+}
+
 const deviceRecoveryProtocol = "device-recovery-v1"
 const deviceHealthProtocol = "device-health-v1"
 
@@ -87,12 +118,15 @@ func legacyDeviceRecoveryCheckin(c Checkin) Checkin {
 	for i := range c.Machine.Devices {
 		c.Machine.Devices[i].Recovery = nil
 		c.Machine.Devices[i].RecoveryBlocked = nil
+		c.Machine.Devices[i].UnsupportedOnDevice = nil
 	}
 	return c
 }
 
 func hasDeviceRecovery(c Checkin) bool {
-	return slices.ContainsFunc(c.Machine.Devices, func(d MachineDevice) bool { return d.Recovery != nil || d.RecoveryBlocked != nil })
+	return slices.ContainsFunc(c.Machine.Devices, func(d MachineDevice) bool {
+		return d.Recovery != nil || d.RecoveryBlocked != nil || len(d.UnsupportedOnDevice) > 0
+	})
 }
 
 func (w Worker) deviceRecoveryCheckin(c Checkin) Checkin {
@@ -107,6 +141,7 @@ func (w Worker) deviceRecoveryCheckin(c Checkin) Checkin {
 		}
 		if !r.healthSupported {
 			c.Machine.Devices[i].RecoveryBlocked = nil
+			c.Machine.Devices[i].UnsupportedOnDevice = nil
 		}
 	}
 	return c
@@ -167,10 +202,13 @@ func (q *Queue) receiveDeviceRecovery(m, old *Machine) {
 }
 
 type deviceHealthObservation struct {
-	event   string
-	at      time.Time
-	normal  bool
-	failure *DeviceHealthFailure
+	event           string
+	at              time.Time
+	normal          bool
+	failure         *DeviceHealthFailure
+	unsupported     []string
+	sibling, model  string
+	siblingTeardown string
 }
 
 type deviceRecoveryObservation struct {
@@ -194,10 +232,11 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 	if len(w.faultHealth) > 0 {
 		return w.faultHealth // Await a kernel scan after these observations.
 	}
-	if w.DeviceHealthProbe == nil || len(w.faults.Devices) == 0 {
+	if w.DeviceHealthProbe == nil && w.DeviceHealthReportProbe == nil || len(w.faults.Devices) == 0 {
 		return nil
 	}
 	devices, faults, probe, clock := slices.Clone(w.Machine.Devices), maps.Clone(w.faults.Devices), w.DeviceHealthProbe, w.Clock
+	comparisonDevices := devices // Keep healthy siblings outside the due-target filter.
 	devices = slices.DeleteFunc(devices, func(d MachineDevice) bool {
 		key := deviceFaultKey(d)
 		fault, due := faults[key], w.faultHealthDue[key]
@@ -212,16 +251,67 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 	if len(devices) == 0 && !pending {
 		return nil
 	}
+
+	reportProbe := w.DeviceHealthReportProbe
+	teardowns := maps.Clone(w.faults.Teardowns)
 	read := func() (map[string]deviceHealthObservation, error) {
 		out := map[string]deviceHealthObservation{}
+		reports := map[string]DeviceHealthReport{}
+		errorsByDevice := map[string]error{}
+		readReport := func(d MachineDevice) (DeviceHealthReport, error) {
+			key := deviceFaultKey(d)
+			if r, ok := reports[key]; ok {
+				return r, errorsByDevice[key]
+			}
+			r, err := reportProbe(ctx, d)
+			reports[key], errorsByDevice[key] = r, err
+			return r, err
+		}
 		for _, d := range devices {
 			key := deviceFaultKey(d)
 			f := faults[key]
 			if f.Reason == "" || f.RepeatedTeardown {
 				continue
 			}
-			normal, err := probe(ctx, d)
-			out[key] = deviceHealthObservation{event: f.Event, at: clock.Now(), normal: normal && err == nil, failure: deviceHealthFailure(normal, err)}
+			h := deviceHealthObservation{event: f.Event}
+			var normal bool
+			var err error
+			if reportProbe != nil && d.Platform == "xpu" {
+				r, readErr := readReport(d)
+				err = readErr
+				if err == nil {
+					_, err = r.proof(nil)
+					if _, comparisonErr := r.proof(&r); err != nil && comparisonErr == nil && d.Fingerprint != "" {
+						for _, sibling := range comparisonDevices {
+							if sibling.Platform != d.Platform || sibling.Identity == d.Identity || sibling.Fingerprint != d.Fingerprint || sibling.Reason != "" || faults[deviceFaultKey(sibling)].Reason != "" {
+								continue
+							}
+							s, siblingErr := readReport(sibling)
+							if siblingErr != nil {
+								continue
+							}
+							// A healthy comparator may lack a capability, but must
+							// positively pass every component it can determine.
+							if _, siblingErr = s.proof(&s); siblingErr != nil {
+								continue
+							}
+							h.unsupported, err = r.proof(&s)
+							h.sibling, h.model = deviceFaultKey(sibling), d.Fingerprint
+							h.siblingTeardown = teardowns[h.sibling].Event
+							if err == nil {
+								break
+							}
+						}
+					}
+				}
+				normal = err == nil
+			} else if probe != nil {
+				normal, err = probe(ctx, d)
+			} else {
+				err = exec.ErrNotFound
+			}
+			h.at, h.normal, h.failure = clock.Now(), normal && err == nil, deviceHealthFailure(normal, err)
+			out[key] = h
 		}
 		return out, nil
 	}
@@ -256,13 +346,13 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 		if f.Reason == "" || f.RepeatedTeardown || f.Event != h.event || h.at.Before(w.faultHealthAfter) {
 			continue
 		}
-		previous := w.faultRejected[key]
-		if h.failure == nil {
-			delete(w.faultRejected, key)
-			continue
-		}
 		if w.faultRejected == nil {
 			w.faultRejected = map[string]deviceHealthObservation{}
+		}
+		previous := w.faultRejected[key]
+		if h.failure == nil {
+			w.faultRejected[key] = h
+			continue
 		}
 		w.faultRejected[key] = h
 		if previous.event != h.event || previous.failure == nil || previous.failure.Error() != h.failure.Error() {
@@ -290,6 +380,22 @@ func (w *Worker) autoClearDeviceFaults(next *deviceQuarantine, health map[string
 			return match != nil && match(d, line.Message) != ""
 		})
 		h, ok := health[key]
+		if ok && len(h.unsupported) > 0 {
+			validSibling := slices.ContainsFunc(w.Machine.Devices, func(s MachineDevice) bool {
+				return d.Fingerprint == h.model && deviceFaultKey(s) == h.sibling && s.Fingerprint == h.model && s.Reason == "" && next.Devices[h.sibling].Reason == "" && next.Teardowns[h.sibling].Event == h.siblingTeardown &&
+					!slices.ContainsFunc(w.faultPending, func(line KernelLogLine) bool {
+						match := w.DeviceFaultMatchers[s.Platform]
+						return match != nil && match(s, line.Message) != ""
+					})
+			})
+			if !validSibling {
+				h.normal = false
+				h.failure = &DeviceHealthFailure{Code: "health_component_unknown", Component: h.unsupported[0]}
+				h.unsupported = nil
+				w.faultRejected[key] = h
+				log.Printf("device recovery proof rejected: device=%s reason=%s", key, h.failure)
+			}
+		}
 		if pending || ok && (!h.normal || h.event != fault.Event) {
 			delete(w.faultRecovery, key)
 			delete(health, key)
@@ -328,6 +434,10 @@ func (w *Worker) autoClearDeviceFaults(next *deviceQuarantine, health map[string
 		}
 		next.Cleared[key] = DeviceRecovery{FaultEvent: fault.Event, HealthySince: r.since, ClearedAt: h.at, ObservationSeconds: r.window.Seconds(), Probe: deviceHealthProbeName(d.Platform)}
 		next.RecoveryWindows[key] = r.window.Seconds()
+		if next.Unsupported == nil {
+			next.Unsupported = map[string][]string{}
+		}
+		next.Unsupported[key] = slices.Clone(h.unsupported)
 		delete(next.Devices, key)
 		delete(w.faultRecovery, key)
 		changed = true
@@ -354,58 +464,13 @@ func (p MachineProbe) DeviceHealth(ctx context.Context, d MachineDevice) (bool, 
 	}
 	switch d.Platform {
 	case "xpu":
-		if d.pciAddress == "" {
-			return false, &DeviceHealthFailure{Code: "health_probe_identity_unavailable"}
-		}
-		data, err := p.Command(ctx, "xpu-smi", "health", "-d", d.pciAddress, "-j")
+		r, err := p.XPUHealthReport(ctx, d)
 		if err != nil {
-			return false, deviceHealthFailure(false, err)
+			return false, err
 		}
-		var health map[string]json.RawMessage
-		if err := json.Unmarshal(data, &health); err != nil {
-			return false, &DeviceHealthFailure{Code: "health_probe_invalid_output"}
-		}
-		if _, failed := health["error"]; failed {
-			return false, &DeviceHealthFailure{Code: "health_probe_error"}
-		}
-		for _, component := range []struct{ field, name string }{
-			{"core_temperature", "core_temperature"}, {"power_health", "power"}, {"memory_health", "memory"},
-		} {
-			data, ok := health[component.field]
-			if !ok {
-				return false, &DeviceHealthFailure{Code: "health_component_missing", Component: component.name}
-			}
-			var reading struct {
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(data, &reading) != nil || reading.Status == "" || reading.Status == "Unknown" {
-				return false, &DeviceHealthFailure{Code: "health_component_unknown", Component: component.name}
-			}
-			if reading.Status != "OK" {
-				return false, &DeviceHealthFailure{Code: "health_component_failed", Component: component.name}
-			}
-		}
-		// Optional components can be unsupported, but an explicit warning or
-		// critical result on any component prevents clearance.
-		for _, field := range slices.Sorted(maps.Keys(health)) {
-			data := health[field]
-			var reading struct {
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(data, &reading) == nil && reading.Status != "" && reading.Status != "OK" && reading.Status != "Unknown" {
-				component := "optional"
-				switch field {
-				case "memory_temperature":
-					component = field
-				case "frequency_health":
-					component = "frequency"
-				case "fabric_port_health":
-					component = "fabric_port"
-				}
-				return false, &DeviceHealthFailure{Code: "health_component_failed", Component: component}
-			}
-		}
-		return true, nil
+		_, err = r.proof(nil)
+		return err == nil, err
+
 	case "cuda":
 		data, err := p.Command(ctx, "nvidia-smi", "-q", "-x", "-i", d.Identity)
 		if err != nil {
@@ -427,4 +492,72 @@ func (p MachineProbe) DeviceHealth(ctx context.Context, d MachineDevice) (bool, 
 	default:
 		return false, &DeviceHealthFailure{Code: "health_probe_unsupported"}
 	}
+}
+
+// XPUHealthReport keeps Unknown separate from malformed/missing evidence.
+// Only explicit undeterminable readings can qualify a sibling comparison.
+func (p MachineProbe) XPUHealthReport(ctx context.Context, d MachineDevice) (DeviceHealthReport, error) {
+	if p.Command == nil {
+		return DeviceHealthReport{}, exec.ErrNotFound
+	}
+	if d.pciAddress == "" {
+		return DeviceHealthReport{}, &DeviceHealthFailure{Code: "health_probe_identity_unavailable"}
+	}
+	data, err := p.Command(ctx, "xpu-smi", "health", "-d", d.pciAddress, "-j")
+	if err != nil {
+		return DeviceHealthReport{}, deviceHealthFailure(false, err)
+	}
+	var health map[string]json.RawMessage
+	if err := json.Unmarshal(data, &health); err != nil {
+		return DeviceHealthReport{}, &DeviceHealthFailure{Code: "health_probe_invalid_output"}
+	}
+	if _, failed := health["error"]; failed {
+		return DeviceHealthReport{}, &DeviceHealthFailure{Code: "health_probe_error"}
+	}
+	report := DeviceHealthReport{Components: map[string]string{}}
+	for _, component := range []struct{ field, name string }{
+		{"core_temperature", "core_temperature"}, {"power_health", "power"}, {"memory_health", "memory"},
+	} {
+		data, ok := health[component.field]
+		if !ok {
+			continue
+		}
+		var reading struct{ Status, Description string }
+		status := "Invalid"
+		if json.Unmarshal(data, &reading) == nil {
+			switch {
+			case reading.Status == "OK":
+				status = "OK"
+			case strings.EqualFold(strings.TrimSpace(reading.Status), "Unknown"), strings.EqualFold(strings.TrimSpace(reading.Status), "cannot be determined"):
+				status = "Unknown"
+			case reading.Status == "" && strings.Contains(strings.ToLower(reading.Description), "cannot be determined"):
+				status = "Unknown"
+			}
+		}
+		report.Components[component.name] = status
+	}
+	// Optional components can be unsupported, but an explicit warning or
+	// critical result on any component prevents clearance.
+	for _, field := range slices.Sorted(maps.Keys(health)) {
+		if field == "core_temperature" || field == "power_health" || field == "memory_health" {
+			continue
+		}
+		data := health[field]
+		var reading struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(data, &reading) == nil && reading.Status != "" && reading.Status != "OK" && reading.Status != "Unknown" {
+			component := "optional"
+			switch field {
+			case "memory_temperature":
+				component = field
+			case "frequency_health":
+				component = "frequency"
+			case "fabric_port_health":
+				component = "fabric_port"
+			}
+			return DeviceHealthReport{}, &DeviceHealthFailure{Code: "health_component_failed", Component: component}
+		}
+	}
+	return report, nil
 }

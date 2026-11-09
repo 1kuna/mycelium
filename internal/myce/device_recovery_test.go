@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,7 +19,7 @@ import (
 )
 
 func TestDeviceFaultAutoClear(t *testing.T) {
-	for _, scenario := range []string{"healthy", "new fault", "monitor gap", "escalated", "unknown core", "unknown memory", "permission denied", "probe exit"} {
+	for _, scenario := range []string{"healthy", "new fault", "monitor gap", "escalated", "unknown core", "unknown memory", "permission denied", "probe exit", "unsupported memory", "healthy sibling memory", "different model", "faulted sibling", "sibling new fault", "sibling missing", "sibling failed", "target failed"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, clock := fixture(t)
 			var journal bytes.Buffer
@@ -29,11 +30,23 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 			m.Devices[0].Platform = "xpu"
 			body := xpuHealthyHealth
 			var probeErr error
-			p := MachineProbe{Command: func(context.Context, string, ...string) ([]byte, error) { return []byte(body), probeErr }}
+			siblingBody := strings.Replace(xpuHealthyHealth, `"memory_health":{"status":"OK"}`, `"memory_health":{"status":"Unknown"}`, 1)
+			siblingScenario := strings.Contains(scenario, "sibling") || scenario == "unsupported memory" || scenario == "different model" || scenario == "target failed"
+			if siblingScenario {
+				m.Devices[1].Platform = "xpu"
+				m.Devices[0].Fingerprint, m.Devices[1].Fingerprint = "same-model", "same-model"
+				m.Devices[1].pciAddress = "0000:07:00.0"
+			}
+			p := MachineProbe{Command: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+				if args[2] == "0000:07:00.0" {
+					return []byte(siblingBody), nil
+				}
+				return []byte(body), probeErr
+			}}
 			m.Devices[0].pciAddress = "0000:03:00.0"
 			w := Worker{Machine: m, Clock: clock, Interval: 2 * time.Second,
 				DeviceFaultMatchers: map[string]DeviceFaultMatcher{"xpu": intelKernelFault},
-				DeviceHealthProbe:   p.DeviceHealth}
+				DeviceHealthProbe:   p.DeviceHealth, DeviceHealthReportProbe: p.XPUHealthReport}
 			root := &workerStore{dir: t.TempDir()}
 			root.deviceHealth.timeout, root.deviceFaults.timeout = -1, -1
 			var lines []KernelLogLine
@@ -63,7 +76,7 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 			case "unknown core":
 				body = strings.Replace(body, `"core_temperature":{"status":"OK"}`, `"core_temperature":{"status":"Unknown"}`, 1)
 				wantRejection = "health_component_unknown: core_temperature"
-			case "unknown memory":
+			case "unknown memory", "unsupported memory", "healthy sibling memory", "different model", "faulted sibling", "sibling new fault", "sibling missing", "sibling failed", "target failed":
 				body = strings.Replace(body, `"memory_health":{"status":"OK"}`, `"memory_health":{"status":"Unknown"}`, 1)
 				wantRejection = "health_component_unknown: memory"
 			case "permission denied":
@@ -74,12 +87,37 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 				probeErr = cmd.Run()
 				wantRejection = "health_probe_exit: exit_status=7"
 			}
+			if scenario == "target failed" {
+				body = strings.Replace(body, `"power_health":{"status":"OK"}`, `"power_health":{"status":"Warning"}`, 1)
+				wantRejection = "health_component_failed: power"
+			}
+			if scenario == "unsupported memory" {
+				wantRejection = ""
+			}
+			if scenario == "healthy sibling memory" {
+				siblingBody = xpuHealthyHealth
+			}
+			if scenario == "sibling missing" {
+				siblingBody = strings.Replace(siblingBody, `"memory_health":{"status":"Unknown"},`, "", 1)
+			}
+			if scenario == "sibling failed" {
+				siblingBody = strings.Replace(siblingBody, `"power_health":{"status":"OK"}`, `"power_health":{"status":"Warning"}`, 1)
+			}
+			if scenario == "different model" {
+				w.Machine.Devices[1].Fingerprint = "other-model"
+			}
+			if scenario == "faulted sibling" {
+				w.faults.Devices[deviceFaultKey(m.Devices[1])] = deviceFault{Reason: "device_fault_xe", Event: strings.Repeat("b", 64), At: clock.Now()}
+			}
 			clock.Advance(8 * time.Second)
 			lines = nil
 			scan() // First normal probe: ten seconds after the actual fault.
 			clock.Advance(4 * time.Second)
 			if scenario == "new fault" {
 				lines = []KernelLogLine{{ID: "2", At: clock.Now(), Message: "xe 0000:03:00.0: Engine reset: engine_class=ccs"}}
+			}
+			if scenario == "sibling new fault" {
+				lines = []KernelLogLine{{ID: "2", At: clock.Now(), Message: "xe 0000:07:00.0: GPU HANG"}}
 			}
 			if scenario == "monitor gap" {
 				logErr = errors.New("unreadable")
@@ -91,7 +129,7 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 			clock.Advance(6 * time.Second)
 			logErr = nil
 			scan()
-			if scenario != "healthy" {
+			if scenario != "healthy" && scenario != "unsupported memory" {
 				if w.Machine.Devices[0].Reason == "" {
 					t.Fatal("cleared without uninterrupted healthy proof")
 				}
@@ -111,7 +149,7 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 					if err != nil || !bytes.Contains(status, []byte(failure.Code)) || strings.Contains(string(status)+journal.String(), "vendor-sensitive") {
 						t.Fatal("status missing rejection or leaked raw error", string(status), err)
 					}
-					if strings.Count(journal.String(), "device recovery proof rejected:") != 1 || !strings.Contains(journal.String(), wantRejection) {
+					if strings.Count(journal.String(), "device recovery proof rejected: device="+key+" ") != 1 || !strings.Contains(journal.String(), wantRejection) {
 						t.Fatal("missing or repeated rejection log", journal.String())
 					}
 					// A new healthy sample retires the rejection but still must
@@ -128,6 +166,9 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 			if w.Machine.Devices[0].Reason != "" || w.Machine.Devices[0].FreeMemoryGB != 0 {
 				t.Fatal("clear must wait for inventory before restoring capacity", w.Machine.Devices[0])
 			}
+			if scenario == "unsupported memory" && !slices.Equal(w.Machine.Devices[0].UnsupportedOnDevice, []string{"memory"}) {
+				t.Fatal("unsupported model component missing from status", w.Machine.Devices[0])
+			}
 			recovery := w.Machine.Devices[0].Recovery
 			if recovery == nil || recovery.FaultEvent == "" || recovery.ObservationSeconds != 10 || recovery.ClearedAt.Sub(recovery.HealthySince) < 10*time.Second {
 				t.Fatal("missing measured clear evidence", recovery)
@@ -143,6 +184,9 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 			}
 			if w.Machine.Devices[0].Reason != "" || w.Machine.Devices[0].Recovery == nil {
 				t.Fatal("recovery lost on restart")
+			}
+			if scenario == "unsupported memory" && !slices.Equal(w.Machine.Devices[0].UnsupportedOnDevice, []string{"memory"}) {
+				t.Fatal("unsupported evidence lost on restart")
 			}
 			// A new fault retires clear authority while retaining its measured
 			// window. An operator clear cannot resurrect that old proof.

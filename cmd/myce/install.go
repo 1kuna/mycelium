@@ -547,6 +547,9 @@ func serviceCommand(args []string) error {
 	if c.LocalDisableReceipts {
 		return myce.ErrLegacyLocalDisableReceipts
 	}
+	if e = myce.EnsureXPUHealthAccess(context.Background(), c, myce.LocalMachineProbe().Command); e != nil {
+		return e
+	}
 	if c.EnvironmentFile != "" {
 		_, queue, err := myce.ReadFleetEnvironment(c.EnvironmentFile)
 		if err != nil {

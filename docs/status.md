@@ -656,7 +656,12 @@ With `device-health-v1` support (#1185),
 `code`, optional `component` or `exit_status`, and worker `observed_at`.
 Only sanitized classifications are reported, never raw probe text or paths.
 A healthy reading clears this diagnostic but must still establish the recovery
-window. Unsupported/unknown required health retains quarantine.
+window. `devices[].unsupported_on_device` lists canonical required components
+excluded by a fresh same-batch healthy same-model sibling comparison (for
+example `memory`). The list accompanies a durable automatic-clear receipt.
+Unknown without that comparison, and every missing or failed required
+component, retain quarantine. See the orchestrator default in
+[DECISIONS.md](DECISIONS.md).
 
 With `device-recovery-v1` support (#1142), `devices[].quarantine_recovery`
 records an automatic clear's fault hash, healthy interval, observation window,

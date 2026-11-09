@@ -2456,8 +2456,9 @@ From the worker release containing #1142, non-escalated quarantine also clears
 automatically after positive vendor health evidence and uninterrupted kernel
 observation. Intel uses `xpu-smi health -d PCI-BDF -j`: core temperature, power
 and memory (native JSON keys `core_temperature`, `power_health`,
-`memory_health`) must report `OK`, and no supported component may report a warning or
-critical state. NVIDIA uses UUID-selected `nvidia-smi -q -x`; the matching device
+`memory_health`) must report `OK`, except for a component proven unsupported by
+same-batch sibling comparison below. No supported component may report a warning
+or critical state. NVIDIA uses UUID-selected `nvidia-smi -q -x`; the matching device
 must explicitly report recovery action `None`. Missing tools, unsupported fields,
 unknown required health and failed reads keep quarantine. Other backends can
 supply the injectable health probe; unsupported backends do not auto-clear.
@@ -2474,16 +2475,47 @@ paths and error strings are never included. A new healthy reading removes the
 last rejection; it does not bypass the recovery window. Older queues receive
 no additive diagnostic field, while recovery-v1 clear receipts remain compatible.
 
-A read-only native check of xpu-smi 2.2.0 found temperature unknown for the
-worker and OK for root, but memory health unknown for both. The worker was denied
-both MEI read/write opens and Intel PMT telemetry reads. This does not isolate
-MEI as the required temperature permission; granting MEI access alone cannot
-supply the missing memory proof. This change installs no speculative udev rule,
-group membership or elevated health command. A supported installer permission
-change requires isolating the necessary read access and qualifying positive
-memory health during an authorized maintenance window. Unknown memory health
-continues to withhold automatic clearance; an idle device or quiet kernel log
-is not a substitute. Track that remaining native acceptance in #1185.
+XPU capability comparison is an orchestrator agent default (2026-11-09, under
+MY-34), not a maintainer ruling; see [the decision](DECISIONS.md). When a required
+component is explicitly `Unknown` / “cannot be determined” on the quarantined
+card and an otherwise healthy same-model sibling in the same health batch, that
+component is excluded from this proof. `devices[].unsupported_on_device` lists
+canonical component names such as `memory`. Model identity uses the existing
+nonempty hardware/driver fingerprint. All other required components must be
+`OK` on the target; the sibling must pass every determinable required component
+and have no inventory exclusion, quarantine or new kernel fault. Missing,
+malformed or failed readings cannot establish unsupported capability. Without a
+healthy same-model sibling (including a single-card host), Unknown retains
+quarantine. Each batch compares fresh readings; there is no cached model
+allowlist. The exclusion accompanies the durable clear receipt in status and
+never shortens the kernel observation window.
+
+Linux XPU worker installation provisions health access automatically, before
+service activation. Binary-only release rollout also performs this idempotent
+prerequisite on service startup, before reading credentials or accepting work.
+The root-owned `/etc/udev/rules.d/70-mycelium-xpu-health.rules` grants the worker's
+existing primary group mode `0660` on GPU MEI nodes whose ancestor driver is
+`mei_gsc`. IGSC opens MEI read/write even for this read-only query. Unrelated
+management-engine MEI nodes remain untouched. Xe-owned Intel PMT `telem` sysfs
+attributes receive that group and mode `0440`; no world access is added. The
+installer reloads the rule and applies the same narrow permissions to current
+nodes, without probing the GPU or restarting a service. Existing group membership
+is already effective, so no user-manager restart or manual group step is needed.
+Installation needs noninteractive administrator authority (`sudo -n`); inability
+to provision returns `xpu_health_access_unavailable` before activation. No
+sudoers grant or elevated health command is installed. Matching rules need no
+privileged startup operation. One worker account owns this host-wide rule;
+multiple distinct worker accounts need an explicit shared-group installation
+design before using it.
+
+Read-only xpu-smi 2.2.0 observations found worker temperature Unknown and root
+temperature OK, with GPU MEI and PMT access denied to the worker; this did not
+isolate an MEI-only dependency. Memory health remained Unknown even as root.
+The orchestrator supplied earlier healthy-sibling evidence of undeterminable
+memory health; a fresh sibling query was skipped because a production attempt
+was running. Installer application and worker-identity temperature/automatic-clear
+verification happen through the release rollout, not manual host edits. Native
+acceptance remains tracked in #1185; laptop fake probes do not establish it.
 
 Vendor probes have a separate single-flight lane, so a slow tool cannot stop
 kernel scanning or create a probe backlog.

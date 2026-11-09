@@ -110,6 +110,7 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 	s := &DeviceTelemetry{At: clock.Now(), FreeGB: &free, ActivePercent: &active}
 	m.Devices[0].Telemetry = s
 	m.Devices[0].Recovery = &DeviceRecovery{FaultEvent: "synthetic"}
+	m.Devices[0].UnsupportedOnDevice = []string{"memory"}
 	m.Devices[0].RecoveryBlocked = &DeviceHealthFailure{Code: "health_component_unknown", Component: "memory"}
 	w := Worker{Clock: clock, Client: Client{URL: server.URL}, unifiedMemoryWire: &workerUnifiedMemoryWire{}}
 	send := func() {
@@ -122,14 +123,14 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 	send()
 	clock.Advance(deviceMemorySampleFreshFor)
 	send()
-	if reports[0].Machine.Devices[0].RecoveryBlocked != nil || reports[1].Machine.Devices[0].RecoveryBlocked == nil || hasDeviceTelemetry(reports[0]) || !hasDeviceTelemetry(reports[1]) || hasDeviceRecovery(reports[0]) || !hasDeviceRecovery(reports[1]) {
+	if reports[0].Machine.Devices[0].RecoveryBlocked != nil || reports[1].Machine.Devices[0].RecoveryBlocked == nil || len(reports[0].Machine.Devices[0].UnsupportedOnDevice) != 0 || len(reports[1].Machine.Devices[0].UnsupportedOnDevice) != 1 || hasDeviceTelemetry(reports[0]) || !hasDeviceTelemetry(reports[1]) || hasDeviceRecovery(reports[0]) || !hasDeviceRecovery(reports[1]) {
 		t.Fatal("telemetry did not negotiate independently")
 	}
 	// Recovery v1 queues still receive clear receipts, without the newer
 	// health diagnostic field. Both adaptations leave local status intact.
 	w.unifiedMemoryWire.healthSupported = false
 	legacy := w.deviceRecoveryCheckin(Checkin{Machine: m})
-	if legacy.Machine.Devices[0].Recovery == nil || legacy.Machine.Devices[0].RecoveryBlocked != nil || m.Devices[0].RecoveryBlocked == nil {
+	if legacy.Machine.Devices[0].Recovery == nil || legacy.Machine.Devices[0].RecoveryBlocked != nil || len(legacy.Machine.Devices[0].UnsupportedOnDevice) != 0 || m.Devices[0].RecoveryBlocked == nil {
 		t.Fatal("health negotiation changed v1 recovery or local status")
 	}
 	w.unifiedMemoryWire.healthSupported = true

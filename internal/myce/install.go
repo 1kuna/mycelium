@@ -55,7 +55,7 @@ func LocalMachineProbe() MachineProbe {
 		// version checks. Those are not hardware probes; test CLI processes
 		// supply their ordinary fake managers through PATH.
 		switch filepath.Base(n) {
-		case "systemctl", "systemd-run", "launchctl", "loginctl", "codesign", "uv", "uvx", "pixi":
+		case "systemctl", "systemd-run", "launchctl", "loginctl", "codesign", "sudo", "uv", "uvx", "pixi":
 		default:
 			probeguard.Check()
 		}
@@ -388,6 +388,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		return errors.New("service runner unavailable")
 	}
 	if err := c.ValidateInstall(); err != nil {
+		return err
+	}
+	if err := EnsureXPUHealthAccess(ctx, c, command); err != nil {
 		return err
 	}
 	c.Version = 1
