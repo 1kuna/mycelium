@@ -111,6 +111,26 @@ func TestEntryUnknownApprovalKeepsReadySlots(t *testing.T) {
 			if q.modelMemory(m.ID) != 8 {
 				t.Fatal("resident custody changed")
 			}
+			// Keep UNKNOWN's ready exception fenced to the current worker session.
+			if err := q.update(func() error {
+				slot := q.s.ModelSlots[slotKey(m.ID, model.Name)]
+				if slot == nil || slot.State != "ready" || slot.Session != m.Session {
+					t.Fatal("unknown ready baseline excluded")
+				}
+				if !q.modelUsableMachine(model, &m) {
+					t.Fatal("unknown ready baseline excluded")
+				}
+				slot.Session = "previous-session"
+				if q.modelUsableMachine(model, &m) {
+					t.Fatal("unknown bypassed fence", "session")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if c := addModelCall(t, q, "production"); c.Machine != "" {
+				t.Fatal("unknown bypassed fence", "session")
+			}
 		})
 	}
 }

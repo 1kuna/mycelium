@@ -103,13 +103,17 @@ func TestModelBundleRejectsCorruptionAndSymlinks(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			c := modelBundleCacheFixture(t)
 			m := bundleFixture(t, c, "bundle")
+			var rejection string
 			switch mode {
 			case "path-escape":
 				m.Files[0].Path = "../a"
+				rejection = `invalid bundle file path "../a"`
 			case "case-collision":
 				m.Files = []ModelFile{{Path: "a", SizeBytes: 1, SHA256: strings.Repeat("a", 64)}, {Path: "A", SizeBytes: 1, SHA256: strings.Repeat("a", 64)}}
+				rejection = `duplicate bundle file path "a"`
 			case "ancestor-collision":
 				m.Files = []ModelFile{{Path: "a", SizeBytes: 1, SHA256: strings.Repeat("a", 64)}, {Path: "a/b", SizeBytes: 1, SHA256: strings.Repeat("a", 64)}}
+				rejection = "bundle file/directory collision"
 			case "identity":
 				m.SizeBytes++
 			case "hash":
@@ -141,6 +145,8 @@ func TestModelBundleRejectsCorruptionAndSymlinks(t *testing.T) {
 			}
 			if _, e := c.Prepare(context.Background(), m); e == nil {
 				t.Fatal("unsafe bundle accepted")
+			} else if rejection != "" && !strings.Contains(e.Error(), rejection) {
+				t.Fatalf("unsafe bundle rejected for unrelated reason: want %q, got %v", rejection, e)
 			}
 			if names, _, e := c.Report([]Model{m}); e == nil && len(names) != 0 {
 				t.Fatal("unsafe bundle advertised", names)

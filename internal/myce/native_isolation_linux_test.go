@@ -190,6 +190,45 @@ func TestNativeIsolationLinuxWorkerSiblingAndControl(t *testing.T) {
 	if support := nativeLinuxDetection(); support.mode == "unavailable" {
 		t.Skipf("host confinement unavailable: %s", support.reason)
 	}
+	t.Run("sidecar-cannot-allow-queue-port", func(t *testing.T) {
+		w := recoveryWorker(t)
+		w.Client.URL = "http://127.0.0.1:8921"
+		// Keep control handshakes in memory so the reserved queue port can be
+		// bound by the sidecar reservation, reaching the overlap launch fence.
+		handler := workerTestHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"ok":true,"start_gate":"`+startGateProtocol+`"}`)
+		}))
+		w.Client.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, r)
+			return recorder.Result(), nil
+		})}
+		store, err := w.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.close()
+		j := recoveryJob(t, []string{"/bin/true"})
+		j.Spec.Isolation, j.Spec.Resumable = "sandboxed", false
+		port := 8921
+		j.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"/bin/true"}, Port: &port}}
+		p, err := startAfterFixtureInputs(t, w, store, j)
+		if p != nil {
+			defer p.stop(w.Clock.Now(), 0, true)
+			select {
+			case finish := <-p.done:
+				if finish.result.Success || finish.result.ReleasePending {
+					t.Fatal("queue-port overlap did not refuse and release", finish)
+				}
+				err = errors.New(finish.result.Error)
+			case <-time.After(10 * time.Second):
+				t.Fatal("queue-port refusal timed out")
+			}
+		}
+		if err == nil || !strings.Contains(err.Error(), "control port") {
+			t.Fatalf("queue port not rejected: %v", err)
+		}
+	})
 	setWorkerSession(t)
 	w := recoveryWorker(t)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"ok":true}`) }))

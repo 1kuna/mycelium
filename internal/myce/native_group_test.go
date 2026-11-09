@@ -296,6 +296,30 @@ func nativeEnv(t *testing.T, dir, name string) map[string]string {
 }
 
 func TestNativeGroupReadyEnvironmentAndCleanup(t *testing.T) {
+	// These authored values cross trust boundaries, unlike ambient filtering.
+	q, _ := fixture(t)
+	submit(t, q, nativeSpec(t))
+	for _, kind := range []string{"collision", "token", "device", "remote-readiness"} {
+		t.Run(kind, func(t *testing.T) {
+			s := nativeSpec(t)
+			switch kind {
+			case "collision":
+				s.Run.Sidecars[0].Name = "a-b"
+				other := s.Run.Sidecars[0]
+				other.Name = "a.b"
+				s.Run.Sidecars = append(s.Run.Sidecars, other)
+			case "token":
+				s.Run.Sidecars[0].Env["MYCE_TOKEN"] = "override"
+			case "device":
+				s.Run.Sidecars[0].Env["CUDA_VISIBLE_DEVICES"] = "other"
+			case "remote-readiness":
+				s.Run.Sidecars[0].Readiness.Path = "//other/health"
+			}
+			if _, err := q.Submit(s); err == nil {
+				t.Fatal("invalid group accepted")
+			}
+		})
+	}
 	for _, platform := range []string{"cuda", "xpu"} {
 		t.Run(platform, func(t *testing.T) {
 			t.Setenv("MYCE_TOKEN", "ambient-private-test-token")

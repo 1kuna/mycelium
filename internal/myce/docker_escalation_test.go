@@ -29,6 +29,17 @@ func TestDockerEscalationHealthyCreateThenCancel(t *testing.T) {
 	if r.CleanupSince != nil || r.EscalatedAt != nil {
 		t.Fatal("healthy create started cleanup timer")
 	}
+	// #74: healthy creation can exceed two minutes without needing cleanup.
+	c.Advance(130 * time.Second)
+	q.escalateDockerCleanup()
+	for _, r := range q.s.HostReleases {
+		if r.CleanupSince != nil || r.EscalatedAt != nil {
+			t.Fatalf("slow create escalated: %+v", r)
+		}
+	}
+	if q.dockerHoldDetail("host").OperatorActionRequired {
+		t.Fatal("slow create operator hold")
+	}
 	// Old persisted false timers must be reset when the exact execution is live.
 	old := c.Now().Add(-5 * time.Minute)
 	r.CleanupSince = &old

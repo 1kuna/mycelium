@@ -147,6 +147,8 @@ func TestCompositionImmutableResolutionReplayAndRestart(t *testing.T) {
 	}
 
 	{
+		// Isolate version qualification from unrelated queued work.
+		q, _ := fixture(t)
 		a := compositionExtension(t, true)
 		b := compositionExtension(t, true)
 		b.Version = "2-debug"
@@ -159,8 +161,18 @@ func TestCompositionImmutableResolutionReplayAndRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 		m := machine("target", "fake")
-		m.CapabilityProfile = &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}
+		m.CapabilityProfile.OS, m.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
+		m.Environments = []string{b.Variants[0].Environments["main"].Key}
 		m.ExtensionFingerprint = "test-fingerprint"
+		qualified := newExtensionReport(b, &m, "extension:"+b.Name)
+		qualified.Setup, qualified.Qualified, qualified.CheckID = true, true, "check-b"
+		m.ExtensionReports = []ExtensionReport{qualified}
+		control := submit(t, q, Spec{Name: "qualification", Project: "test", Extension: extensionKey(b)})
+		reply := check(t, q, m, nil)
+		if reply.Job == nil || reply.Job.ID != control.ID {
+			t.Fatal("qualified version B was not assigned")
+		}
+		finish(t, q, reply.Job, true)
 		report := newExtensionReport(a, &m, "extension:"+a.Name)
 		report.Setup, report.Qualified, report.CheckID = true, true, "check-a"
 		m.ExtensionReports = []ExtensionReport{report}
@@ -320,6 +332,60 @@ while ! test -s child.pid; do sleep 0.01; done
 		t.Fatal(err)
 	}
 	nativeNoSurvivors(t, &nativeTestRun{p: &process{cmd: &exec.Cmd{Process: &os.Process{Pid: state.PID}}}, dir: nativeDir})
+
+	t.Run("missing-preparation-never-builds", func(t *testing.T) {
+		snapshot, err := q.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		missing := recoveryWorker(t)
+		for _, observed := range snapshot.Machines {
+			if observed.ID == m.ID {
+				missing.Machine = *observed
+			}
+		}
+		if missing.Machine.ID != m.ID || len(missing.Machine.ExtensionReports) == 0 {
+			t.Fatal("missing successful worker qualification control")
+		}
+		missing.ExtensionRoot, missing.JobFileRoot = root, shared
+		missing.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+		missing.extensionFingerprint = missing.Machine.ExtensionFingerprint
+		c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: missing.Clock, Run: func(context.Context, []string, string, []string, io.Writer, io.Writer) error {
+			t.Error("execution rebuilt an unprepared environment")
+			return fmt.Errorf("execution-side environment build forbidden")
+		}}
+		missing.environmentCache = c
+		store, err := missing.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.close()
+		store.state.Session = missing.Machine.Session
+		// Snapshot records use blob references; deliver the same frozen bytes
+		// that the successful worker received before exercising its start path.
+		refused := cloneJob(j)
+		if err := q.files.hydrateJob(&refused); err != nil {
+			t.Fatal(err)
+		}
+		attempt, err := newAttemptStore(store, refused)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := startAfterFixtureInputs(t, missing, attempt, refused)
+		if p != nil {
+			defer p.stop(missing.Clock.Now(), 0, true)
+		}
+		if err == nil {
+			t.Fatal("execution rebuilt an unprepared environment")
+		}
+		if !strings.Contains(err.Error(), "environment preparation required") {
+			t.Fatal("execution refused for unrelated reason", err)
+		}
+		r := e.Variants[0].Environments["main"]
+		if c.ready(r.Key) {
+			t.Fatal("execution published readiness")
+		}
+	})
 
 	t.Run("standalone-recipe-survives-expired-input-sweep", func(t *testing.T) {
 
