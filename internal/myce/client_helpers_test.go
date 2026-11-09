@@ -172,9 +172,17 @@ func TestClientWaitRetriesTransientStatusWithinContext(t *testing.T) {
 		})
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 7*time.Second)
 		defer cancel2()
+		deadline, _ := ctx2.Deadline()
 		last, err := c.Wait(ctx2, j.ID)
-		if !errors.Is(err, context.DeadlineExceeded) || ctx2.Err() == nil || last == nil || last.State != "queued" || !strings.Contains(err.Error(), "preparing") || outageReads < 3 {
-			t.Fatalf("deadline/last observation lost: job=%+v error=%v reads=%d", last, err, outageReads)
+		if now := time.Now(); !now.Equal(deadline) {
+			t.Fatal("wait did not stop at owner deadline", now, deadline)
+		}
+		// The retry pause and context timer become ready together. ownerError
+		// can observe the deadline before the timer publishes cancellation;
+		// join that ready work before inspecting the context's published error.
+		synctest.Wait()
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(ctx2.Err(), context.DeadlineExceeded) || last == nil || last.State != "queued" || !strings.Contains(err.Error(), "preparing") || outageReads < 3 {
+			t.Fatalf("deadline/last observation lost: job=%+v error=%v context=%v reads=%d", last, err, ctx2.Err(), outageReads)
 		}
 		ctx3, cancel3 := context.WithCancel(context.Background())
 		cancel3()
