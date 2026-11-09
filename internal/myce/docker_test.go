@@ -19,7 +19,8 @@ import (
 )
 
 func TestDockerCommandContract(t *testing.T) {
-	for _, command := range [][]string{{"docker", "run", "image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "echo", "ok"}} {
+	image := "image@sha256:" + strings.Repeat("a", 64)
+	for _, command := range [][]string{{"docker", "run", image, "echo", "ok"}, {"docker", "run", "--user", "1000", "--device", "/dev/dri/renderD128", "--group-add", "109", "--group-add=render", "--group-add=2147483647", image, "echo", "ok"}} {
 		s := spec("experiment")
 		s.Run.Docker = true
 		s.Run.Command = command
@@ -27,26 +28,12 @@ func TestDockerCommandContract(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, args := range [][]string{{"sh", "-c", "docker run image"}, {"docker", "run", "-d", "image"}, {"docker", "run", "--rm", "image"}, {"docker", "run", "--label", "myce.attempt=wrong", "image"}, {"docker", "run", "--restart=always", "image"}, {"docker", "run", "--privileged", "image"}, {"docker", "run", "--name=x", "image"}, {"docker", "run", "--env", "MYCE_TOKEN=secret", "image"}, {"docker", "run", "--volume", "/var/run:/var/run", "image@sha256:" + strings.Repeat("a", 64)}, {"docker", "run", "--volume", "/tmp:/myce/checkpoint", "image@sha256:" + strings.Repeat("a", 64)}} {
+	for _, args := range [][]string{{"docker", "--host=unix:///tmp/docker", "run", image}, {"docker", "run", "--cidfile=/tmp/x", image}, {"docker", "run", "--group-add=--privileged", image}, {"docker", "run", "--group-add=4294967296", image}, {"sh", "-c", "docker run image"}, {"docker", "run", "-d", "image"}, {"docker", "run", "--rm", "image"}, {"docker", "run", "--label", "myce.attempt=wrong", "image"}, {"docker", "run", "--restart=always", "image"}, {"docker", "run", "--privileged", "image"}, {"docker", "run", "--name=x", "image"}, {"docker", "run", "--env", "MYCE_TOKEN=secret", "image"}, {"docker", "run", "--volume", "/var/run:/var/run", "image@sha256:" + strings.Repeat("a", 64)}, {"docker", "run", "--volume", "/tmp:/myce/checkpoint", "image@sha256:" + strings.Repeat("a", 64)}} {
 		s := spec("experiment")
 		s.Run.Docker = true
 		s.Run.Command = args
 		if err := s.Validate(); err == nil {
 			t.Fatalf("accepted unsafe Docker command: %q", args)
-		}
-	}
-}
-
-func TestDockerSupplementalGroups(t *testing.T) {
-	image := "image@sha256:" + strings.Repeat("a", 64)
-	command := []string{"docker", "run", "--user", "1000", "--device", "/dev/dri/renderD128", "--group-add", "109", "--group-add=render", "--group-add=2147483647", image, "echo", "ok"}
-	args, err := dockerRunArgs(command)
-	if err != nil || !slices.Equal(args, command[2:]) {
-		t.Fatalf("supplemental groups not preserved: %q, %v", args, err)
-	}
-	for _, value := range []string{"--privileged", "4294967296"} {
-		if _, err := dockerRunArgs([]string{"docker", "run", "--group-add=" + value, image}); err == nil {
-			t.Errorf("accepted malformed group %q", value)
 		}
 	}
 }

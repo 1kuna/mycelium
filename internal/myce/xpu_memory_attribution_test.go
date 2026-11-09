@@ -121,4 +121,13 @@ func TestXPUHostMemoryCorrectedSampleReplacesLegacyAfterReopen(t *testing.T) {
 	if got := next.Spec.Needs.HostMemoryGB; math.Abs(got-(7.5+minimumHostMemoryGB)) > 1e-8 {
 		t.Fatalf("legacy history still dominates after reopen: %.3f, want accepted 7.5 GiB plus page rounding", got)
 	}
+
+	t.Run("independent-corrected-run-peak", func(t *testing.T) {
+		a := sampleXPUAttribution(t, 10.75, .25, 0, 0)
+		b := sampleXPUAttribution(t, 7.25, 1, 0, 0)
+		p := mergeMemoryPeaks(a, b)
+		if got := hostMemoryPeakGB(p); math.Abs(got-11) > 1e-8 {
+			t.Fatalf("combined independent runs: %.3f, want 11", got)
+		}
+	})
 }

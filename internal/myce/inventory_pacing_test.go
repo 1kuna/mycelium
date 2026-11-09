@@ -140,6 +140,36 @@ func TestHostInventoryTelemetryIdentityAndExpiry(t *testing.T) {
 		await(t, func() bool { observer.mu.Lock(); defer observer.mu.Unlock(); return observer.telemetry.pending == nil })
 
 	})
+
+	t.Run("changing-telemetry-discovery-backoff", func(t *testing.T) {
+		clock := &workerFakeClock{now: time.Unix(1000, 0)}
+		observer := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: clock, timing: probeTiming{base: time.Second, cores: 2}}}
+		source := func(context.Context) ([]MachineDevice, error) {
+			free, active := float64(clock.Now().Unix()%8), 80.0
+			d := MachineDevice{ID: "0", Platform: "xpu", Identity: "card", Selector: "0", Fingerprint: "driver", FreeMemoryGB: free, BudgetGB: 8, Telemetry: &DeviceTelemetry{At: clock.Now(), FreeGB: &free, ActivePercent: &active}}
+			clock.Advance(250 * time.Millisecond)
+			return []MachineDevice{d}, nil
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { defer close(done); observer.run(ctx, source) }()
+		defer func() { cancel(); <-done }()
+		await(t, func() bool { observer.mu.Lock(); defer observer.mu.Unlock(); return observer.lane.observation.valid() })
+		observer.mu.Lock()
+		first := observer.lane.observation.PeriodSeconds
+		observer.mu.Unlock()
+		clock.Advance(time.Hour)
+		await(t, func() bool {
+			observer.mu.Lock()
+			defer observer.mu.Unlock()
+			return observer.lane.observation.PeriodSeconds > first
+		})
+		observer.mu.Lock()
+		defer observer.mu.Unlock()
+		if observer.lane.observation.PeriodSeconds <= first {
+			t.Fatal("unchanged hardware did not back off", first, observer.lane.observation)
+		}
+	})
 }
 
 func TestWorkerTelemetryUsesInjectedHostSource(t *testing.T) {

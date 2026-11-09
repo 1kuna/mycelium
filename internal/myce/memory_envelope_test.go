@@ -415,6 +415,57 @@ func TestMemoryEnvelopeSiblingHostBudget(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("sibling-learned-memory-identity-isolation", func(t *testing.T) {
+		const resident, total, device = 7.719688415527344, 13.08499526977539, 4.374309539794922
+		for _, variant := range []string{"changed fingerprint", "changed environment"} {
+			t.Run(variant, func(t *testing.T) {
+				q, clock, m, s := floorFreeFitFixture(t, 24)
+				m.CapabilityProfile.SystemMemoryBytes, m.HostAvailableMemoryGB = 31<<30, 31
+				sibling := m.Devices[0]
+				sibling.ID, sibling.Identity, sibling.ExtensionFingerprint = "1", "sibling-card", "sibling-kernel-v1"
+				e := registeredExtension(t, q, s.Extension)
+				siblingTarget := sibling.machine(m)
+				r := newExtensionReport(e, &siblingTarget, "extension:sample")
+				r.Setup, r.Qualified, r.CheckID = true, true, "sibling-check"
+				sibling.ExtensionReports = []ExtensionReport{r}
+				m.Devices = append(m.Devices, sibling)
+				machineCheck(t, q, m)
+				for id, p := range q.s.WorkObservations {
+					delete(q.s.WorkObservations, id)
+					p.Key.Component, p.Key.Hardware, p.Key.Fingerprint = sibling.ID, sibling.Identity, sibling.ExtensionFingerprint
+					host, cgroup, gpu := resident, total, device
+					p.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &cgroup, DeviceGB: &gpu}
+					if variant == "changed fingerprint" {
+						p.Key.Fingerprint = "sibling-previous-kernel"
+					} else {
+						p.Key.Environment = "other-environment"
+					}
+					q.s.WorkObservations[identityHash(p.Key)] = p
+				}
+				if err := q.update(func() error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+				clock.Advance(time.Second)
+				s.RequireTarget = true
+				s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+				queued := submit(t, q, s)
+				next := assignedJob(machineCheck(t, q, m))
+				if next == nil || next.ID != queued.ID {
+					t.Fatal("freshly qualified exploration was not admitted", job(t, q, queued.ID).Reason)
+				}
+				if !strings.Contains(next.MemoryEnvelope.Source, "exploration") {
+					t.Fatal("unknown transfer was accepted", next.MemoryEnvelope)
+				}
+				if got, want := next.Spec.Needs.HostMemoryGB, 24-minimumHostMemoryGB; math.Abs(got-want) > 1e-9 {
+					t.Fatalf("host RAM=%v want=%v", got, want)
+				}
+				if next.Spec.Needs.MemoryGB != m.Devices[0].TotalMemoryGB || next.MemoryEnvelope.Basis != "exploratory" {
+					t.Fatal("unknown sibling device transfer shared", next.MemoryEnvelope)
+				}
+			})
+		}
+	})
 }
 
 func TestMemoryEnvelopeExploratoryFirstRun(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 // Retained #884 evidence: these are different attempts, not a 7.5423 GiB
 // observation. A larger permanently qualified target must not block this one.
 func TestMemoryRecoveryTargetPairedEvidence(t *testing.T) {
-	for _, margin := range []float64{12} {
+	for _, margin := range []float64{2.1867791904561273, 12} {
 		t.Run(fmt.Sprint(margin), func(t *testing.T) {
 			q, clock := fixture(t)
 			m := cpuMachine("worker", "worker", "cpu", 8, 32)
