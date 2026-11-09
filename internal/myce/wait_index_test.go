@@ -14,6 +14,57 @@ import (
 	"time"
 )
 
+// Done is first consulted after waitFor has read an unchanged revision and
+// captured its wake channel, at the blocking select. This handshake prevents a
+// commit/cancel before the waiter has entered that real transport-wait path.
+type waitIndexBlockedContext struct {
+	context.Context
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *waitIndexBlockedContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.entered) })
+	return c.Context.Done()
+}
+
+type waitIndexResult struct {
+	reply WaitReply
+	err   error
+}
+
+func awaitWaitIndexBlocked(t *testing.T, ctx context.Context, index *waitStateIndex, request WaitRequest) <-chan waitIndexResult {
+	t.Helper()
+	blocked := &waitIndexBlockedContext{Context: ctx, entered: make(chan struct{})}
+	done := make(chan waitIndexResult, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		reply, err := index.wait(blocked, request)
+		done <- waitIndexResult{reply, err}
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("waiter did not join after context cancellation")
+		}
+	})
+	select {
+	case <-blocked.entered:
+	case result := <-done:
+		t.Fatalf("unchanged revision returned without blocking: %+v", result)
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not reach transport wait")
+	}
+	select {
+	case result := <-done:
+		t.Fatalf("unchanged revision returned before commit/cancel: %+v", result)
+	default:
+	}
+	return done
+}
+
 func TestWaitIndexCommitRollbackAndUnlockedReads(t *testing.T) {
 	q, clock := fixture(t)
 	j := submit(t, q, spec("experiment"))
@@ -57,21 +108,14 @@ func TestWaitIndexCommitRollbackAndUnlockedReads(t *testing.T) {
 	q.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	awakened := make(chan WaitReply, 1)
-	go func() {
-		r, e := index.wait(ctx, WaitRequest{IDs: []string{j.ID}, After: after, Seconds: 20})
-		if e != nil {
-			t.Error(e)
-		}
-		awakened <- r
-	}()
+	awakened := awaitWaitIndexBlocked(t, ctx, index, WaitRequest{IDs: []string{j.ID}, After: after, Seconds: 20})
 	if err = q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case reply := <-awakened:
-		if reply.Jobs[0].State != "cancelled" || reply.Jobs[0].Revision == after[j.ID] {
-			t.Fatal(reply)
+	case result := <-awakened:
+		if result.err != nil || len(result.reply.Jobs) != 1 || result.reply.Jobs[0].State != "cancelled" || result.reply.Jobs[0].Revision == after[j.ID] {
+			t.Fatal(result.reply, result.err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("committed change did not wake waiter")
@@ -96,10 +140,16 @@ func TestWaitIndexCancellation(t *testing.T) {
 	index := q.waitIndex()
 	initial, _ := index.wait(context.Background(), WaitRequest{IDs: []string{j.ID}})
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := awaitWaitIndexBlocked(t, ctx, index, WaitRequest{IDs: []string{j.ID}, After: map[string]uint64{j.ID: initial.Jobs[0].Revision}, Seconds: 20})
 	cancel()
-	_, err := index.wait(ctx, WaitRequest{IDs: []string{j.ID}, After: map[string]uint64{j.ID: initial.Jobs[0].Revision}, Seconds: 20})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatal(err)
+	select {
+	case result := <-done:
+		if !errors.Is(result.err, context.Canceled) {
+			t.Fatal(result.reply, result.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancellation did not release in-flight waiter")
 	}
 }
 
