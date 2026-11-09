@@ -280,10 +280,10 @@ def memory_requirement(config, platform, mode='full'):
         if not peaks or measured['peak_bytes'] != max(peaks):
             raise RuntimeError('quick memory qualification does not match evidence')
         vm = config.get('memory_measurement', {}).get('vm_peak_bytes', 0) if platform != 'native' else 0
-        return measured['peak_bytes'] + vm + config['memory_measurement']['headroom_bytes']
+        return measured['peak_bytes'] * (2 if platform == 'both' else 1) + vm + config['memory_measurement']['headroom_bytes']
     measured = config.get('memory_measurement')
     if not measured:
-        return 22 * GIB  # Unqualified hosts retain the initial conservative value.
+        return (44 if platform == 'both' else 22) * GIB  # Initial envelope per simultaneous leg.
     if not measured.get('evidence'):
         raise RuntimeError('memory qualification is missing its evidence')
     native = int(measured['native_peak_bytes'])
@@ -294,7 +294,7 @@ def memory_requirement(config, platform, mode='full'):
         return native + headroom
     linux = int(measured.get('linux_peak_bytes') or measured['linux_provisional_bytes'])
     vm = int(measured['vm_peak_bytes'])
-    return max(native, linux + vm) + headroom
+    return (native + linux + vm if platform == 'both' else max(native, linux + vm)) + headroom
 
 
 def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platform='native',
@@ -307,6 +307,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     """
     if type(cores) is not int or cores <= 0:
         raise ValueError('local gate cores must be a positive integer')
+    host_cores = cores * (2 if platform == 'both' else 1)
     directory = root(repo)
     directory.mkdir(parents=True, exist_ok=True)
     if priority == 'calibration' and mode != 'full':
@@ -427,12 +428,12 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             raise RuntimeError('recorded local lane has invalid memory demand; retained')
                         reserved_memory += peak
                         if row.get('platform') != 'native':
-                            vm_cores += demand
-                            vm_memory += peak
+                            vm_cores += row.get('per_leg_cores', demand)
+                            vm_memory += row.get('vm_peak_bytes', peak)
                 reserve = int(config.get('workstation_cpu_reserve_cores', 0))
                 if reserve < 0:
                     raise ValueError('workstation CPU reserve must not be negative')
-                cpu_ok = reserved_cores + worker_cores + cores + reserve <= (os.cpu_count() or 1)
+                cpu_ok = reserved_cores + worker_cores + host_cores + reserve <= (os.cpu_count() or 1)
                 group, resource_ok = None, True
                 # Available RAM already reflects active RSS. Quick's measured peak plus
                 # shared host headroom covers its growth without recharging other runs.
@@ -455,9 +456,11 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             for row in owners) and
                         not any(row.get('exclusive') for row in owners) and
                         (not exclusive or not owners))
+                    vm_peak = (memory_requirement(config, 'linux', mode) - headroom
+                               if platform != 'native' else 0)
                     if platform != 'native':
                         resource_ok = (resource_ok and vm_cores + cores <= resources['vm_cores']
-                                       and vm_memory + peak <= resources['vm_memory_bytes'])
+                                       and vm_memory + vm_peak <= resources['vm_memory_bytes'])
                 ready = (not pending_release and not pending_calibration and queue_first and batch_done and occupied < slots
                         and cpu_ok and memory_ok and resource_ok
                         and (resources or mode != 'full' or full_marker))
@@ -482,7 +485,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         except FileExistsError:
                             continue
                         owner = dict(pid=os.getpid(), run_id=uuid.uuid4().hex,
-                                     mode=mode, priority=priority, cores=cores,
+                                     mode=mode, priority=priority, cores=host_cores, per_leg_cores=cores,
                                      local_worker_usage_at_entry=worker,
                                      fleet_worker_cpu_reserve_cores=worker_cores,
                                      workstation_cpu_reserve_cores=reserve,
@@ -493,7 +496,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             marker = uuid.uuid4().hex
                             owner.update(admission_protocol=2, uid=os.getuid(), resource_group=group['resource_group'],
                                          admission_config_sha256=config_digest,
-                                         platform=platform, peak_bytes=peak, exclusive=exclusive,
+                                         platform=platform, peak_bytes=peak, vm_peak_bytes=vm_peak, exclusive=exclusive,
                                          calibration=bool(calibration),
                                          source_root=str((source_root or repo).resolve()),
                                          process_identity=process_identity(os.getpid()), run_marker=marker,

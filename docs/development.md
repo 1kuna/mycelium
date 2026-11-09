@@ -160,6 +160,17 @@ to cover later growth without assuming shared pages are reclaimable. CPU budgets
 sum across runs; Linux demand also fits the VM's configured CPU/RAM capacity.
 Requests above the qualified CPU budget require a new measurement.
 
+`--platform both` launches the native and local-VM legs together from one frozen
+source. `--cores` remains the allocation **per platform**: four cores per leg
+reserves eight host cores and four guest cores. Admission sums the two measured
+working sets plus the existing shared headroom; native memory is not charged to
+the VM. Each leg retains its own cleanup receipt. Ordinary test failure collects
+both verdicts; a signal or unconfirmed cleanup cancels the peer and retains
+uncertain custody. Both-platform elapsed time measures their overlap, rather
+than adding the two leg walls. Concurrent wall improvement is measured in the
+next release full, not inferred from individual peak RSS.
+
+
 Under MY-41, warning memory pressure alone does not stop admission or running
 work. Missing observations log a warning and continue; they are not evidence of
 critical pressure or swap growth. Complete process-table telemetry uses the

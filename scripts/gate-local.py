@@ -4,11 +4,13 @@ import argparse
 import importlib.util
 import json
 import os
+import queue
 from pathlib import Path
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import uuid
 
 REPO = Path(__file__).resolve().parent.parent
@@ -49,6 +51,8 @@ def prepare(path):
     owner = manifest.get('capacity_owner', {})
     identity['admission'] = dict(cores=manifest['cores'], exclusive=owner.get('exclusive', False),
         calibration=owner.get('calibration', False),
+        host_cores=owner.get('cores', manifest['cores']),
+        concurrent_platforms=manifest['platform'] == 'both',
         configuration_sha256=owner.get('admission_config_sha256'),
         fleet_worker_cpu_reserve_cores=owner.get('fleet_worker_cpu_reserve_cores'),
         workstation_cpu_reserve_cores=owner.get('workstation_cpu_reserve_cores'))
@@ -95,24 +99,36 @@ def execute(path):
                          stopped=True, status=125, phase='preparation', no_payload_started=True)
         raise
     started_receipts = []
-    current = None
+    children = []
+    completed = queue.Queue()
     interrupted = []
 
     def interrupt(signum, frame):
         interrupted.append(signum)
-        if current is not None and current.poll() is None:
-            current.send_signal(signum)
+        for child in children:
+            if child.poll() is None:
+                child.send_signal(signum)
+
+    def invalid_exit(result):
+        return result == 125 or result < 0 or result >= 128
+
     def launch(command, receipt, nonce, **kwargs):
-        nonlocal current
-        if interrupted:
+        # A completed refusal must stop new work, even before its wait-thread
+        # notification. Ordinary test failures still collect the other leg.
+        if interrupted or any(invalid_exit(child.poll()) for child in children
+                              if child.poll() is not None):
             return None
         started_receipts.append((receipt, nonce))
-        current = subprocess.Popen(command, **kwargs)
-        # A signal can arrive after the precheck but before Popen assigns the
-        # new child; the handler then still sees the previous, exited leg.
-        if interrupted and current.poll() is None:
-            current.send_signal(interrupted[-1])
-        return current
+        child = subprocess.Popen(command, **kwargs)
+        children.append(child)
+        # TERM may arrive inside Popen before this child is registered.
+        if interrupted and child.poll() is None:
+            child.send_signal(interrupted[-1])
+        def wait():
+            completed.put((child, child.wait(), receipt, nonce))
+        threading.Thread(target=wait, daemon=True).start()
+        return child
+
     handlers = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
         mode = manifest['mode']
@@ -138,41 +154,45 @@ def execute(path):
                       sys.executable, 'scripts/gate-budget.py', 'scripts/gate-command.sh', *payload]
             if launch(native, native_receipt, native_id, cwd=source, env=native_env) is None:
                 return 125
-            status = current.wait()
-            if not receipts.confirmed(native_receipt, native_id) or status == 125 or status >= 128 or status < 0 or interrupted:
+        if manifest['platform'] != 'native':
+            linux_id = uuid.uuid4().hex
+            linux_receipt = folder / 'linux-cleanup.json'
+            receipts.publish(folder / 'linux-custody.json', linux_id, stopped=False, status=125,
+                             vm=env.get('GATE_VM', 'mycelium-gates'),
+                             source_info=json.loads(info.read_text()))
+            linux = [sys.executable, str(REPO / 'scripts/gate-linux.py'), '--archive', str(runtime),
+                     '--report', str(report), '--cleanup-receipt', str(linux_receipt),
+                     '--cleanup-id', linux_id, '--cores', str(manifest['cores']),
+                     '--input', str(info) + '=source-identity.json']
+            for predecessor in predecessor_files:
+                linux += ['--input', str(predecessor) + '=.gate-predecessors/' + predecessor.name]
+            if mode == 'quick' and not manifest['command']:
+                linux += ['--input', str(selection) + '=gate-selection.tsv']
+            linux_payload = manifest['command'] or ['bash', 'scripts/gate-leg.sh', mode]
+            if mode == 'quick' and not manifest['command']:
+                linux_payload += ['--selection', 'gate-selection.tsv']
+            linux += ['--', 'python3', 'scripts/gate-measure.py', '--source-info', 'source-identity.json',
+                      '--run-id', manifest['identity'],
+                      '--mode', mode, '--phase', 'linux', '--', *linux_payload]
+            if launch(linux, linux_receipt, linux_id, cwd=source, env=env) is None:
                 return 125
-            if manifest['platform'] == 'native':
-                return status
-        linux_id = uuid.uuid4().hex
-        linux_receipt = folder / 'linux-cleanup.json'
-        receipts.publish(folder / 'linux-custody.json', linux_id, stopped=False, status=125,
-                         vm=env.get('GATE_VM', 'mycelium-gates'),
-                         source_info=json.loads(info.read_text()))
-        linux = [sys.executable, str(REPO / 'scripts/gate-linux.py'), '--archive', str(runtime),
-                 '--report', str(report), '--cleanup-receipt', str(linux_receipt),
-                 '--cleanup-id', linux_id, '--cores', str(manifest['cores']),
-                 '--input', str(info) + '=source-identity.json']
-        for predecessor in predecessor_files:
-            linux += ['--input', str(predecessor) + '=.gate-predecessors/' + predecessor.name]
-        if mode == 'quick' and not manifest['command']:
-            linux += ['--input', str(selection) + '=gate-selection.tsv']
-        linux_payload = manifest['command'] or ['bash', 'scripts/gate-leg.sh', mode]
-        if mode == 'quick' and not manifest['command']:
-            linux_payload += ['--selection', 'gate-selection.tsv']
-        linux += ['--', 'python3', 'scripts/gate-measure.py', '--source-info', 'source-identity.json',
-                  '--run-id', manifest['identity'],
-                  '--mode', mode, '--phase', 'linux', '--', *linux_payload]
-        if launch(linux, linux_receipt, linux_id, cwd=source, env=env) is None:
-            return 125
-        result = current.wait()
-        if not receipts.confirmed(linux_receipt, linux_id) or result == 125 or interrupted:
-            return 125
-        return status or result
+        for _ in children:
+            child, result, receipt, nonce = completed.get()
+            if (invalid_exit(result) or interrupted or
+                    not receipts.confirmed(receipt, nonce)):
+                return 125
+            status = status or result
+        return status
     finally:
         # Positive receipts, not exit-code guesses, authorize capacity reuse.
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+        for child in children:
+            child.wait()
         complete = (bool(started_receipts) and
                     all(receipts.confirmed(p, key) for p, key in started_receipts) and
-                    current is not None and current.poll() is not None)
+                    all(child.poll() is not None for child in children))
         receipts.publish(folder / 'overall-cleanup.json', manifest['identity'],
                          stopped=complete, status=0 if complete else 125)
         for sig, handler in handlers.items():
@@ -193,7 +213,8 @@ def main():
     parser.add_argument('--ref')
     parser.add_argument('--platform', choices=('native', 'linux', 'both'))
     parser.add_argument('--priority', choices=('normal', 'release', 'calibration'), default=os.environ.get('GATE_PRIORITY', 'normal'))
-    parser.add_argument('--cores', type=int, default=4)
+    parser.add_argument('--cores', type=int, default=4,
+                        help='CPU cores per platform; both reserves twice this host budget')
     parser.add_argument('--exclusive', action='store_true',
                         help='wait for all local gate work; reserve it for isolated timing')
     parser.add_argument('--after-pid', type=int, help=argparse.SUPPRESS)
