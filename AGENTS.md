@@ -4,7 +4,8 @@
   `docs/DECISIONS.md` holds the maintainer's rulings.
 - Keep every feature easy to use and testable on a laptop with no GPU.
 - One binary, one SQLite queue, plain-command workers. No peer network,
-  leases, replicated registry, or restored v1 architecture.
+  leases, replicated registry, or restored v1 architecture. MY-40 records a
+  maintainer-directed shared-queue design study; the approved design still binds.
 - Batch commands, model calls/servers, and environments are implemented; keep them laptop-testable.
 - Queue and scheduling decisions use an injected `Clock`. Never call
   `time.Now` or `time.Sleep` directly in queue or scheduling logic.
@@ -63,8 +64,9 @@ or running main CI does not block; the sequential runner can lag behind merges.
 Stage explicit paths and commit completed changes; push your own branches.
 Tested fixes deploy to the fleet without a separate task (MY-28, MY-32, MY-33):
 bundle them into one release at a time and roll back if the queue isn't healthy.
-Do not patch during a successful production run; fix a run failing because of
-Mycelium. Keep a healthy, tested release ready before each scheduled production window.
+Keep critical patches short during production runs so other work can proceed
+(MY-39); ordinary updates wait. Fix runs failing because of Mycelium.
+Keep a healthy, tested release ready before each scheduled production window.
 Fleet hardware changes still need a task that authorizes them.
 
 This repository is public: keep host names, addresses, fleet layout, private
