@@ -397,6 +397,70 @@ sys.exit(m.main())
             self.assertTrue((active / 'dead-supervisor').exists())
             self.assertFalse((active / 'nonce').exists())
 
+    def test_cancellation_between_legs_and_during_launch_handoff_revokes_linux(self):
+        for timing in ('between', 'handoff'):
+            with self.subTest(timing=timing), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                path = root / 'manifest.json'
+                path.write_text(json.dumps(dict(repo=str(root), cache=str(root / 'cache'), cores=4,
+                    report=str(root / 'report'), mode='full', command=[], platform='both', identity='run')))
+                calls, children, ids = [], [], []
+                def nonce():
+                    ids.append(1)
+                    if timing == 'between' and len(ids) == 2:
+                        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+                    return Mock(hex='nonce-' + str(len(ids)))
+                def launch(command, **kwargs):
+                    calls.append(command)
+                    child = Mock()
+                    children.append(child)
+                    if len(calls) == 1:
+                        env = kwargs['env']
+                        local.receipts.publish(env['GATE_CLEANUP_RECEIPT'], env['GATE_CLEANUP_ID'],
+                                               stopped=True, status=0)
+                        child.wait.return_value = child.poll.return_value = 0
+                    else:
+                        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+                        child.poll.return_value = None
+                        def wait():
+                            child.poll.return_value = 143
+                            local.receipts.publish(root / 'linux-cleanup.json', 'nonce-2', stopped=True, status=143)
+                            return 143
+                        child.wait.side_effect = wait
+                    return child
+                with (patch.object(local.sources, 'freeze', return_value={'source_sha': 'test'}),
+                      patch.object(local.sources, 'extract', side_effect=lambda a, d: (d / 'scripts').mkdir()),
+                      patch.object(local.sources, 'runtime_archive'),
+                      patch.object(local.sources, 'predecessors', return_value=[]),
+                      patch.object(local, 'uuid', Mock(uuid4=nonce)),
+                      patch.object(local.subprocess, 'Popen', side_effect=launch)):
+                    self.assertEqual(local.execute(path), 125)
+                self.assertEqual(len(calls), 1 if timing == 'between' else 2)
+                if timing == 'handoff':
+                    children[-1].send_signal.assert_called_once_with(signal.SIGTERM)
+                self.assertTrue(local.receipts.confirmed(root / 'overall-cleanup.json', 'run'))
+
+    def test_dead_priority_reservations_do_not_survive_their_waiters(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            identity = capacity.process_identity
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
+                  patch.object(capacity, 'process_identity', side_effect=lambda pid: None if pid == 999999 else identity(pid))):
+                held = capacity.acquire(root, mode='full')
+                row = dict(pid=999999, process_identity='old process', sequence=0, priority='release')
+                for priority in ('release', 'calibration'):
+                    (root / ('local-go-' + priority + '-wait-dead')).write_text(json.dumps(row))
+                (root / 'local-go-wait-dead.json').write_text(json.dumps(row))
+                with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                    capacity.acquire(root, mode='full')
+                self.assertTrue(held.directory.exists())
+                self.assertTrue(held.full.exists())
+                held.release()
+                next_full = capacity.acquire(root, mode='full')
+                next_full.release()
+            self.assertFalse(list(root.glob('local-go-*-wait-dead')))
+
     def test_native_receipt_cannot_hide_a_missing_linux_cleanup_receipt(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -408,6 +472,7 @@ sys.exit(m.main())
                 calls.append(command)
                 child = Mock()
                 if len(calls) == 1:
+                    self.assertEqual(Path(command[1]), root / 'source/scripts/gate-measure.py')
                     env = kwargs['env']
                     local.receipts.publish(env['GATE_CLEANUP_RECEIPT'], env['GATE_CLEANUP_ID'],
                                            stopped=True, status=0)

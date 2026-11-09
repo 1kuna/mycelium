@@ -23,6 +23,35 @@ def process_identity(pid):
     return result.stdout.strip() or None
 
 
+def publish_waiting(path, text):
+    pending = path.with_name('.' + path.name + '.' + uuid.uuid4().hex)
+    pending.write_text(text)
+    pending.replace(path)
+
+
+def priority_waiting(directory, priority):
+    active = False
+    for path in directory.glob('local-go-' + priority + '-wait-*'):
+        raw = path.read_text()
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            row = None
+        if isinstance(row, dict):
+            dead = process_identity(row['pid']) != row['process_identity']
+        elif raw.strip().isdigit():
+            # Older waiting records contained only PID: absence proves death;
+            # an extant/reused PID lacks start identity and remains unknown.
+            dead = process_identity(int(raw)) is None
+        else:
+            dead = False  # Preserve unknown legacy waiting records.
+        if dead:
+            path.unlink()
+        else:
+            active = True
+    return active
+
+
 def full_waiters(directory):
     rows = []
     for path in directory.glob('local-go-wait-*.json'):
@@ -149,14 +178,16 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     queue_ticket = None
     try:
         if priority in ('release', 'calibration'):
-            ticket.write_text(str(os.getpid()) + '\n')
+            with admission_lock(directory):
+                publish_waiting(ticket, json.dumps(dict(pid=os.getpid(),
+                    process_identity=process_identity(os.getpid()))) + '\n')
         if mode == 'full':
             with admission_lock(directory):
                 sequence_path = directory / 'queue-sequence'
                 sequence = int(sequence_path.read_text()) + 1 if sequence_path.exists() else 1
-                sequence_path.write_text(str(sequence))
+                publish_waiting(sequence_path, str(sequence))
                 queue_ticket = directory / ('local-go-wait-' + uuid.uuid4().hex + '.json')
-                queue_ticket.write_text(json.dumps(dict(pid=os.getpid(), process_identity=process_identity(os.getpid()),
+                publish_waiting(queue_ticket, json.dumps(dict(pid=os.getpid(), process_identity=process_identity(os.getpid()),
                     priority=priority, sequence=sequence)) + '\n')
         after_identity = process_identity(after_pid) if after_pid else None
         announced = None
@@ -171,9 +202,11 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 # Two legacy lanes are authorized; full remains serialized until measured.
                 slots = min(2, max(1, int(config.get('heavy_slots', 2))))
                 fulls = min(2, max(1, int(config.get('full_slots', 1))))
-                pending_release = priority not in ('release', 'calibration') and any(directory.glob('local-go-release-wait-*'))
+                release_waiting = priority_waiting(directory, 'release')
+                calibration_waiting = priority_waiting(directory, 'calibration')
+                pending_release = priority not in ('release', 'calibration') and release_waiting
                 pending_calibration = (mode == 'full' and priority != 'calibration'
-                                       and any(directory.glob('local-go-calibration-wait-*')))
+                                       and calibration_waiting)
                 queue = full_waiters(directory) if mode == 'full' else []
                 queue_first = not queue or queue[0] == queue_ticket
                 batch_done = not after_identity or process_identity(after_pid) != after_identity

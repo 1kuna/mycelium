@@ -80,6 +80,17 @@ def execute(path):
         interrupted.append(signum)
         if current is not None and current.poll() is None:
             current.send_signal(signum)
+    def launch(command, receipt, nonce, **kwargs):
+        nonlocal current
+        if interrupted:
+            return None
+        started_receipts.append((receipt, nonce))
+        current = subprocess.Popen(command, **kwargs)
+        # A signal can arrive after the precheck but before Popen assigns the
+        # new child; the handler then still sees the previous, exited leg.
+        if interrupted and current.poll() is None:
+            current.send_signal(interrupted[-1])
+        return current
     handlers = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
         mode = manifest['mode']
@@ -92,12 +103,12 @@ def execute(path):
             payload = manifest['command'] or ['bash', 'scripts/gate-leg.sh', mode]
             if not manifest['command'] and mode == 'quick':
                 payload += ['--selection', str(selection)]
-            native = [sys.executable, str(REPO / 'scripts/gate-measure.py'), '--report', str(report),
+            native = [sys.executable, str(source / 'scripts/gate-measure.py'), '--report', str(report),
                       '--run-id', manifest['identity'],
                       '--source-info', str(info), '--mode', mode, '--phase', 'native', '--',
                       sys.executable, 'scripts/gate-budget.py', 'scripts/gate-command.sh', *payload]
-            started_receipts.append((native_receipt, native_id))
-            current = subprocess.Popen(native, cwd=source, env=native_env)
+            if launch(native, native_receipt, native_id, cwd=source, env=native_env) is None:
+                return 125
             status = current.wait()
             if not receipts.confirmed(native_receipt, native_id) or status == 125 or status >= 128 or status < 0 or interrupted:
                 return 125
@@ -119,8 +130,8 @@ def execute(path):
         linux += ['--', 'python3', 'scripts/gate-measure.py', '--source-info', 'source-identity.json',
                   '--run-id', manifest['identity'],
                   '--mode', mode, '--phase', 'linux', '--', *linux_payload]
-        started_receipts.append((linux_receipt, linux_id))
-        current = subprocess.Popen(linux, cwd=source, env=env)
+        if launch(linux, linux_receipt, linux_id, cwd=source, env=env) is None:
+            return 125
         result = current.wait()
         if not receipts.confirmed(linux_receipt, linux_id) or result == 125 or interrupted:
             return 125
