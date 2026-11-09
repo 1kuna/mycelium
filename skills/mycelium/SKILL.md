@@ -36,6 +36,8 @@ tests; a quarantined device cannot serve work after CPU holders stop. Missing
 values and dropped history remain unknown. `preemption.source` identifies an
 actual planner decision versus a diagnostic projection; the separate target
 field `release_commitment` reports retained releases still pending.
+It clears once those exact releases are acknowledged, even if RAM or another
+blocker still prevents admission.
 `last_planner_decision` keeps its original timestamp and wave vector.
 Read `latest.closed_at`/`latest.closed_reason` for ended waits and `capture_gaps`/`deferred_at`
 for capture deferred to protect control service. See [wait evidence](../../docs/status.md#retained-production-admission-waits-next-release-868).

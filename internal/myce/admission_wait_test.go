@@ -188,6 +188,46 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 			for _, run := range runs {
 				finishInterrupted(t, q, run)
 			}
+			assertReleased := func() *AdmissionWaitSnapshot {
+				t.Helper()
+				latest := admissionWaitAPI(t, q, parent.ID).Latest
+				if latest == nil || latest.ClosedAt != nil || len(latest.Targets) == 0 {
+					t.Fatalf("missing open wait after release acknowledgement: %+v", latest)
+				}
+				for _, target := range latest.Targets {
+					if target.ReleaseCommitment || len(target.Holders) != 0 {
+						t.Fatalf("acknowledged releases still reported as outstanding: %+v", target)
+					}
+				}
+				return latest
+			}
+			// A retained placement survives acknowledgements until assignment,
+			// but its selected releases no longer constitute outstanding custody.
+			assertReleased()
+			m.HostAvailableMemoryGB = 1
+			if assignedJob(machineCheck(t, q, m)) != nil {
+				t.Fatal("production admitted under unrelated RAM pressure")
+			}
+			clock.Advance(time.Second)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			ramBlocked := false
+			for _, target := range assertReleased().Targets {
+				// The replay measures serial targets; combined-device projections
+				// can instead be blocked on an unknown memory envelope.
+				if target.Device != "0" && target.Device != "1" {
+					continue
+				}
+				ramBlocked = true
+				if !slices.Contains(target.Predicates, "host_memory") {
+					t.Fatalf("lost RAM blocker after release acknowledgement: %+v", target)
+				}
+			}
+			if !ramBlocked {
+				t.Fatal("missing measured serial targets under RAM pressure")
+			}
+			m.HostAvailableMemoryGB = 16.4
 			clock.Advance(time.Second)
 			next := assignedJob(machineCheck(t, q, m))
 			if next == nil || next.Batch == nil || next.Batch.Parent != parent.ID {

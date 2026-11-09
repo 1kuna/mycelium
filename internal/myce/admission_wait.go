@@ -552,7 +552,7 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 					}
 				}
 				if placement := j.PreemptionPlacement; placement != nil && placement.Machine == m.ID && placement.Session == m.Session && placement.Device == m.Device && len(placement.Releases) > 0 {
-					target.ReleaseCommitment = true
+					target.ReleaseCommitment = q.preemptionReleasesPending(j)
 				}
 				if _, ok := obligations[hostID(m)]; !ok {
 					obligations[hostID(m)] = q.hostObligations(hostID(m))

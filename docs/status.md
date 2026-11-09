@@ -2634,6 +2634,8 @@ actual scheduler; diagnostic status reads never manufacture a decision.
 `preemption.planned` is the recorded decision's new-stop intent, not delivery
 or release proof. The separate target field `release_commitment` reports
 previously selected releases still pending; it never rewrites that decision.
+It clears after the exact obligations are acknowledged, even when the job
+remains blocked on resources and retains its selected placement.
 `last_planner_decision` preserves the last actual decision's timestamp
 and resource vector for this exact attempt/next piece/target, even when later
 passes only wait for releases. It never labels a new projection as a past
