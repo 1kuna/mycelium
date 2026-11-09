@@ -169,7 +169,7 @@ func enrollmentCommandWithTiming(args []string, probe myce.MachineProbe, home st
 	waitReady := func(c myce.ServiceConfig, client myce.Client) (myce.EnrollmentResult, error) {
 		phase, cancel := context.WithTimeout(signals, o.timeout)
 		defer cancel()
-		return myce.WaitEnrollment(phase, c, client, myce.EnrollmentWait{Clock: clock, Wait: wait, Timeout: o.timeout, Command: probe.Command})
+		return waitEnrollment(phase, c, client, myce.EnrollmentWait{Clock: clock, Wait: wait, Timeout: o.timeout, Command: probe.Command})
 	}
 	var old *myce.ServiceConfig
 	if saved, e := myce.ReadServiceConfig(config); e == nil {
@@ -218,7 +218,7 @@ func enrollmentCommandWithTiming(args []string, probe myce.MachineProbe, home st
 			return
 		}
 		if old.Enrollment {
-			_, e = myce.WaitEnrollment(cleanup, *old, client, myce.EnrollmentWait{Clock: clock, Wait: wait, Timeout: 2 * time.Minute, Command: probe.Command, Version: previousVersion})
+			_, e = waitEnrollment(cleanup, *old, client, myce.EnrollmentWait{Clock: clock, Wait: wait, Timeout: 2 * time.Minute, Command: probe.Command, Version: previousVersion})
 			if e != nil {
 				recoveryFailed(fmt.Errorf("previous release did not become ready: %w", e))
 				return
