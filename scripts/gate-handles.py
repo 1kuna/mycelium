@@ -2,7 +2,9 @@
 """macOS process-path inventory, isolated by gate-budget's bounded supervisor."""
 import ctypes as c
 import errno
+import json
 import os
+import subprocess
 import sys
 
 
@@ -39,7 +41,104 @@ class FdPath(c.Structure):
     _fields_ = [('file', FileInfo), ('vnode', VnodePath)]
 
 
-def inventory(scratch, pids):
+class Descriptor(c.Structure):
+    _fields_ = [('number', c.c_int32), ('kind', c.c_uint32)]
+
+
+class RegionInfo(c.Structure):
+    _fields_ = [('protection', c.c_uint32 * 4), ('offset', c.c_uint64),
+                ('accounting', c.c_uint32 * 14), ('address', c.c_uint64),
+                ('size', c.c_uint64)]
+
+
+class RegionPath(c.Structure):
+    _fields_ = [('region', RegionInfo), ('vnode', VnodePath)]
+
+
+class StatFS(c.Structure):
+    _fields_ = [('block_size', c.c_uint32), ('io_size', c.c_int32),
+                ('blocks', c.c_uint64 * 5), ('fsid', c.c_int32 * 2),
+                ('owner', c.c_uint32), ('type', c.c_uint32),
+                ('flags', c.c_uint32), ('subtype', c.c_uint32),
+                ('type_name', c.c_char * 16), ('mount_on', c.c_char * 1024),
+                ('mount_from', c.c_char * 1024), ('flags_ext', c.c_uint32),
+                ('reserved', c.c_uint32 * 7)]
+
+
+def sealed_residency(executable):
+    if executable == '/System/Volumes' or executable.startswith('/System/Volumes/'):
+        raise RuntimeError('protected executable is on a writable or auxiliary volume')
+    lib = c.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    statfs = lib.statfs64
+    statfs.argtypes = [c.c_char_p, c.POINTER(StatFS)]
+    statfs.restype = c.c_int
+    info = StatFS()
+    if statfs(os.fsencode(executable), c.byref(info)) != 0:
+        raise OSError(c.get_errno(), 'protected executable mount inventory failed')
+    mount = os.fsdecode(info.mount_on)
+    readonly = bool(info.flags & 1)  # MNT_RDONLY from sys/mount.h.
+    if mount != '/' or not readonly:
+        raise RuntimeError('protected executable is not on the read-only system root')
+    return dict(mount_on=mount, readonly=readonly, flags=info.flags,
+                filesystem=os.fsdecode(info.type_name))
+
+
+def process_table():
+    output = subprocess.check_output(
+        ['ps', 'eww', '-axo', 'pid=,ppid=,comm=,args='], text=True, timeout=5)
+    rows = {}
+    for line in output.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) != 4:
+            raise RuntimeError('protected process ancestry inventory incomplete')
+        rows[int(fields[0])] = (int(fields[1]), fields[2], fields[3])
+    return rows
+
+
+def protected_process(pid, scratch, roots, rows=None):
+    """An EPERM exclusion needs independent ps evidence, never a guess."""
+    if rows is None:
+        rows = process_table()
+    if pid not in rows:
+        raise RuntimeError('protected process identity changed')
+    _, _, arguments = rows[pid]
+    # comm can contain spaces; obtain this single value independently rather
+    # than accepting a whitespace-truncated prefix from the ancestry table.
+    executable = subprocess.check_output(['ps', '-p', str(pid), '-o', 'comm='],
+                                         text=True, timeout=5).strip()
+    if not executable.startswith('/') or '\n' in executable:
+        raise RuntimeError('protected executable path is unavailable')
+    executable = os.path.realpath(executable)
+    prefixes = ('/System/', '/usr/libexec/', '/usr/bin/', '/usr/sbin/', '/sbin/', '/bin/')
+    if not executable.startswith(prefixes):
+        raise RuntimeError('EPERM process is not a protected system executable')
+    residency = sealed_residency(executable)
+    # Include every known live gate supervisor as well as persisted identities.
+    roots = set(roots)
+    for candidate, (_, _, command) in rows.items():
+        if any(name in command.split()[:3] or any(os.path.basename(t) == name for t in command.split()[:3])
+               for name in ('gate-local.py', 'gate-budget.py', 'gate-measure.py', 'gate-linux.py',
+                            'gate-guest.py', 'gate-scheduler.py', 'gate-progress.py', 'gate.sh',
+                            'gate-leg.sh', 'gate-command.sh')):
+            roots.add(candidate)
+    chain, cursor = [], pid
+    while cursor:
+        if cursor in roots:
+            raise RuntimeError('EPERM process descends from a gate supervisor')
+        if cursor in chain or cursor not in rows:
+            raise RuntimeError('protected process ancestry inventory incomplete')
+        chain.append(cursor)
+        cursor = rows[cursor][0]
+    forbidden = ('GATE_RUN_ID=', 'GATE_CUSTODY_ID=', 'GATE_SCRATCH=', 'GATE_RUNTIME_DIR=',
+                 '/mycelium-gates/', '/mycelium-gate-', '/.gate/', '/scripts/gate-',
+                 '/scripts/gate.sh', scratch)
+    if any(value in arguments for value in forbidden):
+        raise RuntimeError('EPERM process has a gate marker or path')
+    return dict(pid=pid, executable=executable, ancestry=chain, residency=residency,
+                gate_markers_or_paths=False, reason='EPERM protected system process')
+
+
+def inventory(scratch, pids, all_fds=False, protected_roots=None):
     lib = c.CDLL('/usr/lib/libproc.dylib', use_errno=True)
     lib.proc_pidinfo.argtypes = [c.c_int, c.c_int, c.c_uint64, c.c_void_p, c.c_int]
     lib.proc_pidfdinfo.argtypes = [c.c_int, c.c_int, c.c_int, c.c_void_p, c.c_int]
@@ -53,7 +152,9 @@ def inventory(scratch, pids):
         # Non-vnode descriptors (pipes, sockets) have no file path to inspect.
         gone = {errno.ESRCH, errno.ENOENT}
         if fd:
-            gone.update({errno.EBADF, errno.EINVAL, errno.ENOTSUP})
+            gone.add(errno.EBADF)
+            if not all_fds:
+                gone.update({errno.EINVAL, errno.ENOTSUP})
         if result <= 0 and error in gone:
             return False
         raise OSError(error, 'native process path inventory failed')
@@ -62,22 +163,77 @@ def inventory(scratch, pids):
         name = os.fsdecode(path)
         return name == scratch or name.startswith(scratch + os.sep)
 
+    exclusions_table = None
     for pid in pids:
-        cwd = CwdInfo()
-        paths = []
-        if checked(lib.proc_pidinfo(pid, 9, 0, c.byref(cwd), c.sizeof(cwd)), c.sizeof(cwd)):
-            paths.append(cwd.cwd.path)
-        executable = c.create_string_buffer(4096)
-        if checked(lib.proc_pidpath(pid, executable, len(executable))):
-            paths.append(executable.value)
-        for fd in range(3):
-            info = FdPath()
-            if checked(lib.proc_pidfdinfo(pid, fd, 2, c.byref(info), c.sizeof(info)),
-                       c.sizeof(info), fd=True):
-                paths.append(info.vnode.path)
-        if any(inside(path) for path in paths):
-            print(f'p{pid}\nn{scratch}')
+        try:
+            inventory_pid(lib, pid, scratch, all_fds, checked, inside)
+        except PermissionError as error:
+            if protected_roots is None or error.errno != errno.EPERM:
+                raise
+            if exclusions_table is None:
+                exclusions_table = process_table()
+            print('x' + json.dumps(protected_process(pid, scratch, protected_roots, exclusions_table)), flush=True)
 
+
+def inventory_pid(lib, pid, scratch, all_fds, checked, inside):
+    cwd = CwdInfo()
+    paths = []
+    if checked(lib.proc_pidinfo(pid, 9, 0, c.byref(cwd), c.sizeof(cwd)), c.sizeof(cwd)):
+        paths.append(cwd.cwd.path)
+    executable = c.create_string_buffer(4096)
+    if checked(lib.proc_pidpath(pid, executable, len(executable))):
+        paths.append(executable.value)
+    descriptors = range(3)
+    if all_fds:
+        c.set_errno(0)
+        size = lib.proc_pidinfo(pid, 1, 0, None, 0)  # PROC_PIDLISTFDS
+        if size == 0 and c.get_errno() == 0:
+            descriptors = []
+        elif not checked(size):
+            return
+        entries = (Descriptor * (size // c.sizeof(Descriptor) + 1))()
+        c.set_errno(0)
+        read = lib.proc_pidinfo(pid, 1, 0, c.byref(entries), c.sizeof(entries))
+        if read == 0 and c.get_errno() == 0:
+            read = 0
+        elif not checked(read):
+            return
+        if read >= c.sizeof(entries) or read % c.sizeof(Descriptor):
+            raise RuntimeError('descriptor inventory changed or is incomplete')
+        descriptors = [entry.number for entry in entries[:read // c.sizeof(Descriptor)]
+                       if entry.kind == 1]  # PROX_FDTYPE_VNODE
+    for fd in descriptors:
+        info = FdPath()
+        if checked(lib.proc_pidfdinfo(pid, fd, 2, c.byref(info), c.sizeof(info)),
+                   c.sizeof(info), fd=True):
+            paths.append(info.vnode.path)
+    if all_fds:
+        # PROC_PIDREGIONPATHINFO walks file-backed mappings even after a
+        # fixture closes its descriptors and scrubs argv/environment.
+        address = 0
+        while True:
+            region = RegionPath()
+            c.set_errno(0)
+            count = lib.proc_pidinfo(pid, 8, address, c.byref(region), c.sizeof(region))
+            if count == 0 and (c.get_errno() == errno.ESRCH or
+                               address > 0 and c.get_errno() == errno.EINVAL):
+                break  # End of mapped address space, or a gone PID.
+            checked(count, c.sizeof(region))
+            paths.append(region.vnode.path)
+            following = region.region.address + region.region.size
+            if following <= address or following >= 1 << 64:
+                raise RuntimeError('mapped-file inventory did not advance')
+            address = following
+    if any(inside(path) for path in paths):
+        print(f'p{pid}\nn{scratch}')
 
 if __name__ == '__main__':
-    inventory(sys.argv[1], map(int, sys.argv[2:]))
+    arguments = sys.argv[1:]
+    all_fds = arguments[:1] == ['--all-fds']
+    if all_fds:
+        arguments = arguments[1:]
+    roots = None
+    if arguments[:1] == ['--protected-roots']:
+        roots = [int(v) for v in arguments[1].split(',') if v]
+        arguments = arguments[2:]
+    inventory(arguments[0], map(int, arguments[1:]), all_fds, roots)

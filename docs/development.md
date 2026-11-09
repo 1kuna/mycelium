@@ -11,11 +11,26 @@ contracts, with unsupported/native gaps explicit.
 Quick defaults to the merge base of the current branch and `origin/main`;
 pass an ancestor `BASE` explicitly to check a wider batch. Every supplied ref
 is reduced to its merge base with `HEAD`, so a moving `origin/main` never
-selects unrelated changes that landed after the branch diverged. Known heavy
-runs use the project's Mycelium submission path. Inspect host load/memory/disk
-before local heavy work; do not exceed two full race suites on one Mac.
+selects unrelated changes that landed after the branch diverged. Development gates run directly on the development host, independently of fleet
+nodes and queue availability. On Darwin, the default gate includes native Darwin
+and a directly invoked local Linux VM. Inspect load/memory/disk before heavy work;
+use the capacity admission below rather than creating additional test processes.
 
 ## Laptop test gates
+
+On the 64 GB development host, install Lima and prepare the local Linux VM once
+using [local gate setup](#local-linux-vm). Then the normal commands prove both
+platforms without `myce run` or fleet credentials:
+
+```sh
+./scripts/gate.sh quick
+./scripts/gate.sh full
+```
+
+`GATE_TARGET=native` runs only the current OS, including inside fleet profiles.
+Use it for focused diagnosis or a separately owned baseline; record that it is
+partial platform proof. On Linux, the gate runs natively. Darwin CGO still needs
+a native Mac toolchain.
 
 Run `./scripts/gate.sh` (or `./scripts/gate.sh quick BASE`) for a change. The
 base defaults to the branch merge base with `origin/main`; an explicit ref
@@ -50,6 +65,23 @@ end-to-end tests. It does not repeat those packages in a second race pair or a
 separate dev run. For an authorized urgent hotfix: run quick, deploy, run full
 afterwards, and fix forward if full finds a problem. This workflow does not grant
 fleet/deployment authorization.
+
+Full partitions the dominant `internal/myce` package across up to eight test
+processes while the CLI package runs concurrently. The process limit is the
+available CPU count, capped at nine, with `GOMAXPROCS=1` and `-parallel=1` per
+process to retain workstation headroom. Smaller allocations reduce the shard
+count. Quick selection and its parallelism are unchanged.
+
+The planner asks Go for the current race-enabled inventory, including runnable
+examples and fuzz seed tests, under the same fixture watchdog used for tests.
+Every root runs in exactly one anchored `-run` partition; descendants stay with
+their root. `scripts/gate-test-durations.json` contains measured scheduling hints
+for balancing work, never a coverage list. New or unmeasured roots always run.
+Each partition retains independent HOME, temporary files, process custody and
+progress learning; the shared Go build cache avoids recompiling the package for
+each partition. The scheduler writes its native selection manifest beside the
+temporary selection file, and prints each partition in the gate log. Run
+`python3 scripts/test-gate-shards.py` for the planner regression checks.
 
 Quick and full have no overall wall deadline. Each Go package runs under its
 own test-progress watchdog, keyed by package, exact selected test expression,
@@ -107,6 +139,304 @@ workspace, which is deleted on exit because it holds only rebuildable test state
 Failure logs belong in an
 ignored `.reports/` folder (for example redirect stdout/stderr there).
 
+Local development admission uses an atomic directory per heavy run, shared
+across Git worktrees and ordinary clones under
+`~/.cache/mycelium-gates/control`. It registers legacy checkout report roots,
+recognizes both existing `local-go-slot` lanes and
+preserves unknown/abandoned ownership. Qualified hosts admit full and quick runs
+from their measured per-leg CPU/RAM and live capacity, rather than a fixed full
+count. The four-core qualification observed native peak 7.01 GiB and Linux/VM
+peak 10.57 GiB. With the measured 5.43 GiB host-memory variation reserve, single-run
+gate-memory requirements are 12.45 GiB native and 16.01 GiB Linux. These observations
+are host qualification, not constants for other installations. These requirements
+are checked against live available RAM, which already reflects fleet-worker
+and other background residency. No fleet-worker RAM allowance is added, and no
+worker RSS is subtracted again. Live pressure and swap guards remain active.
+Full admission reserves each active run's entire measured peak on top of the new
+run's peak and shared headroom. This conservatively counts current RSS again
+to cover later growth without assuming shared pages are reclaimable. CPU budgets
+sum across runs; Linux demand also fits the VM's configured CPU/RAM capacity.
+Requests above the qualified CPU budget require a new measurement.
+
+Under MY-41, warning memory pressure alone does not stop admission or running
+work. Missing observations log a warning and continue; they are not evidence of
+critical pressure or swap growth. Complete process-table telemetry uses the
+30-second observer allowance; timeouts retain their command/error in the log. Critical pressure, actual swap growth and the disk floors still
+stop work. Quick and focused requests can use a separate
+`quick_memory_measurement` containing digest-bound successful quick observations
+and their maximum `peak_bytes`. The development-host observations peak at
+2.78 GiB across 39 successful quick phase records, versus 7.01 GiB for fulls.
+Native quick charges that measured peak plus shared host headroom; Linux also
+charges measured VM residency. Live available memory already reflects other
+running processes, so quick does not charge their entire peaks again. This
+avoids the roughly 30 GiB reservation for a small selection. Missing quick
+evidence falls back to the full envelope. This optional quick envelope may be
+refreshed while runs are active: existing reservations keep their original
+charges and only new requests use the new measurement.
+
+MY-41 supersedes the development-custody recovery restrictions below. Operators
+may stop the gate-owned VM and move stale gate custody into a dated backup when
+it blocks iteration. Preserve source, logs and real verdicts; production job
+custody is outside this development-tool reset authority.
+
+Before enabling or re-enabling measured admission, any never-admitted waiter
+started with a pre-change helper must have exited or been restarted by its owner
+with the current helper. Preserve admitted and unknown execution custody;
+restarting a waiter never authorizes clearing that custody.
+Unqualified hosts retain two heavy lanes and one full. Frozen older helpers see
+both old lane directories reserved while the measured allocator is active;
+new helpers wait for old/unknown execution owners to finish. Protocol guards
+leave only after every admitted run has affirmative cleanup. Active resource
+custody binds the normalized capacity configuration and evidence digest;
+configuration changes refuse new admission until that group has cleaned up.
+Measured owners persist the holder PID and start identity, unique run marker,
+and planned private scratch before launching work. Native supervisors and guest
+cleanup nonces are journaled separately in the run's retained receipt folder.
+Repeated termination signals cannot interrupt the budget's cleanup or its
+receipt publication.
+
+After supervisor death, use the supported zero-workload recovery command:
+
+```sh
+python3 scripts/gate-local.py --reconcile RECEIPT_FOLDER [RECEIPT_FOLDER ...]
+```
+
+It holds the host admission lock, verifies the immutable owner/full/group
+bindings and absent recorded PID, and inventories markers, known supervisors
+and descendants over the whole process table. The complete process/file-handle
+inventory for the gate owner's UID must succeed, with no handle or mapped file
+into the entire retained source/scratch tree. This includes closed-descriptor
+mappings (macOS `PROC_PIDREGIONPATHINFO`, Linux `/proc/PID/maps`); an unavailable
+mapping inventory retains custody. Guest active markers must be empty, with a nonce-bound
+positive guest observation and matching affirmative cleanup for every guest
+leg. A second host inventory and binding check precede archiving. Bound records
+are archived under `.reconciled-UUID`; source and scratch are retained. Each
+attempt writes `reconcile-UUID.json` in the control directory, including the
+decision, proof phase and evidence. Recovery never signals another run.
+
+The complete native handle/mapping probe has a 30-second deadline, derived from
+the measured host recovery-probe maximum of 5.39 seconds with roughly fourfold
+load allowance, rounded up. The previous five-second cap refused under ordinary
+load. This is the orchestrator's MY-34 application (2026-11-09), not a relaxation
+of inventory completeness: a timeout still retains occupancy, terminates only
+the observer, and refuses recovery. Ordinary cleanup keeps its separate bound.
+
+Custody protects gate capacity: CPU, RAM, VM residency and scratch used by
+gate-owned processes. Gate runs, ordinary fixtures and supervisors execute as the
+gate owner's UID, so complete file-handle and mapping inspection covers that UID. Another UID's
+file handle (for example a backup or indexing daemon reading a 0755 tree) is not
+gate-run liveness and does not consume the reservation. No directory ownership
+or 0700 mode precondition applies, and recovery never changes permissions or
+requests privilege. This ownership-model interpretation is an orchestrator
+default, not a maintainer ruling (2026-11-09).
+
+Daemon-backed fixtures require separate positive evidence: Docker containers,
+volumes and networks can outlive their test and run outside the gate UID. Before
+creating resources, the real-Docker fixtures journal their endpoint and label
+resources with `myce.gate=RUN_MARKER`. Before launching work, the budget journals
+the effective endpoint selected by `DOCKER_CONTEXT`, `DOCKER_HOST` or Docker's
+configured current context, together with daemon availability and identity.
+Normal cleanup and recovery query each recorded
+daemon for remaining labelled containers, volumes and networks; a changed daemon,
+unreachable configured daemon, malformed journal or failed listing retains
+custody. For new runs, a missing Docker CLI and default socket can establish absent
+prerequisites only when no entry observation or fixture journal requires that
+daemon. Older sources without labels additionally require the Mycelium fixture
+label/name namespace to be empty. Recovery applies the same checks inside the guest,
+alongside its source-bound, nonce-bound positive cleanup. It never removes Docker
+resources or assumes a killed client stopped its containers.
+
+Legacy endpoint recovery is an orchestrator agent default (2026-11-09, received
+by the landing worker), not a maintainer ruling. Old helpers inherited their
+environment; retained bytes do not prove that Docker overrides were absent.
+Recovery therefore enumerates every configured Docker context and known local
+Docker socket, resolves every endpoint to its daemon ID, and requires every
+endpoint reachable and each distinct daemon empty of Mycelium fixture resources.
+Known socket locations include system and rootless sockets and the user socket
+locations for Docker Desktop (including its raw engine socket), every named
+Colima profile, OrbStack, Rancher Desktop and every Lima instance's `sock/*.sock`;
+context endpoints supplement them. Directory enumeration errors refuse recovery.
+Unknown contexts, unreachable endpoints, dangling socket links or failed
+inventories retain custody. Missing current prerequisites cannot qualify an old run.
+
+Readable same-UID launch ancestors are inspected with `ps eww`; Docker endpoint
+overrides refuse legacy recovery. Command arguments are removed before examining
+the appended environment, so a shell command mentioning a variable is not an
+environment observation. The receipt records inspected and unreadable ancestors
+and any inventory uncertainty. Historical launch environments were not retained:
+even when current ancestors show no overrides, a historical non-local, TCP or
+arbitrary local Unix-socket `DOCKER_HOST` may be undiscoverable from current
+contexts and standard sockets. The orchestrator extended the legacy default on
+2026-11-09 only with a further positive bound: a complete, whole-table `ps`
+command/argv inventory must account for every live Docker-API daemon/runtime.
+Classification uses each process's real executable identity, resolved through
+`proc_pidpath` on Darwin and `/proc/PID/exe` on Linux, including parent/child
+checks. An argv basename or symlink alias is never executable proof. Unresolved
+identities refuse; Darwin retains only the reviewed sealed-system EPERM rule.
+The process instance is bound by its birth identity before and after reading
+fresh arguments and the executable, rather than combining a `ps` snapshot's
+arguments with a later PID lookup. Darwin uses `PROC_PIDTBSDINFO` start seconds
+and microseconds; where libproc denies cross-UID access, the unprivileged
+`KERN_PROC_PID` sysctl supplies the same timeval. Linux uses `/proc/PID/stat`
+field22. Parent/child links also require the same captured parent birth.
+Changed or vanished instances are re-observed, with refusal after three
+unstable observations; a failed birth lookup for a still-live PID refuses.
+The unprivileged sysctl route is an orchestrator implementation default
+(2026-11-09), not an expansion of the protected-process exclusion.
+A process that exits after the snapshot may be omitted only after a new `ps`
+positively confirms that PID is absent; an unresolvable live process still refuses.
+`dockerd` hosts and daemon configuration must all resolve to inventoried endpoints;
+socket activation also requires a matching service PID and socket-unit binding.
+Docker Desktop's backend/service/fork group must expose an inventoried Unix
+socket, positively read through macOS process socket metadata. Its private raw
+engine socket is also inventoried. A Lima hostagent requires matching live PID
+and parsed forwarding configuration; forwarding configurations currently refuse
+as unsupported. Other detected API runtimes (including Colima, OrbStack, Rancher
+Desktop, Podman services/machines, nerdctl daemons and buildkitd) retain custody
+until their process-to-endpoint binding has supported positive proof. A containerd
+child is bound to its independently checked dockerd parent; standalone containerd
+is not a Docker API. Failed process/configuration/socket observations refuse.
+
+The remaining residual is a historical daemon that has since exited. Each legacy
+receipt records it alongside the orchestrator's observed facts: the launcher had
+no `DOCKER_*` environment at about 19:00Z, and gate entrypoints do not set
+`DOCKER_HOST`. This is an orchestrator agent default, not a maintainer ruling.
+Host and guest both apply the discovery and process bound. New runs use their
+journaled effective and fixture endpoints instead. Recovery never changes a
+daemon, runtime configuration or another project's resources.
+
+Guest executable attestation is a further orchestrator agent default received
+2026-11-09. Linux kernel threads are excluded only with positive PF_KTHREAD
+(`0x00200000`) evidence from `/proc/PID/stat` field9, never from a missing exe
+link. A missing exe for a non-kernel process refuses. Only inside the configured,
+gate-owned Lima guest, inaccessible root-owned executable identities may use
+read-only `sudo -n readlink /proc/PID/exe` (and `sudo -n cat /proc/PID/stat` when
+needed). Each use, success or failure is recorded in the receipt. Unavailable or
+failed non-interactive attestation refuses. This does not authorize sudo on the
+development host, prompting, signals or any guest mutation.
+
+Orchestrator default (2026-11-09): macOS can deny `libproc` inspection of
+platform-protected processes even under the same UID. Gate binaries, Python,
+shell fixtures and VM helpers are not platform-protected. An `EPERM` process may
+therefore be excluded only with independent, readable `ps` evidence proving all
+three conditions: its executable realpath is under `/System/`, `/usr/libexec/`,
+`/usr/bin/`, `/usr/sbin/`, `/sbin/` or `/bin/` (never `/usr/local/`), and `statfs64`
+positively reports mount `/` with `MNT_RDONLY`; its complete
+parent chain contains no recorded or known gate supervisor; and its command line
+has no gate marker, gate path or retained source/scratch path. Every exclusion
+and its executable/mount/ancestry evidence is recorded in the recovery receipt.
+All `/System/Volumes/` paths are refused, including the writable Data volume;
+a `/System/` prefix alone proves nothing about sealed-volume residency. An
+unknown ancestry, non-system executable, gate descendant or failed `ps` inventory
+retains occupancy. This is a narrow ownership-model application, not a maintainer
+ruling or a privileged recovery path.
+
+Both formats require global gate quiet: every recorded PID number must be
+entirely absent, and no host process may carry any gate marker or known
+gate-supervisor identity. A live or reused recorded PID blocks recovery even
+when a new record has a different start identity. Only old-format records
+lacking all execution-identity fields may use legacy guest cleanup discovery;
+their requested batch must include a source-bound positive guest cleanup.
+New records use their persisted identity and exact guest nonce bindings.
+Partial identities, malformed records,
+live fixtures, incomplete inventories and any uncertainty retain occupancy;
+elapsed age never releases it. There is no force flag or scratch deletion.
+The installed local fleet worker can coexist with local gates. CPU admission
+adds the static `fleet_worker_cpu_reserve_cores` from private local gate config,
+declared local gate cores and the host-qualified workstation reserve. The
+configured fleet share is 4 cores on the qualified development host, matching
+its admitted worker CPU budget when set. An operator updates this share when
+changing that worker budget; do so after local resource custody has cleaned up,
+under the host admission lock. Drift can overcommit CPU and slow work; the
+orchestrator accepts that tradeoff because CPU overcommit is not a safety hazard.
+Admission performs no fleet status reads, allowance caching or generation fencing.
+There is no queue/network dependency in this path. Receipts record the static
+fleet/workstation CPU shares and available/required/physical RAM. Worker
+process-tree CPU/RSS may be recorded as observations and do not determine demand.
+RAM admission uses measured per-leg requirements against live available memory,
+with normal-pressure waiting and live pressure, sustained-swap and disk stops.
+Installed-worker fleet custody is separate from local gate lanes and is never
+modified by local admission. Unknown/local native full custody remains binding;
+all custody still blocks idle cache eviction. Ordinary admission does not require
+an idle host.
+Swap-baseline calibration excludes local gate lanes, while the fleet worker and
+its current job remain measured background. Record that job and its usage with
+the baseline; do not wait for the fleet worker to become idle.
+Ordinary fulls wait in FIFO order by default and print their queue position;
+no polling or relay is needed. Release and calibration fulls take priority over
+ordinary waiters. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is
+removed only after OS process identity proves it has exited or is a zombie. Execution slots
+and unknown fixture custody are never removed by that queue cleanup. There is
+no queue timeout. With normal pressure, insufficient available memory is
+transient capacity: keep the FIFO ticket and print available/required GiB until
+memory frees. Active-run future peaks remain reserved. Disk below the floor,
+non-normal pressure and sustained swap remain real stops; a single-run memory
+requirement exceeding host physical memory refuses instead of waiting forever.
+A reserved calibration full can wait for an identified comparison
+batch to exit without entering gaps between that batch's runs.
+For comparable timings, `./scripts/gate.sh full --exclusive` (or
+`gate-local.py full --exclusive`) drains all local gate work and reserves all
+local capacity until verified cleanup. A queued exclusive waiter also blocks
+new ordinary quick work, even behind an older full, so it can drain. Higher
+priority release/calibration work retains priority. Permanent fleet jobs and other projects
+remain measured background; exclusive is not a promise of an idle workstation.
+Release waiters take the next free lane through `GATE_PRIORITY=release` for a
+gate, or the supported release command wrapper (use an absolute output path
+because source runs in a snapshot):
+
+```sh
+python3 scripts/gate-local.py --priority release --command \
+  go build -o "$PWD/.reports/release-myce" ./cmd/myce
+```
+
+A run needs 45 GiB disk free at entry. The host measurement supervisor remains
+active through source preparation, Linux staging and guest execution, stopping
+its owned supervisor below 42 GiB. On macOS, non-normal memory pressure stops
+owned work immediately. A qualified idle-host swap baseline supplies the peak
+background swapout and swap-use growth rates and the observation interval.
+Two consecutive intervals above the background swapout rate, or with swap use
+growing above baseline alongside the gate/VM working set, stop owned work.
+Two intervals are the minimum evidence of continuation rather than one counter
+batch; the detection cost is two measured sampling periods. An isolated batch
+under normal pressure does not prove thrashing. Each receipt records the baseline,
+its evidence digest and the observed windows. Hosts without that qualification
+retain the strict new-swapout stop. Missing nonce-bound cleanup receipts, SSH failure
+or supervisor death retain capacity; exit status alone never releases it. These floors preserve room for the workstation
+and recovery after the 2026-11-02/03 saturation incident.
+
+Darwin development uses a gate-owned Go build cache shared across checkouts.
+Only idle gate-owned build objects are automatically evicted above 12 GiB;
+module downloads, compatibility sources and timing history are retained. Linux
+uses persistent guest build/module caches and the same idle eviction policy.
+No other project's cache is trimmed. Qualified hosts use a private
+`gate-capacity.json` memory measurement: native sampled peak plus observed
+available-memory variation as headroom; Linux/both use the larger of native
+peak or VM residency plus host supervision, and the same headroom. Guest RSS
+is already inside VM residency and is not added again. Concurrent admission
+verifies digest-bound completed native/Linux measurement evidence. Keep the
+evidence paths/digests private.
+A profile-declared Linux need is explicitly provisional until a real four-core
+Linux measurement replaces it. Unqualified hosts retain the initial 22 GiB
+entry value (16 GiB starting reserve plus profile-declared 6 GiB); that fallback
+is not a measured execution envelope. Compressed pages receive no free-memory
+credit. The 12 GiB build-cache ceiling is an initial storage budget;
+`.reports/gate-local.jsonl` records actual growth.
+
+The guest guardian publishes custody before cache readiness, and channel EOF
+revokes its owned work, including when the host transport dies. Guest cache use
+also has a durable nonce marker: supervisor death cannot make cache users look
+idle merely by releasing a descriptor. An unknown marker prevents automatic
+trimming until its exact cleanup is reconciled. Helpers are frozen once with
+product/test sources; both legs receive those identical helper bytes.
+
+Host-admitted native runs verify their canonical lane, source identity and
+admitting ancestor before replacing the legacy suite-count lock with measured
+resource custody. The admission identity is removed from fixture environments.
+Native-only local fulls publish a host-wide custody reservation under the same
+admission lock, including when using a custom build cache. They cannot enter an
+active measured resource group; their reservation also blocks group creation.
+Fleet jobs keep their separate custody and remain background. Native-only
+legacy/fleet Mac gates retain the following custody mechanism.
 On macOS, the full supervisor holds one of two cross-checkout filesystem locks
 for its entire lifetime, independent of package commands or test expressions. It also
 accounts for older standalone full race commands before entering a slot. The
@@ -404,6 +734,85 @@ Retain the other profile fields, then submit with
 `myce run --profile .reports/go-test-darwin.yaml -- -race ./...` from the repo root.
 Use separate submissions with distinct target lists for cross-platform proof.
 
+## Local Linux VM
+
+Install `lima` through Homebrew. This headless Ubuntu VM uses Apple's native
+virtualization, needs no Docker Desktop UI and can be stopped without changing
+fleet services:
+
+```sh
+limactl create --name=mycelium-gates --tty=false .mycelium/lima-gates.yaml
+limactl start --tty=false mycelium-gates
+# First provision installs HWE; boot the installed kernel before any test work.
+limactl stop mycelium-gates
+limactl start --tty=false mycelium-gates
+limactl autostart enable --condition=login mycelium-gates
+```
+
+The checked-in template installs Ubuntu's supported HWE kernel, `bubblewrap`
+and `nsenter` from the start. The GA 6.8 kernel is insufficient: native
+isolation requires **Landlock ABI >= 6**, plus the actual confinement probe
+described in [operations](operations.md#native-payload-isolation). A kernel
+version alone does not qualify confinement. Keep the previous kernel; only
+restart an existing VM after verifying it is idle. Never weaken isolation or
+disable the global AppArmor restriction to make a gate pass. Subsequent starts
+reuse the installed prerequisites without repeating package installation.
+
+The 100 GiB disk is sparse. Provision Go 1.25.6+, GCC, Git, Python 3, uv and
+`uv python install 3.11` inside the VM; install Docker separately for real-daemon
+focused tests. Follow upstream checksum verification for the Go archive.
+Both platforms receive the same immutable snapshot of tracked and unignored
+source files, including uncommitted edits; host HOME/NAS directories are not mounted. Compilation and
+fixture I/O use the guest-native filesystem. Persistent guest caches are
+`~/.cache/mycelium-gates/go-build` and `~/.cache/mycelium-gates/go-mod`.
+Preparation downloads dependencies before the offline gate. `GATE_VM` selects a
+separately provisioned Lima instance. The initial gate CPU budget is four cores
+per platform leg; the wrapper runs the legs sequentially pending capacity proof.
+
+For a focused Linux command with the same host admission, disk supervision and
+fixture cleanup:
+
+```sh
+python3 scripts/gate-local.py --platform linux --command \
+  go test -race -count=1 ./internal/myce -run '^TestName$'
+```
+
+`--repo DIR --ref SHA` selects committed product/test bytes from another checkout.
+For exact-head release proof, use:
+
+```sh
+python3 scripts/gate-local.py full --repo DIR --ref SHA --priority release
+```
+
+`gate-linux.py` is the transport helper; call the admitted wrapper above for work.
+Instrumentation helpers are overlaid identically on both platforms and identified
+separately from product/test sources. Compatibility predecessor archives are
+created from the actual Git root and checked for their commit and module/core
+contents before either full leg. Failed source snapshots remain for diagnosis;
+confirm fixture exit before removal. Success removes only run source/scratch.
+Explicit refs resolve once to a commit SHA before archiving. Working-tree runs
+verify captured bytes, executable modes and HEAD before testing, and mark any
+difference from the pinned commit as dirty. Inherited `MYCE_*` authority is
+removed before the first admission or measurement subprocess.
+
+Each run prints its private `.reports/local-gates/UUID` receipt directory. Retain
+`manifest.json`, `source-identity.json`, and nonce-bound `native-cleanup.json`,
+`linux-cleanup.json`, `overall-cleanup.json`. The append-only
+`.reports/gate-local.jsonl` schema 1 has a common `run_id` and `phase` of `host`,
+`native` or `linux`; rows identify `source_sha`, `source_dirty`,
+`source_tree_sha256`, `source_archive_sha256` and `instrumentation_sha256`. A clean commit plus matching
+archive/instrumentation digests identifies exact-head proof; HEAD alone does not.
+Rows record wall/user/system seconds, sampled RSS sum (shared pages may count
+twice), disk/cache deltas, host pressure/swap observations, all VZ process RSS and
+foreground process-launch latency. Guest RSS and host VM RSS are separate
+observations. The host row includes preparation and both legs. Launch latency is
+a workstation responsiveness proxy, not a UI latency guarantee.
+
+Stop with `limactl stop mycelium-gates`; disable login startup with
+`limactl autostart disable mycelium-gates`. Before deletion, verify no guest work
+or unique evidence remains. `limactl delete mycelium-gates` removes its disk and
+caches. The existing native Mycelium worker and live fleet policy are independent.
+
 ## Fan-out burst acceptance
 
 Run the real `myce dev` runtime burst separately from race instrumentation:
@@ -526,9 +935,7 @@ feedback; failures are work to fix, not a hold on unrelated merges.
 
 Gate tooling is development tooling: if its custody or guard state blocks work, reset it (stop the gate VM, clear the control-directory records) and fix the tool forward.
 
-The memory guard stops only on critical pressure or real swap growth. Updating
-that guard's implementation is a separate worker's code change; this documentation
-change does not claim it is already implemented. Development gates, custody,
+The memory guard stops only on critical pressure or real swap growth. The local gate implements that guard; unavailable telemetry warns and continues. Development gates, custody,
 admission and guards may be changed freely when they block work. Earlier tooling
 custody and guard restrictions in this document are superseded by MY-41. Preserve
 running production customer jobs, secrets and public-repository privacy.

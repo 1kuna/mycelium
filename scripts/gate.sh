@@ -18,6 +18,11 @@ if [[ $mode == quick && $base == --selection ]]; then
 fi
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
+# Darwin development includes a directly invoked Linux VM; fleet profiles
+# explicitly retain their native-only leg. No queue credential is needed.
+if [[ $(uname -s) == Darwin && ${GATE_TARGET:-both} == both && -f scripts/gate-local.py ]]; then
+  exec python3 scripts/gate-local.py "$@"
+fi
 if [[ ${MYCE_GATE_BUDGET:-} != 1 ]]; then
   exec python3 "$repo/scripts/gate-budget.py" "$repo/scripts/gate.sh" "$@"
 fi
@@ -97,7 +102,19 @@ step() {
   return "$result"
 }
 step gate-progress-regressions python3 scripts/test-gate-progress.py
+if [[ -f scripts/test-gate-local.py ]]; then
+  step gate-local-regressions python3 scripts/test-gate-local.py
+fi
+if [[ -f scripts/test-gate-runtime.py ]]; then
+  step gate-runtime-regressions python3 scripts/test-gate-runtime.py
+fi
+if [[ -f scripts/test-gate-reconcile.py ]]; then
+  step gate-reconcile-regressions python3 scripts/test-gate-reconcile.py
+fi
 step gate-scheduler-regressions python3 scripts/test-gate-scheduler.py
+if [[ -f scripts/test-gate-shards.py ]]; then
+  step gate-shards-regressions python3 scripts/test-gate-shards.py
+fi
 step build go build -o "$scratch/bin/myce" ./cmd/myce
 step vet go vet ./...
 # Same matrix as ReleaseTargets; darwin/arm64 is the native CGO build.

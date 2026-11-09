@@ -1,0 +1,32 @@
+# Local test VM; no host directories or credentials are shared.
+minimumLimaVersion: 2.0.0
+base:
+- template:_images/ubuntu-24.04
+vmType: vz
+cpus: 8
+memory: 24GiB
+disk: 100GiB
+mounts: []
+containerd:
+  system: false
+  user: false
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eu
+    # Ubuntu's GA 6.8 kernel lacks Landlock ABI 6. Install HWE on first
+    # provision, retain the previous kernel, and boot HWE before testing.
+    missing=
+    for package in linux-generic-hwe-24.04 bubblewrap util-linux; do
+      status=$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)
+      if [ "$status" != 'install ok installed' ]; then
+        missing="$missing $package"
+      fi
+    done
+    if [ -n "$missing" ]; then
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      # Package names above are fixed, deliberately split into arguments.
+      apt-get install -y --no-install-recommends $missing
+    fi

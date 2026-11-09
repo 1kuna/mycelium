@@ -57,7 +57,14 @@ func TestPieceDependencyDevCPU(t *testing.T) {
 			if err := InstallExtension(c.ExtensionRoot, sink); err != nil {
 				t.Fatal(err)
 			}
-			d, err := StartDev(c)
+			const fixtureBudget = 45 * time.Second
+			// Non-loss transport uses its outer budget; TestControlClockDeadWorkerDetection covers loss.
+			configureLossTiming := func(q *Queue) {
+				if err := q.SetLossTimeouts(fixtureBudget, fixtureBudget, fixtureBudget); err != nil {
+					t.Fatal(err)
+				}
+			}
+			d, err := startDev(c, configureLossTiming)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -68,7 +75,7 @@ func TestPieceDependencyDevCPU(t *testing.T) {
 					}
 				}
 			}()
-			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), fixtureBudget)
 			defer cancel()
 			probeWait(t, ctx, func() bool { snap, err := d.Queue.Snapshot(); return err == nil && len(snap.Machines) == 2 })
 			cache := &EnvironmentCache{Root: filepath.Join(root, "workers", "fake-1", "environment-cache"), Limit: 1 << 30}
@@ -155,7 +162,7 @@ func TestPieceDependencyDevCPU(t *testing.T) {
 				t.Fatal(err)
 			}
 			d = nil
-			d, err = StartDev(c)
+			d, err = startDev(c, configureLossTiming)
 			if err != nil {
 				t.Fatal(err)
 			}

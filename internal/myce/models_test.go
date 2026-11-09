@@ -217,7 +217,9 @@ func TestModelConfigAndOpenAIValidation(t *testing.T) {
 func TestDevModelHTTPFormats(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	d, e := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: dir + "/db", Checkpoints: dir + "/checkpoints", Token: "test", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+	// Exercise wire formats at the normal worker cadence. A 10 ms heartbeat
+	// makes ordinary scheduling delays look like a missing worker during load.
+	d, e := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: dir + "/db", Checkpoints: dir + "/checkpoints", Token: "test", Workers: 1, MemoryGB: 8, Interval: defaultWorkerInterval})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -234,6 +236,9 @@ func TestDevModelHTTPFormats(t *testing.T) {
 		data, _ := io.ReadAll(res.Body)
 		res.Body.Close()
 		if res.StatusCode != 200 || !json.Valid(data) {
+			if snapshot, err := d.Queue.Snapshot(); err == nil {
+				t.Logf("model load state: %+v", snapshot.LoadedModels)
+			}
 			t.Fatalf("%s: %d %s", path, res.StatusCode, data)
 		}
 	}

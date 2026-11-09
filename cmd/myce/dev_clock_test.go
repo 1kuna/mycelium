@@ -101,7 +101,8 @@ func TestDevClockSubmissionExpiryEndToEnd(t *testing.T) {
 		}
 	}
 	var snapshot myce.Snapshot
-	if err := c.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
+	// Retained history is explicit; the default page follows queue capacity.
+	if err := c.Call(ctx, "GET", "/api/status?jobs=all&detail=full", nil, &snapshot); err != nil {
 		t.Fatal(err)
 	}
 	// Unique cancellation/intent history survives along with replay answers.
