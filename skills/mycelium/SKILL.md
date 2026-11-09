@@ -22,6 +22,8 @@ and experiments remain available for collecting comparison evidence.
 The typed `production_parity_hosts` blocker identifies this hold even for
 extensions without variants. A removed host's queued binding is placed again;
 running execution and release custody remain with its current attempt.
+Parity-held production cannot withhold another project's environment preparation
+on an unapproved host. Eligible production retains its tier/preemption priority.
 
 Use the installed CLI or Python `Client.from_installed()`, which resolve
 credentials internally. Never open, print, copy, pass or set fleet credentials.
