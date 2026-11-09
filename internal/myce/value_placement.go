@@ -284,7 +284,7 @@ func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
 		// whose release this demand already requested. Both have passed this
 		// scan's candidate eligibility checks; stale custody alone cannot
 		// withhold capacity. Other cold winners leave room for ready work.
-		if !environmentReady(j, selected.m) && !preparationOwnsTurn(j) {
+		if !q.admissionGate(j, selected.m, environmentReady(j, selected.m) || preparationOwnsTurn(j), predicateEnvironment) {
 			continue
 		}
 		scan.assignments[targetKey(selected.m)] = j
@@ -319,7 +319,7 @@ func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, s
 		}
 		// Background copies yield to foreground commands in the existing worker.
 		// Builds and stopping preparations still fence admission.
-		if immediate && (q.launchCapacityBlocked(winner, set.m) || q.preemptionReleasesPending(winner) || !scan.live[set.m.ID] || !q.batchSlotFree(set.m, winner) || q.preparationActive(set.m) || q.preparationStopping(set.m) || q.calls[winner.ID] != nil || !fits(winner, set.m, set.m.FreeMemoryGB)) {
+		if immediate && (!q.admissionGate(winner, set.m, !q.launchCapacityBlocked(winner, set.m), predicateLaunchCapacity) || !q.admissionGate(winner, set.m, !q.preemptionReleasesPending(winner), predicateReleasePending) || !q.admissionGate(winner, set.m, scan.live[set.m.ID], predicateWorkerNotLive) || !q.admissionGate(winner, set.m, q.batchSlotFree(set.m, winner), predicateBatchSlot) || !q.admissionGate(winner, set.m, !q.preparationActive(set.m), predicatePreparationActive) || !q.admissionGate(winner, set.m, !q.preparationStopping(set.m), predicatePreparationStopping) || !q.admissionGate(winner, set.m, q.calls[winner.ID] == nil, predicateModelCall) || !q.admissionGate(winner, set.m, fits(winner, set.m, set.m.FreeMemoryGB), predicateResources)) {
 			continue
 		}
 		if best == nil || winner.ID != best.ID && set.before(winner, best) || winner.ID == best.ID && q.projectionTargetBetter(winner, set.m, selected.m, scan, immediate) {

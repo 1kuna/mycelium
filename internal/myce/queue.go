@@ -160,8 +160,9 @@ type Queue struct {
 	deliveryPublish      func(Job, *FileStore, string, func()) error // Test seam; set before use.
 	// Ephemeral exact-attempt samples: restart cannot renew a cached credit.
 	admissionWaitDecisions map[string]map[string]admissionWaitDecision // transient actual planner decisions
-	admissionWaitPending   bool                                        // committed maintenance requests an off-lock observation
-	admissionWaitLast      atomic.Pointer[admissionWaitCapture]        // completed observation inputs; one retained generation
+	admissionTrace         *admissionTrace
+	admissionWaitPending   bool                                 // committed maintenance requests an off-lock observation
+	admissionWaitLast      atomic.Pointer[admissionWaitCapture] // completed observation inputs; one retained generation
 	hostMemorySamples      map[string]map[attemptKey]hostMemorySample
 	hostMemoryLedgers      map[string]*HostMemoryLedger // Immutable after each refresh; shared by diagnostics.
 	memoryLedgerGeneration uint64
@@ -666,6 +667,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	}
 	q.admissionWaitPending = false
 	q.admissionWaitDecisions = nil
+	q.admissionTrace = nil
 	q.memoryObservationIndex = nil
 	defer func() { q.memoryObservationIndex = nil }()
 	old, err := q.beginRecords()
@@ -1767,8 +1769,10 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
 			q.cancelUnofferedPreparations(&m, reply)
 		}()
+		q.beginAdmissionCheckin(&m)
 		reply.Leave = m.Leaving
 		if m.BenchmarkPending || c.BenchmarkDone != "" {
+			q.skipAdmissionSelection(&m, predicateBenchmark)
 			return nil
 		}
 		if m.Leaving {
@@ -1785,6 +1789,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 
 		if len(reports) != 0 {
+			q.skipAdmissionSelection(&m, predicateAttemptReports)
 			seen := map[attemptKey]bool{}
 			for i := range reports {
 				a := q.reconcileAttemptReport(&m, &reports[i], progresses[i])
@@ -1812,6 +1817,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			return nil
 		}
 		// Re-deliver an assignment if its HTTP response was lost before startup.
+		q.skipAdmissionSelection(&m, predicateExistingAssignment)
 		for _, j := range q.liveJobs() {
 			if j.State == "running" && j.ReleaseConfirmed {
 				continue // Final result publication is not an execution offer.
@@ -1843,7 +1849,13 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				return nil
 			}
 		}
+		if m.Leaving {
+			q.skipAdmissionSelection(&m, predicateLeaving)
+		} else if c.Recovering {
+			q.skipAdmissionSelection(&m, predicateRecovering)
+		}
 		if !m.Leaving && !c.Recovering {
+			q.skipAdmissionSelection(&m, predicateSelectionNotReached)
 			scan := q.placementScan()
 			j := q.plannedPick(&m, scan)
 			if j != nil {

@@ -54,6 +54,16 @@ blocker still prevents admission.
 Read `latest.closed_at`/`latest.closed_reason` for ended waits and `capture_gaps`/`deferred_at`
 for capture deferred to protect control service. See [wait evidence](../../docs/status.md#retained-production-admission-waits-next-release-868).
 
+From the queue release containing #1158, overdue waits in every tier can
+include `admission_wait.latest.targets[].admission_decision`. Read `outcome`,
+`stage`, and `predicate` for the actual check-in's first failure; identify the
+observation with `at` and `checkin_machine`/`checkin_session`. `not_considered`
+means selection was skipped, not a rejected candidate. `not_selected` means an
+eligible candidate lost selection order. The threshold is one advertised or
+measured check-in opportunity, not an invented start promise. Absence is unknown;
+unchanged evidence retains its timestamp. Sibling `predicates` remain diagnostic
+projections. See [actual decisions](../../docs/status.md#actual-all-tier-admission-decisions-next-release-1158).
+
 ## First run: adapter to verified result
 
 For an existing project, use its reviewed adapter entry or compatibility profile;

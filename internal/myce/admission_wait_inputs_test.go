@@ -44,6 +44,13 @@ func TestAdmissionWaitExactHolderSamples(t *testing.T) {
 	if !fresh.SampleFresh || fresh.ForecastHostGB == nil || *fresh.ForecastHostGB != 2 || fresh.SampleAgeSeconds == nil || *fresh.SampleAgeSeconds != 0 || fresh.Preemptible || fresh.PreemptionReason != "minimum_runtime" {
 		t.Fatalf("lost fresh forecast or protection: %+v", fresh)
 	}
+	// The first overdue check-in adds a new actual admission decision (#1158).
+	// Establish it before asserting that identical telemetry/decisions reuse it.
+	clock.Advance(time.Second)
+	report.CurrentHostMemory.SampleID++
+	if _, err := q.Checkin(Checkin{Machine: m, Attempts: []AttemptReport{report}, AttemptProtocol: keyedAttemptProtocol, period: time.Second}); err != nil {
+		t.Fatal(err)
+	}
 	observedAt := admissionWaitAPI(t, q, demand.ID).Latest.At
 	clock.Advance(time.Second)
 	report.CurrentHostMemory.SampleID++

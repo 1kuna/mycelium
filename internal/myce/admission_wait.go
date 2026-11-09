@@ -13,19 +13,24 @@ import (
 // The commit already freezes these inputs for supported status reads. Capturing
 // their pointers adds no backlog copy or diagnostic planner work under q.mu.
 type admissionWaitCapture struct {
-	index     *publishedReadIndex
-	decisions map[string]map[string]admissionWaitDecision
-	bytes     uint64
-	service   time.Duration
-	clock     Clock
-	refresh   time.Time
+	index      *publishedReadIndex
+	decisions  map[string]map[string]admissionWaitDecision
+	admissions map[string]map[string]AdmissionDecision
+	bytes      uint64
+	service    time.Duration
+	clock      Clock
+	refresh    time.Time
 }
 
 func (q *Queue) freezeAdmissionWait() *admissionWaitCapture {
 	for _, j := range q.records.live {
-		if j.Spec.Priority == "production" && j.State == "queued" {
+		if j.State == "queued" && (j.Spec.Priority == "production" || j.AdmissionWait != nil || q.admissionTrace != nil && len(q.admissionTrace.jobs[j.ID]) > 0) {
 			_, service := q.evidencePressure()
-			return &admissionWaitCapture{index: q.publishedReads.Load(), decisions: q.admissionWaitDecisions, bytes: q.evidenceBytes, service: service, clock: q.holdClock}
+			var admissions map[string]map[string]AdmissionDecision
+			if q.admissionTrace != nil {
+				admissions = q.admissionTrace.jobs
+			}
+			return &admissionWaitCapture{admissions: admissions, index: q.publishedReads.Load(), decisions: q.admissionWaitDecisions, bytes: q.evidenceBytes, service: service, clock: q.holdClock}
 		}
 	}
 	q.admissionWaitLast.Store(nil)
@@ -55,6 +60,7 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 	source.s.Jobs, source.records = jobs, nil
 	source.evidenceBytes, source.holdClock = c.bytes, c.clock
 	source.admissionWaitDecisions = c.decisions
+	source.admissionTrace = &admissionTrace{jobs: c.admissions}
 	source.memoryPlanning = newMemoryPlanningCache()
 	refresh := func(at time.Time) {
 		if at.After(source.clock.Now()) && (c.refresh.IsZero() || at.Before(c.refresh)) {
@@ -82,7 +88,7 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 	source.buildAdmissionWaits(source.placementScan(), c.service)
 	changes := map[string]*AdmissionWaitEvidence{}
 	for id, j := range jobs {
-		if j.Spec.Priority != "production" || j.State != "queued" || j.AdmissionWait == nil {
+		if j.State != "queued" || j.AdmissionWait == nil {
 			continue
 		}
 		original := readGet(c.index.root, "jobs/"+id)
@@ -171,6 +177,7 @@ type AdmissionWaitSnapshot struct {
 }
 
 type AdmissionWaitTarget struct {
+	AdmissionDecision   *AdmissionDecision    `json:"admission_decision,omitempty"`
 	Host                string                `json:"host"`
 	Machine             string                `json:"machine"`
 	Session             string                `json:"session"`
@@ -394,7 +401,7 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 	waiting := []*Job{}
 	history := uint64(0)
 	for _, j := range q.liveJobs() {
-		if j.Spec.Priority != "production" {
+		if j.Spec.Priority != "production" && j.AdmissionWait == nil && (q.admissionTrace == nil || len(q.admissionTrace.jobs[j.ID]) == 0) {
 			continue
 		}
 		if j.State != "queued" {
@@ -566,6 +573,7 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 				snapshot.Predicate = "no_qualified_target"
 			}
 		}
+		q.attachAdmissionDecisions(j, snapshot, scan)
 		q.touchJob(j.ID).AdmissionWait = retainAdmissionWait(j.AdmissionWait, snapshot, budget, unknown)
 	}
 }
@@ -619,7 +627,7 @@ func sameAdmissionWait(a, b *AdmissionWaitSnapshot) bool {
 	}
 	for i, x := range a.Targets {
 		y := b.Targets[i]
-		if x.Host != y.Host || x.Machine != y.Machine || x.Session != y.Session || x.Device != y.Device || x.DeviceFault != y.DeviceFault || x.Resolution != y.Resolution || x.Concurrency != y.Concurrency || x.Preemption != y.Preemption || x.ReleaseCommitment != y.ReleaseCommitment || x.RequiredCores != y.RequiredCores || x.RequiredHostGB != y.RequiredHostGB || x.RequiredDeviceGB != y.RequiredDeviceGB || !slices.Equal(x.Predicates, y.Predicates) || len(x.Holders) != len(y.Holders) {
+		if x.Host != y.Host || x.Machine != y.Machine || x.Session != y.Session || x.Device != y.Device || x.DeviceFault != y.DeviceFault || x.Resolution != y.Resolution || x.Concurrency != y.Concurrency || x.Preemption != y.Preemption || x.ReleaseCommitment != y.ReleaseCommitment || !sameAdmissionDecision(x.AdmissionDecision, y.AdmissionDecision) || x.RequiredCores != y.RequiredCores || x.RequiredHostGB != y.RequiredHostGB || x.RequiredDeviceGB != y.RequiredDeviceGB || !slices.Equal(x.Predicates, y.Predicates) || len(x.Holders) != len(y.Holders) {
 			return false
 		}
 		if (x.LastPlannerDecision == nil) != (y.LastPlannerDecision == nil) {

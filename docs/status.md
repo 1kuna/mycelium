@@ -2764,3 +2764,42 @@ while keeping the first endpoint. Parent evidence is not copied into a new
 child's execution history. This is an observation-only record, including for parents before any
 child exists. Retained samples survive assignment/retry and queue restart with
 the job; existing job history retention still owns their lifetime.
+
+
+## Actual all-tier admission decisions (next release, #1158)
+
+After a queued job has waited one advertised or measured worker send interval,
+a real check-in can add `admission_wait.latest.targets[].admission_decision`
+for production, deadline and experiment jobs. Unknown cadence grants no invented
+start deadline. This threshold is an observation opportunity, not a start SLA;
+`opportunity_seconds` records its basis. Earlier production diagnostic evidence
+remains available independently.
+
+The typed `outcome` is `rejected`, `not_selected`, or `not_considered`.
+`stage` identifies `candidate_eligibility`, `placement`, or `checkin`.
+`predicate` names the first actual failed branch (for example `tools`,
+`checkpoint`, `maintenance`, `release_pending`, or `resources`). A fitting
+candidate that loses ordering records `not_selected` / `selection_order`.
+An early return records `not_considered`, with reasons such as `attempt_reports`,
+`existing_assignment`, `recovering`, `leaving`, `benchmark`, or `cleanup`.
+`selection_not_reached` means this target did not reach candidate evaluation;
+`candidate_unavailable` means no variant emerged without a more specific
+captured predicate. It does not imply a diagnosed underlying cause.
+
+`at`, `checkin_machine`, `checkin_session`, and optional `device` identify the
+actual observation. Unchanged outcomes reuse their original timestamp; absence
+is unknown, never proof of consideration. Each target retains its most recent
+distinct decision for the same attempt/piece and worker session, including
+check-ins on other targets. Removed inventory expires that target's endpoint.
+The sibling `predicates` remain diagnostic projections; they never claim this
+check-in executed those branches. `resolution=admission_decision_only` means
+only the real decision could be captured, without a concrete diagnostic vector.
+Its zero resource fields are placeholders, not measured capacity.
+
+Only compact enum facts are collected during real selection. Construction,
+comparison and history encoding run outside the writer lock and use the same
+committed-generation fence, capture gaps, measured adaptive history budget and
+lifecycle closure as production evidence. No status read records a decision.
+Per-target endpoints are bounded by current inventory; optional transitions
+share measured evidence headroom across all observed waiting jobs. Missing or
+dropped history cannot explain a past event retroactively.

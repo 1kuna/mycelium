@@ -229,29 +229,29 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
-	if j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m) {
+	if !q.admissionPass(j, m, !(j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m)), predicateDeviceFaultRetry) {
 		return false
 	}
-	return (j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID])) && q.yieldPlacementAllows(j, m) && (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.placementPolicyAllowed(j, m, resident)
+	return q.admissionPass(j, m, j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID]), predicateInventory) && q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) && q.admissionPass(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), predicateDeviceAdmission) && q.admissionPass(j, m, q.diskHeadroomReason(j, m) == "", predicateDiskHeadroom) && q.placementPolicyAllowed(j, m, resident)
 }
 
 // Started preparation retains demand while contact is suspect. Resource,
 // reservation and policy fences still apply; this cannot grant a new assignment.
 func (q *Queue) placementDemandAllowed(j *Job, m *Machine) bool {
-	if j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m) {
+	if !q.admissionPass(j, m, !(j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m)), predicateDeviceFaultRetry) {
 		return false
 	}
-	return q.yieldPlacementAllows(j, m) && (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.reservationAllows(j, m) && q.placementDemandPolicy(j, m, false)
+	return q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) && q.admissionPass(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), predicateDeviceAdmission) && q.admissionPass(j, m, q.diskHeadroomReason(j, m) == "", predicateDiskHeadroom) && q.admissionPass(j, m, q.reservationAllows(j, m), predicateReservation) && q.placementDemandPolicy(j, m, false)
 }
 
 // Recovery retains existing execution custody. Admission-time disk estimates
 // apply only to new work: its writes may already be reflected in observed free.
 func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
-	return q.reservationAllows(j, m) && q.placementPolicyWithoutReservation(j, m, resident)
+	return q.admissionPass(j, m, q.reservationAllows(j, m), predicateReservation) && q.placementPolicyWithoutReservation(j, m, resident)
 }
 
 func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident bool) bool {
-	if q.workerSuspect(m, q.clock.Now()) && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping")) {
+	if !q.admissionPass(j, m, !(q.workerSuspect(m, q.clock.Now()) && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateWorkerSuspect) {
 		return false
 	}
 	return q.placementDemandPolicy(j, m, resident)
@@ -260,43 +260,43 @@ func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident b
 // Useful demand survives temporary contact suspicion. This predicate grants no
 // assignment or preparation authority; those paths still require fresh contact.
 func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
-	if q.variantParityReason(j, m) != "" {
+	if !q.admissionPass(j, m, q.variantParityReason(j, m) == "", predicateVariantParity) {
 		return false
 	}
-	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
+	if !q.admissionPass(j, m, !(j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction()), predicateProductionPaused) {
 		return false
 	}
-	if (j.StartedAt == nil || j.State == "queued") && (q.sharedHostBackoffReason(j, m) != "" || q.storageRootReason(j, m) != "") {
+	if (j.StartedAt == nil || j.State == "queued") && (!q.admissionPass(j, m, q.sharedHostBackoffReason(j, m) == "", predicateSharedHostBackoff) || !q.admissionPass(j, m, q.storageRootReason(j, m) == "", predicateStorageRoot)) {
 		return false
 	}
-	if !dependencyReady(j) || m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
+	if !q.admissionPass(j, m, dependencyReady(j), predicateDependency) || !q.admissionPass(j, m, !m.Recovering, predicateRecovering) || !q.admissionPass(j, m, !cancelled(j), predicateCancelled) || !q.admissionPass(j, m, dockerRuntimeFits(j, m), predicateDockerRuntime) || !q.admissionPass(j, m, !(q.maintenanceBlocked(hostID(m))), predicateMaintenance) || !q.admissionPass(j, m, !m.HostMemoryPolicyMismatch, predicateHostMemoryPolicy) || !q.admissionPass(j, m, logPolicyFits(j.Spec.Logs, m), predicateLogPolicy) {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {
 		if resident {
 			model = q.residentModel(model, m)
 		}
-		if !logPolicyFits(model.Logs, m) || !modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID) {
+		if !q.admissionPass(j, m, logPolicyFits(model.Logs, m), predicateModelLogPolicy) || !q.admissionPass(j, m, modelFenceAllows(model, m), predicateModelFence) || !q.admissionPass(j, m, q.projectAllows(model.Project, m.ID), predicateModelProject) {
 			return false
 		}
 	}
 
-	if availabilityBlocked(m) || (q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || !q.jobAllowsMachine(j, m.ID) {
+	if !q.admissionPass(j, m, !availabilityBlocked(m), predicateAvailability) || !q.admissionPass(j, m, !(q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateMachineCapacity) || !q.admissionPass(j, m, q.startupReleaseBlocker(hostID(m)) == "", predicateStartupRelease) || !q.admissionPass(j, m, q.dockerBlocker(hostID(m)) == "", predicateDockerRelease) || !q.admissionPass(j, m, q.jobAllowsMachine(j, m.ID), predicateAllowedMachine) {
 		return false
 	}
-	if j.ProductionHost != "" && j.ProductionHost != hostID(m) {
+	if !q.admissionPass(j, m, !(j.ProductionHost != "" && j.ProductionHost != hostID(m)), predicateProductionHost) {
 		return false
 	}
-	if q.productionAdmissionReason(j, m) != "" {
+	if !q.admissionPass(j, m, q.productionAdmissionReason(j, m) == "", predicateProductionAdmission) {
 		return false
 	}
 	if !q.held(hostID(m)) {
 		return true
 	}
-	if j.Spec.Priority != "production" {
+	if !q.admissionPass(j, m, j.Spec.Priority == "production", predicateProductionHold) {
 		return false
 	}
-	return q.hostBlockers(hostID(m)) == ""
+	return q.admissionPass(j, m, q.hostBlockers(hostID(m)) == "", predicateHostRelease)
 }
 func (q *Queue) hostBlockers(host string) string {
 	text, _ := q.hostBlockerState(host)
