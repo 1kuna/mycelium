@@ -209,7 +209,10 @@ does not establish the cause of compute timeouts; track those independently.
 
 The optional [host template](../deploy/xe-preempt-timeout/README.md) persists an
 explicitly configured CCS `preempt_timeout_us` across boot and xe device adds,
-with a worker pre-start readback check. It is disabled by default (no writes),
+with a report-only worker pre-start readback check. Udev waiting occurs only
+when configured and an xe card exists, with a five-second best-effort budget;
+failures, timeouts and mismatches log warnings and never block worker startup.
+It is disabled by default (no writes),
 is installed manually, and can restore recorded prior values and be removed.
 It never changes job timeouts or timeslices.
 

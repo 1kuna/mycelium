@@ -13,21 +13,32 @@ these instructions do not imply that the trial passed.
 Use a synchronous udev `RUN` helper rather than an asynchronous systemd device
 activation: the short, local writes complete during each primary DRM card add,
 including boot coldplug, driver rebind and hotplug. No network, GPU workload or
-daemon is started. The worker drop-in waits for udev processing and independently
-verifies the configured value before every worker start. This works with the
-normal **user** worker unit; ordering a root system unit `Before=` a user unit
-would not order the two managers. `udevadm settle` uses its standard 120-second
-timeout: a stuck udev queue prevents worker startup rather than bypassing the
-ordering requirement, at the cost of delaying startup for unrelated udev work.
-Verification failure also prevents startup; udev helper errors alone do not
-prevent device registration, so inspect the journal after every device add.
+daemon is started. The worker drop-in runs a **report-only** startup check.
+Only when a value is configured and an xe primary card is present does it run
+`udevadm settle --timeout=5`, with a matching five-second subprocess deadline.
+Five seconds is an explicit best-effort startup latency budget to avoid the
+120-second default delay; it is not measured device-initialization latency.
+The cost is up to five seconds of startup delay, possibly for unrelated udev
+work; unfinished device initialization can outlast that budget. With an unset
+value or no xe card it does not invoke udevadm or wait.
+
+After that attempt it reads back and logs the configured value. Mismatches,
+unreadable attributes, invalid configuration, missing udevadm, settle failures
+and timeouts produce clear warnings on stderr (the worker journal) and through
+syslog. **They never prevent the worker from starting.** The drop-in's systemd
+`-` prefix also ignores a missing helper/interpreter or another nonzero exit.
+This works with the normal **user** worker unit; ordering a root system unit
+`Before=` a user unit would not order the two managers. This is best-effort
+ordering and reporting, not a guarantee that settings are applied before any
+worker queue is created. Inspect warnings and the device-add journal before
+accepting the trial setting; udev errors do not prevent device registration.
 
 The helper discovers every xe primary card, then every tile/GT CCS class. It
 only writes `engines/ccs/preempt_timeout_us`, reads the live sibling
 `preempt_timeout_min` / `preempt_timeout_max` (never `.defaults` bounds), validates
 all selected ranges before writing, and reads back and logs each write. It
 does not modify bounds, `job_timeout_ms`, timeslices or other engine classes.
-Kernel rejection/readback failure is fatal; completed writes on other devices
+During apply/restore, kernel rejection/readback failure is fatal; completed writes on other devices
 are retained in the rollback record. Repeated application skips matching values.
 No xe/CCS device is a successful no-op.
 
@@ -37,9 +48,14 @@ not volatile card number. The record survives reboot and repeated application.
 Serialized callbacks prevent state updates racing with one another or restore.
 Do not edit state or run another tuning tool concurrently. GPU queue creation
 must be quiescent during initial application and rollback: existing queues keep
-their old timeout. The drop-in gates worker startup, not already-running jobs
-or unrelated applications. Native boot/hotplug/udev ordering remains to be
+their old timeout. The drop-in only reports startup observations; it does not
+gate the worker, already-running jobs or unrelated applications. Native
+boot/hotplug/udev ordering remains to be
 qualified on an authorized idle host; fake sysfs does not prove it.
+Review round 1 requirement (received by the implementation worker): startup
+verification is report-only, and ordering waits are conditional, bounded and
+never block startup. Applying this template still requires a clean confirmation
+batch and separate authorization.
 
 ## Install after separate authorization
 
@@ -100,8 +116,11 @@ journalctl -t myce-xe-preempt-timeout
 systemctl --user status myce-worker.service
 ```
 
-Confirm every xe CCS value, successful readback logs, successful worker pre-start
-commands and that newly created execution queues are used. A readback proves
+Confirm every xe CCS value, successful readback logs, absence of startup
+warnings and that newly created execution queues are used. `verify` is
+report-only and exits successfully even on a mismatch; inspect its messages
+and the sysfs values rather than using its exit status as proof of application.
+A readback proves
 the host setting, not workload stability or the value of already-created queues.
 Collect kernel reset evidence independently during the confirmation workload.
 

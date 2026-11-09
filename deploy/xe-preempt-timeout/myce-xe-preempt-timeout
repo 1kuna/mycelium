@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import syslog
 
@@ -37,7 +38,7 @@ def configured(path: Path) -> int | None:
     return value
 
 
-def engines(root: Path, card: str | None) -> list[tuple[str, Path]]:
+def xe_cards(root: Path, card: str | None) -> list[Path]:
     if card is not None and not re.fullmatch(r"card[0-9]+", card):
         raise ValueError("invalid DRM card name")
     found = []
@@ -47,6 +48,14 @@ def engines(root: Path, card: str | None) -> list[tuple[str, Path]]:
         device = entry / "device"
         if (device / "driver").resolve().name != "xe":
             continue
+        found.append(entry)
+    return found
+
+
+def engines(root: Path, card: str | None) -> list[tuple[str, Path]]:
+    found = []
+    for entry in xe_cards(root, card):
+        device = entry / "device"
         for target in sorted(device.glob("tile[0-9]*/gt[0-9]*/engines/ccs/preempt_timeout_us")):
             identity = device.resolve().name + "/" + str(target.relative_to(device))
             found.append((identity, target))
@@ -74,13 +83,26 @@ def run(args: argparse.Namespace) -> None:
     if args.action != "restore" and value is None:
         log("PREEMPT_TIMEOUT_US unset: leaving kernel/administrator values unchanged")
         return
+    if args.action == "startup" and xe_cards(args.sysfs_root, args.card):
+        # Best-effort ordering only. Five seconds is the startup latency budget,
+        # not a claim about normal udev completion time. Never wait indefinitely.
+        try:
+            result = subprocess.run(["/usr/bin/udevadm", "settle", "--timeout=5"],
+                                    timeout=5, check=False)
+            if result.returncode:
+                log(f"WARNING: udev settle exited {result.returncode}; continuing worker startup")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            log(f"WARNING: udev settle failed: {error}; continuing worker startup")
     targets = engines(args.sysfs_root, args.card)
-    if args.action == "verify":
+    if args.action in ("verify", "startup"):
         for _, target in targets:
-            actual = checked(target, value)
-            if actual != value:
-                raise ValueError(f"{target}: expected {value}, read {actual}; worker must not start")
-            log(f"{target}: verified {actual}")
+            try:
+                actual = checked(target, value)
+                if actual != value:
+                    raise ValueError(f"expected {value}, read {actual}")
+                log(f"{target}: verified {actual}")
+            except (OSError, ValueError) as error:
+                log(f"WARNING: {target}: {error}; report-only, continuing worker startup")
         return
     args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Serialize device-add callbacks, manual apply and rollback. Never unlink
@@ -124,7 +146,7 @@ def run(args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("apply", "verify", "restore"))
+    parser.add_argument("action", choices=("apply", "verify", "startup", "restore"))
     parser.add_argument("--card")
     parser.add_argument("--config", type=Path, default=Path("/etc/myce-xe-preempt-timeout.conf"))
     parser.add_argument("--sysfs-root", type=Path, default=Path("/sys"))
@@ -134,6 +156,9 @@ def main() -> int:
     try:
         run(args)
     except (OSError, ValueError, TypeError) as error:
+        if args.action in ("verify", "startup"):
+            log(f"WARNING: {error}; report-only, continuing worker startup")
+            return 0
         log(f"FAILED: {error}")
         return 1
     return 0

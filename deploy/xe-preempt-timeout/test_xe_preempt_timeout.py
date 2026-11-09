@@ -1,9 +1,12 @@
 """Laptop integration tests: all helper invocations use temporary fake sysfs."""
 from pathlib import Path
+import argparse
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 HELPER = Path(__file__).with_name("myce-xe-preempt-timeout")
@@ -107,12 +110,49 @@ class TimeoutTest(unittest.TestCase):
             self.invoke("verify")
             self.assertEqual(self.target.read_text(), f"{value}\n")
 
-    def test_worker_refuses_unapplied_policy(self):
-        self.assertIn("worker must not start", self.invoke("verify", success=False))
+    def test_worker_reports_unapplied_policy_without_failure(self):
+        self.assertIn("expected 1280000, read 640000", self.invoke("verify"))
+        self.assertIn("continuing worker startup", self.invoke("verify"))
         self.invoke()
         self.invoke("verify")
         self.target.write_text("640000\n")
-        self.invoke("verify", success=False)
+        self.assertIn("report-only", self.invoke("verify"))
+        self.target.with_name("preempt_timeout_min").unlink()
+        self.assertIn("WARNING", self.invoke("verify"))
+        self.config.write_text("PREEMPT_TIMEOUT_US=invalid\n")
+        self.assertIn("continuing worker startup", self.invoke("startup"))
+
+    def test_startup_settle_is_conditional_bounded_and_report_only(self):
+        helper = runpy.run_path(str(HELPER))
+        args = argparse.Namespace(action="startup", config=self.config,
+                                  sysfs_root=self.root, card=None, state_dir=self.state)
+        with mock.patch.object(helper["subprocess"], "run") as settle, \
+                mock.patch.object(helper["syslog"], "syslog") as journal:
+            self.config.write_text("PREEMPT_TIMEOUT_US=\n")
+            helper["run"](args)
+            settle.assert_not_called()
+            self.config.write_text("PREEMPT_TIMEOUT_US=1280000\n")
+            driver = self.root / "class/drm/card0/device/driver"
+            driver.unlink()
+            helper["run"](args)
+            settle.assert_not_called()
+            driver.symlink_to(self.root / "drivers/xe")
+            for outcome in (subprocess.CompletedProcess([], 0),
+                            subprocess.CompletedProcess([], 1),
+                            subprocess.TimeoutExpired("udevadm", 5),
+                            FileNotFoundError("udevadm missing")):
+                settle.reset_mock()
+                settle.side_effect = outcome if isinstance(outcome, Exception) else None
+                settle.return_value = outcome
+                helper["run"](args)
+                settle.assert_called_once_with(
+                    ["/usr/bin/udevadm", "settle", "--timeout=5"], timeout=5, check=False)
+            messages = [call.args[1] for call in journal.call_args_list]
+            self.assertTrue(any("expected 1280000, read 640000" in m for m in messages))
+            self.assertTrue(any("udev settle failed" in m for m in messages))
+            self.assertTrue(any("udev settle exited 1" in m for m in messages))
+        self.assertEqual(self.target.read_text(), "640000\n")
+        self.assertFalse(self.state.exists())
 
     def test_no_xe_and_invalid_card(self):
         self.invoke("apply", "--card", "../card0", success=False)
