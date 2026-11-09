@@ -121,10 +121,10 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 				t.Fatal("initial probe did not retain physical containment", ceiling)
 			}
 			second := submit(t, q, render)
-			report := func(j *Job) AttemptReport {
+			report := func(j *Job, sampleID int64) AttemptReport {
 				footprint := ram / 16
 				return AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true,
-					CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: ram / 32, FootprintGB: &footprint, GrowthGB: ram / 64, GrowthRateGB: ram / 64, GrowthObserved: true}}
+					CurrentHostMemory: &CurrentHostMemory{SampleID: sampleID, NonreclaimableGB: ram / 32, FootprintGB: &footprint, GrowthGB: ram / 64, GrowthRateGB: ram / 64, GrowthObserved: true}}
 			}
 			pull := func(reports ...AttemptReport) *Job {
 				t.Helper()
@@ -139,20 +139,20 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 			if pull(AttemptReport{Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Session: a.Session, Started: true}) != nil {
 				t.Fatal("missing measurement earned credit")
 			}
-			r := report(a)
+			r := report(a, 1)
 			r.CurrentHostMemory.GrowthObserved = false
 			if pull(r) != nil {
 				t.Fatal("unknown growth earned credit")
 			}
-			r = report(a)
+			r = report(a, 2)
 			r.Attempt++
-			unknown := report(a)
+			unknown := report(a, 1)
 			unknown.CurrentHostMemory = nil
 			if pull(unknown, r) != nil {
 				t.Fatal("stale attempt earned credit")
 			}
 			target.HostAvailableMemoryGB = ram * .875
-			r = report(a)
+			r = report(a, 2)
 			b := pull(r)
 			if b == nil || b.ID != second.ID {
 				t.Fatalf("probe held entire host: %s", job(t, q, second.ID).Reason)
@@ -165,7 +165,8 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 				t.Fatal("worker disagrees with queue", err)
 			}
 			// Both probes remain active while the measured OCR job start.
-			reports := []AttemptReport{report(a), report(b)}
+			// Re-deliver the identified observations without renewing their identity.
+			reports := []AttemptReport{r, report(b, 1)}
 			for i := 0; i < 1; i++ {
 				submit(t, q, ocr)
 			}
@@ -174,7 +175,7 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 				if j == nil || j.MemoryEnvelope.Basis != "learned" || j.MemoryEnvelope.Evidence != 1 {
 					t.Fatalf("OCR %d serialized behind probes: %+v", i, j)
 				}
-				reports = append(reports, report(j))
+				reports = append(reports, report(j, 1))
 			}
 			clock.Advance(hostMemorySampleFreshFor)
 			if err := localAttemptAdmission(w, []Job{*a}, *b, nil); err == nil {

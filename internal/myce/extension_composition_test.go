@@ -10,14 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 func compositionExtension(t *testing.T, withEnvironment bool) Extension {
@@ -318,6 +316,86 @@ while ! test -s child.pid; do sleep 0.01; done
 		t.Fatal(err)
 	}
 	nativeNoSurvivors(t, &nativeTestRun{p: &process{cmd: &exec.Cmd{Process: &os.Process{Pid: state.PID}}}, dir: nativeDir})
+
+	t.Run("standalone-recipe-survives-expired-input-sweep", func(t *testing.T) {
+
+		for _, kind := range []string{"inline", "execution-sidecar"} {
+			t.Run(kind, func(t *testing.T) {
+				q, clock := fixture(t)
+				// Inspect the expired input after sweeping, before history retirement.
+				if err := q.ConfigureLogRetention(2 * testFileRetention); err != nil {
+					t.Fatal(err)
+				}
+				lock := filepath.Join(t.TempDir(), "requirements.txt")
+				want := []byte("example==1.0\n")
+				if err := os.WriteFile(lock, want, 0600); err != nil {
+					t.Fatal(err)
+				}
+				r, err := snapshotEnvironment(EnvironmentRecipe{LockFile: lock, Python: "3.12"}, "fake")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"fake": r}}}); err != nil {
+					t.Fatal(err)
+				}
+				s := spec("experiment")
+				s.SubmissionKey = "recipe"
+				s.Environment = Environment{Name: "tools"}
+				switch kind {
+				case "inline":
+					s.Environment = Environment{LockFile: lock, Python: "3.12", Platforms: []string{"fake"}}
+				case "execution-sidecar":
+					s.Environment = Environment{}
+					s.Run = RunSpec{}
+					s.Execution = &ExecutionSpec{Main: ExecutionMember{Command: []string{"true"}, Environment: "tools"}, Sidecars: []NativeSidecar{{Name: "helper", Command: []string{"true"}, Environment: "tools"}}}
+				}
+				j := submit(t, q, s)
+				ref := q.s.Jobs[j.ID].EnvironmentRecipes["fake"].FilesRef
+				if ref == nil {
+					t.Fatal("submitted recipe has no blob reference")
+				}
+
+				// The catalog and delivered answer still own their original bytes.
+				if !reflect.DeepEqual(j.EnvironmentRecipes["fake"].Files, r.Files) || !reflect.DeepEqual(q.environments.Environments["tools"]["fake"].Files, r.Files) {
+					t.Fatal("freezing mutated catalog or response bytes")
+				}
+				m := machine("builder", "fake")
+				m.EnvironmentBuilder = true
+				reply := check(t, q, m, nil)
+				if len(reply.EnvironmentPlan) != 1 || !reflect.DeepEqual(reply.EnvironmentPlan[0].Files, r.Files) {
+					t.Fatal("worker preparation lost recipe bytes", reply.EnvironmentPlan)
+				}
+				m.Environments = []string{r.Key}
+				reply = check(t, q, m, nil)
+				if reply.Job == nil || !reflect.DeepEqual(reply.Job.EnvironmentRecipes["fake"].Files, r.Files) {
+					t.Fatal("worker assignment lost recipe bytes")
+				}
+				if kind == "execution-sidecar" && !reflect.DeepEqual(reply.Job.SidecarEnvironmentRecipes["helper"]["fake"].Files, r.Files) {
+					t.Fatal("worker sidecar lost recipe bytes")
+				}
+				// The same bytes are eligible for reclamation as an expired job's
+				// input, but the submitted recipe retains independent custody.
+				if err := q.update(func() error {
+					finished := clock.Now()
+					q.s.Jobs["expired-input"] = &Job{ID: "expired-input", State: "succeeded", FinishedAt: &finished, Spec: Spec{Files: FileManifest{"old-input": *ref}}}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				clock.Advance(testFileRetention + time.Nanosecond)
+				if err := q.Tick(); err != nil {
+					t.Fatal(err)
+				}
+				if err := q.files.verify(context.Background(), *ref); err != nil {
+					t.Fatal("sweep collected referenced recipe", err)
+				}
+				if !q.s.Jobs["expired-input"].FilesExpired {
+					t.Fatal("sweep did not expire the old input")
+				}
+			})
+		}
+
+	})
 }
 
 // Versions and debug scripts must not multiply identical dependency prefixes.

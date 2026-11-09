@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"encoding/json"
-
 	"fmt"
 	"math"
 	"os"
@@ -47,7 +46,13 @@ func (f gpuHostFS) ReadDir(p string) ([]os.DirEntry, error) {
 }
 
 func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
-	for _, mode := range []string{"b70 212 KiB", "host avg10 only", "cgroup avg10 only", "missing host PSI", "missing cgroup PSI"} {
+	// Historical stalls are baseline, not new pressure. At a 200 ms window,
+	// exactly 2,000 microseconds is 1%; avg10 need not have refreshed yet.
+	if memoryStallPressure(1000000, 1001999, 200*time.Millisecond) || !memoryStallPressure(1000000, 1002000, 200*time.Millisecond) {
+		t.Fatal("cumulative PSI did not respect the 1% elapsed-time boundary")
+	}
+
+	for _, mode := range []string{"b70 212 KiB", "host avg10 only", "cgroup avg10 only", "host PSI total", "cgroup PSI total", "missing host PSI", "missing cgroup PSI"} {
 		t.Run(mode, func(t *testing.T) {
 			clock := &workerFakeClock{now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)}
 			c := fakeCeilings(t)

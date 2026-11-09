@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,6 +111,34 @@ func TestSharedInputsReuseTamperAndEviction(t *testing.T) {
 	if _, err = os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("released entry was not evicted", err)
 	}
+
+	t.Run("cancelled-warm-acquire-releases-custody", func(t *testing.T) {
+
+		nas := t.TempDir()
+		ref := sharedFixtureFile(t, nas, "input", "warm input")
+		input := SharedInput{NAS: "input", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
+		cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20}}
+		_, release, err := cache.Acquire(context.Background(), input, nas)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		path, release, err := cache.Acquire(ctx, input, nas)
+		if release != nil {
+			release()
+		}
+		if !errors.Is(err, context.Canceled) || path != "" || release != nil {
+			t.Fatalf("cancelled warm cache acquired: path=%q release=%v err=%v", path, release != nil, err)
+		}
+		lock, err := cache.cache.tryLock(input.key() + ".use")
+		if err != nil || lock == nil {
+			t.Fatalf("cancelled cache retained use lock: %v", err)
+		}
+		unlockEnvironment(lock)
+
+	})
 }
 func TestSharedInputsNASTreeAndArchiveConfinement(t *testing.T) {
 	nas := t.TempDir()

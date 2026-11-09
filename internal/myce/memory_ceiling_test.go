@@ -1,18 +1,11 @@
 package myce
 
 import (
-	"net/http/httptest"
-)
-
-import (
-	"encoding/json"
-)
-
-import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -694,4 +687,58 @@ func TestMemoryCeilingTinyRequestReservation(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("fractional-below-page-reservation", func(t *testing.T) {
+
+		page := int64(65536)
+		requestBytes := 131072 - 0.5
+		allocations := 2
+
+		requestGiB := requestBytes / (1 << 30)
+		reservedBytes := max(requestBytes, 65536)
+		q, _ := fixture(t)
+		var enforced int64
+		var reserved float64
+		for i := 0; i < allocations; i++ {
+			m := machine(fmt.Sprintf("card%d", i), "fake")
+			m.HostID = "shared"
+			m.HostMemoryMeasured = true
+			m.HostAvailableMemoryGB = 1
+			m.HostMemoryBudgetGB = float64(allocations) * reservedBytes / (1 << 30)
+			check(t, q, m, nil)
+			s := spec("experiment")
+			s.Needs.HostMemoryGB = requestGiB
+			s.AllowedMachines = []string{m.ID}
+			submit(t, q, s)
+			j := check(t, q, m, nil).Job
+			if j == nil {
+				t.Fatal("budget-fitting fractional request refused")
+			}
+			charge := hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) * (1 << 30)
+			if charge != reservedBytes {
+				t.Fatalf("reserved %g bytes, want %g", charge, reservedBytes)
+			}
+			w := Worker{Machine: m}
+			bytes, err := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := fakeCeilings(t)
+			c.pageSize = int(page)
+			c.fs = pagedMemoryFS{pageSize: page}
+			attempt, err := c.create("attempt", bytes, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if float64(attempt.bytes) > charge {
+				t.Errorf("enforced %d > reserved %g", attempt.bytes, charge)
+			}
+			enforced += attempt.bytes
+			reserved += charge
+		}
+		if float64(enforced) > reserved {
+			t.Errorf("aggregate enforced %d > reserved %g", enforced, reserved)
+		}
+
+	})
 }

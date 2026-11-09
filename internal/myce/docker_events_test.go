@@ -2,13 +2,13 @@ package myce
 
 import (
 	"encoding/json"
-
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
-
+	"testing/synctest"
 	"time"
 )
 
@@ -93,4 +93,60 @@ func dockerEventsInput(at time.Time) string {
 		input.WriteByte('\n')
 	}
 	return input.String()
+}
+
+func TestDockerEventsSlowPersistence(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reader, producer := io.Pipe()
+		defer reader.Close()
+		defer producer.Close()
+		w := &dockerEventWriter{identity: "ATTEMPT", capacity: 1 << 20}
+		saving, releaseSave := make(chan struct{}), make(chan struct{})
+		readDone, produced := make(chan struct{}), make(chan struct{})
+		finished := make(chan error, 1)
+		var persisted dockerEventArchive
+		go func() {
+			finished <- w.record(reader, readDone, func(archive dockerEventArchive) error {
+				if persisted.Events == nil {
+					close(saving)
+					<-releaseSave
+				}
+				persisted = archive
+				return nil
+			})
+		}()
+		go func() {
+			input := dockerEventsInput(time.Unix(1, 0))
+			first := strings.IndexByte(input, '\n') + 1
+			_, err := io.WriteString(producer, input[:first])
+			<-saving
+			if err == nil {
+				_, err = io.WriteString(producer, input[first:])
+			}
+			_ = producer.CloseWithError(err)
+			close(produced)
+		}()
+		<-saving
+		synctest.Wait()
+		select {
+		case <-produced:
+		default:
+			t.Error("slow archive persistence blocked event intake; shutdown can kill unwritten events")
+		}
+		select {
+		case <-readDone:
+		default:
+			t.Error("slow archive persistence blocked stream drain")
+		}
+		close(releaseSave)
+		if err := <-finished; err != nil {
+			t.Fatal(err)
+		}
+		if len(persisted.Events) != 260 || persisted.Dropped != 0 {
+			t.Fatalf("complete event archive: events=%d dropped=%d", len(persisted.Events), persisted.Dropped)
+		}
+		if persisted.Events[258].Action != "kill" || persisted.Events[259].Action != "die" {
+			t.Fatal("lost terminal events during slow persistence")
+		}
+	})
 }

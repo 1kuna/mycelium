@@ -5,7 +5,7 @@ import (
 	"errors"
 	"os/exec"
 	"slices"
-
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -107,6 +107,39 @@ func TestHostInventoryTelemetryIdentityAndExpiry(t *testing.T) {
 	if observer.lane.value[0].FreeMemoryGB != 8 {
 		t.Fatal("snapshot mutated discovery evidence")
 	}
+
+	t.Run("pending-sample-after-device-removal", func(t *testing.T) {
+
+		clock := &workerFakeClock{now: time.Unix(1000, 0)}
+		observer := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: clock, timing: probeTiming{base: time.Millisecond, cores: 2}}}
+		var scans atomic.Int32
+		entered, release := make(chan struct{}), make(chan struct{})
+		observer.sampleTelemetry = func(context.Context, []MachineDevice) ([]MachineDevice, error) {
+			close(entered)
+			<-release
+			return nil, nil
+		}
+		source := func(context.Context) ([]MachineDevice, error) {
+			if scans.Add(1) > 1 {
+				return []MachineDevice{}, nil
+			}
+			return []MachineDevice{{ID: "0", Platform: "fake", Identity: "card", Selector: "0"}}, nil
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { defer close(done); observer.run(ctx, source) }()
+		defer func() { cancel(); <-done }()
+		<-entered
+		clock.Advance(time.Second)
+		await(t, func() bool {
+			observer.mu.Lock()
+			defer observer.mu.Unlock()
+			return scans.Load() > 1 && len(observer.lane.value) == 0
+		})
+		close(release)
+		await(t, func() bool { observer.mu.Lock(); defer observer.mu.Unlock(); return observer.telemetry.pending == nil })
+
+	})
 }
 
 func TestWorkerTelemetryUsesInjectedHostSource(t *testing.T) {

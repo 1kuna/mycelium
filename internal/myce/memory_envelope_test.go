@@ -1181,4 +1181,69 @@ func TestMemoryEnvelopeMeasuredRangeAdmissionAndPressure(t *testing.T) {
 			t.Fatal("pressure retained range")
 		}
 	}
+
+	t.Run("incomplete-completion-restores-total", func(t *testing.T) {
+
+		peaks := [2]float64{.1, .1}
+
+		q, clock, m, s := observationFixture(t)
+		s.Needs.Memory = "auto"
+		for _, host := range peaks {
+			j := startObservation(t, q, m, s)
+			clock.Advance(time.Second)
+			r := result(&j, true)
+			total := 12.0
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &total, Events: &MemoryEventCounts{}}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+		}
+		probe := &Job{State: "queued", Spec: s, Extensions: []Extension{registeredExtension(t, q, s.Extension)}}
+		candidate := extensionJobs(probe, &m, true)[0]
+		// A later successful attempt without complete counters restores the
+		// conservative total peak, rather than refreshing a reduced range.
+		j := startObservation(t, q, m, s)
+		clock.Advance(time.Second)
+		r := result(&j, true)
+		host, total := peaks[1], 12.0
+		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, Events: &MemoryEventCounts{}}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got != 12+minimumHostMemoryGB {
+			t.Fatalf("missing counters preserved reduced range: %v", got)
+		}
+
+	})
+
+	t.Run("incomplete-comparable-history-retains-total", func(t *testing.T) {
+
+		q, clock, m, s := observationFixture(t)
+		s.Needs.Memory = "auto"
+		for range 2 {
+			j := startObservation(t, q, m, s)
+			clock.Advance(time.Second)
+			r := result(&j, true)
+			host, total := 4.0, 12.0
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &total, Events: &MemoryEventCounts{}}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Allowance changes can leave more than one comparable row for a local
+		// component. The legacy row has no complete decomposition of its total.
+		for _, point := range q.s.WorkObservations {
+			point.Key.Allowance = "previous-allowance"
+			point.MemoryRange = nil
+			point.MemoryPeak = &AttemptMemoryPeak{HostGB: point.MemoryPeak.HostGB, CgroupGB: point.MemoryPeak.CgroupGB}
+			q.s.WorkObservations[identityHash(point.Key)] = point
+			break
+		}
+		probe := &Job{State: "queued", Spec: s, Extensions: []Extension{registeredExtension(t, q, s.Extension)}}
+		candidate := extensionJobs(probe, &m, true)[0]
+		if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got != 12+minimumHostMemoryGB {
+			t.Fatalf("complete row discounted incomplete local history: %v", got)
+		}
+
+	})
 }

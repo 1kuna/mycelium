@@ -227,8 +227,9 @@ func TestWorkerCommandStartFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.AttemptHistory) != 3 {
-		t.Fatal("missing per-attempt Mycelium launch records", len(got.AttemptHistory))
+	// Every queue attempt needs its durable launch fact before checking contents.
+	if len(got.AttemptHistory) != 3 || len(records) != len(got.AttemptHistory) {
+		t.Fatal("missing per-attempt Mycelium launch records", len(records), len(got.AttemptHistory))
 	}
 
 	for _, path := range records {
