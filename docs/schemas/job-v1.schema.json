@@ -5,6 +5,15 @@
         "available": {
           "type": "number"
         },
+        "contributors": {
+          "items": {
+            "$ref": "#/$defs/HostGrowthContributor"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "envelope_device_gb": {
           "type": "number"
         },
@@ -2070,6 +2079,41 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "HostGrowthContributor": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "charge_gb": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "launching": {
+          "type": "boolean"
+        },
+        "pending_gb": {
+          "type": "number"
+        },
+        "sample_age_seconds": {
+          "type": "number"
+        },
+        "sample_fresh": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "charge_gb",
+        "pending_gb",
+        "sample_fresh"
+      ],
       "type": "object"
     },
     "HostLaunch": {

@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,14 +11,28 @@ import (
 // Available is absent when the probe/configuration was unavailable, never a
 // fabricated zero. Memory quantities are GiB; counts use the indicated unit.
 type AdmissionDetail struct {
-	Subcheck         string   `json:"subcheck"`
-	Unit             string   `json:"unit"`
-	Required         float64  `json:"required"`
-	Available        *float64 `json:"available,omitempty"`
-	Unavailable      bool     `json:"unavailable,omitempty"`
-	EnvelopeSource   string   `json:"envelope_source,omitempty"`
-	EnvelopeHostGB   float64  `json:"envelope_host_gb"`
-	EnvelopeDeviceGB float64  `json:"envelope_device_gb"`
+	Subcheck         string                  `json:"subcheck"`
+	Unit             string                  `json:"unit"`
+	Required         float64                 `json:"required"`
+	Available        *float64                `json:"available,omitempty"`
+	Unavailable      bool                    `json:"unavailable,omitempty"`
+	EnvelopeSource   string                  `json:"envelope_source,omitempty"`
+	EnvelopeHostGB   float64                 `json:"envelope_host_gb"`
+	EnvelopeDeviceGB float64                 `json:"envelope_device_gb"`
+	Contributors     []HostGrowthContributor `json:"contributors,omitempty"`
+}
+
+// These are the terms of the failed physical-growth sum, not memory attributed
+// to the launching job. Model terms have no execution or resident sample.
+type HostGrowthContributor struct {
+	ID               string   `json:"id,omitempty"`
+	Attempt          int      `json:"attempt,omitempty"`
+	Kind             string   `json:"kind"`
+	Launching        bool     `json:"launching,omitempty"`
+	ChargeGB         float64  `json:"charge_gb"`
+	PendingGB        float64  `json:"pending_gb"`
+	SampleAgeSeconds *float64 `json:"sample_age_seconds,omitempty"`
+	SampleFresh      bool     `json:"sample_fresh"`
 }
 
 type admissionError struct{ detail AdmissionDetail }
@@ -35,8 +50,8 @@ func (e *admissionError) Error() string {
 }
 func (e *admissionError) Unwrap() error { return errWorkerMemory }
 
-func refuseAdmission(subcheck, unit string, required, available float64, unavailable bool) error {
-	d := AdmissionDetail{Subcheck: subcheck, Unit: unit, Required: required, Unavailable: unavailable || !validMemoryValue(available)}
+func refuseAdmission(subcheck, unit string, required, available float64, unavailable bool, contributors ...HostGrowthContributor) error {
+	d := AdmissionDetail{Subcheck: subcheck, Unit: unit, Required: required, Unavailable: unavailable || !validMemoryValue(available), Contributors: contributors}
 	if !d.Unavailable {
 		d.Available = &available
 	}
@@ -73,6 +88,32 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 		return nil
 	}
 	out := *d
+	out.Contributors = nil
+	if d.Subcheck == "live_host_growth" {
+		for _, c := range d.Contributors {
+			if !validMemoryValue(c.ChargeGB) || !validMemoryValue(c.PendingGB) {
+				continue
+			}
+			if c.Kind == "attempt" {
+				if len(c.ID) != 32 || c.Attempt < 1 {
+					continue
+				}
+				if _, err := hex.DecodeString(c.ID); err != nil {
+					continue
+				}
+			} else if c.Kind != "model" || c.ID != "" || c.Attempt != 0 {
+				continue
+			}
+			if c.SampleAgeSeconds != nil {
+				age := *c.SampleAgeSeconds
+				if !validMemoryValue(age) {
+					continue
+				}
+				c.SampleAgeSeconds = &age
+			}
+			out.Contributors = append(out.Contributors, c)
+		}
+	}
 	out.Available = nil
 	if d.Available != nil && !d.Unavailable && validMemoryValue(*d.Available) {
 		v := *d.Available

@@ -824,6 +824,16 @@ These values are captured on the worker outside the queue lock and survive
 requeue, acknowledgement and replacement of the current envelope. Queue logs
 include the same comparison in `detail`.
 
+For `live_host_growth`, `required` is the worker's aggregate pending growth,
+not the launching attempt's envelope. Supporting workers retain `contributors`:
+attempt ID/number or model kind, static `charge_gb`, compared `pending_gb`, the
+`launching` flag, and `sample_fresh`/`sample_age_seconds` (absent when no sample
+exists). The terms include exact-helper credit and sum to the failed comparison.
+A launch-capacity refusal with positive `main: not_started` evidence never spends
+losses or infrastructure retries, including an older worker's `launch/io_error`
+classification. Queue Started authorization alone is not main execution; existing
+supervisor custody still requires exact release before retry.
+
 A modern worker also records `prelaunch_refused: true` only for a persisted
 native refusal before custody or launch intent. An exact released copy with
 that proof and no queue-recorded start/custody preserves ledger completeness,
