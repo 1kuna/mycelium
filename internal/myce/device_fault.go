@@ -87,7 +87,11 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 		w.DeviceFaultSource = workerDeviceFaultSource()
 	}
 	if w.DeviceHealthProbe == nil {
-		w.DeviceHealthProbe = workerMachineProbe().DeviceHealth
+		// Resolve host discovery only when a health check runs (#1152): a
+		// worker without a fault source never consults the platform probe.
+		w.DeviceHealthProbe = func(ctx context.Context, d MachineDevice) (bool, error) {
+			return workerMachineProbe().DeviceHealth(ctx, d)
+		}
 	}
 	// Establish the first cursor before offering inventory. Cancellation owns
 	// startup; no fixed deadline assumes how long this host's journal takes.
