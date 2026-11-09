@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http/httptest"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -16,19 +15,10 @@ import (
 // even while a diagnostic projection and a control transaction are in flight.
 // The fake clock keeps the learned response leases valid throughout the burst.
 func TestCheapCachedReadsUnderProjectionPressure(t *testing.T) {
-	cheapReadLoad(t, true)
+	cheapReadLoad(t)
 }
 
-// Run the identical fixture on the parent and candidate for latency evidence.
-// Refusals are reported separately: a fast 429 is never a successful read.
-func TestCheapReadLoadMeasurements(t *testing.T) {
-	if os.Getenv("MYCE_CHEAP_READ_MEASURE") == "" {
-		t.Skip("explicit before/after measurement")
-	}
-	cheapReadLoad(t, false)
-}
-
-func cheapReadLoad(t *testing.T, requireProgress bool) {
+func cheapReadLoad(t *testing.T) {
 	t.Helper()
 	q, clock := fixture(t)
 	for i := range 300 {
@@ -74,11 +64,8 @@ func cheapReadLoad(t *testing.T, requireProgress bool) {
 	go func() { defer close(projected); request("/api/inspection") }()
 	<-entered
 	// Establish real measured pressure without advancing past the cache leases.
-	recoverPressure := func() {}
-	if requireProgress {
-		l := newObservationLimit(pressureClock, q)
-		recoverPressure = observationPressure(l, pressureClock, time.Nanosecond)
-	}
+	l := newObservationLimit(pressureClock, q)
+	recoverPressure := observationPressure(l, pressureClock, time.Nanosecond)
 	q.mu.Lock()
 	var unlock sync.Once
 	releaseControl := func() { unlock.Do(q.mu.Unlock) }
@@ -111,19 +98,12 @@ func cheapReadLoad(t *testing.T, requireProgress bool) {
 	}
 	go func() { workers.Wait(); close(done) }()
 	close(start)
-	if requireProgress {
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			releaseControl()
-			<-done
-			t.Error("completed responses waited behind the live queue transaction")
-		}
-	} else {
-		// A fixed wall-time control occupancy makes the parent comparison finite.
-		<-time.After(50 * time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
 		releaseControl()
 		<-done
+		t.Error("completed responses waited behind the live queue transaction")
 	}
 	close(results)
 	var durations [2][]time.Duration
@@ -147,7 +127,7 @@ func cheapReadLoad(t *testing.T, requireProgress bool) {
 		} else {
 			t.Logf("%s codes=%v no successful reads", path, codes[route])
 		}
-		if requireProgress && codes[route][200] != readers*each/2 {
+		if codes[route][200] != readers*each/2 {
 			t.Errorf("cheap reads shed under projection pressure: %s %v", path, codes[route])
 		}
 	}
