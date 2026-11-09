@@ -167,6 +167,8 @@ func TestCompositionImmutableResolutionReplayAndRestart(t *testing.T) {
 		}
 		m := machine("target", "fake")
 		m.CapabilityProfile.OS, m.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
+		m.HostMemoryBudgetGB = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
+		m.HostAvailableMemoryGB, m.HostMemoryMeasured = m.HostMemoryBudgetGB, true
 		m.Environments = []string{b.Variants[0].Environments["main"].Key}
 		m.ExtensionFingerprint = "test-fingerprint"
 		qualified := newExtensionReport(b, &m, "extension:"+b.Name)
