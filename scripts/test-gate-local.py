@@ -51,6 +51,15 @@ def qualified_config(root):
 
 class LocalGateTests(unittest.TestCase):
     def setUp(self):
+        fakehome = tempfile.TemporaryDirectory()
+        self.addCleanup(fakehome.cleanup)
+        fakebin = Path(fakehome.name)
+        docker = fakebin / 'docker'
+        docker.write_text('#!/bin/sh\nif [ "$3" = info ]; then printf \'"fixture-daemon"\\n\'; fi\n')
+        docker.chmod(0o755)
+        environment = patch.dict(os.environ, PATH=str(fakebin) + os.pathsep + os.environ['PATH'])
+        environment.start()
+        self.addCleanup(environment.stop)
         for name, value in [('legacy_directories', []), ('native_full_custody', False),
                             ('check_pressure', None), ('local_worker_usage', None),
                             ('total_memory', 64 * capacity.GIB)]:

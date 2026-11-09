@@ -3,6 +3,8 @@
 import datetime
 import importlib.util
 import json
+import inspect
+import sys
 import os
 from pathlib import Path
 import re
@@ -17,7 +19,7 @@ def module(name):
     return result
 
 
-capacity, budget = module('gate-capacity'), module('gate-budget')
+capacity, budget, runtime = (module('gate-' + name) for name in ('capacity', 'budget', 'runtime'))
 
 
 def read(path):
@@ -33,7 +35,7 @@ def hexadecimal(value, length=32):
 def host_inventory():
     # Environments are inspected privately; no commands or environment values
     # are returned in a decision receipt.
-    selection = '-eo' if budget.sys.platform.startswith('linux') else '-axo'
+    selection = '-eo' if sys.platform.startswith('linux') else '-axo'
     result = subprocess.run(['ps', 'eww', selection, 'pid=,ppid=,uid=,stat=,lstart=,command='],
                             capture_output=True, text=True, check=True, timeout=10,
                             env=dict(os.environ, LC_ALL='C'))
@@ -66,7 +68,7 @@ def host_inventory():
 
 
 GUEST_PROBE = r'''
-import json, pathlib, sys
+import json, pathlib, sys, os, re
 requests = json.loads(sys.argv[1])
 challenge = sys.argv[2]
 active = pathlib.Path.home()/'.cache/mycelium-gates/active'
@@ -88,9 +90,20 @@ for request in requests:
         if row.get('schema') != 1 or row.get('identity') != path.name.removeprefix('mycelium-gate-') or row.get('stopped') is not True or type(row.get('status')) is not int:
             raise RuntimeError('guest cleanup unconfirmed')
         if nonce and row['identity'] != nonce: raise RuntimeError('guest nonce changed')
-        matches.append(row)
+        matches.append((row, path))
     if len(matches) != 1: raise RuntimeError('guest cleanup is missing or ambiguous')
-    cleanups.append(dict(run_id=request['run_id'], receipt=matches[0]))
+    row, path = matches[0]
+    processes = host_inventory()
+    if any(p['markers'] or p['supervisor'] for p in processes.values()):
+        raise RuntimeError('guest gate processes remain')
+    supervisor = path/'.reports/supervisor.pid'
+    if supervisor.exists() and int(supervisor.read_text()) in processes:
+        raise RuntimeError('guest supervisor PID remains')
+    candidates = {pid for pid, p in processes.items() if p['uid'] == os.getuid()}
+    if scratch_processes(str(path), candidates, all_handles=True):
+        raise RuntimeError('guest source handles or mappings remain')
+    runtime_proof = source_cleanup(path, request['run_id'])
+    cleanups.append(dict(run_id=request['run_id'], receipt=row, docker=runtime_proof))
 print(json.dumps(dict(markers=markers, cleanups=cleanups, challenge=challenge, stopped=not markers)))
 '''
 
@@ -98,7 +111,7 @@ print(json.dumps(dict(markers=markers, cleanups=cleanups, challenge=challenge, s
 def guest_inventory(vm, requests):
     challenge = uuid.uuid4().hex
     result = subprocess.run(['limactl', 'shell', '--workdir=/', vm, '--', 'python3', '-c',
-                             GUEST_PROBE, json.dumps(requests), challenge], capture_output=True, text=True,
+                             Path(runtime.__file__).read_text() + '\n' + inspect.getsource(budget.scratch_processes) + '\n' + inspect.getsource(host_inventory) + '\n' + GUEST_PROBE, json.dumps(requests), challenge], capture_output=True, text=True,
                             check=True, timeout=20)
     row = json.loads(result.stdout)
     if not isinstance(row, dict) or row.get('markers') != [] or row.get('stopped') is not True or row.get('challenge') != challenge or not isinstance(row.get('cleanups'), list):
@@ -113,6 +126,9 @@ def guest_inventory(vm, requests):
         request = next(r for r in requests if r['run_id'] == item['run_id'])
         if request['nonce'] and request['nonce'] != receipt['identity']:
             raise RuntimeError('guest cleanup nonce changed')
+        if (not isinstance(item.get('docker'), list) or not item['docker'] or
+                any(not isinstance(p, dict) or p.get('stopped') is not True for p in item['docker'])):
+            raise RuntimeError('guest Docker cleanup is unconfirmed')
     return row
 
 
@@ -221,7 +237,9 @@ def verify_host(runs, processes, proof=None):
         candidates = {pid for pid, row in processes.items() if row['uid'] == os.getuid()}
         row_proof['handle_inventory_uid'] = os.getuid()
         row_proof['checked_owner_processes'] = len(candidates)
-        holders = budget.scratch_processes(scopes[0], candidates, all_handles=True)
+        row_proof['protected_process_exclusions'] = []
+        holders = budget.scratch_processes(scopes[0], candidates, all_handles=True,
+            protected_roots=roots, evidence=row_proof['protected_process_exclusions'])
         row_proof['file_holder_pids'] = sorted(holders)
         if holders:
             raise RuntimeError('source or scratch file handles remain')
@@ -261,6 +279,11 @@ def reconcile(folders, repo):
             decision['phase'] = 'host-after'
             decision['evidence']['host_after'] = []
             verify_host(runs, host_inventory(), decision['evidence']['host_after'])
+            decision['phase'] = 'runtime'
+            decision['evidence']['docker'] = []
+            for run in runs:
+                decision['evidence']['docker'].append(dict(run_id=run['folder'].name,
+                    proof=runtime.source_cleanup(run['source'], run['owner'].get('run_marker', run['folder'].name))))
             decision['phase'] = 'bindings'
             # Recheck every immutable binding immediately before archiving.
             for run in runs:

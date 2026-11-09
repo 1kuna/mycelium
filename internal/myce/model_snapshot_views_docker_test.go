@@ -67,7 +67,7 @@ func TestModelSnapshotDockerReadOnlyViews(t *testing.T) {
 		})
 		args := []string{binary, "--host", endpoint, "run", "--name", name, "--rm", "-i", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--mount", "type=bind,src=" + mount.Source + ",dst=" + mount.Destination + ",readonly", "--env", "MYCE_MODEL_BASE=" + mount.Destination, image, "sh", "-ec", cmd.Args[2]}
 		cmd.Path = binary
-		cmd.Args = args
+		cmd.Args = append([]string{binary, "--host", endpoint}, gateDockerArgs(t, endpoint, args[3:])...)
 		cmd.Env = dockerClientEnvironment()
 	})
 }

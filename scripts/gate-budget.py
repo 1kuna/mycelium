@@ -3,6 +3,7 @@
 import os
 import fcntl
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -16,6 +17,9 @@ import uuid
 
 
 MACOS_HANDLE_PROBE = [sys.executable, str(Path(__file__).with_name('gate-handles.py'))]
+spec = importlib.util.spec_from_file_location('gate_runtime', Path(__file__).with_name('gate-runtime.py'))
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
 
 
 def interrupted(signum, frame):
@@ -25,7 +29,7 @@ def interrupted(signum, frame):
     raise SystemExit(128 + signum)
 
 
-def scratch_processes(scratch, pids, all_handles=False):
+def scratch_processes(scratch, pids, all_handles=False, protected_roots=None, evidence=None):
     """Use OS file handles for reparented fixtures, including env -i payloads."""
     def inside(name):
         # OS handle inventories give resolved paths. Do not stat every path in
@@ -50,28 +54,42 @@ def scratch_processes(scratch, pids, all_handles=False):
                 except PermissionError:
                     if all_handles:
                         raise
+            if all_handles:
+                try:
+                    with open(f'/proc/{pid}/maps') as mappings:
+                        for line in mappings:
+                            fields = line.rstrip('\n').split(None, 5)
+                            if len(fields) < 5:
+                                raise RuntimeError('mapped-file inventory is incomplete')
+                            if len(fields) == 6:
+                                name = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), fields[5])
+                                if inside(name):
+                                    found.add(pid)
+                except FileNotFoundError:
+                    pass  # Process exited before its mapping inventory.
     else:
         # Apple's lsof cannot exclude network mounts, and even +D scans can
         # block on unrelated storage. libproc reads process paths directly.
         if not pids:
             return found
         command = [*MACOS_HANDLE_PROBE, *(['--all-fds'] if all_handles else []),
+                   *(['--protected-roots', ','.join(map(str, sorted(protected_roots)))]
+                     if protected_roots is not None else []),
                    scratch, *map(str, sorted(pids))]
         # Keep native inspection in a bounded subprocess: an unavailable kernel
         # probe costs retained scratch, never fixture signals or deletion.
         with tempfile.TemporaryFile(mode='w+t') as output_file:
             probe = subprocess.Popen(command, stdout=output_file, stderr=subprocess.DEVNULL)
+            failure, status = None, None
             try:
                 status = probe.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as error:
+                failure = error
                 probe.kill()  # Only the probe we just launched, never candidates.
                 try:
                     probe.wait(timeout=.2)
                 except subprocess.TimeoutExpired:
                     pass  # Do not wait for uninterruptible kernel I/O to return.
-                raise
-            if status != 0:
-                raise subprocess.CalledProcessError(status, command)
             output_file.seek(0)
             output = output_file.read()
         pid = None
@@ -80,6 +98,14 @@ def scratch_processes(scratch, pids, all_handles=False):
                 pid = int(line[1:])
             elif pid in pids and line.startswith('n') and inside(line[1:]):
                 found.add(pid)
+            elif line.startswith('x'):
+                if evidence is None:
+                    raise RuntimeError('protected process exclusion lacks an evidence receipt')
+                evidence.append(json.loads(line[1:]))
+        if failure is not None:
+            raise failure
+        if status != 0:
+            raise subprocess.CalledProcessError(status, command)
     return found
 
 
@@ -386,6 +412,13 @@ def main():
     child_env.pop('GATE_LOCAL_SLOT', None)
     child_env.pop('GATE_LOCAL_SLOT_ID', None)
     child_env['GATE_RUN_ID'] = marker.split('=', 1)[1]
+    runtime_dir = root.parent / '.reports/gate-runtime' / child_env['GATE_RUN_ID']
+    runtime_dir.mkdir(parents=True, mode=0o700)
+    child_env['GATE_RUNTIME_DIR'] = str(runtime_dir)
+    entry = runtime.docker_snapshot()
+    entry['marker'] = child_env['GATE_RUN_ID']
+    entry['labelled_fixtures'] = (root.parent / 'internal/myce/gate_runtime_test.go').is_file()
+    (runtime_dir / 'docker-entry.json').write_text(json.dumps(entry) + '\n')
     # Receipt authority belongs only to this supervisor, never nested fixtures.
     receipt_path = child_env.pop('GATE_CLEANUP_RECEIPT', None)
     receipt_identity = child_env.pop('GATE_CLEANUP_ID', None)
@@ -419,7 +452,9 @@ def main():
         # catches leaked fixtures after an otherwise successful shell exit.
         try:
             stopped = stop_fixtures(marker, scratch, child)
-        except (OSError, subprocess.SubprocessError):
+            runtime_proof = runtime.runtime_cleanup(runtime_dir, child_env['GATE_RUN_ID'])
+            (runtime_dir / 'cleanup.json').write_text(json.dumps(dict(stopped=stopped, docker=runtime_proof)) + '\n')
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             stopped = False
             print('quick: fixture inventory failed; scratch retained', file=sys.stderr)
         if stopped:

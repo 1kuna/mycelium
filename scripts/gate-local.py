@@ -23,7 +23,7 @@ def module(name):
 
 capacity, receipts, sources = (module('gate-' + name) for name in ('capacity', 'receipt', 'source'))
 trim_cache = module('gate-cache').trim_cache
-HELPERS = ('gate-budget.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
+HELPERS = ('gate-runtime.py', 'gate-budget.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
            'gate-cache.py', 'gate-measure.py', 'gate-memory.py', 'gate-guest.py', 'gate-receipt.py')
 
 

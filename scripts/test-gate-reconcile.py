@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Abandoned measured custody needs affirmative host and guest exit proof."""
 import copy
+import contextlib
+import errno
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -49,7 +52,8 @@ class ReconciliationTests(unittest.TestCase):
         for obj, name, value in ((recovery.capacity, 'root', self.control),
                                  (recovery, 'host_inventory', self.host),
                                  (recovery, 'guest_inventory', self.guest),
-                                 (recovery.budget, 'scratch_processes', set())):
+                                 (recovery.budget, 'scratch_processes', set()),
+                                 (recovery.runtime, 'source_cleanup', [dict(stopped=True)])):
             mock = patch.object(obj, name, return_value=value)
             setattr(self, 'mock_root' if name == 'root' else name, mock.start())
             self.addCleanup(mock.stop)
@@ -108,7 +112,8 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(len(list(archive.iterdir())), 6)
         self.assertEqual((scratch / 'retained').read_text(), 'fixture evidence')
         self.assertFalse(recovery.capacity.execution_lanes(self.control))
-        self.scratch_processes.assert_called_with(str(self.folders[0] / 'source'), set(self.host), all_handles=True)
+        self.scratch_processes.assert_called_with(str(self.folders[0] / 'source'), set(self.host), all_handles=True,
+            protected_roots={owner['pid'], 900010}, evidence=[])
 
     def test_legacy_success_requires_global_quiet_and_guest_cleanup(self):
         self.add_run(False)
@@ -173,6 +178,11 @@ class ReconciliationTests(unittest.TestCase):
         self.host_inventory.side_effect = [self.host, {99: process(markers=[owner['run_marker']])}]
         self.assert_refused('global gate quiet')
 
+    def test_daemon_uncertainty_retains_all_bindings(self):
+        self.add_run()
+        self.source_cleanup.side_effect = RuntimeError('Docker daemon cleanup is unknown')
+        self.assert_refused('Docker daemon cleanup is unknown')
+
     def test_guest_probe_requires_empty_markers_nonce_and_positive_cleanup(self):
         # Exercise the actual parser, not the reconcile-level guest stub.
         spec2 = importlib.util.spec_from_file_location('guest_parser', Path(recovery.__file__))
@@ -180,9 +190,13 @@ class ReconciliationTests(unittest.TestCase):
         spec2.loader.exec_module(parser)
         request = dict(run_id='a' * 32, nonce='b' * 32, source_info=dict(head='c' * 40))
         good = dict(challenge='d' * 32, stopped=True, markers=[], cleanups=[dict(
-            run_id=request['run_id'], receipt=dict(schema=1, identity='b' * 32, stopped=True, status=143))])
+            run_id=request['run_id'], receipt=dict(schema=1, identity='b' * 32, stopped=True, status=143), docker=[dict(stopped=True)])])
         variants = [good, dict(good, markers=['active']), dict(good, challenge='wrong'),
                     dict(good, stopped=False), dict(good, cleanups=[])]
+        for docker in (None, [], [dict(stopped=False)]):
+            changed = copy.deepcopy(good)
+            changed['cleanups'][0]['docker'] = docker
+            variants.append(changed)
         for field, value in (('identity', 'f' * 32), ('stopped', False), ('status', None)):
             changed = copy.deepcopy(good)
             changed['cleanups'][0]['receipt'][field] = value
@@ -209,16 +223,17 @@ class ReconciliationTests(unittest.TestCase):
         receipt = dict(schema=1, identity='b' * 32, stopped=True, status=143)
         write(scratch / '.reports/cleanup.json', receipt)
         request = dict(run_id='a' * 32, nonce='b' * 32, source_info=source)
-        prefix = '''import pathlib, sys
-original = pathlib.Path
-def mapped(value='.'):
-    if str(value).startswith('/tmp/mycelium-gate-'):
-        return original(sys.argv[3]) / original(value).name
-    return original(value)
-mapped.home = lambda: original(sys.argv[4])
-pathlib.Path = mapped
-'''
-        command = [sys.executable, '-c', prefix + recovery.GUEST_PROBE,
+        prefix = """def source_cleanup(*args): return [dict(stopped=True)]
+def host_inventory(): return {}
+def scratch_processes(*args, **kwargs): return set()
+"""
+        # Substitute only guest fixture roots; replacing pathlib.Path itself is
+        # incompatible with its different construction paths on Python 3.9/3.12.
+        probe = recovery.GUEST_PROBE.replace("pathlib.Path.home()", "pathlib.Path(sys.argv[4])")
+        probe = probe.replace("pathlib.Path('/tmp/mycelium-gate-'+nonce)",
+                              "pathlib.Path(sys.argv[3])/('mycelium-gate-'+nonce)")
+        probe = probe.replace("pathlib.Path('/tmp').glob", "pathlib.Path(sys.argv[3]).glob")
+        command = [sys.executable, '-c', prefix + probe,
                    json.dumps([request]), 'challenge', str(scratch.parent), str(home)]
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -250,26 +265,65 @@ pathlib.Path = mapped
             with self.assertRaises(subprocess.CalledProcessError):
                 parser.host_inventory()
 
-    def test_native_full_descriptor_inventory_finds_nonstandard_handle(self):
+    def test_native_handle_and_closed_descriptor_mapping_keep_custody(self):
         owner = self.add_run()
         root = Path(owner['scratch'])
         root.mkdir(parents=True)
-        script = 'import os,signal,sys; f=open(sys.argv[1], "w"); print("ready",flush=True); signal.pause()'
-        child = subprocess.Popen([sys.executable, '-c', script, str(root / 'held')],
-                                 cwd='/', stdout=subprocess.PIPE, text=True)
-        try:
-            self.assertEqual(child.stdout.readline().strip(), 'ready')
-            self.assertEqual(REAL_HANDLES(str(root), {child.pid}, all_handles=True), {child.pid})
-            self.host[child.pid] = process()
-            self.host[700001] = process(uid=os.getuid() + 1)
-            self.scratch_processes.side_effect = REAL_HANDLES
-            self.assert_refused('file handles remain')
-            self.scratch_processes.assert_called_with(str(self.folders[0] / 'source'),
-                                                     {os.getpid(), child.pid}, all_handles=True)
-        finally:
-            child.kill()
-            child.wait()
-            child.stdout.close()
+        (root / 'held').write_bytes(b'x' * 4096)
+        for mapped in (False, True):
+            with self.subTest(mapped=mapped):
+                script = 'import mmap,os,signal,sys; f=open(sys.argv[1], "rb"); '
+                if mapped:
+                    script += 'mapping=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ); f.close(); os.environ.clear(); '
+                script += 'print("ready",flush=True); signal.pause()'
+                child = subprocess.Popen([sys.executable, '-c', script, str(root / 'held')],
+                                         cwd='/', stdout=subprocess.PIPE, text=True)
+                try:
+                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    self.assertEqual(REAL_HANDLES(str(root), {child.pid}, all_handles=True), {child.pid})
+                    self.host[child.pid] = process()
+                    self.host[700001] = process(uid=os.getuid() + 1)
+                    self.scratch_processes.side_effect = REAL_HANDLES
+                    self.assert_refused('file handles remain')
+                    self.scratch_processes.assert_called_with(str(self.folders[0] / 'source'),
+                                                             {os.getpid(), child.pid}, all_handles=True,
+                        protected_roots={owner['pid'], 900003}, evidence=[])
+                finally:
+                    self.host.pop(child.pid, None)
+                    child.kill()
+                    child.wait()
+                    child.stdout.close()
+
+    def test_protected_process_exclusions_require_system_identity_and_safe_ancestry(self):
+        spec = importlib.util.spec_from_file_location('handles', Path(recovery.__file__).with_name('gate-handles.py'))
+        handles = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(handles)
+        base = '1 0 /sbin/launchd /sbin/launchd\n'
+        cases = [('409 1 /usr/libexec/UserEventAgent /usr/libexec/UserEventAgent', None),
+                 ('409 1 /opt/fixture/python /opt/fixture/python', 'not a protected'),
+                 ('409 800 /usr/bin/fixture /usr/bin/fixture\n800 1 /opt/python /opt/python gate-budget.py', 'descends'),
+                 ('409 1 /usr/libexec/fixture /usr/libexec/fixture GATE_RUN_ID=owned', 'marker or path'),
+                 ('409 1 /usr/libexec/fixture /usr/libexec/fixture /retained/source/input', 'marker or path')]
+        for line, reason in cases:
+            def ps(args, **kwargs):
+                return line.split(None, 3)[2] if 'comm=' in args else base + line
+            with self.subTest(line=line), patch.object(handles.subprocess, 'check_output', side_effect=ps), \
+                    patch.object(handles.c, 'CDLL'), \
+                    patch.object(handles, 'inventory_pid', side_effect=PermissionError(errno.EPERM, 'restricted')):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    if reason:
+                        with self.assertRaisesRegex(RuntimeError, reason):
+                            handles.inventory('/retained/source', [409], True, {800})
+                    else:
+                        handles.inventory('/retained/source', [409], True, {800})
+                        row = json.loads(output.getvalue()[1:])
+                        self.assertEqual(row['pid'], 409)
+                        self.assertEqual(row['ancestry'], [409, 1])
+                        self.assertFalse(row['gate_markers_or_paths'])
+        with patch.object(handles.subprocess, 'check_output', side_effect=PermissionError('ps unavailable')):
+            with self.assertRaises(PermissionError):
+                handles.protected_process(409, '/retained/source', set())
 
 
 if __name__ == '__main__':

@@ -182,8 +182,10 @@ python3 scripts/gate-local.py --reconcile RECEIPT_FOLDER [RECEIPT_FOLDER ...]
 It holds the host admission lock, verifies the immutable owner/full/group
 bindings and absent recorded PID, and inventories markers, known supervisors
 and descendants over the whole process table. The complete process/file-handle
-inventory for the gate owner's UID must succeed, with no handle into the entire
-retained source/scratch tree. Guest active markers must be empty, with a nonce-bound
+inventory for the gate owner's UID must succeed, with no handle or mapped file
+into the entire retained source/scratch tree. This includes closed-descriptor
+mappings (macOS `PROC_PIDREGIONPATHINFO`, Linux `/proc/PID/maps`); an unavailable
+mapping inventory retains custody. Guest active markers must be empty, with a nonce-bound
 positive guest observation and matching affirmative cleanup for every guest
 leg. A second host inventory and binding check precede archiving. Bound records
 are archived under `.reconciled-UUID`; source and scratch are retained. Each
@@ -191,13 +193,40 @@ attempt writes `reconcile-UUID.json` in the control directory, including the
 decision, proof phase and evidence. Recovery never signals another run.
 
 Custody protects gate capacity: CPU, RAM, VM residency and scratch used by
-gate-owned processes. Gate runs, fixtures and supervisors execute as the gate
-owner's UID, so complete file-handle inspection covers that UID. Another UID's
+gate-owned processes. Gate runs, ordinary fixtures and supervisors execute as the
+gate owner's UID, so complete file-handle and mapping inspection covers that UID. Another UID's
 file handle (for example a backup or indexing daemon reading a 0755 tree) is not
 gate-run liveness and does not consume the reservation. No directory ownership
 or 0700 mode precondition applies, and recovery never changes permissions or
 requests privilege. This ownership-model interpretation is an orchestrator
 default, not a maintainer ruling (2026-11-09).
+
+Daemon-backed fixtures require separate positive evidence: Docker containers,
+volumes and networks can outlive their test and run outside the gate UID. Before
+creating resources, the real-Docker fixtures journal their endpoint and label
+resources with `myce.gate=RUN_MARKER`. The budget records daemon availability and
+identity before launching work. Normal cleanup and recovery query each recorded
+daemon for remaining labelled containers, volumes and networks; a changed daemon,
+unreachable configured daemon, malformed journal or failed listing retains
+custody. A missing Docker CLI and default socket can establish absent prerequisites
+only when no entry observation or fixture journal requires that daemon. Older
+sources without labels additionally require the Mycelium fixture label/name
+namespace to be empty. Recovery applies the same runtime checks inside the guest,
+alongside its source-bound, nonce-bound positive cleanup. It never removes Docker
+resources or assumes a killed client stopped its containers.
+
+Orchestrator default (2026-11-09): macOS can deny `libproc` inspection of
+platform-protected processes even under the same UID. Gate binaries, Python,
+shell fixtures and VM helpers are not platform-protected. An `EPERM` process may
+therefore be excluded only with independent, readable `ps` evidence proving all
+three conditions: its executable realpath is under `/System/`, `/usr/libexec/`,
+`/usr/bin/`, `/usr/sbin/`, `/sbin/` or `/bin/` (never `/usr/local/`); its complete
+parent chain contains no recorded or known gate supervisor; and its command line
+has no gate marker, gate path or retained source/scratch path. Every exclusion
+and its executable/ancestry evidence is recorded in the recovery receipt. An
+unknown ancestry, non-system executable, gate descendant or failed `ps` inventory
+retains occupancy. This is a narrow ownership-model application, not a maintainer
+ruling or a privileged recovery path.
 
 Both formats require global gate quiet: every recorded PID number must be
 entirely absent, and no host process may carry any gate marker or known

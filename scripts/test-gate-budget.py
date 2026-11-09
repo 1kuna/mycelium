@@ -34,9 +34,15 @@ class GateBudgetTests(unittest.TestCase):
         environment = patch.dict(os.environ, HOME=home.name)
         environment.start()
         self.addCleanup(environment.stop)
+        fakebin = Path(home.name) / 'bin'
+        fakebin.mkdir()
+        docker = fakebin / 'docker'
+        docker.write_text('#!/bin/sh\nif [ "$3" = info ]; then printf \'"fixture-daemon"\\n\'; fi\n')
+        docker.chmod(0o755)
+        os.environ['PATH'] = str(fakebin) + os.pathsep + os.environ['PATH']
         for name in ('GATE_LOCAL_SLOT', 'GATE_LOCAL_SLOT_ID', 'MYCE_GATE_BUDGET',
                      'GATE_SCRATCH', 'GATE_RUN_ID', 'GATE_CLEANUP_ID',
-                     'GATE_CLEANUP_RECEIPT', 'GATE_EXECUTION_CUSTODY', 'GATE_CUSTODY_ID'):
+                     'GATE_CLEANUP_RECEIPT', 'GATE_EXECUTION_CUSTODY', 'GATE_CUSTODY_ID', 'GATE_RUNTIME_DIR'):
             os.environ.pop(name, None)
 
     def test_native_only_full_obeys_resource_group_but_fleet_remains_background(self):
@@ -237,6 +243,8 @@ class GateBudgetTests(unittest.TestCase):
                   patch.object(sys, 'argv', ['gate-budget.py', str(gate), 'full']),
                   patch.object(budget, 'acquire_full_slot') as slot,
                   patch.object(budget.subprocess, 'Popen', return_value=child),
+                  patch.object(budget.runtime, 'docker_snapshot', return_value={}),
+                  patch.object(budget.runtime, 'runtime_cleanup', return_value=[]),
                   patch.object(budget, 'stop_fixtures', return_value=True),
                   contextlib.redirect_stdout(io.StringIO())):
                 self.assertEqual(budget.main(), 0)
@@ -295,6 +303,8 @@ class GateBudgetTests(unittest.TestCase):
                           patch.object(sys, 'argv', ['gate-budget.py', str(gate), 'full']),
                           patch.object(budget, 'acquire_full_slot', return_value=first),
                           patch.object(budget.subprocess, 'Popen', return_value=child),
+                          patch.object(budget.runtime, 'docker_snapshot', return_value={}),
+                          patch.object(budget.runtime, 'runtime_cleanup', return_value=[]),
                           patch.object(budget, 'stop_fixtures', return_value=False),
                           contextlib.redirect_stdout(io.StringIO()),
                           contextlib.redirect_stderr(io.StringIO())):
@@ -318,6 +328,7 @@ class GateBudgetTests(unittest.TestCase):
             shutil.copyfile(Path(__file__).with_name('gate-progress.py'), scripts / 'gate-progress.py')
             shutil.copyfile(Path(__file__).with_name('gate-budget.py'), scripts / 'gate-budget.py')
             shutil.copyfile(Path(__file__).with_name('gate-handles.py'), scripts / 'gate-handles.py')
+            shutil.copyfile(Path(__file__).with_name('gate-runtime.py'), scripts / 'gate-runtime.py')
             shutil.copyfile(Path(__file__).with_name('test-gate-progress.py'), scripts / 'test-gate-progress.py')
             (scripts / 'gate-related.py').write_text('print("a\\t^TestA$")\nprint("b\\t^TestB$")\n')
             bin_dir = root / 'bin'
@@ -430,11 +441,11 @@ elif args[0] == 'test':
             real_kill = os.kill
             real_scratch_processes = budget.scratch_processes
 
-            def macos_handles(*args):
+            def macos_handles(*args, **kwargs):
                 # Simulate only the native probe, leaving ps flags native to
                 # the host running this cross-platform regression.
                 with patch.object(sys, 'platform', 'darwin'):
-                    return real_scratch_processes(*args)
+                    return real_scratch_processes(*args, **kwargs)
 
             with (patch.object(sys, 'argv', ['gate-budget.py', str(gate)]),
                   patch.object(budget, 'scratch_processes', side_effect=macos_handles),
@@ -497,6 +508,8 @@ elif args[0] == 'test':
             output = io.StringIO()
             with (patch.object(sys, 'argv', ['gate-budget.py', str(gate)]),
                   patch.object(subprocess, 'Popen', return_value=child),
+                  patch.object(budget.runtime, 'docker_snapshot', return_value={}),
+                  patch.object(budget.runtime, 'runtime_cleanup', return_value=[]),
                   patch.object(budget, 'owned_processes', side_effect=[{12345}, set(), set(), set(), set()]),
                   patch.object(os, 'kill', side_effect=PermissionError('fixture denied')),
                   contextlib.redirect_stdout(output), contextlib.redirect_stderr(output)):
@@ -577,6 +590,7 @@ with patch.object(subprocess.Popen, 'wait', wait):
             shutil.copyfile(scripts / "gate-progress.py", root / "scripts/gate-progress.py")
             shutil.copyfile(scripts / "gate-budget.py", root / "scripts/gate-budget.py")
             shutil.copyfile(scripts / "gate-handles.py", root / "scripts/gate-handles.py")
+            shutil.copyfile(scripts / "gate-runtime.py", root / "scripts/gate-runtime.py")
             shutil.copyfile(scripts / "test-gate-progress.py", root / "scripts/test-gate-progress.py")
             (root / "scripts/gate-related.py").write_text("")
             go = root / "bin/go"
