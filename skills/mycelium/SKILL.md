@@ -13,6 +13,18 @@ installed command's help. Optional contracts name their required components in
 [release behavior](references/release-behavior.md#capability-evidence).
 A merged change or a “next release” note does not establish installed support.
 
+From the queue release enforcing explicit production parity lists, a configured
+project/work `production_parity_hosts` entry bounds all production placements,
+including fan-out and recovery. Native qualification, measured quality and old
+registrations cannot admit an unlisted host. The owner must add an approved host
+to widen the list; an explicitly empty list holds that production work. Checks
+and experiments remain available for collecting comparison evidence.
+The typed `production_parity_hosts` blocker identifies this hold even for
+extensions without variants. A removed host's queued binding is placed again;
+running execution and release custody remain with its current attempt.
+Parity-held production cannot withhold another project's environment preparation
+on an unapproved host. Eligible production retains its tier/preemption priority.
+
 Use the installed CLI or Python `Client.from_installed()`, which resolve
 credentials internally. Never open, print, copy, pass or set fleet credentials.
 A missing CLI or failed authority is an installation-owner hold. Preserve its
@@ -116,6 +128,14 @@ the parent later received a cancellation intent. A parent cancelled before
 success still cancels its dependents with `upstream_cancelled` and reason
 `upstream parent cancelled`; expired outputs return `result_expired`.
 
+From the worker release containing #1168, opt-in XPU fan-out sharing requires
+fresh VRAM counters from the separately administered read-only telemetry broker.
+An older GTT-only broker still supports host RAM accounting; missing VRAM
+evidence withholds extra sharing. Ask the installation owner to qualify the
+[updated broker](../../deploy/gpu-telemetry/README.md), rather than starting GPU
+vendor-tool samplers to unblock placement. Ordinary exclusive admission remains
+available within its configured budget.
+
 ## Observe and recover
 
 Keep owned waits in the foreground. Supporting clients accept one batch of up
@@ -134,6 +154,12 @@ owner to verify identity before same-key replay.
 For detached completion, bind a notifier to your own thread with
 [T3 binding](t3-binding.md). Supporting clients expose local observer diagnostics
 through `myce wait --observer-status`; a PID/lock proves ownership, not delivery.
+From the release containing #1160, shared owners use their own session and a
+clean allowlist environment, excluding runner/job tracking and MYCE_TOKEN while
+preserving PATH/locale for legacy notifiers. Managed attempts/dev sessions keep
+their existing cleanup custody. A dead owner still recovers on the next keyed
+command; automatic supervision is deferred to [#1166](https://github.com/1kuna/mycelium/issues/1166).
+See [upgrade and recovery](../../docs/operations.md#completion-observer-upgrade-and-recovery-next-release).
 Legacy or stalled shared-observer recovery belongs to its operator. Keep stable
 receipts and delivery IDs; do not kill a shared observer or edit its registry.
 
@@ -147,8 +173,18 @@ From the queue release containing #1142, `device_fault_last_healthy` holds a
 job that lost an attempt to a driver fault before it can consume that host's
 last healthy accelerator of the same backend. Keep the job ID and submission
 key: another host, spare healthy capacity or a health-proven recovery can make
-it eligible. This queue protection works with older workers. Automatic
-quarantine clearance additionally needs the supporting worker release and its
+it eligible. This queue protection works with older workers.
+
+The typed hold pauses the remaining relative start/recovery budget; status says
+`paused for device recovery`. The saved amount persists through capacity waiting
+after clearance and restart. Explicit absolute `start_by` and queued-only
+`give_up_at` still bind. If recovery never becomes eligible, the hold terminates
+one existing maximum start window (one hour) after the queue-recorded fault loss
+with `diagnostic_code: device_fault_recovery_timeout`. Preserve that terminal
+result; a late clear cannot revive it. Fresh inventory showing both cards
+healthy releases the guard after an operator clear as well as automatic recovery.
+
+Automatic quarantine clearance additionally needs the supporting worker release and its
 vendor health tool; unsupported/unknown health keeps quarantine. Status
 `devices[].quarantine_recovery` records the fault event, healthy interval,
 measured observation window and clear evidence. Repeated-fault escalation still
@@ -167,6 +203,15 @@ Keep source files unchanged during upload. Clients bind completion to the source
 size and SHA-256, including bytes read for the failed PATCH; another uploader's
 matching blob cannot turn a changed-source retry into success.
 See [file transfer recovery](../../docs/files.md#transfer-behavior).
+
+From the queue release containing #1162, inline jobs accept
+`environment: {backend: pixi, lock_file: /queue/shared/project/pixi.lock, platforms: [cpu]}`.
+The queue must read both `pixi.lock` and adjacent `pixi.toml` at submission;
+`python` is optional. Each input is limited to 1 MiB; oversized Python/Pixi inputs report
+`path_diagnostic.cause: too_large`, naming any required companion. Profile inputs/source do
+not upload these files. Workers build the frozen snapshots through Pixi.
+See [project lock files](../../docs/environments.md#project-lock-files) for
+queue-relative paths and typed read diagnostics.
 
 ## Read for the relevant branch
 

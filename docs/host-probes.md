@@ -56,17 +56,40 @@ pass reuses its device enumeration for XPU qualification fingerprints and
 shares identical fingerprint commands across cards; fingerprint bytes remain
 compatible with existing qualification records.
 
-Discrete XPU telemetry has its own observation lane. One host-wide `xpu-smi`
-CSV query supplies PCI-keyed memory counters for all cards, at most once per
-existing five-second device-consumer interval (or the slower control/probe-cost
-cadence). Xe PMU activity remains per PCI device. A missing tool, unsupported
-counter, missing row or duplicate PCI row supplies unknown memory. Results keep
-their original sample start, and merge only into matching device/driver,
-selector, topology and reserve observations. Missing or ten-second-old samples
-cannot authorize telemetry-dependent sharing. A slow query never blocks
-discovery, check-ins or starts another copy of itself. Per-device runtime
-fallbacks use private device-affinity environments where supported; a full
-inventory or host-wide telemetry query intentionally covers the host.
+Discrete XPU telemetry has its own demand-driven observation lane. Only active
+opt-in fan-out sharing consumes physical card headroom. Idle, CPU-only and
+exclusive-device heartbeats do not request these counters. Sharing reuses one
+sample throughout its existing ten-second freshness window, without renewing
+its timestamp; measured probe cost can slow subsequent observations. Missing or
+expired evidence withholds additional sharing. Ordinary configured-budget
+admission and exact-attempt DRM fdinfo sampling remain independent.
+
+Memory comes from the optional read-only GPU telemetry broker's PCI-keyed
+`vram` counters. The worker never falls back to `xpu-smi`: starting that tool can
+initialize the vendor runtime on every card, including busy siblings. The
+reference broker uses only `DRM_IOCTL_XE_DEVICE_QUERY` with `MEM_REGIONS`; it
+creates no GPU objects or execution contexts. Older kernels silently censor usage to zero without `CAP_PERFMON` or
+`CAP_SYS_ADMIN`; newer kernels expose it without privilege. The broker accepts
+positive usage without extra privilege, but treats a zero as unknown unless
+accounting capability is present. The template adds read-only DRM access with
+no capability expansion.
+A GTT-only broker remains valid for host-backed storage but supplies unknown
+VRAM. Upgrade and qualify the broker separately to retain opportunistic sharing;
+missing counters never become free device memory. Xe PMU activity remains per
+PCI device. Samples merge only into matching device/driver, selector, topology
+and reserve observations, with their original age.
+
+Quarantine recovery is separate from inventory telemetry. A completed health
+reading is reused until the recovery decision's existing quiet window: the greatest of
+fault-to-reading latency, previously measured recovery, and the existing kernel
+teardown-attribution resolution. Failed readings lengthen that interval from
+observed failure duration. A new fault event starts a new decision. This avoids
+repeated vendor initialization while a quiet-window decision cannot yet change;
+the cost is later recovery detection within the measured window. No new fixed
+retry rate is introduced. Health work remains asynchronous, so a stalled tool
+does not block worker control or kernel scans. This pacing does not exclude
+vendor health starts during accelerator/model custody; that guarantee requires
+a separate design and review.
 
 For an already assigned attempt, a fresh direct launch probe can establish
 recovery from a cached `device_probe_unavailable` observation. The direct probe
@@ -191,7 +214,11 @@ hang-cause attribution, fleet change or deployment is implied.
 `TestInventoryHelperLaunchMeasurement` measures an instrumented two-card fake
 inventory for one simulated minute, with a one-second heartbeat, 250ms scan
 cost and two CPU cores. The former per-card fingerprint/query path launches
-174 enumeration and 116 memory helpers; the corrected path launches 35 and 12.
+174 enumeration and 116 memory helpers; #1040 reduced this to 35 and 12, while
+intentionally retaining the five-second host-memory lane. The demand regression
+now simulates one minute each without demand, with sharing demand and after
+withdrawal: zero, six and zero additional broker memory reads, and zero vendor
+initializations throughout.
 This compares launch counts, not native driver overhead or throughput. No
 production GPU or compute workload is exercised.
 
@@ -204,3 +231,32 @@ host. Exclude the activation window from steady-state rates and compare similar
 occupancy. Expected evidence is fewer enumeration/memory helpers and fewer
 warnings without stale data granting sharing. A warning-rate reduction alone
 does not establish the cause of compute timeouts; track those independently.
+
+## Optional xe CCS preemption timeout
+
+The optional [host template](../deploy/xe-preempt-timeout/README.md) persists an
+explicitly configured CCS `preempt_timeout_us` across boot and xe device adds,
+using a metadata-only udev rule that requests a bounded per-card systemd
+oneshot, plus an independent boot oneshot. Udev launches no helper and does no
+sysfs/state I/O; it does not wait for application to finish. The boot
+unit is wanted by `multi-user.target`, has its own start timeout, and has no
+ordering/dependency against the worker. Nothing is added to worker startup:
+the setting matters when GPU jobs create execution queues, well after boot.
+Failures/timeouts affect the optional operation; mismatches log an explicit
+status for the operator. Uninterruptible kernel stalls cannot be cured by a
+process timeout. The template is disabled by default (no writes), is installed
+manually, and can restore recorded prior values and be removed. It never
+changes job timeouts or timeslices.
+
+Evidence status: raising 640000 to 1280000 microseconds is a **diagnostic trial**
+for observed GuC preemption timeouts/engine resets on Intel Arc Pro B70 with xe
+and Linux 7.0, not a vendor-validated setting or established fix. Confirmation
+batch results and native boot/hotplug proof are still required before separate
+authorization to apply it. A hung context can take up to an extra **0.64 seconds**
+to reset, delaying recovery. Newly created GPU execution queues inherit the
+value; existing queues retain their old value, including during rollback.
+
+The template's README contains installation, direct sysfs/journal verification,
+prior-value (or explicit 640000) rollback, uninstall and laptop fake-sysfs tests.
+The live sysfs bound names and validation follow Linux 7.0's
+[`xe_hw_engine_class_sysfs.c`](https://github.com/torvalds/linux/blob/v7.0/drivers/gpu/drm/xe/xe_hw_engine_class_sysfs.c).

@@ -23,6 +23,50 @@ func capacityResult(j *Job, pending bool) Result {
 	return r
 }
 
+// Older workers label the post-Started local refusal io_error. Positive
+// no-main-exec evidence still requires an uncharged wait, not a lost attempt.
+func TestLaunchCapacityLateLegacyRefusal(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("worker", "fake")
+	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 96
+	j := submit(t, q, spec("production"))
+	a := check(t, q, m, nil).Job
+	if err := q.Started(result(a, true)); err != nil {
+		t.Fatal(err)
+	}
+	r := capacityResult(a, true)
+	r.ExecutionCause.Class = "io_error"
+	// Unknown or possible main execution cannot acquire this compatibility
+	// exemption merely by attaching a memory predicate to a generic I/O error.
+	for _, evidence := range []*ExecutionEvidence{nil, {Attempt: a.Attempt, Main: executionMayHaveRun}} {
+		unknown := r
+		unknown.ExecutionEvidence = evidence
+		if launchCapacityRefusal(unknown) {
+			t.Fatal("unproven refusal exempted", evidence)
+		}
+	}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, j.ID)
+	if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Copies[0].LossCharged || got.Copies[0].ReleaseConfirmed {
+		t.Fatalf("legacy refusal lost budget or custody: %+v", got)
+	}
+	clock.Advance(time.Second)
+	m.HostAvailableMemoryGB++
+	if next := check(t, q, m, nil).Job; next != nil {
+		t.Fatal("unreleased supervisor reused", next)
+	}
+	release := result(a, false)
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	if next := check(t, q, m, nil).Job; next == nil || next.ID != j.ID || next.Attempt != 2 {
+		t.Fatal("exact release did not permit capacity retry", next)
+	}
+}
+
 // Real HTTP-ready native helpers reach the member gate on every attempt. Queue
 // time is injected; neither a missing Started nor its presence proves main exec.
 func TestLaunchCapacityNativeHelperRepeated(t *testing.T) {

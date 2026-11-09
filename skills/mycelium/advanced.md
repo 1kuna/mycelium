@@ -288,3 +288,9 @@ infrastructure retries. A helper that ran does not prove main ran or grant
 whole-attempt unlaunched proof. Exact cleanup/release and absolute deadlines
 still bind. Read [launch capacity waits](../../docs/status.md) before relying on
 a worker-only update with an older queue; keep the same job/key.
+
+Supporting workers include aggregate `live_host_growth` contributors and sample
+ages in `execution_cause.admission`; compare those terms before attributing the
+total to the launching job. With the queue's late-handoff correction, positive
+`main: not_started` capacity evidence also protects an older worker's
+`launch/io_error` refusal from loss charges, without releasing its supervisor.

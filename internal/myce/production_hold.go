@@ -606,19 +606,27 @@ func (q *Queue) maintainHolds() {
 	for _, h := range q.s.Hosts {
 		enabled = enabled || h.Policy.hostWide()
 	}
-	if !enabled {
-		return
-	}
 	now := q.clock.Now()
 	demand := map[string]bool{}
 	jobs := []*Job{}
 	for _, j := range q.liveJobs() {
+		// Live owner policy also fences bindings saved by older releases.
+		// Only queued demand moves; existing execution/release custody stays.
+		if j.State == "queued" && j.ProductionHost != "" && (j.Spec.Priority == "production" || jobClass(j.Spec) == "production") && j.Spec.ExtensionCheck == nil && !q.productionParityHostAllowed(j, j.ProductionHost) {
+			j.ProductionHost = ""
+		}
+		if !enabled {
+			continue
+		}
 		if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
 			continue
 		}
 		if dependencyReady(j) && j.Spec.Priority == "production" && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
 			jobs = append(jobs, j)
 		}
+	}
+	if !enabled {
+		return
 	}
 	sort.Slice(jobs, func(a, b int) bool { return q.before(jobs[a], jobs[b], &Machine{}) })
 	for _, j := range jobs {
