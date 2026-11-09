@@ -1,11 +1,10 @@
 """Laptop integration tests: all helper invocations use temporary fake sysfs."""
 from pathlib import Path
 import argparse
+import configparser
 import fcntl
-import os
 import runpy
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -149,29 +148,24 @@ class TimeoutTest(unittest.TestCase):
         self.invoke()
         self.invoke("verify")
 
-    def test_bounded_udev_run_terminates_stalled_attribute_read(self):
-        timeout = shutil.which("timeout") or shutil.which("gtimeout")
-        if not timeout:
-            self.skipTest("GNU timeout unavailable; run this test on Linux or with coreutils")
-        rule = HELPER.with_name("70-myce-xe-preempt-timeout.rules").read_text()
-        command = shlex.split(rule.split('RUN+="', 1)[1].strip().removesuffix('"'))
-        command[0] = timeout
-        index = command.index("/usr/local/libexec/myce-xe-preempt-timeout")
-        command[index:index + 1] = [sys.executable, str(HELPER)]
-        command[command.index("%k")] = "card0"
+    def test_device_service_applies_only_its_card(self):
+        other = self.card("card1", "0000:02:00.0")
+        unit = configparser.ConfigParser(interpolation=None)
+        unit.read(HELPER.with_name("myce-xe-preempt-timeout@.service"))
+        command = shlex.split(unit["Service"]["ExecStart"].replace("%I", "card0"))
+        command[0:1] = [sys.executable, str(HELPER)]
         command.extend(["--config", str(self.config), "--sysfs-root", str(self.root),
                         "--state-dir", str(self.state)])
-        # Exercise the actual RUN command using a FIFO that never supplies data.
-        self.target.unlink()
-        os.mkfifo(self.target)
-        started = time.monotonic()
-        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
-        elapsed = time.monotonic() - started
-        self.assertEqual(result.returncode, 124, result.stderr)
-        self.assertIn("sending signal TERM", result.stderr)
-        self.assertGreaterEqual(elapsed, 10)
-        self.assertLess(elapsed, 13)  # Includes one second scheduling tolerance.
-        self.assertFalse((self.state / "prior.json").exists())
+        result = subprocess.run(command, capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("wrote 1280000, read back 1280000", result.stderr)
+        self.assertEqual(self.target.read_text(), "1280000\n")
+        self.assertEqual(other.read_text(), "640000\n")
+        before = self.target.stat().st_mtime_ns
+        result = subprocess.run(command, capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no write", result.stderr)
+        self.assertEqual(before, self.target.stat().st_mtime_ns)
 
     def test_no_xe_and_invalid_card(self):
         self.invoke("apply", "--card", "../card0", success=False)

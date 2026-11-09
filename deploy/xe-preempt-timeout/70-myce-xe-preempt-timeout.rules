@@ -1,2 +1,2 @@
-# Short bounded callback; never waits for another application holding the lock.
-ACTION=="add", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNEL!="card[0-9]*-*", DRIVERS=="xe", RUN+="/usr/bin/timeout --verbose --kill-after=2 10 /usr/local/libexec/myce-xe-preempt-timeout apply --nonblocking-lock --card %k"
+# Metadata only: systemd applies the setting outside device-event processing.
+ACTION=="add", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNEL!="card[0-9]*-*", DRIVERS=="xe", TAG+="systemd", ENV{SYSTEMD_WANTS}+="myce-xe-preempt-timeout@%k.service"

@@ -209,7 +209,9 @@ does not establish the cause of compute timeouts; track those independently.
 
 The optional [host template](../deploy/xe-preempt-timeout/README.md) persists an
 explicitly configured CCS `preempt_timeout_us` across boot and xe device adds,
-using a bounded udev RUN helper and an independent boot oneshot. The optional
+using a metadata-only udev rule that requests a bounded per-card systemd
+oneshot, plus an independent boot oneshot. Udev launches no helper and does no
+sysfs/state I/O; it does not wait for application to finish. The boot
 unit is wanted by `multi-user.target`, has its own start timeout, and has no
 ordering/dependency against the worker. Nothing is added to worker startup:
 the setting matters when GPU jobs create execution queues, well after boot.

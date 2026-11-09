@@ -2,8 +2,10 @@
 
 This is an administrator-installed Linux host template, not an automatic
 Mycelium installation or a recommended public tuning default. It requires
-Python 3.9+, GNU coreutils `/usr/bin/timeout`, systemd-udev and xe's engine-class
-sysfs interface. The shipped configuration is unset and performs no writes.
+Python 3.9+, systemd-udev and xe's engine-class sysfs interface. GNU
+coreutils `/usr/bin/timeout` is used only in the manual verification/rollback
+examples below, not by udev or the services. The shipped configuration is unset
+and performs no writes.
 See [evidence and tradeoff](../../docs/host-probes.md#optional-xe-ccs-preemption-timeout).
 Application requires a clean confirmation batch and separate authorization;
 these instructions do not imply that the trial passed.
@@ -13,11 +15,16 @@ these instructions do not imply that the trial passed.
 There are two independent application paths:
 
 - The udev `ACTION=="add"` rule matches xe primary DRM cards, including boot
-  coldplug, driver rebind and hotplug. Its short `RUN` command uses GNU timeout:
-  a 10-second deadline and two-second termination grace (12 seconds total,
-  subject to OS scheduling). `--nonblocking-lock` refuses contention immediately
-  with status 75 rather than waiting behind another application. The callback
-  does not start a daemon or wait for the global udev queue.
+  coldplug, driver rebind and hotplug. It only adds the `systemd` tag and
+  `SYSTEMD_WANTS=myce-xe-preempt-timeout@%k.service` metadata. It launches no
+  process and does no sysfs reads/writes, state I/O or fsync during device-event
+  processing. Systemd independently activates the per-card oneshot after the
+  device is available; udev does not wait for its completion.
+  `myce-xe-preempt-timeout@.service` reuses the same apply/readback helper,
+  passing the card name through `%I`, with `TimeoutStartSec=12`,
+  `TimeoutStopSec=2` and control-group termination. `--nonblocking-lock` refuses
+  contention immediately with status 75 rather than waiting behind another
+  application. Instances are device-activated; do not enable the template.
 - The separate `myce-xe-preempt-timeout.service` is a root `Type=oneshot`, enabled
   through `WantedBy=multi-user.target`. It applies and reads back every present
   xe CCS attribute at boot, with `TimeoutStartSec=12`, `TimeoutStopSec=2` and
@@ -38,8 +45,8 @@ remain blocked after termination is requested. There is no dependency connecting
 its lifecycle to the worker's. The timeout budgets prevent ordinary stalled
 reads or lock waits from holding the diagnostic operation indefinitely, at the
 cost of leaving tuning unapplied when the budget expires. They are explicit
-operational budgets, not measured driver timings. If a callback skips a busy
-lock, times out or fails, inspect the logs and reapply/verify before GPU work;
+operational budgets, not measured driver timings. If a device service skips a
+busy lock, times out or fails, inspect the logs and reapply/verify before GPU work;
 the boot scan is not a guarantee that a failed later hotplug has been tuned.
 
 The helper discovers every xe primary card, then every tile/GT CCS class. It
@@ -52,8 +59,8 @@ other engine classes are untouched. No xe/CCS device is a successful no-op.
 `verify` is read-only. A mismatch logs `verification: mismatch, status=1` to
 stderr and syslog and exits 1; read/config/range errors log status 2 and exit 2.
 Apply/restore also log mismatch status 1 on failed write readback, and log their
-completion status. Udev timeout diagnostics appear in the udev journal; service
-timeouts appear in its own systemd journal. These are operator evidence, not
+completion status. Device-service and boot-service timeouts appear in their
+own systemd journals. These are operator evidence, not
 worker start gates. A failed multi-device application can leave completed writes
 on earlier devices; their prior values remain in the rollback record.
 
@@ -87,10 +94,11 @@ settings; use rollback below.
 
 ```sh
 test -x /usr/bin/timeout
-sudo install -o root -g root -m 0644 70-myce-xe-preempt-timeout.rules /etc/udev/rules.d/70-myce-xe-preempt-timeout.rules
 sudo install -o root -g root -m 0644 myce-xe-preempt-timeout.service /etc/systemd/system/myce-xe-preempt-timeout.service
-sudo udevadm control --reload-rules
+sudo install -o root -g root -m 0644 myce-xe-preempt-timeout@.service /etc/systemd/system/myce-xe-preempt-timeout@.service
+sudo install -o root -g root -m 0644 70-myce-xe-preempt-timeout.rules /etc/udev/rules.d/70-myce-xe-preempt-timeout.rules
 sudo systemctl daemon-reload
+sudo udevadm control --reload-rules
 sudo systemctl enable --now myce-xe-preempt-timeout.service
 ```
 
@@ -107,23 +115,26 @@ After installation and each authorized reboot/device-add test:
 sudo /usr/bin/timeout --verbose --kill-after=2 10 /usr/local/libexec/myce-xe-preempt-timeout verify
 grep -H . /sys/class/drm/card[0-9]*/device/tile*/gt*/engines/ccs/preempt_timeout_us
 journalctl -t myce-xe-preempt-timeout
-journalctl -u myce-xe-preempt-timeout.service -u systemd-udevd.service
-systemctl status myce-xe-preempt-timeout.service
+journalctl -u myce-xe-preempt-timeout.service -u 'myce-xe-preempt-timeout@*.service'
+systemctl status myce-xe-preempt-timeout.service myce-xe-preempt-timeout@card0.service
 ```
 
-Confirm every xe CCS value, successful readback logs and exit status. A readback
+Use each actual card name in place of `card0`. Confirm every xe CCS value,
+successful readback logs and exit status. A readback
 proves the host setting, not workload stability or the value of existing queues.
 Collect kernel reset evidence independently during the confirmation workload.
 There is no worker telemetry change in this template.
 
 To uninstall, quiesce GPU queue creators again. Remove the rule, reload udev,
-disable/stop the optional unit, and let in-flight callbacks finish:
+let pending device events finish, then disable/stop the boot unit and stop all
+activated card instances:
 
 ```sh
 sudo rm /etc/udev/rules.d/70-myce-xe-preempt-timeout.rules
 sudo udevadm control --reload-rules
-sudo systemctl disable --now myce-xe-preempt-timeout.service
 sudo udevadm settle --timeout=15
+sudo systemctl disable --now myce-xe-preempt-timeout.service
+sudo systemctl stop 'myce-xe-preempt-timeout@*.service'
 sudo /usr/bin/timeout --verbose --kill-after=2 10 /usr/local/libexec/myce-xe-preempt-timeout restore
 ```
 
@@ -141,9 +152,9 @@ uses kernel defaults with the rule removed. Do not delete unresolved records.
 Once no helper is active and restoration is verified, remove only these files:
 
 ```sh
-sudo rm /etc/systemd/system/myce-xe-preempt-timeout.service
+sudo systemctl reset-failed myce-xe-preempt-timeout.service 'myce-xe-preempt-timeout@*.service'
+sudo rm /etc/systemd/system/myce-xe-preempt-timeout.service /etc/systemd/system/myce-xe-preempt-timeout@.service
 sudo systemctl daemon-reload
-sudo systemctl reset-failed myce-xe-preempt-timeout.service
 sudo rm /usr/local/libexec/myce-xe-preempt-timeout /etc/myce-xe-preempt-timeout.conf
 sudo rm /var/lib/myce-xe-preempt-timeout/prior.json /var/lib/myce-xe-preempt-timeout/lock
 sudo rmdir /var/lib/myce-xe-preempt-timeout
@@ -162,9 +173,11 @@ From the repository root:
 python3 -B deploy/xe-preempt-timeout/test_xe_preempt_timeout.py
 ```
 
-All helper invocations use temporary sysfs/config/state. The bounded-udev FIFO
-regression runs the actual RUN command under GNU `timeout` (`gtimeout` also works
-on macOS); it is explicitly skipped if coreutils is absent. Run it in a local
-Linux VM to cover that path without installing anything on the development host.
-Tests never write real sysfs, install services or contact fleet hosts. Laptop
-proof does not qualify native xe boot/hotplug or uninterruptible driver stalls.
+All eight tests run on macOS and Linux using only Python's standard library,
+with no GNU-timeout dependency or skipped platform-specific case. The per-card
+service test renders and executes the template's `ExecStart` against fake sysfs,
+checking card isolation, readback and idempotence. It replaces the retired
+synchronous-udev timeout test. No service is installed or started by these tests.
+All helper invocations use temporary sysfs/config/state; tests never write real
+sysfs or contact fleet hosts. Laptop proof does not qualify native xe boot,
+systemd/udev device activation, service timeout behavior or driver stalls.
