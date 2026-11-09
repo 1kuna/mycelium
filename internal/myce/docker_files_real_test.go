@@ -115,6 +115,7 @@ printf checkpoint > "$MYCE_CHECKPOINT_DIR/proof"
 	}
 	w := Worker{EnvironmentLimit: 1 << 20, DockerEndpoint: endpoint, Client: client, Machine: m, StateDir: newTestStateRoot(t), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
 	w.dockerCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+		args = gateDockerArgs(t, endpoint, args)
 		cmd := exec.CommandContext(ctx, binary, append([]string{"--host", endpoint}, args...)...)
 		cmd.Env = dockerClientEnvironment()
 		out, err := cmd.Output()

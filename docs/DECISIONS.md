@@ -1,6 +1,6 @@
 # Decisions
 
-Reviewed: 2026-11-09 (MY-41). Owner: project maintainer. This records sanitized rulings; [the approved design](design-proposal.md) remains the only product spec. Dates identify the original rulings, not new qualification. Exact source records and deployment facts remain in private local history.
+Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintainer. This records sanitized rulings; [the approved design](design-proposal.md) remains the only product spec. Dates identify the original rulings, not new qualification. Exact source records and deployment facts remain in private local history.
 
 ## Current rulings
 
@@ -24,6 +24,68 @@ Reviewed: 2026-11-09 (MY-41). Owner: project maintainer. This records sanitized 
   and similar process ceremony, including conflicting instructions in
   `AGENTS.md` and `docs/development.md`. MY-04's release-batch full-suite cadence
   remains; MY-16's fixed development concurrency restriction is superseded.
+
+- **MY-37 — 2026-11-09 — Local development must not depend on fleet availability.**
+  Most Mycelium development should run on the 64 GB development host. Zach:
+  “Most, if not all, mycelium development should be able to occur” on that host;
+  “And iteration should not be dependent on the availability of the nodes. It
+  should just be dependent on the host machine that's being used for development.”
+  Source: Zach's direct instruction, relayed by the Mycelium orchestrator in
+  [#1086](https://github.com/1kuna/mycelium/issues/1086), received by the local-runner
+  and test-speed workers. Quick/full gates run Darwin natively and Linux in a
+  directly invoked local VM, with persistent caches, idle cache trimming,
+  disk floors and measured capacity admission. Fleet gates are optional extra
+  evidence. Supersedes the 2026-11-03 fleet-only gate location and exact-head
+  fleet-gate merge requirement for Mycelium development. Independent review,
+  real race coverage, custody and native platform proof remain required.
+
+- **MY-38 — 2026-11-09 — Faster tests first, faster iteration second.**
+  Zach: “if you need to pause the queue to update and make iteration faster i'd
+  prefer you did that rather than just constantly waiting. us being able to
+  iterate fast matters much more”. Clarification: “i meant pausing the fleet if
+  it means you can apply whatever you need to so we can iterate quicker. but i
+  want you to make the test suite faster too so we can iterate quicker. top
+  priority is faster test suite and second priority is faster iteration so we
+  can reach better stability quicker which can't be done without a faster test
+  suite”. Source: Zach's direct instructions to the Mycelium orchestrator,
+  recorded on [#1086](https://github.com/1kuna/mycelium/issues/1086#issuecomment-6744617550)
+  and [the clarification](https://github.com/1kuna/mycelium/issues/1086#issuecomment-6744698723).
+  Received by the local gate landing and test-speed workers. Priority 1 is a
+  faster test suite; priority 2 is faster iteration toward stability. Fleet
+  pauses are authorized when they enable that work; the clarification supersedes
+  the orchestrator's initial local-gate-only interpretation.
+  Orchestrator application (not Zach's words): hold new placements while running
+  jobs finish or reach a checkpoint, never kill them, announce each pause to
+  affected consumer orchestrators, then resume. Before pausing a production host,
+  notify the orchestrator so it can announce the pause. Local never-admitted
+  gate waiters may be cancelled and restarted with current helpers; admitted
+  and unknown execution custody is never cleared. An admitted gate may only
+  be cancelled through supported cancellation; its replacement must restart
+  immediately. Release-critical work keeps priority; post each replacement
+  receipt or session on its PR. Supersedes the earlier orchestrator default to
+  drain older waiters naturally before measured admission is re-enabled.
+
+- **Orchestrator default (not a maintainer ruling), 2026-11-09 — Measured local admission.**
+  Received by the local-runner worker after calibration: admit fulls from
+  measured per-leg CPU/RAM and live host capacity rather than fixed N=1;
+  reserve all local capacity for explicitly exclusive timing runs. Basis:
+  four-core native peak 7.01 GiB and passing Linux/VM peak 10.57 GiB, plus
+  measured workstation headroom. CPU admission reserves a static fleet-worker
+  share in local gate config, initially 4 cores to match the current admitted
+  worker allowance. The operator updates it when changing that host's worker
+  CPU budget. Drift only overcommits CPU and slows work; this tradeoff is accepted.
+  RAM admission uses live available memory against measured per-leg requirements;
+  it adds no fleet RAM allowance, since live availability reflects actual usage.
+  Normal-pressure shortages retain FIFO position with a visible memory reason;
+  pressure, sustained-swap and disk stops remain, as does refusal of a requirement
+  exceeding physical host RAM. Fulls retain head-of-line FIFO order.
+  This design replaces the per-admission status-read, cache and generation-fencing
+  defaults entirely, avoiding the reproduced concurrent-read races, stale-cache
+  blocking and starvation from live-policy synchronization.
+  Admission is local and never depends on fleet availability. Fleet-worker jobs
+  remain background and their custody is not modified by local gates. Received
+  by the local-runner worker as an orchestrator design change, not Zach's words.
+  This is separate from Zach's MY-37 local-development ruling.
 
 - <a id="my-39"></a>**MY-39 — 2026-11-09 — Critical updates may deploy during production runs.**
   Critical Mycelium updates may deploy during a production consumer's run, so

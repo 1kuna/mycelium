@@ -167,15 +167,15 @@ the same job ID, wait for success, and verify the usual results.
 
 ## Mycelium repository merge gates
 
-Read [the repository merge procedure](../../docs/development.md#automatic-main-full-gates)
-and [current rulings](../../docs/DECISIONS.md#current-rulings). Independent review
-and applicable exact-head fleet proof remain required. Docs-only uses quick;
-full gates stay on fleet. Apply an existing scoped substitute only within its
-authority, evidence and expiry. An owned failure or elapsed queue wait alone is
-not an exception. Preserve original gate verdict and separate disposition.
-Main's queued/running CI does not block; inspect the latest completed run and
-fix red/missing evidence forward as that procedure requires. This consumer
-reference adds no waiver or deployment authority.
+Read [the repository merge procedure](../../docs/development.md#local-merge-proof)
+and [current rulings](../../docs/DECISIONS.md#my-41). Under MY-41, merge on quick
+plus targeted tests, run the full suite once per release batch, and fix breakage
+forward. No independent review or per-PR full is required. Development gates,
+admission and stale custody may be repaired or reset when they block iteration;
+protect running production jobs and secrets. Use the local gate for development;
+fleet compute remains available within the task's authority. Preserve actual
+failed, interrupted and skipped results. This consumer reference grants no
+deployment authority.
 
 ## Results
 

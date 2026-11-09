@@ -2,6 +2,7 @@
 # Runs inside the profile's isolated source folder, never in the caller checkout.
 # gate-quick passes `quick`; its job input gate-selection.tsv replaces Git history.
 set -euo pipefail
+export GATE_TARGET=native
 mode=${1:-full}
 case "$mode" in full) gate=(full);; quick) gate=(quick --selection gate-selection.tsv);; *) echo "gate profile: unknown mode: $mode" >&2; exit 2;; esac
 for tool in go git python3 uv; do
