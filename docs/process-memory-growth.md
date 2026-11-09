@@ -31,9 +31,8 @@ interval for the entire attempt. Synthetic injected-clock observations
 `(seconds, GiB) = (0, 3.35), (1, 4.35), (108.6, 4.35)` produce 107.6 GiB of
 growth under that estimator. The paired estimator reports zero live growth/rate
 after the flat reading and retains 1 GiB of measured peak growth. Related traces
-reproduce 19.9 and 15.5 GiB at 2.6 and 4.4 GiB peaks. These arithmetic replays are
-established by `TestProcessMemoryGrowthReplaysDelayedFlatInflation`; their
-timestamps are synthetic. Attribution of historical refusals remains unproven.
+reproduce 19.9 and 15.5 GiB at 2.6 and 4.4 GiB peaks. These historical arithmetic traces use synthetic timestamps; attribution of
+historical refusals remains unproven.
 
 The cost is that a flat observation stops projecting a historical burst.
 Future unseen bursts remain unknown, as with any sampled estimator. Existing

@@ -182,13 +182,6 @@ Windows session bridge, OS hang reproduction and representative daily-owner
 latency under load require a separately authorized maintenance run. No native
 hang-cause attribution, fleet change or deployment is implied.
 
-`TestInventoryHelperLaunchMeasurement` measures an instrumented two-card fake
-inventory for one simulated minute, with a one-second heartbeat, 250ms scan
-cost and two CPU cores. The former per-card fingerprint/query path launches
-174 enumeration and 116 memory helpers; the corrected path launches 35 and 12.
-This compares launch counts, not native driver overhead or throughput. No
-production GPU or compute workload is exercised.
-
 After an authorized deploy, the operator can compare equal-duration kernel-log
 windows before and after worker activation: count peer-to-peer DMA warnings per
 elapsed minute and record helper launches, observation cost/period, sample age,

@@ -1385,20 +1385,11 @@ extend compatibility to queues predating `machine.tool_inventory`. Tool-based
 placement and the worker's effective-PATH launch recheck retain their meaning.
 The queue's status projection omits the full inventory payload.
 
-`TestToolInventoryWorkerHandshake` exercises the real HTTP check-in path with the
-#790 fixture (40 prepared environments, 2,400 native executable names), inventory
-change, cache mismatch and restart. Fake-clock regressions cover session/version
+`TestToolInventoryWorkerHandshake` exercises the real HTTP check-in path with one
+prepared environment and two native executable names, inventory changes and
+restart. Fake-clock regressions cover session/version
 fences, a delayed concurrent report, rollback and diagnostic placement. The
 upgrade-compatibility process suite owns cross-binary coverage separately.
-
-For a before/after comparison, run `BenchmarkToolInventoryFleet` with
-`-benchtime=25x`. Its source is compatible with #790: run `full` there and `delta`
-on the candidate. Five synthetic CPU workers report against real SQLite with
-6,286 settled jobs, 1,655 retained curves and 1,384 storage observations. It
-reports check-in bytes and total queue mutex hold p50/p99, including transaction
-snapshots/commits and check-in read phases; JSON decoding stays outside that hold.
-The settled backlog isolates inventory overhead and does not model concurrent
-job GET traffic, active scheduling load, native device probes or live latency.
 
 ## CPU and I/O collector cost (#857 item 6)
 

@@ -33,7 +33,7 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/worker_sync.go'] = (
 SUPPLEMENTAL_CONSUMERS['internal/myce/observation_cache_budget.go'] = (
     'status_read_test.go',)
 SUPPLEMENTAL_CONSUMERS['internal/myce/telemetry_budget.go'] = (
-    'job_get_volume_test.go', 'request_timing_test.go', 'queue_mutex_test.go')
+    'job_get_volume_test.go', 'request_timing_test.go')
 SUPPLEMENTAL_CONSUMERS['internal/myce/diagnostic_budget.go'] = (
     'evidence_budget_test.go', 'evidence_readiness_test.go')
 
@@ -53,10 +53,10 @@ for source in ('file_socket_unix', 'file_socket_other'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
         'client_adaptive_test.go', 'file_socket_unix_test.go')
 
-# The non-Linux Xe probe withholds telemetry; Linux exercises the read-only PMU
-# implementation; portable device and admission tests exercise missing evidence.
+# The non-Linux Xe probe withholds telemetry; portable device and admission
+# tests exercise missing evidence and device identity.
 SUPPLEMENTAL_CONSUMERS['internal/myce/xe_activity_other.go'] = (
-    'xe_activity_linux_test.go', 'device_telemetry_test.go', 'discrete_fanout_sharing_test.go')
+    'device_telemetry_test.go', 'discrete_fanout_sharing_test.go')
 
 
 def changed_symbols(diff):
