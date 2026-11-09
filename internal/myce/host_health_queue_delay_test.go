@@ -584,3 +584,64 @@ func TestHostHealthQueueDelayHTTPResponse(t *testing.T) {
 		})
 	}
 }
+
+// A legacy Linux PSI latch can be cleared by queue classification. That healthy
+// report needs the same processing credit as an already-clear worker report.
+func TestHostHealthQueueDelayLegacyPSIRecovery(t *testing.T) {
+	for _, corroborated := range []bool{false, true} {
+		t.Run(map[bool]string{false: "recovered", true: "corroborated-drain"}[corroborated], func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuMachine("legacy-psi-health", "fake", "cpu", 4, 16)
+			h := &HostHealth{DrainReason: "host_memory_pressure", Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .0036, ValidSeconds: 1.021}, AgeSeconds: .0036}
+			for i := range hostHealthWarmup {
+				h.Baseline = append(h.Baseline, HostHealthSample{At: clock.Now().Add(time.Duration(i-hostHealthWarmup-hostHealthConfirmation) * time.Second), HostHealthReading: HostHealthReading{Pressure: .02, WakeSeconds: .001}})
+			}
+			for i := range hostHealthConfirmation {
+				s := HostHealthSample{At: clock.Now().Add(time.Duration(i-hostHealthConfirmation+1) * time.Second), HostHealthReading: HostHealthReading{Pressure: 2, WakeSeconds: .001}}
+				if corroborated {
+					s.SwapGrowth = 1 << 20
+				}
+				h.History = append(h.History, s)
+			}
+			m.HostHealth = h
+			q.fileLifecycle.Lock()
+			done := make(chan error, 1)
+			go func() { _, err := q.Checkin(Checkin{Machine: m}); done <- err }()
+			var once sync.Once
+			release := func() {
+				once.Do(func() {
+					q.fileLifecycle.Unlock()
+					if err := <-done; err != nil {
+						t.Error(err)
+					}
+				})
+			}
+			defer release()
+			await(t, func() bool { q.mu.Lock(); defer q.mu.Unlock(); return q.s.Machines[m.ID] != nil })
+			clock.Advance(3 * time.Second)
+			expected := ""
+			if corroborated {
+				expected = "host_memory_pressure"
+			}
+			q.mu.Lock()
+			reason := q.hostHygieneReason(q.s.Machines[m.ID])
+			q.mu.Unlock()
+			if reason != expected {
+				t.Fatalf("classified PSI during reply preparation: got %q want %q", reason, expected)
+			}
+			if h.DrainReason != "host_memory_pressure" || h.PressureEvaluation != nil {
+				t.Fatal("preparation mutated original worker report")
+			}
+			release()
+			if reason := q.hostHygieneReason(q.s.Machines[m.ID]); reason != expected {
+				t.Fatal("completed PSI reply lost classification or processing credit", reason)
+			}
+			if !corroborated {
+				clock.Advance(h.Probe.freshness() - time.Duration(h.AgeSeconds*float64(time.Second)))
+				if reason := q.hostHygieneReason(q.s.Machines[m.ID]); reason != "host_probe_unknown" {
+					t.Fatal("recovered PSI sensor survived measured service bound", reason)
+				}
+			}
+		})
+	}
+}

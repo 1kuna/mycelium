@@ -63,6 +63,9 @@ type hostHealthPreparation struct {
 }
 
 func (q *Queue) beginHostHealthPreparation(ctx context.Context, m Machine, order uint64) *hostHealthPreparation {
+	// Match admission's effective classification on an owned health copy. A
+	// recovered legacy PSI latch must not discard this request's delay credit.
+	acceptHostHygiene(&m)
 	h := m.HostHealth
 	if h == nil || h.Probe == nil || !hostHealthEvidenceValid(h, 0) || h.DrainReason != "" {
 		return nil
