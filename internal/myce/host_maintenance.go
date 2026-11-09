@@ -187,7 +187,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		freshEvidence = freshEvidence && fresh
 		operational = operational && fresh && !m.HostMemoryPolicyMismatch && m.MemoryError == "" && m.HostMemoryError == "" && m.InventoryReason == "" && (out.Policy.SharedHost == nil || q.sharedPressureFresh(m))
 		out.Healthy = out.Healthy && operational && len(m.UnavailableRoots) == 0
-		out.Healthy = out.Healthy && hostHygieneReasonAt(m, q.clock.Now()) == ""
+		out.Healthy = out.Healthy && q.hostHygieneReasonAt(m, q.clock.Now()) == ""
 		out.Healthy = out.Healthy && !slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
 		out.MemoryInUseGB = max(out.MemoryInUseGB, m.HostMemoryInUseGB)
 		out.MemoryDebtGB = max(out.MemoryDebtGB, m.hostReservationDebtGB)

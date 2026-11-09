@@ -366,12 +366,13 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		contact, settle := a.Queue.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, r.Context())
 		c.contact = contact
 		defer func() { settle(accepted) }()
-		v, err := a.Queue.checkinContext(r.Context(), c)
-		accepted = err == nil
-		if err == nil {
-			v.NASPathChecks = nas.checkin(c)
-		}
-		respondOperation(w, v, err, "worker_checkin_invalid")
+		_, _ = a.Queue.checkinResponseContext(r.Context(), c, func(v Reply, err error) {
+			accepted = err == nil
+			if err == nil {
+				v.NASPathChecks = nas.checkin(c)
+			}
+			respondOperation(w, v, err, "worker_checkin_invalid")
+		})
 	})
 	mux.HandleFunc("POST /api/workers/launch", func(w http.ResponseWriter, r *http.Request) {
 		var l HostLaunch

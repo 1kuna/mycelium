@@ -526,7 +526,9 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 	}
 	fresh := make(map[string]freshness, len(q.s.Machines))
 	for key, m := range q.s.Machines {
-		ledgers[key] = observationMachineLedger{m.toolInventory, m.cpuLedger, m.hostBudgetGB, m.modelReservationDebtGB, m.hostReservationDebtGB}
+		ledgers[key] = observationMachineLedger{healthDelivery: q.freezeHostHealthDelivery(m),
+			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger, hostBudgetGB: m.hostBudgetGB,
+			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB}
 		fresh[key] = freshness{m.LastSeen, q.unreported[key]}
 	}
 	q.freezeContactView(source)
@@ -558,6 +560,11 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 			source.unreported[key] = true
 		}
 		l := ledgers[key]
+		if m.HostHealth != nil {
+			health := *m.HostHealth
+			health.delivery = l.healthDelivery
+			copy.HostHealth = &health
+		}
 		copy.toolInventory = l.toolInventory
 		copy.cpuLedger = l.cpuLedger
 		copy.hostBudgetGB = l.hostBudgetGB

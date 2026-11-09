@@ -115,6 +115,9 @@ func (q *Queue) inRestartGrace(now time.Time) bool {
 // freezeContactView preserves accepted cadence, suspicion and remaining service
 // grace in a detached observation. The caller owns q.mu or an immutable source.
 func (q *Queue) freezeContactView(v *Queue) {
+	if q.mu.control != nil {
+		v.mu.control = &controlClock{clock: v.clock.Now, at: v.clock.Now(), opportunity: q.controlNow()}
+	}
 	if q.mu.control != nil && q.restartControlUntil > 0 {
 		v.restartUntil = v.clock.Now().Add(q.restartControlUntil - q.controlNow())
 	}

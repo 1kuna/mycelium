@@ -403,8 +403,20 @@ func TestAdaptiveProbeQueueDelayCannotRenewEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored := q.s.Machines[m.ID]
-	if hostAvailabilityFresh(stored, clock.Now()) || machineAvailability(stored).Available || q.sharedPressureFresh(stored) || q.hostHygieneReason(stored) != "host_probe_unknown" {
-		t.Fatal("queue delay renewed an expired observation")
+	if hostAvailabilityFresh(stored, clock.Now()) || machineAvailability(stored).Available || q.sharedPressureFresh(stored) {
+		t.Fatal("queue delay renewed expired owner or pressure evidence")
+	}
+	// Host health now excludes queue service, as required by the reporting-
+	// worker incident. The original assertion treated all three lanes as wall
+	// age and incorrectly required this fresh-at-send health report to expire.
+	if reason := q.hostHygieneReason(stored); reason != "" {
+		t.Fatal("queue service invalidated fresh-at-send health", reason)
+	}
+	// The exception cannot renew evidence that was already stale at send.
+	m.HostHealth.AgeSeconds = observation.ValidSeconds
+	check(t, q, m, nil)
+	if reason := q.hostHygieneReason(q.s.Machines[m.ID]); reason != "host_probe_unknown" {
+		t.Fatal("queue delivery renewed stale-at-send health", reason)
 	}
 }
 

@@ -57,6 +57,7 @@ type ForeignConsumer struct {
 }
 
 type HostHealth struct {
+	delivery *hostHealthDelivery // Queue-owned immutable receipt; never accepted from the wire.
 	// Queue-owned explanation; workers omit it, including on strict older peers.
 	PressureEvaluation *HostPressureEvaluation `json:"pressure_evaluation,omitempty"`
 	Probe              *ProbeObservation       `json:"probe,omitempty"`
@@ -440,12 +441,12 @@ func hostHygieneReason(m *Machine) string {
 func (q *Queue) hostHygieneReason(m *Machine) string {
 	for _, other := range q.s.Machines {
 		if hostID(other) == hostID(m) && other.Replacement == nil && !other.Gone && !q.unreported[other.ID] {
-			if reason := hostHygieneReasonAt(other, q.clock.Now()); reason != "" {
+			if reason := q.hostHygieneReasonAt(other, q.clock.Now()); reason != "" {
 				return reason
 			}
 		}
 	}
-	return hostHygieneReasonAt(m, q.clock.Now())
+	return q.hostHygieneReasonAt(m, q.clock.Now())
 }
 
 func hostHealthEvidenceValid(h *HostHealth, elapsed time.Duration) bool {
@@ -453,13 +454,15 @@ func hostHealthEvidenceValid(h *HostHealth, elapsed time.Duration) bool {
 		return true
 	} // Legacy evidence has no new timing fields.
 	return h.Probe.valid() && validMemoryValue(h.AgeSeconds) && elapsed >= 0 &&
-		elapsed.Seconds()+h.AgeSeconds < h.Probe.freshness().Seconds() && len(h.History) > 0 && h.History[len(h.History)-1].Error == ""
+		h.AgeSeconds < h.Probe.freshness().Seconds() &&
+		elapsed < h.Probe.freshness()-time.Duration(h.AgeSeconds*float64(time.Second)) &&
+		len(h.History) > 0 && h.History[len(h.History)-1].Error == ""
 }
-func hostHygieneReasonAt(m *Machine, now time.Time) string {
+func (q *Queue) hostHygieneReasonAt(m *Machine, now time.Time) string {
 	if reason := hostHygieneReason(m); reason != "" {
 		return reason
 	}
-	if m != nil && !hostHealthEvidenceValid(m.HostHealth, now.Sub(m.LastSeen)) {
+	if m != nil && !q.hostHealthEvidenceValid(m, now) {
 		return "host_probe_unknown"
 	}
 	return ""

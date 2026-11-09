@@ -675,9 +675,15 @@ probe period, cost and frozen validity. Read age against that observation's
 validity; a successful check-in cannot renew a failed probe. From the host-health
 delivery correction (#1025), new health observations include the same learned
 report-gap allowance as shared pressure. Stopped or failed sensors still lose
-admission while worker contact continues. An unprecedented delay can exceed the
-learned prediction; read the frozen validity and age together. Owner-latency holds
-now require fresh healthy evidence spanning the attempt's measured interference
+admission while worker contact continues. From the queue-delay correction,
+host-health decisions exclude actual incoming queue processing and mutex
+occupancy from delivery aging. A fresh replacement currently preparing outside
+the mutex pauses only its own session's previous evidence; stale/failed input
+cannot renew it, and cancellation or rejection removes that credit. Diagnostic
+`age_seconds` still includes that wall time; age above validity alone does not establish sensor staleness. A stopped
+sensor's worker-local age still expires, and continuous queue unavailability has
+no finite wall-time detection bound while its control path remains unavailable.
+Owner-latency holds now require fresh healthy evidence spanning the attempt's measured interference
 interval, rather than a fixed retry delay. Other eligible hosts remain available.
 Older workers retain legacy fields and age rules. See
 [host observations](https://github.com/1kuna/mycelium/blob/main/docs/host-probes.md).
