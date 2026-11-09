@@ -147,8 +147,18 @@ From the queue release containing #1142, `device_fault_last_healthy` holds a
 job that lost an attempt to a driver fault before it can consume that host's
 last healthy accelerator of the same backend. Keep the job ID and submission
 key: another host, spare healthy capacity or a health-proven recovery can make
-it eligible. This queue protection works with older workers. Automatic
-quarantine clearance additionally needs the supporting worker release and its
+it eligible. This queue protection works with older workers.
+
+The typed hold pauses the remaining relative start/recovery budget; status says
+`paused for device recovery`. The saved amount persists through capacity waiting
+after clearance and restart. Explicit absolute `start_by` and queued-only
+`give_up_at` still bind. If recovery never becomes eligible, the hold terminates
+one existing maximum start window (one hour) after the queue-recorded fault loss
+with `diagnostic_code: device_fault_recovery_timeout`. Preserve that terminal
+result; a late clear cannot revive it. Fresh inventory showing both cards
+healthy releases the guard after an operator clear as well as automatic recovery.
+
+Automatic quarantine clearance additionally needs the supporting worker release and its
 vendor health tool; unsupported/unknown health keeps quarantine. Status
 `devices[].quarantine_recovery` records the fault event, healthy interval,
 measured observation window and clear evidence. Repeated-fault escalation still
