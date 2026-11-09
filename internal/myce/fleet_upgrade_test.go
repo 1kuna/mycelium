@@ -520,6 +520,28 @@ func TestFleetUpgradeAlreadyCurrentRequiresStableEnrollmentHealth(t *testing.T) 
 	for n := 0; n < 10; n++ {
 		fleetHeartbeatAdvance(t, q, c)
 	}
+	// Let the queue proof expire during its partial window. Keep worker
+	// contacts current without fleetHeartbeatAdvance refreshing that proof.
+	for n := 0; n < 31; n++ {
+		c.Advance(time.Second)
+		m.Fleet.ObservedAt = c.Now()
+		check(t, q, m, nil)
+		fleetTick(t, q)
+		if h := q.fleetActiveHost(); h == nil || h.Host != "queue" || h.QueueDone {
+			t.Fatal("stale queue proof completed its stability window", q.fleetUpgradeStatus())
+		}
+	}
+	if q.fleetProofFresh(q.fleetQueue.Proof) {
+		t.Fatal("fixture refreshed the queue proof while testing expiry")
+	}
+	q.fleetQueue.Proof.ObservedAt = c.Now()
+	fleetTick(t, q)
+	for n := 0; n < 29; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	if h := q.fleetActiveHost(); h == nil || h.Host != "queue" || h.QueueDone {
+		t.Fatal("recovered queue proof retained time from before expiry", q.fleetUpgradeStatus())
+	}
 	q.fleetQueue.Proof.ServiceHealthy = false
 	fleetTick(t, q)
 	q.fleetQueue.Proof.ServiceHealthy = true
