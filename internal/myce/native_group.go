@@ -385,7 +385,6 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		if independentFailure && errors.Is(runErr, errWorkerMemory) {
 			facts.Infrastructure = slices.DeleteFunc(facts.Infrastructure, func(f infrastructureFact) bool { return f.Kind == launchRefused && f.Predicate == "memory_capacity" })
 		}
-		priorityStop := p.priorityStop
 		p.mu.Unlock()
 		groupErr := g.cleanupProcesses(writer, false)
 		p.mu.Lock()
@@ -444,7 +443,12 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 				collectProgramUsage(&r, main.cmd.ProcessState, programUsageFile(g.dir, identity))
 			}
 		}
-		r = classifyAttemptOutcome(r, attemptCause{PriorityStop: priorityStop, memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
+		// Control delivery can record a priority stop while cleanup drains the
+		// group. Retain that provenance, but keep the selected member facts from
+		// before cleanup so its signals cannot rewrite an independent exit.
+		p.mu.Lock()
+		r = classifyAttemptOutcome(r, attemptCause{PriorityStop: p.priorityStop, memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
+		p.mu.Unlock()
 		r.StoragePeak = w.storageObserver.finish()
 		if r.Success {
 			if e := w.publishExtensionFiles(j, filepath.Join(g.dir, "job-files", j.ID, strconv.Itoa(j.Attempt))); e != nil {
