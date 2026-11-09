@@ -30,12 +30,19 @@ func TestInstallWorkerRuntimeAndServiceDetection(t *testing.T) {
 			}
 			binary := filepath.Join(home, "source")
 			os.WriteFile(binary, []byte("fake"), 0700)
-			checked, enabled := false, false
+			checked, enabled, provisioned := false, false, false
 			runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "sudo" {
+					provisioned = true
+					return nil, nil
+				}
 				if name == "cat" {
 					return []byte("fixture " + c.NAS + " nfs rw 0 0\n"), nil
 				}
 				if name == "systemd-run" {
+					if !provisioned {
+						t.Fatal("GPU validation ran before health access provisioning")
+					}
 					checked = true
 					wantProperty := "--property=EnvironmentFile=" + c.GPUEnvironmentFile()
 					found := false
@@ -81,8 +88,22 @@ func TestInstallWorkerRuntimeAndServiceDetection(t *testing.T) {
 			if !checked || !enabled {
 				t.Fatalf("checked=%v enabled=%v", checked, enabled)
 			}
+			// A denied permission migration must not activate the service or
+			// publish replacement credentials.
+			err := Install(context.Background(), c, binary, "changed", func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name != "sudo" {
+					t.Fatalf("command ran after denied health access: %s", name)
+				}
+				return nil, errors.New("denied")
+			})
+			if err == nil || !strings.Contains(err.Error(), "xpu_health_access_unavailable") {
+				t.Fatal(err)
+			}
+			if token, _ := ReadServiceToken(c); token != "private-token" {
+				t.Fatal("denied migration replaced token")
+			}
 			// A failed upgrade also refuses acceptance and retains its saved token.
-			err := Install(context.Background(), c, binary, "changed", func(_ context.Context, n string, args ...string) ([]byte, error) {
+			err = Install(context.Background(), c, binary, "changed", func(_ context.Context, n string, args ...string) ([]byte, error) {
 				if n == "cat" {
 					return []byte("fixture " + c.NAS + " nfs rw 0 0\n"), nil
 				}

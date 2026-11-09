@@ -2455,11 +2455,116 @@ still requires new health-proven recovery or another healthy device/host.
 From the worker release containing #1142, non-escalated quarantine also clears
 automatically after positive vendor health evidence and uninterrupted kernel
 observation. Intel uses `xpu-smi health -d PCI-BDF -j`: core temperature, power
-and memory must report `OK`, and no supported component may report a warning or
-critical state. NVIDIA uses UUID-selected `nvidia-smi -q -x`; the matching device
+and memory (native JSON keys `core_temperature`, `power_health`,
+`memory_health`) must report `OK`, except for a component proven unsupported by
+same-batch sibling comparison below. No supported component may report a warning
+or critical state. NVIDIA uses UUID-selected `nvidia-smi -q -x`; the matching device
 must explicitly report recovery action `None`. Missing tools, unsupported fields,
 unknown required health and failed reads keep quarantine. Other backends can
 supply the injectable health probe; unsupported backends do not auto-clear.
+
+With `device-health-v1` negotiation, the last rejected proof appears in
+`devices[].quarantine_recovery_blocked`: a typed `code`, optional `component`
+or `exit_status`, and the worker's `observed_at`. Examples are
+`health_component_unknown` with `component: memory`,
+`health_component_missing` with `component: power`,
+`health_probe_permission_denied`, and `health_probe_exit` with `exit_status`.
+The worker logs a rejection when its classification or fault changes; repeated
+identical rejections update status without flooding the log. Raw vendor output,
+paths and error strings are never included. A new healthy reading removes the
+last rejection; it does not bypass the recovery window. Older queues receive
+no additive diagnostic field, while recovery-v1 clear receipts remain compatible.
+
+XPU capability comparison is an orchestrator agent default (2026-11-09, under
+MY-34), not a maintainer ruling; see [the decision](DECISIONS.md). When a required
+component is explicitly `Unknown` / “cannot be determined” on the quarantined
+card and an otherwise healthy same-model sibling in the same health batch, that
+component is excluded from this proof. `devices[].unsupported_on_device` lists
+canonical component names such as `memory`. Model identity uses the existing
+nonempty hardware/driver fingerprint. All other required components must be
+`OK` on the target; the sibling must pass every determinable required component
+and have no inventory exclusion, quarantine or new kernel fault. Missing,
+malformed or failed readings cannot establish unsupported capability. Without a
+healthy same-model sibling (including a single-card host), Unknown retains
+quarantine. Each batch compares fresh readings; there is no cached model
+allowlist. Each reading retains its query start and completion timestamps;
+completing a sibling query never renews target evidence. Neither query may
+begin before a kernel-monitor gap. The whole comparison must fit one control
+interval plus the previously measured kernel service-cost prediction, frozen
+before the batch starts. This bounds skew without allowing a stalled batch to
+expand its own allowance; an overly slow comparison retains quarantine. A
+kernel scan must start after both queries complete. Status reports
+`health_probe_monitor_gap` or `health_probe_comparison_stale` when those fences
+reject evidence. The exclusion accompanies the durable clear receipt in status
+and never shortens the kernel observation window.
+
+Linux XPU worker installation provisions health access automatically, before
+service activation. Binary-only release rollout also performs this idempotent
+prerequisite on service startup, before reading credentials or accepting work.
+The root-owned `/etc/udev/rules.d/70-mycelium-xpu-health.rules` grants the worker's
+existing primary group mode `0660` on GPU MEI nodes whose ancestor driver is
+`mei_gsc`. The [retained sanitized trace and matching driver
+observation](evidence/xpu-health-access.md) show xpu-smi 2.2.0 attempting
+`O_RDWR|O_CLOEXEC` on a GPU MEI node, denied for the worker; root's query had no
+such denial. This
+exchange opens a bidirectional HECI channel even though the requested operation
+is a health read. Linux checks both read and write permission for `O_RDWR`, so a
+read-only group grant cannot satisfy the observed invocation. `0660` supplies
+that required open without world access; no read-only alternative has been
+qualified for this tool. PMT was opened `O_RDONLY` and retains read-only access.
+This is a device-access grant, not a health-only boundary: any process with the
+worker's primary group can attempt channel operations beyond health queries,
+subject to the driver's own controls. The installed helper manages permissions;
+it does not restrict channel operations to health. A narrower helper exposing
+only qualified health queries is unimplemented and unqualified future work.
+Unrelated management-engine MEI nodes remain untouched. Xe-owned Intel PMT `telem` sysfs
+attributes receive that group and mode `0440`; no world access is added. The
+installer reloads the rule and applies the same narrow permissions to current
+nodes, without probing the GPU or restarting a service. Existing group membership
+is already effective, so no user-manager restart or manual group step is needed.
+Installation needs noninteractive administrator authority (`sudo -n`); inability
+to provision returns `xpu_health_access_unavailable` before activation. No
+sudoers grant or elevated health command is installed. Each startup/install
+reapplies the setup, even when rule bytes match: a rule published before a failed
+reload or node update is not proof of completed access. Activation stays blocked
+on failure and the next supported install/start repairs that partial application.
+
+The root-only helper and baseline journal live under
+`/var/lib/mycelium/xpu-health-access`. The udev helper records each node's
+original group/mode and filesystem identity before granting access, including
+new/recreated nodes. A stable root lock serializes udev, install and removal.
+Owners are keyed by account and installation identity; several installations
+using the same primary group share access. Different primary groups refuse
+rather than replace another owner's grant.
+
+Supported uninstall stops its worker, releases only that installation's owner
+record, and retains grants while another installation still owns them. The last
+owner removes the unchanged Mycelium rule, reloads udev and restores each
+still-current grant to its recorded original group/mode. Node identity checks
+prevent restoring an old device's receipt onto its replacement. Subsequent
+administrator node edits are preserved; a changed/non-Mycelium rule refuses
+cleanup instead of deleting it. Cleanup failure returns
+`xpu_health_access_cleanup_failed` and retains the service configuration for a
+supported uninstall retry. After grants are restored, final teardown publishes
+a root-only completion record at
+`/var/lib/mycelium/xpu-health-access.teardown` before deleting ownership or
+validation metadata. The same owner can resume directory cleanup using that
+record even if `gid`/`format` are already gone; install and udev application
+refuse while teardown is pending. The completion record is removed only after
+the state directory is gone. The root helper/journal are removed after successful
+last-owner cleanup; the inert lock file remains for coordination. This requires
+noninteractive administrator authority for uninstall as well as install; dry-run
+uninstall makes no changes.
+
+Read-only xpu-smi 2.2.0 observations found worker temperature Unknown and root
+temperature OK, with GPU MEI and PMT access denied to the worker; this did not
+isolate an MEI-only dependency. Memory health remained Unknown even as root.
+The orchestrator supplied earlier healthy-sibling evidence of undeterminable
+memory health; a fresh sibling query was skipped because a production attempt
+was running. Installer application and worker-identity temperature/automatic-clear
+verification happen through the release rollout, not manual host edits. Native
+acceptance remains tracked in #1185; laptop fake probes do not establish it.
+
 Vendor probes have a separate single-flight lane, so a slow tool cannot stop
 kernel scanning or create a probe backlog.
 Completed health readings remain pending until a subsequent kernel scan can

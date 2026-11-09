@@ -260,3 +260,60 @@ The template's README contains installation, direct sysfs/journal verification,
 prior-value (or explicit 640000) rollback, uninstall and laptop fake-sysfs tests.
 The live sysfs bound names and validation follow Linux 7.0's
 [`xe_hw_engine_class_sysfs.c`](https://github.com/torvalds/linux/blob/v7.0/drivers/gpu/drm/xe/xe_hw_engine_class_sysfs.c).
+
+## Quarantine health proof diagnostics (#1185)
+
+XPU recovery reads the native `xpu-smi health` JSON fields `core_temperature`,
+`power_health` and `memory_health`. Required components must report `OK`.
+A component explicitly undeterminable on both the target and an otherwise
+healthy same-model sibling in the same health batch is excluded from that proof
+and published as `unsupported_on_device`. This is the orchestrator's 2026-11-09
+agent default under MY-34, not a maintainer ruling. The existing nonempty
+hardware/driver fingerprint identifies the model. Each batch obtains fresh
+comparison evidence; new sibling kernel faults invalidate it. Each query keeps
+its own start/completion time. A monitoring gap rejects any query begun before
+the gap, and a subsequent kernel scan must follow both query completions. The
+whole comparison is bounded by one control interval plus the prior measured
+kernel service-cost prediction, frozen before starting. Slow comparison cannot
+renew older evidence or grow its own allowance. All other
+required components must be OK, and warnings on optional components still
+prevent clearance. Missing/malformed readings and Unknown without a healthy
+same-model sibling keep quarantine. The kernel observation window is unchanged.
+
+The command runner keeps stdout JSON separate from stderr diagnostics. A MEI
+initialization warning cannot replace component evidence, and successful exit
+alone is insufficient. The supported Linux XPU installer/startup migration
+grants the existing worker primary group access to GPU `mei_gsc` nodes (0660,
+required for IGSC's read/write open) and Xe PMT telemetry attributes (0440,
+read-only), via a root-owned udev rule and immediate application to matching
+nodes. Unrelated MEI nodes are excluded. It needs noninteractive administrator
+authority, installs no sudoers grant, runs no health command as root, and needs
+no manual group/permission step. The captured health invocation opened MEI
+`O_RDWR` for IGSC/HECI, which requires both read and write permission; PMT used
+`O_RDONLY`; the [sanitized native excerpts](evidence/xpu-health-access.md)
+retain the open flags and matching `mei_gsc` observation. Group `0660` permits
+channel operations beyond health queries; the permission helper does not
+restrict that API. A narrower health-only helper remains unqualified future
+work. Every install/start retries the full provisioning sequence, rather
+than trusting rule bytes left by an interrupted setup. The root-only node
+journal also captures recreated nodes; last-owner uninstall restores unchanged
+grants to the saved permissions and removes the rule/helper. Other installation
+owners and administrator edits are preserved. An external root-only completion
+record makes the final teardown resumable after ownership/validation metadata
+is removed; it remains until the state directory is gone. See [installation and rollout
+semantics](operations.md#accelerator-driver-fault-quarantine).
+
+Rejected proofs publish sanitized `quarantine_recovery_blocked` status after
+`device-health-v1` negotiation, with the failed component or command exit status.
+It describes the last rejected observation, not a current health guarantee.
+New healthy evidence removes it but still needs the existing uninterrupted
+kernel observation and measured recovery window. Logs record changed rejection
+classifications rather than raw vendor text. This does not change the probe
+cadence; independent pacing is tracked in #1168/#1171.
+
+The native diagnosis found unknown memory health even as root and both MEI and
+PMT access denials for the worker. It does not establish an MEI-only dependency.
+Earlier healthy-sibling evidence was supplied by the orchestrator; the fresh
+comparison was skipped because that device had a running production attempt.
+Native installation and recovery verification remain release-rollout work in
+#1185. No live permission changes or extra device queries accompany this patch.

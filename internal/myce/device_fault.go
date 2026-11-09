@@ -38,9 +38,10 @@ const deviceFaultFile = "device-quarantine.json"
 var workerDeviceFaultSource = localDeviceFaultSource
 
 type deviceQuarantine struct {
-	BootID  string                 `json:"boot_id"`
-	Seen    map[string]bool        `json:"seen"`
-	Devices map[string]deviceFault `json:"devices"`
+	Unsupported map[string][]string    `json:"unsupported_on_device,omitempty"`
+	BootID      string                 `json:"boot_id"`
+	Seen        map[string]bool        `json:"seen"`
+	Devices     map[string]deviceFault `json:"devices"`
 	// Last fault per device attributed to teardown rather than quarantined.
 	Teardowns       map[string]deviceFault    `json:"teardowns,omitempty"`
 	Cleared         map[string]DeviceRecovery `json:"cleared,omitempty"`
@@ -73,6 +74,7 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	w.faultRecovery = map[string]deviceRecoveryObservation{}
 	w.faultHealth = map[string]deviceHealthObservation{}
 	w.faultHealthDue = map[string]deviceHealthDue{}
+	w.faultRejected = map[string]deviceHealthObservation{}
 	w.faultHealthAfter = w.Clock.Now()
 	data, err := os.ReadFile(filepath.Join(root.dir, deviceFaultFile))
 	if err == nil {
@@ -88,6 +90,11 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 		w.DeviceFaultSource = workerDeviceFaultSource()
 	}
 	if w.DeviceHealthProbe == nil {
+		if w.DeviceHealthReportProbe == nil {
+			w.DeviceHealthReportProbe = func(ctx context.Context, d MachineDevice) (DeviceHealthReport, error) {
+				return workerMachineProbe().XPUHealthReport(ctx, d)
+			}
+		}
 		// Resolve host discovery only when a health check runs (#1152): a
 		// worker without a fault source never consults the platform probe.
 		w.DeviceHealthProbe = func(ctx context.Context, d MachineDevice) (bool, error) {
@@ -109,13 +116,24 @@ func (w *Worker) applyDeviceQuarantine() {
 	for i := range w.Machine.Devices {
 		d := &w.Machine.Devices[i]
 		d.Recovery = nil
+		d.RecoveryBlocked = nil
+		d.UnsupportedOnDevice = nil
 		if recovery, ok := w.faults.Cleared[deviceFaultKey(*d)]; ok {
 			copy := recovery
 			d.Recovery = &copy
+			d.UnsupportedOnDevice = slices.Clone(w.faults.Unsupported[deviceFaultKey(*d)])
 		}
 		d.RepeatedTeardownFault = w.faults.Devices[deviceFaultKey(*d)].RepeatedTeardown
 		if fault := w.faults.Devices[deviceFaultKey(*d)]; fault.Reason != "" {
 			d.Reason, d.FreeMemoryGB = fault.Reason, 0
+			if h := w.faultRejected[deviceFaultKey(*d)]; !fault.RepeatedTeardown && h.event == fault.Event && h.failure != nil {
+				failure := *h.failure
+				failure.ObservedAt = h.at
+				d.RecoveryBlocked = &failure
+			}
+			if h := w.faultRejected[deviceFaultKey(*d)]; !fault.RepeatedTeardown && h.event == fault.Event {
+				d.UnsupportedOnDevice = slices.Clone(h.unsupported)
+			}
 		} else if deviceFaultReason(d.Reason) {
 			// Capacity returns only with the next successful inventory probe.
 			d.Reason = ""
@@ -173,7 +191,7 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 		log.Print("accelerator fault monitor recovered")
 	}
 	w.Machine.FaultMonitorError = ""
-	next := deviceQuarantine{BootID: snapshot.BootID, Seen: map[string]bool{}, Devices: map[string]deviceFault{}, Teardowns: map[string]deviceFault{}, Cleared: map[string]DeviceRecovery{}, RecoveryWindows: map[string]float64{}}
+	next := deviceQuarantine{BootID: snapshot.BootID, Seen: map[string]bool{}, Devices: map[string]deviceFault{}, Teardowns: map[string]deviceFault{}, Cleared: map[string]DeviceRecovery{}, RecoveryWindows: map[string]float64{}, Unsupported: map[string][]string{}}
 	lines := snapshot.Lines
 	if w.faults.BootID == snapshot.BootID {
 		maps.Copy(next.Seen, w.faults.Seen)
@@ -181,6 +199,7 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 		maps.Copy(next.Teardowns, w.faults.Teardowns)
 		maps.Copy(next.Cleared, w.faults.Cleared)
 		maps.Copy(next.RecoveryWindows, w.faults.RecoveryWindows)
+		maps.Copy(next.Unsupported, w.faults.Unsupported)
 		for key, clear := range next.Cleared {
 			next.RecoveryWindows[key] = max(next.RecoveryWindows[key], clear.ObservationSeconds)
 		}
@@ -233,6 +252,7 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 			fault.RepeatedTeardown = fault.RepeatedTeardown || next.Devices[deviceFaultKey(d)].RepeatedTeardown
 			next.Devices[deviceFaultKey(d)] = fault
 			delete(next.Cleared, deviceFaultKey(d)) // A newer fault invalidates the previous clear.
+			delete(next.Unsupported, deviceFaultKey(d))
 			delete(w.faultRecovery, deviceFaultKey(d))
 		}
 	}

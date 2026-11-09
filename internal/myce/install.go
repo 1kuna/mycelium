@@ -55,7 +55,7 @@ func LocalMachineProbe() MachineProbe {
 		// version checks. Those are not hardware probes; test CLI processes
 		// supply their ordinary fake managers through PATH.
 		switch filepath.Base(n) {
-		case "systemctl", "systemd-run", "launchctl", "loginctl", "codesign", "uv", "uvx", "pixi":
+		case "systemctl", "systemd-run", "launchctl", "loginctl", "codesign", "sudo", "uv", "uvx", "pixi":
 		default:
 			probeguard.Check()
 		}
@@ -390,6 +390,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	if err := c.ValidateInstall(); err != nil {
 		return err
 	}
+	if err := EnsureXPUHealthAccess(ctx, c, command); err != nil {
+		return err
+	}
 	c.Version = 1
 	existing := false
 	var installed ServiceConfig
@@ -663,6 +666,11 @@ func Uninstall(ctx context.Context, c ServiceConfig, dry bool, command func(cont
 	}
 	if e != nil {
 		return fmt.Errorf("stop service before removing setup: %w", e)
+	}
+	// Revoke only this installation's health access after stopping its service.
+	// Keep the config/ownership identity available if cleanup needs a retry.
+	if e = xpuHealthAccess(ctx, c, "remove", command); e != nil {
+		return e
 	}
 	// Preserve binary, private credentials, spools, cache and config together.
 	trash := filepath.Join(filepath.Dir(filepath.Dir(c.Config)), ".Trash")

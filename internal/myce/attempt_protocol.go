@@ -90,6 +90,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 			w.unifiedMemoryWire.probeSupported = false
 			w.unifiedMemoryWire.telemetrySupported = false
 			w.unifiedMemoryWire.recoverySupported = false
+			w.unifiedMemoryWire.healthSupported = false
 		}
 		if w.toolReport != nil {
 			w.toolReport.supported = false
@@ -118,6 +119,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		w.unifiedMemoryWire.probeSupported = reply.ProbeMemoryProtocol == probeMemoryProtocol
 		w.unifiedMemoryWire.telemetrySupported = reply.DeviceTelemetryProtocol == deviceTelemetryProtocol
 		w.unifiedMemoryWire.recoverySupported = reply.DeviceRecoveryProtocol == deviceRecoveryProtocol
+		w.unifiedMemoryWire.healthSupported = reply.DeviceHealthProtocol == deviceHealthProtocol
 	}
 	// A lost/discarded assignment leaves no local custody to stop. Validate
 	// the whole reply first, then explicitly release only unheld own-session

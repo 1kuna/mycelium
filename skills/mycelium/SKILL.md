@@ -222,9 +222,16 @@ result; a late clear cannot revive it. Fresh inventory showing both cards
 healthy releases the guard after an operator clear as well as automatic recovery.
 
 Automatic quarantine clearance additionally needs the supporting worker release and its
-vendor health tool; unsupported/unknown health keeps quarantine. Status
+vendor health tool; unknown health without supported capability evidence keeps quarantine. Status
 `devices[].quarantine_recovery` records the fault event, healthy interval,
-measured observation window and clear evidence. Repeated-fault escalation still
+measured observation window and clear evidence. With `device-health-v1`,
+`devices[].quarantine_recovery_blocked` explains the last rejected proof with a
+sanitized code and component or probe exit status. `unsupported_on_device`
+lists a required component excluded only after a fresh healthy same-model
+sibling reports it undeterminable in the same health batch. Every remaining
+required component must be OK; Unknown without that comparison (including a
+single-card host), stale comparison, or a monitoring gap retains quarantine.
+Successful command exit alone is not proof. Repeated-fault escalation still
 needs the maintenance owner. Do not resubmit to bypass the hold or clear real
 devices as a consumer. See [device quarantine](../../docs/operations.md#accelerator-driver-fault-quarantine).
 

@@ -717,6 +717,7 @@ type Checkin struct {
 }
 type Reply struct {
 	DeviceRecoveryProtocol     string                       `json:"device_recovery_protocol,omitempty"`
+	DeviceHealthProtocol       string                       `json:"device_health_protocol,omitempty"`
 	DeviceTelemetryProtocol    string                       `json:"device_telemetry_protocol,omitempty"`
 	UnifiedMemoryProtocol      string                       `json:"unified_memory_protocol,omitempty"`
 	HostMemorySampleProtocol   string                       `json:"host_memory_sample_protocol,omitempty"`

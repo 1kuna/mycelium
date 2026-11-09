@@ -150,6 +150,11 @@ func (m *installMatrixManager) run(ctx context.Context, name string, args ...str
 		default:
 			m.t.Fatalf("unexpected manager operation: %s", call)
 		}
+	} else if name == "sudo" && len(args) == 11 && (args[6] == "install" || args[6] == "remove") && sha256Name.MatchString(args[8]) && reflect.DeepEqual(args, []string{
+		"-n", "--", "/bin/sh", "-c", xpuHealthAccessScript, "myce-xpu-health", args[6], fmt.Sprint(os.Getgid()), args[8], xpuHealthRules(os.Getgid()), xpuHealthAccessScript,
+	}) {
+		// Recognize only our health-access operation without executing sudo.
+		// The dedicated lifecycle fixture exercises its actual shell behavior.
 	} else if name == "systemd-run" {
 		out, _ = json.Marshal(m.c.Detection)
 	} else if name == "cat" && len(args) == 1 && args[0] == "/proc/mounts" {
