@@ -9,6 +9,8 @@ import (
 
 const variantParityAction = "MY-19 production parity approval required: compare this variant's outputs with the reference within the owner's accuracy criteria, then have the owner add this physical host to policy.projects[PROJECT].production_parity_hosts[WORK] using myce policy get/set; native qualification alone is not cross-variant parity"
 
+const productionParityHostHold = "production_parity_hosts"
+
 // Existing portability projection supplies registration warnings; registering
 // an implementation neither executes it nor proves hard requirements/parity.
 type ExtensionRegistration struct {
@@ -46,8 +48,15 @@ func (q *Queue) extensionRegistrationWarnings(e Extension, contexts ...context.C
 	return portabilityWarnings(report)
 }
 
+// An explicit owner list constrains every production placement, including
+// historical registrations and variants with measured quality evidence.
+func (q *Queue) productionParityHostAllowed(j *Job, host string) bool {
+	hosts, configured := q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()]
+	return !configured || slices.Contains(hosts, host)
+}
+
 // Registration metadata is server-owned and frozen with accepted jobs. Older
-// registrations retain their admission contract, including on identical replay.
+// registrations retain their admission contract subject to live owner policy.
 func (q *Queue) variantParityReason(j *Job, m *Machine) string {
 	if q.commandDiscoveryProduction(j) {
 		return commandDiscoveryParityAction
@@ -56,6 +65,9 @@ func (q *Queue) variantParityReason(j *Job, m *Machine) string {
 		return ""
 	}
 	production := j.Spec.Priority == "production" || jobClass(j.Spec) == "production"
+	if production && !q.productionParityHostAllowed(j, hostID(m)) {
+		return productionParityHostHold + ": held: host not in production parity list; " + variantParityAction
+	}
 	approved := slices.Contains(q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()], hostID(m))
 	reason := ""
 	for _, e := range j.Extensions {
@@ -94,7 +106,8 @@ func (q *Queue) variantParityWaitingReason(j *Job) string {
 	if q.commandDiscoveryProduction(j) {
 		return commandDiscoveryParityAction
 	}
-	if !jobHasVariants(j) {
+	_, hasPolicy := q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()]
+	if !jobHasVariants(j) && !hasPolicy {
 		return ""
 	}
 	reason := ""

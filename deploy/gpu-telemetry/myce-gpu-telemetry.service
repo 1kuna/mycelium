@@ -23,6 +23,9 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 PrivateTmp=yes
 PrivateDevices=yes
+# Expose DRM nodes through the private /dev; the broker selects fixed PCI render nodes.
+BindReadOnlyPaths=-/dev/dri
+DeviceAllow=char-drm r
 PrivateNetwork=yes
 IPAddressDeny=any
 RestrictAddressFamilies=AF_UNIX

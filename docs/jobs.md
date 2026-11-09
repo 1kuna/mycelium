@@ -189,7 +189,7 @@ already registered evidence.
 | `require_target` | `false` | Refuse a new submission without an online qualified target of sufficient total admitted capacity; busy qualified targets may queue |
 | `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
 | `excluded_machines` | Empty: no exclusions | Machine-name exclusions, intersected with job and project allow-lists; never widens eligibility |
-| `start_by` | Production: submission + effective start window (readiness for dependents); absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; takes precedence over `start_window`; loss recovery gets a fresh original-length window |
+| `start_by` | Production: submission + effective start window (readiness for dependents); absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; takes precedence over `start_window`; remains an absolute cutoff across loss recovery |
 | `start_window` | Production: `150s`; absent for other priorities | Relative Go duration string, `0 < duration <= 1h`, production batch only; inherited by physical fan-out children |
 | `give_up_at` | Absent: wait indefinitely | RFC3339 expiry while queued; not a running-job timeout |
 | `expected_minutes` | `0` | Rough planning hint, never enforced |
@@ -723,6 +723,17 @@ existing semantics. Missing, incompatible or unreachable workers and an assigned
 start without an accepted startup acknowledgement still consume the window.
 This adds no timeout or retry-budget increase.
 
+A typed `device_fault_last_healthy` hold separately pauses the **remaining**
+relative startup/recovery budget, preserving it across restart. Status shows
+`paused for device recovery`; clearance resumes the saved amount.
+Subsequent capacity waiting preserves that saved amount, including across
+restart, rather than restoring time spent before the hold. To bound
+permanent quarantine, this hold fails with `device_fault_recovery_timeout` one
+existing maximum start window (one hour) after queue-recorded fault loss. Earlier
+absolute `start_by` or queued-only `give_up_at` still wins. This never clears
+quarantine, charges another retry or proves old attempt release. See
+[device-fault recovery](operations.md#accelerator-driver-fault-quarantine).
+
 Job GET exposes the authored duration at `spec.start_window`, the current cutoff
 at `spec.start_by`, and the effective original length at top-level `start_window`
 in **nanoseconds** (`600000000000` for 600 seconds). The effective length is
@@ -731,10 +742,10 @@ available before command startup, including while dependencies block.
 `give_up_at` keeps its queued-only meaning; the earlier applicable expiry wins.
 `deadline` remains an ordering hint. A command that has started may finish after
 `start_by`. After a started attempt loses its machine (including worker restart),
-the recovery attempt gets a fresh window from the queue's loss-detection time:
-loss time plus the original effective window (for an absolute deadline, the
-original `start_by` minus submission time). That original window
-length is durable and does not grow across repeated losses. Brief outages can
+a relative recovery window renews from the queue's loss-detection time:
+loss time plus the original effective window. An explicit absolute `start_by`
+never moves. That original window length is durable and does not grow across
+repeated losses. Brief outages can
 resume; a recovery attempt that does not start within its window fails with
 `production start deadline exceeded: <blocker>` so the caller can run fallback.
 Production worker interruption/release uses the same bounded recovery window. Planned
@@ -845,7 +856,10 @@ work that holds the card, memory or preparation it needs. It starts after
 those exact attempts confirm release; elapsed grace still proves nothing.
 Device scope emits no `production_hold` status entry, binds no new
 production job to the host, and does not pause model copies. A queued
-production job that a host-scope hold already bound keeps that host.
+production job that a host-scope hold already bound keeps that host while
+the current work's production parity policy allows it. A binding excluded
+by an explicit parity list is cleared and placed again; running execution
+and release custody remain with the current attempt.
 
 The startup file only seeds host policy. Change a live host's scope with
 `myce policy` ([live policy](operations.md#change-live-project-policy)).
