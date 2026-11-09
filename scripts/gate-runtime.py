@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import shlex
 
 
 def docker_snapshot(endpoint=None):
@@ -53,8 +54,10 @@ def docker_call(binary, endpoint, arguments):
 def launcher_environment():
     """Inspect readable same-UID launch ancestors, without retaining values."""
     evidence = dict(checked=[], unreadable=[], historical_environment_retained=False)
-    evidence['residual_risk'] = ('Historical environment was not retained. A historical non-local or TCP '
-        'DOCKER_HOST outside this host may not be discoverable from local contexts and sockets.')
+    evidence['residual_risk'] = ('Historical environment was not retained. A historical non-local, TCP or '
+        'arbitrary local Unix-socket DOCKER_HOST may not be discoverable from current contexts and sockets. '
+        'Legacy recovery additionally bounds this with a positive live Docker-API daemon process inventory; '
+        'a historical daemon that has since exited remains outside this host observation.')
     if os.environ.get('DOCKER_HOST') or os.environ.get('DOCKER_CONTEXT'):
         raise RuntimeError('gate launch environment contains Docker endpoint overrides')
     try:
@@ -108,10 +111,158 @@ def launcher_environment():
 def local_socket_paths():
     paths = {Path('/var/run/docker.sock'), Path('/run/docker.sock'),
              Path.home() / '.docker/run/docker.sock', Path.home() / '.colima/default/docker.sock',
-             Path.home() / '.rd/docker.sock', Path('/run/user') / str(os.getuid()) / 'docker.sock'}
+             Path.home() / '.orbstack/run/docker.sock', Path.home() / '.rd/docker.sock',
+             Path.home() / 'Library/Containers/com.docker.docker/Data/docker.raw.sock',
+             Path('/run/user') / str(os.getuid()) / 'docker.sock'}
+    def children(directory):
+        try:
+            return sorted(directory.iterdir())
+        except FileNotFoundError:
+            if directory.is_symlink():
+                raise RuntimeError('local Docker runtime directory target is unknown')
+            return []
+    # Do not use glob: pathlib can suppress directory-inventory errors.
+    for profile in children(Path.home() / '.colima'):
+        if profile.is_dir():
+            paths.add(profile / 'docker.sock')
+    for instance in children(Path.home() / '.lima'):
+        if instance.is_dir():
+            paths.update(p for p in children(instance / 'sock') if p.name.endswith('.sock'))
     if os.environ.get('XDG_RUNTIME_DIR'):
         paths.add(Path(os.environ['XDG_RUNTIME_DIR']) / 'docker.sock')
     return sorted(paths)
+
+
+def native_socket_paths(pids):
+    """Read bound Unix socket addresses without lsof's filesystem walks."""
+    import ctypes as c
+    lib = c.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+    lib.proc_pidinfo.argtypes = [c.c_int, c.c_int, c.c_uint64, c.c_void_p, c.c_int]
+    lib.proc_pidfdinfo.argtypes = [c.c_int, c.c_int, c.c_int, c.c_void_p, c.c_int]
+    class Descriptor(c.Structure):
+        _fields_ = [('number', c.c_int32), ('kind', c.c_uint32)]
+    paths = set()
+    for pid in pids:
+        size = lib.proc_pidinfo(pid, 1, 0, None, 0)
+        if size <= 0:
+            raise RuntimeError('daemon socket descriptor inventory unavailable')
+        entries = (Descriptor * (size // c.sizeof(Descriptor) + 32))()
+        count = lib.proc_pidinfo(pid, 1, 0, c.byref(entries), c.sizeof(entries))
+        if count <= 0 or count >= c.sizeof(entries) or count % c.sizeof(Descriptor):
+            raise RuntimeError('daemon socket descriptor inventory incomplete')
+        for fd in entries[:count // c.sizeof(Descriptor)]:
+            if fd.kind != 2:  # PROX_FDTYPE_SOCKET
+                continue
+            # socket_fdinfo ABI in sys/proc_info.h (64-bit Darwin): 792 bytes;
+            # soi_kind at 256, un_sockinfo.unsi_addr at 280, sun_path at 282.
+            info = c.create_string_buffer(792)
+            if lib.proc_pidfdinfo(pid, fd.number, 3, info, 792) != 792:
+                raise RuntimeError('daemon socket address inventory incomplete')
+            if int.from_bytes(info.raw[256:260], sys.byteorder) == 3:  # SOCKINFO_UN
+                path = os.fsdecode(info.raw[282:386].split(b'\0', 1)[0])
+                if path.startswith('/'):
+                    paths.add(path)
+    return paths
+
+
+def daemon_process_inventory(endpoints):
+    """Legacy bound: every live API runtime needs an inventoried endpoint."""
+    selection = '-eo' if sys.platform.startswith('linux') else '-axo'
+    output = subprocess.check_output(['ps', '-ww', selection, 'pid=,ppid=,command='],
+                                     text=True, timeout=5)
+    rows = {}
+    for line in output.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) != 3:
+            raise RuntimeError('Docker daemon process inventory incomplete')
+        argv = shlex.split(fields[2])
+        # ps does not quote executable paths with spaces. These application
+        # bundles otherwise become an unrecognized truncated argv[0].
+        if re.match(r'^/Applications/Rancher Desktop\.app/', fields[2]):
+            argv[0] = 'rancher-desktop'
+        rows[int(fields[0])] = (int(fields[1]), argv)
+    known = {os.path.realpath(e[7:]): e for e in endpoints if e.startswith('unix://')}
+    proof, covered, lima = [], set(), None
+    def require(pid, kind, candidates, **extra):
+        candidates = set(candidates)
+        if not candidates or not candidates <= set(endpoints):
+            raise RuntimeError('unresolved Docker-API daemon process: ' + str(pid) + ' (' + kind + ')')
+        proof.append(dict(pid=pid, kind=kind, endpoints=sorted(candidates), **extra))
+    for pid, (parent, argv) in rows.items():
+        if not argv or pid in covered:
+            continue
+        name = Path(argv[0]).name.lower()
+        if name == 'dockerd':
+            hosts, config = [], Path('/etc/docker/daemon.json')
+            for index, arg in enumerate(argv[1:], 1):
+                if arg in ('-H', '--host', '--config-file'):
+                    if index + 1 >= len(argv):
+                        raise RuntimeError('Docker daemon arguments incomplete')
+                    if arg == '--config-file':
+                        config = Path(argv[index + 1])
+                    else:
+                        hosts.append(argv[index + 1])
+                elif arg.startswith(('--host=', '-H')):
+                    hosts.append(arg.split('=', 1)[1] if arg.startswith('--host=') else arg[2:])
+                elif arg.startswith('--config-file='):
+                    config = Path(arg.split('=', 1)[1])
+            if config.exists():
+                data = json.loads(config.read_text())
+                configured = data.get('hosts', [])
+                if not isinstance(configured, list) or any(not isinstance(h, str) for h in configured):
+                    raise RuntimeError('Docker daemon host configuration malformed')
+                hosts.extend(configured)
+            if 'fd://' in hosts:
+                service = subprocess.check_output(['systemctl', 'show', 'docker.service', '-p', 'MainPID', '--value'], text=True, timeout=5).strip()
+                listening = subprocess.check_output(['systemctl', 'show', 'docker.socket', '-p', 'Listen', '--value'], text=True, timeout=5).strip()
+                if service != str(pid) or not re.fullmatch(r'/[^\n]+ \(Stream\)', listening):
+                    raise RuntimeError('socket-activated Docker daemon binding unknown')
+                hosts = [h for h in hosts if h != 'fd://'] + ['unix://' + listening[:-9]]
+            hosts = hosts or ['unix:///var/run/docker.sock']
+            hosts = [known.get(os.path.realpath(h[7:]), h) if h.startswith('unix://') else h for h in hosts]
+            require(pid, name, hosts)
+        elif name == 'limactl' and 'hostagent' in argv:
+            if lima is None:
+                lima = [json.loads(line) for line in subprocess.check_output(
+                    ['limactl', 'list', '--json'], text=True, timeout=5).splitlines()]
+            matches = [row for row in lima if row.get('hostAgentPID') == pid]
+            if len(matches) != 1 or not isinstance(matches[0].get('config'), dict):
+                raise RuntimeError('Lima hostagent forwarding configuration unknown')
+            forwards = matches[0]['config'].get('portForwards')
+            if forwards not in (None, []):
+                # Do not guess whether a forwarding rule exposes a Docker API.
+                raise RuntimeError('Lima hostagent forwarding requires endpoint reconciliation')
+            proof.append(dict(pid=pid, kind=name, docker_forwarding=False,
+                              configuration='positive limactl hostAgentPID/config observation'))
+        elif name in ('com.docker.backend', 'vpnkit', 'colima', 'orbstack',
+                      'rancher-desktop', 'buildkitd', 'gvproxy', 'docker-proxy') or name.startswith('dockerd-') or (name == 'rootlesskit' and
+                      any('dockerd' in a for a in argv[1:])) or (name == 'podman' and
+                      ('machine' in argv or 'service' in argv)) or (name == 'nerdctl' and
+                      any(a in argv for a in ('daemon', 'serve'))):
+            group = {pid}
+            while True:
+                children = {p for p, row in rows.items() if row[0] in group}
+                if children <= group:
+                    break
+                group.update(children)
+            if sys.platform != 'darwin':
+                require(pid, name, [])  # Unknown runtime binding stays held.
+            if name not in ('com.docker.backend', 'vpnkit'):
+                require(pid, name, [])  # Other runtime bindings need positive support.
+            # Docker Desktop's backend/service/fork processes expose one VM's
+            # engine. Do not inspect unrelated UI processes in that ancestry.
+            api_group = {p for p in group if Path(rows[p][1][0]).name in ('com.docker.backend', 'vpnkit')}
+            sockets = native_socket_paths(api_group)
+            matched = {known[os.path.realpath(p)] for p in sockets if os.path.realpath(p) in known}
+            require(pid, name, matched, process_group=sorted(group))
+            covered.update(api_group)
+        elif name == 'containerd' and parent in rows and Path(rows[parent][1][0]).name == 'dockerd':
+            # Its Docker parent is checked independently; containerd alone is
+            # not a Docker API endpoint.
+            proof.append(dict(pid=pid, kind=name, docker_parent=parent))
+    return dict(process_count=len(rows), runtimes=proof,
+                historical_launcher_observation='Orchestrator checked no DOCKER_* in launcher environment, 2026-11-09 about 19:00Z; gate entrypoints do not set DOCKER_HOST.',
+                residual_risk='Historical remote/TCP or arbitrary local Unix-socket DOCKER_HOST is not reconstructable. A historical daemon that has since exited cannot be inventoried; accepted orchestrator legacy default, 2026-11-09.')
 
 
 def legacy_endpoints():
@@ -213,6 +364,8 @@ def docker_inventory(marker, entry=None, used=()):
             row['legacy_discovery'] = discovery
         proof.append(row)
         daemons[observation['daemon_identity']] = row
+    if discovery is not None:
+        discovery['daemon_process_inventory'] = daemon_process_inventory(endpoints)
     return proof
 
 

@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import socket
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,6 +15,8 @@ spec = importlib.util.spec_from_file_location('runtime', Path(__file__).with_nam
 runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
 REAL_LAUNCHER_ENVIRONMENT = runtime.launcher_environment
+REAL_LOCAL_SOCKET_PATHS = runtime.local_socket_paths
+REAL_DAEMON_PROCESS_INVENTORY = runtime.daemon_process_inventory
 
 
 class RuntimeTests(unittest.TestCase):
@@ -28,6 +32,7 @@ class RuntimeTests(unittest.TestCase):
         self.resources = {}
         self.contexts = {'default': self.endpoint, 'desktop-linux': 'unix:///fixture/desktop.sock'}
         for name, value in [('launcher_environment', dict(checked=[1], unreadable=[])),
+                            ('daemon_process_inventory', dict(process_count=1, runtimes=[])),
                             ('local_socket_paths', [])]:
             mock = patch.object(runtime, name, return_value=value)
             mock.start()
@@ -130,6 +135,89 @@ class RuntimeTests(unittest.TestCase):
             snapshot = runtime.docker_snapshot()
         self.assertEqual(snapshot['endpoint'], self.endpoint)
         self.assertEqual(snapshot['endpoint_source'], 'DOCKER_HOST')
+
+    def test_named_runtime_sockets_are_all_resolved_and_unreachable_refuses(self):
+        with tempfile.TemporaryDirectory(prefix='gd-', dir='/tmp') as folder:
+            home = Path(folder)
+            names = ('.colima/default/docker.sock', '.colima/named/docker.sock',
+                     '.orbstack/run/docker.sock', '.lima/one/sock/docker.sock',
+                     '.lima/gate-fixture/sock/forwarded.sock', '.rd/docker.sock',
+                     '.docker/run/docker.sock')
+            sockets = []
+            try:
+                for name in names:
+                    path = home / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    sock = socket.socket(socket.AF_UNIX)
+                    sockets.append(sock)
+                    sock.bind(str(path))
+                with patch.object(runtime.Path, 'home', return_value=home):
+                    paths = REAL_LOCAL_SOCKET_PATHS()
+                self.assertTrue({home / name for name in names} <= set(paths))
+                self.assertIn(Path('/var/run/docker.sock'), paths)
+                if sys.platform == 'darwin':
+                    self.assertTrue({str(home / name) for name in names} <= runtime.native_socket_paths({os.getpid()}))
+                with patch.object(runtime, 'local_socket_paths', return_value=paths):
+                    proof = runtime.docker_inventory(self.marker)
+                    self.assertTrue({'unix://' + str(home / name) for name in names} <= set(proof[0]['endpoints']))
+                    actual = self.call.side_effect
+                    def unreachable(binary, endpoint, arguments):
+                        if endpoint == 'unix://' + str(home / names[1]):
+                            raise subprocess.CalledProcessError(1, ['docker'])
+                        return actual(binary, endpoint, arguments)
+                    self.call.side_effect = unreachable
+                    with self.assertRaisesRegex(RuntimeError, 'unknown or unreachable'):
+                        runtime.docker_inventory(self.marker)
+                with patch.object(runtime.Path, 'home', return_value=home), \
+                        patch.object(runtime.Path, 'iterdir', side_effect=PermissionError('inventory denied')):
+                    with self.assertRaises(PermissionError):
+                        REAL_LOCAL_SOCKET_PATHS()
+            finally:
+                for sock in sockets:
+                    sock.close()
+
+    def test_unresolved_daemon_or_process_inventory_failure_refuses(self):
+        rows = '1 0 /sbin/init\n20 1 /usr/bin/dockerd -H unix:///unknown/engine.sock\n'
+        with patch.object(runtime.subprocess, 'check_output', return_value=rows):
+            with self.assertRaisesRegex(RuntimeError, 'unresolved Docker-API daemon'):
+                REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
+        rows = '1 0 /sbin/init\n20 1 /usr/bin/dockerd -H ' + self.endpoint + '\n21 20 /usr/bin/containerd\n'
+        with patch.object(runtime.subprocess, 'check_output', return_value=rows):
+            proof = REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
+            self.assertEqual(proof['runtimes'][0]['endpoints'], [self.endpoint])
+            self.assertEqual(proof['runtimes'][1]['docker_parent'], 20)
+        with patch.object(runtime.subprocess, 'check_output', side_effect=PermissionError('ps unavailable')):
+            with self.assertRaises(PermissionError):
+                REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
+
+    def test_desktop_binding_and_lima_configuration_are_positive_evidence(self):
+        rows = ('1 0 /sbin/init\n20 1 /Applications/Docker.app/com.docker.backend\n'
+                '21 20 /Applications/Docker.app/com.docker.backend services\n'
+                '30 1 /bin/limactl hostagent fixture\n')
+        config = dict(hostAgentPID=30, config=dict(portForwards=None))
+        def observe(args, **kwargs):
+            return json.dumps(config) if args[0] == 'limactl' else rows
+        with patch.object(runtime.sys, 'platform', 'darwin'), \
+                patch.object(runtime.subprocess, 'check_output', side_effect=observe), \
+                patch.object(runtime, 'native_socket_paths', return_value={self.endpoint[7:]}):
+            proof = REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
+            self.assertEqual(proof['runtimes'][0]['endpoints'], [self.endpoint])
+            self.assertFalse(proof['runtimes'][1]['docker_forwarding'])
+            config['config']['portForwards'] = [dict(guestSocket='/run/docker.sock')]
+            with self.assertRaisesRegex(RuntimeError, 'forwarding requires endpoint reconciliation'):
+                REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
+            config['config']['portForwards'] = None
+            rows += '40 20 /usr/bin/dockerd -H unix:///unknown/child.sock\n'
+            with self.assertRaisesRegex(RuntimeError, 'unresolved Docker-API daemon'):
+                REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
+        rows = '1 0 /sbin/init\n20 1 /usr/bin/dockerd -H fd://\n'
+        def socket_activated(args, **kwargs):
+            if args[0] == 'ps':
+                return rows
+            return '20' if args[2] == 'docker.service' else self.endpoint[7:] + ' (Stream)'
+        with patch.object(runtime.subprocess, 'check_output', side_effect=socket_activated):
+            proof = REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
+            self.assertEqual(proof['runtimes'][0]['endpoints'], [self.endpoint])
 
     def test_readable_launch_override_refuses_and_unreadable_environment_is_recorded(self):
         lines = f'{os.getpid()} 1 {os.getuid()} python HOME=/fixture\n1 0 0 launchd'

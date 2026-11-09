@@ -224,7 +224,9 @@ Recovery therefore enumerates every configured Docker context and known local
 Docker socket, resolves every endpoint to its daemon ID, and requires every
 endpoint reachable and each distinct daemon empty of Mycelium fixture resources.
 Known socket locations include system and rootless sockets and the user socket
-locations for common local Docker runtimes; context endpoints supplement them.
+locations for Docker Desktop (including its raw engine socket), every named
+Colima profile, OrbStack, Rancher Desktop and every Lima instance's `sock/*.sock`;
+context endpoints supplement them. Directory enumeration errors refuse recovery.
 Unknown contexts, unreachable endpoints, dangling socket links or failed
 inventories retain custody. Missing current prerequisites cannot qualify an old run.
 
@@ -233,12 +235,30 @@ overrides refuse legacy recovery. Command arguments are removed before examining
 the appended environment, so a shell command mentioning a variable is not an
 environment observation. The receipt records inspected and unreadable ancestors
 and any inventory uncertainty. Historical launch environments were not retained:
-even when current ancestors show no overrides, a historical non-local or TCP
-`DOCKER_HOST` outside this host may be undiscoverable from its current local
-contexts and sockets. This residual risk is explicitly accepted by the
-orchestrator's legacy default and recorded in every legacy daemon proof. Host and
-guest both apply this discovery and positive-inventory rule. New runs use their
-journaled endpoint instead.
+even when current ancestors show no overrides, a historical non-local, TCP or
+arbitrary local Unix-socket `DOCKER_HOST` may be undiscoverable from current
+contexts and standard sockets. The orchestrator extended the legacy default on
+2026-11-09 only with a further positive bound: a complete, whole-table `ps`
+command/argv inventory must account for every live Docker-API daemon/runtime.
+`dockerd` hosts and daemon configuration must all resolve to inventoried endpoints;
+socket activation also requires a matching service PID and socket-unit binding.
+Docker Desktop's backend/service/fork group must expose an inventoried Unix
+socket, positively read through macOS process socket metadata. Its private raw
+engine socket is also inventoried. A Lima hostagent requires matching live PID
+and parsed forwarding configuration; forwarding configurations currently refuse
+as unsupported. Other detected API runtimes (including Colima, OrbStack, Rancher
+Desktop, Podman services/machines, nerdctl daemons and buildkitd) retain custody
+until their process-to-endpoint binding has supported positive proof. A containerd
+child is bound to its independently checked dockerd parent; standalone containerd
+is not a Docker API. Failed process/configuration/socket observations refuse.
+
+The remaining residual is a historical daemon that has since exited. Each legacy
+receipt records it alongside the orchestrator's observed facts: the launcher had
+no `DOCKER_*` environment at about 19:00Z, and gate entrypoints do not set
+`DOCKER_HOST`. This is an orchestrator agent default, not a maintainer ruling.
+Host and guest both apply the discovery and process bound. New runs use their
+journaled effective and fixture endpoints instead. Recovery never changes a
+daemon, runtime configuration or another project's resources.
 
 Orchestrator default (2026-11-09): macOS can deny `libproc` inspection of
 platform-protected processes even under the same UID. Gate binaries, Python,
