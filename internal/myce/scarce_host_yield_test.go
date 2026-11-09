@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -788,22 +789,47 @@ func TestScarceHostYieldTransportFailureAndVerificationFence(t *testing.T) {
 }
 
 func TestScarceHostYieldWorkerRestartReceipt(t *testing.T) {
-	w, store, p := d5NativeStart(t, true, nil, []string{"sh", "-c", `trap 'exit 0' TERM; touch "$1"; while :; do sleep .01; done`, "main", "{work}/ready"})
-	nativeFile(t, p.job.Spec.Run.Workdir, "ready")
-	intent := &PriorityPreemption{Cause: scarceHostYieldCause, Demand: "scarce-demand", Victim: p.job.ID}
-	if err := p.recordPriorityStop(store, intent); err != nil {
-		t.Fatal(err)
-	}
-	p.stop(w.Clock.Now(), time.Minute, false)
-	r := d5Finish(t, p)
-	if !r.Interrupted || !scarceYieldStop(r.PriorityStop) {
-		t.Fatal("yield stop provenance lost", r)
-	}
-	reopened := &workerStore{dir: store.dir, state: store.state}
-	if err := reopened.restorePriorityStop(); err != nil {
-		t.Fatal(err)
-	}
-	if !scarceYieldStop(reopened.state.PriorityStop) || reopened.state.PriorityStop.Demand != intent.Demand {
-		t.Fatal("worker restart lost yield custody")
+	for _, when := range []string{"before-stop", "during-cleanup"} {
+		t.Run(when, func(t *testing.T) {
+			var p *process
+			var intent *PriorityPreemption
+			var armed atomic.Bool
+			var once sync.Once
+			var receiptErr error
+			fs := &memberMemoryFS{beforeRemove: func(string) {
+				if armed.Load() {
+					// Removal is after the real main's selected exit snapshot,
+					// but before result classification. Model control delivery
+					// during cleanup without a scheduler delay or a runtime hook.
+					once.Do(func() { receiptErr = p.recordPriorityStop(nil, intent) })
+				}
+			}}
+			w, store, started := d5NativeStart(t, true, fs, []string{"sh", "-c", `trap 'exit 0' TERM; touch "$1"; while :; do sleep .01; done`, "main", "{work}/ready"})
+			p = started
+			nativeFile(t, p.job.Spec.Run.Workdir, "ready")
+			intent = &PriorityPreemption{Cause: scarceHostYieldCause, Demand: "scarce-demand", Victim: p.job.ID}
+			if when == "before-stop" {
+				if err := p.recordPriorityStop(store, intent); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				armed.Store(true)
+			}
+			p.stop(w.Clock.Now(), time.Minute, false)
+			r := d5Finish(t, p)
+			if receiptErr != nil {
+				t.Fatal(receiptErr)
+			}
+			if r.Success || !r.Interrupted || !scarceYieldStop(r.PriorityStop) || r.PriorityStop.Demand != intent.Demand {
+				t.Fatal("yield stop provenance lost", r)
+			}
+			reopened := &workerStore{dir: store.dir, state: store.state}
+			if err := reopened.restorePriorityStop(); err != nil {
+				t.Fatal(err)
+			}
+			if !scarceYieldStop(reopened.state.PriorityStop) || reopened.state.PriorityStop.Demand != intent.Demand {
+				t.Fatal("worker restart lost yield custody")
+			}
+		})
 	}
 }
