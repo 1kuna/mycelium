@@ -79,17 +79,17 @@ missing counters never become free device memory. Xe PMU activity remains per
 PCI device. Samples merge only into matching device/driver, selector, topology
 and reserve observations, with their original age.
 
-Quarantine recovery is separate from inventory telemetry. XPU vendor health
-checks wait while any accelerator attempt or model retains local custody,
-since even a query aimed at a quarantined card can initialize its busy sibling.
-Kernel fault detection continues. Once quiescent, a completed health reading
-is reused until the recovery decision's existing quiet window: the greatest of
+Quarantine recovery is separate from inventory telemetry. A completed health
+reading is reused until the recovery decision's existing quiet window: the greatest of
 fault-to-reading latency, previously measured recovery, and the existing kernel
 teardown-attribution resolution. Failed readings lengthen that interval from
 observed failure duration. A new fault event starts a new decision. This avoids
 repeated vendor initialization while a quiet-window decision cannot yet change;
 the cost is later recovery detection within the measured window. No new fixed
-retry rate is introduced.
+retry rate is introduced. Health work remains asynchronous, so a stalled tool
+does not block worker control or kernel scans. This pacing does not exclude
+vendor health starts during accelerator/model custody; that guarantee requires
+a separate design and review.
 
 For an already assigned attempt, a fresh direct launch probe can establish
 recovery from a cached `device_probe_unavailable` observation. The direct probe

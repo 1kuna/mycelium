@@ -107,7 +107,6 @@ type deviceHealthDue struct {
 }
 
 func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[string]deviceHealthObservation {
-	root.vendorProbeStart.setBusy(w.vendorGPUActive)
 	for key, h := range w.faultHealth {
 		f := w.faults.Devices[key]
 		if f.Reason == "" || f.RepeatedTeardown || h.event != f.Event {
@@ -124,9 +123,7 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 	devices = slices.DeleteFunc(devices, func(d MachineDevice) bool {
 		key := deviceFaultKey(d)
 		fault, due := faults[key], w.faultHealthDue[key]
-		// A quarantined card's vendor tool can initialize every sibling. Wait
-		// for accelerator custody to end, while kernel fault scans continue.
-		return fault.Reason == "" || fault.RepeatedTeardown || d.Platform == "xpu" && w.vendorGPUActive ||
+		return fault.Reason == "" || fault.RepeatedTeardown ||
 			due.event == fault.Event && clock.Now().Before(due.at)
 	})
 	// Collect an already completed asynchronous read even if no new card is
@@ -142,19 +139,10 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 		for _, d := range devices {
 			key := deviceFaultKey(d)
 			f := faults[key]
-			// Skip known custody between queries. The production command runner
-			// also orders actual process creation against custody acquisition.
-			if f.Reason == "" || f.RepeatedTeardown || d.Platform == "xpu" && root.vendorProbeStart.blocked() {
+			if f.Reason == "" || f.RepeatedTeardown {
 				continue
 			}
-			probeCtx := ctx
-			if d.Platform == "xpu" {
-				probeCtx = withVendorProbeStart(ctx, &root.vendorProbeStart)
-			}
-			normal, err := probe(probeCtx, d)
-			if errors.Is(err, errVendorProbeDeferred) {
-				continue // No query ran; do not postpone an idle recovery decision.
-			}
+			normal, err := probe(ctx, d)
 			out[key] = deviceHealthObservation{f.Event, clock.Now(), normal && err == nil}
 		}
 		return out, nil

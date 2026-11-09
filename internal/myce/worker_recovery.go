@@ -90,7 +90,6 @@ type workerStore struct {
 	faultTiming           probeTiming
 	deviceFaults          checkpointIO[KernelLogSnapshot]
 	deviceHealth          checkpointIO[map[string]deviceHealthObservation]
-	vendorProbeStart      vendorProbeStart
 	stateName             string
 	environmentLogs       checkpointIO[bool]
 	inventory             checkpointIO[[]MachineDevice]
