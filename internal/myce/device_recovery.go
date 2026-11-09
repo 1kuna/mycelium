@@ -50,27 +50,40 @@ type DeviceRecovery struct {
 func (q *Queue) receiveDeviceRecovery(m, old *Machine) {
 	for i := range m.Devices {
 		d := &m.Devices[i]
+		var previous *DeviceRecovery
+		var priorReason string
+		if old != nil {
+			for _, prior := range old.Devices {
+				if prior.Platform == d.Platform && prior.Identity == d.Identity {
+					previous, priorReason = prior.Recovery, prior.Reason
+					break
+				}
+			}
+		}
+		// Negotiation/downgrade can omit the optional field. Retain the old
+		// receipt as historical evidence so that replay never renews it.
 		if d.Recovery == nil {
+			if previous != nil {
+				copy := *previous
+				d.Recovery = &copy
+			}
 			continue
 		}
 		r := *d.Recovery
 		if !sha256Name.MatchString(r.FaultEvent) || !validMemoryValue(r.ObservationSeconds) || r.ObservationSeconds <= 0 || r.HealthySince.IsZero() || r.ClearedAt.Sub(r.HealthySince).Seconds() < r.ObservationSeconds {
 			d.Recovery = nil
+			if previous != nil {
+				copy := *previous
+				d.Recovery = &copy
+			}
 			continue
 		}
 		r.Probe = deviceHealthProbeName(d.Platform)
 		r.ObservedAt = time.Time{}
-		if old != nil && d.Reason == "" {
-			for _, prior := range old.Devices {
-				if prior.Platform != d.Platform || prior.Identity != d.Identity {
-					continue
-				}
-				if previous := prior.Recovery; previous != nil && previous.FaultEvent == r.FaultEvent && previous.ClearedAt == r.ClearedAt {
-					r.ObservedAt = previous.ObservedAt
-				} else if deviceFaultReason(prior.Reason) {
-					r.ObservedAt = q.clock.Now()
-				}
-			}
+		if previous != nil && previous.FaultEvent == r.FaultEvent && previous.ClearedAt == r.ClearedAt {
+			r.ObservedAt = previous.ObservedAt
+		} else if d.Reason == "" && deviceFaultReason(priorReason) {
+			r.ObservedAt = q.clock.Now()
 		}
 		d.Recovery = &r
 	}
@@ -89,6 +102,15 @@ type deviceRecoveryObservation struct {
 }
 
 func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[string]deviceHealthObservation {
+	for key, h := range w.faultHealth {
+		f := w.faults.Devices[key]
+		if f.Reason == "" || f.RepeatedTeardown || h.event != f.Event {
+			delete(w.faultHealth, key)
+		}
+	}
+	if len(w.faultHealth) > 0 {
+		return w.faultHealth // Await a kernel scan after these observations.
+	}
 	if w.DeviceHealthProbe == nil || len(w.faults.Devices) == 0 {
 		return nil
 	}
@@ -110,7 +132,8 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 	if err != nil {
 		return nil
 	}
-	return health
+	w.faultHealth = health
+	return w.faultHealth
 }
 
 // Agent default (#1142, MY-34): observe at least a complete local probe gap
@@ -123,6 +146,7 @@ func (w *Worker) autoClearDeviceFaults(next *deviceQuarantine, health map[string
 		fault := next.Devices[key]
 		if fault.Reason == "" || fault.RepeatedTeardown {
 			delete(w.faultRecovery, key)
+			delete(health, key)
 			continue // Escalated quarantine still requires an operator.
 		}
 		pending := slices.ContainsFunc(w.faultPending, func(line KernelLogLine) bool {
@@ -132,11 +156,20 @@ func (w *Worker) autoClearDeviceFaults(next *deviceQuarantine, health map[string
 		h, ok := health[key]
 		if pending || ok && (!h.normal || h.event != fault.Event) {
 			delete(w.faultRecovery, key)
+			delete(health, key)
 			continue
 		}
-		if !ok || snapshot.started.Before(h.at) || h.at.Before(fault.At) {
+		if !ok {
 			continue
 		}
+		if h.at.Before(fault.At) || h.at.Before(w.faultHealthAfter) {
+			delete(health, key)
+			continue
+		}
+		if snapshot.started.Before(h.at) {
+			continue
+		}
+		delete(health, key) // Consumed only after a subsequent kernel observation.
 		r := w.faultRecovery[key]
 		if r.event != fault.Event {
 			latency := time.Duration(0)
@@ -144,7 +177,7 @@ func (w *Worker) autoClearDeviceFaults(next *deviceQuarantine, health map[string
 				latency = h.at.Sub(fault.At)
 			}
 			r = deviceRecoveryObservation{event: fault.Event, since: h.at, last: h.at,
-				window: max(cadence, teardownFaultWindow, latency, time.Duration(next.Cleared[key].ObservationSeconds*float64(time.Second)))}
+				window: max(cadence, teardownFaultWindow, latency, time.Duration(next.RecoveryWindows[key]*float64(time.Second)))}
 			w.faultRecovery[key] = r
 			continue
 		}
@@ -158,6 +191,7 @@ func (w *Worker) autoClearDeviceFaults(next *deviceQuarantine, health map[string
 			continue
 		}
 		next.Cleared[key] = DeviceRecovery{FaultEvent: fault.Event, HealthySince: r.since, ClearedAt: h.at, ObservationSeconds: r.window.Seconds(), Probe: deviceHealthProbeName(d.Platform)}
+		next.RecoveryWindows[key] = r.window.Seconds()
 		delete(next.Devices, key)
 		delete(w.faultRecovery, key)
 		changed = true

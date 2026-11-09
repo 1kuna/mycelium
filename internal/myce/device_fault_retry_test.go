@@ -22,6 +22,11 @@ func TestDeviceFaultRetryCapacity(t *testing.T) {
 	if !q.deviceFaultRetryBlocked(&j, allocationMachine(&m, []string{"1", "2"})) {
 		t.Fatal("group retry would consume all surviving devices")
 	}
+	j.Spec.Needs.MemoryGB = 16
+	if reason := q.deviceFaultRetryWaitingReason(&j); !deviceFaultRetryReason(reason) {
+		t.Fatal("undersized single cards hid a held group's typed blocker", reason)
+	}
+	j.Spec.Needs.MemoryGB = s.Needs.MemoryGB
 	m.Devices = slices.Clone(m.Devices[:2])
 	machineCheck(t, q, m)
 	if !q.deviceFaultRetryBlocked(&j, allocationMachine(&m, []string{"1"})) {
@@ -55,6 +60,16 @@ func TestDeviceFaultRetryCapacity(t *testing.T) {
 	machineCheck(t, q, m)
 	if !q.deviceFaultRetryBlocked(&j, allocationMachine(&m, []string{"1"})) {
 		t.Fatal("replayed recovery proof renewed past a newer loss")
+	}
+	oldReceipt := q.s.Machines[m.ID].Devices[1].Recovery.ObservedAt
+	oldProof := m.Devices[1].Recovery
+	m.Devices[1].Reason, m.Devices[1].Recovery = "device_fault_xe", nil
+	machineCheck(t, q, m) // Negotiating report omits the optional proof.
+	clock.Advance(time.Second)
+	m.Devices[1].Reason, m.Devices[1].Recovery = "", oldProof // Operator clear, no new health proof.
+	machineCheck(t, q, m)
+	if !q.deviceFaultRetryBlocked(&j, allocationMachine(&m, []string{"1"})) || q.s.Machines[m.ID].Devices[1].Recovery.ObservedAt != oldReceipt {
+		t.Fatal("omission and operator clear renewed historical recovery authority")
 	}
 	other := m3Machine()
 	other.ID, other.HostID = "other", "other"

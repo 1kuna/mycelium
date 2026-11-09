@@ -2423,6 +2423,8 @@ unknown required health and failed reads keep quarantine. Other backends can
 supply the injectable health probe; unsupported backends do not auto-clear.
 Vendor probes have a separate single-flight lane, so a slow tool cannot stop
 kernel scanning or create a probe backlog.
+Completed health readings remain pending until a subsequent kernel scan can
+validate them; exceeding the heartbeat's collection budget does not discard proof.
 
 The observation window is an **agent default**, implementing the relayed consumer
 request, not a maintainer ruling. Following MY-34, it is the largest of the
@@ -2440,7 +2442,12 @@ withheld capacity, in exchange for observing a complete local recovery interval.
 Clear evidence persists in `devices[].quarantine_recovery`: `fault_event`,
 `healthy_since`, `cleared_at`, `observation_seconds` and `probe`. The queue adds
 `observed_at` when it observes the quarantined-to-healthy transition; replaying
-the same proof does not refresh that queue timestamp. Such a transition after
+the same proof does not refresh that queue timestamp, including across reports
+that omit the optional field during negotiation or downgrade. A new worker-side
+fault retires the previous clear proof; its historical observation window remains
+calibration evidence and an operator clear does not restore the retired proof.
+Retained queue receipts are historical: compare their queue time with the job's
+latest fault loss, and check the current device reason. Such a transition after
 the job's loss allows a retry even on a sole recovered card. Worker wall time
 never orders queue admission. Capacity still requires a successful inventory
 refresh, and old attempts still require exact cleanup. Auto-clear requires a

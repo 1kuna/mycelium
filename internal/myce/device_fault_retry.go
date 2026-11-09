@@ -86,10 +86,16 @@ func (q *Queue) deviceFaultRetryWaitingReason(j *Job, scans ...*placementScan) s
 		if !q.jobAllowsMachine(j, m.ID) || !executionTargetMatches(j.Spec, m) || !deviceAllowed(j, m) || m.GPU == "cpu" || m.MemoryError != "" || m.Gone || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
 		}
-		if !q.deviceFaultRetryBlocked(j, m) {
-			return ""
+		capacity := q.qualificationCapacity(m)
+		for _, candidate := range q.memoryCandidates(j, m) {
+			if !fits(candidate, &capacity, capacity.TotalMemoryGB) {
+				continue // An undersized card is not an alternative to a held group.
+			}
+			if !q.deviceFaultRetryBlocked(candidate, m) {
+				return ""
+			}
+			blocked = true
 		}
-		blocked = true
 	}
 	if blocked {
 		return deviceFaultRetryHold + ": preserving the host's last healthy accelerator after this job's driver fault; waiting for another healthy device or host, or a health-proven recovery"

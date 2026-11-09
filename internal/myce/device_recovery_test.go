@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -85,8 +86,58 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 			if w.Machine.Devices[0].Reason != "" || w.Machine.Devices[0].Recovery == nil {
 				t.Fatal("recovery lost on restart")
 			}
+			// A new fault retires clear authority while retaining its measured
+			// window. An operator clear cannot resurrect that old proof.
+			lines = []KernelLogLine{{ID: "2", At: clock.Now().Add(-2 * time.Second), Message: "xe 0000:03:00.0: GPU HANG"}}
+			scan()
+			if w.Machine.Devices[0].Recovery != nil {
+				t.Fatal("new fault retained old recovery authority")
+			}
+			if err := saveWorkerJSON(root.dir, "devices.json", w.Machine.Devices); err != nil {
+				t.Fatal(err)
+			}
+			if err := RequestDeviceQuarantineClear(root.dir, "0"); err != nil {
+				t.Fatal(err)
+			}
+			scan()
+			if w.Machine.Devices[0].Recovery != nil || w.faults.RecoveryWindows[key] != recovery.ObservationSeconds {
+				t.Fatal("operator clear revived old proof or erased historical calibration")
+			}
 		})
 	}
+}
+
+func TestDeviceFaultSlowObservation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		w := Worker{Machine: m3Machine(), Clock: RealClock{}, Interval: time.Second,
+			DeviceFaultSource: func(context.Context, time.Time) (KernelLogSnapshot, error) {
+				<-time.After(50 * time.Millisecond)
+				return KernelLogSnapshot{BootID: "boot"}, nil
+			},
+			DeviceHealthProbe: func(context.Context, MachineDevice) (bool, error) {
+				<-time.After(75 * time.Millisecond)
+				return true, nil
+			}}
+		root := &workerStore{dir: t.TempDir()}
+		if err := w.initDeviceFaults(context.Background(), root); err != nil {
+			t.Fatal(err)
+		}
+		key := deviceFaultKey(w.Machine.Devices[0])
+		w.faults.Devices[key] = deviceFault{Reason: "device_fault_xe", Event: strings.Repeat("a", 64), At: w.Clock.Now().Add(-2 * time.Second)}
+		w.applyDeviceQuarantine()
+		// Both probes exceed the collection budget. The kernel read starts
+		// before health completes; that health result must survive to a later scan.
+		for range 10 {
+			if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
+				t.Fatal(err)
+			}
+			<-time.After(time.Second)
+			synctest.Wait()
+		}
+		if w.Machine.Devices[0].Reason != "" || w.Machine.Devices[0].Recovery == nil {
+			t.Fatal("slow completed observations never established recovery", w.Machine.Devices[0])
+		}
+	})
 }
 
 func TestDeviceHealthVendorEvidence(t *testing.T) {

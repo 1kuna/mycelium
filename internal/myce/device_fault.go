@@ -42,8 +42,9 @@ type deviceQuarantine struct {
 	Seen    map[string]bool        `json:"seen"`
 	Devices map[string]deviceFault `json:"devices"`
 	// Last fault per device attributed to teardown rather than quarantined.
-	Teardowns map[string]deviceFault    `json:"teardowns,omitempty"`
-	Cleared   map[string]DeviceRecovery `json:"cleared,omitempty"`
+	Teardowns       map[string]deviceFault    `json:"teardowns,omitempty"`
+	Cleared         map[string]DeviceRecovery `json:"cleared,omitempty"`
+	RecoveryWindows map[string]float64        `json:"recovery_windows,omitempty"` // Historical calibration, never current clear authority.
 }
 
 type deviceFault struct {
@@ -70,6 +71,8 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	w.faultSince = w.Clock.Now()
 	w.faultTeardowns = map[string][]time.Time{}
 	w.faultRecovery = map[string]deviceRecoveryObservation{}
+	w.faultHealth = map[string]deviceHealthObservation{}
+	w.faultHealthAfter = w.Clock.Now()
 	data, err := os.ReadFile(filepath.Join(root.dir, deviceFaultFile))
 	if err == nil {
 		err = decodeWorkerJSON(data, w.faults)
@@ -152,6 +155,8 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 	}
 	if err != nil || snapshot.BootID == "" {
 		clear(w.faultRecovery) // A monitoring gap cannot prove a quiet window.
+		clear(w.faultHealth)
+		w.faultHealthAfter = w.Clock.Now()
 		// Status shows the gap; optional observation cannot disable unrelated devices.
 		if w.Machine.FaultMonitorError == "" {
 			log.Print("accelerator fault monitor unavailable: kernel log not readable")
@@ -163,16 +168,22 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 		log.Print("accelerator fault monitor recovered")
 	}
 	w.Machine.FaultMonitorError = ""
-	next := deviceQuarantine{BootID: snapshot.BootID, Seen: map[string]bool{}, Devices: map[string]deviceFault{}, Teardowns: map[string]deviceFault{}, Cleared: map[string]DeviceRecovery{}}
+	next := deviceQuarantine{BootID: snapshot.BootID, Seen: map[string]bool{}, Devices: map[string]deviceFault{}, Teardowns: map[string]deviceFault{}, Cleared: map[string]DeviceRecovery{}, RecoveryWindows: map[string]float64{}}
 	lines := snapshot.Lines
 	if w.faults.BootID == snapshot.BootID {
 		maps.Copy(next.Seen, w.faults.Seen)
 		maps.Copy(next.Devices, w.faults.Devices)
 		maps.Copy(next.Teardowns, w.faults.Teardowns)
 		maps.Copy(next.Cleared, w.faults.Cleared)
+		maps.Copy(next.RecoveryWindows, w.faults.RecoveryWindows)
+		for key, clear := range next.Cleared {
+			next.RecoveryWindows[key] = max(next.RecoveryWindows[key], clear.ObservationSeconds)
+		}
 		lines = append(w.faultPending, lines...)
 	} else {
 		clear(w.faultRecovery)
+		clear(w.faultHealth)
+		w.faultHealthAfter = w.Clock.Now()
 	}
 	w.faultPending = nil
 	changed := next.BootID != w.faults.BootID
@@ -216,6 +227,7 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 			// Further lines from the same reset must retain the escalation fact.
 			fault.RepeatedTeardown = fault.RepeatedTeardown || next.Devices[deviceFaultKey(d)].RepeatedTeardown
 			next.Devices[deviceFaultKey(d)] = fault
+			delete(next.Cleared, deviceFaultKey(d)) // A newer fault invalidates the previous clear.
 			delete(w.faultRecovery, deviceFaultKey(d))
 		}
 	}
