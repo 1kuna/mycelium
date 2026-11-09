@@ -1,6 +1,9 @@
 package myce
 
-import "context"
+import (
+	"context"
+	"reflect"
+)
 
 type checkinMemoryIdentities struct {
 	revision         uint64
@@ -24,7 +27,12 @@ func (q *Queue) snapshotCheckinMemoryIdentities(ctx context.Context) checkinMemo
 	if ctx.Err() == nil {
 		for _, j := range q.liveJobs() {
 			if j.State == "queued" && plainMemoryWork(j.Spec) && j.Spec.FanOut == nil {
-				jobs[j] = cloneJob(j)
+				// Copy recipe inputs only, never retained attempts, ledgers or
+				// execution payloads. Hashing remains outside the mutex.
+				s := j.Spec
+				input := Job{Spec: Spec{Project: s.Project, Name: s.Name, ProfileMemory: s.ProfileMemory,
+					Needs: s.Needs, Args: s.Args, Program: s.Program, Run: s.Run, Environment: s.Environment, Files: s.Files}, EnvironmentRecipes: j.EnvironmentRecipes}
+				jobs[j] = copyObservationValue(reflect.ValueOf(input)).Interface().(Job)
 			}
 		}
 	}

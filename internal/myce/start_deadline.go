@@ -90,7 +90,7 @@ func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
 	if reason := q.diskWaitingReason(j, j.ProductionHost); reason != "" {
 		return reason
 	}
-	machines := q.plannerMachines()
+	machines := q.planningMachines(scans...)
 	for _, m := range machines {
 		if !q.projectAllows(j.Spec.Project, m.ID) || !j.Spec.allowsMachine(m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
