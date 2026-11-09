@@ -82,7 +82,7 @@ func fleetE2EEnv(home string) []string {
 	var env []string
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
-		if key != "HOME" && key != "PATH" && !strings.HasPrefix(key, "MYCE_") {
+		if key != "HOME" && key != "PATH" && !strings.HasPrefix(key, "MYCE_") && !strings.HasPrefix(key, "XDG_") {
 			env = append(env, entry)
 		}
 	}
@@ -425,6 +425,14 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		}
 		return true
 	})
+	for _, m := range managers {
+		path := filepath.Join(m.home, "fake-observer.enabled")
+		if err := os.Remove(path); err != nil {
+			t.Fatal("normal installed-service startup did not enable observer supervision", err)
+		}
+		// Simulate an existing host without supervision. The upgraded binary's
+		// service entry must enable it, even when its old helper had no such hook.
+	}
 	before := map[string]myce.Machine{}
 	commandWork := map[string]string{}
 	commandCheckpoint := map[string]string{}
@@ -643,6 +651,9 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	for _, m := range managers {
 		if _, starts := m.process(); starts != 2 {
 			t.Errorf("%s service starts=%d, want 2", m.config.HostID, starts)
+		}
+		if _, err := os.Stat(filepath.Join(m.home, "fake-observer.enabled")); err != nil {
+			t.Error("upgraded service did not automatically enable observer supervision", err)
 		}
 		hash, err := myce.FileSHA256(m.config.Binary)
 		if err != nil || hash != target.hash {

@@ -268,7 +268,9 @@ func TestRequireMemoryCeilingsExitPreventsRestart(t *testing.T) {
 // A subprocess exercises the installed service entry point without an OS service manager.
 func TestInstalledQueueServiceProcess(t *testing.T) {
 	if path := os.Getenv("MYCE_TEST_INSTALLED_SERVICE"); path != "" {
-		if err := serviceCommand([]string{"--config", path}); err != nil {
+		if err := serviceCommandWithObserver([]string{"--config", path}, func(_ context.Context, c myce.ServiceConfig) error {
+			return saveProfileJSON(filepath.Join(filepath.Dir(c.Config), "observer-started"), c.Binary)
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -301,6 +303,7 @@ func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
 	client := myce.Client{URL: "http://" + address, Token: "private-test-only"}
 	var joiningBind string
 	for start := 0; start < 2; start++ {
+		_ = os.Remove(filepath.Join(filepath.Dir(c.Config), "observer-started"))
 		if err = myce.Install(context.Background(), c, os.Args[0], "", runner); err != nil {
 			t.Fatal(err)
 		}
@@ -328,6 +331,10 @@ func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
 			c, err = myce.ReadServiceConfig(c.Config)
 			if err != nil || c.DiscoveryListen == "" {
 				t.Fatal("queue did not save its joining bind", err)
+			}
+			var observerBinary string
+			if err := readProfileJSON(filepath.Join(filepath.Dir(c.Config), "observer-started"), &observerBinary); err != nil || observerBinary != c.Binary {
+				t.Fatal("normal install/reinstall skipped automatic observer setup from the installed slot", err)
 			}
 			if start == 0 {
 				joiningBind = c.DiscoveryListen

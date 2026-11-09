@@ -527,6 +527,10 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	return nil
 }
 func serviceCommand(args []string) error {
+	return serviceCommandWithObserver(args, ensureInstalledObserver)
+}
+
+func serviceCommandWithObserver(args []string, ensureObserver func(context.Context, myce.ServiceConfig) error) error {
 	if len(args) > 0 && args[0] == "observer" {
 		return observerServiceCommand(args[1:])
 	}
@@ -549,6 +553,12 @@ func serviceCommand(args []string) error {
 	}
 	if c.LocalDisableReceipts {
 		return myce.ErrLegacyLocalDisableReceipts
+	}
+	// Every supported installer and fleet upgrade starts this entry point from
+	// the durable installed slot. Existing hosts acquire supervision on their
+	// first upgraded start, without relying on the old installer/helper version.
+	if err := ensureObserver(context.Background(), c); err != nil {
+		fmt.Fprintln(os.Stderr, "observer_supervision_unavailable: automatic setup failed; keyed commands retain on-demand recovery")
 	}
 	if c.EnvironmentFile != "" {
 		_, queue, err := myce.ReadFleetEnvironment(c.EnvironmentFile)

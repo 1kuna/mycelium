@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"mycelium/internal/myce"
 )
 
 // The shared owner is user infrastructure, not part of its starter's job.
@@ -39,6 +41,28 @@ func observerEnvironment() []string {
 const observerServiceLabel = "local.mycelium.observer"
 
 type observerServiceRunner func(context.Context, string, ...string) error
+
+func ensureInstalledObserver(ctx context.Context, c myce.ServiceConfig) error {
+	if os.Getenv("MYCE_DEV_SESSION_ROOT") != "" || os.Getenv("MYCE_PROCESS_SESSION") != "" {
+		return nil // These observers belong to attempt/dev cleanup, never a user service.
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	root, err := sharedProfileRoot()
+	if err != nil {
+		return err
+	}
+	return installObserverService(ctx, runtime.GOOS, home, c.Binary, root, observerEnvironment(), observerManagerCommand)
+}
+
+func observerManagerCommand(ctx context.Context, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	// Manager output may contain private paths or environment values.
+	cmd.Env = notifierEnvironment()
+	return cmd.Run()
+}
 
 func observerServiceCommand(args []string) error {
 	if len(args) == 0 {
@@ -78,11 +102,7 @@ func observerServiceCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		return installObserverService(ctx, runtime.GOOS, home, executable, root, observerEnvironment(), func(ctx context.Context, name string, args ...string) error {
-			cmd := exec.CommandContext(ctx, name, args...)
-			// Manager output may contain private paths or environment values.
-			return cmd.Run()
-		})
+		return installObserverService(ctx, runtime.GOOS, home, executable, root, observerEnvironment(), observerManagerCommand)
 	case "run":
 		// User managers can themselves inherit CI/session variables. Re-exec is
 		// essential: Clearenv alone leaves Linux's initial /proc environment intact.
@@ -146,6 +166,9 @@ func supervisedObserverLock(ctx context.Context, path string) (*os.File, error) 
 }
 
 func installObserverService(ctx context.Context, platform, home, executable, root string, env []string, command observerServiceRunner) error {
+	if !filepath.IsAbs(home) || !filepath.IsAbs(executable) || !filepath.IsAbs(root) {
+		return errors.New("observer service requires absolute home, executable and registry paths")
+	}
 	var path, definition string
 	switch platform {
 	case "darwin":

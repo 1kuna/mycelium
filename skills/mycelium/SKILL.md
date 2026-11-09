@@ -128,8 +128,10 @@ owner to verify identity before same-key replay.
 For detached completion, bind a notifier to your own thread with
 [T3 binding](t3-binding.md). Supporting clients expose local observer diagnostics
 through `myce wait --observer-status`; a PID/lock proves ownership, not delivery.
-From the release containing #1159, `myce service observer install` enables per-user
-launchd/systemd completion supervision with a durable installed CLI. A dead shared owner
+From the release containing #1159, normal install/enrollment and upgraded service
+startup automatically enable per-user launchd/systemd completion supervision.
+Consumer-only installs use `myce service observer install` with a durable CLI.
+A dead shared owner
 then restarts and adopts armed registrations without another keyed command.
 Without an available user manager, the installer reports on-demand fallback:
 the next keyed command recovers a dead owner. Managed attempts/dev sessions keep

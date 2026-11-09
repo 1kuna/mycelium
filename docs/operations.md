@@ -4081,9 +4081,13 @@ use job GET times and the paginated job ledger described in [status](status.md).
 ## Completion observer upgrade and recovery (next release)
 
 Managed observers adopt all armed registrations in their private user registry.
-From the release containing #1159, `myce service observer install` installs and
-starts a per-user completion supervisor; it writes and enables the service without
-manual unit/plist steps. Use a durable installed CLI path, not a disposable build.
+From the release containing #1159, the installed queue/worker service automatically
+installs and enables per-user completion supervision on startup. Normal installs,
+enrollment and fleet upgrades all enter this path; an existing host acquires it
+when its upgraded service starts, without an extra operator command. Definitions
+reference the durable installed binary slot. Consumer-only installations can use
+`myce service observer install` with a durable CLI path, not a disposable build.
+Neither path requires manual unit/plist setup.
 macOS uses `local.mycelium.observer` in the user's launchd GUI domain;
 Linux uses `myce-observer.service` in the systemd user manager. The manager's
 native restart policy/pacing applies (including crash-loop suppression); no
