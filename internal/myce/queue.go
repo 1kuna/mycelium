@@ -123,6 +123,7 @@ type state struct {
 }
 type Queue struct {
 	readGeneration       *readGeneration
+	publishedReads       atomic.Pointer[publishedReadIndex]
 	readRoot             *readNode // q.mu; immutable committed input generations.
 	readModels           *ModelConfig
 	readEnvironments     *EnvironmentCatalog
@@ -218,7 +219,8 @@ type Queue struct {
 	statusHolds      queueHoldSampler
 	logCleanupHolds  queueHoldSampler
 	statusCache      statusCache
-	jobSnapshots     map[string]*jobSnapshotCache // q.mu; entries serialize their own refreshes.
+	jobSnapshotsMu   sync.Mutex // Only cache metadata; never acquired across projection or q.mu acquisition.
+	jobSnapshots     map[string]*jobSnapshotCache
 	observeRead      func(string, time.Duration, time.Duration)
 	usageReader      *sql.DB
 	db               *sql.DB

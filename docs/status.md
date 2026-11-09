@@ -139,13 +139,28 @@ refreshes every five seconds. Keep tokens in private configuration, not URLs.
 
 The page and `GET /api/status` share a snapshot for a lease learned from local
 capture/hit costs and mutation intervals. Job receipts use the same cost-based
-policy with their own generations. Status snapshots do
+policy with their own generations. From the release containing #1052's second
+read correction, completed default-status and job-receipt generations are read
+without acquiring the live queue mutex or entering projection admission. Cache
+metadata locks cover only completed-response metadata, never a rebuild. A slow
+inspection or other in-flight projection therefore cannot shed these cheap
+reads behind it. Their response copies still consume the queue's measured
+memory allowance; a cache hit is not an exemption from physical capacity.
+Negotiated default-status reads reuse a published page when its history rows
+fit the peer's page-planning allowance. A miss, expiry or invalidation still
+uses control-pressure admission before projection. Legacy scalar wait admission
+and the independent batch-wait index retain their existing behavior.
+Status snapshots do
 not drive start authorization, cancellation or result publication.
 Terminal job commits and their release acknowledgements invalidate the shared
 snapshot immediately. If one commits while status is projecting or waiting for
 usage/file-store I/O, status recaptures before returning, including uncached
 filtered and full views and per-job GET. This can repeat observation work during
-completions; ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
+completions; discarded response allocations are released before retrying rather
+than accumulating as if every discarded generation were still in flight.
+Cold immutable-decode allowances remain charged through the request because
+their cached records can survive a response retry.
+Ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
 injected queue time at capture, rather than the response completion time.
 
 Every status and inspection response includes additive `freshness` metadata:
