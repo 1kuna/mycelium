@@ -21,7 +21,7 @@ func devTestBinary(t *testing.T) string {
 	t.Helper()
 	devBinary.Do(func() {
 		devBinary.path = filepath.Join(os.Getenv("MYCE_TEST_DOCKER_BIN"), "myce-dev-test")
-		devBinary.out, devBinary.err = exec.Command("go", "build", "-p", "2", "-tags=myce_test", "-race", "-o", devBinary.path, ".").CombinedOutput()
+		devBinary.out, devBinary.err = exec.Command("go", "build", "-tags=myce_test", "-race", "-o", devBinary.path, ".").CombinedOutput()
 	})
 	if devBinary.err != nil {
 		t.Fatalf("build dev CLI: %v\n%s", devBinary.err, devBinary.out)

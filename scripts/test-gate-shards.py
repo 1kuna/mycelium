@@ -37,18 +37,38 @@ class ShardTests(unittest.TestCase):
         with patch.object(shards, 'native_roots', return_value=names):
             entries = shards.plan(['mycelium/cmd/myce\t.*', 'mycelium/internal/myce\t.*'], 18)
         import re
-        self.assertEqual(entries[0], 'mycelium/cmd/myce\t.*')
-        expressions = [line.split('\t')[1] for line in entries[1:]]
-        for name in names:
-            self.assertEqual(sum(bool(re.fullmatch(expression, name)) for expression in expressions), 1)
-        self.assertFalse(any(re.fullmatch(expression, 'TestAbsent') for expression in expressions))
-        # Go applies -run component-wise: no slash in root expression constrains children.
-        self.assertTrue(all('/' not in expression for expression in expressions))
+        for package in ('mycelium/cmd/myce', 'mycelium/internal/myce'):
+            expressions = [line.split('\t')[1] for line in entries if line.split('\t')[0] == package]
+            for name in names:
+                self.assertEqual(sum(bool(re.fullmatch(expression, name)) for expression in expressions), 1)
+            self.assertFalse(any(re.fullmatch(expression, 'TestAbsent') for expression in expressions))
+            # Go applies -run component-wise: no slash in root expression constrains children.
+            self.assertTrue(all('/' not in expression for expression in expressions))
 
     def test_small_capacity_and_quick_expressions_remain_unsharded(self):
-        entries = ['mycelium/internal/myce\t.*', 'mycelium/internal/myce\t^TestExact$/case']
+        entries = ['mycelium/cmd/myce\t.*', 'mycelium/internal/myce\t.*']
         with patch.object(shards, 'native_roots', side_effect=AssertionError('no discovery expected')):
-            self.assertEqual(shards.plan(entries, 2), entries)
+            self.assertEqual(shards.plan(entries, 1), entries)
+            exact = ['mycelium/internal/myce\t^TestExact$/case', 'unmeasured/package\t.*']
+            self.assertEqual(shards.plan(exact, 4), exact)
+
+    def test_chunks_refill_across_packages_in_longest_first_order(self):
+        import re
+        hints = {'core': {f'TestCore{i}': 10 for i in range(60)},
+                 'cli': {'TestCLI1': 120, 'TestCLI2': 80, 'TestCLI3': 70, 'TestCLI4': 10}}
+        with patch.object(shards.Path, 'read_text', return_value=json.dumps({'packages': hints})), \
+             patch.object(shards, 'native_roots', side_effect=lambda package: list(hints[package])):
+            entries = shards.plan(['core\t.*', 'cli\t.*'], 4)
+        loads = []
+        for entry in entries:
+            package, expression = entry.split('\t')
+            loads.append(sum(weight for name, weight in hints[package].items() if re.fullmatch(expression, name)))
+        self.assertEqual(loads, sorted(loads, reverse=True))
+        self.assertEqual(len(entries), 3 * 4)
+        # CLI work is admitted before the last core chunk, even though core
+        # came first in the package list. Each gets refills, not one long slot.
+        packages = [entry.split('\t')[0] for entry in entries]
+        self.assertLess(packages.index('cli'), max(i for i, package in enumerate(packages) if package == 'core'))
 
     def test_native_inventory_includes_examples_and_seeds_but_no_benchmarks(self):
         package = 'mycelium/internal/myce'
@@ -87,7 +107,7 @@ class ShardTests(unittest.TestCase):
         import sys
         with TemporaryDirectory() as directory:
             selection = Path(directory) / 'selection'
-            selection.write_text('mycelium/cmd/myce\t.*\n')
+            selection.write_text('mycelium/internal/view\t.*\n')
             with patch.dict(os.environ, GOFLAGS='-p=18', GOMAXPROCS='18'):
                 with patch.object(sys, 'argv', ['scheduler', 'full', '18', str(selection)]), \
                      patch.object(scheduler, 'run', return_value=0) as run:

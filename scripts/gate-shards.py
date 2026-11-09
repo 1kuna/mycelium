@@ -71,24 +71,47 @@ def native_roots(package: str) -> list[str]:
 
 
 def plan(entries: list[str], cores: int) -> list[str]:
-    """Expand measured dominant packages; retain other package selections intact."""
+    """Balance CLI/core chunks together so a finished process can refill."""
+    if cores < 1:
+        raise ValueError('core allocation must be positive')
+    if cores == 1:
+        return entries
     hints = json.loads(Path(__file__).with_name('gate-test-durations.json').read_text())['packages']
-    expanded = []
-    # At most eight core processes plus CLI: nine busy cores on an 18-core host.
-    # Smaller allocations leave one process slot for CLI/other packages.
-    count = max(1, min(8, cores - 1))
+    inventories = {}
     for entry in entries:
         package, expression = entry.split('\t', 1)
-        if package not in hints or expression != '.*' or count == 1:
-            expanded.append(entry)
+        if package not in hints or expression != '.*':
             continue
         names = native_roots(package)
         if not names:
             raise ValueError('empty native inventory for sharded package ' + package)
-        groups = partition(names, hints[package], count)
+        inventories[package] = names
+
+    # Three chunks per slot leave refill work when timing estimates differ
+    # from this host. Keep the total a multiple of the slots: independently
+    # rounding each package up can add a nearly empty final scheduling wave.
+    weights = {package: {name: max(.1, hints[package].get(name, .1)) for name in names}
+               for package, names in inventories.items()}
+    totals = {package: sum(values.values()) for package, values in weights.items()}
+    counts = {package: 1 for package in inventories}
+    budget = min(3 * min(9, cores), sum(len(names) for names in inventories.values()))
+    for _ in range(budget - len(counts)):
+        candidates = [package for package in counts if counts[package] < len(inventories[package])]
+        package = max(candidates, key=lambda package: totals[package] / counts[package])
+        counts[package] += 1
+    expanded = []
+    for entry in entries:
+        package, expression = entry.split('\t', 1)
+        if package not in inventories or expression != '.*':
+            expanded.append((0., entry))
+            continue
+        names = inventories[package]
+        groups = partition(names, hints[package], counts[package])
         for group in groups:
             # Slash-free anchored roots select every descendant in that root.
             expression = '^(' + '|'.join(re.escape(name) for name in group) + ')$'
-            expanded.append(package + '\t' + expression)
+            expanded.append((sum(weights[package][name] for name in group), package + '\t' + expression))
         print(f'gate shards {package}: {len(names)} roots in {len(groups)} processes', flush=True)
-    return expanded
+    # Longest chunks first, across packages. Package ordering would otherwise
+    # strand the CLI behind the whole core workload (or the reverse).
+    return [entry for _, entry in sorted(expanded, key=lambda row: -row[0])]
