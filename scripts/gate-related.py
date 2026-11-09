@@ -44,6 +44,8 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/request_projection.go'] = (
 # The non-race diagnostic benchmark has its correctness regressions here.
 SUPPLEMENTAL_CONSUMERS['internal/myce/checkin_persistence_benchmark_test.go'] = (
     'queue_persistence_test.go',)
+SUPPLEMENTAL_CONSUMERS['internal/myce/checkin_evidence_cache_test.go'] = (
+    'queue_persistence_test.go', 'status_read_contention_test.go')
 SUPPLEMENTAL_CONSUMERS['internal/myce/machine_conversion_install.go'] = (
     'machine_migration_test.go', 'machine_verified_empty_test.go',
     'machine_migration_spool_test.go')
