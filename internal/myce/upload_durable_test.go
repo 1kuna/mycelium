@@ -126,11 +126,12 @@ func writeLegacyUpload(root string, ref FileRef, prefix string) error {
 
 // Each unchanged public client is called ONCE. The server changes to real
 // upstream metadata while that call is active, including after an acknowledged
-// first chunk. No test-side retry or preliminary failed session probe can hide
+// first chunk, or another caller overtakes a pending PATCH after reset. No
+// test-side retry or preliminary failed session probe can hide
 // a terminal error in either deployed client's retry/reconciliation path.
 func TestFileStoreLegacyUpgradeRestartsFromZero(t *testing.T) {
 	for _, language := range []string{"Go", "Python"} {
-		for _, upgrade := range []string{"before-head", "between-chunks"} {
+		for _, upgrade := range []string{"before-head", "between-chunks", "overtaken-patch"} {
 			t.Run(language+"/"+upgrade, func(t *testing.T) {
 				chunkSize := 4 << 20
 				if language == "Python" {
@@ -146,8 +147,8 @@ func TestFileStoreLegacyUpgradeRestartsFromZero(t *testing.T) {
 				api := API{Queue: q, Token: "fixture"}.Handler()
 				endpoint := "/api/files/uploads/" + ref.SHA256
 				var mu sync.Mutex
-				upgraded, acceptedFirst := false, false
-				zeroHeads, staleRetries, zeroPatches := 0, 0, 0
+				upgraded, acceptedFirst, overtook := false, false, false
+				zeroHeads, advancedHeads, staleRetries, zeroPatches := 0, 0, 0, 0
 				var resent int64
 				digest := sha256.New()
 				var serverErr error
@@ -163,7 +164,7 @@ func TestFileStoreLegacyUpgradeRestartsFromZero(t *testing.T) {
 						return
 					}
 					inject := !upgraded && r.URL.Path == endpoint &&
-						(upgrade == "before-head" && r.Method == http.MethodHead ||
+						((upgrade == "before-head" || upgrade == "overtaken-patch") && r.Method == http.MethodHead ||
 							upgrade == "between-chunks" && acceptedFirst && r.Method == http.MethodPatch)
 					if inject {
 						// Requests are serialized in this fixture. Replace modern
@@ -190,6 +191,30 @@ func TestFileStoreLegacyUpgradeRestartsFromZero(t *testing.T) {
 						}
 						r.Body = io.NopCloser(strings.NewReader(string(body)))
 					}
+					if upgrade == "overtaken-patch" && upgraded && !overtook && r.Method == http.MethodPatch {
+						// The active client has already read HEAD offset zero and
+						// sent PATCH zero. Let a second caller durably accept the
+						// prefix through the real API before releasing that PATCH.
+						if r.Header.Get("Upload-Offset") != "0" {
+							fail(fmt.Errorf("pending PATCH did not use HEAD zero: %q", r.Header.Get("Upload-Offset")))
+							return
+						}
+						peer := r.Clone(r.Context())
+						prefix := content[:chunkSize]
+						peer.Body = io.NopCloser(strings.NewReader(prefix))
+						peer.ContentLength = int64(len(prefix))
+						peer.Header.Set("Upload-Offset", "0")
+						response := httptest.NewRecorder()
+						api.ServeHTTP(response, peer)
+						if response.Code != 204 || response.Header().Get("Upload-Offset") != fmt.Sprint(chunkSize) {
+							fail(fmt.Errorf("overtaking PATCH failed: %d %s", response.Code, response.Body.String()))
+							return
+						}
+						overtook = true
+						zeroPatches++
+						resent += int64(len(prefix))
+						digest.Write([]byte(prefix))
+					}
 					response := &uploadResponse{ResponseWriter: w}
 					api.ServeHTTP(response, r)
 					if r.Method == http.MethodPost && response.status == 201 {
@@ -207,8 +232,11 @@ func TestFileStoreLegacyUpgradeRestartsFromZero(t *testing.T) {
 					if r.Method == http.MethodHead && upgraded && response.status == 200 && w.Header().Get("Upload-Offset") == "0" {
 						zeroHeads++
 					}
+					if r.Method == http.MethodHead && overtook && response.status == 200 && w.Header().Get("Upload-Offset") == fmt.Sprint(chunkSize) {
+						advancedHeads++
+					}
 					if r.Method == http.MethodPatch {
-						if upgraded && response.status == 503 && r.Header.Get("Upload-Offset") != "0" {
+						if upgraded && response.status == 503 {
 							staleRetries++
 						}
 						if response.status == 204 {
@@ -261,6 +289,12 @@ print(json.dumps(Client(sys.argv[1], "fixture", transfer_timeout=25).upload_file
 				wantZero, wantRetry := 1, 0
 				if upgrade == "between-chunks" {
 					wantZero, wantRetry = 2, 1
+				}
+				if upgrade == "overtaken-patch" {
+					wantRetry = 1
+					if !overtook || advancedHeads != 1 {
+						t.Fatalf("client did not reconcile overtaking progress: overtook=%v advancedHEADs=%d", overtook, advancedHeads)
+					}
 				}
 				if zeroPatches != wantZero || staleRetries != wantRetry {
 					t.Fatalf("wrong resend/retry path: zeroPATCHes=%d staleRetries=%d", zeroPatches, staleRetries)

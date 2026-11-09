@@ -275,8 +275,10 @@ rechecks for valid replacement progress before deleting anything.
 The unchanged Go and Python clients resend the entire source within the same
 active upload call. If a PATCH already carries the old offset, the server resets
 the session and returns retryable HTTP 503 (`request_failed`); their existing
-transient retry reconciles HEAD and sends from zero. Legacy sessions do not
-return missing-session or integrity errors. No client update, operator archive
+transient retry reconciles HEAD and sends from zero. On reset sessions, an offset
+mismatch in either direction is retryable, including when another caller has
+advanced progress beyond a pending PATCH. Legacy sessions do not return
+missing-session or integrity errors. No client update, operator archive
 or manual re-upload is required. Final SHA-256 verification checks the new bytes.
 The accepted upgrade cost is resending one in-flight upload. See
 [operations](operations.md#file-store-crash-recovery).

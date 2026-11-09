@@ -104,7 +104,9 @@ reconciliation. The server resets older partials in place to durable offset zero
 under the same session ID; it never adopts unverified old bytes. HEAD reports
 zero, and the unchanged Go/Python clients resend the whole source. A PATCH
 already carrying an old offset receives retryable 503, so the existing transient
-retry reconciles HEAD within the same active call. No missing-session retry,
+retry reconciles HEAD within the same active call. This also covers a pending
+PATCH overtaken by another resuming caller; retry continues from the current
+accepted offset. No missing-session retry,
 client update, manual archive or reset is needed. Final full-file SHA-256 checks
 the newly sent bytes.
 Genuinely corrupt new-format state needs the queue owner's [recovery](../../docs/operations.md#file-store-crash-recovery).

@@ -844,7 +844,9 @@ Neither deployed client retries a session 404 or tus offset conflict. No such
 response is used for a legacy session. A PATCH with a stale pre-reset offset
 receives retryable HTTP 503 (`request_failed`), causing the unchanged client's
 existing transient retry to HEAD the same ID and resend from zero within its
-active upload call. No manual archive, re-upload or client update is required.
+active upload call. On reset sessions, mismatches in either direction are
+retryable: a caller overtaken by another resume re-HEADs and continues from the
+current accepted offset. No manual archive, re-upload or client update is required.
 The final whole-file SHA-256 check remains mandatory. The orchestrator accepts
 resending one in-flight upload per upgrade (server-side recovery decision,
 2026-11-09, received by the #1179 file-store worker).

@@ -140,11 +140,11 @@ func (s *FileStore) verifiedUpload(ctx context.Context, id string) (*durableUplo
 		}
 	}
 	if record.Restarted {
-		// An active old client can already have sent its next PATCH. A tus
-		// offset conflict is terminal in deployed clients; their existing
-		// transient retry instead reconciles HEAD and resends from zero.
+		// A pending PATCH can be ahead of reset progress or behind another
+		// resuming caller. Both tus offset conflicts are terminal in deployed
+		// clients; their existing transient retry reconciles the current HEAD.
 		if offset, ok := ctx.Value(uploadPatchOffsetKey{}).(string); ok {
-			if n, err := strconv.ParseInt(offset, 10, 64); err == nil && n > record.Offset {
+			if n, err := strconv.ParseInt(offset, 10, 64); err == nil && n != record.Offset {
 				return nil, tus.NewError("request_failed", "upload reset; reconcile the same session with HEAD", http.StatusServiceUnavailable)
 			}
 		}
