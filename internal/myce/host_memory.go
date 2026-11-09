@@ -587,7 +587,8 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 
 // Bounded learned/exploratory estimates are admission reservations; their
 // wider execution ceiling contains unseen growth but is not measured demand.
-// Cold probes still need complete fresh evidence before releasing their ceiling.
+// Cold probes still need complete fresh evidence before releasing their offered
+// envelope. Their adaptive execution ceiling is containment, not extra demand.
 func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
 	if m != nil && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" &&
 		!j.Spec.Run.Docker && j.Spec.Needs.cpuOnly() && j.Spec.Needs.Memory != "auto" && j.Spec.Needs.HostMemoryGB > 0 {
@@ -606,11 +607,18 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	e := j.MemoryEnvelope
 	bounded := adaptiveCeiling > 0 && e.ProbeFloorGB <= 0
 	charge = max(ceiling, retainedHostCharge(j))
-	if adaptiveCeiling > 0 && !bounded {
-		charge = max(charge, adaptiveCeiling)
-	}
+	// A cold probe already reserves the full opportunity admitted beside its
+	// neighbors. Promoting it to wider execution containment here can exceed the
+	// host allowance and block startup before the first observation can arrive.
 	if bounded {
 		charge = boundedHostMemoryCharge(j, m, ceiling, adaptiveCeiling, sample, now)
+	}
+	coldObserved := 0.0
+	if adaptiveCeiling > 0 && !bounded {
+		// An unknown command can outgrow its original opportunity. Retain
+		// measured demand independently of its replaceable live forecast.
+		coldObserved = max(retainedHostCharge(j), sample.peakGB, sample.gb, sample.footprintGB)
+		charge = max(charge, coldObserved+exploratoryDriftMarginGB(m))
 	}
 	if !bounded && !sample.at.IsZero() && !now.Before(sample.at) && now.Sub(sample.at) < sample.freshFor() {
 		charge = max(charge, sample.hostForecast(now))
@@ -622,6 +630,8 @@ func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemoryS
 	floor := e.ProbeFloorGB
 	if bounded {
 		floor = charge // Estimates can grow, never earn probe credit.
+	} else if adaptiveCeiling > 0 {
+		floor = max(floor, coldObserved+exploratoryDriftMarginGB(m))
 	}
 	charge = floor
 	if !bounded {
@@ -696,7 +706,7 @@ func retainedHostCharge(j *Job) float64 {
 func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 	for _, j := range q.liveJobs() {
 		m := q.s.Machines[j.Machine]
-		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || adaptiveMemoryCeilingGB(j, m) <= 0 || j.MemoryEnvelope.ProbeFloorGB > 0 {
+		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || adaptiveMemoryCeilingGB(j, m) <= 0 {
 			continue
 		}
 		sample := q.hostMemorySamples[machine][jobKey(*j)]
@@ -709,6 +719,12 @@ func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 			}
 		}
 		observed = max(observed, sample.peakGB, sample.gb, sample.footprintGB)
+		if j.MemoryEnvelope.ProbeFloorGB > 0 {
+			// Cold probes may release the unused offered envelope after complete
+			// Started evidence. Persist only actual high water, never the offer
+			// or forecast, so a transient prediction cannot become a floor.
+			charge = max(retainedHostCharge(j), observed)
+		}
 		if _, fresh := sample.identifiedHostForecast(now); fresh {
 			id = max(id, sample.id)
 		}

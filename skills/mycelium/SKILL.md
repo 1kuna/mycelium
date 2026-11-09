@@ -90,6 +90,11 @@ CPU probes also use the adaptive guard, so a small residual admission envelope
 is not their execution limit. Native CPU auto-memory OOMs and native accelerator-check host cgroup OOMs
 retain killed-peak floors and retry against usable physical headroom;
 exploratory under-sizing does not spend a fixed attempt budget.
+From the release containing #1116, cold native CPU probes retain their full
+assigned admission envelope before fresh Started telemetry; a wider adaptive
+execution ceiling does not increase that reservation to the whole host.
+Missing/stale data grants no resident credit; measured cold-probe peaks survive
+expiry and queue restart. Forecasts remain replaceable, and exact release is required.
 Growth/overshoot stays replaceable uncertainty, rather than a permanent floor.
 If the measured lower bound exceeds every eligible capacity, the job reports
 a capacity refusal. Inspect each attempt's envelope and learning reason. Declared numeric limits,
@@ -532,6 +537,12 @@ only after the authority owner verifies unchanged trust and identity, replay
 the original saved command/key with its notifier and current installed
 authority, serialized. Updating a candidate binary does not update the installed
 CLI or the image of an existing shared observer; check its reported commit.
+From the queue release containing #1074's established-response shutdown fix,
+cutover closes interrupted TLS sockets without sending another encrypted
+record after a failed write. Earlier queues can generate a real bad-record-MAC
+refusal during shutdown even with unchanged trust. Keep that integrity refusal
+permanent: report it to the authority owner rather than weakening TLS checks;
+same-key recovery still requires the owner's unchanged-identity verification.
 
 From the release containing #1072, Go and Python GET/HEAD, download and
 replay-safe retries follow the current positive `Retry-After` plus jitter;
