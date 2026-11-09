@@ -63,7 +63,7 @@ check: [test, -s, result]
 		server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
 		defer server.Close()
 		var out bytes.Buffer
-		err := runProfile(context.Background(), path, nil, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard)
+		err = runProfile(context.Background(), path, nil, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard)
 		if exitCode(err) != 69 {
 			t.Fatal(err)
 		}

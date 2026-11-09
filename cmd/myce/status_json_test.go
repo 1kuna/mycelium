@@ -44,7 +44,7 @@ func TestStatusJSONPressureView(t *testing.T) {
 	snapshot.HealthAlertDelivery = &myce.HealthAlertDelivery{Pending: 3}
 	snapshot.JobsPage = &myce.StatusJobsPage{Total: 3, Returned: 1, Mode: "recent", NextBefore: "cursor"}
 	snapshot.QueueRelease = myce.CurrentRelease()
-	release := myce.RunningRelease{Version: "v1.2.3", Commit: "0123456789abcdef"}
+	release = myce.RunningRelease{Version: "v1.2.3", Commit: "0123456789abcdef"}
 	snapshot.Machines[0].ID = "worker"
 	snapshot.Machines[0].Release = &release
 	snapshot.Machines[0].ExtensionReports = []myce.ExtensionReport{{Name: "sample", Version: "1", Work: "kind:sample", Qualified: true}}
