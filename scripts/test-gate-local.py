@@ -1009,6 +1009,21 @@ sys.exit(m.main())
         self.assertIn('swapping', measurement.memory.refusal(before, dict(warning, swapouts=53)))
         self.assertIn('pressure', measurement.memory.refusal(before, dict(warning, pressure_level=4)))
 
+    def test_missing_memory_observation_does_not_stop_payload(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with (patch.object(measurement.subprocess, 'check_output', return_value=str(root)),
+                  patch.object(measurement, 'cache_bytes', return_value=0),
+                  patch.object(measurement, 'tree_rss', return_value=1),
+                  patch.object(measurement.memory, 'snapshot', side_effect=subprocess.TimeoutExpired(['ps'], 5))):
+                self.assertEqual(measurement.measure([sys.executable, '-c', 'import time; time.sleep(.1)'],
+                    root / 'metrics', 'quick', 'test', phase='host'), 0)
+            self.assertFalse(json.loads((root / 'metrics').read_text())['refusal'])
+        guard = measurement.memory.SwapGuard(None)
+        self.assertIsNone(guard.check(None))
+        self.assertIsNone(guard.check(dict(pressure_level=2, swapouts=1)))
+        self.assertIn('pressure', guard.check(dict(pressure_level=4, swapouts=1)))
+
     def test_quick_memory_uses_measured_selection_peak(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

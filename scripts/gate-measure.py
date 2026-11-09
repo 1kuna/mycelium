@@ -47,7 +47,11 @@ def measure(command, report, mode, source_sha, *, floor=42 * GIB,
     modules = Path(subprocess.check_output(['go', 'env', 'GOMODCACHE'], text=True).strip())
     before = dict(build_cache_bytes=cache_bytes(cache), module_cache_bytes=cache_bytes(modules),
                   free_bytes=shutil.disk_usage(disk_root).free)
-    before['host_memory'] = memory.snapshot()
+    try:
+        before['host_memory'] = memory.snapshot()
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print('WARNING gate: initial host memory observation unavailable: ' + str(error), file=sys.stderr, flush=True)
+        before['host_memory'] = None
     guard = memory.SwapGuard(before['host_memory'],
                              memory.idle_baseline() if before['host_memory'] else None)
     reason = guard.check(before['host_memory'])
@@ -97,8 +101,12 @@ def measure(command, report, mode, source_sha, *, floor=42 * GIB,
                     sample['tree_rss_sum_bytes'] = tree_rss(child.pid)
                     if guard.baseline is not None:
                         reason = guard.check(current, sample['tree_rss_sum_bytes'])
-            except (OSError, ValueError, subprocess.SubprocessError):
-                reason = 'host memory measurement unavailable'
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                sample['memory_observation_warning'] = str(error)
+                print('WARNING gate: host memory observation unavailable: ' + str(error), file=sys.stderr, flush=True)
+                reason = None
+            if stopped.is_set():
+                return
             if reason:
                 refusal.append(reason)
                 print('STOP gate: ' + reason, file=sys.stderr, flush=True)
@@ -130,7 +138,7 @@ def measure(command, report, mode, source_sha, *, floor=42 * GIB,
         status = child.wait()
     finally:
         stopped.set()
-        observer.join(timeout=6)
+        observer.join()
         for signum, handler in previous.items():
             signal.signal(signum, handler)
     elapsed = time.monotonic() - started

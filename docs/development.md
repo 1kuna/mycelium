@@ -159,7 +159,9 @@ sum across runs; Linux demand also fits the VM's configured CPU/RAM capacity.
 Requests above the qualified CPU budget require a new measurement.
 
 Under MY-41, warning memory pressure alone does not stop admission or running
-work. Critical/unknown pressure, actual swap growth and the disk floors still
+work. Missing observations log a warning and continue; they are not evidence of
+critical pressure or swap growth. Complete process-table telemetry uses the
+30-second observer allowance; timeouts retain their command/error in the log. Critical pressure, actual swap growth and the disk floors still
 stop work. Quick and focused requests can use a separate
 `quick_memory_measurement` containing digest-bound successful quick observations
 and their maximum `peak_bytes`. The development-host observations peak at
@@ -933,7 +935,7 @@ feedback; failures are work to fix, not a hold on unrelated merges.
 
 Gate tooling is development tooling: if its custody or guard state blocks work, reset it (stop the gate VM, clear the control-directory records) and fix the tool forward.
 
-The memory guard stops only on critical pressure or real swap growth. The local gate implements that guard. Development gates, custody,
+The memory guard stops only on critical pressure or real swap growth. The local gate implements that guard; unavailable telemetry warns and continues. Development gates, custody,
 admission and guards may be changed freely when they block work. Earlier tooling
 custody and guard restrictions in this document are superseded by MY-41. Preserve
 running production customer jobs, secrets and public-repository privacy.

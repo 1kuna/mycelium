@@ -21,6 +21,14 @@ def swap_used_bytes(output: str) -> int:
 
 
 def local_worker_usage() -> Optional[dict]:
+    try:
+        return _local_worker_usage()
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print('WARNING gate: worker resource observation unavailable: ' + str(error), file=sys.stderr, flush=True)
+        return None
+
+
+def _local_worker_usage() -> Optional[dict]:
     """Read local launchd/OS usage, independent of queue access or credentials."""
     if sys.platform != 'darwin':
         return None
@@ -32,7 +40,7 @@ def local_worker_usage() -> Optional[dict]:
             pid = int(fields[0])
     if pid is None:
         return dict(pid=None, process_count=0, rss_sum_bytes=0, cpu_cores=0)
-    output = subprocess.check_output(['ps', '-axo', 'pid=,ppid=,rss=,pcpu='], text=True, timeout=5)
+    output = subprocess.check_output(['ps', '-axo', 'pid=,ppid=,rss=,pcpu='], text=True, timeout=30)
     processes = [row.split() for row in output.splitlines() if row.strip()]
     owned = {pid}
     while True:
@@ -57,7 +65,7 @@ def snapshot():
     fields = {k: int(v) for k, v in re.findall(r'^([^:]+):\s+(\d+)\.', output, re.M)}
     pressure = int(subprocess.check_output(['sysctl', '-n',
         'kern.memorystatus_vm_pressure_level'], text=True, timeout=5).strip())
-    processes = subprocess.check_output(['ps', '-axo', 'rss=,comm='], text=True, timeout=5)
+    processes = subprocess.check_output(['ps', '-axo', 'rss=,comm='], text=True, timeout=30)
     vm_rss = sum(int(line.split(None, 1)[0]) * 1024 for line in processes.splitlines()
                  if 'com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/' in line)
     swap_use = subprocess.check_output(['sysctl', '-n', 'vm.swapusage'], text=True, timeout=5)
@@ -167,17 +175,21 @@ class SwapGuard:
         self.windows = []
 
     def check(self, current: Optional[dict], owned_rss_bytes: int = 0) -> Optional[str]:
-        if self.before is None:
-            return None  # The guest's outer host supervisor owns memory safety.
         if current is None:
-            return 'host memory measurement unavailable'
-        if current['pressure_level'] not in (1, 2):
-            return 'host memory pressure is critical or unknown'
+            return None  # MY-41: a failed observer is not evidence of pressure.
+        if current['pressure_level'] == 4:
+            return 'host memory pressure is critical'
+        if self.before is None:
+            self.before = self.previous = current
+            self.previous_working_set = current.get('all_vz_rss_sum_bytes', 0)
+            return None
         if self.baseline is None:
             return refusal(self.before, current)  # Unqualified hosts fail closed.
         elapsed = current['monotonic_seconds'] - self.previous['monotonic_seconds']
         if elapsed < 0 or current['swapouts'] < self.previous['swapouts']:
-            return 'host swap measurement reset during gate'
+            print('WARNING gate: swap observation reset; re-establishing baseline', file=sys.stderr, flush=True)
+            self.previous = current
+            return None
         if elapsed < self.baseline['window_seconds']:
             return None
         rate = (current['swapouts'] - self.previous['swapouts']) * current['page_bytes'] / elapsed
@@ -203,9 +215,9 @@ def refusal(before, current):
     if before is None:
         return None
     if current is None:
-        return 'host memory measurement unavailable'
-    if current['pressure_level'] not in (1, 2):
-        return 'host memory pressure is critical or unknown'
+        return None
+    if current['pressure_level'] == 4:
+        return 'host memory pressure is critical'
     if (current['swapouts'] > before['swapouts'] or
             current.get('swap_used_bytes', 0) > before.get('swap_used_bytes', 0)):
         return 'host began swapping during gate'

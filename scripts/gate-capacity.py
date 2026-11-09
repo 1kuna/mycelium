@@ -211,10 +211,14 @@ def total_memory():
 
 def check_pressure():
     if os.uname().sysname == 'Darwin':
-        level = int(subprocess.check_output(['sysctl', '-n',
-                    'kern.memorystatus_vm_pressure_level'], text=True, timeout=5))
-        if level not in (1, 2):
-            raise RuntimeError('host memory pressure is critical or unknown; no work started')
+        try:
+            level = int(subprocess.check_output(['sysctl', '-n',
+                        'kern.memorystatus_vm_pressure_level'], text=True, timeout=5))
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print('WARNING gate: admission pressure observation unavailable: ' + str(error), flush=True)
+            return
+        if level == 4:
+            raise RuntimeError('host memory pressure is critical; no work started')
 
 
 class Slot:
