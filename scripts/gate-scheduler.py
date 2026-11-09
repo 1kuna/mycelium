@@ -74,7 +74,8 @@ def run(entries, cores, command):
             if child.poll() is None:
                 child.terminate()
         for child in pending:
-            if child.wait() == 125:
+            result = child.wait()
+            if result < 0 or result == 125:
                 status = 125
     return status
 
