@@ -29,6 +29,15 @@ class GateBudgetTests(unittest.TestCase):
         mock = patch.object(budget.Path, 'home', return_value=Path(home.name).resolve())
         mock.start()
         self.addCleanup(mock.stop)
+        # Path.home() mocks stay in this process; fixture subprocesses must
+        # also use the private coordinator and never inherit a real gate lane.
+        environment = patch.dict(os.environ, HOME=home.name)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ('GATE_LOCAL_SLOT', 'GATE_LOCAL_SLOT_ID', 'MYCE_GATE_BUDGET',
+                     'GATE_SCRATCH', 'GATE_RUN_ID', 'GATE_CLEANUP_ID',
+                     'GATE_CLEANUP_RECEIPT'):
+            os.environ.pop(name, None)
 
     def test_native_only_full_obeys_resource_group_but_fleet_remains_background(self):
         with tempfile.TemporaryDirectory() as folder:
