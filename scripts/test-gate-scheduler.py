@@ -47,9 +47,11 @@ if behavior == 'blocked':
         time.sleep(.01)
 elif behavior == 'release':
     (root / 'release').touch()
-elif behavior == '125':
+elif behavior in ('125', 'killed-custody'):
     while not (root / 'oldest-started').exists():
         time.sleep(.01)
+    if behavior == 'killed-custody':
+        os.kill(os.getpid(), signal.SIGKILL)
 elif behavior == 'killed':
     os.kill(os.getpid(), signal.SIGKILL)
 event('finish')
@@ -97,7 +99,7 @@ class SchedulerTests(unittest.TestCase):
         for behavior in ('7', 'killed'):
             with self.subTest(behavior=behavior), tempfile.TemporaryDirectory() as folder:
                 status, output = self.finish(self.launch(Path(folder), [('failure', behavior), ('ok', '0')]))
-                self.assertEqual(status, 1, output)
+                self.assertEqual(status, 125 if behavior == 'killed' else 1, output)
 
     def test_stall_dominates_ordinary_failure_in_final_drain(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -105,13 +107,14 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(status, 124, output)
 
     def test_custody_refusal_stops_before_refill_and_unwinds_sibling(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            status, output = self.finish(self.launch(root, [('oldest', 'blocked'), ('custody', '125'),
-                                                           ('forbidden', 'release')]))
-            self.assertEqual(status, 125, output)
-            self.assertEqual((root / 'admitted').read_text().splitlines(), ['oldest', 'custody'])
-            self.assertIn(['oldest', 'stopped'], [json.loads(x) for x in (root / 'events').read_text().splitlines()])
+        for behavior in ('125', 'killed-custody'):
+            with self.subTest(behavior=behavior), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                status, output = self.finish(self.launch(root, [('oldest', 'blocked'), ('custody', behavior),
+                                                               ('forbidden', 'release')]))
+                self.assertEqual(status, 125, output)
+                self.assertEqual((root / 'admitted').read_text().splitlines(), ['oldest', 'custody'])
+                self.assertIn(['oldest', 'stopped'], [json.loads(x) for x in (root / 'events').read_text().splitlines()])
 
     def test_signal_unwinds_active_watchdog(self):
         with tempfile.TemporaryDirectory() as folder:

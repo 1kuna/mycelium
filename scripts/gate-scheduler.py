@@ -10,7 +10,9 @@ import time
 
 
 def merge_status(status, result):
-    if result == 125 or status == 125:
+    # Signal death cannot establish that the watchdog completed fixture cleanup.
+    # The whole-run supervisor must settle that custody before any slot reuse.
+    if result < 0 or result == 125 or status == 125:
         return 125
     if result == 124 or status == 124:
         return 124
