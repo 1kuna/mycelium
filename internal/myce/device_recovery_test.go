@@ -372,28 +372,33 @@ func TestVendorHealthCustodyOrdersOnlyProcessStart(t *testing.T) {
 		var gate vendorProbeStart
 		ctx := withVendorProbeStart(t.Context(), &gate)
 		starting, finishStart := make(chan struct{}), make(chan struct{})
-		finishQuery, done, acquired := make(chan struct{}), make(chan error, 1), make(chan struct{})
+		finishQuery, done := make(chan struct{}), make(chan error, 1)
+		attempting, acquired := make(chan struct{}), make(chan bool, 1)
+		var startFinished atomic.Bool
 		go func() {
 			err := startProbeCommand(ctx, func() error {
 				close(starting)
 				<-finishStart // Simulated fork/exec, not the command's completion.
+				startFinished.Store(true)
 				return nil
 			})
 			<-finishQuery
 			done <- err
 		}()
 		<-starting
-		go func() { gate.setBusy(true); close(acquired) }()
-		synctest.Wait()
-		select {
-		case <-acquired:
-			t.Fatal("custody overtook process creation")
-		default:
-		}
+		go func() {
+			close(attempting)
+			gate.setBusy(true)
+			acquired <- startFinished.Load()
+		}()
+		<-attempting
 		close(finishStart)
 		synctest.Wait()
 		select {
-		case <-acquired:
+		case ordered := <-acquired:
+			if !ordered {
+				t.Fatal("custody overtook process creation")
+			}
 		default:
 			t.Fatal("custody waited for query completion")
 		}
