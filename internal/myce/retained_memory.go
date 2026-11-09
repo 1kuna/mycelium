@@ -2,6 +2,7 @@ package myce
 
 import (
 	"maps"
+	"reflect"
 	"time"
 )
 
@@ -168,7 +169,7 @@ func snapshotRetainedMemoryJobs(q *Queue) map[string]*Job {
 		source := Job{ID: j.ID, Spec: Spec{Needs: j.Spec.Needs, Args: j.Spec.Args, Program: j.Spec.Program},
 			Timing: j.Timing, AttemptHistory: j.AttemptHistory, MemoryAttempts: j.MemoryAttempts,
 			StartedAt: j.StartedAt, FinishedAt: j.FinishedAt, Extensions: j.Extensions}
-		copy := cloneJob(&source)
+		copy := copyObservationValue(reflect.ValueOf(source)).Interface().(Job)
 		jobs[id] = &copy
 	}
 	return jobs
