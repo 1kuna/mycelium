@@ -51,11 +51,13 @@ separate dev run. For an authorized urgent hotfix: run quick, deploy, run full
 afterwards, and fix forward if full finds a problem. This workflow does not grant
 fleet/deployment authorization.
 
-Full partitions the dominant `internal/myce` package across up to eight test
-processes while the CLI package runs concurrently. The process limit is the
-available CPU count, capped at nine, with `GOMAXPROCS=1` and `-parallel=1` per
-process to retain workstation headroom. Smaller allocations reduce the shard
-count. Quick selection and its parallelism are unchanged.
+Full partitions both `internal/myce` and the CLI into balanced chunks. It
+allocates three chunks per process slot across the packages by measured work,
+then starts the longest estimated chunks first. This leaves work to refill a
+slot when another chunk finishes. The active process limit remains the available
+CPU count, capped at nine, with `GOMAXPROCS=1`, `GOFLAGS=-p=1` and `-parallel=1`
+per process to retain workstation headroom. One-core allocations run each
+package intact. Quick selection and its parallelism are unchanged.
 
 The planner asks Go for the current race-enabled inventory, including runnable
 examples and fuzz seed tests, under the same fixture watchdog used for tests.
