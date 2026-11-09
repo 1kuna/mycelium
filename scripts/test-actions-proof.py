@@ -202,11 +202,52 @@ class ActionsProofTest(unittest.TestCase):
             self.assertEqual(ci.run_pending(self.root, self.repeat, self.scratch, '124:1'), 0)
             self.assertEqual([call.args[1] for call in run.call_args_list], [self.second, self.third])
 
+    def test_incomplete_submissions_remain_recoverable_in_later_workflow(self):
+        self.api.tip = self.first
+        submitted = []
+        def unavailable(*args, cwd=None):
+            self.assertEqual(args[0], 'run')
+            submitted.append(args[-1].split(':')[2])
+            return subprocess.CompletedProcess(args, 69, '', 'PRIVATE infrastructure failure')
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'command', unavailable), \
+                patch.object(ci, 'cleanup', return_value=True), patch.dict(os.environ, self.env), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(ci.run_pending(self.root, self.first, self.scratch, '123:1'), 1)
+        self.assertEqual(submitted, ['darwin', 'linux'])
+        tree = self.git('rev-parse', self.first + '^{tree}')
+        self.assertEqual(self.api.statuses[self.first, tree]['state'], 'error')
+        self.api.tip = self.third
+        later = Path(self.temp.name) / 'later'
+        later.mkdir()
+        recovered = []
+        with patch.object(proof, 'GitHub', return_value=self.api), \
+                patch.object(ci, 'run', side_effect=lambda root, sha, *args: recovered.append(sha) or 0), \
+                patch.object(ci, 'cleanup', return_value=True), patch.dict(os.environ, self.env), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(ci.run_pending(self.root, self.third, later, '124:1'), 0)
+        self.assertEqual(recovered, [self.first, self.second, self.third])
+        self.assertEqual(self.api.statuses[self.first, tree]['state'], 'success')
+
+    def test_explicit_retry_runs_failed_identical_tree_once_per_batch(self):
+        tree = self.git('rev-parse', self.third + '^{tree}')
+        self.api.publish(self.third, tree, 'https://github.com/1kuna/mycelium/actions/runs/1', 'failure')
+        retried = []
+        def run(root, sha, *args):
+            retried.append(sha)
+            return int(sha in (self.third, self.repeat))
+        with patch.object(proof, 'GitHub', return_value=self.api), patch.object(ci, 'run', run), \
+                patch.object(ci, 'cleanup', return_value=True), \
+                patch.dict(os.environ, dict(self.env, GITHUB_RUN_ATTEMPT='2')), redirect_stdout(io.StringIO()):
+            self.assertEqual(ci.run_pending(self.root, self.repeat, self.scratch, '123:2'), 1)
+        self.assertEqual(retried, [self.first, self.second, self.third])
+        self.assertEqual(self.api.statuses[self.repeat, tree]['state'], 'failure')
+
     def test_old_local_context_is_ignored_and_latest_CI_status_is_authoritative(self):
         api = object.__new__(proof.GitHub)
         sha, tree = 'a' * 40, 'b' * 40
         old = {'context': 'mycelium/full-tree-v1', 'description': 'tree:' + tree, 'state': 'success'}
-        with patch.object(api, 'pages', return_value=[old]):
+        ambiguous = dict(old, context='mycelium/main-full-tree-v2', state='failure')
+        with patch.object(api, 'pages', return_value=[old, ambiguous]):
             self.assertIsNone(api.status(sha, tree))
         with patch.object(api, 'pages', return_value=[old,
             {'context': proof.CONTEXT, 'description': 'tree:' + tree, 'state': 'failure'},

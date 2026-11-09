@@ -94,7 +94,7 @@ class ActionsFullTest(unittest.TestCase):
 
     def test_both_platforms_wait_and_verify_accepted_results(self):
         self.assertEqual(self.exercise(), (0, ['darwin', 'linux'], ['darwin', 'linux']))
-        self.assertEqual(self.exercise(bad_marker=True)[0], 1)
+        self.assertEqual(self.exercise(bad_marker=True)[0], ci.INCOMPLETE)
         with self.assertRaises(ValueError):
             ci.frozen_profile('source: {git: main}\n', SHA)
 
@@ -105,7 +105,8 @@ class ActionsFullTest(unittest.TestCase):
                 {'attempt': 1, 'out_of_memory': False},
                 {'attempt': 2, 'out_of_memory': True, 'reason': 'PRIVATE'},
             ]}), (1, ['darwin', 'linux'], ['darwin']))
-        self.assertEqual(self.exercise(submission_failure=True), (1, ['linux'], ['linux']))
+        self.assertEqual(self.exercise(submission_failure=True), (ci.INCOMPLETE, ['linux'], ['linux']))
+        self.assertEqual(self.exercise(linux='cancelled')[0], ci.INCOMPLETE)
 
     def test_oom_requires_current_attempt_and_readable_status(self):
         for output, code in [
@@ -129,7 +130,7 @@ class ActionsFullTest(unittest.TestCase):
         self.assertEqual(ci.submission_failure(reply),
                          'infrastructure failure: no qualified target; inspect private receipt for eligibility requirements')
         self.assertEqual(self.exercise(submission_failure=True, refusal=refusal),
-                         (1, ['linux'], ['linux']))
+                         (ci.INCOMPLETE, ['linux'], ['linux']))
         refusal['refusal_reason'] = 'PRIVATE unsupported environment or host path'
         self.assertEqual(ci.submission_failure(subprocess.CompletedProcess([], 78, json.dumps(refusal))),
                          'infrastructure failure: no qualified target; inspect private receipt for eligibility requirements')

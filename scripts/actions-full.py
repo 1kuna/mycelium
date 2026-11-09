@@ -17,6 +17,8 @@ _spec.loader.exec_module(proof)
 
 PLATFORMS = ('darwin', 'linux')
 TERMINAL = {'succeeded', 'failed', 'cancelled'}
+# A transport/refusal/cancellation is not a completed suite verdict.
+INCOMPLETE = 2
 # GitHub's six-hour job limit is external, not a gate performance deadline.
 # Reserve five minutes for cleanup and five for Actions/checkout overhead.
 WORK_SECONDS = 350 * 60
@@ -101,7 +103,7 @@ def failure_state(job):
 
 def run(root, sha, scratch, owner):
     jobs, states, refusals = {}, {}, {}
-    failed = False
+    failed, incomplete, wait_error = False, False, False
     # Submit both before waiting. An error on one platform must not skip the other.
     for platform in PLATFORMS:
         name = 'gate-full-darwin' if platform == 'darwin' else 'gate-full'
@@ -119,15 +121,15 @@ def run(root, sha, scratch, owner):
         except (ValueError, KeyError, TypeError):
             refusals[platform] = submission_failure(reply)
             print(f'{platform}: {refusals[platform]}', flush=True)
-            failed = True
+            incomplete = True
         if reply.returncode:
-            failed = True
+            incomplete = True
 
     if jobs:
         # The standard CLI waits for every job, including after one fails, and
         # handles reconnects. No model callback, custom polling or wall deadline.
         reply = command('wait', *jobs.values())
-        failed = failed or reply.returncode != 0
+        wait_error = reply.returncode != 0
         for line in reply.stdout.splitlines():
             fields = line.split()
             if len(fields) >= 2 and fields[0] in jobs.values() and fields[1] in TERMINAL:
@@ -148,7 +150,8 @@ def run(root, sha, scratch, owner):
             marker = destination / 'gate-result.txt'
             if reply.returncode or not marker.is_file() or marker.read_text() != 'gate full: exit=0\n':
                 state = 'result verification failed'
-        failed = failed or state != 'succeeded'
+        incomplete = incomplete or state not in ('succeeded', 'failed', 'failed (out of memory)')
+        failed = failed or state in ('failed', 'failed (out of memory)')
         print(f'{platform}: {state}; job {job or "none"}', flush=True)
         rows.append(f'| {platform} | {state} | {job or "none"} |')
     summary = os.environ.get('GITHUB_STEP_SUMMARY')
@@ -160,6 +163,10 @@ def run(root, sha, scratch, owner):
         print('::error title=CI infrastructure failure::At least one platform submission is unconfirmed; '
               'no suite result was verified for that platform. Rerun this workflow to recover '
               'the merge with fresh attempt keys.', flush=True)
+    # Failed waits with no terminal failure are observation errors, not suite
+    # verdicts. A failed platform plus an unavailable peer is incomplete too.
+    if incomplete or (wait_error and not failed):
+        return INCOMPLETE
     return int(failed)
 
 
@@ -188,7 +195,7 @@ def verify_checkout(root, sha, tree):
 
 def run_pending(root, sha, scratch, owner):
     api = proof.GitHub()
-    known, processed = {}, set()
+    known, processed, outcomes = {}, set(), {}
     failed = False
     evidence = f'https://github.com/{proof.REPOSITORY}/actions/runs/{owner.split(":")[0]}'
     # GITHUB_SHA can be a delayed B event after C replaced it in the pending
@@ -200,6 +207,15 @@ def run_pending(root, sha, scratch, owner):
                 continue
             processed.add(candidate)
             tree = proof.git('rev-parse', candidate + '^{tree}')
+            # Current-batch outcomes take precedence over durable history. An
+            # explicit retry is once per distinct tree, even when it fails.
+            if tree in outcomes:
+                recorded = outcomes[tree]
+                proof.report(candidate, tree, 'REUSE: this batch already attempted tree; outcome ' + recorded['state'],
+                             recorded['target_url'])
+                api.publish(candidate, tree, recorded['target_url'], recorded['state'])
+                failed = failed or recorded['state'] != 'success'
+                continue
             recorded = api.status(candidate, tree)
             if recorded is None:
                 recorded = known.get(tree)
@@ -240,12 +256,14 @@ def run_pending(root, sha, scratch, owner):
             cleaned = cleanup(candidate, owner)
             if not cleaned:
                 return 1
-            state = 'failure' if result else 'success'
+            state = 'error' if result == INCOMPLETE else ('failure' if result else 'success')
             api.publish(candidate, tree, evidence, state)
             recorded = {'state': state, 'target_url': evidence, 'source_sha': candidate}
+            outcomes[tree] = recorded
             known[tree] = recorded
             failed = failed or bool(result)
-            proof.report(candidate, tree, 'full ' + state, evidence)
+            label = 'INCOMPLETE: no two-platform verdict; later runs must recover' if state == 'error' else 'full ' + state
+            proof.report(candidate, tree, label, evidence)
 
         current = proof.fetch_main(api)
         if current == tip:

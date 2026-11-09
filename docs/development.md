@@ -481,10 +481,21 @@ batch it resolves main again and covers any new commits before exiting. This
 preserves every distinct landed tree even when GitHub reorders events.
 
 Uncovered trees receive both existing full gates. Successful CI coverage records
-avoid repeating a previously tested tree, including on reruns. A failed tree
-stays failed and needs an explicit rerun; it is never called a pass. Historical
-failures stay visible without poisoning every later fixed tree; a failed current
-tree fails the workflow. Interrupted work or failed status publication can need
+avoid repeating a previously tested tree, including on reruns. A completed failed
+platform outcome is recorded as `failure` only when both platforms have terminal
+verdicts and successful peers have verified result markers. It needs an explicit
+rerun and is never called a pass. Missing submissions, observation errors,
+cancellations or unverifiable results are `error`: incomplete coverage, eligible
+for recovery by a later automatic workflow. Incompleteness on any platform takes
+precedence over a known failure on its peer. A workflow with an incomplete tree
+fails even if newer trees succeed. Historical completed failures stay visible
+without poisoning every later fixed tree; a failed current tree fails the workflow.
+
+An explicit retry executes each distinct tree at most once per batch. Identical
+trees reuse that batch's outcome—including failure or incompleteness—before
+consulting old commit statuses. This prevents a failed C retry from running both
+fulls again for a later identical-tree commit. An incomplete outcome is never
+retried repeatedly within that batch and remains recoverable in a later workflow. Interrupted work or failed status publication can need
 recovery; this is deduplication of recorded results, not an exactly-once execution
 transaction across GitHub and Mycelium. Pre-protocol history is not retroactively
 tested. Pre-existing runs outside the concurrency group are not cancelled.
@@ -501,10 +512,11 @@ success record only after both accepted result markers, those source checks and
 owned cleanup pass. It never pairs historical profiles with the event checkout's
 newer adapter or helpers.
 
-The `mycelium/main-full-tree-v2` commit status records `tree:TREE_ID` and its
-public Actions run URL. Only this new context is read; earlier
-`mycelium/full-tree-v1` statuses are ignored because their source/instrumentation
-provenance was unsound. A different tree or missing successful CI record keeps
+The `mycelium/main-full-tree-v3` commit status records `tree:TREE_ID` and its
+public Actions run URL, with `success`, completed `failure` or incomplete `error`.
+Only this context is read: v1 had unsound source/instrumentation provenance, and
+v2 could mislabel incomplete infrastructure work as a completed failure. Those
+ambiguous older records cannot suppress recovery. A different tree or missing successful CI record keeps
 the full. The newest status in the context is authoritative. Logs and the step
 summary name each tested/skipped tree and the source of any reused CI result.
 

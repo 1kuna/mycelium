@@ -8,8 +8,8 @@ import re
 import subprocess
 from urllib.request import Request, urlopen
 
-# Do not accept v1 statuses: their source/instrumentation provenance was unsound.
-CONTEXT = 'mycelium/main-full-tree-v2'
+# v1 had unbound provenance; v2 could label infrastructure gaps as failures.
+CONTEXT = 'mycelium/main-full-tree-v3'
 REPOSITORY = '1kuna/mycelium'
 
 
