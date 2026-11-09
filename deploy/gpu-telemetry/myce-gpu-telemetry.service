@@ -35,7 +35,7 @@ LockPersonality=yes
 RestrictNamespaces=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_PERFMON
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 UnsetEnvironment=MYCE_TOKEN
 
 [Install]

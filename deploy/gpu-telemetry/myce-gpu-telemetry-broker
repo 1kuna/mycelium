@@ -67,13 +67,13 @@ def vram_regions(raw: bytes) -> dict[str, int]:
 
 
 def collect_vram(card: str) -> dict[str, int]:
-    # The kernel silently returns used=0 without either capability. Never
-    # turn that censored counter into admission headroom, including as root.
+    # Older kernels silently return used=0 without either capability. Newer
+    # kernels expose usage to unprivileged callers. Positive usage proves the
+    # counter is uncensored; ambiguous zero needs privilege, even as root.
     status = Path('/proc/self/status').read_text()
     caps = int(next(line.split()[1] for line in status.splitlines()
                     if line.startswith('CapEff:')), 16)
-    if not caps & ((1 << 38) | (1 << 21)):  # CAP_PERFMON / CAP_SYS_ADMIN.
-        raise ValueError('VRAM accounting capability unavailable')
+    accounting = bool(caps & ((1 << 38) | (1 << 21)))  # PERFMON / SYS_ADMIN.
     nodes = list((Path('/sys/bus/pci/devices') / card / 'drm').glob('renderD*'))
     if len(nodes) != 1:
         raise ValueError('render identity unavailable')
@@ -91,7 +91,10 @@ def collect_vram(card: str) -> dict[str, int]:
         fcntl.ioctl(fd, 0xc0286440, query, True)
         if struct.unpack_from('=I', query, 12)[0] != size:
             raise ValueError('memory query changed size')
-        return vram_regions(data.tobytes())
+        memory = vram_regions(data.tobytes())
+        if not accounting and not memory['used_bytes']:
+            raise ValueError('zero VRAM usage may be censored')
+        return memory
     finally:
         os.close(fd)
 

@@ -154,7 +154,7 @@ class TelemetryTest(unittest.TestCase):
                 ctypes.memmove(address, raw, len(raw))
             struct.pack_into('=I', query, 12, len(raw))
 
-        with mock.patch.object(Path, 'read_text', return_value='CapEff:\t0000004000000000\n'), \
+        with mock.patch.object(Path, 'read_text', return_value='CapEff:\t0000000000000000\n'), \
                 mock.patch.object(Path, 'glob', return_value=[Path('renderD128')]), \
                 mock.patch.object(os, 'open', return_value=10) as opened, \
                 mock.patch.object(os, 'close') as closed, \
@@ -168,11 +168,25 @@ class TelemetryTest(unittest.TestCase):
             telemetry.vram_regions(raw[:-1])
 
     def test_censored_usage_never_becomes_free_vram(self) -> None:
+        raw = struct.pack('=IIHHIQQQQ6Q', 1, 0, 1, 0, 4096,
+                          8 << 30, 0, 0, 0, *([0] * 6))
+
+        def ioctl(fd, request, query, mutate):
+            address = struct.unpack_from('=Q', query, 16)[0]
+            if address:
+                ctypes.memmove(address, raw, len(raw))
+            struct.pack_into('=I', query, 12, len(raw))
+
         with mock.patch.object(Path, 'read_text', return_value='CapEff:\t0000000000000000\n'), \
-                mock.patch.object(os, 'open') as opened:
+                mock.patch.object(Path, 'glob', return_value=[Path('renderD128')]), \
+                mock.patch.object(os, 'open', return_value=10), \
+                mock.patch.object(os, 'close'), \
+                mock.patch.object(telemetry.fcntl, 'ioctl', side_effect=ioctl):
             with self.assertRaises(ValueError):
                 telemetry.collect_vram(CARDS[0])
-            opened.assert_not_called()
+            with mock.patch.object(Path, 'read_text', return_value='CapEff:\t0000004000000000\n'):
+                self.assertEqual(telemetry.collect_vram(CARDS[0]),
+                                 {'total_bytes': 8 << 30, 'used_bytes': 0})
 
     def test_vram_is_optional_and_preserves_gtt_contract(self) -> None:
         with mock.patch.object(telemetry, 'collect_vram', return_value={'total_bytes': 8192, 'used_bytes': 2048}):

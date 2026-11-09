@@ -68,10 +68,11 @@ Memory comes from the optional read-only GPU telemetry broker's PCI-keyed
 `vram` counters. The worker never falls back to `xpu-smi`: starting that tool can
 initialize the vendor runtime on every card, including busy siblings. The
 reference broker uses only `DRM_IOCTL_XE_DEVICE_QUERY` with `MEM_REGIONS`; it
-creates no GPU objects or execution contexts. It verifies accounting capability
-before accepting usage: the kernel silently censors usage to zero without
-`CAP_PERFMON` or `CAP_SYS_ADMIN`. The template grants only `CAP_PERFMON` in
-addition to its existing debugfs-read capability, with read-only DRM access.
+creates no GPU objects or execution contexts. Older kernels silently censor usage to zero without `CAP_PERFMON` or
+`CAP_SYS_ADMIN`; newer kernels expose it without privilege. The broker accepts
+positive usage without extra privilege, but treats a zero as unknown unless
+accounting capability is present. The template adds read-only DRM access with
+no capability expansion.
 A GTT-only broker remains valid for host-backed storage but supplies unknown
 VRAM. Upgrade and qualify the broker separately to retain opportunistic sharing;
 missing counters never become free device memory. Xe PMU activity remains per
