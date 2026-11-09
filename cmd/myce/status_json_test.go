@@ -14,6 +14,13 @@ import (
 )
 
 func TestStatusJSONPressureView(t *testing.T) {
+	q, _, _, _ := waitQueue(t)
+	release := myce.RunningRelease{Version: "v1.2.3", Commit: "0123456789abcdef"}
+	m := myce.Machine{CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 16 << 30}, ID: "worker", Session: "running-session", GPU: "fake", FreeMemoryGB: 8, Release: &release}
+	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+		t.Fatal(err)
+	}
+	live := myce.API{Queue: q, Token: "test-only"}.Handler()
 	snapshot := myce.Snapshot{Machines: []*myce.Machine{{ID: "host", HostAvailableMemoryGB: 3, HostMemoryInUseGB: 1, FreeHostMemoryGB: 2}}, Jobs: []*myce.Job{{ID: "12345678abcdef", State: "queued", DiagnosticCode: "host_memory_headroom"}}}
 
 	exit := 1
@@ -33,6 +40,7 @@ func TestStatusJSONPressureView(t *testing.T) {
 	snapshot.Jobs[0].Attempt = 1
 	snapshot.Jobs[0].Spec.AuthoringOrigin = myce.OriginAdapter
 	snapshot.Jobs = append(snapshot.Jobs, &myce.Job{ID: "waiting-job", State: "queued", Reason: "example: hypha on battery; waiting for external power"})
+	snapshot.FileStore = &myce.FileStoreStatus{Store: "queue-file-store", UsedBytes: 13, FreeBytes: 40, ReclaimableBytes: 9}
 	snapshot.HealthAlertDelivery = &myce.HealthAlertDelivery{Pending: 3}
 	snapshot.JobsPage = &myce.StatusJobsPage{Total: 3, Returned: 1, Mode: "recent", NextBefore: "cursor"}
 	snapshot.QueueRelease = myce.CurrentRelease()
@@ -42,6 +50,11 @@ func TestStatusJSONPressureView(t *testing.T) {
 	snapshot.Machines[0].ExtensionReports = []myce.ExtensionReport{{Name: "sample", Version: "1", Work: "kind:sample", Qualified: true}}
 	snapshot.Jobs[0].Spec.Logs = "none"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/live/") {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/live")
+			live.ServeHTTP(w, r)
+			return
+		}
 		if r.Method != "GET" {
 			t.Errorf("unexpected request: %s", r.Method)
 		}
@@ -91,6 +104,9 @@ func TestStatusJSONPressureView(t *testing.T) {
 	out = captureJoiningOutput(t, func() error { return run([]string{"status", "--queue", server.URL, "--full"}) })
 	if !strings.Contains(out, "sample@1 · kind of work sample · qualified") {
 		t.Errorf("missing %q", "sample@1 · kind of work sample · qualified")
+	}
+	if !strings.Contains(out, "queue-file-store: used=13 bytes free=40 bytes reclaimable=9 bytes") {
+		t.Fatal(out)
 	}
 	full := true
 	if strings.Contains(out, "12345678abcdef") != full {
@@ -160,6 +176,25 @@ func TestStatusJSONPressureView(t *testing.T) {
 		command := "logs"
 		if command == "logs" && !strings.Contains(out, "logs are disabled") {
 			t.Fatal(out)
+		}
+	}
+
+	{
+		snapshot, err := status(context.Background(), myce.Client{URL: server.URL + "/live", Token: "test-only"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.QueueRelease != myce.CurrentRelease() || len(snapshot.Machines) != 1 || snapshot.Machines[0].Release == nil || *snapshot.Machines[0].Release != release {
+			t.Fatalf("running releases missing from API: %+v", snapshot)
+		}
+		out, _, err := captureUsageOutput(t, []string{"status", "--queue", server.URL + "/live", "--token", "test-only"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"queue release: " + myce.CurrentRelease().Version + " (" + myce.CurrentRelease().Commit + ")", "worker worker release: v1.2.3 (0123456789abcdef)"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("status missing %q: %s", want, out)
+			}
 		}
 	}
 }

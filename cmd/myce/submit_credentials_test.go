@@ -4,19 +4,30 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"mycelium/internal/myce"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
-
-	"mycelium/internal/myce"
 )
 
 func TestSubmitInstalledCredentials(t *testing.T) {
 	q, _, _, _ := waitQueue(t)
 	const token = "submit-fixture-private-token"
-	server := httptest.NewTLSServer(myce.API{Queue: q, Token: token}.Handler())
+	var invalid atomic.Bool
+	const reason = "main Docker memory must fit needs.host_memory_gb"
+	handler := myce.API{Queue: q, Token: token}.Handler()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if invalid.Load() {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"code":"job_spec_invalid","error":"` + reason + `"}`))
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
 	defer server.Close()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -51,6 +62,18 @@ func TestSubmitInstalledCredentials(t *testing.T) {
 	snapshot, err := q.Snapshot()
 	if err != nil || len(snapshot.Jobs) != 1 || snapshot.Jobs[0].ID != strings.TrimSpace(out) {
 		t.Fatal("submission missing", err)
+	}
+	{
+		path := filepath.Join(home, "invalid.yaml")
+		if err := os.WriteFile(path, []byte("name: invalid\nproject: test\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		invalid.Store(true)
+		err := run([]string{"submit", "--queue", server.URL, path})
+		if err == nil || !strings.Contains(err.Error(), reason) {
+			t.Fatalf("CLI lost reason: %v", err)
+		}
+		invalid.Store(false)
 	}
 	invitation.Fingerprint = strings.Repeat("0", 64)
 	if err := myce.WriteInvitation(joining, invitation); err != nil {

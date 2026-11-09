@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,8 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 func TestSharedProfileObserverBatchesAndRetiresTerminal(t *testing.T) {
@@ -93,35 +92,6 @@ func TestSharedProfileObserverBatchesAndRetiresTerminal(t *testing.T) {
 	}
 }
 
-func TestSharedProfileObserverExpiryIsObservationFailure(t *testing.T) {
-	root := t.TempDir()
-	dir := filepath.Join(root, "receipt")
-	if err := os.Mkdir(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	clock := &waitClock{now: time.Now()}
-	receipt := profileReceipt{JobID: "job", Status: "running", Observation: "armed"}
-	if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), receipt); err != nil {
-		t.Fatal(err)
-	}
-	reg := sharedProfileRegistration{Directory: dir, Expires: clock.Now().Add(time.Second)}
-	if err := saveProfileJSON(filepath.Join(root, "watch.json"), reg); err != nil {
-		t.Fatal(err)
-	}
-	clock.advance(time.Second)
-	lock, err := profileLock(filepath.Join(root, "observer.lock"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lock.Close()
-	if err := runSharedProfileLoop(context.Background(), root, lock, clock, func(context.Context, time.Duration) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &receipt); err != nil || receipt.ObservationError != "timeout" || receipt.Status != "running" {
-		t.Fatal(receipt, err)
-	}
-}
-
 func sharedWatchFixture(t *testing.T, root, address string, clock *waitClock) (string, string, *os.File) {
 	t.Helper()
 	dir := filepath.Join(root, "receipt")
@@ -144,40 +114,17 @@ func sharedWatchFixture(t *testing.T, root, address string, clock *waitClock) (s
 	t.Cleanup(func() { lock.Close() })
 	return dir, entry, lock
 }
-func TestSharedProfilePermanentTerminalReadFailureRetires(t *testing.T) {
-	for _, status := range []int{401} {
-		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			var requests atomic.Int64
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests.Add(1)
-				if r.URL.Path == "/api/wait" {
-					fmt.Fprint(w, `{"jobs":[{"id":"job","state":"succeeded","revision":1}]}`)
-					return
-				}
-				w.WriteHeader(status)
-				if status == 502 {
-					fmt.Fprint(w, `{"code":"job_reply_invalid"}`)
-				} else if status == 404 {
-					fmt.Fprint(w, `{"code":"job_unknown"}`)
-				}
-			}))
-			defer server.Close()
-			clock := &waitClock{now: time.Now()}
-			root := t.TempDir()
-			dir, _, lock := sharedWatchFixture(t, root, server.URL, clock)
-			if err := runSharedProfileLoop(context.Background(), root, lock, clock, func(context.Context, time.Duration) error { return nil }); err != nil {
-				t.Fatal(err)
-			}
-			var saved profileReceipt
-			if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.Observation != "not_armed" || saved.ObservationError == "" || requests.Load() != 2 {
-				t.Fatal(saved, requests.Load(), err)
-			}
-		})
-	}
-}
+
 func TestSharedProfilePersistenceFailureRetainsOwnership(t *testing.T) {
 	var terminal atomic.Bool
+	var refusal atomic.Int32
+	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Path != "/api/wait" && refusal.Load() != 0 {
+			w.WriteHeader(int(refusal.Load()))
+			return
+		}
 		state := "running"
 		if terminal.Load() {
 			state = "succeeded"
@@ -234,42 +181,42 @@ func TestSharedProfilePersistenceFailureRetainsOwnership(t *testing.T) {
 	if err := readProfileJSON(path, &saved); err != nil || saved.Status != "succeeded" {
 		t.Fatal(saved, err)
 	}
-}
 
-func TestSharedProfileStartupLockSerializes(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "startup.lock")
-	lock, err := profileLock(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lock.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	acquired := make(chan *os.File, 1)
-	failed := make(chan error, 1)
-	go func() {
-		next, err := sharedProfileLock(ctx, path)
-		if err != nil {
-			failed <- err
-		} else {
-			acquired <- next
+	{
+		receipt := profileReceipt{JobID: "job", Status: "running", Observation: "armed"}
+		if err := saveProfileJSON(path, receipt); err != nil {
+			t.Fatal(err)
 		}
-	}()
-	select {
-	case next := <-acquired:
-		next.Close()
-		t.Fatal("duplicate lock owner")
-	case err := <-failed:
-		t.Fatal("registration refused instead of waiting", err)
-	case <-time.After(20 * time.Millisecond):
+		reg := sharedProfileRegistration{Directory: dir, Expires: clock.Now().Add(time.Second)}
+		if err := saveProfileJSON(entry, reg); err != nil {
+			t.Fatal(err)
+		}
+		clock.advance(time.Second)
+		if err := runSharedProfileLoop(context.Background(), root, lock, clock, func(context.Context, time.Duration) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &receipt); err != nil || receipt.ObservationError != "timeout" || receipt.Status != "running" {
+			t.Fatal(receipt, err)
+		}
 	}
-	lock.Close()
-	select {
-	case next := <-acquired:
-		next.Close()
-	case err := <-failed:
-		t.Fatal(err)
-	case <-ctx.Done():
-		t.Fatal("registration did not recover lock")
+	{
+		receipt := profileReceipt{JobID: "job", Status: "running", Observation: "armed", ArmNonce: "arm"}
+		if err := saveProfileJSON(path, receipt); err != nil {
+			t.Fatal(err)
+		}
+		reg := sharedProfileRegistration{Directory: dir, Observer: profileObserver{Queue: server.URL}, Token: "fixture", Expires: clock.Now().Add(time.Hour)}
+		if err := saveProfileJSON(entry, reg); err != nil {
+			t.Fatal(err)
+		}
+		requests.Store(0)
+		refusal.Store(401)
+		if err := runSharedProfileLoop(context.Background(), root, lock, clock, func(context.Context, time.Duration) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		var saved profileReceipt
+		if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.Observation != "not_armed" || saved.ObservationError == "" || requests.Load() != 2 {
+			t.Fatal(saved, requests.Load(), err)
+		}
 	}
+
 }

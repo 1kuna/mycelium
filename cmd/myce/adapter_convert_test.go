@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"io"
+	"mycelium/internal/myce"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -94,6 +96,61 @@ func TestAdapterConvertProfilePreservesFieldsAndApply(t *testing.T) {
 	}
 	if got, _ := os.ReadFile("old.yaml"); string(got) != conversionProfile {
 		t.Fatal("source changed")
+	}
+
+	{
+		root, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		conversionWrite(t, "requirements.txt", "example-package==1.0.0\n")
+		profile := `name: example-test
+project: example
+class: test
+source: {git: HEAD}
+run: {command: [python, test.py, --suite, tooling]}
+needs: {cpu_cores: 2, memory_gb: 1, platform: cpu}
+targets: [{os: linux, arch: amd64, platform: cpu}]
+environment: {lock_file: requirements.txt, python: '3.13', platforms: [cpu]}
+resumable: true
+check: [test, -s, marker.txt]
+`
+		conversionWrite(t, "inline-profile.yaml", profile)
+		var out bytes.Buffer
+		if err := adapterCommand(context.Background(), []string{"convert", "--profile", "inline-profile.yaml"}, &out, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		conversionWrite(t, "inline-adapter.yaml", out.String())
+		a, err := decodeAdapter(out.Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		converted, _, err := adapterProfile(a, "example-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		q, err := myce.Open(filepath.Join(t.TempDir(), "queue.db"), filepath.Join(root, "checkpoints"), myce.RealClock{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer q.Close()
+		newJob, err := q.Submit(converted.Spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(newJob.EnvironmentRecipes) != 1 || string(newJob.EnvironmentRecipes["cpu"].Files["requirements.txt"]) != "example-package==1.0.0\n" {
+			t.Fatal("inline recipe bytes or identity changed")
+		}
+		if err := os.Remove("requirements.txt"); err != nil {
+			t.Fatal(err)
+		}
+		newReport, err := q.Resolve(myce.ResolveRequest{Spec: converted.Spec})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(newReport.Findings) == 0 || newReport.Findings[0].Field != "environment.lock_file" || newReport.Findings[0].Side != "queue" {
+			t.Fatalf("missing queue lock not diagnosed: %+v", newReport.Findings)
+		}
 	}
 
 }

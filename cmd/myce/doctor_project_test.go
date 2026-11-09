@@ -4,18 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
+	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
-
-	"mycelium/internal/myce"
 )
 
 func doctorCPUProject(t *testing.T) string {
@@ -46,9 +44,16 @@ func TestProjectDoctorReadyCPUReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := myce.API{Queue: q, Token: "fixture-secret"}.Handler()
+	var forced atomic.Pointer[myce.ResolveReport]
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.Path)
+		if r.Method == "POST" && r.URL.Path == "/api/resolve" {
+			if report := forced.Load(); report != nil {
+				json.NewEncoder(w).Encode(report)
+				return
+			}
+		}
 		handler.ServeHTTP(w, r)
 	}))
 	defer server.Close()
@@ -76,107 +81,36 @@ func TestProjectDoctorReadyCPUReadOnly(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, ".mycelium/receipts")); !os.IsNotExist(err) {
 		t.Fatal("doctor created receipts", err)
 	}
-}
 
-func TestProjectDoctorHoldsAndCompletion(t *testing.T) {
 	for _, scenario := range []string{"resource pressure", "cold environment"} {
-		t.Run(scenario, func(t *testing.T) {
-			doctorCPUProject(t)
-			body, _ := os.ReadFile(".mycelium/adapter.yaml")
-			args := []string{"--project", "--json"}
-			want := "queue owner"
-			if scenario == "missing notifier" {
-				args = append(args, "--notify", "missing-hook")
-				want = "consumer"
-			}
-			if scenario == "NAS unverified" {
-				body = []byte(strings.Replace(string(body), "    run:", "    shared_inputs: {data: {nas: data.bin, sha256: '"+strings.Repeat("a", 64)+"', size_bytes: 3}}\n    run:", 1))
-				want = "storage owner"
-			}
-			if scenario == "failed preparation" {
-				want = "consumer"
-			}
-			if scenario == "missing input" {
-				body = []byte(strings.Replace(string(body), "    run:", "    inputs: {data: absent.txt}\n    run:", 1))
-				want = "consumer"
-			}
-			if scenario == "dirty source" {
-				body = []byte(strings.Replace(string(body), `source: {directory: "source"}`, `source: {git: HEAD, paths: [source]}`, 1))
-				for _, argv := range [][]string{{"init", "--quiet"}, {"add", "source"}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"}} {
-					cmd := exec.Command("git", argv...)
-					if data, err := cmd.CombinedOutput(); err != nil {
-						t.Fatal(err, string(data))
-					}
-				}
-				os.WriteFile("source/run.sh", []byte("dirty\n"), 0600)
-				want = "consumer"
-			}
-			if err := os.WriteFile(".mycelium/adapter.yaml", body, 0600); err != nil {
-				t.Fatal(err)
-			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == "GET" && r.URL.Path == "/api/ping" {
-					io.WriteString(w, `{"version":1}`)
-					return
-				}
-				if r.Method != "POST" || r.URL.Path != "/api/resolve" {
-					t.Errorf("unexpected write %s %s", r.Method, r.URL.Path)
-					http.Error(w, "bad", 500)
-					return
-				}
-				if scenario == "old server" {
-					http.Error(w, "fixture-secret private authority", 404)
-					return
-				}
-				report := myce.ResolveReport{Targets: []myce.ResolveTarget{{Eligible: true}}}
-				if scenario == "queue lock" {
-					report.Findings = []myce.ResolveFinding{{Field: "environment.lock_file", Side: "queue", Problem: "queue cannot read lock", Fix: "ask the queue owner to make the lock readable, or use a library recipe", PathDiagnostic: &myce.PathDiagnostic{Side: "queue"}}}
-				}
-				switch scenario {
-				case "failed preparation":
-					report.Blocker = &myce.Blocker{Code: "deterministically_failed", Dependency: "environment", Owner: "consumer", Action: "fix immutable recipe", Evidence: "package version is unavailable"}
-				case "resource pressure":
-					report.Blocker = &myce.Blocker{Code: "resource_pressure", Dependency: "host memory", Owner: "queue owner", Action: "wait for memory", Evidence: "requires 4 GiB; available 0.5 GiB"}
-				case "cold environment":
-					report.Blocker = &myce.Blocker{Code: "unprepared", Dependency: "environment", Owner: "queue", Action: "submit normally"}
-				case "unknown observation":
-					report.Blocker = &myce.Blocker{Code: "unknown_observation", Dependency: "inventory", Owner: "queue owner", Action: "restore observations"}
-				case "target constraint":
-					report.Targets = []myce.ResolveTarget{{Reason: "requires linux/arm64; no matching target"}}
-				}
-				json.NewEncoder(w).Encode(report)
-			}))
-			defer server.Close()
-			var out bytes.Buffer
-			err := projectDoctorWithAuthority(context.Background(), args, &out, io.Discard, func(clientFlags) (myce.Client, error) {
-				if scenario == "missing authority" {
-					want = "installation owner"
-					return myce.Client{}, errors.New("fixture-secret /private/config")
-				}
-				return myce.Client{URL: server.URL, Token: "fixture-secret"}, nil
-			})
-			if scenario == "cold environment" {
-				if err != nil || !strings.Contains(out.String(), `"state":"ready"`) {
-					t.Fatalf("%v %s", err, &out)
-				}
-				return
-			}
-			if scenario == "failed preparation" && !strings.Contains(out.String(), "package version is unavailable") {
-				t.Fatal(out.String())
-			}
-			if scenario == "target constraint" && !strings.Contains(out.String(), "requires linux/arm64") {
-				t.Fatal(out.String())
-			}
-			if exitCode(err) != 1 || !strings.Contains(out.String(), `"state":"blocked"`) || !strings.Contains(out.String(), `"owner":"`+want+`"`) {
-				t.Fatalf("%v want=%s output=%s", err, want, &out)
-			}
-			for _, secret := range []string{"fixture-secret", server.URL, "/private/config"} {
-				if strings.Contains(out.String(), secret) {
-					t.Fatal(out.String())
-				}
-			}
+		report := myce.ResolveReport{Targets: []myce.ResolveTarget{{Eligible: true}}}
+		if scenario == "resource pressure" {
+			report.Blocker = &myce.Blocker{Code: "resource_pressure", Dependency: "host memory", Owner: "queue owner", Action: "wait for memory", Evidence: "requires 4 GiB; available 0.5 GiB"}
+		} else {
+			report.Blocker = &myce.Blocker{Code: "unprepared", Dependency: "environment", Owner: "queue", Action: "submit normally"}
+		}
+		forced.Store(&report)
+		var out bytes.Buffer
+		err := projectDoctorWithAuthority(context.Background(), []string{"--project", "--json"}, &out, io.Discard, func(clientFlags) (myce.Client, error) {
+			return myce.Client{URL: server.URL, Token: "fixture-secret"}, nil
 		})
+		if scenario == "cold environment" {
+			if err != nil || !strings.Contains(out.String(), `"state":"ready"`) {
+				t.Fatalf("%v %s", err, &out)
+			}
+			continue
+		}
+		want := "queue owner"
+		if exitCode(err) != 1 || !strings.Contains(out.String(), `"state":"blocked"`) || !strings.Contains(out.String(), `"owner":"`+want+`"`) {
+			t.Fatalf("%v want=%s output=%s", err, want, &out)
+		}
+		for _, secret := range []string{"fixture-secret", server.URL, "/private/config"} {
+			if strings.Contains(out.String(), secret) {
+				t.Fatal(out.String())
+			}
+		}
 	}
+
 }
 
 func doctorReviewFixture(t *testing.T, args []string, resolve func(http.ResponseWriter, *http.Request)) (string, error) {

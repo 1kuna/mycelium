@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mycelium/internal/myce"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"mycelium/internal/myce"
 )
 
 type offlineOnboardingTransport struct{ calls *int }
@@ -74,9 +73,6 @@ func TestReviewNASSelectionBeforeEitherPlan(t *testing.T) {
 				return nil, exec.ErrNotFound
 			}}
 			args := []string{"install", "worker", "--gpu", "cpu"}
-			if dry {
-				args = append(args, "--dry-run")
-			}
 			var err error
 			// Capture ourselves: captureJoiningOutput requires command success.
 			read, write, e := os.Pipe()

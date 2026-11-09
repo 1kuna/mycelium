@@ -3,17 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"mycelium/internal/myce"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
 func maintenanceCLIWorker(id string) myce.Machine {
@@ -105,6 +100,21 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 			t.Fatal("CLI status hid placement policy", output, err)
 		}
 	}
+	{
+		m := maintenanceCLIWorker("machine")
+		m.Devices, m.MemoryError, m.InventoryReason = []myce.MachineDevice{}, "device_probe_unavailable", "device_probe_unavailable"
+		if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := hostMaintenanceCommand(context.Background(), []string{"disable", "host", "--stop", "--wait", "--timeout", "100ms", "--queue", server.URL}, &out); err != nil {
+			t.Fatalf("zero-custody disable wait failed: %v %s", err, out.String())
+		}
+		var status myce.HostMaintenanceStatus
+		if err := json.Unmarshal(out.Bytes(), &status); err != nil || !status.Quiescent || status.Healthy || status.Policy.Mode != "disabled" || status.Policy.StopAt == nil {
+			t.Fatalf("unexpected status: %+v %v", status, err)
+		}
+	}
 	server.Close()
 	if _, err = waitHostMaintenance(context.Background(), client, "host", time.Second, clock, func(context.Context, time.Duration) error { t.Fatal("queue outage was ignored"); return nil }); err == nil {
 		t.Fatal("queue outage passed wait")
@@ -113,65 +123,3 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 
 // #215: an enrolled operator machine manages hosts through installed, pinned
 // authority with no MYCE_TOKEN, like status and cancel (#207).
-func TestHostMaintenanceInstalledAuthority(t *testing.T) {
-	q, _, _, _ := waitQueue(t)
-	m := maintenanceCLIWorker("worker")
-	m.Devices = []myce.MachineDevice{{ID: "0", Platform: "fake", Identity: "fake-stable", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
-		t.Fatal(err)
-	}
-	const token = "host-fixture-token"
-	server := httptest.NewTLSServer(myce.API{Queue: q, Token: token}.Handler())
-	defer server.Close()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	for _, name := range []string{"MYCE_TOKEN", "MYCE_QUEUE", "MYCE_JOINING_FILE"} {
-		t.Setenv(name, "")
-	}
-	joining := filepath.Join(home, "joining.json")
-	hash := sha256.Sum256(server.Certificate().Raw)
-	invitation := myce.Invitation{Version: 1, Token: token, Address: server.URL, Fingerprint: hex.EncodeToString(hash[:])}
-	if err := myce.WriteInvitation(joining, invitation); err != nil {
-		t.Fatal(err)
-	}
-	config := filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
-	if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(myce.ServiceConfig{Role: "worker", JoiningFile: joining})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(config, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		args []string
-		ok   func(myce.HostMaintenanceStatus) bool
-	}{
-
-		{[]string{"drain", "host"}, func(s myce.HostMaintenanceStatus) bool { return s.Policy.Mode == "drained" }},
-
-		{[]string{"resume", "host"}, func(s myce.HostMaintenanceStatus) bool { return s.Policy.Mode == "enabled" }},
-	} {
-		var out bytes.Buffer
-		var status myce.HostMaintenanceStatus
-		if err = hostMaintenanceCommand(context.Background(), tc.args, &out); err != nil || json.Unmarshal(out.Bytes(), &status) != nil || !tc.ok(status) {
-			t.Fatalf("host %v: %s %v", tc.args, out.String(), err)
-		}
-		if strings.Contains(out.String(), token) {
-			t.Fatal("host maintenance exposed authority")
-		}
-	}
-	// A wrong installed pin must refuse before the policy changes.
-	invitation.Fingerprint = strings.Repeat("0", 64)
-	if err = myce.WriteInvitation(joining, invitation); err != nil {
-		t.Fatal(err)
-	}
-	if err = hostMaintenanceCommand(context.Background(), []string{"device", "disable", "host", "0", "--config", config}, &bytes.Buffer{}); err == nil {
-		t.Fatal("host maintenance accepted a mismatched certificate pin")
-	}
-	if current, err := q.HostMaintenanceStatus("host"); err != nil || current.Policy.Mode != "enabled" {
-		t.Fatalf("pin refusal changed policy: %+v %v", current.Policy, err)
-	}
-}

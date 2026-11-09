@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
-
-	"mycelium/internal/myce"
 )
 
 func TestReserveCLI(t *testing.T) {
@@ -25,7 +25,32 @@ func TestReserveCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	const token = "reserve-cli-fixture"
-	server := httptest.NewServer(myce.API{Queue: q, Token: token}.Handler())
+	var synthetic atomic.Int32
+	var captured atomic.Pointer[myce.ReservationRequest]
+	handler := myce.API{Queue: q, Token: token}.Handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if synthetic.Load() == 0 {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/jobs/check":
+			json.NewEncoder(w).Encode(myce.Job{ID: "check", State: "queued", Spec: myce.Spec{ExtensionCheck: &myce.ExtensionCheckRequest{}, Needs: myce.ResourceNeeds{GPU: &myce.GPUSelection{Devices: []string{"1"}}}}})
+		case "POST /api/reservations":
+			var request myce.ReservationRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Error(err)
+			}
+			captured.Store(&request)
+			if synthetic.Load() == 2 {
+				fmt.Fprint(w, `{"id":"validation","selector":"host=host","job":"check","revision":0,"state":"ready"}`)
+				return
+			}
+			json.NewEncoder(w).Encode(myce.Reservation{ReservationOptions: request.ReservationOptions, Job: request.Job, Revision: 1, State: "ready"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
 	defer server.Close()
 	var out bytes.Buffer
 	call := func(args ...string) error {
@@ -69,64 +94,29 @@ func TestReserveCLI(t *testing.T) {
 		t.Fatal("stale release succeeded")
 	}
 
-}
-
-func TestReserveCLIGPUCheckScope(t *testing.T) {
+	synthetic.Store(1)
 	for _, wholeHost := range []bool{false, true} {
-		t.Run(map[bool]string{false: "device", true: "whole host"}[wholeHost], func(t *testing.T) {
-			var request myce.ReservationRequest
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.Method + " " + r.URL.Path {
-				case "GET /api/jobs/check":
-					json.NewEncoder(w).Encode(myce.Job{ID: "check", State: "queued", Spec: myce.Spec{
-						ExtensionCheck: &myce.ExtensionCheckRequest{},
-						Needs:          myce.ResourceNeeds{GPU: &myce.GPUSelection{Devices: []string{"1"}}},
-					}})
-				case "POST /api/reservations":
-					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-						t.Error(err)
-					}
-					json.NewEncoder(w).Encode(myce.Reservation{ReservationOptions: request.ReservationOptions, Job: request.Job, Revision: 1, State: "ready"})
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-			defer server.Close()
-			args := []string{"add", "host=host", "--job", "check", "--owner", "operator", "--reason", "qualification", "--queue", server.URL, "--token", "fixture"}
-			want := "host=host;devices=1"
-			if wholeHost {
-				args = append(args, "--whole-host")
-				want = "host=host"
-			}
-			if err := reserveCommand(context.Background(), args, &bytes.Buffer{}); err != nil {
-				t.Fatal(err)
-			}
-			if request.Selector != want || request.Job != "check" {
-				t.Fatal("wrong qualification reservation", request)
-			}
-		})
+		args := []string{"add", "host=host", "--job", "check", "--owner", "operator", "--reason", "qualification", "--queue", server.URL, "--token", "fixture"}
+		want := "host=host;devices=1"
+		if wholeHost {
+			args = append(args, "--whole-host")
+			want = "host=host"
+		}
+		if err := reserveCommand(context.Background(), args, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		request := *captured.Load()
+		if request.Selector != want || request.Job != "check" {
+			t.Fatal("wrong qualification reservation", request)
+		}
 	}
-}
 
-func TestReserveCLIUnconfirmedResponse(t *testing.T) {
-	for _, body := range []string{`{"id":"validation","selector":"host=host","job":"check","revision":0,"state":"ready"}`} {
-		t.Run(body, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.Method + " " + r.URL.Path {
-				case "GET /api/jobs/check":
-					json.NewEncoder(w).Encode(myce.Job{ID: "check", State: "queued"})
-				case "POST /api/reservations":
-					fmt.Fprint(w, body)
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-			defer server.Close()
-			var out bytes.Buffer
-			err := reserveCommand(context.Background(), []string{"add", "host=host", "--whole-host", "--id", "validation", "--job", "check", "--owner", "operator", "--max-lifetime", "3h", "--reason", "host-wide validation", "--queue", server.URL, "--token", "fixture"}, &out)
-			if !errors.Is(err, errReservationResponseInvalid) || out.Len() != 0 {
-				t.Fatalf("unconfirmed add: error=%v output=%s", err, out.String())
-			}
-		})
+	synthetic.Store(2)
+	{
+		var out bytes.Buffer
+		err := reserveCommand(context.Background(), []string{"add", "host=host", "--whole-host", "--id", "validation", "--job", "check", "--owner", "operator", "--max-lifetime", "3h", "--reason", "host-wide validation", "--queue", server.URL, "--token", "fixture"}, &out)
+		if !errors.Is(err, errReservationResponseInvalid) || out.Len() != 0 {
+			t.Fatalf("unconfirmed add: error=%v output=%s", err, out.String())
+		}
 	}
 }

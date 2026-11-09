@@ -19,8 +19,8 @@ import (
 
 func TestInstallWorkerRepairsJoiningAddressWithSavedPin(t *testing.T) {
 	for _, tc := range []struct {
-		name                    string
-		mismatch, configUpdated bool
+		name     string
+		mismatch bool
 	}{{name: "new address"}, {name: "pin mismatch", mismatch: true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, probe := savedInstallFixture(t, "worker")
@@ -63,13 +63,6 @@ func TestInstallWorkerRepairsJoiningAddressWithSavedPin(t *testing.T) {
 			}
 			defer server.Close()
 			address := "https://" + listener.Addr().String()
-			if tc.configUpdated {
-				c.Queue = address
-				data, _ := json.Marshal(c)
-				if err := os.WriteFile(c.Config, data, 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
 			before := map[string][]byte{}
 			for _, path := range []string{c.Config, c.JoiningFile, c.Binary, c.Service} {
 				before[path], err = os.ReadFile(path)
@@ -193,31 +186,6 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	os.MkdirAll(filepath.Dir(c.Service), 0700)
 	os.WriteFile(c.Service, []byte(c.ServiceText()), 0600)
 	return c, myce.MachineProbe{OS: "linux", Arch: "amd64", Command: fakeSetupManager}
-}
-
-func TestInstallExplicitZeroFalse(t *testing.T) {
-	c, p := savedInstallFixture(t)
-	args := []string{"install", "queue", "--config", c.Config, "--nice=0", "--restart-grace=0", "--production-infrastructure-retries=0", "--reserve-host-memory-gb=0", "--memory-ceiling-slack-gb=0", "--memory-swap-max-bytes=0", "--no-new-privileges=false"}
-	if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
-		t.Fatal(err)
-	}
-	got, err := myce.ReadServiceConfig(c.Config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Nice != 0 || got.RestartGrace != 0 || got.ProductionInfrastructureRetries != 0 || got.ReserveHostMemoryGB != 0 || got.MemoryCeilingSlackGB != 0 || got.MemorySwapMaxBytes != 0 || got.NoNewPrivileges {
-		t.Fatal("explicit zero/false was ignored")
-	}
-	if got.DB != c.DB || got.Path != c.Path || got.ModelCache != c.ModelCache {
-		t.Fatal("unrelated field changed")
-	}
-	if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config}, p, c.NAS); err != nil {
-		t.Fatal(err)
-	}
-	preserved, err := myce.ReadServiceConfig(c.Config)
-	if err != nil || !reflect.DeepEqual(got, preserved) {
-		t.Fatal("omitted flags reset saved zero/false values", err)
-	}
 }
 
 func TestInstallQueueFileStoreWithExecStartOverride(t *testing.T) {
@@ -354,33 +322,55 @@ func TestInstallExplicitQueueNASName(t *testing.T) {
 			if !reflect.DeepEqual(want, got) {
 				t.Fatalf("explicit --%s was ignored or changed unrelated saved fields", field)
 			}
+			c = got
+			if role == "queue" {
+				args := []string{"install", "queue", "--config", c.Config, "--nice=0", "--restart-grace=0", "--production-infrastructure-retries=0", "--reserve-host-memory-gb=0", "--memory-ceiling-slack-gb=0", "--memory-swap-max-bytes=0", "--no-new-privileges=false"}
+				if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
+					t.Fatal(err)
+				}
+				got, err := myce.ReadServiceConfig(c.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Nice != 0 || got.RestartGrace != 0 || got.ProductionInfrastructureRetries != 0 || got.ReserveHostMemoryGB != 0 || got.MemoryCeilingSlackGB != 0 || got.MemorySwapMaxBytes != 0 || got.NoNewPrivileges {
+					t.Fatal("explicit zero/false was ignored")
+				}
+				if got.DB != c.DB || got.Path != c.Path || got.ModelCache != c.ModelCache {
+					t.Fatal("unrelated field changed")
+				}
+				if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config}, p, c.NAS); err != nil {
+					t.Fatal(err)
+				}
+				preserved, err := myce.ReadServiceConfig(c.Config)
+				if err != nil || !reflect.DeepEqual(got, preserved) {
+					t.Fatal("omitted flags reset saved zero/false values", err)
+				}
+			} else {
+				checkpoint := filepath.Join(c.NAS, "new-checkpoints")
+				args := []string{"install", "worker", "--config", c.Config, "--memory-gb=7", "--reserve-memory-gb=0", "--container-retention=0", "--require-memory-ceilings=false", "--checkpoint-root", checkpoint}
+				if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
+					t.Fatal(err)
+				}
+				got, err := myce.ReadServiceConfig(c.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Detection.MemoryGB != 7 || got.Detection.ReserveGB != 0 || got.ContainerRetention == nil || *got.ContainerRetention != 0 || got.RequireMemoryCeilings || got.Checkpoints != checkpoint {
+					t.Fatal("worker explicit overlay ignored")
+				}
+				for _, flag := range []string{"--host-id"} {
+					if err = setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, flag, "different"}, p, c.NAS); err == nil {
+						t.Fatal("changed immutable identity", flag)
+					}
+				}
+			}
+
 		})
 	}
 	{
 		err := setupCommandWithProbe([]string{"doctor"}, myce.MachineProbe{}, t.TempDir())
 		if err == nil || !strings.Contains(err.Error(), "no install found; run myce install first") {
 			t.Fatalf("missing install guidance: %v", err)
-		}
-	}
-}
-
-func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {
-	c, p := savedInstallFixture(t, "worker")
-	checkpoint := filepath.Join(c.NAS, "new-checkpoints")
-	args := []string{"install", "worker", "--config", c.Config, "--memory-gb=7", "--reserve-memory-gb=0", "--container-retention=0", "--require-memory-ceilings=false", "--checkpoint-root", checkpoint}
-	if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
-		t.Fatal(err)
-	}
-	got, err := myce.ReadServiceConfig(c.Config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Detection.MemoryGB != 7 || got.Detection.ReserveGB != 0 || got.ContainerRetention == nil || *got.ContainerRetention != 0 || got.RequireMemoryCeilings || got.Checkpoints != checkpoint {
-		t.Fatal("worker explicit overlay ignored")
-	}
-	for _, flag := range []string{"--host-id"} {
-		if err = setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, flag, "different"}, p, c.NAS); err == nil {
-			t.Fatal("changed immutable identity", flag)
 		}
 	}
 }

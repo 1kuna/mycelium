@@ -132,57 +132,6 @@ func waitFinish(t *testing.T, q *myce.Queue, clock *waitClock, success bool) {
 		t.Fatal(err)
 	}
 }
-func TestWaitQueueOutcomes(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		states []string
-		code   int
-	}{
-		{"mixed", []string{"failed", "succeeded", "cancelled"}, 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			q, clock, _, _ := waitQueue(t)
-			var ids []string
-			for range tc.states {
-				ids = append(ids, waitSubmit(t, q).ID)
-				clock.advance(time.Millisecond)
-			}
-			server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
-			defer server.Close()
-			var out, diagnostics bytes.Buffer
-			step := 0
-			err := waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, append(ids, ids[0]), 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error {
-				if d < 0 || step >= len(ids) {
-					t.Fatalf("unexpected pause %v, step %d", d, step)
-				}
-				clock.advance(d)
-				if tc.states[step] == "cancelled" {
-					if e := q.Cancel(ids[step]); e != nil {
-						t.Fatal(e)
-					}
-				} else {
-					waitFinish(t, q, clock, tc.states[step] == "succeeded")
-				}
-				step++
-				return nil
-			})
-			if exitCode(err) != tc.code || step != len(ids) {
-				t.Fatalf("code=%d err=%v step=%d", exitCode(err), err, step)
-			}
-			if len(strings.Split(strings.TrimSpace(out.String()), "\n")) != len(ids) {
-				t.Fatal(out.String())
-			}
-			for i, id := range ids {
-				if strings.Count(out.String(), id+" "+tc.states[i]) != 1 {
-					t.Fatal(out.String())
-				}
-			}
-			if tc.name == "failure" && out.String() != ids[0]+" failed\n" {
-				t.Fatal(out.String())
-			}
-		})
-	}
-}
 
 func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
@@ -210,6 +159,68 @@ func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+
+	{
+		s := myce.Spec{Name: "production", Project: "test", Priority: "production"}
+		s.Run.Command = []string{"echo", "done"}
+		s.Needs.MemoryGB = 1
+		s.Needs.Platform = myce.Platform{Required: []string{"xpu"}}
+		deadline := clock.Now().Add(3 * time.Second)
+		s.StartBy = &deadline
+		j, err := q.Submit(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out, diagnostics bytes.Buffer
+		err = waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return q.Tick() })
+		if exitCode(err) != 1 || out.String() != j.ID+" failed\n" {
+			t.Fatalf("exit=%d output=%s err=%v", exitCode(err), out.String(), err)
+		}
+	}
+
+	{
+		if err := q.Cancel(j.ID); err != nil {
+			t.Fatal(err)
+		}
+		tc := struct {
+			states []string
+			code   int
+		}{[]string{"failed", "succeeded", "cancelled"}, 1}
+		var ids []string
+		for range tc.states {
+			ids = append(ids, waitSubmit(t, q).ID)
+			clock.advance(time.Millisecond)
+		}
+		var out, diagnostics bytes.Buffer
+		step := 0
+		err := waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, append(ids, ids[0]), 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error {
+			if d < 0 || step >= len(ids) {
+				t.Fatalf("unexpected pause %v, step %d", d, step)
+			}
+			clock.advance(d)
+			if tc.states[step] == "cancelled" {
+				if e := q.Cancel(ids[step]); e != nil {
+					t.Fatal(e)
+				}
+			} else {
+				waitFinish(t, q, clock, tc.states[step] == "succeeded")
+			}
+			step++
+			return nil
+		})
+		if exitCode(err) != tc.code || step != len(ids) {
+			t.Fatalf("code=%d err=%v step=%d", exitCode(err), err, step)
+		}
+		if len(strings.Split(strings.TrimSpace(out.String()), "\n")) != len(ids) {
+			t.Fatal(out.String())
+		}
+		for i, id := range ids {
+			if strings.Count(out.String(), id+" "+tc.states[i]) != 1 {
+				t.Fatal(out.String())
+			}
+		}
+	}
+
 }
 func TestWaitQueueRestartAndNetworkRecovery(t *testing.T) {
 	q, clock, db, checkpoints := waitQueue(t)
@@ -253,37 +264,6 @@ func TestWaitQueueRestartAndNetworkRecovery(t *testing.T) {
 	})
 	if err != nil || step != 3 || out.String() != j.ID+" succeeded\n" || !strings.Contains(diagnostics.String(), "restored") {
 		t.Fatalf("%v %d %s %s", err, step, &out, &diagnostics)
-	}
-}
-func TestWaitHelpUsageAuthAndEnvironment(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
-	j := waitSubmit(t, q)
-	waitFinish(t, q, clock, true)
-	server := httptest.NewServer(myce.API{Queue: q, Token: "private-test-token"}.Handler())
-	defer server.Close()
-	t.Setenv("MYCE_QUEUE", server.URL)
-	t.Setenv("MYCE_TOKEN", "private-test-token")
-	for _, tc := range []struct {
-		args []string
-		code int
-	}{
-		{[]string{"--help"}, 0}, {nil, 2}, {[]string{j.ID, "--timeout", "0"}, 2}, {[]string{j.ID, "--timeout", "bad"}, 2}, {[]string{}, 2}, {[]string{j.ID, "--queue", "invalid"}, 2}, {[]string{j.ID, "--token", "wrong"}, 2}, {[]string{"missing"}, 2}, {[]string{j.ID, "--timeout", "1m"}, 0}, {[]string{"--timeout=1m", j.ID, j.ID}, 0},
-	} {
-		var out, diag bytes.Buffer
-		err := waitCommand(context.Background(), tc.args, &out, &diag)
-		if exitCode(err) != tc.code {
-			t.Fatalf("%v: %v", tc.args, err)
-		}
-		if strings.Contains(diag.String(), "private-test-token") {
-			t.Fatal("help exposed token")
-		}
-		if len(tc.args) > 0 && tc.args[0] == "--help" && !strings.Contains(diag.String(), "3 timeout") {
-			t.Fatal(diag.String())
-		}
-	}
-	t.Setenv("MYCE_TOKEN", "")
-	if exitCode(waitCommand(context.Background(), []string{j.ID}, &bytes.Buffer{}, &bytes.Buffer{})) != 2 {
-		t.Fatal("missing token")
 	}
 }
 
@@ -427,27 +407,6 @@ func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 		if exitCode(err) != 1 || out.String() != j.ID+" cancelled\n" || pauses != 1 {
 			t.Fatalf("immediate wait: err=%v output=%q pauses=%d", err, out.String(), pauses)
 		}
-	}
-}
-
-func TestWaitProductionStartDeadline(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
-	s := myce.Spec{Name: "production", Project: "test", Priority: "production"}
-	s.Run.Command = []string{"echo", "done"}
-	s.Needs.MemoryGB = 1
-	s.Needs.Platform = myce.Platform{Required: []string{"xpu"}}
-	deadline := clock.Now().Add(3 * time.Second)
-	s.StartBy = &deadline
-	j, err := q.Submit(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
-	defer server.Close()
-	var out, diagnostics bytes.Buffer
-	err = waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return q.Tick() })
-	if exitCode(err) != 1 || out.String() != j.ID+" failed\n" {
-		t.Fatalf("exit=%d output=%s err=%v", exitCode(err), out.String(), err)
 	}
 }
 

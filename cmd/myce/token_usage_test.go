@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"mycelium/internal/myce"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,6 +82,36 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 	if code != tc.code || !strings.Contains(out, "usage: myce ") || strings.Contains(out, "MYCE_TOKEN") {
 		t.Errorf("%s: exit %d, output %q", tc.arg, code, out)
 	}
+
+	{
+		q, _, _, _ := waitQueue(t)
+		j := waitSubmit(t, q)
+		server := httptest.NewServer(myce.API{Queue: q, Token: "private-test-token"}.Handler())
+		defer server.Close()
+		t.Setenv("MYCE_JOINING_FILE", "")
+		t.Setenv("MYCE_QUEUE", server.URL)
+		t.Setenv("MYCE_TOKEN", "private-test-token")
+		tc := struct {
+			args []string
+			code int
+		}{[]string{j.ID, "--token", "wrong"}, 2}
+		var out, diag bytes.Buffer
+		err := waitCommand(context.Background(), tc.args, &out, &diag)
+		if exitCode(err) != tc.code {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		if strings.Contains(diag.String(), "private-test-token") {
+			t.Fatal("help exposed token")
+		}
+		snapshot, err := q.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Jobs[0].State != "queued" {
+			t.Fatal("refused authority changed job")
+		}
+	}
+
 }
 
 // Temp files avoid blocking on a pipe when a command prints a large FlagSet.

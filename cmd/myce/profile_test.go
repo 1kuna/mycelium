@@ -55,6 +55,178 @@ check: [test, -s, result]
 	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
 		t.Fatal(err)
 	}
+	{
+		script, err := os.ReadFile(filepath.Join(root, "source", "run.sh"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
+		defer server.Close()
+		var out bytes.Buffer
+		err := runProfile(context.Background(), path, nil, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard)
+		if exitCode(err) != 69 {
+			t.Fatal(err)
+		}
+		var receipt profileReceipt
+		if err = json.Unmarshal(out.Bytes(), &receipt); err != nil {
+			t.Fatal(err)
+		}
+		if receipt.Key != "stable" || receipt.JobID != "" || receipt.Status != "intent" {
+			t.Fatal("lost intent", receipt)
+		}
+		var saved profileReceipt
+		if err = readProfileJSON(filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", "stable"}), "receipt.json"), &saved); err != nil || len(saved.Spec.Run.Command) == 0 {
+			t.Fatal("intent not persisted", err)
+		}
+		if err := os.RemoveAll(filepath.Join(root, "source")); err != nil {
+			t.Fatal(err)
+		}
+		out.Reset()
+		if err = runProfile(context.Background(), path, nil, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard); exitCode(err) != 69 {
+			t.Fatal(err)
+		}
+		var adopted profileReceipt
+		if err = json.Unmarshal(out.Bytes(), &adopted); err != nil || adopted.Key != receipt.Key {
+			t.Fatal("explicit key not adopted", adopted, err)
+		}
+		if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "source", "run.sh"), script, 0600); err != nil {
+			t.Fatal(err)
+		}
+		{
+			source := filepath.Join(root, "source")
+			if err := os.MkdirAll(source, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, "tool"), []byte("source helper"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "replacement"), []byte("explicit replacement"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			profile := `name: fixture
+project: test
+class: experiment
+source: {directory: source}
+inputs: {tool: replacement}
+run: {command: [sh, tool]}
+needs: {cpu_cores: 1, memory_gb: 1}
+targets: [{os: darwin, arch: arm64, platform: cpu}]
+check: [true]
+`
+			file := filepath.Join(profileDir, "legacy.yaml")
+			if err := os.WriteFile(file, []byte(profile), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err := runProfile(context.Background(), file, nil, nil, "legacy-prelaunch", "", "", "", server.URL, "fixture", &out, io.Discard)
+			if exitCode(err) != 69 {
+				t.Fatal(err, out.String())
+			}
+			var receipt profileReceipt
+			if err := json.Unmarshal(out.Bytes(), &receipt); err != nil {
+				t.Fatal(err)
+			}
+			if !receipt.Spec.PrepareSource || strings.Contains(strings.Join(receipt.Spec.Run.Command, " "), "tar -xf") {
+				t.Fatal("source hidden until payload launch", receipt.Spec.Run)
+			}
+			if _, ok := receipt.Spec.Files["tool"]; !ok {
+				t.Fatal("explicit input lost its replacement destination", receipt.Spec.Files)
+			}
+			if _, ok := receipt.Uploads["files/tool"]; !ok {
+				t.Fatal("input upload not bound to destination", receipt.Uploads)
+			}
+			for _, path := range []string{filepath.Join(source, "tool"), filepath.Join(root, "replacement"), file} {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+
+		{
+			local := filepath.Join(root, "runtime.tar")
+			if err := os.WriteFile(local, []byte("runtime"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			profile := `name: shared
+project: test
+class: experiment
+source: {directory: source}
+run: {command: [true]}
+needs: {cpu_cores: 1, memory_gb: 1}
+targets: [{os: linux, arch: amd64, platform: cpu}]
+check: [true]
+shared_inputs:
+  runtime: {local: runtime.tar, archive: tar, unpacked_bytes: 100}
+  original: {nas: media/original.mov, sha256: "` + strings.Repeat("0", 64) + `", size_bytes: 2000000000}
+`
+			path := filepath.Join(profileDir, "shared.yaml")
+			if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err := runProfile(context.Background(), path, nil, nil, "shared", "", "", "", server.URL, "test", &out, io.Discard)
+			if exitCode(err) != 69 {
+				t.Fatal(err)
+			}
+			var receipt profileReceipt
+			if err = json.Unmarshal(out.Bytes(), &receipt); err != nil {
+				t.Fatal(err)
+			}
+			if receipt.Spec.SharedInputs["runtime"].Local != "" || receipt.Spec.SharedInputs["runtime"].SHA256 == "" {
+				t.Fatal("local shared input not lowered")
+			}
+			if len(receipt.Spec.Files) != 1 || len(receipt.Uploads) != 2 || len(receipt.Spec.StoredInputFiles()) != 2 {
+				t.Fatal("NAS input uploaded or local input copied per-job", receipt)
+			}
+			if strings.Contains(receipt.Spec.Run.Command[2], "runtime.tar") || strings.Contains(receipt.Spec.Run.Command[2], "original.mov") {
+				t.Fatal("shared input copied by wrapper")
+			}
+			if err = receipt.Spec.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			// A retained explicit key needs neither source nor local import on replay.
+			if err = os.Remove(local); err != nil {
+				t.Fatal(err)
+			}
+			out.Reset()
+			if err = runProfile(context.Background(), path, nil, nil, "shared", "", "", "", server.URL, "test", &out, io.Discard); exitCode(err) != 69 {
+				t.Fatal(err)
+			}
+
+			{
+				if err := os.WriteFile(local, []byte("runtime"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				profile = strings.Replace(profile, "local: runtime.tar, archive: tar, unpacked_bytes: 100", "local: runtime.tar, sha256: \""+strings.Repeat("0", 64)+"\"", 1)
+				if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
+					t.Fatal(err)
+				}
+				_, findings, err := resolveInput(path, "", "", true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "shared input runtime: sha256 differs"
+				if len(findings.findings) != 1 || !strings.Contains(findings.findings[0].Problem, want) {
+					t.Fatalf("resolve: %+v", findings)
+				}
+				var out bytes.Buffer
+				err = runProfile(context.Background(), path, nil, nil, "", "", "", "", server.URL, "test", &out, io.Discard)
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("got %v", err)
+				}
+			}
+			if err := os.Remove(local); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+	}
 	notifierFIFO := filepath.Join(root, "notifier-fifo")
 	if err := syscall.Mkfifo(notifierFIFO, 0600); err != nil {
 		t.Fatal(err)
@@ -92,6 +264,90 @@ printf '\n' >> "$NOTIFICATION_FILE"
 	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 	defer cancel()
 	wait(t, ctx, func() bool { s, e := status(ctx, d.Client()); return e == nil && len(s.Machines) == 1 })
+	{
+		var host string
+		wait(t, ctx, func() bool {
+			s, err := status(ctx, d.Client())
+			if err == nil && len(s.Machines) == 1 {
+				host = s.Machines[0].ID
+				return true
+			}
+			return false
+		})
+		for _, format := range []string{"adapter"} {
+			t.Run(format, func(t *testing.T) {
+				root := filepath.Join(root, "reason-input")
+				if err := os.Mkdir(root, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "source", "run.sh"), []byte("printf ok > result\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				text := strings.Replace(cpuAdapterYAML("source"), "    source:", fmt.Sprintf("    allowed_machines: [%q]\n    requirement_reasons: {host: 'private explanation /private/input'}\n    source:", host), 1)
+
+				file := filepath.Join(root, format+".yaml")
+				if err := os.WriteFile(file, []byte(text), 0600); err != nil {
+					t.Fatal(err)
+				}
+				command := exec.CommandContext(ctx, binary, "run", "--"+format, file, "--queue", d.URL, "--key", "reason-"+format)
+				command.Dir = root
+				command.Env = append(os.Environ(), "MYCE_TOKEN="+token, "MYCE_NOTIFY=")
+				var stderr bytes.Buffer
+				command.Stderr = &stderr
+				out, err := command.Output()
+				if err != nil {
+					t.Fatal("submission", err, &stderr)
+				}
+				var receipt profileReceipt
+				if err := json.Unmarshal(out, &receipt); err != nil || receipt.Spec.RequirementReasons["host"] != "private explanation /private/input" {
+					t.Fatal("receipt lost authored map", err)
+				}
+				var saved profileReceipt
+				path := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{receipt.Project, receipt.Key}), "receipt.json")
+				if err := readProfileJSON(path, &saved); err != nil || saved.Spec.RequirementReasons["host"] != receipt.Spec.RequirementReasons["host"] {
+					t.Fatal("durable receipt lost map", err)
+				}
+				got, err := d.Client().Wait(ctx, receipt.JobID)
+				if err != nil || got.State != "succeeded" || len(got.RequirementReasons) != 1 || got.RequirementReasons[0] != (myce.RequirementReasonStatus{Constraint: "host", ReasonSource: "authored", Source: "spec.requirement_reasons[host]"}) || len(got.Spec.RequirementReasons) != 0 {
+					t.Fatal("job GET lost safe reason/provenance", got.RequirementReasons, err)
+				}
+				snapshot, err := status(ctx, d.Client())
+				if err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, j := range snapshot.Jobs {
+					if j.ID == receipt.JobID {
+						found = len(j.RequirementReasons) == 1 && j.RequirementReasons[0].ReasonSource == "authored"
+						data, _ := json.Marshal(j)
+						if bytes.Contains(data, []byte("private")) {
+							t.Fatal("raw prose leaked in status")
+						}
+					}
+				}
+				if !found {
+					t.Fatal("status lost reason provenance")
+				}
+			})
+		}
+		// Raw job YAML has only the shared Spec field, not the legacy request map.
+		raw := filepath.Join(root, "reason-job.yaml")
+		text := fmt.Sprintf("name: raw-reason\nproject: test\nclass: experiment\nrun: {command: [echo, ok]}\nneeds: {cpu_cores: 1, memory_gb: 1, platform: cpu}\nallowed_machines: [%q]\nrequirement_reasons: {host: 'private raw-job explanation'}\n", host)
+		if err := os.WriteFile(raw, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+		var report bytes.Buffer
+		if err := specCommand([]string{"check", "--resolve", "--json", "--queue", d.URL, "--token", token, raw}, &report, &report); err != nil {
+			t.Fatal("raw-job resolve", err, &report)
+		}
+		if strings.Contains(report.String(), "Host pin has no declared") || strings.Contains(report.String(), "private raw-job") {
+			t.Fatal("raw-job explanation ignored or leaked", &report)
+		}
+	}
+
 	notificationFile := filepath.Join(root, "notifications")
 	invoke := func(extra ...string) (profileReceipt, error) {
 		cmd := exec.CommandContext(ctx, binary, append([]string{"run", "--queue", d.URL, "--profile", path}, extra...)...)
@@ -307,6 +563,25 @@ printf '\n' >> "$NOTIFICATION_FILE"
 		t.Fatal("expired profile replay", expiredReceipt, err)
 	}
 	t.Log("local dev: frozen source, result check/download, receipt recovery, notification and fake-clock result expiry")
+
+	{
+		dir := filepath.Join(root, "rejected-notification")
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		hook := filepath.Join(dir, "notify")
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 7\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		receipt := profileReceipt{Key: "key", Project: "test", JobID: r.JobID, Status: "running", Observation: "armed", Delivery: "armed"}
+		if err := observeProfile(context.Background(), d.Client(), dir, receipt, profileObserver{Notify: hook}); err == nil {
+			t.Fatal("delivery rejection hidden")
+		}
+		var saved profileReceipt
+		if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.Status != "succeeded" || saved.DeliveryStatus != "failed" || saved.Observation != "not_armed" || saved.Delivery == "armed" {
+			t.Fatal("delivery rejection changed computation state", saved, err)
+		}
+	}
 }
 
 func exitCodeForTest(err error) int {
@@ -318,137 +593,4 @@ func exitCodeForTest(err error) int {
 		return 0
 	}
 	return -1
-}
-
-func TestProfileQueueFailurePersistsIntent(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "fixture.yaml")
-	if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	profile := `name: fixture
-project: test
-class: experiment
-source: {directory: source}
-run: {command: [false]}
-needs: {cpu_cores: 1, memory_gb: 1}
-targets: [{os: linux, arch: amd64, platform: cpu}]
-check: [true]
-`
-	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
-		t.Fatal(err)
-	}
-	// Nonstandard location uses cwd, so make the declared source absolute.
-	profile = strings.Replace(profile, "directory: source", "directory: "+filepath.Join(root, "source"), 1)
-	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
-		t.Fatal(err)
-	}
-	// Put the profile at the conventional location to retain all caller state in root.
-	dir := filepath.Join(root, ".mycelium", "profiles")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	path = filepath.Join(dir, "fixture.yaml")
-	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(refuseProfilePreparation))
-	defer server.Close()
-	var out bytes.Buffer
-	err := runProfile(context.Background(), path, nil, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard)
-	if exitCode(err) != 69 {
-		t.Fatal(err)
-	}
-	var receipt profileReceipt
-	if err = json.Unmarshal(out.Bytes(), &receipt); err != nil {
-		t.Fatal(err)
-	}
-	if receipt.Key != "stable" || receipt.JobID != "" || receipt.Status != "intent" {
-		t.Fatal("lost intent", receipt)
-	}
-	var saved profileReceipt
-	if err = readProfileJSON(filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", "stable"}), "receipt.json"), &saved); err != nil || len(saved.Spec.Run.Command) == 0 {
-		t.Fatal("intent not persisted", err)
-	}
-	if err := os.RemoveAll(filepath.Join(root, "source")); err != nil {
-		t.Fatal(err)
-	}
-	out.Reset()
-	if err = runProfile(context.Background(), path, nil, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard); exitCode(err) != 69 {
-		t.Fatal(err)
-	}
-	var adopted profileReceipt
-	if err = json.Unmarshal(out.Bytes(), &adopted); err != nil || adopted.Key != receipt.Key {
-		t.Fatal("explicit key not adopted", adopted, err)
-	}
-}
-
-func TestProfileTargetRefusalStderrAndReceipt(t *testing.T) {
-	root := t.TempDir()
-	profileDir := filepath.Join(root, ".mycelium", "profiles")
-	if err := os.MkdirAll(profileDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	profile := `name: fixture
-project: test
-class: experiment
-source: {directory: source}
-run: {command: [true]}
-needs: {cpu_cores: 2, memory_gb: 8}
-targets: [{os: linux, arch: amd64, platform: cpu}]
-check: [true]
-`
-	path := filepath.Join(profileDir, "fixture.yaml")
-	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
-		t.Fatal(err)
-	}
-	state := t.TempDir()
-	q, err := myce.Open(filepath.Join(state, "queue.db"), filepath.Join(state, "checkpoints"), &bindClock{now: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer q.Close()
-	if err := q.ConfigureFileStore(filepath.Join(state, "files"), 1<<20, true); err != nil {
-		t.Fatal(err)
-	}
-	m := myce.Machine{Capabilities: []string{"native_isolation_landlock"}, ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
-		HostMemoryMeasured: true, HostAvailableMemoryGB: 32, HostMemoryBudgetGB: 8, MemoryCeilingSlackGB: .125,
-		CapabilityProfile: &myce.CapabilityProfile{OS: "linux", Arch: "amd64", LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
-		t.Fatal(err)
-	}
-	const token = "refusal-fixture-secret"
-	server := httptest.NewServer(myce.API{Queue: q, Token: token}.Handler())
-	defer server.Close()
-	binary := devTestBinary(t)
-	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, "run", "--profile", path, "--queue", server.URL, "--key", "refused")
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "MYCE_TOKEN="+token)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	want := "host memory need 8.125 GiB (8 + 0.125 slack) exceeds allowance 8 GiB on worker"
-	if exitCodeForTest(err) != 78 || !strings.Contains(stderr.String(), "no_qualified_target: "+want) {
-		t.Fatalf("exit=%v stderr=%s", err, &stderr)
-	}
-	var receipt profileReceipt
-	if err := json.Unmarshal(out, &receipt); err != nil {
-		t.Fatal(err)
-	}
-	var saved profileReceipt
-	receiptPath := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", "refused"}), "receipt.json")
-	if err := readProfileJSON(receiptPath, &saved); err != nil {
-		t.Fatal(err)
-	}
-	if receipt.RefusalCode != "no_qualified_target" || !strings.Contains(receipt.RefusalReason, want) || saved.RefusalReason != receipt.RefusalReason || saved.RefusalCode != receipt.RefusalCode {
-		t.Fatalf("printed/saved refusal mismatch: %+v / %+v", receipt, saved)
-	}
-	if strings.Contains(stderr.String(), token) || bytes.Contains(out, []byte(token)) || strings.Contains(receipt.RefusalReason, root) {
-		t.Fatal("refusal leaked credential or private path")
-	}
 }

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"mycelium/internal/myce"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,59 +22,6 @@ func fakeSetupManager(_ context.Context, name string, args ...string) ([]byte, e
 		return []byte("TimeoutStopUSec=45s\nTimeoutStartUSec=1min 30s\n"), nil
 	}
 	return nil, nil
-}
-
-func TestDoctorCLIUsesInjectedRunner(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("MYCE_TOKEN", "test-only-token")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/status" {
-			t.Errorf("unexpected request %s", r.URL.Path)
-		}
-		w.Write([]byte(`{}`))
-	}))
-	defer server.Close()
-	c := myce.ServiceConfig{Role: "queue", Detection: myce.Detection{OS: "linux"}, Queue: server.URL, NAS: home, State: home}
-	b, err := json.Marshal(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(home, "config.json")
-	if err = os.WriteFile(path, b, 0600); err != nil {
-		t.Fatal(err)
-	}
-	lingering := "yes\n"
-	calls := map[string]int{}
-	p := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		calls[name]++
-		switch name {
-		case "mount":
-			return []byte("server:/nas on " + home + " type nfs (rw)\n"), nil
-		case "uv":
-			return []byte("uv test-version"), nil
-		case "loginctl":
-			return []byte(lingering), nil
-		default:
-			t.Fatalf("unexpected live command %s %v", name, args)
-			return nil, errors.New("unexpected command")
-		}
-	}}
-	noAccount := func(string) (myce.WorkerAccount, error) {
-		t.Fatal("doctor looked up worker account")
-		return myce.WorkerAccount{}, myce.ErrHostIdentity
-	}
-	if err = setupCommandWithAccountLookup([]string{"doctor", "--config", path}, p, home, noAccount); err != nil {
-		t.Fatal(err)
-	}
-	lingering = "no\n"
-	if err = setupCommandWithAccountLookup([]string{"doctor", "--config", path}, p, home, noAccount); err == nil || !strings.Contains(err.Error(), "doctor found problems") {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"mount", "uv", "loginctl"} {
-		if calls[name] != 2 {
-			t.Fatalf("%s calls=%d", name, calls[name])
-		}
-	}
 }
 
 func TestInstallCLICPUWithoutGPU(t *testing.T) {
@@ -182,12 +127,57 @@ func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
 				t.Fatal("saved HTTPS joining address failed after startup", err)
 			}
 			joined.HTTP.CloseIdleConnections()
+			if start == 0 {
+				t.Setenv("MYCE_TOKEN", "private-test-only")
+				lingering := "yes\n"
+				p := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+					switch name {
+					case "mount":
+						return []byte("server:/nas on " + home + " type nfs (rw)\n"), nil
+					case "uv":
+						return []byte("uv test-version"), nil
+					case "loginctl":
+						return []byte(lingering), nil
+					default:
+						t.Fatalf("unexpected live command %s %v", name, args)
+						return nil, errors.New("unexpected command")
+					}
+				}}
+				noAccount := func(string) (myce.WorkerAccount, error) {
+					t.Fatal("doctor looked up worker account")
+					return myce.WorkerAccount{}, myce.ErrHostIdentity
+				}
+				if err = setupCommandWithAccountLookup([]string{"doctor", "--config", c.Config}, p, home, noAccount); err != nil {
+					t.Fatal(err)
+				}
+				lingering = "no\n"
+				if err = setupCommandWithAccountLookup([]string{"doctor", "--config", c.Config}, p, home, noAccount); err == nil || !strings.Contains(err.Error(), "doctor found problems") {
+					t.Fatal(err)
+				}
+			}
+
 		}()
 	}
 
 	{
 		if got := exitCode(fmt.Errorf("startup refused: %w", myce.ErrMemoryCeilingsRequired)); got != 78 {
 			t.Fatal("wrong startup exit", got)
+		}
+	}
+
+	for _, configFlag := range []bool{true} {
+		path := filepath.Join(home, "legacy-config.json")
+		data, err := json.Marshal(myce.ServiceConfig{Role: "queue", LocalDisableReceipts: configFlag})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		args := []string{"--config", path}
+
+		if err = serviceCommand(args); err == nil || !strings.Contains(err.Error(), "reinstall") {
+			t.Fatal("installed legacy flag did not explain recovery", err)
 		}
 	}
 
@@ -222,25 +212,5 @@ func TestInstallCLILingerMessage(t *testing.T) {
 				t.Fatal("unknown state hidden")
 			}
 		})
-	}
-}
-
-func TestLegacyReceiptInstalledServiceRejected(t *testing.T) {
-	for _, configFlag := range []bool{true} {
-		path := filepath.Join(t.TempDir(), "config.json")
-		data, err := json.Marshal(myce.ServiceConfig{Role: "queue", LocalDisableReceipts: configFlag})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = os.WriteFile(path, data, 0600); err != nil {
-			t.Fatal(err)
-		}
-		args := []string{"--config", path}
-		if !configFlag {
-			args = append(args, "--", "queue", "--local-disable-receipts")
-		}
-		if err = serviceCommand(args); err == nil || !strings.Contains(err.Error(), "reinstall") {
-			t.Fatal("installed legacy flag did not explain recovery", err)
-		}
 	}
 }
