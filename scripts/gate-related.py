@@ -47,7 +47,7 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/machine_conversion_install.go'] = (
 # Platform socket helpers implement transfer progress underneath file clients.
 for source in ('file_socket_unix', 'file_socket_other'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
-        'client_adaptive_test.go', 'file_transfer_test.go')
+        'client_adaptive_test.go', 'file_socket_unix_test.go')
 
 # The non-Linux Xe probe withholds telemetry; Linux exercises the read-only PMU
 # implementation; portable device and admission tests exercise missing evidence.
