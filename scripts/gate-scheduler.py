@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Admit packages in selection order as any watchdog finishes custody cleanup."""
 from pathlib import Path
+import importlib.util
+import json
+import os
 import queue
 import signal
 import subprocess
@@ -19,7 +22,7 @@ def merge_status(status, result):
     return status if result == 0 else 1
 
 
-def run(entries, cores, command):
+def run(entries, cores, command, environment=None):
     pending = {}
     completed = queue.Queue()
     status = 0
@@ -58,7 +61,7 @@ def run(entries, cores, command):
             reap()
             if status == 125:
                 break
-            child = subprocess.Popen(argv)
+            child = subprocess.Popen(argv, env=environment)
             pending[child] = (label, time.monotonic())
             threading.Thread(target=wait, args=(child,), daemon=True).start()
         while pending and status != 125:
@@ -91,6 +94,19 @@ def main():
     for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(signum, interrupted)
     mode, cores, selection = sys.argv[1:]
+    entries = Path(selection).read_text().splitlines()
+    slots = int(cores)
+    environment = None
+    if mode == 'full':
+        spec = importlib.util.spec_from_file_location('gate_shards', Path(__file__).with_name('gate-shards.py'))
+        shards = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(shards)
+        entries = shards.plan(entries, slots)
+        Path(selection).with_suffix('.shards.json').write_text(json.dumps(entries, indent=2) + '\n')
+        slots = min(9, slots)
+        # Limit aggregate CPU pressure instead of giving every process the
+        # entire host. Go compilation within a shard also inherits this budget.
+        environment = dict(os.environ, GOMAXPROCS='1')
 
     def command(entry):
         package, names = entry.split('\t', 1)
@@ -101,9 +117,10 @@ def main():
         label = f'test:{package}:{names}'
         return label, [sys.executable, str(Path(__file__).with_name('gate-progress.py')),
                        label, 'go', 'test', '-race', '-vet=off', '-json', '-p', '1',
-                       '-parallel', cores, '-count=1', package, '-run', names]
+                       '-parallel', '1' if mode == 'full' else cores,
+                       '-count=1', package, '-run', names]
 
-    return run(Path(selection).read_text().splitlines(), int(cores), command)
+    return run(entries, slots, command, environment)
 
 
 if __name__ == '__main__':
