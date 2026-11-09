@@ -1334,9 +1334,14 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	contact, settle := q.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, ctx)
 	c.contact = contact
 	defer settle(false)
-	reply, err := q.checkinResponseContext(ctx, c, nil)
+	reply, err := q.checkinContext(ctx, c)
 	settle(err == nil)
 	return reply, err
+}
+
+// Callers already own contact tracking, including HTTP and direct queue calls.
+func (q *Queue) checkinContext(ctx context.Context, c Checkin) (Reply, error) {
+	return q.checkinResponseContext(ctx, c, nil)
 }
 
 // The HTTP caller keeps the same request lifecycle through NAS instructions
