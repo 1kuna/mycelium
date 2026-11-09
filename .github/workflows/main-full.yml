@@ -7,6 +7,12 @@ on:
 permissions:
   contents: read
 
+# Replace superseded pending runs; keep started runs to avoid runner cleanup
+# terminating shared helpers (#919, #1159).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   full:
     if: github.repository == '1kuna/mycelium' && github.ref == 'refs/heads/main'
