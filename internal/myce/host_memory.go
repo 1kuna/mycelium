@@ -41,7 +41,7 @@ func hostFitFailure(m *Machine, gpu, host float64) string {
 		return "host memory allowance awaiting worker acknowledgement"
 	}
 	if host == 0 {
-		if strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB != 0 || m.hostBudgetGB != 0 {
+		if strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB != 0 || m.hostBudgetGB != 0 || m.HostMemoryDerivation != nil || m.HostMemoryBudgetMeasured {
 			return "host memory declaration is 0 GiB; allowance or enforced ceilings require a positive declaration"
 		}
 		if !unifiedCUDA(m) || gpu == 0 {
@@ -78,9 +78,13 @@ func (q *Queue) refreshHostMemory() {
 		}
 
 		m.hostBudgetGB = 0
+		m.HostMemoryDerivation = nil
 		m.HostMemoryPolicyMismatch = false
 		for _, other := range q.s.Machines {
 			if hostID(other) != hostID(m) {
+				continue
+			}
+			if policy := q.s.HostMaintenance[hostID(m)].MemoryBudget; policy != nil && policy.Measured && (other.Gone || other.Replacement != nil) {
 				continue
 			}
 			if other.HostMemoryBudgetGB != m.HostMemoryBudgetGB {
@@ -91,9 +95,13 @@ func (q *Queue) refreshHostMemory() {
 			}
 		}
 		if policy, ok := q.s.HostMaintenance[hostID(m)]; ok && policy.MemoryBudget != nil {
-			m.hostBudgetGB = policy.MemoryBudget.GiB
+			budget, derivation := q.measuredHostMemoryBudget(m, *policy.MemoryBudget)
+			m.hostBudgetGB, m.HostMemoryDerivation = budget.GiB, derivation
 			for _, other := range q.s.Machines {
-				if hostID(other) == hostID(m) && other.HostMemoryBudgetGB != m.hostBudgetGB {
+				if policy.MemoryBudget.Measured && (other.Gone || other.Replacement != nil) {
+					continue
+				}
+				if hostID(other) == hostID(m) && (other.HostMemoryBudgetGB != m.hostBudgetGB || other.HostMemoryBudgetMeasured != policy.MemoryBudget.Measured) {
 					m.HostMemoryPolicyMismatch = true
 				}
 			}
@@ -140,8 +148,13 @@ func (q *Queue) refreshHostMemory() {
 		// still consume the static budget; only unused growth consumes live RAM.
 		room := available - growth
 		room = q.unifiedCUDAHostRoom(m, room, growth)
-		if m.hostBudgetGB > 0 {
+		if m.hostBudgetGB > 0 || m.HostMemoryDerivation != nil {
 			room = min(room, m.hostBudgetGB-reserved)
+		}
+		if d := m.HostMemoryDerivation; d != nil && d.Source == "quiescent_v1" {
+			// Existing after-reserve telemetry and learned reserve are upper
+			// bounds on the same physical pool, never independent allocations.
+			room = min(room, m.MemoryObservation.TotalGB-m.MemoryObservation.UsedGB-d.ReserveGB-growth)
 		}
 		room = q.sharedHostRoom(m, room, reserved, growth)
 		m.hostReservationDebtGB = max(0, -room)

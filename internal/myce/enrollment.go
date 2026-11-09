@@ -169,7 +169,14 @@ func evaluateEnrollmentVersion(receipt EnrollmentReceipt, o EnrollmentObservatio
 	if profile == nil || receipt.LogicalCPUs <= 0 || receipt.SystemMemoryBytes == 0 || profile.LogicalCPUs != receipt.LogicalCPUs || profile.SystemMemoryBytes != receipt.SystemMemoryBytes || profile.OS == "" || profile.Arch == "" || !m.HostMemoryMeasured || m.HostAvailableMemoryGB <= 0 {
 		return incomplete("CPU or RAM facts unavailable")
 	}
-	if o.Policy.CPUBudgetCores == nil || o.Policy.MemoryBudget == nil || m.CPUBudgetCores != *o.Policy.CPUBudgetCores || m.HostMemoryBudgetGB != o.Policy.MemoryBudget.GiB {
+	budget := 0.0
+	if o.Policy.MemoryBudget != nil {
+		budget = o.Policy.MemoryBudget.GiB
+		if o.Policy.MemoryBudget.Measured {
+			budget = m.EffectiveHostMemoryBudgetGB
+		}
+	}
+	if o.Policy.CPUBudgetCores == nil || o.Policy.MemoryBudget == nil || m.CPUBudgetCores != *o.Policy.CPUBudgetCores || m.HostMemoryBudgetGB != budget || m.HostMemoryBudgetMeasured != o.Policy.MemoryBudget.Measured {
 		return incomplete("CPU or RAM policy unacknowledged")
 	}
 	switch o.Policy.Mode {
@@ -347,7 +354,11 @@ func (r EnrollmentResult) Summary(c ServiceConfig) string {
 	if p.Availability != nil {
 		participation = p.Availability.Summary()
 	}
-	summary := fmt.Sprintf("%s · %s/%s · %s · CPU %d logical, allowance %d (0=detected minus reserve) · RAM %.1f GiB, allowance %.1f GiB (0=uncapped) · service healthy · %s · NAS · %s · %s", m.ID, p.OS, p.Arch, strings.Join(devices, ", "), p.LogicalCPUs, m.CPUBudgetCores, float64(p.SystemMemoryBytes)/(1<<30), m.HostMemoryBudgetGB, r.State, participation, m.MemoryEnforcement)
+	ramMode := "0=uncapped"
+	if m.HostMemoryBudgetMeasured {
+		ramMode = "measured; authored fallback until idle evidence"
+	}
+	summary := fmt.Sprintf("%s · %s/%s · %s · CPU %d logical, allowance %d (0=detected minus reserve) · RAM %.1f GiB, allowance %.1f GiB (%s) · service healthy · %s · NAS · %s · %s", m.ID, p.OS, p.Arch, strings.Join(devices, ", "), p.LogicalCPUs, m.CPUBudgetCores, float64(p.SystemMemoryBytes)/(1<<30), m.HostMemoryBudgetGB, ramMode, r.State, participation, m.MemoryEnforcement)
 	if r.State == "drained" {
 		summary += "\n" + enrollmentDrainUnproven(c, r.Maintenance).Error()
 	}
