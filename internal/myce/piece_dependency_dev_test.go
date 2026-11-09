@@ -16,7 +16,8 @@ func TestPieceDependencyDevCPU(t *testing.T) {
 	for _, transport := range []string{"file-store", "nas"} {
 		t.Run(transport, func(t *testing.T) {
 			root := newTestStateRoot(t)
-			c := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: filepath.Join(root, "extensions"), JobFileRoot: filepath.Join(root, "nas"), Token: "piece-dev-test", GPU: "cpu", Workers: 2, CPUBudgetCores: 4, Interval: 10 * time.Millisecond}
+			// Dependency transport uses normal worker cadence; 10ms heartbeats contend with file-store commits.
+			c := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: filepath.Join(root, "extensions"), JobFileRoot: filepath.Join(root, "nas"), Token: "piece-dev-test", GPU: "cpu", Workers: 2, CPUBudgetCores: 4, Interval: defaultWorkerInterval}
 			if transport == "file-store" {
 				c.FileStore = filepath.Join(root, "files")
 			} else {
