@@ -139,8 +139,8 @@ fixtures remain. It then archives the abandoned record as `.reconciled-UUID`
 and reuses the slot. Legacy marker/scratch records receive the same fixture-exit
 check. Live holders, live fixtures, malformed records and inventory uncertainty
 retain occupancy; elapsed age never releases custody. Reconciliation never
-signals another run or removes its scratch. Never clear another owner's record
-merely to admit more work.
+signals another run or removes its scratch. Development gate records may be reset under MY-41; preserve running production
+customer jobs.
 The
 two-suite boundary preserves the repository's observed Mac safety rule: more
 concurrent full suites caused false failures. Linux fleet gates rely on the
@@ -479,17 +479,38 @@ with `python3 scripts/test-gate-budget.py`.
 
 ## Automatic main full gates
 
-The [`main-full` workflow](../.github/workflows/main-full.yml) runs only on pushes
-to `main`, once for each merge result (or direct main fix). There are no PR,
-manual-dispatch or schedule triggers. It selects `[self-hosted, mycelium-ci]`;
-GitHub-hosted runners are never used. Do not add workflow concurrency grouping:
-GitHub may replace a pending run in a group, losing proof for an intervening merge.
-Three repository-scoped runners accept separate merges concurrently without
-cancelling older runs. Each runner still waits for its own two Mycelium jobs and
-verifies their accepted results. A backlog waits in Actions; no model callbacks,
-polls or wakes are needed.
+The [`main-full` workflow](../.github/workflows/main-full.yml) provides
+**coalesced, optional evidence of main commits**. It runs only on pushes
+to `main`, on `[self-hosted, mycelium-ci]`; there are no PR, manual-dispatch or
+schedule triggers. Its workflow/ref concurrency group keeps the running member
+and replaces an older pending member with the newest pending member
+(`cancel-in-progress: false`). Started runs are never cancelled to reduce backlog:
+runner cancellation cleanup previously killed shared helpers
+([#919](https://github.com/1kuna/mycelium/issues/919),
+[#1159](https://github.com/1kuna/mycelium/issues/1159)). See
+[GitHub's concurrency contract](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
+The deliberately disabled server-side workflow remains disabled; this change
+does not authorize enabling it or triggering a run.
 
-The throughput change in [#751](https://github.com/1kuna/mycelium/issues/751)
+Each retained run checks out and tests its event's own commit (`github.sha`),
+so GitHub attaches the result to the same SHA that was tested. The summary
+records that tested SHA, always equal to the event SHA. The concurrency group
+retains the newest pending **arrival**, not necessarily the newest commit:
+GitHub does not guarantee event order. In the rare case that a delayed B event
+replaces pending C, B may be the last commit tested. The orchestrator explicitly
+accepts this because main CI is optional evidence; pre-merge exact-head proof
+remains the per-PR guarantee. Runs do not resolve or chase the current main tip.
+
+Zach, 2026-11-09, relayed by the orchestrator and received by the CI implementation
+worker: “yes skip CI runs i think. we should be running the tests where it makes
+sense not repetitive nonsense that just wastes compute for no gain.” The
+orchestrator's scope decision after review round 5 withdraws the review-imposed
+requirement to prove every intermediate main tree in CI. **Each PR's pre-merge
+exact-head local proof is the per-PR guarantee.** Main CI is optional additional
+evidence; coalesced intermediate commits need no separate main run. A failed or
+missing optional main run does not replace or waive pre-merge proof.
+
+Historical runner-capacity evidence (before coalescing): the change in [#751](https://github.com/1kuna/mycelium/issues/751)
 adds two lightweight submitter-role runner services to the fleet pool.
 The T3 host and hosts in a production hold are
 excluded from new runner placement. Both added services use the same repository
@@ -508,60 +529,42 @@ capacity estimate at the observed service times, not a guarantee: shared fleet
 CPU/RAM contention can still extend a run, and an existing burst takes time to
 drain. The target is roughly an hour per new merge after that backlog drains.
 
-Adding runners is the smallest change because the existing submitter already
-waits cheaply through `myce wait`. Ending the workflow after submission would
-lose its verified per-merge result unless a separate completion publisher and
-credential were added. Subsequent measurements now justify the smaller Linux
-full-gate declaration documented above; the initial runner-capacity estimate
-used the previous declarations. Cost: two persistent runner installations, workspaces and small
-submitter/wait processes, plus overlapping gate demand within ordinary Mycelium
-admission; gate resources, test coverage and result acceptance stay the same.
+That historical estimate assumed overlapping main runs. The concurrency group
+now admits one workflow at a time; existing runners are retained without service
+changes. That earlier throughput estimate does not describe the serialized
+workflow. The submitter still waits cheaply through `myce wait` and verifies
+accepted results rather than reporting success immediately after submission.
 
-**Before merging, require the PR's exact-head fleet full gate and independent
-review**, then inspect main's workflow records and latest *completed* `main-full`
-run, including its head SHA. For a docs-only change, a passing exact-head fleet
-quick gate is sufficient in place of full.
-For an exception, apply the [evidence-based acceptance proposal](DECISIONS.md#current-rulings):
-identify the relevant baseline's same failure, the exact candidate result,
-evidence that the change does not worsen it, and the existing scoped authority.
-Issue ownership alone is insufficient. Keep the original gate verdict and
-exception disposition separate; a changed or unexplained failure is unresolved.
-An interrupted or unsubmitted run has no suite verdict. Existing scoped
-substitutes keep their own conditions and expiry; elapsed queue time alone does
-not create an exception. Independent review and the normal exact-head proof
-requirements above remain.
+### Local merge proof
 
-```sh
-gh api repos/1kuna/mycelium/commits/main --jq .sha
-gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main --limit 20 \
-  --json headSha,status,conclusion,url
-gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main \
-  --status completed --limit 1 --json headSha,status,conclusion,url
-```
+Under [MY-41](DECISIONS.md#my-41), merge when quick plus the change's targeted
+tests pass. No independent review, review rounds, exact-head full gate per PR,
+main-CI wait or gate-exception procedure is required. Run the full suite once
+per release batch and fix breakage forward. Automatic main runs remain diagnostic
+feedback; failures are work to fix, not a hold on unrelated merges.
 
-Queued or running main runs do not block a merge, and completed proof need not
-match current main: shared fleet gates can lag behind frequent merges.
-The next merging worker inspects a red completed run's platform summaries,
-Mycelium job IDs and logs, then fixes its failures forward before unrelated
-merges. A reviewed fix with its own passing gate may merge while main is red;
-if the fix is already merged, record the failing test and the merged fix as
-resolution evidence instead of waiting for the backlog to reach it. A merge with
-no workflow run at all is a missing-run defect for that worker to repair, not
-passing evidence. Inspect cancelled runs for interrupted proof as well.
+Gate tooling is development tooling: if its custody or guard state blocks work, reset it (stop the gate VM, clear the control-directory records) and fix the tool forward.
 
-Source: the maintainer's global CI rule, relayed in the 2026-11-04 merge-guidance
-assignment. CI remains once per merge on self-hosted fleet runners; agents do
-not wait on, poll or wake for main CI. Automatic main proof supplements each
-PR's gate and the release full gate. Use the run's job summary to inspect both
-platform outcomes and Mycelium job IDs.
-The workflow's own check reports success/failure; no commit-status credential or
+The memory guard stops only on critical pressure or real swap growth. Updating
+that guard's implementation is a separate worker's code change; this documentation
+change does not claim it is already implemented. Development gates, custody,
+admission and guards may be changed freely when they block work. Earlier tooling
+custody and guard restrictions in this document are superseded by MY-41. Preserve
+running production customer jobs, secrets and public-repository privacy.
+
+Queued or running main runs do not block a merge. Inspect optional results for
+useful failure evidence and fix regressions forward; nobody waits on, polls or
+wakes for main CI. Coalescing means an intermediate merge may have no main run.
+The summary's tested SHA matches the event commit carrying the workflow check.
+
+The workflow's own check reports success/failure. No commit-status writer or
 personal access token is needed.
 
 [`scripts/actions-full.py`](../scripts/actions-full.py) freezes the corresponding
-platform full-gate profile to the exact push SHA and submits it once for Darwin arm64
-and once for Linux, eligible on either amd64 or arm64. CI preserves the profile's
-targets, resources, environment, output contract and check. Linux is one chosen
-target per merge, not an architecture matrix. The temporary architecture-wide
+platform full-gate profile to the event SHA and submits it once for
+Darwin arm64 and once for Linux, eligible on either amd64 or arm64. CI preserves
+the profile's targets, resources, environment, output contract and check. Linux is one chosen
+target per run, not an architecture matrix. The temporary architecture
 exclusion from [#527](https://github.com/1kuna/mycelium/issues/527) is removed after
 the bounded native gate-like I/O measurement described in
 [queue disk contention](operations.md#queue-disk-contention-527). The ordinary
@@ -572,8 +575,8 @@ There are no host pins; Mycelium chooses each worker and
 provides the existing `mycelium-gate` environment. Both submissions happen
 before `myce wait` waits for all jobs, even if one fails. Successful jobs also
 require `myce result` to download the accepted, verified `gate-result.txt` marker.
-The runner does only source transport, waiting and small-result verification;
-full suites never run on it directly. A profile exit 78 with `no_qualified_target`
+The event checkout supplies its profiles, relative inputs and helpers together.
+The runner freezes source/inputs, waits and verifies small accepted results; full suites never run on it directly. A profile exit 78 with `no_qualified_target`
 is a qualification/total-allowance refusal, not a busy-worker indication. Busy
 qualified hosts accept queued jobs and `myce wait` waits for them. CI reports
 host-memory need and allowance numerically for that refusal; other qualification
@@ -582,10 +585,10 @@ or weaken the learned memory envelope. Darwin proves the native CGO target; Linu
 proves its native builds and full race/dev suite.
 
 The deterministic `main-ci:SHA:OS:RUN_ID:RUN_ATTEMPT` keys identify this
-workflow attempt's two jobs. Repeating a submission within that attempt adopts
-the same job, including after an uncertain submit. A workflow rerun uses fresh
+workflow attempt's two jobs for the event SHA. Repeating a submission within
+that attempt adopts the same job, including after an uncertain submit. A workflow rerun uses fresh
 attempt keys: an older attempt's cleanup cannot cancel its replacement, and a
-cancelled key cannot poison a rerun. A failed suite is not automatically rerun.
+cancelled key cannot poison a rerun. There is no automatic retry loop.
 The CLI handles immutable source uploads, idempotent submission and reconnects;
 there is no custom watcher, cursor or status publisher.
 
@@ -611,8 +614,8 @@ states; unconfirmed cancellation fails CI and requires private reconciliation
 with that attempt's exact keys. An unavailable queue or abruptly lost runner can
 prevent confirmation; repeat `scripts/actions-full.py --cleanup-only` with the
 original SHA, run ID and attempt environment after authority is restored.
-No coalescing or supersession of other runs is introduced. If coalescing is
-approved later, cancelling a replaced attempt uses this same ownership path.
+Only never-started concurrency-pending workflows are replaced. Both the submitter
+and final cleanup step use the event SHA for this attempt's keys.
 
 Inspect failures privately with `myce logs JOB_ID`; public logs and
 the summary contain only job IDs, fixed states and exit codes, never raw CLI
@@ -623,19 +626,19 @@ submitted suite reporting `failed`. Its platform row says `infrastructure failur
 and the workflow emits a `CI infrastructure failure` error annotation: that
 platform has no verified suite result. Submission may have been accepted despite
 a lost reply. Resolve the infrastructure problem privately, then
-repeat cleanup for the original attempt, then rerun the workflow/merge with
-fresh attempt keys. There is no automatic retry for a failed suite.
+repeat cleanup for the original attempt. Optional CI failures are reported on
+that run; later pushes test their own event commits rather than retrying historical failures.
 
 ### Public repository and private authority
 
 The runner is registered to **this repository**, not an organization-wide pool.
-Only reviewed code merged to main is eligible: the workflow has neither
+Only code merged to main is eligible: the workflow has neither
 `pull_request` nor `pull_request_target`, and fork/feature pushes cannot trigger
 this repository's runner. Fork copies cannot address the upstream runner.
 Under Settings → Actions → General, require approval for **all outside
 contributors** (`approval_policy: all_external_contributors`). Keep that setting
 when changing workflows. Repository administrators and main writers remain
-trusted: review any workflow or submitter change before merging it.
+trusted: validate workflow or submitter changes with quick and targeted tests.
 
 The workflow grants only `contents: read` to the built-in `GITHUB_TOKEN` and
 pins checkout to an immutable action SHA, with `persist-credentials: false`.
@@ -688,17 +691,17 @@ policy or enable CI admission on such a runner. Use an authorized Linux fleet
 host or leave approval to the host owner. Repository registration and an `online`
 runner alone do not prove queue reachability.
 
-Generated platform profiles and downloaded result markers live in job temp and
-are deleted on exit. Only small CLI recovery receipts remain in the checkout;
+Generated profiles and result markers live in job temp and are deleted after
+owned work settles. Only small CLI recovery receipts remain in the event checkout;
 GitHub terminates job-owned observers at job completion, then the next checkout
 cleans old workspace state. Source-upload staging is removed by the CLI after
 confirmed submission. Runner diagnostic logs stay private; do not upload them
 as public artifacts. Use normal queue artifact retention for fleet outputs.
 
-Validate the submitter offline with `python3 scripts/test-actions-full.py` and
-the quick gate. After independent review and merge, verify the push-to-main run
-uses the registered self-hosted runner and reports both accepted platform results
-before calling activation complete. No full suite runs on a PR push.
+Validate offline with `python3 scripts/test-actions-full.py` and the quick gate. After merge, verify the push-to-main run
+uses the registered self-hosted runner and reports both accepted platform
+results and the tested event SHA before calling activation complete. No full
+suite runs on a PR push.
 
 ## Native acceptance checklist
 
@@ -1467,7 +1470,7 @@ platform/toolchain, package overlap, wall and resource-cost coverage. Preserve
 original verdicts, retained incident/security assertions and unproved donors;
 no runtime target by itself waives the existing gates.
 
-The 50% function-count target influenced #1086 planning; it is not acceptance under this v2.1 assignment. Do not delete or consolidate an additional test merely to reach a number. For every removed or replaced test, retain the duplicate/obsolete reason, any incident/security behavior, named surviving assertions and independent review disposition. Keep uncertain donors. Treat the existing 21m30s figure as #1086's historical work-plan goal, not a v2.1 budget or gate exception; retaining an operational time budget requires a measured cost rationale and its source authority. Report actual before/after wall and fleet resource cost, with missing measurements explicit. A final count or passing full alone does not prove retained behavior.
+The 50% function-count target influenced #1086 planning; it is not acceptance under this v2.1 assignment. Do not delete or consolidate an additional test merely to reach a number. For every removed or replaced test, retain the duplicate/obsolete reason, any incident/security behavior, named surviving assertions and validation disposition. Keep uncertain donors. Treat the existing 21m30s figure as #1086's historical work-plan goal, not a v2.1 budget or gate exception; retaining an operational time budget requires a measured cost rationale and its source authority. Report actual before/after wall and fleet resource cost, with missing measurements explicit. A final count or passing full alone does not prove retained behavior.
 
 Dated inventory: the November 9, 2026 06:10 UTC common-base projection was
 3,396 → 1,698 Go Test functions at `67a487f3`, superseding the earlier
@@ -1476,7 +1479,7 @@ merged counts, passing cases or measured speedup. The issue’s 06:20 UTC update
 withdraws the numeric target and records a per-cut rationale audit in progress.
 
 Next action: the #1086 coordinator retains each cut’s reason, surviving assertions
-and independent review, keeps uncertain donors, and reports actual wall and
+and validation, keeps uncertain donors, and reports actual wall and
 fleet resource cost for the identified combined source. Missing measurements
 and unresolved behavior remain explicit; the final count or a passing full
 alone does not complete acceptance.

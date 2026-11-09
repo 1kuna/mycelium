@@ -72,6 +72,7 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	w.faultTeardowns = map[string][]time.Time{}
 	w.faultRecovery = map[string]deviceRecoveryObservation{}
 	w.faultHealth = map[string]deviceHealthObservation{}
+	w.faultHealthDue = map[string]deviceHealthDue{}
 	w.faultHealthAfter = w.Clock.Now()
 	data, err := os.ReadFile(filepath.Join(root.dir, deviceFaultFile))
 	if err == nil {

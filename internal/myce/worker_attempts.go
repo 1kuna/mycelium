@@ -967,7 +967,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	inventory := hostInventoryObserver{lane: hostProbeLane[[]MachineDevice]{clock: w.Clock, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}}
 	// Telemetry shares the injectable OS/driver source used by fingerprints.
 	telemetryProbe := extensionIdentityProbe()
-	telemetryWorker := Worker{Clock: w.Clock}
+	telemetryWorker := Worker{Clock: w.Clock, GPUTelemetryHelper: w.GPUTelemetryHelper}
 	inventory.sampleTelemetry = func(ctx context.Context, devices []MachineDevice) ([]MachineDevice, error) {
 		telemetryWorker.sampleXPUTelemetry(ctx, telemetryProbe, devices)
 		return devices, nil
@@ -1137,6 +1137,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		}
 		if retry.ready(now) {
 			ctx := observeCtx
+			inventory.requestTelemetry(slices.ContainsFunc(jobs, func(j Job) bool { return !j.Spec.Needs.cpuOnly() && fanOutDeviceSharing(&j) }))
 			m := cloneMachine(&w.Machine)
 			m.HygieneCollection = w.hygieneCollector.snapshot()
 			if w.sharedInputs != nil {

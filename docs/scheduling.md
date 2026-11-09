@@ -146,7 +146,13 @@ Each entry has `production_hold` and an optional `production_hold_scope`
 `production_parity_hosts` is an optional per-project mapping from exact work
 identifiers to physical host IDs whose outputs the consumer has approved as
 matching its reference for that work (MY-19).
-It defaults to empty. Execution qualification alone does not grant parity.
+It defaults to empty. When an exact work key is present, its host list is a hard
+boundary for production placement: initial assignments, fan-out children and
+retargeting must stay within it. This applies to historical registrations and
+measured variants too. An explicitly empty host list admits no production host
+for that work. To widen placement, the owner explicitly adds the approved host.
+Native checks and experiments remain available to gather comparison evidence.
+Execution qualification alone does not grant parity.
 For example, after the consumer approves `worker-b` for ASR, add this to the
 project's existing settings in the exported policy, preserving its other settings:
 
@@ -169,17 +175,19 @@ than device worker IDs or globs; unknown hosts are rejected.
 Consumers own the parity criteria and must revisit approval when their work or
 platform changes; this setting does not infer parity from timing or native checks.
 
-This mapping permits **new occupancy spillover** only: a queued production job
+This mapping also permits **new occupancy spillover**: a queued production job
 bound by a production hold can move when equal-or-higher production work blocks
 its RAM or device admission and an approved alternative can admit it immediately.
 The alternative must still pass placement, maintenance, freshness, memory,
 environment and exact frozen extension version/digest qualification checks.
-Running work keeps its attempt and host custody. An empty mapping (or no hosts
-for the job's work identity) preserves the existing binding behavior, with the
-RAM/device cause visible in job status.
-Existing Docker/disk recovery retargeting is unchanged and does not consult this
-mapping; its parity semantics require a separate maintainer/consumer decision
-([#400](https://github.com/1kuna/mycelium/issues/400)).
+Running work keeps its attempt and host custody. Without an exact work entry,
+existing measured-parity and registration rules apply. Measurements never widen
+an explicit host list. Docker/disk recovery obeys the same production boundary.
+Queued bindings to hosts removed from the list are cleared and placed again,
+including bindings saved by older releases or retained after holds are disabled.
+Preparation lookahead considers only parity-eligible production candidates on
+each host. Parity-held demand cannot withhold another project's preparation on
+an unapproved host; eligible production retains its tier and preemption priority.
 
 Within each tier, fitting projects take turns by weighted recent usage before
 model/environment warmth. Usage has a demand/service-derived horizon and separate stable
